@@ -45,7 +45,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
-    - block: Build torch nightly image
+  - block: Build torch nightly image
     key: block-build-torch-nightly
     depends_on: ~
 
