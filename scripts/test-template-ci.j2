@@ -253,7 +253,7 @@ steps:
     {% endif %}
     soft_fail: {{ step.soft_fail or false }}
     {% filter indent(2) %}
-    {{ render_cuda_config(step, docker_image, default_working_dir, hf_home_fsx, hf_home, branch) }}
+    {{ render_cuda_config(step, docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(2, true) }}
     {% endfilter %}
   {% endif %}
   {% endfor %}
@@ -313,9 +313,7 @@ steps:
         depends_on: image-build-torch-nightly
         {% endif %}
         soft_fail: true
-        {% filter indent(4) %}
-        {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) }}
-        {% endfilter %}
+        {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
       {% endif %}
       {% endfor %}
 
