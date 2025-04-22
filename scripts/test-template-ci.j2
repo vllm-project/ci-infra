@@ -329,8 +329,8 @@ steps:
       {% endif %}
 
     {% if step.num_nodes < 2 %}
-     plugins:
-     {% if step.gpu != "a100" %}
+    plugins:
+      {% if step.gpu != "a100" %}
       - docker#v5.2.0:
           image: {{ docker_image_torch_nightly }}
           always-pull: true
