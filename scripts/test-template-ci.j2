@@ -312,7 +312,7 @@ steps:
         key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
       {% endif %}
 
-      - label: "{{ step.label }}"
+      - label: "Torch Nightly {{ step.label }}"
         {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
         depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
         {% else %}
