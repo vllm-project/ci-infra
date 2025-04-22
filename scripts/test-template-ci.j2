@@ -252,9 +252,7 @@ steps:
     depends_on: image-build
     {% endif %}
     soft_fail: {{ step.soft_fail or false }}
-    {% filter indent(2) %}
-    {{ render_cuda_config(step, docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(2, true) }}
-    {% endfilter %}
+    {{ render_cuda_config(step, docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
   {% endif %}
   {% endfor %}
 
