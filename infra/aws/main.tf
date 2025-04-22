@@ -121,22 +121,24 @@ locals {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "gpu_1_queue"
       InstanceTypes                        = "g6.4xlarge"  # 1 Nvidia L4 GPU, 64GB memory
-      MaxSize                              = 64
+      MaxSize                              = 104
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
-      ImageId                              = "ami-03d9992ee575904da" # Custom AMI with CUDA 12.0
+      ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
+      BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
     }
 
     gpu-4-queue-ci = {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "gpu_4_queue"
       InstanceTypes                        = "g6.12xlarge" # 4 Nvidia L4 GPUs, 192GB memory
-      MaxSize                              = 12
+      MaxSize                              = 32
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
-      ImageId                              = "ami-03d9992ee575904da" # Custom AMI with CUDA 12.0
+      ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
+      BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
     }
   }
 
