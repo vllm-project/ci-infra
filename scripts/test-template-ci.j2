@@ -306,60 +306,60 @@ steps:
       {% endfor %}
     {% endif %}
 
-    {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
-    - block: "Run Torch Nightly {{ step.label }}"
-      depends_on: image-build-torch-nightly
-      key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
-    {% endif %}
-
-    - label: "{{ step.label }}"
       {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
-      depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
-      {% else %}
-      depends_on: image-build-torch-nightly
+      - block: "Run Torch Nightly {{ step.label }}"
+        depends_on: image-build-torch-nightly
+        key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
       {% endif %}
-      soft_fail: true
-      agents:
-        {% if step.no_gpu %}
-        queue: cpu_queue_premerge
-        {% elif step.gpu == "a100" %}
-        queue: a100_queue
-        {% else %}
-        queue: gpu_1_queue
-        {% endif %}
 
-      {% if step.num_nodes < 2 %}
-      plugins:
-        {% if step.gpu != "a100" %}
-        - docker#v5.2.0:
-            image: {{ docker_image_torch_nightly }}
-            always-pull: true
-            propagate-environment: true
-            {% if not step.no_gpu %}
-            gpus: all
-            {% endif %}
-            {% if step.label == "Benchmarks" %}
-            mount-buildkite-agent: true
-            {% endif %}
-            command: [
-              "bash", "-xc",
-              "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"
-            ]
-            environment:
-              - VLLM_USAGE_SOURCE=ci-test
-              - HF_HOME={{ hf_home_fsx }}
-              - HF_TOKEN
-              {% if branch == "main" %}
-              - BUILDKITE_ANALYTICS_TOKEN
-              {% endif %}
-              {% if step.label == "Speculative decoding tests" %}
-              - VLLM_ATTENTION_BACKEND=XFORMERS
-              {% endif %}
-            volumes:
-              - /dev/shm:/dev/shm
-              - {{ hf_home_fsx }}:{{ hf_home_fsx }}
+      - label: "{{ step.label }}"
+        {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+        depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+        {% else %}
+        depends_on: image-build-torch-nightly
         {% endif %}
-      {% endif %}
+        soft_fail: true
+        agents:
+          {% if step.no_gpu %}
+          queue: cpu_queue_premerge
+          {% elif step.gpu == "a100" %}
+          queue: a100_queue
+          {% else %}
+          queue: gpu_1_queue
+          {% endif %}
+
+        {% if step.num_nodes < 2 %}
+        plugins:
+          {% if step.gpu != "a100" %}
+          - docker#v5.2.0:
+              image: {{ docker_image_torch_nightly }}
+              always-pull: true
+              propagate-environment: true
+              {% if not step.no_gpu %}
+              gpus: all
+              {% endif %}
+              {% if step.label == "Benchmarks" %}
+              mount-buildkite-agent: true
+              {% endif %}
+              command: [
+                "bash", "-xc",
+                "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"
+              ]
+              environment:
+                - VLLM_USAGE_SOURCE=ci-test
+                - HF_HOME={{ hf_home_fsx }}
+                - HF_TOKEN
+                {% if branch == "main" %}
+                - BUILDKITE_ANALYTICS_TOKEN
+                {% endif %}
+                {% if step.label == "Speculative decoding tests" %}
+                - VLLM_ATTENTION_BACKEND=XFORMERS
+                {% endif %}
+              volumes:
+                - /dev/shm:/dev/shm
+                - {{ hf_home_fsx }}:{{ hf_home_fsx }}
+          {% endif %}
+        {% endif %}
     {% endif %}
     {% endfor %}
 
