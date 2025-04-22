@@ -23,12 +23,12 @@ upload_pipeline() {
 
     # If pipeline is fastcheck
     if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
-        curl -o .buildkite/test-template.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/scripts/test-template-fastcheck.j2
+        curl -o .buildkite/test-template.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-fastcheck.j2
     fi
 
     # If pipeline is CI
     if [[ $BUILDKITE_PIPELINE_SLUG == "ci" ]]; then
-        curl -o .buildkite/test-template.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/scripts/test-template-ci.j2?$(date +%s)
+        curl -o .buildkite/test-template.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-ci.j2?$(date +%s)
     fi
 
     # (WIP) Use pipeline generator instead of jinja template

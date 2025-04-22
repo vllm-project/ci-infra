@@ -1,7 +1,7 @@
 import pytest
 import sys
 
-from scripts.pipeline_generator.plugin import (
+from buildkite.pipeline_generator.plugin import (
     get_kubernetes_plugin_config,
     get_docker_plugin_config,
     DOCKER_PLUGIN_NAME,
