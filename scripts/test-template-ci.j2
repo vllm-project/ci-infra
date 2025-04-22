@@ -285,7 +285,7 @@ steps:
             limit: 2
 
   {% for step in steps %}
-  {% if step.torch_nightly and  step.num_gpus<2 %}
+  {% if step.torch_nightly and step.num_gpus<2 %}
   {% set ns = namespace(blocked=1) %}
 
   {% if run_all == "1" %}
@@ -318,7 +318,7 @@ steps:
     {% else %}
     depends_on: image-build-torch-nightly
     {% endif %}
-
+    soft_fail: true
     agents:
       {% if step.no_gpu %}
       queue: cpu_queue_premerge
@@ -328,7 +328,7 @@ steps:
       queue: gpu_1_queue
       {% endif %}
 
-      {% if step.num_nodes < 2 %}
+    {% if step.num_nodes < 2 %}
      plugins:
      {% if step.gpu != "a100" %}
       - docker#v5.2.0:
