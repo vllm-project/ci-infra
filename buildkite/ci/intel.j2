@@ -1,0 +1,24 @@
+- block: "Run Intel CPU test"
+    depends_on: ~
+    key: block-intel-cpu
+
+  - label: "Intel CPU Test"
+    depends_on: block-intel-cpu
+    soft_fail: true
+    agents:
+      queue: intel-cpu
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test.sh
+
+  - label: "Intel HPU Test"
+    depends_on: ~
+    soft_fail: true
+    agents:
+      queue: intel-hpu
+    command: bash .buildkite/scripts/hardware_ci/run-hpu-test.sh
+
+  - label: "Intel GPU Test"
+    soft_fail: true
+    depends_on: ~
+    agents:
+      queue: intel-gpu
+    command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh

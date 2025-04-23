@@ -1,0 +1,8 @@
+{% if nightly == "1" %}
+- label: "GH200 Test"
+depends_on: ~
+soft_fail: true
+agents:
+    queue: gh200_queue
+command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
+{% endif %}

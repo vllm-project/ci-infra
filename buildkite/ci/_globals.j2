@@ -1,0 +1,17 @@
+{% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
+{% set docker_image_cu121 = docker_image ~ "-cu121" %}
+{% set docker_image_torch_nightly = docker_image ~ "-torch-nightly" %}
+{% set docker_image_cu118 = docker_image ~ "-cu118" %}
+{% if branch == "main" %}
+  {% set docker_image = docker_image.replace("ci-test", "ci-postmerge") %}
+  {% set docker_image_cu121 = docker_image_cu121.replace("ci-test", "ci-postmerge") %}
+  {% set docker_image_torch_nightly = docker_image_torch_nightly.replace("ci-test", "ci-postmerge") %}
+  {% set docker_image_cu118 = docker_image_cu118.replace("ci-test", "ci-postmerge") %}
+{% endif %}
+
+{% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
+{% set default_working_dir = "/vllm-workspace/tests" %}
+{% set hf_home = "/root/.cache/huggingface" %}
+{% set hf_home_efs = "/mnt/efs/hf_cache" %}
+{% set hf_home_fsx = "/fsx/hf_cache" %}
+{% set list_file_diff = list_file_diff | split("|") %}

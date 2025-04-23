@@ -1,0 +1,17 @@
+- label: "TPU V0 Test"
+  depends_on: ~
+  soft_fail: True
+  agents:
+    queue: tpu_v5_queue
+  commands:
+    - yes | docker system prune -a
+    - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-test.sh; fi
+
+- label: "TPU V1 Test"
+  depends_on: ~
+  soft_fail: true
+  agents:
+    queue: tpu_v6e_queue
+  commands:
+    - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
+    - yes | docker system prune -a

@@ -1,0 +1,11 @@
+{% import "_globals.j2" as global %}
+{% import "_macros.j2" as macros %}
+
+steps:
+{% include "steps/image_build.j2" %}
+{% include "steps/test_matrix.j2" %}
+{% include "steps/torch_nightly.j2" %}
+{% include "steps/amd.j2" %}
+{% include "steps/intel.j2" %}
+{% include "steps/ibm.j2" %}
+{% include "steps/tpu_gh200.j2" %}

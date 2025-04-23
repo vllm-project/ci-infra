@@ -1,0 +1,97 @@
+- label: ":docker: build image"
+key: image-build
+depends_on: ~
+agents:
+    {% if branch == "main" %}
+    queue: cpu_queue_postmerge
+    {% else %}
+    queue: cpu_queue_premerge
+    {% endif %}
+commands:
+    - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+    - |
+    #!/bin/bash
+    if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
+        echo "Image not found, proceeding with build..."
+    else
+        echo "Image found"
+        exit 0
+    fi
+    - "docker build --file docker/Dockerfile --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --tag {{ docker_image }} --target test --progress plain ."
+    - "docker push {{ docker_image }}"
+env:
+    DOCKER_BUILDKIT: "1"
+retry:
+    automatic:
+    - exit_status: -1  # Agent was lost
+        limit: 2
+    - exit_status: -10  # Agent was lost
+        limit: 2
+
+- block: Build CUDA 12.1 image
+key: block-build-cu121
+depends_on: ~
+
+- label: ":docker: build image CUDA 12.1"
+key: image-build-cu121
+depends_on: block-build-cu121
+agents:
+    {% if branch == "main" %}
+    queue: cpu_queue_postmerge
+    {% else %}
+    queue: cpu_queue_premerge
+    {% endif %}
+commands:
+    - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+    - |
+    #!/bin/bash
+    if [[ -z $(docker manifest inspect {{ docker_image_cu121 }}) ]]; then
+        echo "Image not found, proceeding with build..."
+    else
+        echo "Image found"
+        exit 0
+    fi
+    - "docker build --file docker/Dockerfile --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION=12.1.0 --tag {{ docker_image_cu121 }} --target test --progress plain ."
+    - "docker push {{ docker_image_cu121 }}"
+env:
+    DOCKER_BUILDKIT: "1"
+retry:
+    automatic:
+    - exit_status: -1  # Agent was lost
+        limit: 2
+    - exit_status: -10  # Agent was lost
+        limit: 2
+
+- block: Build CUDA 11.8 image
+key: block-build-cu118
+depends_on: ~
+
+- label: ":docker: build image CUDA 11.8"
+key: image-build-cu118
+depends_on: block-build-cu118
+agents:
+    {% if branch == "main" %}
+    queue: cpu_queue_postmerge
+    {% else %}
+    queue: cpu_queue_premerge
+    {% endif %}
+commands:
+    - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+    - |
+    #!/bin/bash
+    if [[ -z $(docker manifest inspect {{ docker_image_cu118 }}) ]]; then
+        echo "Image not found, proceeding with build..."
+    else
+        echo "Image found"
+        exit 0
+    fi
+    - "docker build --file docker/Dockerfile --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION=11.8.0 --tag {{ docker_image_cu118 }} --target test --progress plain ."
+    - "docker push {{ docker_image_cu118 }}"
+env:
+    DOCKER_BUILDKIT: "1"
+retry:
+    automatic:
+    - exit_status: -1  # Agent was lost
+        limit: 2
+    - exit_status: -10  # Agent was lost
+        limit: 2

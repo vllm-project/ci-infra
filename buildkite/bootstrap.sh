@@ -28,7 +28,7 @@ upload_pipeline() {
 
     # If pipeline is CI
     if [[ $BUILDKITE_PIPELINE_SLUG == "ci" ]]; then
-        curl -o .buildkite/test-template.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-ci.j2?$(date +%s)
+        curl -o .buildkite/pipeline.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/pipeline.j2?$(date +%s)
     fi
 
     # (WIP) Use pipeline generator instead of jinja template
@@ -43,7 +43,7 @@ upload_pipeline() {
     echo "Nightly: $NIGHTLY"
 
     cd .buildkite
-    minijinja-cli test-template.j2 test-pipeline.yaml -D branch="$BUILDKITE_BRANCH" -D list_file_diff="$LIST_FILE_DIFF" -D run_all="$RUN_ALL" -D nightly="$NIGHTLY" > pipeline.yml
+    minijinja-cli pipeline.j2 test-pipeline.yaml -D branch="$BUILDKITE_BRANCH" -D list_file_diff="$LIST_FILE_DIFF" -D run_all="$RUN_ALL" -D nightly="$NIGHTLY" > pipeline.yml
     cat pipeline.yml
     buildkite-agent pipeline upload pipeline.yml
     exit 0

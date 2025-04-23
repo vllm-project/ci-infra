@@ -1,0 +1,58 @@
+- group: "vllm against torch nightly"
+    depends_on: ~
+    steps:
+      - block: Build torch nightly image
+        key: block-build-torch-nightly
+        depends_on: ~
+
+      - label: ":docker: build image torch nightly"
+        key: image-build-torch-nightly
+        depends_on: block-build-torch-nightly
+        soft_fail: true
+        agents:
+          {% if branch == "main" %}
+          queue: cpu_queue_postmerge
+          {% else %}
+          queue: cpu_queue_premerge
+          {% endif %}
+        timeout_in_minutes: 360
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            #!/bin/bash
+            if [[ -z $(docker manifest inspect {{ docker_image_torch_nightly }}) ]]; then
+              echo "Image not found, proceeding with build..."
+            else
+              echo "Image found"
+              exit 0
+            fi
+          - "docker build --file docker/Dockerfile.nightly_torch --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --tag {{ docker_image_torch_nightly }} --target test --progress plain ."
+          - "docker push {{ docker_image_torch_nightly }}"
+        env:
+          DOCKER_BUILDKIT: "1"
+        retry:
+          automatic:
+            - exit_status: -1  # Agent was lost
+              limit: 2
+            - exit_status: -10  # Agent was lost
+              limit: 2
+    {% for step in steps %}
+    {% if step.torch_nightly %}
+      {% set ns = namespace(blocked = get_block_status(step, list_file_diff, run_all, nightly)) %}
+
+      {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+      - block: "Run Torch Nightly {{ step.label }}"
+        depends_on: image-build-torch-nightly
+        key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+      {% endif %}
+
+      - label: "Torch Nightly {{ step.label }}"
+        {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+        depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+        {% else %}
+        depends_on: image-build-torch-nightly
+        {% endif %}
+        soft_fail: true
+        {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
+      {% endif %}
+      {% endfor %}

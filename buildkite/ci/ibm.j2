@@ -1,0 +1,28 @@
+{% if branch == "main" %}
+  - label: "IBM Power(ppc64le) CPU Test"
+    depends_on: ~
+    soft_fail: true
+    agents:
+      queue: ibm-ppc64le
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
+  {% else %}
+  - block: "Run IBM Power(ppc64le) CPU Test"
+    depends_on: ~
+    key: block-ibm-ppc64-test
+
+  - label: "IBM Power(ppc64le) CPU Test"
+    depends_on: block-ibm-ppc64-test
+    soft_fail: true
+    agents:
+      queue: ibm-ppc64le
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
+  {% endif %}
+
+  {% if branch == "main" or "s390x" in branch %}
+  - label: "IBM Z (s390x) CPU Test"
+    depends_on: ~
+    soft_fail: true
+    agents:
+      queue: ibm_s390x
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-s390x.sh
+  {% endif %}
