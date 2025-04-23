@@ -28,7 +28,22 @@ upload_pipeline() {
 
     # If pipeline is CI
     if [[ $BUILDKITE_PIPELINE_SLUG == "ci" ]]; then
+        # Create steps directory if it doesn't exist
+        mkdir -p .buildkite/steps
+        # Fetch main pipeline template
         curl -o .buildkite/pipeline.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/pipeline.j2?$(date +%s)
+
+        # Fetch all j2 files from buildkite/ci directory
+        curl -o .buildkite/steps/amd.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/steps/amd.j2?$(date +%s)
+        curl -o .buildkite/steps/ibm.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/steps/ibm.j2?$(date +%s)
+        curl -o .buildkite/steps/intel.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/steps/intel.j2?$(date +%s)
+        curl -o .buildkite/steps/tpu.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/steps/tpu.j2?$(date +%s)
+        curl -o .buildkite/steps/gh200.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/steps/gh200.j2?$(date +%s)
+        curl -o .buildkite/steps/image_build.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/steps/image_build.j2?$(date +%s)
+        curl -o .buildkite/steps/test_matrix.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/steps/test_matrix.j2?$(date +%s)
+        curl -o .buildkite/steps/torch_nightly.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/steps/torch_nightly.j2?$(date +%s)
+        curl -o .buildkite/_globals.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/_globals.j2?$(date +%s)
+        curl -o .buildkite/_macros.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/ci/_macros.j2?$(date +%s)
     fi
 
     # (WIP) Use pipeline generator instead of jinja template
