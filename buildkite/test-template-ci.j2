@@ -444,3 +444,20 @@ steps:
     commands:
       - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
       - yes | docker system prune -a
+
+  - label: "TPU V1 Test Notification"
+    depends_on: run-tpu-v1-test
+    agents:
+      queue: tpu_v6e_queue
+    commands: |
+      if [ $$(buildkite-agent step get "outcome" --step "run-tpu-v1-test") != "passed" ]; then
+         cat <<- YAML | buildkite-agent pipeline upload
+         steps:
+           - label: "Notify owners about failing test"
+             agents:
+               queue: tpu_v6e_queue
+             command: echo "TPU V1 Test failed"
+             notify:
+               - slack:
+                   channels:
+                     - "#collab-google-ci"
