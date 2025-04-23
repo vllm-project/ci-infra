@@ -59,9 +59,8 @@ upload_pipeline() {
 
     cd .buildkite
     minijinja-cli pipeline.j2 test-pipeline.yaml -D branch="$BUILDKITE_BRANCH" -D list_file_diff="$LIST_FILE_DIFF" -D run_all="$RUN_ALL" -D nightly="$NIGHTLY" > pipeline.yaml
-    cat pipeline.yaml
-    buildkite-agent pipeline upload pipeline.yaml
     buildkite-agent artifact upload pipeline.yaml
+    buildkite-agent pipeline upload pipeline.yaml
     exit 0
 }
 
