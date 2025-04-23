@@ -1,9 +1,11 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_cu121 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu121" %}
+{% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu118" %}
 {% if branch == "main" %}
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_cu121 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu121" %}
+{% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
 {% endif %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
@@ -12,6 +14,126 @@
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
+
+{% macro get_block_status(step, list_file_diff, run_all, nightly) %}
+{% set ns = namespace(blocked=1) %}
+
+{% if run_all == "1" or nightly == "1" %}
+  {% set ns.blocked = 0 %}
+{% endif %}
+
+{% if step.source_file_dependencies %}
+  {% for source_file in step.source_file_dependencies %}
+    {% for file in list_file_diff %}
+      {% if source_file in file %}
+        {% set ns.blocked = 0 %}
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+{% else %}
+  {% set ns.blocked = 0 %}
+{% endif %}
+
+{{ ns.blocked }}
+{% endmacro %}
+
+{% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
+agents:
+  {% if step.label == "Documentation Build" %}
+  queue: small_cpu_queue_premerge
+  {% elif step.no_gpu %}
+  queue: cpu_queue_premerge
+  {% elif step.gpu == "a100" %}
+  queue: a100_queue
+  {% elif step.num_gpus == 2 or step.num_gpus == 4 %}
+  queue: gpu_4_queue
+  {% else %}
+  queue: gpu_1_queue
+  {% endif %}
+
+{% if step.num_nodes >= 2 %}
+commands:
+  - ./.buildkite/scripts/run-multi-node-test.sh {{ (step.working_dir or default_working_dir) | safe }} {{ step.num_nodes }} {{ step.num_gpus }} {{ image }} {% for command in step.commands %}"{{ (command | join(' && ')) | safe }}" {% endfor %}
+{% endif %}
+
+{% if step.parallelism %}
+parallelism: {{ step.parallelism }}
+{% endif %}
+
+retry:
+  automatic:
+    - exit_status: -1
+      limit: 1
+    - exit_status: -10
+      limit: 1
+
+{% if step.num_nodes < 2 %}
+plugins:
+  {% if step.gpu != "a100" %}
+  - docker#v5.2.0:
+      image: {{ image }}
+      always-pull: true
+      propagate-environment: true
+      {% if not step.no_gpu %}
+      gpus: all
+      {% endif %}
+      {% if step.label == "Benchmarks" %}
+      mount-buildkite-agent: true
+      {% endif %}
+      command: ["bash", "-xc", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
+      environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - HF_HOME={{ hf_home_fsx }}
+        - HF_TOKEN
+        {% if branch == "main" %}
+        - BUILDKITE_ANALYTICS_TOKEN
+        {% endif %}
+        {% if step.label == "Speculative decoding tests" %}
+        - VLLM_ATTENTION_BACKEND=XFORMERS
+        {% endif %}
+      volumes:
+        - /dev/shm:/dev/shm
+        - {{ hf_home_fsx }}:{{ hf_home_fsx }}
+  {% else %}
+  - kubernetes:
+      podSpec:
+        priorityClassName: ci
+        containers:
+          - image: {{ image }}
+            command:
+              - bash -c '(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(" && ")) | safe }}'
+            resources:
+              limits:
+                nvidia.com/gpu: {{ step.num_gpus or 1 }}
+            volumeMounts:
+              - name: devshm
+                mountPath: /dev/shm
+              - name: hf-cache
+                mountPath: {{ hf_home }}
+            env:
+              - name: VLLM_USAGE_SOURCE
+                value: ci-test
+              - name: HF_HOME
+                value: {{ hf_home }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-token-secret
+                    key: token
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+        volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: {{ hf_home }}
+              type: Directory
+  {% endif %}
+{% endif %}
+{% endmacro %}
+
 
 steps:
   - label: ":docker: build image"
@@ -77,7 +199,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
-  
+
   - block: Build CUDA 11.8 image
     key: block-build-cu118
     depends_on: ~
@@ -111,31 +233,11 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
-  
+
   {% for step in steps %}
   {% if step.fast_check_only != true %}
 
-  {% set ns = namespace(blocked=1) %}
-
-  {% if run_all == "1" %}
-  {% set ns.blocked = 0 %}
-  {% endif %}
-
-  {% if nightly == "1" %}
-  {% set ns.blocked = 0 %}
-  {% endif %}
-
-  {% if step.source_file_dependencies %}
-    {% for source_file in step.source_file_dependencies %}
-      {% for file in list_file_diff %}
-        {% if source_file in file %}
-          {% set ns.blocked = 0 %}
-        {% endif %}
-      {% endfor %}
-    {% endfor %}
-  {% else %}
-    {% set ns.blocked = 0 %}
-  {% endif %}
+  {% set ns = namespace(blocked = get_block_status(step, list_file_diff, run_all, nightly)) %}
 
   {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
   - block: "Run {{ step.label }}"
@@ -149,103 +251,73 @@ steps:
     {% else %}
     depends_on: image-build
     {% endif %}
-    agents:
-      {% if step.label == "Documentation Build" %}
-      queue: small_cpu_queue_premerge
-      {% elif step.no_gpu %}
-      queue: cpu_queue_premerge
-      {% elif step.gpu == "a100" %}
-      queue: a100_queue
-      {% elif step.num_gpus == 2 or step.num_gpus == 4 %}
-      queue: gpu_4_queue
-      {% else %}
-      queue: gpu_1_queue
-      {% endif %}
-    {% if step.num_nodes >= 2%} {# for multi-node test #}
-    commands:
-      - ./.buildkite/scripts/run-multi-node-test.sh {{ (step.working_dir or default_working_dir) | safe  }} {{ step.num_nodes }} {{ step.num_gpus }} {{ docker_image }} {% for command in step.commands %}"{{ (command | join(" && ")) | safe }}" {% endfor %}
-    {% endif %}
     soft_fail: {{ step.soft_fail or false }}
-    {% if step.parallelism %}
-    parallelism: {{ step.parallelism }}
-    {% endif %}
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 1
-        - exit_status: -10  # Agent was lost
-          limit: 1
-    {% if step.num_nodes < 2 %}
-    plugins:
-      {% if step.gpu != "a100" %}
-      - docker#v5.2.0: {# for GPU test #}
-          image: {{ docker_image }}
-          always-pull: true
-          propagate-environment: true
-          {% if not step.no_gpu %}
-          gpus: all
-          {% endif %}
-          {% if step.label == "Benchmarks" %}
-          mount-buildkite-agent: true
-          {% endif %}
-          command: ["bash", "-xc", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
-          environment:
-            - VLLM_USAGE_SOURCE=ci-test
-            - HF_HOME={{ hf_home_fsx }}
-            - HF_TOKEN
-            {% if branch == "main" %}
-            - BUILDKITE_ANALYTICS_TOKEN
-            {% endif %}
-            {% if step.label == "Speculative decoding tests" %}
-            - VLLM_ATTENTION_BACKEND=XFORMERS
-            {% endif %}
-          volumes:
-            - /dev/shm:/dev/shm
-            - {{ hf_home_fsx }}:{{ hf_home_fsx }}
-      {% else %}
-      - kubernetes:
-          podSpec:
-            priorityClassName: ci
-            containers:
-            - image: {{ docker_image }}
-              command:
-                - bash -c '(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}'
-              resources:
-                limits:
-                  nvidia.com/gpu: {{ step.num_gpus or 1 }}
-              volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: {{ hf_home }}
-              env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: HF_HOME
-                value: {{ hf_home }}
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-            nodeSelector:
-              nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-            volumes:
-            - name: devshm
-              emptyDir:
-                medium: Memory
-            - name: hf-cache
-              hostPath:
-                path: {{ hf_home }}
-                type: Directory
-      {% endif %}
-    {% endif %}
+    {{ render_cuda_config(step, docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
   {% endif %}
   {% endfor %}
 
+  - group: "vllm against torch nightly"
+    depends_on: ~
+    steps:
+      - block: Build torch nightly image
+        key: block-build-torch-nightly
+        depends_on: ~
+
+      - label: ":docker: build image torch nightly"
+        key: image-build-torch-nightly
+        depends_on: block-build-torch-nightly
+        soft_fail: true
+        agents:
+          {% if branch == "main" %}
+          queue: cpu_queue_postmerge
+          {% else %}
+          queue: cpu_queue_premerge
+          {% endif %}
+        timeout_in_minutes: 360
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            #!/bin/bash
+            if [[ -z $(docker manifest inspect {{ docker_image_torch_nightly }}) ]]; then
+              echo "Image not found, proceeding with build..."
+            else
+              echo "Image found"
+              exit 0
+            fi
+          - "docker build --file docker/Dockerfile.nightly_torch --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --tag {{ docker_image_torch_nightly }} --target test --progress plain ."
+          - "docker push {{ docker_image_torch_nightly }}"
+        env:
+          DOCKER_BUILDKIT: "1"
+        retry:
+          automatic:
+            - exit_status: -1  # Agent was lost
+              limit: 2
+            - exit_status: -10  # Agent was lost
+              limit: 2
+    {% for step in steps %}
+    {% if step.torch_nightly %}
+      {% set ns = namespace(blocked = get_block_status(step, list_file_diff, run_all, nightly)) %}
+
+      {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+      - block: "Run Torch Nightly {{ step.label }}"
+        depends_on: image-build-torch-nightly
+        key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+      {% endif %}
+
+      - label: "Torch Nightly {{ step.label }}"
+        {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+        depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+        {% else %}
+        depends_on: image-build-torch-nightly
+        {% endif %}
+        soft_fail: true
+        {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
+      {% endif %}
+      {% endfor %}
+
   - group: "AMD Tests"
     depends_on: ~
-    steps:       
+    steps:
       - label: "AMD: :docker: build image"
         depends_on: ~
         soft_fail: true
@@ -272,7 +344,7 @@ steps:
       - label: "AMD: {{ step.label }}"
         depends_on: amd-build
         agents:
-         {% if step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Test %N" or step.label=="Distributed Tests (4 GPUs)" or step.label=="Distributed Comm Ops Test" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" or step.label=="Weight Loading Multiple GPU Test" %}  
+         {% if step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Test %N" or step.label=="Distributed Tests (4 GPUs)" or step.label=="Distributed Comm Ops Test" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" or step.label=="Weight Loading Multiple GPU Test" %}
            queue: amd_mi300
          {% else %}
            queue: amd_mi300_1
@@ -284,7 +356,7 @@ steps:
         soft_fail: true
     {% endif %}
     {% endfor %}
-    
+
   - label: "Neuron Test"
     depends_on: ~
     agents:
@@ -295,7 +367,7 @@ steps:
   - block: "Run Intel CPU test"
     depends_on: ~
     key: block-intel-cpu
-  
+
   - label: "Intel CPU Test"
     depends_on: block-intel-cpu
     soft_fail: true
@@ -309,7 +381,7 @@ steps:
     agents:
       queue: intel-hpu
     command: bash .buildkite/scripts/hardware_ci/run-hpu-test.sh
-  
+
   - label: "Intel GPU Test"
     soft_fail: true
     depends_on: ~
@@ -336,7 +408,7 @@ steps:
       queue: ibm-ppc64le
     command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
   {% endif %}
- 
+
   {% if branch == "main" or "s390x" in branch %}
   - label: "IBM Z (s390x) CPU Test"
     depends_on: ~
@@ -345,7 +417,7 @@ steps:
       queue: ibm_s390x
     command: bash .buildkite/scripts/hardware_ci/run-cpu-test-s390x.sh
   {% endif %}
- 
+
   {% if nightly == "1" %}
   - label: "GH200 Test"
     depends_on: ~
@@ -360,7 +432,7 @@ steps:
     soft_fail: True
     agents:
       queue: tpu_v5_queue
-    commands: 
+    commands:
     - yes | docker system prune -a
     - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-test.sh; fi
 
@@ -372,3 +444,20 @@ steps:
     commands:
       - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
       - yes | docker system prune -a
+
+  - label: "TPU V1 Test Notification"
+    depends_on: run-tpu-v1-test
+    agents:
+      queue: tpu_v6e_queue
+    commands: |
+      if [ $$(buildkite-agent step get "outcome" --step "run-tpu-v1-test") != "passed" ]; then
+         cat <<- YAML | buildkite-agent pipeline upload
+         steps:
+           - label: "Notify owners about failing test"
+             agents:
+               queue: tpu_v6e_queue
+             command: echo "TPU V1 Test failed"
+             notify:
+               - slack:
+                   channels:
+                     - "#collab-google-ci"

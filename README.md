@@ -5,11 +5,11 @@ This repository contains the infrastructure and bootstrap code for the vLLM cont
 
 Current CI Infrastructure Setup:
 
-- AWS Buildkite Elastic CI Stack: Infrastructure code in `infra/aws`
-- 8 TPU Nodes on GCP: Infrastructure code in `infra/gcp_old`
-- GKE Cluster on GCP (currently not in use): Infrastructure code in `infra/gcp`
+- AWS Buildkite Elastic CI Stack: Infrastructure code in `terraform/aws`
+- TPU v5/v6e Nodes on GCP: Infrastructure code in `terraform/gcp_old`
+- GKE Cluster on GCP (currently not in use): Infrastructure code in `terraform/gcp`
 
-Bootstrap scripts are located in the `scripts/` directory.
+Buildkite bootstrap scripts & pipeline template files are located in the `buildkite/` directory.
 
 ## How vLLM Uses Buildkite for CI
 vLLM leverages Buildkite for CI workflow. Whenever a commit is pushed to the vLLM GitHub repository, a Buildkite webhook triggers an event that initiates a new build in the Buildkite pipeline with relevant details like Github branch and commit.
@@ -17,8 +17,8 @@ vLLM leverages Buildkite for CI workflow. Whenever a commit is pushed to the vLL
 Build Process Overview:
 
 - Bootstrap Step:
-    - Executed via `scripts/bootstrap.sh`.
-    - Utilizes a CI Jinja2 template (`scripts/test-template-ci.j2`) along with the [list of tests from vLLM](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-pipeline.yaml) to render a Buildkite YAML configuration that defines all build/test steps and their configurations.
+    - Executed via `buildkite/bootstrap.sh`.
+    - Utilizes a CI Jinja2 template (`buildkite/test-template-ci.j2`) along with the [list of tests from vLLM](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-pipeline.yaml) to render a Buildkite YAML configuration that defines all build/test steps and their configurations.
     - Uploads the rendered YAML to Buildkite to initiate the build.
     - Note: We are transitioning to a custom Buildkite pipeline generator to replace the Jinja2 template rendering soon.
 
