@@ -2,8 +2,8 @@ import pytest
 import sys
 from pydantic import ValidationError
 
-from scripts.pipeline_generator.step import get_step_key, get_block_step, BuildkiteBlockStep, TestStep, DEFAULT_TEST_WORKING_DIR, BuildkiteStep
-from scripts.pipeline_generator.utils import AgentQueue, GPUType
+from buildkite.pipeline_generator.step import get_step_key, get_block_step, BuildkiteBlockStep, TestStep, DEFAULT_TEST_WORKING_DIR, BuildkiteStep
+from buildkite.pipeline_generator.utils import AgentQueue, GPUType
 
 @pytest.mark.parametrize(
     ("step_label", "expected_result"),

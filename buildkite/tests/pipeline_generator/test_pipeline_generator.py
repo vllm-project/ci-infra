@@ -4,9 +4,9 @@ import os
 import tempfile
 import yaml
 
-from scripts.pipeline_generator.pipeline_generator import PipelineGeneratorConfig, PipelineGenerator, read_test_steps, write_buildkite_steps
-from scripts.pipeline_generator.step import BuildkiteStep, BuildkiteBlockStep, DEFAULT_TEST_WORKING_DIR
-from scripts.pipeline_generator.utils import AgentQueue
+from buildkite.pipeline_generator.pipeline_generator import PipelineGeneratorConfig, PipelineGenerator, read_test_steps, write_buildkite_steps
+from buildkite.pipeline_generator.step import BuildkiteStep, BuildkiteBlockStep, DEFAULT_TEST_WORKING_DIR
+from buildkite.pipeline_generator.utils import AgentQueue
 
 TEST_COMMIT = "abcdef0123456789abcdef0123456789abcdef01"
 TEST_CONTAINER_REGISTRY = "container.registry"

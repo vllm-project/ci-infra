@@ -2,7 +2,7 @@ import pytest
 import sys
 from typing import List
 
-from scripts.pipeline_generator.utils import (
+from buildkite.pipeline_generator.utils import (
     get_agent_queue,
     get_full_test_command,
     get_multi_node_test_command,

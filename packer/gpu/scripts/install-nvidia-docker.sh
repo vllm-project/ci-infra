@@ -7,8 +7,7 @@ sudo yum install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r) dkms
 
 sudo yum install -y pkgconfig libglvnd-devel
 
-readonly NVIDIA_DRIVER_VERSION="525.147.05" # Driver version for CUDA 12.0, Linux 64-bit, and L4 GPU
-# vLLM is using CUDA 12.1, so 12.0 is the closest version with a L4 driver available
+readonly NVIDIA_DRIVER_VERSION="570.133.20" # Driver version for CUDA 12.8, Linux 64-bit, and L4 GPU
 NVIDIA_DRIVER="https://us.download.nvidia.com/tesla/${NVIDIA_DRIVER_VERSION}/NVIDIA-Linux-x86_64-${NVIDIA_DRIVER_VERSION}.run"
 
 curl -sfL -o cuda_toolkit.run "${NVIDIA_DRIVER}" # Load runfile into cuda_toolkit.run
