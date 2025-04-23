@@ -23,9 +23,9 @@
         DOCKER_BUILDKIT: "1"
     retry:
         automatic:
-        - exit_status: -1  # Agent was lost
+          - exit_status: -1  # Agent was lost
             limit: 2
-        - exit_status: -10  # Agent was lost
+          - exit_status: -10  # Agent was lost
             limit: 2
 
   - block: Build CUDA 12.1 image
@@ -57,9 +57,9 @@
         DOCKER_BUILDKIT: "1"
     retry:
         automatic:
-        - exit_status: -1  # Agent was lost
+          - exit_status: -1  # Agent was lost
             limit: 2
-        - exit_status: -10  # Agent was lost
+          - exit_status: -10  # Agent was lost
             limit: 2
 
   - block: Build CUDA 11.8 image
@@ -91,7 +91,7 @@
         DOCKER_BUILDKIT: "1"
     retry:
         automatic:
-        - exit_status: -1  # Agent was lost
+          - exit_status: -1  # Agent was lost
             limit: 2
-        - exit_status: -10  # Agent was lost
+          - exit_status: -10  # Agent was lost
             limit: 2
