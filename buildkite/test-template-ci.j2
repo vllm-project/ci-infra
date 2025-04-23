@@ -17,12 +17,9 @@ steps:
   - label: ":docker: build image"
     key: image-build
     depends_on: ~
+    timeout_in_minutes: 600
     agents:
-      {% if branch == "main" %}
       queue: cpu_queue_postmerge
-      {% else %}
-      queue: cpu_queue_premerge
-      {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - |
