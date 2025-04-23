@@ -1,41 +1,41 @@
 - group: "AMD Tests"
-    depends_on: ~
-    steps:
-      - label: "AMD: :docker: build image"
-        depends_on: ~
-        soft_fail: true
-        commands:
-          # Handle the introduction of test target in Dockerfile.rocm
-          - "grep -i 'from base as test' docker/Dockerfile.rocm && docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm --target test --progress plain . || docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm --progress plain ."
-          - "docker push {{ docker_image_amd }}"
-        key: "amd-build"
-        env:
-          DOCKER_BUILDKIT: "1"
-        retry:
-          automatic:
-            - exit_status: -1  # Agent was lost
-              limit: 1
-            - exit_status: -10  # Agent was lost
-              limit: 1
-            - exit_status: 1  # Machine occasionally fail
-              limit: 1
-        agents:
-          queue: amd-cpu
+  depends_on: ~
+  steps:
+    - label: "AMD: :docker: build image"
+      depends_on: ~
+      soft_fail: true
+      commands:
+        # Handle the introduction of test target in Dockerfile.rocm
+        - "grep -i 'from base as test' docker/Dockerfile.rocm && docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm --target test --progress plain . || docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm --progress plain ."
+        - "docker push {{ docker_image_amd }}"
+      key: "amd-build"
+      env:
+        DOCKER_BUILDKIT: "1"
+      retry:
+        automatic:
+          - exit_status: -1  # Agent was lost
+            limit: 1
+          - exit_status: -10  # Agent was lost
+            limit: 1
+          - exit_status: 1  # Machine occasionally fail
+            limit: 1
+      agents:
+        queue: amd-cpu
 
     {% for step in steps %}
     {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
-      - label: "AMD: {{ step.label }}"
-        depends_on: amd-build
-        agents:
-         {% if step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Test %N" or step.label=="Distributed Tests (4 GPUs)" or step.label=="Distributed Comm Ops Test" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" or step.label=="Weight Loading Multiple GPU Test" %}
-           queue: amd_mi300
-         {% else %}
-           queue: amd_mi300_1
-         {% endif%}
-        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
-        env:
-          DOCKER_BUILDKIT: "1"
-        priority: 100
-        soft_fail: true
+    - label: "AMD: {{ step.label }}"
+      depends_on: amd-build
+      agents:
+        {% if step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Test %N" or step.label=="Distributed Tests (4 GPUs)" or step.label=="Distributed Comm Ops Test" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" or step.label=="Weight Loading Multiple GPU Test" %}
+        queue: amd_mi300
+        {% else %}
+        queue: amd_mi300_1
+        {% endif%}
+      command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+      env:
+        DOCKER_BUILDKIT: "1"
+      priority: 100
+      soft_fail: true
     {% endif %}
     {% endfor %}
