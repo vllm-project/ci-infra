@@ -1,7 +1,7 @@
 {% for step in steps %}
   {% if step.fast_check_only != true %}
 
-  {% set ns = namespace(blocked = get_block_status(step, list_file_diff, run_all, nightly)) %}
+  {% set ns = namespace(blocked = macros.get_block_status(step, list_file_diff, run_all, nightly)) %}
 
   {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
   - block: "Run {{ step.label }}"
@@ -16,6 +16,6 @@
     depends_on: image-build
     {% endif %}
     soft_fail: {{ step.soft_fail or false }}
-    {{ render_cuda_config(step, docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
+    {{ macros.render_cuda_config(step, docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
   {% endif %}
 {% endfor %}

@@ -38,7 +38,7 @@
               limit: 2
     {% for step in steps %}
     {% if step.torch_nightly %}
-      {% set ns = namespace(blocked = get_block_status(step, list_file_diff, run_all, nightly)) %}
+      {% set ns = namespace(blocked = macros.get_block_status(step, list_file_diff, run_all, nightly)) %}
 
       {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
       - block: "Run Torch Nightly {{ step.label }}"
@@ -53,6 +53,6 @@
         depends_on: image-build-torch-nightly
         {% endif %}
         soft_fail: true
-        {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
+        {{ macros.render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
       {% endif %}
       {% endfor %}
