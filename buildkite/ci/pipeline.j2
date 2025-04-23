@@ -15,9 +15,7 @@
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
-
 {% import "_macros.j2" as macros %}
-
 steps:
 {% include "steps/image_build.j2" %}
 {% include "steps/test_matrix.j2" %}
