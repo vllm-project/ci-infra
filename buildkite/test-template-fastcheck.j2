@@ -235,6 +235,7 @@ steps:
 
   - label: "TPU V0 Test Notification"
     depends_on: run-tpu-v0-test
+    soft_fail: true
     agents:
       queue: tpu_v5_queue
     commands: |
@@ -268,6 +269,7 @@ steps:
 
   - label: "TPU V1 Test Notification"
     depends_on: run-tpu-v1-test
+    soft_fail: true
     agents:
       queue: tpu_v5_queue
     commands: |
