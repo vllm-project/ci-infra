@@ -15,28 +15,6 @@
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
-{% macro get_block_status(step, list_file_diff, run_all, nightly) %}
-{% set ns = namespace(blocked=1) %}
-
-{% if run_all == "1" or nightly == "1" %}
-  {% set ns.blocked = 0 %}
-{% endif %}
-
-{% if step.source_file_dependencies %}
-  {% for source_file in step.source_file_dependencies %}
-    {% for file in list_file_diff %}
-      {% if source_file in file %}
-        {% set ns.blocked = 0 %}
-      {% endif %}
-    {% endfor %}
-  {% endfor %}
-{% else %}
-  {% set ns.blocked = 0 %}
-{% endif %}
-
-{{ ns.blocked }}
-{% endmacro %}
-
 {% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
 agents:
   {% if step.label == "Documentation Build" %}
@@ -237,7 +215,27 @@ steps:
   {% for step in steps %}
   {% if step.fast_check_only != true %}
 
-  {% set ns = namespace(blocked = get_block_status(step, list_file_diff, run_all, nightly)) %}
+  {% set ns = namespace(blocked=1) %}
+
+  {% if run_all == "1" %}
+  {% set ns.blocked = 0 %}
+  {% endif %}
+
+  {% if nightly == "1" %}
+  {% set ns.blocked = 0 %}
+  {% endif %}
+
+  {% if step.source_file_dependencies %}
+    {% for source_file in step.source_file_dependencies %}
+      {% for file in list_file_diff %}
+        {% if source_file in file %}
+          {% set ns.blocked = 0 %}
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
+  {% else %}
+    {% set ns.blocked = 0 %}
+  {% endif %}
 
   {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
   - block: "Run {{ step.label }}"
