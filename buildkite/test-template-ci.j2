@@ -448,6 +448,7 @@ steps:
 
   - label: "TPU V1 Test Notification"
     depends_on: tpu-v1-test
+    soft_fail: true
     agents:
       queue: tpu_v6e_queue
     commands: |
