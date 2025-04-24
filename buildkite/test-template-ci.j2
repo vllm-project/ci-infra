@@ -435,7 +435,7 @@ steps:
 
   - label: "TPU V1 Test"
     depends_on: ~
-    key: tpu-v1-test
+    key: run-tpu-v1-test
     soft_fail: true
     agents:
       queue: tpu_v6e_queue
@@ -444,17 +444,17 @@ steps:
       - yes | docker system prune -a
 
   - label: "TPU V1 Test Notification"
-    depends_on: tpu-v1-test
+    depends_on: run-tpu-v1-test
     soft_fail: true
     agents:
       queue: tpu_v6e_queue
     commands: |
-      if [ $$(buildkite-agent step get "outcome" --step "tpu-v1-test") != "passed" ]; then
+      if [ $$(buildkite-agent step get "outcome" --step "run-tpu-v1-test") != "passed" ]; then
          cat <<- YAML | buildkite-agent pipeline upload
          steps:
            - label: "Notify owners about failing test"
              agents:
-               queue: tpu_v6e_queue
+               queue: tpu_v5_queue
              command: echo "TPU V1 Test failed"
              notify:
                - slack:
