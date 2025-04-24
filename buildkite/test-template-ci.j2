@@ -438,6 +438,7 @@ steps:
 
   - label: "TPU V1 Test"
     depends_on: ~
+    key: tpu-v1-test
     soft_fail: true
     agents:
       queue: tpu_v6e_queue
@@ -446,7 +447,7 @@ steps:
       - yes | docker system prune -a
 
   - label: "TPU V1 Test Notification"
-    depends_on: run-tpu-v1-test
+    depends_on: tpu-v1-test
     agents:
       queue: tpu_v6e_queue
     commands: |
