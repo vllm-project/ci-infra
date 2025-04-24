@@ -294,16 +294,15 @@ steps:
               limit: 2
     {% for step in steps %}
     {% if step.torch_nightly %}
-      {% set ns = namespace(blocked = get_block_status(step, list_file_diff, run_all, nightly)) %}
 
-      {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+      {% if step.optional and nightly != "1" %}
       - block: "Run Torch Nightly {{ step.label }}"
         depends_on: image-build-torch-nightly
         key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
       {% endif %}
 
       - label: "Torch Nightly {{ step.label }}"
-        {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+        {% if step.optional and nightly != "1" %}
         depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
         {% else %}
         depends_on: image-build-torch-nightly
