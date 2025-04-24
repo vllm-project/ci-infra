@@ -452,7 +452,7 @@ steps:
     agents:
       queue: tpu_v6e_queue
     commands: |
-      if [ $$(buildkite-agent step get "outcome" --step "run-tpu-v1-test") != "passed" ]; then
+      if [ $$(buildkite-agent step get "outcome" --step "tpu-v1-test") != "passed" ]; then
          cat <<- YAML | buildkite-agent pipeline upload
          steps:
            - label: "Notify owners about failing test"
