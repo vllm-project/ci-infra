@@ -443,6 +443,7 @@ steps:
       - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
       - yes | docker system prune -a
 
+  {% if branch == "main" %}
   - label: "TPU V1 Test Notification"
     depends_on: run-tpu-v1-test
     soft_fail: true
@@ -462,3 +463,4 @@ steps:
                      - "vllm#collab-google-ci"
       YAML
       fi
+  {% endif %}
