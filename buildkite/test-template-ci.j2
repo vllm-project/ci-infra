@@ -257,13 +257,18 @@ steps:
   - group: "vllm against torch nightly"
     depends_on: ~
     steps:
+      {% if nightly != "1" %}
       - block: Build torch nightly image
         key: block-build-torch-nightly
         depends_on: ~
-
+      {% endif %}
       - label: ":docker: build image torch nightly"
         key: image-build-torch-nightly
+        {% if nightly != "1" %}
         depends_on: block-build-torch-nightly
+        {% else %}
+        depends_on: ~
+        {% endif %}
         soft_fail: true
         agents:
           {% if branch == "main" %}
@@ -294,15 +299,31 @@ steps:
               limit: 2
     {% for step in steps %}
     {% if step.torch_nightly %}
+      {% set ns = namespace(blocked=1) %}
+      {% if nightly == "1" %}
+      {% set ns.blocked = 0 %}
+      {% endif %}
 
-      {% if step.optional and nightly != "1" %}
+      {% if step.source_file_dependencies %}
+        {% for source_file in step.source_file_dependencies %}
+          {% for file in list_file_diff %}
+            {% if source_file in file %}
+              {% set ns.blocked = 0 %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+      {% else %}
+        {% set ns.blocked = 0 %}
+      {% endif %}
+      
+      {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
       - block: "Run Torch Nightly {{ step.label }}"
         depends_on: image-build-torch-nightly
         key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
       {% endif %}
 
       - label: "Torch Nightly {{ step.label }}"
-        {% if step.optional and nightly != "1" %}
+        {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
         depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
         {% else %}
         depends_on: image-build-torch-nightly
