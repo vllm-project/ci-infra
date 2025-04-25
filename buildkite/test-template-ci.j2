@@ -257,14 +257,14 @@ steps:
   - group: "vllm against torch nightly"
     depends_on: ~
     steps:
-      {% if step.optional and nightly != "1" %}
+      {% if nightly != "1" %}
       - block: Build torch nightly image
         key: block-build-torch-nightly
         depends_on: ~
       {% endif %}
       - label: ":docker: build image torch nightly"
         key: image-build-torch-nightly
-        {% if step.optional and nightly != "1" %}
+        {% if nightly != "1" %}
         depends_on: block-build-torch-nightly
         {% else %}
         depends_on: ~
