@@ -440,14 +440,16 @@ steps:
     command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
   {% endif %}
 
-  {% if branch == "main" or "s390x" in branch %}
-  - label: "IBM Z (s390x) CPU Test"
+  - block: Run "IBM Z (s390x) CPU Test"
     depends_on: ~
+    key: block-ibm-s390x
+
+  - label: "IBM Z (s390x) CPU Test"
+    depends_on: block-ibm-s390x
     soft_fail: true
     agents:
       queue: ibm_s390x
     command: bash .buildkite/scripts/hardware_ci/run-cpu-test-s390x.sh
-  {% endif %}
 
   {% if nightly == "1" %}
   - label: "GH200 Test"
