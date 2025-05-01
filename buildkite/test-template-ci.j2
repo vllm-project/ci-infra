@@ -14,6 +14,7 @@
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
+{% set mirror_hw_selector = '$BUILDKITE_MIRROR_HW' %}
 
 {% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
 agents:
@@ -358,11 +359,11 @@ steps:
           queue: amd-cpu
 
     {% for step in steps %}
-    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
+    {% if step.mirror_hardwares and mirror_hw_selector in step.mirror_hardwares %}
       - label: "AMD MI300: {{ step.label }}"
         depends_on: amd-build
         agents:
-         {% if step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Attention Test %N" or step.label=="Kernels Quantization Test %N" or step.label=="Distributed Tests (4 GPUs)" or step.label=="Distributed Comm Ops Test" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" or step.label=="Weight Loading Multiple GPU Test" %}
+         {% if step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Attention Test %N" or step.label=="Kernels Quantization Test %N" or step.label=="Distributed Tests (4 GPUs)" or step.label=="Distributed Comm Ops Test" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" or step.label=="Weight Loading Multiple GPU Test" or step.label=="Weight Loading Multiple GPU Test - Large Models" %}
            queue: amd_mi300
          {% else %}
            queue: amd_mi300_1
@@ -375,7 +376,7 @@ steps:
     {% endif %}
     {% endfor %}
     {% for step in steps %}
-        {% if step.mirror_hardwares and "amd" in step.mirror_hardwares and (step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Attention Test %N" or step.label=="Kernels Quantization Test %N" or step.label=="Distributed Tests (4 GPUs)" or step.label=="Distributed Comm Ops Test" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" or step.label=="Weight Loading Multiple GPU Test") %}
+        {% if step.mirror_hardwares and mirror_hw_selector in step.mirror_hardwares and (if step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Attention Test %N" or step.label=="Kernels Quantization Test %N" or step.label=="Distributed Tests (4 GPUs)" or step.label=="Distributed Comm Ops Test" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" or step.label=="Weight Loading Multiple GPU Test" or step.label=="Weight Loading Multiple GPU Test - Large Models") %}
       - label: "AMD MI250: {{ step.label }}"
         depends_on: amd-build
         agents:
