@@ -14,7 +14,7 @@
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
-{% set mirror_hw_selector = "$BUILDKITE_MIRROR_HW" %}
+{% set mirror_hw_selector = $BUILDKITE_MIRROR_HW %}
 
 {% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
 agents:
