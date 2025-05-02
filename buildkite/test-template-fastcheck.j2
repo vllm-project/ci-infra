@@ -4,7 +4,7 @@
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
-{% set mirror_hw_selector = "amd$MIRROR_HW" %}
+{% set mirror_hw_selector = "amdexperimental" %}
 
 steps:
   - label: ":docker: build image"
@@ -321,7 +321,7 @@ steps:
         agents:
           queue: amd-cpu
     {% for step in steps %}
-    {% if step.mirror_hardwares and MIRROR_HW in step.mirror_hardwares %}
+    {% if step.mirror_hardwares and mirror_hw_selector in step.mirror_hardwares %}
       - label: "AMD MI300: {{ step.label }}"
         depends_on: amd-build
         agents:
