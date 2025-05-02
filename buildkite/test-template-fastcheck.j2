@@ -4,7 +4,7 @@
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
-{% set mirror_hw_selector = "amd$BUILDKITE_MIRROR_HW" %}
+{% set mirror_hw_selector = "amd$MIRROR_HW" %}
 
 steps:
   - label: ":docker: build image"
