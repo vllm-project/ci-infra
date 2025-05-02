@@ -321,7 +321,7 @@ steps:
         agents:
           queue: amd-cpu
     {% for step in steps %}
-    {% if step.mirror_hardwares and "amdexperimental" in step.mirror_hardwares %}
+    {% if step.mirror_hardwares and mirror_hw_selector==amdexperimental and "amdexperimental" in step.mirror_hardwares %}
       - label: "AMD MI300: {{ step.label }} with {{mirror_hw_selector}}"
         depends_on: amd-build
         agents:
@@ -335,7 +335,7 @@ steps:
           DOCKER_BUILDKIT: "1"
         priority: 100
         soft_fail: true
-    {% elif step.mirror_hardwares and "amdproduction" in step.mirror_hardwares %}
+    {% elif step.mirror_hardwares and mirror_hw_selector==amdproduction and "amdproduction" in step.mirror_hardwares %}
       - label: "AMD MI300: {{ step.label }} with {{mirror_hw_selector}}"
         depends_on: amd-build
         agents:
