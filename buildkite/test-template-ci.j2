@@ -359,7 +359,7 @@ steps:
           queue: amd-cpu
 
     {% for step in steps %}
-    {% if step.mirror_hardwares and mirror_hw_selector in step.mirror_hardwares %}
+    {% if step.mirror_hardwares and MIRROR_HW in step.mirror_hardwares %}
       - label: "AMD MI300: {{ step.label }}"
         depends_on: amd-build
         agents:
