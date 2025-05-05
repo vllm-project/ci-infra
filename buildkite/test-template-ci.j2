@@ -256,8 +256,6 @@ steps:
 
   - group: "vllm against torch nightly"
     depends_on: ~
-    env:
-      TORCH_NIGHTLY: "1"
     steps:
       {% if nightly != "1" %}
       - block: Build torch nightly image
@@ -330,6 +328,8 @@ steps:
         {% else %}
         depends_on: image-build-torch-nightly
         {% endif %}
+        env:
+          TORCH_NIGHTLY: "1"
         soft_fail: true
         {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
       {% endif %}
