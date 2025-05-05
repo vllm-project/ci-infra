@@ -256,6 +256,8 @@ steps:
 
   - group: "vllm against torch nightly"
     depends_on: ~
+    env:
+      TORCH_NIGHLY: "true"
     steps:
       {% if nightly != "1" %}
       - block: Build torch nightly image
@@ -315,7 +317,7 @@ steps:
       {% else %}
         {% set ns.blocked = 0 %}
       {% endif %}
-      
+
       {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
       - block: "Run Torch Nightly {{ step.label }}"
         depends_on: image-build-torch-nightly
