@@ -257,7 +257,7 @@ steps:
   - group: "vllm against torch nightly"
     depends_on: ~
     env:
-      TORCH_NIGHLY: "true"
+      TORCH_NIGHTLY: "true"
     steps:
       {% if nightly != "1" %}
       - block: Build torch nightly image
