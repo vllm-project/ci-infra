@@ -328,9 +328,9 @@ steps:
         {% else %}
         depends_on: image-build-torch-nightly
         {% endif %}
+        soft_fail: true
         env:
           TORCH_NIGHTLY: "1"
-        soft_fail: true
         {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
       {% endif %}
       {% endfor %}
