@@ -63,6 +63,9 @@ plugins:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME={{ hf_home_fsx }}
         - HF_TOKEN
+        {% if step.torch_nightly == "1" %}
+        - TORCH_NIGHTLY=1
+        {% endif %}
         {% if branch == "main" %}
         - BUILDKITE_ANALYTICS_TOKEN
         {% endif %}
@@ -329,8 +332,6 @@ steps:
         depends_on: image-build-torch-nightly
         {% endif %}
         soft_fail: true
-        env:
-          TORCH_NIGHTLY: "1"
         {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
       {% endif %}
       {% endfor %}
