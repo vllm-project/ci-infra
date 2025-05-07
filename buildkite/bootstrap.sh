@@ -41,9 +41,10 @@ upload_pipeline() {
     echo "List file diff: $LIST_FILE_DIFF"
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
+    echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     cd .buildkite
-    minijinja-cli test-template.j2 test-pipeline.yaml -D branch="$BUILDKITE_BRANCH" -D list_file_diff="$LIST_FILE_DIFF" -D run_all="$RUN_ALL" -D nightly="$NIGHTLY" > pipeline.yml
+    minijinja-cli test-template.j2 test-pipeline.yaml -D branch="$BUILDKITE_BRANCH" -D list_file_diff="$LIST_FILE_DIFF" -D run_all="$RUN_ALL" -D nightly="$NIGHTLY" -D mirror_hw="$AMD_MIRROR_HW"> pipeline.yml
     cat pipeline.yml
     buildkite-agent pipeline upload pipeline.yml
     exit 0
