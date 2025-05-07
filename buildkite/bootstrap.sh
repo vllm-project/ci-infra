@@ -14,6 +14,10 @@ if [[ -z "${VLLM_CI_BRANCH:-}" ]]; then
     VLLM_CI_BRANCH="main"
 fi
 
+if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
+    AMD_MIRROR_HW="amdproduction"
+fi
+
 upload_pipeline() {
     echo "Uploading pipeline..."
     # Install minijinja
