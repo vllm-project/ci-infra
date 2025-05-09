@@ -14,6 +14,10 @@ if [[ -z "${VLLM_CI_BRANCH:-}" ]]; then
     VLLM_CI_BRANCH="main"
 fi
 
+if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
+    AMD_MIRROR_HW="amdproduction"
+fi
+
 upload_pipeline() {
     echo "Uploading pipeline..."
     # Install minijinja
@@ -34,16 +38,17 @@ upload_pipeline() {
     # (WIP) Use pipeline generator instead of jinja template
     if [ -e ".buildkite/pipeline_generator/pipeline_generator.py" ]; then
         python -m pip install click pydantic
-        python .buildkite/pipeline_generator/pipeline_generator.py --run_all=$RUN_ALL --list_file_diff="$LIST_FILE_DIFF" --nightly="$NIGHTLY"
+        python .buildkite/pipeline_generator/pipeline_generator.py --run_all=$RUN_ALL --list_file_diff="$LIST_FILE_DIFF" --nightly="$NIGHTLY" --mirror_hw="$AMD_MIRROR_HW"
         buildkite-agent pipeline upload .buildkite/pipeline.yaml
         exit 0
     fi
     echo "List file diff: $LIST_FILE_DIFF"
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
+    echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     cd .buildkite
-    minijinja-cli test-template.j2 test-pipeline.yaml -D branch="$BUILDKITE_BRANCH" -D list_file_diff="$LIST_FILE_DIFF" -D run_all="$RUN_ALL" -D nightly="$NIGHTLY" > pipeline.yml
+    minijinja-cli test-template.j2 test-pipeline.yaml -D branch="$BUILDKITE_BRANCH" -D list_file_diff="$LIST_FILE_DIFF" -D run_all="$RUN_ALL" -D nightly="$NIGHTLY" -D mirror_hw="$AMD_MIRROR_HW"> pipeline.yml
     cat pipeline.yml
     buildkite-agent pipeline upload pipeline.yml
     exit 0
