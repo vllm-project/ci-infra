@@ -56,11 +56,10 @@ The machines communicate with Buildkite server via an agent being installed on t
 2. [Buildkite K8s agent stack](https://github.com/buildkite/agent-stack-k8s) if you want machines to be managed/orchestrated in a Kubernetes cluster.
 3. [Buildkite agent](https://buildkite.com/docs/agent/v3) if you already have existing standalone machines.
 
-For all of these approaches, you would need the following info to set up:
+For all of these approaches, you would need the following info to set up (please contact @khluu on #sig-ci channel - vllm-dev.slack.com to get them):
 - Buildkite agent token
 - Buildkite queue name
 - (optional) Buildkite cluster UUID
-Please contact @khluu to get them.
 
 If you go with option 1 or 2, these info would need to be provided when you setup the stack. 
 For option 3, it doesn't require it when installing agent. After installation, you would need to manually:
