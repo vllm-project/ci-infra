@@ -48,4 +48,21 @@ Components of the stack for each Agent Queue:
 
 Please note that when creating a new build on Buildkite:
 - Please do it on your own feature branch/fork branch on vLLM, preferrably a branch that is up to date with `main`.
-- If it's a fork branch, `HEAD` cannot be used as commit when creating a build. You have to put in the hash of the latest commit on your branch. 
+- If it's a fork branch, `HEAD` cannot be used as commit when creating a build. You have to put in the hash of the latest commit on your branch.
+
+## How to onboard runners onto CI cluster on Buildkite
+The machines communicate with Buildkite server via an agent being installed on the machine. There are multiple ways agents can be installed, depending on how the machines are set up:
+1. [Buildkite Elastic CI stack](https://buildkite.com/docs/agent/v3/elastic-ci-aws/elastic-ci-stack-overview) if you want the compute to be autoscaling EC2 instances.
+2. [Buildkite K8s agent stack](https://github.com/buildkite/agent-stack-k8s) if you want machines to be managed/orchestrated in a Kubernetes cluster.
+3. [Buildkite agent](https://buildkite.com/docs/agent/v3) if you already have existing standalone machines.
+
+For all of these approaches, you would need the following info to set up:
+- Buildkite agent token
+- Buildkite queue name
+- (optional) Buildkite cluster UUID
+Please contact @khluu to get them.
+
+If you go with option 1 or 2, these info would need to be provided when you setup the stack. 
+For option 3, it doesn't require it when installing agent. After installation, you would need to manually:
+- Add these info in the agent config (usually located in `/etc/buildkite-agent/buildkite-agent.cfg`)
+- Restart the agent (usually `systemctl stop buildkite-agent` then `systemctl start buildkite-agent` works)
