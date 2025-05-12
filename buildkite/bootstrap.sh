@@ -48,9 +48,10 @@ upload_pipeline() {
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     cd .buildkite
-    minijinja-cli test-template.j2 test-pipeline.yaml -D branch="$BUILDKITE_BRANCH" -D list_file_diff="$LIST_FILE_DIFF" -D run_all="$RUN_ALL" -D nightly="$NIGHTLY" -D mirror_hw="$AMD_MIRROR_HW"> pipeline.yml
-    cat pipeline.yml
-    buildkite-agent pipeline upload pipeline.yml
+    minijinja-cli test-template.j2 test-pipeline.yaml -D branch="$BUILDKITE_BRANCH" -D list_file_diff="$LIST_FILE_DIFF" -D run_all="$RUN_ALL" -D nightly="$NIGHTLY" -D mirror_hw="$AMD_MIRROR_HW"> pipeline.yaml
+    cat pipeline.yaml
+    buildkite-agent artifact upload pipeline.yaml
+    buildkite-agent pipeline upload pipeline.yaml
     exit 0
 }
 
