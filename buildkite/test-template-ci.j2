@@ -371,7 +371,7 @@ steps:
            queue: amd_mi300_2
          {% else %}
            queue: amd_mi300_1
-         {% endif%}
+         {% endif %}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
         env:
           DOCKER_BUILDKIT: "1"
@@ -444,11 +444,11 @@ steps:
            - label: "Notify owners about failing test"
              agents:
                queue: ibm-ppc64le
-             command: echo "IBM Power(ppc64le) Build/Test failed"
+             command: echo "IBM Power(ppc64le) Build Test failed"
              notify:
                - slack:
                    channels:
-                     - "#vllm-ci-on-power"
+                     - "vllm#vllm-ci-on-power"
       YAML
       fi
 
