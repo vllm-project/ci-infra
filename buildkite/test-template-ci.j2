@@ -431,7 +431,7 @@ steps:
     soft_fail: true
     agents:
       queue: ibm-ppc64le
-      command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
 
   - label: "IBM Power(ppc64le) Build Failure Notification"
     depends_on: "IBM Power(ppc64le) CPU Test"
