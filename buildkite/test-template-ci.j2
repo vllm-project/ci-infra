@@ -428,11 +428,30 @@ steps:
   {% if branch == "main" %}
   - label: "IBM Power(ppc64le) CPU Test"
     depends_on: ~
+    key: ibm-ppc64-test
     soft_fail: true
     agents:
       queue: ibm-ppc64le
     command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
-  {% else %}
+
+  - label: "IBM Power(ppc64le) Build Failure Notification"
+    depends_on: ibm-ppc64-test
+    agents:
+      queue: ibm-ppc64le
+    commands: |
+      if [ $$(buildkite-agent step get "outcome" --step "IBM Power(ppc64le) CPU Test") != "passed" ]; then
+         cat <<- YAML | buildkite-agent pipeline upload
+         steps:
+           - label: "Notify owners about failing test"
+             agents:
+               queue: ibm-ppc64le
+             command: echo "IBM Power(ppc64le) Build/Test failed"
+             notify:
+               - slack:
+                   channels:
+                     - "vllm#vllm-ci-on-power"
+      YAML
+      fi  {% else %}
   - block: "Run IBM Power(ppc64le) CPU Test"
     depends_on: ~
     key: block-ibm-ppc64-test
