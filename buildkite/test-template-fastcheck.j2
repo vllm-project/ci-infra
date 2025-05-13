@@ -328,7 +328,7 @@ steps:
            queue: amd_mi300_8
          {% elif step.label=="Distributed Tests (4 GPUs)" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" %}
            queue: amd_mi300_4
-         {% elif step.label=="Distributed Comm Ops Test" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Weight Loading Multiple GPU Test" or step.label=="Weight Loading Multiple GPU Test - Large Models" %}
+         {% elif step.label=="Basic Models Test" or step.label=="Distributed Comm Ops Test" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Weight Loading Multiple GPU Test" or step.label=="Weight Loading Multiple GPU Test - Large Models" %}
            queue: amd_mi300_2
          {% else %}
            queue: amd_mi300_1
