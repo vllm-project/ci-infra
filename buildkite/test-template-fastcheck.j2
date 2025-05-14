@@ -321,8 +321,12 @@ steps:
           queue: amd-cpu
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
-      - label: "AMD MI300: {{ step.label }} with {{mirror_hw}}"
+      - block: "Run AMD MI300: {{ step.label }} with {{mirror_hw}}"
+        key: block-amd-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
         depends_on: amd-build
+  
+      - label: "AMD MI300: {{ step.label }} with {{mirror_hw}}"
+        depends_on: block-amd-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
         agents:
          {% if step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Attention Test %N" or step.label=="Kernels Quantization Test %N" %}
            queue: amd_mi300_8
