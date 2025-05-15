@@ -1,11 +1,13 @@
-module "benchmark" {
-  source = "./modules/benchmark"
-  providers = {
-    google-beta.us-east1-d = google-beta.us-east1-d
-  }
+# module "benchmark" {
+#   source = "./modules/benchmark"
+#   providers = {
+#     google-beta.us-east1-d = google-beta.us-east1-d
+#   }
 
-  project_id = var.project_id
-}
+#   buildkite_agent_token_benchmark_cluster = var.buildkite_agent_token_benchmark_cluster
+#   huggingface_token     = var.huggingface_token
+# }
+
 module "ci_v6" {
   source = "./modules/ci_v6"
   providers = {
@@ -14,11 +16,18 @@ module "ci_v6" {
   project_id = var.project_id
 }
 
-module "ci_v5" {
-  source = "./modules/ci_v5"
-  providers = {
-    google-beta.us-south1-a = google-beta.us-south1-a
-  }
+# module "ci_v5" {
+#   source = "./modules/ci_v5"
+#   providers = {
+#     google-beta.us-south1-a = google-beta.us-south1-a
+#   }
 
-  project_id = var.project_id
+#   buildkite_agent_token_ci_cluster = var.buildkite_agent_token_ci_cluster
+#   huggingface_token     = var.huggingface_token
+# }
+
+
+output "buildkite_agent_public_key" {
+  value = module.ci_v6.buildkite_agent_public_key
+  sensitive = true
 }

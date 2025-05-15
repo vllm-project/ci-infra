@@ -19,7 +19,7 @@ provider "google-beta" {
 
 terraform {
   backend "gcs" {
-    bucket = "vllm-tf-state"
-    prefix = "terraform/state"
+    bucket = "tpu_commons_ci-infra_tf"
+    prefix = "terraform/ci_v6-vllm-state"
   }
 }
