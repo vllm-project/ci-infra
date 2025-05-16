@@ -48,6 +48,7 @@ steps:
   - label: ":docker: build image CUDA 12.1"
     key: image-build-cu121
     depends_on: block-build-cu121
+    timeout_in_minutes: 600
     agents:
       {% if branch == "main" %}
       queue: cpu_queue_postmerge
@@ -82,6 +83,7 @@ steps:
   - label: ":docker: build image CUDA 11.8"
     key: image-build-cu118
     depends_on: block-build-cu118
+    timeout_in_minutes: 600
     agents:
       {% if branch == "main" %}
       queue: cpu_queue_postmerge
