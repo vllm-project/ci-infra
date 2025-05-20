@@ -140,6 +140,7 @@ steps:
       {% if branch == "main" %}
       - "docker tag {{ docker_image }} {{ docker_image_latest }}"
       - "docker push {{ docker_image_latest }}"
+      {% endif %}
     env:
       DOCKER_BUILDKIT: "1"
     retry:
