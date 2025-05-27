@@ -499,6 +499,7 @@ steps:
     depends_on: ~
     key: run-tpu-v1-test
     soft_fail: true
+    timeout_in_minutes: 300
     agents:
       queue: tpu_v6e_queue
     commands:
