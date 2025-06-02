@@ -441,6 +441,7 @@ steps:
 
   - label: "IBM Power(ppc64le) Build Failure Notification"
     depends_on: ibm-ppc64-test
+    soft_fail: true
     agents:
       queue: ibm-ppc64le
     commands: |
@@ -448,6 +449,7 @@ steps:
          cat <<- YAML | buildkite-agent pipeline upload
          steps:
            - label: "Notify owners about failing test"
+             soft_fail: true
              agents:
                queue: ibm-ppc64le
              command: echo "IBM Power(ppc64le) Build/Test failed"
