@@ -347,7 +347,7 @@ steps:
         soft_fail: true
         commands:
           # Handle the introduction of test target in Dockerfile.rocm
-          - "docker build --build-arg max_jobs=16 --build-arg REMOTE_VLLM=1 --build-arg ARG_PYTORCH_ROCM_ARCH=gfx90a;gfx942 --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm --target test --no-cache --progress plain ."
+          - "docker build --build-arg max_jobs=16 --build-arg REMOTE_VLLM=1 --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942' --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm --target test --no-cache --progress plain ."
           - "docker push {{ docker_image_amd }}"
         key: "amd-build"
         env:
