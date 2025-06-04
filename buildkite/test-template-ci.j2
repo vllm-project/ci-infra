@@ -368,7 +368,7 @@ steps:
       - label: "AMD MI300: {{ step.label }}"
         depends_on: amd-build
         agents:
-         {% if step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Attention Test %N" or step.label=="Kernels Quantization Test %N" %}
+         {% if step.label and step.label=="Benchmarks" or step.label=="Kernels Attention Test %N" or step.label=="Kernels Quantization Test %N" %}
            queue: amd_mi300_8
          {% elif step.label=="Distributed Tests (4 GPUs)" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" %}
            queue: amd_mi300_4
