@@ -65,6 +65,9 @@ plugins:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME={{ hf_home_fsx }}
         - HF_TOKEN
+        {% if step.torch_nightly == "1" %}
+        - TORCH_NIGHTLY=1
+        {% endif %}
         {% if branch == "main" %}
         - BUILDKITE_ANALYTICS_TOKEN
         {% endif %}
@@ -321,7 +324,7 @@ steps:
       {% else %}
         {% set ns.blocked = 0 %}
       {% endif %}
-      
+
       {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
       - block: "Run Torch Nightly {{ step.label }}"
         depends_on: image-build-torch-nightly
