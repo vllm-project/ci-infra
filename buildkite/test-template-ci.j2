@@ -410,7 +410,11 @@ steps:
     key: block-intel-cpu
 
   - label: "Intel CPU Test"
+    {% if branch == "main" %}
+    depends_on: ~
+    {% else %}
     depends_on: block-intel-cpu
+    {% endif %}
     soft_fail: true
     agents:
       queue: intel-cpu
