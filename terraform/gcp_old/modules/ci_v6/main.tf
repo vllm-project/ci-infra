@@ -61,9 +61,14 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo 'tags="queue=tpu_v6e_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${var.huggingface_token}' | sudo tee -a /etc/environment
 
-      sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
+      # Mount persistent disk
+      if ! blkid /dev/nvme0n2; then
+        echo "Formatting /dev/nvme0n2 as ext4..."
+        sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme0n2
+      fi
+      
       sudo mkdir -p /mnt/disks/persist
-      sudo mount -o discard,defaults /dev/sdb /mnt/disks/persist
+      sudo mount -o discard,defaults /dev/nvme0n2 /mnt/disks/persist
 
       jq ". + {\"data-root\": \"/mnt/disks/persist\"}" /etc/docker/daemon.json > /tmp/daemon.json.tmp && mv /tmp/daemon.json.tmp /etc/docker/daemon.json
       systemctl stop docker
