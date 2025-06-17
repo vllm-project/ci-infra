@@ -1,3 +1,18 @@
+data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
+  secret = "projects/${var.project_id}/secrets/buildkite_agent_token_ci_cluster"
+  version = "latest"
+}
+
+data "google_secret_manager_secret_version" "huggingface_token" {
+  secret = "projects/${var.project_id}/secrets/huggingface_token"
+  version = "latest"
+}
+
+locals {
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+}
+
 resource "google_compute_disk" "disk_v5" {
   provider = google-beta.us-south1-a
   count = 7
@@ -50,10 +65,10 @@ resource "google_tpu_v2_vm" "tpu_v5" {
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-      sudo sed -i "s/xxx/${var.buildkite_agent_token_ci_cluster}/g" /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i "s/xxx/${local.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="vllm-tpu-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=tpu_v5_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'HF_TOKEN=${var.huggingface_token}' | sudo tee -a /etc/environment
+      echo 'HF_TOKEN=${local.huggingface_token_value}' | sudo tee -a /etc/environment
 
       sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
       sudo mkdir -p /mnt/disks/persist
