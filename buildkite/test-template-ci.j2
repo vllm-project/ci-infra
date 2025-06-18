@@ -510,7 +510,20 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - yes | docker system prune -a
+      - run .buildkite/scripts/tpu/cleanup_docker.sh
       - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
+
+  - label: "TPU V1 Benchmark Test"
+    depends_on: ~
+    key: run-tpu-v1-benchmark-test
+    soft_fail: true
+    timeout_in_minutes: 30
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - yes | docker system prune -a
+      - run .buildkite/scripts/tpu/cleanup_docker.sh
+      - bash .buildkite/scripts/tpu/docker_run_bm.sh .buildkite/scripts/tpu/config_v6e_1.env
 
   {% if branch == "main" %}
   - label: "TPU V1 Test Notification"
