@@ -1,6 +1,6 @@
 resource "google_secret_manager_secret" "buildkite_agent_token_benchmark_cluster" {
   project   = var.project_id
-  secret_id = "buildkite-agent-token-benchmark-cluster"
+  secret_id = "buildkite_agent_token_benchmark_cluster"
   
   replication {
     auto {}
@@ -15,7 +15,7 @@ resource "google_secret_manager_secret" "buildkite_agent_token_benchmark_cluster
 
 resource "google_secret_manager_secret" "buildkite_agent_token_ci_cluster" {
   project   = var.project_id
-  secret_id = "buildkite-agent-token-ci-cluster"
+  secret_id = "buildkite_agent_token_ci_cluster"
   
   replication {
     auto {}
@@ -30,7 +30,7 @@ resource "google_secret_manager_secret" "buildkite_agent_token_ci_cluster" {
 
 resource "google_secret_manager_secret" "huggingface_token" {
   project   = var.project_id
-  secret_id = "huggingface-token"
+  secret_id = "huggingface_token"
   
   replication {
     auto {}

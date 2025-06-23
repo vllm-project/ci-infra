@@ -39,7 +39,7 @@ resource "google_tpu_v2_vm" "tpu_v5" {
   }
 
   network_config {
-    network = "default"
+    network   = "projects/${var.project_id}/global/networks/default"
     enable_external_ips = true
   }
 

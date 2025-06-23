@@ -40,7 +40,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
   accelerator_type = "v6e-1"
 
   network_config {
-    network = "default"
+    network = "projects/${var.project_id}/global/networks/default"
     enable_external_ips = true
   }
 
