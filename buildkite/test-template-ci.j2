@@ -426,6 +426,10 @@ steps:
     agents:
       queue: intel-hpu
     command: bash .buildkite/scripts/hardware_ci/run-hpu-test.sh
+    notify:
+      - slack:
+          channels:
+            - "vllm#collab-intel-ci"
 
   - label: "Intel GPU Test"
     soft_fail: true
