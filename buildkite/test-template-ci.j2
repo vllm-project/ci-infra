@@ -2,12 +2,14 @@
 {% set docker_image_cu121 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu121" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu118" %}
+{% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cpu" %}
 {% if branch == "main" %}
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_latest = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest" %}
 {% set docker_image_cu121 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu121" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
+{% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
 {% endif %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
@@ -218,6 +220,40 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
+  - block: Build CPU image
+    key: block-build-cpu
+    depends_on: ~
+
+  - label: ":docker: build image CPU"
+    key: image-build-cpu
+    depends_on: block-build-cpu
+    agents:
+      {% if branch == "main" %}
+      queue: cpu_queue_postmerge
+      {% else %}
+      queue: cpu_queue_premerge
+      {% endif %}
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - |
+        #!/bin/bash
+        if [[ -z $(docker manifest inspect {{ docker_image_cpu }}) ]]; then
+          echo "Image not found, proceeding with build..."
+        else
+          echo "Image found"
+          exit 0
+        fi
+      - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image_cpu }} --target test --progress plain ."
+      - "docker push {{ docker_image_cpu }}"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+
   {% for step in steps %}
   {% if step.fast_check_only != true %}
 
@@ -321,7 +357,7 @@ steps:
       {% else %}
         {% set ns.blocked = 0 %}
       {% endif %}
-      
+
       {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
       - block: "Run Torch Nightly {{ step.label }}"
         depends_on: image-build-torch-nightly
