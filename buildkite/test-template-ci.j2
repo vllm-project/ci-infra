@@ -184,13 +184,9 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
-  - block: Build CPU image
-    key: block-build-cpu
-    depends_on: ~
-
   - label: ":docker: build image CPU"
     key: image-build-cpu
-    depends_on: block-build-cpu
+    depends_on: ~
     agents:
       {% if branch == "main" %}
       queue: cpu_queue_postmerge
