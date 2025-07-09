@@ -11,7 +11,7 @@ resource "tls_private_key" "buildkite_agent_ssh_key" {
 
 resource "google_compute_disk" "disk_east5_b" {
   provider = google-beta.us-east5-b
-  count = 2
+  count = 4
 
   name  = "tpu-disk-east5-b-${count.index}"
   size  = 512
@@ -21,7 +21,7 @@ resource "google_compute_disk" "disk_east5_b" {
 
 resource "google_tpu_v2_vm" "tpu_v6_ci" {
   provider = google-beta.us-east5-b
-  count = 2
+  count = 4
   name = "vllm-tpu-v6-ci-${count.index}"
   zone = "us-east5-b" 
 
