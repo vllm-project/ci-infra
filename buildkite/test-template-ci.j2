@@ -520,7 +520,6 @@ steps:
   - label: "TPU V1 Test"
     depends_on: ~
     key: run-tpu-v1-test
-    soft_fail: true
     timeout_in_minutes: 300
     agents:
       queue: tpu_v6e_queue
@@ -532,7 +531,6 @@ steps:
   - label: "TPU V1 Benchmark Test"
     depends_on: ~
     key: run-tpu-v1-benchmark-test
-    soft_fail: true
     timeout_in_minutes: 60
     agents:
       queue: tpu_v6e_queue
