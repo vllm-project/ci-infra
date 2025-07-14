@@ -67,6 +67,9 @@ plugins:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME={{ hf_home_fsx }}
         - HF_TOKEN
+        {% if step.torch_nightly == "1" %}
+        - TORCH_NIGHTLY=1
+        {% endif %}
         {% if branch == "main" %}
         - BUILDKITE_ANALYTICS_TOKEN
         {% endif %}
