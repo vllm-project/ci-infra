@@ -114,6 +114,18 @@ locals {
       EnableInstanceStorage                = "true"
       BuildkiteTerminateInstanceAfterJob   = true
     }
+
+    arm64-cpu-queue-postmerge = {
+      BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
+      BuildkiteQueue                       = "arm64_cpu_queue_postmerge"
+      InstanceTypes                        = "r7g.16xlarge" # 512GB memory for CUDA kernel compilation
+      MaxSize                              = 10
+      ECRAccessPolicy                      = "poweruser"
+      InstanceOperatingSystem              = "linux"
+      OnDemandPercentage                   = 100
+      EnableInstanceStorage                = "true"
+      BuildkiteTerminateInstanceAfterJob   = true
+    }
   }
 
   ci_gpu_queues_parameters = {
@@ -576,6 +588,10 @@ resource "aws_iam_role_policy_attachment" "bk_stack_sccache_bucket_read_write_ac
     {
       for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
       if v.name == "bk-cpu-queue-postmerge" 
+    },
+    {
+      for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
+      if v.name == "bk-arm64-cpu-queue-postmerge"
     }
   )
   role       = each.value.outputs.InstanceRoleName
