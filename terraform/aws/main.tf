@@ -114,6 +114,18 @@ locals {
       EnableInstanceStorage                = "true"
       BuildkiteTerminateInstanceAfterJob   = true
     }
+
+    arm64-cpu-queue-postmerge = {
+      BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
+      BuildkiteQueue                       = "arm64_cpu_queue_postmerge"
+      InstanceTypes                        = "r7g.16xlarge" # 512GB memory for CUDA kernel compilation
+      MaxSize                              = 10
+      ECRAccessPolicy                      = "poweruser"
+      InstanceOperatingSystem              = "linux"
+      OnDemandPercentage                   = 100
+      EnableInstanceStorage                = "true"
+      BuildkiteTerminateInstanceAfterJob   = true
+    }
   }
 
   ci_gpu_queues_parameters = {
