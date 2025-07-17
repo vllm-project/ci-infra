@@ -588,6 +588,10 @@ resource "aws_iam_role_policy_attachment" "bk_stack_sccache_bucket_read_write_ac
     {
       for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
       if v.name == "bk-cpu-queue-postmerge" 
+    },
+    {
+      for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
+      if v.name == "bk-arm64-cpu-queue-postmerge"
     }
   )
   role       = each.value.outputs.InstanceRoleName
