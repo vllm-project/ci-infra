@@ -520,13 +520,24 @@ steps:
   - label: "TPU V1 Test"
     depends_on: ~
     key: run-tpu-v1-test
-    timeout_in_minutes: 300
+    timeout_in_minutes: 180
     agents:
       queue: tpu_v6e_queue
     commands:
       - yes | docker system prune -a
       - bash .buildkite/scripts/tpu/cleanup_docker.sh
       - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
+
+  - label: "TPU V1 Test Part2"
+    depends_on: ~
+    key: run-tpu-v1-test-part2
+    timeout_in_minutes: 90
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - yes | docker system prune -a
+      - bash .buildkite/scripts/tpu/cleanup_docker.sh
+      - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test-part2.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test-part2.sh; fi
 
   - label: "TPU V1 Benchmark Test"
     depends_on: ~
