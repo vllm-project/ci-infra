@@ -57,6 +57,7 @@ upload_pipeline() {
             -D run_all="$RUN_ALL" \
             -D nightly="$NIGHTLY" \
             -D mirror_hw="$AMD_MIRROR_HW" \
+            -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -91,6 +92,7 @@ patterns=(
     "requirements/test.txt"
     "setup.py"
     "csrc/"
+    "cmake/"
 )
 
 ignore_patterns=(
@@ -124,6 +126,17 @@ for file in $file_diff; do
         fi
     fi
 done
+
+# Decide whether to use precompiled wheels
+# Relies on existing patterns array as a basis.
+if [[ $RUN_ALL -eq 1 ]]; then
+    export VLLM_USE_PRECOMPILED=0
+    echo "Detected critical changes, building wheels from source"
+else
+    export VLLM_USE_PRECOMPILED=1
+    echo "No critical changes, using precompiled wheels"
+fi
+
 
 LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
 if [[ $BUILDKITE_BRANCH == "main" ]]; then

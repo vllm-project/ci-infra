@@ -155,7 +155,20 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - "docker build --file docker/Dockerfile --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --tag {{ docker_image }} --target test --progress plain ."
+      - > 
+        docker build --file docker/Dockerfile
+        --build-arg max_jobs=16
+        --build-arg buildkite_commit=$BUILDKITE_COMMIT
+        --build-arg USE_SCCACHE=1
+        {% if branch != "main" %}
+        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
+        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
+        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
+        {% else %}
+        {% endif %}
+        --tag {{ docker_image }}
+        --target test
+        --progress plain .
       - "docker push {{ docker_image }}"
       {% if branch == "main" %}
       - "docker tag {{ docker_image }} {{ docker_image_latest }}"
@@ -193,7 +206,21 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - "docker build --file docker/Dockerfile --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION=11.8.0 --tag {{ docker_image_cu118 }} --target test --progress plain ."
+      - >
+        docker build
+        --file docker/Dockerfile
+        --build-arg max_jobs=16
+        --build-arg buildkite_commit=$BUILDKITE_COMMIT
+        --build-arg USE_SCCACHE=1
+        --build-arg CUDA_VERSION=11.8.0
+        {% if branch != "main" %}
+        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
+        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
+        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
+        {% endif %}
+        --tag {{ docker_image_cu118 }}
+        --target test
+        --progress plain .
       - "docker push {{ docker_image_cu118 }}"
     env:
       DOCKER_BUILDKIT: "1"
@@ -309,7 +336,15 @@ steps:
               echo "Image found"
               exit 0
             fi
-          - "docker build --file docker/Dockerfile.nightly_torch --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --tag {{ docker_image_torch_nightly }} --target test --progress plain ."
+            - >
+              docker build
+              --file docker/Dockerfile.nightly_torch
+              --build-arg max_jobs=16
+              --build-arg buildkite_commit=$BUILDKITE_COMMIT
+              --build-arg USE_SCCACHE=1
+              --tag {{ docker_image_torch_nightly }}
+              --target test
+              --progress plain .
           - "docker push {{ docker_image_torch_nightly }}"
         env:
           DOCKER_BUILDKIT: "1"
@@ -363,7 +398,17 @@ steps:
         soft_fail: true
         commands:
           # Handle the introduction of test target in Dockerfile.rocm
-          - "docker build --build-arg max_jobs=16 --build-arg REMOTE_VLLM=1 --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942' --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm --target test --no-cache --progress plain ."
+            - >
+              docker build
+              --build-arg max_jobs=16
+              --build-arg REMOTE_VLLM=1
+              --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942'
+              --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
+              --tag {{ docker_image_amd }}
+              -f docker/Dockerfile.rocm
+              --target test
+              --no-cache
+              --progress plain .
           - "docker push {{ docker_image_amd }}"
         key: "amd-build"
         env:
