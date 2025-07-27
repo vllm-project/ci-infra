@@ -1,6 +1,44 @@
 # This file is maintained automatically by "terraform init".
 # Manual edits may be lost in future updates.
 
+provider "registry.opentofu.org/buildkite/buildkite" {
+  version = "1.22.1"
+  hashes = [
+    "h1:hioz1BGtbYXov2tWhm6LOhXaG/czaOVi5pv4bWU9zeE=",
+    "zh:06580427eb7ef7c15a6ad4f3e2cccc64d3db8d7517e75ea808d1da2524eb1108",
+    "zh:151ea4bc7bb5321de4f5827fdab6c0e08f910c5bec1221182615ec6314ca0c7c",
+    "zh:3f0ec9eba86c5e3ba8d7b5528d7759943dd611b22dfedee33206fa6776d1a875",
+    "zh:4016586e0ac72b86c4ed43693bfcb8cb9895b947b317a4f545f0335ad853c832",
+    "zh:4d70b1ee046789efdde9948401e21c8b290246f7b12ebeb4ced9970290b8b90f",
+    "zh:51486bee4b9c2cfb1ab889a052f5956e59823c3809dee29c9c37a0bc77c00dc6",
+    "zh:541d4532c875b2ee7ecb98da9a1461e76788893b623b0adf7c634d9fff7770e3",
+    "zh:63cdae945832e7776fe4055f8ee2738e2ba7618c3048565cb966b8f5c4960d67",
+    "zh:6ca3c0b359d61a3b26449a6c61b2fd11671695e3b67a75acb9b54b826c991fb3",
+    "zh:6df1442f8244c431f1fd63031db1d2f70a91b4f9db7d389b59ee56f5c1f9f8a7",
+    "zh:73b71d6168ff1c2c7c876deac44c71467b7b18c39270d1db98bc461614cb35ce",
+    "zh:acfa413a91f4f3fb80e359d364e540d2662d8e22e1746031179a7b7c72101e71",
+    "zh:e434a169289224da3cf345da06c253805d7b65387925aac39c0b9b163a94f962",
+    "zh:f18a2e570d256b420744c7cedce321ddc7dadf8ec5874cc65ec8ae18744f689b",
+    "zh:fd6677a7feedd1fde42e9e9ceef6ec7a1d5ee8ecbb94b1b734fd7ed6812f9e25",
+  ]
+}
+
+provider "registry.opentofu.org/hashicorp/aws" {
+  version = "6.4.0"
+  hashes = [
+    "h1:rZWWVJBZ/yzPf5oWNzY4Lvyr5h1pIZrP7BZKArg2VEE=",
+    "zh:13a76e40785ab232b4cf06a7de64e4e7fe190a4035d3e0a5ed3afcd1b24111ea",
+    "zh:314b8284b73d51d1b1f35dbaabacae862ff3037170ac6a9004ff8feb466c5712",
+    "zh:59d62e7d0c00a4b0fd56c1baae0d255491c84193d9196dc593e3e6d76919c44f",
+    "zh:5ec30bc9d4c9e9cf2c87d800afc0dfdd4252d50f10b7f590a671dde63ca17a25",
+    "zh:6e37ad66926e0990513f701215a025e76f9391b2011b84b5841544afd051151a",
+    "zh:964d4ae48cb46ddcacafe37910962a6e449c618fb68f7d9568b47293ff2dbd66",
+    "zh:bba74b916f8212043c9f801004dac50413265dc80f443858ae930d8cbfc35089",
+    "zh:d14ed006a093f740c92b7429d458160fb706907dfd6789a5097b3f2df9077887",
+    "zh:e26e714843d328332be61ffdb730fe2405085608205b7ece08e5f06fd1261635",
+  ]
+}
+
 provider "registry.terraform.io/buildkite/buildkite" {
   version     = "1.10.1"
   constraints = "1.10.1"
