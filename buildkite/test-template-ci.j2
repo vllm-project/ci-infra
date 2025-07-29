@@ -163,8 +163,7 @@ steps:
         {% if branch != "main" %}
         --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
         --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
-        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
-        {% else %}
+        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true
         {% endif %}
         --tag {{ docker_image }}
         --target test
@@ -216,7 +215,7 @@ steps:
         {% if branch != "main" %}
         --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
         --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
-        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
+        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true
         {% endif %}
         --tag {{ docker_image_cu118 }}
         --target test
