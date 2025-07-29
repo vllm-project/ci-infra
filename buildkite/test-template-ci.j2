@@ -162,8 +162,10 @@ steps:
         --build-arg USE_SCCACHE=1
         {% if branch != "main" %}
         --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
-        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
+        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1
+        {% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true
+        {% endif %}
         {% endif %}
         --tag {{ docker_image }}
         --target test
@@ -214,8 +216,10 @@ steps:
         --build-arg CUDA_VERSION=11.8.0
         {% if branch != "main" %}
         --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
-        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
+        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1
+        {% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true
+        {% endif %}
         {% endif %}
         --tag {{ docker_image_cu118 }}
         --target test
