@@ -28,7 +28,7 @@ steps:
         --build-arg VLLM_DOCKER_BUILD_CONTEXT=1
         --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
         {% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
-          --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true
+        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true
         {% endif %}
         --tag {{ docker_image }} 
         --target test --progress plain .
