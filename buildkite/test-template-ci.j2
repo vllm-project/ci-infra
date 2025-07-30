@@ -27,6 +27,8 @@ agents:
   queue: a100_queue
   {% elif step.gpu == "h200" %}
   queue: skylab-h200
+  {% elif step.gpu == "b200" %}
+  queue: B200
   {% elif step.num_gpus == 2 or step.num_gpus == 4 %}
   queue: gpu_4_queue
   {% else %}
@@ -51,7 +53,7 @@ retry:
 
 {% if step.num_nodes < 2 %}
 plugins:
-  {% if step.gpu != "a100" and step.gpu != "h200" %}
+  {% if step.gpu != "a100" and step.gpu != "h200" and step.gpu != "b200" %}
   - docker#v5.2.0:
       image: {{ image }}
       always-pull: true
@@ -76,7 +78,7 @@ plugins:
       volumes:
         - /dev/shm:/dev/shm
         - {{ hf_home_fsx }}:{{ hf_home_fsx }}
-  {% elif step.gpu == "h200" %}
+  {% elif step.gpu == "h200" or step.gpu == "b200" %}
    - docker#v5.2.0:
       image: {{ image }}
       always-pull: true
