@@ -14,7 +14,7 @@ resource "google_compute_disk" "disk_east5_b" {
   count = 4
 
   name  = "tpu-disk-east5-b-${count.index}"
-  size  = 512
+  size  = 2048
   type  = "hyperdisk-balanced"
   zone  = "us-east5-b"
 }
