@@ -78,12 +78,31 @@ plugins:
       volumes:
         - /dev/shm:/dev/shm
         - {{ hf_home_fsx }}:{{ hf_home_fsx }}
-  {% elif step.gpu == "h200" or step.gpu == "b200" %}
+  {% elif step.gpu == "h200" %}
    - docker#v5.2.0:
       image: {{ image }}
       always-pull: true
       propagate-environment: true
       gpus: all
+      command: ["bash", "-xc", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
+      environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - HF_HOME=/benchmark-hf-cache
+        - HF_TOKEN
+        {% if branch == "main" %}
+        - BUILDKITE_ANALYTICS_TOKEN
+        {% endif %}
+      volumes:
+        - /dev/shm:/dev/shm
+        - /data/benchmark-hf-cache:/benchmark-hf-cache 
+        - /data/benchmark-vllm-cache:/root/.cache/vllm
+  {% elif step.gpu == "b200" %}
+   - docker#v5.2.0:
+      image: {{ image }}
+      always-pull: true
+      propagate-environment: true
+      # gpus will be configured by BUILDKITE_PLUGIN_DOCKER_GPUS in per host environment variable.
+      # gpus: all
       command: ["bash", "-xc", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
       environment:
         - VLLM_USAGE_SOURCE=ci-test
