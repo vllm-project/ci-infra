@@ -25,15 +25,14 @@ upload_pipeline() {
     curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
     source /var/lib/buildkite-agent/.cargo/env
 
-    # If pipeline is fastcheck
     if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
-        curl -o .buildkite/test-template.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-fastcheck.j2
+        curl -o .buildkite/test-template.j2 \
+            https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-fastcheck.j2
+    else
+        curl -o .buildkite/test-template.j2 \
+            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-ci.j2?$(date +%s)"
     fi
 
-    # If pipeline is CI
-    if [[ $BUILDKITE_PIPELINE_SLUG == "ci" ]]; then
-        curl -o .buildkite/test-template.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-ci.j2?$(date +%s)
-    fi
 
     # (WIP) Use pipeline generator instead of jinja template
     if [ -e ".buildkite/pipeline_generator/pipeline_generator.py" ]; then
