@@ -1,3 +1,28 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.3"
+    }
+    buildkite = {
+      source  = "buildkite/buildkite"
+      version = "1.10.1"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-west-2"
+}
+
+provider "buildkite" {
+  organization = "vllm"
+}
+
 resource "buildkite_agent_token" "tf_managed" {
   description = "token used by the build fleet"
 }
@@ -114,6 +139,18 @@ locals {
       EnableInstanceStorage                = "true"
       BuildkiteTerminateInstanceAfterJob   = true
     }
+
+    arm64-cpu-queue-postmerge = {
+      BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
+      BuildkiteQueue                       = "arm64_cpu_queue_postmerge"
+      InstanceTypes                        = "r7g.16xlarge" # 512GB memory for CUDA kernel compilation
+      MaxSize                              = 10
+      ECRAccessPolicy                      = "poweruser"
+      InstanceOperatingSystem              = "linux"
+      OnDemandPercentage                   = 100
+      EnableInstanceStorage                = "true"
+      BuildkiteTerminateInstanceAfterJob   = true
+    }
   }
 
   ci_gpu_queues_parameters = {
@@ -121,7 +158,7 @@ locals {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "gpu_1_queue"
       InstanceTypes                        = "g6.4xlarge"  # 1 Nvidia L4 GPU, 64GB memory
-      MaxSize                              = 104
+      MaxSize                              = 208
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
@@ -133,7 +170,7 @@ locals {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "gpu_4_queue"
       InstanceTypes                        = "g6.12xlarge" # 4 Nvidia L4 GPUs, 192GB memory
-      MaxSize                              = 32
+      MaxSize                              = 64
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
@@ -576,6 +613,10 @@ resource "aws_iam_role_policy_attachment" "bk_stack_sccache_bucket_read_write_ac
     {
       for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
       if v.name == "bk-cpu-queue-postmerge" 
+    },
+    {
+      for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
+      if v.name == "bk-arm64-cpu-queue-postmerge"
     }
   )
   role       = each.value.outputs.InstanceRoleName
@@ -588,4 +629,86 @@ resource "aws_iam_role_policy_attachment" "vllm_wheels_bucket_read_write_access"
   }
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.vllm_wheels_bucket_read_write_access.arn
+}
+
+resource "aws_security_group" "ci-model-weights-sg" {
+  name = "ci-model-weights-security-group"
+  description = "Security group for the CI model weights EFS"
+  vpc_id = module.vpc.vpc_id
+
+  ingress = [
+    {
+      cidr_blocks      = ["10.0.0.0/16"]
+      description      = "Allow inbound NFS from VPC"
+      from_port        = 2049
+      to_port          = 2049
+      protocol         = "tcp"
+      ipv6_cidr_blocks = []
+      prefix_list_ids  = []
+      security_groups  = []
+      self             = false
+    },
+    {
+      cidr_blocks      = []
+      description      = null
+      from_port        = 1018
+      to_port          = 1023
+      protocol         = "tcp"
+      ipv6_cidr_blocks = []
+      prefix_list_ids  = []
+      security_groups  = ["sg-0c83698515e47eb5b"]
+      self             = true
+    },
+    {
+      cidr_blocks      = []
+      description      = null
+      from_port        = 988
+      to_port          = 988
+      protocol         = "tcp"
+      ipv6_cidr_blocks = []
+      prefix_list_ids  = []
+      security_groups  = ["sg-0c83698515e47eb5b"]
+      self             = true
+    }
+  ]
+
+  egress = [
+    {
+      cidr_blocks      = ["0.0.0.0/0"]
+      description      = null
+      from_port        = 0
+      to_port          = 0
+      protocol         = "-1"
+      ipv6_cidr_blocks = []
+      prefix_list_ids  = []
+      security_groups  = []
+      self             = false
+    },
+    {
+      cidr_blocks      = []
+      description      = null
+      from_port        = 1018
+      to_port          = 1023
+      protocol         = "tcp"
+      ipv6_cidr_blocks = []
+      prefix_list_ids  = []
+      security_groups  = ["sg-0c83698515e47eb5b"]
+      self             = true
+    },
+    {
+      cidr_blocks      = []
+      description      = null
+      from_port        = 988
+      to_port          = 988
+      protocol         = "tcp"
+      ipv6_cidr_blocks = []
+      prefix_list_ids  = []
+      security_groups  = ["sg-0c83698515e47eb5b"]
+      self             = true
+    }
+  ]
+
+  tags = {
+    Name = "ci-model-weights-security-group"
+  }
 }

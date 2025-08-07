@@ -20,7 +20,16 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - "docker build --file docker/Dockerfile --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --tag {{ docker_image }} --target test --progress plain ."
+      - >
+        docker build --file docker/Dockerfile 
+        --build-arg max_jobs=16 
+        --build-arg buildkite_commit=$BUILDKITE_COMMIT 
+        --build-arg USE_SCCACHE=1 
+        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1
+        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
+        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
+        --tag {{ docker_image }} 
+        --target test --progress plain .
       - "docker push {{ docker_image }}"
     env:
       DOCKER_BUILDKIT: "1"
@@ -260,7 +269,6 @@ steps:
   - label: "TPU V1 Test"
     key: run-tpu-v1-test
     depends_on: block-tpu-v1
-    soft_fail: true
     agents:
       queue: tpu_v6e_queue
     commands:
@@ -283,7 +291,7 @@ steps:
              notify:
                - slack:
                    channels:
-                     - "#collab-google-ci"
+                     - "#tpu-ci-notifications"
       YAML
       fi
   - block: "Run GH200 Test"
@@ -321,27 +329,21 @@ steps:
           queue: amd-cpu
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
+      {% if step.label and step.label=="Basic Correctness Test" %}
       - block: "Run AMD MI300: {{ step.label }} with {{mirror_hw}}"
         key: block-amd-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
         depends_on: amd-build
-  
+        
       - label: "AMD MI300: {{ step.label }} with {{mirror_hw}}"
         depends_on: block-amd-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
-        agents:
-         {% if step.label and step.label=="Benchmarks" or step.label=="Kernels Attention Test %N" or step.label=="Kernels Quantization Test %N" %}
-           queue: amd_mi300_8
-         {% elif step.label=="Distributed Tests (4 GPUs)" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" %}
-           queue: amd_mi300_4
-         {% elif step.label=="Distributed Comm Ops Test" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Weight Loading Multiple GPU Test" or step.label=="Weight Loading Multiple GPU Test - Large Models" %}
-           queue: amd_mi300_2
-         {% else %}
+        agents:     
            queue: amd_mi300_1
-         {% endif%}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
         env:
           DOCKER_BUILDKIT: "1"
         priority: 100
         soft_fail: true
+      {% endif%}
     {% endif %}
     {% endfor %}
 

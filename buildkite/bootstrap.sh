@@ -25,15 +25,14 @@ upload_pipeline() {
     curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
     source /var/lib/buildkite-agent/.cargo/env
 
-    # If pipeline is fastcheck
     if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
-        curl -o .buildkite/test-template.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-fastcheck.j2
+        curl -o .buildkite/test-template.j2 \
+            https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-fastcheck.j2
+    else
+        curl -o .buildkite/test-template.j2 \
+            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-ci.j2?$(date +%s)"
     fi
 
-    # If pipeline is CI
-    if [[ $BUILDKITE_PIPELINE_SLUG == "ci" ]]; then
-        curl -o .buildkite/test-template.j2 https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-ci.j2?$(date +%s)
-    fi
 
     # (WIP) Use pipeline generator instead of jinja template
     if [ -e ".buildkite/pipeline_generator/pipeline_generator.py" ]; then
@@ -48,7 +47,19 @@ upload_pipeline() {
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     cd .buildkite
-    minijinja-cli test-template.j2 test-pipeline.yaml -D branch="$BUILDKITE_BRANCH" -D list_file_diff="$LIST_FILE_DIFF" -D run_all="$RUN_ALL" -D nightly="$NIGHTLY" -D mirror_hw="$AMD_MIRROR_HW"> pipeline.yaml
+    (
+        set -x
+        # Output pipeline.yaml with all blank lines removed
+        minijinja-cli test-template.j2 test-pipeline.yaml \
+            -D branch="$BUILDKITE_BRANCH" \
+            -D list_file_diff="$LIST_FILE_DIFF" \
+            -D run_all="$RUN_ALL" \
+            -D nightly="$NIGHTLY" \
+            -D mirror_hw="$AMD_MIRROR_HW" \
+            -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
+            | sed '/^[[:space:]]*$/d' \
+            > pipeline.yaml
+    )
     cat pipeline.yaml
     buildkite-agent artifact upload pipeline.yaml
     buildkite-agent pipeline upload pipeline.yaml
@@ -80,6 +91,7 @@ patterns=(
     "requirements/test.txt"
     "setup.py"
     "csrc/"
+    "cmake/"
 )
 
 ignore_patterns=(
@@ -113,6 +125,19 @@ for file in $file_diff; do
         fi
     fi
 done
+
+# Decide whether to use precompiled wheels
+# Relies on existing patterns array as a basis.
+if [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
+    echo "VLLM_USE_PRECOMPILED is already set to: $VLLM_USE_PRECOMPILED"
+elif [[ $RUN_ALL -eq 1 ]]; then
+    export VLLM_USE_PRECOMPILED=0
+    echo "Detected critical changes, building wheels from source"
+else
+    export VLLM_USE_PRECOMPILED=1
+    echo "No critical changes, using precompiled wheels"
+fi
+
 
 LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
