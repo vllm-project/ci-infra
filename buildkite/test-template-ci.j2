@@ -415,7 +415,7 @@ steps:
     steps:
       - label: "AMD: :docker: build image"
         depends_on: ~
-        soft_fail: true
+        soft_fail: false
         commands:
           # Handle the introduction of test target in Dockerfile.rocm
           - >
@@ -462,7 +462,7 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
         priority: 100
-        soft_fail: true
+        soft_fail: false
         {% endif %}
     {% endfor %}
     {% for step in steps %}
