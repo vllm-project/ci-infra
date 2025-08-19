@@ -625,12 +625,14 @@ steps:
 
   {% if branch == "main" %}
   - label: "TPU V1 Test Notification"
-    depends_on: run-tpu-v1-test
+    depends_on: 
+      - run-tpu-v1-test
+      - run-tpu-v1-test-part2
     soft_fail: true
     agents:
       queue: tpu_v6e_queue
     commands: |
-      if [ $$(buildkite-agent step get "outcome" --step "run-tpu-v1-test") != "passed" ]; then
+      if [ $$(buildkite-agent step get "outcome" --step "run-tpu-v1-test") != "passed" || $$(buildkite-agent step get "outcome" --step "run-tpu-v1-test-part2") != "passed"]; then
          cat <<- YAML | buildkite-agent pipeline upload
          steps:
            - label: "Notify owners about failing test"
@@ -640,7 +642,7 @@ steps:
              notify:
                - slack:
                    channels:
-                     - "vllm#collab-google-ci"
+                     - "vllm#tpu-ci-notifications"
       YAML
       fi
   {% endif %}
