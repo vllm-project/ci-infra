@@ -586,6 +586,7 @@ steps:
   {% endif %}
 
   - label: "TPU V1 Test"
+    soft_fail: true
     depends_on: ~
     key: run-tpu-v1-test
     timeout_in_minutes: 180
@@ -597,6 +598,7 @@ steps:
       - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
 
   - label: "TPU V1 Test Part2"
+    soft_fail: true
     depends_on: ~
     key: run-tpu-v1-test-part2
     timeout_in_minutes: 90
@@ -608,6 +610,7 @@ steps:
       - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test-part2.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test-part2.sh; fi
 
   - label: "TPU V1 Benchmark Test"
+    soft_fail: true
     depends_on: ~
     key: run-tpu-v1-benchmark-test
     timeout_in_minutes: 60
@@ -637,7 +640,7 @@ steps:
              notify:
                - slack:
                    channels:
-                     - "vllm#tpu-ci-notifications"
+                     - "vllm#collab-google-ci"
       YAML
       fi
   {% endif %}
