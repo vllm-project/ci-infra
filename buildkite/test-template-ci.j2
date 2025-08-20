@@ -164,7 +164,7 @@ steps:
       {% if branch == "main" %}
       queue: cpu_queue_postmerge
       {% else %}
-      queue: cpu_queue_premerge
+      queue: cpu_queue_premerge_us_east_1
       {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
