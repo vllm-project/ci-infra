@@ -272,8 +272,8 @@ steps:
     agents:
       queue: tpu_v6e_queue
     commands:
-      - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
-      - yes | docker system prune -a
+      - bash .buildkite/scripts/tpu/cleanup_docker.sh
+      - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi      
 
   - label: "TPU V1 Test Notification"
     depends_on: run-tpu-v1-test

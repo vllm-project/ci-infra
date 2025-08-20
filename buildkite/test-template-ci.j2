@@ -593,7 +593,6 @@ steps:
     agents:
       queue: tpu_v6e_queue
     commands:
-      - yes | docker system prune -a
       - bash .buildkite/scripts/tpu/cleanup_docker.sh
       - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
 
@@ -605,7 +604,6 @@ steps:
     agents:
       queue: tpu_v6e_queue
     commands:
-      - yes | docker system prune -a
       - bash .buildkite/scripts/tpu/cleanup_docker.sh
       - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test-part2.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test-part2.sh; fi
 
@@ -617,7 +615,6 @@ steps:
     agents:
       queue: tpu_v6e_queue
     commands:
-      - yes | docker system prune -a
       - bash .buildkite/scripts/tpu/cleanup_docker.sh
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=0 --tag vllm/vllm-tpu-bm --progress plain -f docker/Dockerfile.tpu ."
       - bash .buildkite/scripts/tpu/docker_run_bm.sh .buildkite/scripts/tpu/config_v6e_1.env
