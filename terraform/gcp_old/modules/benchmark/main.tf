@@ -21,7 +21,7 @@ locals {
 
 resource "google_compute_disk" "disk_east1_d" {
   provider = google-beta.us-east1-d
-  count = 2
+  count = 0
 
   name  = "tpu-disk-east1-d${count.index + 1}"
   size  = 512
@@ -31,7 +31,7 @@ resource "google_compute_disk" "disk_east1_d" {
 
 resource "google_tpu_v2_vm" "tpu_v6_benchmark" {
   provider = google-beta.us-east1-d
-  count = 2
+  count = 0
   name = "vllm-tpu-v6-benchmark-${count.index + 1}"
   zone = "us-east1-d"
 
