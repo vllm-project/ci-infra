@@ -9,6 +9,14 @@
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
 {% endif %}
+{% set skip_image_build = (skip_image_build | default("0")) %}
+{% set requirements_changed = (requirements_changed | default("0")) %}
+{% if skip_image_build == "1" and docker_image_override is defined and docker_image_override %}
+  {% set docker_image = docker_image_override %}
+  {% set docker_image_torch_nightly = docker_image_override %}
+  {% set docker_image_cu118 = docker_image_override %}
+  {% set docker_image_cpu = docker_image_override %}
+{% endif %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
@@ -16,6 +24,39 @@
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
+{% macro vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed) -%}
+set -euo pipefail
+{% if skip_image_build != "1" %}
+echo "SKIP_IMAGE_BUILD={{ skip_image_build }} REQUIREMENTS_CHANGED={{ requirements_changed }}
+
+# Copy in the code from the checkout
+rm -rf /vllm-workspace/vllm || true
+cp -a /workdir/. /vllm-workspace/
+
+# Compute Python major.minor
+export PYTHON_VERSION="$(python3 -c 'import sys;print(\".\".join(map(str,sys.version_info[:2])))')"
+
+# Refresh site-packages v1 from workspace
+rm -rf /usr/local/lib/python$PYTHON_VERSION/dist-packages/vllm/v1
+mkdir -p /usr/local/lib/python$PYTHON_VERSION/dist-packages/vllm
+cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python$PYTHON_VERSION/dist-packages/vllm/
+
+# Restore the src/vllm layout so wheel stays authoritative for compiled .so
+rm -rf /vllm-workspace/src || true
+mkdir -p /vllm-workspace/src
+mv /vllm-workspace/vllm /vllm-workspace/src/vllm
+
+{% if requirements_changed == '1' %}
+cd /vllm-workspace
+uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
+{% endif %}
+{% endif %}
+(command -v nvidia-smi >/dev/null && nvidia-smi || true)
+export VLLM_LOGGING_LEVEL=DEBUG
+export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+cd {{ (step.working_dir or default_working_dir) | safe }}
+{{ step.command or (step.commands | join(' && ')) | safe }}
+{%- endmacro %}
 
 {% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
 agents:
@@ -64,7 +105,11 @@ plugins:
       {% if step.label == "Benchmarks" %}
       mount-buildkite-agent: true
       {% endif %}
-      command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
+      command:
+          - "/bin/bash"
+          - "-xce"
+          - |
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed) | indent(12,true) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME={{ hf_home_fsx }}
@@ -85,7 +130,11 @@ plugins:
       always-pull: true
       propagate-environment: true
       gpus: all
-      command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
+      command:
+          - "/bin/bash"
+          - "-xce"
+          - |
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed) | indent(12,true) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME=/benchmark-hf-cache
@@ -105,7 +154,11 @@ plugins:
       propagate-environment: true
       # gpus will be configured by BUILDKITE_PLUGIN_DOCKER_GPUS in per host environment variable.
       # gpus: all
-      command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
+      command:
+          - "/bin/bash"
+          - "-xce"
+          - |
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed) | indent(12,true) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME=/benchmark-hf-cache
@@ -160,6 +213,7 @@ plugins:
 
 
 steps:
+  {% if skip_image_build != "1" %}
   - label: ":docker: build image"
     key: image-build
     depends_on: ~
@@ -285,6 +339,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
+  {% endif %}
 
   {% for step in steps %}
   {% if step.fast_check_only != true %}
@@ -313,7 +368,11 @@ steps:
 
   {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
   - block: "Run {{ step.label }}"
+    {% if skip_image_build != "1" %}
     depends_on: image-build
+    {% else %}
+    depends_on: ~
+    {% endif %}
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
   {% endif %}
 
@@ -321,7 +380,11 @@ steps:
     {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% else %}
+    {% if skip_image_build != "1" %}
     depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
+    {% else %}
+    depends_on: ~
+    {% endif %}
     {% endif %}
     soft_fail: {{ step.soft_fail or false }}
     {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
