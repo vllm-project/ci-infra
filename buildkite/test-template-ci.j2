@@ -94,7 +94,7 @@ plugins:
         {% endif %}
       volumes:
         - /dev/shm:/dev/shm
-        - /data/benchmark-hf-cache:/benchmark-hf-cache 
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
   {% elif step.gpu == "b200" %}
    - docker#v5.2.0:
@@ -113,7 +113,7 @@ plugins:
         {% endif %}
       volumes:
         - /dev/shm:/dev/shm
-        - /data/benchmark-hf-cache:/benchmark-hf-cache 
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
   {% else %}
   - kubernetes:
@@ -176,7 +176,7 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - > 
+      - >
         docker build --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
@@ -358,15 +358,15 @@ steps:
               echo "Image found"
               exit 0
             fi
-            - >
-              docker build
-              --file docker/Dockerfile.nightly_torch
-              --build-arg max_jobs=16
-              --build-arg buildkite_commit=$BUILDKITE_COMMIT
-              --build-arg USE_SCCACHE=1
-              --tag {{ docker_image_torch_nightly }}
-              --target test
-              --progress plain .
+          - >
+            docker build
+            --file docker/Dockerfile.nightly_torch
+            --build-arg max_jobs=16
+            --build-arg buildkite_commit=$BUILDKITE_COMMIT
+            --build-arg USE_SCCACHE=1
+            --tag {{ docker_image_torch_nightly }}
+            --target test
+            --progress plain .
           - "docker push {{ docker_image_torch_nightly }}"
         env:
           DOCKER_BUILDKIT: "1"
@@ -622,7 +622,7 @@ steps:
 
   {% if branch == "main" %}
   - label: "TPU V1 Test Notification"
-    depends_on: 
+    depends_on:
       - run-tpu-v1-test
       - run-tpu-v1-test-part2
     soft_fail: true
