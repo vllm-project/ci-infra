@@ -72,11 +72,11 @@ plugins:
       {% if step.label == "Benchmarks" %}
       mount-buildkite-agent: true
       {% endif %}
+      entrypoint: ["/bin/bash", "-lc"]
       command:
-        - >
-          /bin/bash -lc "
+        - |
           set -euo pipefail
-          echo \"SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}\"
+          echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
           rsync -av --progress /workdir/ /vllm-workspace
           md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
           (command -v nvidia-smi >/dev/null && nvidia-smi || true)
@@ -90,7 +90,6 @@ plugins:
           uv pip install --system -e .
           cd {{ (step.working_dir or default_working_dir) | safe }}
           {{ step.command or (step.commands | join(' && ')) | safe }}
-          "
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME={{ hf_home_fsx }}
@@ -116,11 +115,11 @@ plugins:
       always-pull: true
       propagate-environment: true
       gpus: all
+      entrypoint: ["/bin/bash", "-lc"]
       command:
-        - >
-          /bin/bash -lc "
+        - |
           set -euo pipefail
-          echo \"SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}\"
+          echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
           rsync -av --progress /workdir/ /vllm-workspace
           md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
           (command -v nvidia-smi >/dev/null && nvidia-smi || true)
@@ -134,7 +133,6 @@ plugins:
           uv pip install --system -e .
           cd {{ (step.working_dir or default_working_dir) | safe }}
           {{ step.command or (step.commands | join(' && ')) | safe }}
-          "
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME=/benchmark-hf-cache
@@ -159,11 +157,11 @@ plugins:
       propagate-environment: true
       # gpus will be configured by BUILDKITE_PLUGIN_DOCKER_GPUS in per host environment variable.
       # gpus: all
+      entrypoint: ["/bin/bash", "-lc"]
       command:
-        - >
-          /bin/bash -lc "
+        - |
           set -euo pipefail
-          echo \"SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}\"
+          echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
           rsync -av --progress /workdir/ /vllm-workspace
           md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
           (command -v nvidia-smi >/dev/null && nvidia-smi || true)
@@ -177,7 +175,6 @@ plugins:
           uv pip install --system -e .
           cd {{ (step.working_dir or default_working_dir) | safe }}
           {{ step.command or (step.commands | join(' && ')) | safe }}
-          "
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME=/benchmark-hf-cache
