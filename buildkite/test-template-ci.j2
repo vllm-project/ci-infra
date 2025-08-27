@@ -78,7 +78,7 @@ plugins:
           - |
             set -euo pipefail
             echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
-            rsync -av --progress /workdir/ /vllm-workspace
+            cp -a /workdir/. /vllm-workspace/
             md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
             (command -v nvidia-smi >/dev/null && nvidia-smi || true)
             export VLLM_LOGGING_LEVEL=DEBUG
@@ -122,7 +122,7 @@ plugins:
           - |
             set -euo pipefail
             echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
-            rsync -av --progress /workdir/ /vllm-workspace
+            cp -a /workdir/. /vllm-workspace/
             md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
             (command -v nvidia-smi >/dev/null && nvidia-smi || true)
             export VLLM_LOGGING_LEVEL=DEBUG
@@ -165,7 +165,7 @@ plugins:
           - |
             set -euo pipefail
             echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
-            rsync -av --progress /workdir/ /vllm-workspace
+            cp -a /workdir/. /vllm-workspace/
             md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
             (command -v nvidia-smi >/dev/null && nvidia-smi || true)
             export VLLM_LOGGING_LEVEL=DEBUG
