@@ -168,6 +168,21 @@ plugins:
 
 
 steps:
+  - label: ":docker: !bang DEBUG STEP doug"
+    key: image-build
+    depends_on: ~
+    agents:
+      {% if branch == "main" %}
+      queue: cpu_queue_postmerge_us_east_1
+      {% else %}
+      queue: cpu_queue_premerge_us_east_1
+      {% endif %}
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - |
+        #!/bin/bash
+        echo "!bang: the pwd: $(pwd)"
+
   {% if skip_image_build != "1" %}
   - label: ":docker: build image"
     key: image-build
