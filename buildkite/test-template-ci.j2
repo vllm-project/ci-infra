@@ -86,7 +86,12 @@ plugins:
       volumes:
         - /dev/shm:/dev/shm
         - {{ hf_home_fsx }}:{{ hf_home_fsx }}
-        - ${BUILDKITE_BUILD_CHECKOUT_PATH}:/vllm-workspace/:rw
+      {% if skip_image_build != "1" %}
+      workdir: /vllm-workspace
+      # mount-checkout defaults to true, so your checkout is automatically
+      # mounted into /workdir or the workdir you set
+      mount-checkout: true
+      {% endif %}
   {% elif step.gpu == "h200" %}
    - docker#v5.2.0:
       image: {{ image }}
@@ -105,7 +110,12 @@ plugins:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache 
         - /data/benchmark-vllm-cache:/root/.cache/vllm
-        - ${BUILDKITE_BUILD_CHECKOUT_PATH}:/vllm-workspace/:rw
+      {% if skip_image_build != "1" %}
+                workdir: /vllm-workspace
+          # mount-checkout defaults to true, so your checkout is automatically
+          # mounted into /workdir or the workdir you set
+          mount-checkout: true
+      {% endif %}
   {% elif step.gpu == "b200" %}
    - docker#v5.2.0:
       image: {{ image }}
@@ -125,7 +135,12 @@ plugins:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache 
         - /data/benchmark-vllm-cache:/root/.cache/vllm
-        - ${BUILDKITE_BUILD_CHECKOUT_PATH}:/vllm-workspace/:rw
+      {% if skip_image_build != "1" %}
+                workdir: /vllm-workspace
+          # mount-checkout defaults to true, so your checkout is automatically
+          # mounted into /workdir or the workdir you set
+          mount-checkout: true
+      {% endif %}
   {% else %}
   - kubernetes:
       podSpec:
