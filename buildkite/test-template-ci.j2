@@ -83,12 +83,10 @@ plugins:
             (command -v nvidia-smi >/dev/null && nvidia-smi || true)
             export VLLM_LOGGING_LEVEL=DEBUG
             export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-            python3 -m pip install -U pip uv
             {% if requirements_changed == '1' %}
             cd /vllm-workspace
             uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
             {% endif %}
-            uv pip install --system -e .
             cd {{ (step.working_dir or default_working_dir) | safe }}
             {{ step.command or (step.commands | join(' && ')) | safe }}
       environment:
@@ -127,12 +125,10 @@ plugins:
             (command -v nvidia-smi >/dev/null && nvidia-smi || true)
             export VLLM_LOGGING_LEVEL=DEBUG
             export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-            python3 -m pip install -U pip uv
             {% if requirements_changed == '1' %}
             cd /vllm-workspace
             uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
             {% endif %}
-            uv pip install --system -e .
             cd {{ (step.working_dir or default_working_dir) | safe }}
             {{ step.command or (step.commands | join(' && ')) | safe }}
       environment:
@@ -170,12 +166,10 @@ plugins:
             (command -v nvidia-smi >/dev/null && nvidia-smi || true)
             export VLLM_LOGGING_LEVEL=DEBUG
             export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-            python3 -m pip install -U pip uv
             {% if requirements_changed == '1' %}
             cd /vllm-workspace
             uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
             {% endif %}
-            uv pip install --system -e .
             cd {{ (step.working_dir or default_working_dir) | safe }}
             {{ step.command or (step.commands | join(' && ')) | safe }}
       environment:
