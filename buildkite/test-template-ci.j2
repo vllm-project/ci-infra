@@ -73,10 +73,11 @@ plugins:
       mount-buildkite-agent: true
       {% endif %}
       command:
-        - |
+        - >
           bash -xc "
           echo \"SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}\"
           rsync -av --progress /workdir/ /vllm-workspace
+          md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
           (command nvidia-smi || true)
           export VLLM_LOGGING_LEVEL=DEBUG
           export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
@@ -115,10 +116,11 @@ plugins:
       propagate-environment: true
       gpus: all
       command:
-        - |
+        - >
           bash -xc "
           echo \"SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}\"
           rsync -av --progress /workdir/ /vllm-workspace
+          md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
           (command nvidia-smi || true)
           export VLLM_LOGGING_LEVEL=DEBUG
           export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
@@ -156,10 +158,11 @@ plugins:
       # gpus will be configured by BUILDKITE_PLUGIN_DOCKER_GPUS in per host environment variable.
       # gpus: all
       command:
-        - |
+        - >
           bash -xc "
           echo \"SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}\"
           rsync -av --progress /workdir/ /vllm-workspace
+          md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
           (command nvidia-smi || true)
           export VLLM_LOGGING_LEVEL=DEBUG
           export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
