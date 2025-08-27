@@ -182,6 +182,7 @@ steps:
       - |
         #!/bin/bash
         echo "!bang: the pwd: $(pwd)"
+        echo "!BANG: checkout path: $BUILDKITE_BUILD_CHECKOUT_PATH
         ls -l
 
   {% if skip_image_build != "1" %}
