@@ -74,11 +74,12 @@ plugins:
       {% endif %}
       command:
         - >
-          bash -xc "
+          /bin/bash -lc "
+          set -euo pipefail
           echo \"SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}\"
           rsync -av --progress /workdir/ /vllm-workspace
           md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
-          (command nvidia-smi || true)
+          (command -v nvidia-smi >/dev/null && nvidia-smi || true)
           export VLLM_LOGGING_LEVEL=DEBUG
           export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
           python3 -m pip install -U pip uv
@@ -117,11 +118,12 @@ plugins:
       gpus: all
       command:
         - >
-          bash -xc "
+          /bin/bash -lc "
+          set -euo pipefail
           echo \"SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}\"
           rsync -av --progress /workdir/ /vllm-workspace
           md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
-          (command nvidia-smi || true)
+          (command -v nvidia-smi >/dev/null && nvidia-smi || true)
           export VLLM_LOGGING_LEVEL=DEBUG
           export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
           python3 -m pip install -U pip uv
@@ -159,11 +161,12 @@ plugins:
       # gpus: all
       command:
         - >
-          bash -xc "
+          /bin/bash -lc "
+          set -euo pipefail
           echo \"SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}\"
           rsync -av --progress /workdir/ /vllm-workspace
           md5sum /vllm-workspace/examples/offline_inference/logits_processor.py
-          (command nvidia-smi || true)
+          (command -v nvidia-smi >/dev/null && nvidia-smi || true)
           export VLLM_LOGGING_LEVEL=DEBUG
           export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
           python3 -m pip install -U pip uv
