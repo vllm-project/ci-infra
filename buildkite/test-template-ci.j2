@@ -182,6 +182,7 @@ steps:
       - |
         #!/bin/bash
         echo "!bang: the pwd: $(pwd)"
+        ls -l
 
   {% if skip_image_build != "1" %}
   - label: ":docker: build image"
