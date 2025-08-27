@@ -232,7 +232,7 @@ plugins:
 
 steps:
   - label: ":docker: !bang DEBUG STEP doug"
-    key: image-build
+    key: debug-step
     depends_on: ~
     agents:
       {% if branch == "main" %}
