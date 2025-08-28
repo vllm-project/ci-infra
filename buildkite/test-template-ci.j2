@@ -80,9 +80,9 @@ plugins:
             echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
             # Copy in the code from the checkout
             cp -a /workdir/. /vllm-workspace/
+            export PYTHON_VERSION="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
             rm -Rf /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
             mkdir -p /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-            export PYTHON_VERSION="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
             cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
             # Restore the src/vllm layout
             rm -Rf /vllm-workspace/src || true
@@ -189,9 +189,9 @@ plugins:
             echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
             # Copy in the code from the checkout
             cp -a /workdir/. /vllm-workspace/
+            export PYTHON_VERSION="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
             rm -Rf /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
             mkdir -p /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-            export PYTHON_VERSION="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
             cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
             # Restore the src/vllm layout
             rm -Rf /vllm-workspace/src || true
