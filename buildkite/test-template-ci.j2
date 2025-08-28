@@ -24,6 +24,41 @@
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
+{% macro vllm_checkoutoverlay_script(step,default_working_dir) -%}
+set -euo pipefail
+{% if skip_image_build != "1" %}
+echo "SKIP_IMAGE_BUILD={{ skip_image_build }} REQUIREMENTS_CHANGED={{ requirements_changed }} IMAGE={{ image }}"
+
+# Copy in the code from the checkout
+rm -rf /vllm-workspace/vllm || true
+cp -a /workdir/. /vllm-workspace/
+
+# Compute Python major.minor at runtime (avoid Buildkite ${} interpolation)
+export PYTHON_VERSION="$(python3 -c 'import sys;print(\".\".join(map(str,sys.version_info[:2])))')"
+
+# Refresh site-packages v1 from workspace
+rm -rf /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
+mkdir -p /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
+cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/
+
+# Restore the src/vllm layout so wheel stays authoritative for compiled .so
+rm -rf /vllm-workspace/src || true
+mkdir -p /vllm-workspace/src
+mv /vllm-workspace/vllm /vllm-workspace/src/vllm
+
+md5sum /vllm-workspace/setup.py || true
+
+{% if requirements_changed == '1' %}
+cd /vllm-workspace
+uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
+{% endif %}
+{% endif %}
+(command -v nvidia-smi >/dev/null && nvidia-smi || true)
+export VLLM_LOGGING_LEVEL=DEBUG
+export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+cd {{ (step.working_dir or default_working_dir) | safe }}
+{{ step.command or (step.commands | join(' && ')) | safe }}
+{%- endmacro %}
 
 {% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
 agents:
@@ -76,29 +111,7 @@ plugins:
           - "/bin/bash"
           - "-xc"
           - |
-            set -euo pipefail
-            echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
-            # Copy in the code from the checkout
-            rm -rf /vllm-workspace/vllm || true
-            cp -a /workdir/. /vllm-workspace/
-            export PYTHON_VERSION="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
-            rm -Rf /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-            mkdir -p /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-            cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-            # Restore the src/vllm layout
-            rm -Rf /vllm-workspace/src || true
-            mkdir -p /vllm-workspace/src
-            mv /vllm-workspace/vllm /vllm-workspace/src/vllm
-            md5sum /vllm-workspace/setup.py
-            (command -v nvidia-smi >/dev/null && nvidia-smi || true)
-            export VLLM_LOGGING_LEVEL=DEBUG
-            export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-            {% if requirements_changed == '1' %}
-            cd /vllm-workspace
-            uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
-            {% endif %}
-            cd {{ (step.working_dir or default_working_dir) | safe }}
-            {{ step.command or (step.commands | join(' && ')) | safe }}
+{{ vllm_checkoutoverlay_script(step,default_working_dir) | indent(12) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME={{ hf_home_fsx }}
@@ -112,12 +125,6 @@ plugins:
       volumes:
         - /dev/shm:/dev/shm
         - {{ hf_home_fsx }}:{{ hf_home_fsx }}
-      {% if skip_image_build != "1" %}
-      # workdir: /vllm-workspace
-      # mount-checkout defaults to true, so your checkout is automatically
-      # mounted into /workdir or the workdir you set
-      # mount-checkout: true
-      {% endif %}
   {% elif step.gpu == "h200" %}
    - docker#v5.2.0:
       image: {{ image }}
@@ -128,32 +135,7 @@ plugins:
           - "/bin/bash"
           - "-xc"
           - |
-            set -euo pipefail
-            echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
-            # Copy in the code from the checkout
-            cp -a /workdir/. /vllm-workspace/
-            rm -Rf /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-            mkdir -p /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/
-            export PYTHON_VERSION="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
-            cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/
-            # Restore the src/vllm layout
-            rm -Rf /vllm-workspace/src || true
-            rm -rf /vllm-workspace/vllm || true
-            mkdir -p /vllm-workspace/src
-            if [ -d /vllm-workspace/vllm ]; then
-              rm -rf /vllm-workspace/src/vllm
-              mv /vllm-workspace/vllm /vllm-workspace/src/vllm
-            fi
-            md5sum /vllm-workspace/setup.py
-            (command -v nvidia-smi >/dev/null && nvidia-smi || true)
-            export VLLM_LOGGING_LEVEL=DEBUG
-            export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-            {% if requirements_changed == '1' %}
-            cd /vllm-workspace
-            uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
-            {% endif %}
-            cd {{ (step.working_dir or default_working_dir) | safe }}
-            {{ step.command or (step.commands | join(' && ')) | safe }}
+{{ vllm_checkoutoverlay_script(step,default_working_dir) | indent(12) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME=/benchmark-hf-cache
@@ -165,12 +147,6 @@ plugins:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache 
         - /data/benchmark-vllm-cache:/root/.cache/vllm
-      {% if skip_image_build != "1" %}
-      # workdir: /vllm-workspace
-      # mount-checkout defaults to true, so your checkout is automatically
-      # mounted into /workdir or the workdir you set
-      # mount-checkout: true
-      {% endif %}
   {% elif step.gpu == "b200" %}
    - docker#v5.2.0:
       image: {{ image }}
@@ -182,29 +158,7 @@ plugins:
           - "/bin/bash"
           - "-xc"
           - |
-            set -euo pipefail
-            echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
-            # Copy in the code from the checkout
-            rm -rf /vllm-workspace/vllm || true
-            cp -a /workdir/. /vllm-workspace/
-            export PYTHON_VERSION="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
-            rm -Rf /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-            mkdir -p /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-            cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-            # Restore the src/vllm layout
-            rm -Rf /vllm-workspace/src || true
-            mkdir -p /vllm-workspace/src
-            mv /vllm-workspace/vllm /vllm-workspace/src/vllm
-            md5sum /vllm-workspace/setup.py
-            (command -v nvidia-smi >/dev/null && nvidia-smi || true)
-            export VLLM_LOGGING_LEVEL=DEBUG
-            export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-            {% if requirements_changed == '1' %}
-            cd /vllm-workspace
-            uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
-            {% endif %}
-            cd {{ (step.working_dir or default_working_dir) | safe }}
-            {{ step.command or (step.commands | join(' && ')) | safe }}
+{{ vllm_checkoutoverlay_script(step,default_working_dir) | indent(12) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME=/benchmark-hf-cache
@@ -216,12 +170,6 @@ plugins:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache 
         - /data/benchmark-vllm-cache:/root/.cache/vllm
-      {% if skip_image_build != "1" %}
-      # workdir: /vllm-workspace
-      # mount-checkout defaults to true, so your checkout is automatically
-      # mounted into /workdir or the workdir you set
-      # mount-checkout: true
-      {% endif %}
   {% else %}
   - kubernetes:
       podSpec:
