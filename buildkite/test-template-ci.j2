@@ -168,14 +168,6 @@ steps:
       {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
       - >
         docker build --file docker/Dockerfile
         --build-arg max_jobs=16
