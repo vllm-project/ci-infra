@@ -180,7 +180,11 @@ steps:
         docker build --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
+        {% if branch == "main" %}
         --build-arg USE_SCCACHE=1
+        {% else %}
+        --build-arg USE_SCCACHE=0
+        {% endif %}
         --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
         --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
         {% if branch != "main" %}
