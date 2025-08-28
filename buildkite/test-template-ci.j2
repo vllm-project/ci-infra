@@ -111,7 +111,7 @@ plugins:
           - "/bin/bash"
           - "-xc"
           - |
-{{ vllm_checkoutoverlay_script(step,default_working_dir) | indent(12) }}
+{{ vllm_checkoutoverlay_script(step,default_working_dir) | indent(12,true) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME={{ hf_home_fsx }}
@@ -135,7 +135,7 @@ plugins:
           - "/bin/bash"
           - "-xc"
           - |
-{{ vllm_checkoutoverlay_script(step,default_working_dir) | indent(12) }}
+{{ vllm_checkoutoverlay_script(step,default_working_dir) | indent(12,true) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME=/benchmark-hf-cache
@@ -158,7 +158,7 @@ plugins:
           - "/bin/bash"
           - "-xc"
           - |
-{{ vllm_checkoutoverlay_script(step,default_working_dir) | indent(12) }}
+{{ vllm_checkoutoverlay_script(step,default_working_dir) | indent(12,true) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - HF_HOME=/benchmark-hf-cache
