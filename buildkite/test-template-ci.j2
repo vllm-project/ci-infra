@@ -79,6 +79,7 @@ plugins:
             set -euo pipefail
             echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
             # Copy in the code from the checkout
+            rm -rf /vllm-workspace/vllm || true
             cp -a /workdir/. /vllm-workspace/
             export PYTHON_VERSION="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
             rm -Rf /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
@@ -86,12 +87,8 @@ plugins:
             cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
             # Restore the src/vllm layout
             rm -Rf /vllm-workspace/src || true
-            rm -rf /vllm-workspace/vllm || true
             mkdir -p /vllm-workspace/src
-            if [ -d /vllm-workspace/vllm ]; then
-              rm -rf /vllm-workspace/src/vllm
-              mv /vllm-workspace/vllm /vllm-workspace/src/vllm
-            fi
+            mv /vllm-workspace/vllm /vllm-workspace/src/vllm
             md5sum /vllm-workspace/setup.py
             (command -v nvidia-smi >/dev/null && nvidia-smi || true)
             export VLLM_LOGGING_LEVEL=DEBUG
@@ -188,6 +185,7 @@ plugins:
             set -euo pipefail
             echo "SKIP_IMAGE_BUILD={{ skip_image_build | default('0') }} REQUIREMENTS_CHANGED={{ requirements_changed | default('0') }} IMAGE={{ image }}"
             # Copy in the code from the checkout
+            rm -rf /vllm-workspace/vllm || true
             cp -a /workdir/. /vllm-workspace/
             export PYTHON_VERSION="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
             rm -Rf /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
@@ -195,12 +193,8 @@ plugins:
             cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
             # Restore the src/vllm layout
             rm -Rf /vllm-workspace/src || true
-            rm -rf /vllm-workspace/vllm || true
             mkdir -p /vllm-workspace/src
-            if [ -d /vllm-workspace/vllm ]; then
-              rm -rf /vllm-workspace/src/vllm
-              mv /vllm-workspace/vllm /vllm-workspace/src/vllm
-            fi
+            mv /vllm-workspace/vllm /vllm-workspace/src/vllm
             md5sum /vllm-workspace/setup.py
             (command -v nvidia-smi >/dev/null && nvidia-smi || true)
             export VLLM_LOGGING_LEVEL=DEBUG
