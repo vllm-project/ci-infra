@@ -33,7 +33,7 @@ echo "SKIP_IMAGE_BUILD={{ skip_image_build }} REQUIREMENTS_CHANGED={{ requiremen
 rm -rf /vllm-workspace/vllm || true
 cp -a /workdir/. /vllm-workspace/
 
-# Compute Python major.minor at runtime (avoid Buildkite ${} interpolation)
+# Compute Python major.minor
 export PYTHON_VERSION="$(python3 -c 'import sys;print(\".\".join(map(str,sys.version_info[:2])))')"
 
 # Refresh site-packages v1 from workspace
