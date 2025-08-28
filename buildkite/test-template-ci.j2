@@ -37,9 +37,9 @@ cp -a /workdir/. /vllm-workspace/
 export PYTHON_VERSION="$(python3 -c 'import sys;print(\".\".join(map(str,sys.version_info[:2])))')"
 
 # Refresh site-packages v1 from workspace
-rm -rf /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-mkdir -p /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
-cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/
+rm -rf /usr/local/lib/python$PYTHON_VERSION/dist-packages/vllm/v1
+mkdir -p /usr/local/lib/python$PYTHON_VERSION/dist-packages/vllm
+cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python$PYTHON_VERSION/dist-packages/vllm/
 
 # Restore the src/vllm layout so wheel stays authoritative for compiled .so
 rm -rf /vllm-workspace/src || true
