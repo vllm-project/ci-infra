@@ -171,7 +171,9 @@ echo "Final SKIP_IMAGE_BUILD=${SKIP_IMAGE_BUILD} (RUN_ALL=${RUN_ALL}, VLLM_USE_P
 if [[ "$BUILDKITE_BRANCH" == "main" ]]; then
     DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
 else
-    DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:latest"
+    # Stub! This should probably be considered....
+    DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
+    # DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:latest"
 fi
 
 
