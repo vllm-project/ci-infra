@@ -318,10 +318,10 @@ steps:
     {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
     {% else %}
-    depends_on: image-build
+    depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
     {% endif %}
     soft_fail: {{ step.soft_fail or false }}
-    {{ render_cuda_config(step, docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
+    {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
   {% endif %}
   {% endfor %}
 
