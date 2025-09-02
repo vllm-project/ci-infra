@@ -8,6 +8,7 @@
 steps:
   - label: ":docker: build image"
     key: image-build
+    timeout_in_minutes: 600
     agents:
       queue: cpu_queue_premerge
     commands:
@@ -20,8 +21,26 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - "docker build --file docker/Dockerfile --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --tag {{ docker_image }} --target test --progress plain ."
+      - >
+        docker build --file docker/Dockerfile
+        --build-arg max_jobs=16
+        --build-arg buildkite_commit=$BUILDKITE_COMMIT
+        --build-arg USE_SCCACHE=1
+        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
+        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
+        {% if branch != "main" %}
+        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
+        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
+        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
+        {% endif %}
+        --tag {{ docker_image }}
+        --target test
+        --progress plain .
       - "docker push {{ docker_image }}"
+      {% if branch == "main" %}
+      - "docker tag {{ docker_image }} {{ docker_image_latest }}"
+      - "docker push {{ docker_image_latest }}"
+      {% endif %}
     env:
       DOCKER_BUILDKIT: "1"
     retry:
@@ -94,11 +113,11 @@ steps:
   {% for step in steps %}
   {% if step.gpu != "a100" and step.fast_check != true and step.num_nodes < 2 %}
   - block: "Run {{ step.label }}"
-    key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+    key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     depends_on: image-build
 
   - label: "{{ step.label }}"
-    depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+    depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     agents:
       {% if step.label == "Documentation Build" %}
       queue: small_cpu_queue_premerge
@@ -147,11 +166,11 @@ steps:
   {% for step in steps %}
   {% if step.num_nodes >= 2 %}
   - block: "Run {{ step.label }}"
-    key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+    key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     depends_on: image-build
 
   - label: "{{ step.label }}"
-    depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+    depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     agents:
       queue: gpu_4_queue
     commands:
@@ -235,6 +254,7 @@ steps:
 
   - label: "TPU V0 Test Notification"
     depends_on: run-tpu-v0-test
+    soft_fail: true
     agents:
       queue: tpu_v5_queue
     commands: |
@@ -259,15 +279,15 @@ steps:
   - label: "TPU V1 Test"
     key: run-tpu-v1-test
     depends_on: block-tpu-v1
-    soft_fail: true
     agents:
-      queue: tpu_v5_queue
+      queue: tpu_v6e_queue
     commands:
-      - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
-      - yes | docker system prune -a
+      - bash .buildkite/scripts/tpu/cleanup_docker.sh
+      - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi      
 
   - label: "TPU V1 Test Notification"
     depends_on: run-tpu-v1-test
+    soft_fail: true
     agents:
       queue: tpu_v5_queue
     commands: |
@@ -281,7 +301,7 @@ steps:
              notify:
                - slack:
                    channels:
-                     - "#collab-google-ci"
+                     - "#tpu-ci-notifications"
       YAML
       fi
   - block: "Run GH200 Test"
@@ -298,11 +318,11 @@ steps:
   - group: "AMD Tests"
     depends_on: ~
     steps:    
-      - label: "AMD: :docker: build image"
+      - label: "AMD: :docker: build image with {{mirror_hw}}"
         depends_on: ~
         soft_fail: true
         commands:
-          - "grep -i 'from base as test' docker/Dockerfile.rocm && docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm --target test --progress plain . || docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm --progress plain ."
+          - "docker build --build-arg max_jobs=16 --build-arg REMOTE_VLLM=1 --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942' --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm --target test --no-cache --progress plain ."
           - "docker push {{ docker_image_amd }}"
         key: amd-build
         env:
@@ -318,19 +338,43 @@ steps:
         agents:
           queue: amd-cpu
     {% for step in steps %}
-    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
-      - label: "AMD: {{ step.label }}"
+    {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
+      {% if step.label and step.label=="Basic Correctness Test" %}
+      - block: "Run AMD MI300: {{ step.label }} with {{mirror_hw}}"
+        key: block-amd-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         depends_on: amd-build
-        agents:
-         {% if step.label and step.label=="Benchmarks" or step.label=="LoRA Test %N" or step.label=="Kernels Test %N" or step.label=="Distributed Tests (4 GPUs)" or step.label=="Distributed Comm Ops Test" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" or step.label=="Weight Loading Multiple GPU Test" %}
-           queue: amd_mi300
-         {% else %}
+        
+      - label: "AMD MI300: {{ step.label }} with {{mirror_hw}}"
+        depends_on: block-amd-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+        agents:     
            queue: amd_mi300_1
-         {% endif%}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
         env:
           DOCKER_BUILDKIT: "1"
         priority: 100
         soft_fail: true
+      {% endif%}
     {% endif %}
     {% endfor %}
+
+  - block: "Run Intel CPU test"
+    depends_on: ~
+    key: block-intel-cpu
+
+  - label: "Intel CPU Test"
+    depends_on: block-intel-cpu
+    soft_fail: true
+    agents:
+      queue: intel-cpu
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test.sh
+
+  - block: "Run Intel GPU test"
+    depends_on: ~
+    key: block-intel-gpu
+
+  - label: "Intel GPU Test"
+    soft_fail: true
+    depends_on: block-intel-gpu
+    agents:
+      queue: intel-gpu
+    command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh
