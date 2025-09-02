@@ -19,6 +19,11 @@ provider "aws" {
   region = "us-west-2"
 }
 
+provider "aws" {
+  alias = "us_east_1"
+  region = "us-east-1"
+}
+
 provider "buildkite" {
   organization = "vllm"
 }
@@ -55,6 +60,14 @@ resource "aws_ssm_parameter" "bk_agent_token_cluster_ci" {
   value = buildkite_cluster_agent_token.ci.token
 }
 
+resource "aws_ssm_parameter" "bk_agent_token_cluster_ci_us_east_1" {
+  name  = "/bk_agent_token_cluster_ci_us_east_1"
+  type  = "String"
+  value = buildkite_cluster_agent_token.ci.token
+  provider = aws.us_east_1
+}
+
+
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.0.0"
@@ -73,6 +86,31 @@ module "vpc" {
 
   tags = {
     Name = "vLLM CI VPC"
+  }
+}
+
+module "vpc_us_east_1" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.0.0"
+
+  name = "vllm-ci-vpc-us-east-1"
+  cidr = "10.0.0.0/16"
+
+  azs            = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d"]
+  public_subnets = ["10.0.0.0/18", "10.0.64.0/18", "10.0.128.0/18", "10.0.192.0/18"]
+
+  enable_dns_hostnames          = true
+  map_public_ip_on_launch       = true
+  manage_default_network_acl    = false
+  manage_default_route_table    = false
+  manage_default_security_group = false
+
+  tags = {
+    Name = "vLLM CI VPC us-east-1"
+  }
+
+  providers = {
+    aws = aws.us_east_1
   }
 }
 
@@ -115,6 +153,22 @@ locals {
     }
   }
 
+  queues_parameters_premerge_us_east_1 = {
+    cpu-queue-premerge-us-east-1 = {
+      BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci_us_east_1.name
+      BuildkiteQueue                       = "cpu_queue_premerge_us_east_1"
+      InstanceTypes                        = "r6in.16xlarge" # 512GB memory for CUDA kernel compilation
+      MaxSize                              = 10
+      ECRAccessPolicy                      = "readonly"
+      InstanceOperatingSystem              = "linux"
+      OnDemandPercentage                   = 100
+      EnableInstanceStorage                = "true"
+      VpcId                                = module.vpc_us_east_1.vpc_id
+      SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
+      Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
+    }
+  }
+
   queues_parameters_postmerge = {
     small-cpu-queue-postmerge = {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
@@ -153,6 +207,23 @@ locals {
     }
   }
 
+  queues_parameters_postmerge_us_east_1 = {
+    cpu-queue-postmerge-us-east-1 = {
+      BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci_us_east_1.name
+      BuildkiteQueue                       = "cpu_queue_postmerge_us_east_1"
+      InstanceTypes                        = "r6in.16xlarge" # 512GB memory for CUDA kernel compilation
+      MaxSize                              = 10
+      ECRAccessPolicy                      = "poweruser"
+      InstanceOperatingSystem              = "linux"
+      OnDemandPercentage                   = 100
+      EnableInstanceStorage                = "true"
+      BuildkiteTerminateInstanceAfterJob   = true
+      VpcId                                = module.vpc_us_east_1.vpc_id
+      SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
+      Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
+    }
+  }
+
   ci_gpu_queues_parameters = {
     gpu-1-queue-ci = {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
@@ -164,6 +235,8 @@ locals {
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
+      BuildkiteTerminateInstanceAfterJob   = false
+      ScaleInIdlePeriod                    = 600 # 10 minutes
     }
 
     gpu-4-queue-ci = {
@@ -176,6 +249,8 @@ locals {
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
+      BuildkiteTerminateInstanceAfterJob   = false
+      ScaleInIdlePeriod                    = 600 # 10 minutes
     }
   }
 
@@ -197,8 +272,18 @@ locals {
     name => merge(local.default_parameters, params)
   }
 
+  merged_parameters_premerge_us_east_1 = {
+    for name, params in local.queues_parameters_premerge_us_east_1 :
+    name => merge(local.default_parameters, params)
+  }
+
   merged_parameters_postmerge = {
     for name, params in local.queues_parameters_postmerge :
+    name => merge(local.default_parameters, params)
+  }
+
+  merged_parameters_postmerge_us_east_1 = {
+    for name, params in local.queues_parameters_postmerge_us_east_1 :
     name => merge(local.default_parameters, params)
   }
 
@@ -229,6 +314,24 @@ resource "aws_cloudformation_stack" "bk_queue_premerge" {
   }
 }
 
+resource "aws_cloudformation_stack" "bk_queue_premerge_us_east_1" {
+  for_each   = local.merged_parameters_premerge_us_east_1
+  name       = "bk-${each.key}"
+  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
+  
+  template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
+  capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
+
+  lifecycle {
+    ignore_changes = [
+      tags["AppManagerCFNStackKey"],
+      tags_all["AppManagerCFNStackKey"],
+    ]
+  }
+
+  provider = aws.us_east_1
+}
+
 resource "aws_cloudformation_stack" "bk_queue_postmerge" {
   for_each   = local.merged_parameters_postmerge
   name       = "bk-${each.key}"
@@ -243,6 +346,24 @@ resource "aws_cloudformation_stack" "bk_queue_postmerge" {
       tags_all["AppManagerCFNStackKey"],
     ]
   }
+}
+
+resource "aws_cloudformation_stack" "bk_queue_postmerge_us_east_1" {
+  for_each   = local.merged_parameters_postmerge_us_east_1
+  name       = "bk-${each.key}"
+  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
+
+  template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
+  capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
+
+  lifecycle {
+    ignore_changes = [
+      tags["AppManagerCFNStackKey"],
+      tags_all["AppManagerCFNStackKey"],
+    ]
+  }
+
+  provider = aws.us_east_1
 }
 
 resource "aws_cloudformation_stack" "bk_queue_ci_gpu" {
@@ -546,7 +667,9 @@ resource "aws_iam_role_policy_attachment" "premerge_ecr_public_write_access" {
   for_each   = merge(
     aws_cloudformation_stack.bk_queue,
     aws_cloudformation_stack.bk_queue_premerge,
-    aws_cloudformation_stack.bk_queue_postmerge
+    aws_cloudformation_stack.bk_queue_premerge_us_east_1,
+    aws_cloudformation_stack.bk_queue_postmerge,
+    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
   )
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.premerge_ecr_public_write_access_policy.arn
@@ -562,7 +685,8 @@ resource "aws_iam_role_policy_attachment" "postmerge_ecr_public_read_access" {
 
 resource "aws_iam_role_policy_attachment" "postmerge_ecr_public_read_write_access" {
   for_each   = merge(
-    aws_cloudformation_stack.bk_queue_postmerge
+    aws_cloudformation_stack.bk_queue_postmerge,
+    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
   )
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.postmerge_ecr_public_read_write_access_policy.arn
@@ -570,7 +694,8 @@ resource "aws_iam_role_policy_attachment" "postmerge_ecr_public_read_write_acces
 
 resource "aws_iam_role_policy_attachment" "release_ecr_public_read_write_access" {
   for_each   = merge(
-    aws_cloudformation_stack.bk_queue_postmerge
+    aws_cloudformation_stack.bk_queue_postmerge,
+    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
   )
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.release_ecr_public_read_write_access_policy.arn
@@ -578,7 +703,8 @@ resource "aws_iam_role_policy_attachment" "release_ecr_public_read_write_access"
 
 resource "aws_iam_role_policy_attachment" "cpu_release_ecr_public_read_write_access" {
   for_each   = merge(
-    aws_cloudformation_stack.bk_queue_postmerge
+    aws_cloudformation_stack.bk_queue_postmerge,
+    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
   )
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.cpu_release_ecr_public_read_write_access_policy.arn
@@ -588,7 +714,9 @@ resource "aws_iam_role_policy_attachment" "bk_stack_secrets_access" {
   for_each = merge(
     aws_cloudformation_stack.bk_queue,
     aws_cloudformation_stack.bk_queue_premerge,
+    aws_cloudformation_stack.bk_queue_premerge_us_east_1,
     aws_cloudformation_stack.bk_queue_postmerge,
+    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
     aws_cloudformation_stack.bk_queue_ci_gpu,
   )
   role       = each.value.outputs.InstanceRoleName
@@ -617,6 +745,10 @@ resource "aws_iam_role_policy_attachment" "bk_stack_sccache_bucket_read_write_ac
     {
       for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
       if v.name == "bk-arm64-cpu-queue-postmerge"
+    },
+    {
+      for k, v in aws_cloudformation_stack.bk_queue_postmerge_us_east_1 : k => v
+      if v.name == "bk-cpu-queue-postmerge-us-east-1"
     }
   )
   role       = each.value.outputs.InstanceRoleName
@@ -626,6 +758,14 @@ resource "aws_iam_role_policy_attachment" "bk_stack_sccache_bucket_read_write_ac
 resource "aws_iam_role_policy_attachment" "vllm_wheels_bucket_read_write_access" {
   for_each = {
     for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
+  }
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.vllm_wheels_bucket_read_write_access.arn
+}
+
+resource "aws_iam_role_policy_attachment" "vllm_wheels_bucket_read_write_access_us_east_1" {
+  for_each = {
+    for k, v in aws_cloudformation_stack.bk_queue_postmerge_us_east_1 : k => v
   }
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.vllm_wheels_bucket_read_write_access.arn

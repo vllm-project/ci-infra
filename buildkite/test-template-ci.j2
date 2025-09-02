@@ -94,7 +94,7 @@ plugins:
         {% endif %}
       volumes:
         - /dev/shm:/dev/shm
-        - /data/benchmark-hf-cache:/benchmark-hf-cache 
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
   {% elif step.gpu == "b200" %}
    - docker#v5.2.0:
@@ -113,7 +113,7 @@ plugins:
         {% endif %}
       volumes:
         - /dev/shm:/dev/shm
-        - /data/benchmark-hf-cache:/benchmark-hf-cache 
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
   {% else %}
   - kubernetes:
@@ -176,7 +176,7 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - > 
+      - >
         docker build --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
@@ -311,12 +311,12 @@ steps:
   {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
   - block: "Run {{ step.label }}"
     depends_on: image-build
-    key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+    key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
   {% endif %}
 
   - label: "{{ step.label }}"
     {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
-    depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+    depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% else %}
     depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
     {% endif %}
@@ -358,15 +358,15 @@ steps:
               echo "Image found"
               exit 0
             fi
-            - >
-              docker build
-              --file docker/Dockerfile.nightly_torch
-              --build-arg max_jobs=16
-              --build-arg buildkite_commit=$BUILDKITE_COMMIT
-              --build-arg USE_SCCACHE=1
-              --tag {{ docker_image_torch_nightly }}
-              --target test
-              --progress plain .
+          - >
+            docker build
+            --file docker/Dockerfile.nightly_torch
+            --build-arg max_jobs=16
+            --build-arg buildkite_commit=$BUILDKITE_COMMIT
+            --build-arg USE_SCCACHE=1
+            --tag {{ docker_image_torch_nightly }}
+            --target test
+            --progress plain .
           - "docker push {{ docker_image_torch_nightly }}"
         env:
           DOCKER_BUILDKIT: "1"
@@ -398,12 +398,12 @@ steps:
       {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
       - block: "Run Torch Nightly {{ step.label }}"
         depends_on: image-build-torch-nightly
-        key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+        key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
       {% endif %}
 
       - label: "Torch Nightly {{ step.label }}"
         {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
-        depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") }}
+        depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         {% else %}
         depends_on: image-build-torch-nightly
         {% endif %}
@@ -622,7 +622,7 @@ steps:
 
   {% if branch == "main" %}
   - label: "TPU V1 Test Notification"
-    depends_on: 
+    depends_on:
       - run-tpu-v1-test
       - run-tpu-v1-test-part2
     soft_fail: true
