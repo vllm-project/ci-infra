@@ -66,6 +66,7 @@ steps:
       queue: gpu_1_queue
       {% endif %}
     soft_fail: {{ step.soft_fail or false }}
+    cancel_on_build_failing: {{ step.cancel_on_build_failing or true }}
     {% if step.parallelism %}
     parallelism: {{ step.parallelism }}
     {% endif %}
@@ -119,6 +120,7 @@ steps:
       queue: gpu_1_queue
       {% endif %}
     soft_fail: {{ step.soft_fail or false }}
+    cancel_on_build_failing: {{ step.cancel_on_build_failing or true }}
     {% if step.parallelism %}
     parallelism: {{ step.parallelism }}
     {% endif %}
@@ -178,6 +180,7 @@ steps:
     agents:
       queue: a100_queue
     soft_fail: {{ step.soft_fail or false }}
+    cancel_on_build_failing: {{ step.cancel_on_build_failing or true }}
     {% if step.parallelism %}
     parallelism: {{ step.parallelism }}
     {% endif %}
