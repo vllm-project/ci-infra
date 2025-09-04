@@ -91,6 +91,7 @@ steps:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
             - HF_TOKEN
+            - PYTEST_ADDOPTS=-x
             {% if step.label == "Speculative decoding tests" %}
             - VLLM_ATTENTION_BACKEND=XFORMERS
             {% endif %}
@@ -144,6 +145,7 @@ steps:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
             - HF_TOKEN
+            - PYTEST_ADDOPTS=-x
             {% if step.label == "Speculative decoding tests" %}
             - VLLM_ATTENTION_BACKEND=XFORMERS
             {% endif %}
