@@ -96,9 +96,7 @@ steps:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
             - HF_TOKEN
-            {% if "override-fast-fail" not in (build.pull_request.labels or []) %}
             - PYTEST_ADDOPTS=-x
-            {% endif %}
             {% if step.label == "Speculative decoding tests" %}
             - VLLM_ATTENTION_BACKEND=XFORMERS
             {% endif %}
@@ -152,9 +150,7 @@ steps:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
             - HF_TOKEN
-            {% if "override-fast-fail" not in (build.pull_request.labels or []) %}
             - PYTEST_ADDOPTS=-x
-            {% endif %}
             {% if step.label == "Speculative decoding tests" %}
             - VLLM_ATTENTION_BACKEND=XFORMERS
             {% endif %}
