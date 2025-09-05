@@ -19,6 +19,21 @@ if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
     AMD_MIRROR_HW="amdproduction"
 fi
 
+fail_fast() {
+    DISABLE_LABEL="ci-no-fail-fast"
+    # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
+    if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+        PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+        if [[ $PR_LABELS == *"$DISABLE_LABEL"* ]]; then
+            echo false
+        else
+            echo true
+        fi
+    else
+        echo false  # not a PR or BUILDKITE_PULL_REQUEST not set
+    fi
+}
+
 upload_pipeline() {
     echo "Uploading pipeline..."
     # Install minijinja
@@ -47,6 +62,8 @@ upload_pipeline() {
     echo "Nightly: $NIGHTLY"
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
+    FAIL_FAST=$(fail_fast)
+
     cd .buildkite
     (
         set -x
@@ -57,6 +74,7 @@ upload_pipeline() {
             -D run_all="$RUN_ALL" \
             -D nightly="$NIGHTLY" \
             -D mirror_hw="$AMD_MIRROR_HW" \
+            -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
