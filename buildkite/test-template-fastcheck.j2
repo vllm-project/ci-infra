@@ -7,7 +7,7 @@
 
 steps:
   - label: "Starting the build"
-    command: echo "BUILDKITE_PULL_REQUEST_LABELS: $BUILDKITE_PULL_REQUEST_LABELS"
+    command: echo "BUILDKITE_PULL_REQUEST_LABELS"
     agents:
       queue: cpu_queue_premerge
 
@@ -181,6 +181,7 @@ steps:
   {% for step in steps %}
   {% if step.gpu == "a100" %}
   - label: "{{ step.label }}"
+    depends_on: image-build
     priority: 10000
     agents:
       queue: a100_queue
