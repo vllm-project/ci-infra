@@ -6,7 +6,7 @@
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 
 steps:
-  - label: "Starting the build"
+  {# - label: "Starting the build"
     command: echo Contains "ci/build"
     if: "build.pull_request.labels includes 'ci/build'"
     agents:
@@ -16,14 +16,15 @@ steps:
     command: |
       echo "The labels for this pull request are:"
       echo $BUILDKITE_PULL_REQUEST_LABELS
-    if: "build.pull_request.labels"
+    if: "build.pull_request.labels" #}
 
-  {# - command: echo $$PULL_REQUEST_LABELS
+  - label: "Print PR Labels"
+    command: echo $$PULL_REQUEST_LABELS
     plugins:
       - sv-oss/github-pr-labels#v0.0.2:
           publish-env-var: PULL_REQUEST_LABELS
     agents:
-      queue: cpu_queue_premerge #}
+      queue: cpu_queue_premerge
 
   - label: ":docker: build image"
     key: image-build
