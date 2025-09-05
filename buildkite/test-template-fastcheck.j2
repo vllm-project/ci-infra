@@ -6,6 +6,13 @@
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 
 steps:
+  {% if "ci/build" in (build.pull_request.labels or []) %}
+  - label: "Starting the build"
+    command: echo "starting the build"
+    agents:
+      queue: cpu_queue_premerge
+  {% endif %}
+  
   - label: ":docker: build image"
     key: image-build
     agents:
@@ -91,7 +98,9 @@ steps:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
             - HF_TOKEN
+            {% if "override-fast-fail" not in (build.pull_request.labels or []) %}
             - PYTEST_ADDOPTS=-x
+            {% endif %}
             {% if step.label == "Speculative decoding tests" %}
             - VLLM_ATTENTION_BACKEND=XFORMERS
             {% endif %}
@@ -145,7 +154,9 @@ steps:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
             - HF_TOKEN
+            {% if "override-fast-fail" not in (build.pull_request.labels or []) %}
             - PYTEST_ADDOPTS=-x
+            {% endif %}
             {% if step.label == "Speculative decoding tests" %}
             - VLLM_ATTENTION_BACKEND=XFORMERS
             {% endif %}
