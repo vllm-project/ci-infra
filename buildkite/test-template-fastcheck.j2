@@ -7,7 +7,7 @@
 
 steps:
   - label: "Starting the build"
-    command: echo "BUILDKITE_PULL_REQUEST_LABELS"
+    command: echo $BUILDKITE_PULL_REQUEST_LABELS
     agents:
       queue: cpu_queue_premerge
 
