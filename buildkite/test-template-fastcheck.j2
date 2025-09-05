@@ -12,12 +12,12 @@ steps:
     agents:
       queue: cpu_queue_premerge
 
-  - command: echo $$PULL_REQUEST_LABELS
+  {# - command: echo $$PULL_REQUEST_LABELS
     plugins:
       - sv-oss/github-pr-labels#v0.0.2:
           publish-env-var: PULL_REQUEST_LABELS
     agents:
-      queue: cpu_queue_premerge
+      queue: cpu_queue_premerge #}
 
   - label: ":docker: build image"
     key: image-build
