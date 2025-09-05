@@ -1,0 +1,44 @@
+#!/bin/bash
+
+# A short description of the script's purpose.
+# This script gets the ID of a GitHub repository by its name.
+
+# --- Usage Section ---
+usage() {
+  echo "Usage: $(basename "$0") -r <REPO_NAME>"
+  echo "  -h              Display this help message."
+  echo "  -r <REPO_NAME>  The name of the repository in the vllm-project organization. (Required)"
+  exit 1
+}
+
+# --- Argument Handling with getopts ---
+REPO_NAME=""
+
+while getopts "hr:" opt; do
+  case $opt in
+    h)
+      usage
+      ;;
+    r)
+      REPO_NAME="$OPTARG"
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      usage
+      ;;
+  esac
+done
+
+# Check if REPO_NAME was provided
+if [ -z "$REPO_NAME" ]; then
+  echo
+  echo "Error: The -r flag is required." >&2
+  echo
+  usage
+fi
+
+OWNER='vllm-project'
+
+# --- Main Logic ---
+# Use the gh API to get repository details and extract the ID.
+gh api -H "Accept: application/vnd.github+json" "repos/$OWNER/$REPO_NAME" | jq .id
