@@ -6,13 +6,13 @@
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 
 steps:
-  {% if "ci/build" in (build.pull_request.labels or []) %}
+  {% if "override-fast-fail" not in (BUILDKITE_PULL_REQUEST_LABELS or "").split(",") %}
   - label: "Starting the build"
     command: echo "starting the build"
     agents:
       queue: cpu_queue_premerge
   {% endif %}
-  
+
   - label: ":docker: build image"
     key: image-build
     agents:
