@@ -86,12 +86,17 @@ steps:
           {% if step.label == "Benchmarks" %}
           mount-buildkite-agent: true
           {% endif %}
-          command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
+          command: 
+            - "bash"
+            - "{% if disable_fast_fail %}-xc{% else %}-xce{% endif %}"
+            - "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
             - HF_TOKEN
+            {% if not disable_fast_fail %}
             - PYTEST_ADDOPTS=-x
+            {% endif %}
             {% if step.label == "Speculative decoding tests" %}
             - VLLM_ATTENTION_BACKEND=XFORMERS
             {% endif %}
@@ -140,12 +145,17 @@ steps:
           {% if step.label == "Benchmarks" %}
           mount-buildkite-agent: true
           {% endif %}
-          command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
+          command: 
+            - "bash"
+            - "{% if disable_fast_fail %}-xc{% else %}-xce{% endif %}"
+            - "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
             - HF_TOKEN
+            {% if not disable_fast_fail %}
             - PYTEST_ADDOPTS=-x
+            {% endif %}
             {% if step.label == "Speculative decoding tests" %}
             - VLLM_ATTENTION_BACKEND=XFORMERS
             {% endif %}
