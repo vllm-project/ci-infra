@@ -1,6 +1,0 @@
-terraform {
-  backend "gcs" {
-    bucket = "github-settings-tfstate-fc0fc11b62052364"
-    prefix = "terraform/runner-group-a"
-  }
-}
