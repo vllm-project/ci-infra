@@ -12,6 +12,12 @@ steps:
     agents:
       queue: cpu_queue_premerge
 
+  - label: "Print PR Labels"
+    command: |
+      echo "The labels for this pull request are:"
+      echo $BUILDKITE_PULL_REQUEST_LABELS
+    if: "build.pull_request.labels"
+
   {# - command: echo $$PULL_REQUEST_LABELS
     plugins:
       - sv-oss/github-pr-labels#v0.0.2:
