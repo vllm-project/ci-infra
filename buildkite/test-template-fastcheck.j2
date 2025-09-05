@@ -7,9 +7,15 @@
 
 steps:
   - label: "Starting the build"
-    command: echo $BUILDKITE_PULL_REQUEST_LABELS
+    command: echo Contains "ci/build"
+    if: "build.pull_request.labels includes 'ci/build'"
     agents:
       queue: cpu_queue_premerge
+
+  - command: echo $$PULL_REQUEST_LABELS
+    plugins:
+      - sv-oss/github-pr-labels#v0.0.2:
+          publish-env-var: PULL_REQUEST_LABELS
 
   - label: ":docker: build image"
     key: image-build
