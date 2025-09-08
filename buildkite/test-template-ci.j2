@@ -27,7 +27,7 @@
 {% macro vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed) -%}
 set -euo pipefail
 {% if skip_image_build != "1" %}
-echo "SKIP_IMAGE_BUILD={{ skip_image_build }} REQUIREMENTS_CHANGED={{ requirements_changed }}
+echo "SKIP_IMAGE_BUILD={{ skip_image_build }} REQUIREMENTS_CHANGED={{ requirements_changed }}"
 
 # Copy in the code from the checkout
 rm -rf /vllm-workspace/vllm || true
