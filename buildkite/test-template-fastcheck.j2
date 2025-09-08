@@ -1,11 +1,51 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
+{% set skip_image_build = (skip_image_build | default("0")) %}
+{% set requirements_changed = (requirements_changed | default("0")) %}
+{% if skip_image_build == "1" and docker_image_override is defined and docker_image_override %}
+  {% set docker_image = docker_image_override %}
+{% endif %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 
+{% macro vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed) -%}
+set -euo pipefail
+{% if skip_image_build != "1" %}
+echo "SKIP_IMAGE_BUILD={{ skip_image_build }} REQUIREMENTS_CHANGED={{ requirements_changed }}"
+
+# Copy in the code from the checkout
+rm -rf /vllm-workspace/vllm || true
+cp -a /workdir/. /vllm-workspace/
+
+# Compute Python major.minor
+export PYTHON_VERSION="$(python3 -c 'import sys;print(\".\".join(map(str,sys.version_info[:2])))')"
+
+# Refresh site-packages v1 from workspace
+rm -rf /usr/local/lib/python$PYTHON_VERSION/dist-packages/vllm/v1
+mkdir -p /usr/local/lib/python$PYTHON_VERSION/dist-packages/vllm
+cp -a /vllm-workspace/src/vllm/v1 /usr/local/lib/python$PYTHON_VERSION/dist-packages/vllm/
+
+# Restore the src/vllm layout so wheel stays authoritative for compiled .so
+rm -rf /vllm-workspace/src || true
+mkdir -p /vllm-workspace/src
+mv /vllm-workspace/vllm /vllm-workspace/src/vllm
+
+{% if requirements_changed == '1' %}
+cd /vllm-workspace
+uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
+{% endif %}
+{% endif %}
+(command -v nvidia-smi >/dev/null && nvidia-smi || true)
+export VLLM_LOGGING_LEVEL=DEBUG
+export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+cd {{ (step.working_dir or default_working_dir) | safe }}
+{{ step.command or (step.commands | join(' && ')) | safe }}
+{%- endmacro %}
+
 steps:
+  {% if skip_image_build != "1" %}
   - label: ":docker: build image"
     key: image-build
     agents:
@@ -39,6 +79,7 @@ steps:
           limit: 5
         - exit_status: -10  # Agent was lost
           limit: 5
+  {% endif %}
 
   - block: Run Neuron Test
     depends_on: ~
@@ -54,7 +95,11 @@ steps:
   {% for step in steps %}
   {% if step.gpu != "a100" and step.fast_check == true and step.num_nodes < 2 %}
   - label: "{{ step.label }}"
+    {% if skip_image_build != "1" %}
     depends_on: image-build
+    {% else %}
+    depends_on: ~
+    {% endif %}
     agents:
       {% if step.label == "Documentation Build" %}
       queue: small_cpu_queue_premerge
@@ -86,7 +131,11 @@ steps:
           {% if step.label == "Benchmarks" %}
           mount-buildkite-agent: true
           {% endif %}
-          command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
+          command:
+            - "/bin/bash"
+            - "-xce"
+            - |
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed) | indent(14,true) }}
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
@@ -105,7 +154,11 @@ steps:
   {% if step.gpu != "a100" and step.fast_check != true and step.num_nodes < 2 %}
   - block: "Run {{ step.label }}"
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+    {% if skip_image_build != "1" %}
     depends_on: image-build
+    {% else %}
+    depends_on: ~
+    {% endif %}
 
   - label: "{{ step.label }}"
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
@@ -140,7 +193,11 @@ steps:
           {% if step.label == "Benchmarks" %}
           mount-buildkite-agent: true
           {% endif %}
-          command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
+          command:
+            - "/bin/bash"
+            - "-xce"
+            - |
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed) | indent(14,true) }}
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
@@ -159,7 +216,11 @@ steps:
   {% if step.num_nodes >= 2 %}
   - block: "Run {{ step.label }}"
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+    {% if skip_image_build != "1" %}
     depends_on: image-build
+    {% else %}
+    depends_on: ~
+    {% endif %}
 
   - label: "{{ step.label }}"
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
@@ -171,7 +232,11 @@ steps:
   {% endfor %}
 
   - block: "Run A100 tests"
+    {% if skip_image_build != "1" %}
     depends_on: image-build
+    {% else %}
+    depends_on: ~
+    {% endif %}
 
   {% for step in steps %}
   {% if step.gpu == "a100" %}
