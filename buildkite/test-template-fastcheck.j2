@@ -94,7 +94,7 @@ steps:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_HOME={{ hf_home_fsx }}
             - HF_TOKEN
-            {% if !disable_fast_fail %}
+            {% if not disable_fast_fail %}
             - PYTEST_ADDOPTS=-x
             {% endif %}
             {% if step.label == "Speculative decoding tests" %}
