@@ -19,15 +19,15 @@ if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
     AMD_MIRROR_HW="amdproduction"
 fi
 
-disable_fast_fail() {
-    DISABLE_LABEL="ci/build"
+has_disable_fast_fail_label() {
+    DISABLE_LABEL="ci/build" #TODO: create a new label for this, "ci/build" is used for now because it's the only label available to me.
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
         if [[ $PR_LABELS == *"$DISABLE_LABEL"* ]]; then
-            echo 0  # true - disable label is present
+            echo 0  # true - disable fast fail label is present
         else
-            echo 1  # false - disable label is not present
+            echo 1  # false - disable fast fail label is not present
         fi
     else
         echo 1  # false - not a PR or BUILDKITE_PULL_REQUEST not set
@@ -62,7 +62,7 @@ upload_pipeline() {
     echo "Nightly: $NIGHTLY"
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
-    DISABLE_FAST_FAIL=$(disable_fast_fail)
+    DISABLE_FAST_FAIL=$(has_disable_fast_fail_label)
 
     cd .buildkite
     (
