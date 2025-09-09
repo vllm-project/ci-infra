@@ -61,7 +61,7 @@ plugins:
       {% if not step.no_gpu %}
       gpus: all
       {% endif %}
-      {% if step.label == "Benchmarks" %}
+      {% if step.label == "Benchmarks" or step.mount_buildkite_agent %}
       mount-buildkite-agent: true
       {% endif %}
       command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
