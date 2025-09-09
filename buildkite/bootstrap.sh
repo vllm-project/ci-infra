@@ -20,7 +20,7 @@ if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
 fi
 
 has_disable_fast_fail_label() {
-    DISABLE_LABEL="ci/build" #TODO: create a new label for this, "ci/build" is used for now because it's the only label available to me.
+    DISABLE_LABEL="random-label-name" #TODO: create a new label for this, "ci/build" is used for now because it's the only label available to me.
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
