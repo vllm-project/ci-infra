@@ -27,7 +27,7 @@
 {% macro vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed) -%}
 set -euo pipefail
 {% if skip_image_build != "1" %}
-echo "SKIP_IMAGE_BUILD={{ skip_image_build }} REQUIREMENTS_CHANGED={{ requirements_changed }}
+echo "SKIP_IMAGE_BUILD={{ skip_image_build }} REQUIREMENTS_CHANGED={{ requirements_changed }}"
 
 # Copy in the code from the checkout
 rm -rf /vllm-workspace/vllm || true
@@ -55,7 +55,7 @@ uv pip install --system -r requirements/common.txt -r requirements/build.txt -r 
 export VLLM_LOGGING_LEVEL=DEBUG
 export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
 cd {{ (step.working_dir or default_working_dir) | safe }}
-{{ step.command or (step.commands | join(' && ')) | safe }}"
+{{ step.command or (step.commands | join(' && ')) | safe }}
 {%- endmacro %}
 
 {% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
