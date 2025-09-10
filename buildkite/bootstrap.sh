@@ -25,12 +25,12 @@ has_disable_fast_fail_label() {
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
         if [[ $PR_LABELS == *"$DISABLE_LABEL"* ]]; then
-            echo true
+            echo 0
         else
-            echo false
+            echo 1
         fi
     else
-        echo false  # false - not a PR or BUILDKITE_PULL_REQUEST not set
+        echo 1  # false - not a PR or BUILDKITE_PULL_REQUEST not set
     fi
 }
 
