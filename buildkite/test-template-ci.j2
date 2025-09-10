@@ -67,6 +67,7 @@ plugins:
       command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
       environment:
         - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME={{ hf_home_fsx }}
         - HF_TOKEN
         - PYTEST_ADDOPTS=-x
@@ -88,6 +89,7 @@ plugins:
       command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
       environment:
         - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - PYTEST_ADDOPTS=-x
@@ -108,6 +110,7 @@ plugins:
       command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
       environment:
         - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - PYTEST_ADDOPTS=-x
@@ -137,6 +140,8 @@ plugins:
             env:
               - name: VLLM_USAGE_SOURCE
                 value: ci-test
+              - name: NCCL_CUMEM_HOST_ENABLE
+                value: 0
               - name: HF_HOME
                 value: {{ hf_home }}
               - name: HF_TOKEN
