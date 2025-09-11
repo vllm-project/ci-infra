@@ -20,7 +20,7 @@ if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
 fi
 
 has_disable_fast_fail_label() {
-    DISABLE_LABEL="todo-create-label" #TODO: create a new label for this
+    DISABLE_LABEL="ci-no-fail-fast"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
