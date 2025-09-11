@@ -527,8 +527,12 @@ steps:
     command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh
 
   {% if branch == "main" %}
-  - label: "IBM Power(ppc64le) CPU Test"
+  - block: "Run IBM Power CPU test"
+    key: block-ibm-power
     depends_on: ~
+
+  - label: "IBM Power(ppc64le) CPU Test"
+    depends_on: block-ibm-power
     key: ibm-ppc64-test
     soft_fail: true
     agents:
