@@ -17,9 +17,9 @@
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
-{% macro transform_single_command(cmd, coverage_file) %}
+{% macro add_pytest_coverage(cmd, coverage_file) %}
 {% if "pytest " in cmd %}
-COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report= --cov-append ") }} || true
+COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report= --cov-append --durations=0") }} || true
 {% else %}
 {{ cmd }}
 {% endif %}
@@ -33,11 +33,11 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {% set has_pytest = false %}
 {% if step.command %}
 {% if "pytest " in step.command %}{% set has_pytest = true %}{% endif %}
-{{ transform_single_command(step.command, coverage_file) }}
+{{ add_pytest_coverage(step.command, coverage_file) }}
 {% else %}
 {% for cmd in step.commands %}
 {% if "pytest " in cmd %}{% set has_pytest = true %}{% endif %}
-{{ transform_single_command(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}{% endfor %}
+{{ add_pytest_coverage(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}{% endfor %}
 {% endif %}{% if has_pytest %} && buildkite-agent artifact upload {{ coverage_file }}{% endif %}
 {% else %}
 {{ step.command or (step.commands | join(' && ')) | safe }}
@@ -681,4 +681,33 @@ steps:
                      - "vllm#tpu-ci-notifications"
       YAML
       fi
+  {% endif %}
+
+  {% if cov_enabled %}
+  - label: ":chart_with_upwards_trend: Generate Coverage Report"
+    depends_on: ~
+    agents:
+      queue: cpu_queue_premerge_us_east_1
+    soft_fail: true
+    commands:
+      # Download all coverage artifacts
+      - buildkite-agent artifact download '.coverage.*' . || echo "No coverage files found"
+      # Install coverage tools
+      - pip install coverage
+      # Combine all coverage files
+      - coverage combine
+      # Generate HTML report
+      - coverage html -d coverage_html_report
+      # Create coverage zip
+      - zip -r coverage_report.zip coverage_html_report/
+      # Upload the zipped coverage report
+      - buildkite-agent artifact upload coverage_report.zip
+      # Display coverage summary
+      - coverage report
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 1
+        - exit_status: -10
+          limit: 1
   {% endif %}
