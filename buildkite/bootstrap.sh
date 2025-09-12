@@ -34,6 +34,10 @@ fail_fast() {
     fi
 }
 
+if [[ -z "${COV_ENABLED:-}" ]]; then
+    COV_ENABLED=0
+fi
+
 upload_pipeline() {
     echo "Uploading pipeline..."
     # Install minijinja
@@ -76,6 +80,7 @@ upload_pipeline() {
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
+            -D cov_enabled="$COV_ENABLED" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
