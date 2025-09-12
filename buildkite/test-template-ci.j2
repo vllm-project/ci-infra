@@ -699,16 +699,24 @@ steps:
       - buildkite-agent artifact download '.coverage.*' . || echo "No coverage files found"
       # Install coverage tools
       - pip install coverage
-      # Combine all coverage files
-      - coverage combine
-      # Generate HTML report
-      - coverage html -d coverage_html_report
-      # Create coverage zip
-      - zip -r coverage_report.zip coverage_html_report/
-      # Upload the zipped coverage report
-      - buildkite-agent artifact upload coverage_report.zip
-      # Display coverage summary
-      - coverage report
+      # Check if any coverage files exist before proceeding
+      - |
+        if ls .coverage.* 1> /dev/null 2>&1; then
+          echo "Coverage files found, generating report..."
+          # Combine all coverage files
+          python -m coverage combine
+          # Generate HTML report
+          python -m coverage html -d coverage_html_report
+          # Create coverage zip
+          zip -r coverage_report.zip coverage_html_report/
+          # Upload the zipped coverage report
+          buildkite-agent artifact upload coverage_report.zip
+          # Display coverage summary
+          python -m coverage report
+        else
+          echo "No coverage files found. Skipping coverage report generation."
+          echo "This may indicate that all pytest steps failed or coverage was not enabled."
+        fi
     retry:
       automatic:
         - exit_status: -1
