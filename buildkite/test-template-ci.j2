@@ -691,41 +691,34 @@ steps:
 
   - label: "Generate Coverage Report and Upload"
     depends_on: block-generate-coverage-report
-    agents:
-      queue: cpu_queue_premerge_us_east_1
     soft_fail: true
-    commands:
-      # Download all coverage artifacts
-      - buildkite-agent artifact download '.coverage.*' . || echo "No coverage files found"
-      # Install coverage tools
-      - pip install coverage
-      # Check if any coverage files exist before proceeding
-      - |
-        if ls .coverage.* 1> /dev/null 2>&1; then
-          echo "Coverage files found, generating report..."
-          # Create coverage config for path remapping
-          cat > .coveragerc << EOF
-        [paths]
-        source =
-            vllm/
-            /usr/local/lib/python*/dist-packages/vllm/
-            /usr/local/lib/python*/site-packages/vllm/
-            ./vllm/
-        EOF
-          # Combine all coverage files with path remapping
-          python -m coverage combine
-          # Generate HTML report
-          python -m coverage html -d coverage_html_report
-          # Create coverage zip
-          zip -r coverage_report.zip coverage_html_report/
-          # Upload the zipped coverage report
-          buildkite-agent artifact upload coverage_report.zip
-          # Display coverage summary
-          python -m coverage report
-        else
-          echo "No coverage files found. Skipping coverage report generation."
-          echo "This may indicate that all pytest steps failed or coverage was not enabled."
-        fi
+    plugins:
+      - docker#v5.2.0:
+          image: {{ docker_image }}
+          always-pull: true
+          mount-buildkite-agent: true
+          command: |
+            # Download all coverage artifacts
+            buildkite-agent artifact download '.coverage.*' . || echo "No coverage files found"
+            # Check if any coverage files exist before proceeding
+            if ls .coverage.* 1> /dev/null 2>&1; then
+              echo "Coverage files found, generating report..."
+              # Combine all coverage files
+              python -m coverage combine
+              # Generate HTML report
+              python -m coverage html -d coverage_html_report
+              # Create coverage zip
+              zip -r coverage_report.zip coverage_html_report/
+              # Upload the zipped coverage report
+              buildkite-agent artifact upload coverage_report.zip
+              # Display coverage summary
+              python -m coverage report
+            else
+              echo "No coverage files found. Skipping coverage report generation."
+              echo "This may indicate that all pytest steps failed or coverage was not enabled."
+            fi
+          environment:
+            - BUILDKITE_AGENT_ACCESS_TOKEN
     retry:
       automatic:
         - exit_status: -1
