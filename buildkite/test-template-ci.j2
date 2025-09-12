@@ -1,3 +1,4 @@
+{% set cov_enabled = (cov_enabled == "1") %}
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu118" %}
@@ -16,6 +17,32 @@
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
+{% macro transform_single_command(cmd, coverage_file) %}
+{% if "pytest " in cmd %}
+COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report= --cov-append ") }} || true
+{% else %}
+{{ cmd }}
+{% endif %}
+{% endmacro %}
+
+{% macro transform_commands(step, cov_enabled) %}
+{% if cov_enabled %}
+{% set step_length = step.label | length %}
+{% set step_first = step.label | first | default("x") %}
+{% set coverage_file = ".coverage." + step_length ~ "_" ~ step_first %}
+{% set has_pytest = false %}
+{% if step.command %}
+{% if "pytest " in step.command %}{% set has_pytest = true %}{% endif %}
+{{ transform_single_command(step.command, coverage_file) }}
+{% else %}
+{% for cmd in step.commands %}
+{% if "pytest " in cmd %}{% set has_pytest = true %}{% endif %}
+{{ transform_single_command(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}{% endfor %}
+{% endif %}{% if has_pytest %} && buildkite-agent artifact upload {{ coverage_file }}{% endif %}
+{% else %}
+{{ step.command or (step.commands | join(' && ')) | safe }}
+{% endif %}
+{% endmacro %}
 
 {% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
 agents:
@@ -61,10 +88,10 @@ plugins:
       {% if not step.no_gpu %}
       gpus: all
       {% endif %}
-      {% if step.label == "Benchmarks" or step.mount_buildkite_agent %}
+      {% if step.label == "Benchmarks" or step.mount_buildkite_agent or cov_enabled %}
       mount-buildkite-agent: true
       {% endif %}
-      command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"]
+      command: ["bash", "-xce", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ transform_commands(step, cov_enabled) }}"]
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0

@@ -19,6 +19,10 @@ if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
     AMD_MIRROR_HW="amdproduction"
 fi
 
+if [[ -z "${COV_ENABLED:-}" ]]; then
+    COV_ENABLED=0
+fi
+
 upload_pipeline() {
     echo "Uploading pipeline..."
     # Install minijinja
@@ -58,6 +62,7 @@ upload_pipeline() {
             -D nightly="$NIGHTLY" \
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
+            -D cov_enabled="$COV_ENABLED" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
