@@ -692,6 +692,8 @@ steps:
   - label: "Generate Coverage Report and Upload"
     depends_on: block-generate-coverage-report
     soft_fail: true
+    agents:
+      queue: cpu_queue_postmerge_us_east_1
     plugins:
       - docker#v5.2.0:
           image: {{ docker_image }}
