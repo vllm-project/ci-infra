@@ -703,7 +703,16 @@ steps:
       - |
         if ls .coverage.* 1> /dev/null 2>&1; then
           echo "Coverage files found, generating report..."
-          # Combine all coverage files
+          # Create coverage config for path remapping
+          cat > .coveragerc << EOF
+        [paths]
+        source =
+            vllm/
+            /usr/local/lib/python*/dist-packages/vllm/
+            /usr/local/lib/python*/site-packages/vllm/
+            ./vllm/
+        EOF
+          # Combine all coverage files with path remapping
           python -m coverage combine
           # Generate HTML report
           python -m coverage html -d coverage_html_report
