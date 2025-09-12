@@ -684,8 +684,13 @@ steps:
   {% endif %}
 
   {% if cov_enabled %}
-  - label: ":chart_with_upwards_trend: Generate Coverage Report"
+  - block: "Generate Coverage Report"
     depends_on: ~
+    key: block-generate-coverage-report
+    prompt: "Generate HTML coverage report from all test coverage files?"
+
+  - label: "Generate Coverage Report and Upload"
+    depends_on: block-generate-coverage-report
     agents:
       queue: cpu_queue_premerge_us_east_1
     soft_fail: true
