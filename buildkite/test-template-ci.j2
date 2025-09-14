@@ -176,19 +176,15 @@ steps:
       {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
       - >
         docker build --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
+        {% if branch == "main" %}
         --build-arg USE_SCCACHE=1
+        {% else %}
+        --build-arg USE_SCCACHE=0
+        {% endif %}
         --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
         --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
         {% if branch != "main" %}
