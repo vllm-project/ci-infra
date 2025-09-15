@@ -493,6 +493,7 @@ steps:
             priority: 100
             soft_fail: true
     {% endif %}
+    {% endif %}
     {% endfor %}
     {% for step in steps %}
         # removed because of lack of HW resources: step.label and step.label=="Benchmarks" or step.label=="Pipeline Parallelism Test" or
