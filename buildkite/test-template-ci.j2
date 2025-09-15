@@ -473,6 +473,24 @@ steps:
           DOCKER_BUILDKIT: "1"
         priority: 100
         soft_fail: false
+      {% else %}
+      - label: "AMD MI300 softfail: {{ step.label }}"
+        depends_on: amd-build
+        agents:
+         {% if step.label and step.label=="Benchmarks" or step.label=="Kernels Attention Test %N" or step.label=="LoRA Test %N" or step.label=="Kernels Quantization Test %N" %}
+           queue: amd_mi325_8
+         {% elif step.label=="Distributed Tests (4 GPUs)" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" %}
+           queue: amd_mi325_4
+         {% elif step.label=="Distributed Comm Ops Test" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Weight Loading Multiple GPU Test" or step.label=="Weight Loading Multiple GPU Test - Large Models" %}
+           queue: amd_mi325_2
+         {% else %}
+           queue: amd_mi325_1
+         {% endif%}
+        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        soft_fail: true
       {% endif %}
     {% endif %}
     {% endfor %}
