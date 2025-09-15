@@ -66,14 +66,14 @@ plugins:
       {% endif %}
       command: 
         - "bash"
-        - "{% if fail_fast %}-xce{% else %}-xc{% endif %}"
+        - "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}"
         - "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME={{ hf_home_fsx }}
         - HF_TOKEN
-        {% if fail_fast %}
+        {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
         {% if branch == "main" %}
@@ -93,14 +93,14 @@ plugins:
       gpus: all
       command: 
         - "bash"
-        - "{% if fail_fast %}-xce{% else %}-xc{% endif %}"
+        - "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}"
         - "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
-        {% if fast_fail %}
+        {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
         {% if branch == "main" %}
@@ -119,14 +119,14 @@ plugins:
       # gpus: all
       command: 
         - "bash"
-        - "{% if fail_fast %}-xce{% else %}-xc{% endif %}"
+        - "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}"
         - "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
-        {% if fail_fast %}
+        {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
         {% if branch == "main" %}
