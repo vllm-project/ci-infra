@@ -473,7 +473,7 @@ steps:
           DOCKER_BUILDKIT: "1"
         priority: 100
         soft_fail: false
-        {% else %}
+    {% else %}
       - label: "AMD MI300 softfail: {{ step.label }}"
         depends_on: amd-build
         agents:
@@ -491,8 +491,8 @@ steps:
           DOCKER_BUILDKIT: "1"
         priority: 100
         soft_fail: false
-        {% endif %}
-        {% endif %}
+    {% endif %}
+    {% endif %}
     {% endfor %}
 {% for step in steps %}
 {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
