@@ -456,7 +456,7 @@ steps:
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
       {% if step.grade == "Blocking" %}
-      - label: "AMD MI300 blocking: {{ step.label }}"
+      - label: "AMD MI325 blocking: {{ step.label }}"
         depends_on: amd-build
         agents:
          {% if step.label and step.label=="Benchmarks" or step.label=="Kernels Attention Test %N" or step.label=="LoRA Test %N" or step.label=="Kernels Quantization Test %N" %}
@@ -474,7 +474,7 @@ steps:
         priority: 100
         soft_fail: false
       {% else %}
-      - label: "AMD MI300 softfail: {{ step.label }}"
+      - label: "AMD MI325 softfail: {{ step.label }}"
         depends_on: amd-build
         agents:
          {% if step.label and step.label=="Benchmarks" or step.label=="Kernels Attention Test %N" or step.label=="LoRA Test %N" or step.label=="Kernels Quantization Test %N" %}
