@@ -185,8 +185,18 @@ else
 fi
 echo "Final SKIP_IMAGE_BUILD=${SKIP_IMAGE_BUILD} (RUN_ALL=${RUN_ALL}, VLLM_USE_PRECOMPILED=${VLLM_USE_PRECOMPILED:-unset})"
 
-# TODO: This will be replaced with a method which selects image based on latest common ancestor 
-DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
+# Select Docker image based on latest common ancestor (LCA) commit between current branch and main
+LCA_COMMIT=""
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    LCA_COMMIT=$(git merge-base origin/main HEAD)
+fi
+if [[ -n "$LCA_COMMIT" ]]; then
+    DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$LCA_COMMIT"
+    echo "Using Docker image for LCA commit: $DOCKER_IMAGE_OVERRIDE"
+else
+    DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
+    echo "Could not determine LCA commit, using latest Docker image: $DOCKER_IMAGE_OVERRIDE"
+fi
 
 ################## end WIP #####################
 
