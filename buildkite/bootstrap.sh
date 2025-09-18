@@ -50,7 +50,8 @@ upload_pipeline() {
     cd .buildkite
     (
         set -x
-        minijinja-cli test-template.j2 test-pipeline.yaml \
+        # Updated to use your custom template
+        minijinja-cli test-template-ci-myscript.j2 test-pipeline.yaml \
             -D branch="$BUILDKITE_BRANCH" \
             -D list_file_diff="$LIST_FILE_DIFF" \
             -D run_all="$RUN_ALL" \
