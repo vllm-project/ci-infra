@@ -1,17 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
-# Force only the specific test
+# Hardcode single test
 export RUN_ALL=0
 export LIST_FILE_DIFF="tests/benchmarks/test_latency_cli.py"
 
-# Ensure precompiled wheels are used if available (or rebuild if needed)
-export VLLM_USE_PRECOMPILED=0  # set to 1 if you want to skip building wheels
+# Precompiled wheels (optional)
+export VLLM_USE_PRECOMPILED=1
 
-# Docker image tag (temporary local)
+# Docker image
 DOCKER_IMAGE="vllm-test-minimal:latest"
 
-# Build Docker image for testing (test target builds wheel etc.)
+# Build Docker image for testing
 docker build -f docker/Dockerfile \
     --build-arg max_jobs=16 \
     --build-arg USE_SCCACHE=1 \
@@ -20,6 +20,6 @@ docker build -f docker/Dockerfile \
     --tag $DOCKER_IMAGE \
     .
 
-# Run the specific test inside Docker
+# Run only the specific test file
 docker run --rm -v "$(pwd)":/vllm-workspace -w /vllm-workspace $DOCKER_IMAGE \
     pytest tests/benchmarks/test_latency_cli.py -v
