@@ -44,14 +44,10 @@ steps:
     key: pre-commit-checks
     agents:
       queue: cpu_queue_premerge
-    command: |
-      pip install pre-commit
-      pre-commit install
-      pre-commit run --all-files --hook-stage manual
-      if [ $? -ne 0 ]; then
-        echo "pre-commit checks failed. Canceling the build."
-        buildkite-agent build cancel
-      fi
+    commands:
+      - pip install pre-commit
+      - pre-commit install
+      - pre-commit run --all-files --hook-stage manual || (echo "pre-commit checks failed. Canceling the build." && buildkite-agent build cancel)
 
   - block: Run Neuron Test
     depends_on: ~
