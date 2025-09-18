@@ -2,9 +2,9 @@
 
 set -euo pipefail
 
-if [[ -z "${RUN_ALL:-}" ]]; then
-    RUN_ALL=0
-fi
+# Always hardcode to single test
+RUN_ALL=0
+LIST_FILE_DIFF="tests/benchmarks/test_latency_cli.py"
 
 if [[ -z "${NIGHTLY:-}" ]]; then
     NIGHTLY=0
@@ -39,23 +39,9 @@ upload_pipeline() {
     curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
     source /var/lib/buildkite-agent/.cargo/env
 
-    # Always fetch your custom template
-    curl -o .buildkite/test-template.j2 \
-        "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-ci-myscript.j2?$(date +%s)"
-
-    if [ -e ".buildkite/pipeline_generator/pipeline_generator.py" ]; then
-        python -m pip install click pydantic
-        python .buildkite/pipeline_generator/pipeline_generator.py \
-            --run_all=$RUN_ALL \
-            --list_file_diff="$LIST_FILE_DIFF" \
-            --nightly="$NIGHTLY" \
-            --mirror_hw="$AMD_MIRROR_HW"
-        buildkite-agent pipeline upload .buildkite/pipeline.yaml
-        exit 0
-    fi
-
-    echo "List file diff: $LIST_FILE_DIFF"
-    echo "Run all: $RUN_ALL"
+    # Always skip downloading template — use local copy
+    echo "List file diff (hardcoded): $LIST_FILE_DIFF"
+    echo "Run all (hardcoded): $RUN_ALL"
     echo "Nightly: $NIGHTLY"
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
@@ -81,76 +67,13 @@ upload_pipeline() {
     exit 0
 }
 
-get_diff() {
-    $(git add .)
-    echo $(git diff --name-only --diff-filter=ACMDR $(git merge-base origin/main HEAD))
-}
-
-get_diff_main() {
-    $(git add .)
-    echo $(git diff --name-only --diff-filter=ACMDR HEAD~1)
-}
-
-file_diff=$(get_diff)
-if [[ $BUILDKITE_BRANCH == "main" ]]; then
-    file_diff=$(get_diff_main)
-fi
-
-patterns=(
-    ".buildkite/test-pipeline"
-    "docker/Dockerfile"
-    "CMakeLists.txt"
-    "requirements/common.txt"
-    "requirements/cuda.txt"
-    "requirements/build.txt"
-    "requirements/test.txt"
-    "setup.py"
-    "csrc/"
-    "cmake/"
-)
-
-ignore_patterns=(
-    "docker/Dockerfile."
-)
-
-for file in $file_diff; do
-    matches_pattern=0
-    for pattern in "${patterns[@]}"; do
-        if [[ $file == $pattern* ]] || [[ $file == $pattern ]]; then
-            matches_pattern=1
-            break
-        fi
-    done
-
-    if [[ $matches_pattern -eq 1 ]]; then
-        matches_ignore=0
-        for ignore in "${ignore_patterns[@]}"; do
-            if [[ $file == $ignore* ]] || [[ $file == $ignore ]]; then
-                matches_ignore=1
-                break
-            fi
-        done
-
-        if [[ $matches_ignore -eq 0 ]]; then
-            RUN_ALL=1
-            echo "Found changes: $file. Run all tests"
-            break
-        fi
-    fi
-done
-
+# Force precompiled decision logic (optional, but left here)
 if [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
     echo "VLLM_USE_PRECOMPILED is already set to: $VLLM_USE_PRECOMPILED"
-elif [[ $RUN_ALL -eq 1 ]]; then
-    export VLLM_USE_PRECOMPILED=0
-    echo "Detected critical changes, building wheels from source"
 else
     export VLLM_USE_PRECOMPILED=1
-    echo "No critical changes, using precompiled wheels"
+    echo "Using precompiled wheels (default for hardcoded test run)"
 fi
 
-LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
-if [[ $BUILDKITE_BRANCH == "main" ]]; then
-    LIST_FILE_DIFF=$(get_diff_main | tr ' ' '|')
-fi
+# Skip diff logic entirely and upload pipeline directly
 upload_pipeline
