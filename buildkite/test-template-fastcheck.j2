@@ -40,6 +40,19 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 5
 
+  - label: ":pre-commit: Pre-commit checks"
+    key: pre-commit-checks
+    agents:
+      queue: cpu_queue_premerge
+    command: |
+      pip install pre-commit
+      pre-commit install
+      pre-commit run --all-files --hook-stage manual
+      if [ $? -ne 0 ]; then
+        echo "--- :rotating_light: pre-commit checks failed! Canceling the build. :rotating_light:"
+        buildkite-agent build cancel
+      fi
+
   - block: Run Neuron Test
     depends_on: ~
     key: run-neuron-test
