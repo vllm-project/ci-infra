@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 set -euo pipefail
@@ -21,7 +20,6 @@ fi
 
 fail_fast() {
     DISABLE_LABEL="ci-no-fail-fast"
-    # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
         if [[ $PR_LABELS == *"$DISABLE_LABEL"* ]]; then
@@ -30,7 +28,7 @@ fail_fast() {
             echo true
         fi
     else
-        echo false  # not a PR or BUILDKITE_PULL_REQUEST not set
+        echo false
     fi
 }
 
@@ -41,22 +39,21 @@ upload_pipeline() {
     curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
     source /var/lib/buildkite-agent/.cargo/env
 
-    if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
-        curl -o .buildkite/test-template.j2 \
-            https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-fastcheck.j2
-    else
-        curl -o .buildkite/test-template.j2 \
-            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-ci-myscript.j2?$(date +%s)"
-    fi
+    # Always fetch your custom template
+    curl -o .buildkite/test-template.j2 \
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-ci-myscript.j2?$(date +%s)"
 
-
-    # (WIP) Use pipeline generator instead of jinja template
     if [ -e ".buildkite/pipeline_generator/pipeline_generator.py" ]; then
         python -m pip install click pydantic
-        python .buildkite/pipeline_generator/pipeline_generator.py --run_all=$RUN_ALL --list_file_diff="$LIST_FILE_DIFF" --nightly="$NIGHTLY" --mirror_hw="$AMD_MIRROR_HW"
+        python .buildkite/pipeline_generator/pipeline_generator.py \
+            --run_all=$RUN_ALL \
+            --list_file_diff="$LIST_FILE_DIFF" \
+            --nightly="$NIGHTLY" \
+            --mirror_hw="$AMD_MIRROR_HW"
         buildkite-agent pipeline upload .buildkite/pipeline.yaml
         exit 0
     fi
+
     echo "List file diff: $LIST_FILE_DIFF"
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
@@ -67,7 +64,6 @@ upload_pipeline() {
     cd .buildkite
     (
         set -x
-        # Output pipeline.yaml with all blank lines removed
         minijinja-cli test-template.j2 test-pipeline.yaml \
             -D branch="$BUILDKITE_BRANCH" \
             -D list_file_diff="$LIST_FILE_DIFF" \
@@ -118,7 +114,6 @@ ignore_patterns=(
 )
 
 for file in $file_diff; do
-    # First check if file matches any pattern
     matches_pattern=0
     for pattern in "${patterns[@]}"; do
         if [[ $file == $pattern* ]] || [[ $file == $pattern ]]; then
@@ -127,7 +122,6 @@ for file in $file_diff; do
         fi
     done
 
-    # If file matches pattern, check it's not in ignore patterns
     if [[ $matches_pattern -eq 1 ]]; then
         matches_ignore=0
         for ignore in "${ignore_patterns[@]}"; do
@@ -145,8 +139,6 @@ for file in $file_diff; do
     fi
 done
 
-# Decide whether to use precompiled wheels
-# Relies on existing patterns array as a basis.
 if [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
     echo "VLLM_USE_PRECOMPILED is already set to: $VLLM_USE_PRECOMPILED"
 elif [[ $RUN_ALL -eq 1 ]]; then
@@ -156,7 +148,6 @@ else
     export VLLM_USE_PRECOMPILED=1
     echo "No critical changes, using precompiled wheels"
 fi
-
 
 LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
