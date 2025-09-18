@@ -49,7 +49,7 @@ steps:
       pre-commit install
       pre-commit run --all-files --hook-stage manual
       if [ $? -ne 0 ]; then
-        echo "--- :rotating_light: pre-commit checks failed! Canceling the build. :rotating_light:"
+        echo "pre-commit checks failed. Canceling the build."
         buildkite-agent build cancel
       fi
 
