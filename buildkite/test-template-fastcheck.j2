@@ -1,11 +1,59 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
+{% set skip_image_build = (skip_image_build | default("0")) %}
+{% set requirements_changed = (requirements_changed | default("0")) %}
+{% if skip_image_build == "1" and docker_image_override is defined and docker_image_override %}
+  {% set docker_image = docker_image_override %}
+{% endif %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 
+{% macro vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed,fail_fast) -%}
+set {% if fail_fast == "true" %}-xeuo pipefail{% else %}-xuo{% endif %}
+echo "SKIP_IMAGE_BUILD={{ skip_image_build }} REQUIREMENTS_CHANGED={{ requirements_changed }}"
+{% if skip_image_build == "1" %}
+
+# Copy in the code from the checkout to the workspace
+rm -rf /vllm-workspace/vllm || true
+cp -a /workdir/. /vllm-workspace/
+
+# Overlay the pure-Python vllm into the install package dir
+export SITEPKG="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+cp -a /vllm-workspace/vllm/* "$$SITEPKG/vllm/"
+
+# Restore src/ layout, as Dockerfile does. Hides code from tests, but allows setup.
+rm -rf /vllm-workspace/src || true
+mkdir -p /vllm-workspace/src
+mv /vllm-workspace/vllm /vllm-workspace/src/vllm
+
+# If deps changed, re-install (system-wide in the container)
+{% if requirements_changed == '1' %}
+cd /vllm-workspace
+uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
+{% endif %}
+{% endif %}
+
+(command -v nvidia-smi >/dev/null && nvidia-smi || true)
+export VLLM_LOGGING_LEVEL=DEBUG
+export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+cd {{ (step.working_dir or default_working_dir) | safe }}
+
+{# Emit commands exactly as input. #}
+{% if step.command -%}
+{{ step.command | replace(' \\', '') | trim | safe }}
+{%- elif step.commands -%}
+{%- for cmd in step.commands %}
+{{ cmd | replace(' \\', '') | trim | safe }}
+{%- endfor %}
+{%- else -%}
+echo "No command(s) defined for this step." >&2; exit 2
+{%- endif %}
+{%- endmacro %}
+
 steps:
+  {% if skip_image_build != "1" %}
   - label: ":docker: build image"
     key: image-build
     agents:
@@ -39,6 +87,7 @@ steps:
           limit: 5
         - exit_status: -10  # Agent was lost
           limit: 5
+  {% endif %}
 
   - block: Run Neuron Test
     depends_on: ~
@@ -54,7 +103,11 @@ steps:
   {% for step in steps %}
   {% if step.gpu != "a100" and step.fast_check == true and step.num_nodes < 2 %}
   - label: "{{ step.label }}"
+    {% if skip_image_build != "1" %}
     depends_on: image-build
+    {% else %}
+    depends_on: ~
+    {% endif %}
     agents:
       {% if step.label == "Documentation Build" %}
       queue: small_cpu_queue_premerge
@@ -86,10 +139,11 @@ steps:
           {% if step.label == "Benchmarks" %}
           mount-buildkite-agent: true
           {% endif %}
-          command: 
-            - "bash"
-            - "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}"
-            - "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"
+          command:
+            - "/bin/bash"
+            - "-xce"
+            - |
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed,fail_fast) | indent(14,true) }}
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - NCCL_CUMEM_HOST_ENABLE=0
@@ -111,7 +165,11 @@ steps:
   {% if step.gpu != "a100" and step.fast_check != true and step.num_nodes < 2 %}
   - block: "Run {{ step.label }}"
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+    {% if skip_image_build != "1" %}
     depends_on: image-build
+    {% else %}
+    depends_on: ~
+    {% endif %}
 
   - label: "{{ step.label }}"
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
@@ -146,10 +204,11 @@ steps:
           {% if step.label == "Benchmarks" %}
           mount-buildkite-agent: true
           {% endif %}
-          command: 
-            - "bash"
-            - "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}"
-            - "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"
+          command:
+            - "/bin/bash"
+            - "-xce"
+            - |
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed,fail_fast) | indent(14,true) }}
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - NCCL_CUMEM_HOST_ENABLE=0
@@ -171,7 +230,11 @@ steps:
   {% if step.num_nodes >= 2 %}
   - block: "Run {{ step.label }}"
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+    {% if skip_image_build != "1" %}
     depends_on: image-build
+    {% else %}
+    depends_on: ~
+    {% endif %}
 
   - label: "{{ step.label }}"
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
@@ -183,7 +246,11 @@ steps:
   {% endfor %}
 
   - block: "Run A100 tests"
+    {% if skip_image_build != "1" %}
     depends_on: image-build
+    {% else %}
+    depends_on: ~
+    {% endif %}
 
   {% for step in steps %}
   {% if step.gpu == "a100" %}

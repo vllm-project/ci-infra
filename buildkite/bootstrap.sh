@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 set -euo pipefail
@@ -76,6 +75,9 @@ upload_pipeline() {
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
+            -D skip_image_build="$SKIP_IMAGE_BUILD" \
+            -D requirements_changed="$REQUIREMENTS_CHANGED" \
+            -D docker_image_override="$DOCKER_IMAGE_OVERRIDE" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -117,6 +119,16 @@ ignore_patterns=(
     "docker/Dockerfile."
 )
 
+# Track changes to requirements/*.txt explicitly
+REQUIREMENTS_CHANGED=0
+for f in $file_diff; do
+    case "$f" in
+        requirements/common.txt|requirements/cuda.txt|requirements/build.txt|requirements/test.txt)
+            REQUIREMENTS_CHANGED=1
+            ;;
+    esac
+done
+
 for file in $file_diff; do
     # First check if file matches any pattern
     matches_pattern=0
@@ -157,6 +169,36 @@ else
     echo "No critical changes, using precompiled wheels"
 fi
 
+# Decide whether to skip building docker images (pull & mount code instead)
+# Honor manual override if provided.
+if [[ -n "${SKIP_IMAGE_BUILD:-}" ]]; then
+    echo "SKIP_IMAGE_BUILD is preset to: ${SKIP_IMAGE_BUILD}"
+else
+    # Auto decision:
+    # - No critical changes (RUN_ALL==0)
+    # - VLLM_USE_PRECOMPILED==1
+    if [[ "${VLLM_USE_PRECOMPILED:-}" == "1" && "$RUN_ALL" -eq 0 ]]; then
+        SKIP_IMAGE_BUILD=1
+    else
+        SKIP_IMAGE_BUILD=0
+    fi
+fi
+echo "Final SKIP_IMAGE_BUILD=${SKIP_IMAGE_BUILD} (RUN_ALL=${RUN_ALL}, VLLM_USE_PRECOMPILED=${VLLM_USE_PRECOMPILED:-unset})"
+
+# Select Docker image based on latest common ancestor (LCA) commit between current branch and main
+LCA_COMMIT=""
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    LCA_COMMIT=$(git merge-base origin/main HEAD)
+fi
+if [[ -n "$LCA_COMMIT" ]]; then
+    DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$LCA_COMMIT"
+    echo "Using Docker image for LCA commit: $DOCKER_IMAGE_OVERRIDE"
+else
+    DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
+    echo "Could not determine LCA commit, using latest Docker image: $DOCKER_IMAGE_OVERRIDE"
+fi
+
+################## end WIP #####################
 
 LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
