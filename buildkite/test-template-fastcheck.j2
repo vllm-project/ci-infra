@@ -49,7 +49,7 @@ steps:
       - |
         #!/bin/bash
         env
-        curl -H "Authorization: Bearer $BUILDKITE_AGENT_JOB_API_TOKEN" \
+        curl -H "Authorization: Bearer $BUILDKITE_AGENT_ACCESS_TOKEN" \
         -X PUT "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORGANIZATION_SLUG/pipelines/$BUILDKITE_PIPELINE_SLUG/builds/$BUILDKITE_BUILD_NUMBER/cancel"
       - exit 1
       - pip install pre-commit
