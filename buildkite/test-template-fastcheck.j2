@@ -42,12 +42,14 @@ steps:
 
   - label: ":pre-commit: Pre-commit checks"
     key: pre-commit-checks
+    cancel_on_build_failing: true
     agents:
       queue: cpu_queue_premerge
     commands:
+      - exit 1
       - pip install pre-commit
       - export PATH="$HOME/.local/bin:$PATH"
-      - pre-commit run --all-files --hook-stage manual || (echo "pre-commit checks failed. Canceling the build." && buildkite-agent pipeline cancel)
+      - pre-commit run --all-files --hook-stage manual
 
   - block: Run Neuron Test
     depends_on: ~
