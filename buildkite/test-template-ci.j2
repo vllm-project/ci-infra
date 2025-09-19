@@ -479,11 +479,11 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
         priority: 100
-         {% if step.label and step.label=="Regression Test" or step.label=="Engine Test" %}
-           soft_fail: false
-         {% else %}
-           soft_fail: true
-         {% endif%}
+        {% if step.label and step.label=="Regression Test" or step.label=="Engine Test" %}
+        soft_fail: false
+        {% else %}
+        soft_fail: true
+        {% endif%}
     {% endif %}
     {% endfor %}
     {% for step in steps %}
