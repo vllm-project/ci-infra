@@ -47,7 +47,6 @@ steps:
     commands:
       - pip install pre-commit
       - export PATH="$HOME/.local/bin:$PATH"
-      - pre-commit install
       - pre-commit run --all-files --hook-stage manual || (echo "pre-commit checks failed. Canceling the build." && buildkite-agent pipeline cancel)
 
   - block: Run Neuron Test
