@@ -1,7 +1,6 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set skip_image_build = (skip_image_build | default("0")) %}
-{% set requirements_changed = (requirements_changed | default("0")) %}
 {% if skip_image_build == "1" and docker_image_override is defined and docker_image_override %}
   {% set docker_image = docker_image_override %}
 {% endif %}
@@ -10,9 +9,9 @@
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 
-{% macro vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed,fail_fast) -%}
+{% macro vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,fail_fast) -%}
 set {% if fail_fast == "true" %}-xeuo pipefail{% else %}-xuo{% endif %}
-echo "SKIP_IMAGE_BUILD={{ skip_image_build }} REQUIREMENTS_CHANGED={{ requirements_changed }}"
+echo "SKIP_IMAGE_BUILD={{ skip_image_build }}"
 {% if skip_image_build == "1" %}
 
 # Copy in the code from the checkout to the workspace
@@ -27,12 +26,6 @@ cp -a /vllm-workspace/vllm/* "$$SITEPKG/vllm/"
 rm -rf /vllm-workspace/src || true
 mkdir -p /vllm-workspace/src
 mv /vllm-workspace/vllm /vllm-workspace/src/vllm
-
-# If deps changed, re-install (system-wide in the container)
-{% if requirements_changed == '1' %}
-cd /vllm-workspace
-uv pip install --system -r requirements/common.txt -r requirements/build.txt -r requirements/test.txt
-{% endif %}
 {% endif %}
 
 (command -v nvidia-smi >/dev/null && nvidia-smi || true)
@@ -143,7 +136,7 @@ steps:
             - "/bin/bash"
             - "-xce"
             - |
-{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed,fail_fast) | indent(14,true) }}
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,fail_fast) | indent(14,true) }}
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - NCCL_CUMEM_HOST_ENABLE=0
@@ -208,7 +201,7 @@ steps:
             - "/bin/bash"
             - "-xce"
             - |
-{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,requirements_changed,fail_fast) | indent(14,true) }}
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,fail_fast) | indent(14,true) }}
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - NCCL_CUMEM_HOST_ENABLE=0
