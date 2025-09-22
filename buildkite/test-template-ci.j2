@@ -711,7 +711,7 @@ steps:
           image: {{ docker_image }}
           always-pull: true
           mount-buildkite-agent: true
-          command: ["bash", "-xce", "buildkite-agent artifact download '.coverage.*' . || echo 'No coverage files found' && if ls .coverage.* 1> /dev/null 2>&1; then echo 'Coverage files found, generating report...' && python3 -m coverage combine && python3 -m coverage html -d coverage_html_report && python3 -m coverage xml -o coverage.xml && tar -czf coverage_report.tar.gz coverage_html_report/ && buildkite-agent artifact upload coverage_report.tar.gz && python3 -m coverage report && if [ -n \"$${CODECOV_TOKEN}\" ]; then echo 'Installing codecov CLI...' && curl -Os https://cli.codecov.io/latest/linux/codecov && chmod +x codecov && echo 'Uploading to codecov...' && ./codecov upload-process -t $${CODECOV_TOKEN} -f coverage.xml --git-service github --build $${BUILDKITE_BUILD_NUMBER} --branch $${BUILDKITE_BRANCH} --sha $${BUILDKITE_COMMIT} --slug vllm-project/vllm --verbose || echo 'Codecov upload failed, continuing...'; else echo 'CODECOV_TOKEN not set, skipping codecov upload'; fi; else echo 'No coverage files found. Skipping coverage report generation.' && echo 'This may indicate that all pytest steps failed or coverage was not enabled.'; fi"]
+          command: ["bash", "-xce", "curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/process_coverage.sh | bash"]
           environment:
             - BUILDKITE_AGENT_ACCESS_TOKEN
             - CODECOV_TOKEN
