@@ -192,6 +192,7 @@ if [[ "${SKIP_IMAGE_BUILD}" == "1" ]]; then
     fi
     if [[ -n "$LCA_COMMIT" ]]; then
         IMAGE_TAG="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$LCA_COMMIT"
+        echo "IMAGE_TAG: $IMAGE_TAG"
         # Check if the image exists on the registry
         if [[ -z $(docker manifest inspect "$IMAGE_TAG") ]]; then
             DOCKER_IMAGE_OVERRIDE="$IMAGE_TAG"
