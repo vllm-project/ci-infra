@@ -11,7 +11,7 @@ resource "tls_private_key" "buildkite_agent_ssh_key" {
 
 resource "google_compute_disk" "disk_east5_b" {
   provider = google-beta.us-east5-b
-  count = 4
+  count = 24
 
   name  = "tpu-disk-east5-b-${count.index}"
   size  = 2048
@@ -21,7 +21,7 @@ resource "google_compute_disk" "disk_east5_b" {
 
 resource "google_tpu_v2_vm" "tpu_v6_ci" {
   provider = google-beta.us-east5-b
-  count = 4
+  count = 24
   name = "vllm-tpu-v6-ci-${count.index}"
   zone = "us-east5-b" 
 
@@ -75,15 +75,31 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo 'tags="queue=tpu_v6e_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${local.huggingface_token_value}' | sudo tee -a /etc/environment
 
-      sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme0n2
       sudo mkdir -p /mnt/disks/persist
-      sudo mount -o discard,defaults /dev/nvme0n2 /mnt/disks/persist
-      sudo chmod 777 -R /mnt/disks/persist
+
+      # Format if not already formatted
+      if ! blkid /dev/nvme0n2; then
+        echo "Formatting /dev/nvme0n2 as ext4..."
+        sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme0n2
+      fi
+
+      # Add to /etc/fstab using UUID
+      disk_uuid=$(blkid -s UUID -o value /dev/nvme0n2)
+      if ! grep -q "/mnt/disks/persist" /etc/fstab; then
+       echo "UUID=$disk_uuid /mnt/disks/persist ext4 defaults,discard 0 2" | sudo tee -a /etc/fstab
+      fi
+
+      # Only mount if not already mounted (first boot or recovery)
+      if ! mountpoint -q /mnt/disks/persist; then
+        sudo mount /mnt/disks/persist
+      fi
 
       jq ". + {\"data-root\": \"/mnt/disks/persist\"}" /etc/docker/daemon.json > /tmp/daemon.json.tmp && mv /tmp/daemon.json.tmp /etc/docker/daemon.json
       systemctl stop docker
       systemctl daemon-reload
       systemctl start docker
+
+      sudo chmod 777 /mnt/disks/persist
 
       systemctl enable buildkite-agent
       systemctl start buildkite-agent
