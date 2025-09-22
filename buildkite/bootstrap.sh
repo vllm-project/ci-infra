@@ -195,12 +195,12 @@ if [[ "${SKIP_IMAGE_BUILD}" == "1" ]]; then
         echo "IMAGE_TAG: $IMAGE_TAG"
         # Check if the image exists on the registry
         if [[ -z $(docker manifest inspect "$IMAGE_TAG") ]]; then
-            DOCKER_IMAGE_OVERRIDE="$IMAGE_TAG"
-            echo "Using Docker image for LCA commit: $DOCKER_IMAGE_OVERRIDE"
-        else
             echo "LCA image not found, falling back to build image"
             SKIP_IMAGE_BUILD=0
             VLLM_USE_PRECOMPILED=0
+        else
+            DOCKER_IMAGE_OVERRIDE="$IMAGE_TAG"
+            echo "Using Docker image for LCA commit: $DOCKER_IMAGE_OVERRIDE"
         fi
     else
         DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
