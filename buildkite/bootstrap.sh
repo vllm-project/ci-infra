@@ -183,20 +183,31 @@ else
         SKIP_IMAGE_BUILD=0
     fi
 fi
-echo "Final SKIP_IMAGE_BUILD=${SKIP_IMAGE_BUILD} (RUN_ALL=${RUN_ALL}, VLLM_USE_PRECOMPILED=${VLLM_USE_PRECOMPILED:-unset})"
 
-# Select Docker image based on latest common ancestor (LCA) commit between current branch and main
-LCA_COMMIT=""
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    LCA_COMMIT=$(git merge-base origin/main HEAD)
+# Determine the lowest common ancestor (LCA) commit with main branch if skipping image build
+if [[ "${SKIP_IMAGE_BUILD}" == "1" ]]; then
+    LCA_COMMIT=""
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        LCA_COMMIT=$(git merge-base origin/main HEAD)
+    fi
+    if [[ -n "$LCA_COMMIT" ]]; then
+        IMAGE_TAG="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$LCA_COMMIT"
+        # Check if the image exists on the registry
+        if docker manifest inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+            DOCKER_IMAGE_OVERRIDE="$IMAGE_TAG"
+            echo "Using Docker image for LCA commit: $DOCKER_IMAGE_OVERRIDE"
+        else
+            echo "LCA image not found, falling back to build image"
+            SKIP_IMAGE_BUILD=0
+            VLLM_USE_PRECOMPILED=0
+        fi
+    else
+        DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
+        echo "Could not determine LCA commit, using latest Docker image: $DOCKER_IMAGE_OVERRIDE"
+    fi
 fi
-if [[ -n "$LCA_COMMIT" ]]; then
-    DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$LCA_COMMIT"
-    echo "Using Docker image for LCA commit: $DOCKER_IMAGE_OVERRIDE"
-else
-    DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
-    echo "Could not determine LCA commit, using latest Docker image: $DOCKER_IMAGE_OVERRIDE"
-fi
+
+echo "Final SKIP_IMAGE_BUILD=${SKIP_IMAGE_BUILD} (RUN_ALL=${RUN_ALL}, VLLM_USE_PRECOMPILED=${VLLM_USE_PRECOMPILED:-unset})"
 
 ################## end WIP #####################
 
