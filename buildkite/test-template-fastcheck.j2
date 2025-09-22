@@ -346,14 +346,18 @@ steps:
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
       {% if step.label and step.label=="Basic Correctness Test" %}
-      - block: "Run AMD MI300: {{ step.label }} with {{mirror_hw}}"
+      - block: "{{ step.agent_pool }}: {{ step.label }}"
         key: block-amd-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         depends_on: amd-build
         
-      - label: "AMD MI300: {{ step.label }} with {{mirror_hw}}"
+      - label: "{{ step.agent_pool }}: {{ step.label }}"
         depends_on: block-amd-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         agents:     
-           queue: amd_mi300_1
+          {% if step.agent_pool %}
+          queue: {{ step.agent_pool }}
+          {% else %}
+          queue: amd_mi325_1
+          {% endif %}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
         env:
           DOCKER_BUILDKIT: "1"
