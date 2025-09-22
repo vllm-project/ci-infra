@@ -161,7 +161,7 @@ done
 # Relies on existing patterns array as a basis.
 if [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
     echo "VLLM_USE_PRECOMPILED is already set to: $VLLM_USE_PRECOMPILED"
-elif [[ $RUN_ALL -eq 1 ]]; then
+elif [[ $RUN_ALL -eq 1 || "${BUILDKITE_BRANCH}" == "main" ]]; then
     export VLLM_USE_PRECOMPILED=0
     echo "Detected critical changes, building wheels from source"
 else
