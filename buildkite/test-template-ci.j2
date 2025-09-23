@@ -10,6 +10,13 @@
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
 {% endif %}
+{% set skip_image_build = (skip_image_build | default("0")) %}
+{% if skip_image_build == "1" and docker_image_override is defined and docker_image_override %}
+  {% set docker_image = docker_image_override %}
+  {% set docker_image_torch_nightly = docker_image_override %}
+  {% set docker_image_cu118 = docker_image_override %}
+  {% set docker_image_cpu = docker_image_override %}
+{% endif %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
@@ -30,12 +37,71 @@
 {%- set tests_only = (tests_acc.only_tests and tests_acc.any) %}
 {%- set changed_tests = tests_acc.changed %}
 
-{% macro add_pytest_coverage(cmd, coverage_file) %}
-{% if "pytest " in cmd %}
-COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report= --cov-append --durations=0 ") }} || true
-{% else %}
-{{ cmd }}
+{# --- helpers ------------------------------------------------------------ #}
+
+{# collapse backslash-newline-indentation to a single space, trim ends #}
+{% macro clean_cmd(cmd) -%}
+{{- cmd
+   | replace(' \\', '') | trim | safe
+-}}
+{%- endmacro %}
+
+{# emit step.command / step.commands, cleaned and joined safely #}
+{% macro emit_step_commands(step) -%}
+{%- if step.command -%}
+{{ clean_cmd(step.command) }}
+{%- elif step.commands -%}
+{%- for c in step.commands -%}
+{{ clean_cmd(c) }}{{ " && " if not loop.last else "" }}
+{%- endfor -%}
+{%- else -%}
+echo "No command(s) defined for this step." >&2; exit 2
+{%- endif -%}
+{%- endmacro %}
+
+{# wrap pytest with coverage flags if present #}
+{% macro add_pytest_coverage(cmd, coverage_file) -%}
+{%- set c = clean_cmd(cmd) -%}
+{%- if "pytest " in c -%}
+COVERAGE_FILE={{ coverage_file }} {{ c | replace("pytest ", "pytest --cov=vllm --cov-report= --cov-append --durations=0 ") }} || true
+{%- else -%}
+{{ c }}
+{%- endif -%}
+{%- endmacro %}
+
+{# --- main macros -------------------------------------------------------- #}
+
+{% macro vllm_checkoutoverlay_script(step, default_working_dir, skip_image_build, fail_fast, cov_enabled) %}
+{% if fail_fast == "true" -%}
+set -xeuo pipefail
+{%- else -%}
+set -xuo pipefail
+{%- endif %}
+
+echo "SKIP_IMAGE_BUILD={{ skip_image_build }}"
+
+{% if skip_image_build == "1" %}
+# Copy in the code from the checkout to the workspace
+rm -rf /vllm-workspace/vllm || true
+cp -a /workdir/. /vllm-workspace/
+
+# Overlay the pure-Python vllm into the install package dir
+export SITEPKG="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+cp -a /vllm-workspace/vllm/* "$$SITEPKG/vllm/"
+
+# Restore src/ layout, as Dockerfile does. Hides code from tests, but allows setup.
+rm -rf /vllm-workspace/src || true
+mkdir -p /vllm-workspace/src
+mv /vllm-workspace/vllm /vllm-workspace/src/vllm
 {% endif %}
+
+(command -v nvidia-smi >/dev/null && nvidia-smi || true)
+export VLLM_LOGGING_LEVEL=DEBUG
+export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+cd {{ (step.working_dir or default_working_dir) | safe }}
+
+# Run tests with intelligent targeting and coverage
+{{ add_docker_pytest_coverage(step, cov_enabled) }}
 {% endmacro %}
 
 {% macro add_docker_pytest_coverage(step, cov_enabled) %}
@@ -47,29 +113,27 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {# Intelligent test targeting: Build matched test targets for this step when only tests changed #}
 {%- set match_ns = namespace(targets=[]) %}
 {%- if tests_only and step.source_file_dependencies %}
-{%- for dep in step.source_file_dependencies %}
-{%- if dep[:6] == 'tests/' %}
-{%- set dep_rel = dep[6:] %}
-{# Handle deps that already end with '/' (e.g., tests/benchmarks/) #}
-{%- if dep_rel[-1:] == '/' %}
-{%- set dep_dir_prefix = dep_rel %}
-{%- set dep_file_name = dep_rel[:-1] ~ '.py' %}
-{%- else %}
-{%- set dep_dir_prefix = dep_rel ~ '/' %}
-{%- set dep_file_name = dep_rel ~ '.py' %}
-{%- endif %}
-{%- for t in changed_tests %}
-{# Check if t starts with dep_dir_prefix (for directories) or equals dep_file_name (for files) #}
-{%- set prefix_len = dep_dir_prefix | length %}
-{%- set t_prefix = t[:prefix_len] %}
-{%- set cond1 = (t | length >= prefix_len and t_prefix == dep_dir_prefix) %}
-{%- set cond2 = (t == dep_file_name) %}
-{%- if cond1 or cond2 %}
-{%- set match_ns.targets = match_ns.targets + [t] %}
-{%- endif %}
-{%- endfor %}
-{%- endif %}
-{%- endfor %}
+  {%- for dep in step.source_file_dependencies %}
+    {%- if dep[:6] == 'tests/' %}
+      {%- set dep_rel = dep[6:] %}
+      {%- if dep_rel[-1:] == '/' %}
+        {%- set dep_dir_prefix = dep_rel %}
+        {%- set dep_file_name = dep_rel[:-1] ~ '.py' %}
+      {%- else %}
+        {%- set dep_dir_prefix = dep_rel ~ '/' %}
+        {%- set dep_file_name = dep_rel ~ '.py' %}
+      {%- endif %}
+      {%- for t in changed_tests %}
+        {%- set prefix_len = dep_dir_prefix | length %}
+        {%- set t_prefix = t[:prefix_len] %}
+        {%- set cond1 = (t | length >= prefix_len and t_prefix == dep_dir_prefix) %}
+        {%- set cond2 = (t == dep_file_name) %}
+        {%- if cond1 or cond2 %}
+          {%- set match_ns.targets = match_ns.targets + [t] %}
+        {%- endif %}
+      {%- endfor %}
+    {%- endif %}
+  {%- endfor %}
 {%- endif %}
 {%- set matched_targets = match_ns.targets %}
 
@@ -168,22 +232,26 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {% if matched_targets | length > 0 %}
 pytest -v -s{{ marker_ns.markers }} {{ matched_targets | join(' ') }}
 {% else %}
-{# Default behavior: preserve original commands with optional coverage injection #}
-{% if cov_enabled %}
-{% set ns = namespace(has_pytest=false) %}
-{% if step.command %}
-{% if "pytest " in step.command %}{% set ns.has_pytest = true %}{% endif %}
-{{ add_pytest_coverage(step.command, coverage_file) }}
-{% else %}
-{% for cmd in step.commands %}
-{% if "pytest " in cmd %}{% set ns.has_pytest = true %}{% endif %}
-{{ add_pytest_coverage(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}{% endfor %}
-{% endif %}{% if ns.has_pytest %} && curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"{% endif %}
-{% else %}
-{{ step.command or (step.commands | join(' && ')) | safe }}
-{% endif %}
+  {# Default behavior: preserve original commands with optional coverage injection, all cleaned #}
+  {% if cov_enabled %}
+    {% set ns = namespace(has_pytest=false) %}
+    {% if step.command %}
+      {% if "pytest " in clean_cmd(step.command) %}{% set ns.has_pytest = true %}{% endif %}
+      {{ add_pytest_coverage(step.command, coverage_file) }}
+    {% else %}
+      {%- for cmd in step.commands -%}
+{{ add_pytest_coverage(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}
+      {%- endfor -%}
+    {% endif %}
+    {%- if ns.has_pytest -%}
+ && curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- "{{ step.label }}"
+    {%- endif -%}
+  {% else %}
+{{ emit_step_commands(step) }}
+  {% endif %}
 {% endif %}
 {% endmacro %}
+
 
 {% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
 agents:
@@ -234,7 +302,11 @@ plugins:
       {% if step.label == "Benchmarks" or step.mount_buildkite_agent or cov_enabled %}
       mount-buildkite-agent: true
       {% endif %}
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
+      command:
+          - "/bin/bash"
+          - "-c"
+          - |
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,fail_fast,cov_enabled) | indent(12,true) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -259,7 +331,11 @@ plugins:
       always-pull: true
       propagate-environment: true
       gpus: all
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
+      command:
+          - "/bin/bash"
+          - "-c"
+          - |
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,fail_fast,cov_enabled) | indent(12,true) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -283,7 +359,11 @@ plugins:
       propagate-environment: true
       # gpus will be configured by BUILDKITE_PLUGIN_DOCKER_GPUS in per host environment variable.
       # gpus: all
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
+      command:
+          - "/bin/bash"
+          - "-c"
+          - |
+{{ vllm_checkoutoverlay_script(step,default_working_dir,skip_image_build,fail_fast,cov_enabled) | indent(12,true) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -381,6 +461,7 @@ plugins:
 
 
 steps:
+  {% if skip_image_build != "1" %}
   - label: ":docker: build image"
     key: image-build
     depends_on: ~
@@ -506,6 +587,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
+  {% endif %}
 
   {% for step in steps %}
   {% if step.fast_check_only != true %}
@@ -534,7 +616,11 @@ steps:
 
   {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
   - block: "Run {{ step.label }}"
+    {% if skip_image_build != "1" %}
     depends_on: image-build
+    {% else %}
+    depends_on: ~
+    {% endif %}
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
   {% endif %}
 
@@ -542,7 +628,11 @@ steps:
     {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% else %}
+    {% if skip_image_build != "1" %}
     depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
+    {% else %}
+    depends_on: ~
+    {% endif %}
     {% endif %}
     soft_fail: {{ step.soft_fail or false }}
     {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
