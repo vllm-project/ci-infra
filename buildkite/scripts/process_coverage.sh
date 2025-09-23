@@ -1,11 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Allow custom secret name via environment variable
-CODECOV_SECRET_NAME="${CODECOV_SECRET_NAME:-CODECOV_TOKEN}"
-
 echo "Starting coverage processing..."
-echo "Using secret name: ${CODECOV_SECRET_NAME}"
 echo "DEBUG: Full environment dump for codecov-related variables:"
 env | grep -i codecov || echo "No codecov variables in environment"
 
@@ -47,7 +43,7 @@ echo "Coverage summary:"
 python3 -m coverage report
 
 # Upload to codecov - try multiple methods to get token
-echo "Fetching CODECOV_TOKEN from buildkite secrets..."
+echo "Fetching CODECOV_TOKEN from AWS Secrets Manager..."
 echo "DEBUG: Current CODECOV_TOKEN value: '${CODECOV_TOKEN:-<not set>}'"
 
 # Method 1: Check environment variable first (if passed directly)
@@ -56,65 +52,48 @@ if [ -n "${CODECOV_TOKEN:-}" ]; then
     echo "DEBUG: Token length: ${#CODECOV_TOKEN} characters"
     echo "DEBUG: Token first 8 chars: ${CODECOV_TOKEN:0:8}..."
 else
-    echo "No CODECOV_TOKEN in environment, trying buildkite secrets..."
-    echo "DEBUG: About to run: buildkite-agent secret get '${CODECOV_SECRET_NAME}'"
+    echo "No CODECOV_TOKEN in environment, trying AWS Secrets Manager..."
+    echo "DEBUG: About to fetch secret: ci_codecov_token"
     
-    # Method 2: Try buildkite-agent secret get with full error output
+    # Method 2: Try AWS Secrets Manager
     set +e  # Don't exit on error
-    CODECOV_TOKEN=$(buildkite-agent secret get "${CODECOV_SECRET_NAME}" 2>&1)
+    CODECOV_TOKEN=$(aws secretsmanager get-secret-value --secret-id ci_codecov_token --query SecretString --output text 2>&1)
     SECRET_EXIT_CODE=$?
     set -e  # Re-enable exit on error
     
-    echo "DEBUG: buildkite-agent secret get exit code: ${SECRET_EXIT_CODE}"
-    echo "DEBUG: buildkite-agent secret get output: '${CODECOV_TOKEN}'"
+    echo "DEBUG: AWS Secrets Manager exit code: ${SECRET_EXIT_CODE}"
     
     if [ ${SECRET_EXIT_CODE} -ne 0 ]; then
-        echo "DEBUG: Secret get failed, clearing token variable"
+        echo "DEBUG: AWS Secrets Manager failed: '${CODECOV_TOKEN}'"
+        echo "WARNING: Failed to fetch codecov token from AWS Secrets Manager"
         CODECOV_TOKEN=""
     else
-        echo "DEBUG: Secret get succeeded! Token length: ${#CODECOV_TOKEN}"
+        echo "DEBUG: AWS Secrets Manager succeeded! Token length: ${#CODECOV_TOKEN}"
         echo "DEBUG: Token first 8 chars: ${CODECOV_TOKEN:0:8}..."
     fi
 fi
 
-# Method 3: Try alternative secret names with verbose logging
+# Method 3: Fallback - try alternative AWS secret names
 if [ -z "${CODECOV_TOKEN}" ]; then
-    echo "Primary secret name failed, trying alternative secret names..."
-    for name in "codecov-token" "codecov_token" "CODECOV" "codecov" "codecov_upload_token" "CODECOV_UPLOAD_TOKEN"; do
-        echo "DEBUG: Trying secret name: $name"
+    echo "Primary AWS secret failed, trying alternative secret names..."
+    for secret_name in "codecov_token" "ci_codecov" "vllm_codecov_token"; do
+        echo "DEBUG: Trying AWS secret: $secret_name"
         set +e
-        TEMP_TOKEN=$(buildkite-agent secret get "$name" 2>&1)
+        TEMP_TOKEN=$(aws secretsmanager get-secret-value --secret-id "$secret_name" --query SecretString --output text 2>&1)
         EXIT_CODE=$?
         set -e
         
-        echo "DEBUG: Exit code for '$name': ${EXIT_CODE}"
-        echo "DEBUG: Output for '$name': '${TEMP_TOKEN}'"
-        
-        if [ ${EXIT_CODE} -eq 0 ] && [ -n "${TEMP_TOKEN}" ]; then
-            echo "SUCCESS! Found token with name: $name"
+        if [ ${EXIT_CODE} -eq 0 ] && [ -n "${TEMP_TOKEN}" ] && [[ "${TEMP_TOKEN}" != *"error"* ]]; then
+            echo "SUCCESS! Found token with AWS secret name: $secret_name"
             echo "DEBUG: Token length: ${#TEMP_TOKEN} characters"
             echo "DEBUG: Token first 8 chars: ${TEMP_TOKEN:0:8}..."
             CODECOV_TOKEN="${TEMP_TOKEN}"
             break
         else
-            echo "DEBUG: Failed to get secret '$name'"
+            echo "DEBUG: Failed to get AWS secret '$secret_name'"
         fi
     done
 fi
-
-# Debug: Show buildkite-agent secret help and try to list secrets
-echo "Available buildkite-agent commands:"
-buildkite-agent --help | grep -E "(secret|env)" || echo "No secret commands found"
-
-echo "Buildkite-agent secret subcommands:"
-buildkite-agent secret --help 2>/dev/null || echo "Secret help not available"
-
-echo "Attempting to get more verbose error information:"
-echo "Trying ${CODECOV_SECRET_NAME} with verbose output:"
-buildkite-agent secret get "${CODECOV_SECRET_NAME}" 2>&1 || echo "Failed to get ${CODECOV_SECRET_NAME}"
-
-echo "Checking if we can list secrets:"
-buildkite-agent secret list 2>&1 || echo "Cannot list secrets (may need permissions)"
 
 echo "DEBUG: Final token check..."
 echo "DEBUG: CODECOV_TOKEN value: '${CODECOV_TOKEN:-<empty>}'"
@@ -165,8 +144,19 @@ if [ -n "${CODECOV_TOKEN}" ]; then
     
     echo "Codecov upload completed successfully!"
 else
-    echo "CODECOV_TOKEN not found in buildkite secrets, skipping codecov upload"
-    echo "Make sure to add CODECOV_TOKEN to buildkite secrets manager"
+    echo "CODECOV_TOKEN not found, skipping codecov upload"
+    echo ""
+    echo "=== CODECOV SETUP SUGGESTIONS ==="
+    echo "1. Set as environment variable in your buildkite pipeline:"
+    echo "   env:"
+    echo "     CODECOV_TOKEN: \"your-token-here\""
+    echo ""
+    echo "2. Or add to AWS Secrets Manager with name 'ci_codecov_token'"
+    echo "   aws secretsmanager create-secret --name ci_codecov_token --secret-string \"your-token\""
+    echo ""
+    echo "3. Make sure the terraform is updated with codecov secret access"
+    echo "   (see terraform/aws/secrets.tf and main.tf for reference)"
+    echo "=================================="
 fi
 
 echo "Coverage processing completed!"

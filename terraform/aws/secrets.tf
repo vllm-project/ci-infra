@@ -10,3 +10,12 @@ resource "aws_secretsmanager_secret_version" "ci_hf_token" {
 resource "aws_secretsmanager_secret" "bk_analytics_token" {
   name = "bk_analytics_token"
 }
+
+resource "aws_secretsmanager_secret" "ci_codecov_token" {
+  name = "ci_codecov_token"
+}
+
+resource "aws_secretsmanager_secret_version" "ci_codecov_token" {
+  secret_id = aws_secretsmanager_secret.ci_codecov_token.id
+  secret_string = var.ci_codecov_token
+}

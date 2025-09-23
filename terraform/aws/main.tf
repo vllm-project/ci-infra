@@ -590,7 +590,8 @@ resource "aws_iam_policy" "bk_stack_secrets_access" {
       Effect = "Allow",
       Resource = [
         aws_secretsmanager_secret.ci_hf_token.arn,
-        aws_secretsmanager_secret.bk_analytics_token.arn
+        aws_secretsmanager_secret.bk_analytics_token.arn,
+        aws_secretsmanager_secret.ci_codecov_token.arn
       ]
     }]
   })
