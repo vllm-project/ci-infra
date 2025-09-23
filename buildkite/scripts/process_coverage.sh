@@ -40,12 +40,37 @@ buildkite-agent artifact upload coverage_report.tar.gz
 echo "Coverage summary:"
 python3 -m coverage report
 
-# Upload to codecov using buildkite secrets
+# Upload to codecov - try multiple methods to get token
 echo "Fetching CODECOV_TOKEN from buildkite secrets..."
-CODECOV_TOKEN=$(buildkite-agent secret get CODECOV_TOKEN 2>/dev/null || echo "")
+
+# Method 1: Check environment variable first (if passed directly)
+if [ -n "${CODECOV_TOKEN:-}" ]; then
+    echo "Found CODECOV_TOKEN in environment variable"
+else
+    echo "No CODECOV_TOKEN in environment, trying buildkite secrets..."
+    
+    # Method 2: Try buildkite-agent secret get
+    CODECOV_TOKEN=$(buildkite-agent secret get CODECOV_TOKEN 2>/dev/null || echo "")
+fi
+
+# Method 3: Try alternative secret names
+if [ -z "${CODECOV_TOKEN}" ]; then
+    echo "buildkite-agent secret get failed, trying alternative secret names..."
+    CODECOV_TOKEN=$(buildkite-agent secret get codecov-token 2>/dev/null || echo "")
+fi
+
+# Method 4: Try with different case
+if [ -z "${CODECOV_TOKEN}" ]; then
+    echo "codecov-token failed, trying lowercase..."
+    CODECOV_TOKEN=$(buildkite-agent secret get codecov_token 2>/dev/null || echo "")
+fi
+
+# Debug: List available secrets (if possible)
+echo "Available buildkite-agent commands:"
+buildkite-agent --help | grep -E "(secret|env)" || echo "No secret commands found"
 
 if [ -n "${CODECOV_TOKEN}" ]; then
-    echo "CODECOV_TOKEN retrieved from secrets, proceeding with codecov upload..."
+    echo "CODECOV_TOKEN found! Proceeding with codecov upload..."
     
     # Install codecov CLI
     echo "Installing codecov CLI..."
