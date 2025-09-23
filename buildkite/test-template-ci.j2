@@ -97,6 +97,7 @@ plugins:
         - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME={{ hf_home_fsx }}
         - HF_TOKEN
+        - CODECOV_TOKEN
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
@@ -124,6 +125,7 @@ plugins:
         - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
+        - CODECOV_TOKEN
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
@@ -150,6 +152,7 @@ plugins:
         - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
+        - CODECOV_TOKEN
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
