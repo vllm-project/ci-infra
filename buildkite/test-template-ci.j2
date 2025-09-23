@@ -19,7 +19,7 @@
 
 {% macro add_pytest_coverage(cmd, coverage_file) %}
 {% if "pytest " in cmd %}
-COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report=xml:coverage.xml --cov-append --durations=0 ") }} && if [ -n "${CODECOV_TOKEN:-}" ]; then [ ! -f codecov ] && curl -Os https://cli.codecov.io/latest/linux/codecov && chmod +x codecov; ./codecov upload-process -t "${CODECOV_TOKEN}" -f coverage.xml --git-service github --build "${BUILDKITE_BUILD_NUMBER:-unknown}" --branch "${BUILDKITE_BRANCH:-unknown}" --sha "${BUILDKITE_COMMIT:-unknown}" --slug vllm-project/vllm || echo "Codecov upload failed, continuing..."; fi || true
+COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report=xml:coverage.xml --cov-append --durations=0 ") }} || true
 {% else %}
 {{ cmd }}
 {% endif %}
@@ -30,12 +30,15 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {% set step_length = step.label | length %}
 {% set step_first = step.label | first | default("x") %}
 {% set coverage_file = ".coverage." + step_length ~ "_" ~ step_first %}
+{% set ns = namespace(has_pytest=false) %}
 {% if step.command %}
+{% if "pytest " in step.command %}{% set ns.has_pytest = true %}{% endif %}
 {{ add_pytest_coverage(step.command, coverage_file) }}
 {% else %}
 {% for cmd in step.commands %}
+{% if "pytest " in cmd %}{% set ns.has_pytest = true %}{% endif %}
 {{ add_pytest_coverage(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}{% endfor %}
-{% endif %}
+{% endif %}{% if ns.has_pytest %} && if [ -n "${CODECOV_TOKEN:-}" ]; then [ ! -f codecov ] && curl -Os https://cli.codecov.io/latest/linux/codecov && chmod +x codecov; ./codecov upload-process -t "${CODECOV_TOKEN}" -f coverage.xml --git-service github --build "${BUILDKITE_BUILD_NUMBER:-unknown}" --branch "${BUILDKITE_BRANCH:-unknown}" --sha "${BUILDKITE_COMMIT:-unknown}" --slug vllm-project/vllm || echo "Codecov upload failed, continuing..."; fi{% endif %}
 {% else %}
 {{ step.command or (step.commands | join(' && ')) | safe }}
 {% endif %}
