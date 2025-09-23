@@ -1,7 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+# Allow custom secret name via environment variable
+CODECOV_SECRET_NAME="${CODECOV_SECRET_NAME:-CODECOV_TOKEN}"
+
 echo "Starting coverage processing..."
+echo "Using secret name: ${CODECOV_SECRET_NAME}"
 
 # Download coverage files from buildkite artifacts
 echo "Downloading coverage artifacts..."
@@ -50,7 +54,7 @@ else
     echo "No CODECOV_TOKEN in environment, trying buildkite secrets..."
     
     # Method 2: Try buildkite-agent secret get
-    CODECOV_TOKEN=$(buildkite-agent secret get CODECOV_TOKEN 2>/dev/null || echo "")
+    CODECOV_TOKEN=$(buildkite-agent secret get "${CODECOV_SECRET_NAME}" 2>/dev/null || echo "")
 fi
 
 # Method 3: Try alternative secret names
@@ -86,8 +90,8 @@ echo "Buildkite-agent secret subcommands:"
 buildkite-agent secret --help 2>/dev/null || echo "Secret help not available"
 
 echo "Attempting to get more verbose error information:"
-echo "Trying CODECOV_TOKEN with verbose output:"
-buildkite-agent secret get CODECOV_TOKEN 2>&1 || echo "Failed to get CODECOV_TOKEN"
+echo "Trying ${CODECOV_SECRET_NAME} with verbose output:"
+buildkite-agent secret get "${CODECOV_SECRET_NAME}" 2>&1 || echo "Failed to get ${CODECOV_SECRET_NAME}"
 
 echo "Checking if we can list secrets:"
 buildkite-agent secret list 2>&1 || echo "Cannot list secrets (may need permissions)"
