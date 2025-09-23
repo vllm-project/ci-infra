@@ -65,9 +65,32 @@ if [ -z "${CODECOV_TOKEN}" ]; then
     CODECOV_TOKEN=$(buildkite-agent secret get codecov_token 2>/dev/null || echo "")
 fi
 
-# Debug: List available secrets (if possible)
+# Method 5: Try other common variations
+if [ -z "${CODECOV_TOKEN}" ]; then
+    echo "codecov_token failed, trying other variations..."
+    for name in "CODECOV" "codecov" "codecov_upload_token" "CODECOV_UPLOAD_TOKEN"; do
+        echo "Trying secret name: $name"
+        CODECOV_TOKEN=$(buildkite-agent secret get "$name" 2>/dev/null || echo "")
+        if [ -n "${CODECOV_TOKEN}" ]; then
+            echo "Success! Found token with name: $name"
+            break
+        fi
+    done
+fi
+
+# Debug: Show buildkite-agent secret help and try to list secrets
 echo "Available buildkite-agent commands:"
 buildkite-agent --help | grep -E "(secret|env)" || echo "No secret commands found"
+
+echo "Buildkite-agent secret subcommands:"
+buildkite-agent secret --help 2>/dev/null || echo "Secret help not available"
+
+echo "Attempting to get more verbose error information:"
+echo "Trying CODECOV_TOKEN with verbose output:"
+buildkite-agent secret get CODECOV_TOKEN 2>&1 || echo "Failed to get CODECOV_TOKEN"
+
+echo "Checking if we can list secrets:"
+buildkite-agent secret list 2>&1 || echo "Cannot list secrets (may need permissions)"
 
 if [ -n "${CODECOV_TOKEN}" ]; then
     echo "CODECOV_TOKEN found! Proceeding with codecov upload..."
