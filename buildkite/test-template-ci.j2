@@ -19,7 +19,7 @@
 
 {% macro add_pytest_coverage(cmd, coverage_file) %}
 {% if "pytest " in cmd %}
-COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report= --cov-append --durations=0 ") }} || true
+COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report=xml:coverage.xml --cov-append --durations=0 ") }} && if [ -n "${CODECOV_TOKEN:-}" ]; then curl -Os https://cli.codecov.io/latest/linux/codecov && chmod +x codecov && ./codecov upload-process -t "${CODECOV_TOKEN}" -f coverage.xml --git-service github --build "${BUILDKITE_BUILD_NUMBER:-unknown}" --branch "${BUILDKITE_BRANCH:-unknown}" --sha "${BUILDKITE_COMMIT:-unknown}" --slug vllm-project/vllm || echo "Codecov upload failed, continuing..."; fi || true
 {% else %}
 {{ cmd }}
 {% endif %}
@@ -30,15 +30,12 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {% set step_length = step.label | length %}
 {% set step_first = step.label | first | default("x") %}
 {% set coverage_file = ".coverage." + step_length ~ "_" ~ step_first %}
-{% set ns = namespace(has_pytest=false) %}
 {% if step.command %}
-{% if "pytest " in step.command %}{% set ns.has_pytest = true %}{% endif %}
 {{ add_pytest_coverage(step.command, coverage_file) }}
 {% else %}
 {% for cmd in step.commands %}
-{% if "pytest " in cmd %}{% set ns.has_pytest = true %}{% endif %}
 {{ add_pytest_coverage(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}{% endfor %}
-{% endif %}{% if ns.has_pytest %} && buildkite-agent artifact upload {{ coverage_file }}{% endif %}
+{% endif %}
 {% else %}
 {{ step.command or (step.commands | join(' && ')) | safe }}
 {% endif %}
@@ -698,48 +695,3 @@ steps:
       fi
   {% endif %}
 
-  {% if cov_enabled %}
-  - label: "Generate Coverage Report and Upload"
-    depends_on:
-      {% for step in steps %}
-      {% if step.fast_check_only != true %}
-      {% set ns = namespace(blocked=1) %}
-      {% if run_all == "1" %}{% set ns.blocked = 0 %}{% endif %}
-      {% if nightly == "1" %}{% set ns.blocked = 0 %}{% endif %}
-      {% if step.source_file_dependencies %}
-        {% for source_file in step.source_file_dependencies %}
-          {% for file in list_file_diff %}
-            {% if source_file in file %}{% set ns.blocked = 0 %}{% endif %}
-          {% endfor %}
-        {% endfor %}
-      {% else %}
-        {% set ns.blocked = 0 %}
-      {% endif %}
-      {% if not (ns.blocked == 1 or (step.optional and nightly != "1")) %}
-      - step: "{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}"
-        allow_failure: true
-      {% endif %}
-      {% endif %}
-      {% endfor %}
-    soft_fail: true
-    agents:
-      queue: cpu_queue_postmerge_us_east_1
-    plugins:
-      - docker#v5.2.0:
-          image: {{ docker_image }}
-          always-pull: true
-          mount-buildkite-agent: true
-          command: ["bash", "-xce", "curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/process_coverage.sh | bash"]
-          environment:
-            - BUILDKITE_AGENT_ACCESS_TOKEN
-            - BUILDKITE_BUILD_NUMBER
-            - BUILDKITE_BRANCH
-            - BUILDKITE_COMMIT
-            - CODECOV_TOKEN
-    retry:
-      automatic:
-        - exit_status: -1
-          limit: 1
-        - exit_status: -10
-          limit: 1
-  {% endif %}
