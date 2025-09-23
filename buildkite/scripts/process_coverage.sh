@@ -119,8 +119,7 @@ if [ -n "${CODECOV_TOKEN}" ]; then
     echo "DEBUG:     --build \"${BUILDKITE_BUILD_NUMBER:-unknown}\" \\"
     echo "DEBUG:     --branch \"${BUILDKITE_BRANCH:-unknown}\" \\"
     echo "DEBUG:     --sha \"${BUILDKITE_COMMIT:-unknown}\" \\"
-    echo "DEBUG:     --slug vllm-project/vllm \\"
-    echo "DEBUG:     --verbose"
+    echo "DEBUG:     --slug vllm-project/vllm"
     
     set +e
     ./codecov upload-process \
@@ -130,8 +129,7 @@ if [ -n "${CODECOV_TOKEN}" ]; then
         --build "${BUILDKITE_BUILD_NUMBER:-unknown}" \
         --branch "${BUILDKITE_BRANCH:-unknown}" \
         --sha "${BUILDKITE_COMMIT:-unknown}" \
-        --slug vllm-project/vllm \
-        --verbose
+        --slug vllm-project/vllm
     CODECOV_EXIT_CODE=$?
     set -e
     
