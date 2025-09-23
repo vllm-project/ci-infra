@@ -81,7 +81,6 @@ upload_pipeline() {
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
             -D cov_enabled="$COV_ENABLED" \
             -D skip_image_build="$SKIP_IMAGE_BUILD" \
-            -D requirements_changed="$REQUIREMENTS_CHANGED" \
             -D docker_image_override="$DOCKER_IMAGE_OVERRIDE" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
@@ -123,16 +122,6 @@ patterns=(
 ignore_patterns=(
     "docker/Dockerfile."
 )
-
-# Track changes to requirements/*.txt explicitly
-REQUIREMENTS_CHANGED=0
-for f in $file_diff; do
-    case "$f" in
-        requirements/common.txt|requirements/cuda.txt|requirements/build.txt|requirements/test.txt)
-            REQUIREMENTS_CHANGED=1
-            ;;
-    esac
-done
 
 for file in $file_diff; do
     # First check if file matches any pattern
