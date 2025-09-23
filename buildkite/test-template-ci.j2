@@ -16,6 +16,14 @@
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
+{% set codecov_function %}
+upload_codecov() {
+  if [ -n "$${CODECOV_TOKEN:-}" ] && [ -f coverage.xml ]; then
+    [ ! -f codecov ] && curl -Os https://cli.codecov.io/latest/linux/codecov && chmod +x codecov
+    ./codecov upload-process -t "$${CODECOV_TOKEN}" -f coverage.xml --git-service github --build "$${BUILDKITE_BUILD_NUMBER:-unknown}" --branch "$${BUILDKITE_BRANCH:-unknown}" --sha "$${BUILDKITE_COMMIT:-unknown}" --slug vllm-project/vllm || echo 'Codecov upload failed, continuing...'
+  fi
+}
+{% endset %}
 
 {% macro add_pytest_coverage(cmd, coverage_file) %}
 {% if "pytest " in cmd %}
@@ -95,12 +103,7 @@ plugins:
         - "bash"
         - "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}"
         - |
-          upload_codecov() {
-            if [ -n "$${CODECOV_TOKEN:-}" ] && [ -f coverage.xml ]; then
-              [ ! -f codecov ] && curl -Os https://cli.codecov.io/latest/linux/codecov && chmod +x codecov
-              ./codecov upload-process -t "$${CODECOV_TOKEN}" -f coverage.xml --git-service github --build "$${BUILDKITE_BUILD_NUMBER:-unknown}" --branch "$${BUILDKITE_BRANCH:-unknown}" --sha "$${BUILDKITE_COMMIT:-unknown}" --slug vllm-project/vllm || echo 'Codecov upload failed, continuing...'
-            fi
-          }
+          {{ codecov_function }}
           (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
@@ -130,12 +133,7 @@ plugins:
         - "bash"
         - "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}"
         - |
-          upload_codecov() {
-            if [ -n "$${CODECOV_TOKEN:-}" ] && [ -f coverage.xml ]; then
-              [ ! -f codecov ] && curl -Os https://cli.codecov.io/latest/linux/codecov && chmod +x codecov
-              ./codecov upload-process -t "$${CODECOV_TOKEN}" -f coverage.xml --git-service github --build "$${BUILDKITE_BUILD_NUMBER:-unknown}" --branch "$${BUILDKITE_BRANCH:-unknown}" --sha "$${BUILDKITE_COMMIT:-unknown}" --slug vllm-project/vllm || echo 'Codecov upload failed, continuing...'
-            fi
-          }
+          {{ codecov_function }}
           (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
@@ -164,12 +162,7 @@ plugins:
         - "bash"
         - "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}"
         - |
-          upload_codecov() {
-            if [ -n "$${CODECOV_TOKEN:-}" ] && [ -f coverage.xml ]; then
-              [ ! -f codecov ] && curl -Os https://cli.codecov.io/latest/linux/codecov && chmod +x codecov
-              ./codecov upload-process -t "$${CODECOV_TOKEN}" -f coverage.xml --git-service github --build "$${BUILDKITE_BUILD_NUMBER:-unknown}" --branch "$${BUILDKITE_BRANCH:-unknown}" --sha "$${BUILDKITE_COMMIT:-unknown}" --slug vllm-project/vllm || echo 'Codecov upload failed, continuing...'
-            fi
-          }
+          {{ codecov_function }}
           (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}
       environment:
         - VLLM_USAGE_SOURCE=ci-test
