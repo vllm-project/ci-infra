@@ -565,6 +565,14 @@ steps:
       queue: intel-gpu
     command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh
 
+  - label: "Ascend NPU Test"
+    soft_fail: true
+    depends_on: ~
+    timeout_in_minutes: 20
+    agents:
+      queue: "ascend"
+    command: bash .buildkite/scripts/hardware_ci/run-npu-test.sh
+
   {% if branch == "main" %}
   - block: "Run IBM Power CPU test"
     key: block-ibm-power
