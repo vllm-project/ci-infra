@@ -699,13 +699,28 @@ steps:
   {% endif %}
 
   {% if cov_enabled %}
-  - block: "Generate Coverage Report"
-    depends_on: ~
-    key: block-generate-coverage-report
-    prompt: "Generate HTML coverage report from all test coverage files?"
-
   - label: "Generate Coverage Report and Upload"
-    depends_on: block-generate-coverage-report
+    depends_on:
+      {% for step in steps %}
+      {% if step.fast_check_only != true %}
+      {% set ns = namespace(blocked=1) %}
+      {% if run_all == "1" %}{% set ns.blocked = 0 %}{% endif %}
+      {% if nightly == "1" %}{% set ns.blocked = 0 %}{% endif %}
+      {% if step.source_file_dependencies %}
+        {% for source_file in step.source_file_dependencies %}
+          {% for file in list_file_diff %}
+            {% if source_file in file %}{% set ns.blocked = 0 %}{% endif %}
+          {% endfor %}
+        {% endfor %}
+      {% else %}
+        {% set ns.blocked = 0 %}
+      {% endif %}
+      {% if not (ns.blocked == 1 or (step.optional and nightly != "1")) %}
+      - step: "{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}"
+        allow_failure: true
+      {% endif %}
+      {% endif %}
+      {% endfor %}
     soft_fail: true
     agents:
       queue: cpu_queue_postmerge_us_east_1
