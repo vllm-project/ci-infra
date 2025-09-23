@@ -714,7 +714,6 @@ steps:
           command: ["bash", "-xce", "curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/process_coverage.sh | bash"]
           environment:
             - BUILDKITE_AGENT_ACCESS_TOKEN
-            - CODECOV_TOKEN
             - BUILDKITE_BUILD_NUMBER
             - BUILDKITE_BRANCH
             - BUILDKITE_COMMIT

@@ -40,9 +40,12 @@ buildkite-agent artifact upload coverage_report.tar.gz
 echo "Coverage summary:"
 python3 -m coverage report
 
-# Upload to codecov if token is available
-if [ -n "${CODECOV_TOKEN:-}" ]; then
-    echo "CODECOV_TOKEN found, proceeding with codecov upload..."
+# Upload to codecov using buildkite secrets
+echo "Fetching CODECOV_TOKEN from buildkite secrets..."
+CODECOV_TOKEN=$(buildkite-agent secret get CODECOV_TOKEN 2>/dev/null || echo "")
+
+if [ -n "${CODECOV_TOKEN}" ]; then
+    echo "CODECOV_TOKEN retrieved from secrets, proceeding with codecov upload..."
     
     # Install codecov CLI
     echo "Installing codecov CLI..."
@@ -66,7 +69,8 @@ if [ -n "${CODECOV_TOKEN:-}" ]; then
     
     echo "Codecov upload completed successfully!"
 else
-    echo "CODECOV_TOKEN not set, skipping codecov upload"
+    echo "CODECOV_TOKEN not found in buildkite secrets, skipping codecov upload"
+    echo "Make sure to add CODECOV_TOKEN to buildkite secrets manager"
 fi
 
 echo "Coverage processing completed!"
