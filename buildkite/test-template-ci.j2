@@ -20,7 +20,7 @@
 
 {% macro add_pytest_coverage(cmd, coverage_file) %}
 {% if "pytest " in cmd %}
-COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=/vllm-workspace/vllm --cov-config=/vllm-workspace/.coveragerc --cov-report=xml --cov-append --durations=0 ") }} || true
+COVERAGE_FILE={{ coverage_file }} cd /vllm-workspace && {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report=xml --cov-append --durations=0 ") }} || true
 {% else %}
 {{ cmd }}
 {% endif %}
