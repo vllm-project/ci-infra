@@ -466,6 +466,27 @@ steps:
         depends_on: ~
         soft_fail: false
         commands:
+           # Check disk usage and cleanup if necessary
+          - |
+            docker_root=$(docker info -f '{{.DockerRootDir}}')
+            if [ -z "$docker_root" ]; then
+              echo "Failed to determine Docker root directory. Manual check on failure" # If k8s pods are used for building
+            fi
+            echo "Docker root directory: $docker_root"
+    
+            disk_usage=$(df "$docker_root" | tail -1 | awk '{print $5}' | sed 's/%//')
+            threshold=70
+    
+            if [ "$disk_usage" -gt "$threshold" ]; then
+              echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
+              docker image prune -f
+              docker volume prune -f
+              docker system prune --force --filter "until=72h" --all
+              echo "Docker images and volumes cleanup completed."
+            else
+              echo "Disk usage is below $threshold%. No cleanup needed."
+            fi
+
           # Handle the introduction of test target in Dockerfile.rocm
           - >
             docker build
