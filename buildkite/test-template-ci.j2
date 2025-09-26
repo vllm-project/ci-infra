@@ -237,7 +237,7 @@ steps:
         fi
       - "docker buildx ls"
       - >
-        docker build --file docker/Dockerfile
+        docker buildx build --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
         --build-arg USE_SCCACHE=1
