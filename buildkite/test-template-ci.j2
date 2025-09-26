@@ -236,26 +236,26 @@ steps:
             docker buildx use docker_container_builder
         fi
       - "docker buildx ls"
-      - >
-        docker buildx build --file docker/Dockerfile
-        --build-arg max_jobs=16
-        --build-arg buildkite_commit=$BUILDKITE_COMMIT
-        --build-arg USE_SCCACHE=1
-        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
-        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
+      - |
+        #!/bin/bash
+        set -euo pipefail
+        trap 'docker buildx use default || true; docker buildx rm -f "docker_container_builder" || true; docker buildx ls || true' EXIT 
+        docker buildx build --file docker/Dockerfile \
+        --build-arg max_jobs=16 \
+        --build-arg buildkite_commit=$BUILDKITE_COMMIT \
+        --build-arg USE_SCCACHE=1 \
+        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0" \
+        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a" \
         {% if branch != "main" %}
-        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
-        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
-        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
+        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }} \
+        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %} \
+        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %} \
         {% endif %}
-        --tag {{ docker_image }}
-        --cache-from=type=registry,ref={{ docker_image_cache }}
-        --cache-to=type=registry,ref={{ docker_image_cache }},mode=max
-        --target test
+        --tag {{ docker_image }} \
+        --cache-from=type=registry,ref={{ docker_image_cache }} \
+        --cache-to=type=registry,ref={{ docker_image_cache }},mode=max \
+        --target test \
         --progress plain .
-      - "docker buildx use default"
-      - "docker buildx rm docker_container_builder"
-      - "docker buildx ls"
       - "docker push {{ docker_image }}"
       {% if branch == "main" %}
       - "docker tag {{ docker_image }} {{ docker_image_latest }}"
