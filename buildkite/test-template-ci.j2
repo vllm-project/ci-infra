@@ -217,6 +217,14 @@ steps:
       {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - |
+        #!/bin/bash
+        if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
+          echo "Image not found, proceeding with build..."
+        else
+          echo "Image found"
+          exit 0
+        fi
       - "docker buildx ls"
       - |
         #!/bin/bash
@@ -228,17 +236,6 @@ steps:
             docker buildx use docker_container_builder
         fi
       - "docker buildx ls"
-      - "docker buildx use default"
-      - "docker buildx rm docker_container_builder"
-      - "docker buildx ls"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
       - >
         docker build --file docker/Dockerfile
         --build-arg max_jobs=16
@@ -256,6 +253,9 @@ steps:
         --cache-to=type=registry,ref={{ docker_image_cache }},mode=max
         --target test
         --progress plain .
+      - "docker buildx use default"
+      - "docker buildx rm docker_container_builder"
+      - "docker buildx ls"
       - "docker push {{ docker_image }}"
       {% if branch == "main" %}
       - "docker tag {{ docker_image }} {{ docker_image_latest }}"
