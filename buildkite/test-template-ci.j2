@@ -225,8 +225,9 @@ steps:
           echo "Image found"
           exit 0
         fi
+      - "docker buildx ls"
       - >
-        docker buildx build --file docker/Dockerfile
+        docker build --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
         --build-arg USE_SCCACHE=1
