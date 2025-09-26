@@ -217,6 +217,7 @@ steps:
       {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker buildx ls"
       - |
         #!/bin/bash
         if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
@@ -225,7 +226,6 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - "docker buildx ls"
       - >
         docker build --file docker/Dockerfile
         --build-arg max_jobs=16
