@@ -219,6 +219,7 @@ steps:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "docker buildx ls"
       - |
+        #!/bin/bash
         if ! docker buildx inspect docker_container_builder >/dev/null 2>&1; then
             echo "Creating and enabling docker-container builder instance"
             docker buildx create --use --name docker_container_builder
