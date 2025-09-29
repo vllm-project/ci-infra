@@ -17,6 +17,14 @@
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
+{% set docs_check = namespace(all_docs=true, found_any=false) %}
+{% for file in list_file_diff %}
+{% set docs_check.found_any = true %}
+{% if file[:5] != 'docs/' %}
+{% set docs_check.all_docs = false %}
+{% endif %}
+{% endfor %}
+{% set docs_only = (docs_check.all_docs and docs_check.found_any) %}
 {% macro add_pytest_coverage(cmd, coverage_file) %}
 {% if "pytest " in cmd %}
 COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report= --cov-append --durations=0 ") }} || true
@@ -529,6 +537,7 @@ steps:
         {% endif %}
     {% endfor %}
 
+{% if not docs_only %}
   - label: "Neuron Test"
     depends_on: ~
     agents:
@@ -701,6 +710,7 @@ steps:
                      - "vllm#tpu-ci-notifications"
       YAML
       fi
+{% endif %}
   {% endif %}
 
   {% if cov_enabled %}
