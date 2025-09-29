@@ -106,7 +106,6 @@ if [[ $BUILDKITE_BRANCH == "main" ]]; then
 fi
 
 patterns=(
-    ".buildkite/test-pipeline"
     "docker/Dockerfile"
     "CMakeLists.txt"
     "requirements/common.txt"
@@ -120,6 +119,10 @@ patterns=(
 
 ignore_patterns=(
     "docker/Dockerfile."
+    "csrc/cpu"
+    "csrc/rocm"
+    "cmake/hipify.py"
+    "cmake/cpu_extension.cmake"
 )
 
 for file in $file_diff; do
