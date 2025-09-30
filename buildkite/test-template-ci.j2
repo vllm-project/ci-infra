@@ -27,7 +27,7 @@
 {% set docs_only = (docs_check.all_docs and docs_check.found_any) %}
 {% macro add_pytest_coverage(cmd, coverage_file) %}
 {% if "pytest " in cmd %}
-COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report= --cov-append --durations=0 ") }} || true
+COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report=xml --cov-append --durations=0 ") }} || true
 {% else %}
 {{ cmd }}
 {% endif %}
@@ -46,7 +46,7 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {% for cmd in step.commands %}
 {% if "pytest " in cmd %}{% set ns.has_pytest = true %}{% endif %}
 {{ add_pytest_coverage(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}{% endfor %}
-{% endif %}{% if ns.has_pytest %} && buildkite-agent artifact upload {{ coverage_file }}{% endif %}
+{% endif %}{% if ns.has_pytest %} && curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"{% endif %}
 {% else %}
 {{ step.command or (step.commands | join(' && ')) | safe }}
 {% endif %}
@@ -105,6 +105,7 @@ plugins:
         - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME={{ hf_home_fsx }}
         - HF_TOKEN
+        - CODECOV_TOKEN
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
@@ -123,15 +124,13 @@ plugins:
       always-pull: true
       propagate-environment: true
       gpus: all
-      command: 
-        - "bash"
-        - "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}"
-        - "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"
+      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
+        - CODECOV_TOKEN
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
@@ -149,15 +148,13 @@ plugins:
       propagate-environment: true
       # gpus will be configured by BUILDKITE_PLUGIN_DOCKER_GPUS in per host environment variable.
       # gpus: all
-      command: 
-        - "bash"
-        - "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}"
-        - "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}"
+      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
+        - CODECOV_TOKEN
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
@@ -711,31 +708,4 @@ steps:
       YAML
       fi
 {% endif %}
-  {% endif %}
-
-  {% if cov_enabled %}
-  - block: "Generate Coverage Report"
-    depends_on: ~
-    key: block-generate-coverage-report
-    prompt: "Generate HTML coverage report from all test coverage files?"
-
-  - label: "Generate Coverage Report and Upload"
-    depends_on: block-generate-coverage-report
-    soft_fail: true
-    agents:
-      queue: cpu_queue_postmerge_us_east_1
-    plugins:
-      - docker#v5.2.0:
-          image: {{ docker_image }}
-          always-pull: true
-          mount-buildkite-agent: true
-          command: ["bash", "-xce", "buildkite-agent artifact download '.coverage.*' . || echo 'No coverage files found' && if ls .coverage.* 1> /dev/null 2>&1; then echo 'Coverage files found, generating report...' && python3 -m coverage combine && python3 -m coverage html -d coverage_html_report && tar -czf coverage_report.tar.gz coverage_html_report/ && buildkite-agent artifact upload coverage_report.tar.gz && python3 -m coverage report; else echo 'No coverage files found. Skipping coverage report generation.' && echo 'This may indicate that all pytest steps failed or coverage was not enabled.'; fi"]
-          environment:
-            - BUILDKITE_AGENT_ACCESS_TOKEN
-    retry:
-      automatic:
-        - exit_status: -1
-          limit: 1
-        - exit_status: -10
-          limit: 1
   {% endif %}
