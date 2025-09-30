@@ -19,8 +19,8 @@ if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
     AMD_MIRROR_HW="amdproduction"
 fi
 
-if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
-    DOCS_ONLY_DISABLE=0
+if [[ -z "${DOCS_ONLY:-}" ]]; then
+    DOCS_ONLY=0
 fi
 
 fail_fast() {
@@ -114,7 +114,7 @@ fi
 # ----------------------------------------------------------------------
 
 # skip pipeline if all changed files are under docs/
-if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
+if [[ "${DOCS_ONLY}" != "1" ]]; then
   if [[ -n "${file_diff:-}" ]]; then
     docs_only=1
     # Robust iteration over newline-separated file_diff
