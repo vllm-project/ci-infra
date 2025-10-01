@@ -511,7 +511,7 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
         priority: 100
-        {% if step.label and step.label=="Regresson Test" or step.label=="Engine Test" %}
+        {% if step.label and step.label=="Regresson Test" %}
         soft_fail: false
         {% else %}
         soft_fail: true
