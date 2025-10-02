@@ -126,7 +126,7 @@ if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
         docs_only=0
         break
       fi
-    done <<< "$file_diff"
+    done < <(printf '%s\n' "$file_diff" | tr ' ' '\n' | tr -d '\r')
 
     if [[ "$docs_only" -eq 1 ]]; then
       buildkite-agent annotate ":memo: CI skipped — docs/** only changes detected
