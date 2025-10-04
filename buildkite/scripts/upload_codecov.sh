@@ -20,6 +20,15 @@ if [ ! -f coverage.xml ]; then
     exit 0
 fi
 
+# Normalize filenames in coverage.xml to ensure consistent paths across uploads
+# Map any site/dist-packages and workspace-relative paths to canonical "vllm/"
+# Works across /usr, /usr/local, /opt/conda, virtualenvs, etc.
+sed -i 's@filename="[^"]*/site-packages/vllm/@filename="vllm/@g' coverage.xml || true
+sed -i 's@filename="[^"]*/dist-packages/vllm/@filename="vllm/@g' coverage.xml || true
+sed -i 's@filename="/vllm-workspace/vllm/@filename="vllm/@g' coverage.xml || true
+sed -i 's@filename="\./vllm/@filename="vllm/@g' coverage.xml || true
+sed -i 's@filename="\.\./vllm/@filename="vllm/@g' coverage.xml || true
+
 # Download codecov CLI if not present
 if [ ! -f codecov ]; then
     curl -Os https://cli.codecov.io/latest/linux/codecov
