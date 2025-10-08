@@ -325,7 +325,7 @@ plugins:
           {% if step.agent_pool %}
           queue: {{ step.agent_pool }}
           {% else %}
-          queue: amd_mi325_2
+          queue: amd_mi325_1
           {% endif %}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
         env:
