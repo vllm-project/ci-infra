@@ -3,6 +3,12 @@ set -e
 
 # Script to upload coverage to Codecov
 # Usage: upload_codecov.sh "Step Label"
+#
+# Coverage Architecture Notes:
+# - Tests import vllm from: /usr/local/lib/python3.12/dist-packages/vllm/ (installed package)
+# - Source code exists at: /vllm-workspace/src/vllm/ (for python_only_compile.sh test)
+# - Coverage tracks the installed package location during test execution
+# - Path mapping in .coveragerc normalizes paths to vllm/ for reporting
 
 STEP_LABEL="${1:-unknown}"
 
@@ -15,57 +21,75 @@ if [ "$FLAG" = "multi-modal_models_test_standard" ]; then
     exit 0
 fi
 
-# Find and normalize ALL coverage.xml files in the workspace
-# This handles cases where tests run from different directories (e.g., whisper tests with cd ..)
-COVERAGE_FILES=$(find /vllm-workspace -name "coverage.xml" -type f 2>/dev/null || true)
+# Find all .coverage.* files in the workspace
+COVERAGE_DB_FILES=$(find /vllm-workspace -name ".coverage.*" -type f 2>/dev/null || true)
 
-if [ -z "$COVERAGE_FILES" ]; then
-    echo "No coverage.xml files found in /vllm-workspace, skipping upload"
+if [ -z "$COVERAGE_DB_FILES" ]; then
+    echo "No .coverage.* files found in /vllm-workspace, skipping upload"
     exit 0
 fi
 
-echo "Found coverage.xml files:"
-echo "$COVERAGE_FILES"
+echo "Found $(echo "$COVERAGE_DB_FILES" | wc -l) coverage file(s) to process"
 
-# Normalize paths in ALL coverage.xml files
-for cov_file in $COVERAGE_FILES; do
-    echo ""
-    echo "Processing: $cov_file"
-    echo "Sample paths before normalization:"
-    grep 'filename=' "$cov_file" | head -3 || true
-    
-    # Normalize filenames to ensure consistent paths across uploads
-    # Map any site/dist-packages and workspace-relative paths to canonical "vllm/"
-    if sed -i \
-        -e 's@filename="[^"]*/site-packages/vllm/@filename="vllm/@g' \
-        -e 's@filename="[^"]*/dist-packages/vllm/@filename="vllm/@g' \
-        -e 's@filename="/vllm-workspace/vllm/@filename="vllm/@g' \
-        -e 's@filename="\./vllm/@filename="vllm/@g' \
-        -e 's@filename="\.\./vllm/@filename="vllm/@g' \
-        "$cov_file" 2>/dev/null; then
-        echo "✓ Path normalization successful for $cov_file"
-    else
-        echo "⚠ Warning: sed path normalization failed for $cov_file"
+# Change to /vllm-workspace to combine coverage files
+cd /vllm-workspace
+
+# Move all .coverage.* files to the current directory so coverage combine can find them
+# Note: coverage combine only looks in the current directory, not subdirectories
+# Using cp -n to skip files that are already in the target directory
+for cov_file in $COVERAGE_DB_FILES; do
+    if [ -f "$cov_file" ]; then
+        cp -n "$cov_file" . 2>/dev/null || true
     fi
-    
-    echo "Sample paths after normalization:"
-    grep 'filename=' "$cov_file" | head -3 || true
 done
 
-# Use coverage.xml in current directory for upload
-if [ ! -f coverage.xml ]; then
-    echo "Warning: No coverage.xml in current directory $(pwd), using first found file"
-    FIRST_COV=$(echo "$COVERAGE_FILES" | head -1)
-    ln -s "$FIRST_COV" coverage.xml || cp "$FIRST_COV" coverage.xml
+# Combine all coverage database files into a single .coverage file
+# This will apply the [paths] remapping from .coveragerc to normalize paths to vllm/
+echo "Combining coverage files..."
+COMBINE_OUTPUT=$(python3 -m coverage combine --keep 2>&1)
+COMBINE_EXIT=$?
+
+echo "$COMBINE_OUTPUT"
+
+# Check if it's the "No data to combine" error (coverage exits with 0 even for this!)
+if echo "$COMBINE_OUTPUT" | grep -q "No data to combine"; then
+    echo "Warning: No coverage data found - skipping upload"
+    exit 0
 fi
 
-# Ensure Codecov does not re-generate coverage from local DBs anywhere; upload XML as-is
-find /vllm-workspace -type f -name ".coverage*" -delete 2>/dev/null || true
-rm -f .coverage .coverage.* 2>/dev/null || true
+if [ $COMBINE_EXIT -ne 0 ]; then
+    echo "Error: coverage combine failed with status $COMBINE_EXIT"
+    exit 1
+fi
+
+# Check if combine was successful
+if [ ! -f .coverage ]; then
+    echo "Error: Failed to combine coverage files - .coverage not created"
+    exit 1
+fi
+echo "Successfully combined coverage files"
+
+# Generate XML report from the combined coverage data
+# This will use the path mappings from .coveragerc to normalize paths
+echo "Generating XML coverage report..."
+python3 -m coverage xml -o coverage.xml
+
+if [ ! -f coverage.xml ]; then
+    echo "Error: Failed to generate coverage.xml"
+    exit 1
+fi
+
+# Count total files in coverage report
+TOTAL_FILES=$(grep -c '<class.*filename=' coverage.xml || echo "0")
+echo "Generated coverage.xml with $TOTAL_FILES files"
 
 # Download codecov CLI if not present
 if [ ! -f codecov ]; then
-    curl -Os https://cli.codecov.io/latest/linux/codecov
+    echo "Downloading codecov CLI..."
+    if ! curl -Os https://cli.codecov.io/latest/linux/codecov; then
+        echo "Warning: Failed to download codecov CLI"
+        exit 1
+    fi
     chmod +x codecov
 fi
 
@@ -90,7 +114,7 @@ if [ "$UPLOAD_SLUG" = "$DEFAULT_SLUG" ] && [ -z "${CODECOV_TOKEN:-}" ]; then
 fi
 
 # Build Codecov args
-# Use coverage-upload directory to ensure codecov only finds our single combined file
+# Let codecov find all coverage files and use codecov.yml fixes to normalize paths
 CODECOV_ARGS=(upload-process -f coverage.xml --git-service github \
     --build "${BUILDKITE_BUILD_NUMBER:-unknown}" \
     --branch "${BUILDKITE_BRANCH:-unknown}" \
@@ -107,6 +131,7 @@ if [ -n "${BUILDKITE_PULL_REQUEST:-}" ] && [ "${BUILDKITE_PULL_REQUEST}" != "fal
 fi
 
 # Upload to codecov
-./codecov "${CODECOV_ARGS[@]}" || true
+echo "Uploading to codecov..."
+./codecov "${CODECOV_ARGS[@]}" || echo "Warning: codecov upload failed"
 
 exit 0
