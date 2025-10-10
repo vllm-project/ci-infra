@@ -54,7 +54,7 @@ upload_pipeline() {
             https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-fastcheck.j2
     else
         curl -o .buildkite/test-template.j2 \
-            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
+            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-ci.j2?$(date +%s)"
     fi
 
 
@@ -76,7 +76,7 @@ upload_pipeline() {
     (
         set -x
         # Output pipeline.yaml with all blank lines removed
-        minijinja-cli test-template.j2 test-amd.yaml \
+        minijinja-cli test-template.j2 test-pipeline.yaml \
             -D branch="$BUILDKITE_BRANCH" \
             -D list_file_diff="$LIST_FILE_DIFF" \
             -D run_all="$RUN_ALL" \
