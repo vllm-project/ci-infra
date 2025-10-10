@@ -323,7 +323,7 @@ plugins:
         depends_on: amd-build
         agents:
           {% if step.agent_pool %}
-          queue: {{ step.agent_pool }}
+          queue: amd_{{ step.agent_pool }}
           {% else %}
           queue: amd_mi325_1
           {% endif %}
