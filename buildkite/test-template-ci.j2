@@ -9,7 +9,8 @@
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
-{% set docker_image_hpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-hpu" %}
+{# Note: docker_image_hpu is NOT defined here because HPU uses a different commit tag (from vllm-gaudi compatibility) #}
+{# HPU image tag is determined dynamically in the build step based on VLLM_STABLE_COMMIT #}
 {% endif %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
@@ -508,6 +509,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
+  {% if branch == "main" %}
   - label: ":docker: build image HPU"
     key: image-build-hpu
     depends_on: ~
@@ -517,14 +519,33 @@ steps:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - |
         #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image_hpu }}) ]]; then
+        # Fetch the compatible vLLM commit for vllm-gaudi
+        VLLM_STABLE_COMMIT=$(curl -s https://raw.githubusercontent.com/vllm-project/vllm-gaudi/main/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT | tr -d '\n')
+        echo "Compatible vLLM commit for vllm-gaudi: $VLLM_STABLE_COMMIT"
+        
+        # HPU images always use postmerge registry (main branch only)
+        REGISTRY="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo"
+        
+        # HPU images use the stable commit tag, not BUILDKITE_COMMIT
+        HPU_IMAGE_TAG="${REGISTRY}:${VLLM_STABLE_COMMIT}-hpu"
+        
+        if [[ -z $(docker manifest inspect "$HPU_IMAGE_TAG") ]]; then
           echo "Image not found, proceeding with build..."
         else
-          echo "Image found"
+          echo "Image $HPU_IMAGE_TAG already exists"
           exit 0
         fi
-      - "docker build --file docker/Dockerfile.hpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image_hpu }} --progress plain ."
-      - "docker push {{ docker_image_hpu }}"
+        
+        # Build with the stable commit
+        docker build \
+          --file docker/Dockerfile.hpu \
+          --build-arg max_jobs=16 \
+          --build-arg VLLM_COMMIT=$VLLM_STABLE_COMMIT \
+          --build-arg VLLM_GAUDI_COMMIT=main \
+          --tag "$HPU_IMAGE_TAG" \
+          --progress plain .
+        
+        docker push "$HPU_IMAGE_TAG"
     env:
       DOCKER_BUILDKIT: "1"
     retry:
@@ -533,6 +554,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
+  {% endif %}
   
   {% for step in steps %}
   {% if step.fast_check_only != true %}
