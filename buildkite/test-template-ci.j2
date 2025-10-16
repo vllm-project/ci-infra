@@ -760,7 +760,7 @@ steps:
          steps:
            - label: "Notify owners about failing test"
              agents:
-               queue: tpu_v5_queue
+               queue: tpu_v6e_queue
              command: echo "TPU V1 Test failed"
              notify:
                - slack:
