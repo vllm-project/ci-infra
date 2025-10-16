@@ -73,9 +73,100 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {%- endif %}
 {%- set matched_targets = match_ns.targets %}
 
+{# Filter matched targets to only include those actually covered by step commands #}
+{# This ensures intelligent filtering mirrors normal behavior - if a test isn't run normally, don't run it in intelligent mode #}
+{%- set filter_ns = namespace(filtered_targets=[], covered_paths=[]) %}
+{%- if matched_targets | length > 0 %}
+{%- set all_commands = step.commands if step.commands else ([step.command] if step.command else []) %}
+{# Extract test paths from pytest commands (e.g., "v1/core", "v1/executor") #}
+{%- for cmd in all_commands %}
+{%- if "pytest " in cmd %}
+{# Split command to find pytest arguments #}
+{%- set cmd_parts = cmd | split(" ") | list %}
+{%- set in_pytest = false %}
+{%- for part in cmd_parts %}
+{%- if part == "pytest" %}
+{%- set in_pytest = true %}
+{%- elif in_pytest and part[:1] != "-" and "/" in part %}
+{# This looks like a test path (contains / and doesn't start with -) #}
+{# Skip specific tests (contain ::) - we only want directories or files #}
+{%- if "::" not in part %}
+{%- if part[-3:] == ".py" %}
+{# It's a file - add both the file itself and its directory (if deep enough) #}
+{# Add the file as-is for exact matching #}
+{%- set filter_ns.covered_paths = filter_ns.covered_paths + [part] %}
+{# Also add directory if it has at least 2 levels (e.g., v1/core but not just v1) #}
+{%- set path_parts = part | split("/") | list %}
+{%- if path_parts | length > 2 %}
+{%- set dir_parts = path_parts[:-1] %}
+{%- set dir_path = dir_parts | join("/") %}
+{%- set filter_ns.covered_paths = filter_ns.covered_paths + [dir_path] %}
+{%- endif %}
+{%- else %}
+{# It's a directory path #}
+{%- set filter_ns.covered_paths = filter_ns.covered_paths + [part] %}
+{%- endif %}
+{%- endif %}
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+{%- endfor %}
+{# Now check each matched target against covered paths #}
+{%- for target in matched_targets %}
+{%- set target_ns = namespace(is_covered=false) %}
+{%- for covered_path in filter_ns.covered_paths %}
+{# Check if target starts with this covered path (ensure proper directory matching) #}
+{%- set covered_len = covered_path | length %}
+{%- if target[:covered_len] == covered_path %}
+{# Ensure it's a proper directory match (next char is / or end of string) #}
+{%- if target | length == covered_len or target[covered_len:covered_len+1] == "/" %}
+{%- set target_ns.is_covered = true %}
+{%- endif %}
+{%- endif %}
+{%- endfor %}
+{%- if target_ns.is_covered %}
+{%- set filter_ns.filtered_targets = filter_ns.filtered_targets + [target] %}
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+{%- set matched_targets = filter_ns.filtered_targets %}
+
+{# Extract pytest markers from original commands to preserve them in intelligent filtering #}
+{%- set marker_ns = namespace(markers='') %}
+{%- if matched_targets | length > 0 %}
+{%- set all_commands = step.commands if step.commands else ([step.command] if step.command else []) %}
+{%- for cmd in all_commands %}
+{%- if "pytest " in cmd and " -m " in cmd %}
+{# Extract the -m marker argument using split filter and convert to list #}
+{%- set parts = cmd | split(" -m ") | list %}
+{%- if parts | length > 1 %}
+{%- set after_m = parts[1] %}
+{# Find the marker value (first token after -m, handling quotes) #}
+{%- if after_m[0:1] == "'" %}
+{%- set marker_parts = after_m[1:] | split("'") | list %}
+{%- if marker_parts | length > 0 %}
+{%- set marker_ns.markers = " -m '" ~ marker_parts[0] ~ "'" %}
+{%- endif %}
+{%- elif after_m[0:1] == '"' %}
+{%- set marker_parts = after_m[1:] | split('"') | list %}
+{%- if marker_parts | length > 0 %}
+{%- set marker_ns.markers = ' -m "' ~ marker_parts[0] ~ '"' %}
+{%- endif %}
+{%- else %}
+{# No quotes, take first word #}
+{%- set marker_parts = after_m | split(" ") | list %}
+{%- if marker_parts | length > 0 %}
+{%- set marker_ns.markers = " -m " ~ marker_parts[0] %}
+{%- endif %}
+{%- endif %}
+{%- endif %}
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+
 {# If we have matched targets, run only those specific tests #}
 {% if matched_targets | length > 0 %}
-pytest -v -s {{ matched_targets | join(' ') }}
+pytest -v -s{{ marker_ns.markers }} {{ matched_targets | join(' ') }}
 {% else %}
 {# Default behavior: preserve original commands with optional coverage injection #}
 {% if cov_enabled %}
