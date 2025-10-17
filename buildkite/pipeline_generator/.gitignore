@@ -1,0 +1,35 @@
+# Test artifacts
+tests/.pipeline_debug/
+tests/.pipeline_test_results.json
+.pipeline_test_results.json
+.pipeline_debug/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.coveragerc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+
+
+
