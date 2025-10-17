@@ -1,0 +1,58 @@
+from pydantic import BaseModel, model_validator
+from typing import List, Dict, Any, Optional
+from typing_extensions import Self
+
+from ..utils.constants import AgentQueue
+
+BUILD_STEP_KEY = "build"
+
+
+class BuildkiteStep(BaseModel):
+    """This class represents a step in Buildkite format."""
+    label: str
+    agents: Dict[str, str] = {"queue": AgentQueue.AWS_CPU.value}
+    commands: List[str]
+    key: Optional[str] = None
+    plugins: Optional[List[Dict]] = None
+    parallelism: Optional[int] = None
+    soft_fail: Optional[bool] = None
+    depends_on: Optional[str] = None  # Changed default from "build" to None
+    env: Optional[Dict[str, str]] = None
+    retry: Optional[Dict[str, Any]] = None
+    timeout_in_minutes: Optional[int] = None
+    command: Optional[str] = None
+    priority: Optional[int] = None
+
+    @model_validator(mode="after")
+    def validate_agent_queue(self) -> Self:
+        queue = self.agents.get("queue")
+        if queue and not any(q.value == queue for q in AgentQueue):
+            raise ValueError(f"Invalid agent queue: {queue}")
+        return self
+
+
+class BuildkiteBlockStep(BaseModel):
+    """This class represents a block step in Buildkite format."""
+    block: str
+    key: str
+    depends_on: Optional[str] = None  # No default depends_on
+
+
+def get_step_key(step_label: str) -> str:
+    """
+    Generate step key from label matching jinja template logic.
+    Jinja: step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-")
+    """
+    step_key = step_label.lower()
+    step_key = step_key.replace(" ", "-")
+    step_key = step_key.replace("(", "")
+    step_key = step_key.replace(")", "")
+    step_key = step_key.replace("%", "")
+    step_key = step_key.replace(",", "-")
+    step_key = step_key.replace("+", "-")
+    return step_key
+
+
+def get_block_step(step_label: str) -> BuildkiteBlockStep:
+    return BuildkiteBlockStep(block=f"Run {step_label}", key=f"block-{get_step_key(step_label)}")
+
