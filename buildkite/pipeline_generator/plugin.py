@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 
-from .utils import HF_HOME
+from .utils.constants import HF_HOME
 
 DOCKER_PLUGIN_NAME = "docker#v5.2.0"
 KUBERNETES_PLUGIN_NAME = "kubernetes"
@@ -16,11 +16,11 @@ DEFAULT_DOCKER_VOLUMES = [
     "/dev/shm:/dev/shm",
     f"{HF_HOME}:{HF_HOME}"
 ]
-DEFAULT_KUBERNETES_CONTAINER_VOLUME_MOUNTS = [
+DEFAULT_KUBERNETES_CONTAINER_VOLUME_MOUNTS: List[Dict[str, str]] = [
     {"name": "devshm", "mountPath": "/dev/shm"},
     {"name": "hf-cache", "mountPath": HF_HOME}
 ]
-DEFAULT_KUBERNETES_CONTAINER_ENVIRONMENT_VARIABLES = [
+DEFAULT_KUBERNETES_CONTAINER_ENVIRONMENT_VARIABLES: List[Dict[str, Any]] = [
     {"name": "HF_HOME", "value": HF_HOME},
     {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
     {
@@ -64,10 +64,10 @@ class KubernetesPodContainerConfig(BaseModel):
     resources: Dict[str, Dict[str, int]]
     volume_mounts: List[Dict[str, str]] = Field(
         alias="volumeMounts",
-        default=DEFAULT_KUBERNETES_CONTAINER_VOLUME_MOUNTS
+        default=DEFAULT_KUBERNETES_CONTAINER_VOLUME_MOUNTS  # type: ignore
     )
-    env: List[Dict[str, str]] = Field(
-        default=DEFAULT_KUBERNETES_CONTAINER_ENVIRONMENT_VARIABLES,
+    env: List[Dict[str, Any]] = Field(
+        default_factory=lambda: list(DEFAULT_KUBERNETES_CONTAINER_ENVIRONMENT_VARIABLES)
     )
 
 
