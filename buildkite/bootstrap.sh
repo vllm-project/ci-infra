@@ -114,27 +114,30 @@ fi
 # Early exit start: skip pipeline if conditions are met
 # ----------------------------------------------------------------------
 
-# skip pipeline if all changed files are under docs/
+# skip pipeline if *every* changed file is docs/** OR **/*.md OR mkdocs.yaml
 if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
   if [[ -n "${file_diff:-}" ]]; then
     docs_only=1
-    # Robust iteration over newline-separated file_diff
+    # Iterate robustly over newline-separated paths
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
-      # **Policy:** only skip if *every* path starts with docs/
-      if [[ "$f" != docs/* ]]; then
+      # Match any of: docs/**  OR  **/*.md  OR  mkdocs.yaml
+      # Using prefix check for docs/ so nested paths match (no need for globstar).
+      if [[ "${f#docs/}" != "$f" || "$f" == *.md || "$f" == "mkdocs.yaml" ]]; then
+        continue
+      else
         docs_only=0
         break
       fi
     done < <(printf '%s\n' "$file_diff" | tr ' ' '\n' | tr -d '\r')
 
     if [[ "$docs_only" -eq 1 ]]; then
-      buildkite-agent annotate ":memo: CI skipped — docs/** only changes detected
+      buildkite-agent annotate ":memo: CI skipped — docs/Markdown/mkdocs-only changes detected
 
 \`\`\`
-${file_diff}
+$(printf '%s\n' "$file_diff" | tr ' ' '\n')
 \`\`\`" --style "info" || true
-      echo "[docs-only] All changes are under docs/. Exiting before pipeline upload."
+      echo "[docs-only] All changes are docs/**, *.md, or mkdocs.(yml|yaml). Exiting before pipeline upload."
       exit 0
     fi
   fi
