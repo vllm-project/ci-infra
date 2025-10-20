@@ -137,7 +137,7 @@ if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
 \`\`\`
 $(printf '%s\n' "$file_diff" | tr ' ' '\n')
 \`\`\`" --style "info" || true
-      echo "[docs-only] All changes are docs/**, *.md, or mkdocs.(yml|yaml). Exiting before pipeline upload."
+      echo "[docs-only] All changes are docs/**, *.md, or mkdocs.yaml. Exiting before pipeline upload."
       exit 0
     fi
   fi
