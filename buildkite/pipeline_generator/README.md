@@ -24,42 +24,52 @@ python pipeline_generator.py --pipeline_mode amd
 ```
 pipeline_generator/
 ├── pipeline_generator.py      # Main entry point
-├── config.py                  # Configuration
-├── build_config.py            # Build step configs
-├── hardware_config.py         # Hardware test configs
+├── pipeline_config.py         # Configuration
+├── docker_build_configs.py    # Build step configs
+├── hardware_test_configs.py   # Hardware test configs
+├── pyproject.toml             # Ruff & mypy config
 │
-├── models/                    # Data models
+├── ci/                        # CI-specific logic
+│   ├── ci_pipeline.py        # Main CI orchestration
+│   ├── docker_builds.py      # CI Docker builds
+│   ├── docker_plugins.py     # CI Docker plugin construction
+│   ├── test_step_converter.py # Convert tests to Buildkite steps
+│   ├── test_filtering.py     # Which tests to run
+│   ├── manual_trigger_rules.py # Blocking logic
+│   ├── amd_tests.py          # AMD test group
+│   ├── torch_nightly_tests.py # Torch nightly group
+│   └── hardware_tests.py     # External hardware tests
+│
+├── fastcheck/                 # Fastcheck-specific logic
+│   ├── fastcheck_pipeline.py # Main fastcheck orchestration
+│   ├── docker_builds.py      # Fastcheck Docker builds
+│   ├── docker_plugins.py     # Fastcheck Docker plugin construction
+│   ├── test_step_converter.py # Convert tests to Buildkite steps
+│   ├── test_filtering.py     # Which tests to run
+│   ├── manual_trigger_rules.py # Blocking logic
+│   ├── amd_tests.py          # AMD test group (Basic Correctness only)
+│   └── hardware_tests.py     # Hardware tests (TPU, GH200, Intel)
+│
+├── data_models/               # Pydantic data models
 │   ├── test_step.py          # Input from test-pipeline.yaml
 │   ├── buildkite_step.py     # Output for Buildkite
 │   └── docker_config.py      # Docker/K8s configs
 │
-├── steps/                     # Step generators (organized by type)
-│   ├── build_steps.py        # Docker image builds
-│   ├── test_steps.py         # Regular test steps
-│   ├── hardware_steps.py     # External hardware (Neuron, TPU, Intel, etc.)
-│   └── group_steps.py        # Special groups (AMD, Torch Nightly)
-│
-├── transformers/              # Command transformation pipeline
-│   ├── base.py               # Base transformer interface
+├── command_builders/          # Command transformations (CI only)
 │   ├── normalizer.py         # Flatten & normalize commands
-│   ├── test_targeting.py     # Intelligent test targeting
-│   └── coverage.py           # Coverage injection
+│   ├── intelligent_test_selection.py # Intelligent test targeting
+│   └── coverage_injection.py # Coverage injection
 │
-├── selection/                 # Test selection logic
-│   ├── filtering.py          # Should run/skip decisions
-│   └── blocking.py           # Block step (manual trigger) logic
-│
-├── docker/                    # Docker plugin builders
-│   └── plugin_builder.py     # Builds Docker/K8s plugins
-│
-├── utils/                     # Utilities
-│   ├── constants.py          # Enums, constants
-│   ├── agents.py             # Agent queue selection
-│   └── commands.py           # Command helpers
+├── utils/                     # Shared utilities & constants
+│   ├── constants.py          # All constants (build keys, queues, labels, etc.)
+│   ├── agent_queues.py       # Agent queue selection
+│   ├── command_utils.py      # Command helpers
+│   └── amd_command_builder.py # AMD command formatting
 │
 └── tests/                     # Test suite
     ├── test_*.py             # 125 unit tests
-    └── test_integration_comprehensive.py  # 56 integration scenarios
+    ├── test_integration_comprehensive.py  # 56 CI scenarios
+    └── test_integration_fastcheck.py      # 8 fastcheck scenarios
 ```
 
 ## Main Flow
@@ -88,77 +98,24 @@ def generate(self, test_steps):
     return steps
 ```
 
-This structure keeps the high-level flow readable while organizing details into focused modules.
-
-## Command Transformation Pipeline
-
-One key improvement over Jinja is making command transformations explicit. When converting a test step to a Buildkite step, commands go through:
-
-1. **Flatten** - Multi-node commands (list of lists) become single list
-2. **Normalize** - Remove backslashes from YAML line continuations
-3. **Test Targeting** - If only test files changed, run just those tests
-4. **Coverage** - Inject coverage collection if enabled
-5. **Join** - Combine into single command string
-
-This happens in `docker/plugin_builder.py::build_docker_command()`. Adding a new transformation is straightforward - just create a new transformer in `transformers/`.
+CI and Fastcheck have completely separate implementations with zero shared logic that has mode checks. This makes it easy to modify one without worrying about breaking the other.
 
 ## Where to Find Things
 
-Coming from the Jinja template? Here's where logic moved:
+**For CI pipeline:**
+- Main logic: `ci/ci_pipeline.py`
+- Build steps: `ci/docker_builds.py`
+- Test filtering: `ci/test_filtering.py` and `ci/manual_trigger_rules.py`
+- AMD/Torch nightly: `ci/amd_tests.py`, `ci/torch_nightly_tests.py`
 
-**Build steps** (lines 14-179 in Jinja)  
-Now in: `steps/build_steps.py`
+**For Fastcheck pipeline:**
+- Main logic: `fastcheck/fastcheck_pipeline.py`
+- Everything else in `fastcheck/` directory
 
-**Test step conversion** (lines 180-550 in Jinja)  
-Now in: `steps/test_steps.py` and `docker/plugin_builder.py`
-
-**Test selection/blocking** (lines 508-530, 600-621 in Jinja)  
-Now in: `selection/blocking.py` and `selection/filtering.py`
-
-**Coverage injection** (lines 33-158 in Jinja)  
-Now in: `transformers/coverage.py`
-
-**Intelligent test targeting** (lines 20-158 in Jinja)  
-Now in: `transformers/test_targeting.py` and `selection/filtering.py`
-
-**AMD tests** (lines 662-727 in Jinja)  
-Now in: `steps/group_steps.py::generate_amd_group()`
-
-**Torch Nightly tests** (lines 579-658 in Jinja)  
-Now in: `steps/group_steps.py::generate_torch_nightly_group()`
-
-**Hardware tests** (lines 729-863 in Jinja)  
-Now in: `steps/hardware_steps.py`
-
-## Common Tasks
-
-### Adding a new build variant
-Edit `steps/build_steps.py`. Follow the pattern of existing build steps.
-
-### Adding command transformation logic
-Create a new transformer in `transformers/`:
-
-```python
-from .base import CommandTransformer
-
-class MyTransformer(CommandTransformer):
-    def transform(self, commands, test_step, config):
-        if should_apply():
-            return modified_commands
-        return None  # Falls through to next transformer
-```
-
-Then use it in `docker/plugin_builder.py::build_docker_command()`.
-
-### Adding a new hardware platform
-Add configuration to `hardware_config.py` and generation logic to `steps/hardware_steps.py`.
-
-### Adjusting Docker plugin configuration
-Look in `docker/plugin_builder.py` for the plugin builder logic, or `models/docker_config.py` for the config dataclasses.
-
-### Changing test selection rules
-- Run/skip decisions: `selection/filtering.py`
-- Block (manual trigger) decisions: `selection/blocking.py`
+**Shared code:**
+- Constants: `utils/constants.py` (build keys, queues, labels, etc.)
+- Data models: `data_models/`
+- Config files: `*_config.py` at root
 
 ## Testing
 
@@ -169,14 +126,11 @@ python -m pytest tests/ -k "not integration" -v
 
 Run integration tests (verifies 100% compatibility with Jinja):
 ```bash
-# CI mode (56 scenarios)
-python tests/test_integration_comprehensive.py
+# All integration tests via pytest
+pytest tests/test_integration_comprehensive.py tests/test_integration_fastcheck.py
 
-# Fastcheck mode (8 scenarios)
-python tests/test_integration_fastcheck.py
-
-# AMD mode (not yet implemented)
-python tests/test_integration_amd.py
+# Or run specific scenario
+pytest tests/test_integration_comprehensive.py -k "coverage"
 ```
 
 **Status**: CI and Fastcheck modes achieve 100% YAML compatibility with their respective Jinja templates.
