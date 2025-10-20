@@ -17,10 +17,10 @@ from ..hardware_test_configs import (
     get_intel_cpu_config,
     get_tpu_notification_config,
 )
+from ..utils.constants import AgentQueue
 
 
-def generate_all_hardware_tests(
-        branch: str, nightly: bool) -> List[Dict[str, Any]]:
+def generate_all_hardware_tests(branch: str, nightly: bool) -> List[Dict[str, Any]]:
     """Generate all hardware-specific test steps using data-driven configuration."""
     steps = []
 
@@ -81,7 +81,7 @@ fi"""
                 "label": "TPU V1 Test Notification",
                 "depends_on": tpu_depends_on,
                 "soft_fail": True,
-                "agents": {"queue": "tpu_v6e_queue"},
+                "agents": {"queue": AgentQueue.TPU_V6E_QUEUE},
                 "commands": tpu_notif_command,
             }
         )

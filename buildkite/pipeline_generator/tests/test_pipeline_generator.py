@@ -123,23 +123,10 @@ class TestWriteBuildkitePipeline:
     def test_write_buildkite_steps(self):
         """Test writing Buildkite steps to YAML."""
         steps = [
-            BuildkiteStep(
-                label="Test 1",
-                commands=[
-                    'echo "Test1.1"',
-                    'echo "Test1.2"']),
-            BuildkiteStep(
-                label="Test 2",
-                commands=["command3"],
-                agents={
-                    "queue": AgentQueue.AWS_1xL4.value}),
-            BuildkiteBlockStep(
-                block="Run Test 3",
-                key="block-test-3"),
-            BuildkiteStep(
-                label="Test 3",
-                commands=["command4"],
-                depends_on="block-test-3"),
+            BuildkiteStep(label="Test 1", commands=['echo "Test1.1"', 'echo "Test1.2"']),
+            BuildkiteStep(label="Test 2", commands=["command3"], agents={"queue": AgentQueue.GPU_1_QUEUE}),
+            BuildkiteBlockStep(block="Run Test 3", key="block-test-3"),
+            BuildkiteStep(label="Test 3", commands=["command4"], depends_on="block-test-3"),
         ]
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -157,8 +144,7 @@ class TestWriteBuildkitePipeline:
             assert len(pipeline["steps"]) == 4
 
             # Check that steps have expected labels
-            labels = [s.get("label") or s.get("block")
-                      for s in pipeline["steps"]]
+            labels = [s.get("label") or s.get("block") for s in pipeline["steps"]]
             assert "Test 1" in labels
             assert "Test 2" in labels
             assert "Run Test 3" in labels
@@ -168,8 +154,7 @@ class TestWriteBuildkitePipeline:
 class TestPipelineGenerator:
     """Integration tests for PipelineGenerator."""
 
-    def test_generate_pipeline_with_simple_test(
-            self, pipeline_config, simple_test_step):
+    def test_generate_pipeline_with_simple_test(self, pipeline_config, simple_test_step):
         """Test generating pipeline with simple test."""
         generator = PipelineGenerator(pipeline_config)
         steps = generator.generate([simple_test_step])
@@ -178,8 +163,7 @@ class TestPipelineGenerator:
         # Should have build steps and test steps
         assert any(isinstance(step, (BuildkiteStep, dict)) for step in steps)
 
-    def test_generate_pipeline_with_optional(
-            self, pipeline_config, optional_test_step):
+    def test_generate_pipeline_with_optional(self, pipeline_config, optional_test_step):
         """Test generating pipeline with optional test."""
         generator = PipelineGenerator(pipeline_config)
         steps = generator.generate([optional_test_step])
@@ -187,8 +171,7 @@ class TestPipelineGenerator:
         # Optional test should be in the pipeline (may be blocked)
         assert len(steps) > 0
 
-    def test_generate_complete_pipeline(
-            self, pipeline_config, simple_test_step):
+    def test_generate_complete_pipeline(self, pipeline_config, simple_test_step):
         """Test generating complete pipeline."""
         generator = PipelineGenerator(pipeline_config)
         steps = generator.generate([simple_test_step])
@@ -202,8 +185,7 @@ class TestPipelineGenerator:
 
         # Should have at least one step labeled with "Build"
         labels = [s.label for s in buildkite_steps if hasattr(s, "label")]
-        assert any("build" in label.lower() or "image" in label.lower()
-                   for label in labels)
+        assert any("build" in label.lower() or "image" in label.lower() for label in labels)
 
     def test_generate_with_run_all(self, simple_test_step):
         """Test generating pipeline with run_all enabled."""
@@ -247,8 +229,7 @@ class TestPipelineGenerator:
 
         # In nightly mode, optional tests should not be blocked
         # Check that test step exists without preceding block
-        test_steps = [s for s in steps if isinstance(
-            s, BuildkiteStep) and s.label == "Optional Test"]
+        test_steps = [s for s in steps if isinstance(s, BuildkiteStep) and s.label == "Optional Test"]
         assert len(test_steps) > 0
 
 

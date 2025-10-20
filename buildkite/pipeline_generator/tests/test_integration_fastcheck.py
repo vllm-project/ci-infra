@@ -4,13 +4,6 @@ Integration test suite for fastcheck pipeline mode.
 Compares Python generator output against test-template-fastcheck.j2
 """
 
-from buildkite.pipeline_generator.utils import VLLM_ECR_REPO, VLLM_ECR_URL, PipelineMode
-from buildkite.pipeline_generator.pipeline_generator import (
-    PipelineGenerator,
-    read_test_steps,
-    write_buildkite_pipeline,
-)
-from buildkite.pipeline_generator.pipeline_config import PipelineGeneratorConfig
 import os
 import subprocess
 import sys
@@ -19,6 +12,14 @@ from typing import List, Tuple
 
 import pytest
 import yaml
+
+from buildkite.pipeline_generator.pipeline_config import PipelineGeneratorConfig
+from buildkite.pipeline_generator.pipeline_generator import (
+    PipelineGenerator,
+    read_test_steps,
+    write_buildkite_pipeline,
+)
+from buildkite.pipeline_generator.utils import VLLM_ECR_REPO, VLLM_ECR_URL, PipelineMode
 
 # Add parent directories to path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -44,13 +45,8 @@ class Scenario:
 def get_fastcheck_scenarios() -> List[Scenario]:
     """Get test scenarios for fastcheck mode."""
     return [
-        Scenario(
-            name="fastcheck_default",
-            description="Default fastcheck configuration"),
-        Scenario(
-            name="fastcheck_main_branch",
-            branch="main",
-            description="Fastcheck on main branch"),
+        Scenario(name="fastcheck_default", description="Default fastcheck configuration"),
+        Scenario(name="fastcheck_main_branch", branch="main", description="Fastcheck on main branch"),
         Scenario(
             name="fastcheck_pr_branch",
             branch="feature-branch",
@@ -84,11 +80,7 @@ def get_fastcheck_scenarios() -> List[Scenario]:
     ]
 
 
-def run_jinja_fastcheck(scenario: Scenario,
-                        template_path: str,
-                        test_pipeline_path: str,
-                        output_path: str) -> Tuple[bool,
-                                                   str]:
+def run_jinja_fastcheck(scenario: Scenario, template_path: str, test_pipeline_path: str, output_path: str) -> Tuple[bool, str]:
     """Run Jinja template to generate pipeline."""
     try:
         cmd = [
@@ -103,11 +95,7 @@ def run_jinja_fastcheck(scenario: Scenario,
             f"mirror_hw={scenario.mirror_hw}",
         ]
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         # Remove blank lines like bootstrap.sh does
         lines = [line for line in result.stdout.split("\n") if line.strip()]
@@ -121,9 +109,7 @@ def run_jinja_fastcheck(scenario: Scenario,
         return False, str(e)
 
 
-def run_python_fastcheck(
-    scenario: Scenario, test_pipeline_path: str, output_path: str
-) -> Tuple[bool, str]:
+def run_python_fastcheck(scenario: Scenario, test_pipeline_path: str, output_path: str) -> Tuple[bool, str]:
     """Run Python generator to generate pipeline."""
     try:
         test_steps = read_test_steps(test_pipeline_path)
@@ -189,34 +175,25 @@ def test_pipeline_path():
 def check_minijinja():
     """Check that minijinja-cli is available."""
     try:
-        subprocess.run(["minijinja-cli", "--version"],
-                       capture_output=True, check=True)
+        subprocess.run(["minijinja-cli", "--version"], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         pytest.skip(
             "minijinja-cli not found. Install: curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh"
         )
 
 
-@pytest.mark.parametrize("scenario",
-                         get_fastcheck_scenarios(),
-                         ids=lambda s: s.name)
-def test_fastcheck_pipeline_scenario(
-    scenario, template_path, test_pipeline_path, check_minijinja, tmp_path
-):
+@pytest.mark.parametrize("scenario", get_fastcheck_scenarios(), ids=lambda s: s.name)
+def test_fastcheck_pipeline_scenario(scenario, template_path, test_pipeline_path, check_minijinja, tmp_path):
     """Test that Python generator produces identical output to Jinja template for fastcheck scenarios."""
     jinja_output = tmp_path / f"jinja_{scenario.name}.yaml"
     python_output = tmp_path / f"python_{scenario.name}.yaml"
 
     # Generate with Jinja
-    jinja_success, jinja_error = run_jinja_fastcheck(
-        scenario, template_path, test_pipeline_path, str(jinja_output)
-    )
+    jinja_success, jinja_error = run_jinja_fastcheck(scenario, template_path, test_pipeline_path, str(jinja_output))
     assert jinja_success, f"Jinja generation failed: {jinja_error}"
 
     # Generate with Python
-    python_success, python_error = run_python_fastcheck(
-        scenario, test_pipeline_path, str(python_output)
-    )
+    python_success, python_error = run_python_fastcheck(scenario, test_pipeline_path, str(python_output))
     assert python_success, f"Python generation failed: {python_error}"
 
     # Compare outputs

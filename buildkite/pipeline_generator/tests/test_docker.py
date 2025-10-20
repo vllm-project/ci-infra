@@ -82,33 +82,25 @@ class TestStandardDockerConfig:
 
     def test_to_plugin_dict_basic(self):
         """Test basic Docker plugin dict."""
-        config = StandardDockerConfig(
-            image="test:latest", command="echo hello")
+        config = StandardDockerConfig(image="test:latest", command="echo hello")
         plugin = config.to_plugin_dict()
 
         assert "docker#v5.2.0" in plugin
         assert plugin["docker#v5.2.0"]["image"] == "test:latest"
-        assert plugin["docker#v5.2.0"]["command"] == [
-            "bash", "-xc", "echo hello"]
+        assert plugin["docker#v5.2.0"]["command"] == ["bash", "-xc", "echo hello"]
         assert plugin["docker#v5.2.0"]["always-pull"] is True
         assert plugin["docker#v5.2.0"]["gpus"] == "all"
 
     def test_to_plugin_dict_no_gpu(self):
         """Test Docker plugin dict without GPU."""
-        config = StandardDockerConfig(
-            image="test:latest",
-            command="echo hello",
-            has_gpu=False)
+        config = StandardDockerConfig(image="test:latest", command="echo hello", has_gpu=False)
         plugin = config.to_plugin_dict()
 
         assert "gpus" not in plugin["docker#v5.2.0"]
 
     def test_to_plugin_dict_mount_agent(self):
         """Test Docker plugin dict with mounted agent."""
-        config = StandardDockerConfig(
-            image="test:latest",
-            command="echo hello",
-            mount_buildkite_agent=True)
+        config = StandardDockerConfig(image="test:latest", command="echo hello", mount_buildkite_agent=True)
         plugin = config.to_plugin_dict()
 
         assert plugin["docker#v5.2.0"]["mount-buildkite-agent"] is True
@@ -119,10 +111,7 @@ class TestSpecialGPUDockerConfig:
 
     def test_to_plugin_dict_h200(self):
         """Test H200 Docker plugin dict."""
-        config = SpecialGPUDockerConfig(
-            image="test:latest",
-            command="echo hello",
-            gpu_type="h200")
+        config = SpecialGPUDockerConfig(image="test:latest", command="echo hello", gpu_type="h200")
         plugin = config.to_plugin_dict()
 
         assert "docker#v5.2.0" in plugin
@@ -131,10 +120,7 @@ class TestSpecialGPUDockerConfig:
 
     def test_to_plugin_dict_b200(self):
         """Test B200 Docker plugin dict (no gpus key)."""
-        config = SpecialGPUDockerConfig(
-            image="test:latest",
-            command="echo hello",
-            gpu_type="b200")
+        config = SpecialGPUDockerConfig(image="test:latest", command="echo hello", gpu_type="b200")
         plugin = config.to_plugin_dict()
 
         assert "gpus" not in plugin["docker#v5.2.0"]
@@ -191,10 +177,7 @@ class TestDockerCommandBuilder:
 
     def test_build_full_docker_command(self):
         """Test building full Docker command."""
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest test.py"],
-            working_dir="/tests")
+        test_step = TestStep(label="Test", commands=["pytest test.py"], working_dir="/tests")
 
         class Config:
             pipeline_mode = PipelineMode.CI
@@ -231,10 +214,7 @@ class TestPluginBuilder:
 
     def test_build_plugin_for_h200(self):
         """Test building plugin for H200."""
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest test.py"],
-            gpu=GPUType.H200)
+        test_step = TestStep(label="Test", commands=["pytest test.py"], gpu=GPUType.H200)
 
         class Config:
             pipeline_mode = PipelineMode.CI
@@ -251,11 +231,7 @@ class TestPluginBuilder:
 
     def test_build_plugin_for_h100(self):
         """Test building plugin for H100 (Kubernetes)."""
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest test.py"],
-            gpu=GPUType.H100,
-            num_gpus=2)
+        test_step = TestStep(label="Test", commands=["pytest test.py"], gpu=GPUType.H100, num_gpus=2)
 
         class Config:
             pipeline_mode = PipelineMode.CI

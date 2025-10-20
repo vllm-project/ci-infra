@@ -22,9 +22,7 @@ class PipelineGenerator:
         config.validate()
         self.config = config
 
-    def generate(
-        self, test_steps: List[TestStep]
-    ) -> List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]]:
+    def generate(self, test_steps: List[TestStep]) -> List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]]:
         """Generate the complete pipeline - delegates to mode-specific generators."""
 
         # AMD mode: Only AMD group
@@ -46,9 +44,7 @@ def read_test_steps(file_path: str) -> List[TestStep]:
     return [TestStep(**step) for step in content["steps"]]
 
 
-def write_buildkite_pipeline(
-    steps: List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]], file_path: str
-) -> None:
+def write_buildkite_pipeline(steps: List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]], file_path: str) -> None:
     """Write the buildkite steps to the Buildkite pipeline yaml file."""
     # Convert steps to dicts, handling both objects and plain dicts
     steps_dicts = []
@@ -74,29 +70,20 @@ def write_buildkite_pipeline(
     default=".buildkite/test-pipeline.yaml",
     help="Path to the test pipeline yaml file",
 )
-@click.option("--run_all", type=str, default="0",
-              help="If set to 1, run all tests")
-@click.option("--nightly", type=str, default="0",
-              help="If set to 1, run nightly tests")
+@click.option("--run_all", type=str, default="0", help="If set to 1, run all tests")
+@click.option("--nightly", type=str, default="0", help="If set to 1, run nightly tests")
 @click.option(
     "--list_file_diff",
     type=str,
     default="",
     help="List of files in the diff between current branch and main (pipe-separated)",
 )
-@click.option("--mirror_hw",
-              type=str,
-              default="amdexperimental",
-              help="Mirror hardware to use")
-@click.option("--fail_fast", type=str, default="false",
-              help="Enable fail fast mode")
-@click.option("--vllm_use_precompiled", type=str,
-              default="0", help="Use precompiled wheels")
+@click.option("--mirror_hw", type=str, default="amdexperimental", help="Mirror hardware to use")
+@click.option("--fail_fast", type=str, default="false", help="Enable fail fast mode")
+@click.option("--vllm_use_precompiled", type=str, default="0", help="Use precompiled wheels")
 @click.option("--cov_enabled", type=str, default="0", help="Enable coverage")
-@click.option("--vllm_ci_branch", type=str,
-              default="main", help="CI branch to use")
-@click.option("--pipeline_mode", type=str, default="ci",
-              help="Pipeline mode: ci, fastcheck, or amd")
+@click.option("--vllm_ci_branch", type=str, default="main", help="CI branch to use")
+@click.option("--pipeline_mode", type=str, default="ci", help="Pipeline mode: ci, fastcheck, or amd")
 @click.option(
     "--output",
     type=str,

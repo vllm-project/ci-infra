@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .utils.constants import BuildStepKeys, EnvironmentVariables
+from .utils.constants import AgentQueue, BuildStepKeys, EnvironmentVariables, RetryConfig
 
 
 @dataclass
@@ -26,9 +26,7 @@ class DockerBuildConfig:
     def _get_image_check_command(self) -> str:
         """Generate command to check if image already exists."""
         # Use $BUILDKITE_COMMIT in image tag
-        image_tag = self.image_tag.replace(
-            self.build_args.get("buildkite_commit", ""), "$BUILDKITE_COMMIT"
-        )
+        image_tag = self.image_tag.replace(self.build_args.get("buildkite_commit", ""), "$BUILDKITE_COMMIT")
         # Fastcheck template adds trailing newline
         suffix = "\n" if self.use_fastcheck_formatting else ""
         return f"""#!/bin/bash
@@ -62,19 +60,14 @@ fi{suffix}"""
                     suffix = "  "
 
                 if key == "buildkite_commit":
-                    lines.append(
-                        f"--build-arg {key}=$BUILDKITE_COMMIT{suffix}")
+                    lines.append(f"--build-arg {key}=$BUILDKITE_COMMIT{suffix}")
                 else:
                     if " " in str(value):
                         lines.append(f'--build-arg {key}="{value}"{suffix}')
                     else:
                         lines.append(f"--build-arg {key}={value}{suffix}")
 
-            image_tag = self.image_tag.replace(
-                self.build_args.get(
-                    "buildkite_commit",
-                    ""),
-                "$BUILDKITE_COMMIT")
+            image_tag = self.image_tag.replace(self.build_args.get("buildkite_commit", ""), "$BUILDKITE_COMMIT")
             lines.append(f"--tag {image_tag}  ")
             lines.append(f"--target {self.target} ")
             lines.append("--progress plain .\n")
@@ -91,23 +84,15 @@ fi{suffix}"""
                 else:
                     cmd_parts.append(f"--build-arg {key}={value}")
 
-            image_tag = self.image_tag.replace(
-                self.build_args.get(
-                    "buildkite_commit",
-                    ""),
-                "$BUILDKITE_COMMIT")
-            cmd_parts.extend(
-                [f"--tag {image_tag}", f"--target {self.target}", "--progress plain ."]
-            )
+            image_tag = self.image_tag.replace(self.build_args.get("buildkite_commit", ""), "$BUILDKITE_COMMIT")
+            cmd_parts.extend([f"--tag {image_tag}", f"--target {self.target}", "--progress plain ."])
 
             return " ".join(cmd_parts)
 
     def get_commands(self) -> List[str]:
         """Get all commands for this build step."""
         # Use $BUILDKITE_COMMIT in image tags
-        image_tag = self.image_tag.replace(
-            self.build_args.get("buildkite_commit", ""), "$BUILDKITE_COMMIT"
-        )
+        image_tag = self.image_tag.replace(self.build_args.get("buildkite_commit", ""), "$BUILDKITE_COMMIT")
 
         commands = [
             "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7",
@@ -118,9 +103,7 @@ fi{suffix}"""
 
         if self.push_latest and self.latest_tag:
             # latest_tag should stay as "latest", not use $BUILDKITE_COMMIT
-            commands.extend(
-                [f"docker tag {image_tag} {self.latest_tag}", f"docker push {self.latest_tag}"]
-            )
+            commands.extend([f"docker tag {image_tag} {self.latest_tag}", f"docker push {self.latest_tag}"])
 
         return commands
 
@@ -134,8 +117,11 @@ fi{suffix}"""
             "env": {EnvironmentVariables.DOCKER_BUILDKIT: "1"},
             "retry": {
                 "automatic": [
-                    {"exit_status": -1, "limit": self.retry_limit},
-                    {"exit_status": -10, "limit": self.retry_limit},
+                    {"exit_status": RetryConfig.EXIT_STATUS_AGENT_LOST, "limit": self.retry_limit},
+                    {
+                        "exit_status": RetryConfig.EXIT_STATUS_AGENT_TERMINATED,
+                        "limit": self.retry_limit,
+                    },
                 ]
             },
         }
@@ -230,13 +216,13 @@ class AMDBuildConfig:
             "label": label,
             "key": BuildStepKeys.AMD_BUILD,
             "depends_on": None,
-            "agents": {"queue": "amd-cpu"},
+            "agents": {"queue": AgentQueue.AMD_CPU},
             "env": {EnvironmentVariables.DOCKER_BUILDKIT: "1"},
             "soft_fail": soft_fail,
             "retry": {
                 "automatic": [
-                    {"exit_status": -1, "limit": 1},
-                    {"exit_status": -10, "limit": 1},
+                    {"exit_status": RetryConfig.EXIT_STATUS_AGENT_LOST, "limit": 1},
+                    {"exit_status": RetryConfig.EXIT_STATUS_AGENT_TERMINATED, "limit": 1},
                     {"exit_status": 1, "limit": 1},
                 ]
             },
@@ -267,9 +253,7 @@ def create_main_cuda_build(
             extra_args["USE_FLASHINFER_PREBUILT_WHEEL"] = "true"
 
     # Create latest tag - replace $BUILDKITE_COMMIT with latest
-    latest_tag = image_tag.replace(
-        "$BUILDKITE_COMMIT",
-        "latest") if branch == "main" else None
+    latest_tag = image_tag.replace("$BUILDKITE_COMMIT", "latest") if branch == "main" else None
 
     # Determine if we should push latest
     if push_latest is None:
@@ -289,12 +273,9 @@ def create_main_cuda_build(
     )
 
 
-def create_fastcheck_build(
-    commit: str, image_tag: str, queue: str, vllm_use_precompiled: str
-) -> DockerBuildConfig:
+def create_fastcheck_build(commit: str, image_tag: str, queue: str, vllm_use_precompiled: str) -> DockerBuildConfig:
     """Create fastcheck build configuration."""
-    extra_args = {"VLLM_DOCKER_BUILD_CONTEXT": "1",
-                  "VLLM_USE_PRECOMPILED": vllm_use_precompiled}
+    extra_args = {"VLLM_DOCKER_BUILD_CONTEXT": "1", "VLLM_USE_PRECOMPILED": vllm_use_precompiled}
 
     if vllm_use_precompiled == "1":
         extra_args["USE_FLASHINFER_PREBUILT_WHEEL"] = "true"
@@ -317,12 +298,7 @@ def create_fastcheck_build(
     return config
 
 
-def create_cu118_build(
-        commit: str,
-        image_tag: str,
-        queue: str,
-        branch: str,
-        vllm_use_precompiled: str) -> DockerBuildConfig:
+def create_cu118_build(commit: str, image_tag: str, queue: str, branch: str, vllm_use_precompiled: str) -> DockerBuildConfig:
     """Create CUDA 11.8 build configuration."""
     extra_args = {"CUDA_VERSION": "11.8.0"}
 
@@ -343,10 +319,7 @@ def create_cu118_build(
     )
 
 
-def create_cpu_build(
-        commit: str,
-        image_tag: str,
-        queue: str) -> DockerBuildConfig:
+def create_cpu_build(commit: str, image_tag: str, queue: str) -> DockerBuildConfig:
     """Create CPU build configuration."""
     extra_args = {"VLLM_CPU_AVX512BF16": "true", "VLLM_CPU_AVX512VNNI": "true"}
 
@@ -364,9 +337,7 @@ def create_cpu_build(
     )
 
 
-def create_torch_nightly_build(
-    commit: str, image_tag: str, queue: str, depends_on: Optional[str]
-) -> DockerBuildConfig:
+def create_torch_nightly_build(commit: str, image_tag: str, queue: str, depends_on: Optional[str]) -> DockerBuildConfig:
     """Create torch nightly build configuration."""
     return create_cuda_build_config(
         label=":docker: build image torch nightly",

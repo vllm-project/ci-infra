@@ -4,13 +4,6 @@ Integration test suite for AMD pipeline mode.
 Compares Python generator output against test-template-amd.j2
 """
 
-from buildkite.pipeline_generator.utils import VLLM_ECR_REPO, VLLM_ECR_URL, PipelineMode
-from buildkite.pipeline_generator.pipeline_generator import (
-    PipelineGenerator,
-    read_test_steps,
-    write_buildkite_pipeline,
-)
-from buildkite.pipeline_generator.pipeline_config import PipelineGeneratorConfig
 import os
 import subprocess
 import sys
@@ -19,6 +12,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 import yaml
+
+from buildkite.pipeline_generator.pipeline_config import PipelineGeneratorConfig
+from buildkite.pipeline_generator.pipeline_generator import (
+    PipelineGenerator,
+    read_test_steps,
+    write_buildkite_pipeline,
+)
+from buildkite.pipeline_generator.utils import VLLM_ECR_REPO, VLLM_ECR_URL, PipelineMode
 
 # Add parent directories to path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -55,11 +56,7 @@ def get_amd_scenarios() -> List[Scenario]:
     ]
 
 
-def run_jinja_amd(
-        scenario: Scenario,
-        template_path: str,
-        test_pipeline_path: str,
-        output_path: str) -> tuple:
+def run_jinja_amd(scenario: Scenario, template_path: str, test_pipeline_path: str, output_path: str) -> tuple:
     """Run Jinja template to generate AMD pipeline."""
     try:
         cmd = [
@@ -70,11 +67,7 @@ def run_jinja_amd(
             f"mirror_hw={scenario.mirror_hw}",
         ]
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         # Remove blank lines like bootstrap.sh does
         lines = [line for line in result.stdout.split("\n") if line.strip()]
@@ -88,10 +81,7 @@ def run_jinja_amd(
         return False, str(e)
 
 
-def run_python_amd(
-        scenario: Scenario,
-        test_pipeline_path: str,
-        output_path: str) -> tuple:
+def run_python_amd(scenario: Scenario, test_pipeline_path: str, output_path: str) -> tuple:
     """Run Python generator to generate AMD pipeline."""
     try:
         test_steps = read_test_steps(test_pipeline_path)
@@ -130,31 +120,22 @@ def compare_yaml_trees(jinja_path: str, python_path: str) -> Dict[str, Any]:
 
     matches = jinja_data == python_data
 
-    return {
-        "yaml_trees_equal": matches,
-        "jinja_data": jinja_data,
-        "python_data": python_data}
+    return {"yaml_trees_equal": matches, "jinja_data": jinja_data, "python_data": python_data}
 
 
 def main():
     # Paths
     ci_infra_path = "/Users/rezabarazesh/Documents/test/ci-infra"
     vllm_path = "/Users/rezabarazesh/Documents/test/vllm"
-    template_path = os.path.join(
-        ci_infra_path,
-        "buildkite/test-template-amd.j2")
-    test_pipeline_path = os.path.join(
-        vllm_path, ".buildkite/test-pipeline.yaml")
+    template_path = os.path.join(ci_infra_path, "buildkite/test-template-amd.j2")
+    test_pipeline_path = os.path.join(vllm_path, ".buildkite/test-pipeline.yaml")
 
     # Check minijinja
     try:
-        subprocess.run(["minijinja-cli", "--version"],
-                       capture_output=True, check=True)
+        subprocess.run(["minijinja-cli", "--version"], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("Error: minijinja-cli not found")
-        print(
-            "Install: curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh"
-        )
+        print("Install: curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh")
         sys.exit(1)
 
     scenarios = get_amd_scenarios()
@@ -186,9 +167,7 @@ def main():
 
             # Generate with jinja
             print("  [1/3] Generating with Jinja template...", end=" ")
-            jinja_success, jinja_error = run_jinja_amd(
-                scenario, template_path, test_pipeline_path, jinja_output
-            )
+            jinja_success, jinja_error = run_jinja_amd(scenario, template_path, test_pipeline_path, jinja_output)
             if jinja_success:
                 print("[OK]")
             else:
@@ -198,9 +177,7 @@ def main():
 
             # Generate with Python
             print("  [2/3] Generating with Python generator...", end=" ")
-            python_success, python_error = run_python_amd(
-                scenario, test_pipeline_path, python_output
-            )
+            python_success, python_error = run_python_amd(scenario, test_pipeline_path, python_output)
             if python_success:
                 print("[OK]")
             else:

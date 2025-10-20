@@ -12,13 +12,13 @@ class BuildkiteStep(BaseModel):
     """This class represents a step in Buildkite format."""
 
     label: str
-    agents: Dict[str, str] = {"queue": AgentQueue.AWS_CPU.value}
+    agents: Dict[str, str] = {"queue": AgentQueue.CPU_QUEUE}
     commands: List[str]
     key: Optional[str] = None
     plugins: Optional[List[Dict]] = None
     parallelism: Optional[int] = None
     soft_fail: Optional[bool] = None
-    depends_on: Optional[str] = None  # Changed default from "build" to None
+    depends_on: Optional[str] = None
     env: Optional[Dict[str, str]] = None
     retry: Optional[Dict[str, Any]] = None
     timeout_in_minutes: Optional[int] = None
@@ -28,7 +28,8 @@ class BuildkiteStep(BaseModel):
     @model_validator(mode="after")
     def validate_agent_queue(self) -> Self:
         queue = self.agents.get("queue")
-        if queue and not any(q.value == queue for q in AgentQueue):
+        valid_queues = {getattr(AgentQueue, attr) for attr in dir(AgentQueue) if not attr.startswith("_") and isinstance(getattr(AgentQueue, attr), str)}
+        if queue and queue not in valid_queues:
             raise ValueError(f"Invalid agent queue: {queue}")
         return self
 
@@ -57,5 +58,4 @@ def get_step_key(step_label: str) -> str:
 
 
 def get_block_step(step_label: str) -> BuildkiteBlockStep:
-    return BuildkiteBlockStep(
-        block=f"Run {step_label}", key=f"block-{get_step_key(step_label)}")
+    return BuildkiteBlockStep(block=f"Run {step_label}", key=f"block-{get_step_key(step_label)}")

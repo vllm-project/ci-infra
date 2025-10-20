@@ -9,10 +9,7 @@ def inject_coverage_into_command(cmd: str, coverage_file: str) -> str:
     """Inject coverage flags into pytest commands."""
     if "pytest " in cmd:
         replacement = "pytest --cov=vllm --cov-report= --cov-append --durations=0 "
-        return f"COVERAGE_FILE={coverage_file} {
-            cmd.replace(
-                'pytest ',
-                replacement)} || true"
+        return f"COVERAGE_FILE={coverage_file} {cmd.replace('pytest ', replacement)} || true"
     return cmd
 
 
@@ -23,18 +20,13 @@ def get_coverage_file_id(step_label: str) -> str:
     return f".coverage.{step_length}_{step_first}"
 
 
-def inject_coverage_into_commands(
-        commands: list,
-        step_label: str,
-        vllm_ci_branch: str) -> str:
+def inject_coverage_into_commands(commands: list, step_label: str, vllm_ci_branch: str) -> str:
     """
     Inject coverage into commands and return combined command string.
     """
     coverage_file = get_coverage_file_id(step_label)
 
-    injected_commands = [
-        inject_coverage_into_command(
-            cmd, coverage_file) for cmd in commands]
+    injected_commands = [inject_coverage_into_command(cmd, coverage_file) for cmd in commands]
 
     # Check if any pytest commands were found
     has_pytest = any("pytest " in cmd for cmd in commands)
@@ -50,13 +42,8 @@ def inject_coverage_into_commands(
 class CoverageTransformer(CommandTransformer):
     """Transformer that injects coverage collection into commands."""
 
-    def transform(
-            self,
-            commands: List[str],
-            test_step,
-            config) -> Optional[str]:
+    def transform(self, commands: List[str], test_step, config) -> Optional[str]:
         """Transform commands to include coverage collection if enabled."""
         if config.cov_enabled:
-            return inject_coverage_into_commands(
-                commands, test_step.label, config.vllm_ci_branch)
+            return inject_coverage_into_commands(commands, test_step.label, config.vllm_ci_branch)
         return " && ".join(commands)

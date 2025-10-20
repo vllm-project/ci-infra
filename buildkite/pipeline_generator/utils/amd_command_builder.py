@@ -26,8 +26,7 @@ def format_amd_commands(test_step) -> str:  # type: ignore[no-untyped-def]
 
     # Multi-node format: list of lists -> JSON string representation
     if raw_commands and isinstance(raw_commands[0], list):
-        return " && ".join([json.dumps(node_cmds)
-                           for node_cmds in raw_commands])
+        return " && ".join([json.dumps(node_cmds) for node_cmds in raw_commands])
 
     # Simple list of commands
     commands_list: List[str] = raw_commands  # type: ignore[assignment]

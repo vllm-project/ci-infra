@@ -5,7 +5,14 @@ from typing import Any, Dict, List, Optional
 from ..data_models.test_step import TestStep
 from ..pipeline_config import PipelineGeneratorConfig
 from ..utils.amd_command_builder import build_amd_test_command, format_amd_commands
-from ..utils.constants import DEFAULT_WORKING_DIR, AMDLabelPrefixes, AMDQueueLabels, BuildStepKeys, EnvironmentVariables
+from ..utils.constants import (
+    DEFAULT_WORKING_DIR,
+    AMDLabelPrefixes,
+    AMDQueueLabels,
+    BuildStepKeys,
+    EnvironmentVariables,
+    PriorityValues,
+)
 from .docker_builds import generate_amd_build_step
 
 
@@ -26,9 +33,7 @@ def get_amd_queue(label: str, num_gpus: Optional[int] = None) -> str:
         return "amd_mi325_1"
 
 
-def generate_amd_group(
-    test_steps: List[TestStep], config: PipelineGeneratorConfig
-) -> Dict[str, Any]:
+def generate_amd_group(test_steps: List[TestStep], config: PipelineGeneratorConfig) -> Dict[str, Any]:
     """Generate the AMD tests group for CI (all AMD tests)."""
     amd_steps = []
 
@@ -60,7 +65,7 @@ def generate_amd_group(
             "agents": {"queue": queue},
             "env": {EnvironmentVariables.DOCKER_BUILDKIT: "1"},
             "soft_fail": False,
-            "priority": 100,
+            "priority": PriorityValues.AMD_TESTS,
             "command": full_command,
         }
         amd_steps.append(amd_step_dict)

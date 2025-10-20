@@ -263,31 +263,82 @@ class GPUType(str, enum.Enum):
     B200 = "b200"
 
 
-class AgentQueue(str, enum.Enum):
-    AWS_CPU = "cpu_queue"
-    AWS_SMALL_CPU = "small_cpu_queue"
-    AWS_CPU_PREMERGE = "cpu_queue_premerge_us_east_1"
-    AWS_CPU_PREMERGE_SIMPLE = "cpu_queue_premerge"  # For fastcheck
-    AWS_CPU_POSTMERGE = "cpu_queue_postmerge_us_east_1"
-    AWS_1xL4 = "gpu_1_queue"
-    AWS_4xL4 = "gpu_4_queue"
-    A100 = "a100_queue"
-    H100 = "mithril-h100-pool"
-    H200 = "skylab-h200"
+class AgentQueue:
+    """Agent queue names"""
+
+    CPU_QUEUE = "cpu_queue"
+    SMALL_CPU_QUEUE = "small_cpu_queue"
+    CPU_QUEUE_PREMERGE_US_EAST_1 = "cpu_queue_premerge_us_east_1"
+    CPU_QUEUE_PREMERGE = "cpu_queue_premerge"  # For fastcheck
+    CPU_QUEUE_POSTMERGE_US_EAST_1 = "cpu_queue_postmerge_us_east_1"
+    GPU_1_QUEUE = "gpu_1_queue"
+    GPU_4_QUEUE = "gpu_4_queue"
+    A100_QUEUE = "a100_queue"
+    MITHRIL_H100_POOL = "mithril-h100-pool"
+    SKYLAB_H200 = "skylab-h200"
     B200 = "B200"
-    AMD_GPU = "amd"
+    AMD = "amd"
     AMD_CPU = "amd-cpu"
     AMD_MI325_1 = "amd_mi325_1"
     AMD_MI325_2 = "amd_mi325_2"
     AMD_MI325_4 = "amd_mi325_4"
     AMD_MI325_8 = "amd_mi325_8"
+    AMD_MI300_1 = "amd_mi300_1"  # Fastcheck AMD queue
     NEURON = "neuron"
     INTEL_CPU = "intel-cpu"
     INTEL_GPU = "intel-gpu"
     INTEL_HPU = "intel-hpu"
-    TPU = "tpu_v6e_queue"
-    GH200 = "gh200_queue"
+    TPU_V5_QUEUE = "tpu_v5_queue"
+    TPU_V6E_QUEUE = "tpu_v6e_queue"
+    GH200_QUEUE = "gh200_queue"
     IBM_PPC64LE = "ibm-ppc64le"
     IBM_S390X = "ibm_s390x"
     ASCEND = "ascend"
-    SMALL_CPU_PREMERGE = "small_cpu_queue_premerge"
+    SMALL_CPU_QUEUE_PREMERGE = "small_cpu_queue_premerge"
+
+
+# Kubernetes Constants
+class KubernetesConstants:
+    """Constants for Kubernetes configurations."""
+
+    NVIDIA_GPU_RESOURCE = "nvidia.com/gpu"
+    NVIDIA_GPU_PRODUCT = "nvidia.com/gpu.product"
+    NVIDIA_A100_PRODUCT = "NVIDIA-A100-SXM4-80GB"
+    HF_TOKEN_SECRET_NAME = "hf-token-secret"
+    HF_TOKEN_SECRET_KEY = "token"
+    PRIORITY_CLASS_CI = "ci"
+
+    # Volume names
+    DEVSHM_VOLUME = "devshm"
+    HF_CACHE_VOLUME = "hf-cache"
+
+    # Mount paths
+    DEV_SHM_PATH = "/dev/shm"
+
+    # Volume types
+    EMPTY_DIR_MEDIUM = "Memory"
+    HOST_PATH_TYPE = "Directory"
+
+
+# Priority Values
+class PriorityValues:
+    """Step priority values."""
+
+    AMD_TESTS = 100
+    A100_TESTS = 10000
+
+
+# Retry Configuration
+class RetryConfig:
+    """Standard retry configurations."""
+
+    EXIT_STATUS_AGENT_LOST = -1
+    EXIT_STATUS_AGENT_TERMINATED = -10
+
+
+# Buildkite Plugin Names
+class PluginNames:
+    """Buildkite plugin identifiers."""
+
+    DOCKER = "docker#v5.2.0"
+    KUBERNETES = "kubernetes"

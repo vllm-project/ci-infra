@@ -43,10 +43,7 @@ class TestShouldRunStep:
 
     def test_should_run_step_with_matching_dependency(self):
         """Test step runs when dependencies match file diff."""
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest test.py"],
-            source_file_dependencies=["vllm/engine/"])
+        test_step = TestStep(label="Test", commands=["pytest test.py"], source_file_dependencies=["vllm/engine/"])
 
         class Config:
             pipeline_mode = PipelineMode.CI
@@ -58,10 +55,7 @@ class TestShouldRunStep:
 
     def test_should_run_step_no_matching_dependency(self):
         """Test step doesn't run when dependencies don't match."""
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest test.py"],
-            source_file_dependencies=["vllm/engine/"])
+        test_step = TestStep(label="Test", commands=["pytest test.py"], source_file_dependencies=["vllm/engine/"])
 
         class Config:
             pipeline_mode = PipelineMode.CI
@@ -96,10 +90,7 @@ class TestChangedTests:
             "tests/v2/test_executor.py",
         ]
         changed = get_changed_tests(file_diff)
-        assert changed == [
-            "v1/test_engine.py",
-            "v1/test_model.py",
-            "v2/test_executor.py"]
+        assert changed == ["v1/test_engine.py", "v1/test_model.py", "v2/test_executor.py"]
 
     def test_get_changed_tests_no_tests(self):
         """Test extracting changed tests when none changed."""
@@ -132,10 +123,7 @@ class TestIntelligentTestTargeting:
             commands=["pytest v1/core/test_engine.py v1/core/test_model.py"],
             source_file_dependencies=["tests/v1/core/"],
         )
-        changed_tests = [
-            "v1/core/test_engine.py",
-            "v1/core/test_model.py",
-            "v2/test_other.py"]
+        changed_tests = ["v1/core/test_engine.py", "v1/core/test_model.py", "v2/test_other.py"]
 
         targets = get_intelligent_test_targets(test_step, changed_tests)
         # Tests in v1/core/ should match dependencies
@@ -213,10 +201,7 @@ class TestShouldBlockStep:
 
     def test_should_block_optional_step(self):
         """Test that optional steps are blocked when not in nightly mode."""
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest test.py"],
-            optional=True)
+        test_step = TestStep(label="Test", commands=["pytest test.py"], optional=True)
 
         class Config:
             pipeline_mode = PipelineMode.CI
@@ -228,10 +213,7 @@ class TestShouldBlockStep:
 
     def test_should_not_block_optional_step_in_nightly(self):
         """Test that optional steps are not blocked in nightly mode."""
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest test.py"],
-            optional=True)
+        test_step = TestStep(label="Test", commands=["pytest test.py"], optional=True)
 
         class Config:
             pipeline_mode = PipelineMode.CI
@@ -243,10 +225,7 @@ class TestShouldBlockStep:
 
     def test_should_block_step_no_matching_dependencies(self):
         """Test blocking when dependencies don't match."""
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest test.py"],
-            source_file_dependencies=["vllm/engine/"])
+        test_step = TestStep(label="Test", commands=["pytest test.py"], source_file_dependencies=["vllm/engine/"])
 
         class Config:
             pipeline_mode = PipelineMode.CI
@@ -258,10 +237,7 @@ class TestShouldBlockStep:
 
     def test_should_not_block_step_matching_dependencies(self):
         """Test not blocking when dependencies match."""
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest test.py"],
-            source_file_dependencies=["vllm/engine/"])
+        test_step = TestStep(label="Test", commands=["pytest test.py"], source_file_dependencies=["vllm/engine/"])
 
         class Config:
             pipeline_mode = PipelineMode.CI
@@ -292,10 +268,7 @@ class TestShouldBlockStep:
 
     def test_torch_nightly_group_not_blocking_in_nightly_mode(self):
         """Test not blocking torch nightly steps in nightly mode."""
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest test.py"],
-            torch_nightly=True)
+        test_step = TestStep(label="Test", commands=["pytest test.py"], torch_nightly=True)
 
         class Config:
             pipeline_mode = PipelineMode.CI

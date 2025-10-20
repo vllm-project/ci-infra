@@ -40,8 +40,7 @@ class TestStep(BaseModel):
         if not values.get("command") and not values.get("commands"):
             raise ValueError("Either 'command' or 'commands' must be defined.")
         if values.get("command") and values.get("commands"):
-            raise ValueError(
-                "Only one of 'command' or 'commands' can be defined.")
+            raise ValueError("Only one of 'command' or 'commands' can be defined.")
         if values.get("command"):
             values["commands"] = [values["command"]]
             del values["command"]
@@ -50,21 +49,18 @@ class TestStep(BaseModel):
     @model_validator(mode="after")
     def validate_gpu(self) -> Self:
         if self.gpu and self.no_gpu:
-            raise ValueError(
-                "Both 'gpu' and 'no_gpu' cannot be defined together.")
+            raise ValueError("Both 'gpu' and 'no_gpu' cannot be defined together.")
         return self
 
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
         if self.num_nodes and not self.num_gpus:
-            raise ValueError(
-                "'num_gpus' must be defined if 'num_nodes' is defined.")
+            raise ValueError("'num_gpus' must be defined if 'num_nodes' is defined.")
         if self.num_nodes and self.commands:
             # For multi-node, commands should be a list of lists
             if isinstance(self.commands, list) and len(self.commands) > 0:
                 # If it's a list of lists, check the length
                 if isinstance(self.commands[0], list):
                     if len(self.commands) != self.num_nodes:
-                        raise ValueError(
-                            "Number of command lists must match the number of nodes.")
+                        raise ValueError("Number of command lists must match the number of nodes.")
         return self

@@ -11,24 +11,25 @@ def get_agent_queue(
     gpu_type: Optional[str],
     num_gpus: Optional[int],
     label: Optional[str] = None,
-) -> AgentQueue:
+) -> str:
     """Determine the agent queue based on GPU requirements."""
     # Documentation Build gets special queue
     if label == TestLabels.DOCUMENTATION_BUILD:
-        return AgentQueue.SMALL_CPU_PREMERGE
+        return AgentQueue.SMALL_CPU_QUEUE_PREMERGE
 
     if no_gpu:
-        return AgentQueue.AWS_CPU_PREMERGE
+        return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
 
-    # Special GPU types
-    if gpu_type == GPUType.A100.value:
-        return AgentQueue.A100
-    if gpu_type == GPUType.H100.value:
-        return AgentQueue.H100
-    if gpu_type == GPUType.H200.value:
-        return AgentQueue.H200
-    if gpu_type == GPUType.B200.value:
-        return AgentQueue.B200
+    # Map GPU types to queues
+    gpu_queue_map = {
+        GPUType.A100.value: AgentQueue.A100_QUEUE,
+        GPUType.H100.value: AgentQueue.MITHRIL_H100_POOL,
+        GPUType.H200.value: AgentQueue.SKYLAB_H200,
+        GPUType.B200.value: AgentQueue.B200,
+    }
+
+    if gpu_type and gpu_type in gpu_queue_map:
+        return gpu_queue_map[gpu_type]
 
     # Default CUDA GPUs (L4)
-    return AgentQueue.AWS_1xL4 if not num_gpus or num_gpus == 1 else AgentQueue.AWS_4xL4
+    return AgentQueue.GPU_1_QUEUE if not num_gpus or num_gpus == 1 else AgentQueue.GPU_4_QUEUE

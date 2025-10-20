@@ -41,8 +41,7 @@ class HardwareTestConfig:
             # GH200 uses: command: nvidia-smi && bash script.sh
             step["command"] = f"nvidia-smi && bash {self.script_path}"
         elif self.extra_commands:
-            step["commands"] = self.extra_commands + \
-                [f"bash {self.script_path}"]
+            step["commands"] = self.extra_commands + [f"bash {self.script_path}"]
         else:
             step["command"] = f"bash {self.script_path}"
 
@@ -101,8 +100,7 @@ class NotificationStepConfig:
         # Build condition check
         conditions = []
         for step in self.check_steps:
-            conditions.append(
-                f'$$(buildkite-agent step get "outcome" --step "{step}") != "passed"')
+            conditions.append(f'$$(buildkite-agent step get "outcome" --step "{step}") != "passed"')
         condition_str = " || ".join(conditions)
 
         # IBM Power uses single bracket [ ], TPU uses double bracket [[ ]]
@@ -183,10 +181,7 @@ GH200_CONFIG = HardwareTestConfig(
 def get_intel_cpu_config(branch: str) -> ConditionalTestConfig:
     """Get Intel CPU test configuration."""
     # Always create block (matches jinja behavior)
-    block = BlockStepConfig(
-        label="Run Intel CPU test",
-        key="block-intel-cpu",
-        depends_on=None)
+    block = BlockStepConfig(label="Run Intel CPU test", key="block-intel-cpu", depends_on=None)
 
     test = HardwareTestConfig(
         label="Intel CPU Test",
@@ -202,10 +197,7 @@ def get_intel_cpu_config(branch: str) -> ConditionalTestConfig:
 def get_ibm_power_config(branch: str) -> ConditionalTestConfig:
     """Get IBM Power test configuration."""
     if branch == "main":
-        block = BlockStepConfig(
-            label="Run IBM Power CPU test",
-            key="block-ibm-power",
-            depends_on=None)
+        block = BlockStepConfig(label="Run IBM Power CPU test", key="block-ibm-power", depends_on=None)
         test = HardwareTestConfig(
             label="IBM Power(ppc64le) CPU Test",
             queue="ibm-ppc64le",
@@ -214,10 +206,7 @@ def get_ibm_power_config(branch: str) -> ConditionalTestConfig:
             key="ibm-ppc64-test",
         )
     else:
-        block = BlockStepConfig(
-            label="Run IBM Power(ppc64le) CPU Test",
-            key="block-ibm-ppc64-test",
-            depends_on=None)
+        block = BlockStepConfig(label="Run IBM Power(ppc64le) CPU Test", key="block-ibm-ppc64-test", depends_on=None)
         test = HardwareTestConfig(
             label="IBM Power(ppc64le) CPU Test",
             queue="ibm-ppc64le",
@@ -230,11 +219,7 @@ def get_ibm_power_config(branch: str) -> ConditionalTestConfig:
 
 def get_ibm_s390x_config(nightly: bool) -> ConditionalTestConfig:
     """Get IBM Z (s390x) test configuration."""
-    block = (
-        None if nightly else BlockStepConfig(
-            label='Run "IBM Z (s390x) CPU Test"',
-            key="block-ibm-s390x",
-            depends_on=None))
+    block = None if nightly else BlockStepConfig(label='Run "IBM Z (s390x) CPU Test"', key="block-ibm-s390x", depends_on=None)
 
     test = HardwareTestConfig(
         label="IBM Z (s390x) CPU Test",
@@ -265,8 +250,7 @@ class TPUTestConfig:
             commands.append(self.extra_docker_build)
 
         if self.script_path:
-            commands.append(
-                f'if [[ -f "{self.script_path}" ]]; then bash {self.script_path}; fi')
+            commands.append(f'if [[ -f "{self.script_path}" ]]; then bash {self.script_path}; fi')
 
         commands.extend(self.extra_scripts)
 

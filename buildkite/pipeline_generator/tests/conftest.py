@@ -51,11 +51,7 @@ def multi_node_test_step():
 @pytest.fixture
 def gpu_test_step():
     """Create a GPU test step for testing."""
-    return TestStep(
-        label="GPU Test",
-        commands=["pytest -v test_gpu.py"],
-        gpu="a100",
-        num_gpus=2)
+    return TestStep(label="GPU Test", commands=["pytest -v test_gpu.py"], gpu="a100", num_gpus=2)
 
 
 @pytest.fixture

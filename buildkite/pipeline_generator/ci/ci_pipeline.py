@@ -18,9 +18,7 @@ from .test_step_converter import convert_test_step_to_buildkite_step
 from .torch_nightly_tests import generate_torch_nightly_group
 
 
-def _create_ci_test_with_optional_block(
-    test_step: TestStep, config: PipelineGeneratorConfig
-) -> List[Union[BuildkiteStep, BuildkiteBlockStep]]:
+def _create_ci_test_with_optional_block(test_step: TestStep, config: PipelineGeneratorConfig) -> List[Union[BuildkiteStep, BuildkiteBlockStep]]:
     """
     Create test step with optional blocking step.
 
@@ -30,8 +28,7 @@ def _create_ci_test_with_optional_block(
     container_image = config.container_image_cpu if test_step.no_gpu else config.container_image
 
     # Convert test step
-    buildkite_step = convert_test_step_to_buildkite_step(
-        test_step, container_image, config)
+    buildkite_step = convert_test_step_to_buildkite_step(test_step, container_image, config)
 
     # Add blocking step if needed
     if should_block_ci_test(test_step, config):
@@ -50,9 +47,7 @@ def _create_ci_test_with_optional_block(
     return [buildkite_step]
 
 
-def generate_ci_test_steps(
-    test_steps: List[TestStep], config: PipelineGeneratorConfig
-) -> List[Union[BuildkiteStep, BuildkiteBlockStep]]:
+def generate_ci_test_steps(test_steps: List[TestStep], config: PipelineGeneratorConfig) -> List[Union[BuildkiteStep, BuildkiteBlockStep]]:
     """Generate test steps for CI mode - no mode checks, pure CI logic."""
     steps: List[Union[BuildkiteStep, BuildkiteBlockStep]] = []
 
@@ -67,9 +62,7 @@ def generate_ci_test_steps(
     return steps
 
 
-def generate_ci_pipeline(
-    test_steps: List[TestStep], config: PipelineGeneratorConfig
-) -> List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]]:
+def generate_ci_pipeline(test_steps: List[TestStep], config: PipelineGeneratorConfig) -> List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]]:
     """Generate complete CI pipeline."""
     steps: List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]] = []
 

@@ -4,9 +4,7 @@ from ..data_models.test_step import TestStep
 from ..pipeline_config import PipelineGeneratorConfig
 
 
-def should_block_fastcheck_test(
-        test_step: TestStep,
-        config: PipelineGeneratorConfig) -> bool:
+def should_block_fastcheck_test(test_step: TestStep, config: PipelineGeneratorConfig) -> bool:
     """
     Determine if a fastcheck test needs a manual trigger block.
 

@@ -48,26 +48,22 @@ class PipelineGeneratorConfig:
         # Fastcheck and AMD always use test-repo
         if self.pipeline_mode in [PipelineMode.FASTCHECK, PipelineMode.AMD]:
             return "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT"
-        return f"public.ecr.aws/q9t5s3a7/vllm-ci-{
-            self._get_repo_suffix()}-repo:$BUILDKITE_COMMIT"
+        return f"public.ecr.aws/q9t5s3a7/vllm-ci-{self._get_repo_suffix()}-repo:$BUILDKITE_COMMIT"
 
     @property
     def container_image_torch_nightly(self):
         """Get the torch nightly container image."""
-        return f"public.ecr.aws/q9t5s3a7/vllm-ci-{
-            self._get_repo_suffix()}-repo:$BUILDKITE_COMMIT-torch-nightly"
+        return f"public.ecr.aws/q9t5s3a7/vllm-ci-{self._get_repo_suffix()}-repo:$BUILDKITE_COMMIT-torch-nightly"
 
     @property
     def container_image_cu118(self):
         """Get the CUDA 11.8 container image."""
-        return f"public.ecr.aws/q9t5s3a7/vllm-ci-{
-            self._get_repo_suffix()}-repo:$BUILDKITE_COMMIT-cu118"
+        return f"public.ecr.aws/q9t5s3a7/vllm-ci-{self._get_repo_suffix()}-repo:$BUILDKITE_COMMIT-cu118"
 
     @property
     def container_image_cpu(self):
         """Get the CPU container image."""
-        return f"public.ecr.aws/q9t5s3a7/vllm-ci-{
-            self._get_repo_suffix()}-repo:$BUILDKITE_COMMIT-cpu"
+        return f"public.ecr.aws/q9t5s3a7/vllm-ci-{self._get_repo_suffix()}-repo:$BUILDKITE_COMMIT-cpu"
 
     @property
     def container_image_amd(self):
@@ -79,6 +75,4 @@ class PipelineGeneratorConfig:
         # Check if commit is a valid Git commit hash
         pattern = r"^[0-9a-f]{40}$"
         if not re.match(pattern, self.commit):
-            raise ValueError(
-                f"Commit {
-                    self.commit} is not a valid Git commit hash")
+            raise ValueError(f"Commit {self.commit} is not a valid Git commit hash")

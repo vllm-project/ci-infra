@@ -4,13 +4,6 @@ Comprehensive test suite for pipeline generator.
 Tests all scenarios, flags, and edge cases with detailed YAML diff output.
 """
 
-from buildkite.pipeline_generator.utils import VLLM_ECR_REPO, VLLM_ECR_URL
-from buildkite.pipeline_generator.pipeline_generator import (
-    PipelineGenerator,
-    read_test_steps,
-    write_buildkite_pipeline,
-)
-from buildkite.pipeline_generator.pipeline_config import PipelineGeneratorConfig
 import difflib
 import os
 import subprocess
@@ -20,6 +13,14 @@ from typing import Any, Dict, List, Tuple, cast
 
 import pytest
 import yaml
+
+from buildkite.pipeline_generator.pipeline_config import PipelineGeneratorConfig
+from buildkite.pipeline_generator.pipeline_generator import (
+    PipelineGenerator,
+    read_test_steps,
+    write_buildkite_pipeline,
+)
+from buildkite.pipeline_generator.utils import VLLM_ECR_REPO, VLLM_ECR_URL
 
 # Add parent directories to path for imports
 # We're in pipeline_generator/tests/, need to go up to ci-infra/buildkite
@@ -124,7 +125,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="Changes to vllm core code",
             branch="feature-branch",
             list_file_diff="vllm/engine/llm_engine.py|vllm/worker/worker.py|vllm/attention/backends/flash_attn.py",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -132,7 +134,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="Only test files changed (intelligent targeting)",
             branch="feature-branch",
             list_file_diff="tests/engine/test_engine.py|tests/test_config.py|tests/test_sequence.py",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -140,7 +143,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="Changes to csrc (should trigger more tests)",
             branch="feature-branch",
             list_file_diff="csrc/attention/attention_kernels.cu|csrc/quantization/fp8/fp8_kernels.cu",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -148,7 +152,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="Changes to multimodal code",
             branch="feature-branch",
             list_file_diff="vllm/multimodal/base.py|tests/multimodal/test_mapper.py",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -156,7 +161,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="Changes to distributed code",
             branch="feature-branch",
             list_file_diff="vllm/distributed/parallel_state.py|tests/distributed/test_pynccl.py",
-        ))
+        )
+    )
 
     # ==================== Build Configuration ====================
     scenarios.append(
@@ -205,7 +211,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             branch="feature-branch",
             cov_enabled="1",
             list_file_diff="tests/models/test_transformers.py|tests/engine/test_engine.py",
-        ))
+        )
+    )
 
     # ==================== CI Branch Variations ====================
     scenarios.append(
@@ -294,7 +301,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="Only engine test file changed - should run only that test",
             branch="feature-branch",
             list_file_diff="tests/engine/test_engine.py",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -311,7 +319,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="Multiple test files in same directory",
             branch="feature-branch",
             list_file_diff="tests/engine/test_engine.py|tests/engine/test_llm_engine.py|tests/tokenization/test_tokenizers.py",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -319,7 +328,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="V1 test directory changes",
             branch="feature-branch",
             list_file_diff="tests/v1/engine/test_engine_core.py|tests/v1/core/test_scheduler.py",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -336,7 +346,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="Distributed test changes",
             branch="feature-branch",
             list_file_diff="tests/distributed/test_pynccl.py|tests/distributed/test_comm_ops.py",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -344,7 +355,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="Kernel test changes",
             branch="feature-branch",
             list_file_diff="tests/kernels/attention/test_flashinfer.py|tests/kernels/quantization/test_fp8.py",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -352,7 +364,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             description="Mix of test and non-test files (should disable intelligent filtering)",
             branch="feature-branch",
             list_file_diff="tests/engine/test_engine.py|vllm/engine/llm_engine.py|tests/test_config.py",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -361,7 +374,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             branch="feature-branch",
             cov_enabled="1",
             list_file_diff="tests/samplers/test_sampling.py|tests/samplers/test_logits.py",
-        ))
+        )
+    )
 
     # ==================== Pytest Integration Tests ====================
     scenarios.append(
@@ -453,7 +467,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             branch="feature-branch",
             run_all="0",
             list_file_diff="tests/models/language/generation_ppl_test/test_ppl.py",
-        ))
+        )
+    )
 
     scenarios.append(
         Scenario(
@@ -462,7 +477,8 @@ def get_all_test_scenarios() -> List[Scenario]:
             branch="feature-branch",
             nightly="1",
             list_file_diff="tests/models/language/generation_ppl_test/test_ppl.py",
-        ))
+        )
+    )
 
     # ==================== Source File Dependencies Edge Cases ===============
     scenarios.append(
@@ -593,17 +609,14 @@ def get_all_test_scenarios() -> List[Scenario]:
     return scenarios
 
 
-def run_python_pipeline(
-    scenario: Scenario, test_pipeline_path: str, output_path: str
-) -> Tuple[bool, str]:
+def run_python_pipeline(scenario: Scenario, test_pipeline_path: str, output_path: str) -> Tuple[bool, str]:
     """Run Python pipeline generator."""
     os.environ["BUILDKITE_COMMIT"] = scenario.commit
     os.environ["BUILDKITE_BRANCH"] = scenario.branch
 
     try:
         test_steps = read_test_steps(test_pipeline_path)
-        file_diff = scenario.list_file_diff.split(
-            "|") if scenario.list_file_diff else []
+        file_diff = scenario.list_file_diff.split("|") if scenario.list_file_diff else []
 
         config = PipelineGeneratorConfig(
             run_all=scenario.run_all == "1",
@@ -630,11 +643,7 @@ def run_python_pipeline(
         return False, f"Error: {e}\n{traceback.format_exc()}"
 
 
-def run_jinja_pipeline(scenario: Scenario,
-                       template_path: str,
-                       test_pipeline_path: str,
-                       output_path: str) -> Tuple[bool,
-                                                  str]:
+def run_jinja_pipeline(scenario: Scenario, template_path: str, test_pipeline_path: str, output_path: str) -> Tuple[bool, str]:
     """Run minijinja-cli to generate pipeline from jinja template."""
     cmd = [
         "minijinja-cli",
@@ -661,11 +670,7 @@ def run_jinja_pipeline(scenario: Scenario,
     ]
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             return False, f"minijinja error: {result.stderr}"
 
@@ -698,9 +703,7 @@ def show_yaml_diff(jinja_file: str, python_file: str, max_lines: int = 100):
     )
 
     if len(diff) > max_lines:
-        print(
-            f"    Showing first {max_lines} diff lines (total: {
-                len(diff)}):")
+        print(f"    Showing first {max_lines} diff lines (total: {len(diff)}):")
         for line in diff[:max_lines]:
             print(f"    {line}", end="")
         print(f"    ... ({len(diff) - max_lines} more lines)")
@@ -709,8 +712,7 @@ def show_yaml_diff(jinja_file: str, python_file: str, max_lines: int = 100):
             print(f"    {line}", end="")
 
 
-def analyze_step_differences(
-        jinja_file: str, python_file: str) -> Dict[str, Any]:
+def analyze_step_differences(jinja_file: str, python_file: str) -> Dict[str, Any]:
     """Analyze differences between pipelines at step level."""
     with open(jinja_file, "r") as f:
         jinja_data = yaml.safe_load(f)
@@ -721,12 +723,8 @@ def analyze_step_differences(
     python_steps = python_data.get("steps", [])
 
     analysis = {
-        "total_steps": {
-            "jinja": len(jinja_steps),
-            "python": len(python_steps)},
-        "step_labels": {
-            "jinja": [],
-            "python": []},
+        "total_steps": {"jinja": len(jinja_steps), "python": len(python_steps)},
+        "step_labels": {"jinja": [], "python": []},
         "missing_in_python": [],
         "missing_in_jinja": [],
         "different_fields": [],
@@ -739,8 +737,7 @@ def analyze_step_differences(
     for i, step_obj in enumerate(jinja_steps):
         step = cast(Dict[str, Any], step_obj)
         if "label" in step:
-            analysis["step_labels"]["jinja"].append(
-                step["label"])  # type: ignore
+            analysis["step_labels"]["jinja"].append(step["label"])  # type: ignore
             jinja_label_map[step["label"]] = i  # type: ignore
         elif "group" in step:
             label = f"GROUP:{step['group']}"  # type: ignore
@@ -754,8 +751,7 @@ def analyze_step_differences(
     for i, step_obj in enumerate(python_steps):
         step = cast(Dict[str, Any], step_obj)
         if "label" in step:
-            analysis["step_labels"]["python"].append(
-                step["label"])  # type: ignore
+            analysis["step_labels"]["python"].append(step["label"])  # type: ignore
             python_label_map[step["label"]] = i  # type: ignore
         elif "group" in step:
             label = f"GROUP:{step['group']}"  # type: ignore
@@ -862,9 +858,7 @@ def deep_equal(obj1, obj2) -> bool:
     return obj1 == obj2
 
 
-def compare_pipelines(
-    jinja_file: str, python_file: str, scenario_name: str, show_diff: bool = False
-) -> Tuple[bool, Dict[str, Any]]:
+def compare_pipelines(jinja_file: str, python_file: str, scenario_name: str, show_diff: bool = False) -> Tuple[bool, Dict[str, Any]]:
     """Compare two pipeline files using deep equality of parsed YAML trees."""
     with open(jinja_file, "r") as f:
         jinja_content = f.read()
@@ -884,14 +878,8 @@ def compare_pipelines(
     analysis = analyze_step_differences(jinja_file, python_file)
 
     # String comparison (for reference)
-    jinja_normalized_str = yaml.dump(
-        jinja_data,
-        sort_keys=False,
-        default_flow_style=False)
-    python_normalized_str = yaml.dump(
-        python_data,
-        sort_keys=False,
-        default_flow_style=False)
+    jinja_normalized_str = yaml.dump(jinja_data, sort_keys=False, default_flow_style=False)
+    python_normalized_str = yaml.dump(python_data, sort_keys=False, default_flow_style=False)
     exact_string_match = jinja_normalized_str == python_normalized_str
 
     # Find actual data differences if trees don't match
@@ -901,15 +889,9 @@ def compare_pipelines(
         python_steps = python_data.get("steps", [])
 
         if len(jinja_steps) == len(python_steps):
-            for i, (jinja_step, python_step) in enumerate(
-                    zip(jinja_steps, python_steps)):
+            for i, (jinja_step, python_step) in enumerate(zip(jinja_steps, python_steps)):
                 if not deep_equal(jinja_step, python_step):
-                    step_id = (
-                        jinja_step.get("label")
-                        or jinja_step.get("block")
-                        or jinja_step.get("group")
-                        or f"Step {i}"
-                    )
+                    step_id = jinja_step.get("label") or jinja_step.get("block") or jinja_step.get("group") or f"Step {i}"
                     # Find specific differences
                     jinja_keys = set(jinja_step.keys())
                     python_keys = set(python_step.keys())
@@ -931,10 +913,7 @@ def compare_pipelines(
 
                     different_steps.append(diff_info)
         else:
-            different_steps.append(
-                f"Step count mismatch: {
-                    len(jinja_steps)} vs {
-                    len(python_steps)}")
+            different_steps.append(f"Step count mismatch: {len(jinja_steps)} vs {len(python_steps)}")
 
     result = {
         "yaml_trees_equal": yaml_trees_equal,
@@ -979,40 +958,29 @@ def test_pipeline_path():
 def check_minijinja():
     """Check that minijinja-cli is available."""
     try:
-        subprocess.run(["minijinja-cli", "--version"],
-                       capture_output=True, check=True)
+        subprocess.run(["minijinja-cli", "--version"], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         pytest.skip(
             "minijinja-cli not found. Install: curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh"
         )
 
 
-@pytest.mark.parametrize("scenario",
-                         get_all_test_scenarios(),
-                         ids=lambda s: s.name)
-def test_ci_pipeline_scenario(
-    scenario, template_path, test_pipeline_path, check_minijinja, tmp_path
-):
+@pytest.mark.parametrize("scenario", get_all_test_scenarios(), ids=lambda s: s.name)
+def test_ci_pipeline_scenario(scenario, template_path, test_pipeline_path, check_minijinja, tmp_path):
     """Test that Python generator produces identical output to Jinja template for each scenario."""
     jinja_output = tmp_path / f"jinja_{scenario.name}.yaml"
     python_output = tmp_path / f"python_{scenario.name}.yaml"
 
     # Generate with Jinja
-    jinja_success, jinja_error = run_jinja_pipeline(
-        scenario, template_path, test_pipeline_path, str(jinja_output)
-    )
+    jinja_success, jinja_error = run_jinja_pipeline(scenario, template_path, test_pipeline_path, str(jinja_output))
     assert jinja_success, f"Jinja generation failed: {jinja_error}"
 
     # Generate with Python
-    python_success, python_error = run_python_pipeline(
-        scenario, test_pipeline_path, str(python_output)
-    )
+    python_success, python_error = run_python_pipeline(scenario, test_pipeline_path, str(python_output))
     assert python_success, f"Python generation failed: {python_error}"
 
     # Compare outputs
-    matches, comparison = compare_pipelines(
-        str(jinja_output), str(python_output), scenario.name, show_diff=True
-    )
+    matches, comparison = compare_pipelines(str(jinja_output), str(python_output), scenario.name, show_diff=True)
     assert matches, f"Pipeline outputs don't match:\n{comparison}"
 
 

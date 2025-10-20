@@ -6,16 +6,22 @@ from ..ci.hardware_tests import generate_all_hardware_tests
 from ..data_models.buildkite_step import BuildkiteBlockStep, BuildkiteStep, get_step_key
 from ..data_models.test_step import TestStep
 from ..pipeline_config import PipelineGeneratorConfig
-from ..utils.constants import BlockLabels, BuildStepKeys, GPUType, HardwareLabels, Scripts
+from ..utils.constants import (
+    AgentQueue,
+    BlockLabels,
+    BuildStepKeys,
+    GPUType,
+    HardwareLabels,
+    PriorityValues,
+    Scripts,
+)
 from .amd_tests import generate_amd_group
 from .docker_builds import generate_main_build_step
 from .hardware_tests import get_gh200_test, get_intel_tests, get_tpu_v0_tests, get_tpu_v1_tests
 from .test_step_converter import convert_fastcheck_test_step
 
 
-def generate_fastcheck_test_steps(
-    test_steps: List[TestStep], config: PipelineGeneratorConfig
-) -> List[Union[BuildkiteStep, BuildkiteBlockStep]]:
+def generate_fastcheck_test_steps(test_steps: List[TestStep], config: PipelineGeneratorConfig) -> List[Union[BuildkiteStep, BuildkiteBlockStep]]:
     """
     Generate test steps for fastcheck mode - only fast_check tests.
 
@@ -38,8 +44,7 @@ def generate_fastcheck_test_steps(
         depends_on = BuildStepKeys.MAIN_IMAGE
 
         # Convert using fastcheck converter (always main image)
-        buildkite_step = convert_fastcheck_test_step(
-            test_step, config.container_image, config)
+        buildkite_step = convert_fastcheck_test_step(test_step, config.container_image, config)
         buildkite_step.depends_on = depends_on
         steps.append(buildkite_step)
 
@@ -56,7 +61,7 @@ def _add_neuron_test(steps: List) -> None:
     neuron_test: Dict[str, Any] = {
         "label": HardwareLabels.NEURON_TEST,
         "depends_on": "run-neuron-test",
-        "agents": {"queue": "neuron"},
+        "agents": {"queue": AgentQueue.NEURON},
         "command": f"bash {Scripts.RUN_NEURON_TEST}",
         "soft_fail": False,
     }
@@ -64,9 +69,7 @@ def _add_neuron_test(steps: List) -> None:
     steps.append(neuron_test)
 
 
-def generate_blocked_test_steps(
-    test_steps: List[TestStep], config: PipelineGeneratorConfig
-) -> List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]]:
+def generate_blocked_test_steps(test_steps: List[TestStep], config: PipelineGeneratorConfig) -> List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]]:
     """Generate blocked steps for non-fast-check tests."""
     steps: List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]] = []
 
@@ -82,13 +85,13 @@ def generate_blocked_test_steps(
         block_key = f"block-{get_step_key(test_step.label)}"
         steps.append(
             BuildkiteBlockStep(
-                block=f"Run {
-                    test_step.label}",
+                block=f"Run {test_step.label}",
                 key=block_key,
-                depends_on=BuildStepKeys.MAIN_IMAGE))
+                depends_on=BuildStepKeys.MAIN_IMAGE,
+            )
+        )
 
-        buildkite_step = convert_fastcheck_test_step(
-            test_step, config.container_image, config)
+        buildkite_step = convert_fastcheck_test_step(test_step, config.container_image, config)
         buildkite_step.depends_on = block_key
         steps.append(buildkite_step)
 
@@ -100,13 +103,13 @@ def generate_blocked_test_steps(
         block_key = f"block-{get_step_key(test_step.label)}"
         steps.append(
             BuildkiteBlockStep(
-                block=f"Run {
-                    test_step.label}",
+                block=f"Run {test_step.label}",
                 key=block_key,
-                depends_on=BuildStepKeys.MAIN_IMAGE))
+                depends_on=BuildStepKeys.MAIN_IMAGE,
+            )
+        )
 
-        buildkite_step = convert_fastcheck_test_step(
-            test_step, config.container_image, config)
+        buildkite_step = convert_fastcheck_test_step(test_step, config.container_image, config)
         buildkite_step.depends_on = block_key
         steps.append(buildkite_step)
 
@@ -119,17 +122,14 @@ def generate_blocked_test_steps(
         }
         steps.append(a100_block)  # type: ignore[arg-type]
         for test_step in a100_tests:
-            buildkite_step = convert_fastcheck_test_step(
-                test_step, config.container_image, config)
-            buildkite_step.priority = 10000
+            buildkite_step = convert_fastcheck_test_step(test_step, config.container_image, config)
+            buildkite_step.priority = PriorityValues.A100_TESTS
             steps.append(buildkite_step)
 
     return steps
 
 
-def generate_fastcheck_pipeline(
-    test_steps: List[TestStep], config: PipelineGeneratorConfig
-) -> List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]]:
+def generate_fastcheck_pipeline(test_steps: List[TestStep], config: PipelineGeneratorConfig) -> List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]]:
     """Generate complete fastcheck pipeline."""
     steps: List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]] = []
 

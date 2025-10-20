@@ -11,7 +11,7 @@ def generate_main_build_step(config: PipelineGeneratorConfig) -> BuildkiteStep:
     build_config = create_fastcheck_build(
         commit=config.commit,
         image_tag=config.container_image,
-        queue=AgentQueue.AWS_CPU_PREMERGE_SIMPLE.value,
+        queue=AgentQueue.CPU_QUEUE_PREMERGE,
         vllm_use_precompiled=config.vllm_use_precompiled,
     )
 

@@ -19,8 +19,7 @@ from ..pipeline_config import PipelineGeneratorConfig
 from ..utils.constants import DEFAULT_WORKING_DIR, GPUType, ShellCommands, TestLabels
 
 
-def build_docker_command(test_step: TestStep,
-                         config: PipelineGeneratorConfig) -> str:
+def build_docker_command(test_step: TestStep, config: PipelineGeneratorConfig) -> str:
     """
     Build docker command with command transformation pipeline.
 
@@ -37,8 +36,7 @@ def build_docker_command(test_step: TestStep,
 
     # Try intelligent test targeting first
     targeting_transformer = TestTargetingTransformer()
-    targeted_command = targeting_transformer.transform(
-        commands, test_step, config)
+    targeted_command = targeting_transformer.transform(commands, test_step, config)
     if targeted_command:
         return targeted_command
 
@@ -48,18 +46,14 @@ def build_docker_command(test_step: TestStep,
     return result if result else " && ".join(commands)
 
 
-def build_full_docker_command(
-        test_step: TestStep,
-        config: PipelineGeneratorConfig) -> str:
+def build_full_docker_command(test_step: TestStep, config: PipelineGeneratorConfig) -> str:
     """Build the full command that runs inside docker container."""
     docker_command = build_docker_command(test_step, config)
     working_dir = test_step.working_dir or DEFAULT_WORKING_DIR
     return f"{ShellCommands.CHECK_NVIDIA_GPU} && {ShellCommands.SETUP_DEPRECATED_BEAM_SEARCH} && cd {working_dir} && {docker_command}"
 
 
-def build_full_docker_command_no_coverage(
-    test_step: TestStep, config: PipelineGeneratorConfig
-) -> str:
+def build_full_docker_command_no_coverage(test_step: TestStep, config: PipelineGeneratorConfig) -> str:
     """Build docker command without coverage injection (for kubernetes)."""
     # Flatten and normalize commands
     commands = flatten_commands(test_step.commands or [])
@@ -71,9 +65,7 @@ def build_full_docker_command_no_coverage(
     return f"{ShellCommands.CHECK_NVIDIA_GPU} && {ShellCommands.SETUP_DEPRECATED_BEAM_SEARCH} && cd {working_dir} && {docker_command}"
 
 
-def build_docker_plugin(
-    test_step: TestStep, container_image: str, config: PipelineGeneratorConfig
-) -> Dict:
+def build_docker_plugin(test_step: TestStep, container_image: str, config: PipelineGeneratorConfig) -> Dict:
     """Build standard Docker plugin configuration."""
     full_command = build_full_docker_command(test_step, config)
     # Docker plugin commands need trailing space to match CI template
@@ -89,8 +81,7 @@ def build_docker_plugin(
         hf_home=HF_HOME_FSX,
         fail_fast=config.fail_fast,
         is_main_branch=(config.branch == "main"),  # CI mode
-        special_attention_backend=(
-            test_step.label == TestLabels.SPECULATIVE_DECODING_TESTS),
+        special_attention_backend=(test_step.label == TestLabels.SPECULATIVE_DECODING_TESTS),
         skip_codecov=False,  # CI mode always includes coverage token
     )
 
@@ -98,8 +89,7 @@ def build_docker_plugin(
     volumes = DockerVolumes(hf_home=HF_HOME_FSX)
 
     # Determine if mount_buildkite_agent is needed
-    mount_agent = (test_step.label ==
-                   TestLabels.BENCHMARKS or test_step.mount_buildkite_agent or config.cov_enabled)
+    mount_agent = test_step.label == TestLabels.BENCHMARKS or test_step.mount_buildkite_agent or config.cov_enabled
 
     docker_config = StandardDockerConfig(
         image=container_image,
@@ -114,9 +104,7 @@ def build_docker_plugin(
     return docker_config.to_plugin_dict()
 
 
-def build_special_gpu_plugin(
-    test_step: TestStep, container_image: str, config: PipelineGeneratorConfig
-) -> Dict:
+def build_special_gpu_plugin(test_step: TestStep, container_image: str, config: PipelineGeneratorConfig) -> Dict:
     """Build Docker plugin for special GPUs (H200, B200)."""
     full_command = build_full_docker_command(test_step, config)
     # Docker plugin commands need trailing space to match jinja
@@ -138,32 +126,25 @@ def build_special_gpu_plugin(
     return docker_config.to_plugin_dict()
 
 
-def build_kubernetes_plugin(
-    test_step: TestStep, container_image: str, config: PipelineGeneratorConfig
-) -> Dict:
+def build_kubernetes_plugin(test_step: TestStep, container_image: str, config: PipelineGeneratorConfig) -> Dict:
     """Build Kubernetes plugin for A100/H100."""
     # For kubernetes, build command WITHOUT coverage (jinja doesn't inject
     # coverage for kubernetes)
-    docker_command_no_cov = build_full_docker_command_no_coverage(
-        test_step, config)
+    docker_command_no_cov = build_full_docker_command_no_coverage(test_step, config)
     num_gpus = test_step.num_gpus or 1
 
     # Route to GPU-specific config
     if test_step.gpu == GPUType.H100:
-        return get_h100_kubernetes_config(
-            container_image, docker_command_no_cov, num_gpus)
+        return get_h100_kubernetes_config(container_image, docker_command_no_cov, num_gpus)
 
     if test_step.gpu == GPUType.A100:
-        return get_a100_kubernetes_config(
-            container_image, docker_command_no_cov, num_gpus)
+        return get_a100_kubernetes_config(container_image, docker_command_no_cov, num_gpus)
 
     # Fallback to standard Docker plugin
     return build_docker_plugin(test_step, container_image, config)
 
 
-def build_plugin_for_test_step(
-    test_step: TestStep, container_image: str, config: PipelineGeneratorConfig
-) -> Dict:
+def build_plugin_for_test_step(test_step: TestStep, container_image: str, config: PipelineGeneratorConfig) -> Dict:
     """
     Build the appropriate plugin configuration for a test step.
 

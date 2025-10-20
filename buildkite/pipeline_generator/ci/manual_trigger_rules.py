@@ -4,9 +4,7 @@ from ..data_models.test_step import TestStep
 from ..pipeline_config import PipelineGeneratorConfig
 
 
-def should_run_ci_test(
-        test_step: TestStep,
-        config: PipelineGeneratorConfig) -> bool:
+def should_run_ci_test(test_step: TestStep, config: PipelineGeneratorConfig) -> bool:
     """
     Determine if a CI test should run based on configuration and file changes.
 
@@ -28,8 +26,7 @@ def should_run_ci_test(
     return True
 
 
-def should_block_ci_test(test_step: TestStep,
-                         config: PipelineGeneratorConfig) -> bool:
+def should_block_ci_test(test_step: TestStep, config: PipelineGeneratorConfig) -> bool:
     """
     Determine if a CI test needs a manual trigger block.
 
@@ -48,9 +45,7 @@ def should_block_ci_test(test_step: TestStep,
     return False
 
 
-def should_block_torch_nightly_test(
-        test_step: TestStep,
-        config: PipelineGeneratorConfig) -> bool:
+def should_block_torch_nightly_test(test_step: TestStep, config: PipelineGeneratorConfig) -> bool:
     """
     Blocking logic for tests in the torch nightly group.
 

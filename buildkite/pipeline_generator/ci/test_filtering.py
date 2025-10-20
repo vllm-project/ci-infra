@@ -6,9 +6,7 @@ from ..data_models.test_step import TestStep
 from ..pipeline_config import PipelineGeneratorConfig
 
 
-def should_run_step(
-        test_step: TestStep,
-        config: PipelineGeneratorConfig) -> bool:
+def should_run_step(test_step: TestStep, config: PipelineGeneratorConfig) -> bool:
     """Determine if a step should run based on configuration and file changes."""
     # Always run if run_all or nightly is enabled
     if config.run_all or config.nightly:
@@ -33,8 +31,7 @@ def get_changed_tests(file_diff: List[str]) -> List[str]:
     """
     changed_tests = []
     for file in file_diff:
-        if file.startswith(
-                "tests/") and "/test_" in file and file.endswith(".py"):
+        if file.startswith("tests/") and "/test_" in file and file.endswith(".py"):
             # Remove tests/ prefix
             changed_tests.append(file[6:])
     return changed_tests
@@ -46,16 +43,13 @@ def are_only_tests_changed(file_diff: List[str]) -> bool:
         return False
 
     for file in file_diff:
-        if not (file.startswith("tests/")
-                and "/test_" in file and file.endswith(".py")):
+        if not (file.startswith("tests/") and "/test_" in file and file.endswith(".py")):
             return False
 
     return True
 
 
-def get_intelligent_test_targets(
-        test_step: TestStep,
-        changed_tests: List[str]) -> List[str]:
+def get_intelligent_test_targets(test_step: TestStep, changed_tests: List[str]) -> List[str]:
     """
     Get specific test targets when only test files changed.
     Returns list of test paths to run, or empty list if no matches.
@@ -94,9 +88,7 @@ def get_intelligent_test_targets(
     for target in matched_targets:
         # Check if target is covered by any of the command paths
         is_covered = any(
-            target.startswith(covered_path)
-            and (len(target) == len(covered_path) or target[len(covered_path)] == "/")
-            for covered_path in covered_paths
+            target.startswith(covered_path) and (len(target) == len(covered_path) or target[len(covered_path)] == "/") for covered_path in covered_paths
         )
         if is_covered:
             filtered_targets.append(target)
@@ -125,8 +117,7 @@ def extract_covered_test_paths(commands) -> List[str]:
                 continue
 
             # Skip if not in pytest args, starts with -, or is a specific test
-            if not in_pytest or part.startswith(
-                    "-") or "/" not in part or "::" in part:
+            if not in_pytest or part.startswith("-") or "/" not in part or "::" in part:
                 continue
 
             # Add the test path

@@ -8,11 +8,7 @@ class CommandTransformer(ABC):
     """Base class for command transformers."""
 
     @abstractmethod
-    def transform(
-            self,
-            commands: List[str],
-            test_step,
-            config) -> Optional[str]:
+    def transform(self, commands: List[str], test_step, config) -> Optional[str]:
         """
         Transform commands into a single command string.
 

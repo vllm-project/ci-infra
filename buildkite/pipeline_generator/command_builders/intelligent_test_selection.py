@@ -14,11 +14,7 @@ from .command_builder_base import CommandTransformer
 class TestTargetingTransformer(CommandTransformer):
     """Transformer that applies intelligent test targeting when only tests changed."""
 
-    def transform(
-            self,
-            commands: List[str],
-            test_step,
-            config) -> Optional[str]:
+    def transform(self, commands: List[str], test_step, config) -> Optional[str]:
         """
         Transform commands to target specific tests when only test files changed.
 
@@ -28,8 +24,7 @@ class TestTargetingTransformer(CommandTransformer):
             return None
 
         changed_tests = get_changed_tests(config.list_file_diff)
-        matched_targets = get_intelligent_test_targets(
-            test_step, changed_tests)
+        matched_targets = get_intelligent_test_targets(test_step, changed_tests)
 
         if not matched_targets:
             return None

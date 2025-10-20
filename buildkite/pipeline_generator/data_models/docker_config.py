@@ -3,6 +3,13 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from ..utils.constants import (
+    EnvironmentValues,
+    EnvironmentVariables,
+    KubernetesConstants,
+    PluginNames,
+)
+
 # Environment configuration
 HF_HOME_FSX = "/fsx/hf_cache"
 HF_HOME = "/root/.cache/huggingface"
@@ -22,7 +29,7 @@ class DockerEnvironment:
     def get_environment_list(self) -> List[str]:
         """Get list of environment variables."""
         env_vars = [
-            "VLLM_USAGE_SOURCE=ci-test",
+            f"{EnvironmentVariables.VLLM_USAGE_SOURCE}={EnvironmentValues.VLLM_USAGE_CI_TEST}",
             "NCCL_CUMEM_HOST_ENABLE=0",
             f"HF_HOME={self.hf_home}",
             "HF_TOKEN",
@@ -39,7 +46,7 @@ class DockerEnvironment:
             env_vars.append("BUILDKITE_ANALYTICS_TOKEN")
 
         if self.special_attention_backend:
-            env_vars.append("VLLM_ATTENTION_BACKEND=XFORMERS")
+            env_vars.append(f"{EnvironmentVariables.VLLM_ATTENTION_BACKEND}={EnvironmentValues.ATTENTION_BACKEND_XFORMERS}")
 
         env_vars.extend(self.additional_vars)
         return env_vars
@@ -77,7 +84,7 @@ class StandardDockerConfig:
         vols = self.volumes or DockerVolumes()
 
         plugin = {
-            "docker#v5.2.0": {
+            PluginNames.DOCKER: {
                 "image": self.image,
                 "always-pull": True,
                 "propagate-environment": True,
@@ -88,10 +95,10 @@ class StandardDockerConfig:
         }
 
         if self.has_gpu:
-            plugin["docker#v5.2.0"]["gpus"] = "all"
+            plugin[PluginNames.DOCKER]["gpus"] = "all"
 
         if self.mount_buildkite_agent:
-            plugin["docker#v5.2.0"]["mount-buildkite-agent"] = True
+            plugin[PluginNames.DOCKER]["mount-buildkite-agent"] = True
 
         return plugin
 
@@ -110,7 +117,7 @@ class SpecialGPUDockerConfig:
     def to_plugin_dict(self) -> Dict[str, Any]:
         """Convert to Docker plugin dictionary for special GPUs."""
         env_vars = [
-            "VLLM_USAGE_SOURCE=ci-test",
+            f"{EnvironmentVariables.VLLM_USAGE_SOURCE}={EnvironmentValues.VLLM_USAGE_CI_TEST}",
             "NCCL_CUMEM_HOST_ENABLE=0",
             "HF_HOME=/benchmark-hf-cache",
             "HF_TOKEN",
@@ -130,7 +137,7 @@ class SpecialGPUDockerConfig:
         ]
 
         plugin = {
-            "docker#v5.2.0": {
+            PluginNames.DOCKER: {
                 "image": self.image,
                 "always-pull": True,
                 "propagate-environment": True,
@@ -142,7 +149,7 @@ class SpecialGPUDockerConfig:
 
         # B200 doesn't specify gpus (configured by environment variable)
         if self.gpu_type != "b200":
-            plugin["docker#v5.2.0"]["gpus"] = "all"
+            plugin[PluginNames.DOCKER]["gpus"] = "all"
 
         return plugin
 
@@ -156,11 +163,11 @@ class KubernetesResourceConfig:
 
     def get_resource_limits(self) -> Dict[str, Any]:
         """Get resource limits."""
-        return {"nvidia.com/gpu": self.num_gpus}
+        return {KubernetesConstants.NVIDIA_GPU_RESOURCE: self.num_gpus}
 
     def get_node_selector(self) -> Dict[str, str]:
         """Get node selector."""
-        return {"nvidia.com/gpu.product": self.gpu_product}
+        return {KubernetesConstants.NVIDIA_GPU_PRODUCT: self.gpu_product}
 
 
 @dataclass
@@ -182,11 +189,17 @@ class KubernetesConfig:
                     "command": [f'bash -c "{self.command}"'],
                     "resources": {"limits": self.resources.get_resource_limits()},
                     "volumeMounts": [
-                        {"name": "devshm", "mountPath": "/dev/shm"},
-                        {"name": "hf-cache", "mountPath": HF_HOME},
+                        {
+                            "name": KubernetesConstants.DEVSHM_VOLUME,
+                            "mountPath": KubernetesConstants.DEV_SHM_PATH,
+                        },
+                        {"name": KubernetesConstants.HF_CACHE_VOLUME, "mountPath": HF_HOME},
                     ],
                     "env": [
-                        {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
+                        {
+                            "name": EnvironmentVariables.VLLM_USAGE_SOURCE,
+                            "value": EnvironmentValues.VLLM_USAGE_CI_TEST,
+                        },
                         {"name": "NCCL_CUMEM_HOST_ENABLE", "value": "0"},
                         {"name": "HF_HOME", "value": HF_HOME},
                     ],
@@ -194,8 +207,17 @@ class KubernetesConfig:
             ],
             "nodeSelector": self.resources.get_node_selector(),
             "volumes": [
-                {"name": "devshm", "emptyDir": {"medium": "Memory"}},
-                {"name": "hf-cache", "hostPath": {"path": self.hf_cache_path, "type": "Directory"}},
+                {
+                    "name": KubernetesConstants.DEVSHM_VOLUME,
+                    "emptyDir": {"medium": KubernetesConstants.EMPTY_DIR_MEDIUM},
+                },
+                {
+                    "name": KubernetesConstants.HF_CACHE_VOLUME,
+                    "hostPath": {
+                        "path": self.hf_cache_path,
+                        "type": KubernetesConstants.HOST_PATH_TYPE,
+                    },
+                },
             ],
         }
 
@@ -205,38 +227,37 @@ class KubernetesConfig:
             pod_spec["containers"][0]["env"].append(
                 {
                     "name": "HF_TOKEN",
-                    "valueFrom": {"secretKeyRef": {"name": "hf-token-secret", "key": "token"}},
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": KubernetesConstants.HF_TOKEN_SECRET_NAME,
+                            "key": KubernetesConstants.HF_TOKEN_SECRET_KEY,
+                        }
+                    },
                 }
             )
 
-        return {"kubernetes": {"podSpec": pod_spec}}
+        return {PluginNames.KUBERNETES: {"podSpec": pod_spec}}
 
 
 # GPU-specific Kubernetes configurations
-def get_h100_kubernetes_config(
-        image: str, command: str, num_gpus: int = 1) -> Dict[str, Any]:
+def get_h100_kubernetes_config(image: str, command: str, num_gpus: int = 1) -> Dict[str, Any]:
     """Get H100 Kubernetes configuration."""
     config = KubernetesConfig(
         image=image,
         command=command,
-        resources=KubernetesResourceConfig(
-            num_gpus=num_gpus,
-            gpu_product="NVIDIA-H100-80GB-HBM3"),
+        resources=KubernetesResourceConfig(num_gpus=num_gpus, gpu_product="NVIDIA-H100-80GB-HBM3"),
         hf_cache_path="/mnt/hf-cache",
     )
     return config.to_plugin_dict()
 
 
-def get_a100_kubernetes_config(
-        image: str, command: str, num_gpus: int = 1) -> Dict[str, Any]:
+def get_a100_kubernetes_config(image: str, command: str, num_gpus: int = 1) -> Dict[str, Any]:
     """Get A100 Kubernetes configuration."""
     config = KubernetesConfig(
         image=image,
         command=command,
-        resources=KubernetesResourceConfig(
-            num_gpus=num_gpus,
-            gpu_product="NVIDIA-A100-SXM4-80GB"),
+        resources=KubernetesResourceConfig(num_gpus=num_gpus, gpu_product=KubernetesConstants.NVIDIA_A100_PRODUCT),
         hf_cache_path=HF_HOME,
-        priority_class="ci",
+        priority_class=KubernetesConstants.PRIORITY_CLASS_CI,
     )
     return config.to_plugin_dict()

@@ -53,10 +53,7 @@ class TestTestTargetingTransformer:
     def test_transform_no_test_changes(self):
         """Test transform when non-test files changed."""
         transformer = TestTargetingTransformer()
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest v1/"],
-            source_file_dependencies=["tests/v1/"])
+        test_step = TestStep(label="Test", commands=["pytest v1/"], source_file_dependencies=["tests/v1/"])
 
         class Config:
             list_file_diff = ["vllm/engine.py", "vllm/model.py"]
@@ -76,13 +73,9 @@ class TestTestTargetingTransformer:
         )
 
         class Config:
-            list_file_diff = [
-                "tests/v1/test_engine.py",
-                "tests/v1/test_model.py"]
+            list_file_diff = ["tests/v1/test_engine.py", "tests/v1/test_model.py"]
 
-        result = transformer.transform(
-            ["pytest v1/test_engine.py v1/test_model.py"], test_step, Config()
-        )
+        result = transformer.transform(["pytest v1/test_engine.py v1/test_model.py"], test_step, Config())
         # Should return targeted command when tests match
         assert result is not None
         assert "pytest -v -s" in result
@@ -92,10 +85,7 @@ class TestTestTargetingTransformer:
     def test_transform_only_tests_changed_no_match(self):
         """Test transform when tests changed but no match."""
         transformer = TestTargetingTransformer()
-        test_step = TestStep(
-            label="Test",
-            commands=["pytest v1/"],
-            source_file_dependencies=["tests/v1/"])
+        test_step = TestStep(label="Test", commands=["pytest v1/"], source_file_dependencies=["tests/v1/"])
 
         class Config:
             list_file_diff = ["tests/v2/test_other.py"]
@@ -116,8 +106,7 @@ class TestTestTargetingTransformer:
         class Config:
             list_file_diff = ["tests/v1/test_engine.py"]
 
-        result = transformer.transform(
-            ["pytest -m slow v1/test_engine.py"], test_step, Config())
+        result = transformer.transform(["pytest -m slow v1/test_engine.py"], test_step, Config())
         assert result is not None
         assert "-m 'slow'" in result or "-m slow" in result
         assert "v1/test_engine.py" in result
