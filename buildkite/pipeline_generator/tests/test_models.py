@@ -1,27 +1,29 @@
 """Tests for data models."""
+
 import pytest
 from pydantic import ValidationError
 
-from ..models.test_step import TestStep, DEFAULT_TEST_WORKING_DIR
-from ..models.buildkite_step import (
-    BuildkiteStep,
+from ..data_models.buildkite_step import (
     BuildkiteBlockStep,
+    BuildkiteStep,
+    get_block_step,
     get_step_key,
-    get_block_step
 )
+from ..data_models.test_step import DEFAULT_TEST_WORKING_DIR, TestStep
 from ..utils.constants import AgentQueue, GPUType
 
 
 class TestStepKey:
     """Tests for step key generation."""
-    
+
     @pytest.mark.parametrize(
         ("step_label", "expected_result"),
         [
             ("Test Step", "test-step"),
             ("Test Step 2", "test-step-2"),
             ("Test (Step)", "test-step"),
-            ("Test A, B, C", "test-a--b--c"),  # Commas are replaced with dashes
+            # Commas are replaced with dashes
+            ("Test A, B, C", "test-a--b--c"),
             ("Distributed Tests (50%)", "distributed-tests-50"),
             ("LoRA Test +Plus", "lora-test--plus"),
         ],
@@ -32,7 +34,7 @@ class TestStepKey:
 
 class TestBlockStep:
     """Tests for block step generation."""
-    
+
     @pytest.mark.parametrize(
         ("step_label", "expected_block", "expected_key"),
         [
@@ -41,7 +43,11 @@ class TestBlockStep:
             ("Test (Step)", "Run Test (Step)", "block-test-step"),
         ],
     )
-    def test_get_block_step(self, step_label: str, expected_block: str, expected_key: str):
+    def test_get_block_step(
+            self,
+            step_label: str,
+            expected_block: str,
+            expected_key: str):
         block_step = get_block_step(step_label)
         assert block_step.block == expected_block
         assert block_step.key == expected_key
@@ -49,7 +55,7 @@ class TestBlockStep:
 
 class TestTestStep:
     """Tests for TestStep model."""
-    
+
     def test_create_test_step_with_command(self):
         """Test creating a test step with command field."""
         test_step = TestStep(
@@ -101,8 +107,7 @@ class TestTestStep:
             label="Test Step",
             command="echo 'hello'",
             gpu=GPUType.A100,
-            num_gpus=2
-        )
+            num_gpus=2)
         assert test_step.gpu == GPUType.A100
         assert test_step.num_gpus == 2
 
@@ -117,7 +122,9 @@ class TestTestStep:
 
     def test_create_test_step_multi_node_missing_num_gpus(self):
         """Test that multi-node without num_gpus fails."""
-        with pytest.raises(ValueError, match="'num_gpus' must be defined if 'num_nodes' is defined"):
+        with pytest.raises(
+            ValueError, match="'num_gpus' must be defined if 'num_nodes' is defined"
+        ):
             TestStep(
                 label="Test Step",
                 command="echo 'hello'",
@@ -126,12 +133,17 @@ class TestTestStep:
 
     def test_create_test_step_multi_node_mismatched_commands(self):
         """Test that multi-node with wrong number of command lists fails."""
-        with pytest.raises(ValueError, match="Number of command lists must match the number of nodes"):
+        with pytest.raises(
+            ValueError, match="Number of command lists must match the number of nodes"
+        ):
             TestStep(
                 label="Test Step",
                 num_nodes=2,
                 num_gpus=2,
-                commands=[["echo 'hello1'"], ["echo 'hello2'"], ["echo 'hello3'"]],
+                commands=[
+                    ["echo 'hello1'"],
+                    ["echo 'hello2'"],
+                    ["echo 'hello3'"]],
             )
 
     def test_create_test_step_multi_node_valid(self):
@@ -154,7 +166,8 @@ class TestTestStep:
             command="pytest test.py",
             source_file_dependencies=["vllm/engine/", "tests/test_engine.py"],
         )
-        assert test_step.source_file_dependencies == ["vllm/engine/", "tests/test_engine.py"]
+        assert test_step.source_file_dependencies == [
+            "vllm/engine/", "tests/test_engine.py"]
 
     def test_create_test_step_optional(self):
         """Test creating an optional test step."""
@@ -168,7 +181,7 @@ class TestTestStep:
 
 class TestBuildkiteStep:
     """Tests for BuildkiteStep model."""
-    
+
     def test_create_buildkite_step(self):
         """Test creating a basic Buildkite step."""
         buildkite_step = BuildkiteStep(
@@ -194,7 +207,7 @@ class TestBuildkiteStep:
         buildkite_step = BuildkiteStep(
             label="Test Step",
             commands=["echo 'hello'"],
-            agents={"queue": AgentQueue.AWS_1xL4.value}
+            agents={"queue": AgentQueue.AWS_1xL4.value},
         )
         assert buildkite_step.agents == {"queue": AgentQueue.AWS_1xL4.value}
 
@@ -209,32 +222,28 @@ class TestBuildkiteStep:
 
     def test_create_buildkite_step_with_plugins(self):
         """Test creating a step with plugins."""
-        buildkite_step = BuildkiteStep(
-            label="Test Step",
-            commands=[],
-            plugins=[{"docker#v5.2.0": {"image": "test:latest"}}]
-        )
-        assert buildkite_step.plugins == [{"docker#v5.2.0": {"image": "test:latest"}}]
+        buildkite_step = BuildkiteStep(label="Test Step", commands=[], plugins=[
+            {"docker#v5.2.0": {"image": "test:latest"}}])
+        assert buildkite_step.plugins == [
+            {"docker#v5.2.0": {"image": "test:latest"}}]
 
     def test_create_buildkite_step_with_retry(self):
         """Test creating a step with retry configuration."""
         buildkite_step = BuildkiteStep(
             label="Test Step",
             commands=["echo 'hello'"],
-            retry={"automatic": [{"exit_status": -1, "limit": 1}]}
+            retry={"automatic": [{"exit_status": -1, "limit": 1}]},
         )
-        assert buildkite_step.retry == {"automatic": [{"exit_status": -1, "limit": 1}]}
+        assert buildkite_step.retry == {
+            "automatic": [{"exit_status": -1, "limit": 1}]}
 
 
 class TestBuildkiteBlockStep:
     """Tests for BuildkiteBlockStep model."""
-    
+
     def test_create_block_step(self):
         """Test creating a basic block step."""
-        block_step = BuildkiteBlockStep(
-            block="Run Test",
-            key="block-test"
-        )
+        block_step = BuildkiteBlockStep(block="Run Test", key="block-test")
         assert block_step.block == "Run Test"
         assert block_step.key == "block-test"
         assert block_step.depends_on is None
@@ -242,9 +251,6 @@ class TestBuildkiteBlockStep:
     def test_create_block_step_with_depends_on(self):
         """Test creating a block step with dependencies."""
         block_step = BuildkiteBlockStep(
-            block="Run Test",
-            key="block-test",
-            depends_on="image-build"
+            block="Run Test", key="block-test", depends_on="image-build"
         )
         assert block_step.depends_on == "image-build"
-

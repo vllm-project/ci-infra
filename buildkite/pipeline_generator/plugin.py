@@ -1,5 +1,6 @@
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
 
 from .utils.constants import HF_HOME
 
@@ -10,34 +11,27 @@ DEFAULT_DOCKER_ENVIRONMENT_VARIBLES = [
     f"HF_HOME={HF_HOME}",
     "VLLM_USAGE_SOURCE=ci-test",
     "HF_TOKEN",
-    "BUILDKITE_ANALYTICS_TOKEN"
+    "BUILDKITE_ANALYTICS_TOKEN",
 ]
-DEFAULT_DOCKER_VOLUMES = [
-    "/dev/shm:/dev/shm",
-    f"{HF_HOME}:{HF_HOME}"
-]
+DEFAULT_DOCKER_VOLUMES = ["/dev/shm:/dev/shm", f"{HF_HOME}:{HF_HOME}"]
 DEFAULT_KUBERNETES_CONTAINER_VOLUME_MOUNTS: List[Dict[str, str]] = [
     {"name": "devshm", "mountPath": "/dev/shm"},
-    {"name": "hf-cache", "mountPath": HF_HOME}
+    {"name": "hf-cache", "mountPath": HF_HOME},
 ]
 DEFAULT_KUBERNETES_CONTAINER_ENVIRONMENT_VARIABLES: List[Dict[str, Any]] = [
     {"name": "HF_HOME", "value": HF_HOME},
     {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
     {
         "name": "HF_TOKEN",
-        "valueFrom": {
-            "secretKeyRef": {
-                "name": "hf-token-secret",
-                "key": "token"
-            }
-        }
+        "valueFrom": {"secretKeyRef": {"name": "hf-token-secret", "key": "token"}},
     },
 ]
 DEFAULT_KUBERNETES_POD_VOLUMES = [
     {"name": "devshm", "emptyDir": {"medium": "Memory"}},
-    {"name": "hf-cache", "hostPath": {"path": HF_HOME, "type": "Directory"}}
+    {"name": "hf-cache", "hostPath": {"path": HF_HOME, "type": "Directory"}},
 ]
-DEFAULT_KUBERNETES_NODE_SELECTOR = {"nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"}
+DEFAULT_KUBERNETES_NODE_SELECTOR = {
+    "nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"}
 
 
 class DockerPluginConfig(BaseModel):
@@ -46,11 +40,14 @@ class DockerPluginConfig(BaseModel):
     The specification is based on:
     https://github.com/buildkite-plugins/docker-buildkite-plugin?tab=readme-ov-file#configuration
     """
+
     image: str = ""
     always_pull: bool = Field(default=True, alias="always-pull")
-    propagate_environment: bool = Field(default=True, alias="propagate-environment")
+    propagate_environment: bool = Field(
+        default=True, alias="propagate-environment")
     gpus: Optional[str] = "all"
-    mount_buildkite_agent: Optional[bool] = Field(default=False, alias="mount-buildkite-agent")
+    mount_buildkite_agent: Optional[bool] = Field(
+        default=False, alias="mount-buildkite-agent")
     environment: List[str] = DEFAULT_DOCKER_ENVIRONMENT_VARIBLES
     volumes: List[str] = DEFAULT_DOCKER_VOLUMES
     shell: List[str] = ["/bin/bash", "-c"]
@@ -60,36 +57,36 @@ class KubernetesPodContainerConfig(BaseModel):
     """
     Configuration for a container running in a Kubernetes pod.
     """
+
     image: str
     resources: Dict[str, Dict[str, int]]
     volume_mounts: List[Dict[str, str]] = Field(
         alias="volumeMounts",
-        default=DEFAULT_KUBERNETES_CONTAINER_VOLUME_MOUNTS  # type: ignore
+        default=DEFAULT_KUBERNETES_CONTAINER_VOLUME_MOUNTS,  # type: ignore
     )
-    env: List[Dict[str, Any]] = Field(
-        default_factory=lambda: list(DEFAULT_KUBERNETES_CONTAINER_ENVIRONMENT_VARIABLES)
-    )
+    env: List[Dict[str, Any]] = Field(default_factory=lambda: list(
+        DEFAULT_KUBERNETES_CONTAINER_ENVIRONMENT_VARIABLES))
 
 
 class KubernetesPodSpec(BaseModel):
     """
     Configuration for a Kubernetes pod running in a Buildkite step.
     """
+
     containers: List[KubernetesPodContainerConfig]
     priority_class_name: str = Field(default="ci", alias="priorityClassName")
     node_selector: Dict[str, Any] = Field(
-        default=DEFAULT_KUBERNETES_NODE_SELECTOR,
-        alias="nodeSelector"
+        default=DEFAULT_KUBERNETES_NODE_SELECTOR, alias="nodeSelector"
     )
     volumes: List[Dict[str, Any]] = Field(
-        default=DEFAULT_KUBERNETES_POD_VOLUMES
-    )
+        default=DEFAULT_KUBERNETES_POD_VOLUMES)
 
 
 class KubernetesPluginConfig(BaseModel):
     """
     Configuration for Kubernetes plugin running in a Buildkite step.
     """
+
     pod_spec: KubernetesPodSpec = Field(alias="podSpec")
 
 
@@ -98,11 +95,13 @@ def get_kubernetes_plugin_config(container_image: str, num_gpus: int) -> Dict:
         containers=[
             KubernetesPodContainerConfig(
                 image=container_image,
-                resources={"limits": {"nvidia.com/gpu": num_gpus}}
-            )
-        ]
-    )
-    return {KUBERNETES_PLUGIN_NAME: KubernetesPluginConfig(podSpec=pod_spec).dict(by_alias=True)}
+                resources={
+                    "limits": {
+                        "nvidia.com/gpu": num_gpus}})])
+    return {
+        KUBERNETES_PLUGIN_NAME: KubernetesPluginConfig(
+            podSpec=pod_spec).model_dump(
+            by_alias=True)}
 
 
 def get_docker_plugin_config(docker_image_path: str, no_gpu: bool) -> Dict:
@@ -111,4 +110,7 @@ def get_docker_plugin_config(docker_image_path: str, no_gpu: bool) -> Dict:
     )
     if no_gpu:
         docker_plugin_config.gpus = None
-    return {DOCKER_PLUGIN_NAME: docker_plugin_config.dict(exclude_none=True, by_alias=True)}
+    return {
+        DOCKER_PLUGIN_NAME: docker_plugin_config.model_dump(
+            exclude_none=True,
+            by_alias=True)}

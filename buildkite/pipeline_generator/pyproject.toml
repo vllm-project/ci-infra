@@ -1,0 +1,37 @@
+[tool.ruff]
+# Exclude common directories
+exclude = [
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    "*.egg-info",
+]
+
+line-length = 160  # Allow longer lines for type annotations and strings
+
+[tool.ruff.lint]
+# Enable pycodestyle (E), Pyflakes (F), and isort (I) rules
+select = ["E", "F", "I"]
+
+# Ignore specific rules for certain files
+[tool.ruff.lint.per-file-ignores]
+# Integration tests need to modify sys.path before importing (E402)
+"tests/test_integration_*.py" = ["E402"]
+# Hardware test configs and integration tests have long shell commands/URLs (E501)
+"hardware_test_configs.py" = ["E501"]
+"ci/hardware_tests.py" = ["E501"]
+"command_builders/coverage_injection.py" = ["E501"]
+"tests/test_integration_comprehensive.py" = ["E402", "E501"]
+"tests/test_integration_fastcheck.py" = ["E402", "E501"]
+"tests/test_integration_amd.py" = ["E402", "E501"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false  # Allow gradual typing
+exclude = [
+    "tests/",
+    "__pycache__/",
+]
+
