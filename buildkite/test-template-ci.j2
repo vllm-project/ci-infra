@@ -322,6 +322,11 @@ plugins:
                 value: "0"
               - name: HF_HOME
                 value: {{ hf_home }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-token-secret
+                    key: token
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
         volumes:
