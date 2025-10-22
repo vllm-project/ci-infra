@@ -421,8 +421,8 @@ steps:
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
         {% endif %}
         --tag {{ docker_image }}
-        --cache-from=type=registry,ref={{ docker_image_cache }},compression=uncompressed \
-        --cache-to=type=registry,ref={{ docker_image_cache }},mode=max,compression=uncompressed \
+        --cache-from=type=registry,ref={{ docker_image_cache }},compression=uncompressed
+        --cache-to=type=registry,ref={{ docker_image_cache }},mode=max,compression=uncompressed
         --target test
         --push
         --progress plain .
