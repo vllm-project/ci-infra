@@ -160,7 +160,7 @@ steps:
   - label: ":docker: build image"
     key: image-build
     depends_on: ~
-    timeout_in_minutes: 600
+    timeout_in_minutes: 900
     agents:
       queue: cpu_queue_postmerge_us_east_1
     commands:
