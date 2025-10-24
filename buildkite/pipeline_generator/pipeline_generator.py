@@ -1,67 +1,41 @@
-import click
+"""Main pipeline generator orchestration."""
+
 import os
-import re
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Union
+
+import click
 import yaml
-from pydantic import BaseModel, field_validator
 
-from .step import BuildkiteStep, BuildkiteBlockStep, TestStep
-from .utils import VLLM_ECR_URL, VLLM_ECR_REPO, AgentQueue
-from .pipeline_generator_helper import get_build_commands
-
-class PipelineGeneratorConfig:
-    def __init__(
-        self,
-        container_registry: str,
-        container_registry_repo: str,
-        commit: str,
-        list_file_diff: List[str],
-        run_all: bool = False,
-    ):
-        self.run_all = run_all
-        self.list_file_diff = list_file_diff
-        self.container_registry = container_registry
-        self.container_registry_repo = container_registry_repo
-        self.commit = commit
-
-    @property
-    def container_image(self):
-        return f"{self.container_registry}/{self.container_registry_repo}:{self.commit}"
-    
-    def validate(self):
-        """Validate the configuration."""
-        # Check if commit is a valid Git commit hash
-        pattern = r"^[0-9a-f]{40}$"
-        if not re.match(pattern, self.commit):
-            raise ValueError(f"Commit {self.commit} is not a valid Git commit hash")
+from .ci.amd_tests import generate_amd_group
+from .ci.ci_pipeline import generate_ci_pipeline
+from .data_models.buildkite_step import BuildkiteBlockStep, BuildkiteStep
+from .data_models.test_step import TestStep
+from .fastcheck.fastcheck_pipeline import generate_fastcheck_pipeline
+from .pipeline_config import PipelineGeneratorConfig
+from .utils.constants import VLLM_ECR_REPO, VLLM_ECR_URL, PipelineMode
 
 
 class PipelineGenerator:
-    def __init__(
-            self, 
-            config: PipelineGeneratorConfig
-        ):
+    """Main pipeline generator - orchestrates mode-specific generation."""
+
+    def __init__(self, config: PipelineGeneratorConfig):
         config.validate()
         self.config = config
 
-    def generate_build_step(self) -> BuildkiteStep:
-        """Build the Docker image and push it to container registry."""
-        build_commands = get_build_commands(self.config.container_registry, self.config.commit, self.config.container_image)
+    def generate(self, test_steps: List[TestStep]) -> List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]]:
+        """Generate the complete pipeline - delegates to mode-specific generators."""
 
-        return BuildkiteStep(
-            label=":docker: build image",
-            key="build",
-            agents={"queue": AgentQueue.AWS_CPU.value},
-            env={"DOCKER_BUILDKIT": "1"},
-            retry={
-                "automatic": [
-                    {"exit_status": -1, "limit": 2},
-                    {"exit_status": -10, "limit": 2}
-                ]
-            },
-            commands=build_commands,
-            depends_on=None,
-        )
+        # AMD mode: Only AMD group
+        if self.config.pipeline_mode == PipelineMode.AMD:
+            return [generate_amd_group(test_steps, self.config)]
+
+        # CI mode
+        if self.config.pipeline_mode == PipelineMode.CI:
+            return generate_ci_pipeline(test_steps, self.config)
+
+        # Fastcheck mode
+        return generate_fastcheck_pipeline(test_steps, self.config)
+
 
 def read_test_steps(file_path: str) -> List[TestStep]:
     """Read test steps from test pipeline yaml and parse them into TestStep objects."""
@@ -69,23 +43,105 @@ def read_test_steps(file_path: str) -> List[TestStep]:
         content = yaml.safe_load(f)
     return [TestStep(**step) for step in content["steps"]]
 
-def write_buildkite_steps(steps: List[Union[BuildkiteStep, BuildkiteBlockStep]], file_path: str) -> None:
+
+def write_buildkite_pipeline(steps: List[Union[BuildkiteStep, BuildkiteBlockStep, Dict[str, Any]]], file_path: str) -> None:
     """Write the buildkite steps to the Buildkite pipeline yaml file."""
-    buildkite_steps_dict = {"steps": [step.dict(exclude_none=True) for step in steps]}
+    # Convert steps to dicts, handling both objects and plain dicts
+    steps_dicts = []
+    for step in steps:
+        if isinstance(step, (BuildkiteStep, BuildkiteBlockStep)):
+            step_dict = step.model_dump(exclude_none=True)
+            # Remove empty commands list (matches Jinja behavior)
+            if "commands" in step_dict and step_dict["commands"] == []:
+                del step_dict["commands"]
+            steps_dicts.append(step_dict)
+        else:
+            steps_dicts.append(step)
+
+    pipeline = {"steps": steps_dicts}
     with open(file_path, "w") as f:
-        yaml.dump(buildkite_steps_dict, f, sort_keys=False)
+        yaml.dump(pipeline, f, sort_keys=False, default_flow_style=False)
+
 
 @click.command()
-@click.option("--test_path", type=str, required=True, help="Path to the test pipeline yaml file")
-@click.option("--run_all", type=str, help="If set to 1, run all tests")
-@click.option("--list_file_diff", type=str, help="List of files in the diff between current branch and main")
-def main(test_path: str, external_hardware_test_path: str, run_all: str, list_file_diff: str):
+@click.option(
+    "--test_path",
+    type=str,
+    default=".buildkite/test-pipeline.yaml",
+    help="Path to the test pipeline yaml file",
+)
+@click.option("--run_all", type=str, default="0", help="If set to 1, run all tests")
+@click.option("--nightly", type=str, default="0", help="If set to 1, run nightly tests")
+@click.option(
+    "--list_file_diff",
+    type=str,
+    default="",
+    help="List of files in the diff between current branch and main (pipe-separated)",
+)
+@click.option("--mirror_hw", type=str, default="amdexperimental", help="Mirror hardware to use")
+@click.option("--fail_fast", type=str, default="false", help="Enable fail fast mode")
+@click.option("--vllm_use_precompiled", type=str, default="0", help="Use precompiled wheels")
+@click.option("--cov_enabled", type=str, default="0", help="Enable coverage")
+@click.option("--vllm_ci_branch", type=str, default="main", help="CI branch to use")
+@click.option("--pipeline_mode", type=str, default="ci", help="Pipeline mode: ci, fastcheck, or amd")
+@click.option(
+    "--output",
+    type=str,
+    default=".buildkite/pipeline.yaml",
+    help="Output path for generated pipeline",
+)
+def main(
+    test_path: str,
+    run_all: str,
+    nightly: str,
+    list_file_diff: str,
+    mirror_hw: str,
+    fail_fast: str,
+    vllm_use_precompiled: str,
+    cov_enabled: str,
+    vllm_ci_branch: str,
+    pipeline_mode: str,
+    output: str,
+):
+    """Generate Buildkite pipeline from test configuration."""
     test_steps = read_test_steps(test_path)
+
+    # Get environment variables
+    commit = os.getenv("BUILDKITE_COMMIT", "0" * 40)
+    branch = os.getenv("BUILDKITE_BRANCH", "main")
+
+    # Parse list_file_diff
+    file_diff = list_file_diff.split("|") if list_file_diff else []
+
+    # Parse pipeline mode
+    mode = PipelineMode.CI
+    if pipeline_mode == "fastcheck":
+        mode = PipelineMode.FASTCHECK
+    elif pipeline_mode == "amd":
+        mode = PipelineMode.AMD
 
     pipeline_generator_config = PipelineGeneratorConfig(
         run_all=run_all == "1",
-        list_file_diff=list_file_diff,
+        nightly=nightly == "1",
+        list_file_diff=file_diff,
         container_registry=VLLM_ECR_URL,
         container_registry_repo=VLLM_ECR_REPO,
-        commit=os.getenv("BUILDKITE_COMMIT"),
+        commit=commit,
+        branch=branch,
+        mirror_hw=mirror_hw,
+        fail_fast=fail_fast == "true",
+        vllm_use_precompiled=vllm_use_precompiled,
+        cov_enabled=cov_enabled == "1",
+        vllm_ci_branch=vllm_ci_branch,
+        pipeline_mode=mode,
     )
+
+    generator = PipelineGenerator(pipeline_generator_config)
+    steps = generator.generate(test_steps)
+
+    write_buildkite_pipeline(steps, output)
+    print(f"Pipeline generated at {output}")
+
+
+if __name__ == "__main__":
+    main()

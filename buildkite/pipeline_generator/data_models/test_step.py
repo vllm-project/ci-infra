@@ -1,18 +1,22 @@
-from pydantic import BaseModel, Field, root_validator, model_validator
-from typing import List, Dict, Any, Optional
+from typing import List, Optional, Union
+
+from pydantic import BaseModel, model_validator
 from typing_extensions import Self
 
-from .utils import AgentQueue, GPUType
+from ..utils.constants import GPUType
 
-BUILD_STEP_KEY = "build"
 DEFAULT_TEST_WORKING_DIR = "/vllm-workspace/tests"
+
 
 class TestStep(BaseModel):
     """This class represents a test step defined in the test configuration file."""
+
     label: str
     working_dir: Optional[str] = DEFAULT_TEST_WORKING_DIR
     optional: Optional[bool] = False
     fast_check: Optional[bool] = None
+    fast_check_only: Optional[bool] = None
+    torch_nightly: Optional[bool] = None
     mirror_hardwares: Optional[List[str]] = None
     no_gpu: Optional[bool] = None
     gpu: Optional[GPUType] = None
@@ -21,12 +25,14 @@ class TestStep(BaseModel):
     source_file_dependencies: Optional[List[str]] = None
     soft_fail: Optional[bool] = None
     parallelism: Optional[int] = None
+    timeout_in_minutes: Optional[int] = None
+    mount_buildkite_agent: Optional[bool] = None
     command: Optional[str] = None
-    commands: Optional[List[str]] = None
+    commands: Optional[Union[List[str], List[List[str]]]] = None
 
     @model_validator(mode="before")
     @classmethod
-    def validate_and_convert_command(cls, values) -> Any:
+    def validate_and_convert_command(cls, values):
         """
         Validate that either 'command' or 'commands' is defined.
         If 'command' is defined, convert it to 'commands'.
@@ -45,54 +51,16 @@ class TestStep(BaseModel):
         if self.gpu and self.no_gpu:
             raise ValueError("Both 'gpu' and 'no_gpu' cannot be defined together.")
         return self
-    
+
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
         if self.num_nodes and not self.num_gpus:
             raise ValueError("'num_gpus' must be defined if 'num_nodes' is defined.")
-        if self.num_nodes and len(self.commands) != self.num_nodes:
-            raise ValueError("Number of commands must match the number of nodes.")
+        if self.num_nodes and self.commands:
+            # For multi-node, commands should be a list of lists
+            if isinstance(self.commands, list) and len(self.commands) > 0:
+                # If it's a list of lists, check the length
+                if isinstance(self.commands[0], list):
+                    if len(self.commands) != self.num_nodes:
+                        raise ValueError("Number of command lists must match the number of nodes.")
         return self
-
-
-class BuildkiteStep(BaseModel):
-    """This class represents a step in Buildkite format."""
-    label: str
-    agents: Dict[str, str] = {"queue": AgentQueue.AWS_CPU.value}
-    commands: List[str]
-    key: Optional[str] = None
-    plugins: Optional[List[Dict]] = None
-    parallelism: Optional[int] = None
-    soft_fail: Optional[bool] = None
-    depends_on: Optional[str] = "build"
-    env: Optional[Dict[str, str]] = None
-    retry: Optional[Dict[str, Any]] = None
-
-    @model_validator(mode="after")
-    def validate_agent_queue(self) -> Self:
-        queue = self.agents.get("queue")
-        if not AgentQueue(queue):
-            raise ValueError(f"Invalid agent queue: {queue}")
-
-
-class BuildkiteBlockStep(BaseModel):
-    """This class represents a block step in Buildkite format."""
-    block: str
-    key: str
-    depends_on: Optional[str] = BUILD_STEP_KEY
-
-
-def get_step_key(step_label: str) -> str:
-    step_key = ""
-    skip_chars = "()% "
-    for char in step_label.lower():
-        if char in ", " and step_key[-1] != "-":
-            step_key += "-"
-        elif char not in skip_chars:
-            step_key += char
-
-    return step_key
-
-
-def get_block_step(step_label: str) -> BuildkiteBlockStep:
-    return BuildkiteBlockStep(block=f"Run {step_label}", key=f"block-{get_step_key(step_label)}")
