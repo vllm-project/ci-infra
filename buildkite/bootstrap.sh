@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 set -euo pipefail
@@ -86,6 +85,8 @@ upload_pipeline() {
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D skip_image_build="$SKIP_IMAGE_BUILD" \
+            -D docker_image_override="$DOCKER_IMAGE_OVERRIDE" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -166,9 +167,9 @@ ignore_patterns=(
     "cmake/hipify.py"
     "cmake/cpu_extension.cmake"
 )
-
+# Detect if there are critical changes matching patterns
+CRITICAL_CHANGE_DETECTED=0
 for file in $file_diff; do
-    # First check if file matches any pattern
     matches_pattern=0
     for pattern in "${patterns[@]}"; do
         if [[ $file == $pattern* ]] || [[ $file == $pattern ]]; then
@@ -177,7 +178,6 @@ for file in $file_diff; do
         fi
     done
 
-    # If file matches pattern, check it's not in ignore patterns
     if [[ $matches_pattern -eq 1 ]]; then
         matches_ignore=0
         for ignore in "${ignore_patterns[@]}"; do
@@ -188,25 +188,72 @@ for file in $file_diff; do
         done
 
         if [[ $matches_ignore -eq 0 ]]; then
-            RUN_ALL=1
-            echo "Found changes: $file. Run all tests"
+            CRITICAL_CHANGE_DETECTED=1
+            echo "Found critical changes: $file"
             break
         fi
     fi
 done
 
+# RUN_ALL can be set manually, but also set it when critical changes are detected
+if [[ -z "${RUN_ALL:-}" ]]; then
+    RUN_ALL=0
+fi
+if [[ $CRITICAL_CHANGE_DETECTED -eq 1 ]]; then
+    RUN_ALL=1
+    echo "RUN_ALL set due to critical changes"
+fi
+
 # Decide whether to use precompiled wheels
-# Relies on existing patterns array as a basis.
 if [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
     echo "VLLM_USE_PRECOMPILED is already set to: $VLLM_USE_PRECOMPILED"
-elif [[ $RUN_ALL -eq 1 ]]; then
+elif [[ $CRITICAL_CHANGE_DETECTED -eq 1 || "${BUILDKITE_BRANCH}" == "main" ]]; then
     export VLLM_USE_PRECOMPILED=0
-    echo "Detected critical changes, building wheels from source"
+    echo "Detected critical changes or main branch, building wheels from source"
 else
     export VLLM_USE_PRECOMPILED=1
     echo "No critical changes, using precompiled wheels"
 fi
 
+# Decide whether to skip building docker images (pull & mount code instead)
+if [[ -n "${SKIP_IMAGE_BUILD:-}" ]]; then
+    echo "SKIP_IMAGE_BUILD is preset to: ${SKIP_IMAGE_BUILD}"
+else
+    if [[ "${VLLM_USE_PRECOMPILED:-}" == "1" && "$CRITICAL_CHANGE_DETECTED" -eq 0 ]]; then
+        SKIP_IMAGE_BUILD=1
+    else
+        SKIP_IMAGE_BUILD=0
+    fi
+fi
+
+# Determine the lowest common ancestor (LCA) commit with main branch if skipping image build
+DOCKER_IMAGE_OVERRIDE=""
+if [[ "${SKIP_IMAGE_BUILD}" == "1" ]]; then
+    LCA_COMMIT=""
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        LCA_COMMIT=$(git merge-base origin/main HEAD)
+    fi
+    if [[ -n "$LCA_COMMIT" ]]; then
+        IMAGE_TAG="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$LCA_COMMIT"
+        echo "Checking for Docker image for LCA: $IMAGE_TAG"
+        # Check if the image exists on the registry
+        if docker manifest inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+            DOCKER_IMAGE_OVERRIDE="$IMAGE_TAG"
+            echo "Using Docker image for LCA commit: $DOCKER_IMAGE_OVERRIDE"
+        else
+            echo "LCA image not found, falling back to build image"
+            SKIP_IMAGE_BUILD=0
+            VLLM_USE_PRECOMPILED=0
+        fi
+    else
+        DOCKER_IMAGE_OVERRIDE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
+        echo "Could not determine LCA commit, using latest Docker image: $DOCKER_IMAGE_OVERRIDE"
+    fi
+fi
+
+echo "Final SKIP_IMAGE_BUILD=${SKIP_IMAGE_BUILD} (RUN_ALL=${RUN_ALL}, VLLM_USE_PRECOMPILED=${VLLM_USE_PRECOMPILED:-unset})"
+
+################## end WIP #####################
 
 LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
