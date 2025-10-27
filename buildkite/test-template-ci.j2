@@ -174,7 +174,7 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 
 {# If we have matched targets, run only those specific tests #}
 {% if matched_targets | length > 0 %}
-pytest -v -s{{ marker_ns.markers }} --junitxml=test-results.junit.xml -o junit_family=legacy {{ matched_targets | join(' ') }}; PYTEST_EXIT=$?; curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"; exit $PYTEST_EXIT
+pytest -v -s{{ marker_ns.markers }} --junitxml=test-results.junit.xml -o junit_family=legacy {{ matched_targets | join(' ') }}; PYTEST_EXIT=$$?; curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"; exit $$PYTEST_EXIT
 {% else %}
 {# Default behavior: preserve original commands with optional coverage/junit injection #}
 {% set ns = namespace(has_pytest=false) %}
@@ -186,7 +186,7 @@ pytest -v -s{{ marker_ns.markers }} --junitxml=test-results.junit.xml -o junit_f
 {% for cmd in step.commands %}
 {% if "pytest " in cmd %}{% set ns.has_pytest = true %}{% endif %}
 {{ add_pytest_coverage(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}{% endfor %}
-{% endif %}{% if ns.has_pytest %}; PYTEST_EXIT=$?; curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"; exit $PYTEST_EXIT{% endif %}
+{% endif %}{% if ns.has_pytest %}; PYTEST_EXIT=$$?; curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"; exit $$PYTEST_EXIT{% endif %}
 {% else %}
 {# Coverage disabled: still collect test analytics via JUnit XML #}
 {% if step.command %}
@@ -196,7 +196,7 @@ pytest -v -s{{ marker_ns.markers }} --junitxml=test-results.junit.xml -o junit_f
 {% for cmd in step.commands %}
 {% if "pytest " in cmd %}{% set ns.has_pytest = true %}{% endif %}
 {{ add_pytest_junit(cmd) }}{{ " && " if not loop.last else "" }}{% endfor %}
-{% endif %}{% if ns.has_pytest %}; PYTEST_EXIT=$?; curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"; exit $PYTEST_EXIT{% endif %}
+{% endif %}{% if ns.has_pytest %}; PYTEST_EXIT=$$?; curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"; exit $$PYTEST_EXIT{% endif %}
 {% endif %}
 {% endif %}
 {% endmacro %}
