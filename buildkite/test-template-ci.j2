@@ -32,7 +32,15 @@
 
 {% macro add_pytest_coverage(cmd, coverage_file) %}
 {% if "pytest " in cmd %}
-COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report= --cov-append --durations=0 ") }} || true
+COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report= --cov-append --durations=0 --junitxml=test-results.junit.xml -o junit_family=legacy ") }}
+{% else %}
+{{ cmd }}
+{% endif %}
+{% endmacro %}
+
+{% macro add_pytest_junit(cmd) %}
+{% if "pytest " in cmd %}
+{{ cmd | replace("pytest ", "pytest --junitxml=test-results.junit.xml -o junit_family=legacy ") }}
 {% else %}
 {{ cmd }}
 {% endif %}
@@ -166,11 +174,11 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 
 {# If we have matched targets, run only those specific tests #}
 {% if matched_targets | length > 0 %}
-pytest -v -s{{ marker_ns.markers }} {{ matched_targets | join(' ') }}
+pytest -v -s{{ marker_ns.markers }} --junitxml=test-results.junit.xml -o junit_family=legacy {{ matched_targets | join(' ') }}; PYTEST_EXIT=$?; curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"; exit $PYTEST_EXIT
 {% else %}
-{# Default behavior: preserve original commands with optional coverage injection #}
-{% if cov_enabled %}
+{# Default behavior: preserve original commands with optional coverage/junit injection #}
 {% set ns = namespace(has_pytest=false) %}
+{% if cov_enabled %}
 {% if step.command %}
 {% if "pytest " in step.command %}{% set ns.has_pytest = true %}{% endif %}
 {{ add_pytest_coverage(step.command, coverage_file) }}
@@ -178,9 +186,17 @@ pytest -v -s{{ marker_ns.markers }} {{ matched_targets | join(' ') }}
 {% for cmd in step.commands %}
 {% if "pytest " in cmd %}{% set ns.has_pytest = true %}{% endif %}
 {{ add_pytest_coverage(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}{% endfor %}
-{% endif %}{% if ns.has_pytest %} && curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"{% endif %}
+{% endif %}{% if ns.has_pytest %}; PYTEST_EXIT=$?; curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"; exit $PYTEST_EXIT{% endif %}
 {% else %}
-{{ step.command or (step.commands | join(' && ')) | safe }}
+{# Coverage disabled: still collect test analytics via JUnit XML #}
+{% if step.command %}
+{% if "pytest " in step.command %}{% set ns.has_pytest = true %}{% endif %}
+{{ add_pytest_junit(step.command) }}
+{% else %}
+{% for cmd in step.commands %}
+{% if "pytest " in cmd %}{% set ns.has_pytest = true %}{% endif %}
+{{ add_pytest_junit(cmd) }}{{ " && " if not loop.last else "" }}{% endfor %}
+{% endif %}{% if ns.has_pytest %}; PYTEST_EXIT=$?; curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"; exit $PYTEST_EXIT{% endif %}
 {% endif %}
 {% endif %}
 {% endmacro %}

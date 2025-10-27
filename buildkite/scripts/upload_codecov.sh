@@ -25,63 +25,62 @@ fi
 COVERAGE_DB_FILES=$(find /vllm-workspace -name ".coverage.*" -type f 2>/dev/null || true)
 
 if [ -z "$COVERAGE_DB_FILES" ]; then
-    echo "No .coverage.* files found in /vllm-workspace, skipping upload"
-    exit 0
+    echo "No .coverage.* files found in /vllm-workspace"
+    SKIP_COVERAGE=true
+else
+    echo "Found $(echo "$COVERAGE_DB_FILES" | wc -l) coverage file(s) to process"
+    SKIP_COVERAGE=false
 fi
 
-echo "Found $(echo "$COVERAGE_DB_FILES" | wc -l) coverage file(s) to process"
-
-# Change to /vllm-workspace to combine coverage files
+# Change to /vllm-workspace to process coverage and test results
 cd /vllm-workspace
 
-# Move all .coverage.* files to the current directory so coverage combine can find them
-# Note: coverage combine only looks in the current directory, not subdirectories
-# Using cp -n to skip files that are already in the target directory
-for cov_file in $COVERAGE_DB_FILES; do
-    if [ -f "$cov_file" ]; then
-        cp -n "$cov_file" . 2>/dev/null || true
+if [ "$SKIP_COVERAGE" = false ]; then
+    # Move all .coverage.* files to the current directory so coverage combine can find them
+    # Note: coverage combine only looks in the current directory, not subdirectories
+    # Using cp -n to skip files that are already in the target directory
+    for cov_file in $COVERAGE_DB_FILES; do
+        if [ -f "$cov_file" ]; then
+            cp -n "$cov_file" . 2>/dev/null || true
+        fi
+    done
+
+    # Combine all coverage database files into a single .coverage file
+    # This will apply the [paths] remapping from .coveragerc to normalize paths to vllm/
+    echo "Combining coverage files..."
+    COMBINE_OUTPUT=$(python3 -m coverage combine --keep 2>&1)
+    COMBINE_EXIT=$?
+
+    echo "$COMBINE_OUTPUT"
+
+    # Check if it's the "No data to combine" error (coverage exits with 0 even for this!)
+    if echo "$COMBINE_OUTPUT" | grep -q "No data to combine"; then
+        echo "Warning: No coverage data found - skipping coverage upload"
+        SKIP_COVERAGE=true
+    elif [ $COMBINE_EXIT -ne 0 ]; then
+        echo "Error: coverage combine failed with status $COMBINE_EXIT"
+        SKIP_COVERAGE=true
+    elif [ ! -f .coverage ]; then
+        echo "Error: Failed to combine coverage files - .coverage not created"
+        SKIP_COVERAGE=true
+    else
+        echo "Successfully combined coverage files"
+
+        # Generate XML report from the combined coverage data
+        # This will use the path mappings from .coveragerc to normalize paths
+        echo "Generating XML coverage report..."
+        python3 -m coverage xml -o coverage.xml
+
+        if [ ! -f coverage.xml ]; then
+            echo "Error: Failed to generate coverage.xml"
+            SKIP_COVERAGE=true
+        else
+            # Count total files in coverage report
+            TOTAL_FILES=$(grep -c '<class.*filename=' coverage.xml || echo "0")
+            echo "Generated coverage.xml with $TOTAL_FILES files"
+        fi
     fi
-done
-
-# Combine all coverage database files into a single .coverage file
-# This will apply the [paths] remapping from .coveragerc to normalize paths to vllm/
-echo "Combining coverage files..."
-COMBINE_OUTPUT=$(python3 -m coverage combine --keep 2>&1)
-COMBINE_EXIT=$?
-
-echo "$COMBINE_OUTPUT"
-
-# Check if it's the "No data to combine" error (coverage exits with 0 even for this!)
-if echo "$COMBINE_OUTPUT" | grep -q "No data to combine"; then
-    echo "Warning: No coverage data found - skipping upload"
-    exit 0
 fi
-
-if [ $COMBINE_EXIT -ne 0 ]; then
-    echo "Error: coverage combine failed with status $COMBINE_EXIT"
-    exit 1
-fi
-
-# Check if combine was successful
-if [ ! -f .coverage ]; then
-    echo "Error: Failed to combine coverage files - .coverage not created"
-    exit 1
-fi
-echo "Successfully combined coverage files"
-
-# Generate XML report from the combined coverage data
-# This will use the path mappings from .coveragerc to normalize paths
-echo "Generating XML coverage report..."
-python3 -m coverage xml -o coverage.xml
-
-if [ ! -f coverage.xml ]; then
-    echo "Error: Failed to generate coverage.xml"
-    exit 1
-fi
-
-# Count total files in coverage report
-TOTAL_FILES=$(grep -c '<class.*filename=' coverage.xml || echo "0")
-echo "Generated coverage.xml with $TOTAL_FILES files"
 
 # Download codecov CLI if not present
 if [ ! -f codecov ]; then
@@ -130,8 +129,30 @@ if [ -n "${BUILDKITE_PULL_REQUEST:-}" ] && [ "${BUILDKITE_PULL_REQUEST}" != "fal
     CODECOV_ARGS=("${CODECOV_ARGS[@]}" --pr "${BUILDKITE_PULL_REQUEST}")
 fi
 
-# Upload to codecov
-echo "Uploading to codecov..."
-./codecov "${CODECOV_ARGS[@]}" || echo "Warning: codecov upload failed"
+# Upload coverage to codecov if available
+if [ "$SKIP_COVERAGE" = false ] && [ -f coverage.xml ]; then
+    echo "Uploading coverage to codecov..."
+    ./codecov "${CODECOV_ARGS[@]}" || echo "Warning: codecov coverage upload failed"
+else
+    echo "Skipping coverage upload (no coverage data available)"
+fi
+
+# Upload test results if JUnit XML files exist
+JUNIT_FILES=$(find /vllm-workspace -name "test-results.junit.xml" -o -name "*junit.xml" -type f 2>/dev/null || true)
+
+if [ -n "$JUNIT_FILES" ]; then
+    echo "Found JUnit test result files, uploading to Codecov Test Analytics..."
+    for junit_file in $JUNIT_FILES; do
+        echo "Uploading test results from: $junit_file"
+        ./codecov do-upload --report-type test_results \
+            --git-service github \
+            --sha "${BUILDKITE_COMMIT:-unknown}" \
+            --slug "$UPLOAD_SLUG" \
+            --flag "$FLAG" \
+            --file "$junit_file" || echo "Warning: test results upload failed for $junit_file"
+    done
+else
+    echo "No JUnit test result files found, skipping test results upload"
+fi
 
 exit 0
