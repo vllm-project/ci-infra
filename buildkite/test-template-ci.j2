@@ -388,9 +388,9 @@ steps:
     depends_on: ~
     agents:
       {% if branch == "main" %}
-      queue: cpu_queue_premerge
+      queue: cpu_queue_postmerge_us_east_1
       {% else %}
-      queue: cpu_queue_premerge
+      queue: cpu_queue_premerge_us_east_1
       {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
@@ -415,7 +415,7 @@ steps:
       - "docker buildx ls"
       - >
         docker buildx build --file docker/Dockerfile
-        --build-arg max_jobs=64
+        --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
         --build-arg USE_SCCACHE=1
         --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
@@ -426,14 +426,11 @@ steps:
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
         {% endif %}
         --tag {{ docker_image }}
-        --cache-from=type=registry,ref={{ docker_image_cache }},compression=uncompressed
-        --cache-to=type=registry,ref={{ docker_image_cache }},mode=max,compression=uncompressed
+        --cache-from=type=registry,ref={{ docker_image_cache }}
+        --cache-to=type=registry,ref={{ docker_image_cache }},mode=max
         --target test
         --push
         --progress plain .
-      - "docker buildx use default"
-      - "docker buildx rm docker_container_builder"
-      - "docker buildx ls"
       {% if branch == "main" %}
       - "docker tag {{ docker_image }} {{ docker_image_latest }}"
       - "docker push {{ docker_image_latest }}"
