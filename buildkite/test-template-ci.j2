@@ -537,7 +537,7 @@ steps:
         git clone https://github.com/vllm-project/vllm-gaudi.git /tmp/vllm-gaudi
         
         docker build \
-          --file /tmp/vllm-gaudi/tests/ci_benchmark/Dockerfile.hpu \
+          --file /tmp/vllm-gaudi/tests/pytorch_ci_hud_benchmark/Dockerfile.hpu \
           --build-arg max_jobs=16 \
           --build-arg VLLM_COMMIT=$VLLM_STABLE_COMMIT \
           --build-arg VLLM_GAUDI_COMMIT=main \
