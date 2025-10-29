@@ -9,8 +9,6 @@
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
-{# Note: docker_image_hpu is NOT defined here because HPU uses a different commit tag (from vllm-gaudi compatibility) #}
-{# HPU image tag is determined dynamically in the build step based on VLLM_STABLE_COMMIT #}
 {% endif %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
@@ -536,9 +534,10 @@ steps:
           exit 0
         fi
         
-        # Build with the stable commit
+        git clone https://github.com/vllm-project/vllm-gaudi.git /tmp/vllm-gaudi
+        
         docker build \
-          --file docker/Dockerfile.hpu \
+          --file /tmp/vllm-gaudi/tests/ci_benchmark/Dockerfile.hpu \
           --build-arg max_jobs=16 \
           --build-arg VLLM_COMMIT=$VLLM_STABLE_COMMIT \
           --build-arg VLLM_GAUDI_COMMIT=main \
