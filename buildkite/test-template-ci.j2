@@ -520,7 +520,7 @@ steps:
       - |
         #!/bin/bash
         # Fetch the compatible vLLM commit for vllm-gaudi
-        VLLM_STABLE_COMMIT=$(curl -s https://raw.githubusercontent.com/vllm-project/vllm-gaudi/main/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT | tr -d '\n')
+        VLLM_STABLE_COMMIT=$(curl -s https://raw.githubusercontent.com/vllm-project/vllm-gaudi/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT | tr -d '\n')
         echo "Compatible vLLM commit for vllm-gaudi: $VLLM_STABLE_COMMIT"
         
         # HPU images always use postmerge registry (main branch only)
