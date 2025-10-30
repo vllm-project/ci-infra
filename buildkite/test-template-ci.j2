@@ -532,14 +532,14 @@ steps:
     {% set ns.blocked = 0 %}
   {% endif %}
 
-  {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+  {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and (step.ci_always_run != true) %}
   - block: "Run {{ step.label }}"
     depends_on: image-build
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
   {% endif %}
 
   - label: "{{ step.label }}"
-    {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+    {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and (step.ci_always_run != true) %}
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% else %}
     depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
