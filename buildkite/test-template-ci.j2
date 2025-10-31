@@ -507,6 +507,54 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
+  {% if branch == "main" %}
+  - label: ":docker: build image HPU"
+    key: image-build-hpu
+    depends_on: ~
+    agents:
+      queue: cpu_queue_postmerge_us_east_1
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - |
+        #!/bin/bash
+        # Fetch the compatible vLLM commit for vllm-gaudi
+        VLLM_STABLE_COMMIT=$(curl -s https://raw.githubusercontent.com/vllm-project/vllm-gaudi/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT | tr -d '\n')
+        echo "Compatible vLLM commit for vllm-gaudi: $VLLM_STABLE_COMMIT"
+        
+        # HPU images always use postmerge registry (main branch only)
+        REGISTRY="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo"
+        
+        # HPU images use the stable commit tag, not BUILDKITE_COMMIT
+        HPU_IMAGE_TAG="${REGISTRY}:${VLLM_STABLE_COMMIT}-hpu"
+        
+        if [[ -z $(docker manifest inspect "$HPU_IMAGE_TAG") ]]; then
+          echo "Image not found, proceeding with build..."
+        else
+          echo "Image $HPU_IMAGE_TAG already exists"
+          exit 0
+        fi
+        
+        git clone https://github.com/vllm-project/vllm-gaudi.git /tmp/vllm-gaudi
+        
+        docker build \
+          --file /tmp/vllm-gaudi/tests/pytorch_ci_hud_benchmark/Dockerfile.hpu \
+          --build-arg max_jobs=16 \
+          --build-arg VLLM_COMMIT=$VLLM_STABLE_COMMIT \
+          --build-arg VLLM_GAUDI_COMMIT=main \
+          --tag "$HPU_IMAGE_TAG" \
+          --progress plain .
+        
+        docker push "$HPU_IMAGE_TAG"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+  {% endif %}
+  
   {% for step in steps %}
   {% if step.fast_check_only != true %}
 
