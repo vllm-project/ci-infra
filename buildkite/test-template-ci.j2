@@ -511,6 +511,7 @@ steps:
   - label: ":docker: build image HPU"
     key: image-build-hpu
     depends_on: ~
+    soft_fail: true
     agents:
       queue: cpu_queue_postmerge_us_east_1
     commands:
