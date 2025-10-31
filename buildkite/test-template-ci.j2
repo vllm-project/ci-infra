@@ -519,14 +519,14 @@ steps:
       - |
         #!/bin/bash
         # Fetch the compatible vLLM commit for vllm-gaudi
-        VLLM_STABLE_COMMIT=$(curl -s https://raw.githubusercontent.com/vllm-project/vllm-gaudi/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT | tr -d '\n')
+        export VLLM_STABLE_COMMIT=$(curl -s https://raw.githubusercontent.com/vllm-project/vllm-gaudi/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT | tr -d '\n')
         echo "Compatible vLLM commit for vllm-gaudi: $VLLM_STABLE_COMMIT"
         
         # HPU images always use postmerge registry (main branch only)
-        REGISTRY="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo"
+        export REGISTRY="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo"
         
         # HPU images use the stable commit tag, not BUILDKITE_COMMIT
-        HPU_IMAGE_TAG="${REGISTRY}:${VLLM_STABLE_COMMIT}-hpu"
+        export HPU_IMAGE_TAG="${REGISTRY}:${VLLM_STABLE_COMMIT}-hpu"
         
         if [[ -z $(docker manifest inspect "$HPU_IMAGE_TAG") ]]; then
           echo "Image not found, proceeding with build..."
@@ -535,6 +535,7 @@ steps:
           exit 0
         fi
         
+        rm -rf /tmp/vllm-gaudi | true
         git clone https://github.com/vllm-project/vllm-gaudi.git /tmp/vllm-gaudi
         
         docker build \
