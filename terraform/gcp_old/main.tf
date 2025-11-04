@@ -19,6 +19,16 @@ module "ci_v6" {
   project_id            = var.project_id
 }
 
+module "ci_cpu" {
+  source    = "./modules/ci_cpu"
+  providers = {
+    google-beta.us-east5-b = google-beta.us-east5-b
+  }
+
+  buildkite_agent_token_ci_cluster = var.buildkite_agent_token_ci_cluster
+  project_id                       = var.project_id
+}
+
 # module "ci_v5" {
 #   source = "./modules/ci_v5"
 #   providers = {
