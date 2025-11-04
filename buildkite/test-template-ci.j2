@@ -169,7 +169,12 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 
 {# If we have matched targets, run only those specific tests #}
 {% if matched_targets | length > 0 %}
-pytest -v -s{{ marker_ns.markers }} {{ matched_targets | join(' ') }}
+{# Extract and preserve export statements from original commands #}
+{%- set all_commands = step.commands if step.commands else ([step.command] if step.command else []) %}
+{%- for cmd in all_commands %}
+{%- if cmd[:7] == 'export ' %}
+{{ cmd }} && {% endif %}
+{%- endfor %}pytest -v -s{{ marker_ns.markers }} {{ matched_targets | join(' ') }}
 {% else %}
 {# Default behavior: preserve original commands with optional coverage injection #}
 {% if cov_enabled %}
