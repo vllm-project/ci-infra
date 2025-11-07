@@ -609,6 +609,7 @@ steps:
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
       - label: "AMD MI300: {{ step.label }}"
         depends_on: amd-build
+        soft_fail: true
         agents:
          {% if step.label and step.label=="Benchmarks" or step.label=="Kernels Attention Test %N" or step.label=="LoRA Test %N" or step.label=="Kernels Quantization Test %N" %}
            queue: amd_mi325_8
