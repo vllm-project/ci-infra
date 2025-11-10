@@ -5,12 +5,12 @@
 # Runtime: v2-alpha-tpuv6e
 
 data "google_secret_manager_secret_version" "buildkite_agent_token_benchmark_cluster" {
-  secret = "projects/${var.project_id}/secrets/buildkite_agent_token_benchmark_cluster"
+  secret = "projects/${var.project_id}/secrets/bm-agent-hf-token"
   version = "latest"
 }
 
 data "google_secret_manager_secret_version" "huggingface_token" {
-  secret = "projects/${var.project_id}/secrets/huggingface_token"
+  secret = "projects/${var.project_id}/secrets/tpu_commons_buildkite_hf_token"
   version = "latest"
 }
 

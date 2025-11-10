@@ -4,7 +4,7 @@
 # Type: e2-standard-2
 
 data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
-  secret = "projects/${var.project_id}/secrets/buildkite_agent_token_ci_cluster"
+  secret = "projects/${var.project_id}/secrets/tpu_commons_buildkite_agent_token"
   version = "latest"
 }
 
