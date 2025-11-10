@@ -3,6 +3,15 @@
 # Region: us-east5-b
 # Type: e2-standard-2
 
+data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
+  secret = "projects/${var.project_id}/secrets/buildkite_agent_token_ci_cluster"
+  version = "latest"
+}
+
+locals {
+  buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+}
+
 resource "tls_private_key" "buildkite_agent_ssh_key" {
   algorithm = "RSA"
   rsa_bits  = 4096
@@ -76,7 +85,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       echo '${tls_private_key.buildkite_agent_ssh_key.public_key_openssh}' | sudo -u buildkite-agent tee /var/lib/buildkite-agent/.ssh/id_rsa.pub
       sudo -u buildkite-agent chmod 644 /var/lib/buildkite-agent/.ssh/id_rsa.pub
 
-      sudo sed -i "s/xxx/${var.buildkite_agent_token_ci_cluster}/g" /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i "s/xxx/${local.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="vllm-cpu-vm-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=cpu"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
 

@@ -1,3 +1,3 @@
 variable "project_id" {
-  default = "vllm-405802"
+  default = "cloud-tpu-inference-test"
 }
