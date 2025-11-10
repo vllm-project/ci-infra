@@ -39,7 +39,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
     access_config {
       nat_ip = google_compute_address.static[count.index].address
     }
-    subnetwork  = "projects/${var.project_id}/global/networks/default"
+    subnetwork = "projects/${var.project_id}/regions/us-east5/subnetworks/default"
   }
 
   metadata = {
