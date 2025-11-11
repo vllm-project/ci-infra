@@ -396,7 +396,7 @@ steps:
           --tag {{ docker_image_hpu }} \
           --progress plain \
           https://github.com/vllm-project/vllm-gaudi.git
-        
+
         docker push {{ docker_image_hpu }}
     env:
       DOCKER_BUILDKIT: "1"
@@ -411,7 +411,7 @@ steps:
   - block: "Build Arm64 CPU image"
     depends_on: ~
     key: block-arm64-cpu-img-build
-    
+
   - label: ":docker: build image ARM64 CPU"
     key: image-build-arm64-cpu
     depends_on: block-arm64-cpu-img-build
@@ -467,14 +467,14 @@ steps:
     {% set ns.blocked = 0 %}
   {% endif %}
 
-  {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+  {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
   - block: "Run {{ step.label }}"
     depends_on: image-build
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
   {% endif %}
 
   - label: "{{ step.label }}"
-    {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+    {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% else %}
     depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
