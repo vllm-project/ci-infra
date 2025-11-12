@@ -33,9 +33,3 @@ module "ci_cpu" {
 #   buildkite_agent_token_ci_cluster = var.buildkite_agent_token_ci_cluster
 #   huggingface_token     = var.huggingface_token
 # }
-
-
-output "buildkite_agent_public_key" {
-  value = module.ci_v6.buildkite_agent_public_key
-  sensitive = true
-}

@@ -12,11 +12,6 @@ locals {
   buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
 }
 
-resource "tls_private_key" "buildkite_agent_ssh_key" {
-  algorithm = "RSA"
-  rsa_bits  = 4096
-}
-
 resource "google_compute_instance" "buildkite-agent-instance" {
   provider = google-beta.us-east5-b
   count    = var.instance_count
@@ -75,16 +70,6 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-
-      sudo mkdir -p /var/lib/buildkite-agent/.ssh
-      sudo chown buildkite-agent:buildkite-agent /var/lib/buildkite-agent/.ssh
-      sudo chmod 700 /var/lib/buildkite-agent/.ssh
-
-      echo '${tls_private_key.buildkite_agent_ssh_key.private_key_pem}' | sudo -u buildkite-agent tee /var/lib/buildkite-agent/.ssh/id_rsa
-      sudo -u buildkite-agent chmod 600 /var/lib/buildkite-agent/.ssh/id_rsa
-      echo '${tls_private_key.buildkite_agent_ssh_key.public_key_openssh}' | sudo -u buildkite-agent tee /var/lib/buildkite-agent/.ssh/id_rsa.pub
-      sudo -u buildkite-agent chmod 644 /var/lib/buildkite-agent/.ssh/id_rsa.pub
-
       sudo sed -i "s/xxx/${local.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="vllm-cpu-vm-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=cpu"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
@@ -102,9 +87,4 @@ resource "google_compute_address" "static" {
   provider = google-beta.us-east5-b
   name     = "vllm-ci-cpu-${count.index}-ip"
   count    = var.instance_count
-}
-
-output "buildkite_agent_public_key" {
-  value = tls_private_key.buildkite_agent_ssh_key.public_key_openssh
-  sensitive = true
 }
