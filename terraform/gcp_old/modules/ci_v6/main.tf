@@ -5,7 +5,7 @@
 # Runtime: v2-alpha-tpuv6e
 
 data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
-  secret = "projects/${var.project_id}/secrets/${var.buildkite_agent_token_ci_cluster_name}"
+  secret = "projects/${var.project_id}/secrets/${var.buildkite_ci_agent_token_name}"
   version = "latest"
 }
 

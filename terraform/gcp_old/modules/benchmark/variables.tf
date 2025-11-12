@@ -2,9 +2,9 @@ variable "project_id" {
   default = "cloud-tpu-inference-test"
 }
 
-variable "buildkite_agent_token_benchmark_cluster_name" {
+variable "buildkite_benchmark_agent_token_name" {
   type = string
-  description = "google_secret_manager_secret name for benchmark cluster agent token"
+  description = "google_secret_manager_secret name for benchmark agent token"
 }
 
 variable "huggingface_token_name" {

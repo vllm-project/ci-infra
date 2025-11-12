@@ -5,7 +5,7 @@ module "benchmark" {
   }
 
   project_id = var.project_id
-  buildkite_agent_token_benchmark_cluster_name = var.buildkite_agent_token_benchmark_cluster_name
+  buildkite_benchmark_agent_token_name = var.buildkite_benchmark_agent_token_name
   huggingface_token_name = var.huggingface_token_name
 }
 module "ci_v6" {
@@ -14,7 +14,7 @@ module "ci_v6" {
     google-beta.us-east5-b = google-beta.us-east5-b
   }  
   project_id = var.project_id
-  buildkite_agent_token_ci_cluster_name = var.buildkite_agent_token_ci_cluster_name
+  buildkite_ci_agent_token_name = var.buildkite_ci_agent_token_name
   huggingface_token_name = var.huggingface_token_name
   ci_v6_instance_count = var.ci_v6_instance_count
   ci_v6_disk_size = var.ci_v6_disk_size
@@ -27,6 +27,6 @@ module "ci_v5" {
   }
 
   project_id = var.project_id
-  buildkite_agent_token_ci_cluster_name = var.buildkite_agent_token_ci_cluster_name
+  buildkite_ci_agent_token_name = var.buildkite_ci_agent_token_name
   huggingface_token_name = var.huggingface_token_name
 }

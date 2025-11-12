@@ -2,11 +2,11 @@ variable "project_id" {
   default = "cloud-tpu-inference-test"
 }
 
-variable "buildkite_agent_token_benchmark_cluster_name" {
+variable "buildkite_benchmark_agent_token_name" {
   default = "bm-agent-hf-token"
 }
 
-variable "buildkite_agent_token_ci_cluster_name" {
+variable "buildkite_ci_agent_token_name" {
   default = "tpu_commons_buildkite_agent_token"
 }
 

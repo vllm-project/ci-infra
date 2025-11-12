@@ -2,11 +2,11 @@ variable "project_id" {
   default = "vllm-405802"
 }
 
-variable "buildkite_agent_token_benchmark_cluster_name" {
+variable "buildkite_benchmark_agent_token_name" {
   default = "buildkite_agent_token_benchmark_cluster"
 }
 
-variable "buildkite_agent_token_ci_cluster_name" {
+variable "buildkite_ci_agent_token_name" {
   default = "buildkite_agent_token_ci_cluster"
 }
 

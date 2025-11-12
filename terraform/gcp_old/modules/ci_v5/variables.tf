@@ -2,9 +2,9 @@ variable "project_id" {
   default = "vllm-405802"
 }
 
-variable "buildkite_agent_token_ci_cluster_name" {
+variable "buildkite_ci_agent_token_name" {
   type = string
-  description = "google_secret_manager_secret name for ci cluster agent token"
+  description = "google_secret_manager_secret name for ci agent token"
 }
 
 variable "huggingface_token_name" {
