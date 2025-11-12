@@ -5,12 +5,12 @@
 # Runtime: v2-alpha-tpuv6e
 
 data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
-  secret = "projects/${var.project_id}/secrets/tpu_commons_buildkite_agent_token"
+  secret = "projects/${var.project_id}/secrets/${var.buildkite_agent_token_ci_cluster_name}"
   version = "latest"
 }
 
 data "google_secret_manager_secret_version" "huggingface_token" {
-  secret  = "projects/${var.project_id}/secrets/tpu_commons_buildkite_hf_token"
+  secret  = "projects/${var.project_id}/secrets/${var.huggingface_token_name}"
   version = "latest"
 }
 
@@ -21,17 +21,17 @@ locals {
 
 resource "google_compute_disk" "disk_east5_b" {
   provider = google-beta.us-east5-b
-  count = 24
+  count = "${var.ci_v6_instance_count}"
 
   name  = "tpu-disk-east5-b-${count.index}"
-  size  = 2048
+  size  = "${var.ci_v6_disk_size}"
   type  = "hyperdisk-balanced"
   zone  = "us-east5-b"
 }
 
 resource "google_tpu_v2_vm" "tpu_v6_ci" {
   provider = google-beta.us-east5-b
-  count = 24
+  count = "${var.ci_v6_instance_count}"
   name = "vllm-tpu-v6-ci-${count.index}"
   zone = "us-east5-b" 
 
