@@ -1,4 +1,4 @@
-data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
+data "google_secret_manager_secret_version" "buildkite_ci_agent_token" {
   secret = "projects/${var.project_id}/secrets/${var.buildkite_ci_agent_token_name}"
   version = "latest"
 }
@@ -9,7 +9,7 @@ data "google_secret_manager_secret_version" "huggingface_token" {
 }
 
 locals {
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_ci_agent_token.secret_data
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 

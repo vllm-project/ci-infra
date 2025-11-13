@@ -4,7 +4,7 @@
 # Type: v6e-8
 # Runtime: v2-alpha-tpuv6e
 
-data "google_secret_manager_secret_version" "buildkite_agent_token_benchmark_cluster" {
+data "google_secret_manager_secret_version" "buildkite_benchmark_agent_token" {
   secret = "projects/${var.project_id}/secrets/${var.buildkite_benchmark_agent_token_name}"
   version = "latest"
 }
@@ -15,7 +15,7 @@ data "google_secret_manager_secret_version" "huggingface_token" {
 }
 
 locals {  
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_benchmark_cluster.secret_data
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_benchmark_agent_token.secret_data
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
