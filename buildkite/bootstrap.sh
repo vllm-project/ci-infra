@@ -86,6 +86,7 @@ upload_pipeline() {
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D previous_commit="$(git rev-parse HEAD^)" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
