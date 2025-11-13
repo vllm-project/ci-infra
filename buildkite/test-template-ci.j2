@@ -1,11 +1,13 @@
 {% set cov_enabled = (cov_enabled == "1") %}
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
+{% set docker_image_cache = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:cache" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cpu" %}
 {% set docker_image_arm64_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-arm64-cpu" %}
 {% if branch == "main" %}
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
+{% set docker_image_cache = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:cache" %}
 {% set docker_image_latest = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
@@ -264,8 +266,19 @@ steps:
           echo "Image found"
           exit 0
         fi
+      - "docker buildx ls"
+      - |
+        #!/bin/bash
+        if ! docker buildx inspect docker_container_builder >/dev/null 2>&1; then
+            echo "Creating and enabling docker-container builder instance"
+            docker buildx create --use --name docker_container_builder
+        else
+            echo "docker-container builder instance already exists"
+            docker buildx use docker_container_builder
+        fi
+      - "docker buildx ls"
       - >
-        docker build --file docker/Dockerfile
+        docker buildx build --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
         --build-arg USE_SCCACHE=1
@@ -277,9 +290,11 @@ steps:
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
         {% endif %}
         --tag {{ docker_image }}
+        --cache-from=type=registry,ref={{ docker_image_cache }}
+        --cache-to=type=registry,ref={{ docker_image_cache }},mode=max
         --target test
+        --push
         --progress plain .
-      - "docker push {{ docker_image }}"
       {% if branch == "main" %}
       - "docker tag {{ docker_image }} {{ docker_image_latest }}"
       - "docker push {{ docker_image_latest }}"
