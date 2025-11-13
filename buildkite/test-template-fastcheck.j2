@@ -384,3 +384,14 @@ steps:
     agents:
       queue: intel-gpu
     command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh
+
+  - block: "Run Arm CPU test"
+    depends_on: ~
+    key: block-arm-cpu
+
+  - label: "Arm CPU Test"
+    depends_on: block-arm-cpu
+    soft_fail: true
+    agents:
+      queue: arm-cpu
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh

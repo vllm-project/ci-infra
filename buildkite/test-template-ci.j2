@@ -663,6 +663,21 @@ steps:
       queue: intel-gpu
     command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh
 
+  - block: "Run Arm CPU test"
+    depends_on: ~
+    key: block-arm-cpu
+
+  - label: "Arm CPU Test"
+    {% if branch == "main" %}
+    depends_on: ~
+    {% else %}
+    depends_on: block-arm-cpu
+    {% endif %}
+    soft_fail: true
+    agents:
+      queue: arm-cpu
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
+
   - label: "Ascend NPU Test"
     soft_fail: true
     depends_on: ~
