@@ -12,8 +12,12 @@ locals {
   buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
 }
 
+data "google_client_config" "gcp_client" {
+  provider = google-beta
+}
+
 resource "google_compute_instance" "buildkite-agent-instance" {
-  provider = google-beta.us-east5-b
+  provider = google-beta
   count    = var.instance_count
   name     = "vllm-ci-cpu-${count.index}"
 
@@ -43,7 +47,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
     access_config {
       nat_ip = google_compute_address.static[count.index].address
     }
-    subnetwork = "projects/${var.project_id}/regions/us-east5/subnetworks/default"
+    subnetwork = "projects/${var.project_id}/regions/${data.google_client_config.gcp_client.region}/subnetworks/default"
   }
 
   metadata = {
@@ -84,7 +88,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
 }
 
 resource "google_compute_address" "static" {
-  provider = google-beta.us-east5-b
+  provider = google-beta
   name     = "vllm-ci-cpu-${count.index}-ip"
   count    = var.instance_count
 }
