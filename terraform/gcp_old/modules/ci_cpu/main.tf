@@ -3,13 +3,13 @@
 # Region: us-east5-b
 # Type: e2-standard-2
 
-data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
-  secret = "projects/${var.project_id}/secrets/tpu_commons_buildkite_agent_token"
+data "google_secret_manager_secret_version" "buildkite_ci_agent_token" {
+  secret = "projects/${var.project_id}/secrets/${var.buildkite_ci_agent_token_name}"
   version = "latest"
 }
 
 locals {
-  buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_token_value = data.google_secret_manager_secret_version.buildkite_ci_agent_token.secret_data
 }
 
 resource "google_compute_instance" "buildkite-agent-instance" {

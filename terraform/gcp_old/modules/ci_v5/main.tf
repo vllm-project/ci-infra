@@ -1,52 +1,46 @@
-# 16 nodes for CI cluster
-# 1 TPU v6e device each
-# Region: us-east5-b
-# Type: v6e-1
-# Runtime: v2-alpha-tpuv6e
-
-data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
-  secret = "projects/${var.project_id}/secrets/buildkite_agent_token_ci_cluster"
+data "google_secret_manager_secret_version" "buildkite_ci_agent_token" {
+  secret = "projects/${var.project_id}/secrets/${var.buildkite_ci_agent_token_name}"
   version = "latest"
 }
 
 data "google_secret_manager_secret_version" "huggingface_token" {
-  secret = "projects/${var.project_id}/secrets/huggingface_token"
+  secret = "projects/${var.project_id}/secrets/${var.huggingface_token_name}"
   version = "latest"
 }
 
 locals {
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_ci_agent_token.secret_data
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
-resource "google_compute_disk" "disk_east5_b" {
-  provider = google-beta.us-east5-b
-  count = 16
+resource "google_compute_disk" "disk_v5" {
+  provider = google-beta.us-south1-a
+  count = 7
 
-  name  = "tpu-disk-east5-b-${count.index}"
+  name  = "tpu-disk-south1-a-${count.index + 1}"
   size  = 512
-  type  = "hyperdisk-balanced"
-  zone  = "us-east5-b"
+  type  = "pd-ssd"
+  zone  = "us-south1-a"
 }
 
-resource "google_tpu_v2_vm" "tpu_v6_ci" {
-  provider = google-beta.us-east5-b
-  count = 16
-  name = "vllm-tpu-v6-ci-${count.index}"
-  zone = "us-east5-b" 
+resource "google_tpu_v2_vm" "tpu_v5" {
+  provider = google-beta.us-south1-a
+  count = 7
+  name = "vllm-tpu-v5-${count.index + 1}"
+  zone = "us-south1-a"
 
-  runtime_version = "v2-alpha-tpuv6e"
+  runtime_version = "v2-alpha-tpuv5-lite"
 
-  accelerator_type = "v6e-1"
-
-  network_config {
-    network = "projects/${var.project_id}/global/networks/default"
-    enable_external_ips = true
-  }
+  accelerator_type = "v5litepod-1"
 
   data_disks {
-    source_disk = google_compute_disk.disk_east5_b[count.index].id
+    source_disk = google_compute_disk.disk_v5[count.index].id
     mode = "READ_WRITE"
+  }
+
+  network_config {
+    network   = "projects/${var.project_id}/global/networks/default"
+    enable_external_ips = true
   }
 
   metadata = {
@@ -73,17 +67,12 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
 
       sudo sed -i "s/xxx/${local.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="vllm-tpu-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'tags="queue=tpu_v6e_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      echo 'tags="queue=tpu_v5_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${local.huggingface_token_value}' | sudo tee -a /etc/environment
 
-      # Mount persistent disk
-      if ! blkid /dev/nvme0n2; then
-        echo "Formatting /dev/nvme0n2 as ext4..."
-        sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme0n2
-      fi
-      
+      sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
       sudo mkdir -p /mnt/disks/persist
-      sudo mount -o discard,defaults /dev/nvme0n2 /mnt/disks/persist
+      sudo mount -o discard,defaults /dev/sdb /mnt/disks/persist
 
       jq ". + {\"data-root\": \"/mnt/disks/persist\"}" /etc/docker/daemon.json > /tmp/daemon.json.tmp && mv /tmp/daemon.json.tmp /etc/docker/daemon.json
       systemctl stop docker
