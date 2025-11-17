@@ -1,51 +1,52 @@
-# 2 nodes for Performance Benchmark cluster
-# 8 TPU v6e devices each
-# Region: us-east1-d
-# Type: v6e-8
+# 16 nodes for CI cluster
+# 1 TPU v6e device each
+# Region: us-east5-b
+# Type: v6e-1
 # Runtime: v2-alpha-tpuv6e
 
-data "google_secret_manager_secret_version" "buildkite_agent_token_benchmark_cluster" {
-  secret = "projects/${var.project_id}/secrets/buildkite_agent_token_benchmark_cluster"
+data "google_secret_manager_secret_version" "buildkite_ci_agent_token" {
+  secret = "projects/${var.project_id}/secrets/${var.buildkite_ci_agent_token_name}"
   version = "latest"
 }
 
 data "google_secret_manager_secret_version" "huggingface_token" {
-  secret = "projects/${var.project_id}/secrets/huggingface_token"
+  secret  = "projects/${var.project_id}/secrets/${var.huggingface_token_name}"
   version = "latest"
 }
 
-locals {  
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_benchmark_cluster.secret_data
+locals {
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_ci_agent_token.secret_data
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
-resource "google_compute_disk" "disk_east1_d" {
-  provider = google-beta.us-east1-d
-  count = 0
+resource "google_compute_disk" "disk_east5_b" {
+  provider = google-beta.us-east5-b
+  count = "${var.ci_v6_instance_count}"
 
-  name  = "tpu-disk-east1-d${count.index + 1}"
-  size  = 512
+  name  = "tpu-disk-east5-b-${count.index}"
+  size  = "${var.ci_v6_disk_size}"
   type  = "hyperdisk-balanced"
-  zone  = "us-east1-d"
+  zone  = "us-east5-b"
 }
 
-resource "google_tpu_v2_vm" "tpu_v6_benchmark" {
-  provider = google-beta.us-east1-d
-  count = 0
-  name = "vllm-tpu-v6-benchmark-${count.index + 1}"
-  zone = "us-east1-d"
+resource "google_tpu_v2_vm" "tpu_v6_ci" {
+  provider = google-beta.us-east5-b
+  count = "${var.ci_v6_instance_count}"
+  name = "vllm-tpu-v6-ci-${count.index}"
+  zone = "us-east5-b" 
 
   runtime_version = "v2-alpha-tpuv6e"
-  accelerator_type = "v6e-8"
 
-  data_disks {
-    source_disk = google_compute_disk.disk_east1_d[count.index].id
-    mode = "READ_WRITE"
-  }
+  accelerator_type = "v6e-1"
 
   network_config {
     network = "projects/${var.project_id}/global/networks/default"
     enable_external_ips = true
+  }
+
+  data_disks {
+    source_disk = google_compute_disk.disk_east5_b[count.index].id
+    mode = "READ_WRITE"
   }
 
   metadata = {
@@ -71,18 +72,35 @@ resource "google_tpu_v2_vm" "tpu_v6_benchmark" {
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       sudo sed -i "s/xxx/${local.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
-      sudo sed -i 's/name="%hostname-%spawn"/name="vllm-tpu-v6-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'tags="queue=tpu_8_v6e_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i 's/name="%hostname-%spawn"/name="vllm-tpu-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
+      echo 'tags="queue=tpu_v6e_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${local.huggingface_token_value}' | sudo tee -a /etc/environment
 
-      sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
       sudo mkdir -p /mnt/disks/persist
-      sudo mount -o discard,defaults /dev/sdb /mnt/disks/persist
+
+      # Format if not already formatted
+      if ! blkid /dev/nvme0n2; then
+        echo "Formatting /dev/nvme0n2 as ext4..."
+        sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme0n2
+      fi
+
+      # Add to /etc/fstab using UUID
+      disk_uuid=$(blkid -s UUID -o value /dev/nvme0n2)
+      if ! grep -q "/mnt/disks/persist" /etc/fstab; then
+       echo "UUID=$disk_uuid /mnt/disks/persist ext4 defaults,discard 0 2" | sudo tee -a /etc/fstab
+      fi
+
+      # Only mount if not already mounted (first boot or recovery)
+      if ! mountpoint -q /mnt/disks/persist; then
+        sudo mount /mnt/disks/persist
+      fi
 
       jq ". + {\"data-root\": \"/mnt/disks/persist\"}" /etc/docker/daemon.json > /tmp/daemon.json.tmp && mv /tmp/daemon.json.tmp /etc/docker/daemon.json
       systemctl stop docker
       systemctl daemon-reload
       systemctl start docker
+
+      sudo chmod 777 /mnt/disks/persist
 
       systemctl enable buildkite-agent
       systemctl start buildkite-agent
