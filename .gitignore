@@ -37,6 +37,14 @@ terraform.rc
 
 .vscode/
 
+# Claude
+CLAUDE.md
+.claude/
+
+# Codex
+AGENTS.md
+.codex/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

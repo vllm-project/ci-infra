@@ -740,5 +740,50 @@ steps:
     agents:
       queue: gh200_queue
     command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
+
+  - label: "Nightly Tests Failure Notification"
+    depends_on: ~
+    soft_fail: true
+    agents:
+      queue: small_cpu_queue
+    commands: |
+      echo "Checking test outcomes for nightly build..."
+      FAILED_TESTS=""
+      TOTAL_CHECKED=0
+      TOTAL_FAILED=0
+
+      {% for step in steps %}
+      TOTAL_CHECKED=$$((TOTAL_CHECKED + 1))
+      OUTCOME=$$(buildkite-agent step get "outcome" --step "{{ step.label }}" 2>/dev/null || echo "unknown")
+      echo "Step '{{ step.label }}': $$OUTCOME"
+      if [ "$$OUTCOME" != "passed" ] && [ "$$OUTCOME" != "unknown" ]; then
+        FAILED_TESTS="$$FAILED_TESTS\n- {{ step.label }} ($$OUTCOME)"
+        TOTAL_FAILED=$$((TOTAL_FAILED + 1))
+      fi
+      {% endfor %}
+
+      echo "Total steps checked: $$TOTAL_CHECKED"
+      echo "Total failed: $$TOTAL_FAILED"
+
+      if [ -n "$$FAILED_TESTS" ]; then
+        echo "Failed tests found, uploading notification step..."
+        cat <<- YAML | buildkite-agent pipeline upload
+        steps:
+          - label: ":slack: Notify about nightly test failures"
+            soft_fail: true
+            agents:
+              queue: small_cpu_queue
+            command: |
+              echo "Nightly tests failed ($$TOTAL_FAILED/$$TOTAL_CHECKED):"
+              echo -e "$$FAILED_TESTS"
+            notify:
+              - slack:
+                  channels:
+                    - "vllm#buildkite-notifications"
+        YAML
+        echo "Notification step uploaded successfully"
+      else
+        echo "No failed tests found, skipping notification"
+      fi
   {% endif %}
 
