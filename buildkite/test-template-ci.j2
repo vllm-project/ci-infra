@@ -484,6 +484,12 @@ steps:
   {% endif %}
   {% endfor %}
 
+  {% if nightly == "1" %}
+  - wait:
+    key: main-tests-complete
+    continue_on_failure: true
+  {% endif %}
+
   - group: "vllm against torch nightly"
     depends_on: ~
     steps:
@@ -627,6 +633,12 @@ steps:
         {% endif %}
     {% endfor %}
 
+  {% if nightly == "1" %}
+  - wait:
+    key: amd-tests-complete
+    continue_on_failure: true
+  {% endif %}
+
   - label: "Neuron Test"
     depends_on: ~
     agents:
@@ -741,7 +753,9 @@ steps:
       queue: gh200_queue
     command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
 
-  - wait: ~
+  - wait:
+    depends_on:
+      - main-tests-complete
     continue_on_failure: true
 
   - label: "Nightly Tests Failure Notification"
