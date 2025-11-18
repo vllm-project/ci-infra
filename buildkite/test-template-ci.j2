@@ -314,7 +314,11 @@ steps:
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
         {% endif %}
         --tag {{ docker_image }}
+        {% if branch != "main" %}
         --cache-from=type=registry,ref={{ previous_docker_image }}
+        {% else %}
+        --cache-from=type=registry,ref={{ docker_image_latest }}
+        {% endif %}
         --cache-to=type=inline
         --target test
         --progress plain .
