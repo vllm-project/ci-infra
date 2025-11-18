@@ -741,6 +741,9 @@ steps:
       queue: gh200_queue
     command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
 
+  - wait: ~
+    continue_on_failure: true
+
   - label: "Nightly Tests Failure Notification"
     depends_on: ~
     soft_fail: true
@@ -780,7 +783,7 @@ steps:
               - slack:
                   channels:
                     - "vllm#buildkite-notifications"
-        YAML
+      YAML
         echo "Notification step uploaded successfully"
       else
         echo "No failed tests found, skipping notification"
