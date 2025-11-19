@@ -779,7 +779,11 @@ steps:
       OUTCOME=$$(buildkite-agent step get "outcome" --step "$$STEP_KEY" 2>/dev/null || echo "unknown")
       echo "Step '{{ step.label }}' (key: $$STEP_KEY): $$OUTCOME"
       if [ "$$OUTCOME" != "passed" ] && [ "$$OUTCOME" != "unknown" ]; then
-        FAILED_TESTS="$$FAILED_TESTS\n- {{ step.label }} ($$OUTCOME)"
+        if [ -z "$$FAILED_TESTS" ]; then
+          FAILED_TESTS="- {{ step.label }} ($$OUTCOME)"
+        else
+          FAILED_TESTS="$$FAILED_TESTS\n- {{ step.label }} ($$OUTCOME)"
+        fi
         TOTAL_FAILED=$$((TOTAL_FAILED + 1))
       fi
       {% endif %}
@@ -803,7 +807,6 @@ steps:
             command: |
               echo "Nightly tests failed ($$TOTAL_FAILED/$$TOTAL_CHECKED):"
               printf '%b\n' "$$FAILED_TESTS"
-              echo "$$FAILED_TESTS_FORMATTED"
             notify:
               - slack:
                   channels:
