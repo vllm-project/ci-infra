@@ -800,21 +800,18 @@ steps:
               echo "Nightly tests failed ($$TOTAL_FAILED/$$TOTAL_CHECKED):"
               printf '%s\n' "$$FAILED_TESTS"
             notify:
-              - slack:
-                  channels:
-                    - "vllm#buildkite-notifications"
-                  message: |
-                    :rotating_light: Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)
+              - slack: "@zhewenl"
+                message: |
+                  :rotating_light: Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)
 
-                    Failed tests:
-                    $$FAILED_TESTS
+                  Failed tests:
+                  $$FAILED_TESTS
 
-                    Build: <$$BUILDKITE_BUILD_URL|#$$BUILDKITE_BUILD_NUMBER>
-                    Build Time: $$BUILDKITE_BUILD_CREATED_AT
+                  Build: <$$BUILDKITE_BUILD_URL|#$$BUILDKITE_BUILD_NUMBER>
+                  Build Time: $$BUILDKITE_BUILD_CREATED_AT
       YAML
         echo "Notification step uploaded successfully"
       else
         echo "No failed tests found, skipping notification"
-      ficho "No failed tests found, skipping notification"
       fi
   {% endif %}
