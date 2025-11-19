@@ -474,6 +474,7 @@ steps:
   {% endif %}
 
   - label: "{{ step.label }}"
+    key: test-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% else %}
@@ -485,9 +486,16 @@ steps:
   {% endfor %}
 
   {% if nightly == "1" %}
+  # Wait for all main test steps to complete (ignoring block steps like block-build-cu118, block-arm64-cpu-img-build)
   - wait:
     key: main-tests-complete
-    continue_on_failure: true
+    depends_on:
+      {% for step in steps %}
+      {% if step.fast_check_only != true %}
+      - test-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+      {% endif %}
+      {% endfor %}
+    allow_dependency_failure: true
   {% endif %}
 
   - group: "vllm against torch nightly"
@@ -753,7 +761,8 @@ steps:
       queue: gh200_queue
     command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
 
-  - wait:
+  - label: "Waiting for main nightly tests to complete"
+    wait: ~
     depends_on:
       - main-tests-complete
     continue_on_failure: true
@@ -769,13 +778,16 @@ steps:
       TOTAL_FAILED=0
 
       {% for step in steps %}
+      {% if step.fast_check_only != true %}
+      STEP_KEY="test-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}"
       TOTAL_CHECKED=$$((TOTAL_CHECKED + 1))
-      OUTCOME=$$(buildkite-agent step get "outcome" --step "{{ step.label }}" 2>/dev/null || echo "unknown")
-      echo "Step '{{ step.label }}': $$OUTCOME"
+      OUTCOME=$$(buildkite-agent step get "outcome" --step "$$STEP_KEY" 2>/dev/null || echo "unknown")
+      echo "Step '{{ step.label }}' (key: $$STEP_KEY): $$OUTCOME"
       if [ "$$OUTCOME" != "passed" ] && [ "$$OUTCOME" != "unknown" ]; then
         FAILED_TESTS="$$FAILED_TESTS\n- {{ step.label }} ($$OUTCOME)"
         TOTAL_FAILED=$$((TOTAL_FAILED + 1))
       fi
+      {% endif %}
       {% endfor %}
 
       echo "Total steps checked: $$TOTAL_CHECKED"
