@@ -641,11 +641,6 @@ steps:
         {% endif %}
     {% endfor %}
 
-  {% if nightly == "1" %}
-  - wait:
-    key: amd-tests-complete
-    continue_on_failure: true
-  {% endif %}
 
   - label: "Neuron Test"
     depends_on: ~
@@ -808,6 +803,14 @@ steps:
               - slack:
                   channels:
                     - "vllm#buildkite-notifications"
+                  message: |
+                    :rotating_light: Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)
+
+                    Failed tests:
+                    $$FAILED_TESTS
+
+                    Build: <\$$BUILDKITE_BUILD_URL|#\$$BUILDKITE_BUILD_NUMBER>
+                    Branch: \$$BUILDKITE_BRANCH
       YAML
         echo "Notification step uploaded successfully"
       else
