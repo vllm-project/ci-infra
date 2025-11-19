@@ -200,7 +200,7 @@ plugins:
           - name: hf-cache
             hostPath:
               path: /mnt/hf-cache
-              type: Directory
+              type: DirectoryOrCreate
   {% else %}
   - kubernetes:
       podSpec:
