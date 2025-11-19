@@ -803,6 +803,7 @@ steps:
             command: |
               echo "Nightly tests failed ($$TOTAL_FAILED/$$TOTAL_CHECKED):"
               printf '%b\n' "$$FAILED_TESTS"
+              echo "$$FAILED_TESTS_FORMATTED"
             notify:
               - slack:
                   channels:
@@ -810,8 +811,7 @@ steps:
                   message: |
                     :rotating_light: Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)
 
-                    Failed tests:
-                    $$FAILED_TESTS_FORMATTED
+                    Failed tests:$$FAILED_TESTS_FORMATTED
 
                     Build: <$${BUILDKITE_BUILD_URL}|#$${BUILDKITE_BUILD_NUMBER}>
       YAML
