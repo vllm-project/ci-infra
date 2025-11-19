@@ -791,8 +791,8 @@ steps:
       if [ -n "$$FAILED_TESTS" ]; then
         echo "Failed tests found, uploading notification step..."
 
-        # Format failed tests for Slack (convert \n to actual newlines)
-        FAILED_TESTS_SLACK=$$(echo -e "$$FAILED_TESTS")
+        # Format failed tests for Slack (convert \n to actual newlines and indent properly)
+        FAILED_TESTS_SLACK=$$(echo -e "$$FAILED_TESTS" | sed 's/^/            /')
 
         # Create notification YAML with variable substitution
         cat <<EOF | buildkite-agent pipeline upload
