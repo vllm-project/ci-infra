@@ -790,6 +790,10 @@ steps:
 
       if [ -n "$$FAILED_TESTS" ]; then
         echo "Failed tests found, uploading notification step..."
+
+        # Convert \n to actual newlines for the Slack message
+        FAILED_TESTS_FORMATTED=$$(printf '%b' "$$FAILED_TESTS")
+
         cat <<- YAML | buildkite-agent pipeline upload
         steps:
           - label: ":slack: Notify about nightly test failures"
@@ -798,17 +802,18 @@ steps:
               queue: small_cpu_queue_premerge
             command: |
               echo "Nightly tests failed ($$TOTAL_FAILED/$$TOTAL_CHECKED):"
-              printf '%s\n' "$$FAILED_TESTS"
+              printf '%b\n' "$$FAILED_TESTS"
             notify:
-              - slack: "@zhewenl"
-                message: |
-                  :rotating_light: Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)
+              - slack:
+                  channels:
+                    - "vllm#buildkite-notifications"
+                  message: |
+                    :rotating_light: Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)
 
-                  Failed tests:
-                  $$FAILED_TESTS
+                    Failed tests:
+                    $$FAILED_TESTS_FORMATTED
 
-                  Build: <$$BUILDKITE_BUILD_URL|#$$BUILDKITE_BUILD_NUMBER>
-                  Build Time: $$BUILDKITE_BUILD_CREATED_AT
+                    Build: <$${BUILDKITE_BUILD_URL}|#$${BUILDKITE_BUILD_NUMBER}>
       YAML
         echo "Notification step uploaded successfully"
       else
