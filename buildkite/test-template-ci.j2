@@ -762,7 +762,7 @@ steps:
       - main-tests-complete
     continue_on_failure: true
 
-  - label: "Nightly Tests Failure Notification"
+  - label: "Collect Nightly Tests Failures"
     soft_fail: true
     agents:
       queue: small_cpu_queue_premerge
@@ -790,6 +790,10 @@ steps:
 
       if [ -n "$$FAILED_TESTS" ]; then
         echo "Failed tests found, uploading notification step..."
+
+        # Format failed tests with proper newlines for Slack
+        FAILED_TESTS_SLACK=$$(printf "$$FAILED_TESTS" | sed 's/\\n/\n            /g')
+
         cat <<- YAML | buildkite-agent pipeline upload
         steps:
           - label: ":slack: Notify about nightly test failures"
@@ -804,13 +808,13 @@ steps:
                   channels:
                     - "vllm#buildkite-notifications"
                   message: |
-                    :rotating_light: Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)
+                    :rotating_light: *Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)*
 
-                    Failed tests:
-                    $$FAILED_TESTS
+                    *Failed tests:*
+                    $$FAILED_TESTS_SLACK
 
-                    Build: <\$$BUILDKITE_BUILD_URL|#\$$BUILDKITE_BUILD_NUMBER>
-                    Branch: \$$BUILDKITE_BRANCH
+                    *Build:* <$$BUILDKITE_BUILD_URL|#$$BUILDKITE_BUILD_NUMBER>
+                    *Build Time:* $$BUILDKITE_BUILD_CREATED_AT
       YAML
         echo "Notification step uploaded successfully"
       else
