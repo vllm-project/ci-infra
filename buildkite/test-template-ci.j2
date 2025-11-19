@@ -192,7 +192,7 @@ plugins:
                     name: hf-token-secret
                     key: token
         nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+          node.kubernetes.io/instance-type: gpu-h100-sxm
         volumes:
           - name: devshm
             emptyDir:
