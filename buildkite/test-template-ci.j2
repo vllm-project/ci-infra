@@ -791,31 +791,32 @@ steps:
       if [ -n "$$FAILED_TESTS" ]; then
         echo "Failed tests found, uploading notification step..."
 
-        # Format failed tests with proper newlines for Slack
-        FAILED_TESTS_SLACK=$$(printf "$$FAILED_TESTS" | sed 's/\\n/\n            /g')
+        # Format failed tests for Slack (convert \n to actual newlines)
+        FAILED_TESTS_SLACK=$$(echo -e "$$FAILED_TESTS")
 
-        cat <<- YAML | buildkite-agent pipeline upload
-        steps:
-          - label: ":slack: Notify about nightly test failures"
-            soft_fail: true
-            agents:
-              queue: small_cpu_queue_premerge
-            command: |
-              echo "Nightly tests failed ($$TOTAL_FAILED/$$TOTAL_CHECKED):"
-              echo -e "$$FAILED_TESTS"
-            notify:
-              - slack:
-                  channels:
-                    - "vllm#buildkite-notifications"
-                  message: |
-                    :rotating_light: *Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)*
+        # Create notification YAML with variable substitution
+        cat <<EOF | buildkite-agent pipeline upload
+steps:
+  - label: ":slack: Notify about nightly test failures"
+    soft_fail: true
+    agents:
+      queue: small_cpu_queue_premerge
+    command: |
+      echo "Nightly tests failed ($$TOTAL_FAILED/$$TOTAL_CHECKED):"
+      echo -e "$$FAILED_TESTS"
+    notify:
+      - slack:
+          channels:
+            - "vllm#buildkite-notifications"
+          message: |
+            :rotating_light: *Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)*
 
-                    *Failed tests:*
-                    $$FAILED_TESTS_SLACK
+            *Failed tests:*
+$${FAILED_TESTS_SLACK}
 
-                    *Build:* <$$BUILDKITE_BUILD_URL|#$$BUILDKITE_BUILD_NUMBER>
-                    *Build Time:* $$BUILDKITE_BUILD_CREATED_AT
-      YAML
+            *Build:* <$${BUILDKITE_BUILD_URL}|#$${BUILDKITE_BUILD_NUMBER}>
+            *Build Time:* $${BUILDKITE_BUILD_CREATED_AT}
+EOF
         echo "Notification step uploaded successfully"
       else
         echo "No failed tests found, skipping notification"
