@@ -814,7 +814,8 @@ steps:
                   message: |
                     :rotating_light: Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)
 
-                    Failed tests:$$FAILED_TESTS_FORMATTED
+                    Failed tests:
+                    $$FAILED_TESTS_FORMATTED
 
                     Build: <$${BUILDKITE_BUILD_URL}|#$${BUILDKITE_BUILD_NUMBER}>
       YAML
