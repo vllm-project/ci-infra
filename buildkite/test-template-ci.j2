@@ -14,7 +14,7 @@ steps:
     - kubernetes:
           podSpec:
             containers:
-              - image: 936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:57430fc95c8a94a7c68b3d525e3b8823b0f2433f
+              - image: 936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:c68c7b403dce632dbbbb6d2482ea86fe7bf53d51
                 command:
                   - bash -c "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/tests && pytest -v -s v1/attention"
                 resources:
