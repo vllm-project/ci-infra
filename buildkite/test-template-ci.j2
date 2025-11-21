@@ -1,19 +1,56 @@
 {% set cov_enabled = (cov_enabled == "1") %}
-{% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
-{% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-torch-nightly" %}
-{% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu118" %}
-{% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cpu" %}
-{% set docker_image_arm64_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-arm64-cpu" %}
+
+{# =============================
+   Select ECR Repo
+   ============================= #}
+
+{% set repo_test = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo" %}
+{% set repo_postmerge = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo" %}
+{% set repo_amd = "rocm/vllm-ci" %}
+
+{# select repo based on branch #}
 {% if branch == "main" %}
-{% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
-{% set docker_image_latest = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest" %}
-{% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly" %}
-{% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
-{% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
-{% set docker_image_arm64_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-arm64-cpu" %}
-{% set docker_image_hpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-hpu" %}
+  {% set repo = repo_postmerge %}
+{% else %}
+  {% set repo = repo_test %}
 {% endif %}
-{% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
+
+{# =============================
+   Docker Image URIs with $BUILDKITE_COMMIT
+   ============================= #}
+
+{% set docker_image               = repo ~ ":$BUILDKITE_COMMIT" %}
+{% set docker_image_torch_nightly = repo ~ ":$BUILDKITE_COMMIT-torch-nightly" %}
+{% set docker_image_cu118         = repo ~ ":$BUILDKITE_COMMIT-cu118" %}
+{% set docker_image_cpu           = repo ~ ":$BUILDKITE_COMMIT-cpu" %}
+{% set docker_image_arm64_cpu     = repo ~ ":$BUILDKITE_COMMIT-arm64-cpu" %}
+
+{# --- main-only current images --- #}
+{% if branch == "main" %}
+  {% set docker_image_latest = repo ~ ":latest" %}
+  {% set docker_image_hpu    = repo ~ ":$BUILDKITE_COMMIT-hpu" %}
+{% endif %}
+
+{% set docker_image_amd           = repo_amd ~ ":$BUILDKITE_COMMIT" %}
+
+{# =============================
+   Docker Image URIs with {{ previous_commit }}
+   ============================= #}
+
+{% set previous_docker_image               = repo ~ ":" ~ previous_commit %}
+{% set previous_docker_image_torch_nightly = repo ~ ":" ~ previous_commit ~ "-torch-nightly" %}
+{% set previous_docker_image_cu118         = repo ~ ":" ~ previous_commit ~ "-cu118" %}
+{% set previous_docker_image_cpu           = repo ~ ":" ~ previous_commit ~ "-cpu" %}
+{% set previous_docker_image_arm64_cpu     = repo ~ ":" ~ previous_commit ~ "-arm64-cpu" %}
+
+{# --- main-only previous images --- #}
+{% if branch == "main" %}
+  {% set previous_docker_image_hpu = repo ~ ":" ~ previous_commit ~ "-hpu" %}
+{% endif %}
+
+{% set previous_docker_image_amd           = repo_amd ~ ":" ~ previous_commit %}
+{# ============================= #}
+
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
@@ -265,7 +302,7 @@ steps:
           exit 0
         fi
       - >
-        docker build --file docker/Dockerfile
+        docker buildx build --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
         --build-arg USE_SCCACHE=1
@@ -277,6 +314,12 @@ steps:
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
         {% endif %}
         --tag {{ docker_image }}
+        {% if branch != "main" %}
+        --cache-from=type=registry,ref={{ previous_docker_image }}
+        {% else %}
+        --cache-from=type=registry,ref={{ docker_image_latest }}
+        {% endif %}
+        --cache-to=type=inline
         --target test
         --progress plain .
       - "docker push {{ docker_image }}"
@@ -284,8 +327,6 @@ steps:
       - "docker tag {{ docker_image }} {{ docker_image_latest }}"
       - "docker push {{ docker_image_latest }}"
       {% endif %}
-    env:
-      DOCKER_BUILDKIT: "1"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -317,7 +358,7 @@ steps:
           exit 0
         fi
       - >
-        docker build
+        docker buildx build
         --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
@@ -329,11 +370,11 @@ steps:
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
         {% endif %}
         --tag {{ docker_image_cu118 }}
+        --cache-from=type=registry,ref={{ previous_docker_image_cu118 }}
+        --cache-to=type=inline
         --target test
         --progress plain .
       - "docker push {{ docker_image_cu118 }}"
-    env:
-      DOCKER_BUILDKIT: "1"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -360,10 +401,8 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag {{ docker_image_cpu }} --target vllm-test --progress plain ."
+      - "docker buildx build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag {{ docker_image_cpu }} --cache-from=type=registry,ref={{ previous_docker_image_cpu }} --cache-to=type=inline --target vllm-test --progress plain ."
       - "docker push {{ docker_image_cpu }}"
-    env:
-      DOCKER_BUILDKIT: "1"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -389,17 +428,17 @@ steps:
           exit 0
         fi
       - |
-        docker build \
+        docker buildx build \
           --file tests/pytorch_ci_hud_benchmark/Dockerfile.hpu \
           --build-arg max_jobs=16 \
           --build-arg buildkite_commit=$BUILDKITE_COMMIT \
           --tag {{ docker_image_hpu }} \
+          --cache-from=type=registry,ref={{ previous_docker_image_hpu }}
+          --cache-to=type=inline
           --progress plain \
           https://github.com/vllm-project/vllm-gaudi.git
 
         docker push {{ docker_image_hpu }}
-    env:
-      DOCKER_BUILDKIT: "1"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -431,10 +470,8 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image_cpu }} --target vllm-test --progress plain ."
+      - "docker buildx build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image_arm64_cpu }} --cache-from=type=registry,ref={{ previous_docker_image_arm64_cpu }} --cache-to=type=inline --target vllm-test --progress plain ."
       - "docker push {{ docker_image_cpu }}"
-    env:
-      DOCKER_BUILDKIT: "1"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -522,17 +559,17 @@ steps:
               exit 0
             fi
           - >
-            docker build
+            docker buildx build
             --file docker/Dockerfile.nightly_torch
             --build-arg max_jobs=16
             --build-arg buildkite_commit=$BUILDKITE_COMMIT
             --build-arg USE_SCCACHE=1
             --tag {{ docker_image_torch_nightly }}
+            --cache-from=type=registry,ref={{ previous_docker_image_torch_nightly }}
+            --cache-to=type=inline
             --target test
             --progress plain .
           - "docker push {{ docker_image_torch_nightly }}"
-        env:
-          DOCKER_BUILDKIT: "1"
         retry:
           automatic:
             - exit_status: -1  # Agent was lost
@@ -584,20 +621,20 @@ steps:
         commands:
           # Handle the introduction of test target in Dockerfile.rocm
           - >
-            docker build
+            docker buildx build
             --build-arg max_jobs=16
             --build-arg REMOTE_VLLM=1
             --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942'
             --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
             --tag {{ docker_image_amd }}
+            --cache-from=type=registry,ref={{ previous_docker_image_amd }}
+            --cache-to=type=inline
             -f docker/Dockerfile.rocm
             --target test
             --no-cache
             --progress plain .
           - "docker push {{ docker_image_amd }}"
         key: "amd-build"
-        env:
-          DOCKER_BUILDKIT: "1"
         retry:
           automatic:
             - exit_status: -1  # Agent was lost
