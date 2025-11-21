@@ -3,5 +3,6 @@ variable "project_id" {
 }
 
 variable "instance_count" {
-  default = 8
+  type        = number
+  description = "Number of VM instance"
 }

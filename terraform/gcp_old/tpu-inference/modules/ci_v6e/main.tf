@@ -1,28 +1,28 @@
-# 16 nodes for CI cluster
-# 1 TPU v6e device each
-# Region: us-east5-b
-# Type: v6e-1
+# 1 TPU device each
 # Runtime: v2-alpha-tpuv6e
 
-resource "google_compute_disk" "disk_east5_b" {
-  provider = google-beta.us-east5-b
-  count = 24
-
-  name  = "tpu-disk-east5-b-${count.index}"
-  size  = 2048
-  type  = "hyperdisk-balanced"
-  zone  = "us-east5-b"
+resource "google_compute_disk" "tpu_disk" {
+  provider = google-beta
+  count    = var.instance_count
+  name     = "ci-tpu-${var.accelerator_type}-disk-${count.index}"
+  size     = 2048
+  type     = "hyperdisk-balanced"
 }
 
 resource "google_tpu_v2_vm" "tpu_v6_ci" {
-  provider = google-beta.us-east5-b
-  count = 24
-  name = "vllm-tpu-v6-ci-${count.index}"
-  zone = "us-east5-b" 
+  provider = google-beta
+  count    = var.instance_count
+  name     = "vllm-tpu-${var.accelerator_type}-ci-${count.index}"
 
-  runtime_version = "v2-alpha-tpuv6e"
+  runtime_version  = "v2-alpha-tpuv6e"
+  accelerator_type = var.accelerator_type
 
-  accelerator_type = "v6e-1"
+  dynamic "scheduling_config" {    
+    for_each = var.reserved ? [1] : []
+    content {
+      reserved = var.reserved
+    }
+  }
 
   network_config {
     network             = "projects/${var.project_id}/global/networks/default"
@@ -30,8 +30,8 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
   }
 
   data_disks {
-    source_disk = google_compute_disk.disk_east5_b[count.index].id
-    mode = "READ_WRITE"
+    source_disk = google_compute_disk.tpu_disk[count.index].id
+    mode        = "READ_WRITE"
   }
 
   metadata = {
@@ -40,8 +40,6 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
 
       apt-get update
       apt-get install -y curl build-essential jq
-
-      curl -o- https://get.docker.com/ | bash -
 
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
       /root/.cargo/bin/cargo install minijinja-cli
@@ -57,8 +55,8 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
-      sudo sed -i 's/name="%hostname-%spawn"/name="vllm-tpu-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'tags="queue=tpu_v6e_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i 's/name="%hostname-%spawn"/name="vllm-tpu-${var.accelerator_type}-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
+      echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
 
       sudo mkdir -p /mnt/disks/persist
