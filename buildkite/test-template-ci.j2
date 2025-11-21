@@ -1,6 +1,6 @@
 steps:
-  - label: "Distributed Tests (8 GPUs)"
-    depends_on: ~
+- label: "V1 Test attention (H100)"
+    depends_on: block-v1-test-attention-h100
     soft_fail: false
     agents:
       queue: mithril-h100-pool
@@ -14,12 +14,12 @@ steps:
       - kubernetes:
           podSpec:
             containers:
-              - image: 936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:1840c5cb1818ae036cb4d8276d37ce81142acbee
+              - image: 936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT
                 command:
-                  - bash -c "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/tests && export NCCL_CUMEM_HOST_ENABLE=0 && torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep"
+                  - bash -c "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/tests && pytest -v -s v1/attention"
                 resources:
                   limits:
-                    nvidia.com/gpu: 8
+                    nvidia.com/gpu: 1
                 volumeMounts:
                   - name: devshm
                     mountPath: /dev/shm
