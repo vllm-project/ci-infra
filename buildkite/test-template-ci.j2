@@ -58,7 +58,7 @@ agents:
   {% elif step.gpu == "a100" %}
   queue: a100_queue
   {% elif step.gpu == "h100" %}
-  queue: mithril-h100-pool
+  queue: IBM-H100-OpenShift
   {% elif step.gpu == "h200" %}
   queue: skylab-h200
   {% elif step.gpu == "b200" %}
