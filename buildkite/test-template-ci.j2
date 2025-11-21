@@ -3,13 +3,13 @@ steps:
     depends_on: ~
     soft_fail: false
     agents:
-    queue: mithril-h100-pool
+        queue: mithril-h100-pool
     retry:
-    automatic:
-    - exit_status: -1
-      limit: 1
-    - exit_status: -10
-      limit: 1
+        automatic:
+        - exit_status: -1
+          limit: 1
+        - exit_status: -10
+          limit: 1
     plugins:
     - kubernetes:
       podSpec:
