@@ -18,6 +18,7 @@
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
+{% set hf_home_ibm = "/model-cache/huggingface" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
 {% macro add_pytest_coverage(cmd, coverage_file) %}
@@ -58,7 +59,7 @@ agents:
   {% elif step.gpu == "a100" %}
   queue: a100_queue
   {% elif step.gpu == "h100" %}
-  queue: mithril-h100-pool
+  queue: IBM-H100-OpenShift
   {% elif step.gpu == "h200" %}
   queue: skylab-h200
   {% elif step.gpu == "b200" %}
@@ -178,21 +179,21 @@ plugins:
               - name: devshm
                 mountPath: /dev/shm
               - name: hf-cache
-                mountPath: {{ hf_home }}
+                mountPath: {{ hf_home_ibm }}
             env:
               - name: VLLM_USAGE_SOURCE
                 value: ci-test
               - name: NCCL_CUMEM_HOST_ENABLE
                 value: "0"
               - name: HF_HOME
-                value: {{ hf_home }}
+                value: {{ hf_home_ibm }}
               - name: HF_TOKEN
                 valueFrom:
                   secretKeyRef:
                     name: hf-token-secret
                     key: token
         nodeSelector:
-          node.kubernetes.io/instance-type: gpu-h100-sxm
+          nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
         volumes:
           - name: devshm
             emptyDir:
