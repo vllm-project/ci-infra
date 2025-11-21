@@ -14,7 +14,7 @@ steps:
       - kubernetes:
           podSpec:
             containers:
-              - image: 936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:1840c5cb1818ae036cb4d8276d37ce81142acbee
+              - image: 936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:1840c5cb1818ae036cb4d8276d37ce81142acbee
                 command:
                   - bash -c "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/tests && export NCCL_CUMEM_HOST_ENABLE=0 && torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep"
                 resources:
