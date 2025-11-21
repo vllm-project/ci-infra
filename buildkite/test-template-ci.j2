@@ -1,49 +1,49 @@
 steps:
-- label: "V1 Test attention (H100)"
+-   label: "V1 Test attention (H100)"
     depends_on: ~
     soft_fail: false
     agents:
-      queue: mithril-h100-pool
+    queue: mithril-h100-pool
     retry:
-      automatic:
-        - exit_status: -1
-          limit: 1
-        - exit_status: -10
-          limit: 1
+    automatic:
+    - exit_status: -1
+      limit: 1
+    - exit_status: -10
+      limit: 1
     plugins:
-      - kubernetes:
-          podSpec:
-            containers:
-              - image: 936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT
-                command:
-                  - bash -c "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/tests && pytest -v -s v1/attention"
-                resources:
-                  limits:
-                    nvidia.com/gpu: 1
-                volumeMounts:
-                  - name: devshm
-                    mountPath: /dev/shm
-                  - name: hf-cache
-                    mountPath: /root/.cache/huggingface
-                env:
-                  - name: VLLM_USAGE_SOURCE
-                    value: ci-test
-                  - name: NCCL_CUMEM_HOST_ENABLE
-                    value: "0"
-                  - name: HF_HOME
-                    value: /root/.cache/huggingface
-                  - name: HF_TOKEN
-                    valueFrom:
-                      secretKeyRef:
-                        name: hf-token-secret
-                        key: token
-            nodeSelector:
-              node.kubernetes.io/instance-type: gpu-h100-sxm
-            volumes:
+    - kubernetes:
+      podSpec:
+        containers:
+          - image: 936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT
+            command:
+              - bash -c "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/tests && pytest -v -s v1/attention"
+            resources:
+              limits:
+                nvidia.com/gpu: 1
+            volumeMounts:
               - name: devshm
-                emptyDir:
-                  medium: Memory
+                mountPath: /dev/shm
               - name: hf-cache
-                hostPath:
-                  path: /mnt/hf-cache
-                  type: DirectoryOrCreate
+                mountPath: /root/.cache/huggingface
+            env:
+              - name: VLLM_USAGE_SOURCE
+                value: ci-test
+              - name: NCCL_CUMEM_HOST_ENABLE
+                value: "0"
+              - name: HF_HOME
+                value: /root/.cache/huggingface
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-token-secret
+                    key: token
+        nodeSelector:
+          node.kubernetes.io/instance-type: gpu-h100-sxm
+        volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
