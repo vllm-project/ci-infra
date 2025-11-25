@@ -54,7 +54,7 @@ upload_pipeline() {
             "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
 
     else
-        curl -o .buildkite/test-template.j2 \
+        AMD_MIRROR_HW="amdtentative" curl -o .buildkite/test-template.j2 \
             "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
     fi
 
