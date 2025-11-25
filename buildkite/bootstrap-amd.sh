@@ -50,11 +50,11 @@ upload_pipeline() {
     source /var/lib/buildkite-agent/.cargo/env
 
     if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then   
-        AMD_MIRROR_HW="amdtentative" curl -o .buildkite/test-template.j2 \
+        curl -o .buildkite/test-template.j2 \
             "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
 
     else
-        AMD_MIRROR_HW="amdtentative" curl -o .buildkite/test-template.j2 \
+        curl -o .buildkite/test-template.j2 \
             "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
     fi
 
@@ -77,7 +77,7 @@ upload_pipeline() {
     (
         set -x
         # Output pipeline.yaml with all blank lines removed
-        minijinja-cli test-template.j2 test-amd.yaml \
+        AMD_MIRROR_HW="amdtentative" minijinja-cli test-template.j2 test-amd.yaml \
             -D branch="$BUILDKITE_BRANCH" \
             -D list_file_diff="$LIST_FILE_DIFF" \
             -D run_all="$RUN_ALL" \
