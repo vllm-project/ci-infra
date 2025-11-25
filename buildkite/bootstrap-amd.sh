@@ -49,10 +49,10 @@ upload_pipeline() {
     curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
     source /var/lib/buildkite-agent/.cargo/env
 
-    if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
-        curl -o .buildkite/test-template.j2 \
+    if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then   
+        AMD_MIRROR_HW="amdtentative" curl -o .buildkite/test-template.j2 \
             "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
-            AMD_MIRROR_HW="amdtentative"
+
     else
         curl -o .buildkite/test-template.j2 \
             "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
