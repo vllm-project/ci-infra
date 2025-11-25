@@ -46,10 +46,11 @@ upload_pipeline() {
     echo "Uploading pipeline..."
     # Install minijinja
     ls .buildkite || buildkite-agent annotate --style error 'Please merge upstream main branch for buildkite CI'
-    AMD_MIRROR_HW="amdtentative" curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
+    curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
     source /var/lib/buildkite-agent/.cargo/env
 
-    if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then   
+    if [[ $BUILDKITE_PIPELINE_SLUG == "amd-ci" ]]; then
+        AMD_MIRROR_HW="amdtentative"    
         curl -o .buildkite/test-template.j2 \
             "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
 
@@ -62,7 +63,7 @@ upload_pipeline() {
     # (WIP) Use pipeline generator instead of jinja template
     if [ -e ".buildkite/pipeline_generator/pipeline_generator.py" ]; then
         python -m pip install click pydantic
-        AMD_MIRROR_HW="amdtentative" python .buildkite/pipeline_generator/pipeline_generator.py --run_all=$RUN_ALL --list_file_diff="$LIST_FILE_DIFF" --nightly="$NIGHTLY" --mirror_hw="amdtentative" #"$AMD_MIRROR_HW"
+        python .buildkite/pipeline_generator/pipeline_generator.py --run_all=$RUN_ALL --list_file_diff="$LIST_FILE_DIFF" --nightly="$NIGHTLY" --mirror_hw="$AMD_MIRROR_HW"
         buildkite-agent pipeline upload .buildkite/pipeline.yaml
         exit 0
     fi
@@ -76,13 +77,13 @@ upload_pipeline() {
     cd .buildkite
     (
         set -x
-        # Output pipeline.yaml with all blank lines removed #$AMD_MIRROR_HW" \
-        AMD_MIRROR_HW="amdtentative" minijinja-cli test-template.j2 test-amd.yaml \
+        # Output pipeline.yaml with all blank lines removed 
+        minijinja-cli test-template.j2 test-amd.yaml \
             -D branch="$BUILDKITE_BRANCH" \
             -D list_file_diff="$LIST_FILE_DIFF" \
             -D run_all="$RUN_ALL" \
             -D nightly="$NIGHTLY" \
-            -D mirror_hw="amdtentative" \ 
+            -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
             -D cov_enabled="$COV_ENABLED" \
