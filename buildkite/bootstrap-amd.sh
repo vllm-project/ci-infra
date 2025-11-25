@@ -76,13 +76,13 @@ upload_pipeline() {
     cd .buildkite
     (
         set -x
-        # Output pipeline.yaml with all blank lines removed
-        minijinja-cli test-template.j2 test-amd.yaml \
+        # Output pipeline.yaml with all blank lines removed #$AMD_MIRROR_HW" \
+        AMD_MIRROR_HW="amdtentative" minijinja-cli test-template.j2 test-amd.yaml \
             -D branch="$BUILDKITE_BRANCH" \
             -D list_file_diff="$LIST_FILE_DIFF" \
             -D run_all="$RUN_ALL" \
             -D nightly="$NIGHTLY" \
-            -D mirror_hw="$AMD_MIRROR_HW" \
+            -D mirror_hw="amdtentative" \ 
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
             -D cov_enabled="$COV_ENABLED" \
