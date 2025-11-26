@@ -13,4 +13,4 @@ dependencies = [
 ]
 
 [project.scripts]
-pipeline-generator = "pipeline_generator_main:main"
+pipeline-generator = "main:main"
