@@ -1,7 +1,8 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pydantic import model_validator
 from typing_extensions import Self
+from collections import defaultdict
 
 import os
 import yaml
@@ -60,6 +61,19 @@ def parse_steps_from_yaml(yaml_data: dict):
             step.group = group
     return steps
 
-def sort_steps(steps: List[Step]):
+def group_steps(steps: List[Step]) -> Dict[str, List[Step]]:
+    grouped_steps = defaultdict(list)
+    for step in steps:
+        if step.group:
+            grouped_steps[step.group].append(step)
+        else:
+            grouped_steps["ungrouped"].append(step)
+    return grouped_steps
+
+def group_and_sort_steps(steps: List[Step]) -> Dict[str, List[Step]]:
     # Sort steps by group and label
-    return sorted(steps, key=lambda x: (x.group, x.label))
+    grouped_steps = group_steps(steps)
+    sorted_group_steps = {}
+    for group, steps in grouped_steps.items():
+        sorted_group_steps[group] = sorted(steps, key=lambda x: x.label)
+    return sorted_group_steps

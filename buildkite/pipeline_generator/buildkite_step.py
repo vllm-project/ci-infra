@@ -9,7 +9,6 @@ from collections import defaultdict
 
 class BuildkiteCommandStep(BaseModel):
     label: str
-    group: str
     agents: Dict[str, str] = {}
     commands: List[str] = []
     depends_on: Optional[List[str]] = None
@@ -28,6 +27,10 @@ class BuildkiteCommandStep(BaseModel):
             "plugins": self.plugins
         }
 
+class BuildkiteGroupStep(BaseModel):
+    group: str
+    steps: List[BuildkiteCommandStep]
+
 def get_step_plugin(step: Step, image: str):
     # Use K8s plugin
     if step.gpu in [GPUType.H100, GPUType.H200]:
@@ -35,21 +38,19 @@ def get_step_plugin(step: Step, image: str):
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, image)}
 
-def convert_step_to_buildkite_step(step: Step, image: str):
-    buildkite_step = BuildkiteCommandStep(
-        label=step.label,
-        group=step.group,
-        commands=step.commands,
-        depends_on=step.depends_on,
-        soft_fail=step.soft_fail,
-        agents={"queue": get_agent_queue(step)},
-        plugins=[get_step_plugin(step, image)]
-    )
-    return buildkite_step
-
-def group_steps(steps: List[BuildkiteCommandStep]):
-    grouped_steps = defaultdict(list)
-    for step in steps:
-        if step.group:
-            grouped_steps[step.group].append(step)
-    return grouped_steps
+def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], image: str) -> List[BuildkiteGroupStep]:
+    buildkite_group_steps = []
+    for group, steps in group_steps.items():
+        group_steps = []
+        for step in steps:
+            buildkite_step = BuildkiteCommandStep(
+                label=step.label,
+                commands=step.commands,
+                depends_on=step.depends_on,
+                soft_fail=step.soft_fail,
+                agents={"queue": get_agent_queue(step)},
+                plugins=[get_step_plugin(step, image)]
+            )
+            group_steps.append(buildkite_step)
+        buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps))
+    return buildkite_group_steps
