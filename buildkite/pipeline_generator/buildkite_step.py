@@ -5,6 +5,7 @@ from pipeline_generator_helper import get_agent_queue
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
 from utils import GPUType
+from collections import defaultdict
 
 class BuildkiteCommandStep(BaseModel):
     label: str
@@ -45,3 +46,10 @@ def convert_step_to_buildkite_step(step: Step, image: str):
         plugins=[get_step_plugin(step, image)]
     )
     return buildkite_step
+
+def group_steps(steps: List[BuildkiteCommandStep]):
+    grouped_steps = defaultdict(list)
+    for step in steps:
+        if step.group:
+            grouped_steps[step.group].append(step)
+    return grouped_steps

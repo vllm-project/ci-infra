@@ -5,7 +5,7 @@ import yaml
 
 from pipeline_generator_helper import get_pr_labels, get_list_file_diff, should_run_all, should_use_precompiled, should_fail_fast
 from step import read_steps_from_job_dir, sort_steps
-from buildkite_step import convert_step_to_buildkite_step
+from buildkite_step import convert_step_to_buildkite_step, group_steps
 from pipeline_generator_helper import get_image
 
 class PipelineConfig(BaseModel):
@@ -58,12 +58,18 @@ class PipelineGenerator:
         image = get_image(self.pipeline_config.registries, self.branch, self.commit)
 
         buildkite_steps = [convert_step_to_buildkite_step(step, image) for step in steps]
-
-        buildkite_steps_dict = {"steps": [buildkite_step.dict(exclude_none=True) for buildkite_step in buildkite_steps]}
-        print(buildkite_steps_dict)
-        with open("buildkite_steps.yaml", "w") as f, open(self.output_file_path, "w") as f2:
+        grouped_buildkite_steps = group_steps(buildkite_steps)
+        buildkite_steps_dict = {"steps": []}
+        for group, steps in grouped_buildkite_steps.items():
+            steps = [step.dict(exclude_none=True) for step in steps]
+            for step in steps:
+                del step["group"]
+            buildkite_steps_dict["steps"].append({
+                "group": group,
+                "steps": steps
+            })
+        with open("buildkite_steps.yaml", "w") as f:
             yaml.dump(buildkite_steps_dict, f, sort_keys=False, default_flow_style=False)
-            yaml.dump(buildkite_steps_dict, f2, sort_keys=False, default_flow_style=False)
         # print(self.output_file_path)
         # with open(self.output_file_path, "w") as f:
         #     yaml.dump(buildkite_steps_dict, f, sort_keys=False, default_flow_style=False)
