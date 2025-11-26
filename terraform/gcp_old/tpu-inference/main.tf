@@ -19,7 +19,7 @@ data "google_secret_manager_secret_version" "huggingface_token" {
 }
 
 module "ci_v6" {
-  source = "./modules/ci_v6"
+  source = "../modules/ci_v6"
   providers = {
     google-beta.us-east5-b = google-beta.us-east5-b
   }
@@ -29,7 +29,7 @@ module "ci_v6" {
 }
 
 module "ci_v6e_8" {
-  source    = "./modules/ci_v6e"
+  source    = "../modules/ci_v6e"
   providers = {
     google-beta = google-beta.us-central1-b
   }
@@ -44,7 +44,7 @@ module "ci_v6e_8" {
 }
 
 module "ci_cpu" {
-  source    = "./modules/ci_cpu"
+  source    = "../modules/ci_cpu"
   providers = {
     google-beta = google-beta.us-east5-b
   }
