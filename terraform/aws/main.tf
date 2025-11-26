@@ -461,6 +461,55 @@ resource "aws_iam_policy" "premerge_ecr_public_write_access_policy" {
   })
 }
 
+resource "aws_iam_policy" "premerge_ecr_cache_read_write_access_policy" {
+  name        = "premerge_ecr_cache_read_write_access_policy"
+  description = "Policy to read and write cache to premerge cache repo and read from postmerge cache repo"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:CompleteLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:GetAuthorizationToken",
+        "sts:GetServiceBearerToken"
+      ]
+      Resource = [
+        "arn:aws:ecr:us-east-1:936637512419:repository/vllm-ci-test-cache",
+        "arn:aws:ecr:us-west-2:936637512419:repository/vllm-ci-test-cache"
+      ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:GetAuthorizationToken",
+          "sts:GetServiceBearerToken"
+        ]
+        Resource = [
+          "arn:aws:ecr:us-east-1:936637512419:repository/vllm-ci-postmerge-cache",
+          "arn:aws:ecr:us-west-2:936637512419:repository/vllm-ci-postmerge-cache"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "sts:GetServiceBearerToken"
+        ],
+        Resource = "*"
+    }]
+  })
+}
+
 resource "aws_iam_policy" "postmerge_ecr_public_read_access_policy" {
   name        = "postmerge-ecr-public-read-access-policy"
   description = "Policy to pull images from postmerge ECR"
@@ -512,6 +561,41 @@ resource "aws_iam_policy" "postmerge_ecr_public_read_write_access_policy" {
         "sts:GetServiceBearerToken"
       ]
       Resource = "arn:aws:ecr-public::936637512419:repository/vllm-ci-postmerge-repo"
+    }]
+  })
+}
+
+resource "aws_iam_policy" "postmerge_ecr_cache_read_write_access_policy" {
+  name        = "postmerge_ecr_cache_read_write_access_policy"
+  description = "Policy to read and write cache to postmerge cache repo"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:CompleteLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:GetAuthorizationToken",
+        "sts:GetServiceBearerToken"
+      ]
+      Resource = [
+        "arn:aws:ecr:us-east-1:936637512419:repository/vllm-ci-postmerge-cache",
+        "arn:aws:ecr:us-west-2:936637512419:repository/vllm-ci-postmerge-cache"
+      ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "sts:GetServiceBearerToken"
+        ],
+        Resource = "*"
     }]
   })
 }
@@ -675,6 +759,16 @@ resource "aws_iam_role_policy_attachment" "premerge_ecr_public_write_access" {
   policy_arn = aws_iam_policy.premerge_ecr_public_write_access_policy.arn
 }
 
+resource "aws_iam_role_policy_attachment" "premerge_ecr_cache_read_write_access" {
+  for_each = merge(
+    aws_cloudformation_stack.bk_queue,
+    aws_cloudformation_stack.bk_queue_premerge,
+    aws_cloudformation_stack.bk_queue_premerge_us_east_1,
+  )
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.premerge_ecr_cache_read_write_access_policy.arn
+}
+
 resource "aws_iam_role_policy_attachment" "postmerge_ecr_public_read_access" {
   for_each   = merge(
     aws_cloudformation_stack.bk_queue_ci_gpu
@@ -690,6 +784,15 @@ resource "aws_iam_role_policy_attachment" "postmerge_ecr_public_read_write_acces
   )
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.postmerge_ecr_public_read_write_access_policy.arn
+}
+
+resource "aws_iam_role_policy_attachment" "postmerge_ecr_cache_read_write_access" {
+  for_each = merge(
+    aws_cloudformation_stack.bk_queue_postmerge,
+    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
+  )
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.postmerge_ecr_cache_read_write_access_policy.arn
 }
 
 resource "aws_iam_role_policy_attachment" "release_ecr_public_read_write_access" {
