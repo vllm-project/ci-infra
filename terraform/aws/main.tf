@@ -173,7 +173,7 @@ locals {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci_us_east_1.name
       BuildkiteQueue                       = "cpu_queue_premerge_us_east_1"
       InstanceTypes                        = "r6in.16xlarge" # 512GB memory for CUDA kernel compilation
-      MaxSize                              = 10
+      MaxSize                              = 20
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
@@ -250,8 +250,7 @@ locals {
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
-      BuildkiteTerminateInstanceAfterJob   = false
-      ScaleInIdlePeriod                    = 600 # 10 minutes
+      BuildkiteTerminateInstanceAfterJob   = true
     }
 
     gpu-4-queue-ci = {
@@ -264,8 +263,7 @@ locals {
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
-      BuildkiteTerminateInstanceAfterJob   = false
-      ScaleInIdlePeriod                    = 600 # 10 minutes
+      BuildkiteTerminateInstanceAfterJob   = true
     }
   }
 
