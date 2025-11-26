@@ -1,11 +1,13 @@
 {% set cov_enabled = (cov_enabled == "1") %}
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
+{% set pull_through_docker_image = "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cpu" %}
 {% set docker_image_arm64_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-arm64-cpu" %}
 {% if branch == "main" %}
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
+{% set pull_through_docker_image = "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_latest = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
@@ -192,7 +194,7 @@ plugins:
                     name: hf-token-secret
                     key: token
         nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+          node.kubernetes.io/instance-type: gpu-h100-sxm
         volumes:
           - name: devshm
             emptyDir:
@@ -200,7 +202,7 @@ plugins:
           - name: hf-cache
             hostPath:
               path: /mnt/hf-cache
-              type: Directory
+              type: DirectoryOrCreate
   {% else %}
   - kubernetes:
       podSpec:
@@ -360,7 +362,7 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --tag {{ docker_image_cpu }} --target vllm-test --progress plain ."
+      - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag {{ docker_image_cpu }} --target vllm-test --progress plain ."
       - "docker push {{ docker_image_cpu }}"
     env:
       DOCKER_BUILDKIT: "1"
@@ -480,7 +482,7 @@ steps:
     depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
     {% endif %}
     soft_fail: {{ step.soft_fail or false }}
-    {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
+    {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else (pull_through_docker_image if step.gpu == "h100" else docker_image), default_working_dir, hf_home_fsx, hf_home, branch) | indent(4, true) }}
   {% endif %}
   {% endfor %}
 
@@ -757,61 +759,3 @@ steps:
     command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
   {% endif %}
 
-  - label: "TPU V1 Test"
-    soft_fail: true
-    depends_on: ~
-    key: run-tpu-v1-test
-    timeout_in_minutes: 180
-    agents:
-      queue: tpu_v6e_queue
-    commands:
-      - bash .buildkite/scripts/tpu/cleanup_docker.sh
-      - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi
-
-  - label: "TPU V1 Test Part2"
-    soft_fail: true
-    depends_on: ~
-    key: run-tpu-v1-test-part2
-    timeout_in_minutes: 90
-    agents:
-      queue: tpu_v6e_queue
-    commands:
-      - bash .buildkite/scripts/tpu/cleanup_docker.sh
-      - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test-part2.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test-part2.sh; fi
-
-  - label: "TPU V1 Benchmark Test"
-    soft_fail: true
-    depends_on: ~
-    key: run-tpu-v1-benchmark-test
-    timeout_in_minutes: 60
-    agents:
-      queue: tpu_v6e_queue
-    commands:
-      - bash .buildkite/scripts/tpu/cleanup_docker.sh
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=0 --tag vllm/vllm-tpu-bm --progress plain -f docker/Dockerfile.tpu ."
-      - bash .buildkite/scripts/tpu/docker_run_bm.sh .buildkite/scripts/tpu/config_v6e_1.env
-      - bash .buildkite/scripts/tpu/docker_run_bm.sh .buildkite/scripts/tpu/quantized_v6e_1.env
-
-  {% if branch == "main" %}
-  - label: "TPU V1 Test Notification"
-    depends_on:
-      - run-tpu-v1-test
-      - run-tpu-v1-test-part2
-    soft_fail: true
-    agents:
-      queue: tpu_v6e_queue
-    commands: |
-      if [[ $$(buildkite-agent step get "outcome" --step "run-tpu-v1-test") != "passed" || $$(buildkite-agent step get "outcome" --step "run-tpu-v1-test-part2") != "passed" ]]; then
-         cat <<- YAML | buildkite-agent pipeline upload
-         steps:
-           - label: "Notify owners about failing test"
-             agents:
-               queue: tpu_v6e_queue
-             command: echo "TPU V1 Test failed"
-             notify:
-               - slack:
-                   channels:
-                     - "vllm#tpu-ci-notifications"
-      YAML
-      fi
-  {% endif %}

@@ -242,74 +242,8 @@ steps:
               path: {{ hf_home }}
               type: Directory
   {% endif %}
-  {% endfor %}
+  {% endfor %} 
 
-  - block: "Run TPU V0 Test"
-    key: block-tpu-v0
-    depends_on: ~
-
-  - label: "TPU V0 Test"
-    key: run-tpu-v0-test
-    depends_on: block-tpu-v0
-    soft_fail: true
-    agents:
-      queue: tpu_v5_queue
-    commands:
-      - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-test.sh; fi
-      - yes | docker system prune -a
-
-  - label: "TPU V0 Test Notification"
-    depends_on: run-tpu-v0-test
-    soft_fail: true
-    agents:
-      queue: tpu_v5_queue
-    commands: |
-      if [ $$(buildkite-agent step get "outcome" --step "run-tpu-v0-test") != "passed" ]; then
-         cat <<- YAML | buildkite-agent pipeline upload
-         steps:
-           - label: "Notify owners about failing test"
-             agents:
-               queue: tpu_v5_queue
-             command: echo "TPU V0 Test failed"
-             notify:
-               - slack:
-                   channels:
-                     - "#collab-google-ci"
-      YAML
-      fi
-
-  - block: "Run TPU V1 Test"
-    key: block-tpu-v1
-    depends_on: ~
-
-  - label: "TPU V1 Test"
-    key: run-tpu-v1-test
-    depends_on: block-tpu-v1
-    agents:
-      queue: tpu_v6e_queue
-    commands:
-      - bash .buildkite/scripts/tpu/cleanup_docker.sh
-      - if [[ -f ".buildkite/scripts/hardware_ci/run-tpu-v1-test.sh" ]]; then bash .buildkite/scripts/hardware_ci/run-tpu-v1-test.sh; fi      
-
-  - label: "TPU V1 Test Notification"
-    depends_on: run-tpu-v1-test
-    soft_fail: true
-    agents:
-      queue: tpu_v5_queue
-    commands: |
-      if [ $$(buildkite-agent step get "outcome" --step "run-tpu-v1-test") != "passed" ]; then
-         cat <<- YAML | buildkite-agent pipeline upload
-         steps:
-           - label: "Notify owners about failing test"
-             agents:
-               queue: tpu_v5_queue
-             command: echo "TPU V1 Test failed"
-             notify:
-               - slack:
-                   channels:
-                     - "#tpu-ci-notifications"
-      YAML
-      fi
   - block: "Run GH200 Test"
     depends_on: ~
     key: block-gh200
