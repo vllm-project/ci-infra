@@ -15,5 +15,15 @@ dependencies = [
 [project.scripts]
 pipeline-generator = "main:main"
 
+[tool.setuptools]
+py-modules = [
+    "main",
+    "pipeline_generator",
+    "pipeline_generator_helper",
+    "buildkite_step",
+    "step",
+    "utils"
+]
+
 [tool.setuptools.packages.find]
-where = ["."]
+include = [".", "plugin"]
