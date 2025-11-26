@@ -34,8 +34,6 @@ class Step(BaseModel):
     def validate_multi_node(self) -> Self:
         if self.num_nodes and not self.num_gpus:
             raise ValueError("'num_gpus' must be defined if 'num_nodes' is defined.")
-        if self.num_nodes and len(self.commands) != self.num_nodes:
-            raise ValueError("Number of commands must match the number of nodes.")
         return self
     
     @classmethod
