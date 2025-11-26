@@ -1,0 +1,27 @@
+group: bb
+steps:
+- label: Test A
+  commands:
+  - echo "Test A"
+  - echo "Test A.B"
+
+- label: Test B
+  working_dir: "/tests/b/"
+  no_gpu: true
+  commands:
+  - echo "Test B"
+
+- label: Test C
+  commands:
+  - echo "Test C"
+  - echo "Test C.D"
+  source_file_dependencies:
+  - "file1"
+  - "src/file2"
+
+- label: Test D
+  num_nodes: 2
+  num_gpus: 4
+  commands:
+  - echo "Test D.A"
+  - echo "Test D.B"
