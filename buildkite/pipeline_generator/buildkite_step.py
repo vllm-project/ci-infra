@@ -33,7 +33,7 @@ def get_step_plugin(step: Step, image: str):
     if step.gpu in [GPUType.H100, GPUType.H200]:
         return get_k8s_plugin(step, image)
     else:
-        return get_docker_plugin(step, image)
+        return {"docker#v5.2.0": get_docker_plugin(step, image)}
 
 def convert_step_to_buildkite_step(step: Step, image: str):
     buildkite_step = BuildkiteCommandStep(

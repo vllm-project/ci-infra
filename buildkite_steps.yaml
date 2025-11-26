@@ -9,19 +9,20 @@ steps:
     - echo "Test E.F"
     soft_fail: false
     plugins:
-    - image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
-      always_pull: true
-      propagate_environment: true
-      gpus: all
-      environment:
-      - VLLM_USAGE_SOURCE=ci-test
-      - NCCL_CUMEM_HOST_ENABLE=0
-      - HF_HOME=/fsx/hf_cache
-      - HF_TOKEN
-      - CODECOV_TOKEN
-      volumes:
-      - /dev/shm:/dev/shm
-      - /fsx/hf_cache:/fsx/hf_cache
+    - docker#v5.2.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
+        always_pull: true
+        propagate_environment: true
+        gpus: all
+        environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
+        - HF_HOME=/fsx/hf_cache
+        - HF_TOKEN
+        - CODECOV_TOKEN
+        volumes:
+        - /dev/shm:/dev/shm
+        - /fsx/hf_cache:/fsx/hf_cache
   - label: Test F
     agents:
       queue: cpu_queue_premerge_us_east_1
@@ -29,19 +30,20 @@ steps:
     - echo "Test F"
     soft_fail: false
     plugins:
-    - image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
-      always_pull: true
-      propagate_environment: true
-      gpus: all
-      environment:
-      - VLLM_USAGE_SOURCE=ci-test
-      - NCCL_CUMEM_HOST_ENABLE=0
-      - HF_HOME=/fsx/hf_cache
-      - HF_TOKEN
-      - CODECOV_TOKEN
-      volumes:
-      - /dev/shm:/dev/shm
-      - /fsx/hf_cache:/fsx/hf_cache
+    - docker#v5.2.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
+        always_pull: true
+        propagate_environment: true
+        gpus: all
+        environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
+        - HF_HOME=/fsx/hf_cache
+        - HF_TOKEN
+        - CODECOV_TOKEN
+        volumes:
+        - /dev/shm:/dev/shm
+        - /fsx/hf_cache:/fsx/hf_cache
   - label: Test G
     agents:
       queue: gpu_1_queue
@@ -50,19 +52,20 @@ steps:
     - echo "Test G.H"
     soft_fail: false
     plugins:
-    - image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
-      always_pull: true
-      propagate_environment: true
-      gpus: all
-      environment:
-      - VLLM_USAGE_SOURCE=ci-test
-      - NCCL_CUMEM_HOST_ENABLE=0
-      - HF_HOME=/fsx/hf_cache
-      - HF_TOKEN
-      - CODECOV_TOKEN
-      volumes:
-      - /dev/shm:/dev/shm
-      - /fsx/hf_cache:/fsx/hf_cache
+    - docker#v5.2.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
+        always_pull: true
+        propagate_environment: true
+        gpus: all
+        environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
+        - HF_HOME=/fsx/hf_cache
+        - HF_TOKEN
+        - CODECOV_TOKEN
+        volumes:
+        - /dev/shm:/dev/shm
+        - /fsx/hf_cache:/fsx/hf_cache
   - label: Test H
     agents:
       queue: gpu_4_queue
@@ -71,19 +74,20 @@ steps:
     - echo "Test H.J"
     soft_fail: false
     plugins:
-    - image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
-      always_pull: true
-      propagate_environment: true
-      gpus: all
-      environment:
-      - VLLM_USAGE_SOURCE=ci-test
-      - NCCL_CUMEM_HOST_ENABLE=0
-      - HF_HOME=/fsx/hf_cache
-      - HF_TOKEN
-      - CODECOV_TOKEN
-      volumes:
-      - /dev/shm:/dev/shm
-      - /fsx/hf_cache:/fsx/hf_cache
+    - docker#v5.2.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
+        always_pull: true
+        propagate_environment: true
+        gpus: all
+        environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
+        - HF_HOME=/fsx/hf_cache
+        - HF_TOKEN
+        - CODECOV_TOKEN
+        volumes:
+        - /dev/shm:/dev/shm
+        - /fsx/hf_cache:/fsx/hf_cache
 - group: bb
   steps:
   - label: Test A
@@ -94,19 +98,20 @@ steps:
     - echo "Test A.B"
     soft_fail: false
     plugins:
-    - image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
-      always_pull: true
-      propagate_environment: true
-      gpus: all
-      environment:
-      - VLLM_USAGE_SOURCE=ci-test
-      - NCCL_CUMEM_HOST_ENABLE=0
-      - HF_HOME=/fsx/hf_cache
-      - HF_TOKEN
-      - CODECOV_TOKEN
-      volumes:
-      - /dev/shm:/dev/shm
-      - /fsx/hf_cache:/fsx/hf_cache
+    - docker#v5.2.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
+        always_pull: true
+        propagate_environment: true
+        gpus: all
+        environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
+        - HF_HOME=/fsx/hf_cache
+        - HF_TOKEN
+        - CODECOV_TOKEN
+        volumes:
+        - /dev/shm:/dev/shm
+        - /fsx/hf_cache:/fsx/hf_cache
   - label: Test B
     agents:
       queue: cpu_queue_premerge_us_east_1
@@ -114,19 +119,20 @@ steps:
     - echo "Test B"
     soft_fail: false
     plugins:
-    - image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
-      always_pull: true
-      propagate_environment: true
-      gpus: all
-      environment:
-      - VLLM_USAGE_SOURCE=ci-test
-      - NCCL_CUMEM_HOST_ENABLE=0
-      - HF_HOME=/fsx/hf_cache
-      - HF_TOKEN
-      - CODECOV_TOKEN
-      volumes:
-      - /dev/shm:/dev/shm
-      - /fsx/hf_cache:/fsx/hf_cache
+    - docker#v5.2.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
+        always_pull: true
+        propagate_environment: true
+        gpus: all
+        environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
+        - HF_HOME=/fsx/hf_cache
+        - HF_TOKEN
+        - CODECOV_TOKEN
+        volumes:
+        - /dev/shm:/dev/shm
+        - /fsx/hf_cache:/fsx/hf_cache
   - label: Test C
     agents:
       queue: gpu_1_queue
@@ -135,19 +141,20 @@ steps:
     - echo "Test C.D"
     soft_fail: false
     plugins:
-    - image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
-      always_pull: true
-      propagate_environment: true
-      gpus: all
-      environment:
-      - VLLM_USAGE_SOURCE=ci-test
-      - NCCL_CUMEM_HOST_ENABLE=0
-      - HF_HOME=/fsx/hf_cache
-      - HF_TOKEN
-      - CODECOV_TOKEN
-      volumes:
-      - /dev/shm:/dev/shm
-      - /fsx/hf_cache:/fsx/hf_cache
+    - docker#v5.2.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
+        always_pull: true
+        propagate_environment: true
+        gpus: all
+        environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
+        - HF_HOME=/fsx/hf_cache
+        - HF_TOKEN
+        - CODECOV_TOKEN
+        volumes:
+        - /dev/shm:/dev/shm
+        - /fsx/hf_cache:/fsx/hf_cache
   - label: Test D
     agents:
       queue: gpu_4_queue
@@ -156,16 +163,17 @@ steps:
     - echo "Test D.B"
     soft_fail: false
     plugins:
-    - image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
-      always_pull: true
-      propagate_environment: true
-      gpus: all
-      environment:
-      - VLLM_USAGE_SOURCE=ci-test
-      - NCCL_CUMEM_HOST_ENABLE=0
-      - HF_HOME=/fsx/hf_cache
-      - HF_TOKEN
-      - CODECOV_TOKEN
-      volumes:
-      - /dev/shm:/dev/shm
-      - /fsx/hf_cache:/fsx/hf_cache
+    - docker#v5.2.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-premerge-repo:123
+        always_pull: true
+        propagate_environment: true
+        gpus: all
+        environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
+        - HF_HOME=/fsx/hf_cache
+        - HF_TOKEN
+        - CODECOV_TOKEN
+        volumes:
+        - /dev/shm:/dev/shm
+        - /fsx/hf_cache:/fsx/hf_cache
