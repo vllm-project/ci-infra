@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-pipeline-generator = "buildkite.pipeline-generator.main:main"
+pipeline-generator = "pipeline-generator.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
