@@ -44,9 +44,9 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], ima
         group_steps = []
         for step in steps:
             step_commands = step.commands
-            for command in step_commands:
-                command = command.replace("$REPO:$BUILDKITE_COMMIT", image)
-                command = command.replace("$BUILDKITE_COMMIT", commit)
+            for i, command in enumerate(step_commands):
+                step_commands[i] = command.replace("$REPO:$BUILDKITE_COMMIT", image)
+                step_commands[i] = step_commands[i].replace("$BUILDKITE_COMMIT", commit)
             step.commands = step_commands
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
