@@ -57,7 +57,7 @@ class PipelineGenerator:
         group_steps = group_and_sort_steps(steps)
         image = get_image(self.pipeline_config.registries, self.branch, self.commit)
 
-        buildkite_group_steps = convert_group_step_to_buildkite_step(group_steps, image)
+        buildkite_group_steps = convert_group_step_to_buildkite_step(group_steps, image, self.commit)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:

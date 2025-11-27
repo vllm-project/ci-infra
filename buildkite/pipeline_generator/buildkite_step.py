@@ -38,14 +38,19 @@ def get_step_plugin(step: Step, image: str):
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, image)}
 
-def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], image: str) -> List[BuildkiteGroupStep]:
+def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], image: str, commit: str) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
     for group, steps in group_steps.items():
         group_steps = []
         for step in steps:
+            step_commands = step.commands
+            for command in step_commands:
+                command = command.replace("$REPO:$BUILDKITE_COMMIT", image)
+                command = command.replace("$BUILDKITE_COMMIT", commit)
+            step.commands = step_commands
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
-                commands=step.commands,
+                commands=step_commands,
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
