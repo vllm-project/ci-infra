@@ -20,7 +20,8 @@ variable "buildkite_queue_name" {
 }
 
 variable "project_id" {
-  default = "cloud-tpu-inference-test"
+  type        = string
+  description = "The project ID for creating TPU agents"
 }
 
 variable "buildkite_token_value" {
