@@ -132,6 +132,7 @@ plugins:
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
+        - CUDA_VISIBLE_DEVICES=1,2
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
