@@ -56,8 +56,11 @@ class PipelineGenerator:
             steps.extend(read_steps_from_job_dir(job_dir))
         group_steps = group_and_sort_steps(steps)
         image = get_image(self.pipeline_config.registries, self.branch, self.commit)
-
-        buildkite_group_steps = convert_group_step_to_buildkite_step(group_steps, image, self.commit)
+        variables_to_inject = {
+            "$REPO": self.pipeline_config.registries["main"] if self.branch == "main" else self.pipeline_config.registries["premerge"],
+            "$BUILDKITE_COMMIT": self.commit,
+        }
+        buildkite_group_steps = convert_group_step_to_buildkite_step(group_steps, variables_to_inject)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
         for buildkite_group_step in buildkite_group_steps:
             print(buildkite_group_step.group)

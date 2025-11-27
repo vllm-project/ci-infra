@@ -38,15 +38,15 @@ def get_step_plugin(step: Step, image: str):
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, image)}
 
-def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], image: str, commit: str) -> List[BuildkiteGroupStep]:
+def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], variables_to_inject: Dict[str, str]) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
     for group, steps in group_steps.items():
         group_steps = []
         for step in steps:
             step_commands = step.commands
             for i, command in enumerate(step_commands):
-                step_commands[i] = command.replace("$REPO:$BUILDKITE_COMMIT", image)
-                step_commands[i] = step_commands[i].replace("$BUILDKITE_COMMIT", commit)
+                for variable, value in variables_to_inject.items():
+                    step_commands[i] = step_commands[i].replace(variable, value)
             step.commands = step_commands
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
