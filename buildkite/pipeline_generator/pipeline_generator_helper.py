@@ -1,74 +1,96 @@
-from typing import Dict, List, Optional
+import os
+from typing import List
+import re
+import subprocess
+import requests
 
-from .utils import GPUType, get_agent_queue, get_full_test_command, get_multi_node_test_command
-from .step import TestStep, BuildkiteStep, get_step_key
-from .plugin import get_docker_plugin_config, get_kubernetes_plugin_config
+from step import Step
+from utils import AgentQueue, GPUType
 
-def get_plugin_config(
-        container_image: str,
-        no_gpu: Optional[bool] = None,
-        gpu_type: Optional[GPUType] = None,
-        num_gpus: Optional[int] = None
-    ) -> Dict:
-    """Returns the plugin configuration for the Buildkite step."""
-    if gpu_type and gpu_type == GPUType.A100 and num_gpus:
-        return get_kubernetes_plugin_config(
-            container_image,
-            num_gpus
-        )
-    return get_docker_plugin_config(
-        container_image,
-        no_gpu or False,
-    )
+def should_run_all(pr_labels: List[str], list_file_diff: List[str], run_all_patterns: List[str], run_all_exclude_patterns: List[str]) -> bool:
+    """Determine if the pipeline should run all tests."""
+    if os.getenv("RUN_ALL") == "1":
+        return True
+    if "ready-run-all-tests" in pr_labels:
+        return True
+    pattern_matched = False
+    for file in list_file_diff:
+        for pattern in run_all_patterns:
+            if re.match(pattern, file):
+                pattern_matched = True
+                break
+        if pattern_matched:
+            match_ignore = False
+            for exclude_pattern in run_all_exclude_patterns:
+                if re.match(exclude_pattern, file):
+                    match_ignore = True
+                    break
+            if not match_ignore:
+                return True
+    return False
 
-
-def convert_test_step_to_buildkite_step(step: TestStep, container_image: str) -> BuildkiteStep:
-    """Convert TestStep into BuildkiteStep."""
-    buildkite_step = BuildkiteStep(
-        label=step.label,
-        key=get_step_key(step.label),
-        commands=step.commands,
-        parallelism=step.parallelism,
-        soft_fail=step.soft_fail,
-        plugins=[get_plugin_config(container_image, step.no_gpu, step.gpu, step.num_gpus)],
-        agents={"queue": get_agent_queue(step.no_gpu, step.gpu, step.num_gpus).value}
-    )
-    # If test is multi-node, configure step to run with custom script
-    if step.num_nodes and step.num_nodes > 1:
-        buildkite_step.commands = [get_multi_node_test_command(
-                step.commands,
-                step.working_dir,
-                step.num_nodes,
-                step.num_gpus,
-                container_image
+def get_list_file_diff(branch: str) -> List[str]:
+    """Get list of file paths that get changed between current branch and origin/main."""
+    try:
+        subprocess.run(["git", "add", "."], check=True)
+        if branch == "main":
+            output = subprocess.check_output(
+                ["git", "diff", "--name-only", "--diff-filter=ACMDR", "HEAD~1"],
+                universal_newlines=True
             )
-        ]
-        buildkite_step.plugins = None
-    return buildkite_step
+        else:
+            merge_base = subprocess.check_output(
+                ["git", "merge-base", "origin/main", "HEAD"],
+                universal_newlines=True
+            )
+            output = subprocess.check_output(
+                ["git", "diff", "--name-only", "--diff-filter=ACMDR", merge_base.strip()],
+                universal_newlines=True
+            )
+        return [line for line in output.split('\n') if line.strip()]
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to get git diff: {e}")
 
-def get_build_commands(container_registry: str, buildkite_commit: str, container_image: str) -> List[str]:
-    ecr_login_command = (
-        "aws ecr-public get-login-password --region us-east-1 | "
-        f"docker login --username AWS --password-stdin {container_registry}"
-    )
-    image_check_command = f"""#!/bin/bash
-if [[ -z $(docker manifest inspect {container_image}) ]]; then
-echo "Image not found, proceeding with build..."
-else
-echo "Image found"
-exit 0
-fi
-"""
-    docker_build_command = (
-        f"docker build "
-        f"--file docker/Dockerfile "
-        f"--build-arg max_jobs=64 "
-        f"--build-arg buildkite_commit={buildkite_commit} "
-        f"--build-arg USE_SCCACHE=1 "
-        f"--tag {container_image} "
-        f"--target test "
-        f"--progress plain ."
-    )
-    # TODO: Stop using . in docker build command
-    docker_push_command = f"docker push {container_image}"
-    return [ecr_login_command, image_check_command, docker_build_command, docker_push_command]
+def get_pr_labels(pull_request: str) -> List[str]:
+    if not pull_request or pull_request == "false":
+        return []
+    request_url = f"https://api.github.com/repos/vllm-project/vllm/pulls/{pull_request}"
+    response = requests.get(request_url)
+    response.raise_for_status()
+    return [label["name"] for label in response.json()["labels"]]
+
+def should_use_precompiled(self, run_all: bool) -> bool:
+    if os.getenv("VLLM_USE_PRECOMPILED") == "1":
+        return True
+    if run_all:
+        return False
+    return True
+
+def should_fail_fast(pr_labels: List[str]) -> bool:
+    if "ci-no-fail-fast" in pr_labels:
+        return False
+    return True
+
+def get_image(registries: List[str], branch: str, commit: str) -> str:
+    if branch == "main":
+        return f"{registries['main']}:{commit}"
+    else:
+        return f"{registries['premerge']}:{commit}"
+
+def get_agent_queue(step: Step):
+    if step.label == "Documentation Build":
+        return AgentQueue.SMALL_CPU_QUEUE_PREMERGE
+    elif step.no_gpu:
+        return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
+    elif step.gpu == GPUType.A100:
+        return AgentQueue.A100_QUEUE
+    elif step.gpu == GPUType.H100:
+        return AgentQueue.MITHRIL_H100_POOL
+    elif step.gpu == GPUType.H200:
+        return AgentQueue.SKYLAB_H200
+    elif step.gpu == GPUType.B200:
+        return AgentQueue.B200
+    elif step.num_gpus == 2 or step.num_gpus == 4:
+        return AgentQueue.GPU_4_QUEUE
+    else:
+        return AgentQueue.GPU_1_QUEUE
