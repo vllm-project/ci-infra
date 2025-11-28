@@ -410,19 +410,15 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
   {% endif %}
-
-  - block: "Build Arm64 CPU image"
-    depends_on: ~
-    key: block-arm64-cpu-img-build
-
+  
   - label: ":docker: build image ARM64 CPU"
     key: image-build-arm64-cpu
-    depends_on: block-arm64-cpu-img-build
+    depends_on: ~
     agents:
       {% if branch == "main" %}
       queue: arm64_cpu_queue_postmerge
       {% else %}
-      queue: arm64_cpu_queue_postmerge
+      queue: arm64_cpu_queue_premerge
       {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
