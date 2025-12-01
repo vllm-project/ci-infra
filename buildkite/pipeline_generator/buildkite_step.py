@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 from step import Step
-from pipeline_generator_helper import get_agent_queue
+from utils import get_agent_queue
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
 from utils import GPUType
@@ -54,8 +54,9 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], ima
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
-                
             )
+            if step.env:
+                buildkite_step.env = step.env
             # if step is image build, don't use docker plugin
             if not step.label.startswith(":docker:"):
                 buildkite_step.plugins = [get_step_plugin(step, image)]

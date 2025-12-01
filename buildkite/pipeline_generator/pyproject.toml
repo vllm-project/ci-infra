@@ -19,7 +19,6 @@ pipeline-generator = "main:main"
 py-modules = [
     "main",
     "pipeline_generator",
-    "pipeline_generator_helper",
     "buildkite_step",
     "step",
     "utils"

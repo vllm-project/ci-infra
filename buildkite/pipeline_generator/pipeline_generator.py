@@ -3,10 +3,9 @@ from typing import List, Dict
 import os
 import yaml
 
-from pipeline_generator_helper import get_pr_labels, get_list_file_diff, should_run_all, should_use_precompiled, should_fail_fast
+from utils import get_image, get_pr_labels, get_list_file_diff, should_run_all, should_use_precompiled, should_fail_fast
 from step import read_steps_from_job_dir, group_and_sort_steps
 from buildkite_step import convert_group_step_to_buildkite_step
-from pipeline_generator_helper import get_image
 
 class PipelineConfig(BaseModel):
     name: str

@@ -23,6 +23,7 @@ class Step(BaseModel):
     soft_fail: Optional[bool] = False
     parallelism: Optional[int] = None
     mount_buildkite_agent: Optional[bool] = False
+    env: Optional[Dict[str, str]] = None
 
     @model_validator(mode="after")
     def validate_gpu(self) -> Self:
