@@ -31,6 +31,11 @@ class BuildkiteCommandStep(BaseModel):
             "retry": self.retry
         }
 
+class BuildkiteBlockStep(BaseModel):
+    label: str
+    depends_on: str
+    key: str
+
 class BuildkiteGroupStep(BaseModel):
     group: str
     steps: List[BuildkiteCommandStep]
@@ -52,12 +57,18 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
         "$BUILDKITE_COMMIT": global_config["commit"]
     }
     list_file_diff = get_list_file_diff()
-    print(list_file_diff)
     for group, steps in group_steps.items():
         group_steps = []
         for step in steps:
-            # check whether step should run automatically
-
+            # generate block step if step should not run automatically
+            block_step = None
+            if not step_should_run(step, list_file_diff):
+                block_step = BuildkiteBlockStep(
+                    label=f"Run {step.label}",
+                    depends_on="image-build",
+                    key=f"block-{generate_step_key(step.label)}"
+                )
+                group_steps.append(block_step)
             step_commands = step.commands
             for i, command in enumerate(step_commands):
                 for variable, value in variables_to_inject.items():
@@ -70,6 +81,8 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
             )
+            if block_step:
+                group_steps.append(block_step)
             if step.env:
                 buildkite_step.env = step.env
             if step.retry:
@@ -82,3 +95,30 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
             group_steps.append(buildkite_step)
         buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps))
     return buildkite_group_steps
+
+def step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+    global_config = get_global_config()
+    if global_config["nightly"] == "1":
+        return True
+    if step.optional:
+        return False
+    if global_config["run_all"] == "1":
+        return True
+    if step.source_file_dependencies:
+        for source_file in step.source_file_dependencies:
+            for diff_file in list_file_diff:
+                if source_file in diff_file:
+                    return True
+    return True
+
+def generate_step_key(step_label: str) -> str:
+    return (
+        step_label
+        .replace(" ", "-")
+        .lower()
+        .replace("(", "")
+        .replace(")", "")
+        .replace("%", "")
+        .replace(",", "-")
+        .replace("+", "-")
+    )
