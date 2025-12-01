@@ -13,6 +13,7 @@ class Step(BaseModel):
     label: str
     group: str = ""
     working_dir: str = DEFAULT_TEST_WORKING_DIR
+    key: Optional[str] = None
     depends_on: Optional[List[str]] = None
     commands: Optional[List[str]] = None
     gpu: Optional[str] = None

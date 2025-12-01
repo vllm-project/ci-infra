@@ -62,6 +62,8 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], ima
                 buildkite_step.env = step.env
             if step.retry:
                 buildkite_step.retry = step.retry
+            if step.key:
+                buildkite_step.key = step.key
             # if step is image build, don't use docker plugin
             if not step.label.startswith(":docker:"):
                 buildkite_step.plugins = [get_step_plugin(step, image)]
