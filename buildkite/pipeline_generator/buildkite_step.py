@@ -36,8 +36,8 @@ class BuildkiteGroupStep(BaseModel):
 
 def get_step_plugin(step: Step, image: str):
     # Use K8s plugin
-    print(step.label, step.gpu, step.gpu in [GPUType.H100, GPUType.H200])
-    if step.gpu in [GPUType.H100, GPUType.H200]:
+    print(step.label, step.gpu, step.gpu in [GPUType.H100.value, GPUType.H200.value])
+    if step.gpu in [GPUType.H100.value, GPUType.H200.value]:
         return get_k8s_plugin(step, image)
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, image)}
