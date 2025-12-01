@@ -76,7 +76,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                     key=f"block-{generate_step_key(step.label)}"
                 )
                 if step.label.startswith(":docker:"):
-                    block_step.depends_on = "~"
+                    block_step.depends_on = []
                 group_steps.append(block_step)
             step_commands = step.commands
             for i, command in enumerate(step_commands):
