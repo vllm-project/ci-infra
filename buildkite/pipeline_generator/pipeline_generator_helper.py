@@ -71,11 +71,11 @@ def should_fail_fast(pr_labels: List[str]) -> bool:
         return False
     return True
 
-def get_image(registries: List[str], branch: str, commit: str) -> str:
+def get_image(registries: List[str], repositories: Dict[str, str], branch: str, commit: str) -> str:
     if branch == "main":
-        return f"{registries['main']}:{commit}"
+        return f"{registries}:{repositories['main']}:{commit}"
     else:
-        return f"{registries['premerge']}:{commit}"
+        return f"{registries}:{repositories['premerge']}:{commit}"
 
 def get_agent_queue(step: Step):
     if step.label == "Documentation Build":

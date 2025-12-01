@@ -25,7 +25,6 @@ class PipelineConfig(BaseModel):
             raise FileNotFoundError(f"Pipeline config file not found: {yaml_path}")
         with open(yaml_path, "r") as f:
             data = yaml.safe_load(f)
-            print(data)
         return cls(name=data["name"], job_dirs=data["job_dirs"], run_all_patterns=data["run_all_patterns"], run_all_exclude_patterns=data["run_all_exclude_patterns"], registries=data["registries"], repositories=data["repositories"])
     
     def validate(self):
@@ -56,7 +55,7 @@ class PipelineGenerator:
         for job_dir in self.pipeline_config.job_dirs:
             steps.extend(read_steps_from_job_dir(job_dir))
         group_steps = group_and_sort_steps(steps)
-        image = get_image(self.pipeline_config.registries, self.branch, self.commit)
+        image = get_image(self.pipeline_config.registries, self.pipeline_config.repositories, self.branch, self.commit)
         
         # inject values to replace variables in step commands
         variables_to_inject = {
