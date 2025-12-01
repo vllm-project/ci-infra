@@ -12,6 +12,8 @@ class GlobalConfig(TypedDict):
     pull_request: Optional[str] = None
     run_all_patterns: Optional[List[str]] = None
     run_all_exclude_patterns: Optional[List[str]] = None
+    nightly: Optional[str] = "0"
+    run_all: Optional[str] = "0"
 
 config = None
 
@@ -34,6 +36,8 @@ def init_global_config(pipeline_config_path: str):
         pull_request=os.getenv("BUILDKITE_PULL_REQUEST"),
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
+        nightly=os.getenv("NIGHTLY", "0"),
+        run_all=os.getenv("RUN_ALL", "0"),
     )
 
 def get_global_config():
