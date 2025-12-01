@@ -5,8 +5,8 @@ from utils import GPUType
 
 docker_plugin_template = {
     "image": "",
-    "always_pull": True,
-    "propagate_environment": True,
+    "always-pull": True,
+    "propagate-environment": True,
     "gpus": "all",
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
@@ -23,8 +23,8 @@ docker_plugin_template = {
 
 h200_plugin_template = {
     "image": "",
-    "always_pull": True,
-    "propagate_environment": True,
+    "always-pull": True,
+    "propagate-environment": True,
     "gpus": "all",
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
@@ -42,8 +42,8 @@ h200_plugin_template = {
 
 b200_plugin_template = {
     "image": "",
-    "always_pull": True,
-    "propagate_environment": True,
+    "always-pull": True,
+    "propagate-environment": True,
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
