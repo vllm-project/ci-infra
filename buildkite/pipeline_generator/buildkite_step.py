@@ -9,6 +9,7 @@ from collections import defaultdict
 
 class BuildkiteCommandStep(BaseModel):
     label: str
+    key: Optional[str] = None
     agents: Dict[str, str] = {}
     commands: List[str] = []
     depends_on: Optional[List[str]] = None
