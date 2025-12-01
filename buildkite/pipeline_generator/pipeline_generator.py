@@ -6,6 +6,7 @@ import yaml
 from utils import get_image, get_pr_labels, get_list_file_diff, should_run_all, should_use_precompiled, should_fail_fast
 from step import read_steps_from_job_dir, group_steps
 from buildkite_step import convert_group_step_to_buildkite_step
+from global_config import init_global_config
 
 class PipelineConfig(BaseModel):
     name: str
@@ -43,6 +44,7 @@ class PipelineGenerator:
         self.output_file_path = output_file_path
 
     def generate(self):
+        global_config = get_global_config()
         self.pr_labels = get_pr_labels()
         self.list_file_diff = get_list_file_diff()
         self.run_all = should_run_all(self.pr_labels, self.list_file_diff)
@@ -60,10 +62,10 @@ class PipelineGenerator:
         # inject values to replace variables in step commands
         variables_to_inject = {
             "$REGISTRY": self.pipeline_config.registries,
-            "$REPO": ["main"] if self.branch == "main" else self.pipeline_config.repositories["premerge"],
-            "$BUILDKITE_COMMIT": self.commit,
+            "$REPO": ["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
+            "$BUILDKITE_COMMIT": global_config["commit"],
         }
-        buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps, image, variables_to_inject, self.branch)
+        buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps, image, variables_to_inject)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
 
         buildkite_steps_dict = {"steps": []}

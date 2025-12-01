@@ -5,6 +5,7 @@ from typing import List, Dict
 import re
 import subprocess
 import requests
+from global_config import get_global_config
 
 class GPUType(Enum):
     H100 = "h100"
