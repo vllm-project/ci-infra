@@ -62,6 +62,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
         for step in steps:
             # generate block step if step should not run automatically
             block_step = None
+            print(f"Step {step.label} should run: {step_should_run(step, list_file_diff)}")
             if not step_should_run(step, list_file_diff):
                 block_step = BuildkiteBlockStep(
                     label=f"Run {step.label}",
@@ -82,7 +83,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 agents={"queue": get_agent_queue(step)},
             )
             if block_step:
-                group_steps.append(block_step)
+                step.depends_on = block_step.key
             if step.env:
                 buildkite_step.env = step.env
             if step.retry:
