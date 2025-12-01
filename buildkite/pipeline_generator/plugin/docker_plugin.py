@@ -70,7 +70,7 @@ def get_docker_plugin(step: Step, image: str):
 
     if step.label == "Benchmarks" or step.mount_buildkite_agent:
         plugin["mount_buildkite_agent"] = True
-    if step.no_gpu:
+    if step.no_gpu and plugin.get("gpus"):
         del plugin["gpus"]
     # TODO: Add BUILDKITE_ANALYTICS_TOKEN and pytest addopts for fail_fast 
     return plugin
