@@ -144,9 +144,9 @@ a100_plugin_template = {
 
 def get_k8s_plugin(step: Step, image: str):
     plugin = None
-    if step.gpu == GPUType.H100:
+    if step.gpu == GPUType.H100.value:
         plugin = h100_plugin_template
-    elif step.gpu == GPUType.A100:
+    elif step.gpu == GPUType.A100.value:
         plugin = a100_plugin_template
     plugin["kubernetes"]["podSpec"]["containers"][0]["image"] = image
     plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] = step.num_gpus or 1
