@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from step import Step
 from utils import get_agent_queue, get_image
 from global_config import get_global_config
@@ -38,7 +38,7 @@ class BuildkiteBlockStep(BaseModel):
 
 class BuildkiteGroupStep(BaseModel):
     group: str
-    steps: List[BuildkiteCommandStep]
+    steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
 
 def get_step_plugin(step: Step):
     # Use K8s plugin
