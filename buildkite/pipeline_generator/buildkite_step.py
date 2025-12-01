@@ -41,7 +41,7 @@ def get_step_plugin(step: Step, image: str):
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, image)}
 
-def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], image: str, variables_to_inject: Dict[str, str]) -> List[BuildkiteGroupStep]:
+def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], image: str, variables_to_inject: Dict[str, str], branch: str) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
     for group, steps in group_steps.items():
         group_steps = []
@@ -56,7 +56,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], ima
                 commands=step_commands,
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
-                agents={"queue": get_agent_queue(step)},
+                agents={"queue": get_agent_queue(step, branch)},
             )
             if step.env:
                 buildkite_step.env = step.env

@@ -25,7 +25,7 @@ class AgentQueue(Enum):
     CPU_QUEUE_PREMERGE_US_EAST_1 = "cpu_queue_premerge_us_east_1"
     CPU_QUEUE_POSTMERGE_US_EAST_1 = "cpu_queue_postmerge_us_east_1"
 
-def get_agent_queue(step: Step):
+def get_agent_queue(step: Step, branch: str):
     if step.label.startswith(":docker:"):
         if branch == "main":
             return AgentQueue.CPU_QUEUE_POSTMERGE_US_EAST_1
