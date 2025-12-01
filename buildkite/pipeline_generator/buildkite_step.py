@@ -29,7 +29,8 @@ class BuildkiteCommandStep(BaseModel):
             "retry": self.retry,
             "plugins": self.plugins,
             "env": self.env,
-            "retry": self.retry
+            "retry": self.retry,
+            "parallelism": self.parallelism
         }
 
 class BuildkiteBlockStep(BaseModel):
