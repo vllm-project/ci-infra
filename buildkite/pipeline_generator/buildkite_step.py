@@ -26,7 +26,7 @@ class BuildkiteCommandStep(BaseModel):
             "soft_fail": self.soft_fail,
             "retry": self.retry,
             "plugins": self.plugins,
-            "env": self.env
+            "env": self.env,
             "retry": self.retry
         }
 
