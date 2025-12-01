@@ -36,6 +36,7 @@ class BuildkiteGroupStep(BaseModel):
 
 def get_step_plugin(step: Step, image: str):
     # Use K8s plugin
+    print(step.label, step.gpu, step.gpu in [GPUType.H100, GPUType.H200])
     if step.gpu in [GPUType.H100, GPUType.H200]:
         return get_k8s_plugin(step, image)
     else:
