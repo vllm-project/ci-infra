@@ -144,6 +144,7 @@ a100_plugin_template = {
 
 def get_k8s_plugin(step: Step, image: str):
     plugin = None
+    print(step.gpu, step.gpu == GPUType.H100.value)
     if step.gpu == GPUType.H100.value:
         plugin = h100_plugin_template
     elif step.gpu == GPUType.A100.value:
