@@ -26,6 +26,7 @@ class Step(BaseModel):
     mount_buildkite_agent: Optional[bool] = False
     env: Optional[Dict[str, str]] = None
     retry: Optional[Dict[str, Any]] = None
+    optional: Optional[bool] = False
 
     @model_validator(mode="after")
     def validate_gpu(self) -> Self:
