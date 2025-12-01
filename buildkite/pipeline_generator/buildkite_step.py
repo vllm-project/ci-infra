@@ -5,7 +5,7 @@ from utils import get_agent_queue, get_image
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
-from utils import GPUType
+from utils import GPUType, get_list_file_diff
 
 class BuildkiteCommandStep(BaseModel):
     label: str
