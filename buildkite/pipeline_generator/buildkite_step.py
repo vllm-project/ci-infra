@@ -15,6 +15,7 @@ class BuildkiteCommandStep(BaseModel):
     soft_fail: Optional[bool] = False
     retry: Optional[Dict[str, Any]] = None
     plugins: Optional[List[Dict[str, Any]]] = None
+    env: Optional[Dict[str, str]] = None
 
     def to_yaml(self):
         return {
@@ -24,7 +25,8 @@ class BuildkiteCommandStep(BaseModel):
             "depends_on": self.depends_on,
             "soft_fail": self.soft_fail,
             "retry": self.retry,
-            "plugins": self.plugins
+            "plugins": self.plugins,
+            "env": self.env
         }
 
 class BuildkiteGroupStep(BaseModel):
