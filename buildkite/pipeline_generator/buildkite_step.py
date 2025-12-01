@@ -54,8 +54,11 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], ima
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
-                plugins=[get_step_plugin(step, image)]
+                
             )
+            # if step is image build, don't use docker plugin
+            if not step.label.startswith(":docker:"):
+                buildkite_step.plugins = [get_step_plugin(step, image)]
             group_steps.append(buildkite_step)
         buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps))
     return buildkite_group_steps

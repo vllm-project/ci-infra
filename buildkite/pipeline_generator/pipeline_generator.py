@@ -56,7 +56,7 @@ class PipelineGenerator:
             steps.extend(read_steps_from_job_dir(job_dir))
         group_steps = group_and_sort_steps(steps)
         image = get_image(self.pipeline_config.registries, self.pipeline_config.repositories, self.branch, self.commit)
-        
+
         # inject values to replace variables in step commands
         variables_to_inject = {
             "$REGISTRY": self.pipeline_config.registries,
