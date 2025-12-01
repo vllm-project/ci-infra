@@ -27,15 +27,8 @@ class PipelineGenerator:
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
         grouped_steps = group_steps(steps)
-        image = get_image()
 
-        # inject values to replace variables in step commands
-        variables_to_inject = {
-            "$REGISTRY": global_config["registries"],
-            "$REPO": ["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
-            "$BUILDKITE_COMMIT": global_config["commit"],
-        }
-        buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps, image, variables_to_inject)
+        buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
 
         buildkite_steps_dict = {"steps": []}

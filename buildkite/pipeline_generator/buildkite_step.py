@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 from step import Step
-from utils import get_agent_queue
+from utils import get_agent_queue, get_image
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
@@ -36,15 +36,22 @@ class BuildkiteGroupStep(BaseModel):
     group: str
     steps: List[BuildkiteCommandStep]
 
-def get_step_plugin(step: Step, image: str):
+def get_step_plugin(step: Step):
     # Use K8s plugin
     if step.gpu in [GPUType.H100.value, GPUType.A100.value]:
-        return {"kubernetes": get_k8s_plugin(step, image)}
+        return {"kubernetes": get_k8s_plugin(step, get_image())}
     else:
-        return {"docker#v5.2.0": get_docker_plugin(step, image)}
+        return {"docker#v5.2.0": get_docker_plugin(step, get_image())}
 
-def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], image: str, variables_to_inject: Dict[str, str]) -> List[BuildkiteGroupStep]:
+def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
+    # inject values to replace variables in step commands
+    global_config = get_global_config()
+    variables_to_inject = {
+        "$REGISTRY": global_config["registries"],
+        "$REPO": ["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
+        "$BUILDKITE_COMMIT": global_config["commit"]
+    }
     for group, steps in group_steps.items():
         group_steps = []
         for step in steps:
@@ -68,7 +75,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], ima
                 buildkite_step.key = step.key
             # if step is image build, don't use docker plugin
             if not step.label.startswith(":docker:"):
-                buildkite_step.plugins = [get_step_plugin(step, image)]
+                buildkite_step.plugins = [get_step_plugin(step)]
             group_steps.append(buildkite_step)
         buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps))
     return buildkite_group_steps
