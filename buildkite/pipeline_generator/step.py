@@ -58,7 +58,7 @@ def read_steps_from_job_dir(job_dir: str):
             if file.endswith(".yaml"):
                 with open(os.path.join(root, file), "r") as f:
                     data = yaml.safe_load(f)
-                    group_depends_on = data.get("group_depends_on", None)
+                    group_depends_on = data.get("depends_on", None)
                     file_steps = parse_steps_from_yaml(data)
                     if group_depends_on:
                         for step in file_steps:
