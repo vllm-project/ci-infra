@@ -100,6 +100,8 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 buildkite_step.retry = step.retry
             if step.key:
                 buildkite_step.key = step.key
+            if step.parallelism:
+                buildkite_step.parallelism = step.parallelism
             # if step is image build, don't use docker plugin
             # if step is multi-node test, don't use docker plugin
             if step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2):
