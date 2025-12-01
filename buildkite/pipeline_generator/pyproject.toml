@@ -21,7 +21,8 @@ py-modules = [
     "pipeline_generator",
     "buildkite_step",
     "step",
-    "utils"
+    "utils",
+    "global_config",
 ]
 
 [tool.setuptools.packages.find]
