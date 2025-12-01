@@ -13,10 +13,11 @@ class PipelineConfig(BaseModel):
     job_dirs: List[str]
     run_all_patterns: List[str]
     run_all_exclude_patterns: List[str]
-    registries: Dict[str, str]
+    registries: str
+    repositories: Dict[str, str]
 
-    def __init__(self, name: str, job_dirs: List[str], run_all_patterns: List[str], run_all_exclude_patterns: List[str], registries: Dict[str, str]):
-        super().__init__(name=name, job_dirs=job_dirs, run_all_patterns=run_all_patterns, run_all_exclude_patterns=run_all_exclude_patterns, registries=registries)
+    def __init__(self, name: str, job_dirs: List[str], run_all_patterns: List[str], run_all_exclude_patterns: List[str], registries: str, repositories: Dict[str, str]):
+        super().__init__(name=name, job_dirs=job_dirs, run_all_patterns=run_all_patterns, run_all_exclude_patterns=run_all_exclude_patterns, registries=registries, repositories=repositories)
 
     @classmethod
     def from_yaml(cls, yaml_path: str):
@@ -25,7 +26,7 @@ class PipelineConfig(BaseModel):
         with open(yaml_path, "r") as f:
             data = yaml.safe_load(f)
             print(data)
-        return cls(name=data["name"], job_dirs=data["job_dirs"], run_all_patterns=data["run_all_patterns"], run_all_exclude_patterns=data["run_all_exclude_patterns"], registries=data["registries"])
+        return cls(name=data["name"], job_dirs=data["job_dirs"], run_all_patterns=data["run_all_patterns"], run_all_exclude_patterns=data["run_all_exclude_patterns"], registries=data["registries"], repositories=data["repositories"])
     
     def validate(self):
         for job_dir in self.job_dirs:
@@ -50,20 +51,22 @@ class PipelineGenerator:
         # vLLM only variables
         self.use_precompiled = should_use_precompiled(self.pr_labels, self.run_all)
         self.fail_fast = should_fail_fast(self.pr_labels)
-    
+
         steps = []
         for job_dir in self.pipeline_config.job_dirs:
             steps.extend(read_steps_from_job_dir(job_dir))
         group_steps = group_and_sort_steps(steps)
         image = get_image(self.pipeline_config.registries, self.branch, self.commit)
+        
+        # inject values to replace variables in step commands
         variables_to_inject = {
-            "$REPO": self.pipeline_config.registries["main"] if self.branch == "main" else self.pipeline_config.registries["premerge"],
+            "$REGISTRY": self.pipeline_config.registries
+            "$REPO": self.pipeline_config.repositories["main"] if self.branch == "main" else self.pipeline_config.repositories["premerge"],
             "$BUILDKITE_COMMIT": self.commit,
         }
         buildkite_group_steps = convert_group_step_to_buildkite_step(group_steps, image, variables_to_inject)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
-        for buildkite_group_step in buildkite_group_steps:
-            print(buildkite_group_step.group)
+
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
             buildkite_steps_dict["steps"].append(buildkite_group_step.dict(exclude_none=True))
