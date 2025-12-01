@@ -53,7 +53,7 @@ class PipelineGenerator:
         steps = []
         for job_dir in self.pipeline_config.job_dirs:
             steps.extend(read_steps_from_job_dir(job_dir))
-        group_steps = group_and_sort_steps(steps)
+        grouped_steps = group_steps(steps)
         image = get_image(self.pipeline_config.registries, self.pipeline_config.repositories, self.branch, self.commit)
 
         # inject values to replace variables in step commands
@@ -62,7 +62,7 @@ class PipelineGenerator:
             "$REPO": self.pipeline_config.repositories["main"] if self.branch == "main" else self.pipeline_config.repositories["premerge"],
             "$BUILDKITE_COMMIT": self.commit,
         }
-        buildkite_group_steps = convert_group_step_to_buildkite_step(group_steps, image, variables_to_inject)
+        buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps, image, variables_to_inject)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
 
         buildkite_steps_dict = {"steps": []}

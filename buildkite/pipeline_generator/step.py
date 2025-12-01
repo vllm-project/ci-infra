@@ -42,16 +42,6 @@ class Step(BaseModel):
     def from_yaml(cls, yaml_data: dict):
         return cls(**yaml_data)
 
-def read_steps_from_job_dir(job_dir: str):
-    steps = []
-    for root, _, files in os.walk(job_dir):
-        for file in files:
-            if file.endswith(".yaml"):
-                with open(os.path.join(root, file), "r") as f:
-                    data = yaml.safe_load(f)
-                    steps.extend(parse_steps_from_yaml(data))
-    return steps
-
 def parse_steps_from_yaml(yaml_data: dict):
     group = yaml_data.get("group", None)
     yaml_steps = yaml_data.get("steps", [])
@@ -61,6 +51,23 @@ def parse_steps_from_yaml(yaml_data: dict):
             step.group = group
     return steps
 
+def read_steps_from_job_dir(job_dir: str):
+    steps = []
+    for root, _, files in os.walk(job_dir):
+        for file in files:
+            if file.endswith(".yaml"):
+                with open(os.path.join(root, file), "r") as f:
+                    data = yaml.safe_load(f)
+                    group_depends_on = data.get("group_depends_on", None)
+                    file_steps = parse_steps_from_yaml(data)
+                    if group_depends_on:
+                        for step in file_steps:
+                            if step.depends_on:
+                                continue
+                            step.depends_on = group_depends_on
+                    steps.extend(file_steps)
+    return steps
+
 def group_steps(steps: List[Step]) -> Dict[str, List[Step]]:
     grouped_steps = defaultdict(list)
     for step in steps:
@@ -68,12 +75,7 @@ def group_steps(steps: List[Step]) -> Dict[str, List[Step]]:
             grouped_steps[step.group].append(step)
         else:
             grouped_steps["ungrouped"].append(step)
-    return grouped_steps
-
-def group_and_sort_steps(steps: List[Step]) -> Dict[str, List[Step]]:
-    # Sort steps by group and label
-    grouped_steps = group_steps(steps)
-    sorted_group_steps = {}
+    sorted_grouped_steps = {}
     for group, steps in grouped_steps.items():
-        sorted_group_steps[group] = sorted(steps, key=lambda x: x.label)
-    return sorted_group_steps
+        sorted_grouped_steps[group] = sorted(steps, key=lambda x: x.label)
+    return sorted_grouped_steps
