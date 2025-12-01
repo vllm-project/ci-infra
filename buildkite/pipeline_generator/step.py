@@ -67,6 +67,12 @@ def read_steps_from_job_dir(job_dir: str):
                             if step.depends_on:
                                 continue
                             step.depends_on = group_depends_on
+                            step.commands = [
+                                "(command nvidia-smi || true)",
+                                "export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1",
+                                f"cd {step.working_dir}",
+                                *step.commands,
+                            ]
                     steps.extend(file_steps)
     return steps
 
