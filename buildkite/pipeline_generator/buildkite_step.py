@@ -32,9 +32,16 @@ class BuildkiteCommandStep(BaseModel):
         }
 
 class BuildkiteBlockStep(BaseModel):
-    label: str
+    block: str
     depends_on: str
     key: str
+
+    def to_yaml(self):
+        return {
+            "block": self.block,
+            "depends_on": self.depends_on,
+            "key": self.key
+        }
 
 class BuildkiteGroupStep(BaseModel):
     group: str
