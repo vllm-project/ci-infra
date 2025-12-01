@@ -59,7 +59,7 @@ class PipelineGenerator:
         
         # inject values to replace variables in step commands
         variables_to_inject = {
-            "$REGISTRY": self.pipeline_config.registries
+            "$REGISTRY": self.pipeline_config.registries,
             "$REPO": self.pipeline_config.repositories["main"] if self.branch == "main" else self.pipeline_config.repositories["premerge"],
             "$BUILDKITE_COMMIT": self.commit,
         }
