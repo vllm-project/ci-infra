@@ -122,6 +122,6 @@ def get_image() -> str:
     registries = global_config["registries"]
     repositories = global_config["repositories"]
     if branch == "main":
-        return f"{registries}:{repositories['main']}:{commit}"
+        return f"{registries}/{repositories['main']}:{commit}"
     else:
-        return f"{registries}:{repositories['premerge']}:{commit}"
+        return f"{registries}/{repositories['premerge']}:{commit}"
