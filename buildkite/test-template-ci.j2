@@ -49,6 +49,10 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {% endif %}
 {% endmacro %}
 
+{% macro test_step_key(label) -%}
+test-{{ label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+{%- endmacro %}
+
 {% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
 agents:
   {% if step.label == "Documentation Build" %}
@@ -474,7 +478,7 @@ steps:
   {% endif %}
 
   - label: "{{ step.label }}"
-    key: test-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+    key: {{ test_step_key(step.label) }}
     {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% else %}
@@ -492,7 +496,7 @@ steps:
     depends_on:
       {% for step in steps %}
       {% if step.fast_check_only != true %}
-      - test-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+      - {{ test_step_key(step.label) }}
       {% endif %}
       {% endfor %}
     allow_dependency_failure: true
@@ -773,7 +777,7 @@ steps:
 
       {% for step in steps %}
       {% if step.fast_check_only != true %}
-      STEP_KEY="test-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}"
+      STEP_KEY="{{ test_step_key(step.label) }}"
       TOTAL_CHECKED=$$((TOTAL_CHECKED + 1))
       OUTCOME=$$(buildkite-agent step get "outcome" --step "$$STEP_KEY" 2>/dev/null || echo "unknown")
       echo "Step '{{ step.label }}' (key: $$STEP_KEY): $$OUTCOME"
