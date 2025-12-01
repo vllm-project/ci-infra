@@ -58,7 +58,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]], ima
                 commands=step_commands,
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
-                agents={"queue": get_agent_queue(step, get_global_config()["branch"])},
+                agents={"queue": get_agent_queue(step)},
             )
             if step.env:
                 buildkite_step.env = step.env
