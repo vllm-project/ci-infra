@@ -8,8 +8,6 @@ from pipeline_generator import PipelineGenerator
 def main(pipeline_config_path, output_file_path):
     pipeline_generator = PipelineGenerator(pipeline_config_path, output_file_path)
     pipeline = pipeline_generator.generate()
-    with open(output_file_path, "w") as f:
-        yaml.dump(pipeline, f)
 
 if __name__ == "__main__":
     main()
