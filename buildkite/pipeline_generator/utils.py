@@ -7,13 +7,13 @@ import subprocess
 import requests
 from global_config import get_global_config
 
-class GPUType(Enum):
+class GPUType(str, Enum):
     H100 = "h100"
     H200 = "h200"
     B200 = "b200"
     A100 = "a100"
 
-class AgentQueue(Enum):
+class AgentQueue(str, Enum):
     CPU_QUEUE_PREMERGE = "cpu_queue_premerge"
     CPU_QUEUE_POSTMERGE = "cpu_queue_postmerge"
     GPU_1_QUEUE = "gpu_1_queue"
@@ -37,13 +37,13 @@ def get_agent_queue(step: Step):
         return AgentQueue.SMALL_CPU_QUEUE_PREMERGE
     elif step.no_gpu:
         return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
-    elif step.gpu == GPUType.A100:
+    elif step.gpu == GPUType.A100.value:
         return AgentQueue.A100_QUEUE
-    elif step.gpu == GPUType.H100:
+    elif step.gpu == GPUType.H100.value:
         return AgentQueue.MITHRIL_H100_POOL
-    elif step.gpu == GPUType.H200:
+    elif step.gpu == GPUType.H200.value:
         return AgentQueue.SKYLAB_H200
-    elif step.gpu == GPUType.B200:
+    elif step.gpu == GPUType.B200.value:
         return AgentQueue.B200
     elif step.num_gpus == 2 or step.num_gpus == 4:
         return AgentQueue.GPU_4_QUEUE
