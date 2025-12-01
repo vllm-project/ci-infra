@@ -14,6 +14,7 @@ class GPUType(Enum):
 
 class AgentQueue(Enum):
     CPU_QUEUE_PREMERGE = "cpu_queue_premerge"
+    CPU_QUEUE_POSTMERGE = "cpu_queue_postmerge"
     GPU_1_QUEUE = "gpu_1_queue"
     GPU_4_QUEUE = "gpu_4_queue"
     MITHRIL_H100_POOL = "mithril-h100-pool"
@@ -22,9 +23,15 @@ class AgentQueue(Enum):
     SMALL_CPU_QUEUE_PREMERGE = "small_cpu_queue_premerge"
     A100_QUEUE = "a100_queue"
     CPU_QUEUE_PREMERGE_US_EAST_1 = "cpu_queue_premerge_us_east_1"
+    CPU_QUEUE_POSTMERGE_US_EAST_1 = "cpu_queue_postmerge_us_east_1"
 
 def get_agent_queue(step: Step):
-    if step.label == "Documentation Build":
+    if step.label.startswith(":docker:"):
+        if branch == "main":
+            return AgentQueue.CPU_QUEUE_POSTMERGE_US_EAST_1
+        else:
+            return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
+    elif step.label == "Documentation Build":
         return AgentQueue.SMALL_CPU_QUEUE_PREMERGE
     elif step.no_gpu:
         return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
