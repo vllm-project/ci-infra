@@ -17,6 +17,7 @@ class BuildkiteCommandStep(BaseModel):
     retry: Optional[Dict[str, Any]] = None
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
+    parallelism: Optional[int] = None
 
     def to_yaml(self):
         return {
@@ -99,7 +100,8 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
             if step.key:
                 buildkite_step.key = step.key
             # if step is image build, don't use docker plugin
-            if not step.label.startswith(":docker:"):
+            # if step is multi-node test, don't use docker plugin
+            if not step.label.startswith(":docker:") and not step.num_nodes >= 2:
                 buildkite_step.plugins = [get_step_plugin(step)]
             group_steps.append(buildkite_step)
         buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps))

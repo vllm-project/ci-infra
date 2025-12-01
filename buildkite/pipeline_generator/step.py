@@ -73,6 +73,7 @@ def read_steps_from_job_dir(job_dir: str):
                                 f"cd {step.working_dir}",
                                 *step.commands,
                             ]
+                            step.commands = [cmd.replace("'", '"') for cmd in step.commands]
                     steps.extend(file_steps)
     return steps
 
