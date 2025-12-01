@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import List, Dict
 import re
 import subprocess
 import requests
