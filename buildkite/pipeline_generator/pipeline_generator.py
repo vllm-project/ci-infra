@@ -34,6 +34,7 @@ class PipelineConfig(BaseModel):
 
 class PipelineGenerator:
     def __init__(self, pipeline_config_path: str, output_file_path: str):
+        init_global_config(pipeline_config_path)
         self.branch = os.getenv("BUILDKITE_BRANCH")
         self.pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
         self.commit = os.getenv("BUILDKITE_COMMIT")
@@ -42,9 +43,9 @@ class PipelineGenerator:
         self.output_file_path = output_file_path
 
     def generate(self):
-        self.pr_labels = get_pr_labels(self.pull_request)
-        self.list_file_diff = get_list_file_diff(self.branch)
-        self.run_all = should_run_all(self.pr_labels, self.list_file_diff, self.pipeline_config.run_all_patterns, self.pipeline_config.run_all_exclude_patterns)
+        self.pr_labels = get_pr_labels()
+        self.list_file_diff = get_list_file_diff()
+        self.run_all = should_run_all(self.pr_labels, self.list_file_diff)
 
         # vLLM only variables
         self.use_precompiled = should_use_precompiled(self.pr_labels, self.run_all)
@@ -54,12 +55,12 @@ class PipelineGenerator:
         for job_dir in self.pipeline_config.job_dirs:
             steps.extend(read_steps_from_job_dir(job_dir))
         grouped_steps = group_steps(steps)
-        image = get_image(self.pipeline_config.registries, self.pipeline_config.repositories, self.branch, self.commit)
+        image = get_image()
 
         # inject values to replace variables in step commands
         variables_to_inject = {
             "$REGISTRY": self.pipeline_config.registries,
-            "$REPO": self.pipeline_config.repositories["main"] if self.branch == "main" else self.pipeline_config.repositories["premerge"],
+            "$REPO": ["main"] if self.branch == "main" else self.pipeline_config.repositories["premerge"],
             "$BUILDKITE_COMMIT": self.commit,
         }
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps, image, variables_to_inject, self.branch)

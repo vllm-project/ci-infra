@@ -25,7 +25,8 @@ class AgentQueue(Enum):
     CPU_QUEUE_PREMERGE_US_EAST_1 = "cpu_queue_premerge_us_east_1"
     CPU_QUEUE_POSTMERGE_US_EAST_1 = "cpu_queue_postmerge_us_east_1"
 
-def get_agent_queue(step: Step, branch: str):
+def get_agent_queue(step: Step):
+    branch = get_global_config()["branch"]
     if step.label.startswith(":docker:"):
         if branch == "main":
             return AgentQueue.CPU_QUEUE_POSTMERGE_US_EAST_1
@@ -48,7 +49,7 @@ def get_agent_queue(step: Step, branch: str):
     else:
         return AgentQueue.GPU_1_QUEUE
 
-def should_run_all(pr_labels: List[str], list_file_diff: List[str], run_all_patterns: List[str], run_all_exclude_patterns: List[str]) -> bool:
+def should_run_all(pr_labels: List[str], list_file_diff: List[str]) -> bool:
     """Determine if the pipeline should run all tests."""
     if os.getenv("RUN_ALL") == "1":
         return True
@@ -56,13 +57,13 @@ def should_run_all(pr_labels: List[str], list_file_diff: List[str], run_all_patt
         return True
     pattern_matched = False
     for file in list_file_diff:
-        for pattern in run_all_patterns:
+        for pattern in get_global_config()["run_all_patterns"]:
             if re.match(pattern, file):
                 pattern_matched = True
                 break
         if pattern_matched:
             match_ignore = False
-            for exclude_pattern in run_all_exclude_patterns:
+            for exclude_pattern in get_global_config()["run_all_exclude_patterns"]:
                 if re.match(exclude_pattern, file):
                     match_ignore = True
                     break
@@ -70,11 +71,11 @@ def should_run_all(pr_labels: List[str], list_file_diff: List[str], run_all_patt
                 return True
     return False
 
-def get_list_file_diff(branch: str) -> List[str]:
+def get_list_file_diff() -> List[str]:
     """Get list of file paths that get changed between current branch and origin/main."""
     try:
         subprocess.run(["git", "add", "."], check=True)
-        if branch == "main":
+        if get_global_config()["branch"] == "main":
             output = subprocess.check_output(
                 ["git", "diff", "--name-only", "--diff-filter=ACMDR", "HEAD~1"],
                 universal_newlines=True
@@ -92,7 +93,8 @@ def get_list_file_diff(branch: str) -> List[str]:
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to get git diff: {e}")
 
-def get_pr_labels(pull_request: str) -> List[str]:
+def get_pr_labels() -> List[str]:
+    pull_request = get_global_config()["pull_request"]
     if not pull_request or pull_request == "false":
         return []
     request_url = f"https://api.github.com/repos/vllm-project/vllm/pulls/{pull_request}"
@@ -112,7 +114,12 @@ def should_fail_fast(pr_labels: List[str]) -> bool:
         return False
     return True
 
-def get_image(registries: List[str], repositories: Dict[str, str], branch: str, commit: str) -> str:
+def get_image() -> str:
+    global_config = get_global_config()
+    commit = global_config["commit"]
+    branch = global_config["branch"]
+    registries = global_config["registries"]
+    repositories = global_config["repositories"]
     if branch == "main":
         return f"{registries}:{repositories['main']}:{commit}"
     else:
