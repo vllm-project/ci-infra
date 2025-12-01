@@ -71,6 +71,7 @@ class PipelineGenerator:
             yaml.dump(buildkite_steps_dict, f, sort_keys=False, default_flow_style=False)
         with open(self.output_file_path, "w") as f:
             f.write("debug null value")
+        print("debug null value")
 
         # print(self.output_file_path)
         # with open(self.output_file_path, "w") as f:
