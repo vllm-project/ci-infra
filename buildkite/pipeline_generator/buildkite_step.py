@@ -6,7 +6,6 @@ from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
 from utils import GPUType
-from collections import defaultdict
 
 class BuildkiteCommandStep(BaseModel):
     label: str
@@ -52,9 +51,13 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
         "$REPO": ["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
         "$BUILDKITE_COMMIT": global_config["commit"]
     }
+    list_file_diff = get_list_file_diff()
+    print(list_file_diff)
     for group, steps in group_steps.items():
         group_steps = []
         for step in steps:
+            # check whether step should run automatically
+
             step_commands = step.commands
             for i, command in enumerate(step_commands):
                 for variable, value in variables_to_inject.items():
