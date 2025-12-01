@@ -71,7 +71,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
             block_step = None
             if not step_should_run(step, list_file_diff):
                 block_step = BuildkiteBlockStep(
-                    label=f"Run {step.label}",
+                    block=f"Run {step.label}",
                     depends_on="image-build",
                     key=f"block-{generate_step_key(step.label)}"
                 )
