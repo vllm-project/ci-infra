@@ -474,6 +474,7 @@ steps:
   {% endif %}
 
   - label: "{{ step.label }}"
+    key: test-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% else %}
@@ -483,6 +484,19 @@ steps:
     {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
   {% endif %}
   {% endfor %}
+
+  {% if nightly == "1" %}
+  # Wait for all main test steps to complete
+  - wait:
+    key: main-tests-complete
+    depends_on:
+      {% for step in steps %}
+      {% if step.fast_check_only != true %}
+      - test-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+      {% endif %}
+      {% endfor %}
+    allow_dependency_failure: true
+  {% endif %}
 
   - group: "vllm against torch nightly"
     depends_on: ~
@@ -740,5 +754,68 @@ steps:
     agents:
       queue: gh200_queue
     command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
-  {% endif %}
 
+  - label: "Waiting for main nightly tests to complete"
+    wait: ~
+    depends_on:
+      - main-tests-complete
+    continue_on_failure: true
+
+  - label: "Nightly Tests Failure Notification"
+    soft_fail: true
+    agents:
+      queue: small_cpu_queue_premerge
+    commands: |
+      echo "Checking test outcomes for nightly build..."
+      FAILED_TESTS=""
+      TOTAL_CHECKED=0
+      TOTAL_FAILED=0
+
+      {% for step in steps %}
+      {% if step.fast_check_only != true %}
+      STEP_KEY="test-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}"
+      TOTAL_CHECKED=$$((TOTAL_CHECKED + 1))
+      OUTCOME=$$(buildkite-agent step get "outcome" --step "$$STEP_KEY" 2>/dev/null || echo "unknown")
+      echo "Step '{{ step.label }}' (key: $$STEP_KEY): $$OUTCOME"
+      if [ "$$OUTCOME" != "passed" ] && [ "$$OUTCOME" != "unknown" ]; then
+        if [ -z "$$FAILED_TESTS" ]; then
+          FAILED_TESTS="{{ step.label }} ($$OUTCOME)"
+        else
+          FAILED_TESTS="$$FAILED_TESTS, {{ step.label }} ($$OUTCOME)"
+        fi
+        TOTAL_FAILED=$$((TOTAL_FAILED + 1))
+      fi
+      {% endif %}
+      {% endfor %}
+
+      echo "Total steps checked: $$TOTAL_CHECKED"
+      echo "Total failed: $$TOTAL_FAILED"
+
+      if [ -n "$$FAILED_TESTS" ]; then
+        echo "Failed tests found, uploading notification step..."
+
+        cat <<- YAML | buildkite-agent pipeline upload
+        steps:
+          - label: ":slack: Notify about nightly test failures"
+            soft_fail: true
+            agents:
+              queue: small_cpu_queue_premerge
+            command: |
+              echo "Nightly tests failed ($$TOTAL_FAILED/$$TOTAL_CHECKED):"
+              echo "$$FAILED_TESTS"
+            notify:
+              - slack:
+                  channels:
+                    - "vllm#buildkite-notifications"
+                  message: |
+                    :rotating_light: Nightly Tests Failed ($$TOTAL_FAILED/$$TOTAL_CHECKED)
+
+                    Failed tests: $$FAILED_TESTS
+
+                    Build: <$${BUILDKITE_BUILD_URL}|#$${BUILDKITE_BUILD_NUMBER}>
+      YAML
+        echo "Notification step uploaded successfully"
+      else
+        echo "No failed tests found, skipping notification"
+      fi
+  {% endif %}
