@@ -37,13 +37,13 @@ def get_agent_queue(step: Step):
         return AgentQueue.SMALL_CPU_QUEUE_PREMERGE
     elif step.no_gpu:
         return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
-    elif step.gpu == GPUType.A100.value:
+    elif step.gpu == GPUType.A100:
         return AgentQueue.A100_QUEUE
-    elif step.gpu == GPUType.H100.value:
+    elif step.gpu == GPUType.H100:
         return AgentQueue.MITHRIL_H100_POOL
-    elif step.gpu == GPUType.H200.value:
+    elif step.gpu == GPUType.H200:
         return AgentQueue.SKYLAB_H200
-    elif step.gpu == GPUType.B200.value:
+    elif step.gpu == GPUType.B200:
         return AgentQueue.B200
     elif step.num_gpus == 2 or step.num_gpus == 4:
         return AgentQueue.GPU_4_QUEUE
