@@ -150,5 +150,4 @@ def get_k8s_plugin(step: Step, image: str):
         plugin = a100_plugin_template
     plugin["kubernetes"]["podSpec"]["containers"][0]["image"] = image
     plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] = step.num_gpus or 1
-    plugin["kubernetes"]["podSpec"]["containers"][0]["command"] = ["bash", "-c", f"(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {step.working_dir} && {' && '.join(step.commands)}"]
     return plugin

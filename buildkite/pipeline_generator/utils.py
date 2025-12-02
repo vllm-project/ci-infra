@@ -118,6 +118,7 @@ def should_fail_fast(pr_labels: List[str]) -> bool:
 def get_image() -> str:
     global_config = get_global_config()
     commit = global_config["commit"]
+    commit = "234c89e37a7d481dc307a5ac18201bfb9c1d9f6c"
     branch = global_config["branch"]
     registries = global_config["registries"]
     repositories = global_config["repositories"]

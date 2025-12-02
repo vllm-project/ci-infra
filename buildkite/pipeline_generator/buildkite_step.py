@@ -71,10 +71,10 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
         for step in steps:
             # generate block step if step should not run automatically
             block_step = None
-            if not step_should_run(step, list_file_diff):
+            if 1==1 or not step_should_run(step, list_file_diff):
                 block_step = BuildkiteBlockStep(
                     block=f"Run {step.label}",
-                    depends_on="image-build",
+                    depends_on=[],
                     key=f"block-{generate_step_key(step.label)}"
                 )
                 if step.label.startswith(":docker:"):
