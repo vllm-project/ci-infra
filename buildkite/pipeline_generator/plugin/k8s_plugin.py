@@ -9,7 +9,6 @@ h100_plugin_template = {
             "containers": [
                 {
                     "image": "",
-                    "command": [],
                     "resources": {
                         "limits": {
                             "nvidia.com/gpu": ""
@@ -79,7 +78,6 @@ a100_plugin_template = {
             "containers": [
                 {
                     "image": "",
-                    "command": [],
                     "resources": {
                         "limits": {
                             "nvidia.com/gpu": ""
