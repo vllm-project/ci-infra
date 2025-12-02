@@ -483,6 +483,7 @@ steps:
     depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
     {% endif %}
     soft_fail: {{ step.soft_fail or false }}
+    priority: 100
     {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else (pull_through_docker_image if step.gpu == "h100" else docker_image), default_working_dir, hf_home_fsx, hf_home, branch) | indent(4, true) }}
   {% endif %}
   {% endfor %}
