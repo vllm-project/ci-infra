@@ -1,11 +1,13 @@
 {% set cov_enabled = (cov_enabled == "1") %}
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
+{% set pull_through_docker_image = "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cpu" %}
 {% set docker_image_arm64_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-arm64-cpu" %}
 {% if branch == "main" %}
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
+{% set pull_through_docker_image = "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_latest = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
@@ -134,6 +136,7 @@ plugins:
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
+        - CUDA_VISIBLE_DEVICES=1,2
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
@@ -196,7 +199,7 @@ plugins:
                     name: hf-token-secret
                     key: token
         nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+          node.kubernetes.io/instance-type: gpu-h100-sxm
         volumes:
           - name: devshm
             emptyDir:
@@ -204,7 +207,7 @@ plugins:
           - name: hf-cache
             hostPath:
               path: /mnt/hf-cache
-              type: Directory
+              type: DirectoryOrCreate
   {% else %}
   - kubernetes:
       podSpec:
@@ -485,7 +488,7 @@ steps:
     depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
     {% endif %}
     soft_fail: {{ step.soft_fail or false }}
-    {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else docker_image, default_working_dir, hf_home_fsx, hf_home, branch)  | indent(4, true) }}
+    {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else (pull_through_docker_image if step.gpu == "h100" else docker_image), default_working_dir, hf_home_fsx, hf_home, branch) | indent(4, true) }}
   {% endif %}
   {% endfor %}
 
@@ -680,6 +683,21 @@ steps:
     agents:
       queue: intel-gpu
     command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh
+
+  - block: "Run Arm CPU test"
+    depends_on: ~
+    key: block-arm-cpu
+
+  - label: "Arm CPU Test"
+    {% if branch == "main" %}
+    depends_on: ~
+    {% else %}
+    depends_on: block-arm-cpu
+    {% endif %}
+    soft_fail: true
+    agents:
+      queue: arm-cpu
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
 
   - label: "Ascend NPU Test"
     soft_fail: true
