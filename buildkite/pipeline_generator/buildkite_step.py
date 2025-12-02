@@ -35,8 +35,8 @@ class BuildkiteCommandStep(BaseModel):
 
 class BuildkiteBlockStep(BaseModel):
     block: str
-    depends_on: str
-    key: str
+    depends_on: Optional[Union[str, List[str]]] = None
+    key: Optional[str] = None
 
     def to_yaml(self):
         return {
