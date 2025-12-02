@@ -74,7 +74,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
             if 1==1 or not step_should_run(step, list_file_diff):
                 block_step = BuildkiteBlockStep(
                     block=f"Run {step.label}",
-                    depends_on=[],
+                    depends_on="[]",
                     key=f"block-{generate_step_key(step.label)}"
                 )
                 if step.label.startswith(":docker:"):
