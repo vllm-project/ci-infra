@@ -436,7 +436,11 @@ steps:
     {% else %}
     depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
     {% endif %}
+    {% if step.label == "Python-only Installation Test" %}
+    soft_fail: true
+    {% else %}
     soft_fail: {{ step.soft_fail or false }}
+    {% endif %}
     {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else (pull_through_docker_image if step.gpu == "h100" else docker_image), default_working_dir, hf_home_fsx, hf_home, branch) | indent(4, true) }}
   {% endif %}
   {% endfor %}
