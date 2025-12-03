@@ -111,9 +111,8 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 pass
             else:
                 buildkite_step.plugins = [get_step_plugin(step)]
-                if step.no_gpu:
-                    print(step.label, buildkite_step.plugins)
             group_steps.append(buildkite_step)
+        print(group_steps)
         buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps))
     return buildkite_group_steps
 
