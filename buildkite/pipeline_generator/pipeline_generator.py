@@ -32,7 +32,7 @@ class PipelineGenerator:
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
         for group_step in buildkite_group_steps:
             for step in group_step.steps:
-                if step.get("label") and "CPU" in step.get("label"):
+                if step.depends_on and "cpu" in step.depends_on:
                     print(step)
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
