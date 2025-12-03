@@ -30,7 +30,10 @@ class PipelineGenerator:
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
-        print("buildkite_group_steps: ", buildkite_group_steps)
+        for group_step in buildkite_group_steps:
+            for step in group_step.steps:
+                if "CPU" in step.label:
+                    print(step)
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
             buildkite_steps_dict["steps"].append(buildkite_group_step.dict(exclude_none=True))
