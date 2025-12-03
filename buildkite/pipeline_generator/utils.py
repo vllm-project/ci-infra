@@ -130,4 +130,5 @@ def get_image(cpu: bool = False) -> str:
         print("before: ", image)
         image = f"{image}-cpu"
         print("after:", image)
+    print("return: ", image)
     return image
