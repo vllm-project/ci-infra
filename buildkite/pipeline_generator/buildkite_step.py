@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, TypedDict
 from step import Step
 from utils import get_agent_queue, get_image
 from global_config import get_global_config
