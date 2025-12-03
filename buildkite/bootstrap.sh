@@ -57,6 +57,70 @@ if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
 
+clean_docker_tag() {
+    # Function to replace invalid characters in Docker image tags and truncate to 128 chars
+    # Valid characters: a-z, A-Z, 0-9, _, ., -
+    local input="$1"
+    echo "$input" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-128
+}
+
+resolve_ecr_cache_vars() {
+    # Resolve ECR cache-from, cache-to using buildkite environment variables:
+    #  -  BUILDKITE_BRANCH 
+    #  -  BUILDKITE_PULL_REQUEST
+    #  -  BUILDKITE_PULL_REQUEST_BASE_BRANCH
+
+    # Define ECR repository URLs for test and main cache
+    local TEST_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-test-cache"
+    local MAIN_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache"
+    
+    # login to ECR to check ceche availability
+    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
+    
+    if [[ "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
+        # For non-PR builds
+        if [[ "$BUILDKITE_BRANCH" == "main" ]]; then
+            # For main branch: use main cache for both source and destination
+            CACHE_TO="${MAIN_CACHE_ECR}:latest"
+            CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+        else
+            # For other branches: use branch-specific cache if it exists
+            local clean_branch=$(clean_docker_tag "$BUILDKITE_BRANCH")
+            CACHE_TO="${TEST_CACHE_ECR}:${clean_branch}"
+            if docker manifest inspect "${TEST_CACHE_ECR}:${clean_branch}" &>/dev/null; then
+                # Use branch-specific cache if available
+                CACHE_FROM="${TEST_CACHE_ECR}:${clean_branch}"
+            else
+                # Fallback to main cache if branch cache doesn't exist
+                CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+            fi
+        fi
+    else
+        # For PR builds
+        # Always set cache destination to PR-specific tag
+        CACHE_TO="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}"
+        
+        if docker manifest inspect "${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}" &>/dev/null; then
+            # Use PR-specific cache if it exists
+            CACHE_FROM="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}"
+        elif [[ "$BUILDKITE_PULL_REQUEST_BASE_BRANCH" != "main" ]]; then
+            # For PRs targeting non-main branches, try using base branch cache
+            local clean_base=$(clean_docker_tag "$BUILDKITE_PULL_REQUEST_BASE_BRANCH")
+            if docker manifest inspect "${TEST_CACHE_ECR}:${clean_base}" &>/dev/null; then
+                CACHE_FROM="${TEST_CACHE_ECR}:${clean_base}"
+            else
+                # Fallback to main cache if base branch cache doesn't exist
+                CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+            fi
+        else
+            # Fallback to main cache for PRs targeting main branch
+            CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+        fi
+    fi
+    # Export variables
+    export CACHE_FROM CACHE_TO
+}
+
 upload_pipeline() {
     echo "Uploading pipeline..."
     # Install minijinja
@@ -86,7 +150,17 @@ upload_pipeline() {
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     FAIL_FAST=$(fail_fast)
-
+    
+    # Resolve CACHE_FROM and CACHE_TO for ECR Registry Caching
+    resolve_ecr_cache_vars
+    if [[ -z "${CACHE_FROM:-}" ]] || [[ -z "${CACHE_TO:-}" ]]; then
+        echo "Error: CACHE_FROM or CACHE_TO not set after resolve_ecr_cache_vars"
+        exit 1
+    else
+        echo "Resolved CACHE_FROM: ${CACHE_FROM}"
+        echo "Resolved CACHE_TO: ${CACHE_TO}"
+    fi
+    
     cd .buildkite
     (
         set -x
@@ -101,6 +175,8 @@ upload_pipeline() {
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D cache_from="$CACHE_FROM" \
+            -D cache_to="$CACHE_TO" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )

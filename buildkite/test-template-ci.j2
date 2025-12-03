@@ -259,6 +259,10 @@ steps:
       {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
+      - "docker buildx create --name vllm-builder --driver docker-container --use"
+      - "docker buildx inspect --bootstrap"
+      - "docker buildx ls"
       - |
         #!/bin/bash
         if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
@@ -268,7 +272,7 @@ steps:
           exit 0
         fi
       - >
-        docker build --file docker/Dockerfile
+        docker buildx build --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
         --build-arg USE_SCCACHE=1
@@ -279,16 +283,15 @@ steps:
         --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
         {% endif %}
+        --cache-from type=registry,ref={{ cache_from }},mode=max
+        --cache-to type=registry,ref={{ cache_to }},mode=max
         --tag {{ docker_image }}
+        {% if branch == "main" %}
+        --tag {{ docker_image_latest }}
+        {% endif %}
+        --push
         --target test
         --progress plain .
-      - "docker push {{ docker_image }}"
-      {% if branch == "main" %}
-      - "docker tag {{ docker_image }} {{ docker_image_latest }}"
-      - "docker push {{ docker_image_latest }}"
-      {% endif %}
-    env:
-      DOCKER_BUILDKIT: "1"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
