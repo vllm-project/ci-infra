@@ -7,7 +7,7 @@ from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
 from utils import GPUType, get_list_file_diff
 
-class BuildkiteCommandStep(BaseModel):
+class BuildkiteCommandStep(TypedDict):
     label: str
     key: Optional[str] = None
     agents: Dict[str, str] = {}
@@ -33,7 +33,7 @@ class BuildkiteCommandStep(BaseModel):
             "parallelism": self.parallelism
         }
 
-class BuildkiteBlockStep(BaseModel):
+class BuildkiteBlockStep(TypedDict):
     block: str
     depends_on: Optional[Union[str, List[str]]] = None
     key: Optional[str] = None
@@ -45,7 +45,7 @@ class BuildkiteBlockStep(BaseModel):
             "key": self.key
         }
 
-class BuildkiteGroupStep(BaseModel):
+class BuildkiteGroupStep(TypedDict):
     group: str
     steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
 
