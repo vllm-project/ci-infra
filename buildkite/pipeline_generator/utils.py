@@ -123,9 +123,9 @@ def get_image(cpu: bool = False) -> str:
     repositories = global_config["repositories"]
     image = None
     if branch == "main":
-        return f"{registries}/{repositories['main']}:{commit}"
+        image = f"{registries}/{repositories['main']}:{commit}"
     else:
-        return f"{registries}/{repositories['premerge']}:{commit}"
+        image = f"{registries}/{repositories['premerge']}:{commit}"
     if cpu:
         image = f"{image}-cpu"
     return image
