@@ -29,6 +29,7 @@ class PipelineGenerator:
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
+        print(buildkite_group_steps)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
