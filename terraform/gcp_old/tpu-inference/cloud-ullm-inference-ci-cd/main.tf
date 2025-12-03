@@ -15,7 +15,7 @@ module "ci_v6e_1" {
   }
 
   accelerator_type                 = "v6e-1"
-  reserved                         = false
+  reserved                         = true
   instance_count                   = 1
   buildkite_queue_name             = "tpu_v6e_queue"
   project_id                       = var.project_id
