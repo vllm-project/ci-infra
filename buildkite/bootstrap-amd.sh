@@ -100,6 +100,7 @@ upload_pipeline() {
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
+            -D vllm_merge_base_commit="$(git merge-base origin/main HEAD)" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
             | sed '/^[[:space:]]*$/d' \
