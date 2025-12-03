@@ -84,7 +84,6 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
             for i, command in enumerate(step_commands):
                 for variable, value in variables_to_inject.items():
                     step_commands[i] = step_commands[i].replace(variable, value)
-            step.commands = step_commands
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
                 commands=step_commands,
@@ -108,6 +107,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 pass
             else:
                 buildkite_step.plugins = [get_step_plugin(step)]
+                buildkite_step.commands = [f"cd {step.working_dir}", *buildkite_step.commands]
             group_steps.append(buildkite_step)
         buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps))
     return buildkite_group_steps

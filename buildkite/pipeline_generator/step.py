@@ -70,7 +70,6 @@ def read_steps_from_job_dir(job_dir: str):
                             step.commands = [
                                 "(command nvidia-smi || true)",
                                 "export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1",
-                                f"cd {step.working_dir}",
                                 *step.commands,
                             ]
                             step.commands = [cmd.replace("'", '"') for cmd in step.commands]
