@@ -127,6 +127,6 @@ def get_image(cpu: bool = False) -> str:
     else:
         image = f"{registries}/{repositories['premerge']}:{commit}"
     if cpu:
-        print(image)
         image = f"{image}-cpu"
+    print(image)
     return image
