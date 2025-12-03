@@ -23,6 +23,10 @@ if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
     DOCS_ONLY_DISABLE=0
 fi
 
+if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
+    MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD)
+fi
+
 fail_fast() {
     DISABLE_LABEL="ci-no-fail-fast"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
@@ -99,7 +103,7 @@ upload_pipeline() {
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
-            -D vllm_merge_base_commit="$(git merge-base origin/main HEAD)" \
+            -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
             | sed '/^[[:space:]]*$/d' \
@@ -227,13 +231,27 @@ elif [[ $RUN_ALL -eq 1 ]]; then
     export VLLM_USE_PRECOMPILED=0
     echo "Detected critical changes, building wheels from source"
 else
-    export VLLM_USE_PRECOMPILED=1
-    echo "No critical changes, using precompiled wheels"
+    echo "No critical changes, trying to use precompiled wheels"
+    # check whether we have precompiled wheels available for the merge base commit
+    # this might happen when:
+    # (1) the main commit is very new and wheels are not built yet
+    # (2) the merge base commit is somehow not on main branch (is that possible?)
+    # (3) (maybe later) we have retired some too old precompiled wheels
+    # (4) unfortunately, the commit fails to build
+    meta_url="https://wheels.vllm.ai/${MERGE_BASE_COMMIT}/vllm/metadata.json"
+    echo "Checking for precompiled wheel metadata at: $meta_url"
+    if curl --silent --head --fail "$meta_url"; then
+        echo "Precompiled wheels are available for commit ${MERGE_BASE_COMMIT}"
+        export VLLM_USE_PRECOMPILED=1
+    else
+        echo "Precompiled wheels are NOT available for commit ${MERGE_BASE_COMMIT}, forcing build from source"
+        export VLLM_USE_PRECOMPILED=0
+    fi
 fi
-
 
 LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
     LIST_FILE_DIFF=$(get_diff_main | tr ' ' '|')
 fi
+
 upload_pipeline
