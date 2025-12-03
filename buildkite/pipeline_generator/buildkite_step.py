@@ -54,9 +54,6 @@ def get_step_plugin(step: Step):
     if step.gpu in [GPUType.H100.value, GPUType.A100.value]:
         return get_k8s_plugin(step, get_image(step.no_gpu))
     else:
-        if step.no_gpu:
-            print(step.label, step.no_gpu)
-            print(get_image(step.no_gpu))
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(step.no_gpu))}
 
 def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> List[BuildkiteGroupStep]:
