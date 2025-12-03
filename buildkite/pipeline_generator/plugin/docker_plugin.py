@@ -72,5 +72,7 @@ def get_docker_plugin(step: Step, image: str):
         plugin["mount_buildkite_agent"] = True
     if step.no_gpu and plugin.get("gpus"):
         del plugin["gpus"]
-    # TODO: Add BUILDKITE_ANALYTICS_TOKEN and pytest addopts for fail_fast 
+    # TODO: Add BUILDKITE_ANALYTICS_TOKEN and pytest addopts for fail_fast
+    if step.no_gpu:
+        print(step.label, plugin)
     return plugin
