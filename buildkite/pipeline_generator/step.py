@@ -72,6 +72,7 @@ def read_steps_from_job_dir(job_dir: str):
                                 "export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1",
                                 *step.commands,
                             ]
+                            if not step.num_nodes:
                             step.commands = [cmd.replace("'", '"') for cmd in step.commands]
                     steps.extend(file_steps)
     return steps

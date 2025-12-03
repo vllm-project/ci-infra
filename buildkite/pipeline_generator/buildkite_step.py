@@ -63,7 +63,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
     variables_to_inject = {
         "$REGISTRY": global_config["registries"],
         "$REPO": ["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
-        "$BUILDKITE_COMMIT": global_config["commit"]
+        "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT"
     }
     list_file_diff = get_list_file_diff()
     for group, steps in group_steps.items():
