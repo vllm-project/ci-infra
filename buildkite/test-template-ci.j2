@@ -2,7 +2,6 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set pull_through_docker_image = "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-torch-nightly" %}
-{% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cpu" %}
 {% set docker_image_arm64_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-arm64-cpu" %}
 {% if branch == "main" %}
@@ -10,7 +9,6 @@
 {% set pull_through_docker_image = "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_latest = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly" %}
-{% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
 {% set docker_image_arm64_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-arm64-cpu" %}
 {% set docker_image_hpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-hpu" %}
@@ -275,6 +273,7 @@ steps:
         --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
         --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
         {% if branch != "main" %}
+        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
         --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
         --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
@@ -287,54 +286,6 @@ steps:
       - "docker tag {{ docker_image }} {{ docker_image_latest }}"
       - "docker push {{ docker_image_latest }}"
       {% endif %}
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 2
-        - exit_status: -10  # Agent was lost
-          limit: 2
-
-  - block: Build CUDA 11.8 image
-    key: block-build-cu118
-    depends_on: ~
-
-  - label: ":docker: build image CUDA 11.8"
-    key: image-build-cu118
-    depends_on: block-build-cu118
-    agents:
-      {% if branch == "main" %}
-      queue: cpu_queue_postmerge_us_east_1
-      {% else %}
-      queue: cpu_queue_premerge_us_east_1
-      {% endif %}
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image_cu118 }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
-      - >
-        docker build
-        --file docker/Dockerfile
-        --build-arg max_jobs=16
-        --build-arg buildkite_commit=$BUILDKITE_COMMIT
-        --build-arg USE_SCCACHE=1
-        --build-arg CUDA_VERSION=11.8.0
-        {% if branch != "main" %}
-        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
-        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
-        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
-        {% endif %}
-        --tag {{ docker_image_cu118 }}
-        --target test
-        --progress plain .
-      - "docker push {{ docker_image_cu118 }}"
     env:
       DOCKER_BUILDKIT: "1"
     retry:
