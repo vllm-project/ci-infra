@@ -115,13 +115,17 @@ def should_fail_fast(pr_labels: List[str]) -> bool:
         return False
     return True
 
-def get_image() -> str:
+def get_image(cpu: bool = False) -> str:
     global_config = get_global_config()
     commit = global_config["commit"]
     branch = global_config["branch"]
     registries = global_config["registries"]
     repositories = global_config["repositories"]
+    image = None
     if branch == "main":
         return f"{registries}/{repositories['main']}:{commit}"
     else:
         return f"{registries}/{repositories['premerge']}:{commit}"
+    if cpu:
+        image = f"{image}-cpu"
+    return image

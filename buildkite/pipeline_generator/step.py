@@ -13,11 +13,11 @@ class Step(BaseModel):
     label: str
     group: str = ""
     working_dir: str = DEFAULT_TEST_WORKING_DIR
+    no_gpu: bool = False
     key: Optional[str] = None
     depends_on: Optional[List[str]] = None
     commands: Optional[List[str]] = None
     gpu: Optional[str] = None
-    no_gpu: Optional[bool] = False
     num_gpus: Optional[int] = None
     num_nodes: Optional[int] = None
     source_file_dependencies: Optional[List[str]] = None

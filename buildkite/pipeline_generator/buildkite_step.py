@@ -52,9 +52,9 @@ class BuildkiteGroupStep(BaseModel):
 def get_step_plugin(step: Step):
     # Use K8s plugin
     if step.gpu in [GPUType.H100.value, GPUType.A100.value]:
-        return get_k8s_plugin(step, get_image())
+        return get_k8s_plugin(step, get_image(step.no_gpu))
     else:
-        return {"docker#v5.2.0": get_docker_plugin(step, get_image())}
+        return {"docker#v5.2.0": get_docker_plugin(step, get_image(step.no_gpu))}
 
 def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
