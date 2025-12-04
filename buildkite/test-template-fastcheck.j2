@@ -26,8 +26,10 @@ steps:
         --build-arg buildkite_commit=$BUILDKITE_COMMIT 
         --build-arg USE_SCCACHE=1 
         --build-arg VLLM_DOCKER_BUILD_CONTEXT=1
-        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
-        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
+        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
+        {% if vllm_use_precompiled == "1" %}
+        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
+        {% endif %}
         --tag {{ docker_image }} 
         --target test --progress plain .
       - "docker push {{ docker_image }}"
