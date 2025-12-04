@@ -111,7 +111,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
             group_steps.append(buildkite_step)
         buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps))
         if "Distributed" in group:
-            print(group_steps)
+            print("before: ",group_steps)
         print("---")
     return buildkite_group_steps
 
