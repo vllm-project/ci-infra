@@ -71,7 +71,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
         for step in steps:
             # generate block step if step should not run automatically
             block_step = None
-            if 1==1 or not step_should_run(step, list_file_diff):
+            if not step_should_run(step, list_file_diff):
                 block_step = BuildkiteBlockStep(
                     block=f"Run {step.label}",
                     depends_on=[],
@@ -101,8 +101,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
-            # if step is image build, don't use docker plugin
-            # if step is multi-node test, don't use docker plugin
+            # if step is image build / multi-node test, don't use docker plugin
             if step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2):
                 pass
             else:
