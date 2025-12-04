@@ -166,6 +166,17 @@ locals {
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
     }
+
+    arm64-cpu-queue-premerge = {
+      BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
+      BuildkiteQueue                       = "arm64_cpu_queue_premerge"
+      InstanceTypes                        = "r7g.16xlarge" # 512GB memory for CUDA kernel compilation
+      MaxSize                              = 10
+      ECRAccessPolicy                      = "readonly"
+      InstanceOperatingSystem              = "linux"
+      OnDemandPercentage                   = 100
+      EnableInstanceStorage                = "true"
+    }
   }
 
   queues_parameters_premerge_us_east_1 = {
@@ -861,10 +872,16 @@ resource "aws_iam_role_policy_attachment" "bk_stack_secrets_access" {
 }
 
 resource "aws_iam_role_policy_attachment" "bk_stack_sccache_bucket_read_access" {
-  for_each = {
-    for k, v in aws_cloudformation_stack.bk_queue_premerge : k => v
-    if v.name == "bk-cpu-queue-premerge"
-  }
+  for_each = merge(
+    {
+      for k, v in aws_cloudformation_stack.bk_queue_premerge : k => v
+      if v.name == "bk-cpu-queue-premerge"
+    },
+    {
+      for k, v in aws_cloudformation_stack.bk_queue_premerge : k => v
+      if v.name == "bk-arm64-cpu-queue-premerge"
+    },
+  )
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.bk_stack_sccache_bucket_read_access.arn
 }
