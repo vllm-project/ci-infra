@@ -108,6 +108,8 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 buildkite_step.plugins = [get_step_plugin(step)]
                 buildkite_step.commands = [f"cd {step.working_dir}", *buildkite_step.commands]
             group_steps.append(buildkite_step)
+            if "8 GPUs" in step.label:
+                print(buildkite_step)
         buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps))
     return buildkite_group_steps
 
