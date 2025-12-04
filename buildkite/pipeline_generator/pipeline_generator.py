@@ -32,6 +32,8 @@ class PipelineGenerator:
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
+            if "Distributed" in buildkite_group_step.group:
+                print(buildkite_group_step)
             buildkite_steps_dict["steps"].append(buildkite_group_step.dict(exclude_none=True))
         with open(self.output_file_path, "w") as f:
             yaml.dump(buildkite_steps_dict, f, sort_keys=False, default_flow_style=False)
