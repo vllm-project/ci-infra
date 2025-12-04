@@ -105,7 +105,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
             if step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2):
                 pass
             else:
-                buildkite_step.plugins = [get_step_plugin(step)]
+                buildkite_step.plugins = [copy.deepcopy(get_step_plugin(step))]
                 buildkite_step.commands = [f"cd {step.working_dir}", *buildkite_step.commands]
             group_steps.append(buildkite_step)
             if "8 GPUs" in step.label:
