@@ -57,24 +57,27 @@ def read_steps_from_job_dir(job_dir: str):
     steps = []
     for root, _, files in os.walk(job_dir):
         for file in files:
-            if file.endswith(".yaml"):
-                with open(os.path.join(root, file), "r") as f:
-                    data = yaml.safe_load(f)
-                    group_depends_on = data.get("depends_on", None)
-                    file_steps = parse_steps_from_yaml(data)
-                    if group_depends_on:
-                        for step in file_steps:
-                            if step.depends_on:
-                                continue
-                            step.depends_on = group_depends_on
+            if not file.endswith(".yaml"):
+                continue
+            yaml_path = os.path.join(root, file)
+            with open(yaml_path, "r") as f:
+                data = yaml.safe_load(f)
+            group_depends_on = data.get("depends_on")
+            file_steps = parse_steps_from_yaml(data)
+            if group_depends_on:
+                for step in file_steps:
+                    if not step.depends_on:
+                        step.depends_on = group_depends_on
+                        step.commands = [
+                            "(command nvidia-smi || true)",
+                            "export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1",
+                            *(step.commands or []),
+                        ]
+                        if not step.num_nodes:
                             step.commands = [
-                                "(command nvidia-smi || true)",
-                                "export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1",
-                                *step.commands,
+                                cmd.replace("'", '"') for cmd in step.commands
                             ]
-                            if not step.num_nodes:
-                                step.commands = [cmd.replace("'", '"') for cmd in step.commands]
-                    steps.extend(file_steps)
+            steps.extend(file_steps)
     return steps
 
 def group_steps(steps: List[Step]) -> Dict[str, List[Step]]:

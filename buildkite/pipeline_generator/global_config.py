@@ -22,8 +22,6 @@ def init_global_config(pipeline_config_path: str):
     if config:
         return
     pipeline_config = yaml.safe_load(open(pipeline_config_path, "r"))
-
-    # validate pipeline config
     _validate_pipeline_config(pipeline_config)
 
     config = GlobalConfig(

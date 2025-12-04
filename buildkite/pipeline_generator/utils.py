@@ -103,10 +103,11 @@ def get_pr_labels() -> List[str]:
     response.raise_for_status()
     return [label["name"] for label in response.json()["labels"]]
 
-def should_use_precompiled(self, run_all: bool) -> bool:
+def should_use_precompiled() -> bool:
+    global_config = get_global_config()
     if os.getenv("VLLM_USE_PRECOMPILED") == "1":
         return True
-    if run_all:
+    if global_config["run_all"] == "1":
         return False
     return True
 
