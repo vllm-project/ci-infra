@@ -20,7 +20,7 @@ class PipelineGenerator:
         self.run_all = should_run_all(self.pr_labels, self.list_file_diff)
 
         # vLLM only variables
-        self.use_precompiled = should_use_precompiled(self.pr_labels, self.run_all)
+        self.use_precompiled = should_use_precompiled()
         self.fail_fast = should_fail_fast(self.pr_labels)
 
         steps = []
