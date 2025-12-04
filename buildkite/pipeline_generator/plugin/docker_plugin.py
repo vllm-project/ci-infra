@@ -2,6 +2,7 @@ from pydantic import BaseModel
 from typing import List
 from step import Step
 from utils import GPUType
+import copy
 
 docker_plugin_template = {
     "image": "",
