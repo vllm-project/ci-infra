@@ -61,11 +61,11 @@ b200_plugin_template = {
 def get_docker_plugin(step: Step, image: str):
     plugin = None
     if step.gpu == GPUType.H200:
-        plugin = h200_plugin_template.copy()
+        plugin = copy.deepcopy(h200_plugin_template)
     elif step.gpu == GPUType.B200:
-        plugin = b200_plugin_template.copy()
+        plugin = copy.deepcopy(b200_plugin_template)
     else:
-        plugin = docker_plugin_template.copy()
+        plugin = copy.deepcopy(docker_plugin_template)
     plugin["image"] = image
 
     if step.label == "Benchmarks" or step.mount_buildkite_agent:
