@@ -5,3 +5,7 @@ variable "project_id" {
 variable "secret_project_id" {
   default = "cloud-tpu-inference-test"
 }
+
+variable "project_short_name" {
+  default = "cicd"
+}

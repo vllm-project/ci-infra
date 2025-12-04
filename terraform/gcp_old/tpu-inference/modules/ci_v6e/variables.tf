@@ -24,6 +24,11 @@ variable "project_id" {
   description = "The project ID for creating TPU agents"
 }
 
+variable "project_short_name" {
+  type        = string
+  description = "Short name for improved readability"
+}
+
 variable "buildkite_token_value" {
   type        = string
   description = "Agent token used to connect to Buildkite."
