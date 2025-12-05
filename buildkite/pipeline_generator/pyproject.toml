@@ -26,4 +26,4 @@ py-modules = [
 ]
 
 [tool.setuptools.packages.find]
-include = [".", "plugin"]
+include = [".", "plugin", "utils_lib"]
