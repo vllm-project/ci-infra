@@ -20,6 +20,7 @@ class GlobalConfig(TypedDict):
     docs_only_disable: Optional[str] = "0"
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
+    use_precompiled: bool = False
 
 config = None
 
@@ -46,6 +47,7 @@ def init_global_config(pipeline_config_path: str):
         merge_base_commit=_get_merge_base_commit(),
         list_file_diff=_get_list_file_diff(os.getenv("BUILDKITE_BRANCH"), _get_merge_base_commit()),
         fail_fast=_should_fail_fast(_get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST"))),
+        use_precompiled=_should_use_precompiled(_should_run_all(_get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST")), _get_list_file_diff(os.getenv("BUILDKITE_BRANCH"), _get_merge_base_commit()), pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)), _get_merge_base_commit()),
     )
 
 def get_global_config():
@@ -137,3 +139,16 @@ def _get_pr_labels(pull_request: str) -> List[str]:
     response = requests.get(request_url)
     response.raise_for_status()
     return [label["name"] for label in response.json()["labels"]]
+
+def _should_use_precompiled(run_all: bool, merge_base_commit: Optional[str]) -> bool:
+    if os.getenv("VLLM_USE_PRECOMPILED") == "1":
+        return True
+    if run_all:
+        return False
+    wheel_metadata_url = f"https://wheels.vllm.ai/{merge_base_commit}/vllm/metadata.json"
+    response = requests.get(wheel_metadata_url)
+    response.raise_for_status()
+    if response.headers:
+        return True
+    else:
+        return False

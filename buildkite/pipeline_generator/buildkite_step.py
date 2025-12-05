@@ -61,11 +61,20 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
     buildkite_group_steps = []
     # inject values to replace variables in step commands
     global_config = get_global_config()
-    variables_to_inject = {
-        "$REGISTRY": global_config["registries"],
-        "$REPO": ["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
-        "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT"
-    }
+    if global_config["name"] == "vllm_ci":
+        cache_from_tag, cache_to_tag = get_ecr_cache_registry()
+        variables_to_inject = {
+            "$REGISTRY": global_config["registries"],
+            "$REPO": ["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
+            "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
+            "$BRANCH": global_config["branch"],
+            "$VLLM_USE_PRECOMPILED": "1" if global_config["use_precompiled"] else "0",
+            "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
+            "$CACHE_FROM": cache_from_tag,
+            "$CACHE_TO": cache_to_tag,
+        }
+    else:
+        variables_to_inject = {}
     list_file_diff = global_config["list_file_diff"]
     for group, steps in group_steps.items():
         group_steps = []
