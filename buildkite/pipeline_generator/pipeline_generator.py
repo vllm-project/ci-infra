@@ -29,7 +29,7 @@ class PipelineGenerator:
                     ],
                     check=True
                 )
-            sys.exit(0)
+                sys.exit(0)
 
         image_build_steps = get_image_build_steps()
         steps = []
