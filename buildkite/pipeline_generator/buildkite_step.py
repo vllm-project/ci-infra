@@ -81,43 +81,77 @@ def get_agent_queue(step: Step):
     else:
         return AgentQueue.GPU_1_QUEUE
 
+def _get_variables_to_inject() -> Dict[str, str]:
+    global_config = get_global_config()
+    if global_config["name"] != "vllm_ci":
+        return {}
+        
+    cache_from_tag, cache_to_tag = get_ecr_cache_registry()
+    return {
+        "$REGISTRY": global_config["registries"],
+        "$REPO": "main" if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
+        "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
+        "$BRANCH": global_config["branch"],
+        "$VLLM_USE_PRECOMPILED": "1" if global_config["use_precompiled"] else "0",
+        "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
+        "$CACHE_FROM": cache_from_tag,
+        "$CACHE_TO": cache_to_tag,
+    }
+
+def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[str]:
+    """Prepare step commands with variables injected and default setup commands."""
+    commands = []
+    # Default setup commands
+    if not step.label.startswith(":docker:"):
+        commands.append("(command nvidia-smi || true)")
+        commands.append("export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1")
+    
+    if step.commands:
+        commands.extend(step.commands)
+    
+    final_commands = []
+    for command in commands:
+        if not step.num_nodes:
+            command = command.replace("'", '"')
+        for variable, value in variables_to_inject.items():
+            command = command.replace(variable, value)
+        final_commands.append(command)
+
+    if not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
+         final_commands.insert(0, f"cd {step.working_dir}")
+         
+    return final_commands
+
+def _create_block_step(step: Step, list_file_diff: List[str]) -> Optional[BuildkiteBlockStep]:
+    if step_should_run(step, list_file_diff):
+        return None
+        
+    block_step = BuildkiteBlockStep(
+        block=f"Run {step.label}",
+        depends_on=[],
+        key=f"block-{generate_step_key(step.label)}"
+    )
+    if step.label.startswith(":docker:"):
+        block_step.depends_on = []
+    return block_step
+
 def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
-    # inject values to replace variables in step commands
+    variables_to_inject = _get_variables_to_inject()
     global_config = get_global_config()
-    if global_config["name"] == "vllm_ci":
-        cache_from_tag, cache_to_tag = get_ecr_cache_registry()
-        variables_to_inject = {
-            "$REGISTRY": global_config["registries"],
-            "$REPO": "main" if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
-            "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
-            "$BRANCH": global_config["branch"],
-            "$VLLM_USE_PRECOMPILED": "1" if global_config["use_precompiled"] else "0",
-            "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
-            "$CACHE_FROM": cache_from_tag,
-            "$CACHE_TO": cache_to_tag,
-        }
-    else:
-        variables_to_inject = {}
     list_file_diff = global_config["list_file_diff"]
+
     for group, steps in group_steps.items():
-        group_steps = []
+        group_steps_list = []
         for step in steps:
-            # generate block step if step should not run automatically
-            block_step = None
-            if not step_should_run(step, list_file_diff):
-                block_step = BuildkiteBlockStep(
-                    block=f"Run {step.label}",
-                    depends_on=[],
-                    key=f"block-{generate_step_key(step.label)}"
-                )
-                if step.label.startswith(":docker:"):
-                    block_step.depends_on = []
-                group_steps.append(block_step)
-            step_commands = step.commands
-            for i, command in enumerate(step_commands):
-                for variable, value in variables_to_inject.items():
-                    step_commands[i] = step_commands[i].replace(variable, value)
+            # block step
+            block_step = _create_block_step(step, list_file_diff)
+            if block_step:
+                group_steps_list.append(block_step)
+
+            # command step
+            step_commands = _prepare_commands(step, variables_to_inject)
+            
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
                 commands=step_commands,
@@ -125,6 +159,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
             )
+            
             if block_step:
                 buildkite_step.depends_on = block_step.key
             if step.env:
@@ -135,14 +170,15 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
-            # if step is image build / multi-node test, don't use docker plugin
-            if step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2):
-                pass
-            else:
+
+            # add plugin
+            if not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
                 buildkite_step.plugins = [get_step_plugin(step)]
-                buildkite_step.commands = [f"cd {step.working_dir}", *buildkite_step.commands]
-            group_steps.append(buildkite_step)
-        buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps))
+                
+            group_steps_list.append(buildkite_step)
+            
+        buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps_list))
+        
     return buildkite_group_steps
 
 def step_should_run(step: Step, list_file_diff: List[str]) -> bool:
