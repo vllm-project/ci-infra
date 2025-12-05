@@ -20,6 +20,7 @@ class PipelineGenerator:
         # Skip if changes are doc-only
         if global_config["docs_only_disable"] == "0":
             if is_docs_only_change(global_config["list_file_diff"]):
+                print("List file diff: ", global_config["list_file_diff"])
                 print("All changes are doc-only, skipping CI.")
                 subprocess.run([
                     "buildkite-agent",
