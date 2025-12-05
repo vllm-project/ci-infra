@@ -50,26 +50,6 @@ def get_agent_queue(step: Step):
     else:
         return AgentQueue.GPU_1_QUEUE
 
-def get_list_file_diff() -> List[str]:
-    """Get list of file paths that get changed between current branch and origin/main."""
-    try:
-        subprocess.run(["git", "add", "."], check=True)
-        if get_global_config()["branch"] == "main":
-            output = subprocess.check_output(
-                ["git", "diff", "--name-only", "--diff-filter=ACMDR", "HEAD~1"],
-                universal_newlines=True
-            )
-        else:
-            merge_base = get_global_config()["merge_base_commit"]
-            output = subprocess.check_output(
-                ["git", "diff", "--name-only", "--diff-filter=ACMDR", merge_base.strip()],
-                universal_newlines=True
-            )
-        return [line for line in output.split('\n') if line.strip()]
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to get git diff: {e}")
-
-
 def is_docs_only_change(list_file_diff: List[str]) -> bool:
     for file_path in list_file_diff:
         if not file_path:

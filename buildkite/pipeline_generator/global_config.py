@@ -2,7 +2,6 @@ from typing import TypedDict, List, Dict, Optional
 import yaml
 import os
 import subprocess
-from utils import get_list_file_diff
 import re
 
 class GlobalConfig(TypedDict):
@@ -44,7 +43,7 @@ def init_global_config(pipeline_config_path: str):
         nightly=os.getenv("NIGHTLY", "0"),
         run_all=_should_run_all(get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST")), get_list_file_diff(), pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)),
         merge_base_commit=_get_merge_base_commit(),
-        list_file_diff=get_list_file_diff(),
+        list_file_diff=_get_list_file_diff(os.getenv("BUILDKITE_BRANCH"), _get_merge_base_commit()),
         fail_fast=_should_fail_fast(get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST"))),
     )
 
@@ -110,3 +109,22 @@ def _should_fail_fast(pr_labels: List[str]) -> bool:
     if "ci-no-fail-fast" in pr_labels:
         return False
     return True
+
+def _get_list_file_diff(branch: str, merge_base_commit: Optional[str]) -> List[str]:
+    """Get list of file paths that get changed between current branch and origin/main."""
+    try:
+        subprocess.run(["git", "add", "."], check=True)
+        if branch == "main":
+            output = subprocess.check_output(
+                ["git", "diff", "--name-only", "--diff-filter=ACMDR", "HEAD~1"],
+                universal_newlines=True
+            )
+        else:
+            merge_base = merge_base_commit
+            output = subprocess.check_output(
+                ["git", "diff", "--name-only", "--diff-filter=ACMDR", merge_base.strip()],
+                universal_newlines=True
+            )
+        return [line for line in output.split('\n') if line.strip()]
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to get git diff: {e}")
