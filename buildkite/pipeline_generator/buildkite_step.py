@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, TypedDict
 import copy
 from step import Step
-from utils import get_agent_queue, get_image
+from utils import get_agent_queue, get_image, get_ecr_cache_registry
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
