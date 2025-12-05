@@ -50,7 +50,7 @@ class BuildkiteGroupStep(BaseModel):
     group: str
     steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
 
-def get_step_plugin(step: Step):
+def _get_step_plugin(step: Step):
     # Use K8s plugin
     if step.gpu in [GPUType.H100.value, GPUType.A100.value]:
         return get_k8s_plugin(step, get_image(step.no_gpu))
@@ -123,13 +123,13 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     return final_commands
 
 def _create_block_step(step: Step, list_file_diff: List[str]) -> Optional[BuildkiteBlockStep]:
-    if step_should_run(step, list_file_diff):
+    if _step_should_run(step, list_file_diff):
         return None
         
     block_step = BuildkiteBlockStep(
         block=f"Run {step.label}",
         depends_on=[],
-        key=f"block-{generate_step_key(step.label)}"
+        key=f"block-{_generate_step_key(step.label)}"
     )
     if step.label.startswith(":docker:"):
         block_step.depends_on = []
@@ -173,7 +173,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
 
             # add plugin
             if not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
-                buildkite_step.plugins = [get_step_plugin(step)]
+                buildkite_step.plugins = [_get_step_plugin(step)]
                 
             group_steps_list.append(buildkite_step)
             
@@ -181,7 +181,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
         
     return buildkite_group_steps
 
-def step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
     if global_config["nightly"] == "1":
         return True
@@ -196,7 +196,7 @@ def step_should_run(step: Step, list_file_diff: List[str]) -> bool:
                     return True
     return True
 
-def generate_step_key(step_label: str) -> str:
+def _generate_step_key(step_label: str) -> str:
     return (
         step_label
         .replace(" ", "-")
