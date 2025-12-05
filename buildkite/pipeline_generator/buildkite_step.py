@@ -61,6 +61,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
     buildkite_group_steps = []
     # inject values to replace variables in step commands
     global_config = get_global_config()
+    print("NAME: ", global_config["name"])
     if global_config["name"] == "vllm_ci":
         cache_from_tag, cache_to_tag = get_ecr_cache_registry()
         variables_to_inject = {
