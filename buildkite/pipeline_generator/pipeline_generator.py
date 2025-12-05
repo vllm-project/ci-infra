@@ -3,7 +3,7 @@ from typing import List, Dict
 import os
 import yaml
 import subprocess
-from utils import get_pr_labels, get_list_file_diff, should_run_all, should_use_precompiled, should_fail_fast, is_docs_only_change
+from utils import is_docs_only_change
 from step import read_steps_from_job_dir, group_steps
 from buildkite_step import convert_group_step_to_buildkite_step
 from global_config import init_global_config, get_global_config
@@ -18,7 +18,7 @@ class PipelineGenerator:
 
         # Skip if changes are doc-only
         if global_config["docs_only_disable"] == "0":
-            if is_docs_only_change(self.list_file_diff):
+            if is_docs_only_change(global_config["list_file_diff"]):
                 print("All changes are doc-only, skipping CI.")
                 subprocess.run([
                     "buildkite-agent",
