@@ -1,6 +1,9 @@
 from typing import TypedDict, List, Dict, Optional
 import yaml
 import os
+import subprocess
+from utils import get_list_file_diff
+import re
 
 class GlobalConfig(TypedDict):
     name: str
@@ -13,7 +16,10 @@ class GlobalConfig(TypedDict):
     run_all_patterns: Optional[List[str]] = None
     run_all_exclude_patterns: Optional[List[str]] = None
     nightly: Optional[str] = "0"
-    run_all: Optional[str] = "0"
+    run_all: bool = False
+    docs_only_disable: Optional[str] = "0"
+    merge_base_commit: Optional[str] = None
+    fail_fast: bool = False
 
 config = None
 
@@ -36,7 +42,10 @@ def init_global_config(pipeline_config_path: str):
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
-        run_all=os.getenv("RUN_ALL", "0"),
+        run_all=_should_run_all(get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST")), get_list_file_diff(), pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)),
+        merge_base_commit=_get_merge_base_commit(),
+        list_file_diff=get_list_file_diff(),
+        fail_fast=_should_fail_fast(get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST"))),
     )
 
 def get_global_config():
@@ -57,3 +66,47 @@ def _validate_pipeline_config(pipeline_config: Dict):
     for job_dir in pipeline_config["job_dirs"]:
         if not os.path.exists(job_dir):
             raise ValueError(f"Job directory not found: {job_dir}")
+
+def _get_merge_base_commit() -> Optional[str]:
+    """Get merge base commit from env var or compute it via git."""
+    merge_base = os.getenv("MERGE_BASE_COMMIT")
+    if merge_base:
+        return merge_base
+    # Compute merge base if not provided
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "origin/main", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+
+def _should_run_all(pr_labels: List[str], list_file_diff: List[str], run_all_patterns: List[str], run_all_exclude_patterns: List[str]) -> bool:
+    """Determine if the pipeline should run all tests."""
+    if os.getenv("RUN_ALL") == "1":
+        return True
+    if "ready-run-all-tests" in pr_labels:
+        return True
+    pattern_matched = False
+    for file in list_file_diff:
+        for pattern in run_all_patterns:
+            if re.match(pattern, file):
+                pattern_matched = True
+                break
+        if pattern_matched:
+            match_ignore = False
+            for exclude_pattern in run_all_exclude_patterns:
+                if re.match(exclude_pattern, file):
+                    match_ignore = True
+                    break
+            if not match_ignore:
+                return True
+    return False
+
+def _should_fail_fast(pr_labels: List[str]) -> bool:
+    if "ci-no-fail-fast" in pr_labels:
+        return False
+    return True

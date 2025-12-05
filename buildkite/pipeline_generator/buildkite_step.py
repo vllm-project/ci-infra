@@ -6,7 +6,7 @@ from utils import get_agent_queue, get_image
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
-from utils import GPUType, get_list_file_diff
+from utils import GPUType
 
 class BuildkiteCommandStep(BaseModel):
     label: str
@@ -66,7 +66,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
         "$REPO": ["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT"
     }
-    list_file_diff = get_list_file_diff()
+    list_file_diff = global_config["list_file_diff"]
     for group, steps in group_steps.items():
         group_steps = []
         for step in steps:
@@ -118,7 +118,7 @@ def step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return True
     if step.optional:
         return False
-    if global_config["run_all"] == "1":
+    if global_config["run_all"]:
         return True
     if step.source_file_dependencies:
         for source_file in step.source_file_dependencies:

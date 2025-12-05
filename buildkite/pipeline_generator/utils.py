@@ -50,28 +50,6 @@ def get_agent_queue(step: Step):
     else:
         return AgentQueue.GPU_1_QUEUE
 
-def should_run_all(pr_labels: List[str], list_file_diff: List[str]) -> bool:
-    """Determine if the pipeline should run all tests."""
-    if os.getenv("RUN_ALL") == "1":
-        return True
-    if "ready-run-all-tests" in pr_labels:
-        return True
-    pattern_matched = False
-    for file in list_file_diff:
-        for pattern in get_global_config()["run_all_patterns"]:
-            if re.match(pattern, file):
-                pattern_matched = True
-                break
-        if pattern_matched:
-            match_ignore = False
-            for exclude_pattern in get_global_config()["run_all_exclude_patterns"]:
-                if re.match(exclude_pattern, file):
-                    match_ignore = True
-                    break
-            if not match_ignore:
-                return True
-    return False
-
 def get_list_file_diff() -> List[str]:
     """Get list of file paths that get changed between current branch and origin/main."""
     try:
@@ -82,10 +60,7 @@ def get_list_file_diff() -> List[str]:
                 universal_newlines=True
             )
         else:
-            merge_base = subprocess.check_output(
-                ["git", "merge-base", "origin/main", "HEAD"],
-                universal_newlines=True
-            )
+            merge_base = get_global_config()["merge_base_commit"]
             output = subprocess.check_output(
                 ["git", "diff", "--name-only", "--diff-filter=ACMDR", merge_base.strip()],
                 universal_newlines=True
@@ -108,8 +83,7 @@ def is_docs_only_change(list_file_diff: List[str]) -> bool:
         return False
     return True
 
-def get_pr_labels() -> List[str]:
-    pull_request = get_global_config()["pull_request"]
+def get_pr_labels(pull_request: str) -> List[str]:
     if not pull_request or pull_request == "false":
         return []
     request_url = f"https://api.github.com/repos/vllm-project/vllm/pulls/{pull_request}"
@@ -123,12 +97,13 @@ def should_use_precompiled() -> bool:
         return True
     if global_config["run_all"] == "1":
         return False
-    return True
-
-def should_fail_fast(pr_labels: List[str]) -> bool:
-    if "ci-no-fail-fast" in pr_labels:
+    wheel_metadata_url = f"https://wheels.vllm.ai/{global_config['merge_base_commit']}/vllm/metadata.json"
+    response = requests.get(wheel_metadata_url)
+    response.raise_for_status()
+    if response.headers:
+        return True
+    else:
         return False
-    return True
 
 def get_image(cpu: bool = False) -> str:
     global_config = get_global_config()

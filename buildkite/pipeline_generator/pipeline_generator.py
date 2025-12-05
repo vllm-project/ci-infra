@@ -15,8 +15,6 @@ class PipelineGenerator:
 
     def generate(self):
         global_config = get_global_config()
-        self.pr_labels = get_pr_labels()
-        self.list_file_diff = get_list_file_diff()
 
         # Skip if changes are doc-only
         if global_config["docs_only_disable"] == "0":
@@ -31,12 +29,7 @@ class PipelineGenerator:
                 )
             sys.exit(0)
 
-        self.run_all = should_run_all(self.pr_labels, self.list_file_diff)
-
-        # vLLM only variables
-        self.use_precompiled = should_use_precompiled()
-        self.fail_fast = should_fail_fast(self.pr_labels)
-
+        image_build_steps = get_image_build_steps()
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
