@@ -61,9 +61,9 @@ b200_plugin_template = {
 
 def get_docker_plugin(step: Step, image: str):
     plugin = None
-    if step.gpu == GPUType.H200:
+    if step.gpu == GPUType.H200.value:
         plugin = copy.deepcopy(h200_plugin_template)
-    elif step.gpu == GPUType.B200:
+    elif step.gpu == GPUType.B200.value:
         plugin = copy.deepcopy(b200_plugin_template)
     else:
         plugin = copy.deepcopy(docker_plugin_template)

@@ -20,31 +20,11 @@ class BuildkiteCommandStep(BaseModel):
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
 
-    def to_yaml(self):
-        return {
-            "label": self.label,
-            "group": self.group,
-            "commands": self.commands,
-            "depends_on": self.depends_on,
-            "soft_fail": self.soft_fail,
-            "retry": self.retry,
-            "plugins": self.plugins,
-            "env": self.env,
-            "retry": self.retry,
-            "parallelism": self.parallelism
-        }
 
 class BuildkiteBlockStep(BaseModel):
     block: str
     depends_on: Optional[Union[str, List[str]]] = None
     key: Optional[str] = None
-
-    def to_yaml(self):
-        return {
-            "block": self.block,
-            "depends_on": self.depends_on,
-            "key": self.key
-        }
 
 class BuildkiteGroupStep(BaseModel):
     group: str
@@ -57,29 +37,27 @@ def _get_step_plugin(step: Step):
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(step.no_gpu))}
 
+_GPU_TO_QUEUE = {
+    GPUType.A100.value: AgentQueue.A100_QUEUE,
+    GPUType.H100.value: AgentQueue.MITHRIL_H100_POOL,
+    GPUType.H200.value: AgentQueue.SKYLAB_H200,
+    GPUType.B200.value: AgentQueue.B200,
+}
+
+
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
     if step.label.startswith(":docker:"):
-        if branch == "main":
-            return AgentQueue.CPU_QUEUE_POSTMERGE_US_EAST_1
-        else:
-            return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
-    elif step.label == "Documentation Build":
+        return AgentQueue.CPU_QUEUE_POSTMERGE_US_EAST_1 if branch == "main" else AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
+    if step.label == "Documentation Build":
         return AgentQueue.SMALL_CPU_QUEUE_PREMERGE
-    elif step.no_gpu:
+    if step.no_gpu:
         return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
-    elif step.gpu == GPUType.A100:
-        return AgentQueue.A100_QUEUE
-    elif step.gpu == GPUType.H100:
-        return AgentQueue.MITHRIL_H100_POOL
-    elif step.gpu == GPUType.H200:
-        return AgentQueue.SKYLAB_H200
-    elif step.gpu == GPUType.B200:
-        return AgentQueue.B200
-    elif step.num_gpus == 2 or step.num_gpus == 4:
+    if step.gpu in _GPU_TO_QUEUE:
+        return _GPU_TO_QUEUE[step.gpu]
+    if step.num_gpus in (2, 4):
         return AgentQueue.GPU_4_QUEUE
-    else:
-        return AgentQueue.GPU_1_QUEUE
+    return AgentQueue.GPU_1_QUEUE
 
 def _get_variables_to_inject() -> Dict[str, str]:
     global_config = get_global_config()
@@ -189,12 +167,15 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     if global_config["run_all"]:
         return True
-    if step.source_file_dependencies:
-        for source_file in step.source_file_dependencies:
-            for diff_file in list_file_diff:
-                if source_file in diff_file:
-                    return True
-    return True
+    # If no dependencies specified, always run
+    if not step.source_file_dependencies:
+        return True
+    # Only run if at least one dependency matches a changed file
+    for source_file in step.source_file_dependencies:
+        for diff_file in list_file_diff:
+            if source_file in diff_file:
+                return True
+    return False
 
 def _generate_step_key(step_label: str) -> str:
     return (
