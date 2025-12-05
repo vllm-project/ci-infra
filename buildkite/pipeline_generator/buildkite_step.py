@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
 from step import Step
-from lib.docker_utils import get_image, get_ecr_cache_registry
+from utils_lib.docker_utils import get_image, get_ecr_cache_registry
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin

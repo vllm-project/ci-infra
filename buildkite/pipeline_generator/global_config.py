@@ -3,7 +3,7 @@ import yaml
 import os
 import re
 import requests
-from lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels
+from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels
 
 class GlobalConfig(TypedDict):
     name: str
