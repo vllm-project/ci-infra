@@ -63,14 +63,6 @@ def is_docs_only_change(list_file_diff: List[str]) -> bool:
         return False
     return True
 
-def get_pr_labels(pull_request: str) -> List[str]:
-    if not pull_request or pull_request == "false":
-        return []
-    request_url = f"https://api.github.com/repos/vllm-project/vllm/pulls/{pull_request}"
-    response = requests.get(request_url)
-    response.raise_for_status()
-    return [label["name"] for label in response.json()["labels"]]
-
 def should_use_precompiled() -> bool:
     global_config = get_global_config()
     if os.getenv("VLLM_USE_PRECOMPILED") == "1":

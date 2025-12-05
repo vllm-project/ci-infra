@@ -3,6 +3,7 @@ import yaml
 import os
 import subprocess
 import re
+import requests
 
 class GlobalConfig(TypedDict):
     name: str
@@ -41,10 +42,10 @@ def init_global_config(pipeline_config_path: str):
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
-        run_all=_should_run_all(get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST")), get_list_file_diff(), pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)),
+        run_all=_should_run_all(_get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST")), _get_list_file_diff(os.getenv("BUILDKITE_BRANCH"), _get_merge_base_commit()), pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)),
         merge_base_commit=_get_merge_base_commit(),
         list_file_diff=_get_list_file_diff(os.getenv("BUILDKITE_BRANCH"), _get_merge_base_commit()),
-        fail_fast=_should_fail_fast(get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST"))),
+        fail_fast=_should_fail_fast(_get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST"))),
     )
 
 def get_global_config():
@@ -128,3 +129,11 @@ def _get_list_file_diff(branch: str, merge_base_commit: Optional[str]) -> List[s
         return [line for line in output.split('\n') if line.strip()]
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to get git diff: {e}")
+
+def _get_pr_labels(pull_request: str) -> List[str]:
+    if not pull_request or pull_request == "false":
+        return []
+    request_url = f"https://api.github.com/repos/vllm-project/vllm/pulls/{pull_request}"
+    response = requests.get(request_url)
+    response.raise_for_status()
+    return [label["name"] for label in response.json()["labels"]]
