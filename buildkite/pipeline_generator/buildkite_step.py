@@ -1,15 +1,15 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union, TypedDict
-import copy
+from typing import Dict, List, Optional, Any, Union
 from step import Step
-from utils import get_agent_queue, get_image, get_ecr_cache_registry
+from lib.docker_utils import get_image, get_ecr_cache_registry
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
-from utils import GPUType
+from constants import GPUType, AgentQueue
 
 class BuildkiteCommandStep(BaseModel):
     label: str
+    group: Optional[str] = None
     key: Optional[str] = None
     agents: Dict[str, str] = {}
     commands: List[str] = []
@@ -56,6 +56,30 @@ def get_step_plugin(step: Step):
         return get_k8s_plugin(step, get_image(step.no_gpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(step.no_gpu))}
+
+def get_agent_queue(step: Step):
+    branch = get_global_config()["branch"]
+    if step.label.startswith(":docker:"):
+        if branch == "main":
+            return AgentQueue.CPU_QUEUE_POSTMERGE_US_EAST_1
+        else:
+            return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
+    elif step.label == "Documentation Build":
+        return AgentQueue.SMALL_CPU_QUEUE_PREMERGE
+    elif step.no_gpu:
+        return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
+    elif step.gpu == GPUType.A100:
+        return AgentQueue.A100_QUEUE
+    elif step.gpu == GPUType.H100:
+        return AgentQueue.MITHRIL_H100_POOL
+    elif step.gpu == GPUType.H200:
+        return AgentQueue.SKYLAB_H200
+    elif step.gpu == GPUType.B200:
+        return AgentQueue.B200
+    elif step.num_gpus == 2 or step.num_gpus == 4:
+        return AgentQueue.GPU_4_QUEUE
+    else:
+        return AgentQueue.GPU_1_QUEUE
 
 def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []

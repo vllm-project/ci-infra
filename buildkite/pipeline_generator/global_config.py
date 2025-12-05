@@ -1,9 +1,9 @@
 from typing import TypedDict, List, Dict, Optional
 import yaml
 import os
-import subprocess
 import re
 import requests
+from lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels
 
 class GlobalConfig(TypedDict):
     name: str
@@ -30,24 +30,30 @@ def init_global_config(pipeline_config_path: str):
         return
     pipeline_config = yaml.safe_load(open(pipeline_config_path, "r"))
     _validate_pipeline_config(pipeline_config)
+    
+    branch = os.getenv("BUILDKITE_BRANCH")
+    pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
+    merge_base_commit = get_merge_base_commit()
+    list_file_diff = get_list_file_diff(branch, merge_base_commit)
+    pr_labels = get_pr_labels(pull_request)
 
     config = GlobalConfig(
         name=pipeline_config["name"],
         job_dirs=pipeline_config["job_dirs"],
         registries=pipeline_config["registries"],
         repositories=pipeline_config["repositories"],
-        branch=os.getenv("BUILDKITE_BRANCH"),
+        branch=branch,
         commit=os.getenv("BUILDKITE_COMMIT"),
-        pull_request=os.getenv("BUILDKITE_PULL_REQUEST"),
+        pull_request=pull_request,
         docs_only_disable=os.getenv("DOCS_ONLY_DISABLE", "0"),
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
-        run_all=_should_run_all(_get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST")), _get_list_file_diff(os.getenv("BUILDKITE_BRANCH"), _get_merge_base_commit()), pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)),
-        merge_base_commit=_get_merge_base_commit(),
-        list_file_diff=_get_list_file_diff(os.getenv("BUILDKITE_BRANCH"), _get_merge_base_commit()),
-        fail_fast=_should_fail_fast(_get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST"))),
-        use_precompiled=_should_use_precompiled(_should_run_all(_get_pr_labels(os.getenv("BUILDKITE_PULL_REQUEST")), _get_list_file_diff(os.getenv("BUILDKITE_BRANCH"), _get_merge_base_commit()), pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)), _get_merge_base_commit()),
+        run_all=_should_run_all(pr_labels, list_file_diff, pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)),
+        merge_base_commit=merge_base_commit,
+        list_file_diff=list_file_diff,
+        fail_fast=_should_fail_fast(pr_labels),
+        use_precompiled=_should_use_precompiled(_should_run_all(pr_labels, list_file_diff, pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)), merge_base_commit),
     )
 
 def get_global_config():
@@ -68,23 +74,6 @@ def _validate_pipeline_config(pipeline_config: Dict):
     for job_dir in pipeline_config["job_dirs"]:
         if not os.path.exists(job_dir):
             raise ValueError(f"Job directory not found: {job_dir}")
-
-def _get_merge_base_commit() -> Optional[str]:
-    """Get merge base commit from env var or compute it via git."""
-    merge_base = os.getenv("MERGE_BASE_COMMIT")
-    if merge_base:
-        return merge_base
-    # Compute merge base if not provided
-    try:
-        result = subprocess.run(
-            ["git", "merge-base", "origin/main", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError:
-        return None
 
 def _should_run_all(pr_labels: List[str], list_file_diff: List[str], run_all_patterns: List[str], run_all_exclude_patterns: List[str]) -> bool:
     """Determine if the pipeline should run all tests."""
@@ -113,33 +102,6 @@ def _should_fail_fast(pr_labels: List[str]) -> bool:
         return False
     return True
 
-def _get_list_file_diff(branch: str, merge_base_commit: Optional[str]) -> List[str]:
-    """Get list of file paths that get changed between current branch and origin/main."""
-    try:
-        subprocess.run(["git", "add", "."], check=True)
-        if branch == "main":
-            output = subprocess.check_output(
-                ["git", "diff", "--name-only", "--diff-filter=ACMDR", "HEAD~1"],
-                universal_newlines=True
-            )
-        else:
-            merge_base = merge_base_commit
-            output = subprocess.check_output(
-                ["git", "diff", "--name-only", "--diff-filter=ACMDR", merge_base.strip()],
-                universal_newlines=True
-            )
-        return [line for line in output.split('\n') if line.strip()]
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to get git diff: {e}")
-
-def _get_pr_labels(pull_request: str) -> List[str]:
-    if not pull_request or pull_request == "false":
-        return []
-    request_url = f"https://api.github.com/repos/vllm-project/vllm/pulls/{pull_request}"
-    response = requests.get(request_url)
-    response.raise_for_status()
-    return [label["name"] for label in response.json()["labels"]]
-
 def _should_use_precompiled(run_all: bool, merge_base_commit: Optional[str]) -> bool:
     if os.getenv("VLLM_USE_PRECOMPILED") == "1":
         return True
@@ -147,7 +109,9 @@ def _should_use_precompiled(run_all: bool, merge_base_commit: Optional[str]) -> 
         return False
     wheel_metadata_url = f"https://wheels.vllm.ai/{merge_base_commit}/vllm/metadata.json"
     response = requests.get(wheel_metadata_url)
-    response.raise_for_status()
+    # 404 or other error means wheel doesn't exist
+    if response.status_code != 200:
+         return False
     if response.headers:
         return True
     else:

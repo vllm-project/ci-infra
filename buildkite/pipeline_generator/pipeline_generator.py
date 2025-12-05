@@ -4,7 +4,6 @@ import os
 import yaml
 import subprocess
 import sys
-from utils import is_docs_only_change
 from step import read_steps_from_job_dir, group_steps
 from buildkite_step import convert_group_step_to_buildkite_step
 from global_config import init_global_config, get_global_config
@@ -44,3 +43,16 @@ class PipelineGenerator:
         with open(self.output_file_path, "w") as f:
             yaml.dump(buildkite_steps_dict, f, sort_keys=False, default_flow_style=False)
         return buildkite_steps_dict
+
+def is_docs_only_change(list_file_diff: List[str]) -> bool:
+    for file_path in list_file_diff:
+        if not file_path:
+            continue
+        if file_path.startswith("docs/"):
+            continue
+        if file_path.endswith(".md"):
+            continue
+        if file_path == "mkdocs.yaml":
+            continue
+        return False
+    return True

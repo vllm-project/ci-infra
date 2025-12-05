@@ -1,6 +1,6 @@
 import copy
 from step import Step
-from utils import GPUType
+from constants import GPUType
 
 HF_HOME = "/root/.cache/huggingface"
 
