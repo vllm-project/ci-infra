@@ -66,7 +66,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
         cache_from_tag, cache_to_tag = get_ecr_cache_registry()
         variables_to_inject = {
             "$REGISTRY": global_config["registries"],
-            "$REPO": ["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
+            "$REPO": "main" if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
             "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
             "$BRANCH": global_config["branch"],
             "$VLLM_USE_PRECOMPILED": "1" if global_config["use_precompiled"] else "0",
