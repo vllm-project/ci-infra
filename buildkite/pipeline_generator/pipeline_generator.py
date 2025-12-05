@@ -31,7 +31,6 @@ class PipelineGenerator:
                 )
                 sys.exit(0)
 
-        image_build_steps = get_image_build_steps()
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
