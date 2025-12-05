@@ -1,7 +1,7 @@
 from enum import Enum
 from step import Step
 import os
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import re
 import subprocess
 import requests
@@ -93,6 +93,20 @@ def get_list_file_diff() -> List[str]:
         return [line for line in output.split('\n') if line.strip()]
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to get git diff: {e}")
+
+
+def is_docs_only_change(list_file_diff: List[str]) -> bool:
+    for file_path in list_file_diff:
+        if not file_path:
+            continue
+        if file_path.startswith("docs/"):
+            continue
+        if file_path.endswith(".md"):
+            continue
+        if file_path == "mkdocs.yaml":
+            continue
+        return False
+    return True
 
 def get_pr_labels() -> List[str]:
     pull_request = get_global_config()["pull_request"]

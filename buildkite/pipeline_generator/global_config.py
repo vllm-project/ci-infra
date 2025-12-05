@@ -32,6 +32,7 @@ def init_global_config(pipeline_config_path: str):
         branch=os.getenv("BUILDKITE_BRANCH"),
         commit=os.getenv("BUILDKITE_COMMIT"),
         pull_request=os.getenv("BUILDKITE_PULL_REQUEST"),
+        docs_only_disable=os.getenv("DOCS_ONLY_DISABLE", "0"),
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),

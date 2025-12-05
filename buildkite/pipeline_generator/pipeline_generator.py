@@ -2,14 +2,14 @@ from pydantic import BaseModel
 from typing import List, Dict
 import os
 import yaml
-
-from utils import get_pr_labels, get_list_file_diff, should_run_all, should_use_precompiled, should_fail_fast
+import subprocess
+from utils import get_pr_labels, get_list_file_diff, should_run_all, should_use_precompiled, should_fail_fast, is_docs_only_change
 from step import read_steps_from_job_dir, group_steps
 from buildkite_step import convert_group_step_to_buildkite_step
 from global_config import init_global_config, get_global_config
 
 class PipelineGenerator:
-    def __init__(self, pipeline_config_path: str, output_file_path: str):
+    def __init__(self, pipeline_config_path: str, output_file_path: str, docs_only_disable: bool = False):
         init_global_config(pipeline_config_path)
         self.output_file_path = output_file_path
 
@@ -17,6 +17,20 @@ class PipelineGenerator:
         global_config = get_global_config()
         self.pr_labels = get_pr_labels()
         self.list_file_diff = get_list_file_diff()
+
+        # Skip if changes are doc-only
+        if global_config["docs_only_disable"] == "0":
+            if is_docs_only_change(self.list_file_diff):
+                print("All changes are doc-only, skipping CI.")
+                subprocess.run([
+                    "buildkite-agent",
+                    "annotate",
+                    ":memo: CI skipped — doc-only changes
+                    ],
+                    check=True
+                )
+            sys.exit(0)
+
         self.run_all = should_run_all(self.pr_labels, self.list_file_diff)
 
         # vLLM only variables
