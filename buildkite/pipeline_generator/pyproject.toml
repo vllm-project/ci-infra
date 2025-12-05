@@ -23,6 +23,7 @@ py-modules = [
     "step",
     "utils",
     "global_config",
+    "constants",
 ]
 
 [tool.setuptools.packages.find]
