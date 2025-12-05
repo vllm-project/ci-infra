@@ -23,6 +23,10 @@ if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
     DOCS_ONLY_DISABLE=0
 fi
 
+if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
+    MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD)
+fi
+
 fail_fast() {
     DISABLE_LABEL="ci-no-fail-fast"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
@@ -38,9 +42,88 @@ fail_fast() {
     fi
 }
 
+check_run_all_label() {
+    RUN_ALL_LABEL="ready-run-all-tests"
+    # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
+    if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+        PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+        if [[ $PR_LABELS == *"$RUN_ALL_LABEL"* ]]; then
+            echo true
+        else
+            echo false
+        fi
+    else
+        echo false  # not a PR or BUILDKITE_PULL_REQUEST not set
+    fi
+}
+
 if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
+
+clean_docker_tag() {
+    # Function to replace invalid characters in Docker image tags and truncate to 128 chars
+    # Valid characters: a-z, A-Z, 0-9, _, ., -
+    local input="$1"
+    echo "$input" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-128
+}
+
+resolve_ecr_cache_vars() {
+    # Resolve ECR cache-from, cache-to using buildkite environment variables:
+    #  -  BUILDKITE_BRANCH 
+    #  -  BUILDKITE_PULL_REQUEST
+    #  -  BUILDKITE_PULL_REQUEST_BASE_BRANCH
+
+    # Define ECR repository URLs for test and main cache
+    local TEST_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-test-cache"
+    local MAIN_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache"
+    
+    # login to ECR to check ceche availability
+    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
+    
+    if [[ "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
+        # For non-PR builds
+        if [[ "$BUILDKITE_BRANCH" == "main" ]]; then
+            # For main branch: use main cache for both source and destination
+            CACHE_TO="${MAIN_CACHE_ECR}:latest"
+            CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+        else
+            # For other branches: use branch-specific cache if it exists
+            local clean_branch=$(clean_docker_tag "$BUILDKITE_BRANCH")
+            CACHE_TO="${TEST_CACHE_ECR}:${clean_branch}"
+            if docker manifest inspect "${TEST_CACHE_ECR}:${clean_branch}" &>/dev/null; then
+                # Use branch-specific cache if available
+                CACHE_FROM="${TEST_CACHE_ECR}:${clean_branch}"
+            else
+                # Fallback to main cache if branch cache doesn't exist
+                CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+            fi
+        fi
+    else
+        # For PR builds
+        # Always set cache destination to PR-specific tag
+        CACHE_TO="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}"
+        
+        if docker manifest inspect "${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}" &>/dev/null; then
+            # Use PR-specific cache if it exists
+            CACHE_FROM="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}"
+        elif [[ "$BUILDKITE_PULL_REQUEST_BASE_BRANCH" != "main" ]]; then
+            # For PRs targeting non-main branches, try using base branch cache
+            local clean_base=$(clean_docker_tag "$BUILDKITE_PULL_REQUEST_BASE_BRANCH")
+            if docker manifest inspect "${TEST_CACHE_ECR}:${clean_base}" &>/dev/null; then
+                CACHE_FROM="${TEST_CACHE_ECR}:${clean_base}"
+            else
+                # Fallback to main cache if base branch cache doesn't exist
+                CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+            fi
+        else
+            # Fallback to main cache for PRs targeting main branch
+            CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+        fi
+    fi
+    # Export variables
+    export CACHE_FROM CACHE_TO
+}
 
 upload_pipeline() {
     echo "Uploading pipeline..."
@@ -71,7 +154,17 @@ upload_pipeline() {
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     FAIL_FAST=$(fail_fast)
-
+    
+    # Resolve CACHE_FROM and CACHE_TO for ECR Registry Caching
+    resolve_ecr_cache_vars
+    if [[ -z "${CACHE_FROM:-}" ]] || [[ -z "${CACHE_TO:-}" ]]; then
+        echo "Error: CACHE_FROM or CACHE_TO not set after resolve_ecr_cache_vars"
+        exit 1
+    else
+        echo "Resolved CACHE_FROM: ${CACHE_FROM}"
+        echo "Resolved CACHE_TO: ${CACHE_TO}"
+    fi
+    
     cd .buildkite
     (
         set -x
@@ -84,8 +177,11 @@ upload_pipeline() {
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
+            -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D cache_from="$CACHE_FROM" \
+            -D cache_to="$CACHE_TO" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -114,27 +210,30 @@ fi
 # Early exit start: skip pipeline if conditions are met
 # ----------------------------------------------------------------------
 
-# skip pipeline if all changed files are under docs/
+# skip pipeline if *every* changed file is docs/** OR **/*.md OR mkdocs.yaml
 if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
   if [[ -n "${file_diff:-}" ]]; then
     docs_only=1
-    # Robust iteration over newline-separated file_diff
+    # Iterate robustly over newline-separated paths
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
-      # **Policy:** only skip if *every* path starts with docs/
-      if [[ "$f" != docs/* ]]; then
+      # Match any of: docs/**  OR  **/*.md  OR  mkdocs.yaml
+      # Using prefix check for docs/ so nested paths match (no need for globstar).
+      if [[ "${f#docs/}" != "$f" || "$f" == *.md || "$f" == "mkdocs.yaml" ]]; then
+        continue
+      else
         docs_only=0
         break
       fi
     done < <(printf '%s\n' "$file_diff" | tr ' ' '\n' | tr -d '\r')
 
     if [[ "$docs_only" -eq 1 ]]; then
-      buildkite-agent annotate ":memo: CI skipped — docs/** only changes detected
+      buildkite-agent annotate ":memo: CI skipped — docs/Markdown/mkdocs-only changes detected
 
 \`\`\`
-${file_diff}
+$(printf '%s\n' "$file_diff" | tr ' ' '\n')
 \`\`\`" --style "info" || true
-      echo "[docs-only] All changes are under docs/. Exiting before pipeline upload."
+      echo "[docs-only] All changes are docs/**, *.md, or mkdocs.yaml. Exiting before pipeline upload."
       exit 0
     fi
   fi
@@ -192,6 +291,14 @@ for file in $file_diff; do
     fi
 done
 
+# Check for ready-run-all-tests label
+LABEL_RUN_ALL=$(check_run_all_label)
+if [[ $LABEL_RUN_ALL == true ]]; then
+    RUN_ALL=1
+    NIGHTLY=1
+    echo "Found 'ready-run-all-tests' label. Running all tests including optional tests."
+fi
+
 # Decide whether to use precompiled wheels
 # Relies on existing patterns array as a basis.
 if [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
@@ -200,13 +307,27 @@ elif [[ $RUN_ALL -eq 1 ]]; then
     export VLLM_USE_PRECOMPILED=0
     echo "Detected critical changes, building wheels from source"
 else
-    export VLLM_USE_PRECOMPILED=1
-    echo "No critical changes, using precompiled wheels"
+    echo "No critical changes, trying to use precompiled wheels"
+    # check whether we have precompiled wheels available for the merge base commit
+    # this might happen when:
+    # (1) the main commit is very new and wheels are not built yet
+    # (2) the merge base commit is somehow not on main branch (is that possible?)
+    # (3) (maybe later) we have retired some too old precompiled wheels
+    # (4) unfortunately, the commit fails to build
+    meta_url="https://wheels.vllm.ai/${MERGE_BASE_COMMIT}/vllm/metadata.json"
+    echo "Checking for precompiled wheel metadata at: $meta_url"
+    if curl --silent --head --fail "$meta_url"; then
+        echo "Precompiled wheels are available for commit ${MERGE_BASE_COMMIT}"
+        export VLLM_USE_PRECOMPILED=1
+    else
+        echo "Precompiled wheels are NOT available for commit ${MERGE_BASE_COMMIT}, forcing build from source"
+        export VLLM_USE_PRECOMPILED=0
+    fi
 fi
-
 
 LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
     LIST_FILE_DIFF=$(get_diff_main | tr ' ' '|')
 fi
+
 upload_pipeline

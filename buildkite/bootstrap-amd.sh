@@ -38,6 +38,21 @@ fail_fast() {
     fi
 }
 
+check_run_all_label() {
+    RUN_ALL_LABEL="ready-run-all-tests"
+    # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
+    if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+        PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+        if [[ $PR_LABELS == *"$RUN_ALL_LABEL"* ]]; then
+            echo true
+        else
+            echo false
+        fi
+    else
+        echo false  # not a PR or BUILDKITE_PULL_REQUEST not set
+    fi
+}
+
 if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
@@ -50,8 +65,9 @@ upload_pipeline() {
     source /var/lib/buildkite-agent/.cargo/env
 
     if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
+        AMD_MIRROR_HW="amdtentative"
         curl -o .buildkite/test-template.j2 \
-            https://raw.githubusercontent.com/vllm-project/ci-infra/"$VLLM_CI_BRANCH"/buildkite/test-template-fastcheck.j2
+            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
     else
         curl -o .buildkite/test-template.j2 \
             "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
@@ -84,6 +100,7 @@ upload_pipeline() {
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
+            -D vllm_merge_base_commit="$(git merge-base origin/main HEAD)" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
             | sed '/^[[:space:]]*$/d' \
@@ -191,6 +208,14 @@ for file in $file_diff; do
         fi
     fi
 done
+
+# Check for ready-run-all-tests label
+LABEL_RUN_ALL=$(check_run_all_label)
+if [[ $LABEL_RUN_ALL == true ]]; then
+    RUN_ALL=1
+    NIGHTLY=1
+    echo "Found 'ready-run-all-tests' label. Running all tests including optional tests."
+fi
 
 # Decide whether to use precompiled wheels
 # Relies on existing patterns array as a basis.

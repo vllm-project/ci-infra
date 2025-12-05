@@ -115,6 +115,21 @@ module "vpc_us_east_1" {
 }
 
 locals {
+  ecr_cache_lifecycle_policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      selection = {
+        tagStatus   = "any"
+        countType   = "sinceImagePushed"
+        countUnit   = "days"
+        countNumber = 14
+      }
+      action = {
+        type = "expire"
+      }
+    }]
+  })
+
   default_parameters = {
     elastic_ci_stack_version             = var.elastic_ci_stack_version
     BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token.name
@@ -158,7 +173,7 @@ locals {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci_us_east_1.name
       BuildkiteQueue                       = "cpu_queue_premerge_us_east_1"
       InstanceTypes                        = "r6in.16xlarge" # 512GB memory for CUDA kernel compilation
-      MaxSize                              = 10
+      MaxSize                              = 20
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
@@ -235,8 +250,7 @@ locals {
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
-      BuildkiteTerminateInstanceAfterJob   = false
-      ScaleInIdlePeriod                    = 600 # 10 minutes
+      BuildkiteTerminateInstanceAfterJob   = true
     }
 
     gpu-4-queue-ci = {
@@ -249,8 +263,7 @@ locals {
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
-      BuildkiteTerminateInstanceAfterJob   = false
-      ScaleInIdlePeriod                    = 600 # 10 minutes
+      BuildkiteTerminateInstanceAfterJob   = true
     }
   }
 
@@ -398,6 +411,30 @@ resource "aws_cloudformation_stack" "bk_queue" {
   }
 }
 
+# ECR repositories for BuildKit cache
+resource "aws_ecr_repository" "vllm_ci_test_cache" {
+  name     = "vllm-ci-test-cache"
+  provider = aws.us_east_1
+}
+
+resource "aws_ecr_repository" "vllm_ci_postmerge_cache" {
+  name     = "vllm-ci-postmerge-cache"
+  provider = aws.us_east_1
+}
+
+# Lifecycle policies for cache repositories
+resource "aws_ecr_lifecycle_policy" "vllm_ci_test_cache" {
+  repository = aws_ecr_repository.vllm_ci_test_cache.name
+  provider   = aws.us_east_1
+  policy     = local.ecr_cache_lifecycle_policy
+}
+
+resource "aws_ecr_lifecycle_policy" "vllm_ci_postmerge_cache" {
+  repository = aws_ecr_repository.vllm_ci_postmerge_cache.name
+  provider   = aws.us_east_1
+  policy     = local.ecr_cache_lifecycle_policy
+}
+
 resource "aws_iam_policy" "premerge_ecr_public_read_access_policy" {
   name        = "premerge-ecr-public-read-access-policy"
   description = "Policy to pull images from premerge ECR"
@@ -461,6 +498,53 @@ resource "aws_iam_policy" "premerge_ecr_public_write_access_policy" {
   })
 }
 
+resource "aws_iam_policy" "premerge_ecr_cache_read_write_access_policy" {
+  name        = "premerge_ecr_cache_read_write_access_policy"
+  description = "Policy to read and write cache to premerge cache repo and read from postmerge cache repo"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:CompleteLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:GetAuthorizationToken",
+        "sts:GetServiceBearerToken"
+      ]
+      Resource = [
+        "arn:aws:ecr:us-east-1:936637512419:repository/vllm-ci-test-cache"
+      ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:GetAuthorizationToken",
+          "sts:GetServiceBearerToken"
+        ]
+        Resource = [
+          "arn:aws:ecr:us-east-1:936637512419:repository/vllm-ci-postmerge-cache"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "sts:GetServiceBearerToken"
+        ],
+        Resource = "*"
+    }]
+  })
+}
+
 resource "aws_iam_policy" "postmerge_ecr_public_read_access_policy" {
   name        = "postmerge-ecr-public-read-access-policy"
   description = "Policy to pull images from postmerge ECR"
@@ -512,6 +596,40 @@ resource "aws_iam_policy" "postmerge_ecr_public_read_write_access_policy" {
         "sts:GetServiceBearerToken"
       ]
       Resource = "arn:aws:ecr-public::936637512419:repository/vllm-ci-postmerge-repo"
+    }]
+  })
+}
+
+resource "aws_iam_policy" "postmerge_ecr_cache_read_write_access_policy" {
+  name        = "postmerge_ecr_cache_read_write_access_policy"
+  description = "Policy to read and write cache to postmerge cache repo"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:CompleteLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:GetAuthorizationToken",
+        "sts:GetServiceBearerToken"
+      ]
+      Resource = [
+        "arn:aws:ecr:us-east-1:936637512419:repository/vllm-ci-postmerge-cache"
+      ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "sts:GetServiceBearerToken"
+        ],
+        Resource = "*"
     }]
   })
 }
@@ -675,6 +793,16 @@ resource "aws_iam_role_policy_attachment" "premerge_ecr_public_write_access" {
   policy_arn = aws_iam_policy.premerge_ecr_public_write_access_policy.arn
 }
 
+resource "aws_iam_role_policy_attachment" "premerge_ecr_cache_read_write_access" {
+  for_each = merge(
+    aws_cloudformation_stack.bk_queue,
+    aws_cloudformation_stack.bk_queue_premerge,
+    aws_cloudformation_stack.bk_queue_premerge_us_east_1,
+  )
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.premerge_ecr_cache_read_write_access_policy.arn
+}
+
 resource "aws_iam_role_policy_attachment" "postmerge_ecr_public_read_access" {
   for_each   = merge(
     aws_cloudformation_stack.bk_queue_ci_gpu
@@ -690,6 +818,15 @@ resource "aws_iam_role_policy_attachment" "postmerge_ecr_public_read_write_acces
   )
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.postmerge_ecr_public_read_write_access_policy.arn
+}
+
+resource "aws_iam_role_policy_attachment" "postmerge_ecr_cache_read_write_access" {
+  for_each = merge(
+    aws_cloudformation_stack.bk_queue_postmerge,
+    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
+  )
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.postmerge_ecr_cache_read_write_access_policy.arn
 }
 
 resource "aws_iam_role_policy_attachment" "release_ecr_public_read_write_access" {
