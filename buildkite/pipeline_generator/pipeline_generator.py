@@ -23,7 +23,7 @@ class PipelineGenerator:
                 subprocess.run([
                     "buildkite-agent",
                     "annotate",
-                    ":memo: CI skipped — doc-only changes
+                    ":memo: CI skipped — doc-only changes"
                     ],
                     check=True
                 )
