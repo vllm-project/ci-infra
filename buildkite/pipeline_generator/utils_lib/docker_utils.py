@@ -6,7 +6,7 @@ from global_config import get_global_config
 
 def get_image(cpu: bool = False) -> str:
     global_config = get_global_config()
-    commit = "$$BUILDKITE_COMMIT"
+    commit = "$BUILDKITE_COMMIT"
     branch = global_config["branch"]
     registries = global_config["registries"]
     repositories = global_config["repositories"]
