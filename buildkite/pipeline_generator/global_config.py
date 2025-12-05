@@ -2,8 +2,8 @@ from typing import TypedDict, List, Dict, Optional
 import yaml
 import os
 import re
-import requests
 from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels
+from utils_lib.vllm_utils import check_wheel_exists
 
 class GlobalConfig(TypedDict):
     name: str
@@ -107,12 +107,4 @@ def _should_use_precompiled(run_all: bool, merge_base_commit: Optional[str]) -> 
         return True
     if run_all:
         return False
-    wheel_metadata_url = f"https://wheels.vllm.ai/{merge_base_commit}/vllm/metadata.json"
-    response = requests.get(wheel_metadata_url)
-    # 404 or other error means wheel doesn't exist
-    if response.status_code != 200:
-         return False
-    if response.headers:
-        return True
-    else:
-        return False
+    return check_wheel_exists(merge_base_commit)
