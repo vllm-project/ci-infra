@@ -94,6 +94,8 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
             step_commands = step.commands
             for i, command in enumerate(step_commands):
                 for variable, value in variables_to_inject.items():
+                    print("VARIABLE: ", variable)
+                    print("VALUE: ", value)
                     step_commands[i] = step_commands[i].replace(variable, value)
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
