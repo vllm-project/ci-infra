@@ -23,6 +23,10 @@ if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
     DOCS_ONLY_DISABLE=0
 fi
 
+if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
+    MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD)
+fi
+
 fail_fast() {
     DISABLE_LABEL="ci-no-fail-fast"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
@@ -57,6 +61,70 @@ if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
 
+clean_docker_tag() {
+    # Function to replace invalid characters in Docker image tags and truncate to 128 chars
+    # Valid characters: a-z, A-Z, 0-9, _, ., -
+    local input="$1"
+    echo "$input" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-128
+}
+
+resolve_ecr_cache_vars() {
+    # Resolve ECR cache-from, cache-to using buildkite environment variables:
+    #  -  BUILDKITE_BRANCH 
+    #  -  BUILDKITE_PULL_REQUEST
+    #  -  BUILDKITE_PULL_REQUEST_BASE_BRANCH
+
+    # Define ECR repository URLs for test and main cache
+    local TEST_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-test-cache"
+    local MAIN_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache"
+    
+    # login to ECR to check ceche availability
+    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
+    
+    if [[ "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
+        # For non-PR builds
+        if [[ "$BUILDKITE_BRANCH" == "main" ]]; then
+            # For main branch: use main cache for both source and destination
+            CACHE_TO="${MAIN_CACHE_ECR}:latest"
+            CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+        else
+            # For other branches: use branch-specific cache if it exists
+            local clean_branch=$(clean_docker_tag "$BUILDKITE_BRANCH")
+            CACHE_TO="${TEST_CACHE_ECR}:${clean_branch}"
+            if docker manifest inspect "${TEST_CACHE_ECR}:${clean_branch}" &>/dev/null; then
+                # Use branch-specific cache if available
+                CACHE_FROM="${TEST_CACHE_ECR}:${clean_branch}"
+            else
+                # Fallback to main cache if branch cache doesn't exist
+                CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+            fi
+        fi
+    else
+        # For PR builds
+        # Always set cache destination to PR-specific tag
+        CACHE_TO="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}"
+        
+        if docker manifest inspect "${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}" &>/dev/null; then
+            # Use PR-specific cache if it exists
+            CACHE_FROM="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}"
+        elif [[ "$BUILDKITE_PULL_REQUEST_BASE_BRANCH" != "main" ]]; then
+            # For PRs targeting non-main branches, try using base branch cache
+            local clean_base=$(clean_docker_tag "$BUILDKITE_PULL_REQUEST_BASE_BRANCH")
+            if docker manifest inspect "${TEST_CACHE_ECR}:${clean_base}" &>/dev/null; then
+                CACHE_FROM="${TEST_CACHE_ECR}:${clean_base}"
+            else
+                # Fallback to main cache if base branch cache doesn't exist
+                CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+            fi
+        else
+            # Fallback to main cache for PRs targeting main branch
+            CACHE_FROM="${MAIN_CACHE_ECR}:latest"
+        fi
+    fi
+    # Export variables
+    export CACHE_FROM CACHE_TO
+}
+
 upload_pipeline() {
     echo "Uploading pipeline..."
     # Install minijinja
@@ -86,7 +154,17 @@ upload_pipeline() {
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     FAIL_FAST=$(fail_fast)
-
+    
+    # Resolve CACHE_FROM and CACHE_TO for ECR Registry Caching
+    resolve_ecr_cache_vars
+    if [[ -z "${CACHE_FROM:-}" ]] || [[ -z "${CACHE_TO:-}" ]]; then
+        echo "Error: CACHE_FROM or CACHE_TO not set after resolve_ecr_cache_vars"
+        exit 1
+    else
+        echo "Resolved CACHE_FROM: ${CACHE_FROM}"
+        echo "Resolved CACHE_TO: ${CACHE_TO}"
+    fi
+    
     cd .buildkite
     (
         set -x
@@ -99,8 +177,11 @@ upload_pipeline() {
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
+            -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D cache_from="$CACHE_FROM" \
+            -D cache_to="$CACHE_TO" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -226,13 +307,27 @@ elif [[ $RUN_ALL -eq 1 ]]; then
     export VLLM_USE_PRECOMPILED=0
     echo "Detected critical changes, building wheels from source"
 else
-    export VLLM_USE_PRECOMPILED=1
-    echo "No critical changes, using precompiled wheels"
+    echo "No critical changes, trying to use precompiled wheels"
+    # check whether we have precompiled wheels available for the merge base commit
+    # this might happen when:
+    # (1) the main commit is very new and wheels are not built yet
+    # (2) the merge base commit is somehow not on main branch (is that possible?)
+    # (3) (maybe later) we have retired some too old precompiled wheels
+    # (4) unfortunately, the commit fails to build
+    meta_url="https://wheels.vllm.ai/${MERGE_BASE_COMMIT}/vllm/metadata.json"
+    echo "Checking for precompiled wheel metadata at: $meta_url"
+    if curl --silent --head --fail "$meta_url"; then
+        echo "Precompiled wheels are available for commit ${MERGE_BASE_COMMIT}"
+        export VLLM_USE_PRECOMPILED=1
+    else
+        echo "Precompiled wheels are NOT available for commit ${MERGE_BASE_COMMIT}, forcing build from source"
+        export VLLM_USE_PRECOMPILED=0
+    fi
 fi
-
 
 LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
     LIST_FILE_DIFF=$(get_diff_main | tr ' ' '|')
 fi
+
 upload_pipeline

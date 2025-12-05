@@ -2,7 +2,6 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set pull_through_docker_image = "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-torch-nightly" %}
-{% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cpu" %}
 {% set docker_image_arm64_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-arm64-cpu" %}
 {% if branch == "main" %}
@@ -10,7 +9,6 @@
 {% set pull_through_docker_image = "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_latest = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest" %}
 {% set docker_image_torch_nightly = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly" %}
-{% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
 {% set docker_image_arm64_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-arm64-cpu" %}
 {% set docker_image_hpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-hpu" %}
@@ -132,6 +130,7 @@ plugins:
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
+        - CUDA_VISIBLE_DEVICES=1,2
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
@@ -258,6 +257,10 @@ steps:
       {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
+      - "docker buildx create --name vllm-builder --driver docker-container --use"
+      - "docker buildx inspect --bootstrap"
+      - "docker buildx ls"
       - |
         #!/bin/bash
         if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
@@ -267,75 +270,25 @@ steps:
           exit 0
         fi
       - >
-        docker build --file docker/Dockerfile
+        docker buildx build --file docker/Dockerfile
         --build-arg max_jobs=16
         --build-arg buildkite_commit=$BUILDKITE_COMMIT
         --build-arg USE_SCCACHE=1
         --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
         --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
-        {% if branch != "main" %}
         --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
-        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
-        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
+        {% if vllm_use_precompiled == "1" %}
+        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
         {% endif %}
+        --cache-from type=registry,ref={{ cache_from }},mode=max
+        --cache-to type=registry,ref={{ cache_to }},mode=max
         --tag {{ docker_image }}
-        --target test
-        --progress plain .
-      - "docker push {{ docker_image }}"
-      {% if branch == "main" %}
-      - "docker tag {{ docker_image }} {{ docker_image_latest }}"
-      - "docker push {{ docker_image_latest }}"
-      {% endif %}
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 2
-        - exit_status: -10  # Agent was lost
-          limit: 2
-
-  - block: Build CUDA 11.8 image
-    key: block-build-cu118
-    depends_on: ~
-
-  - label: ":docker: build image CUDA 11.8"
-    key: image-build-cu118
-    depends_on: block-build-cu118
-    agents:
-      {% if branch == "main" %}
-      queue: cpu_queue_postmerge_us_east_1
-      {% else %}
-      queue: cpu_queue_premerge_us_east_1
-      {% endif %}
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image_cu118 }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
-      - >
-        docker build
-        --file docker/Dockerfile
-        --build-arg max_jobs=16
-        --build-arg buildkite_commit=$BUILDKITE_COMMIT
-        --build-arg USE_SCCACHE=1
-        --build-arg CUDA_VERSION=11.8.0
-        {% if branch != "main" %}
-        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
-        --build-arg VLLM_DOCKER_BUILD_CONTEXT=1{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
-        --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
+        {% if branch == "main" %}
+        --tag {{ docker_image_latest }}
         {% endif %}
-        --tag {{ docker_image_cu118 }}
+        --push
         --target test
         --progress plain .
-      - "docker push {{ docker_image_cu118 }}"
-    env:
-      DOCKER_BUILDKIT: "1"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -481,7 +434,11 @@ steps:
     {% else %}
     depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
     {% endif %}
+    {% if step.label == "Python-only Installation Test" %}
+    soft_fail: true
+    {% else %}
     soft_fail: {{ step.soft_fail or false }}
+    {% endif %}
     {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else (pull_through_docker_image if step.gpu == "h100" else docker_image), default_working_dir, hf_home_fsx, hf_home, branch) | indent(4, true) }}
   {% endif %}
   {% endfor %}
@@ -664,6 +621,21 @@ steps:
     agents:
       queue: intel-gpu
     command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh
+
+  - block: "Run Arm CPU test"
+    depends_on: ~
+    key: block-arm-cpu
+
+  - label: "Arm CPU Test"
+    {% if branch == "main" %}
+    depends_on: ~
+    {% else %}
+    depends_on: block-arm-cpu
+    {% endif %}
+    soft_fail: true
+    agents:
+      queue: arm-cpu
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
 
   - label: "Ascend NPU Test"
     soft_fail: true
