@@ -280,8 +280,10 @@ steps:
         {% if vllm_use_precompiled == "1" %}
         --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
         {% endif %}
+        --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd
         --cache-from type=registry,ref={{ cache_from }},mode=max
-        --cache-to type=registry,ref={{ cache_to }},mode=max
+        --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max
+        --cache-from type=registry,ref={{ cache_from_main }},mode=max
         --tag {{ docker_image }}
         {% if branch == "main" %}
         --tag {{ docker_image_latest }}
