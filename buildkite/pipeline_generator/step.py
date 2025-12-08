@@ -27,6 +27,7 @@ class Step(BaseModel):
     env: Optional[Dict[str, str]] = None
     retry: Optional[Dict[str, Any]] = None
     optional: Optional[bool] = False
+    no_plugin: Optional[bool] = False
 
     @model_validator(mode="after")
     def validate_gpu(self) -> Self:
