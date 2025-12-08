@@ -37,6 +37,10 @@ def init_global_config(pipeline_config_path: str):
     list_file_diff = get_list_file_diff(branch, merge_base_commit)
     pr_labels = get_pr_labels(pull_request)
 
+    run_all_patterns = pipeline_config.get("run_all_patterns") or []
+    run_all_exclude_patterns = pipeline_config.get("run_all_exclude_patterns") or []
+    run_all = _should_run_all(pr_labels, list_file_diff, run_all_patterns, run_all_exclude_patterns)
+
     config = GlobalConfig(
         name=pipeline_config["name"],
         job_dirs=pipeline_config["job_dirs"],
@@ -46,14 +50,14 @@ def init_global_config(pipeline_config_path: str):
         commit=os.getenv("BUILDKITE_COMMIT"),
         pull_request=pull_request,
         docs_only_disable=os.getenv("DOCS_ONLY_DISABLE", "0"),
-        run_all_patterns=pipeline_config.get("run_all_patterns", None),
-        run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
+        run_all_patterns=run_all_patterns or None,
+        run_all_exclude_patterns=run_all_exclude_patterns or None,
         nightly=os.getenv("NIGHTLY", "0"),
-        run_all=_should_run_all(pr_labels, list_file_diff, pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)),
+        run_all=run_all,
         merge_base_commit=merge_base_commit,
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
-        use_precompiled=_should_use_precompiled(_should_run_all(pr_labels, list_file_diff, pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)), merge_base_commit),
+        use_precompiled=_should_use_precompiled(run_all, merge_base_commit),
     )
 
 def get_global_config():
