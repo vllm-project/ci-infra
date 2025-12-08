@@ -172,6 +172,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 buildkite_step.parallelism = step.parallelism
 
             # add plugin
+            print(step.label, step.no_plugin)
             if not step.no_plugin and not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
                 buildkite_step.plugins = [_get_step_plugin(step)]
                 
