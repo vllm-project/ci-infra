@@ -18,8 +18,8 @@ data "google_secret_manager_secret_version" "huggingface_token" {
   version = "latest"
 }
 
-module "ci_v6" {
-  source = "../modules/ci_v6"
+module "ci_v6e_1" {
+  source = "../modules/ci_v6e"
   providers = {
     google-beta = google-beta.us-east5-b
   }
