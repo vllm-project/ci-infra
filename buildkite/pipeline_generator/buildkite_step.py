@@ -7,6 +7,7 @@ from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
 from constants import GPUType, AgentQueue
 
+
 class BuildkiteCommandStep(BaseModel):
     label: str
     group: Optional[str] = None
@@ -30,9 +31,9 @@ class BuildkiteCommandStep(BaseModel):
             "retry": self.retry,
             "plugins": self.plugins,
             "env": self.env,
-            "retry": self.retry,
-            "parallelism": self.parallelism
+            "parallelism": self.parallelism,
         }
+
 
 class BuildkiteBlockStep(BaseModel):
     block: str
@@ -40,15 +41,13 @@ class BuildkiteBlockStep(BaseModel):
     key: Optional[str] = None
 
     def to_yaml(self):
-        return {
-            "block": self.block,
-            "depends_on": self.depends_on,
-            "key": self.key
-        }
+        return {"block": self.block, "depends_on": self.depends_on, "key": self.key}
+
 
 class BuildkiteGroupStep(BaseModel):
     group: str
     steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
+
 
 def _get_step_plugin(step: Step):
     # Use K8s plugin
@@ -56,6 +55,7 @@ def _get_step_plugin(step: Step):
         return get_k8s_plugin(step, get_image(step.no_gpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(step.no_gpu))}
+
 
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
@@ -81,15 +81,18 @@ def get_agent_queue(step: Step):
     else:
         return AgentQueue.GPU_1_QUEUE
 
+
 def _get_variables_to_inject() -> Dict[str, str]:
     global_config = get_global_config()
     if global_config["name"] != "vllm_ci":
         return {}
-        
+
     cache_from_tag, cache_to_tag = get_ecr_cache_registry()
     return {
         "$REGISTRY": global_config["registries"],
-        "$REPO": "main" if global_config["branch"] == "main" else global_config["repositories"]["premerge"],
+        "$REPO": "main"
+        if global_config["branch"] == "main"
+        else global_config["repositories"]["premerge"],
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
         "$BRANCH": global_config["branch"],
         "$VLLM_USE_PRECOMPILED": "1" if global_config["use_precompiled"] else "0",
@@ -98,17 +101,17 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$CACHE_TO": cache_to_tag,
     }
 
+
 def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
     commands = []
     # Default setup commands
     if not step.label.startswith(":docker:"):
         commands.append("(command nvidia-smi || true)")
-        commands.append("export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1")
-    
+
     if step.commands:
         commands.extend(step.commands)
-    
+
     final_commands = []
     for command in commands:
         if not step.num_nodes:
@@ -117,25 +120,33 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
             command = command.replace(variable, value)
         final_commands.append(command)
 
-    if not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
-         final_commands.insert(0, f"cd {step.working_dir}")
-         
+    if step.working_dir and not (
+        step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)
+    ):
+        final_commands.insert(0, f"cd {step.working_dir}")
+
     return final_commands
 
-def _create_block_step(step: Step, list_file_diff: List[str]) -> Optional[BuildkiteBlockStep]:
+
+def _create_block_step(
+    step: Step, list_file_diff: List[str]
+) -> Optional[BuildkiteBlockStep]:
     if _step_should_run(step, list_file_diff):
         return None
-        
+
     block_step = BuildkiteBlockStep(
         block=f"Run {step.label}",
         depends_on=[],
-        key=f"block-{_generate_step_key(step.label)}"
+        key=f"block-{_generate_step_key(step.label)}",
     )
     if step.label.startswith(":docker:"):
         block_step.depends_on = []
     return block_step
 
-def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> List[BuildkiteGroupStep]:
+
+def convert_group_step_to_buildkite_step(
+    group_steps: Dict[str, List[Step]],
+) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
     variables_to_inject = _get_variables_to_inject()
     global_config = get_global_config()
@@ -151,7 +162,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
 
             # command step
             step_commands = _prepare_commands(step, variables_to_inject)
-            
+
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
                 commands=step_commands,
@@ -159,7 +170,7 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
             )
-            
+
             if block_step:
                 buildkite_step.depends_on = block_step.key
             if step.env:
@@ -172,14 +183,20 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 buildkite_step.parallelism = step.parallelism
 
             # add plugin
-            if not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
+            if not step.no_plugin and not (
+                step.label.startswith(":docker:")
+                or (step.num_nodes and step.num_nodes >= 2)
+            ):
                 buildkite_step.plugins = [_get_step_plugin(step)]
-                
+
             group_steps_list.append(buildkite_step)
-            
-        buildkite_group_steps.append(BuildkiteGroupStep(group=group, steps=group_steps_list))
-        
+
+        buildkite_group_steps.append(
+            BuildkiteGroupStep(group=group, steps=group_steps_list)
+        )
+
     return buildkite_group_steps
+
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
@@ -196,10 +213,10 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
                     return True
     return True
 
+
 def _generate_step_key(step_label: str) -> str:
     return (
-        step_label
-        .replace(" ", "-")
+        step_label.replace(" ", "-")
         .lower()
         .replace("(", "")
         .replace(")", "")

@@ -5,8 +5,10 @@ import re
 import requests
 from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels
 
+
 class GlobalConfig(TypedDict):
     name: str
+    github_repo_name: str
     job_dirs: List[str]
     registries: str
     repositories: Dict[str, str]
@@ -22,7 +24,9 @@ class GlobalConfig(TypedDict):
     fail_fast: bool = False
     use_precompiled: bool = False
 
+
 config = None
+
 
 def init_global_config(pipeline_config_path: str):
     global config
@@ -30,15 +34,16 @@ def init_global_config(pipeline_config_path: str):
         return
     pipeline_config = yaml.safe_load(open(pipeline_config_path, "r"))
     _validate_pipeline_config(pipeline_config)
-    
+
     branch = os.getenv("BUILDKITE_BRANCH")
     pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
     merge_base_commit = get_merge_base_commit()
     list_file_diff = get_list_file_diff(branch, merge_base_commit)
-    pr_labels = get_pr_labels(pull_request)
+    pr_labels = get_pr_labels(pull_request, pipeline_config["github_repo_name"])
 
     config = GlobalConfig(
         name=pipeline_config["name"],
+        github_repo_name=pipeline_config["github_repo_name"],
         job_dirs=pipeline_config["job_dirs"],
         registries=pipeline_config["registries"],
         repositories=pipeline_config["repositories"],
@@ -49,18 +54,33 @@ def init_global_config(pipeline_config_path: str):
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
-        run_all=_should_run_all(pr_labels, list_file_diff, pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)),
+        run_all=_should_run_all(
+            pr_labels,
+            list_file_diff,
+            pipeline_config.get("run_all_patterns", None),
+            pipeline_config.get("run_all_exclude_patterns", None),
+        ),
         merge_base_commit=merge_base_commit,
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
-        use_precompiled=_should_use_precompiled(_should_run_all(pr_labels, list_file_diff, pipeline_config.get("run_all_patterns", None), pipeline_config.get("run_all_exclude_patterns", None)), merge_base_commit),
+        use_precompiled=_should_use_precompiled(
+            _should_run_all(
+                pr_labels,
+                list_file_diff,
+                pipeline_config.get("run_all_patterns", None),
+                pipeline_config.get("run_all_exclude_patterns", None),
+            ),
+            merge_base_commit,
+        ),
     )
+
 
 def get_global_config():
     global config
     if not config:
         raise ValueError("Global config not initialized")
     return config
+
 
 def _validate_pipeline_config(pipeline_config: Dict):
     if not pipeline_config["name"]:
@@ -75,7 +95,13 @@ def _validate_pipeline_config(pipeline_config: Dict):
         if not os.path.exists(job_dir):
             raise ValueError(f"Job directory not found: {job_dir}")
 
-def _should_run_all(pr_labels: List[str], list_file_diff: List[str], run_all_patterns: List[str], run_all_exclude_patterns: List[str]) -> bool:
+
+def _should_run_all(
+    pr_labels: List[str],
+    list_file_diff: List[str],
+    run_all_patterns: List[str],
+    run_all_exclude_patterns: List[str],
+) -> bool:
     """Determine if the pipeline should run all tests."""
     if os.getenv("RUN_ALL") == "1":
         return True
@@ -97,20 +123,24 @@ def _should_run_all(pr_labels: List[str], list_file_diff: List[str], run_all_pat
                 return True
     return False
 
+
 def _should_fail_fast(pr_labels: List[str]) -> bool:
     if "ci-no-fail-fast" in pr_labels:
         return False
     return True
+
 
 def _should_use_precompiled(run_all: bool, merge_base_commit: Optional[str]) -> bool:
     if os.getenv("VLLM_USE_PRECOMPILED") == "1":
         return True
     if run_all:
         return False
-    wheel_metadata_url = f"https://wheels.vllm.ai/{merge_base_commit}/vllm/metadata.json"
+    wheel_metadata_url = (
+        f"https://wheels.vllm.ai/{merge_base_commit}/vllm/metadata.json"
+    )
     response = requests.get(wheel_metadata_url)
     if response.status_code != 200:
-         return False
+        return False
     if response.headers:
         return True
     else:

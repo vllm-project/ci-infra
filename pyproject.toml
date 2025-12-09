@@ -12,4 +12,3 @@ include = ["buildkite*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-

@@ -7,12 +7,11 @@ from collections import defaultdict
 import os
 import yaml
 
-DEFAULT_TEST_WORKING_DIR = "/vllm-workspace/tests"
 
 class Step(BaseModel):
     label: str
     group: str = ""
-    working_dir: str = DEFAULT_TEST_WORKING_DIR
+    working_dir: Optional[str] = None
     no_gpu: bool = False
     key: Optional[str] = None
     depends_on: Optional[List[str]] = None
@@ -27,6 +26,7 @@ class Step(BaseModel):
     env: Optional[Dict[str, str]] = None
     retry: Optional[Dict[str, Any]] = None
     optional: Optional[bool] = False
+    no_plugin: Optional[bool] = False
 
     @model_validator(mode="after")
     def validate_gpu(self) -> Self:
@@ -39,10 +39,11 @@ class Step(BaseModel):
         if self.num_nodes and not self.num_gpus:
             raise ValueError("'num_gpus' must be defined if 'num_nodes' is defined.")
         return self
-    
+
     @classmethod
     def from_yaml(cls, yaml_data: dict):
         return cls(**yaml_data)
+
 
 def parse_steps_from_yaml(yaml_data: dict):
     group = yaml_data.get("group", None)
@@ -52,6 +53,7 @@ def parse_steps_from_yaml(yaml_data: dict):
         for step in steps:
             step.group = group
     return steps
+
 
 def read_steps_from_job_dir(job_dir: str):
     steps = []
@@ -70,6 +72,7 @@ def read_steps_from_job_dir(job_dir: str):
                         step.depends_on = group_depends_on
             steps.extend(file_steps)
     return steps
+
 
 def group_steps(steps: List[Step]) -> Dict[str, List[Step]]:
     grouped_steps = defaultdict(list)
