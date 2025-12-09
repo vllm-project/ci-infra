@@ -39,7 +39,7 @@ job_dirs:
   - ".buildkite/test_areas"
   - ".buildkite/image_build"
 
-# List of regex patterns to trigger all tests. If any changed file matches these, 
+# List of regex patterns to trigger all tests. If any changed file matches these,
 # all steps will be marked to run (overriding individual file dependencies).
 run_all_patterns:
   - "docker/Dockerfile"
@@ -49,7 +49,7 @@ run_all_patterns:
   - "csrc/"
 
 # List of regex patterns to exclude from run_all_patterns checks.
-# If a file matches run_all_patterns but ALSO matches one of these, 
+# If a file matches run_all_patterns but ALSO matches one of these,
 # it will NOT trigger a "run all".
 run_all_exclude_patterns:
   - "docker/Dockerfile."
