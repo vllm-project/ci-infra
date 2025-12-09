@@ -35,6 +35,9 @@ def init_global_config(pipeline_config_path: str):
     pipeline_config = yaml.safe_load(open(pipeline_config_path, "r"))
     _validate_pipeline_config(pipeline_config)
 
+    if "github_repo_name" not in pipeline_config:
+        pipeline_config["github_repo_name"] = "vllm-project/vllm"
+
     branch = os.getenv("BUILDKITE_BRANCH")
     pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
     merge_base_commit = get_merge_base_commit()
