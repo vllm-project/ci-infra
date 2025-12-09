@@ -1,6 +1,7 @@
 import subprocess
 import os
 from typing import List, Optional
+import requests
 
 def get_merge_base_commit() -> Optional[str]:
     """Get merge base commit from env var or compute it via git."""

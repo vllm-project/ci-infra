@@ -36,6 +36,7 @@ def init_global_config(pipeline_config_path: str):
     merge_base_commit = get_merge_base_commit()
     list_file_diff = get_list_file_diff(branch, merge_base_commit)
     pr_labels = get_pr_labels(pull_request)
+    print("PR labels: ", pr_labels)
 
     config = GlobalConfig(
         name=pipeline_config["name"],
