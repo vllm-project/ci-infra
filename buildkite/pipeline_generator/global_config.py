@@ -7,6 +7,7 @@ from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_p
 
 class GlobalConfig(TypedDict):
     name: str
+    github_repo_name: str
     job_dirs: List[str]
     registries: str
     repositories: Dict[str, str]
@@ -35,11 +36,11 @@ def init_global_config(pipeline_config_path: str):
     pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
     merge_base_commit = get_merge_base_commit()
     list_file_diff = get_list_file_diff(branch, merge_base_commit)
-    pr_labels = get_pr_labels(pull_request)
-    print("PR labels: ", pr_labels)
+    pr_labels = get_pr_labels(pull_request, pipeline_config["github_repo_name"])
 
     config = GlobalConfig(
         name=pipeline_config["name"],
+        github_repo_name=pipeline_config["github_repo_name"],
         job_dirs=pipeline_config["job_dirs"],
         registries=pipeline_config["registries"],
         repositories=pipeline_config["repositories"],

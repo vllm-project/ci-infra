@@ -44,10 +44,10 @@ def get_list_file_diff(branch: str, merge_base_commit: Optional[str]) -> List[st
         # Case where merge_base_commit is None
         raise RuntimeError("Failed to determine merge base commit for git diff.")
 
-def get_pr_labels(pull_request: str) -> List[str]:
+def get_pr_labels(pull_request: str, repo_name: str) -> List[str]:
     if not pull_request or pull_request == "false":
         return []
-    request_url = f"https://api.github.com/repos/vllm-project/vllm/pulls/{pull_request}"
+    request_url = f"https://api.github.com/repos/{repo_name}/pulls/{pull_request}"
     response = requests.get(request_url)
     response.raise_for_status()
     return [label["name"] for label in response.json()["labels"]]
