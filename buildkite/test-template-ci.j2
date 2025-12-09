@@ -245,10 +245,87 @@ plugins:
 {% endmacro %}
 
 
+{# =============================================================================
+   Base Image Builds
+   =============================================================================
+   These steps build the base images used by the main Dockerfile:
+     - vllm-build-base: Build environment with CUDA devel, Python, PyTorch
+     - vllm-runtime-base: Runtime environment with CUDA JIT tools, FlashInfer, etc.
+
+   TODO: Add scheduled builds to periodically rebuild base images with:
+     - Latest security patches from upstream base images (nvidia/cuda, ubuntu)
+     - Updated system packages
+     - Fresh PyTorch/FlashInfer versions if pinned to ranges
+   ============================================================================= #}
+
+{# Check if base image files changed #}
+{% set base_image_files = [
+  "docker/Dockerfile.build-base",
+  "docker/Dockerfile.runtime-base",
+  "docker/build-base-image.sh",
+  "requirements/cuda.txt",
+  "requirements/common.txt",
+  "tools/install_gdrcopy.sh"
+] %}
+{% set ns_base = namespace(changed=false) %}
+{% for base_file in base_image_files %}
+  {% for diff_file in list_file_diff %}
+    {% if base_file in diff_file %}
+      {% set ns_base.changed = true %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
 steps:
+{% if ns_base.changed %}
+  - label: ":docker: Build vllm-build-base"
+    key: "build-base-image"
+    depends_on: ~
+    agents:
+      {% if branch == "main" %}
+      queue: cpu_queue_postmerge_us_east_1
+      {% else %}
+      queue: cpu_queue_premerge_us_east_1
+      {% endif %}
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "./docker/build-base-image.sh --dockerfile docker/Dockerfile.build-base --image-name vllm-build-base"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+
+  - label: ":docker: Build vllm-runtime-base"
+    key: "runtime-base-image"
+    depends_on: ~
+    agents:
+      {% if branch == "main" %}
+      queue: cpu_queue_postmerge_us_east_1
+      {% else %}
+      queue: cpu_queue_premerge_us_east_1
+      {% endif %}
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "./docker/build-base-image.sh --dockerfile docker/Dockerfile.runtime-base --image-name vllm-runtime-base"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+{% endif %}
+
   - label: ":docker: build image"
     key: image-build
+{% if ns_base.changed %}
+    depends_on:
+      - "build-base-image"
+      - "runtime-base-image"
+{% else %}
     depends_on: ~
+{% endif %}
     agents:
       {% if branch == "main" %}
       queue: cpu_queue_postmerge_us_east_1
