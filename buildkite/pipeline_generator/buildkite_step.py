@@ -108,7 +108,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     # Default setup commands
     if not step.label.startswith(":docker:"):
         commands.append("(command nvidia-smi || true)")
-    
+
     if step.commands:
         commands.extend(step.commands)
 
