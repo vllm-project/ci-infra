@@ -1,5 +1,5 @@
 # 1 TPU device each
-# Runtime: v2-alpha-tpuv6e
+# Runtime: v2-alpha-tpu7-ubuntu2404
 
 data "google_client_config" "config" {
   provider = google-beta
@@ -13,12 +13,12 @@ resource "google_compute_disk" "tpu_disk" {
   type     = "hyperdisk-balanced"
 }
 
-resource "google_tpu_v2_vm" "tpu_v6_ci" {
+resource "google_tpu_v2_vm" "tpu_v7x_ci" {
   provider = google-beta
   count    = var.instance_count
   name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
 
-  runtime_version  = "v2-alpha-tpuv6e"
+  runtime_version  = "v2-alpha-tpu7-ubuntu2404"
   accelerator_type = var.accelerator_type
 
   dynamic "scheduling_config" {    
@@ -66,13 +66,13 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       sudo mkdir -p /mnt/disks/persist
 
       # Format if not already formatted
-      if ! blkid /dev/nvme0n2; then
-        echo "Formatting /dev/nvme0n2 as ext4..."
-        sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme0n2
+      if ! blkid /dev/nvme1n1; then
+        echo "Formatting /dev/nvme1n1 as ext4..."
+        sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme1n1
       fi
 
       # Add to /etc/fstab using UUID
-      disk_uuid=$(blkid -s UUID -o value /dev/nvme0n2)
+      disk_uuid=$(blkid -s UUID -o value /dev/nvme1n1)
       if ! grep -q "/mnt/disks/persist" /etc/fstab; then
        echo "UUID=$disk_uuid /mnt/disks/persist ext4 defaults,discard 0 2" | sudo tee -a /etc/fstab
       fi
