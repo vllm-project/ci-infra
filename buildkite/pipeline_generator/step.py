@@ -7,12 +7,10 @@ from collections import defaultdict
 import os
 import yaml
 
-DEFAULT_TEST_WORKING_DIR = "/vllm-workspace/tests"
-
 class Step(BaseModel):
     label: str
     group: str = ""
-    working_dir: str = DEFAULT_TEST_WORKING_DIR
+    working_dir: Optional[str] = None
     no_gpu: bool = False
     key: Optional[str] = None
     depends_on: Optional[List[str]] = None
@@ -27,6 +25,7 @@ class Step(BaseModel):
     env: Optional[Dict[str, str]] = None
     retry: Optional[Dict[str, Any]] = None
     optional: Optional[bool] = False
+    no_plugin: Optional[bool] = False
 
     @model_validator(mode="after")
     def validate_gpu(self) -> Self:

@@ -104,7 +104,6 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     # Default setup commands
     if not step.label.startswith(":docker:"):
         commands.append("(command nvidia-smi || true)")
-        commands.append("export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1")
     
     if step.commands:
         commands.extend(step.commands)
@@ -117,7 +116,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
             command = command.replace(variable, value)
         final_commands.append(command)
 
-    if not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
+    if step.working_dir and not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
          final_commands.insert(0, f"cd {step.working_dir}")
          
     return final_commands
@@ -172,7 +171,8 @@ def convert_group_step_to_buildkite_step(group_steps: Dict[str, List[Step]]) -> 
                 buildkite_step.parallelism = step.parallelism
 
             # add plugin
-            if not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
+            print(step.label, step.no_plugin)
+            if not step.no_plugin and not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
                 buildkite_step.plugins = [_get_step_plugin(step)]
                 
             group_steps_list.append(buildkite_step)
