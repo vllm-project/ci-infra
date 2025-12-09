@@ -1,5 +1,3 @@
-from pydantic import BaseModel
-from typing import List
 from step import Step
 from constants import GPUType
 import copy
@@ -58,6 +56,7 @@ b200_plugin_template = {
         "/data/benchmark-vllm-cache:/root/.cache/vllm",
     ],
 }
+
 
 def get_docker_plugin(step: Step, image: str):
     plugin = None

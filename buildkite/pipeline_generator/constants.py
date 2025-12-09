@@ -1,10 +1,12 @@
 from enum import Enum
 
+
 class GPUType(str, Enum):
     H100 = "h100"
     H200 = "h200"
     B200 = "b200"
     A100 = "a100"
+
 
 class AgentQueue(str, Enum):
     CPU_QUEUE_PREMERGE = "cpu_queue_premerge"
@@ -18,4 +20,3 @@ class AgentQueue(str, Enum):
     A100_QUEUE = "a100_queue"
     CPU_QUEUE_PREMERGE_US_EAST_1 = "cpu_queue_premerge_us_east_1"
     CPU_QUEUE_POSTMERGE_US_EAST_1 = "cpu_queue_postmerge_us_east_1"
-

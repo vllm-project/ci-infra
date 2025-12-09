@@ -1,6 +1,4 @@
-from pydantic import BaseModel
-from typing import List, Dict
-import os
+from typing import List
 import yaml
 import subprocess
 import sys
@@ -8,8 +6,14 @@ from step import read_steps_from_job_dir, group_steps
 from buildkite_step import convert_group_step_to_buildkite_step
 from global_config import init_global_config, get_global_config
 
+
 class PipelineGenerator:
-    def __init__(self, pipeline_config_path: str, output_file_path: str, docs_only_disable: bool = False):
+    def __init__(
+        self,
+        pipeline_config_path: str,
+        output_file_path: str,
+        docs_only_disable: bool = False,
+    ):
         init_global_config(pipeline_config_path)
         self.output_file_path = output_file_path
 
@@ -21,12 +25,13 @@ class PipelineGenerator:
             if is_docs_only_change(global_config["list_file_diff"]):
                 print("List file diff: ", global_config["list_file_diff"])
                 print("All changes are doc-only, skipping CI.")
-                subprocess.run([
-                    "buildkite-agent",
-                    "annotate",
-                    ":memo: CI skipped — doc-only changes"
+                subprocess.run(
+                    [
+                        "buildkite-agent",
+                        "annotate",
+                        ":memo: CI skipped — doc-only changes",
                     ],
-                    check=True
+                    check=True,
                 )
                 sys.exit(0)
 
@@ -39,10 +44,15 @@ class PipelineGenerator:
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
-            buildkite_steps_dict["steps"].append(buildkite_group_step.dict(exclude_none=True))
+            buildkite_steps_dict["steps"].append(
+                buildkite_group_step.dict(exclude_none=True)
+            )
         with open(self.output_file_path, "w") as f:
-            yaml.dump(buildkite_steps_dict, f, sort_keys=False, default_flow_style=False)
+            yaml.dump(
+                buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
+            )
         return buildkite_steps_dict
+
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:
     for file_path in list_file_diff:
