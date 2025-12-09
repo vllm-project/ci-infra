@@ -16,7 +16,7 @@ variable "instance_count" {
 
 variable "disk_size" {
   type        = number
-  description = "Number of TPU instance"
+  description = "The mount disk size"
   default     = 2048
 }
 

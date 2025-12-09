@@ -1,5 +1,5 @@
 # 1 TPU device each
-# Runtime: v2-alpha-tpuv6e
+# Runtime: v2-alpha-tpu7-ubuntu2404
 
 data "google_client_config" "config" {
   provider = google-beta
