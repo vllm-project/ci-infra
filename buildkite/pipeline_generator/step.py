@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Any
 from pydantic import model_validator
 from typing_extensions import Self
 from collections import defaultdict
-
+from global_config import get_global_config
 import os
 import yaml
 
@@ -56,6 +56,7 @@ def parse_steps_from_yaml(yaml_data: dict):
 
 
 def read_steps_from_job_dir(job_dir: str):
+    global_config = get_global_config()
     steps = []
     for root, _, files in os.walk(job_dir):
         for file in files:
@@ -70,6 +71,11 @@ def read_steps_from_job_dir(job_dir: str):
                 for step in file_steps:
                     if not step.depends_on:
                         step.depends_on = group_depends_on
+                    if (
+                        not step.working_dir
+                        and global_config["github_repo_name"] == "vllm-project/vllm"
+                    ):
+                        step.working_dir = "/vllm-workspace/tests"
             steps.extend(file_steps)
     return steps
 
