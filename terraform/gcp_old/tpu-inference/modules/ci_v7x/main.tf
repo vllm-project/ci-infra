@@ -16,8 +16,8 @@ resource "google_compute_disk" "tpu_disk" {
 resource "google_tpu_v2_vm" "tpu_v7x_ci" {
   provider = google-beta
   count    = var.instance_count
-  name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
 
+  name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"  
   runtime_version  = "v2-alpha-tpu7-ubuntu2404"
   accelerator_type = var.accelerator_type
 
