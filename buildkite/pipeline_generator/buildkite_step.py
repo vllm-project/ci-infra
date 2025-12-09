@@ -90,7 +90,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
     cache_from_tag, cache_to_tag = get_ecr_cache_registry()
     return {
         "$REGISTRY": global_config["registries"],
-        "$REPO": "main"
+        "$REPO": global_config["repositories"]["main"]
         if global_config["branch"] == "main"
         else global_config["repositories"]["premerge"],
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
