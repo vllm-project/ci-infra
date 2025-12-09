@@ -117,7 +117,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
             command = command.replace(variable, value)
         final_commands.append(command)
 
-    if not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
+    if step.working_dir and not (step.label.startswith(":docker:") or (step.num_nodes and step.num_nodes >= 2)):
          final_commands.insert(0, f"cd {step.working_dir}")
          
     return final_commands
