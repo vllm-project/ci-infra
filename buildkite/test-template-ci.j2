@@ -130,7 +130,9 @@ plugins:
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
+        {% if step.num_gpus and step.num_gpus == 2 %}
         - CUDA_VISIBLE_DEVICES=1,2
+        {% endif %}
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
