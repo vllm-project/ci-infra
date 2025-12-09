@@ -104,7 +104,6 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     # Default setup commands
     if not step.label.startswith(":docker:"):
         commands.append("(command nvidia-smi || true)")
-        commands.append("export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1")
     
     if step.commands:
         commands.extend(step.commands)
