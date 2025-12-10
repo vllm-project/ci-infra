@@ -442,9 +442,15 @@ steps:
   {% endif %}
   {% endfor %}
 
-  - group: "vllm against torch nightly"
+  - group: "vLLM Against PyTorch Nightly"
     depends_on: ~
     steps:
+      - label: "Install nightly torch packages"
+        key: install-torch-nightly
+        depends_on: image-build
+        soft_fail: false
+        commands:
+          - uv pip install --quiet torch torchvision torchaudio --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu128
     {% for step in steps %}
     {% if step.torch_nightly %}
       {% set ns = namespace(blocked=1) %}
@@ -466,7 +472,7 @@ steps:
 
       {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
       - block: "Run Torch Nightly {{ step.label }}"
-        depends_on: image-build
+        depends_on: install-torch-nightly
         key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
       {% endif %}
 
@@ -474,7 +480,7 @@ steps:
         {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
         depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         {% else %}
-        depends_on: image-build
+        depends_on: install-torch-nightly
         {% endif %}
         soft_fail: true
         {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else (pull_through_docker_image if step.gpu == "h100" else docker_image), default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
