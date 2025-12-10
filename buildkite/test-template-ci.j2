@@ -98,7 +98,7 @@ plugins:
       {% if step.label == "Benchmarks" or step.mount_buildkite_agent or cov_enabled %}
       mount-buildkite-agent: true
       {% endif %}
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
+      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory' && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
