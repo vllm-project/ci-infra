@@ -218,7 +218,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
                         f"Source file {source_file} in diff file {diff_file}, step should run"
                     )
                     return True
-    return True
+    return False
 
 
 def _generate_step_key(step_label: str) -> str:
