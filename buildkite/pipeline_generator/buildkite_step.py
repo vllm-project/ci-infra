@@ -131,7 +131,9 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
 def _create_block_step(
     step: Step, list_file_diff: List[str]
 ) -> Optional[BuildkiteBlockStep]:
-    if _step_should_run(step, list_file_diff):
+    should_run = _step_should_run(step, list_file_diff)
+    print(f"Step {step.label} should run: {should_run}")
+    if should_run:
         return None
 
     block_step = BuildkiteBlockStep(
