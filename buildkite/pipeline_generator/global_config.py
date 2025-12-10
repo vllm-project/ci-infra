@@ -76,7 +76,9 @@ def init_global_config(pipeline_config_path: str):
             merge_base_commit,
         ),
     )
-    print("Config: ", config)
+    print("Config:\n")
+    for key, value in config.items():
+        print(f"{key}: {value}\n")
 
 
 def get_global_config():
@@ -124,8 +126,6 @@ def _should_run_all(
                     match_ignore = True
                     break
             if not match_ignore:
-                print("Pattern matched: ", pattern)
-                print("File: ", file)
                 return True
     return False
 
