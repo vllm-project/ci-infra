@@ -76,8 +76,7 @@ def init_global_config(pipeline_config_path: str):
             merge_base_commit,
         ),
     )
-    print("Run all?: ", config["run_all"])
-    print("List file diff: ", list_file_diff)
+    print("Config: ", config)
 
 
 def get_global_config():

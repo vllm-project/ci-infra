@@ -131,9 +131,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
 def _create_block_step(
     step: Step, list_file_diff: List[str]
 ) -> Optional[BuildkiteBlockStep]:
-    should_run = _step_should_run(step, list_file_diff)
-    print(f"Step {step.label} should run: {should_run}")
-    if should_run:
+    if _step_should_run(step, list_file_diff):
         return None
 
     block_step = BuildkiteBlockStep(
@@ -203,20 +201,15 @@ def convert_group_step_to_buildkite_step(
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
     if global_config["nightly"] == "1":
-        print("Nightly is 1, step should run")
         return True
     if step.optional:
         return False
     if global_config["run_all"]:
-        print("Run all is 1, step should run")
         return True
     if step.source_file_dependencies:
         for source_file in step.source_file_dependencies:
             for diff_file in list_file_diff:
                 if source_file in diff_file:
-                    print(
-                        f"Source file {source_file} in diff file {diff_file}, step should run"
-                    )
                     return True
     return False
 
