@@ -251,6 +251,7 @@ steps:
   - label: ":docker: build image"
     key: image-build
     depends_on: ~
+    timeout_in_minutes: 600
     agents:
       {% if branch == "main" %}
       queue: cpu_queue_postmerge_us_east_1
