@@ -123,6 +123,8 @@ def _should_run_all(
                     match_ignore = True
                     break
             if not match_ignore:
+                print("Pattern matched: ", pattern)
+                print("File: ", file)
                 return True
     return False
 
