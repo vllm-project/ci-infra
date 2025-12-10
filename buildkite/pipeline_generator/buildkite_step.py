@@ -211,7 +211,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
             for diff_file in list_file_diff:
                 if source_file in diff_file:
                     return True
-    return True
+    return False
 
 
 def _generate_step_key(step_label: str) -> str:

@@ -76,6 +76,9 @@ def init_global_config(pipeline_config_path: str):
             merge_base_commit,
         ),
     )
+    print("Config:\n")
+    for key, value in config.items():
+        print(f"{key}: {value}\n")
 
 
 def get_global_config():
