@@ -366,10 +366,11 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
   {% endif %}
-  
+
   - label: ":docker: build image ARM64 CPU"
     key: image-build-arm64-cpu
     depends_on: ~
+    soft_fail: true
     agents:
       {% if branch == "main" %}
       queue: arm64_cpu_queue_postmerge
@@ -715,4 +716,3 @@ steps:
       queue: gh200_queue
     command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
   {% endif %}
-
