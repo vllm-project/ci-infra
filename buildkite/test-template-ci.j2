@@ -168,6 +168,11 @@ plugins:
   {% elif step.gpu == "h100" %}
   - kubernetes:
       podSpec:
+        serviceAccountName: buildkite-h100
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          fsGroup: 0
         containers:
           - image: {{ image }}
             command:
@@ -181,11 +186,11 @@ plugins:
               - name: hf-cache
                 mountPath: {{ hf_home_ibm }}
               - name: hf-cache
-                mountPath: /root/.cache
-                subPath: root-cache
+                mountPath: /model-cache/.cache
+                subPath: model-cache
               - name: hf-cache
-                mountPath: /root/.config
-                subPath: root-config
+                mountPath: /model-cache/.config
+                subPath: model-config
             env:
               - name: VLLM_USAGE_SOURCE
                 value: ci-test
