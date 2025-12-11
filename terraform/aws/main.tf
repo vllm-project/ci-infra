@@ -149,7 +149,7 @@ locals {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "small_cpu_queue_premerge"
       InstanceTypes                        = "r6in.large" # Intel Ice Lake with AVX-512 for vLLM CPU backend
-      MaxSize                              = 10
+      MaxSize                              = 40
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
