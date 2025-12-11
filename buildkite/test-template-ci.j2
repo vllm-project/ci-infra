@@ -198,6 +198,10 @@ plugins:
                   secretKeyRef:
                     name: hf-token-secret
                     key: token
+              - name: XDG_CACHE_HOME
+                value: /root/.cache
+              - name: XDG_CONFIG_HOME
+                value: /root/.config
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
         volumes:
