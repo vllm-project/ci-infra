@@ -180,6 +180,12 @@ plugins:
                 mountPath: /dev/shm
               - name: hf-cache
                 mountPath: {{ hf_home_ibm }}
+              - name: hf-cache
+                mountPath: /root/.cache
+                subPath: root-cache
+              - name: hf-cache
+                mountPath: /root/.config
+                subPath: root-config
             env:
               - name: VLLM_USAGE_SOURCE
                 value: ci-test
