@@ -199,9 +199,11 @@ plugins:
                     name: hf-token-secret
                     key: token
               - name: XDG_CACHE_HOME
-                value: /root/.cache
+                value: /model-cache/.cache
               - name: XDG_CONFIG_HOME
-                value: /root/.config
+                value: /model-cache/.config
+              - name: FLASHINFER_WORKSPACE_DIR
+                value: /model-cache/.cache/flashinfer
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
         volumes:
