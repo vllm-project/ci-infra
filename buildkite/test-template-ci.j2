@@ -248,10 +248,10 @@ plugins:
 
 
 steps:
-  - label: ":arrow_down: pull parent commit image"
-    key: pull-parent-image
+  - label: ":docker: build image (with prebake simulation)"
+    key: image-build
     depends_on: ~
-    timeout_in_minutes: 30
+    timeout_in_minutes: 600
     agents:
       {% if branch == "main" %}
       queue: cpu_queue_postmerge_us_east_1
@@ -264,83 +264,88 @@ steps:
       - |
         #!/bin/bash
         set -e
+
+        # Check if current commit image already exists
+        echo "--- :mag: Checking if current commit image exists"
+        START_TIME=$$(date +%s)
+        if docker manifest inspect {{ docker_image }} > /dev/null 2>&1; then
+          echo "Image already exists, skipping build"
+          exit 0
+        fi
+        END_TIME=$$(date +%s)
+        echo "✓ Image check completed in $$((END_TIME - START_TIME)) seconds"
+
+        # Find and pull parent commit image (simulating prebaked image)
+        echo "--- :arrow_down: Pulling parent commit image (prebake simulation)"
+        START_TIME=$$(date +%s)
         PARENT_COMMIT=$$(git rev-parse HEAD^)
         echo "Parent commit: $$PARENT_COMMIT"
 
-        # Try both test-repo and postmerge-repo registries
         PARENT_IMAGE_TEST="public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$$PARENT_COMMIT"
         PARENT_IMAGE_POSTMERGE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$$PARENT_COMMIT"
-
         PARENT_IMAGE=""
 
-        # Check test-repo first
         echo "Checking for parent image in test-repo..."
         if docker manifest inspect "$$PARENT_IMAGE_TEST" > /dev/null 2>&1; then
           echo "Found parent image in test-repo"
           PARENT_IMAGE="$$PARENT_IMAGE_TEST"
-        # Check postmerge-repo as fallback
         elif docker manifest inspect "$$PARENT_IMAGE_POSTMERGE" > /dev/null 2>&1; then
           echo "Found parent image in postmerge-repo"
           PARENT_IMAGE="$$PARENT_IMAGE_POSTMERGE"
         else
-          echo "Parent image not found in either registry, skipping pull"
+          echo "Parent image not found in either registry"
         fi
 
         if [ -n "$$PARENT_IMAGE" ]; then
           echo "Pulling parent image: $$PARENT_IMAGE"
-          docker pull "$$PARENT_IMAGE" || echo "Failed to pull, will rely on cache layers"
+          docker pull "$$PARENT_IMAGE" || echo "Failed to pull parent image"
         fi
-    retry:
-      automatic:
-        - exit_status: "*"
-          limit: 2
+        END_TIME=$$(date +%s)
+        echo "✓ Parent image pull completed in $$((END_TIME - START_TIME)) seconds"
 
-  - label: ":docker: build image"
-    key: image-build
-    depends_on: pull-parent-image
-    timeout_in_minutes: 600
-    agents:
-      {% if branch == "main" %}
-      queue: cpu_queue_postmerge_us_east_1
-      {% else %}
-      queue: cpu_queue_premerge_us_east_1
-      {% endif %}
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
-      - "docker buildx create --name vllm-builder --driver docker-container --use"
-      - "docker buildx inspect --bootstrap"
-      - "docker buildx ls"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
-      - >
-        docker buildx build --file docker/Dockerfile
-        --build-arg max_jobs=16
-        --build-arg buildkite_commit=$BUILDKITE_COMMIT
-        --build-arg USE_SCCACHE=1
-        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
-        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
-        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
+        # Setup buildx
+        echo "--- :hammer: Setting up buildx"
+        START_TIME=$$(date +%s)
+        docker buildx create --name vllm-builder --driver docker-container --use
+        docker buildx inspect --bootstrap
+        docker buildx ls
+        END_TIME=$$(date +%s)
+        echo "✓ Buildx setup completed in $$((END_TIME - START_TIME)) seconds"
+
+        # Build with timing
+        echo "--- :docker: Building Docker image"
+        BUILD_START=$$(date +%s)
+
+        docker buildx build --file docker/Dockerfile \
+        --build-arg max_jobs=16 \
+        --build-arg buildkite_commit=$$BUILDKITE_COMMIT \
+        --build-arg USE_SCCACHE=1 \
+        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0" \
+        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a" \
+        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }} \
         {% if vllm_use_precompiled == "1" %}
-        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
+        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }} \
         {% endif %}
-        --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd
-        --cache-from type=registry,ref={{ cache_from }},mode=max
-        --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max
-        --cache-from type=registry,ref={{ cache_from_main }},mode=max
-        --tag {{ docker_image }}
+        --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd \
+        --cache-from type=registry,ref={{ cache_from }},mode=max \
+        --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max \
+        --cache-from type=registry,ref={{ cache_from_main }},mode=max \
+        --cache-from type=registry,ref="$$PARENT_IMAGE_TEST",mode=max \
+        --cache-from type=registry,ref="$$PARENT_IMAGE_POSTMERGE",mode=max \
+        --tag {{ docker_image }} \
         {% if branch == "main" %}
-        --tag {{ docker_image_latest }}
+        --tag {{ docker_image_latest }} \
         {% endif %}
-        --push
-        --target test
+        --push \
+        --target test \
         --progress plain .
+
+        BUILD_END=$$(date +%s)
+        BUILD_DURATION=$$((BUILD_END - BUILD_START))
+        echo ""
+        echo "=========================================="
+        echo "✓ Docker build completed in $$BUILD_DURATION seconds ($$(echo "scale=2; $$BUILD_DURATION/60" | bc) minutes)"
+        echo "=========================================="
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
