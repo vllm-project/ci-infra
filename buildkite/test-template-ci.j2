@@ -59,7 +59,7 @@ agents:
   queue: a100_queue
   {% elif step.gpu == "h100" %}
   queue: mithril-h100-pool
-  {% elif step.gpu == "h200" and step.num_gpus == 8 %}
+  {% elif step.gpu == "h200" and step.num_gpus and step.num_gpus == 8 %}
   queue: nebius-h200
   {% elif step.gpu == "h200" %}
   queue: skylab-h200
@@ -119,7 +119,7 @@ plugins:
       volumes:
         - /dev/shm:/dev/shm
         - {{ hf_home_fsx }}:{{ hf_home_fsx }}
-  {% elif step.gpu == "h200" and step.num_gpus == 8 %}
+  {% elif step.gpu == "h200" and step.num_gpus and step.num_gpus == 8 %}
   - kubernetes:
       podSpec:
         containers:
