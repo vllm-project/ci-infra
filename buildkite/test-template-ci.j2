@@ -248,9 +248,46 @@ plugins:
 
 
 steps:
+  - label: ":arrow_down: pull parent commit image"
+    key: pull-parent-image
+    depends_on: ~
+    timeout_in_minutes: 30
+    agents:
+      {% if branch == "main" %}
+      queue: cpu_queue_postmerge_us_east_1
+      {% else %}
+      queue: cpu_queue_premerge_us_east_1
+      {% endif %}
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
+      - |
+        #!/bin/bash
+        set -e
+        PARENT_COMMIT=$(git rev-parse HEAD^)
+        echo "Parent commit: $PARENT_COMMIT"
+
+        {% if branch == "main" %}
+        PARENT_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$PARENT_COMMIT"
+        {% else %}
+        PARENT_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$PARENT_COMMIT"
+        {% endif %}
+
+        echo "Attempting to pull parent image: $PARENT_IMAGE"
+        if docker manifest inspect "$PARENT_IMAGE" > /dev/null 2>&1; then
+          echo "Parent image found, pulling..."
+          docker pull "$PARENT_IMAGE" || echo "Failed to pull, will rely on cache layers"
+        else
+          echo "Parent image not found in registry, skipping pull"
+        fi
+    retry:
+      automatic:
+        - exit_status: "*"
+          limit: 2
+
   - label: ":docker: build image"
     key: image-build
-    depends_on: ~
+    depends_on: pull-parent-image
     timeout_in_minutes: 600
     agents:
       {% if branch == "main" %}
@@ -272,27 +309,36 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - >
-        docker buildx build --file docker/Dockerfile
-        --build-arg max_jobs=16
-        --build-arg buildkite_commit=$BUILDKITE_COMMIT
-        --build-arg USE_SCCACHE=1
-        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
-        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
-        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
-        {% if vllm_use_precompiled == "1" %}
-        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
-        {% endif %}
-        --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd
-        --cache-from type=registry,ref={{ cache_from }},mode=max
-        --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max
-        --cache-from type=registry,ref={{ cache_from_main }},mode=max
-        --tag {{ docker_image }}
+      - |
+        #!/bin/bash
+        PARENT_COMMIT=$(git rev-parse HEAD^)
         {% if branch == "main" %}
-        --tag {{ docker_image_latest }}
+        PARENT_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$PARENT_COMMIT"
+        {% else %}
+        PARENT_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$PARENT_COMMIT"
         {% endif %}
-        --push
-        --target test
+
+        docker buildx build --file docker/Dockerfile \
+        --build-arg max_jobs=16 \
+        --build-arg buildkite_commit=$BUILDKITE_COMMIT \
+        --build-arg USE_SCCACHE=1 \
+        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0" \
+        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a" \
+        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }} \
+        {% if vllm_use_precompiled == "1" %}
+        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }} \
+        {% endif %}
+        --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd \
+        --cache-from type=registry,ref={{ cache_from }},mode=max \
+        --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max \
+        --cache-from type=registry,ref={{ cache_from_main }},mode=max \
+        --cache-from type=registry,ref="$PARENT_IMAGE",mode=max \
+        --tag {{ docker_image }} \
+        {% if branch == "main" %}
+        --tag {{ docker_image_latest }} \
+        {% endif %}
+        --push \
+        --target test \
         --progress plain .
     retry:
       automatic:
