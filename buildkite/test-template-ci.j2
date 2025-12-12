@@ -59,7 +59,11 @@ agents:
   {% elif step.gpu == "a100" %}
   queue: a100_queue
   {% elif step.gpu == "h100" %}
+  {% if step.num_gpus == 4 %}
   queue: IBM-H100-OpenShift
+  {% else %}
+  queue: mithril-h100-pool
+  {% endif %}
   {% elif step.gpu == "h200" %}
   queue: skylab-h200
   {% elif step.gpu == "b200" %}
@@ -165,7 +169,7 @@ plugins:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
-  {% elif step.gpu == "h100" %}
+  {% elif step.gpu == "h100" and step.num_gpus == 4 %} # IBM H100
   - kubernetes:
       podSpec:
         serviceAccountName: buildkite-h100
@@ -218,6 +222,43 @@ plugins:
           - name: hf-cache
             persistentVolumeClaim:
               claimName: hf-cache-pvc
+  {% elif step.gpu == "h100" %} # Nebius H100 
+  - kubernetes:
+      podSpec:
+        containers:
+          - image: {{ image }}
+            command:
+              - bash -c "{{ '(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe) }}"
+            resources:
+              limits:
+                nvidia.com/gpu: {{ step.num_gpus or 1 }}
+            volumeMounts:
+              - name: devshm
+                mountPath: /dev/shm
+              - name: hf-cache
+                mountPath: {{ hf_home }}
+            env:
+              - name: VLLM_USAGE_SOURCE
+                value: ci-test
+              - name: NCCL_CUMEM_HOST_ENABLE
+                value: "0"
+              - name: HF_HOME
+                value: {{ hf_home }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-token-secret
+                    key: token
+        nodeSelector:
+          node.kubernetes.io/instance-type: gpu-h100-sxm
+        volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
   {% else %}
   - kubernetes:
       podSpec:
