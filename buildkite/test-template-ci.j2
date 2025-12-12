@@ -478,17 +478,21 @@ steps:
               exit 0
             fi
           - >
-            docker build --file docker/Dockerfile
+            docker buildx --file docker/Dockerfile
             --build-arg max_jobs=16
             --build-arg buildkite_commit=$BUILDKITE_COMMIT
             --build-arg USE_SCCACHE=1
             --build-arg PYTORCH_NIGHTLY=1
             --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
             --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
+            --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd
+            --cache-from type=registry,ref={{ cache_from }},mode=max
+            --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max
+            --cache-from type=registry,ref={{ cache_from_main }},mode=max
             --tag {{ docker_image_torch_nightly }}
+            --push
             --target test
             --progress plain .
-          - "docker push {{ docker_image_torch_nightly }}"
         env:
           DOCKER_BUILDKIT: "1"
         retry:
