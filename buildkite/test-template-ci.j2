@@ -264,21 +264,31 @@ steps:
       - |
         #!/bin/bash
         set -e
-        PARENT_COMMIT=$(git rev-parse HEAD^)
-        echo "Parent commit: $PARENT_COMMIT"
+        PARENT_COMMIT=$$(git rev-parse HEAD^)
+        echo "Parent commit: $$PARENT_COMMIT"
 
-        {% if branch == "main" %}
-        PARENT_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$PARENT_COMMIT"
-        {% else %}
-        PARENT_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$PARENT_COMMIT"
-        {% endif %}
+        # Try both test-repo and postmerge-repo registries
+        PARENT_IMAGE_TEST="public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$$PARENT_COMMIT"
+        PARENT_IMAGE_POSTMERGE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$$PARENT_COMMIT"
 
-        echo "Attempting to pull parent image: $PARENT_IMAGE"
-        if docker manifest inspect "$PARENT_IMAGE" > /dev/null 2>&1; then
-          echo "Parent image found, pulling..."
-          docker pull "$PARENT_IMAGE" || echo "Failed to pull, will rely on cache layers"
+        PARENT_IMAGE=""
+
+        # Check test-repo first
+        echo "Checking for parent image in test-repo..."
+        if docker manifest inspect "$$PARENT_IMAGE_TEST" > /dev/null 2>&1; then
+          echo "Found parent image in test-repo"
+          PARENT_IMAGE="$$PARENT_IMAGE_TEST"
+        # Check postmerge-repo as fallback
+        elif docker manifest inspect "$$PARENT_IMAGE_POSTMERGE" > /dev/null 2>&1; then
+          echo "Found parent image in postmerge-repo"
+          PARENT_IMAGE="$$PARENT_IMAGE_POSTMERGE"
         else
-          echo "Parent image not found in registry, skipping pull"
+          echo "Parent image not found in either registry, skipping pull"
+        fi
+
+        if [ -n "$$PARENT_IMAGE" ]; then
+          echo "Pulling parent image: $$PARENT_IMAGE"
+          docker pull "$$PARENT_IMAGE" || echo "Failed to pull, will rely on cache layers"
         fi
     retry:
       automatic:
@@ -309,36 +319,27 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - |
-        #!/bin/bash
-        PARENT_COMMIT=$(git rev-parse HEAD^)
-        {% if branch == "main" %}
-        PARENT_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$PARENT_COMMIT"
-        {% else %}
-        PARENT_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$PARENT_COMMIT"
-        {% endif %}
-
-        docker buildx build --file docker/Dockerfile \
-        --build-arg max_jobs=16 \
-        --build-arg buildkite_commit=$BUILDKITE_COMMIT \
-        --build-arg USE_SCCACHE=1 \
-        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0" \
-        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a" \
-        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }} \
+      - >
+        docker buildx build --file docker/Dockerfile
+        --build-arg max_jobs=16
+        --build-arg buildkite_commit=$BUILDKITE_COMMIT
+        --build-arg USE_SCCACHE=1
+        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
+        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
+        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
         {% if vllm_use_precompiled == "1" %}
-        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }} \
+        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
         {% endif %}
-        --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd \
-        --cache-from type=registry,ref={{ cache_from }},mode=max \
-        --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max \
-        --cache-from type=registry,ref={{ cache_from_main }},mode=max \
-        --cache-from type=registry,ref="$PARENT_IMAGE",mode=max \
-        --tag {{ docker_image }} \
+        --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd
+        --cache-from type=registry,ref={{ cache_from }},mode=max
+        --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max
+        --cache-from type=registry,ref={{ cache_from_main }},mode=max
+        --tag {{ docker_image }}
         {% if branch == "main" %}
-        --tag {{ docker_image_latest }} \
+        --tag {{ docker_image_latest }}
         {% endif %}
-        --push \
-        --target test \
+        --push
+        --target test
         --progress plain .
     retry:
       automatic:
@@ -347,419 +348,420 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
-  - label: ":docker: build image CPU"
-    key: image-build-cpu
-    depends_on: ~
-    agents:
-      {% if branch == "main" %}
-      queue: cpu_queue_postmerge_us_east_1
-      {% else %}
-      queue: cpu_queue_premerge_us_east_1
-      {% endif %}
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image_cpu }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
-      - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag {{ docker_image_cpu }} --target vllm-test --progress plain ."
-      - "docker push {{ docker_image_cpu }}"
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 2
-        - exit_status: -10  # Agent was lost
-          limit: 2
+# Commented out all other build and test steps to only test prebake image simulation
+#  - label: ":docker: build image CPU"
+#   key: image-build-cpu
+#   depends_on: ~
+#   agents:
+#     {% if branch == "main" %}
+#     queue: cpu_queue_postmerge_us_east_1
+#     {% else %}
+#     queue: cpu_queue_premerge_us_east_1
+#     {% endif %}
+#   commands:
+#     - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+#     - |
+#       #!/bin/bash
+#       if [[ -z $(docker manifest inspect {{ docker_image_cpu }}) ]]; then
+#         echo "Image not found, proceeding with build..."
+#       else
+#         echo "Image found"
+#         exit 0
+#       fi
+#     - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag {{ docker_image_cpu }} --target vllm-test --progress plain ."
+#     - "docker push {{ docker_image_cpu }}"
+#   env:
+#     DOCKER_BUILDKIT: "1"
+#   retry:
+#     automatic:
+#       - exit_status: -1  # Agent was lost
+#         limit: 2
+#       - exit_status: -10  # Agent was lost
+#         limit: 2
 
-  {% if branch == "main" %}
-  - label: ":docker: build image HPU"
-    key: image-build-hpu
-    depends_on: ~
-    soft_fail: true
-    agents:
-      queue: cpu_queue_postmerge_us_east_1
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image_hpu }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
-      - |
-        docker build \
-          --file tests/pytorch_ci_hud_benchmark/Dockerfile.hpu \
-          --build-arg max_jobs=16 \
-          --build-arg buildkite_commit=$BUILDKITE_COMMIT \
-          --tag {{ docker_image_hpu }} \
-          --progress plain \
-          https://github.com/vllm-project/vllm-gaudi.git
+# {% if branch == "main" %}
+# - label: ":docker: build image HPU"
+#   key: image-build-hpu
+#   depends_on: ~
+#   soft_fail: true
+#   agents:
+#     queue: cpu_queue_postmerge_us_east_1
+#   commands:
+#     - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+#     - |
+#       #!/bin/bash
+#       if [[ -z $(docker manifest inspect {{ docker_image_hpu }}) ]]; then
+#         echo "Image not found, proceeding with build..."
+#       else
+#         echo "Image found"
+#         exit 0
+#       fi
+#     - |
+#       docker build \
+#         --file tests/pytorch_ci_hud_benchmark/Dockerfile.hpu \
+#         --build-arg max_jobs=16 \
+#         --build-arg buildkite_commit=$BUILDKITE_COMMIT \
+#         --tag {{ docker_image_hpu }} \
+#         --progress plain \
+#         https://github.com/vllm-project/vllm-gaudi.git
 
-        docker push {{ docker_image_hpu }}
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 2
-        - exit_status: -10  # Agent was lost
-          limit: 2
-  {% endif %}
+#       docker push {{ docker_image_hpu }}
+#   env:
+#     DOCKER_BUILDKIT: "1"
+#   retry:
+#     automatic:
+#       - exit_status: -1  # Agent was lost
+#         limit: 2
+#       - exit_status: -10  # Agent was lost
+#         limit: 2
+# {% endif %}
 
-  - label: ":docker: build image ARM64 CPU"
-    key: image-build-arm64-cpu
-    depends_on: ~
-    soft_fail: true
-    agents:
-      {% if branch == "main" %}
-      queue: arm64_cpu_queue_postmerge
-      {% else %}
-      queue: arm64_cpu_queue_premerge
-      {% endif %}
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image_arm64_cpu }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
-      - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image_arm64_cpu }} --target vllm-test --progress plain ."
-      - "docker push {{ docker_image_arm64_cpu }}"
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 2
-        - exit_status: -10  # Agent was lost
-          limit: 2
+# - label: ":docker: build image ARM64 CPU"
+#   key: image-build-arm64-cpu
+#   depends_on: ~
+#   soft_fail: true
+#   agents:
+#     {% if branch == "main" %}
+#     queue: arm64_cpu_queue_postmerge
+#     {% else %}
+#     queue: arm64_cpu_queue_premerge
+#     {% endif %}
+#   commands:
+#     - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+#     - |
+#       #!/bin/bash
+#       if [[ -z $(docker manifest inspect {{ docker_image_arm64_cpu }}) ]]; then
+#         echo "Image not found, proceeding with build..."
+#       else
+#         echo "Image found"
+#         exit 0
+#       fi
+#     - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image_arm64_cpu }} --target vllm-test --progress plain ."
+#     - "docker push {{ docker_image_arm64_cpu }}"
+#   env:
+#     DOCKER_BUILDKIT: "1"
+#   retry:
+#     automatic:
+#       - exit_status: -1  # Agent was lost
+#         limit: 2
+#       - exit_status: -10  # Agent was lost
+#         limit: 2
 
-  {% for step in steps %}
-  {% if step.fast_check_only != true %}
+# {% for step in steps %}
+# {% if step.fast_check_only != true %}
 
-  {% set ns = namespace(blocked=1) %}
+# {% set ns = namespace(blocked=1) %}
 
-  {% if run_all == "1" %}
-  {% set ns.blocked = 0 %}
-  {% endif %}
+# {% if run_all == "1" %}
+# {% set ns.blocked = 0 %}
+# {% endif %}
 
-  {% if nightly == "1" %}
-  {% set ns.blocked = 0 %}
-  {% endif %}
+# {% if nightly == "1" %}
+# {% set ns.blocked = 0 %}
+# {% endif %}
 
-  {% if step.source_file_dependencies %}
-    {% for source_file in step.source_file_dependencies %}
-      {% for file in list_file_diff %}
-        {% if source_file in file %}
-          {% set ns.blocked = 0 %}
-        {% endif %}
-      {% endfor %}
-    {% endfor %}
-  {% else %}
-    {% set ns.blocked = 0 %}
-  {% endif %}
+# {% if step.source_file_dependencies %}
+#   {% for source_file in step.source_file_dependencies %}
+#     {% for file in list_file_diff %}
+#       {% if source_file in file %}
+#         {% set ns.blocked = 0 %}
+#       {% endif %}
+#     {% endfor %}
+#   {% endfor %}
+# {% else %}
+#   {% set ns.blocked = 0 %}
+# {% endif %}
 
-  {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
-  - block: "Run {{ step.label }}"
-    depends_on: image-build
-    key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
-  {% endif %}
+# {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+# - block: "Run {{ step.label }}"
+#   depends_on: image-build
+#   key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+# {% endif %}
 
-  - label: "{{ step.label }}"
-    {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
-    depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
-    {% else %}
-    depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
-    {% endif %}
-    {% if step.label == "Python-only Installation Test" %}
-    soft_fail: true
-    {% else %}
-    soft_fail: {{ step.soft_fail or false }}
-    {% endif %}
-    {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else (pull_through_docker_image if step.gpu == "h100" else docker_image), default_working_dir, hf_home_fsx, hf_home, branch) | indent(4, true) }}
-  {% endif %}
-  {% endfor %}
+# - label: "{{ step.label }}"
+#   {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+#   depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+#   {% else %}
+#   depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
+#   {% endif %}
+#   {% if step.label == "Python-only Installation Test" %}
+#   soft_fail: true
+#   {% else %}
+#   soft_fail: {{ step.soft_fail or false }}
+#   {% endif %}
+#   {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else (pull_through_docker_image if step.gpu == "h100" else docker_image), default_working_dir, hf_home_fsx, hf_home, branch) | indent(4, true) }}
+# {% endif %}
+# {% endfor %}
 
-  - group: "vllm against torch nightly"
-    depends_on: ~
-    steps:
-      {% if nightly != "1" %}
-      - block: Build torch nightly image
-        key: block-build-torch-nightly
-        depends_on: ~
-      {% endif %}
-      - label: ":docker: build image torch nightly"
-        key: image-build-torch-nightly
-        {% if nightly != "1" %}
-        depends_on: block-build-torch-nightly
-        {% else %}
-        depends_on: ~
-        {% endif %}
-        soft_fail: true
-        agents:
-          {% if branch == "main" %}
-          queue: cpu_queue_postmerge_us_east_1
-          {% else %}
-          queue: cpu_queue_premerge_us_east_1
-          {% endif %}
-        timeout_in_minutes: 360
-        commands:
-          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - |
-            #!/bin/bash
-            if [[ -z $(docker manifest inspect {{ docker_image_torch_nightly }}) ]]; then
-              echo "Image not found, proceeding with build..."
-            else
-              echo "Image found"
-              exit 0
-            fi
-          - >
-            docker build
-            --file docker/Dockerfile.nightly_torch
-            --build-arg max_jobs=16
-            --build-arg buildkite_commit=$BUILDKITE_COMMIT
-            --build-arg USE_SCCACHE=1
-            --tag {{ docker_image_torch_nightly }}
-            --target test
-            --progress plain .
-          - "docker push {{ docker_image_torch_nightly }}"
-        env:
-          DOCKER_BUILDKIT: "1"
-        retry:
-          automatic:
-            - exit_status: -1  # Agent was lost
-              limit: 2
-            - exit_status: -10  # Agent was lost
-              limit: 2
-    {% for step in steps %}
-    {% if step.torch_nightly %}
-      {% set ns = namespace(blocked=1) %}
-      {% if nightly == "1" %}
-      {% set ns.blocked = 0 %}
-      {% endif %}
+# - group: "vllm against torch nightly"
+#   depends_on: ~
+#   steps:
+#     {% if nightly != "1" %}
+#     - block: Build torch nightly image
+#       key: block-build-torch-nightly
+#       depends_on: ~
+#     {% endif %}
+#     - label: ":docker: build image torch nightly"
+#       key: image-build-torch-nightly
+#       {% if nightly != "1" %}
+#       depends_on: block-build-torch-nightly
+#       {% else %}
+#       depends_on: ~
+#       {% endif %}
+#       soft_fail: true
+#       agents:
+#         {% if branch == "main" %}
+#         queue: cpu_queue_postmerge_us_east_1
+#         {% else %}
+#         queue: cpu_queue_premerge_us_east_1
+#         {% endif %}
+#       timeout_in_minutes: 360
+#       commands:
+#         - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+#         - |
+#           #!/bin/bash
+#           if [[ -z $(docker manifest inspect {{ docker_image_torch_nightly }}) ]]; then
+#             echo "Image not found, proceeding with build..."
+#           else
+#             echo "Image found"
+#             exit 0
+#           fi
+#         - >
+#           docker build
+#           --file docker/Dockerfile.nightly_torch
+#           --build-arg max_jobs=16
+#           --build-arg buildkite_commit=$BUILDKITE_COMMIT
+#           --build-arg USE_SCCACHE=1
+#           --tag {{ docker_image_torch_nightly }}
+#           --target test
+#           --progress plain .
+#         - "docker push {{ docker_image_torch_nightly }}"
+#       env:
+#         DOCKER_BUILDKIT: "1"
+#       retry:
+#         automatic:
+#           - exit_status: -1  # Agent was lost
+#             limit: 2
+#           - exit_status: -10  # Agent was lost
+#             limit: 2
+#   {% for step in steps %}
+#   {% if step.torch_nightly %}
+#     {% set ns = namespace(blocked=1) %}
+#     {% if nightly == "1" %}
+#     {% set ns.blocked = 0 %}
+#     {% endif %}
 
-      {% if step.source_file_dependencies %}
-        {% for source_file in step.source_file_dependencies %}
-          {% for file in list_file_diff %}
-            {% if source_file in file %}
-              {% set ns.blocked = 0 %}
-            {% endif %}
-          {% endfor %}
-        {% endfor %}
-      {% else %}
-        {% set ns.blocked = 0 %}
-      {% endif %}
+#     {% if step.source_file_dependencies %}
+#       {% for source_file in step.source_file_dependencies %}
+#         {% for file in list_file_diff %}
+#           {% if source_file in file %}
+#             {% set ns.blocked = 0 %}
+#           {% endif %}
+#         {% endfor %}
+#       {% endfor %}
+#     {% else %}
+#       {% set ns.blocked = 0 %}
+#     {% endif %}
 
-      {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
-      - block: "Run Torch Nightly {{ step.label }}"
-        depends_on: image-build-torch-nightly
-        key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
-      {% endif %}
+#     {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+#     - block: "Run Torch Nightly {{ step.label }}"
+#       depends_on: image-build-torch-nightly
+#       key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+#     {% endif %}
 
-      - label: "Torch Nightly {{ step.label }}"
-        {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
-        depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
-        {% else %}
-        depends_on: image-build-torch-nightly
-        {% endif %}
-        soft_fail: true
-        {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
-      {% endif %}
-      {% endfor %}
+#     - label: "Torch Nightly {{ step.label }}"
+#       {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+#       depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+#       {% else %}
+#       depends_on: image-build-torch-nightly
+#       {% endif %}
+#       soft_fail: true
+#       {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
+#     {% endif %}
+#     {% endfor %}
 
-  - group: "AMD Tests"
-    depends_on: ~
-    steps:
-      - label: "AMD: :docker: build image"
-        depends_on: ~
-        soft_fail: false
-        commands:
-          # Handle the introduction of test target in Dockerfile.rocm
-          - >
-            docker build
-            --build-arg max_jobs=16
-            --build-arg REMOTE_VLLM=1
-            --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942'
-            --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
-            --tag {{ docker_image_amd }}
-            -f docker/Dockerfile.rocm
-            --target test
-            --no-cache
-            --progress plain .
-          - "docker push {{ docker_image_amd }}"
-        key: "amd-build"
-        env:
-          DOCKER_BUILDKIT: "1"
-        retry:
-          automatic:
-            - exit_status: -1  # Agent was lost
-              limit: 1
-            - exit_status: -10  # Agent was lost
-              limit: 1
-            - exit_status: 1  # Machine occasionally fail
-              limit: 1
-        agents:
-          queue: amd-cpu
+# - group: "AMD Tests"
+#   depends_on: ~
+#   steps:
+#     - label: "AMD: :docker: build image"
+#       depends_on: ~
+#       soft_fail: false
+#       commands:
+#         # Handle the introduction of test target in Dockerfile.rocm
+#         - >
+#           docker build
+#           --build-arg max_jobs=16
+#           --build-arg REMOTE_VLLM=1
+#           --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942'
+#           --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
+#           --tag {{ docker_image_amd }}
+#           -f docker/Dockerfile.rocm
+#           --target test
+#           --no-cache
+#           --progress plain .
+#         - "docker push {{ docker_image_amd }}"
+#       key: "amd-build"
+#       env:
+#         DOCKER_BUILDKIT: "1"
+#       retry:
+#         automatic:
+#           - exit_status: -1  # Agent was lost
+#             limit: 1
+#           - exit_status: -10  # Agent was lost
+#             limit: 1
+#           - exit_status: 1  # Machine occasionally fail
+#             limit: 1
+#       agents:
+#         queue: amd-cpu
 
-    {% for step in steps %}
-    {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
-      - label: "AMD MI300: {{ step.label }}"
-        depends_on: amd-build
-        soft_fail: true
-        agents:
-         {% if step.label and step.label=="Benchmarks" or step.label=="Kernels Attention Test %N" or step.label=="LoRA Test %N" or step.label=="Kernels Quantization Test %N" %}
-           queue: amd_mi325_8
-         {% elif step.label=="Distributed Tests (4 GPUs)" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" %}
-           queue: amd_mi325_4
-         {% elif step.label=="Distributed Comm Ops Test" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Weight Loading Multiple GPU Test" or step.label=="Weight Loading Multiple GPU Test - Large Models" %}
-           queue: amd_mi325_2
-         {% else %}
-           queue: amd_mi325_1
-         {% endif%}
-        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
-        env:
-          DOCKER_BUILDKIT: "1"
-        priority: 100
-        {% endif %}
-    {% endfor %}
+#   {% for step in steps %}
+#   {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
+#     - label: "AMD MI300: {{ step.label }}"
+#       depends_on: amd-build
+#       soft_fail: true
+#       agents:
+#        {% if step.label and step.label=="Benchmarks" or step.label=="Kernels Attention Test %N" or step.label=="LoRA Test %N" or step.label=="Kernels Quantization Test %N" %}
+#          queue: amd_mi325_8
+#        {% elif step.label=="Distributed Tests (4 GPUs)" or step.label=="2 Node Tests (4 GPUs in total)" or step.label=="Multi-step Tests (4 GPUs)" or step.label=="Pipeline Parallelism Test" or step.label=="LoRA TP Test (Distributed)" %}
+#          queue: amd_mi325_4
+#        {% elif step.label=="Distributed Comm Ops Test" or step.label=="Distributed Tests (2 GPUs)" or step.label=="Plugin Tests (2 GPUs)" or step.label=="Weight Loading Multiple GPU Test" or step.label=="Weight Loading Multiple GPU Test - Large Models" %}
+#          queue: amd_mi325_2
+#        {% else %}
+#          queue: amd_mi325_1
+#        {% endif%}
+#       command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+#       env:
+#         DOCKER_BUILDKIT: "1"
+#       priority: 100
+#       {% endif %}
+#   {% endfor %}
 
-  - label: "Neuron Test"
-    depends_on: ~
-    agents:
-      queue: neuron
-    command: bash .buildkite/scripts/hardware_ci/run-neuron-test.sh
-    soft_fail: true
+# - label: "Neuron Test"
+#   depends_on: ~
+#   agents:
+#     queue: neuron
+#   command: bash .buildkite/scripts/hardware_ci/run-neuron-test.sh
+#   soft_fail: true
 
-  - block: "Run Intel CPU test"
-    depends_on: ~
-    key: block-intel-cpu
+# - block: "Run Intel CPU test"
+#   depends_on: ~
+#   key: block-intel-cpu
 
-  - label: "Intel CPU Test"
-    {% if branch == "main" %}
-    depends_on: ~
-    {% else %}
-    depends_on: block-intel-cpu
-    {% endif %}
-    soft_fail: true
-    agents:
-      queue: intel-cpu
-    command: bash .buildkite/scripts/hardware_ci/run-cpu-test.sh
+# - label: "Intel CPU Test"
+#   {% if branch == "main" %}
+#   depends_on: ~
+#   {% else %}
+#   depends_on: block-intel-cpu
+#   {% endif %}
+#   soft_fail: true
+#   agents:
+#     queue: intel-cpu
+#   command: bash .buildkite/scripts/hardware_ci/run-cpu-test.sh
 
-  - label: "Intel HPU Test"
-    depends_on: ~
-    soft_fail: true
-    agents:
-      queue: intel-hpu
-    command: bash .buildkite/scripts/hardware_ci/run-hpu-test.sh
+# - label: "Intel HPU Test"
+#   depends_on: ~
+#   soft_fail: true
+#   agents:
+#     queue: intel-hpu
+#   command: bash .buildkite/scripts/hardware_ci/run-hpu-test.sh
 
-  - label: "Intel GPU Test"
-    soft_fail: true
-    depends_on: ~
-    agents:
-      queue: intel-gpu
-    command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh
+# - label: "Intel GPU Test"
+#   soft_fail: true
+#   depends_on: ~
+#   agents:
+#     queue: intel-gpu
+#   command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh
 
-  - block: "Run Arm CPU test"
-    depends_on: ~
-    key: block-arm-cpu
+# - block: "Run Arm CPU test"
+#   depends_on: ~
+#   key: block-arm-cpu
 
-  - label: "Arm CPU Test"
-    {% if branch == "main" %}
-    depends_on: ~
-    {% else %}
-    depends_on: block-arm-cpu
-    {% endif %}
-    soft_fail: true
-    agents:
-      queue: arm-cpu
-    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
+# - label: "Arm CPU Test"
+#   {% if branch == "main" %}
+#   depends_on: ~
+#   {% else %}
+#   depends_on: block-arm-cpu
+#   {% endif %}
+#   soft_fail: true
+#   agents:
+#     queue: arm-cpu
+#   command: bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
 
-  - label: "Ascend NPU Test"
-    soft_fail: true
-    depends_on: ~
-    timeout_in_minutes: 20
-    agents:
-      queue: "ascend"
-    command: bash .buildkite/scripts/hardware_ci/run-npu-test.sh
+# - label: "Ascend NPU Test"
+#   soft_fail: true
+#   depends_on: ~
+#   timeout_in_minutes: 20
+#   agents:
+#     queue: "ascend"
+#   command: bash .buildkite/scripts/hardware_ci/run-npu-test.sh
 
-  {% if branch == "main" %}
-  - block: "Run IBM Power CPU test"
-    key: block-ibm-power
-    depends_on: ~
+# {% if branch == "main" %}
+# - block: "Run IBM Power CPU test"
+#   key: block-ibm-power
+#   depends_on: ~
 
-  - label: "IBM Power(ppc64le) CPU Test"
-    depends_on: block-ibm-power
-    key: ibm-ppc64-test
-    soft_fail: true
-    agents:
-      queue: ibm-ppc64le
-    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
+# - label: "IBM Power(ppc64le) CPU Test"
+#   depends_on: block-ibm-power
+#   key: ibm-ppc64-test
+#   soft_fail: true
+#   agents:
+#     queue: ibm-ppc64le
+#   command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
 
-  - label: "IBM Power(ppc64le) Build Failure Notification"
-    depends_on: ibm-ppc64-test
-    soft_fail: true
-    agents:
-      queue: ibm-ppc64le
-    commands: |
-      if [ $$(buildkite-agent step get "outcome" --step "IBM Power(ppc64le) CPU Test") != "passed" ]; then
-         cat <<- YAML | buildkite-agent pipeline upload
-         steps:
-           - label: "Notify owners about failing test"
-             soft_fail: true
-             agents:
-               queue: ibm-ppc64le
-             command: echo "IBM Power(ppc64le) Build/Test failed"
-             notify:
-               - slack:
-                   channels:
-                     - "vllm#vllm-ci-on-power"
-      YAML
-      fi  {% else %}
-  - block: "Run IBM Power(ppc64le) CPU Test"
-    depends_on: ~
-    key: block-ibm-ppc64-test
+# - label: "IBM Power(ppc64le) Build Failure Notification"
+#   depends_on: ibm-ppc64-test
+#   soft_fail: true
+#   agents:
+#     queue: ibm-ppc64le
+#   commands: |
+#     if [ $$(buildkite-agent step get "outcome" --step "IBM Power(ppc64le) CPU Test") != "passed" ]; then
+#        cat <<- YAML | buildkite-agent pipeline upload
+#        steps:
+#          - label: "Notify owners about failing test"
+#            soft_fail: true
+#            agents:
+#              queue: ibm-ppc64le
+#            command: echo "IBM Power(ppc64le) Build/Test failed"
+#            notify:
+#              - slack:
+#                  channels:
+#                    - "vllm#vllm-ci-on-power"
+#     YAML
+#     fi  {% else %}
+# - block: "Run IBM Power(ppc64le) CPU Test"
+#   depends_on: ~
+#   key: block-ibm-ppc64-test
 
-  - label: "IBM Power(ppc64le) CPU Test"
-    depends_on: block-ibm-ppc64-test
-    soft_fail: true
-    agents:
-      queue: ibm-ppc64le
-    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
-  {% endif %}
+# - label: "IBM Power(ppc64le) CPU Test"
+#   depends_on: block-ibm-ppc64-test
+#   soft_fail: true
+#   agents:
+#     queue: ibm-ppc64le
+#   command: bash .buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
+# {% endif %}
 
-  {% if nightly != "1" %}
-  - block: Run "IBM Z (s390x) CPU Test"
-    depends_on: ~
-    key: block-ibm-s390x
-  {% endif %}
+# {% if nightly != "1" %}
+# - block: Run "IBM Z (s390x) CPU Test"
+#   depends_on: ~
+#   key: block-ibm-s390x
+# {% endif %}
 
-  - label: "IBM Z (s390x) CPU Test"
-    {% if nightly == "1" %}
-    depends_on: ~
-    {% else %}
-    depends_on: block-ibm-s390x
-    {% endif %}
-    soft_fail: true
-    agents:
-      queue: ibm_s390x
-    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-s390x.sh
+# - label: "IBM Z (s390x) CPU Test"
+#   {% if nightly == "1" %}
+#   depends_on: ~
+#   {% else %}
+#   depends_on: block-ibm-s390x
+#   {% endif %}
+#   soft_fail: true
+#   agents:
+#     queue: ibm_s390x
+#   command: bash .buildkite/scripts/hardware_ci/run-cpu-test-s390x.sh
 
-  {% if nightly == "1" %}
-  - label: "GH200 Test"
-    depends_on: ~
-    soft_fail: true
-    agents:
-      queue: gh200_queue
-    command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
-  {% endif %}
+# {% if nightly == "1" %}
+# - label: "GH200 Test"
+#   depends_on: ~
+#   soft_fail: true
+#   agents:
+#     queue: gh200_queue
+#   command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
+# {% endif %}
