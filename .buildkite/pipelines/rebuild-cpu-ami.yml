@@ -13,6 +13,7 @@
 
 env:
   SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
+  SSM_PARAM_SECURITY_GROUP: "/buildkite/packer/security-group-id"
   BUILDKITE_STACK_VERSION: "6.21.0"
 
 steps:
@@ -23,11 +24,10 @@ steps:
         set -euo pipefail
         cd packer/cpu
 
-        # Ensure yq is available
+        # Install yq if not available (Amazon Linux 2)
         if ! command -v yq &> /dev/null; then
           echo "Installing yq..."
-          sudo wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
-          sudo chmod +x /usr/local/bin/yq
+          sudo pip3 install yq
         fi
 
         echo "--- :cloudformation: Fetching base AMI from Buildkite stack v$${BUILDKITE_STACK_VERSION}"
@@ -37,7 +37,7 @@ steps:
         # Extract AMI ID for us-east-1 x86_64 from CloudFormation template
         SOURCE_AMI=$$(curl -s "$$STACK_URL" | yq '.Mappings.AWSRegion2AMI.us-east-1.linuxamd64')
 
-        if [[ -z "$$SOURCE_AMI" || ! "$$SOURCE_AMI" =~ ^ami-[a-f0-9]+$$ ]]; then
+        if [[ -z "$$SOURCE_AMI" || ! "$$SOURCE_AMI" =~ ^ami-[a-fA-F0-9]+$$ ]]; then
           echo "Error: Failed to extract valid AMI from stack template"
           echo "Got: $$SOURCE_AMI"
           exit 1
@@ -45,9 +45,23 @@ steps:
 
         echo "Using base AMI: $$SOURCE_AMI (from Buildkite stack v$${BUILDKITE_STACK_VERSION})"
 
+        echo "--- :ssm: Fetching security group ID"
+        SECURITY_GROUP_ID=$$(aws ssm get-parameter --name "$${SSM_PARAM_SECURITY_GROUP}" --query 'Parameter.Value' --output text --region us-east-1)
+
+        if [[ -z "$$SECURITY_GROUP_ID" || ! "$$SECURITY_GROUP_ID" =~ ^sg-[a-fA-F0-9]+$$ ]]; then
+          echo "Error: Failed to fetch valid security group ID from SSM"
+          echo "Got: $$SECURITY_GROUP_ID"
+          exit 1
+        fi
+
+        echo "Using security group: $$SECURITY_GROUP_ID"
+
         echo "--- :packer: Building AMI"
         packer init .
-        packer build -var "source_ami=$$SOURCE_AMI" buildkite-cpu-ami.pkr.hcl
+        packer build \
+          -var "source_ami=$$SOURCE_AMI" \
+          -var "security_group_id=$$SECURITY_GROUP_ID" \
+          buildkite-cpu-ami.pkr.hcl
 
         echo "--- :aws: Extracting AMI ID"
 
@@ -64,7 +78,7 @@ steps:
           exit 1
         fi
 
-        if [[ ! "$$US_EAST_1_AMI" =~ ^ami-[a-f0-9]+$$ ]]; then
+        if [[ ! "$$US_EAST_1_AMI" =~ ^ami-[a-fA-F0-9]+$$ ]]; then
           echo "Error: Invalid AMI ID format: $$US_EAST_1_AMI"
           exit 1
         fi
@@ -99,3 +113,62 @@ steps:
     agents:
       queue: packer_build_queue
     depends_on: build-ami
+
+  - label: ":broom: Cleanup Old AMIs"
+    key: cleanup-amis
+    command:
+      - |
+        set -euo pipefail
+
+        echo "--- :aws: Cleaning up old AMIs (keeping latest 3 that are older than 3 days)"
+
+        # Get cutoff date (3 days ago)
+        CUTOFF_DATE=$$(date -u -d '3 days ago' '+%Y-%m-%dT%H:%M:%S')
+
+        # Get all CPU build AMIs older than 3 days, sorted by creation date (newest first)
+        AMIS=$$(aws ec2 describe-images \
+          --owners self \
+          --filters "Name=name,Values=vllm-buildkite-stack-linux-cpu-build-*" \
+          --query "sort_by(Images[?CreationDate<'$$CUTOFF_DATE'], &CreationDate) | reverse(@) | [*].ImageId" \
+          --output text \
+          --region us-east-1)
+
+        # Convert to array
+        AMI_ARRAY=($$AMIS)
+        TOTAL=$${#AMI_ARRAY[@]}
+
+        echo "Found $$TOTAL AMIs older than 3 days"
+
+        if [[ $$TOTAL -le 3 ]]; then
+          echo "Only $$TOTAL old AMIs exist, nothing to clean up"
+          exit 0
+        fi
+
+        # Keep first 3 (newest of the old ones), delete the rest
+        KEEP=3
+        DELETE_COUNT=$$((TOTAL - KEEP))
+        echo "Keeping $$KEEP AMIs for rollback, deleting $$DELETE_COUNT older AMIs"
+
+        for ((i=KEEP; i<TOTAL; i++)); do
+          AMI_ID=$${AMI_ARRAY[$$i]}
+          echo "Deleting AMI: $$AMI_ID"
+
+          # Get snapshot ID before deregistering
+          SNAPSHOT_ID=$$(aws ec2 describe-images --image-ids $$AMI_ID \
+            --query 'Images[0].BlockDeviceMappings[0].Ebs.SnapshotId' \
+            --output text --region us-east-1)
+
+          # Deregister the AMI
+          aws ec2 deregister-image --image-id $$AMI_ID --region us-east-1
+
+          # Delete the snapshot if it exists
+          if [[ -n "$$SNAPSHOT_ID" && "$$SNAPSHOT_ID" != "None" ]]; then
+            echo "Deleting snapshot: $$SNAPSHOT_ID"
+            aws ec2 delete-snapshot --snapshot-id $$SNAPSHOT_ID --region us-east-1
+          fi
+        done
+
+        echo "Cleanup complete"
+    agents:
+      queue: packer_build_queue
+    depends_on: update-ssm
