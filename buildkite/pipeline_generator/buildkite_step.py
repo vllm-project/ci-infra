@@ -86,6 +86,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
     global_config = get_global_config()
     if global_config["name"] != "vllm_ci":
         return {}
+    # hi
 
     cache_from_tag, cache_to_tag = get_ecr_cache_registry()
     return {
