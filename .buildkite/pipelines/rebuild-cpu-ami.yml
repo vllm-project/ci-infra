@@ -13,17 +13,62 @@
 
 env:
   SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
+  BUILDKITE_STACK_VERSION: "6.21.0"
 
 steps:
   - label: ":packer: Build CPU AMI"
     key: build-ami
     command:
-      - cd packer/cpu
-      - packer init .
-      - packer build buildkite-cpu-ami.pkr.hcl
       - |
+        set -euo pipefail
+        cd packer/cpu
+
+        # Ensure yq is available
+        if ! command -v yq &> /dev/null; then
+          echo "Installing yq..."
+          sudo wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+        fi
+
+        echo "--- :cloudformation: Fetching base AMI from Buildkite stack v$${BUILDKITE_STACK_VERSION}"
+
+        STACK_URL="https://s3.amazonaws.com/buildkite-aws-stack/v$${BUILDKITE_STACK_VERSION}/aws-stack.yml"
+
+        # Extract AMI ID for us-east-1 x86_64 from CloudFormation template
+        SOURCE_AMI=$$(curl -s "$$STACK_URL" | yq '.Mappings.AWSRegion2AMI.us-east-1.linuxamd64')
+
+        if [[ -z "$$SOURCE_AMI" || ! "$$SOURCE_AMI" =~ ^ami-[a-f0-9]+$$ ]]; then
+          echo "Error: Failed to extract valid AMI from stack template"
+          echo "Got: $$SOURCE_AMI"
+          exit 1
+        fi
+
+        echo "Using base AMI: $$SOURCE_AMI (from Buildkite stack v$${BUILDKITE_STACK_VERSION})"
+
+        echo "--- :packer: Building AMI"
+        packer init .
+        packer build -var "source_ami=$$SOURCE_AMI" buildkite-cpu-ami.pkr.hcl
+
         echo "--- :aws: Extracting AMI ID"
-        US_EAST_1_AMI=$$(jq -r '.builds[-1].artifact_id | split(":")[1]' manifest.json)
+
+        if [[ ! -f manifest.json ]]; then
+          echo "Error: manifest.json not found"
+          exit 1
+        fi
+
+        US_EAST_1_AMI=$$(jq -r '.builds[-1].artifact_id | split(":")[1] // empty' manifest.json)
+
+        if [[ -z "$$US_EAST_1_AMI" ]]; then
+          echo "Error: Failed to extract AMI ID from manifest.json"
+          cat manifest.json
+          exit 1
+        fi
+
+        if [[ ! "$$US_EAST_1_AMI" =~ ^ami-[a-f0-9]+$$ ]]; then
+          echo "Error: Invalid AMI ID format: $$US_EAST_1_AMI"
+          exit 1
+        fi
+
         echo "us-east-1 AMI: $$US_EAST_1_AMI"
         buildkite-agent meta-data set "ami-us-east-1" "$$US_EAST_1_AMI"
     agents:
@@ -31,7 +76,7 @@ steps:
     timeout_in_minutes: 60
     retry:
       automatic:
-        - exit_status: "*"
+        - exit_status: -1  # Agent/infrastructure failures only
           limit: 1
 
   - label: ":aws: Update SSM Parameter"

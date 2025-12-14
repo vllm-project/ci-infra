@@ -12,7 +12,13 @@ echo "=== Creating BuildKit configuration ==="
 sudo mkdir -p /etc/buildkit
 cat <<'EOF' | sudo tee /etc/buildkit/buildkitd.toml
 # BuildKit daemon configuration for vLLM CI builds
-# Optimized for stateless instances with pre-warmed cache
+#
+# gc = false: Garbage collection disabled because:
+#   - Instances are ephemeral (terminated after each job)
+#   - AMI is rebuilt daily with fresh cache
+#   - 512GB disk is more than enough for a single build
+#
+# max-parallelism = 16: Optimize for high-CPU build instances
 
 [worker.oci]
   max-parallelism = 16
@@ -66,12 +72,19 @@ if [[ -n "${BUILDER_CONTAINER}" ]]; then
   sudo docker update --restart=always "${BUILDER_CONTAINER}"
   echo "=== Builder container '${BUILDER_CONTAINER}' configured with restart=always ==="
 else
-  echo "WARNING: Builder container not found"
+  echo "ERROR: Builder container not found"
   sudo docker ps -a | grep buildkit || true
+  exit 1
 fi
 
 # Get the state volume name
 STATE_VOLUME=$(sudo docker volume ls --format "{{.Name}}" | grep "buildx_buildkit_baked-vllm-builder" | head -1)
+
+if [[ -z "${STATE_VOLUME}" ]]; then
+  echo "ERROR: BuildKit state volume not found"
+  sudo docker volume ls
+  exit 1
+fi
 
 # Verify setup
 echo "=== BuildKit setup complete ==="
@@ -87,4 +100,4 @@ echo "Builder container: ${BUILDER_CONTAINER:-not found}"
 echo "State volume: ${STATE_VOLUME:-not found}"
 echo ""
 echo "CI can recreate builder with same name to inherit cache:"
-echo "  docker buildx create --name baked-vllm-builder --driver docker-container --use --bootstrap"
+echo "  docker buildx create --name baked-vllm-builder --driver docker-container --config /etc/buildkit/buildkitd.toml --use --bootstrap"

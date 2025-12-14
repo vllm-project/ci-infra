@@ -3,6 +3,11 @@ variable "region" {
   default = "us-east-1"
 }
 
+variable "source_ami" {
+  type        = string
+  description = "Source AMI ID from Buildkite Elastic CI Stack. Fetched from CloudFormation template."
+}
+
 variable "deprecate_days" {
   type        = number
   default     = 7
@@ -10,19 +15,20 @@ variable "deprecate_days" {
 }
 
 locals {
-  timestamp    = regex_replace(timestamp(), "[- TZ:]", "")
-  deprecate_at = timeadd(timestamp(), "${var.deprecate_days * 24}h")
+  timestamp         = regex_replace(timestamp(), "[- TZ:]", "")
+  deprecate_hours   = var.deprecate_days * 24
+  deprecate_at      = timeadd(timestamp(), "${local.deprecate_hours}h")
 }
 
 source "amazon-ebs" "cpu_build_box" {
   ami_name        = "vllm-buildkite-stack-linux-cpu-build-${local.timestamp}"
   ami_description = "vLLM Buildkite CPU Build AMI (optimized for Docker builds with pre-warmed cache)"
-  ami_groups      = ["all"]
 
   # Deprecate after 7 days - allows rollback window before cleanup
   deprecate_at = local.deprecate_at
 
-  instance_type = "r6in.16xlarge"
+  # Smaller instance sufficient for image pulling and buildx setup
+  instance_type = "r6in.8xlarge"
 
   launch_block_device_mappings {
     delete_on_termination = true
@@ -35,14 +41,8 @@ source "amazon-ebs" "cpu_build_box" {
 
   region = var.region
 
-  source_ami_filter {
-    filters = {
-      architecture = "x86_64"
-      name         = "buildkite-stack-linux-x86_64-2024-05-27T04-51-04Z-us-east-1"
-    }
-    most_recent = true
-    owners      = ["172840064832"]
-  }
+  # Use the same base AMI as the Buildkite Elastic CI Stack
+  source_ami = var.source_ami
 
   ssh_username = "ec2-user"
   ssh_timeout  = "30m"

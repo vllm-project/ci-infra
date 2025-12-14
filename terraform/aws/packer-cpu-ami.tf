@@ -63,7 +63,7 @@ resource "aws_ssm_parameter" "cpu_build_ami_us_east_1" {
 locals {
   queues_parameters_packer = {
     packer-build-queue = {
-      BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci.name
+      BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci_us_east_1.name
       BuildkiteQueue                        = "packer_build_queue"
       InstanceTypes                         = "r6in.large"
       MaxSize                               = 2
@@ -72,6 +72,9 @@ locals {
       OnDemandPercentage                    = 100
       EnableInstanceStorage                 = "true"
       BuildkiteTerminateInstanceAfterJob    = true
+      VpcId                                 = module.vpc_us_east_1.vpc_id
+      SecurityGroupIds                      = module.vpc_us_east_1.default_security_group_id
+      Subnets                               = join(",", module.vpc_us_east_1.public_subnets)
     }
   }
 
@@ -81,6 +84,12 @@ locals {
   }
 
   # Custom CPU build AMI configuration using SSM dynamic reference
+  # Only applied to specific x86_64 CPU build queues in us-east-1
+  cpu_build_ami_queues = toset([
+    "cpu-queue-premerge-us-east-1",
+    "cpu-queue-postmerge-us-east-1",
+  ])
+
   cpu_build_ami_config_us_east_1 = {
     ImageId = "{{resolve:ssm:/buildkite/cpu-build-ami/us-east-1}}"
   }
@@ -93,6 +102,8 @@ resource "aws_cloudformation_stack" "bk_queue_packer" {
 
   template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
+
+  provider = aws.us_east_1
 
   lifecycle {
     ignore_changes = [
@@ -109,54 +120,141 @@ resource "aws_cloudformation_stack" "bk_queue_packer" {
 resource "aws_iam_policy" "packer_ami_builder_policy" {
   name        = "packer-ami-builder-policy"
   description = "Policy to allow Packer to build AMIs and update SSM"
+  provider    = aws.us_east_1
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      # Read-only describe actions (required for discovery)
       {
+        Sid    = "DescribeResources"
         Effect = "Allow"
         Action = [
-          "ec2:RunInstances",
-          "ec2:TerminateInstances",
-          "ec2:StopInstances",
           "ec2:DescribeInstances",
           "ec2:DescribeInstanceStatus",
-          "ec2:CreateImage",
-          "ec2:RegisterImage",
-          "ec2:DeregisterImage",
           "ec2:DescribeImages",
-          "ec2:ModifyImageAttribute",
-          "ec2:CreateSnapshot",
-          "ec2:DeleteSnapshot",
           "ec2:DescribeSnapshots",
-          "ec2:CreateVolume",
-          "ec2:DeleteVolume",
-          "ec2:AttachVolume",
-          "ec2:DetachVolume",
           "ec2:DescribeVolumes",
-          "ec2:CreateKeyPair",
-          "ec2:DeleteKeyPair",
           "ec2:DescribeKeyPairs",
-          "ec2:CreateSecurityGroup",
-          "ec2:DeleteSecurityGroup",
-          "ec2:AuthorizeSecurityGroupIngress",
           "ec2:DescribeSecurityGroups",
-          "ec2:CreateNetworkInterface",
-          "ec2:DeleteNetworkInterface",
           "ec2:DescribeNetworkInterfaces",
           "ec2:DescribeVpcs",
           "ec2:DescribeSubnets",
           "ec2:DescribeRegions",
-          "ec2:CreateTags",
-          "ec2:DescribeTags",
-          "iam:PassRole"
+          "ec2:DescribeTags"
         ]
         Resource = "*"
       },
+      # Instance management - scoped to us-east-1
       {
+        Sid    = "ManageInstances"
+        Effect = "Allow"
+        Action = [
+          "ec2:RunInstances",
+          "ec2:TerminateInstances",
+          "ec2:StopInstances"
+        ]
+        Resource = [
+          "arn:aws:ec2:us-east-1:*:instance/*",
+          "arn:aws:ec2:us-east-1:*:volume/*",
+          "arn:aws:ec2:us-east-1:*:network-interface/*",
+          "arn:aws:ec2:us-east-1:*:security-group/*",
+          "arn:aws:ec2:us-east-1:*:subnet/*",
+          "arn:aws:ec2:us-east-1:*:key-pair/*",
+          "arn:aws:ec2:us-east-1:*:image/*"
+        ]
+      },
+      # AMI creation - scoped to us-east-1
+      {
+        Sid    = "CreateAMI"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateImage",
+          "ec2:RegisterImage"
+        ]
+        Resource = "arn:aws:ec2:us-east-1:*:image/*"
+      },
+      # Snapshot management - scoped to us-east-1
+      {
+        Sid    = "ManageSnapshots"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateSnapshot",
+          "ec2:DeleteSnapshot"
+        ]
+        Resource = "arn:aws:ec2:us-east-1::snapshot/*"
+      },
+      # Volume management - scoped to us-east-1
+      {
+        Sid    = "ManageVolumes"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateVolume",
+          "ec2:DeleteVolume",
+          "ec2:AttachVolume",
+          "ec2:DetachVolume"
+        ]
+        Resource = "arn:aws:ec2:us-east-1:*:volume/*"
+      },
+      # Temporary key pair for SSH access
+      {
+        Sid    = "ManageKeyPairs"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateKeyPair",
+          "ec2:DeleteKeyPair"
+        ]
+        Resource = "arn:aws:ec2:us-east-1:*:key-pair/packer_*"
+      },
+      # Temporary security group for SSH access
+      {
+        Sid    = "ManageSecurityGroups"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateSecurityGroup",
+          "ec2:DeleteSecurityGroup",
+          "ec2:AuthorizeSecurityGroupIngress"
+        ]
+        Resource = [
+          "arn:aws:ec2:us-east-1:*:security-group/*",
+          "arn:aws:ec2:us-east-1:*:vpc/*"
+        ]
+      },
+      # Network interface management
+      {
+        Sid    = "ManageNetworkInterfaces"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DeleteNetworkInterface"
+        ]
+        Resource = "arn:aws:ec2:us-east-1:*:*"
+      },
+      # Tagging - only for resources we create
+      {
+        Sid    = "CreateTags"
+        Effect = "Allow"
+        Action = "ec2:CreateTags"
+        Resource = "arn:aws:ec2:us-east-1:*:*"
+        Condition = {
+          StringEquals = {
+            "ec2:CreateAction" = [
+              "RunInstances",
+              "CreateImage",
+              "CreateSnapshot",
+              "CreateVolume",
+              "CreateSecurityGroup",
+              "CreateKeyPair"
+            ]
+          }
+        }
+      },
+      # SSM parameter update - scoped to specific path
+      {
+        Sid      = "UpdateSSMParameter"
         Effect   = "Allow"
         Action   = ["ssm:PutParameter", "ssm:GetParameter"]
-        Resource = ["arn:aws:ssm:us-east-1:*:parameter/buildkite/cpu-build-ami/*"]
+        Resource = "arn:aws:ssm:us-east-1:*:parameter/buildkite/cpu-build-ami/*"
       }
     ]
   })

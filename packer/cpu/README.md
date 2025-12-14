@@ -8,7 +8,7 @@ This directory contains Packer configuration for building a custom AMI optimized
 - **Optimized buildx**: Pre-configured with `max-parallelism=16` and `gc=false`
 - **Persistent builder**: BuildKit container with `restart=always`
 - **Fast storage**: gp3 volumes with 6000 IOPS and 500 MB/s throughput
-- **Fully automated**: Pipeline updates SSM and triggers instance refresh
+- **Fully automated**: Pipeline updates SSM; new instances use latest AMI via natural turnover
 - **Auto-deprecation**: Old AMIs are deprecated after 7 days
 
 ## Architecture
@@ -78,7 +78,7 @@ packer build buildkite-cpu-ami.pkr.hcl
    terraform apply
    ```
 
-After this, the pipeline runs automatically at 6 AM PST daily (schedule is managed via Terraform).
+After this, the pipeline runs automatically at 6 AM UTC daily (schedule is managed via Terraform).
 
 ## Configuration Details
 
