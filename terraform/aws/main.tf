@@ -298,7 +298,12 @@ locals {
 
   merged_parameters_premerge_us_east_1 = {
     for name, params in local.queues_parameters_premerge_us_east_1 :
-    name => merge(local.default_parameters, params)
+    name => merge(
+      local.default_parameters,
+      params,
+      # Add custom CPU build AMI (defined in packer-cpu-ami.tf)
+      local.cpu_build_ami_config_us_east_1
+    )
   }
 
   merged_parameters_postmerge = {
@@ -308,7 +313,12 @@ locals {
 
   merged_parameters_postmerge_us_east_1 = {
     for name, params in local.queues_parameters_postmerge_us_east_1 :
-    name => merge(local.default_parameters, params)
+    name => merge(
+      local.default_parameters,
+      params,
+      # Add custom CPU build AMI (defined in packer-cpu-ami.tf)
+      local.cpu_build_ami_config_us_east_1
+    )
   }
 
   merged_parameters_ci_gpu = {

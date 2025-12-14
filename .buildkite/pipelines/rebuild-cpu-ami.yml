@@ -1,0 +1,56 @@
+# Buildkite pipeline for rebuilding the CPU build AMI
+#
+# This pipeline is scheduled to run daily at 6 AM UTC to keep the
+# Docker layer cache fresh. The schedule is managed via Terraform.
+#
+# The pipeline uses the dedicated packer_build_queue which has EC2 permissions
+# to create and manage AMIs and update SSM parameters.
+#
+# Automation Flow:
+#   1. Build AMI in us-east-1
+#   2. Update SSM parameter with new AMI ID
+#   3. New instances automatically use the latest AMI (via SSM dynamic reference)
+
+env:
+  SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
+
+steps:
+  - label: ":packer: Build CPU AMI"
+    key: build-ami
+    command:
+      - cd packer/cpu
+      - packer init .
+      - packer build buildkite-cpu-ami.pkr.hcl
+      - |
+        echo "--- :aws: Extracting AMI ID"
+        US_EAST_1_AMI=$$(jq -r '.builds[-1].artifact_id | split(":")[1]' manifest.json)
+        echo "us-east-1 AMI: $$US_EAST_1_AMI"
+        buildkite-agent meta-data set "ami-us-east-1" "$$US_EAST_1_AMI"
+    agents:
+      queue: packer_build_queue
+    timeout_in_minutes: 60
+    retry:
+      automatic:
+        - exit_status: "*"
+          limit: 1
+
+  - label: ":aws: Update SSM Parameter"
+    key: update-ssm
+    command:
+      - |
+        echo "--- :ssm: Updating SSM parameter with new AMI ID"
+
+        US_EAST_1_AMI=$$(buildkite-agent meta-data get "ami-us-east-1")
+
+        echo "Updating $${SSM_PARAM_US_EAST_1} -> $$US_EAST_1_AMI"
+        aws ssm put-parameter \
+          --name "$${SSM_PARAM_US_EAST_1}" \
+          --value "$$US_EAST_1_AMI" \
+          --type String \
+          --overwrite \
+          --region us-east-1
+
+        echo "SSM parameter updated successfully"
+    agents:
+      queue: packer_build_queue
+    depends_on: build-ami
