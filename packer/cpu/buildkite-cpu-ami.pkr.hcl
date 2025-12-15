@@ -8,6 +8,11 @@ variable "source_ami" {
   description = "Source AMI ID from Buildkite Elastic CI Stack. Fetched from CloudFormation template."
 }
 
+variable "security_group_id" {
+  type        = string
+  description = "Pre-created security group ID for Packer build instances. Fetched from SSM."
+}
+
 variable "deprecate_days" {
   type        = number
   default     = 7
@@ -27,8 +32,8 @@ source "amazon-ebs" "cpu_build_box" {
   # Deprecate after 7 days - allows rollback window before cleanup
   deprecate_at = local.deprecate_at
 
-  # Smaller instance sufficient for image pulling and buildx setup
-  instance_type = "r6in.8xlarge"
+  # Network-optimized instance for fast image pulls during AMI build
+  instance_type = "r6in.large"
 
   launch_block_device_mappings {
     delete_on_termination = true
@@ -43,6 +48,9 @@ source "amazon-ebs" "cpu_build_box" {
 
   # Use the same base AMI as the Buildkite Elastic CI Stack
   source_ami = var.source_ami
+
+  # Use pre-created security group (managed by Terraform)
+  security_group_id = var.security_group_id
 
   ssh_username = "ec2-user"
   ssh_timeout  = "30m"

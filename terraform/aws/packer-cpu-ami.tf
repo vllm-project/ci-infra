@@ -30,18 +30,18 @@ resource "buildkite_pipeline" "rebuild_cpu_ami" {
   cluster_id = "Q2x1c3Rlci0tLTljZWNjNmIxLTk0Y2QtNDNkMS1hMjU2LWFiNDM4MDgzZjRmNQ=="
 }
 
-# Schedule for daily AMI rebuild at 6 AM UTC
+# Schedule for daily AMI rebuild at 11 AM UTC (3 AM PST)
 resource "buildkite_pipeline_schedule" "rebuild_cpu_ami_daily" {
   pipeline_id = buildkite_pipeline.rebuild_cpu_ami.id
   label       = "Daily AMI Rebuild"
-  cronline    = "0 6 * * *"
+  cronline    = "0 11 * * *"
   branch      = "main"
   message     = "Daily scheduled rebuild of CPU build AMI"
   enabled     = true
 }
 
 # -----------------------------------------------------------------------------
-# SSM Parameter for AMI ID
+# SSM Parameters
 # -----------------------------------------------------------------------------
 
 resource "aws_ssm_parameter" "cpu_build_ami_us_east_1" {
@@ -53,6 +53,46 @@ resource "aws_ssm_parameter" "cpu_build_ami_us_east_1" {
 
   lifecycle {
     ignore_changes = [value]
+  }
+}
+
+resource "aws_ssm_parameter" "packer_security_group_id" {
+  name        = "/buildkite/packer/security-group-id"
+  type        = "String"
+  value       = aws_security_group.packer_build.id
+  description = "Security group ID for Packer build instances"
+  provider    = aws.us_east_1
+}
+
+# -----------------------------------------------------------------------------
+# Packer Build Security Group
+# -----------------------------------------------------------------------------
+
+resource "aws_security_group" "packer_build" {
+  name        = "packer-build-sg"
+  description = "Security group for Packer AMI build instances"
+  vpc_id      = module.vpc_us_east_1.vpc_id
+  provider    = aws.us_east_1
+
+  # SSH access from within VPC (Buildkite agent -> Packer build instance)
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [module.vpc_us_east_1.vpc_cidr_block]
+    description = "SSH from VPC for Packer builds"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound"
+  }
+
+  tags = {
+    Name = "packer-build-sg"
   }
 }
 
@@ -164,13 +204,14 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "arn:aws:ec2:us-east-1:*:image/*"
         ]
       },
-      # AMI creation - scoped to us-east-1
+      # AMI management - scoped to us-east-1
       {
-        Sid    = "CreateAMI"
+        Sid    = "ManageAMIs"
         Effect = "Allow"
         Action = [
           "ec2:CreateImage",
-          "ec2:RegisterImage"
+          "ec2:RegisterImage",
+          "ec2:DeregisterImage"
         ]
         Resource = "arn:aws:ec2:us-east-1:*:image/*"
       },
@@ -182,7 +223,7 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "ec2:CreateSnapshot",
           "ec2:DeleteSnapshot"
         ]
-        Resource = "arn:aws:ec2:us-east-1::snapshot/*"
+        Resource = "arn:aws:ec2:us-east-1:*:snapshot/*"
       },
       # Volume management - scoped to us-east-1
       {
@@ -190,9 +231,7 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         Effect = "Allow"
         Action = [
           "ec2:CreateVolume",
-          "ec2:DeleteVolume",
-          "ec2:AttachVolume",
-          "ec2:DetachVolume"
+          "ec2:DeleteVolume"
         ]
         Resource = "arn:aws:ec2:us-east-1:*:volume/*"
       },
@@ -206,20 +245,6 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         ]
         Resource = "arn:aws:ec2:us-east-1:*:key-pair/packer_*"
       },
-      # Temporary security group for SSH access
-      {
-        Sid    = "ManageSecurityGroups"
-        Effect = "Allow"
-        Action = [
-          "ec2:CreateSecurityGroup",
-          "ec2:DeleteSecurityGroup",
-          "ec2:AuthorizeSecurityGroupIngress"
-        ]
-        Resource = [
-          "arn:aws:ec2:us-east-1:*:security-group/*",
-          "arn:aws:ec2:us-east-1:*:vpc/*"
-        ]
-      },
       # Network interface management
       {
         Sid    = "ManageNetworkInterfaces"
@@ -228,33 +253,40 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "ec2:CreateNetworkInterface",
           "ec2:DeleteNetworkInterface"
         ]
-        Resource = "arn:aws:ec2:us-east-1:*:*"
+        Resource = "arn:aws:ec2:us-east-1:*:network-interface/*"
       },
-      # Tagging - only for resources we create
+      # Tagging - only for resources created by allowed actions
       {
         Sid    = "CreateTags"
         Effect = "Allow"
         Action = "ec2:CreateTags"
-        Resource = "arn:aws:ec2:us-east-1:*:*"
+        Resource = [
+          "arn:aws:ec2:us-east-1:*:instance/*",
+          "arn:aws:ec2:us-east-1:*:volume/*",
+          "arn:aws:ec2:us-east-1:*:network-interface/*",
+          "arn:aws:ec2:us-east-1:*:image/*",
+          "arn:aws:ec2:us-east-1:*:snapshot/*"
+        ]
         Condition = {
           StringEquals = {
             "ec2:CreateAction" = [
               "RunInstances",
               "CreateImage",
               "CreateSnapshot",
-              "CreateVolume",
-              "CreateSecurityGroup",
-              "CreateKeyPair"
+              "CreateVolume"
             ]
           }
         }
       },
-      # SSM parameter update - scoped to specific path
+      # SSM parameter access - read security group ID, read/write AMI ID
       {
         Sid      = "UpdateSSMParameter"
         Effect   = "Allow"
         Action   = ["ssm:PutParameter", "ssm:GetParameter"]
-        Resource = "arn:aws:ssm:us-east-1:*:parameter/buildkite/cpu-build-ami/*"
+        Resource = [
+          "arn:aws:ssm:us-east-1:*:parameter/buildkite/cpu-build-ami/*",
+          "arn:aws:ssm:us-east-1:*:parameter/buildkite/packer/*"
+        ]
       }
     ]
   })

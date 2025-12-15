@@ -35,16 +35,16 @@ EOF
 # - docker-container driver automatically creates a Docker volume for cache
 # - Volume name: buildx_buildkit_<builder-name>0_state
 # - This volume is stored in /var/lib/docker/volumes/ (part of EBS snapshot)
-# - If CI recreates builder with same name, it gets the cached state.
 #
 # After AMI snapshot/restore:
 # - The volume persists (it's on the EBS volume)
-# - CI can either:
-#   1. Start the existing builder container
-#   2. Create new builder with same name -> inherits the volume!
+# - The container is set to restart=always, so it starts automatically
+# - If the container is deleted, CI can recreate the builder with the same
+#   name to inherit the existing volume and cached state
 # -----------------------------------------------------------------------------
 echo "=== Creating baked builder ==="
 
+# network=host: Avoids Docker network overhead, enables direct ECR/registry access
 sudo docker buildx create \
   --name baked-vllm-builder \
   --driver docker-container \
