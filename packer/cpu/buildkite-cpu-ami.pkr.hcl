@@ -69,6 +69,9 @@ source "amazon-ebs" "cpu_build_box" {
   # Use subnet in the same VPC as the security group
   subnet_id = var.subnet_id
 
+  # Assign public IP for internet access (required to reach EC2 API)
+  associate_public_ip_address = true
+
   ssh_username = "ec2-user"
   ssh_timeout  = "30m"
 }
