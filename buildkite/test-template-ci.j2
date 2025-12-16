@@ -1,5 +1,12 @@
 {# TEMPORARY: Minimal template for debugging arm64 release build with INSTALL_KV_CONNECTORS=true #}
 {# To restore: git checkout buildkite/test-template-ci.j2 #}
+{#
+   ROOT CAUSE: The new extensions-build stage runs in parallel with csrc-build.
+   Both use sccache (x86_64 binary via emulation on arm64), causing
+   "failed to acquire jobserver token" error when they compete for resources.
+
+   FIX: USE_SCCACHE=0 to disable sccache on arm64 builds.
+#}
 
 steps:
   - label: ":docker: Build release image (arm64) - DEBUG"
@@ -8,7 +15,8 @@ steps:
     agents:
       queue: arm64_cpu_queue_premerge
     commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag vllm-arm64-debug:$BUILDKITE_COMMIT --target vllm-openai --progress plain -f docker/Dockerfile ."
+      # USE_SCCACHE=0 to avoid jobserver token conflict with parallel Docker build stages
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=0 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag vllm-arm64-debug:$BUILDKITE_COMMIT --target vllm-openai --progress plain -f docker/Dockerfile ."
     env:
       DOCKER_BUILDKIT: "1"
     retry:
