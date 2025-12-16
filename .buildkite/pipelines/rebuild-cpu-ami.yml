@@ -36,7 +36,7 @@ steps:
         STACK_URL="https://s3.amazonaws.com/buildkite-aws-stack/v$${STACK_VERSION}/aws-stack.yml"
 
         # Extract AMI ID for us-east-1 x86_64 from CloudFormation template
-        SOURCE_AMI=$$(curl -s "$$STACK_URL" | yq '.Mappings.AWSRegion2AMI["us-east-1"].linuxamd64')
+        SOURCE_AMI=$$(curl -s "$$STACK_URL" | yq -r '.Mappings.AWSRegion2AMI["us-east-1"].linuxamd64')
 
         if [[ -z "$$SOURCE_AMI" || ! "$$SOURCE_AMI" =~ ^ami-[a-fA-F0-9]+$$ ]]; then
           echo "Error: Failed to extract valid AMI from stack template"
