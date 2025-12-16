@@ -14,7 +14,7 @@
 env:
   SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
   SSM_PARAM_SECURITY_GROUP: "/buildkite/packer/security-group-id"
-  BUILDKITE_STACK_VERSION: "6.21.0"
+  STACK_VERSION: "6.21.0"
 
 steps:
   - label: ":packer: Build CPU AMI"
@@ -31,12 +31,12 @@ steps:
           export PATH="$$HOME/.local/bin:$$PATH"
         fi
 
-        echo "--- :cloudformation: Fetching base AMI from Buildkite stack v$${BUILDKITE_STACK_VERSION}"
+        echo "--- :cloudformation: Fetching base AMI from Buildkite stack v$${STACK_VERSION}"
 
-        STACK_URL="https://s3.amazonaws.com/buildkite-aws-stack/v$${BUILDKITE_STACK_VERSION}/aws-stack.yml"
+        STACK_URL="https://s3.amazonaws.com/buildkite-aws-stack/v$${STACK_VERSION}/aws-stack.yml"
 
         # Extract AMI ID for us-east-1 x86_64 from CloudFormation template
-        SOURCE_AMI=$$(curl -s "$$STACK_URL" | yq '.Mappings.AWSRegion2AMI.us-east-1.linuxamd64')
+        SOURCE_AMI=$$(curl -s "$$STACK_URL" | yq '.Mappings.AWSRegion2AMI["us-east-1"].linuxamd64')
 
         if [[ -z "$$SOURCE_AMI" || ! "$$SOURCE_AMI" =~ ^ami-[a-fA-F0-9]+$$ ]]; then
           echo "Error: Failed to extract valid AMI from stack template"
@@ -44,7 +44,7 @@ steps:
           exit 1
         fi
 
-        echo "Using base AMI: $$SOURCE_AMI (from Buildkite stack v$${BUILDKITE_STACK_VERSION})"
+        echo "Using base AMI: $$SOURCE_AMI (from Buildkite stack v$${STACK_VERSION})"
 
         echo "--- :ssm: Fetching security group ID"
         SECURITY_GROUP_ID=$$(aws ssm get-parameter --name "$${SSM_PARAM_SECURITY_GROUP}" --query 'Parameter.Value' --output text --region us-east-1)
