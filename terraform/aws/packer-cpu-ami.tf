@@ -64,6 +64,14 @@ resource "aws_ssm_parameter" "packer_security_group_id" {
   provider    = aws.us_east_1
 }
 
+resource "aws_ssm_parameter" "packer_subnet_id" {
+  name        = "/buildkite/packer/subnet-id"
+  type        = "String"
+  value       = module.vpc_us_east_1.public_subnets[0]
+  description = "Subnet ID for Packer build instances"
+  provider    = aws.us_east_1
+}
+
 # -----------------------------------------------------------------------------
 # Packer Build Security Group
 # -----------------------------------------------------------------------------

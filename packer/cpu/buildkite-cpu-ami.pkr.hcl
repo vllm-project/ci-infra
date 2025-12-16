@@ -22,6 +22,11 @@ variable "security_group_id" {
   description = "Pre-created security group ID for Packer build instances. Fetched from SSM."
 }
 
+variable "subnet_id" {
+  type        = string
+  description = "Subnet ID for Packer build instances. Fetched from SSM."
+}
+
 variable "deprecate_days" {
   type        = number
   default     = 7
@@ -60,6 +65,9 @@ source "amazon-ebs" "cpu_build_box" {
 
   # Use pre-created security group (managed by Terraform)
   security_group_id = var.security_group_id
+
+  # Use subnet in the same VPC as the security group
+  subnet_id = var.subnet_id
 
   ssh_username = "ec2-user"
   ssh_timeout  = "30m"

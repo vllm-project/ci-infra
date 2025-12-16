@@ -14,6 +14,7 @@
 env:
   SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
   SSM_PARAM_SECURITY_GROUP: "/buildkite/packer/security-group-id"
+  SSM_PARAM_SUBNET: "/buildkite/packer/subnet-id"
   STACK_VERSION: "6.21.0"
 
 steps:
@@ -65,11 +66,23 @@ steps:
 
         echo "Using security group: $$SECURITY_GROUP_ID"
 
+        echo "--- :ssm: Fetching subnet ID"
+        SUBNET_ID=$$(aws ssm get-parameter --name "$${SSM_PARAM_SUBNET}" --query 'Parameter.Value' --output text --region us-east-1)
+
+        if [[ -z "$$SUBNET_ID" || ! "$$SUBNET_ID" =~ ^subnet-[a-fA-F0-9]+$$ ]]; then
+          echo "Error: Failed to fetch valid subnet ID from SSM"
+          echo "Got: $$SUBNET_ID"
+          exit 1
+        fi
+
+        echo "Using subnet: $$SUBNET_ID"
+
         echo "--- :packer: Building AMI"
         packer init .
         packer build \
           -var "source_ami=$$SOURCE_AMI" \
           -var "security_group_id=$$SECURITY_GROUP_ID" \
+          -var "subnet_id=$$SUBNET_ID" \
           buildkite-cpu-ami.pkr.hcl
 
         echo "--- :aws: Extracting AMI ID"
