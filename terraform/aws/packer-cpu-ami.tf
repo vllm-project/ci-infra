@@ -213,6 +213,7 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         ]
       },
       # AMI management - scoped to us-east-1
+      # CreateImage requires permissions on instance, image, and snapshot resources
       {
         Sid    = "ManageAMIs"
         Effect = "Allow"
@@ -223,7 +224,8 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         ]
         Resource = [
           "arn:aws:ec2:us-east-1:*:image/*",
-          "arn:aws:ec2:us-east-1:*:instance/*"
+          "arn:aws:ec2:us-east-1:*:instance/*",
+          "arn:aws:ec2:us-east-1::snapshot/*"
         ]
       },
       # Snapshot management - scoped to us-east-1
