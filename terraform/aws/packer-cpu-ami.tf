@@ -221,7 +221,10 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "ec2:RegisterImage",
           "ec2:DeregisterImage"
         ]
-        Resource = "arn:aws:ec2:us-east-1:*:image/*"
+        Resource = [
+          "arn:aws:ec2:us-east-1:*:image/*",
+          "arn:aws:ec2:us-east-1:*:instance/*"
+        ]
       },
       # Snapshot management - scoped to us-east-1
       {
