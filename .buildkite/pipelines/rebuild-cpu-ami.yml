@@ -1,6 +1,6 @@
 # Buildkite pipeline for rebuilding the CPU build AMI
 #
-# This pipeline is scheduled to run daily at 6 AM UTC to keep the
+# This pipeline is scheduled to run daily at 11 AM UTC (3 AM PST) to keep the
 # Docker layer cache fresh. The schedule is managed via Terraform.
 #
 # The pipeline uses the dedicated packer_build_queue which has EC2 permissions
@@ -27,7 +27,8 @@ steps:
         # Install yq if not available (Amazon Linux 2)
         if ! command -v yq &> /dev/null; then
           echo "Installing yq..."
-          sudo pip3 install yq
+          pip3 install yq
+          export PATH="$$HOME/.local/bin:$$PATH"
         fi
 
         echo "--- :cloudformation: Fetching base AMI from Buildkite stack v$${BUILDKITE_STACK_VERSION}"
