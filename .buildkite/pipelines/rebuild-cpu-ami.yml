@@ -31,6 +31,14 @@ steps:
           export PATH="$$HOME/.local/bin:$$PATH"
         fi
 
+        # Install packer if not available
+        if ! command -v packer &> /dev/null; then
+          echo "Installing packer..."
+          curl -fsSL https://releases.hashicorp.com/packer/1.11.2/packer_1.11.2_linux_amd64.zip -o /tmp/packer.zip
+          unzip -o /tmp/packer.zip -d $$HOME/.local/bin
+          rm /tmp/packer.zip
+        fi
+
         echo "--- :cloudformation: Fetching base AMI from Buildkite stack v$${STACK_VERSION}"
 
         STACK_URL="https://s3.amazonaws.com/buildkite-aws-stack/v$${STACK_VERSION}/aws-stack.yml"
