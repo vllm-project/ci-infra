@@ -220,7 +220,8 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         Action = [
           "ec2:CreateImage",
           "ec2:RegisterImage",
-          "ec2:DeregisterImage"
+          "ec2:DeregisterImage",
+          "ec2:EnableImageDeprecation"
         ]
         Resource = [
           "arn:aws:ec2:us-east-1:*:image/*",
