@@ -72,6 +72,9 @@ source "amazon-ebs" "cpu_build_box" {
   # Assign public IP for internet access (required to reach EC2 API)
   associate_public_ip_address = true
 
+  # Use private IP for SSH (Buildkite agent is in same VPC)
+  ssh_interface = "private_ip"
+
   ssh_username = "ec2-user"
   ssh_timeout  = "30m"
 }
