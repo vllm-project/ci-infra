@@ -307,6 +307,8 @@ locals {
     name => merge(
       local.default_parameters,
       params,
+      # Add custom CPU build AMI only for specific queues (defined in packer-cpu-ami.tf)
+      contains(local.cpu_build_ami_queues, name) ? local.cpu_build_ami_config_us_east_1 : {}
     )
   }
 
@@ -320,6 +322,8 @@ locals {
     name => merge(
       local.default_parameters,
       params,
+      # Add custom CPU build AMI only for specific queues (defined in packer-cpu-ami.tf)
+      contains(local.cpu_build_ami_queues, name) ? local.cpu_build_ami_config_us_east_1 : {}
     )
   }
 
