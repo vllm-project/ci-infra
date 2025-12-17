@@ -131,7 +131,7 @@ locals {
     name => merge(local.default_parameters, params)
   }
 
-  # Custom CPU build AMI configuration
+  # Custom CPU build AMI configuration using SSM dynamic reference
   # Only applied to specific x86_64 CPU build queues in us-east-1
   cpu_build_ami_queues = toset([
     "cpu-queue-premerge-us-east-1",
@@ -139,14 +139,8 @@ locals {
   ])
 
   cpu_build_ami_config_us_east_1 = {
-    ImageId = data.aws_ssm_parameter.cpu_build_ami_us_east_1.value
+    ImageId = "{{resolve:ssm:/buildkite/cpu-build-ami/us-east-1}}"
   }
-}
-
-# Read current AMI ID from SSM (updated by Packer pipeline)
-data "aws_ssm_parameter" "cpu_build_ami_us_east_1" {
-  name     = "/buildkite/cpu-build-ami/us-east-1"
-  provider = aws.us_east_1
 }
 
 resource "aws_cloudformation_stack" "bk_queue_packer" {
