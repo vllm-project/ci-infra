@@ -190,7 +190,7 @@ locals {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci_us_east_1.name
       BuildkiteQueue                       = "cpu_queue_premerge_us_east_1"
       InstanceTypes                        = "r6in.16xlarge" # 512GB memory for CUDA kernel compilation
-      MaxSize                              = 20
+      MaxSize                              = 40
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
