@@ -125,7 +125,19 @@ plugins:
         containers:
           - image: {{ image }}
             command:
-              - bash -c "{{ '(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe) }}"
+              - bash -c "{% set cmds = (step.command or (step.commands | join(' && '))) | safe %}
+failed=0
+(command nvidia-smi || true)
+export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+cd {{ (step.working_dir or default_working_dir) | safe }}
+{% if step.commands %}
+{% for cmd in step.commands %}
+{{ cmd }} || failed=1
+{% endfor %}
+{% else %}
+{{ step.command }} || failed=1
+{% endif %}
+exit $failed"
             resources:
               limits:
                 nvidia.com/gpu: {{ step.num_gpus or 1 }}
@@ -162,7 +174,7 @@ plugins:
       always-pull: true
       propagate-environment: true
       gpus: all
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
+      command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -450,6 +462,8 @@ steps:
   {% if nightly == "1" %}
   {% set ns.blocked = 0 %}
   {% endif %}
+
+  {% set ns.blocked = 1 %}
 
   {% if step.source_file_dependencies %}
     {% for source_file in step.source_file_dependencies %}
