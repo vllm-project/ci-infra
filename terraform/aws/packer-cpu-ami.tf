@@ -131,7 +131,7 @@ locals {
     name => merge(local.default_parameters, params)
   }
 
-  # Custom CPU build AMI configuration using SSM dynamic reference
+  # Custom CPU build AMI configuration
   # Only applied to specific x86_64 CPU build queues in us-east-1
   cpu_build_ami_queues = toset([
     "cpu-queue-premerge-us-east-1",
@@ -139,8 +139,26 @@ locals {
   ])
 
   cpu_build_ami_config_us_east_1 = {
-    ImageId = "{{resolve:ssm:/buildkite/cpu-build-ami/us-east-1}}"
+    # Use data source to resolve AMI ID from SSM at plan time
+    # This ensures terraform apply triggers stack updates when AMI changes
+    ImageId = data.aws_ssm_parameter.cpu_build_ami_us_east_1.value
   }
+}
+
+# -----------------------------------------------------------------------------
+# Data Source to Resolve Current AMI from SSM
+# -----------------------------------------------------------------------------
+# This data source reads the current AMI ID from SSM at terraform plan time.
+# Combined with the Packer pipeline's CloudFormation refresh step, this provides
+# two ways to update the CPU queues with a new AMI:
+#   1. Daily: Packer pipeline updates SSM, then triggers CF stack refresh
+#   2. On-demand: terraform apply reads SSM and updates stacks if AMI changed
+
+data "aws_ssm_parameter" "cpu_build_ami_us_east_1" {
+  name     = aws_ssm_parameter.cpu_build_ami_us_east_1.name
+  provider = aws.us_east_1
+
+  depends_on = [aws_ssm_parameter.cpu_build_ami_us_east_1]
 }
 
 resource "aws_cloudformation_stack" "bk_queue_packer" {
