@@ -303,14 +303,6 @@ steps:
       - "docker buildx create --name vllm-builder --driver docker-container --use"
       - "docker buildx inspect --bootstrap"
       - "docker buildx ls"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
       - >
         docker buildx build --file docker/Dockerfile
         --build-arg max_jobs=16
@@ -462,6 +454,8 @@ steps:
   {% else %}
     {% set ns.blocked = 0 %}
   {% endif %}
+
+  {% set ns.blocked = 1 %}
 
   {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
   - block: "Run {{ step.label }}"
