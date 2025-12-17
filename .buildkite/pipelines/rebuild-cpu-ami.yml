@@ -136,6 +136,54 @@ steps:
       queue: packer_build_queue
     depends_on: build-ami
 
+  - label: ":cloudformation: Refresh CPU Queues"
+    key: refresh-stacks
+    command:
+      - |
+        set -euo pipefail
+
+        echo "--- :cloudformation: Triggering CloudFormation stack updates to pick up new AMI"
+
+        # Force CloudFormation to re-resolve the SSM dynamic reference
+        # by triggering a stack update with the same template
+
+        for STACK in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
+          echo "Updating stack: $$STACK"
+
+          # Get current parameters
+          PARAMS=$$(aws cloudformation describe-stacks \
+            --stack-name "$$STACK" \
+            --query 'Stacks[0].Parameters' \
+            --output json \
+            --region us-east-1)
+
+          # Trigger update with same template and parameters
+          # This forces CloudFormation to re-resolve SSM dynamic references
+          aws cloudformation update-stack \
+            --stack-name "$$STACK" \
+            --use-previous-template \
+            --parameters "$$PARAMS" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --region us-east-1 || {
+              # update-stack fails if no changes - that's ok
+              echo "No update needed or already in progress for $$STACK"
+            }
+        done
+
+        echo "--- :hourglass: Waiting for stack updates to complete"
+
+        for STACK in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
+          echo "Waiting for $$STACK..."
+          aws cloudformation wait stack-update-complete \
+            --stack-name "$$STACK" \
+            --region us-east-1 || echo "$$STACK update completed or no update was needed"
+        done
+
+        echo "Stack updates complete. New instances will use the updated AMI."
+    agents:
+      queue: packer_build_queue
+    depends_on: update-ssm
+
   - label: ":broom: Cleanup Old AMIs"
     key: cleanup-amis
     command:
@@ -193,4 +241,4 @@ steps:
         echo "Cleanup complete"
     agents:
       queue: packer_build_queue
-    depends_on: update-ssm
+    depends_on: refresh-stacks
