@@ -303,7 +303,15 @@ steps:
       - |
         # Debug: Show AMI and pre-baked builder info
         echo "--- :aws: Debug: Instance AMI"
-        curl -s http://169.254.169.254/latest/meta-data/ami-id || echo "Could not fetch AMI ID"
+        INSTANCE_AMI=$(curl -s http://169.254.169.254/latest/meta-data/ami-id || echo "Could not fetch")
+        echo "Instance AMI: $INSTANCE_AMI"
+        EXPECTED_AMI=$(aws ssm get-parameter --name "/buildkite/cpu-build-ami/us-east-1" --query 'Parameter.Value' --output text --region us-east-1 || echo "Could not fetch")
+        echo "Expected AMI (from SSM): $EXPECTED_AMI"
+        if [[ "$INSTANCE_AMI" == "$EXPECTED_AMI" ]]; then
+          echo "✅ Running on custom AMI"
+        else
+          echo "❌ NOT running on custom AMI"
+        fi
         echo ""
         echo "--- :docker: Debug: Pre-existing builders and volumes"
         docker buildx ls
