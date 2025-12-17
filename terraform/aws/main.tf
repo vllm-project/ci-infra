@@ -20,7 +20,7 @@ provider "aws" {
 }
 
 provider "aws" {
-  alias = "us_east_1"
+  alias  = "us_east_1"
   region = "us-east-1"
 }
 
@@ -28,42 +28,48 @@ provider "buildkite" {
   organization = "vllm"
 }
 
-resource "buildkite_agent_token" "tf_managed" {
-  description = "token used by the build fleet"
+# Provide tokens as variables instead of creating/polling resources
+variable "bk_agent_token" {
+  description = "Buildkite agent token for the build fleet"
+  type        = string
+  sensitive   = true
 }
 
-resource "buildkite_cluster_agent_token" "perf_benchmark" {
-  cluster_id  = "Q2x1c3Rlci0tLWUxNjMwOGZjLTVkYTEtNGE2OC04YzAzLWI1YjdkYzA1YzcyZA=="
-  description = "token used by the perf benchmark fleet"
+variable "bk_agent_token_cluster_perf_benchmark" {
+  description = "Buildkite cluster agent token for perf benchmark fleet"
+  type        = string
+  sensitive   = true
 }
 
-resource "buildkite_cluster_agent_token" "ci" {
-  cluster_id  = "Q2x1c3Rlci0tLTljZWNjNmIxLTk0Y2QtNDNkMS1hMjU2LWFiNDM4MDgzZjRmNQ=="
-  description = "token used by the CI AWS fleet"
+variable "bk_agent_token_cluster_ci" {
+  description = "Buildkite cluster agent token for CI AWS fleet"
+  type        = string
+  sensitive   = true
 }
 
+# Write these tokens into SSM Parameter Store for use by instances
 resource "aws_ssm_parameter" "bk_agent_token" {
   name  = "/bk_agent_token"
   type  = "String"
-  value = buildkite_agent_token.tf_managed.token
+  value = var.bk_agent_token
 }
 
 resource "aws_ssm_parameter" "bk_agent_token_cluster_perf_benchmark" {
   name  = "/bk_agent_token_cluster_perf_benchmark"
   type  = "String"
-  value = buildkite_cluster_agent_token.perf_benchmark.token
+  value = var.bk_agent_token_cluster_perf_benchmark
 }
 
 resource "aws_ssm_parameter" "bk_agent_token_cluster_ci" {
   name  = "/bk_agent_token_cluster_ci"
   type  = "String"
-  value = buildkite_cluster_agent_token.ci.token
+  value = var.bk_agent_token_cluster_ci
 }
 
 resource "aws_ssm_parameter" "bk_agent_token_cluster_ci_us_east_1" {
-  name  = "/bk_agent_token_cluster_ci_us_east_1"
-  type  = "String"
-  value = buildkite_cluster_agent_token.ci.token
+  name     = "/bk_agent_token_cluster_ci_us_east_1"
+  type     = "String"
+  value    = var.bk_agent_token_cluster_ci
   provider = aws.us_east_1
 }
 
@@ -131,17 +137,17 @@ locals {
   })
 
   default_parameters = {
-    elastic_ci_stack_version             = var.elastic_ci_stack_version
+    elastic_ci_stack_version              = var.elastic_ci_stack_version
     BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token.name
-    MinSize                              = 0
-    EnableECRPlugin                      = "true"
-    VpcId                               = module.vpc.vpc_id
-    SecurityGroupIds                     = module.vpc.default_security_group_id
-    Subnets                             = join(",", module.vpc.public_subnets)
-    RootVolumeSize                      = 512   # Gb
-    EnableDockerUserNamespaceRemap      = false # Turn off remap so we can run dind
-    BuildkiteAgentTimestampLines        = true
-    BuildkiteTerminateInstanceAfterJob  = true
+    MinSize                               = 0
+    EnableECRPlugin                       = "true"
+    VpcId                                 = module.vpc.vpc_id
+    SecurityGroupIds                      = module.vpc.default_security_group_id
+    Subnets                               = join(",", module.vpc.public_subnets)
+    RootVolumeSize                        = 512   # Gb
+    EnableDockerUserNamespaceRemap        = false # Turn off remap so we can run dind
+    BuildkiteAgentTimestampLines          = true
+    BuildkiteTerminateInstanceAfterJob    = true
   }
 
   queues_parameters_premerge = {
@@ -352,7 +358,7 @@ resource "aws_cloudformation_stack" "bk_queue_premerge_us_east_1" {
   for_each   = local.merged_parameters_premerge_us_east_1
   name       = "bk-${each.key}"
   parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
-  
+
   template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
 
@@ -466,7 +472,7 @@ resource "aws_iam_policy" "premerge_ecr_public_read_access_policy" {
       Effect   = "Allow"
       Action = [
         "ecr-public:GetAuthorizationToken",
-        "ecr-public:BatchCheckLayerAvailability", 
+        "ecr-public:BatchCheckLayerAvailability",
         "ecr-public:GetDownloadUrlForLayer",
         "ecr-public:GetRepositoryCatalogData",
         "ecr-public:DescribeRepositories",
@@ -576,7 +582,7 @@ resource "aws_iam_policy" "postmerge_ecr_public_read_access_policy" {
       Effect   = "Allow"
       Action = [
         "ecr-public:GetAuthorizationToken",
-        "ecr-public:BatchCheckLayerAvailability", 
+        "ecr-public:BatchCheckLayerAvailability",
         "ecr-public:GetDownloadUrlForLayer",
         "ecr-public:GetRepositoryCatalogData",
         "ecr-public:DescribeRepositories",
@@ -602,7 +608,7 @@ resource "aws_iam_policy" "postmerge_ecr_public_read_write_access_policy" {
         "ecr-public:CompleteLayerUpload",
         "ecr-public:DescribeImageTags",
         "ecr-public:DescribeImages",
-        "ecr-public:DescribeRegistries", 
+        "ecr-public:DescribeRegistries",
         "ecr-public:DescribeRepositories",
         "ecr-public:GetAuthorizationToken",
         "ecr-public:GetRegistryCatalogData",
@@ -668,7 +674,7 @@ resource "aws_iam_policy" "release_ecr_public_read_write_access_policy" {
         "ecr-public:CompleteLayerUpload",
         "ecr-public:DescribeImageTags",
         "ecr-public:DescribeImages",
-        "ecr-public:DescribeRegistries", 
+        "ecr-public:DescribeRegistries",
         "ecr-public:DescribeRepositories",
         "ecr-public:GetAuthorizationToken",
         "ecr-public:GetRegistryCatalogData",
@@ -700,7 +706,7 @@ resource "aws_iam_policy" "cpu_release_ecr_public_read_write_access_policy" {
         "ecr-public:CompleteLayerUpload",
         "ecr-public:DescribeImageTags",
         "ecr-public:DescribeImages",
-        "ecr-public:DescribeRegistries", 
+        "ecr-public:DescribeRegistries",
         "ecr-public:DescribeRepositories",
         "ecr-public:GetAuthorizationToken",
         "ecr-public:GetRegistryCatalogData",
@@ -904,7 +910,7 @@ resource "aws_iam_role_policy_attachment" "bk_stack_sccache_bucket_read_write_ac
     },
     {
       for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
-      if v.name == "bk-cpu-queue-postmerge" 
+      if v.name == "bk-cpu-queue-postmerge"
     },
     {
       for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
@@ -936,9 +942,9 @@ resource "aws_iam_role_policy_attachment" "vllm_wheels_bucket_read_write_access_
 }
 
 resource "aws_security_group" "ci-model-weights-sg" {
-  name = "ci-model-weights-security-group"
+  name        = "ci-model-weights-security-group"
   description = "Security group for the CI model weights EFS"
-  vpc_id = module.vpc.vpc_id
+  vpc_id      = module.vpc.vpc_id
 
   ingress = [
     {
