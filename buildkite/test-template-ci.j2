@@ -301,10 +301,14 @@ steps:
       - |
         echo "--- :aws: AMI Debug Info"
         # Use IMDSv2 (token required)
-        TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-        INSTANCE_AMI=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/ami-id)
+        echo "Fetching IMDS token..."
+        TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>&1) || true
+        echo "Token result: ${TOKEN:0:20}..."
+        echo "Fetching AMI ID..."
+        INSTANCE_AMI=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/ami-id 2>&1) || true
         echo "Instance AMI: $INSTANCE_AMI"
-        EXPECTED_AMI=$(aws ssm get-parameter --name "/buildkite/cpu-build-ami/us-east-1" --query 'Parameter.Value' --output text --region us-east-1 2>/dev/null || echo "N/A")
+        echo "Fetching SSM parameter..."
+        EXPECTED_AMI=$(aws ssm get-parameter --name "/buildkite/cpu-build-ami/us-east-1" --query 'Parameter.Value' --output text --region us-east-1 2>&1) || true
         echo "Expected AMI: $EXPECTED_AMI"
         if [[ "$INSTANCE_AMI" == "$EXPECTED_AMI" ]]; then
           echo "✅ Running on custom CPU build AMI"
