@@ -300,6 +300,15 @@ steps:
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
+      - |
+        # Debug: Show AMI and pre-baked builder info
+        echo "--- :aws: Debug: Instance AMI"
+        curl -s http://169.254.169.254/latest/meta-data/ami-id || echo "Could not fetch AMI ID"
+        echo ""
+        echo "--- :docker: Debug: Pre-existing builders and volumes"
+        docker buildx ls
+        docker volume ls | grep buildkit || echo "No buildkit volumes found"
+        docker ps -a | grep buildkit || echo "No buildkit containers found"
       - "docker buildx create --name vllm-builder --driver docker-container --use"
       - "docker buildx inspect --bootstrap"
       - "docker buildx ls"
