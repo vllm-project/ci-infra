@@ -287,9 +287,53 @@ plugins:
 
 
 steps:
+  - label: ":mag: Debug AMI Config"
+    key: debug-ami
+    depends_on: ~
+    timeout_in_minutes: 5
+    agents:
+      {% if branch == "main" %}
+      queue: cpu_queue_postmerge_us_east_1
+      {% else %}
+      queue: cpu_queue_premerge_us_east_1
+      {% endif %}
+    commands:
+      - |
+        set -euo pipefail
+
+        echo "--- :aws: Instance Info"
+        INSTANCE_AMI=$(curl -s http://169.254.169.254/latest/meta-data/ami-id)
+        INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+        echo "Instance ID: $INSTANCE_ID"
+        echo "Instance AMI: $INSTANCE_AMI"
+
+        echo "--- :aws: SSM Parameter (Expected AMI)"
+        EXPECTED_AMI=$(aws ssm get-parameter --name "/buildkite/cpu-build-ami/us-east-1" --query 'Parameter.Value' --output text --region us-east-1)
+        echo "Expected AMI: $EXPECTED_AMI"
+
+        if [[ "$INSTANCE_AMI" == "$EXPECTED_AMI" ]]; then
+          echo "✅ Running on custom AMI"
+        else
+          echo "❌ NOT running on custom AMI"
+        fi
+
+        echo "--- :aws: CloudFormation Stack ImageId"
+        echo "Premerge stack:"
+        aws cloudformation describe-stacks --stack-name bk-cpu-queue-premerge-us-east-1 --query 'Stacks[0].Parameters[?ParameterKey==`ImageId`]' --output table --region us-east-1 || echo "Could not fetch"
+        echo "Postmerge stack:"
+        aws cloudformation describe-stacks --stack-name bk-cpu-queue-postmerge-us-east-1 --query 'Stacks[0].Parameters[?ParameterKey==`ImageId`]' --output table --region us-east-1 || echo "Could not fetch"
+
+        echo "--- :docker: Pre-existing builders and volumes"
+        docker buildx ls
+        docker volume ls | grep buildkit || echo "No buildkit volumes found"
+        docker ps -a | grep buildkit || echo "No buildkit containers found"
+
+        echo "--- :docker: Docker images"
+        docker images | head -20
+
   - label: ":docker: build image"
     key: image-build
-    depends_on: ~
+    depends_on: debug-ami
     timeout_in_minutes: 600
     agents:
       {% if branch == "main" %}
@@ -300,23 +344,6 @@ steps:
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
-      - |
-        # Debug: Show AMI and pre-baked builder info
-        echo "--- :aws: Debug: Instance AMI"
-        INSTANCE_AMI=$(curl -s http://169.254.169.254/latest/meta-data/ami-id || echo "Could not fetch")
-        echo "Instance AMI: $INSTANCE_AMI"
-        EXPECTED_AMI=$(aws ssm get-parameter --name "/buildkite/cpu-build-ami/us-east-1" --query 'Parameter.Value' --output text --region us-east-1 || echo "Could not fetch")
-        echo "Expected AMI (from SSM): $EXPECTED_AMI"
-        if [[ "$INSTANCE_AMI" == "$EXPECTED_AMI" ]]; then
-          echo "✅ Running on custom AMI"
-        else
-          echo "❌ NOT running on custom AMI"
-        fi
-        echo ""
-        echo "--- :docker: Debug: Pre-existing builders and volumes"
-        docker buildx ls
-        docker volume ls | grep buildkit || echo "No buildkit volumes found"
-        docker ps -a | grep buildkit || echo "No buildkit containers found"
       - "docker buildx create --name vllm-builder --driver docker-container --use"
       - "docker buildx inspect --bootstrap"
       - "docker buildx ls"
