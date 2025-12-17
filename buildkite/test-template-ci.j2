@@ -298,6 +298,20 @@ steps:
       queue: cpu_queue_premerge_us_east_1
       {% endif %}
     commands:
+      - |
+        echo "--- :aws: AMI Debug Info"
+        INSTANCE_AMI=$(curl -s http://169.254.169.254/latest/meta-data/ami-id)
+        echo "Instance AMI: $INSTANCE_AMI"
+        EXPECTED_AMI=$(aws ssm get-parameter --name "/buildkite/cpu-build-ami/us-east-1" --query 'Parameter.Value' --output text --region us-east-1 2>/dev/null || echo "N/A")
+        echo "Expected AMI: $EXPECTED_AMI"
+        if [[ "$INSTANCE_AMI" == "$EXPECTED_AMI" ]]; then
+          echo "✅ Running on custom CPU build AMI"
+        else
+          echo "⚠️ NOT running on custom AMI"
+        fi
+        echo "--- :docker: Pre-existing builders"
+        docker buildx ls
+        docker volume ls | grep buildkit || echo "No buildkit volumes"
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
       - "docker buildx create --name vllm-builder --driver docker-container --use"
