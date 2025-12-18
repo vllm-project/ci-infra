@@ -359,6 +359,16 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
             "iam:PassedToService" = "cloudformation.amazonaws.com"
           }
         }
+      },
+      # CloudFormation needs to read instance profiles during stack updates
+      {
+        Sid    = "GetInstanceProfile"
+        Effect = "Allow"
+        Action = "iam:GetInstanceProfile"
+        Resource = [
+          "arn:aws:iam::*:instance-profile/bk-cpu-queue-premerge-us-east-1-*",
+          "arn:aws:iam::*:instance-profile/bk-cpu-queue-postmerge-us-east-1-*"
+        ]
       }
     ]
   })
