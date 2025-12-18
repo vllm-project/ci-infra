@@ -330,6 +330,21 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "arn:aws:autoscaling:us-east-1:*:autoScalingGroup:*:autoScalingGroupName/bk-cpu-queue-premerge-us-east-1-*",
           "arn:aws:autoscaling:us-east-1:*:autoScalingGroup:*:autoScalingGroupName/bk-cpu-queue-postmerge-us-east-1-*"
         ]
+      },
+      # Pass role to EC2 - required when launch template has instance profile
+      {
+        Sid      = "PassRoleToEC2"
+        Effect   = "Allow"
+        Action   = "iam:PassRole"
+        Resource = [
+          "arn:aws:iam::*:role/bk-cpu-queue-premerge-us-east-1-*",
+          "arn:aws:iam::*:role/bk-cpu-queue-postmerge-us-east-1-*"
+        ]
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "ec2.amazonaws.com"
+          }
+        }
       }
     ]
   })
