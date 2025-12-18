@@ -298,6 +298,37 @@ steps:
       queue: cpu_queue_premerge_us_east_1
       {% endif %}
     commands:
+      - |
+        echo "--- :docker: Debug: Check for baked builder BEFORE creating new one"
+        echo "Current user: $(whoami)"
+        echo "Home directory: $HOME"
+        echo ""
+        echo "AMI marker file:"
+        cat /etc/vllm-ami-info 2>/dev/null || echo "No /etc/vllm-ami-info found (old AMI or not a vLLM AMI)"
+        echo ""
+        echo "Check current user's buildx config:"
+        ls -la ~/.docker/buildx/ 2>/dev/null || echo "No ~/.docker/buildx/"
+        echo ""
+        echo "Docker containers:"
+        docker ps -a | grep -E "buildkit|baked" || echo "No buildkit containers"
+        echo ""
+        echo "Docker volumes:"
+        docker volume ls | grep buildkit || echo "No buildkit volumes"
+        echo ""
+        echo "Docker data on disk:"
+        sudo ls -la /var/lib/docker/containers/ 2>/dev/null | head -5 || echo "Cannot access /var/lib/docker/containers/"
+        sudo ls -la /var/lib/docker/volumes/ 2>/dev/null | head -5 || echo "Cannot access /var/lib/docker/volumes/"
+        echo ""
+        echo "Buildx builders:"
+        docker buildx ls
+        echo ""
+        echo "Checking for baked-vllm-builder..."
+        if docker buildx inspect baked-vllm-builder &>/dev/null; then
+          echo "✅ baked-vllm-builder exists!"
+          docker buildx inspect baked-vllm-builder
+        else
+          echo "❌ baked-vllm-builder not found"
+        fi
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
       - "docker buildx create --name vllm-builder --driver docker-container --use"
