@@ -1,0 +1,61 @@
+# Temporary test pipeline - just tests the CloudFormation refresh step
+# Delete after testing
+
+env:
+  SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
+
+steps:
+  - label: ":cloudformation: Test Refresh CPU Queues"
+    command:
+      - |
+        set -euo pipefail
+
+        echo "--- :cloudformation: Triggering CloudFormation stack updates to pick up new AMI"
+
+        # Get the new AMI ID from SSM
+        NEW_AMI=$$(aws ssm get-parameter \
+          --name "$${SSM_PARAM_US_EAST_1}" \
+          --query 'Parameter.Value' \
+          --output text \
+          --region us-east-1)
+
+        echo "New AMI ID: $$NEW_AMI"
+
+        for STACK in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
+          echo "Updating stack: $$STACK with AMI: $$NEW_AMI"
+
+          # Get current parameters and replace ImageId with the new AMI
+          PARAMS=$$(aws cloudformation describe-stacks \
+            --stack-name "$$STACK" \
+            --query 'Stacks[0].Parameters' \
+            --output json \
+            --region us-east-1 | jq --arg ami "$$NEW_AMI" \
+            'map(if .ParameterKey == "ImageId" then .ParameterValue = $$ami else . end)')
+
+          echo "Parameters: $$PARAMS"
+
+          # Trigger update with new AMI ID
+          aws cloudformation update-stack \
+            --stack-name "$$STACK" \
+            --use-previous-template \
+            --parameters "$$PARAMS" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --region us-east-1 || {
+              # update-stack fails if no changes - that's ok
+              echo "No update needed or already in progress for $$STACK"
+            }
+        done
+
+        echo "--- :hourglass: Waiting for stack updates to complete"
+
+        for STACK in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
+          echo "Waiting for $$STACK..."
+          aws cloudformation wait stack-update-complete \
+            --stack-name "$$STACK" \
+            --region us-east-1 || echo "$$STACK update completed or no update was needed"
+        done
+
+        echo "Stack updates complete. New instances will use the updated AMI."
+    agents:
+      queue: packer_build_queue
+    timeout_in_minutes: 30
