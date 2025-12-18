@@ -162,7 +162,7 @@ steps:
             --query 'Stacks[0].Parameters' \
             --output json \
             --region us-east-1 | jq --arg ami "$$NEW_AMI" \
-            'map(if .ParameterKey == "ImageId" then .ParameterValue = $ami else . end)')
+            'map(if .ParameterKey == "ImageId" then .ParameterValue = $$ami else . end)')
 
           # Trigger update with new AMI ID
           aws cloudformation update-stack \
