@@ -144,21 +144,27 @@ steps:
 
         echo "--- :cloudformation: Triggering CloudFormation stack updates to pick up new AMI"
 
-        # Force CloudFormation to re-resolve the SSM dynamic reference
-        # by triggering a stack update with the same template
+        # Get the new AMI ID from SSM (just updated in previous step)
+        NEW_AMI=$$(aws ssm get-parameter \
+          --name "$${SSM_PARAM_US_EAST_1}" \
+          --query 'Parameter.Value' \
+          --output text \
+          --region us-east-1)
+
+        echo "New AMI ID: $$NEW_AMI"
 
         for STACK in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
-          echo "Updating stack: $$STACK"
+          echo "Updating stack: $$STACK with AMI: $$NEW_AMI"
 
-          # Get current parameters
+          # Get current parameters and replace ImageId with the new AMI
           PARAMS=$$(aws cloudformation describe-stacks \
             --stack-name "$$STACK" \
             --query 'Stacks[0].Parameters' \
             --output json \
-            --region us-east-1)
+            --region us-east-1 | jq --arg ami "$$NEW_AMI" \
+            'map(if .ParameterKey == "ImageId" then .ParameterValue = $ami else . end)')
 
-          # Trigger update with same template and parameters
-          # This forces CloudFormation to re-resolve SSM dynamic references
+          # Trigger update with new AMI ID
           aws cloudformation update-stack \
             --stack-name "$$STACK" \
             --use-previous-template \
