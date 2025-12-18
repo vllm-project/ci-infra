@@ -303,17 +303,8 @@ steps:
         echo "Current user: $(whoami)"
         echo "Home directory: $HOME"
         echo ""
-        echo "What is backing /mnt/ephemeral/docker?"
-        df -h /mnt/ephemeral/docker 2>/dev/null || echo "Path does not exist"
-        echo ""
-        echo "Mount info:"
-        mount | grep -E "ephemeral|docker" || echo "No ephemeral/docker mounts"
-        echo ""
-        echo "Block devices:"
-        lsblk
-        echo ""
         echo "Docker info (root dir and storage driver):"
-        docker info 2>&1 | grep -E 'Docker Root Dir|Storage Driver|Data loop file|Metadata loop file' || docker info
+        docker info 2>&1 | grep -E 'Docker Root Dir|Storage Driver'
         echo ""
         echo "AMI marker file:"
         cat /etc/vllm-ami-info 2>/dev/null || echo "No /etc/vllm-ami-info found (old AMI or not a vLLM AMI)"
@@ -326,10 +317,6 @@ steps:
         echo ""
         echo "Docker volumes:"
         docker volume ls | grep buildkit || echo "No buildkit volumes"
-        echo ""
-        echo "Docker data on disk:"
-        sudo ls -la /var/lib/docker/containers/ 2>/dev/null | head -5 || echo "Cannot access /var/lib/docker/containers/"
-        sudo ls -la /var/lib/docker/volumes/ 2>/dev/null | head -5 || echo "Cannot access /var/lib/docker/volumes/"
         echo ""
         echo "Buildx builders:"
         docker buildx ls
