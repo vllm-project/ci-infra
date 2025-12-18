@@ -303,6 +303,15 @@ steps:
         echo "Current user: $(whoami)"
         echo "Home directory: $HOME"
         echo ""
+        echo "What is backing /mnt/ephemeral/docker?"
+        df -h /mnt/ephemeral/docker 2>/dev/null || echo "Path does not exist"
+        echo ""
+        echo "Mount info:"
+        mount | grep -E "ephemeral|docker" || echo "No ephemeral/docker mounts"
+        echo ""
+        echo "Block devices:"
+        lsblk
+        echo ""
         echo "Docker info (root dir and storage driver):"
         docker info 2>&1 | grep -E 'Docker Root Dir|Storage Driver|Data loop file|Metadata loop file' || docker info
         echo ""
