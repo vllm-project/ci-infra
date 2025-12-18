@@ -91,6 +91,13 @@ build {
     script = "scripts/install-build-tools.sh"
   }
 
+  # Run buildx setup as buildkite-agent user with correct HOME
+  provisioner "shell" {
+    inline = [
+      "sudo -u buildkite-agent -i bash /tmp/scripts/setup-buildx.sh"
+    ]
+  }
+
   provisioner "shell" {
     script = "scripts/pull-base-images.sh"
   }
@@ -115,10 +122,10 @@ build {
       "sudo ls -la /var/lib/docker/volumes/ | head -5",
       "echo ''",
       "echo 'Full buildx config for buildkite-agent:'",
-      "sudo find /home/buildkite-agent/.docker -type f -o -type d 2>/dev/null | head -30",
+      "sudo find /var/lib/buildkite-agent/.docker -type f -o -type d 2>/dev/null | head -30",
       "echo ''",
       "echo 'Current file contents:'",
-      "sudo cat /home/buildkite-agent/.docker/buildx/current 2>/dev/null || echo 'No current file'",
+      "sudo cat /var/lib/buildkite-agent/.docker/buildx/current 2>/dev/null || echo 'No current file'",
       "echo ''",
       "echo 'Creating AMI marker file...'",
       "echo \"AMI_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | sudo tee /etc/vllm-ami-info",
