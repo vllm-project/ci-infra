@@ -299,39 +299,33 @@ steps:
       {% endif %}
     commands:
       - |
-        echo "--- :docker: Debug: Check for baked builder BEFORE creating new one"
-        echo "Current user: $(whoami)"
-        echo "Home directory: $HOME"
-        echo ""
-        echo "Docker info (root dir and storage driver):"
-        docker info 2>&1 | grep -E 'Docker Root Dir|Storage Driver'
-        echo ""
-        echo "AMI marker file:"
-        cat /etc/vllm-ami-info 2>/dev/null || echo "No /etc/vllm-ami-info found (old AMI or not a vLLM AMI)"
-        echo ""
-        echo "Check current user's buildx config:"
-        ls -la ~/.docker/buildx/ 2>/dev/null || echo "No ~/.docker/buildx/"
-        echo ""
-        echo "Docker containers:"
-        docker ps -a | grep -E "buildkit|baked" || echo "No buildkit containers"
-        echo ""
-        echo "Docker volumes:"
-        docker volume ls | grep buildkit || echo "No buildkit volumes"
-        echo ""
-        echo "Buildx builders:"
-        docker buildx ls
-        echo ""
-        echo "Checking for baked-vllm-builder..."
+        echo "--- :docker: Check/recreate baked builder"
+        echo "Docker Root Dir: $(docker info 2>&1 | grep 'Docker Root Dir' | awk '{print $4}')"
+
+        # Check if baked-vllm-builder exists
         if docker buildx inspect baked-vllm-builder &>/dev/null; then
-          echo "✅ baked-vllm-builder exists!"
-          docker buildx inspect baked-vllm-builder
+          echo "✅ baked-vllm-builder already exists"
+          docker buildx use baked-vllm-builder
         else
-          echo "❌ baked-vllm-builder not found"
+          echo "Builder config not found, checking for existing container/volume..."
+          docker ps -a | grep baked-vllm-builder || true
+          docker volume ls | grep baked-vllm-builder || true
+
+          # Recreate the builder - this reuses the existing container and volume with cached layers
+          echo "Recreating baked-vllm-builder (will reuse existing cache)..."
+          docker buildx create \
+            --name baked-vllm-builder \
+            --driver docker-container \
+            --driver-opt network=host \
+            --use
+
+          echo "✅ baked-vllm-builder recreated"
         fi
+
+        docker buildx inspect --bootstrap
+        docker buildx ls
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
-      - "docker buildx create --name vllm-builder --driver docker-container --use"
-      - "docker buildx inspect --bootstrap"
       - "docker buildx ls"
       - |
         #!/bin/bash
