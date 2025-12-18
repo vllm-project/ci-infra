@@ -302,6 +302,10 @@ steps:
         echo "--- :docker: Check/recreate baked builder"
         docker info 2>&1 | grep 'Docker Root Dir'
 
+        echo ""
+        echo "Cached images from AMI:"
+        docker images
+
         # Check if baked-vllm-builder exists
         if docker buildx inspect baked-vllm-builder &>/dev/null; then
           echo "✅ baked-vllm-builder already exists"
