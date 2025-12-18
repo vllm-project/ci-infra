@@ -153,26 +153,25 @@ steps:
 
         echo "New AMI ID: $$NEW_AMI"
 
-        # ASG names follow the pattern: <stack-name>-AgentAutoScaleGroup-<random>
-        # We need to find them dynamically
-        for STACK_PREFIX in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
-          echo "--- Processing $$STACK_PREFIX"
+        # Target specific CloudFormation stacks and get their ASG from outputs
+        for STACK_NAME in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
+          echo "--- Processing stack: $$STACK_NAME"
 
-          # Find the ASG for this stack
-          ASG_NAME=$$(aws autoscaling describe-auto-scaling-groups \
-            --query "AutoScalingGroups[?starts_with(AutoScalingGroupName, '$$STACK_PREFIX')].AutoScalingGroupName" \
+          # Get the ASG name from CloudFormation stack outputs
+          ASG_NAME=$$(aws cloudformation describe-stacks \
+            --stack-name "$$STACK_NAME" \
+            --query 'Stacks[0].Outputs[?OutputKey==`AgentAutoScaleGroup`].OutputValue' \
             --output text \
             --region us-east-1)
 
-          if [[ -z "$$ASG_NAME" ]]; then
-            echo "Warning: No ASG found for $$STACK_PREFIX"
+          if [[ -z "$$ASG_NAME" || "$$ASG_NAME" == "None" ]]; then
+            echo "Warning: No ASG found in stack $$STACK_NAME outputs"
             continue
           fi
 
           echo "Found ASG: $$ASG_NAME"
 
           # Get the launch template ID from the ASG
-          # Check both direct LaunchTemplate and MixedInstancesPolicy.LaunchTemplate
           LT_ID=$$(aws autoscaling describe-auto-scaling-groups \
             --auto-scaling-group-names "$$ASG_NAME" \
             --query 'AutoScalingGroups[0].MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId || AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId' \
@@ -198,7 +197,6 @@ steps:
           echo "Created new launch template version: $$NEW_VERSION"
 
           # Update the ASG to use the new launch template version
-          # Use mixed-instances-policy since that's how the ASG is configured
           aws autoscaling update-auto-scaling-group \
             --auto-scaling-group-name "$$ASG_NAME" \
             --mixed-instances-policy "LaunchTemplate={LaunchTemplateSpecification={LaunchTemplateId=$$LT_ID,Version=$$NEW_VERSION}}" \
