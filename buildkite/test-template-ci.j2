@@ -300,19 +300,31 @@ steps:
     commands:
       - |
         echo "--- :docker: Debug: Check for baked builder BEFORE creating new one"
-        echo "Docker containers:"
-        docker ps -a | grep -E "buildkit|baked" || echo "No buildkit containers"
+        echo "Current user: $(whoami)"
+        echo "Home directory: $HOME"
+        echo ""
+        echo "Check root's buildx config:"
+        sudo ls -la /root/.docker/buildx/ 2>/dev/null || echo "No /root/.docker/buildx/"
+        echo ""
+        echo "Check current user's buildx config:"
+        ls -la ~/.docker/buildx/ 2>/dev/null || echo "No ~/.docker/buildx/"
+        echo ""
+        echo "Docker containers (all users):"
+        sudo docker ps -a | grep -E "buildkit|baked" || echo "No buildkit containers"
         echo ""
         echo "Docker volumes:"
-        docker volume ls | grep buildkit || echo "No buildkit volumes"
+        sudo docker volume ls | grep buildkit || echo "No buildkit volumes"
         echo ""
-        echo "Buildx builders:"
+        echo "Buildx builders (current user):"
         docker buildx ls
         echo ""
+        echo "Buildx builders (root):"
+        sudo docker buildx ls
+        echo ""
         echo "Checking for baked-vllm-builder..."
-        if docker buildx inspect baked-vllm-builder &>/dev/null; then
-          echo "✅ baked-vllm-builder exists!"
-          docker buildx inspect baked-vllm-builder
+        if sudo docker buildx inspect baked-vllm-builder &>/dev/null; then
+          echo "✅ baked-vllm-builder exists (as root)!"
+          sudo docker buildx inspect baked-vllm-builder
         else
           echo "❌ baked-vllm-builder not found"
         fi
