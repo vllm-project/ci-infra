@@ -95,6 +95,33 @@ build {
     script = "scripts/pull-base-images.sh"
   }
 
+  # Ensure Docker data is synced to disk before AMI snapshot
+  provisioner "shell" {
+    inline = [
+      "echo '=== Preparing for AMI snapshot ==='",
+      "echo 'Current Docker state:'",
+      "docker ps -a",
+      "docker volume ls",
+      "echo ''",
+      "echo 'Stopping Docker gracefully...'",
+      "sudo systemctl stop docker",
+      "sudo sync",
+      "echo ''",
+      "echo 'Verifying Docker data on disk:'",
+      "sudo ls -la /var/lib/docker/containers/ | head -5",
+      "sudo ls -la /var/lib/docker/volumes/ | head -5",
+      "echo ''",
+      "echo 'Buildx config for buildkite-agent:'",
+      "sudo ls -la /home/buildkite-agent/.docker/buildx/instances/ || echo 'No instances dir'",
+      "echo ''",
+      "echo 'Creating AMI marker file...'",
+      "echo \"AMI_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | sudo tee /etc/vllm-ami-info",
+      "echo \"BUILDER_CONTAINER=buildx_buildkit_baked-vllm-builder0\" | sudo tee -a /etc/vllm-ami-info",
+      "echo ''",
+      "echo 'Ready for snapshot'"
+    ]
+  }
+
   post-processor "manifest" {
     output     = "manifest.json"
     strip_path = true
