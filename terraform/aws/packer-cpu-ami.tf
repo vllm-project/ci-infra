@@ -322,6 +322,7 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         ]
       },
       # CloudFormation access - trigger stack updates to pick up new AMI
+      # Includes wildcard for nested stacks (e.g., *-Autoscaling-*)
       {
         Sid    = "RefreshCPUStacks"
         Effect = "Allow"
@@ -331,7 +332,9 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         ]
         Resource = [
           "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-premerge-us-east-1/*",
-          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-postmerge-us-east-1/*"
+          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-premerge-us-east-1-*/*",
+          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-postmerge-us-east-1/*",
+          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-postmerge-us-east-1-*/*"
         ]
       },
       # CloudFormation also needs to pass IAM roles during stack update
