@@ -21,7 +21,8 @@ steps:
           exit 0
         fi
       - >
-        docker build --file docker/Dockerfile 
+        docker build --file docker/Dockerfile
+        --build-arg USE_GIT_VERSION=0
         --build-arg max_jobs=16 
         --build-arg buildkite_commit=$BUILDKITE_COMMIT 
         --build-arg USE_SCCACHE=1 
