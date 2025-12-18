@@ -1,7 +1,9 @@
 #!/bin/bash
 set -eu -o pipefail
 
-# This script runs as ec2-user, so we need sudo for system changes
+# This script runs as ec2-user via Packer provisioner.
+# The Buildkite agent runs as 'buildkite-agent' user, so we need to create
+# the builder for that user, not root or ec2-user.
 
 echo "=== Installing build tools and optimizing Docker for CI builds ==="
 
@@ -27,7 +29,7 @@ cat <<'EOF' | sudo tee /etc/buildkit/buildkitd.toml
 EOF
 
 # -----------------------------------------------------------------------------
-# Create the baked builder
+# Create the baked builder as buildkite-agent user
 #
 # NOTE: Prefixed with "baked-" to avoid conflict with CI's "vllm-builder".
 #
@@ -42,10 +44,11 @@ EOF
 # - If the container is deleted, CI can recreate the builder with the same
 #   name to inherit the existing volume and cached state
 # -----------------------------------------------------------------------------
-echo "=== Creating baked builder ==="
+echo "=== Creating baked builder as buildkite-agent user ==="
 
+# Create builder as buildkite-agent user (the user that runs CI jobs)
 # network=host: Avoids Docker network overhead, enables direct ECR/registry access
-sudo docker buildx create \
+sudo -u buildkite-agent docker buildx create \
   --name baked-vllm-builder \
   --driver docker-container \
   --driver-opt network=host \
@@ -55,7 +58,7 @@ sudo docker buildx create \
 
 # Show the created volume
 echo "=== BuildKit state volume created ==="
-sudo docker volume ls | grep buildkit || true
+docker volume ls | grep buildkit || true
 
 # -----------------------------------------------------------------------------
 # Configure the builder container to restart on boot
@@ -66,36 +69,37 @@ echo "=== Configuring builder to restart on boot ==="
 sleep 3
 
 # Dynamically get the builder container name (don't hardcode it)
-BUILDER_CONTAINER=$(sudo docker ps --filter "name=buildx_buildkit_baked-vllm-builder" --format "{{.Names}}" | head -1)
+BUILDER_CONTAINER=$(docker ps --filter "name=buildx_buildkit_baked-vllm-builder" --format "{{.Names}}" | head -1)
 
 if [[ -n "${BUILDER_CONTAINER}" ]]; then
-  sudo docker update --restart=always "${BUILDER_CONTAINER}"
+  docker update --restart=always "${BUILDER_CONTAINER}"
   echo "=== Builder container '${BUILDER_CONTAINER}' configured with restart=always ==="
 else
   echo "ERROR: Builder container not found"
-  sudo docker ps -a | grep buildkit || true
+  docker ps -a | grep buildkit || true
   exit 1
 fi
 
 # Get the state volume name
-STATE_VOLUME=$(sudo docker volume ls --format "{{.Name}}" | grep "buildx_buildkit_baked-vllm-builder" | head -1)
+STATE_VOLUME=$(docker volume ls --format "{{.Name}}" | grep "buildx_buildkit_baked-vllm-builder" | head -1)
 
 if [[ -z "${STATE_VOLUME}" ]]; then
   echo "ERROR: BuildKit state volume not found"
-  sudo docker volume ls
+  docker volume ls
   exit 1
 fi
 
 # Verify setup
 echo "=== BuildKit setup complete ==="
-sudo docker buildx ls
-sudo docker ps --filter "name=buildkit" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
-sudo docker volume ls | grep buildkit
+sudo -u buildkite-agent docker buildx ls
+docker ps --filter "name=buildkit" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+docker volume ls | grep buildkit
 
 echo ""
 echo "=== Configuration summary ==="
 echo "BuildKit config: /etc/buildkit/buildkitd.toml"
 echo "Builder name: baked-vllm-builder"
+echo "Builder user: buildkite-agent"
 echo "Builder container: ${BUILDER_CONTAINER:-not found}"
 echo "State volume: ${STATE_VOLUME:-not found}"
 echo ""
