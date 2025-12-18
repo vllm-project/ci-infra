@@ -99,6 +99,9 @@ build {
   provisioner "shell" {
     inline = [
       "echo '=== Preparing for AMI snapshot ==='",
+      "echo 'Docker info:'",
+      "docker info 2>&1 | grep -E 'Docker Root Dir|Storage Driver|Data loop file|Metadata loop file' || docker info",
+      "echo ''",
       "echo 'Current Docker state:'",
       "docker ps -a",
       "docker volume ls",

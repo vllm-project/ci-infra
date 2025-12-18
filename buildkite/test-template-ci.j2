@@ -303,6 +303,9 @@ steps:
         echo "Current user: $(whoami)"
         echo "Home directory: $HOME"
         echo ""
+        echo "Docker info (root dir and storage driver):"
+        docker info 2>&1 | grep -E 'Docker Root Dir|Storage Driver|Data loop file|Metadata loop file' || docker info
+        echo ""
         echo "AMI marker file:"
         cat /etc/vllm-ami-info 2>/dev/null || echo "No /etc/vllm-ami-info found (old AMI or not a vLLM AMI)"
         echo ""
