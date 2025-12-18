@@ -194,7 +194,7 @@ locals {
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
-      EnableInstanceStorage                = "true"
+      EnableInstanceStorage                = "false" # r6in has no instance storage; use EBS for Docker to preserve AMI cache
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
       Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
@@ -248,7 +248,7 @@ locals {
       ECRAccessPolicy                      = "poweruser"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
-      EnableInstanceStorage                = "true"
+      EnableInstanceStorage                = "false" # r6in has no instance storage; use EBS for Docker to preserve AMI cache
       BuildkiteTerminateInstanceAfterJob   = true
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id

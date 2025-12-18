@@ -299,26 +299,6 @@ steps:
       {% endif %}
     commands:
       - |
-        echo "--- :docker: Reverting Docker to use /var/lib/docker (AMI cache)"
-        echo "Current Docker config:"
-        sudo cat /etc/docker/daemon.json
-        echo ""
-        echo "Stopping Docker..."
-        sudo systemctl stop docker
-        echo ""
-        echo "Reverting data-root to /var/lib/docker..."
-        sudo jq 'del(."data-root") | ."data-root"="/var/lib/docker"' /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json.new
-        sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json
-        echo ""
-        echo "New Docker config:"
-        sudo cat /etc/docker/daemon.json
-        echo ""
-        echo "Starting Docker..."
-        sudo systemctl start docker
-        echo ""
-        echo "Docker info after restart:"
-        docker info 2>&1 | grep -E 'Docker Root Dir|Storage Driver'
-      - |
         echo "--- :docker: Debug: Check for baked builder BEFORE creating new one"
         echo "Current user: $(whoami)"
         echo "Home directory: $HOME"
