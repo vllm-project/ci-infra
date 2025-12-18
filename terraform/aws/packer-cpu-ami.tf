@@ -204,6 +204,7 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         Resource = "*"
       },
       # Instance management - scoped to us-east-1
+      # Includes launch-template/* for ASG to validate launch template usage
       {
         Sid    = "ManageInstances"
         Effect = "Allow"
@@ -219,7 +220,8 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "arn:aws:ec2:us-east-1:*:security-group/*",
           "arn:aws:ec2:us-east-1:*:subnet/*",
           "arn:aws:ec2:us-east-1:*:key-pair/*",
-          "arn:aws:ec2:us-east-1:*:image/*"
+          "arn:aws:ec2:us-east-1:*:image/*",
+          "arn:aws:ec2:us-east-1:*:launch-template/*"
         ]
       },
       # AMI management - scoped to us-east-1
