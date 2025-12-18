@@ -328,7 +328,11 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         Effect = "Allow"
         Action = [
           "cloudformation:DescribeStacks",
-          "cloudformation:UpdateStack"
+          "cloudformation:UpdateStack",
+          "cloudformation:CreateChangeSet",
+          "cloudformation:DescribeChangeSet",
+          "cloudformation:ExecuteChangeSet",
+          "cloudformation:DeleteChangeSet"
         ]
         Resource = [
           "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-premerge-us-east-1/*",
@@ -336,6 +340,13 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-postmerge-us-east-1/*",
           "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-postmerge-us-east-1-*/*"
         ]
+      },
+      # Allow CloudFormation transforms (SAM/Serverless)
+      {
+        Sid    = "CloudFormationTransforms"
+        Effect = "Allow"
+        Action = "cloudformation:CreateChangeSet"
+        Resource = "arn:aws:cloudformation:us-east-1:aws:transform/*"
       },
       # CloudFormation also needs to pass IAM roles during stack update
       {
