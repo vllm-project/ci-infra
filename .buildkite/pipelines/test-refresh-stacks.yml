@@ -1,16 +1,16 @@
-# Temporary test pipeline - just tests the CloudFormation refresh step
+# Temporary test pipeline - tests the launch template update step
 # Delete after testing
 
 env:
   SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
 
 steps:
-  - label: ":cloudformation: Test Refresh CPU Queues"
+  - label: ":rocket: Test Update Launch Templates"
     command:
       - |
         set -euo pipefail
 
-        echo "--- :cloudformation: Triggering CloudFormation stack updates to pick up new AMI"
+        echo "--- :aws: Updating Launch Templates with new AMI"
 
         # Get the new AMI ID from SSM
         NEW_AMI=$$(aws ssm get-parameter \
@@ -21,41 +21,61 @@ steps:
 
         echo "New AMI ID: $$NEW_AMI"
 
-        for STACK in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
-          echo "Updating stack: $$STACK with AMI: $$NEW_AMI"
+        # ASG names follow the pattern: <stack-name>-AgentAutoScaleGroup-<random>
+        # We need to find them dynamically
+        for STACK_PREFIX in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
+          echo "--- Processing $$STACK_PREFIX"
 
-          # Get current parameters and replace ImageId with the new AMI
-          PARAMS=$$(aws cloudformation describe-stacks \
-            --stack-name "$$STACK" \
-            --query 'Stacks[0].Parameters' \
-            --output json \
-            --region us-east-1 | jq --arg ami "$$NEW_AMI" \
-            'map(if .ParameterKey == "ImageId" then .ParameterValue = $$ami else . end)')
+          # Find the ASG for this stack
+          ASG_NAME=$$(aws autoscaling describe-auto-scaling-groups \
+            --query "AutoScalingGroups[?starts_with(AutoScalingGroupName, '$$STACK_PREFIX')].AutoScalingGroupName" \
+            --output text \
+            --region us-east-1)
 
-          echo "Parameters: $$PARAMS"
+          if [[ -z "$$ASG_NAME" ]]; then
+            echo "Warning: No ASG found for $$STACK_PREFIX"
+            continue
+          fi
 
-          # Trigger update with new AMI ID
-          aws cloudformation update-stack \
-            --stack-name "$$STACK" \
-            --use-previous-template \
-            --parameters "$$PARAMS" \
-            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-            --region us-east-1 || {
-              # update-stack fails if no changes - that's ok
-              echo "No update needed or already in progress for $$STACK"
-            }
+          echo "Found ASG: $$ASG_NAME"
+
+          # Get the launch template ID from the ASG
+          LT_ID=$$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "$$ASG_NAME" \
+            --query 'AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId' \
+            --output text \
+            --region us-east-1)
+
+          if [[ -z "$$LT_ID" || "$$LT_ID" == "None" ]]; then
+            echo "Warning: No launch template found for ASG $$ASG_NAME"
+            continue
+          fi
+
+          echo "Found Launch Template: $$LT_ID"
+
+          # Create a new launch template version with the new AMI
+          NEW_VERSION=$$(aws ec2 create-launch-template-version \
+            --launch-template-id "$$LT_ID" \
+            --source-version '$$Latest' \
+            --launch-template-data "{\"ImageId\": \"$$NEW_AMI\"}" \
+            --query 'LaunchTemplateVersion.VersionNumber' \
+            --output text \
+            --region us-east-1)
+
+          echo "Created new launch template version: $$NEW_VERSION"
+
+          # Update the ASG to use the new launch template version
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name "$$ASG_NAME" \
+            --launch-template "LaunchTemplateId=$$LT_ID,Version=$$NEW_VERSION" \
+            --region us-east-1
+
+          echo "Updated ASG $$ASG_NAME to use launch template version $$NEW_VERSION"
         done
 
-        echo "--- :hourglass: Waiting for stack updates to complete"
-
-        for STACK in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
-          echo "Waiting for $$STACK..."
-          aws cloudformation wait stack-update-complete \
-            --stack-name "$$STACK" \
-            --region us-east-1 || echo "$$STACK update completed or no update was needed"
-        done
-
-        echo "Stack updates complete. New instances will use the updated AMI."
+        echo ""
+        echo "Launch templates updated. New instances will use AMI: $$NEW_AMI"
+        echo "Existing instances will continue running until they complete their jobs."
     agents:
       queue: packer_build_queue
-    timeout_in_minutes: 30
+    timeout_in_minutes: 10

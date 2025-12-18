@@ -132,34 +132,23 @@ locals {
   }
 
   # Custom CPU build AMI configuration
-  # Only applied to specific x86_64 CPU build queues in us-east-1
+  # NOTE: ImageId is NOT managed by Terraform for these queues.
+  # The Packer pipeline updates the launch templates directly for non-disruptive AMI updates.
+  # Terraform only manages the initial stack creation; AMI updates happen via pipeline.
   cpu_build_ami_queues = toset([
     "cpu-queue-premerge-us-east-1",
     "cpu-queue-postmerge-us-east-1",
   ])
 
-  cpu_build_ami_config_us_east_1 = {
-    # Use data source to resolve AMI ID from SSM at plan time
-    # This ensures terraform apply triggers stack updates when AMI changes
-    ImageId = data.aws_ssm_parameter.cpu_build_ami_us_east_1.value
-  }
+  # Empty config - AMI is managed by pipeline, not Terraform
+  cpu_build_ami_config_us_east_1 = {}
 }
 
 # -----------------------------------------------------------------------------
-# Data Source to Resolve Current AMI from SSM
+# SSM Parameter for AMI ID (written by Packer pipeline, read by pipeline)
 # -----------------------------------------------------------------------------
-# This data source reads the current AMI ID from SSM at terraform plan time.
-# Combined with the Packer pipeline's CloudFormation refresh step, this provides
-# two ways to update the CPU queues with a new AMI:
-#   1. Daily: Packer pipeline updates SSM, then triggers CF stack refresh
-#   2. On-demand: terraform apply reads SSM and updates stacks if AMI changed
-
-data "aws_ssm_parameter" "cpu_build_ami_us_east_1" {
-  name     = aws_ssm_parameter.cpu_build_ami_us_east_1.name
-  provider = aws.us_east_1
-
-  depends_on = [aws_ssm_parameter.cpu_build_ami_us_east_1]
-}
+# The pipeline reads this SSM parameter and updates launch templates directly.
+# Terraform does NOT read this to update CloudFormation stacks.
 
 resource "aws_cloudformation_stack" "bk_queue_packer" {
   for_each   = local.merged_parameters_packer
@@ -185,7 +174,7 @@ resource "aws_cloudformation_stack" "bk_queue_packer" {
 
 resource "aws_iam_policy" "packer_ami_builder_policy" {
   name        = "packer-ami-builder-policy"
-  description = "Policy to allow Packer to build AMIs and update SSM"
+  description = "Policy to allow Packer to build AMIs and update launch templates"
   provider    = aws.us_east_1
 
   policy = jsonencode({
@@ -207,7 +196,10 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "ec2:DescribeVpcs",
           "ec2:DescribeSubnets",
           "ec2:DescribeRegions",
-          "ec2:DescribeTags"
+          "ec2:DescribeTags",
+          "ec2:DescribeLaunchTemplates",
+          "ec2:DescribeLaunchTemplateVersions",
+          "autoscaling:DescribeAutoScalingGroups"
         ]
         Resource = "*"
       },
@@ -231,7 +223,6 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         ]
       },
       # AMI management - scoped to us-east-1
-      # CreateImage requires permissions on instance, image, and snapshot resources
       {
         Sid    = "ManageAMIs"
         Effect = "Allow"
@@ -311,9 +302,9 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           }
         }
       },
-      # SSM parameter access - read security group ID, read/write AMI ID
+      # SSM parameter access - read security group/subnet, read/write AMI ID
       {
-        Sid      = "UpdateSSMParameter"
+        Sid      = "SSMParameterAccess"
         Effect   = "Allow"
         Action   = ["ssm:PutParameter", "ssm:GetParameter"]
         Resource = [
@@ -321,53 +312,21 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "arn:aws:ssm:us-east-1:*:parameter/buildkite/packer/*"
         ]
       },
-      # CloudFormation access - trigger stack updates to pick up new AMI
-      # Includes wildcard for nested stacks (e.g., *-Autoscaling-*)
+      # Launch template update - for non-disruptive AMI rollout
       {
-        Sid    = "RefreshCPUStacks"
+        Sid    = "UpdateLaunchTemplates"
         Effect = "Allow"
-        Action = [
-          "cloudformation:DescribeStacks",
-          "cloudformation:UpdateStack",
-          "cloudformation:CreateChangeSet",
-          "cloudformation:DescribeChangeSet",
-          "cloudformation:ExecuteChangeSet",
-          "cloudformation:DeleteChangeSet"
-        ]
+        Action = "ec2:CreateLaunchTemplateVersion"
+        Resource = "arn:aws:ec2:us-east-1:*:launch-template/*"
+      },
+      # ASG update - to use new launch template version
+      {
+        Sid    = "UpdateAutoScalingGroups"
+        Effect = "Allow"
+        Action = "autoscaling:UpdateAutoScalingGroup"
         Resource = [
-          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-premerge-us-east-1/*",
-          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-premerge-us-east-1-*/*",
-          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-postmerge-us-east-1/*",
-          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-postmerge-us-east-1-*/*"
-        ]
-      },
-      # Allow CloudFormation transforms (SAM/Serverless)
-      {
-        Sid    = "CloudFormationTransforms"
-        Effect = "Allow"
-        Action = "cloudformation:CreateChangeSet"
-        Resource = "arn:aws:cloudformation:us-east-1:aws:transform/*"
-      },
-      # CloudFormation also needs to pass IAM roles during stack update
-      {
-        Sid      = "PassRoleForStackUpdate"
-        Effect   = "Allow"
-        Action   = "iam:PassRole"
-        Resource = "*"
-        Condition = {
-          StringEquals = {
-            "iam:PassedToService" = "cloudformation.amazonaws.com"
-          }
-        }
-      },
-      # CloudFormation needs to read instance profiles during stack updates
-      {
-        Sid    = "GetInstanceProfile"
-        Effect = "Allow"
-        Action = "iam:GetInstanceProfile"
-        Resource = [
-          "arn:aws:iam::*:instance-profile/bk-cpu-queue-premerge-us-east-1-*",
-          "arn:aws:iam::*:instance-profile/bk-cpu-queue-postmerge-us-east-1-*"
+          "arn:aws:autoscaling:us-east-1:*:autoScalingGroup:*:autoScalingGroupName/bk-cpu-queue-premerge-us-east-1-*",
+          "arn:aws:autoscaling:us-east-1:*:autoScalingGroup:*:autoScalingGroupName/bk-cpu-queue-postmerge-us-east-1-*"
         ]
       }
     ]
