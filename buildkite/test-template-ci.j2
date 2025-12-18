@@ -300,7 +300,7 @@ steps:
     commands:
       - |
         echo "--- :docker: Check/recreate baked builder"
-        echo "Docker Root Dir: $(docker info 2>&1 | grep 'Docker Root Dir' | awk '{print $4}')"
+        docker info 2>&1 | grep 'Docker Root Dir'
 
         # Check if baked-vllm-builder exists
         if docker buildx inspect baked-vllm-builder &>/dev/null; then
