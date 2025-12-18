@@ -160,7 +160,7 @@ steps:
           # Get the ASG name from CloudFormation stack outputs
           ASG_NAME=$$(aws cloudformation describe-stacks \
             --stack-name "$$STACK_NAME" \
-            --query 'Stacks[0].Outputs[?OutputKey==`AgentAutoScaleGroup`].OutputValue' \
+            --query 'Stacks[0].Outputs[?OutputKey==`AutoScalingGroupName`].OutputValue' \
             --output text \
             --region us-east-1)
 

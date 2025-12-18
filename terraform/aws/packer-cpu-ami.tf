@@ -199,7 +199,8 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "ec2:DescribeTags",
           "ec2:DescribeLaunchTemplates",
           "ec2:DescribeLaunchTemplateVersions",
-          "autoscaling:DescribeAutoScalingGroups"
+          "autoscaling:DescribeAutoScalingGroups",
+          "cloudformation:DescribeStacks"
         ]
         Resource = "*"
       },
