@@ -338,12 +338,21 @@ steps:
 
         echo ""
         echo "=== Buildx builder setup ==="
-        # Check if baked-vllm-builder config exists (systemd should create it on boot)
-        if docker buildx inspect baked-vllm-builder &>/dev/null; then
-          echo "✅ baked-vllm-builder already configured"
+        # Check if baked-vllm-builder is configured with the remote driver
+        BUILDER_DRIVER=$(docker buildx inspect baked-vllm-builder 2>/dev/null | grep -oP 'Driver:\s+\K\S+' || echo "none")
+        echo "Current builder driver: $BUILDER_DRIVER"
+
+        if [[ "$BUILDER_DRIVER" == "remote" ]]; then
+          echo "✅ baked-vllm-builder already configured with remote driver"
           docker buildx use baked-vllm-builder
         else
-          echo "Builder config not found, creating..."
+          # Remove old builder if exists with wrong driver
+          if [[ "$BUILDER_DRIVER" != "none" ]]; then
+            echo "Removing old builder with $BUILDER_DRIVER driver..."
+            docker buildx rm baked-vllm-builder 2>/dev/null || true
+          fi
+
+          echo "Creating builder..."
           # Connect to standalone buildkitd daemon
           if [[ -S /run/buildkit/buildkitd.sock ]]; then
             echo "Connecting to buildkitd via socket..."
