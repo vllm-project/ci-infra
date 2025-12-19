@@ -2,9 +2,9 @@
 set -eu -o pipefail
 
 # This script runs as buildkite-agent user (via sudo -u buildkite-agent -i)
-# The -i flag ensures we get the correct HOME directory from the login shell.
+# It configures buildx to use the standalone BuildKit daemon and warms the cache.
 
-echo "=== Setting up buildx builder as buildkite-agent ==="
+echo "=== Setting up buildx to use standalone BuildKit daemon ==="
 echo "Running as user: $(whoami)"
 echo "HOME directory: $HOME"
 
@@ -14,65 +14,57 @@ if [[ "$(whoami)" != "buildkite-agent" ]]; then
   exit 1
 fi
 
+# Verify buildkitd is running
+if ! sudo systemctl is-active --quiet buildkitd.service; then
+  echo "ERROR: buildkitd service is not running"
+  sudo systemctl status buildkitd.service --no-pager
+  exit 1
+fi
+
+# Verify socket exists
+if [[ ! -S /run/buildkit/buildkitd.sock ]]; then
+  echo "ERROR: BuildKit socket not found at /run/buildkit/buildkitd.sock"
+  ls -la /run/buildkit/ || echo "Directory doesn't exist"
+  exit 1
+fi
+
 # -----------------------------------------------------------------------------
-# Create the baked builder
-#
-# Cache persistence strategy:
-# - docker-container driver automatically creates a Docker volume for cache
-# - Volume name: buildx_buildkit_<builder-name>0_state
-# - This volume is stored in /var/lib/docker/volumes/ (part of EBS snapshot)
-#
-# After AMI snapshot/restore:
-# - The volume persists (it's on the EBS volume)
-# - The container is set to restart=always, so it starts automatically
-# - A systemd service recreates the buildx config on boot
+# Create buildx builder using remote driver
+# This connects to the standalone buildkitd daemon via Unix socket
 # -----------------------------------------------------------------------------
-echo "Creating baked-vllm-builder..."
+echo "Creating baked-vllm-builder using remote driver..."
+
+# Remove any existing builder with this name
+docker buildx rm baked-vllm-builder 2>/dev/null || true
+
 docker buildx create \
   --name baked-vllm-builder \
-  --driver docker-container \
-  --driver-opt network=host \
-  --config /etc/buildkit/buildkitd.toml \
+  --driver remote \
   --use \
-  --bootstrap
+  unix:///run/buildkit/buildkitd.sock
 
-# Wait for container to be fully running
-sleep 3
+echo "✅ Builder created"
 
-# Configure the builder container to restart on boot
-echo "=== Configuring builder to restart on boot ==="
-BUILDER_CONTAINER=$(docker ps --filter "name=buildx_buildkit_baked-vllm-builder" --format "{{.Names}}" | head -1)
-
-if [[ -n "${BUILDER_CONTAINER}" ]]; then
-  docker update --restart=always "${BUILDER_CONTAINER}"
-  echo "Container '${BUILDER_CONTAINER}' configured with restart=always"
-else
-  echo "ERROR: Builder container not found"
-  docker ps -a | grep buildkit || true
-  exit 1
-fi
-
-# Verify the state volume was created
-STATE_VOLUME=$(docker volume ls --format "{{.Name}}" | grep "buildx_buildkit_baked-vllm-builder" | head -1)
-if [[ -z "${STATE_VOLUME}" ]]; then
-  echo "ERROR: BuildKit state volume not found"
-  docker volume ls
-  exit 1
-fi
-
-# -----------------------------------------------------------------------------
-# Verification
-# -----------------------------------------------------------------------------
+# Verify the builder works
 echo ""
 echo "=== Buildx configuration ==="
-echo "Config location: $HOME/.docker/buildx/"
-ls -la "$HOME/.docker/buildx/"
+docker buildx inspect baked-vllm-builder
 echo ""
 echo "Available builders:"
 docker buildx ls
 echo ""
+
+# -----------------------------------------------------------------------------
+# Show BuildKit cache location
+# -----------------------------------------------------------------------------
+echo "=== BuildKit cache location ==="
+echo "Cache directory: /var/lib/buildkit"
+sudo du -sh /var/lib/buildkit 2>/dev/null || echo "Could not determine size"
+sudo ls -la /var/lib/buildkit/ || true
+
+echo ""
 echo "=== Summary ==="
 echo "Builder name: baked-vllm-builder"
-echo "Container: ${BUILDER_CONTAINER}"
-echo "State volume: ${STATE_VOLUME}"
-echo "Config dir: $HOME/.docker/buildx/"
+echo "Driver: remote"
+echo "Endpoint: unix:///run/buildkit/buildkitd.sock"
+echo "Cache: /var/lib/buildkit (persists across AMI snapshot)"

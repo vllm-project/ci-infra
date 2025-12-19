@@ -299,7 +299,7 @@ steps:
       {% endif %}
     commands:
       - |
-        echo "--- :docker: Check/attach baked builder"
+        echo "--- :docker: Check BuildKit and buildx"
         docker info 2>&1 | grep 'Docker Root Dir'
 
         echo ""
@@ -307,44 +307,51 @@ steps:
         docker images
 
         echo ""
-        echo "BuildKit state volume:"
-        docker volume ls | grep baked-vllm-builder || echo "No baked-vllm-builder volume found"
-        # Find the actual volume name and show size
-        VOLUME_NAME=$(docker volume ls --format '{{"{{"}}.Name{{"}}"}}' | grep baked-vllm-builder | head -1)
-        if [[ -n "$VOLUME_NAME" ]]; then
-          echo "Volume name: $VOLUME_NAME"
-          VOLUME_PATH=$(docker volume inspect "$VOLUME_NAME" --format '{{"{{"}}.Mountpoint{{"}}"}}' 2>/dev/null || true)
-          if [[ -n "$VOLUME_PATH" ]]; then
-            echo "Volume path: $VOLUME_PATH"
-            sudo du -sh "$VOLUME_PATH" 2>/dev/null || echo "Could not get volume size"
-          fi
+        echo "=== BuildKit daemon status ==="
+        if sudo systemctl is-active --quiet buildkitd.service 2>/dev/null; then
+          echo "✅ buildkitd service is running"
+          sudo systemctl status buildkitd.service --no-pager || true
         else
-          echo "No BuildKit volume found"
+          echo "❌ buildkitd service not running"
+          sudo systemctl status buildkitd.service --no-pager || true
         fi
 
+        echo ""
+        echo "=== BuildKit cache size ==="
+        if [[ -d /var/lib/buildkit ]]; then
+          sudo du -sh /var/lib/buildkit 2>/dev/null || echo "Could not get cache size"
+        else
+          echo "No BuildKit cache directory found"
+        fi
+
+        echo ""
+        echo "=== BuildKit socket ==="
+        if [[ -S /run/buildkit/buildkitd.sock ]]; then
+          echo "✅ Socket available at /run/buildkit/buildkitd.sock"
+        else
+          echo "❌ Socket not found"
+          ls -la /run/buildkit/ 2>/dev/null || echo "Directory doesn't exist"
+        fi
+
+        echo ""
+        echo "=== Buildx builder setup ==="
         # Check if baked-vllm-builder config exists (systemd should create it on boot)
         if docker buildx inspect baked-vllm-builder &>/dev/null; then
           echo "✅ baked-vllm-builder already configured"
           docker buildx use baked-vllm-builder
         else
-          echo "Builder config not found, checking for existing container..."
-          docker ps -a | grep baked-vllm-builder || true
-
-          # Find the existing baked builder container (created during AMI build)
-          CONTAINER_NAME=$(docker ps --filter "name=buildx_buildkit_baked-vllm-builder" --format "{{"{{"}}.Names{{"}}"}}" | head -1)
-
-          if [[ -n "$CONTAINER_NAME" ]]; then
-            # Attach to the existing container using remote driver
-            # This reuses the container's cache instead of creating a new empty one
-            echo "Attaching to existing container: $CONTAINER_NAME"
+          echo "Builder config not found, creating..."
+          # Connect to standalone buildkitd daemon
+          if [[ -S /run/buildkit/buildkitd.sock ]]; then
+            echo "Connecting to buildkitd via socket..."
             docker buildx create \
               --name baked-vllm-builder \
               --driver remote \
               --use \
-              "docker-container://$CONTAINER_NAME"
-            echo "✅ baked-vllm-builder attached to existing container"
+              unix:///run/buildkit/buildkitd.sock
+            echo "✅ Connected to buildkitd"
           else
-            echo "WARNING: No baked builder container found, creating new builder (no cache)"
+            echo "WARNING: buildkitd not available, creating container-based builder (no cache)"
             docker buildx create \
               --name baked-vllm-builder \
               --driver docker-container \
@@ -355,7 +362,7 @@ steps:
           fi
         fi
 
-        docker buildx inspect --bootstrap
+        docker buildx inspect
         docker buildx ls
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
