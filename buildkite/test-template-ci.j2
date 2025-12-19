@@ -306,6 +306,16 @@ steps:
         echo "Cached images from AMI:"
         docker images
 
+        echo ""
+        echo "BuildKit state volume:"
+        docker volume ls | grep baked-vllm-builder || echo "No baked-vllm-builder volume found"
+        # Show volume size (du on the volume mount point)
+        VOLUME_PATH=$(docker volume inspect buildx_buildkit_baked-vllm-builder0_state --format '{{"{{"}}.Mountpoint{{"}}"}}' 2>/dev/null || true)
+        if [[ -n "$VOLUME_PATH" ]]; then
+          echo "Volume path: $VOLUME_PATH"
+          sudo du -sh "$VOLUME_PATH" 2>/dev/null || echo "Could not get volume size"
+        fi
+
         # Check if baked-vllm-builder config exists (systemd should create it on boot)
         if docker buildx inspect baked-vllm-builder &>/dev/null; then
           echo "✅ baked-vllm-builder already configured"
@@ -313,7 +323,6 @@ steps:
         else
           echo "Builder config not found, checking for existing container..."
           docker ps -a | grep baked-vllm-builder || true
-          docker volume ls | grep baked-vllm-builder || true
 
           # Find the existing baked builder container (created during AMI build)
           CONTAINER_NAME=$(docker ps --filter "name=buildx_buildkit_baked-vllm-builder" --format "{{"{{"}}.Names{{"}}"}}" | head -1)
