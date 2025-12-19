@@ -58,7 +58,7 @@ docker buildx build \
   --cache-to "type=local,dest=${LOCAL_CACHE_DIR},mode=max" \
   --target base \
   --progress plain \
-  -f Dockerfile \
+  -f docker/Dockerfile \
   . || echo "Build stopped (expected - we just want the cache)"
 
 # Cleanup
