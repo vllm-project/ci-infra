@@ -11,7 +11,7 @@ set -eu -o pipefail
 #
 # The ECR_TOKEN environment variable is passed from Packer.
 
-LOCAL_CACHE_DIR="/var/lib/buildkit/vllm-cache"
+LOCAL_CACHE_DIR="/home/buildkite-agent/.buildkit-cache"
 ECR_REGISTRY="936637512419.dkr.ecr.us-east-1.amazonaws.com"
 CACHE_IMAGE="${ECR_REGISTRY}/vllm-ci-postmerge-cache:latest"
 
@@ -44,6 +44,9 @@ VLLM_DIR="/tmp/vllm-cache-build"
 rm -rf "$VLLM_DIR"
 git clone --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_DIR"
 cd "$VLLM_DIR"
+
+# Create local cache directory (buildkite-agent owns this)
+mkdir -p "$LOCAL_CACHE_DIR"
 
 echo ""
 echo "Building with cache-from registry, cache-to local..."

@@ -383,7 +383,7 @@ steps:
         --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
         {% endif %}
         --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd
-        --cache-from type=local,src=/var/lib/buildkit/vllm-cache
+        --cache-from type=local,src=/home/buildkite-agent/.buildkit-cache
         --cache-from type=registry,ref={{ cache_from }},mode=max
         --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max
         --cache-from type=registry,ref={{ cache_from_main }},mode=max
