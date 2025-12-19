@@ -25,11 +25,6 @@ fi
 docker buildx use baked-vllm-builder
 echo "Using builder: baked-vllm-builder"
 
-# Login to ECR (instance should have IAM role access)
-echo ""
-echo "=== Logging into ECR ==="
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
-
 # Clone vllm repo to get Dockerfile
 WORK_DIR=$(mktemp -d)
 cd "$WORK_DIR"
@@ -40,21 +35,22 @@ git clone --depth 1 https://github.com/vllm-project/vllm.git .
 
 echo ""
 echo "=== Running build to warm cache ==="
-echo "This will pull cache from ECR registry into local BuildKit cache."
+echo "Building from scratch to populate local BuildKit cache."
+echo "This may take 30-60 minutes but will save time on every CI build."
 
-# Run the build with cache-from to pull layers into buildkit
-# We don't need to push - just build to populate local cache
-# Use --load=false and --push=false to avoid outputting anything
+# Run the build to populate buildkit cache
+# Don't need --cache-from or --cache-to or --push - just build to cache locally
+# Use simple args to avoid errors
 docker buildx build \
   --file docker/Dockerfile \
   --build-arg max_jobs=8 \
   --build-arg USE_SCCACHE=1 \
-  --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0" \
-  --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a" \
-  --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:latest,mode=max \
   --target test \
   --progress plain \
-  . || echo "Build completed (may have partial cache)"
+  . || {
+    echo "Build failed but may have partial cache"
+    echo "Continuing with whatever cache was populated..."
+  }
 
 # Cleanup
 cd /
