@@ -64,8 +64,8 @@ After=network.target docker.service
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/buildkitd --config /etc/buildkit/buildkitd.toml --root /var/lib/buildkit
-# Set socket permissions after buildkitd creates it (make accessible to all users)
-ExecStartPost=/bin/bash -c 'sleep 2 && chmod 755 /run/buildkit && chmod 666 /run/buildkit/buildkitd.sock'
+# Set permissions after buildkitd creates files (make accessible for debugging)
+ExecStartPost=/bin/bash -c 'sleep 2 && chmod 755 /run/buildkit && chmod 666 /run/buildkit/buildkitd.sock && chmod -R 755 /var/lib/buildkit'
 Restart=always
 RestartSec=5
 

@@ -317,10 +317,8 @@ steps:
 
         echo ""
         echo "=== BuildKit cache debug ==="
-        # Use sudo to check cache contents
-        sudo ls -la /var/lib/buildkit/ 2>/dev/null || echo "Cannot list /var/lib/buildkit"
-        sudo du -sh /var/lib/buildkit 2>/dev/null || echo "Cannot get cache size"
-        sudo du -sh /var/lib/buildkit/*/ 2>/dev/null || echo "Cannot list subdirectories"
+        ls -la /var/lib/buildkit/ 2>/dev/null || echo "Cannot list /var/lib/buildkit (permission denied)"
+        du -sh /var/lib/buildkit 2>/dev/null || echo "Cannot get cache size"
 
         echo ""
         echo "=== BuildKit socket ==="
