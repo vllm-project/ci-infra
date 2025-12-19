@@ -77,12 +77,16 @@ steps:
 
         echo "Using subnet: $$SUBNET_ID"
 
+        echo "--- :docker: Getting ECR token for cache image"
+        ECR_TOKEN=$$(aws ecr get-login-password --region us-east-1)
+
         echo "--- :packer: Building AMI"
         packer init .
         packer build \
           -var "source_ami=$$SOURCE_AMI" \
           -var "security_group_id=$$SECURITY_GROUP_ID" \
           -var "subnet_id=$$SUBNET_ID" \
+          -var "ecr_token=$$ECR_TOKEN" \
           buildkite-cpu-ami.pkr.hcl
 
         echo "--- :aws: Extracting AMI ID"

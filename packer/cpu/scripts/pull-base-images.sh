@@ -1,16 +1,27 @@
 #!/bin/bash
 set -eu -o pipefail
 
-# Pre-pull Docker images into BuildKit cache.
+# Pre-pull Docker cache images into BuildKit cache.
 # This runs as buildkite-agent user since that's who owns the buildx config.
 #
 # We use buildx to pull images so they're cached in /var/lib/buildkit,
 # not in Docker's layer store (/var/lib/docker).
 #
-# NOTE: We pull from public.ecr.aws which allows unauthenticated access.
+# The ECR_TOKEN environment variable is passed from Packer.
 
-echo "=== Pre-pulling images into BuildKit cache ==="
+echo "=== Pre-pulling cache images into BuildKit cache ==="
 echo "Running as user: $(whoami)"
+
+# Authenticate to ECR using token passed from Packer
+ECR_REGISTRY="936637512419.dkr.ecr.us-east-1.amazonaws.com"
+
+if [[ -z "${ECR_TOKEN:-}" ]]; then
+  echo "ERROR: ECR_TOKEN not set"
+  exit 1
+fi
+
+echo "Authenticating to ECR..."
+echo "$ECR_TOKEN" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
 # Verify buildx builder is configured
 if ! docker buildx inspect baked-vllm-builder &>/dev/null; then
@@ -22,21 +33,23 @@ fi
 docker buildx use baked-vllm-builder
 echo "Using builder: baked-vllm-builder"
 
-# Images to pre-pull (add more as needed)
-IMAGES=(
-  "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
-)
-
-for image in "${IMAGES[@]}"; do
-  echo ""
-  echo "Pulling into BuildKit cache: ${image}"
-  # Build a minimal Dockerfile that just pulls the image
-  # Use --load to force BuildKit to actually download all layers
-  # This caches all layers in BuildKit's cache (/var/lib/buildkit)
-  echo "FROM ${image}" | docker buildx build --builder baked-vllm-builder --load --progress plain -
-done
+# Cache image to pre-pull (this is what --cache-from uses in CI builds)
+CACHE_IMAGE="${ECR_REGISTRY}/vllm-ci-postmerge-cache:latest"
 
 echo ""
-echo "=== BuildKit cache populated ==="
+echo "Pulling cache image into BuildKit cache: ${CACHE_IMAGE}"
+
+# Import the cache by using --cache-from in a minimal build
+# This downloads the cache manifests and blobs into local BuildKit storage
+docker buildx build \
+  --builder baked-vllm-builder \
+  --cache-from "type=registry,ref=${CACHE_IMAGE}" \
+  --progress plain \
+  --output type=cacheonly \
+  - <<< "FROM scratch"
+
+echo ""
+echo "=== BuildKit cache populated with cache image ==="
 echo "Cache location: /var/lib/buildkit"
 ls -la /var/lib/buildkit/ 2>/dev/null || echo "Cannot list (permission denied)"
+du -sh /var/lib/buildkit 2>/dev/null || echo "Cannot get size"

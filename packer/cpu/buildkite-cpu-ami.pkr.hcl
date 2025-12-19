@@ -33,6 +33,12 @@ variable "deprecate_days" {
   description = "Number of days after which the AMI is marked as deprecated"
 }
 
+variable "ecr_token" {
+  type        = string
+  sensitive   = true
+  description = "ECR authentication token for pulling cache images"
+}
+
 locals {
   timestamp         = regex_replace(timestamp(), "[- TZ:]", "")
   deprecate_hours   = var.deprecate_days * 24
@@ -100,8 +106,11 @@ build {
 
   # Pull images into BuildKit cache (runs as buildkite-agent)
   provisioner "shell" {
+    environment_vars = [
+      "ECR_TOKEN=${var.ecr_token}"
+    ]
     inline = [
-      "sudo -u buildkite-agent -i bash /tmp/scripts/pull-base-images.sh"
+      "sudo -u buildkite-agent -i ECR_TOKEN=\"$ECR_TOKEN\" bash /tmp/scripts/pull-base-images.sh"
     ]
   }
 
