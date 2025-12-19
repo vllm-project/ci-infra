@@ -309,11 +309,17 @@ steps:
         echo ""
         echo "BuildKit state volume:"
         docker volume ls | grep baked-vllm-builder || echo "No baked-vllm-builder volume found"
-        # Show volume size (du on the volume mount point)
-        VOLUME_PATH=$(docker volume inspect buildx_buildkit_baked-vllm-builder0_state --format '{{"{{"}}.Mountpoint{{"}}"}}' 2>/dev/null || true)
-        if [[ -n "$VOLUME_PATH" ]]; then
-          echo "Volume path: $VOLUME_PATH"
-          sudo du -sh "$VOLUME_PATH" 2>/dev/null || echo "Could not get volume size"
+        # Find the actual volume name and show size
+        VOLUME_NAME=$(docker volume ls --format '{{"{{"}}.Name{{"}}"}}' | grep baked-vllm-builder | head -1)
+        if [[ -n "$VOLUME_NAME" ]]; then
+          echo "Volume name: $VOLUME_NAME"
+          VOLUME_PATH=$(docker volume inspect "$VOLUME_NAME" --format '{{"{{"}}.Mountpoint{{"}}"}}' 2>/dev/null || true)
+          if [[ -n "$VOLUME_PATH" ]]; then
+            echo "Volume path: $VOLUME_PATH"
+            sudo du -sh "$VOLUME_PATH" 2>/dev/null || echo "Could not get volume size"
+          fi
+        else
+          echo "No BuildKit volume found"
         fi
 
         # Check if baked-vllm-builder config exists (systemd should create it on boot)
