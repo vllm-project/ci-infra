@@ -42,6 +42,11 @@ echo "Pulling cache image into BuildKit cache: ${CACHE_IMAGE}"
 # Pull the cache image using buildx with --load to force all layers to download
 echo "FROM ${CACHE_IMAGE}" | docker buildx build --builder baked-vllm-builder --load --progress plain -
 
+# Logout from ECR (don't leave credentials in the AMI)
+echo ""
+echo "Logging out from ECR..."
+docker logout "$ECR_REGISTRY"
+
 echo ""
 echo "=== BuildKit cache populated with cache image ==="
 echo "Cache location: /var/lib/buildkit"
