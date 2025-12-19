@@ -89,15 +89,18 @@ resolve_ecr_cache_vars() {
     if [[ "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
         if [[ "$BUILDKITE_BRANCH" == "main" ]]; then
             local cache="${MAIN_CACHE_ECR}:latest"
+            CACHE_TO_COMMIT="${MAIN_CACHE_ECR}:${BUILDKITE_COMMIT}"
         else
             local clean_branch=$(clean_docker_tag "$BUILDKITE_BRANCH")
             local cache="${TEST_CACHE_ECR}:${clean_branch}"
+            CACHE_TO_COMMIT=""
         fi
         CACHE_TO="$cache"
         CACHE_FROM="$cache"
         CACHE_FROM_BASE_BRANCH="$cache"
     else
         CACHE_TO="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}"
+        CACHE_TO_COMMIT=""
         CACHE_FROM="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}"
         if [[ "$BUILDKITE_PULL_REQUEST_BASE_BRANCH" == "main" ]]; then
             CACHE_FROM_BASE_BRANCH="${MAIN_CACHE_ECR}:latest"
@@ -106,9 +109,9 @@ resolve_ecr_cache_vars() {
             CACHE_FROM_BASE_BRANCH="${TEST_CACHE_ECR}:${clean_base}"
         fi
     fi
-    
+
     CACHE_FROM_MAIN="${MAIN_CACHE_ECR}:latest"
-    export CACHE_FROM CACHE_FROM_BASE_BRANCH CACHE_FROM_MAIN CACHE_TO
+    export CACHE_FROM CACHE_FROM_BASE_BRANCH CACHE_FROM_MAIN CACHE_TO CACHE_TO_COMMIT
 }
 
 upload_pipeline() {
@@ -172,6 +175,7 @@ upload_pipeline() {
             -D cache_from_base_branch="$CACHE_FROM_BASE_BRANCH" \
             -D cache_from_main="$CACHE_FROM_MAIN" \
             -D cache_to="$CACHE_TO" \
+            -D cache_to_commit="$CACHE_TO_COMMIT" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )

@@ -390,6 +390,9 @@ steps:
         --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
         {% endif %}
         --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd
+        {% if cache_to_commit %}
+        --cache-to type=registry,ref={{ cache_to_commit }},mode=max,compression=zstd
+        {% endif %}
         --cache-from type=local,src=/home/buildkite-agent/.buildkit-cache
         --cache-from type=registry,ref={{ cache_from }},mode=max
         --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max

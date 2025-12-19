@@ -39,14 +39,20 @@ def _docker_manifest_exists(image_tag: str) -> bool:
         return False
 
 
-def get_ecr_cache_registry() -> Tuple[str, str]:
+def get_ecr_cache_registry() -> Tuple[str, str, str]:
+    """Get ECR cache registry tags.
+
+    Returns:
+        Tuple of (cache_from_tag, cache_to_tag, cache_to_commit_tag)
+        cache_to_commit_tag is the commit-specific tag (only for main branch, empty otherwise)
+    """
     global_config = get_global_config()
     branch = global_config["branch"]
     test_cache_ecr = "936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-test-cache"
     postmerge_cache_ecr = (
         "936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache"
     )
-    cache_from_tag, cache_to_tag = None, None
+    cache_from_tag, cache_to_tag, cache_to_commit_tag = None, None, ""
     # Authenticate Docker to AWS ECR
     login_cmd = ["aws", "ecr", "get-login-password", "--region", "us-east-1"]
     try:
@@ -87,6 +93,7 @@ def get_ecr_cache_registry() -> Tuple[str, str]:
     else:  # non-PR build
         if branch == "main":  # postmerge
             cache_to_tag = f"{postmerge_cache_ecr}:latest"
+            cache_to_commit_tag = f"{postmerge_cache_ecr}:$BUILDKITE_COMMIT"
             cache_from_tag = f"{postmerge_cache_ecr}:latest"
         else:
             clean_branch = _clean_docker_tag(branch)
@@ -97,4 +104,4 @@ def get_ecr_cache_registry() -> Tuple[str, str]:
                 cache_from_tag = f"{postmerge_cache_ecr}:latest"
     if not cache_from_tag or not cache_to_tag:
         raise RuntimeError("Failed to get ECR cache tags")
-    return cache_from_tag, cache_to_tag
+    return cache_from_tag, cache_to_tag, cache_to_commit_tag

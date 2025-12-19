@@ -87,7 +87,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
     if global_config["name"] != "vllm_ci":
         return {}
 
-    cache_from_tag, cache_to_tag = get_ecr_cache_registry()
+    cache_from_tag, cache_to_tag, cache_to_commit_tag = get_ecr_cache_registry()
     return {
         "$REGISTRY": global_config["registries"],
         "$REPO": global_config["repositories"]["main"]
@@ -99,6 +99,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
+        "$CACHE_TO_COMMIT": cache_to_commit_tag,
     }
 
 
