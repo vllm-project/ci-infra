@@ -33,6 +33,11 @@ echo "=== Creating BuildKit configuration ==="
 sudo mkdir -p /etc/buildkit
 sudo mkdir -p /var/lib/buildkit
 
+# Create local cache directory for buildkite-agent
+# The home directory may not exist yet during Packer build
+sudo mkdir -p /home/buildkite-agent/.buildkit-cache
+sudo chown -R buildkite-agent:buildkite-agent /home/buildkite-agent/.buildkit-cache
+
 cat <<'EOF' | sudo tee /etc/buildkit/buildkitd.toml
 # BuildKit daemon configuration for vLLM CI builds
 #

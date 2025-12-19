@@ -45,9 +45,6 @@ rm -rf "$VLLM_DIR"
 git clone --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_DIR"
 cd "$VLLM_DIR"
 
-# Create local cache directory (buildkite-agent owns this)
-mkdir -p "$LOCAL_CACHE_DIR"
-
 echo ""
 echo "Building with cache-from registry, cache-to local..."
 echo "Cache from: ${CACHE_IMAGE}"
