@@ -319,6 +319,8 @@ steps:
         else
           echo "❌ buildkitd not running (no socket)"
         fi
+        # Show systemd status (may need sudo for full details)
+        systemctl status buildkitd.service --no-pager 2>/dev/null || echo "Cannot get systemd status"
 
         echo ""
         echo "=== BuildKit cache debug ==="
@@ -399,6 +401,14 @@ steps:
         --push
         --target test
         --progress plain .
+      - |
+        echo "--- :docker: Post-build status check"
+        echo "=== BuildKit daemon status after build ==="
+        systemctl status buildkitd.service --no-pager 2>/dev/null || echo "Cannot get systemd status"
+        echo ""
+        echo "=== System resources after build ==="
+        free -h
+        df -h /var/lib/buildkit /home/buildkite-agent 2>/dev/null || df -h
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
