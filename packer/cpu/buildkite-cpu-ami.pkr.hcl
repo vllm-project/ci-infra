@@ -98,8 +98,11 @@ build {
     ]
   }
 
+  # Pull images into BuildKit cache (runs as buildkite-agent)
   provisioner "shell" {
-    script = "scripts/pull-base-images.sh"
+    inline = [
+      "sudo -u buildkite-agent -i bash /tmp/scripts/pull-base-images.sh"
+    ]
   }
 
   # Ensure Docker data is synced to disk before AMI snapshot
