@@ -31,8 +31,9 @@ for image in "${IMAGES[@]}"; do
   echo ""
   echo "Pulling into BuildKit cache: ${image}"
   # Build a minimal Dockerfile that just pulls the image
+  # Use --load to force BuildKit to actually download all layers
   # This caches all layers in BuildKit's cache (/var/lib/buildkit)
-  echo "FROM ${image}" | docker buildx build --builder baked-vllm-builder --progress plain -
+  echo "FROM ${image}" | docker buildx build --builder baked-vllm-builder --load --progress plain -
 done
 
 echo ""
