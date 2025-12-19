@@ -5,15 +5,16 @@ set -eu -o pipefail
 # This runs as buildkite-agent user since that's who owns the buildx config.
 #
 # Strategy:
-# 1. Clone vLLM repo to get the Dockerfile
-# 2. Build with --cache-from to pull cache from ECR registry
-# 3. Export to --cache-to type=local for CI builds to use
+# 1. Clone vLLM repo
+# 2. Find the latest commit that has a cache manifest in ECR
+# 3. Checkout that commit and build with --cache-from
+# 4. Export to --cache-to type=local for CI builds to use
 #
 # The ECR_TOKEN environment variable is passed from Packer.
 
 LOCAL_CACHE_DIR="/home/buildkite-agent/.buildkit-cache"
 ECR_REGISTRY="936637512419.dkr.ecr.us-east-1.amazonaws.com"
-CACHE_IMAGE="${ECR_REGISTRY}/vllm-ci-postmerge-cache:latest"
+CACHE_REPO="${ECR_REGISTRY}/vllm-ci-postmerge-cache"
 
 echo "=== Pre-warming BuildKit cache ==="
 echo "Running as user: $(whoami)"
@@ -37,13 +38,42 @@ fi
 docker buildx use baked-vllm-builder
 echo "Using builder: baked-vllm-builder"
 
-# Clone vLLM repo
+# Clone vLLM repo (full history needed to walk commits)
 echo ""
 echo "Cloning vLLM repository..."
 VLLM_DIR="/tmp/vllm-cache-build"
 rm -rf "$VLLM_DIR"
-git clone --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_DIR"
+git clone --depth 50 https://github.com/vllm-project/vllm.git "$VLLM_DIR"
 cd "$VLLM_DIR"
+
+# Find the latest commit that has a cache manifest in ECR
+echo ""
+echo "Finding latest commit with cache in ECR..."
+
+FOUND_COMMIT=""
+for commit in $(git log --format="%H" -n 50); do
+  CACHE_TAG="${CACHE_REPO}:${commit}"
+  echo "Checking: ${commit:0:12}..."
+
+  # Check if cache manifest exists for this commit
+  if docker manifest inspect "$CACHE_TAG" &>/dev/null; then
+    echo "✅ Found cache for commit: ${commit:0:12}"
+    FOUND_COMMIT="$commit"
+    break
+  fi
+done
+
+if [[ -z "$FOUND_COMMIT" ]]; then
+  echo "⚠️ No commit-specific cache found, falling back to 'latest'"
+  CACHE_IMAGE="${CACHE_REPO}:latest"
+else
+  echo "Using cache from commit: $FOUND_COMMIT"
+  CACHE_IMAGE="${CACHE_REPO}:${FOUND_COMMIT}"
+
+  # Checkout the specific commit so Dockerfile matches the cache
+  echo "Checking out commit ${FOUND_COMMIT:0:12}..."
+  git checkout "$FOUND_COMMIT"
+fi
 
 echo ""
 echo "Building with cache-from registry, cache-to local..."
