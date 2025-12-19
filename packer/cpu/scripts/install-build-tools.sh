@@ -59,11 +59,13 @@ echo "=== Creating BuildKit systemd service ==="
 cat <<'EOF' | sudo tee /etc/systemd/system/buildkitd.service
 [Unit]
 Description=BuildKit daemon for Docker builds
-After=network.target
+After=network.target docker.service
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/buildkitd --config /etc/buildkit/buildkitd.toml --root /var/lib/buildkit
+# Set socket permissions after buildkitd creates it (make accessible to all users)
+ExecStartPost=/bin/bash -c 'sleep 2 && chmod 755 /run/buildkit && chmod 666 /run/buildkit/buildkitd.sock'
 Restart=always
 RestartSec=5
 
@@ -81,7 +83,7 @@ sudo systemctl enable buildkitd.service
 
 echo "=== Starting BuildKit daemon ==="
 sudo systemctl start buildkitd.service
-sleep 3
+sleep 5  # Wait for daemon start + ExecStartPost chmod
 
 # Verify it's running
 if sudo systemctl is-active --quiet buildkitd.service; then
@@ -93,14 +95,25 @@ else
   exit 1
 fi
 
-# Verify socket is available
-if [[ -S /run/buildkit/buildkitd.sock ]]; then
+# Verify socket is available (use sudo since /run/buildkit is root-owned)
+if sudo test -S /run/buildkit/buildkitd.sock; then
   echo "✅ BuildKit socket available at /run/buildkit/buildkitd.sock"
+  sudo ls -la /run/buildkit/
+
+  # Verify permissions allow access without sudo
+  if test -r /run/buildkit/buildkitd.sock && test -w /run/buildkit/buildkitd.sock; then
+    echo "✅ Socket is accessible without sudo"
+  else
+    echo "⚠️ Socket not accessible, manually setting permissions"
+    sudo chmod 755 /run/buildkit
+    sudo chmod 666 /run/buildkit/buildkitd.sock
+  fi
 else
   echo "❌ BuildKit socket not found"
-  ls -la /run/buildkit/ || echo "Directory /run/buildkit doesn't exist"
+  sudo ls -la /run/buildkit/ || echo "Directory /run/buildkit doesn't exist"
   exit 1
 fi
+
 
 echo "=== BuildKit installation complete ==="
 
