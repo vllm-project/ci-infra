@@ -303,6 +303,11 @@ steps:
         docker info 2>&1 | grep 'Docker Root Dir'
 
         echo ""
+        echo "=== System resources ==="
+        free -h
+        df -h /var/lib/buildkit /home/buildkite-agent 2>/dev/null || df -h
+
+        echo ""
         echo "Cached images from AMI:"
         docker images
 

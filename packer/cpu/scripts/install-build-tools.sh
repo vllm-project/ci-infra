@@ -69,6 +69,16 @@ ExecStartPost=/bin/bash -c 'sleep 2 && chmod 755 /run/buildkit && chmod 666 /run
 Restart=always
 RestartSec=5
 
+# Prevent OOM killer from targeting buildkitd
+OOMScoreAdjust=-500
+
+# No timeout for long-running builds
+TimeoutStartSec=0
+TimeoutStopSec=300
+
+# Increase file descriptor limits
+LimitNOFILE=1048576
+
 # Security hardening
 NoNewPrivileges=false
 ProtectSystem=false
