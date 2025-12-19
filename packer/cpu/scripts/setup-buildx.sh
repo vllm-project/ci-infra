@@ -2,7 +2,8 @@
 set -eu -o pipefail
 
 # This script runs as buildkite-agent user (via sudo -u buildkite-agent -i)
-# It configures buildx to use the standalone BuildKit daemon and warms the cache.
+# It configures buildx to use the standalone BuildKit daemon.
+# NOTE: This script cannot use sudo - buildkite-agent has no sudo access.
 
 echo "=== Setting up buildx to use standalone BuildKit daemon ==="
 echo "Running as user: $(whoami)"
@@ -14,19 +15,22 @@ if [[ "$(whoami)" != "buildkite-agent" ]]; then
   exit 1
 fi
 
-# Verify buildkitd is running
-if ! sudo systemctl is-active --quiet buildkitd.service; then
-  echo "ERROR: buildkitd service is not running"
-  sudo systemctl status buildkitd.service --no-pager
+# Verify socket exists and is accessible
+# (install-build-tools.sh should have set permissions via ExecStartPost)
+if [[ ! -S /run/buildkit/buildkitd.sock ]]; then
+  echo "ERROR: BuildKit socket not found at /run/buildkit/buildkitd.sock"
+  ls -la /run/buildkit/ 2>/dev/null || echo "Directory /run/buildkit doesn't exist or not accessible"
   exit 1
 fi
 
-# Verify socket exists
-if [[ ! -S /run/buildkit/buildkitd.sock ]]; then
-  echo "ERROR: BuildKit socket not found at /run/buildkit/buildkitd.sock"
-  ls -la /run/buildkit/ || echo "Directory doesn't exist"
+# Verify we can access the socket
+if [[ ! -r /run/buildkit/buildkitd.sock ]] || [[ ! -w /run/buildkit/buildkitd.sock ]]; then
+  echo "ERROR: BuildKit socket exists but is not readable/writable"
+  ls -la /run/buildkit/buildkitd.sock
   exit 1
 fi
+
+echo "✅ BuildKit socket is accessible at /run/buildkit/buildkitd.sock"
 
 # -----------------------------------------------------------------------------
 # Create buildx builder using remote driver
@@ -54,15 +58,6 @@ echo "Available builders:"
 docker buildx ls
 echo ""
 
-# -----------------------------------------------------------------------------
-# Show BuildKit cache location
-# -----------------------------------------------------------------------------
-echo "=== BuildKit cache location ==="
-echo "Cache directory: /var/lib/buildkit"
-sudo du -sh /var/lib/buildkit 2>/dev/null || echo "Could not determine size"
-sudo ls -la /var/lib/buildkit/ || true
-
-echo ""
 echo "=== Summary ==="
 echo "Builder name: baked-vllm-builder"
 echo "Driver: remote"
