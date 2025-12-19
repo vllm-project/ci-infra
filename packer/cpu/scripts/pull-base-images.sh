@@ -51,14 +51,19 @@ echo "Cache from: ${CACHE_IMAGE}"
 echo "Cache to: ${LOCAL_CACHE_DIR}"
 
 # Build with cache import/export
-# Use --target test to match CI builds and import relevant cache layers
+# Use same build args as CI to match cache keys
 docker buildx build \
   --builder baked-vllm-builder \
+  --file docker/Dockerfile \
+  --build-arg max_jobs=16 \
+  --build-arg USE_SCCACHE=1 \
+  --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0" \
+  --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a" \
+  --build-arg VLLM_USE_PRECOMPILED=0 \
   --cache-from "type=registry,ref=${CACHE_IMAGE}" \
   --cache-to "type=local,dest=${LOCAL_CACHE_DIR},mode=max" \
   --target test \
   --progress plain \
-  -f docker/Dockerfile \
   . || echo "Build stopped (expected - we just want the cache)"
 
 # Cleanup
