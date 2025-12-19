@@ -102,14 +102,6 @@ build {
     script = "scripts/pull-base-images.sh"
   }
 
-  # Warm the BuildKit cache by running a build
-  # This pulls cache from ECR into local /var/lib/buildkit
-  provisioner "shell" {
-    inline = [
-      "sudo -u buildkite-agent -i bash /tmp/scripts/warm-buildkit-cache.sh"
-    ]
-  }
-
   # Ensure Docker data is synced to disk before AMI snapshot
   provisioner "shell" {
     inline = [
