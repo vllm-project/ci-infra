@@ -39,14 +39,8 @@ CACHE_IMAGE="${ECR_REGISTRY}/vllm-ci-postmerge-cache:latest"
 echo ""
 echo "Pulling cache image into BuildKit cache: ${CACHE_IMAGE}"
 
-# Import the cache by using --cache-from in a minimal build
-# This downloads the cache manifests and blobs into local BuildKit storage
-docker buildx build \
-  --builder baked-vllm-builder \
-  --cache-from "type=registry,ref=${CACHE_IMAGE}" \
-  --progress plain \
-  --output type=cacheonly \
-  - <<< "FROM scratch"
+# Pull the cache image using buildx with --load to force all layers to download
+echo "FROM ${CACHE_IMAGE}" | docker buildx build --builder baked-vllm-builder --load --progress plain -
 
 echo ""
 echo "=== BuildKit cache populated with cache image ==="
