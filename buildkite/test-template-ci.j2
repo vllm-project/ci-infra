@@ -316,12 +316,11 @@ steps:
         fi
 
         echo ""
-        echo "=== BuildKit cache size ==="
-        if [[ -d /var/lib/buildkit ]]; then
-          du -sh /var/lib/buildkit 2>/dev/null || echo "Could not get cache size (permission denied)"
-        else
-          echo "No BuildKit cache directory found"
-        fi
+        echo "=== BuildKit cache debug ==="
+        # Use sudo to check cache contents
+        sudo ls -la /var/lib/buildkit/ 2>/dev/null || echo "Cannot list /var/lib/buildkit"
+        sudo du -sh /var/lib/buildkit 2>/dev/null || echo "Cannot get cache size"
+        sudo du -sh /var/lib/buildkit/*/ 2>/dev/null || echo "Cannot list subdirectories"
 
         echo ""
         echo "=== BuildKit socket ==="
