@@ -28,3 +28,16 @@ cat <<'EOF' | sudo tee /etc/buildkit/buildkitd.toml
 EOF
 
 echo "BuildKit configuration created at /etc/buildkit/buildkitd.toml"
+
+# -----------------------------------------------------------------------------
+# Install systemd service to create buildx config on boot
+#
+# The buildx client config (~/.docker/buildx/) doesn't persist across AMI
+# snapshot/restore. This service runs on boot to recreate it.
+# -----------------------------------------------------------------------------
+echo "=== Installing buildx-builder systemd service ==="
+sudo cp /tmp/scripts/buildx-builder.service /etc/systemd/system/buildx-builder.service
+sudo chmod 644 /etc/systemd/system/buildx-builder.service
+sudo systemctl daemon-reload
+sudo systemctl enable buildx-builder.service
+echo "Enabled buildx-builder.service to run on boot"

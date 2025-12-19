@@ -25,6 +25,7 @@ fi
 # After AMI snapshot/restore:
 # - The volume persists (it's on the EBS volume)
 # - The container is set to restart=always, so it starts automatically
+# - A systemd service recreates the buildx config on boot
 # -----------------------------------------------------------------------------
 echo "Creating baked-vllm-builder..."
 docker buildx create \

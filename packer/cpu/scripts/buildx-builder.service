@@ -1,0 +1,43 @@
+[Unit]
+Description=Attach to baked BuildX builder container
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=buildkite-agent
+Group=buildkite-agent
+
+# Wait for Docker to be ready
+ExecStartPre=/bin/bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+# Wait for the baked builder container to be running (it has restart=always)
+ExecStartPre=/bin/bash -c '\
+  for i in {1..30}; do \
+    if docker ps --format "{{.Names}}" | grep -q "buildx_buildkit_baked-vllm-builder"; then \
+      echo "Builder container is running"; \
+      exit 0; \
+    fi; \
+    echo "Waiting for builder container... ($i/30)"; \
+    sleep 2; \
+  done; \
+  echo "ERROR: Builder container not found after 60s"; \
+  docker ps -a | grep baked || true; \
+  exit 1'
+
+# Attach to the existing baked builder container using remote driver
+# This reuses the container and its cached layers instead of creating a new one
+ExecStart=/bin/bash -c '\
+  CONTAINER_NAME=$(docker ps --filter "name=buildx_buildkit_baked-vllm-builder" --format "{{.Names}}" | head -1); \
+  echo "Attaching to container: $CONTAINER_NAME"; \
+  docker buildx create \
+    --name baked-vllm-builder \
+    --driver remote \
+    --use \
+    "docker-container://$CONTAINER_NAME" && \
+  echo "Builder attached successfully" && \
+  docker buildx inspect baked-vllm-builder'
+
+[Install]
+WantedBy=multi-user.target

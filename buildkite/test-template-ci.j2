@@ -299,31 +299,45 @@ steps:
       {% endif %}
     commands:
       - |
-        echo "--- :docker: Check/recreate baked builder"
+        echo "--- :docker: Check/attach baked builder"
         docker info 2>&1 | grep 'Docker Root Dir'
 
         echo ""
         echo "Cached images from AMI:"
         docker images
 
-        # Check if baked-vllm-builder exists
+        # Check if baked-vllm-builder config exists (systemd should create it on boot)
         if docker buildx inspect baked-vllm-builder &>/dev/null; then
-          echo "✅ baked-vllm-builder already exists"
+          echo "✅ baked-vllm-builder already configured"
           docker buildx use baked-vllm-builder
         else
-          echo "Builder config not found, checking for existing container/volume..."
+          echo "Builder config not found, checking for existing container..."
           docker ps -a | grep baked-vllm-builder || true
           docker volume ls | grep baked-vllm-builder || true
 
-          # Recreate the builder - this reuses the existing container and volume with cached layers
-          echo "Recreating baked-vllm-builder (will reuse existing cache)..."
-          docker buildx create \
-            --name baked-vllm-builder \
-            --driver docker-container \
-            --driver-opt network=host \
-            --use
+          # Find the existing baked builder container (created during AMI build)
+          CONTAINER_NAME=$(docker ps --filter "name=buildx_buildkit_baked-vllm-builder" --format "{{"{{"}}.Names{{"}}"}}" | head -1)
 
-          echo "✅ baked-vllm-builder recreated"
+          if [[ -n "$CONTAINER_NAME" ]]; then
+            # Attach to the existing container using remote driver
+            # This reuses the container's cache instead of creating a new empty one
+            echo "Attaching to existing container: $CONTAINER_NAME"
+            docker buildx create \
+              --name baked-vllm-builder \
+              --driver remote \
+              --use \
+              "docker-container://$CONTAINER_NAME"
+            echo "✅ baked-vllm-builder attached to existing container"
+          else
+            echo "WARNING: No baked builder container found, creating new builder (no cache)"
+            docker buildx create \
+              --name baked-vllm-builder \
+              --driver docker-container \
+              --driver-opt network=host \
+              --use \
+              --bootstrap
+            echo "⚠️ Created new builder without pre-baked cache"
+          fi
         fi
 
         docker buildx inspect --bootstrap
