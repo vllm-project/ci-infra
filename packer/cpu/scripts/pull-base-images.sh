@@ -51,12 +51,12 @@ echo "Cache from: ${CACHE_IMAGE}"
 echo "Cache to: ${LOCAL_CACHE_DIR}"
 
 # Build with cache import/export
-# Use --target base to avoid building the full image (just import cache)
+# Use --target test to match CI builds and import relevant cache layers
 docker buildx build \
   --builder baked-vllm-builder \
   --cache-from "type=registry,ref=${CACHE_IMAGE}" \
   --cache-to "type=local,dest=${LOCAL_CACHE_DIR},mode=max" \
-  --target base \
+  --target test \
   --progress plain \
   -f docker/Dockerfile \
   . || echo "Build stopped (expected - we just want the cache)"
