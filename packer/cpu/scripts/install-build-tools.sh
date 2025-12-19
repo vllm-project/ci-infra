@@ -33,6 +33,10 @@ echo "=== Creating BuildKit configuration ==="
 sudo mkdir -p /etc/buildkit
 sudo mkdir -p /var/lib/buildkit
 
+# Create local cache directory for cache-to type=local (writable by buildkite-agent)
+sudo mkdir -p /var/lib/buildkit/vllm-cache
+sudo chown buildkite-agent:buildkite-agent /var/lib/buildkit/vllm-cache
+
 cat <<'EOF' | sudo tee /etc/buildkit/buildkitd.toml
 # BuildKit daemon configuration for vLLM CI builds
 #
