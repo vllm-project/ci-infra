@@ -102,6 +102,14 @@ build {
     script = "scripts/pull-base-images.sh"
   }
 
+  # Warm the BuildKit cache by running a build
+  # This pulls cache from ECR into local /var/lib/buildkit
+  provisioner "shell" {
+    inline = [
+      "sudo -u buildkite-agent -i bash /tmp/scripts/warm-buildkit-cache.sh"
+    ]
+  }
+
   # Ensure Docker data is synced to disk before AMI snapshot
   provisioner "shell" {
     inline = [
@@ -113,23 +121,22 @@ build {
       "docker ps -a",
       "docker volume ls",
       "echo ''",
-      "echo 'Stopping Docker gracefully...'",
+      "echo 'BuildKit cache size:'",
+      "sudo du -sh /var/lib/buildkit 2>/dev/null || echo 'No buildkit cache'",
+      "sudo ls -la /var/lib/buildkit/ 2>/dev/null | head -10 || true",
+      "echo ''",
+      "echo 'Stopping buildkitd and Docker gracefully...'",
+      "sudo systemctl stop buildkitd || true",
       "sudo systemctl stop docker",
       "sudo sync",
       "echo ''",
-      "echo 'Verifying Docker data on disk:'",
+      "echo 'Verifying data on disk:'",
       "sudo ls -la /var/lib/docker/containers/ | head -5",
-      "sudo ls -la /var/lib/docker/volumes/ | head -5",
-      "echo ''",
-      "echo 'Full buildx config for buildkite-agent:'",
-      "sudo find /var/lib/buildkite-agent/.docker -type f -o -type d 2>/dev/null | head -30",
-      "echo ''",
-      "echo 'Current file contents:'",
-      "sudo cat /var/lib/buildkite-agent/.docker/buildx/current 2>/dev/null || echo 'No current file'",
+      "sudo du -sh /var/lib/buildkit || echo 'No buildkit cache'",
       "echo ''",
       "echo 'Creating AMI marker file...'",
       "echo \"AMI_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | sudo tee /etc/vllm-ami-info",
-      "echo \"BUILDER_CONTAINER=buildx_buildkit_baked-vllm-builder0\" | sudo tee -a /etc/vllm-ami-info",
+      "echo \"BUILDKIT_CACHE=/var/lib/buildkit\" | sudo tee -a /etc/vllm-ami-info",
       "echo ''",
       "echo 'Ready for snapshot'"
     ]
