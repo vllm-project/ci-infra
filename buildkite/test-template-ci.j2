@@ -381,25 +381,23 @@ steps:
       - "docker buildx ls"
       - |
         echo "--- :floppy_disk: Copy local cache to tmpfs for faster reads"
-        DISK_CACHE="/home/buildkite-agent/.buildkit-cache"
-        TMPFS_CACHE="/dev/shm/buildkit-cache"
 
-        if [ -d "$DISK_CACHE" ] && [ "$(ls -A $DISK_CACHE 2>/dev/null)" ]; then
+        if [ -d /home/buildkite-agent/.buildkit-cache ] && [ "$(ls -A /home/buildkite-agent/.buildkit-cache 2>/dev/null)" ]; then
           echo "Disk cache size:"
-          du -sh "$DISK_CACHE"
+          du -sh /home/buildkite-agent/.buildkit-cache
 
           echo "Available tmpfs space:"
           df -h /dev/shm
 
           echo "Copying cache to tmpfs..."
-          time cp -r "$DISK_CACHE" "$TMPFS_CACHE"
+          time cp -r /home/buildkite-agent/.buildkit-cache /dev/shm/buildkit-cache
 
           echo "tmpfs cache size:"
-          du -sh "$TMPFS_CACHE"
-          ls -la "$TMPFS_CACHE"
+          du -sh /dev/shm/buildkit-cache
+          ls -la /dev/shm/buildkit-cache
         else
           echo "No local cache found on disk, creating empty tmpfs cache dir"
-          mkdir -p "$TMPFS_CACHE"
+          mkdir -p /dev/shm/buildkit-cache
         fi
       - >
         docker buildx build --file docker/Dockerfile
