@@ -399,6 +399,7 @@ steps:
         --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max
         --cache-from type=registry,ref={{ cache_from_main }},mode=max
         --tag {{ docker_image }}
+        --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:commit-test
         {% if branch == "main" %}
         --tag {{ docker_image_latest }}
         {% endif %}
