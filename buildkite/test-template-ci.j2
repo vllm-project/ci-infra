@@ -410,7 +410,7 @@ steps:
         {% if branch == "main" %}
         --tag {{ docker_image_latest }}
         {% endif %}
-        --pull
+        --load
         --push
         --target test
         --progress plain .
