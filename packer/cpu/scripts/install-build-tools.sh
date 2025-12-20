@@ -7,6 +7,17 @@ set -eu -o pipefail
 echo "=== Installing BuildKit as standalone systemd service ==="
 
 # -----------------------------------------------------------------------------
+# Install regctl for cache management
+# -----------------------------------------------------------------------------
+echo "=== Installing regctl ==="
+REGCTL_VERSION="v0.7.1"
+curl -fsSL "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-amd64" -o /tmp/regctl
+sudo install -m 755 /tmp/regctl /usr/local/bin/regctl
+rm /tmp/regctl
+echo "regctl installed:"
+regctl version
+
+# -----------------------------------------------------------------------------
 # Install BuildKit binary
 # Extract buildkitd from the official moby/buildkit image
 # -----------------------------------------------------------------------------

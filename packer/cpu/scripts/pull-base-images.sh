@@ -1,14 +1,12 @@
 #!/bin/bash
 set -eu -o pipefail
 
-# Pre-warm BuildKit cache by building vLLM with cache from ECR.
-# This runs as buildkite-agent user since that's who owns the buildx config.
+# Pre-warm BuildKit cache using regctl to copy cache from ECR.
+# This runs as buildkite-agent user.
 #
 # Strategy:
-# 1. Clone vLLM repo
-# 2. Find the latest commit that has a cache manifest in ECR
-# 3. Checkout that commit and build with --cache-from
-# 4. Export to --cache-to type=local for CI builds to use
+# 1. Use regctl to copy BuildKit cache manifest from ECR to local OCI layout
+# 2. CI builds use --cache-from type=local,src=/path/to/cache
 #
 # The ECR_TOKEN environment variable is passed from Packer.
 
@@ -16,7 +14,7 @@ LOCAL_CACHE_DIR="/home/buildkite-agent/.buildkit-cache"
 ECR_REGISTRY="936637512419.dkr.ecr.us-east-1.amazonaws.com"
 CACHE_REPO="${ECR_REGISTRY}/vllm-ci-postmerge-cache"
 
-echo "=== Pre-warming BuildKit cache ==="
+echo "=== Pre-warming BuildKit cache with regctl ==="
 echo "Running as user: $(whoami)"
 
 # Authenticate to ECR
@@ -26,90 +24,36 @@ if [[ -z "${ECR_TOKEN:-}" ]]; then
 fi
 
 echo "Authenticating to ECR..."
-echo "$ECR_TOKEN" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+echo "$ECR_TOKEN" | regctl registry login --pass-stdin "$ECR_REGISTRY" -u AWS
 
-# Verify buildx builder is configured
-if ! docker buildx inspect baked-vllm-builder &>/dev/null; then
-  echo "ERROR: baked-vllm-builder not found"
-  docker buildx ls
-  exit 1
-fi
+# Ensure local cache directory exists
+mkdir -p "$LOCAL_CACHE_DIR"
 
-docker buildx use baked-vllm-builder
-echo "Using builder: baked-vllm-builder"
-
-# Clone vLLM repo (full history needed to walk commits)
+# Try to find a commit-specific cache, fall back to latest
 echo ""
-echo "Cloning vLLM repository..."
-VLLM_DIR="/tmp/vllm-cache-build"
-rm -rf "$VLLM_DIR"
-git clone --depth 50 https://github.com/vllm-project/vllm.git "$VLLM_DIR"
-cd "$VLLM_DIR"
+echo "Checking for cache in ECR..."
 
-# Find the latest commit that has a cache manifest in ECR
-echo ""
-echo "Finding latest commit with cache in ECR..."
+# First try latest
+CACHE_IMAGE="${CACHE_REPO}:latest"
 
-FOUND_COMMIT=""
-for commit in $(git log --format="%H" -n 50); do
-  CACHE_TAG="${CACHE_REPO}:${commit}"
-  echo "Checking: ${commit:0:12}..."
-
-  # Check if cache manifest exists for this commit
-  if docker manifest inspect "$CACHE_TAG" &>/dev/null; then
-    echo "✅ Found cache for commit: ${commit:0:12}"
-    FOUND_COMMIT="$commit"
-    break
-  fi
-done
-
-if [[ -z "$FOUND_COMMIT" ]]; then
-  echo "⚠️ No commit-specific cache found, falling back to 'latest'"
-  CACHE_IMAGE="${CACHE_REPO}:latest"
+if regctl manifest head "$CACHE_IMAGE" &>/dev/null; then
+  echo "✅ Found cache: $CACHE_IMAGE"
 else
-  echo "Using cache from commit: $FOUND_COMMIT"
-  CACHE_IMAGE="${CACHE_REPO}:${FOUND_COMMIT}"
-
-  # Checkout the specific commit so Dockerfile matches the cache
-  echo "Checking out commit ${FOUND_COMMIT:0:12}..."
-  git checkout "$FOUND_COMMIT"
+  echo "❌ No cache found at $CACHE_IMAGE"
+  echo "Skipping cache warmup"
+  exit 0
 fi
 
+# Copy cache from ECR to local OCI layout
 echo ""
-echo "Building with cache-from registry, cache-to local..."
-echo "Cache from: ${CACHE_IMAGE}"
-echo "Cache to: ${LOCAL_CACHE_DIR}"
+echo "Copying cache to local OCI layout..."
+echo "From: ${CACHE_IMAGE}"
+echo "To: ocidir://${LOCAL_CACHE_DIR}"
 
-# Build with cache import/export
-# Use same build args as CI to match cache keys
-docker buildx build \
-  --builder baked-vllm-builder \
-  --file docker/Dockerfile \
-  --build-arg max_jobs=16 \
-  --build-arg USE_SCCACHE=1 \
-  --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0" \
-  --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a" \
-  --build-arg VLLM_USE_PRECOMPILED=0 \
-  --cache-from "type=registry,ref=${CACHE_IMAGE}" \
-  --cache-to "type=local,dest=${LOCAL_CACHE_DIR},mode=max" \
-  --target test \
-  --progress plain \
-  . || echo "Build stopped (expected - we just want the cache)"
-
-# Cleanup
-cd /
-rm -rf "$VLLM_DIR"
-
-# Logout from ECR
-echo ""
-echo "Logging out from ECR..."
-docker logout "$ECR_REGISTRY"
+regctl image copy "$CACHE_IMAGE" "ocidir://${LOCAL_CACHE_DIR}"
 
 echo ""
 echo "=== BuildKit cache populated ==="
 echo "Local cache location: ${LOCAL_CACHE_DIR}"
-ls -la "$LOCAL_CACHE_DIR" 2>/dev/null || echo "Cannot list (permission denied)"
+ls -la "$LOCAL_CACHE_DIR" 2>/dev/null || echo "Cannot list"
 du -sh "$LOCAL_CACHE_DIR" 2>/dev/null || echo "Cannot get size"
-echo ""
-echo "BuildKit cache location: /var/lib/buildkit"
-du -sh /var/lib/buildkit 2>/dev/null || echo "Cannot get size"
