@@ -195,6 +195,8 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "false" # r6in has no instance storage; use EBS for Docker to preserve AMI cache
+      RootVolumeIops                       = 16000   # Max gp3 IOPS for fast cache reads
+      RootVolumeThroughput                 = 1000    # Max gp3 throughput (MB/s)
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
       Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
@@ -249,6 +251,8 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "false" # r6in has no instance storage; use EBS for Docker to preserve AMI cache
+      RootVolumeIops                       = 16000   # Max gp3 IOPS for fast cache reads
+      RootVolumeThroughput                 = 1000    # Max gp3 throughput (MB/s)
       BuildkiteTerminateInstanceAfterJob   = true
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
