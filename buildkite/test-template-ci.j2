@@ -380,12 +380,26 @@ steps:
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
       - "docker buildx ls"
       - |
-        echo "--- :floppy_disk: Local BuildKit cache size"
-        if [ -d /home/buildkite-agent/.buildkit-cache ]; then
-          du -sh /home/buildkite-agent/.buildkit-cache
-          ls -la /home/buildkite-agent/.buildkit-cache
+        echo "--- :floppy_disk: Copy local cache to tmpfs for faster reads"
+        DISK_CACHE="/home/buildkite-agent/.buildkit-cache"
+        TMPFS_CACHE="/dev/shm/buildkit-cache"
+
+        if [ -d "$DISK_CACHE" ] && [ "$(ls -A $DISK_CACHE 2>/dev/null)" ]; then
+          echo "Disk cache size:"
+          du -sh "$DISK_CACHE"
+
+          echo "Available tmpfs space:"
+          df -h /dev/shm
+
+          echo "Copying cache to tmpfs..."
+          time cp -r "$DISK_CACHE" "$TMPFS_CACHE"
+
+          echo "tmpfs cache size:"
+          du -sh "$TMPFS_CACHE"
+          ls -la "$TMPFS_CACHE"
         else
-          echo "No local cache directory found"
+          echo "No local cache found on disk, creating empty tmpfs cache dir"
+          mkdir -p "$TMPFS_CACHE"
         fi
       - >
         docker buildx build --file docker/Dockerfile
@@ -402,7 +416,7 @@ steps:
         {% if cache_to_commit %}
         --cache-to type=registry,ref={{ cache_to_commit }},mode=max,compression=zstd
         {% endif %}
-        --cache-from type=local,src=/home/buildkite-agent/.buildkit-cache
+        --cache-from type=local,src=/dev/shm/buildkit-cache
         --tag {{ docker_image }}
         --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:commit-test
         {% if branch == "main" %}
