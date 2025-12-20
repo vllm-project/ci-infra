@@ -404,7 +404,7 @@ steps:
         --tag {{ docker_image_latest }}
         {% endif %}
         --load
-        --push
+        --output type=registry,push=true
         --target test
         --progress plain .
       - |
