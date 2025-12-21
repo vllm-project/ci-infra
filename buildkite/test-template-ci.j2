@@ -380,25 +380,37 @@ steps:
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
       - "docker buildx ls"
       - |
-        echo "--- :floppy_disk: Copy local cache to tmpfs for faster reads"
+        echo "--- :rocket: Mount tmpfs for BuildKit storage (RAM-backed)"
 
-        if [ -d /home/buildkite-agent/.buildkit-cache ] && [ "$(ls -A /home/buildkite-agent/.buildkit-cache 2>/dev/null)" ]; then
-          echo "Disk cache size:"
-          du -sh /home/buildkite-agent/.buildkit-cache
+        echo "Available memory:"
+        free -h
 
-          echo "Available tmpfs space:"
-          df -h /dev/shm
+        echo "Stopping buildkitd..."
+        sudo systemctl stop buildkitd || true
 
-          echo "Copying cache to tmpfs..."
-          time cp -r /home/buildkite-agent/.buildkit-cache /dev/shm/buildkit-cache
+        echo "Mounting tmpfs (100GB) on /var/lib/buildkit..."
+        sudo mount -t tmpfs -o size=100G tmpfs /var/lib/buildkit
 
-          echo "tmpfs cache size:"
-          du -sh /dev/shm/buildkit-cache
-          ls -la /dev/shm/buildkit-cache
-        else
-          echo "No local cache found on disk, creating empty tmpfs cache dir"
-          mkdir -p /dev/shm/buildkit-cache
-        fi
+        echo "Starting buildkitd with tmpfs storage..."
+        sudo systemctl start buildkitd
+        sleep 3
+
+        echo "Verifying buildkitd is running..."
+        systemctl status buildkitd --no-pager || true
+
+        echo "BuildKit storage (should be tmpfs):"
+        df -h /var/lib/buildkit
+        mount | grep buildkit || true
+
+        echo "Recreating buildx builder to connect to fresh buildkitd..."
+        docker buildx rm baked-vllm-builder 2>/dev/null || true
+        docker buildx create \
+          --name baked-vllm-builder \
+          --driver remote \
+          --use \
+          unix:///run/buildkit/buildkitd.sock
+
+        docker buildx inspect
       - >
         docker buildx build --file docker/Dockerfile
         --build-arg max_jobs=16
@@ -414,7 +426,9 @@ steps:
         {% if cache_to_commit %}
         --cache-to type=registry,ref={{ cache_to_commit }},mode=max,compression=zstd
         {% endif %}
-        --cache-from type=local,src=/dev/shm/buildkit-cache
+        --cache-from type=registry,ref={{ cache_from }},mode=max
+        --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max
+        --cache-from type=registry,ref={{ cache_from_main }},mode=max
         --tag {{ docker_image }}
         --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:commit-test
         {% if branch == "main" %}
