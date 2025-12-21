@@ -380,37 +380,41 @@ steps:
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
       - "docker buildx ls"
       - |
-        echo "--- :rocket: Mount tmpfs for BuildKit storage (RAM-backed)"
+        echo "--- :rocket: Create BuildKit container with tmpfs storage (RAM-backed)"
 
         echo "Available memory:"
         free -h
 
-        echo "Stopping buildkitd..."
-        sudo systemctl stop buildkitd || true
+        echo "Removing any existing builder..."
+        docker buildx rm baked-vllm-builder 2>/dev/null || true
 
-        echo "Mounting tmpfs (100GB) on /var/lib/buildkit..."
-        sudo mount -t tmpfs -o size=100G tmpfs /var/lib/buildkit
+        echo "Creating BuildKit container with tmpfs mount for /var/lib/buildkit..."
+        docker run -d \
+          --name buildkit-tmpfs \
+          --privileged \
+          --network host \
+          --tmpfs /var/lib/buildkit:exec,size=100G \
+          moby/buildkit:buildx-stable-1 \
+          --addr unix:///run/buildkit/buildkitd.sock \
+          --addr tcp://0.0.0.0:1234
 
-        echo "Starting buildkitd with tmpfs storage..."
-        sudo systemctl start buildkitd
         sleep 3
 
-        echo "Verifying buildkitd is running..."
-        systemctl status buildkitd --no-pager || true
+        echo "Verifying BuildKit container is running..."
+        docker ps --filter "name=buildkit-tmpfs"
 
-        echo "BuildKit storage (should be tmpfs):"
-        df -h /var/lib/buildkit
-        mount | grep buildkit || true
+        echo "BuildKit storage (should show tmpfs):"
+        docker exec buildkit-tmpfs df -h /var/lib/buildkit
 
-        echo "Recreating buildx builder to connect to fresh buildkitd..."
-        docker buildx rm baked-vllm-builder 2>/dev/null || true
+        echo "Creating buildx builder pointing to container..."
         docker buildx create \
           --name baked-vllm-builder \
           --driver remote \
           --use \
-          unix:///run/buildkit/buildkitd.sock
+          tcp://127.0.0.1:1234
 
         docker buildx inspect
+        docker buildx ls
       - >
         docker buildx build --file docker/Dockerfile
         --build-arg max_jobs=16
