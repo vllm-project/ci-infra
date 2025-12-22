@@ -380,38 +380,22 @@ steps:
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
       - "docker buildx ls"
       - |
-        echo "--- :rocket: Create BuildKit container with tmpfs storage (RAM-backed)"
-
+        echo "--- :docker: Setup buildx builder"
         echo "Available memory:"
         free -h
+        echo ""
+        echo "Disk info:"
+        df -h /var/lib/buildkit /var/lib/docker 2>/dev/null || df -h
+        echo ""
 
-        echo "Removing any existing builder..."
+        # Use docker-container driver for simplicity
         docker buildx rm baked-vllm-builder 2>/dev/null || true
-
-        echo "Creating BuildKit container with tmpfs mount for /var/lib/buildkit..."
-        docker run -d \
-          --name buildkit-tmpfs \
-          --privileged \
-          --network host \
-          --tmpfs /var/lib/buildkit:exec,size=100G \
-          moby/buildkit:buildx-stable-1 \
-          --addr unix:///run/buildkit/buildkitd.sock \
-          --addr tcp://0.0.0.0:1234
-
-        sleep 3
-
-        echo "Verifying BuildKit container is running..."
-        docker ps --filter "name=buildkit-tmpfs"
-
-        echo "BuildKit storage (should show tmpfs):"
-        docker exec buildkit-tmpfs df -h /var/lib/buildkit
-
-        echo "Creating buildx builder pointing to container..."
         docker buildx create \
           --name baked-vllm-builder \
-          --driver remote \
+          --driver docker-container \
+          --driver-opt network=host \
           --use \
-          tcp://127.0.0.1:1234
+          --bootstrap
 
         docker buildx inspect
         docker buildx ls
