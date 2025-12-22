@@ -387,15 +387,30 @@ steps:
         echo "Disk info:"
         df -h /var/lib/buildkit /var/lib/docker 2>/dev/null || df -h
         echo ""
+        echo "BuildKit pre-populated cache size:"
+        du -sh /var/lib/buildkit 2>/dev/null || echo "No BuildKit cache found"
+        echo ""
 
-        # Use docker-container driver for simplicity
         docker buildx rm baked-vllm-builder 2>/dev/null || true
-        docker buildx create \
-          --name baked-vllm-builder \
-          --driver docker-container \
-          --driver-opt network=host \
-          --use \
-          --bootstrap
+
+        # Try to use pre-populated buildkitd daemon (with cache in /var/lib/buildkit)
+        if [[ -S /run/buildkit/buildkitd.sock ]]; then
+          echo "✅ Found buildkitd socket, connecting with remote driver..."
+          docker buildx create \
+            --name baked-vllm-builder \
+            --driver remote \
+            --use \
+            unix:///run/buildkit/buildkitd.sock
+          echo "Connected to buildkitd with pre-populated cache"
+        else
+          echo "⚠️ buildkitd not available, using docker-container driver"
+          docker buildx create \
+            --name baked-vllm-builder \
+            --driver docker-container \
+            --driver-opt network=host \
+            --use \
+            --bootstrap
+        fi
 
         docker buildx inspect
         docker buildx ls
