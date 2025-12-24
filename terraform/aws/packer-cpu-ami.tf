@@ -106,9 +106,6 @@ locals {
     "cpu-queue-postmerge-us-east-1",
   ])
 
-  cpu_build_ami_config_us_east_1 = {
-    ImageId = "{{resolve:ssm:/buildkite/cpu-build-ami/us-east-1}}"
-  }
 }
 
 resource "aws_cloudformation_stack" "bk_queue_packer" {

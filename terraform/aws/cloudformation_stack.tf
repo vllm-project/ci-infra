@@ -53,14 +53,16 @@ locals {
       BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci_us_east_1.name
       BuildkiteQueue                       = "cpu_queue_premerge_us_east_1"
       InstanceTypes                        = "r6in.16xlarge" # 512GB memory for CUDA kernel compilation
-      MaxSize                              = 40
+      MaxSize                              = 20
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
-      EnableInstanceStorage                = "true"
+      EnableInstanceStorage                = "false"
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
       Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
+      RootVolumeIops                       = 16000
+      RootVolumeThroughput                 = 1000
     }
   }
 
@@ -111,11 +113,13 @@ locals {
       ECRAccessPolicy                      = "poweruser"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
-      EnableInstanceStorage                = "true"
+      EnableInstanceStorage                = "false"
       BuildkiteTerminateInstanceAfterJob   = true
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
       Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
+      RootVolumeIops                       = 16000
+      RootVolumeThroughput                 = 1000
     }
   }
 
@@ -169,9 +173,7 @@ locals {
     for name, params in local.queues_parameters_premerge_us_east_1 :
     name => merge(
       local.default_parameters,
-      params,
-      # Add custom CPU build AMI only for specific queues (defined in packer-cpu-ami.tf)
-      contains(local.cpu_build_ami_queues, name) ? local.cpu_build_ami_config_us_east_1 : {}
+      params
     )
   }
 
@@ -184,9 +186,7 @@ locals {
     for name, params in local.queues_parameters_postmerge_us_east_1 :
     name => merge(
       local.default_parameters,
-      params,
-      # Add custom CPU build AMI only for specific queues (defined in packer-cpu-ami.tf)
-      contains(local.cpu_build_ami_queues, name) ? local.cpu_build_ami_config_us_east_1 : {}
+      params
     )
   }
 
