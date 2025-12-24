@@ -9,38 +9,6 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Buildkite Pipeline and Schedule
-# -----------------------------------------------------------------------------
-
-resource "buildkite_pipeline" "rebuild_cpu_ami" {
-  name        = "Rebuild CPU Build AMI"
-  repository  = "https://github.com/vllm-project/ci-infra.git"
-  description = "Daily rebuild of CPU build AMI with pre-warmed Docker cache"
-
-  default_branch = "main"
-
-  steps = <<-YAML
-    steps:
-      - label: ":pipeline: Upload Pipeline"
-        command: buildkite-agent pipeline upload .buildkite/pipelines/rebuild-cpu-ami.yml
-        agents:
-          queue: packer_build_queue
-  YAML
-
-  cluster_id = "Q2x1c3Rlci0tLTljZWNjNmIxLTk0Y2QtNDNkMS1hMjU2LWFiNDM4MDgzZjRmNQ=="
-}
-
-# Schedule for daily AMI rebuild at 11 AM UTC (3 AM PST)
-resource "buildkite_pipeline_schedule" "rebuild_cpu_ami_daily" {
-  pipeline_id = buildkite_pipeline.rebuild_cpu_ami.id
-  label       = "Daily AMI Rebuild"
-  cronline    = "0 11 * * *"
-  branch      = "main"
-  message     = "Daily scheduled rebuild of CPU build AMI"
-  enabled     = true
-}
-
-# -----------------------------------------------------------------------------
 # SSM Parameters
 # -----------------------------------------------------------------------------
 
