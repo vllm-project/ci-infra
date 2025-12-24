@@ -330,7 +330,9 @@ resource "aws_iam_policy" "vllm_wheels_bucket_read_write_access" {
       Effect = "Allow",
       Resource = [
         "arn:aws:s3:::vllm-wheels/*",
-        "arn:aws:s3:::vllm-wheels"
+        "arn:aws:s3:::vllm-wheels",
+        "arn:aws:s3:::vllm-wheels-dev",
+        "arn:aws:s3:::vllm-wheels-dev/*"
       ]
     }]
   })
