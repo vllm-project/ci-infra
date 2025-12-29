@@ -9,7 +9,7 @@
 # Automation Flow:
 #   1. Build AMI in us-east-1
 #   2. Update SSM parameter with new AMI ID
-#   3. New instances automatically use the latest AMI (via SSM dynamic reference)
+#   3. Update Launch Templates directly (bypasses CF to avoid SAR URL expiration)
 
 env:
   SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
@@ -77,12 +77,73 @@ steps:
 
         echo "Using subnet: $$SUBNET_ID"
 
+        echo "--- :docker: Getting ECR token for cache image"
+        ECR_TOKEN=$$(aws ecr get-login-password --region us-east-1)
+
+        # Login to ECR for image inspection
+        echo "$$ECR_TOKEN" | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
+
+        echo "--- :git: Determining commit for cache warming"
+        VLLM_COMMIT="$${VLLM_COMMIT:-}"
+
+        # If no commit specified, extract from postmerge image annotations
+        if [[ -z "$$VLLM_COMMIT" ]]; then
+          echo "No VLLM_COMMIT specified, extracting from postmerge image..."
+          POSTMERGE_IMAGE="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:latest"
+
+          # Get commit from OCI annotation on image index
+          VLLM_COMMIT=$$(docker buildx imagetools inspect "$$POSTMERGE_IMAGE" --raw | jq -r '.annotations["org.opencontainers.image.revision"] // empty' 2>/dev/null || echo "")
+
+          if [[ -n "$$VLLM_COMMIT" ]]; then
+            echo "Extracted commit from postmerge image annotation: $$VLLM_COMMIT"
+          else
+            echo "Warning: Could not extract commit from postmerge image, using HEAD"
+          fi
+        else
+          echo "Using specified VLLM_COMMIT: $$VLLM_COMMIT"
+        fi
+
+        rm -rf vllm-cache-source
+        echo "--- :git: Cloning vLLM repo for cache warming"
+        git clone https://github.com/vllm-project/vllm.git vllm-cache-source
+        cd vllm-cache-source
+
+        # Checkout specific commit if specified (Buildkite can fetch commits from forks)
+        if [[ -n "$$VLLM_COMMIT" ]]; then
+          echo "Fetching and checking out: $$VLLM_COMMIT"
+          git fetch origin "$$VLLM_COMMIT" || git fetch origin
+          git checkout "$$VLLM_COMMIT"
+        fi
+
+        # Compute merge base with main for precompiled wheel support
+        echo "--- :git: Computing merge base with main"
+        git fetch origin main
+        MERGE_BASE=$$(git merge-base HEAD origin/main 2>/dev/null || echo "")
+        if [[ -n "$$MERGE_BASE" ]]; then
+          echo "Merge base: $$MERGE_BASE"
+        else
+          echo "Warning: Could not compute merge base"
+        fi
+
+        # Verify docker-bake.hcl exists
+        if [[ -f docker/docker-bake.hcl ]]; then
+          echo "Found docker/docker-bake.hcl"
+        else
+          echo "Warning: docker/docker-bake.hcl not found - cache warming will be skipped"
+        fi
+
+        cd ..
+
         echo "--- :packer: Building AMI"
         packer init .
         packer build \
           -var "source_ami=$$SOURCE_AMI" \
           -var "security_group_id=$$SECURITY_GROUP_ID" \
           -var "subnet_id=$$SUBNET_ID" \
+          -var "ecr_token=$$ECR_TOKEN" \
+          -var "vllm_commit=$${VLLM_COMMIT:-}" \
+          -var "vllm_use_precompiled=1" \
+          -var "vllm_merge_base_commit=$${MERGE_BASE:-}" \
           buildkite-cpu-ami.pkr.hcl
 
         echo "--- :aws: Extracting AMI ID"
@@ -135,6 +196,116 @@ steps:
     agents:
       queue: packer_build_queue
     depends_on: build-ami
+
+  - label: ":rocket: Update Launch Templates"
+    key: refresh-stacks
+    command:
+      - |
+        set -euo pipefail
+
+        # =============================================================================
+        # AMI Rollout via Direct Launch Template Update
+        #
+        # This bypasses CloudFormation entirely to avoid SAR presigned URL expiration.
+        #
+        # How it works:
+        # 1. Read the new AMI ID from SSM
+        # 2. Find the Launch Template created by the CF stack
+        # 3. Create a new LT version with the new AMI
+        # 4. Update ASG to use the new LT version
+        # =============================================================================
+
+        echo "--- :rocket: Direct Launch Template Update"
+
+        # Read new AMI from SSM
+        NEW_AMI=$$(aws ssm get-parameter \
+          --name "$${SSM_PARAM_US_EAST_1}" \
+          --query 'Parameter.Value' \
+          --output text \
+          --region us-east-1)
+
+        echo "New AMI ID: $$NEW_AMI"
+
+        for STACK_NAME in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
+          echo ""
+          echo "--- Processing stack: $$STACK_NAME"
+
+          # Get the Launch Template ID from the CF stack
+          LT_ID=$$(aws cloudformation describe-stack-resource \
+            --stack-name "$$STACK_NAME" \
+            --logical-resource-id AgentLaunchTemplate \
+            --query 'StackResourceDetail.PhysicalResourceId' \
+            --output text \
+            --region us-east-1)
+
+          echo "Launch Template: $$LT_ID"
+
+          # Get latest LT version to check current AMI
+          LATEST_VERSION=$$(aws ec2 describe-launch-templates \
+            --launch-template-ids "$$LT_ID" \
+            --query 'LaunchTemplates[0].LatestVersionNumber' \
+            --output text \
+            --region us-east-1)
+
+          echo "Latest LT Version: $$LATEST_VERSION"
+
+          # Check current AMI in the latest version
+          CURRENT_AMI=$$(aws ec2 describe-launch-template-versions \
+            --launch-template-id "$$LT_ID" \
+            --versions "$$LATEST_VERSION" \
+            --query 'LaunchTemplateVersions[0].LaunchTemplateData.ImageId' \
+            --output text \
+            --region us-east-1)
+
+          echo "Current AMI: $$CURRENT_AMI"
+          echo "New AMI: $$NEW_AMI"
+
+          if [ "$$CURRENT_AMI" = "$$NEW_AMI" ]; then
+            echo "AMI unchanged, skipping $$STACK_NAME"
+            continue
+          fi
+
+          # Create new Launch Template version with new AMI
+          echo "Creating new LT version..."
+          NEW_VERSION=$$(aws ec2 create-launch-template-version \
+            --launch-template-id "$$LT_ID" \
+            --source-version "$$LATEST_VERSION" \
+            --launch-template-data "{\"ImageId\":\"$$NEW_AMI\"}" \
+            --query 'LaunchTemplateVersion.VersionNumber' \
+            --output text \
+            --region us-east-1)
+
+          echo "✅ $$STACK_NAME: Created LT version $$NEW_VERSION with AMI $$NEW_AMI"
+
+          # Update ASG to use the new LT version
+          # ASG uses MixedInstancesPolicy, so we update via that path
+          echo "Updating ASG to use LT version $$NEW_VERSION..."
+
+          # Get ASG name from CF stack
+          ASG_NAME=$$(aws cloudformation describe-stack-resource \
+            --stack-name "$$STACK_NAME" \
+            --logical-resource-id AgentAutoScaleGroup \
+            --query 'StackResourceDetail.PhysicalResourceId' \
+            --output text \
+            --region us-east-1)
+
+          echo "ASG: $$ASG_NAME"
+
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name "$$ASG_NAME" \
+            --mixed-instances-policy "LaunchTemplate={LaunchTemplateSpecification={LaunchTemplateId=$$LT_ID,Version=$$NEW_VERSION}}" \
+            --region us-east-1
+
+          echo "✅ ASG updated to use LT version $$NEW_VERSION"
+        done
+
+        echo ""
+        echo "--- :white_check_mark: Launch Template updates complete"
+        echo "New instances will use AMI: $$NEW_AMI"
+        echo "Existing instances will cycle out naturally (TerminateInstanceAfterJob=true)"
+    agents:
+      queue: packer_build_queue
+    depends_on: update-ssm
 
   - label: ":broom: Cleanup Old AMIs"
     key: cleanup-amis
@@ -193,4 +364,4 @@ steps:
         echo "Cleanup complete"
     agents:
       queue: packer_build_queue
-    depends_on: update-ssm
+    depends_on: refresh-stacks

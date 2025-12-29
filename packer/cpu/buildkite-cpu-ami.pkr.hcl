@@ -33,6 +33,30 @@ variable "deprecate_days" {
   description = "Number of days after which the AMI is marked as deprecated"
 }
 
+variable "ecr_token" {
+  type        = string
+  sensitive   = true
+  description = "ECR authentication token for pulling cache images"
+}
+
+variable "vllm_commit" {
+  type        = string
+  default     = ""
+  description = "vLLM commit SHA to build/cache from (extracted from postmerge image if not provided)"
+}
+
+variable "vllm_use_precompiled" {
+  type        = string
+  default     = "1"
+  description = "Whether to use precompiled wheels (must match CI for cache parity)"
+}
+
+variable "vllm_merge_base_commit" {
+  type        = string
+  default     = ""
+  description = "Merge base commit for precompiled wheels (must match CI for cache parity)"
+}
+
 locals {
   timestamp         = regex_replace(timestamp(), "[- TZ:]", "")
   deprecate_hours   = var.deprecate_days * 24
@@ -82,17 +106,72 @@ source "amazon-ebs" "cpu_build_box" {
 build {
   sources = ["source.amazon-ebs.cpu_build_box"]
 
+  # Upload scripts to the instance
   provisioner "file" {
     destination = "/tmp"
     source      = "scripts"
   }
 
+  # Upload ci.hcl for bake builds
+  provisioner "file" {
+    destination = "/tmp/ci.hcl"
+    source      = "../../docker/ci.hcl"
+  }
+
+  # Upload vLLM repo (cloned by pipeline) for cache warming
+  provisioner "file" {
+    destination = "/tmp/vllm"
+    source      = "vllm-cache-source"
+  }
+
+  # Configure network settings for high-throughput operations
+  provisioner "shell" {
+    script = "scripts/configure-network.sh"
+  }
+
+  # Install BuildKit as standalone systemd service (runs as ec2-user with sudo)
   provisioner "shell" {
     script = "scripts/install-build-tools.sh"
   }
 
+  # Warm the cache by building vLLM image (runs as buildkite-agent)
   provisioner "shell" {
-    script = "scripts/pull-base-images.sh"
+    environment_vars = [
+      "ECR_TOKEN=${var.ecr_token}",
+      "VLLM_COMMIT=${var.vllm_commit}",
+      "VLLM_USE_PRECOMPILED=${var.vllm_use_precompiled}",
+      "VLLM_MERGE_BASE_COMMIT=${var.vllm_merge_base_commit}"
+    ]
+    inline = [
+      "sudo -u buildkite-agent -i ECR_TOKEN=\"$ECR_TOKEN\" VLLM_COMMIT=\"$VLLM_COMMIT\" VLLM_USE_PRECOMPILED=\"$VLLM_USE_PRECOMPILED\" VLLM_MERGE_BASE_COMMIT=\"$VLLM_MERGE_BASE_COMMIT\" bash /tmp/scripts/warm-cache.sh"
+    ]
+  }
+
+  # Prepare for AMI snapshot
+  provisioner "shell" {
+    inline = [
+      "echo '=== Preparing for AMI snapshot ==='",
+      "echo 'Docker info:'",
+      "docker info 2>&1 | grep -E 'Docker Root Dir|Storage Driver' || docker info",
+      "echo ''",
+      "echo 'BuildKit cache size:'",
+      "sudo du -sh /var/lib/buildkit 2>/dev/null || echo 'No buildkit cache'",
+      "sudo ls -la /var/lib/buildkit/ 2>/dev/null | head -10 || true",
+      "echo ''",
+      "echo 'Stopping buildkitd and Docker gracefully...'",
+      "sudo systemctl stop buildkitd || true",
+      "sudo systemctl stop docker",
+      "sudo sync",
+      "echo ''",
+      "echo 'Verifying data on disk:'",
+      "sudo du -sh /var/lib/buildkit || echo 'No buildkit cache'",
+      "echo ''",
+      "echo 'Creating AMI marker file...'",
+      "echo \"AMI_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | sudo tee /etc/vllm-ami-info",
+      "echo \"BUILDKIT_CACHE=/var/lib/buildkit\" | sudo tee -a /etc/vllm-ami-info",
+      "echo ''",
+      "echo 'Ready for snapshot'"
+    ]
   }
 
   post-processor "manifest" {

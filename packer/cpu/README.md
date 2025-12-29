@@ -125,7 +125,7 @@ IMAGES=(
 )
 ```
 
-Add more images to the list in `scripts/pull-base-images.sh` as needed.
+Add more images to the list in `scripts/warm-cache.sh` as needed.
 
 ### BuildKit (`/etc/buildkit/buildkitd.toml`)
 
