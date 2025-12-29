@@ -518,11 +518,15 @@ steps:
               exit 0
             fi
           - >
-            docker build
-            --file docker/Dockerfile.nightly_torch
+            docker buildx build 
+            --file docker/Dockerfile
             --build-arg max_jobs=16
             --build-arg buildkite_commit=$BUILDKITE_COMMIT
             --build-arg USE_SCCACHE=1
+            --build-arg USE_TORCH_NIGHTLY=true
+            --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
+            --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
+            --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
             --tag {{ docker_image_torch_nightly }}
             --target test
             --progress plain .
