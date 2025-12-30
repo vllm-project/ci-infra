@@ -117,7 +117,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     """Prepare step commands with variables injected and default setup commands."""
     commands = []
     # Default setup commands
-    if not step.label.startswith(":docker:"):
+    if not step.label.startswith(":docker:") and not step.no_plugin:
         commands.append("(command nvidia-smi || true)")
 
     if step.commands:
