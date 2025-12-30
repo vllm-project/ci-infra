@@ -61,25 +61,35 @@ def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
     if step.label.startswith(":docker:"):
         if branch == "main":
-            return AgentQueue.CPU_QUEUE_POSTMERGE_US_EAST_1
+            return AgentQueue.CPU_POSTMERGE_US_EAST_1
         else:
-            return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
+            return AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.label == "Documentation Build":
-        return AgentQueue.SMALL_CPU_QUEUE_PREMERGE
+        return AgentQueue.SMALL_CPU_PREMERGE
     elif step.device == DeviceType.CPU:
-        return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
+        return AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.device == DeviceType.A100:
-        return AgentQueue.A100_QUEUE
+        return AgentQueue.A100
     elif step.device == DeviceType.H100:
-        return AgentQueue.MITHRIL_H100_POOL
+        return AgentQueue.MITHRIL_H100
     elif step.device == DeviceType.H200:
         return AgentQueue.SKYLAB_H200
     elif step.device == DeviceType.B200:
         return AgentQueue.B200
+    elif step.device == DeviceType.INTEL_CPU:
+        return AgentQueue.INTEL_CPU
+    elif step.device == DeviceType.INTEL_HPU:
+        return AgentQueue.INTEL_HPU
+    elif step.device == DeviceType.INTEL_GPU:
+        return AgentQueue.INTEL_GPU
+    elif step.device == DeviceType.ARM_CPU:
+        return AgentQueue.ARM_CPU
+    elif step.device == DeviceType.GH200:
+        return AgentQueue.GH200
     elif step.num_devices == 2 or step.num_devices == 4:
-        return AgentQueue.GPU_4_QUEUE
+        return AgentQueue.GPU_4
     else:
-        return AgentQueue.GPU_1_QUEUE
+        return AgentQueue.GPU_1
 
 
 def _get_variables_to_inject() -> Dict[str, str]:
