@@ -87,6 +87,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.ARM_CPU
     elif step.device == DeviceType.GH200:
         return AgentQueue.GH200
+    elif step.device == DeviceType.ASCEND:
+        return AgentQueue.ASCEND
     elif step.num_devices == 2 or step.num_devices == 4:
         return AgentQueue.GPU_4
     else:

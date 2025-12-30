@@ -12,6 +12,7 @@ class DeviceType(str, Enum):
     INTEL_GPU = "intel_gpu"
     ARM_CPU = "arm_cpu"
     GH200 = "gh200"
+    ASCEND = "ascend_npu"
 
 
 class AgentQueue(str, Enum):
@@ -31,3 +32,4 @@ class AgentQueue(str, Enum):
     INTEL_GPU = "intel-gpu"
     ARM_CPU = "arm-cpu"
     GH200 = "gh200_queue"
+    ASCEND = "ascend"
