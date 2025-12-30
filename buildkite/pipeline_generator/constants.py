@@ -1,11 +1,12 @@
 from enum import Enum
 
 
-class GPUType(str, Enum):
+class DeviceType(str, Enum):
     H100 = "h100"
     H200 = "h200"
     B200 = "b200"
     A100 = "a100"
+    CPU = "cpu"
 
 
 class AgentQueue(str, Enum):

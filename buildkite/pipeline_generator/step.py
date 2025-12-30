@@ -12,12 +12,11 @@ class Step(BaseModel):
     label: str
     group: str = ""
     working_dir: Optional[str] = None
-    no_gpu: bool = False
     key: Optional[str] = None
     depends_on: Optional[List[str]] = None
     commands: Optional[List[str]] = None
-    gpu: Optional[str] = None
-    num_gpus: Optional[int] = None
+    device: Optional[str] = None
+    num_devices: Optional[int] = None
     num_nodes: Optional[int] = None
     source_file_dependencies: Optional[List[str]] = None
     soft_fail: Optional[bool] = False
@@ -29,15 +28,9 @@ class Step(BaseModel):
     no_plugin: Optional[bool] = False
 
     @model_validator(mode="after")
-    def validate_gpu(self) -> Self:
-        if self.gpu and self.no_gpu:
-            raise ValueError("Both 'gpu' and 'no_gpu' cannot be defined together.")
-        return self
-
-    @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
-        if self.num_nodes and not self.num_gpus:
-            raise ValueError("'num_gpus' must be defined if 'num_nodes' is defined.")
+        if self.num_nodes and not self.num_devices:
+            raise ValueError("'num_devices' must be defined if 'num_nodes' is defined.")
         return self
 
     @classmethod

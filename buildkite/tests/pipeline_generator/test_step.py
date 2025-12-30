@@ -12,7 +12,7 @@ def test_read_steps_from_job_dir():
     assert steps[0].group == "bb"
     assert steps[0].commands == ['echo "Test A"', 'echo "Test A.B"']
     assert steps[3].num_nodes == 2
-    assert steps[3].num_gpus == 4
+    assert steps[3].num_devices == 4
     assert steps[4].label == "Test E"
     assert steps[4].group == "a"
 

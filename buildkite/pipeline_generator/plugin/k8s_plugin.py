@@ -1,6 +1,6 @@
 import copy
 from step import Step
-from constants import GPUType
+from constants import DeviceType
 
 HF_HOME = "/root/.cache/huggingface"
 
@@ -86,13 +86,13 @@ a100_plugin_template = {
 
 def get_k8s_plugin(step: Step, image: str):
     plugin = None
-    if step.gpu == GPUType.H100.value:
+    if step.device == DeviceType.H100:
         plugin = copy.deepcopy(h100_plugin_template)
-    elif step.gpu == GPUType.A100.value:
+    elif step.device == DeviceType.A100.value:
         plugin = copy.deepcopy(a100_plugin_template)
 
     plugin["kubernetes"]["podSpec"]["containers"][0]["image"] = image
     plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"][
         "nvidia.com/gpu"
-    ] = step.num_gpus or 1
+    ] = step.num_devices or 1
     return plugin

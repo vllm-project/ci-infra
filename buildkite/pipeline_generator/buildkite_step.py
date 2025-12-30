@@ -5,7 +5,7 @@ from utils_lib.docker_utils import get_image, get_ecr_cache_registry
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
-from constants import GPUType, AgentQueue
+from constants import DeviceType, AgentQueue
 
 
 class BuildkiteCommandStep(BaseModel):
@@ -51,7 +51,7 @@ class BuildkiteGroupStep(BaseModel):
 
 def _get_step_plugin(step: Step):
     # Use K8s plugin
-    if step.gpu in [GPUType.H100.value, GPUType.A100.value]:
+    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
         return get_k8s_plugin(step, get_image(step.no_gpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(step.no_gpu))}
@@ -66,17 +66,17 @@ def get_agent_queue(step: Step):
             return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
     elif step.label == "Documentation Build":
         return AgentQueue.SMALL_CPU_QUEUE_PREMERGE
-    elif step.no_gpu:
+    elif step.device == DeviceType.CPU:
         return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
-    elif step.gpu == GPUType.A100:
+    elif step.device == DeviceType.A100:
         return AgentQueue.A100_QUEUE
-    elif step.gpu == GPUType.H100:
+    elif step.device == DeviceType.H100:
         return AgentQueue.MITHRIL_H100_POOL
-    elif step.gpu == GPUType.H200:
+    elif step.device == DeviceType.H200:
         return AgentQueue.SKYLAB_H200
-    elif step.gpu == GPUType.B200:
+    elif step.device == DeviceType.B200:
         return AgentQueue.B200
-    elif step.num_gpus == 2 or step.num_gpus == 4:
+    elif step.num_devices == 2 or step.num_devices == 4:
         return AgentQueue.GPU_4_QUEUE
     else:
         return AgentQueue.GPU_1_QUEUE
