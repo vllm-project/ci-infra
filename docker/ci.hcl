@@ -100,8 +100,8 @@ function "get_cache_from" {
 function "get_cache_to" {
   params = []
   result = compact([
-    CACHE_TO != "" ? "type=registry,ref=${CACHE_TO},mode=max,compression=zstd" : "",
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${BUILDKITE_COMMIT},mode=max,compression=zstd" : "",
+    CACHE_TO != "" ? "type=registry,ref=${CACHE_TO},mode=max,compression=zstd,compression-level=1" : "",
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${BUILDKITE_COMMIT},mode=max,compression=zstd,compression-level=1" : "",
   ])
 }
 
