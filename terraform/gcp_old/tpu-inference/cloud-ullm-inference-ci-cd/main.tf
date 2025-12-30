@@ -50,9 +50,9 @@ module "ci_v7x_2" {
 
   accelerator_type                 = "tpu7x-2"
   reserved                         = true
-  instance_count                   = 16
+  instance_count                   = 8
   buildkite_queue_name             = "tpu_v7x_2_queue"
-  disk_size                        = 256
+  disk_size                        = 512
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
   buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
