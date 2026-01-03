@@ -30,6 +30,15 @@
 
 set -euo pipefail
 
+# Run machine config debug script first (before any early exits)
+VLLM_CI_BRANCH="${VLLM_CI_BRANCH:-main}"
+echo "--- :mag: Machine Configuration Debug"
+if curl -sSf "https://raw.githubusercontent.com/vllm-project/ci-infra/refs/heads/${VLLM_CI_BRANCH}/buildkite/scripts/debug-machine-config.sh" -o /tmp/debug-machine-config.sh 2>/dev/null; then
+    bash /tmp/debug-machine-config.sh || true
+else
+    echo "Could not download debug-machine-config.sh from branch ${VLLM_CI_BRANCH}"
+fi
+
 # Check if image already exists (skip build if it does)
 if [[ -n "${IMAGE_TAG:-}" ]]; then
     echo "--- :mag: Checking if image exists"
