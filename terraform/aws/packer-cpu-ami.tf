@@ -277,3 +277,10 @@ resource "aws_iam_role_policy_attachment" "packer_ami_builder_access" {
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.packer_ami_builder_policy.arn
 }
+
+# sccache read-only access for cache warming during AMI builds
+resource "aws_iam_role_policy_attachment" "packer_sccache_bucket_read_access" {
+  for_each   = aws_cloudformation_stack.bk_queue_packer
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.bk_stack_sccache_bucket_read_access.arn
+}
