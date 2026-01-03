@@ -124,6 +124,11 @@ build {
     source      = "vllm-cache-source"
   }
 
+  # Configure network settings for high-throughput operations
+  provisioner "shell" {
+    script = "scripts/configure-network.sh"
+  }
+
   # Install BuildKit as standalone systemd service (runs as ec2-user with sudo)
   provisioner "shell" {
     script = "scripts/install-build-tools.sh"
