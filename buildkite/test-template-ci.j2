@@ -300,39 +300,22 @@ steps:
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
-      - "docker buildx create --name vllm-builder --driver docker-container --use"
-      - "docker buildx inspect --bootstrap"
-      - "docker buildx ls"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
-      - >
-        docker buildx build --file docker/Dockerfile
-        --build-arg max_jobs=16
-        --build-arg buildkite_commit=$BUILDKITE_COMMIT
-        --build-arg USE_SCCACHE=1
-        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
-        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
-        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
-        {% if vllm_use_precompiled == "1" %}
-        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
-        {% endif %}
-        --cache-to type=registry,ref={{ cache_to }},mode=max,compression=zstd
-        --cache-from type=registry,ref={{ cache_from }},mode=max
-        --cache-from type=registry,ref={{ cache_from_base_branch }},mode=max
-        --cache-from type=registry,ref={{ cache_from_main }},mode=max
-        --tag {{ docker_image }}
-        {% if branch == "main" %}
-        --tag {{ docker_image_latest }}
-        {% endif %}
-        --push
-        --target test
-        --progress plain .
+      - "curl -sSfL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch }}/buildkite/scripts/ci-bake.sh | bash -s -- test-ci"
+    env:
+      VLLM_CI_BRANCH: "{{ vllm_ci_branch }}"
+      CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch }}/docker/ci.hcl"
+      IMAGE_TAG: "{{ docker_image }}"
+      {% if branch == "main" %}
+      IMAGE_TAG_LATEST: "{{ docker_image_latest }}"
+      {% endif %}
+      CACHE_TO: "{{ cache_to }}"
+      CACHE_FROM: "{{ cache_from }}"
+      CACHE_FROM_BASE: "{{ cache_from_base_branch }}"
+      CACHE_FROM_MAIN: "{{ cache_from_main }}"
+      VLLM_USE_PRECOMPILED: "{{ vllm_use_precompiled | default('0') }}"
+      {% if vllm_use_precompiled == "1" %}
+      VLLM_MERGE_BASE_COMMIT: "{{ vllm_merge_base_commit }}"
+      {% endif %}
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
