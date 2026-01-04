@@ -1,0 +1,25 @@
+[Unit]
+Description=Configure buildx to use BuildKit daemon
+After=buildkitd.service docker.service
+Requires=buildkitd.service docker.service
+Before=buildkite-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=buildkite-agent
+Group=buildkite-agent
+Environment=HOME=/var/lib/buildkite-agent
+
+# Create the buildx builder config pointing to buildkitd
+ExecStart=/bin/bash -c '\
+  docker buildx rm baked-vllm-builder 2>/dev/null || true; \
+  docker buildx create \
+    --name baked-vllm-builder \
+    --driver remote \
+    --use \
+    unix:///run/buildkit/buildkitd.sock && \
+  echo "buildx configured to use buildkitd"'
+
+[Install]
+WantedBy=multi-user.target buildkite-agent.service
