@@ -18,6 +18,7 @@
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
+{% set hf_home_ibm = "/model-cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
 {% macro add_pytest_coverage(cmd, coverage_file) %}
@@ -58,7 +59,7 @@ agents:
   {% elif step.gpu == "a100" %}
   queue: a100_queue
   {% elif step.gpu == "h100" %}
-  queue: mithril-h100-pool
+  queue: IBM-H100-OpenShift
   {% elif step.gpu == "h200" and step.num_gpus and step.num_gpus == 8 %}
   queue: nebius-h200
   {% elif step.gpu == "h200" %}
@@ -209,6 +210,11 @@ plugins:
   {% elif step.gpu == "h100" %}
   - kubernetes:
       podSpec:
+        serviceAccountName: buildkite-h100
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          fsGroup: 0
         containers:
           - image: {{ image }}
             command:
@@ -220,29 +226,34 @@ plugins:
               - name: devshm
                 mountPath: /dev/shm
               - name: hf-cache
-                mountPath: {{ hf_home }}
+                mountPath: {{ hf_home_ibm }}
             env:
               - name: VLLM_USAGE_SOURCE
                 value: ci-test
               - name: NCCL_CUMEM_HOST_ENABLE
                 value: "0"
               - name: HF_HOME
-                value: {{ hf_home }}
+                value: {{ hf_home_ibm }}/huggingface
               - name: HF_TOKEN
                 valueFrom:
                   secretKeyRef:
                     name: hf-token-secret
                     key: token
+              - name: XDG_CACHE_HOME
+                value: {{ hf_home_ibm }}/.cache
+              - name: XDG_CONFIG_HOME
+                value: {{ hf_home_ibm }}/.config
+              - name: FLASHINFER_WORKSPACE_DIR
+                value: {{ hf_home_ibm }}/.cache/flashinfer
         nodeSelector:
-          node.kubernetes.io/instance-type: gpu-h100-sxm
+          node.kubernetes.io/instance-type: NVIDIA-H100-80GB-HBM3
         volumes:
           - name: devshm
             emptyDir:
               medium: Memory
           - name: hf-cache
-            hostPath:
-              path: /mnt/hf-cache
-              type: DirectoryOrCreate
+            persistentVolumeClaim:
+              claimName: nvme-model-cache-pvc
   {% else %}
   - kubernetes:
       podSpec:
