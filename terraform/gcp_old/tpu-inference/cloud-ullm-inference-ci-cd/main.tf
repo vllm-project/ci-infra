@@ -3,6 +3,11 @@ data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
   version = "latest"
 }
 
+data "google_secret_manager_secret_version" "buildkite_analytics_token_ci_cluster" {
+  secret  = "projects/${var.secret_project_id}/secrets/tpu_commons_buildkite_analytics_token"
+  version = "latest"
+}
+
 data "google_secret_manager_secret_version" "huggingface_token" {
   secret  = "projects/${var.secret_project_id}/secrets/tpu_commons_buildkite_hf_token"
   version = "latest"
@@ -22,6 +27,7 @@ module "ci_v6e_1" {
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
   buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_analytics_token_value  = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
   huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
@@ -38,6 +44,7 @@ module "ci_v6e_8" {
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
   buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_analytics_token_value  = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
   huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
@@ -56,6 +63,7 @@ module "ci_v7x_2" {
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
   buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_analytics_token_value  = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
   huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
@@ -73,5 +81,6 @@ module "ci_v7x_8" {
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
   buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_analytics_token_value  = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
   huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
