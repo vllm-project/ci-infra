@@ -1,0 +1,305 @@
+# Buildkite pipeline for rebuilding the CPU build AMI
+#
+# This pipeline is scheduled to run daily at 11 AM UTC (3 AM PST) to keep the
+# Docker layer cache fresh. The schedule is managed via Terraform.
+#
+# The pipeline uses the dedicated packer_build_queue which has EC2 permissions
+# to create and manage AMIs and update SSM parameters.
+#
+# Automation Flow:
+#   1. Build AMI in us-east-1
+#   2. Update SSM parameter with new AMI ID
+#   3. Update Launch Templates and ASGs directly
+#   4. Cleanup old AMIs
+
+env:
+  SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
+  SSM_PARAM_SECURITY_GROUP: "/buildkite/packer/security-group-id"
+  SSM_PARAM_SUBNET: "/buildkite/packer/subnet-id"
+  STACK_VERSION: "6.21.0"
+
+steps:
+  - label: ":packer: Build CPU AMI"
+    key: build-ami
+    command:
+      - |
+        set -euo pipefail
+        cd packer/cpu
+
+        # Install yq if not available (Amazon Linux 2)
+        if ! command -v yq &> /dev/null; then
+          echo "Installing yq..."
+          pip3 install yq
+          export PATH="$$HOME/.local/bin:$$PATH"
+        fi
+
+        # Install packer if not available
+        if ! command -v packer &> /dev/null; then
+          echo "Installing packer..."
+          curl -fsSL https://releases.hashicorp.com/packer/1.11.2/packer_1.11.2_linux_amd64.zip -o /tmp/packer.zip
+          unzip -o /tmp/packer.zip -d $$HOME/.local/bin
+          rm /tmp/packer.zip
+        fi
+
+        echo "--- :cloudformation: Fetching base AMI from Buildkite stack v$${STACK_VERSION}"
+
+        STACK_URL="https://s3.amazonaws.com/buildkite-aws-stack/v$${STACK_VERSION}/aws-stack.yml"
+
+        # Extract AMI ID for us-east-1 x86_64 from CloudFormation template
+        SOURCE_AMI=$$(curl -s "$$STACK_URL" | yq -r '.Mappings.AWSRegion2AMI["us-east-1"].linuxamd64')
+
+        if [[ -z "$$SOURCE_AMI" || ! "$$SOURCE_AMI" =~ ^ami-[a-fA-F0-9]+$$ ]]; then
+          echo "Error: Failed to extract valid AMI from stack template"
+          echo "Got: $$SOURCE_AMI"
+          exit 1
+        fi
+
+        echo "Using base AMI: $$SOURCE_AMI (from Buildkite stack v$${STACK_VERSION})"
+
+        echo "--- :ssm: Fetching security group ID"
+        SECURITY_GROUP_ID=$$(aws ssm get-parameter --name "$${SSM_PARAM_SECURITY_GROUP}" --query 'Parameter.Value' --output text --region us-east-1)
+
+        if [[ -z "$$SECURITY_GROUP_ID" || ! "$$SECURITY_GROUP_ID" =~ ^sg-[a-fA-F0-9]+$$ ]]; then
+          echo "Error: Failed to fetch valid security group ID from SSM"
+          echo "Got: $$SECURITY_GROUP_ID"
+          exit 1
+        fi
+
+        echo "Using security group: $$SECURITY_GROUP_ID"
+
+        echo "--- :ssm: Fetching subnet ID"
+        SUBNET_ID=$$(aws ssm get-parameter --name "$${SSM_PARAM_SUBNET}" --query 'Parameter.Value' --output text --region us-east-1)
+
+        if [[ -z "$$SUBNET_ID" || ! "$$SUBNET_ID" =~ ^subnet-[a-fA-F0-9]+$$ ]]; then
+          echo "Error: Failed to fetch valid subnet ID from SSM"
+          echo "Got: $$SUBNET_ID"
+          exit 1
+        fi
+
+        echo "Using subnet: $$SUBNET_ID"
+
+        echo "--- :packer: Building AMI"
+        packer init .
+        packer build \
+          -var "source_ami=$$SOURCE_AMI" \
+          -var "security_group_id=$$SECURITY_GROUP_ID" \
+          -var "subnet_id=$$SUBNET_ID" \
+          buildkite-cpu-ami.pkr.hcl
+
+        echo "--- :aws: Extracting AMI ID"
+
+        if [[ ! -f manifest.json ]]; then
+          echo "Error: manifest.json not found"
+          exit 1
+        fi
+
+        US_EAST_1_AMI=$$(jq -r '.builds[-1].artifact_id | split(":")[1] // empty' manifest.json)
+
+        if [[ -z "$$US_EAST_1_AMI" ]]; then
+          echo "Error: Failed to extract AMI ID from manifest.json"
+          cat manifest.json
+          exit 1
+        fi
+
+        if [[ ! "$$US_EAST_1_AMI" =~ ^ami-[a-fA-F0-9]+$$ ]]; then
+          echo "Error: Invalid AMI ID format: $$US_EAST_1_AMI"
+          exit 1
+        fi
+
+        echo "us-east-1 AMI: $$US_EAST_1_AMI"
+        buildkite-agent meta-data set "ami-us-east-1" "$$US_EAST_1_AMI"
+    agents:
+      queue: packer_build_queue
+    timeout_in_minutes: 60
+    retry:
+      automatic:
+        - exit_status: -1  # Agent/infrastructure failures only
+          limit: 1
+
+  - label: ":aws: Update SSM Parameter"
+    key: update-ssm
+    command:
+      - |
+        echo "--- :ssm: Updating SSM parameter with new AMI ID"
+
+        US_EAST_1_AMI=$$(buildkite-agent meta-data get "ami-us-east-1")
+
+        echo "Updating $${SSM_PARAM_US_EAST_1} -> $$US_EAST_1_AMI"
+        aws ssm put-parameter \
+          --name "$${SSM_PARAM_US_EAST_1}" \
+          --value "$$US_EAST_1_AMI" \
+          --type String \
+          --overwrite \
+          --region us-east-1
+
+        echo "SSM parameter updated successfully"
+    agents:
+      queue: packer_build_queue
+    depends_on: build-ami
+
+  - label: ":rocket: Update Launch Templates"
+    key: update-launch-templates
+    command:
+      - |
+        set -euo pipefail
+
+        # =============================================================================
+        # AMI Rollout via Direct Launch Template Update
+        #
+        # How it works:
+        # 1. Read the new AMI ID from SSM
+        # 2. Find the Launch Template created by the CF stack
+        # 3. Create a new LT version with the new AMI
+        # 4. Update ASG to use the new LT version
+        # =============================================================================
+
+        echo "--- :rocket: Direct Launch Template Update"
+
+        # Read new AMI from SSM
+        NEW_AMI=$$(aws ssm get-parameter \
+          --name "$${SSM_PARAM_US_EAST_1}" \
+          --query 'Parameter.Value' \
+          --output text \
+          --region us-east-1)
+
+        echo "New AMI ID: $$NEW_AMI"
+
+        for STACK_NAME in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
+          echo ""
+          echo "--- Processing stack: $$STACK_NAME"
+
+          # Get the Launch Template ID from the CF stack
+          LT_ID=$$(aws cloudformation describe-stack-resource \
+            --stack-name "$$STACK_NAME" \
+            --logical-resource-id AgentLaunchTemplate \
+            --query 'StackResourceDetail.PhysicalResourceId' \
+            --output text \
+            --region us-east-1)
+
+          echo "Launch Template: $$LT_ID"
+
+          # Get latest LT version to check current AMI
+          LATEST_VERSION=$$(aws ec2 describe-launch-templates \
+            --launch-template-ids "$$LT_ID" \
+            --query 'LaunchTemplates[0].LatestVersionNumber' \
+            --output text \
+            --region us-east-1)
+
+          echo "Latest LT Version: $$LATEST_VERSION"
+
+          # Check current AMI in the latest version
+          CURRENT_AMI=$$(aws ec2 describe-launch-template-versions \
+            --launch-template-id "$$LT_ID" \
+            --versions "$$LATEST_VERSION" \
+            --query 'LaunchTemplateVersions[0].LaunchTemplateData.ImageId' \
+            --output text \
+            --region us-east-1)
+
+          echo "Current AMI: $$CURRENT_AMI"
+          echo "New AMI: $$NEW_AMI"
+
+          if [ "$$CURRENT_AMI" = "$$NEW_AMI" ]; then
+            echo "AMI unchanged, skipping $$STACK_NAME"
+            continue
+          fi
+
+          # Create new Launch Template version with new AMI
+          echo "Creating new LT version..."
+          NEW_VERSION=$$(aws ec2 create-launch-template-version \
+            --launch-template-id "$$LT_ID" \
+            --source-version "$$LATEST_VERSION" \
+            --launch-template-data "{\"ImageId\":\"$$NEW_AMI\"}" \
+            --query 'LaunchTemplateVersion.VersionNumber' \
+            --output text \
+            --region us-east-1)
+
+          echo "✅ $$STACK_NAME: Created LT version $$NEW_VERSION with AMI $$NEW_AMI"
+
+          # Update ASG to use the new LT version
+          # ASG uses MixedInstancesPolicy, so we update via that path
+          echo "Updating ASG to use LT version $$NEW_VERSION..."
+
+          # Get ASG name from CF stack
+          ASG_NAME=$$(aws cloudformation describe-stack-resource \
+            --stack-name "$$STACK_NAME" \
+            --logical-resource-id AgentAutoScaleGroup \
+            --query 'StackResourceDetail.PhysicalResourceId' \
+            --output text \
+            --region us-east-1)
+
+          echo "ASG: $$ASG_NAME"
+
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name "$$ASG_NAME" \
+            --mixed-instances-policy "LaunchTemplate={LaunchTemplateSpecification={LaunchTemplateId=$$LT_ID,Version=$$NEW_VERSION}}" \
+            --region us-east-1
+
+          echo "✅ ASG updated to use LT version $$NEW_VERSION"
+        done
+
+        echo ""
+        echo "--- :white_check_mark: Launch Template updates complete"
+        echo "New instances will use AMI: $$NEW_AMI"
+        echo "Existing instances will cycle out naturally (TerminateInstanceAfterJob=true)"
+    agents:
+      queue: packer_build_queue
+    depends_on: update-ssm
+
+  - label ":broom: Cleanup Old AMIs"
+    key: cleanup-amis
+    command:
+      - |
+        set -euo pipefail
+
+        echo "--- :aws: Cleaning up old AMIs (keeping latest 3 that are older than 3 days)"
+
+        # Get cutoff date (3 days ago)
+        CUTOFF_DATE=$$(date -u -d '3 days ago' '+%Y-%m-%dT%H:%M:%S')
+
+        # Get all CPU build AMIs older than 3 days, sorted by creation date (newest first)
+        AMIS=$$(aws ec2 describe-images \
+          --owners self \
+          --filters "Name=name,Values=vllm-buildkite-stack-linux-cpu-build-*" \
+          --query "sort_by(Images[?CreationDate<'$$CUTOFF_DATE'], &CreationDate) | reverse(@) | [*].ImageId" \
+          --output text \
+          --region us-east-1)
+
+        # Convert to array
+        AMI_ARRAY=($$AMIS)
+        TOTAL=$${#AMI_ARRAY[@]}
+
+        echo "Found $$TOTAL AMIs older than 3 days"
+
+        if [[ $$TOTAL -le 3 ]]; then
+          echo "Only $$TOTAL old AMIs exist, nothing to clean up"
+          exit 0
+        fi
+
+        # Keep first 3 (newest of the old ones), delete the rest
+        KEEP=3
+        DELETE_COUNT=$$((TOTAL - KEEP))
+        echo "Keeping $$KEEP AMIs for rollback, deleting $$DELETE_COUNT older AMIs"
+
+        for ((i=KEEP; i<TOTAL; i++)); do
+          AMI_ID=$${AMI_ARRAY[$$i]}
+          echo "Deleting AMI: $$AMI_ID"
+
+          # Get snapshot ID before deregistering
+          SNAPSHOT_ID=$$(aws ec2 describe-images --image-ids $$AMI_ID \
+            --query 'Images[0].BlockDeviceMappings[0].Ebs.SnapshotId' \
+            --output text --region us-east-1)
+
+          # Deregister the AMI
+          aws ec2 deregister-image --image-id $$AMI_ID --region us-east-1
+
+          # Delete the snapshot if it exists
+          if [[ -n "$$SNAPSHOT_ID" && "$$SNAPSHOT_ID" != "None" ]]; then
+            echo "Deleting snapshot: $$SNAPSHOT_ID"
+            aws ec2 delete-snapshot --snapshot-id $$SNAPSHOT_ID --region us-east-1
+          fi
+        done
+
+        echo "Cleanup complete"
+    agents:
+      queue: packer_build_queue
+    depends_on: update-launch-templates

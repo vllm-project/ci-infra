@@ -48,7 +48,7 @@ Components of the stack for each Agent Queue:
 
 Please note that when creating a new build on Buildkite:
 - Please do it on your own feature branch/fork branch on vLLM, preferrably a branch that is up to date with `main`.
-- If it's a fork branch, `HEAD` cannot be used as commit when creating a build. You have to put in the hash of the latest commit on your branch.
+- If it's a fork branch, `HEAD` cannot be used as commit when creating a build. You have to put in the hash of the latest commit on your branch. Also, format the branch name to include your fork prefix as `<fork/username>:<branch name on fork>`.
 
 ## How to onboard runners onto CI cluster on Buildkite
 The machines communicate with Buildkite server via an agent being installed on the machine. There are multiple ways agents can be installed, depending on how the machines are set up:

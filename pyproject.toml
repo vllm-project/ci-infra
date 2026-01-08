@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ci-infra"
+version = "0.1.0"
+requires-python = ">=3.8"
+
+[tool.setuptools.packages.find]
+include = ["buildkite*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

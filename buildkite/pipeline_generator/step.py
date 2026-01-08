@@ -1,98 +1,93 @@
-from pydantic import BaseModel, Field, root_validator, model_validator
-from typing import List, Dict, Any, Optional
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+from pydantic import model_validator
 from typing_extensions import Self
+from collections import defaultdict
+from global_config import get_global_config
+import os
+import yaml
 
-from .utils import AgentQueue, GPUType
 
-BUILD_STEP_KEY = "build"
-DEFAULT_TEST_WORKING_DIR = "/vllm-workspace/tests"
-
-class TestStep(BaseModel):
-    """This class represents a test step defined in the test configuration file."""
+class Step(BaseModel):
     label: str
-    working_dir: Optional[str] = DEFAULT_TEST_WORKING_DIR
-    optional: Optional[bool] = False
-    fast_check: Optional[bool] = None
-    mirror_hardwares: Optional[List[str]] = None
-    no_gpu: Optional[bool] = None
-    gpu: Optional[GPUType] = None
+    group: str = ""
+    working_dir: Optional[str] = None
+    no_gpu: bool = False
+    key: Optional[str] = None
+    depends_on: Optional[List[str]] = None
+    commands: Optional[List[str]] = None
+    gpu: Optional[str] = None
     num_gpus: Optional[int] = None
     num_nodes: Optional[int] = None
     source_file_dependencies: Optional[List[str]] = None
-    soft_fail: Optional[bool] = None
+    soft_fail: Optional[bool] = False
     parallelism: Optional[int] = None
-    command: Optional[str] = None
-    commands: Optional[List[str]] = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def validate_and_convert_command(cls, values) -> Any:
-        """
-        Validate that either 'command' or 'commands' is defined.
-        If 'command' is defined, convert it to 'commands'.
-        """
-        if not values.get("command") and not values.get("commands"):
-            raise ValueError("Either 'command' or 'commands' must be defined.")
-        if values.get("command") and values.get("commands"):
-            raise ValueError("Only one of 'command' or 'commands' can be defined.")
-        if values.get("command"):
-            values["commands"] = [values["command"]]
-            del values["command"]
-        return values
+    mount_buildkite_agent: Optional[bool] = False
+    env: Optional[Dict[str, str]] = None
+    retry: Optional[Dict[str, Any]] = None
+    optional: Optional[bool] = False
+    no_plugin: Optional[bool] = False
 
     @model_validator(mode="after")
     def validate_gpu(self) -> Self:
         if self.gpu and self.no_gpu:
             raise ValueError("Both 'gpu' and 'no_gpu' cannot be defined together.")
         return self
-    
+
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
         if self.num_nodes and not self.num_gpus:
             raise ValueError("'num_gpus' must be defined if 'num_nodes' is defined.")
-        if self.num_nodes and len(self.commands) != self.num_nodes:
-            raise ValueError("Number of commands must match the number of nodes.")
         return self
 
-
-class BuildkiteStep(BaseModel):
-    """This class represents a step in Buildkite format."""
-    label: str
-    agents: Dict[str, str] = {"queue": AgentQueue.AWS_CPU.value}
-    commands: List[str]
-    key: Optional[str] = None
-    plugins: Optional[List[Dict]] = None
-    parallelism: Optional[int] = None
-    soft_fail: Optional[bool] = None
-    depends_on: Optional[str] = "build"
-    env: Optional[Dict[str, str]] = None
-    retry: Optional[Dict[str, Any]] = None
-
-    @model_validator(mode="after")
-    def validate_agent_queue(self) -> Self:
-        queue = self.agents.get("queue")
-        if not AgentQueue(queue):
-            raise ValueError(f"Invalid agent queue: {queue}")
+    @classmethod
+    def from_yaml(cls, yaml_data: dict):
+        return cls(**yaml_data)
 
 
-class BuildkiteBlockStep(BaseModel):
-    """This class represents a block step in Buildkite format."""
-    block: str
-    key: str
-    depends_on: Optional[str] = BUILD_STEP_KEY
+def parse_steps_from_yaml(yaml_data: dict):
+    group = yaml_data.get("group", None)
+    yaml_steps = yaml_data.get("steps", [])
+    steps = [Step.from_yaml(step) for step in yaml_steps]
+    if group:
+        for step in steps:
+            step.group = group
+    return steps
 
 
-def get_step_key(step_label: str) -> str:
-    step_key = ""
-    skip_chars = "()% "
-    for char in step_label.lower():
-        if char in ", " and step_key[-1] != "-":
-            step_key += "-"
-        elif char not in skip_chars:
-            step_key += char
+def read_steps_from_job_dir(job_dir: str):
+    global_config = get_global_config()
+    steps = []
+    for root, _, files in os.walk(job_dir):
+        for file in files:
+            if not file.endswith(".yaml"):
+                continue
+            yaml_path = os.path.join(root, file)
+            with open(yaml_path, "r") as f:
+                data = yaml.safe_load(f)
+            group_depends_on = data.get("depends_on")
+            file_steps = parse_steps_from_yaml(data)
+            if group_depends_on:
+                for step in file_steps:
+                    if not step.depends_on:
+                        step.depends_on = group_depends_on
+                    if (
+                        not step.working_dir
+                        and global_config["github_repo_name"] == "vllm-project/vllm"
+                    ):
+                        step.working_dir = "/vllm-workspace/tests"
+            steps.extend(file_steps)
+    return steps
 
-    return step_key
 
-
-def get_block_step(step_label: str) -> BuildkiteBlockStep:
-    return BuildkiteBlockStep(block=f"Run {step_label}", key=f"block-{get_step_key(step_label)}")
+def group_steps(steps: List[Step]) -> Dict[str, List[Step]]:
+    grouped_steps = defaultdict(list)
+    for step in steps:
+        if step.group:
+            grouped_steps[step.group].append(step)
+        else:
+            grouped_steps["ungrouped"].append(step)
+    sorted_grouped_steps = {}
+    for group, steps in grouped_steps.items():
+        sorted_grouped_steps[group] = sorted(steps, key=lambda x: x.label)
+    return sorted_grouped_steps

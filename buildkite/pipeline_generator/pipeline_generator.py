@@ -1,91 +1,68 @@
-import click
-import os
-import re
-from typing import List, Optional, Union
+from typing import List
 import yaml
-from pydantic import BaseModel, field_validator
-
-from .step import BuildkiteStep, BuildkiteBlockStep, TestStep
-from .utils import VLLM_ECR_URL, VLLM_ECR_REPO, AgentQueue
-from .pipeline_generator_helper import get_build_commands
-
-class PipelineGeneratorConfig:
-    def __init__(
-        self,
-        container_registry: str,
-        container_registry_repo: str,
-        commit: str,
-        list_file_diff: List[str],
-        run_all: bool = False,
-    ):
-        self.run_all = run_all
-        self.list_file_diff = list_file_diff
-        self.container_registry = container_registry
-        self.container_registry_repo = container_registry_repo
-        self.commit = commit
-
-    @property
-    def container_image(self):
-        return f"{self.container_registry}/{self.container_registry_repo}:{self.commit}"
-    
-    def validate(self):
-        """Validate the configuration."""
-        # Check if commit is a valid Git commit hash
-        pattern = r"^[0-9a-f]{40}$"
-        if not re.match(pattern, self.commit):
-            raise ValueError(f"Commit {self.commit} is not a valid Git commit hash")
+import subprocess
+import sys
+from step import read_steps_from_job_dir, group_steps
+from buildkite_step import convert_group_step_to_buildkite_step
+from global_config import init_global_config, get_global_config
 
 
 class PipelineGenerator:
     def __init__(
-            self, 
-            config: PipelineGeneratorConfig
-        ):
-        config.validate()
-        self.config = config
+        self,
+        pipeline_config_path: str,
+        output_file_path: str,
+        docs_only_disable: bool = False,
+    ):
+        init_global_config(pipeline_config_path)
+        self.output_file_path = output_file_path
 
-    def generate_build_step(self) -> BuildkiteStep:
-        """Build the Docker image and push it to container registry."""
-        build_commands = get_build_commands(self.config.container_registry, self.config.commit, self.config.container_image)
+    def generate(self):
+        global_config = get_global_config()
 
-        return BuildkiteStep(
-            label=":docker: build image",
-            key="build",
-            agents={"queue": AgentQueue.AWS_CPU.value},
-            env={"DOCKER_BUILDKIT": "1"},
-            retry={
-                "automatic": [
-                    {"exit_status": -1, "limit": 2},
-                    {"exit_status": -10, "limit": 2}
-                ]
-            },
-            commands=build_commands,
-            depends_on=None,
-        )
+        # Skip if changes are doc-only
+        if global_config["docs_only_disable"] == "0":
+            if is_docs_only_change(global_config["list_file_diff"]):
+                print("List file diff: ", global_config["list_file_diff"])
+                print("All changes are doc-only, skipping CI.")
+                subprocess.run(
+                    [
+                        "buildkite-agent",
+                        "annotate",
+                        ":memo: CI skipped — doc-only changes",
+                    ],
+                    check=True,
+                )
+                sys.exit(0)
 
-def read_test_steps(file_path: str) -> List[TestStep]:
-    """Read test steps from test pipeline yaml and parse them into TestStep objects."""
-    with open(file_path, "r") as f:
-        content = yaml.safe_load(f)
-    return [TestStep(**step) for step in content["steps"]]
+        steps = []
+        for job_dir in global_config["job_dirs"]:
+            steps.extend(read_steps_from_job_dir(job_dir))
+        grouped_steps = group_steps(steps)
 
-def write_buildkite_steps(steps: List[Union[BuildkiteStep, BuildkiteBlockStep]], file_path: str) -> None:
-    """Write the buildkite steps to the Buildkite pipeline yaml file."""
-    buildkite_steps_dict = {"steps": [step.dict(exclude_none=True) for step in steps]}
-    with open(file_path, "w") as f:
-        yaml.dump(buildkite_steps_dict, f, sort_keys=False)
+        buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
+        buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
+        buildkite_steps_dict = {"steps": []}
+        for buildkite_group_step in buildkite_group_steps:
+            buildkite_steps_dict["steps"].append(
+                buildkite_group_step.dict(exclude_none=True)
+            )
+        with open(self.output_file_path, "w") as f:
+            yaml.dump(
+                buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
+            )
+        return buildkite_steps_dict
 
-@click.command()
-@click.option("--test_path", type=str, required=True, help="Path to the test pipeline yaml file")
-@click.option("--run_all", type=str, help="If set to 1, run all tests")
-@click.option("--list_file_diff", type=str, help="List of files in the diff between current branch and main")
-def main(test_path: str, external_hardware_test_path: str, run_all: str, list_file_diff: str):
-    test_steps = read_test_steps(test_path)
 
-    pipeline_generator_config = PipelineGeneratorConfig(
-        run_all=run_all == "1",
-        list_file_diff=list_file_diff,
-        container_registry=VLLM_ECR_URL,
-        container_registry_repo=VLLM_ECR_REPO,
-        commit=os.getenv("BUILDKITE_COMMIT"),
-    )
+def is_docs_only_change(list_file_diff: List[str]) -> bool:
+    for file_path in list_file_diff:
+        if not file_path:
+            continue
+        if file_path.startswith("docs/"):
+            continue
+        if file_path.endswith(".md"):
+            continue
+        if file_path == "mkdocs.yaml":
+            continue
+        return False
+    return True

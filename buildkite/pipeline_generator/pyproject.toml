@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipeline-generator"
+version = "0.1.0"
+dependencies = [
+    "pyyaml",
+    "click",
+    "pydantic>=2.0",
+    "requests",
+]
+
+[project.scripts]
+pipeline-generator = "main:main"
+
+[tool.setuptools]
+py-modules = [
+    "main",
+    "pipeline_generator",
+    "buildkite_step",
+    "step",
+    "utils",
+    "global_config",
+    "constants",
+]
+
+[tool.setuptools.packages.find]
+include = [".", "plugin", "utils_lib"]

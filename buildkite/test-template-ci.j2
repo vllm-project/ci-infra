@@ -59,6 +59,8 @@ agents:
   queue: a100_queue
   {% elif step.gpu == "h100" %}
   queue: mithril-h100-pool
+  {% elif step.gpu == "h200" and step.num_gpus and step.num_gpus == 8 %}
+  queue: nebius-h200
   {% elif step.gpu == "h200" %}
   queue: skylab-h200
   {% elif step.gpu == "b200" %}
@@ -98,7 +100,7 @@ plugins:
       {% if step.label == "Benchmarks" or step.mount_buildkite_agent or cov_enabled %}
       mount-buildkite-agent: true
       {% endif %}
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
+      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory' && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
       environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -117,6 +119,43 @@ plugins:
       volumes:
         - /dev/shm:/dev/shm
         - {{ hf_home_fsx }}:{{ hf_home_fsx }}
+  {% elif step.gpu == "h200" and step.num_gpus and step.num_gpus == 8 %}
+  - kubernetes:
+      podSpec:
+        containers:
+          - image: {{ image }}
+            command:
+              - bash -c "{{ '(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe) }}"
+            resources:
+              limits:
+                nvidia.com/gpu: {{ step.num_gpus or 1 }}
+            volumeMounts:
+              - name: devshm
+                mountPath: /dev/shm
+              - name: hf-cache
+                mountPath: {{ hf_home }}
+            env:
+              - name: VLLM_USAGE_SOURCE
+                value: ci-test
+              - name: NCCL_CUMEM_HOST_ENABLE
+                value: "0"
+              - name: HF_HOME
+                value: {{ hf_home }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-token-secret
+                    key: token
+        nodeSelector:
+          node.kubernetes.io/instance-type: gpu-h200-sxm
+        volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
   {% elif step.gpu == "h200" %}
    - docker#v5.2.0:
       image: {{ image }}
@@ -130,7 +169,9 @@ plugins:
         - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
+        {% if step.num_gpus and step.num_gpus == 2 %}
         - CUDA_VISIBLE_DEVICES=1,2
+        {% endif %}
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
@@ -249,6 +290,7 @@ steps:
   - label: ":docker: build image"
     key: image-build
     depends_on: ~
+    timeout_in_minutes: 600
     agents:
       {% if branch == "main" %}
       queue: cpu_queue_postmerge_us_east_1
@@ -258,37 +300,22 @@ steps:
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
-      - "docker buildx create --name vllm-builder --driver docker-container --use"
-      - "docker buildx inspect --bootstrap"
-      - "docker buildx ls"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
-      - >
-        docker buildx build --file docker/Dockerfile
-        --build-arg max_jobs=16
-        --build-arg buildkite_commit=$BUILDKITE_COMMIT
-        --build-arg USE_SCCACHE=1
-        --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
-        --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
-        --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}
-        {% if vllm_use_precompiled == "1" %}
-        --build-arg VLLM_MERGE_BASE_COMMIT={{ vllm_merge_base_commit }}
-        {% endif %}
-        --cache-from type=registry,ref={{ cache_from }},mode=max
-        --cache-to type=registry,ref={{ cache_to }},mode=max
-        --tag {{ docker_image }}
-        {% if branch == "main" %}
-        --tag {{ docker_image_latest }}
-        {% endif %}
-        --push
-        --target test
-        --progress plain .
+      - "curl -sSfL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch }}/buildkite/scripts/ci-bake.sh | bash -s -- test-ci"
+    env:
+      VLLM_CI_BRANCH: "{{ vllm_ci_branch }}"
+      CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch }}/docker/ci.hcl"
+      IMAGE_TAG: "{{ docker_image }}"
+      {% if branch == "main" %}
+      IMAGE_TAG_LATEST: "{{ docker_image_latest }}"
+      {% endif %}
+      CACHE_TO: "{{ cache_to }}"
+      CACHE_FROM: "{{ cache_from }}"
+      CACHE_FROM_BASE: "{{ cache_from_base_branch }}"
+      CACHE_FROM_MAIN: "{{ cache_from_main }}"
+      VLLM_USE_PRECOMPILED: "{{ vllm_use_precompiled | default('0') }}"
+      {% if vllm_use_precompiled == "1" %}
+      VLLM_MERGE_BASE_COMMIT: "{{ vllm_merge_base_commit }}"
+      {% endif %}
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -363,31 +390,28 @@ steps:
           limit: 2
   {% endif %}
 
-  - block: "Build Arm64 CPU image"
-    depends_on: ~
-    key: block-arm64-cpu-img-build
-
   - label: ":docker: build image ARM64 CPU"
     key: image-build-arm64-cpu
-    depends_on: block-arm64-cpu-img-build
+    depends_on: ~
+    soft_fail: true
     agents:
       {% if branch == "main" %}
       queue: arm64_cpu_queue_postmerge
       {% else %}
-      queue: arm64_cpu_queue_postmerge
+      queue: arm64_cpu_queue_premerge
       {% endif %}
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - |
         #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image_cpu }}) ]]; then
+        if [[ -z $(docker manifest inspect {{ docker_image_arm64_cpu }}) ]]; then
           echo "Image not found, proceeding with build..."
         else
           echo "Image found"
           exit 0
         fi
-      - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image_cpu }} --target vllm-test --progress plain ."
-      - "docker push {{ docker_image_cpu }}"
+      - "docker build --file docker/Dockerfile.cpu --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image_arm64_cpu }} --target vllm-test --progress plain ."
+      - "docker push {{ docker_image_arm64_cpu }}"
     env:
       DOCKER_BUILDKIT: "1"
     retry:
@@ -715,4 +739,3 @@ steps:
       queue: gh200_queue
     command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
   {% endif %}
-

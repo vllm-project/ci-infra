@@ -16,8 +16,7 @@ variable "instance_count" {
 
 variable "disk_size" {
   type        = number
-  description = "The mount disk size"
-  default     = 2048
+  description = "The large disk size"
 }
 
 variable "buildkite_queue_name" {

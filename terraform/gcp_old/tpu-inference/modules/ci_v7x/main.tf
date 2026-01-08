@@ -1,28 +1,32 @@
-# 16 nodes for CI cluster
-# 1 TPU v6e device each
-# Region: us-east5-b
-# Type: v6e-1
-# Runtime: v2-alpha-tpuv6e
+# 1 TPU device each
+# Runtime: v2-alpha-tpu7-ubuntu2404
 
-resource "google_compute_disk" "disk_east5_b" {
-  provider = google-beta.us-east5-b
-  count = 24
-
-  name  = "tpu-disk-east5-b-${count.index}"
-  size  = 2048
-  type  = "hyperdisk-balanced"
-  zone  = "us-east5-b"
+data "google_client_config" "config" {
+  provider = google-beta
 }
 
-resource "google_tpu_v2_vm" "tpu_v6_ci" {
-  provider = google-beta.us-east5-b
-  count = 24
-  name = "vllm-tpu-v6-ci-${count.index}"
-  zone = "us-east5-b" 
+resource "google_compute_disk" "tpu_disk" {
+  provider = google-beta
+  count    = var.instance_count
+  name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}-disk"
+  size     = var.disk_size
+  type     = "hyperdisk-balanced"
+}
 
-  runtime_version = "v2-alpha-tpuv6e"
+resource "google_tpu_v2_vm" "tpu_v7x_ci" {
+  provider = google-beta
+  count    = var.instance_count
 
-  accelerator_type = "v6e-1"
+  name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"  
+  runtime_version  = "v2-alpha-tpu7-ubuntu2404"
+  accelerator_type = var.accelerator_type
+
+  dynamic "scheduling_config" {    
+    for_each = var.reserved ? [1] : []
+    content {
+      reserved = var.reserved
+    }
+  }
 
   network_config {
     network             = "projects/${var.project_id}/global/networks/default"
@@ -30,8 +34,8 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
   }
 
   data_disks {
-    source_disk = google_compute_disk.disk_east5_b[count.index].id
-    mode = "READ_WRITE"
+    source_disk = google_compute_disk.tpu_disk[count.index].id
+    mode        = "READ_WRITE"
   }
 
   metadata = {
@@ -40,8 +44,6 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
 
       apt-get update
       apt-get install -y curl build-essential jq
-
-      curl -o- https://get.docker.com/ | bash -
 
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
       /root/.cargo/bin/cargo install minijinja-cli
@@ -57,21 +59,21 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
-      sudo sed -i 's/name="%hostname-%spawn"/name="vllm-tpu-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'tags="queue=tpu_v6e_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i 's/name="%hostname-%spawn"/name="${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"/' /etc/buildkite-agent/buildkite-agent.cfg
+      echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
       echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
 
       sudo mkdir -p /mnt/disks/persist
 
       # Format if not already formatted
-      if ! blkid /dev/nvme0n2; then
-        echo "Formatting /dev/nvme0n2 as ext4..."
-        sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme0n2
+      if ! blkid /dev/nvme1n1; then
+        echo "Formatting /dev/nvme1n1 as ext4..."
+        sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme1n1
       fi
 
       # Add to /etc/fstab using UUID
-      disk_uuid=$(blkid -s UUID -o value /dev/nvme0n2)
+      disk_uuid=$(blkid -s UUID -o value /dev/nvme1n1)
       if ! grep -q "/mnt/disks/persist" /etc/fstab; then
        echo "UUID=$disk_uuid /mnt/disks/persist ext4 defaults,discard 0 2" | sudo tee -a /etc/fstab
       fi
