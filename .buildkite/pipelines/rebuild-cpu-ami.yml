@@ -92,8 +92,29 @@ steps:
           echo "No VLLM_COMMIT specified, extracting from public postmerge image..."
           POSTMERGE_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
 
-          # Get commit from OCI annotation on image index (no auth needed for public ECR)
-          VLLM_COMMIT=$$(docker buildx imagetools inspect "$$POSTMERGE_IMAGE" --raw | jq -r '.annotations["org.opencontainers.image.revision"] // empty' 2>/dev/null || echo "")
+          # NOTE: vLLM's docker-bake.hcl uses "index,manifest:" prefix which should put
+          # annotations at both index and manifest levels. Locally with buildx v0.29.1,
+          # test images showed annotations at both levels correctly. However, actual vLLM
+          # images in CI only have them at manifest level with the full key name.
+          # We try index first, then fall back to manifest level.
+          # TODO: Investigate why CI images differ from local test builds.
+
+          # Try extracting from index-level annotation first
+          VLLM_COMMIT=$$(docker buildx imagetools inspect "$$POSTMERGE_IMAGE" --raw | \
+            jq -r '.annotations["org.opencontainers.image.revision"] // empty' 2>/dev/null || echo "")
+
+          # If not found at index level, try manifest level
+          if [[ -z "$$VLLM_COMMIT" ]]; then
+            # Get the amd64 manifest digest
+            MANIFEST_DIGEST=$$(docker buildx imagetools inspect "$$POSTMERGE_IMAGE" --raw | \
+              jq -r '.manifests[] | select(.platform.architecture == "amd64" and .platform.os == "linux") | .digest' 2>/dev/null || echo "")
+
+            if [[ -n "$$MANIFEST_DIGEST" ]]; then
+              # Extract commit from manifest annotation (key includes the "index,manifest:" prefix)
+              VLLM_COMMIT=$$(docker buildx imagetools inspect "$$POSTMERGE_IMAGE@$$MANIFEST_DIGEST" --raw | \
+                jq -r '.annotations["index,manifest:org.opencontainers.image.revision"] // empty' 2>/dev/null || echo "")
+            fi
+          fi
 
           if [[ -n "$$VLLM_COMMIT" ]]; then
             echo "Extracted commit from postmerge image annotation: $$VLLM_COMMIT"
