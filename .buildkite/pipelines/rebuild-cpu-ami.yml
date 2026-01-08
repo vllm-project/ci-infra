@@ -245,7 +245,7 @@ steps:
       queue: packer_build_queue
     depends_on: update-ssm
 
-  - label ":broom: Cleanup Old AMIs"
+  - label: ":broom: Cleanup Old AMIs"
     key: cleanup-amis
     command:
       - |
