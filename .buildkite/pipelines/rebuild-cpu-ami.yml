@@ -87,12 +87,12 @@ steps:
         echo "--- :git: Determining commit for cache warming"
         VLLM_COMMIT="$${VLLM_COMMIT:-}"
 
-        # If no commit specified, extract from postmerge image annotations
+        # If no commit specified, extract from public postmerge image annotations
         if [[ -z "$$VLLM_COMMIT" ]]; then
-          echo "No VLLM_COMMIT specified, extracting from postmerge image..."
-          POSTMERGE_IMAGE="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:latest"
+          echo "No VLLM_COMMIT specified, extracting from public postmerge image..."
+          POSTMERGE_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
 
-          # Get commit from OCI annotation on image index
+          # Get commit from OCI annotation on image index (no auth needed for public ECR)
           VLLM_COMMIT=$$(docker buildx imagetools inspect "$$POSTMERGE_IMAGE" --raw | jq -r '.annotations["org.opencontainers.image.revision"] // empty' 2>/dev/null || echo "")
 
           if [[ -n "$$VLLM_COMMIT" ]]; then
