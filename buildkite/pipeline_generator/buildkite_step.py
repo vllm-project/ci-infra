@@ -141,12 +141,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     return final_commands
 
 
-def _create_block_step(
-    step: Step, list_file_diff: List[str]
-) -> Optional[BuildkiteBlockStep]:
-    if _step_should_run(step, list_file_diff):
-        return None
-
+def _create_block_step(step: Step, list_file_diff: List[str]) -> BuildkiteBlockStep:
     block_step = BuildkiteBlockStep(
         block=f"Run {step.label}",
         depends_on=[],
@@ -169,7 +164,9 @@ def convert_group_step_to_buildkite_step(
         group_steps_list = []
         for step in steps:
             # block step
-            block_step = _create_block_step(step, list_file_diff)
+            block_step = None
+            if not _step_should_run(step, list_file_diff):
+                block_step = _create_block_step(step, list_file_diff)
             if block_step:
                 group_steps_list.append(block_step)
 
