@@ -246,7 +246,7 @@ plugins:
               - name: FLASHINFER_WORKSPACE_DIR
                 value: {{ hf_home_ibm }}/.cache/flashinfer
         nodeSelector:
-          node.kubernetes.io/instance-type: NVIDIA-H100-80GB-HBM3
+          node.kubernetes.io/instance-type: gx3d.160x1792.8h100
         volumes:
           - name: devshm
             emptyDir:
