@@ -9,7 +9,8 @@
 # Automation Flow:
 #   1. Build AMI in us-east-1
 #   2. Update SSM parameter with new AMI ID
-#   3. New instances automatically use the latest AMI (via SSM dynamic reference)
+#   3. Update Launch Templates and ASGs directly
+#   4. Cleanup old AMIs
 
 env:
   SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
@@ -136,7 +137,115 @@ steps:
       queue: packer_build_queue
     depends_on: build-ami
 
-  - label: ":broom: Cleanup Old AMIs"
+  - label: ":rocket: Update Launch Templates"
+    key: update-launch-templates
+    command:
+      - |
+        set -euo pipefail
+
+        # =============================================================================
+        # AMI Rollout via Direct Launch Template Update
+        #
+        # How it works:
+        # 1. Read the new AMI ID from SSM
+        # 2. Find the Launch Template created by the CF stack
+        # 3. Create a new LT version with the new AMI
+        # 4. Update ASG to use the new LT version
+        # =============================================================================
+
+        echo "--- :rocket: Direct Launch Template Update"
+
+        # Read new AMI from SSM
+        NEW_AMI=$$(aws ssm get-parameter \
+          --name "$${SSM_PARAM_US_EAST_1}" \
+          --query 'Parameter.Value' \
+          --output text \
+          --region us-east-1)
+
+        echo "New AMI ID: $$NEW_AMI"
+
+        for STACK_NAME in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
+          echo ""
+          echo "--- Processing stack: $$STACK_NAME"
+
+          # Get the Launch Template ID from the CF stack
+          LT_ID=$$(aws cloudformation describe-stack-resource \
+            --stack-name "$$STACK_NAME" \
+            --logical-resource-id AgentLaunchTemplate \
+            --query 'StackResourceDetail.PhysicalResourceId' \
+            --output text \
+            --region us-east-1)
+
+          echo "Launch Template: $$LT_ID"
+
+          # Get latest LT version to check current AMI
+          LATEST_VERSION=$$(aws ec2 describe-launch-templates \
+            --launch-template-ids "$$LT_ID" \
+            --query 'LaunchTemplates[0].LatestVersionNumber' \
+            --output text \
+            --region us-east-1)
+
+          echo "Latest LT Version: $$LATEST_VERSION"
+
+          # Check current AMI in the latest version
+          CURRENT_AMI=$$(aws ec2 describe-launch-template-versions \
+            --launch-template-id "$$LT_ID" \
+            --versions "$$LATEST_VERSION" \
+            --query 'LaunchTemplateVersions[0].LaunchTemplateData.ImageId' \
+            --output text \
+            --region us-east-1)
+
+          echo "Current AMI: $$CURRENT_AMI"
+          echo "New AMI: $$NEW_AMI"
+
+          if [ "$$CURRENT_AMI" = "$$NEW_AMI" ]; then
+            echo "AMI unchanged, skipping $$STACK_NAME"
+            continue
+          fi
+
+          # Create new Launch Template version with new AMI
+          echo "Creating new LT version..."
+          NEW_VERSION=$$(aws ec2 create-launch-template-version \
+            --launch-template-id "$$LT_ID" \
+            --source-version "$$LATEST_VERSION" \
+            --launch-template-data "{\"ImageId\":\"$$NEW_AMI\"}" \
+            --query 'LaunchTemplateVersion.VersionNumber' \
+            --output text \
+            --region us-east-1)
+
+          echo "✅ $$STACK_NAME: Created LT version $$NEW_VERSION with AMI $$NEW_AMI"
+
+          # Update ASG to use the new LT version
+          # ASG uses MixedInstancesPolicy, so we update via that path
+          echo "Updating ASG to use LT version $$NEW_VERSION..."
+
+          # Get ASG name from CF stack
+          ASG_NAME=$$(aws cloudformation describe-stack-resource \
+            --stack-name "$$STACK_NAME" \
+            --logical-resource-id AgentAutoScaleGroup \
+            --query 'StackResourceDetail.PhysicalResourceId' \
+            --output text \
+            --region us-east-1)
+
+          echo "ASG: $$ASG_NAME"
+
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name "$$ASG_NAME" \
+            --mixed-instances-policy "LaunchTemplate={LaunchTemplateSpecification={LaunchTemplateId=$$LT_ID,Version=$$NEW_VERSION}}" \
+            --region us-east-1
+
+          echo "✅ ASG updated to use LT version $$NEW_VERSION"
+        done
+
+        echo ""
+        echo "--- :white_check_mark: Launch Template updates complete"
+        echo "New instances will use AMI: $$NEW_AMI"
+        echo "Existing instances will cycle out naturally (TerminateInstanceAfterJob=true)"
+    agents:
+      queue: packer_build_queue
+    depends_on: update-ssm
+
+  - label ":broom: Cleanup Old AMIs"
     key: cleanup-amis
     command:
       - |
@@ -193,4 +302,4 @@ steps:
         echo "Cleanup complete"
     agents:
       queue: packer_build_queue
-    depends_on: update-ssm
+    depends_on: update-launch-templates
