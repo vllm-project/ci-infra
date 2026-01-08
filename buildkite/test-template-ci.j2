@@ -18,7 +18,7 @@
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
-{% set hf_home_ibm = "/model-cache" %}
+{% set hf_home_ibm = "/mnt/model-cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
 {% macro add_pytest_coverage(cmd, coverage_file) %}
