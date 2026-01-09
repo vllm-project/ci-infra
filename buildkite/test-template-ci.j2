@@ -688,7 +688,7 @@ steps:
     agents:
       queue: ibm-ppc64le
     commands: |
-      if [ $$(buildkite-agent step get "outcome" --step "IBM Power(ppc64le) CPU Test") != "passed" ]; then
+      if [ $$(buildkite-agent step get "outcome" --step "ibm-ppc64-test") != "passed" ]; then
          cat <<- YAML | buildkite-agent pipeline upload
          steps:
            - label: "Notify owners about failing test"
