@@ -43,6 +43,10 @@ variable "BUILDKITE_COMMIT" {
   default = ""
 }
 
+variable "PARENT_COMMIT" {
+  default = ""
+}
+
 # Bridge to vLLM's COMMIT variable for OCI labels
 variable "COMMIT" {
   default = BUILDKITE_COMMIT
@@ -90,6 +94,7 @@ function "get_cache_from" {
   params = []
   result = compact([
     BUILDKITE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${BUILDKITE_COMMIT},mode=max" : "",
+    PARENT_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${PARENT_COMMIT},mode=max" : "",
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${VLLM_MERGE_BASE_COMMIT},mode=max" : "",
     CACHE_FROM != "" ? "type=registry,ref=${CACHE_FROM},mode=max" : "",
     CACHE_FROM_BASE != "" ? "type=registry,ref=${CACHE_FROM_BASE},mode=max" : "",
