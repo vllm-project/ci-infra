@@ -130,8 +130,8 @@ target "test-ci" {
   cache-from = get_cache_from()
   cache-to   = get_cache_to()
   tags = compact([
-    IMAGE_TAG,
-    IMAGE_TAG_LATEST,
+    # Force private ECR for single-registry testing
+    BUILDKITE_COMMIT != "" ? "${REGISTRY}/vllm-ci-test-repo-private:${BUILDKITE_COMMIT}" : "",
   ])
   output = ["type=registry"]
 }
@@ -144,5 +144,13 @@ target "cache-warm" {
     "type=registry,ref=${REGISTRY}/vllm-ci-postmerge-cache:latest,mode=max",
     BUILDKITE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${BUILDKITE_COMMIT},mode=max" : "",
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${VLLM_MERGE_BASE_COMMIT},mode=max" : "",
+  ])
+}
+
+# Test target: image + cache both to private ECR (same registry)
+target "test-ci-private" {
+  inherits   = ["test-ci"]
+  tags = compact([
+    BUILDKITE_COMMIT != "" ? "${REGISTRY}/vllm-ci-test-repo-private:${BUILDKITE_COMMIT}" : "",
   ])
 }
