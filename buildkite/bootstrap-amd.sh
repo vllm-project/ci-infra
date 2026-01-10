@@ -162,19 +162,22 @@ fi
 # ----------------------------------------------------------------------
 
 patterns=(
-    "docker/Dockerfile"
+    "docker/Dockerfile.rocm"
+    "docker/Dockerfile.rocm_base"
     "CMakeLists.txt"
     "requirements/common.txt"
     "requirements/cuda.txt"
     "requirements/build.txt"
     "requirements/test.txt"
+    "requirements/rocm.txt"
+    "requirements/rocm-build.txt"
+    "requirements/rocm-test.txt"
     "setup.py"
     "csrc/"
     "cmake/"
 )
 
 ignore_patterns=(
-    "docker/Dockerfile."
     "csrc/cpu"
     "csrc/rocm"
     "cmake/hipify.py"
