@@ -341,12 +341,12 @@ plugins:
     {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
     - block: "Run {{ step.agent_pool }}: {{ step.label }}"
       depends_on: amd-build
-      key: "block-{{ step.agent_pool }}: {{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}"
+      key: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% endif %}
 
     - label: "{{ step.agent_pool }}: {{ step.label }}"
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
-      depends_on: "block-{{ step.agent_pool }}: {{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}"
+      depends_on: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
       {% else %}
       depends_on: amd-build
       {% endif %}
