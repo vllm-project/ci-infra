@@ -320,7 +320,7 @@ plugins:
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
     
-      {% set ns = namespace(blocked=1) %}
+    {% set ns = namespace(blocked=1) %}
 
     {% if run_all == "1" or nightly == "1" %}
     {% set ns.blocked = 0 %}
