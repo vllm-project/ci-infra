@@ -19,6 +19,7 @@
 #
 # Build configuration (passed through to bake via environment):
 #   BUILDKITE_COMMIT    - Git commit (auto-detected from Buildkite)
+#   PARENT_COMMIT       - Parent commit (HEAD~1) for cache fallback (auto-computed)
 #   IMAGE_TAG           - Primary image tag
 #   IMAGE_TAG_LATEST    - Latest tag (optional)
 #   CACHE_FROM          - Cache source
@@ -134,6 +135,19 @@ fi
 # Show builder info
 echo "Active builder:"
 docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
+
+# Compute parent commit for cache fallback (if not already set)
+if [[ -z "${PARENT_COMMIT:-}" ]]; then
+    PARENT_COMMIT=$(git rev-parse HEAD~1 2>/dev/null || echo "")
+    if [[ -n "${PARENT_COMMIT}" ]]; then
+        echo "Computed parent commit for cache fallback: ${PARENT_COMMIT}"
+        export PARENT_COMMIT
+    else
+        echo "Could not determine parent commit (may be first commit in repo)"
+    fi
+else
+    echo "Using provided PARENT_COMMIT: ${PARENT_COMMIT}"
+fi
 
 # Print resolved configuration (for debugging)
 echo "--- :page_facing_up: Resolved bake configuration"
