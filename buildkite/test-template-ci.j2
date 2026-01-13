@@ -18,6 +18,7 @@
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
+{% set hf_home_ibm = "/mnt/model-cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
 {% macro add_pytest_coverage(cmd, coverage_file) %}
@@ -57,6 +58,8 @@ agents:
   queue: cpu_queue_premerge_us_east_1
   {% elif step.gpu == "a100" %}
   queue: a100_queue
+  {% elif step.gpu == "h100" and step.num_gpus >= 4 %}
+  queue: IBM-H100-OpenShift
   {% elif step.gpu == "h100" %}
   queue: mithril-h100-pool
   {% elif step.gpu == "h200" and step.num_gpus and step.num_gpus == 8 %}
@@ -206,6 +209,53 @@ plugins:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
+  {% elif step.gpu == "h100" and step.num_gpus >= 4 %}
+  - kubernetes:
+      podSpec:
+        serviceAccountName: buildkite-h100
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          fsGroup: 0
+        containers:
+          - image: {{ image }}
+            command:
+              - bash -c "{{ '(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe) }}"
+            resources:
+              limits:
+                nvidia.com/gpu: {{ step.num_gpus or 1 }}
+            volumeMounts:
+              - name: devshm
+                mountPath: /dev/shm
+              - name: hf-cache
+                mountPath: {{ hf_home_ibm }}
+            env:
+              - name: VLLM_USAGE_SOURCE
+                value: ci-test
+              - name: NCCL_CUMEM_HOST_ENABLE
+                value: "0"
+              - name: HF_HOME
+                value: {{ hf_home_ibm }}/huggingface
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-token-secret
+                    key: token
+              - name: XDG_CACHE_HOME
+                value: {{ hf_home_ibm }}/.cache
+              - name: XDG_CONFIG_HOME
+                value: {{ hf_home_ibm }}/.config
+              - name: FLASHINFER_WORKSPACE_DIR
+                value: {{ hf_home_ibm }}/.cache/flashinfer
+        nodeSelector:
+          node.kubernetes.io/instance-type: gx3d.160x1792.8h100
+        volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            persistentVolumeClaim:
+              claimName: nvme-model-cache-pvc
   {% elif step.gpu == "h100" %}
   - kubernetes:
       podSpec:
@@ -463,7 +513,7 @@ steps:
     {% else %}
     soft_fail: {{ step.soft_fail or false }}
     {% endif %}
-    {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else (pull_through_docker_image if step.gpu == "h100" else docker_image), default_working_dir, hf_home_fsx, hf_home, branch) | indent(4, true) }}
+    {{ render_cuda_config(step, docker_image_cpu if step.no_gpu else (pull_through_docker_image if step.gpu == "h100" and step.num_gpus < 4 else docker_image), default_working_dir, hf_home_fsx, hf_home, branch) | indent(4, true) }}
   {% endif %}
   {% endfor %}
 
