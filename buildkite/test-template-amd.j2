@@ -319,8 +319,37 @@ plugins:
 
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
-      - label: "{{ step.agent_pool }}: {{ step.label }}"
+    
+    {% set ns = namespace(blocked=1) %}
+
+    {% if run_all == "1" or nightly == "1" %}
+    {% set ns.blocked = 0 %}
+    {% endif %}
+
+      {% if step.source_file_dependencies %}
+        {% for source_file in step.source_file_dependencies %}
+          {% for file in list_file_diff %}
+            {% if source_file in file %}
+              {% set ns.blocked = 0 %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+      {% else %}
+        {% set ns.blocked = 0 %}
+      {% endif %}
+
+      {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+      - block: "Run {{ step.agent_pool }}: {{ step.label }}"
         depends_on: amd-build
+        key: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+      {% endif %}
+
+      - label: "{{ step.agent_pool }}: {{ step.label }}"
+        {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+        depends_on: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+        {% else %}
+        depends_on: amd-build
+        {% endif %}
         agents:
           {% if step.agent_pool %}
           queue: amd_{{ step.agent_pool }}
