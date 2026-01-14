@@ -84,67 +84,76 @@ steps:
         # Login to ECR for image inspection
         echo "$$ECR_TOKEN" | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
 
-        echo "--- :git: Determining commit for cache warming"
-        VLLM_COMMIT="$${VLLM_COMMIT:-}"
+        echo "--- :mag: Inspecting postmerge image for build metadata"
+        POSTMERGE_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
 
-        # If no commit specified, extract from public postmerge image annotations
-        if [[ -z "$$VLLM_COMMIT" ]]; then
-          echo "No VLLM_COMMIT specified, extracting from public postmerge image..."
-          POSTMERGE_IMAGE="public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest"
-
-          # NOTE: vLLM's docker-bake.hcl uses "index,manifest:" prefix which should put
-          # annotations at both index and manifest levels. Locally with buildx v0.29.1,
-          # test images showed annotations at both levels correctly. However, actual vLLM
-          # images in CI only have them at manifest level with the full key name.
-          # We try index first, then fall back to manifest level.
-          # TODO: Investigate why CI images differ from local test builds.
-
-          # Try extracting from index-level annotation first
-          VLLM_COMMIT=$$(docker buildx imagetools inspect "$$POSTMERGE_IMAGE" --raw | \
-            jq -r '.annotations["org.opencontainers.image.revision"] // empty' 2>/dev/null || echo "")
-
-          # If not found at index level, try manifest level
-          if [[ -z "$$VLLM_COMMIT" ]]; then
-            # Get the amd64 manifest digest
-            MANIFEST_DIGEST=$$(docker buildx imagetools inspect "$$POSTMERGE_IMAGE" --raw | \
+        # Helper function to get annotation from image
+        # NOTE: vLLM's docker-bake.hcl uses "index,manifest:" prefix which should put
+        # annotations at both index and manifest levels. Locally with buildx v0.29.1,
+        # test images showed annotations at both levels correctly. However, actual vLLM
+        # images in CI only have them at manifest level with the full key name.
+        # We try index first, then fall back to manifest level.
+        # TODO: Investigate why CI images differ from local test builds.
+        get_annotation() {
+          local image="$$1" key="$$2"
+          # Try index level first
+          local value=$$(docker buildx imagetools inspect "$$image" --raw | \
+            jq -r ".annotations[\"$$key\"] // empty" 2>/dev/null || echo "")
+          if [[ -z "$$value" ]]; then
+            # Fall back to manifest level (amd64)
+            local digest=$$(docker buildx imagetools inspect "$$image" --raw | \
               jq -r '.manifests[] | select(.platform.architecture == "amd64" and .platform.os == "linux") | .digest' 2>/dev/null || echo "")
-
-            if [[ -n "$$MANIFEST_DIGEST" ]]; then
-              # Extract commit from manifest annotation (key includes the "index,manifest:" prefix)
-              VLLM_COMMIT=$$(docker buildx imagetools inspect "$$POSTMERGE_IMAGE@$$MANIFEST_DIGEST" --raw | \
-                jq -r '.annotations["index,manifest:org.opencontainers.image.revision"] // empty' 2>/dev/null || echo "")
+            if [[ -n "$$digest" ]]; then
+              value=$$(docker buildx imagetools inspect "$$image@$$digest" --raw | \
+                jq -r ".annotations[\"index,manifest:$$key\"] // empty" 2>/dev/null || echo "")
             fi
           fi
+          echo "$$value"
+        }
 
-          if [[ -n "$$VLLM_COMMIT" ]]; then
-            echo "Extracted commit from postmerge image annotation: $$VLLM_COMMIT"
-          else
-            echo "Warning: Could not extract commit from postmerge image, using HEAD"
-          fi
-        else
-          echo "Using specified VLLM_COMMIT: $$VLLM_COMMIT"
+        CI_BUILD_NUMBER=$$(get_annotation "$$POSTMERGE_IMAGE" "vllm.buildkite.build_number")
+        CI_BUILD_ID=$$(get_annotation "$$POSTMERGE_IMAGE" "vllm.buildkite.build_id")
+        VLLM_COMMIT=$$(get_annotation "$$POSTMERGE_IMAGE" "org.opencontainers.image.revision")
+
+        if [[ -z "$$CI_BUILD_ID" ]]; then
+          echo "ERROR: Postmerge image has no build_id annotation"
+          echo "The image may have been built before this annotation was added."
+          exit 1
         fi
+
+        echo "✅ Found CI build metadata:"
+        echo "   Build Number: #$$CI_BUILD_NUMBER"
+        echo "   Build ID: $$CI_BUILD_ID"
+        echo "   Commit: $$VLLM_COMMIT"
+        echo "   URL: https://buildkite.com/vllm/ci/builds/$$CI_BUILD_NUMBER"
+
+        echo "--- :buildkite: Fetching bake config from CI build #$$CI_BUILD_NUMBER"
+        CONFIG_FILE="bake-config-build-$$CI_BUILD_NUMBER.json"
+
+        # Download the artifact using the build UUID from the annotation
+        buildkite-agent artifact download "$$CONFIG_FILE" . --build "$$CI_BUILD_ID" || {
+          echo "ERROR: Failed to download artifact $$CONFIG_FILE from build #$$CI_BUILD_NUMBER"
+          echo "The CI build may not have published the bake config artifact."
+          exit 1
+        }
+
+        if [[ ! -f "$$CONFIG_FILE" ]]; then
+          echo "ERROR: Artifact file $$CONFIG_FILE not found after download"
+          exit 1
+        fi
+
+        echo "✅ Downloaded: $$CONFIG_FILE"
 
         rm -rf vllm-cache-source
         echo "--- :git: Cloning vLLM repo for cache warming"
         git clone https://github.com/vllm-project/vllm.git vllm-cache-source
         cd vllm-cache-source
 
-        # Checkout specific commit if specified (Buildkite can fetch commits from forks)
+        # Checkout specific commit
         if [[ -n "$$VLLM_COMMIT" ]]; then
           echo "Fetching and checking out: $$VLLM_COMMIT"
           git fetch origin "$$VLLM_COMMIT" || git fetch origin
           git checkout "$$VLLM_COMMIT"
-        fi
-
-        # Compute merge base with main for precompiled wheel support
-        echo "--- :git: Computing merge base with main"
-        git fetch origin main
-        MERGE_BASE=$$(git merge-base HEAD origin/main 2>/dev/null || echo "")
-        if [[ -n "$$MERGE_BASE" ]]; then
-          echo "Merge base: $$MERGE_BASE"
-        else
-          echo "Warning: Could not compute merge base"
         fi
 
         # Verify docker-bake.hcl exists
@@ -156,16 +165,19 @@ steps:
 
         cd ..
 
-        echo "--- :packer: Building AMI"
+        # Create a separate directory for the bake config (don't pollute git repo or Docker context)
+        mkdir -p ci-config
+        cp "$$CONFIG_FILE" ci-config/bake-config.json
+        echo "✅ Prepared bake config at ci-config/bake-config.json"
+
+        echo "--- :packer: Building AMI with exact CI configuration"
         packer init .
         packer build \
           -var "source_ami=$$SOURCE_AMI" \
           -var "security_group_id=$$SECURITY_GROUP_ID" \
           -var "subnet_id=$$SUBNET_ID" \
           -var "ecr_token=$$ECR_TOKEN" \
-          -var "vllm_commit=$${VLLM_COMMIT:-}" \
-          -var "vllm_use_precompiled=1" \
-          -var "vllm_merge_base_commit=$${MERGE_BASE:-}" \
+          -var "vllm_commit=$$VLLM_COMMIT" \
           buildkite-cpu-ami.pkr.hcl
 
         echo "--- :aws: Extracting AMI ID"

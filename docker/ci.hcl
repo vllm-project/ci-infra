@@ -43,6 +43,14 @@ variable "BUILDKITE_COMMIT" {
   default = ""
 }
 
+variable "BUILDKITE_BUILD_NUMBER" {
+  default = ""
+}
+
+variable "BUILDKITE_BUILD_ID" {
+  default = ""
+}
+
 variable "PARENT_COMMIT" {
   default = ""
 }
@@ -113,6 +121,10 @@ function "get_cache_to" {
 # CI targets
 
 target "_ci" {
+  annotations = [
+    "index,manifest:vllm.buildkite.build_number=${BUILDKITE_BUILD_NUMBER}",
+    "index,manifest:vllm.buildkite.build_id=${BUILDKITE_BUILD_ID}",
+  ]
   args = {
     buildkite_commit          = BUILDKITE_COMMIT
     USE_SCCACHE               = USE_SCCACHE

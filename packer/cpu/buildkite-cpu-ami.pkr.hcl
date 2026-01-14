@@ -41,20 +41,7 @@ variable "ecr_token" {
 
 variable "vllm_commit" {
   type        = string
-  default     = ""
-  description = "vLLM commit SHA to build/cache from (extracted from postmerge image if not provided)"
-}
-
-variable "vllm_use_precompiled" {
-  type        = string
-  default     = "1"
-  description = "Whether to use precompiled wheels (must match CI for cache parity)"
-}
-
-variable "vllm_merge_base_commit" {
-  type        = string
-  default     = ""
-  description = "Merge base commit for precompiled wheels (must match CI for cache parity)"
+  description = "vLLM commit SHA for cache warming"
 }
 
 locals {
@@ -112,10 +99,16 @@ build {
     source      = "scripts"
   }
 
-  # Upload ci.hcl for bake builds
+  # Upload bake config (separate from vLLM repo to avoid polluting git/Docker context)
   provisioner "file" {
-    destination = "/tmp/ci.hcl"
-    source      = "../../docker/ci.hcl"
+    destination = "/tmp/ci-bake-config.json"
+    source      = "ci-config/bake-config.json"
+  }
+
+  # Upload cache-warm overlay
+  provisioner "file" {
+    destination = "/tmp/cache-warm-overlay.hcl"
+    source      = "cache-warm-overlay.hcl"
   }
 
   # Upload vLLM repo (cloned by pipeline) for cache warming
@@ -133,12 +126,10 @@ build {
   provisioner "shell" {
     environment_vars = [
       "ECR_TOKEN=${var.ecr_token}",
-      "VLLM_COMMIT=${var.vllm_commit}",
-      "VLLM_USE_PRECOMPILED=${var.vllm_use_precompiled}",
-      "VLLM_MERGE_BASE_COMMIT=${var.vllm_merge_base_commit}"
+      "VLLM_COMMIT=${var.vllm_commit}"
     ]
     inline = [
-      "sudo -u buildkite-agent -i ECR_TOKEN=\"$ECR_TOKEN\" VLLM_COMMIT=\"$VLLM_COMMIT\" VLLM_USE_PRECOMPILED=\"$VLLM_USE_PRECOMPILED\" VLLM_MERGE_BASE_COMMIT=\"$VLLM_MERGE_BASE_COMMIT\" bash /tmp/scripts/warm-cache.sh"
+      "sudo -u buildkite-agent -i ECR_TOKEN=\"$ECR_TOKEN\" VLLM_COMMIT=\"$VLLM_COMMIT\" bash /tmp/scripts/warm-cache.sh"
     ]
   }
 
