@@ -3,19 +3,18 @@ set -eu -o pipefail
 
 # Warm the Docker cache by building the vLLM image.
 # This runs "docker buildx bake cache-warm" which:
-# - Pulls cache from postmerge-cache:latest and specified commit
+# - Pulls cache from the commit-specific cache registry
 # - Builds the image (caching layers locally in /var/lib/buildkit)
 # - Outputs to cache only (no image pushed)
 #
 # Files uploaded by Packer:
-# - /tmp/ci.hcl - CI configuration from ci-infra
+# - /tmp/ci-bake-config.json - CI build configuration artifact
+# - /tmp/cache-warm-overlay.hcl - Overlay that defines cache-warm target
 # - /tmp/vllm - vLLM repo (cloned by pipeline, uploaded by Packer)
 #
 # Environment variables:
 # - ECR_TOKEN: Required for ECR authentication
 # - VLLM_COMMIT: Commit to build/cache from (for cache key parity with CI)
-#
-# The ECR_TOKEN environment variable is passed from Packer for auth.
 
 echo "=== Warming Docker cache with vLLM build ==="
 echo "Running as user: $(whoami)"
@@ -26,18 +25,19 @@ if [[ -z "${ECR_TOKEN:-}" ]]; then
   exit 1
 fi
 
+if [[ -z "${VLLM_COMMIT:-}" ]]; then
+  echo "ERROR: VLLM_COMMIT not set"
+  exit 1
+fi
+
 ECR_REGISTRY="936637512419.dkr.ecr.us-east-1.amazonaws.com"
 echo "Authenticating to ECR..."
 echo "$ECR_TOKEN" | docker login --password-stdin --username AWS "$ECR_REGISTRY"
 
 # Check for required files (uploaded by Packer)
-CI_HCL_PATH="/tmp/ci.hcl"
 VLLM_DIR="/tmp/vllm"
-
-if [[ ! -f "${CI_HCL_PATH}" ]]; then
-  echo "ERROR: ci.hcl not found at ${CI_HCL_PATH}"
-  exit 1
-fi
+BAKE_CONFIG="/tmp/ci-bake-config.json"
+OVERLAY_CONFIG="/tmp/cache-warm-overlay.hcl"
 
 if [[ ! -d "${VLLM_DIR}" ]]; then
   echo "ERROR: vLLM directory not found at ${VLLM_DIR}"
@@ -45,16 +45,21 @@ if [[ ! -d "${VLLM_DIR}" ]]; then
   exit 1
 fi
 
-# Check if docker-bake.hcl exists
-if [[ ! -f "${VLLM_DIR}/docker/docker-bake.hcl" ]]; then
-  echo "WARNING: docker/docker-bake.hcl not found in vLLM repo"
-  echo "Cache warming requires docker-bake.hcl to be present"
-  echo "Skipping cache warming - AMI will still work but without warm cache"
-  exit 0
+if [[ ! -f "${BAKE_CONFIG}" ]]; then
+  echo "ERROR: Bake config not found at ${BAKE_CONFIG}"
+  echo "The AMI pipeline should have downloaded the bake config artifact"
+  exit 1
 fi
 
-echo "Using ci.hcl from ${CI_HCL_PATH}"
+if [[ ! -f "${OVERLAY_CONFIG}" ]]; then
+  echo "ERROR: Overlay config not found at ${OVERLAY_CONFIG}"
+  exit 1
+fi
+
 echo "Using vLLM from ${VLLM_DIR}"
+echo "Using bake config from ${BAKE_CONFIG}"
+echo "Using overlay from ${OVERLAY_CONFIG}"
+echo "Cache commit: ${VLLM_COMMIT}"
 
 cd "${VLLM_DIR}"
 
@@ -64,26 +69,21 @@ docker buildx use baked-vllm-builder
 
 # Print resolved config
 echo "=== Resolved bake configuration ==="
-BUILDKITE_COMMIT="${VLLM_COMMIT:-}" \
-VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}" \
-VLLM_MERGE_BASE_COMMIT="${VLLM_MERGE_BASE_COMMIT:-}" \
-docker buildx bake -f docker/docker-bake.hcl -f "${CI_HCL_PATH}" --print cache-warm || true
+docker buildx bake \
+  -f "${BAKE_CONFIG}" \
+  -f "${OVERLAY_CONFIG}" \
+  --set "cache-warm.cache-from=type=registry,ref=${ECR_REGISTRY}/vllm-ci-test-cache:${VLLM_COMMIT},mode=max" \
+  --print cache-warm || true
 
 # Run cache-warm build
 echo "=== Running cache-warm build ==="
 echo "This will populate /var/lib/buildkit with cached layers..."
-if [[ -n "${VLLM_COMMIT:-}" ]]; then
-  echo "Building from commit: ${VLLM_COMMIT}"
-  echo "Setting BUILDKITE_COMMIT=${VLLM_COMMIT} for cache key parity with CI"
-fi
-echo "VLLM_USE_PRECOMPILED=${VLLM_USE_PRECOMPILED:-1}"
-echo "VLLM_MERGE_BASE_COMMIT=${VLLM_MERGE_BASE_COMMIT:-}"
-BUILDKITE_COMMIT="${VLLM_COMMIT:-}" \
-VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}" \
-VLLM_MERGE_BASE_COMMIT="${VLLM_MERGE_BASE_COMMIT:-}" \
-docker buildx bake -f docker/docker-bake.hcl -f "${CI_HCL_PATH}" --progress plain cache-warm || {
-  echo "Build completed (cache warming done even if build had warnings)"
-}
+echo "Pulling cache from: ${ECR_REGISTRY}/vllm-ci-test-cache:${VLLM_COMMIT}"
+docker buildx bake \
+  -f "${BAKE_CONFIG}" \
+  -f "${OVERLAY_CONFIG}" \
+  --set "cache-warm.cache-from=type=registry,ref=${ECR_REGISTRY}/vllm-ci-test-cache:${VLLM_COMMIT},mode=max" \
+  --progress plain cache-warm
 
 # Show cache status
 echo ""

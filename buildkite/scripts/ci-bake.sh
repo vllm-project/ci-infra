@@ -149,9 +149,11 @@ else
     echo "Using provided PARENT_COMMIT: ${PARENT_COMMIT}"
 fi
 
-# Print resolved configuration (for debugging)
+# Print resolved configuration for debugging and save for artifact upload
 echo "--- :page_facing_up: Resolved bake configuration"
-docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --print "${TARGET}" || true
+BAKE_CONFIG_FILE="bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
+docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
+echo "Saved bake config to ${BAKE_CONFIG_FILE}"
 
 # Run the actual build
 echo "--- :docker: Building ${TARGET}"

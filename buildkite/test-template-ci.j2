@@ -301,7 +301,10 @@ steps:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com"
       - "curl -sSfL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch }}/buildkite/scripts/ci-bake.sh | bash -s -- test-ci"
+      - "buildkite-agent artifact upload bake-config-build-$$BUILDKITE_BUILD_NUMBER.json"
     env:
+      BUILDKITE_BUILD_NUMBER: "$BUILDKITE_BUILD_NUMBER"
+      BUILDKITE_BUILD_ID: "$BUILDKITE_BUILD_ID"
       VLLM_CI_BRANCH: "{{ vllm_ci_branch }}"
       CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch }}/docker/ci.hcl"
       IMAGE_TAG: "{{ docker_image }}"
