@@ -43,12 +43,12 @@ module "ci_v6e_1" {
 module "ci_v6e_8" {
   source    = "../modules/ci_v6e"
   providers = {
-    google-beta = google-beta.us-central1-b
+    google-beta = google-beta.southamerica-west1-a
   }
 
   accelerator_type                 = "v6e-8"
   reserved                         = true
-  instance_count                   = 6
+  instance_count                   = 9
   buildkite_queue_name             = "tpu_v6e_8_queue"
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
