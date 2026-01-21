@@ -356,7 +356,11 @@ plugins:
           {% else %}
           queue: amd_mi325_1
           {% endif %}
+        {% if step.num_nodes and step.num_nodes >= 2 %}
+        command: (command rocm-smi || true) && ./.buildkite/scripts/run-multi-node-test.sh {{ (step.working_dir or default_working_dir) | safe }} {{ step.num_nodes }} {{ step.num_gpus or 1 }} {{ docker_image_amd }} {% for command in step.commands %} "{{ (command | join(' && ')) | safe }}" {% endfor %}
+        {% else %}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+        {% endif %}
         env:
           DOCKER_BUILDKIT: "1"
         priority: 100
@@ -364,6 +368,9 @@ plugins:
         soft_fail: false
         {% else %}
         soft_fail: true
-        {% endif%}
+        {% endif %}
+        {% if step.parallelism %}
+        parallelism: {{ step.parallelism }}
+        {% endif %}
     {% endif %}
     {% endfor %}
