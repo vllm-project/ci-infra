@@ -309,9 +309,11 @@ plugins:
         retry:
           automatic:
             - exit_status: -1  # Agent was lost
-              limit: 1
+              limit: 2
             - exit_status: -10  # Agent was lost
-              limit: 1
+              limit: 2
+            - exit_status: 128  # Git connectivity issues
+              limit: 2
             - exit_status: 1  # Machine occasionally fail
               limit: 1
         agents:
@@ -372,5 +374,13 @@ plugins:
         {% if step.parallelism %}
         parallelism: {{ step.parallelism }}
         {% endif %}
+        retry:
+          automatic:
+            - exit_status: -1  # Agent was lost
+              limit: 2
+            - exit_status: -10  # Agent was lost
+              limit: 2
+            - exit_status: 128  # Git connectivity issues
+              limit: 2
     {% endif %}
     {% endfor %}
