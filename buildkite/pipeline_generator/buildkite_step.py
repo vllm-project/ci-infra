@@ -117,7 +117,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
             else f"{global_config['registries']}/{global_config['repositories']['premerge']}",
         "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}"
             if global_config["branch"] == "main"
-            else f"{global_config['registries']}/{global_config['repositories']['premerge']}",
+            else None,
     }
 
 
