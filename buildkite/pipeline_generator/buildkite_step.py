@@ -85,6 +85,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.INTEL_GPU
     elif step.device == DeviceType.ARM_CPU:
         return AgentQueue.ARM_CPU
+    elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
+        return AgentQueue.AMD_CPU
     elif step.device == DeviceType.GH200:
         return AgentQueue.GH200
     elif step.device == DeviceType.ASCEND:
@@ -127,6 +129,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     # Default setup commands
     if not step.label.startswith(":docker:") and not step.no_plugin:
         commands.append("(command nvidia-smi || true)")
+        commands.append("export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'")
 
     if step.commands:
         commands.extend(step.commands)
