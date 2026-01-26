@@ -174,7 +174,8 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "arn:aws:ec2:us-east-1:*:security-group/*",
           "arn:aws:ec2:us-east-1:*:subnet/*",
           "arn:aws:ec2:us-east-1:*:key-pair/*",
-          "arn:aws:ec2:us-east-1:*:image/*"
+          "arn:aws:ec2:us-east-1:*:image/*",
+          "arn:aws:ec2:us-east-1:*:launch-template/*"
         ]
       },
       # AMI management - scoped to us-east-1
@@ -267,6 +268,49 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
           "arn:aws:ssm:us-east-1:*:parameter/buildkite/cpu-build-ami/*",
           "arn:aws:ssm:us-east-1:*:parameter/buildkite/packer/*"
         ]
+      },
+      # CloudFormation read-only - to discover LT ID and ASG name from stack resources
+      {
+        Sid    = "DescribeCloudFormationStacks"
+        Effect = "Allow"
+        Action = [
+          "cloudformation:DescribeStackResource"
+        ]
+        Resource = [
+          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-premerge-us-east-1/*",
+          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-postmerge-us-east-1/*"
+        ]
+      },
+      # EC2 LaunchTemplate permissions - for direct AMI updates
+      {
+        Sid    = "ManageLaunchTemplates"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateLaunchTemplateVersion",
+          "ec2:DescribeLaunchTemplates",
+          "ec2:DescribeLaunchTemplateVersions"
+        ]
+        Resource = "*"
+      },
+      # AutoScaling permissions - for updating ASGs to use new LT versions
+      {
+        Sid    = "ManageAutoScaling"
+        Effect = "Allow"
+        Action = [
+          "autoscaling:DescribeAutoScalingGroups",
+          "autoscaling:UpdateAutoScalingGroup"
+        ]
+        Resource = "*"
+      },
+      # IAM PassRole - required when updating ASG with a LT that has an instance profile
+      {
+        Sid    = "PassRoleForASG"
+        Effect = "Allow"
+        Action = "iam:PassRole"
+        Resource = [
+          "arn:aws:iam::*:role/bk-cpu-queue-premerge-us-east-1-*",
+          "arn:aws:iam::*:role/bk-cpu-queue-postmerge-us-east-1-*"
+        ]
       }
     ]
   })
@@ -276,4 +320,11 @@ resource "aws_iam_role_policy_attachment" "packer_ami_builder_access" {
   for_each   = aws_cloudformation_stack.bk_queue_packer
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.packer_ami_builder_policy.arn
+}
+
+# sccache read-only access for cache warming during AMI builds
+resource "aws_iam_role_policy_attachment" "packer_sccache_bucket_read_access" {
+  for_each   = aws_cloudformation_stack.bk_queue_packer
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.bk_stack_sccache_bucket_read_access.arn
 }
