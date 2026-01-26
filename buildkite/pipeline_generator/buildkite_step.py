@@ -136,6 +136,8 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
         if not step.num_nodes:
             command = command.replace("'", '"')
         for variable, value in variables_to_inject.items():
+            if not value:
+                continue
             command = command.replace(variable, value)
         final_commands.append(command)
 
