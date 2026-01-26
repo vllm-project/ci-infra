@@ -112,10 +112,10 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
-         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}"
+         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
             if global_config["branch"] == "main"
-            else f"{global_config['registries']}/{global_config['repositories']['premerge']}",
-        "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}"
+            else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT",
+        "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
             if global_config["branch"] == "main"
             else None,
     }
