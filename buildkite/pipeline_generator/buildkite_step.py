@@ -193,7 +193,9 @@ def convert_group_step_to_buildkite_step(
             )
 
             if block_step:
-                buildkite_step.depends_on = block_step.key
+                buildkite_step.depends_on = [block_step.key]
+                if step.depends_on:
+                    buildkite_step.depends_on.extend(step.depends_on)
             if step.env:
                 buildkite_step.env = step.env
             if step.retry:
