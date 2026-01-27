@@ -7,7 +7,7 @@ steps:
 
 - label: Test B
   working_dir: "/tests/b/"
-  no_gpu: true
+  device: cpu
   commands:
   - echo "Test B"
 
@@ -21,7 +21,7 @@ steps:
 
 - label: Test D
   num_nodes: 2
-  num_gpus: 4
+  num_devices: 4
   commands:
   - echo "Test D.A"
   - echo "Test D.B"
