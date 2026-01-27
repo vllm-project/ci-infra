@@ -1,5 +1,5 @@
 from step import Step
-from constants import GPUType
+from constants import DeviceType
 import copy
 
 docker_plugin_template = {
@@ -60,9 +60,9 @@ b200_plugin_template = {
 
 def get_docker_plugin(step: Step, image: str):
     plugin = None
-    if step.gpu == GPUType.H200:
+    if step.device == DeviceType.H200:
         plugin = copy.deepcopy(h200_plugin_template)
-    elif step.gpu == GPUType.B200:
+    elif step.device == DeviceType.B200:
         plugin = copy.deepcopy(b200_plugin_template)
     else:
         plugin = copy.deepcopy(docker_plugin_template)
@@ -70,7 +70,7 @@ def get_docker_plugin(step: Step, image: str):
 
     if step.label == "Benchmarks" or step.mount_buildkite_agent:
         plugin["mount_buildkite_agent"] = True
-    if step.no_gpu and plugin.get("gpus"):
+    if step.device == DeviceType.CPU and plugin.get("gpus"):
         del plugin["gpus"]
     # TODO: Add BUILDKITE_ANALYTICS_TOKEN and pytest addopts for fail_fast
     return plugin

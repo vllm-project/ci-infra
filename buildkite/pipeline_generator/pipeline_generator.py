@@ -1,7 +1,7 @@
 from typing import List
 import yaml
 import subprocess
-import sys
+import os
 from step import read_steps_from_job_dir, group_steps
 from buildkite_step import convert_group_step_to_buildkite_step
 from global_config import init_global_config, get_global_config
@@ -33,7 +33,10 @@ class PipelineGenerator:
                     ],
                     check=True,
                 )
-                sys.exit(0)
+                output_dir_path = os.path.dirname(self.output_file_path)
+                with open(os.path.join(output_dir_path, ".docs_only"), "w") as f:
+                    f.write("true")
+                return
 
         steps = []
         for job_dir in global_config["job_dirs"]:
@@ -51,7 +54,7 @@ class PipelineGenerator:
             yaml.dump(
                 buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
             )
-        return buildkite_steps_dict
+        return
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:

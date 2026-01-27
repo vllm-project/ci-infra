@@ -21,7 +21,7 @@ module "ci_v6e_1" {
 
   accelerator_type                 = "v6e-1"
   reserved                         = true
-  instance_count                   = 18
+  instance_count                   = 0
   disk_size                        = 512
   buildkite_queue_name             = "tpu_v6e_queue"
   project_id                       = var.project_id
@@ -39,7 +39,7 @@ module "ci_v6e_8" {
 
   accelerator_type                 = "v6e-8"
   reserved                         = true
-  instance_count                   = 1
+  instance_count                   = 0
   buildkite_queue_name             = "tpu_v6e_8_queue"
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
