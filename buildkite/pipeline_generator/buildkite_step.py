@@ -117,7 +117,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
             if global_config["branch"] == "main"
             else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT",
-        "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
+        "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:latest"
             if global_config["branch"] == "main"
             else None,
     }
