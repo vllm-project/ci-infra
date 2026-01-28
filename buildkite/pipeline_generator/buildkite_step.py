@@ -141,7 +141,11 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
         for variable, value in variables_to_inject.items():
             if not value:
                 continue
-            command = command.replace(variable, value)
+            # Use regex to only replace whole variable matches (not substrings)
+            import re
+            # Escape variable (may have $ or special characters)
+            pattern = re.escape(variable)
+            command = re.sub(pattern + r'\b', value, command)
         final_commands.append(command)
 
     if step.working_dir and not (
