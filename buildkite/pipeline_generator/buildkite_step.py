@@ -114,7 +114,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
-         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
+        "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
             if global_config["branch"] == "main"
             else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT",
         "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
@@ -168,6 +168,7 @@ def convert_group_step_to_buildkite_step(
 ) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
     variables_to_inject = _get_variables_to_inject()
+    print(variables_to_inject)
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
 
