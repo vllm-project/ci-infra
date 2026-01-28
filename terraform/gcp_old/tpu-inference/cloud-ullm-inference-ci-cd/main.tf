@@ -59,7 +59,7 @@ module "ci_v7x_2" {
   reserved                         = true
   instance_count                   = 8
   buildkite_queue_name             = "tpu_v7x_2_queue"
-  disk_size                        = 512
+  disk_size                        = 1024
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
   buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
@@ -77,7 +77,7 @@ module "ci_v7x_8" {
   reserved                         = true
   instance_count                   = 8
   buildkite_queue_name             = "tpu_v7x_8_queue"
-  disk_size                        = 1024
+  disk_size                        = 2048
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
   buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
