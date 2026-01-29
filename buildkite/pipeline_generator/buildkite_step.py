@@ -20,6 +20,7 @@ class BuildkiteCommandStep(BaseModel):
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
+    priority: Optional[int] = None
 
     def to_yaml(self):
         return {
@@ -32,6 +33,7 @@ class BuildkiteCommandStep(BaseModel):
             "plugins": self.plugins,
             "env": self.env,
             "parallelism": self.parallelism,
+            "priority": self.priority,
         }
 
 
@@ -176,6 +178,9 @@ def convert_group_step_to_buildkite_step(
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
 
+    # Collect AMD mirror steps separately
+    amd_mirror_steps = []
+
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
@@ -219,8 +224,19 @@ def convert_group_step_to_buildkite_step(
 
             group_steps_list.append(buildkite_step)
 
+            # Create AMD mirror step if enabled
+            if step.amd_mirror:
+                amd_step = _create_amd_mirror_step(step, step_commands)
+                amd_mirror_steps.append(amd_step)
+
         buildkite_group_steps.append(
             BuildkiteGroupStep(group=group, steps=group_steps_list)
+        )
+
+    # Add AMD mirror steps as a separate group if any exist
+    if amd_mirror_steps:
+        buildkite_group_steps.append(
+            BuildkiteGroupStep(group="AMD Tests", steps=amd_mirror_steps)
         )
 
     return buildkite_group_steps
@@ -255,4 +271,37 @@ def _generate_step_key(step_label: str) -> str:
         .replace("+", "-")
         .replace(":", "-")
         .replace(".", "-")
+    )
+
+
+def _create_amd_mirror_step(step: Step, original_commands: List[str]) -> BuildkiteCommandStep:
+    """Create an AMD mirrored step from the original step."""
+    # Join the original commands into a single string
+    commands_str = " && ".join(original_commands)
+
+    # Wrap in the AMD test script
+    amd_command = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{commands_str}"'
+
+    # Extract a clean label from the original (remove emoji prefixes if any)
+    original_label = step.label
+    # Create the AMD label
+    amd_label = f"mi325_1: {original_label}"
+
+    amd_retry = {
+        "automatic": [
+            {"exit_status": -1, "limit": 2},   # Agent was lost
+            {"exit_status": -10, "limit": 2},  # Agent was lost
+            {"exit_status": 128, "limit": 2},  # Git connectivity issues
+        ]
+    }
+
+    return BuildkiteCommandStep(
+        label=amd_label,
+        commands=[amd_command],
+        depends_on=["amd-build"],
+        agents={"queue": AgentQueue.AMD_MI325_1},
+        env={"DOCKER_BUILDKIT": "1"},
+        priority=100,
+        soft_fail=True,
+        retry=amd_retry,
     )
