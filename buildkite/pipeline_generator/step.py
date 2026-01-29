@@ -26,6 +26,7 @@ class Step(BaseModel):
     retry: Optional[Dict[str, Any]] = None
     optional: Optional[bool] = False
     no_plugin: Optional[bool] = False
+    timeout_in_minutes: Optional[int] = None
 
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
