@@ -66,10 +66,13 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       cp /root/.cargo/bin/minijinja-cli /usr/bin/minijinja-cli
       chmod 777 /usr/bin/minijinja-cli
 
+      curl -fsSL "https://packages.buildkite.com/buildkite/cli-deb/gpgkey" | sudo gpg --dearmor -o /usr/share/keyrings/buildkite_cli-deb-archive-keyring.gpg
+      echo -e "deb [signed-by=/usr/share/keyrings/buildkite_cli-deb-archive-keyring.gpg] https://packages.buildkite.com/buildkite/cli-deb/any/ any main\ndeb-src [signed-by=/usr/share/keyrings/buildkite_cli-deb-archive-keyring.gpg] https://packages.buildkite.com/buildkite/cli-deb/any/ any main" | sudo tee /etc/apt/sources.list.d/buildkite-buildkite-cli-deb.list
+
       curl -fsSL https://keys.openpgp.org/vks/v1/by-fingerprint/32A37959C2FA5C3C99EFBC32A79206696452D198 | sudo gpg --dearmor -o /usr/share/keyrings/buildkite-agent-archive-keyring.gpg
       echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
       apt-get update
-      apt-get install -y buildkite-agent
+      apt-get install -y bk buildkite-agent
 
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet

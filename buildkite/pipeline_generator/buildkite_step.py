@@ -5,7 +5,7 @@ from utils_lib.docker_utils import get_image, get_ecr_cache_registry
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
-from constants import GPUType, AgentQueue
+from constants import DeviceType, AgentQueue
 
 
 class BuildkiteCommandStep(BaseModel):
@@ -51,35 +51,50 @@ class BuildkiteGroupStep(BaseModel):
 
 def _get_step_plugin(step: Step):
     # Use K8s plugin
-    if step.gpu in [GPUType.H100.value, GPUType.A100.value]:
-        return get_k8s_plugin(step, get_image(step.no_gpu))
+    use_cpu = step.device == DeviceType.CPU or False
+    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
+        return get_k8s_plugin(step, get_image(use_cpu))
     else:
-        return {"docker#v5.2.0": get_docker_plugin(step, get_image(step.no_gpu))}
+        return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu))}
 
 
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
     if step.label.startswith(":docker:"):
         if branch == "main":
-            return AgentQueue.CPU_QUEUE_POSTMERGE_US_EAST_1
+            return AgentQueue.CPU_POSTMERGE_US_EAST_1
         else:
-            return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
+            return AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.label == "Documentation Build":
-        return AgentQueue.SMALL_CPU_QUEUE_PREMERGE
-    elif step.no_gpu:
-        return AgentQueue.CPU_QUEUE_PREMERGE_US_EAST_1
-    elif step.gpu == GPUType.A100:
-        return AgentQueue.A100_QUEUE
-    elif step.gpu == GPUType.H100:
-        return AgentQueue.MITHRIL_H100_POOL
-    elif step.gpu == GPUType.H200:
+        return AgentQueue.SMALL_CPU_PREMERGE
+    elif step.device == DeviceType.CPU:
+        return AgentQueue.CPU_PREMERGE_US_EAST_1
+    elif step.device == DeviceType.A100:
+        return AgentQueue.A100
+    elif step.device == DeviceType.H100:
+        return AgentQueue.MITHRIL_H100
+    elif step.device == DeviceType.H200:
         return AgentQueue.SKYLAB_H200
-    elif step.gpu == GPUType.B200:
+    elif step.device == DeviceType.B200:
         return AgentQueue.B200
-    elif step.num_gpus == 2 or step.num_gpus == 4:
-        return AgentQueue.GPU_4_QUEUE
+    elif step.device == DeviceType.INTEL_CPU:
+        return AgentQueue.INTEL_CPU
+    elif step.device == DeviceType.INTEL_HPU:
+        return AgentQueue.INTEL_HPU
+    elif step.device == DeviceType.INTEL_GPU:
+        return AgentQueue.INTEL_GPU
+    elif step.device == DeviceType.ARM_CPU:
+        return AgentQueue.ARM_CPU
+    elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
+        return AgentQueue.AMD_CPU
+    elif step.device == DeviceType.GH200:
+        return AgentQueue.GH200
+    elif step.device == DeviceType.ASCEND:
+        return AgentQueue.ASCEND
+    elif step.num_devices == 2 or step.num_devices == 4:
+        return AgentQueue.GPU_4
     else:
-        return AgentQueue.GPU_1_QUEUE
+        return AgentQueue.GPU_1
 
 
 def _get_variables_to_inject() -> Dict[str, str]:
@@ -99,6 +114,12 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
+        "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
+            if global_config["branch"] == "main"
+            else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT",
+        "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:latest"
+            if global_config["branch"] == "main"
+            else None,
     }
 
 
@@ -106,8 +127,9 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     """Prepare step commands with variables injected and default setup commands."""
     commands = []
     # Default setup commands
-    if not step.label.startswith(":docker:"):
+    if not step.label.startswith(":docker:") and not step.no_plugin:
         commands.append("(command nvidia-smi || true)")
+        commands.append("export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'")
 
     if step.commands:
         commands.extend(step.commands)
@@ -117,7 +139,13 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
         if not step.num_nodes:
             command = command.replace("'", '"')
         for variable, value in variables_to_inject.items():
-            command = command.replace(variable, value)
+            if not value:
+                continue
+            # Use regex to only replace whole variable matches (not substrings)
+            import re
+            # Escape variable (may have $ or special characters)
+            pattern = re.escape(variable)
+            command = re.sub(pattern + r'\b', value, command)
         final_commands.append(command)
 
     if step.working_dir and not (
@@ -128,12 +156,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     return final_commands
 
 
-def _create_block_step(
-    step: Step, list_file_diff: List[str]
-) -> Optional[BuildkiteBlockStep]:
-    if _step_should_run(step, list_file_diff):
-        return None
-
+def _create_block_step(step: Step, list_file_diff: List[str]) -> BuildkiteBlockStep:
     block_step = BuildkiteBlockStep(
         block=f"Run {step.label}",
         depends_on=[],
@@ -149,6 +172,7 @@ def convert_group_step_to_buildkite_step(
 ) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
     variables_to_inject = _get_variables_to_inject()
+    print(variables_to_inject)
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
 
@@ -156,7 +180,9 @@ def convert_group_step_to_buildkite_step(
         group_steps_list = []
         for step in steps:
             # block step
-            block_step = _create_block_step(step, list_file_diff)
+            block_step = None
+            if not _step_should_run(step, list_file_diff):
+                block_step = _create_block_step(step, list_file_diff)
             if block_step:
                 group_steps_list.append(block_step)
 
@@ -172,7 +198,9 @@ def convert_group_step_to_buildkite_step(
             )
 
             if block_step:
-                buildkite_step.depends_on = block_step.key
+                buildkite_step.depends_on = [block_step.key]
+                if step.depends_on:
+                    buildkite_step.depends_on.extend(step.depends_on)
             if step.env:
                 buildkite_step.env = step.env
             if step.retry:
@@ -200,7 +228,7 @@ def convert_group_step_to_buildkite_step(
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
-    if step.key == "image-build":
+    if step.key and step.key.startswith("image-build"):
         return True
     if global_config["nightly"] == "1":
         return True
