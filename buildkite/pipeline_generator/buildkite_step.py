@@ -20,7 +20,6 @@ class BuildkiteCommandStep(BaseModel):
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
-    timeout_in_minutes: Optional[int] = None
 
     def to_yaml(self):
         return {
@@ -33,7 +32,6 @@ class BuildkiteCommandStep(BaseModel):
             "plugins": self.plugins,
             "env": self.env,
             "parallelism": self.parallelism,
-            "timeout_in_minutes": self.timeout_in_minutes,
         }
 
 
@@ -211,8 +209,6 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
-            if step.timeout_in_minutes:
-                buildkite_step.timeout_in_minutes = step.timeout_in_minutes
 
             # add plugin
             if not step.no_plugin and not (
