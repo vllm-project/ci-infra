@@ -225,8 +225,8 @@ def convert_group_step_to_buildkite_step(
             group_steps_list.append(buildkite_step)
 
             # Create AMD mirror step if enabled
-            if step.amd_mirror:
-                amd_step = _create_amd_mirror_step(step, step_commands)
+            if step.mirror and step.mirror.get("amd"):
+                amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
                 amd_mirror_steps.append(amd_step)
 
         buildkite_group_steps.append(
@@ -274,7 +274,7 @@ def _generate_step_key(step_label: str) -> str:
     )
 
 
-def _create_amd_mirror_step(step: Step, original_commands: List[str]) -> BuildkiteCommandStep:
+def _create_amd_mirror_step(step: Step, original_commands: List[str], amd_queue: str) -> BuildkiteCommandStep:
     """Create an AMD mirrored step from the original step."""
     # Join the original commands into a single string
     commands_str = " && ".join(original_commands)
@@ -282,10 +282,9 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str]) -> Buildki
     # Wrap in the AMD test script
     amd_command = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{commands_str}"'
 
-    # Extract a clean label from the original (remove emoji prefixes if any)
-    original_label = step.label
-    # Create the AMD label
-    amd_label = f"mi325_1: {original_label}"
+    # Extract queue suffix for label prefix (e.g., "amd_mi325_1" -> "mi325_1")
+    label_prefix = amd_queue.replace("amd_", "") if amd_queue.startswith("amd_") else amd_queue
+    amd_label = f"{label_prefix}: {step.label}"
 
     amd_retry = {
         "automatic": [
@@ -299,7 +298,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str]) -> Buildki
         label=amd_label,
         commands=[amd_command],
         depends_on=["amd-build"],
-        agents={"queue": AgentQueue.AMD_MI325_1},
+        agents={"queue": amd_queue},
         env={"DOCKER_BUILDKIT": "1"},
         priority=100,
         soft_fail=True,
