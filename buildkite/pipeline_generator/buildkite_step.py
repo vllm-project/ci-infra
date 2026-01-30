@@ -225,6 +225,9 @@ def convert_group_step_to_buildkite_step(
             group_steps_list.append(buildkite_step)
 
             # Create AMD mirror step if enabled
+            print(f"Step: {step}")
+            if step.mirror:
+                print(f"Step mirror: {step.mirror}")
             if step.mirror and step.mirror.get("amd"):
                 print(f"Creating AMD mirror step for {step.label} with queue {step.mirror['amd']}")
                 amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
