@@ -110,7 +110,7 @@ plugins:
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
-        {% if branch == "main" or branch == "dougbtv:test" %}
+        {% if branch == "main" or branch == "dougbtv" %}
         - BUILDKITE_ANALYTICS_TOKEN
         {% endif %}
         {% if step.label == "Speculative decoding tests" %}
@@ -175,7 +175,7 @@ plugins:
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
-        {% if branch == "main" or branch == "dougbtv:test" %}
+        {% if branch == "main" or branch == "dougbtv" %}
         - BUILDKITE_ANALYTICS_TOKEN
         {% endif %}
       volumes:
@@ -199,7 +199,7 @@ plugins:
         {% if fail_fast == "true" %}
         - PYTEST_ADDOPTS=-x
         {% endif %}
-        {% if branch == "main" or branch == "dougbtv:test" %}
+        {% if branch == "main" or branch == "dougbtv" %}
         - BUILDKITE_ANALYTICS_TOKEN
         {% endif %}
       volumes:
