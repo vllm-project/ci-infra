@@ -26,7 +26,7 @@ class Step(BaseModel):
     retry: Optional[Dict[str, Any]] = None
     optional: Optional[bool] = False
     no_plugin: Optional[bool] = False
-    mirror: Optional[Dict[str, str]] = None
+    mirror: Optional[Dict[str, Any]] = None
 
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
