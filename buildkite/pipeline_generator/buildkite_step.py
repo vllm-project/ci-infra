@@ -245,7 +245,7 @@ def convert_group_step_to_buildkite_step(
     # If AMD mirror step exists, make it a group step
     if amd_mirror_steps:
         buildkite_group_steps.append(
-            BuildkiteGroupStep(group="Hardware - AMD", steps=amd_mirror_steps)
+            BuildkiteGroupStep(group="Hardware-AMD", steps=amd_mirror_steps)
         )
 
     return buildkite_group_steps
