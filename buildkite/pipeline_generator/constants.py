@@ -14,6 +14,9 @@ class DeviceType(str, Enum):
     GH200 = "gh200"
     ASCEND = "ascend_npu"
     AMD_CPU = "amd_cpu"
+    AMD_MI325_1 = "mi325_1"
+    AMD_MI325_8 = "mi325_8"
+
 
 
 class AgentQueue(str, Enum):
@@ -36,3 +39,4 @@ class AgentQueue(str, Enum):
     ASCEND = "ascend"
     AMD_CPU = "amd-cpu"
     AMD_MI325_1 = "amd_mi325_1"
+    AMD_MI325_8 = "amd_mi325_8"

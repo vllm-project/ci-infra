@@ -224,10 +224,7 @@ def convert_group_step_to_buildkite_step(
 
             group_steps_list.append(buildkite_step)
 
-            # Create AMD mirror step if enabled
-            print(f"Step: {step}")
-            if step.mirror:
-                print(f"Step mirror: {step.mirror}")
+            # Create AMD mirror step if specified
             if step.mirror and step.mirror.get("amd"):
                 print(f"Creating AMD mirror step for {step.label} with queue {step.mirror['amd']}")
                 amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
@@ -237,10 +234,10 @@ def convert_group_step_to_buildkite_step(
             BuildkiteGroupStep(group=group, steps=group_steps_list)
         )
 
-    # Add AMD mirror steps as a separate group if any exist
+    # If AMD mirror step exists, make it a group step
     if amd_mirror_steps:
         buildkite_group_steps.append(
-            BuildkiteGroupStep(group="AMD Tests", steps=amd_mirror_steps)
+            BuildkiteGroupStep(group="Hardware - AMD", steps=amd_mirror_steps)
         )
 
     return buildkite_group_steps
@@ -278,17 +275,27 @@ def _generate_step_key(step_label: str) -> str:
     )
 
 
-def _create_amd_mirror_step(step: Step, original_commands: List[str], amd_queue: str) -> BuildkiteCommandStep:
+def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[str, Any]) -> BuildkiteCommandStep:
     """Create an AMD mirrored step from the original step."""
-    # Join the original commands into a single string
+    amd_device = amd["device"]
     commands_str = " && ".join(original_commands)
 
-    # Wrap in the AMD test script
+    # Add AMD test script wrapper
     amd_command = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{commands_str}"'
 
-    # Extract queue suffix for label prefix (e.g., "amd_mi325_1" -> "mi325_1")
-    label_prefix = amd_queue.replace("amd_", "") if amd_queue.startswith("amd_") else amd_queue
-    amd_label = f"{label_prefix}: {step.label}"
+    # Extract device name from queue name
+    device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
+    amd_label = f"AMD: {step.label} ({device_type})"
+
+    # Get AMD queue name from device name
+    amd_queue = None
+    if amd_device == DeviceType.AMD_MI325_1:
+        amd_queue = AgentQueue.AMD_MI325_1
+    elif amd_device == DeviceType.AMD_MI325_8:
+        amd_queue = AgentQueue.AMD_MI325_8
+    
+    if not amd_queue:
+        raise ValueError(f"Invalid device: {amd_device}")
 
     amd_retry = {
         "automatic": [
