@@ -301,6 +301,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd_queue:
     return BuildkiteCommandStep(
         label=amd_label,
         commands=[amd_command],
+        group="AMD",
         depends_on=["image-build-amd"],
         agents={"queue": amd_queue},
         env={"DOCKER_BUILDKIT": "1"},
