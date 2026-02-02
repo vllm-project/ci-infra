@@ -22,7 +22,7 @@ class AgentQueue(str, Enum):
     GPU_1 = "gpu_1_queue"
     GPU_4 = "gpu_4_queue"
     MITHRIL_H100 = "mithril-h100-pool"
-    SKYLAB_H200 = "skylab-h200"
+    SKYLAB_H200 = "nebius-h200"
     B200 = "B200"
     SMALL_CPU_PREMERGE = "small_cpu_queue_premerge"
     A100 = "a100_queue"

@@ -4,6 +4,49 @@ from constants import DeviceType
 
 HF_HOME = "/root/.cache/huggingface"
 
+nebius_h200_plugin_template = {
+    "kubernetes": {
+        "podSpec": {
+            "containers": [
+                {
+                    "image": "",
+                    "resources": {
+                        "limits": {
+                            "nvidia.com/gpu": 8
+                        }
+                    },
+                    "volumeMounts": [
+                        {"name": "devshm", "mountPath": "/dev/shm"},
+                        {"name": "hf-cache", "mountPath": "/root/.cache/huggingface"},
+                    ],
+                    "env": [
+                        {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
+                        {"name": "NCCL_CUMEM_HOST_ENABLE", "value": "0"},
+                        {"name": "HF_HOME", "value": "/root/.cache/huggingface"},
+                        {
+                            "name": "HF_TOKEN",
+                            "valueFrom": {
+                                "secretKeyRef": {
+                                    "name": "hf-token-secret",
+                                    "key": "token",
+                                }
+                            },
+                        },
+                    ],
+                }
+            ],
+            "nodeSelector": {"node.kubernetes.io/instance-type": "gpu-h200-sxm"},
+            "volumes": [
+                {"name": "devshm", "emptyDir": {"medium": "Memory"}},
+                {
+                    "name": "hf-cache",
+                    "hostPath": {"path": "/mnt/hf-cache", "type": "DirectoryOrCreate"},
+                },
+            ],
+        }
+    }
+}
+
 h100_plugin_template = {
     "kubernetes": {
         "podSpec": {
@@ -88,6 +131,8 @@ def get_k8s_plugin(step: Step, image: str):
     plugin = None
     if step.device == DeviceType.H100:
         plugin = copy.deepcopy(h100_plugin_template)
+    elif step.device == DeviceType.H200:
+        plugin = copy.deepcopy(nebius_h200_plugin_template)
     elif step.device == DeviceType.A100.value:
         plugin = copy.deepcopy(a100_plugin_template)
 
