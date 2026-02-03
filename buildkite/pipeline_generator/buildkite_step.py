@@ -228,7 +228,7 @@ def convert_group_step_to_buildkite_step(
                 amd_block_step = None
                 if not _step_should_run(step, list_file_diff):
                     amd_block_step = BuildkiteBlockStep(
-                        block=f"Run AMD Mirror: {step.label}",
+                        block=f"Run AMD: {step.label}",
                         depends_on=["image-build-amd"],
                         key=f"block-amd-{_generate_step_key(step.label)}",
                     )
@@ -286,10 +286,11 @@ def _generate_step_key(step_label: str) -> str:
 def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[str, Any]) -> BuildkiteCommandStep:
     """Create an AMD mirrored step from the original step."""
     amd_device = amd["device"]
-    commands_str = " && ".join(original_commands)
+    amd_commands = amd.get("commands", original_commands)
+    amd_commands_str = " && ".join(amd_commands)
 
     # Add AMD test script wrapper
-    amd_command = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{commands_str}"'
+    amd_command_wrapped = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{amd_commands_str}"'
 
     # Extract device name from queue name
     device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
@@ -315,7 +316,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
 
     return BuildkiteCommandStep(
         label=amd_label,
-        commands=[amd_command],
+        commands=[amd_command_wrapped],
         depends_on=["image-build-amd"],
         agents={"queue": amd_queue},
         env={"DOCKER_BUILDKIT": "1"},
