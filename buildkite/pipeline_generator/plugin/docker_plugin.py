@@ -13,6 +13,7 @@ docker_plugin_template = {
         "HF_HOME=/fsx/hf_cache",
         "HF_TOKEN",
         "CODECOV_TOKEN",
+        "BUILDKITE_ANALYTICS_TOKEN",
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
@@ -31,6 +32,7 @@ h200_plugin_template = {
         "HF_HOME=/benchmark-hf-cache",
         "HF_TOKEN",
         "CODECOV_TOKEN",
+        "BUILDKITE_ANALYTICS_TOKEN",
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
@@ -49,6 +51,7 @@ b200_plugin_template = {
         "HF_HOME=/benchmark-hf-cache",
         "HF_TOKEN",
         "CODECOV_TOKEN",
+        "BUILDKITE_ANALYTICS_TOKEN",
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
