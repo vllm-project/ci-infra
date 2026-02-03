@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
 from step import Step
-from utils_lib.docker_utils import get_image, get_ecr_cache_registry
+from utils_lib.docker_utils import get_image, get_ecr_cache_registry, resolve_ecr_cache_vars
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
@@ -102,7 +102,9 @@ def _get_variables_to_inject() -> Dict[str, str]:
     if global_config["name"] != "vllm_ci":
         return {}
 
-    cache_from_tag, cache_to_tag = get_ecr_cache_registry()
+    # Get all 4 cache values for multi-level fallback
+    cache_from, cache_from_base, cache_from_main, cache_to = resolve_ecr_cache_vars()
+
     return {
         "$REGISTRY": global_config["registries"],
         "$REPO": global_config["repositories"]["main"]
@@ -112,8 +114,10 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$BRANCH": global_config["branch"],
         "$VLLM_USE_PRECOMPILED": "1" if global_config["use_precompiled"] else "0",
         "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
-        "$CACHE_FROM": cache_from_tag,
-        "$CACHE_TO": cache_to_tag,
+        "$CACHE_FROM": cache_from,
+        "$CACHE_FROM_BASE_BRANCH": cache_from_base,
+        "$CACHE_FROM_MAIN": cache_from_main,
+        "$CACHE_TO": cache_to,
         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
             if global_config["branch"] == "main"
             else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT",

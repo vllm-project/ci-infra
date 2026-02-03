@@ -39,6 +39,50 @@ def _docker_manifest_exists(image_tag: str) -> bool:
         return False
 
 
+def resolve_ecr_cache_vars() -> Tuple[str, str, str, str]:
+    """
+    Resolve ECR cache variables for multi-level fallback.
+
+    Returns:
+        (cache_from, cache_from_base, cache_from_main, cache_to)
+    """
+    global_config = get_global_config()
+    branch = global_config["branch"]
+    pull_request = global_config.get("pull_request")
+
+    test_cache_ecr = "936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-test-cache"
+    main_cache_ecr = "936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache"
+
+    # Main branch cache (always available as ultimate fallback)
+    cache_from_main = f"{main_cache_ecr}:latest"
+
+    if not pull_request or pull_request == "false":
+        # Non-PR build (postmerge or branch build)
+        if branch == "main":
+            cache = f"{main_cache_ecr}:latest"
+        else:
+            clean_branch = _clean_docker_tag(branch)
+            cache = f"{test_cache_ecr}:{clean_branch}"
+
+        cache_from = cache
+        cache_from_base = cache
+        cache_to = cache
+    else:
+        # PR build
+        cache_to = f"{test_cache_ecr}:pr-{pull_request}"
+        cache_from = cache_to
+
+        # Base branch cache
+        base_branch = os.getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+        if base_branch == "main":
+            cache_from_base = cache_from_main
+        else:
+            clean_base = _clean_docker_tag(base_branch)
+            cache_from_base = f"{test_cache_ecr}:{clean_base}"
+
+    return cache_from, cache_from_base, cache_from_main, cache_to
+
+
 def get_ecr_cache_registry() -> Tuple[str, str]:
     global_config = get_global_config()
     branch = global_config["branch"]
