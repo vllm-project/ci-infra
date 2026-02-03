@@ -40,6 +40,21 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 5
 
+  - label: ":pre-commit: Pre-commit checks"
+    key: pre-commit-checks
+    cancel_on_build_failing: true
+    agents:
+      queue: cpu_queue_premerge
+    command: |
+      pip install pre-commit
+      export PATH="$HOME/.local/bin:$PATH"
+      if ! pre-commit run --all-files --hook-stage manual; then
+        echo "Pre-commit checks failed. Canceling the build."
+        curl -H "Authorization: Bearer $BUILDKITE_AGENT_ACCESS_TOKEN" \
+        -X PUT "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORGANIZATION_SLUG/pipelines/$BUILDKITE_PIPELINE_SLUG/builds/$BUILDKITE_BUILD_NUMBER/cancel"
+        exit 1
+      fi
+
   - block: Run Neuron Test
     depends_on: ~
     key: run-neuron-test
