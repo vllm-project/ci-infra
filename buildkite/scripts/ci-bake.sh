@@ -31,17 +31,6 @@
 
 set -euo pipefail
 
-# Check if image already exists (skip build if it does)
-if [[ -n "${IMAGE_TAG:-}" ]]; then
-    echo "--- :mag: Checking if image exists"
-    if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
-        echo "Image already exists: ${IMAGE_TAG}"
-        echo "Skipping build"
-        exit 0
-    fi
-    echo "Image not found, proceeding with build"
-fi
-
 # Configuration with defaults
 TARGET="${1:-test-ci}"
 CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infra/main/docker/ci.hcl}"
