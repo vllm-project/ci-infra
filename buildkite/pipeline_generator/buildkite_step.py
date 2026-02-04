@@ -20,6 +20,7 @@ class BuildkiteCommandStep(BaseModel):
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
+    priority: Optional[int] = None
 
     def to_yaml(self):
         return {
@@ -32,6 +33,7 @@ class BuildkiteCommandStep(BaseModel):
             "plugins": self.plugins,
             "env": self.env,
             "parallelism": self.parallelism,
+            "priority": self.priority,
         }
 
 
@@ -176,6 +178,8 @@ def convert_group_step_to_buildkite_step(
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
 
+    amd_mirror_steps = []
+
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
@@ -219,8 +223,29 @@ def convert_group_step_to_buildkite_step(
 
             group_steps_list.append(buildkite_step)
 
+            # Create AMD mirror step and its block step if specified/applicable
+            if step.mirror and step.mirror.get("amd"):
+                amd_block_step = None
+                if not _step_should_run(step, list_file_diff):
+                    amd_block_step = BuildkiteBlockStep(
+                        block=f"Run AMD: {step.label}",
+                        depends_on=["image-build-amd"],
+                        key=f"block-amd-{_generate_step_key(step.label)}",
+                    )
+                    amd_mirror_steps.append(amd_block_step)
+                amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
+                if amd_block_step:
+                    amd_step.depends_on.extend([amd_block_step.key])
+                amd_mirror_steps.append(amd_step)
+
         buildkite_group_steps.append(
             BuildkiteGroupStep(group=group, steps=group_steps_list)
+        )
+
+    # If AMD mirror step exists, make it a group step
+    if amd_mirror_steps:
+        buildkite_group_steps.append(
+            BuildkiteGroupStep(group="Hardware-AMD Tests", steps=amd_mirror_steps)
         )
 
     return buildkite_group_steps
@@ -255,4 +280,51 @@ def _generate_step_key(step_label: str) -> str:
         .replace("+", "-")
         .replace(":", "-")
         .replace(".", "-")
+    )
+
+
+def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[str, Any]) -> BuildkiteCommandStep:
+    """Create an AMD mirrored step from the original step."""
+    amd_device = amd["device"]
+    amd_commands = amd.get("commands", original_commands)
+    amd_commands_str = " && ".join(amd_commands)
+    working_dir = amd.get("working_dir", step.working_dir)
+    if working_dir:
+        amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
+
+    # Add AMD test script wrapper
+    amd_command_wrapped = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{amd_commands_str}"'
+
+    # Extract device name from queue name
+    device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
+    amd_label = f"AMD: {step.label} ({device_type})"
+
+    # Get AMD queue name from device name
+    amd_queue = None
+    if amd_device == DeviceType.AMD_MI325_1:
+        amd_queue = AgentQueue.AMD_MI325_1
+    elif amd_device == DeviceType.AMD_MI325_8:
+        amd_queue = AgentQueue.AMD_MI325_8
+    
+    if not amd_queue:
+        raise ValueError(f"Invalid device: {amd_device}")
+
+    amd_retry = {
+        "automatic": [
+            {"exit_status": -1, "limit": 2},   # Agent was lost
+            {"exit_status": -10, "limit": 2},  # Agent was lost
+            {"exit_status": 128, "limit": 2},  # Git connectivity issues
+        ]
+    }
+
+    return BuildkiteCommandStep(
+        label=amd_label,
+        commands=[amd_command_wrapped],
+        depends_on=["image-build-amd"],
+        agents={"queue": amd_queue},
+        env={"DOCKER_BUILDKIT": "1"},
+        priority=200,
+        soft_fail=False,
+        retry=amd_retry,
+        parallelism=step.parallelism,
     )
