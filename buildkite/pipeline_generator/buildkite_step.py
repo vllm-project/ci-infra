@@ -288,6 +288,9 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
     amd_device = amd["device"]
     amd_commands = amd.get("commands", original_commands)
     amd_commands_str = " && ".join(amd_commands)
+    working_dir = amd.get("working_dir", step.working_dir)
+    if working_dir:
+        amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
 
     # Add AMD test script wrapper
     amd_command_wrapped = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{amd_commands_str}"'
