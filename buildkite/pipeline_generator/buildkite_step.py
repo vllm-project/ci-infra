@@ -280,6 +280,7 @@ def _generate_step_key(step_label: str) -> str:
         .replace("+", "-")
         .replace(":", "-")
         .replace(".", "-")
+        .replace("/", "-")
     )
 
 
