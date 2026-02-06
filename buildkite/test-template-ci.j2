@@ -619,13 +619,6 @@ steps:
         {% endif %}
     {% endfor %}
 
-  - label: "Neuron Test"
-    depends_on: ~
-    agents:
-      queue: neuron
-    command: bash .buildkite/scripts/hardware_ci/run-neuron-test.sh
-    soft_fail: true
-
   - block: "Run Intel CPU test"
     depends_on: ~
     key: block-intel-cpu
