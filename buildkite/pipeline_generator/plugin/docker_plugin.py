@@ -36,8 +36,6 @@ h200_plugin_template = {
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
-        "/data/benchmark-hf-cache:/benchmark-hf-cache",
-        "/data/benchmark-vllm-cache:/root/.cache/vllm",
     ],
 }
 
