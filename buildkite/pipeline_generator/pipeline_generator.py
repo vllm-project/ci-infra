@@ -14,8 +14,9 @@ class PipelineGenerator:
         output_file_path: str,
         docs_only_disable: bool = False,
         queue_routing: Optional[Dict[str, str]] = None,
+        step_filter: Optional[Dict[str, List[str]]] = None,
     ):
-        init_global_config(pipeline_config_path, queue_routing=queue_routing)
+        init_global_config(pipeline_config_path, queue_routing=queue_routing, step_filter=step_filter)
         self.output_file_path = output_file_path
 
     def generate(self):

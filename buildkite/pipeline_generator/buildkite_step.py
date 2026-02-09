@@ -51,6 +51,28 @@ class BuildkiteGroupStep(BaseModel):
     steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
 
 
+def _step_passes_filter(step: Step, queue_value: str) -> bool:
+    """Check if a step passes the configured step filter.
+
+    A step must match ALL specified filter keys (AND across keys).
+    Within each key, it must match ANY of the listed values (OR within a key).
+    """
+    global_config = get_global_config()
+    step_filter = global_config.get("step_filter", {})
+    if not step_filter:
+        return True
+
+    for key, allowed_values in step_filter.items():
+        if key == "queue":
+            resolved_queue = queue_value.value if isinstance(queue_value, AgentQueue) else queue_value
+            if resolved_queue not in allowed_values:
+                return False
+        elif key == "device":
+            if step.device not in allowed_values:
+                return False
+    return True
+
+
 def _get_step_plugin(step: Step):
     # Use K8s plugin
     use_cpu = step.device == DeviceType.CPU or False
@@ -190,6 +212,12 @@ def convert_group_step_to_buildkite_step(
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
+            agent_queue = get_agent_queue(step)
+
+            # Apply step filter — skip steps that don't match
+            if not _step_passes_filter(step, agent_queue):
+                continue
+
             # block step
             block_step = None
             if not _step_should_run(step, list_file_diff):
@@ -205,7 +233,7 @@ def convert_group_step_to_buildkite_step(
                 commands=step_commands,
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
-                agents={"queue": get_agent_queue(step)},
+                agents={"queue": agent_queue},
             )
 
             if block_step:
@@ -244,6 +272,10 @@ def convert_group_step_to_buildkite_step(
                 if amd_block_step:
                     amd_step.depends_on.extend([amd_block_step.key])
                 amd_mirror_steps.append(amd_step)
+
+        # Skip empty groups (all steps filtered out)
+        if not group_steps_list:
+            continue
 
         buildkite_group_steps.append(
             BuildkiteGroupStep(group=group, steps=group_steps_list)
