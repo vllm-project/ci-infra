@@ -59,6 +59,7 @@ def _step_passes_filter(step: Step, queue_value: str) -> bool:
     """
     global_config = get_global_config()
     step_filter = global_config.get("step_filter", {})
+    print("step_filter: ", step_filter)
     if not step_filter:
         return True
 
