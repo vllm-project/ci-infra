@@ -140,7 +140,6 @@ target "test-ci" {
   inherits   = ["_common", "_ci", "_labels"]
   target     = "test"
   cache-from = get_cache_from()
-  cache-to   = get_cache_to()
   tags = compact([
     IMAGE_TAG,
     IMAGE_TAG_LATEST,
