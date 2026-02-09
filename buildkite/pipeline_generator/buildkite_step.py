@@ -59,7 +59,6 @@ def _step_passes_filter(step: Step, queue_value: str) -> bool:
     """
     global_config = get_global_config()
     step_filter = global_config.get("step_filter", {})
-    print("step_filter: ", step_filter)
     if not step_filter:
         return True
 
@@ -123,10 +122,8 @@ def get_agent_queue(step: Step):
         queue = AgentQueue.GPU_1
 
     queue_routing = global_config.get("queue_routing", {})
-    print("queue_routing: ", queue_routing)
     queue_value = queue.value if isinstance(queue, AgentQueue) else queue
     if queue_value in queue_routing:
-        print("convert queue: ", queue_value, "to: ", queue_routing[queue_value])
         return queue_routing[queue_value]
     return queue
 
@@ -206,7 +203,7 @@ def convert_group_step_to_buildkite_step(
 ) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
     variables_to_inject = _get_variables_to_inject()
-    print(variables_to_inject)
+    print("variables_to_inject: ", variables_to_inject)
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
 
