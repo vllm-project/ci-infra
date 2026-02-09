@@ -1,4 +1,4 @@
-from typing import List
+from typing import Dict, List, Optional
 import yaml
 import subprocess
 import os
@@ -13,8 +13,9 @@ class PipelineGenerator:
         pipeline_config_path: str,
         output_file_path: str,
         docs_only_disable: bool = False,
+        queue_routing: Optional[Dict[str, str]] = None,
     ):
-        init_global_config(pipeline_config_path)
+        init_global_config(pipeline_config_path, queue_routing=queue_routing)
         self.output_file_path = output_file_path
 
     def generate(self):

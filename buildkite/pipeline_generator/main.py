@@ -1,3 +1,5 @@
+import json
+
 import click
 from pipeline_generator import PipelineGenerator
 
@@ -9,8 +11,20 @@ from pipeline_generator import PipelineGenerator
     help="Path to the pipeline config file",
 )
 @click.option("--output_file_path", type=click.Path(), help="Path to the output file")
-def main(pipeline_config_path, output_file_path):
-    pipeline_generator = PipelineGenerator(pipeline_config_path, output_file_path)
+@click.option(
+    "--queue_routing",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to a JSON file mapping original queue names to replacement queue names",
+)
+def main(pipeline_config_path, output_file_path, queue_routing):
+    queue_routing_dict = None
+    if queue_routing:
+        with open(queue_routing, "r") as f:
+            queue_routing_dict = json.load(f)
+    pipeline_generator = PipelineGenerator(
+        pipeline_config_path, output_file_path, queue_routing=queue_routing_dict
+    )
     pipeline_generator.generate()
 
 

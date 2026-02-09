@@ -61,42 +61,49 @@ def _get_step_plugin(step: Step):
 
 
 def get_agent_queue(step: Step):
-    branch = get_global_config()["branch"]
+    global_config = get_global_config()
+    branch = global_config["branch"]
     if step.label.startswith(":docker:"):
         if branch == "main":
-            return AgentQueue.CPU_POSTMERGE_US_EAST_1
+            queue = AgentQueue.CPU_POSTMERGE_US_EAST_1
         else:
-            return AgentQueue.CPU_PREMERGE_US_EAST_1
+            queue = AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.label == "Documentation Build":
-        return AgentQueue.SMALL_CPU_PREMERGE
+        queue = AgentQueue.SMALL_CPU_PREMERGE
     elif step.device == DeviceType.CPU:
-        return AgentQueue.CPU_PREMERGE_US_EAST_1
+        queue = AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.device == DeviceType.A100:
-        return AgentQueue.A100
+        queue = AgentQueue.A100
     elif step.device == DeviceType.H100:
-        return AgentQueue.MITHRIL_H100
+        queue = AgentQueue.MITHRIL_H100
     elif step.device == DeviceType.H200:
-        return AgentQueue.SKYLAB_H200
+        queue = AgentQueue.SKYLAB_H200
     elif step.device == DeviceType.B200:
-        return AgentQueue.B200
+        queue = AgentQueue.B200
     elif step.device == DeviceType.INTEL_CPU:
-        return AgentQueue.INTEL_CPU
+        queue = AgentQueue.INTEL_CPU
     elif step.device == DeviceType.INTEL_HPU:
-        return AgentQueue.INTEL_HPU
+        queue = AgentQueue.INTEL_HPU
     elif step.device == DeviceType.INTEL_GPU:
-        return AgentQueue.INTEL_GPU
+        queue = AgentQueue.INTEL_GPU
     elif step.device == DeviceType.ARM_CPU:
-        return AgentQueue.ARM_CPU
+        queue = AgentQueue.ARM_CPU
     elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
-        return AgentQueue.AMD_CPU
+        queue = AgentQueue.AMD_CPU
     elif step.device == DeviceType.GH200:
-        return AgentQueue.GH200
+        queue = AgentQueue.GH200
     elif step.device == DeviceType.ASCEND:
-        return AgentQueue.ASCEND
+        queue = AgentQueue.ASCEND
     elif step.num_devices == 2 or step.num_devices == 4:
-        return AgentQueue.GPU_4
+        queue = AgentQueue.GPU_4
     else:
-        return AgentQueue.GPU_1
+        queue = AgentQueue.GPU_1
+
+    queue_routing = global_config.get("queue_routing", {})
+    queue_value = queue.value if isinstance(queue, AgentQueue) else queue
+    if queue_value in queue_routing:
+        return queue_routing[queue_value]
+    return queue
 
 
 def _get_variables_to_inject() -> Dict[str, str]:

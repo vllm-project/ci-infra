@@ -23,12 +23,13 @@ class GlobalConfig(TypedDict):
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
     use_precompiled: bool = False
+    queue_routing: Dict[str, str] = {}
 
 
 config = None
 
 
-def init_global_config(pipeline_config_path: str):
+def init_global_config(pipeline_config_path: str, queue_routing: Optional[Dict[str, str]] = None):
     global config
     if config:
         return
@@ -75,6 +76,7 @@ def init_global_config(pipeline_config_path: str):
             ),
             merge_base_commit,
         ),
+        queue_routing=queue_routing or {},
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
