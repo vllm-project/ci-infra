@@ -1,4 +1,3 @@
-from typing import Dict, List, Optional
 import yaml
 import subprocess
 import os
@@ -12,11 +11,8 @@ class PipelineGenerator:
         self,
         pipeline_config_path: str,
         output_file_path: str,
-        docs_only_disable: bool = False,
-        queue_routing: Optional[Dict[str, str]] = None,
-        step_filter: Optional[Dict[str, List[str]]] = None,
     ):
-        init_global_config(pipeline_config_path, queue_routing=queue_routing, step_filter=step_filter)
+        init_global_config(pipeline_config_path)
         self.output_file_path = output_file_path
 
     def generate(self):

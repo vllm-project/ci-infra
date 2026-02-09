@@ -30,7 +30,7 @@ class GlobalConfig(TypedDict):
 config = None
 
 
-def init_global_config(pipeline_config_path: str, queue_routing: Optional[Dict[str, str]] = None, step_filter: Optional[Dict[str, List[str]]] = None):
+def init_global_config(pipeline_config_path: str):
     global config
     if config:
         return
@@ -77,8 +77,8 @@ def init_global_config(pipeline_config_path: str, queue_routing: Optional[Dict[s
             ),
             merge_base_commit,
         ),
-        queue_routing=queue_routing or {},
-        step_filter=step_filter or {},
+        queue_routing=pipeline_config.get("queue_routing", {}),
+        step_filter=pipeline_config.get("step_filter", {}),
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
