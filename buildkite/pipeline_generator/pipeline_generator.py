@@ -58,6 +58,8 @@ class PipelineGenerator:
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:
+    print("list_file_diff: ", list_file_diff)
+    print("len(list_file_diff): ", len(list_file_diff))
     if len(list_file_diff) == 0:
         return False
     for file_path in list_file_diff:
