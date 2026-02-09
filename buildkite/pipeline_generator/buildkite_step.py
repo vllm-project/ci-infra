@@ -122,8 +122,10 @@ def get_agent_queue(step: Step):
         queue = AgentQueue.GPU_1
 
     queue_routing = global_config.get("queue_routing", {})
+    print("queue_routing: ", queue_routing)
     queue_value = queue.value if isinstance(queue, AgentQueue) else queue
     if queue_value in queue_routing:
+        print("convert queue: ", queue_value, "to: ", queue_routing[queue_value])
         return queue_routing[queue_value]
     return queue
 
