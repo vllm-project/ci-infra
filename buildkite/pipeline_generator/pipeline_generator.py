@@ -4,7 +4,7 @@ import os
 from step import read_steps_from_job_dir, group_steps
 from buildkite_step import convert_group_step_to_buildkite_step
 from global_config import init_global_config, get_global_config
-
+from typing import List
 
 class PipelineGenerator:
     def __init__(
