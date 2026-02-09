@@ -12,15 +12,15 @@ from pipeline_generator import PipelineGenerator
 )
 @click.option("--output_file_path", type=click.Path(), help="Path to the output file")
 @click.option(
-    "--queue_routing",
+    "--queue_routing_file_path",
     type=click.Path(exists=True),
     default=None,
     help="Path to a JSON file mapping original queue names to replacement queue names",
 )
-def main(pipeline_config_path, output_file_path, queue_routing):
+def main(pipeline_config_path, output_file_path, queue_routing_file_path):
     queue_routing_dict = None
-    if queue_routing:
-        with open(queue_routing, "r") as f:
+    if queue_routing_file_path:
+        with open(queue_routing_file_path, "r") as f:
             queue_routing_dict = json.load(f)
     pipeline_generator = PipelineGenerator(
         pipeline_config_path, output_file_path, queue_routing=queue_routing_dict
