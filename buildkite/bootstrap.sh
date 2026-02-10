@@ -23,6 +23,10 @@ if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
     DOCS_ONLY_DISABLE=0
 fi
 
+if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
+    MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD)
+fi
+
 fail_fast() {
     DISABLE_LABEL="ci-no-fail-fast"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
@@ -38,9 +42,74 @@ fail_fast() {
     fi
 }
 
+check_run_all_label() {
+    RUN_ALL_LABEL="ready-run-all-tests"
+    # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
+    if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+        PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+        if [[ $PR_LABELS == *"$RUN_ALL_LABEL"* ]]; then
+            echo true
+        else
+            echo false
+        fi
+    else
+        echo false  # not a PR or BUILDKITE_PULL_REQUEST not set
+    fi
+}
+
 if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
+
+clean_docker_tag() {
+    # Function to replace invalid characters in Docker image tags and truncate to 128 chars
+    # Valid characters: a-z, A-Z, 0-9, _, ., -
+    local input="$1"
+    echo "$input" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-128
+}
+
+resolve_ecr_cache_vars() {
+    # Resolve ECR cache-from, cache-to using buildkite environment variables:
+    #  -  BUILDKITE_BRANCH 
+    #  -  BUILDKITE_PULL_REQUEST
+    #  -  BUILDKITE_PULL_REQUEST_BASE_BRANCH
+    # Export environment variables: 
+    #  -  CACHE_FROM: primary cache source
+    #  -  CACHE_FROM_BASE_BRANCH: secondary cache source
+    #  -  CACHE_FROM_MAIN: fallback cache source
+    #  -  CACHE_TO: cache destination
+    # Note: CACHE_FROM, CACHE_FROM_BASE_BRANCH, CACHE_FROM_MAIN could be the same.
+    #     This is intended behavior to allow BuildKit to merge all possible cache source 
+    #     to maximize cache hit potential, see https://docs.docker.com/build/cache/backends/#multiple-caches
+
+    # Define ECR repository URLs for test and main cache
+    local TEST_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-test-cache"
+    local MAIN_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache"
+    
+    if [[ "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
+        if [[ "$BUILDKITE_BRANCH" == "main" ]]; then
+            local cache="${MAIN_CACHE_ECR}:latest"
+        else
+            local clean_branch=$(clean_docker_tag "$BUILDKITE_BRANCH")
+            local cache="${TEST_CACHE_ECR}:${clean_branch}"
+        fi
+        CACHE_TO="$cache"
+        CACHE_FROM="$cache"
+        CACHE_FROM_BASE_BRANCH="$cache"
+    else
+        CACHE_TO="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}"
+        CACHE_FROM="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}"
+        if [[ "$BUILDKITE_PULL_REQUEST_BASE_BRANCH" == "main" ]]; then
+            CACHE_FROM_BASE_BRANCH="${MAIN_CACHE_ECR}:latest"
+        else
+            local clean_base=$(clean_docker_tag "$BUILDKITE_PULL_REQUEST_BASE_BRANCH")
+            CACHE_FROM_BASE_BRANCH="${TEST_CACHE_ECR}:${clean_base}"
+        fi
+    fi
+    
+    CACHE_FROM_MAIN="${MAIN_CACHE_ECR}:latest"
+    export CACHE_FROM CACHE_FROM_BASE_BRANCH CACHE_FROM_MAIN CACHE_TO
+}
 
 upload_pipeline() {
     echo "Uploading pipeline..."
@@ -71,7 +140,19 @@ upload_pipeline() {
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     FAIL_FAST=$(fail_fast)
-
+    
+    # Resolve CACHE_FROM and CACHE_TO for ECR Registry Caching
+    resolve_ecr_cache_vars
+    if [[ -z "${CACHE_FROM:-}" ]] || [[ -z "${CACHE_FROM_BASE_BRANCH:-}" ]] || [[ -z "${CACHE_FROM_MAIN:-}" ]] || [[ -z "${CACHE_TO:-}" ]]; then
+        echo "Error: CACHE_FROM, CACHE_FROM_BASE_BRANCH, CACHE_FROM_MAIN, or CACHE_TO not set after resolve_ecr_cache_vars"
+        exit 1
+    else
+        echo "Resolved CACHE_FROM: ${CACHE_FROM}"
+        echo "Resolved CACHE_FROM_BASE_BRANCH: ${CACHE_FROM_BASE_BRANCH}"
+        echo "Resolved CACHE_FROM_MAIN: ${CACHE_FROM_MAIN}"
+        echo "Resolved CACHE_TO: ${CACHE_TO}"
+    fi
+    
     cd .buildkite
     (
         set -x
@@ -84,8 +165,13 @@ upload_pipeline() {
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
+            -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D cache_from="$CACHE_FROM" \
+            -D cache_from_base_branch="$CACHE_FROM_BASE_BRANCH" \
+            -D cache_from_main="$CACHE_FROM_MAIN" \
+            -D cache_to="$CACHE_TO" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -195,6 +281,14 @@ for file in $file_diff; do
     fi
 done
 
+# Check for ready-run-all-tests label
+LABEL_RUN_ALL=$(check_run_all_label)
+if [[ $LABEL_RUN_ALL == true ]]; then
+    RUN_ALL=1
+    NIGHTLY=1
+    echo "Found 'ready-run-all-tests' label. Running all tests including optional tests."
+fi
+
 # Decide whether to use precompiled wheels
 # Relies on existing patterns array as a basis.
 if [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
@@ -203,13 +297,27 @@ elif [[ $RUN_ALL -eq 1 ]]; then
     export VLLM_USE_PRECOMPILED=0
     echo "Detected critical changes, building wheels from source"
 else
-    export VLLM_USE_PRECOMPILED=1
-    echo "No critical changes, using precompiled wheels"
+    echo "No critical changes, trying to use precompiled wheels"
+    # check whether we have precompiled wheels available for the merge base commit
+    # this might happen when:
+    # (1) the main commit is very new and wheels are not built yet
+    # (2) the merge base commit is somehow not on main branch (is that possible?)
+    # (3) (maybe later) we have retired some too old precompiled wheels
+    # (4) unfortunately, the commit fails to build
+    meta_url="https://wheels.vllm.ai/${MERGE_BASE_COMMIT}/vllm/metadata.json"
+    echo "Checking for precompiled wheel metadata at: $meta_url"
+    if curl --silent --head --fail "$meta_url"; then
+        echo "Precompiled wheels are available for commit ${MERGE_BASE_COMMIT}"
+        export VLLM_USE_PRECOMPILED=1
+    else
+        echo "Precompiled wheels are NOT available for commit ${MERGE_BASE_COMMIT}, forcing build from source"
+        export VLLM_USE_PRECOMPILED=0
+    fi
 fi
-
 
 LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
     LIST_FILE_DIFF=$(get_diff_main | tr ' ' '|')
 fi
+
 upload_pipeline
