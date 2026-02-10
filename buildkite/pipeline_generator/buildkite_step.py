@@ -76,7 +76,7 @@ def _step_passes_filter(step: Step, queue_value: str) -> bool:
 def _get_step_plugin(step: Step):
     # Use K8s plugin
     use_cpu = step.device == DeviceType.CPU or False
-    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
+    if step.device in [DeviceType.A100.value]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu))}
@@ -124,7 +124,15 @@ def get_agent_queue(step: Step):
     queue_routing = global_config.get("queue_routing", {})
     queue_value = queue.value if isinstance(queue, AgentQueue) else queue
     if queue_value in queue_routing:
-        return queue_routing[queue_value]
+        new_queue = queue_routing[queue_value]
+        if new_queue == "h200": 
+            if step.num_devices and step.num_devices == 4:
+                new_queue = "h200-4"
+            elif step.num_devices == 8:
+                new_queue = "h200-8"
+            else:
+                new_queue = "h200-2"
+        return new_queue
     return queue
 
 

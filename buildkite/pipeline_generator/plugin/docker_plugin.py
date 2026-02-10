@@ -46,15 +46,13 @@ b200_plugin_template = {
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
-        "HF_HOME=/benchmark-hf-cache",
+        "HF_HOME=/dev/shm/",
         "HF_TOKEN",
         "CODECOV_TOKEN",
         "BUILDKITE_ANALYTICS_TOKEN",
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
-        "/data/benchmark-hf-cache:/benchmark-hf-cache",
-        "/data/benchmark-vllm-cache:/root/.cache/vllm",
     ],
 }
 
@@ -65,6 +63,8 @@ def get_docker_plugin(step: Step, image: str):
         plugin = copy.deepcopy(h200_plugin_template)
     elif step.device == DeviceType.B200:
         plugin = copy.deepcopy(b200_plugin_template)
+    elif step.device == DeviceType.H100:
+        plugin = copy.deepcopy(h200_plugin_template)
     else:
         plugin = copy.deepcopy(docker_plugin_template)
     plugin["image"] = image
