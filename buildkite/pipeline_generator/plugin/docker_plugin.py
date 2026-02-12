@@ -36,6 +36,7 @@ h200_plugin_template = {
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
+        "/mnt/vllm-ci:/mnt/vllm-ci",
     ],
 }
 
