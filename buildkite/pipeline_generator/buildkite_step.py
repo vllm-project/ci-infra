@@ -113,7 +113,13 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
         "$BRANCH": global_config["branch"],
         "$VLLM_USE_PRECOMPILED": "1" if global_config["use_precompiled"] else "0",
-        "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
+        # Only pass merge base commit when using precompiled wheels. When
+        # building from source (use_precompiled=False), this arg is unused but
+        # participates in Docker's layer cache key — passing a different hash
+        # on every build invalidates the ~11min compilation layer.
+        "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"]
+        if global_config["use_precompiled"]
+        else "",
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
