@@ -183,12 +183,9 @@ def convert_group_step_to_buildkite_step(
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
-            # block step
-            block_step = None
+            # TEMPORARY: Skip non-image-build steps entirely
             if not _step_should_run(step, list_file_diff):
-                block_step = _create_block_step(step, list_file_diff)
-            if block_step:
-                group_steps_list.append(block_step)
+                continue
 
             # command step
             step_commands = _prepare_commands(step, variables_to_inject)
@@ -201,10 +198,6 @@ def convert_group_step_to_buildkite_step(
                 agents={"queue": get_agent_queue(step)},
             )
 
-            if block_step:
-                buildkite_step.depends_on = [block_step.key]
-                if step.depends_on:
-                    buildkite_step.depends_on.extend(step.depends_on)
             if step.env:
                 buildkite_step.env = step.env
             if step.retry:
@@ -238,9 +231,10 @@ def convert_group_step_to_buildkite_step(
                     amd_step.depends_on.extend([amd_block_step.key])
                 amd_mirror_steps.append(amd_step)
 
-        buildkite_group_steps.append(
-            BuildkiteGroupStep(group=group, steps=group_steps_list)
-        )
+        if group_steps_list:
+            buildkite_group_steps.append(
+                BuildkiteGroupStep(group=group, steps=group_steps_list)
+            )
 
     # If AMD mirror step exists, make it a group step
     if amd_mirror_steps:
@@ -253,19 +247,9 @@ def convert_group_step_to_buildkite_step(
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
-    if step.key and step.key.startswith("image-build"):
+    # TEMPORARY: Only run the main image-build step for cache testing
+    if step.key == "image-build":
         return True
-    if global_config["nightly"] == "1":
-        return True
-    if step.optional:
-        return False
-    if global_config["run_all"]:
-        return True
-    if step.source_file_dependencies:
-        for source_file in step.source_file_dependencies:
-            for diff_file in list_file_diff:
-                if source_file in diff_file:
-                    return True
     return False
 
 
