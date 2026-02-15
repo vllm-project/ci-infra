@@ -107,7 +107,14 @@ resolve_ecr_cache_vars() {
         fi
     fi
     
-    CACHE_FROM_MAIN="${MAIN_CACHE_ECR}:latest"
+    # Only use postmerge cache for main branch builds. For non-main builds,
+    # the postmerge cache has layers from a different Dockerfile version which
+    # can cause conflicting chain IDs and non-deterministic cache misses.
+    if [[ "${BUILDKITE_BRANCH:-}" == "main" ]]; then
+        CACHE_FROM_MAIN="${MAIN_CACHE_ECR}:latest"
+    else
+        CACHE_FROM_MAIN=""
+    fi
     export CACHE_FROM CACHE_FROM_BASE_BRANCH CACHE_FROM_MAIN CACHE_TO
 }
 
