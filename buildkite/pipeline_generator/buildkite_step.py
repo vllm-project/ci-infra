@@ -119,7 +119,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
         # on every build invalidates the ~11min compilation layer.
         "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"]
         if global_config["use_precompiled"]
-        else "",
+        else '""',
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
