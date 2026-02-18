@@ -112,8 +112,6 @@ def _get_variables_to_inject() -> Dict[str, str]:
         else global_config["repositories"]["premerge"],
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
         "$BRANCH": global_config["branch"],
-        "$VLLM_USE_PRECOMPILED": "0",
-        "$VLLM_MERGE_BASE_COMMIT": '""',
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
