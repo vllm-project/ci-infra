@@ -56,7 +56,9 @@ check_run_all_label() {
 compute_rocm_base_cache_key() {
     local DOCKERFILE="docker/Dockerfile.rocm_base"
     local CI_PYTHON_VERSION="${ROCM_CI_PYTHON_VERSION:-3.12}"
-    local CI_PYTORCH_ROCM_ARCH="${ROCM_CI_PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
+    local DEFAULT_ARCH
+    DEFAULT_ARCH=$(grep '^ARG PYTORCH_ROCM_ARCH=' "$DOCKERFILE" | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
+    local CI_PYTORCH_ROCM_ARCH="${ROCM_CI_PYTORCH_ROCM_ARCH:-$DEFAULT_ARCH}"
 
     if [[ ! -f "$DOCKERFILE" ]]; then
         echo "unknown"
