@@ -8,7 +8,7 @@
 {% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
 {% endif %}
-{% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
+{% set docker_image_amd = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-rocm" %}
 {% set rocm_base_ecr_image = "public.ecr.aws/q9t5s3a7/vllm-release-repo" %}
 {% set rocm_base_ecr_commit_tag = rocm_base_ecr_image ~ ":$BUILDKITE_COMMIT-" ~ rocm_base_cache_key ~ "-rocm-base" %}
 {% set rocm_base_ecr_cache_tag = rocm_base_ecr_image ~ ":" ~ rocm_base_cache_key ~ "-rocm-base" %}
