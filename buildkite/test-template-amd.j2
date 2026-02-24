@@ -437,7 +437,7 @@ plugins:
 
             echo "Base image ready: rocm/vllm-dev:base-ci"
         agents:
-          queue: amd-cpu
+          queue: cpu_queue_postmerge
         env:
           DOCKER_BUILDKIT: "1"
         retry:
