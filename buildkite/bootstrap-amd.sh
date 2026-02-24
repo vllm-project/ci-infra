@@ -55,7 +55,9 @@ check_run_all_label() {
 
 compute_rocm_base_cache_key() {
     local DOCKERFILE="docker/Dockerfile.rocm_base"
-    local CI_PYTHON_VERSION="${ROCM_CI_PYTHON_VERSION:-3.12}"
+    local DEFAULT_PYTHON
+    DEFAULT_PYTHON=$(grep '^ARG PYTHON_VERSION=' "$DOCKERFILE" | sed 's/^ARG PYTHON_VERSION=//')
+    local CI_PYTHON_VERSION="${ROCM_CI_PYTHON_VERSION:-$DEFAULT_PYTHON}"
     local DEFAULT_ARCH
     DEFAULT_ARCH=$(grep '^ARG PYTORCH_ROCM_ARCH=' "$DOCKERFILE" | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
     local CI_PYTORCH_ROCM_ARCH="${ROCM_CI_PYTORCH_ROCM_ARCH:-$DEFAULT_ARCH}"

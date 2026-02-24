@@ -314,7 +314,7 @@ plugins:
               exit 1
             fi
         agents:
-          queue: amd-cpu
+          queue: cpu_queue_postmerge
         soft_fail: false
 {% endif %}
 
@@ -378,12 +378,14 @@ plugins:
 
                 PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
                 echo "Using PYTORCH_ROCM_ARCH from Dockerfile.rocm_base: $${PYTORCH_ROCM_ARCH}"
+                PYTHON_VERSION=$$(grep '^ARG PYTHON_VERSION=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTHON_VERSION=//')
+                echo "Using PYTHON_VERSION from Dockerfile.rocm_base: $${PYTHON_VERSION}"
 
                 DOCKER_BUILDKIT=1 docker buildx build \
                   --file docker/Dockerfile.rocm_base \
                   --tag "rocm/vllm-dev:base-ci" \
                   --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
-                  --build-arg PYTHON_VERSION="3.12" \
+                  --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
                   --build-arg USE_SCCACHE=1 \
                   --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
                   --build-arg SCCACHE_REGION_NAME=us-west-2 \
@@ -403,7 +405,7 @@ plugins:
                   --tag rocm-base-debs:ci \
                   --target debs_wheel_release \
                   --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
-                  --build-arg PYTHON_VERSION="3.12" \
+                  --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
                   --build-arg USE_SCCACHE=1 \
                   --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
                   --build-arg SCCACHE_REGION_NAME=us-west-2 \
@@ -414,7 +416,7 @@ plugins:
                 cid=$$(docker create rocm-base-debs:ci)
                 docker cp $${cid}:/app/debs/. artifacts/rocm-base-wheels/
                 docker rm $${cid}
-                export PYTHON_VERSION=3.12
+                export PYTHON_VERSION
                 export PYTORCH_ROCM_ARCH
                 S3_BUCKET=vllm-wheels .buildkite/scripts/cache-rocm-base-wheels.sh upload
               fi
@@ -596,7 +598,9 @@ plugins:
             docker tag "{{ rocm_base_ecr_commit_tag }}" rocm/vllm-dev:base-ci
 
             # Download base wheels from S3 cache
-            export PYTHON_VERSION=3.12
+            PYTHON_VERSION=$$(grep '^ARG PYTHON_VERSION=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTHON_VERSION=//')
+            echo "Using PYTHON_VERSION from Dockerfile.rocm_base: $${PYTHON_VERSION}"
+            export PYTHON_VERSION
             PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
             echo "Using PYTORCH_ROCM_ARCH from Dockerfile.rocm_base: $${PYTORCH_ROCM_ARCH}"
             export PYTORCH_ROCM_ARCH
