@@ -23,6 +23,10 @@ if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
     DOCS_ONLY_DISABLE=0
 fi
 
+if [[ -z "${VLLM_PIN_IMAGE:-}" ]]; then
+    VLLM_PIN_IMAGE=""
+fi
+
 if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
     MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD)
 fi
@@ -172,6 +176,7 @@ upload_pipeline() {
             -D cache_from_base_branch="$CACHE_FROM_BASE_BRANCH" \
             -D cache_from_main="$CACHE_FROM_MAIN" \
             -D cache_to="$CACHE_TO" \
+            -D vllm_pin_image="$VLLM_PIN_IMAGE" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -291,7 +296,10 @@ fi
 
 # Decide whether to use precompiled wheels
 # Relies on existing patterns array as a basis.
-if [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
+if [[ -n "${VLLM_PIN_IMAGE:-}" ]]; then
+    export VLLM_USE_PRECOMPILED=0
+    echo "VLLM_PIN_IMAGE is set, skipping precompiled wheel logic"
+elif [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
     echo "VLLM_USE_PRECOMPILED is already set to: $VLLM_USE_PRECOMPILED"
 elif [[ $RUN_ALL -eq 1 ]]; then
     export VLLM_USE_PRECOMPILED=0

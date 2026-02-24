@@ -119,9 +119,11 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$BRANCH": global_config["branch"],
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
-        "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
+        "$IMAGE_TAG": global_config["vllm_pin_image"]
+            if global_config.get("vllm_pin_image")
+            else (f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
             if global_config["branch"] == "main"
-            else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT",
+            else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT"),
         "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:latest"
             if global_config["branch"] == "main"
             else None,
@@ -208,6 +210,14 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.depends_on = [block_step.key]
                 if step.depends_on:
                     buildkite_step.depends_on.extend(step.depends_on)
+
+            # Strip image-build dependencies when using a pinned image
+            if global_config.get("vllm_pin_image") and buildkite_step.depends_on:
+                buildkite_step.depends_on = [
+                    d for d in buildkite_step.depends_on
+                    if not d.startswith("image-build")
+                ] or None
+
             if step.env:
                 buildkite_step.env = step.env
             if step.retry:
@@ -232,7 +242,7 @@ def convert_group_step_to_buildkite_step(
                 if not _step_should_run(step, list_file_diff):
                     amd_block_step = BuildkiteBlockStep(
                         block=f"Run AMD: {step.label}",
-                        depends_on=["image-build-amd"],
+                        depends_on=[] if global_config.get("vllm_pin_image") else ["image-build-amd"],
                         key=f"block-amd-{_generate_step_key(step.label)}",
                     )
                     amd_mirror_steps.append(amd_block_step)
@@ -257,6 +267,8 @@ def convert_group_step_to_buildkite_step(
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
     if step.key and step.key.startswith("image-build"):
+        if global_config.get("vllm_pin_image"):
+            return False
         return True
     if global_config["nightly"] == "1":
         return True
@@ -321,10 +333,11 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         ]
     }
 
+    global_config = get_global_config()
     return BuildkiteCommandStep(
         label=amd_label,
         commands=[amd_command_wrapped],
-        depends_on=["image-build-amd"],
+        depends_on=[] if global_config.get("vllm_pin_image") else ["image-build-amd"],
         agents={"queue": amd_queue},
         env={"DOCKER_BUILDKIT": "1"},
         priority=200,
