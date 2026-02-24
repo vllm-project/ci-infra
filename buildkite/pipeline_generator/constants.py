@@ -22,6 +22,8 @@ class DeviceType(str, Enum):
 class AgentQueue(str, Enum):
     CPU_PREMERGE = "cpu_queue_premerge"
     CPU_POSTMERGE = "cpu_queue_postmerge"
+    ARM64_CPU_PREMERGE = "arm64_cpu_queue_premerge"
+    ARM64_CPU_POSTMERGE = "arm64_cpu_queue_postmerge"
     GPU_1 = "gpu_1_queue"
     GPU_4 = "gpu_4_queue"
     MITHRIL_H100 = "mithril-h100-pool"

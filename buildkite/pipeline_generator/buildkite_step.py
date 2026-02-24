@@ -63,6 +63,11 @@ def _get_step_plugin(step: Step):
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
     if step.label.startswith(":docker:"):
+        if "arm64" in step.label:
+            if branch == "main":
+                return AgentQueue.ARM64_CPU_POSTMERGE
+            else:
+                return AgentQueue.ARM64_CPU_PREMERGE
         if branch == "main":
             return AgentQueue.CPU_POSTMERGE_US_EAST_1
         else:
@@ -112,8 +117,6 @@ def _get_variables_to_inject() -> Dict[str, str]:
         else global_config["repositories"]["premerge"],
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
         "$BRANCH": global_config["branch"],
-        "$VLLM_USE_PRECOMPILED": "1" if global_config["use_precompiled"] else "0",
-        "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"

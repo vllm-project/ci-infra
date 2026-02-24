@@ -29,13 +29,14 @@ h200_plugin_template = {
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
-        "HF_HOME=/dev/shm/",
         "HF_TOKEN",
+        "HF_HOME",
         "CODECOV_TOKEN",
         "BUILDKITE_ANALYTICS_TOKEN",
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
+        "/mnt/vllm-ci:/mnt/vllm-ci",
     ],
 }
 
