@@ -303,15 +303,21 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
     device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
     amd_label = f"AMD: {step.label} ({device_type})"
 
-    # Get AMD queue name from device name
-    amd_queue = None
-    if amd_device == DeviceType.AMD_MI325_1:
-        amd_queue = AgentQueue.AMD_MI325_1
-    elif amd_device == DeviceType.AMD_MI325_8:
-        amd_queue = AgentQueue.AMD_MI325_8
-    
+    # Map device type to agent queue
+    amd_queue_map = {
+        DeviceType.AMD_MI325_1: AgentQueue.AMD_MI325_1,
+        DeviceType.AMD_MI325_2: AgentQueue.AMD_MI325_2,
+        DeviceType.AMD_MI325_4: AgentQueue.AMD_MI325_4,
+        DeviceType.AMD_MI325_8: AgentQueue.AMD_MI325_8,
+        DeviceType.AMD_MI355_1: AgentQueue.AMD_MI355_1,
+        DeviceType.AMD_MI355_2: AgentQueue.AMD_MI355_2,
+        DeviceType.AMD_MI355_4: AgentQueue.AMD_MI355_4,
+        DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
+    }
+
+    amd_queue = amd_queue_map.get(amd_device)
     if not amd_queue:
-        raise ValueError(f"Invalid device: {amd_device}")
+        raise ValueError(f"Invalid AMD device: {amd_device}. Valid devices: {list(amd_queue_map.keys())}")
 
     amd_retry = {
         "automatic": [
