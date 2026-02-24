@@ -13,6 +13,14 @@
 {% set docker_image_arm64_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-arm64-cpu" %}
 {% set docker_image_hpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-hpu" %}
 {% endif %}
+{% if vllm_pin_image %}
+{% set docker_image = vllm_pin_image %}
+{% set pull_through_docker_image = vllm_pin_image %}
+{% set docker_image_cpu = vllm_pin_image %}
+{% set docker_image_arm64_cpu = vllm_pin_image %}
+{% set docker_image_torch_nightly = vllm_pin_image %}
+{% set docker_image_hpu = vllm_pin_image %}
+{% endif %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
@@ -287,6 +295,7 @@ plugins:
 
 
 steps:
+  {% if not vllm_pin_image %}
   - label: ":docker: build image"
     key: image-build
     depends_on: ~
@@ -423,6 +432,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
+  {% endif %}
 
   {% for step in steps %}
   {% if step.fast_check_only != true %}
@@ -451,7 +461,7 @@ steps:
 
   {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
   - block: "Run {{ step.label }}"
-    depends_on: image-build
+    depends_on: {{ "~" if vllm_pin_image else "image-build" }}
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
   {% endif %}
 
@@ -459,7 +469,7 @@ steps:
     {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
     {% else %}
-    depends_on: {{ "image-build-cpu" if step.no_gpu else "image-build" }}
+    depends_on: {{ "~" if vllm_pin_image else ("image-build-cpu" if step.no_gpu else "image-build") }}
     {% endif %}
     {% if step.label == "Python-only Installation Test" %}
     soft_fail: true
@@ -473,11 +483,12 @@ steps:
   - group: "vLLM Against PyTorch Nightly"
     depends_on: ~
     steps:
-      {% if nightly != "1" %}
+      {% if nightly != "1" and not vllm_pin_image %}
       - block: Build torch nightly image
         key: block-build-torch-nightly
         depends_on: ~
       {% endif %}
+      {% if not vllm_pin_image %}
       - label: ":docker: build image torch nightly"
         key: image-build-torch-nightly
         {% if nightly != "1" %}
@@ -527,6 +538,7 @@ steps:
               limit: 2
             - exit_status: -10  # Agent was lost
               limit: 2
+      {% endif %}
     {% for step in steps %}
     {% if step.torch_nightly %}
       {% set ns = namespace(blocked=1) %}
@@ -548,7 +560,7 @@ steps:
 
       {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
       - block: "Run Torch Nightly {{ step.label }}"
-        depends_on: image-build-torch-nightly
+        depends_on: {{ "~" if vllm_pin_image else "image-build-torch-nightly" }}
         key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
       {% endif %}
 
@@ -556,7 +568,7 @@ steps:
         {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
         depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         {% else %}
-        depends_on: image-build-torch-nightly
+        depends_on: {{ "~" if vllm_pin_image else "image-build-torch-nightly" }}
         {% endif %}
         soft_fail: true
         {{ render_cuda_config(step, docker_image_torch_nightly, default_working_dir, hf_home_fsx, hf_home, branch) | indent(8, true) }}
@@ -566,6 +578,7 @@ steps:
   - group: "AMD Tests"
     depends_on: ~
     steps:
+      {% if not vllm_pin_image %}
       - label: "AMD: :docker: build image"
         depends_on: ~
         soft_fail: false
@@ -596,11 +609,12 @@ steps:
               limit: 1
         agents:
           queue: amd-cpu
+      {% endif %}
 
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
       - label: "AMD MI300: {{ step.label }}"
-        depends_on: amd-build
+        depends_on: {{ "~" if vllm_pin_image else "amd-build" }}
         soft_fail: true
         agents:
          {% if step.label and step.label=="Benchmarks" or step.label=="Kernels Attention Test %N" or step.label=="LoRA Test %N" or step.label=="Kernels Quantization Test %N" %}

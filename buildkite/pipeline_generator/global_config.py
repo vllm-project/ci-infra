@@ -21,6 +21,7 @@ class GlobalConfig(TypedDict):
     docs_only_disable: Optional[str] = "0"
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
+    vllm_pin_image: Optional[str] = ""
 
 
 config = None
@@ -64,6 +65,7 @@ def init_global_config(pipeline_config_path: str):
         merge_base_commit=merge_base_commit,
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
+        vllm_pin_image=os.getenv("VLLM_PIN_IMAGE", ""),
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True

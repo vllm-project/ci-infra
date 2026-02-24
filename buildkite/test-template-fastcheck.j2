@@ -1,11 +1,16 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
+{% if vllm_pin_image %}
+{% set docker_image = vllm_pin_image %}
+{% set docker_image_amd = vllm_pin_image %}
+{% endif %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 
 steps:
+  {% if not vllm_pin_image %}
   - label: ":docker: build image"
     key: image-build
     agents:
@@ -21,14 +26,14 @@ steps:
           exit 0
         fi
       - >
-        docker build --file docker/Dockerfile 
-        --build-arg max_jobs=16 
-        --build-arg buildkite_commit=$BUILDKITE_COMMIT 
-        --build-arg USE_SCCACHE=1 
+        docker build --file docker/Dockerfile
+        --build-arg max_jobs=16
+        --build-arg buildkite_commit=$BUILDKITE_COMMIT
+        --build-arg USE_SCCACHE=1
         --build-arg VLLM_DOCKER_BUILD_CONTEXT=1
         --build-arg VLLM_USE_PRECOMPILED={{ vllm_use_precompiled | default("0") }}{% if vllm_use_precompiled is defined and vllm_use_precompiled == "1" %}
         --build-arg USE_FLASHINFER_PREBUILT_WHEEL=true{% endif %}
-        --tag {{ docker_image }} 
+        --tag {{ docker_image }}
         --target test --progress plain .
       - "docker push {{ docker_image }}"
     env:
@@ -39,6 +44,7 @@ steps:
           limit: 5
         - exit_status: -10  # Agent was lost
           limit: 5
+  {% endif %}
 
   - block: Run Neuron Test
     depends_on: ~
@@ -54,7 +60,7 @@ steps:
   {% for step in steps %}
   {% if step.gpu != "a100" and step.fast_check == true and step.num_nodes < 2 %}
   - label: "{{ step.label }}"
-    depends_on: image-build
+    depends_on: {{ "~" if vllm_pin_image else "image-build" }}
     agents:
       {% if step.label == "Documentation Build" %}
       queue: small_cpu_queue_premerge
@@ -111,7 +117,7 @@ steps:
   {% if step.gpu != "a100" and step.fast_check != true and step.num_nodes < 2 %}
   - block: "Run {{ step.label }}"
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
-    depends_on: image-build
+    depends_on: {{ "~" if vllm_pin_image else "image-build" }}
 
   - label: "{{ step.label }}"
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
@@ -171,7 +177,7 @@ steps:
   {% if step.num_nodes >= 2 %}
   - block: "Run {{ step.label }}"
     key: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
-    depends_on: image-build
+    depends_on: {{ "~" if vllm_pin_image else "image-build" }}
 
   - label: "{{ step.label }}"
     depends_on: block-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
@@ -183,7 +189,7 @@ steps:
   {% endfor %}
 
   - block: "Run A100 tests"
-    depends_on: image-build
+    depends_on: {{ "~" if vllm_pin_image else "image-build" }}
 
   {% for step in steps %}
   {% if step.gpu == "a100" %}
@@ -257,7 +263,8 @@ steps:
 
   - group: "AMD Tests"
     depends_on: ~
-    steps:    
+    steps:
+      {% if not vllm_pin_image %}
       - label: "AMD: :docker: build image with {{mirror_hw}}"
         depends_on: ~
         soft_fail: true
@@ -277,13 +284,14 @@ steps:
               limit: 1
         agents:
           queue: amd-cpu
+      {% endif %}
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
       {% if step.label and step.label=="Basic Correctness Test" %}
       - block: "Run AMD MI300: {{ step.label }} with {{mirror_hw}}"
         key: block-amd-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
-        depends_on: amd-build
-        
+        depends_on: {{ "~" if vllm_pin_image else "amd-build" }}
+
       - label: "AMD MI300: {{ step.label }} with {{mirror_hw}}"
         depends_on: block-amd-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         agents:     

@@ -7,6 +7,8 @@ from global_config import get_global_config
 
 def get_image(cpu: bool = False) -> str:
     global_config = get_global_config()
+    if global_config.get("vllm_pin_image"):
+        return global_config["vllm_pin_image"]
     commit = "$BUILDKITE_COMMIT"
     branch = global_config["branch"]
     registries = global_config["registries"]
