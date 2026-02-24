@@ -473,14 +473,14 @@ steps:
   - group: "vLLM Against PyTorch Nightly"
     depends_on: ~
     steps:
-      {% if nightly != "1" %}
+      {% if nightly != "1" and branch != "main" %}
       - block: Build torch nightly image
         key: block-build-torch-nightly
         depends_on: ~
       {% endif %}
       - label: ":docker: build image torch nightly"
         key: image-build-torch-nightly
-        {% if nightly != "1" %}
+        {% if nightly != "1" and branch != "main" %}
         depends_on: block-build-torch-nightly
         {% else %}
         depends_on: ~
@@ -513,8 +513,8 @@ steps:
             --build-arg buildkite_commit=$BUILDKITE_COMMIT
             --build-arg USE_SCCACHE=1
             --build-arg PYTORCH_NIGHTLY=1
-            --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0"
-            --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a"
+            --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0 12.0"
+            --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a 12.0a"
             --tag {{ docker_image_torch_nightly }}
             --push
             --target test
@@ -530,7 +530,7 @@ steps:
     {% for step in steps %}
     {% if step.torch_nightly %}
       {% set ns = namespace(blocked=1) %}
-      {% if nightly == "1" %}
+      {% if nightly == "1" or branch == "main" %}
       {% set ns.blocked = 0 %}
       {% endif %}
 
@@ -546,14 +546,14 @@ steps:
         {% set ns.blocked = 0 %}
       {% endif %}
 
-      {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+      {% if ns.blocked == 1 or (step.optional and nightly != "1" and branch != "main") %}
       - block: "Run Torch Nightly {{ step.label }}"
         depends_on: image-build-torch-nightly
         key: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
       {% endif %}
 
       - label: "Torch Nightly {{ step.label }}"
-        {% if ns.blocked == 1 or (step.optional and nightly != "1") %}
+        {% if ns.blocked == 1 or (step.optional and nightly != "1" and branch != "main") %}
         depends_on: block-torch-nightly-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         {% else %}
         depends_on: image-build-torch-nightly
