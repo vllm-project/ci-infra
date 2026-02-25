@@ -136,6 +136,8 @@ def get_k8s_plugin(step: Step, image: str):
     elif step.device == DeviceType.A100.value:
         plugin = copy.deepcopy(a100_plugin_template)
 
+    if step.device == DeviceType.H100:
+        image = image.replace("public.ecr.aws", "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache")
     plugin["kubernetes"]["podSpec"]["containers"][0]["image"] = image
     plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"][
         "nvidia.com/gpu"
