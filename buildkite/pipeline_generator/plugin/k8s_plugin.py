@@ -53,6 +53,7 @@ h100_plugin_template = {
             "containers": [
                 {
                     "image": "",
+                    "priorityClassName": "high-priority",
                     "resources": {"limits": {"nvidia.com/gpu": ""}},
                     "volumeMounts": [
                         {"name": "devshm", "mountPath": "/dev/shm"},
