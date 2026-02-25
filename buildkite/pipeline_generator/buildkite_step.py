@@ -1,5 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
+import os
+
 from step import Step
 from utils_lib.docker_utils import get_image, get_ecr_cache_registry
 from global_config import get_global_config
@@ -202,6 +204,7 @@ def convert_group_step_to_buildkite_step(
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
+                priority=10 if os.getenv("PRIORITY", "") == "HIGH" else 100
             )
 
             if block_step:
