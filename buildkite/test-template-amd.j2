@@ -343,7 +343,7 @@ plugins:
             echo "  ECR Commit Tag: $${ECR_COMMIT_TAG}"
             echo "========================================"
             
-            DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y awscli
+            pip install awscli
             # Login to ECR
             aws ecr-public get-login-password --region us-east-1 | \
               docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
@@ -456,7 +456,7 @@ plugins:
         depends_on: amd-rocm-base-build
         soft_fail: false
         commands:
-          - "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y awscli"
+          - "pip install awscli"
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
           - "docker pull {{ rocm_base_ecr_commit_tag }} && docker tag {{ rocm_base_ecr_commit_tag }} rocm/vllm-dev:base-ci"
           - >
@@ -466,6 +466,10 @@ plugins:
             --build-arg ARG_PYTORCH_ROCM_ARCH='gfx942;gfx950'
             --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
             --build-arg BASE_IMAGE=rocm/vllm-dev:base-ci
+            --build-arg USE_SCCACHE=1
+            --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache
+            --build-arg SCCACHE_REGION_NAME=us-west-2
+            --build-arg SCCACHE_S3_NO_CREDENTIALS=0
             --tag {{ docker_image_amd }}
             -f docker/Dockerfile.rocm
             --target test
