@@ -333,6 +333,9 @@ plugins:
             CACHE_KEY="{{ rocm_base_cache_key }}"
             ECR_CACHE_TAG="{{ rocm_base_ecr_cache_tag }}"
             ECR_COMMIT_TAG="{{ rocm_base_ecr_commit_tag }}"
+{% if branch == "main" %}
+            ECR_NIGHTLY_TAG="{{ rocm_base_ecr_nightly_tag }}"
+{% endif %}
             S3_BUCKET="vllm-wheels"
             S3_CACHE_PATH="s3://$${S3_BUCKET}/rocm/cache/$${CACHE_KEY}"
 
@@ -341,9 +344,12 @@ plugins:
             echo "  Cache Key: $${CACHE_KEY}"
             echo "  ECR Cache Tag: $${ECR_CACHE_TAG}"
             echo "  ECR Commit Tag: $${ECR_COMMIT_TAG}"
+{% if branch == "main" %}
+            echo "  ECR Nightly Tag: $${ECR_NIGHTLY_TAG}"
+{% endif %}
             echo "========================================"
             
-            pip install awscli
+            python3 -m pip install awscli
             # Login to ECR
             aws ecr-public get-login-password --region us-east-1 | \
               docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
@@ -356,8 +362,15 @@ plugins:
             fi
 
             if [ "$$IMAGE_EXISTS" -eq 1 ]; then
-              docker pull "$${ECR_CACHE_TAG}"
-              docker tag "$${ECR_CACHE_TAG}" "rocm/vllm-dev:base-ci"
+              echo "ECR cache HIT: $${ECR_CACHE_TAG}"
+              # Create commit tag directly from cache tag (no pull needed)
+              docker buildx imagetools create --tag "$${ECR_COMMIT_TAG}" "$${ECR_CACHE_TAG}"
+              echo "Tagged $${ECR_CACHE_TAG} as $${ECR_COMMIT_TAG} in ECR (no pull required)"
+{% if branch == "main" %}
+              # On main, also tag as latest nightly (no pull needed)
+              docker buildx imagetools create --tag "$${ECR_NIGHTLY_TAG}" "$${ECR_CACHE_TAG}"
+              echo "Tagged $${ECR_CACHE_TAG} as $${ECR_NIGHTLY_TAG} in ECR (no pull required)"
+{% endif %}
             else
               # Tier 2: Check S3 cache
               S3_IMAGE_EXISTS=0
@@ -425,18 +438,15 @@ plugins:
               # Push to ECR (cache tag for future lookups + commit tag for traceability)
               docker tag "rocm/vllm-dev:base-ci" "$${ECR_CACHE_TAG}"
               docker push "$${ECR_CACHE_TAG}"
-            fi
-
-            # Always push the commit-specific tag
-            docker tag "rocm/vllm-dev:base-ci" "$${ECR_COMMIT_TAG}"
-            docker push "$${ECR_COMMIT_TAG}"
-
+              docker tag "rocm/vllm-dev:base-ci" "$${ECR_COMMIT_TAG}"
+              docker push "$${ECR_COMMIT_TAG}"
 {% if branch == "main" %}
-            # On main, also tag as latest nightly
-            docker tag "rocm/vllm-dev:base-ci" "{{ rocm_base_ecr_nightly_tag }}"
-            docker push "{{ rocm_base_ecr_nightly_tag }}"
-            echo "Pushed nightly tag: {{ rocm_base_ecr_nightly_tag }}"
+              # On main, also tag and push as latest nightly
+              docker tag "rocm/vllm-dev:base-ci" "$${ECR_NIGHTLY_TAG}"
+              docker push "$${ECR_NIGHTLY_TAG}"
+              echo "Pushed nightly tag: $${ECR_NIGHTLY_TAG}"
 {% endif %}
+            fi
 
             echo "Base image ready: $${ECR_COMMIT_TAG}"
         agents:
@@ -456,7 +466,7 @@ plugins:
         depends_on: amd-rocm-base-build
         soft_fail: false
         commands:
-          - "pip install awscli"
+          - "python3 -m pip install awscli"
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
           - "docker pull {{ rocm_base_ecr_commit_tag }} && docker tag {{ rocm_base_ecr_commit_tag }} rocm/vllm-dev:base-ci"
           - >
