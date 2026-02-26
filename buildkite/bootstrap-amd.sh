@@ -53,6 +53,28 @@ check_run_all_label() {
     fi
 }
 
+check_amd_ci_labels() {
+    # AMD CI should only run when:
+    # 1. Both 'ready' AND 'rocm' labels are present, OR
+    # 2. 'run-rocm-tests' label is present
+    # This avoids triggering expensive AMD CI on every PR that merely touches ROCm files.
+    if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+        PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+        if [[ $PR_LABELS == *"run-rocm-tests"* ]]; then
+            echo true
+            return
+        fi
+        if [[ $PR_LABELS == *"ready"* ]] && [[ $PR_LABELS == *"rocm"* ]]; then
+            echo true
+            return
+        fi
+        echo false
+    else
+        # Non-PR builds (e.g. main branch) always run
+        echo true
+    fi
+}
+
 if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
@@ -155,6 +177,24 @@ ${file_diff}
       exit 0
     fi
   fi
+fi
+
+# skip AMD CI unless required labels are present on PRs
+# AMD CI requires: ('ready' AND 'rocm') OR 'run-rocm-tests'
+# This prevents the auto-applied 'rocm' label alone from triggering expensive AMD CI jobs.
+# Reviewers/maintainers can use 'run-rocm-tests' for refactoring PRs that need extensive
+# AMD testing before review.
+if [[ "$BUILDKITE_BRANCH" != "main" ]]; then
+    AMD_LABELS_OK=$(check_amd_ci_labels)
+    if [[ "$AMD_LABELS_OK" != "true" ]]; then
+        buildkite-agent annotate ":amd: AMD CI skipped — requires both \`ready\` + \`rocm\` labels, or \`run-rocm-tests\` label.
+
+To trigger AMD CI, a reviewer can:
+- Add the \`ready\` label (with \`rocm\` already present), or
+- Add the \`run-rocm-tests\` label directly." --style "info" || true
+        echo "[amd-labels] AMD CI not triggered. Missing required labels."
+        exit 0
+    fi
 fi
 
 # ----------------------------------------------------------------------
