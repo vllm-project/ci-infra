@@ -314,7 +314,7 @@ plugins:
               exit 1
             fi
         agents:
-          queue: cpu_queue_postmerge
+          queue: amd-cpu
         soft_fail: false
 {% endif %}
 
@@ -342,7 +342,8 @@ plugins:
             echo "  ECR Cache Tag: $${ECR_CACHE_TAG}"
             echo "  ECR Commit Tag: $${ECR_COMMIT_TAG}"
             echo "========================================"
-
+            
+            sudo apt-get update && sudo apt-get install -y awscli
             # Login to ECR
             aws ecr-public get-login-password --region us-east-1 | \
               docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
@@ -437,9 +438,9 @@ plugins:
             echo "Pushed nightly tag: {{ rocm_base_ecr_nightly_tag }}"
 {% endif %}
 
-            echo "Base image ready: rocm/vllm-dev:base-ci"
+            echo "Base image ready: $${ECR_COMMIT_TAG}"
         agents:
-          queue: cpu_queue_postmerge
+          queue: amd-cpu
         env:
           DOCKER_BUILDKIT: "1"
         retry:
@@ -455,6 +456,7 @@ plugins:
         depends_on: amd-rocm-base-build
         soft_fail: false
         commands:
+          - "sudo apt-get update && sudo apt-get install -y awscli"
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
           - "docker pull {{ rocm_base_ecr_commit_tag }} && docker tag {{ rocm_base_ecr_commit_tag }} rocm/vllm-dev:base-ci"
           - >
@@ -484,7 +486,7 @@ plugins:
             - exit_status: 1
               limit: 1
         agents:
-          queue: cpu_queue_postmerge
+          queue: amd-cpu
 
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
