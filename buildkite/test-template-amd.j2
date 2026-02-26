@@ -343,7 +343,7 @@ plugins:
             echo "  ECR Commit Tag: $${ECR_COMMIT_TAG}"
             echo "========================================"
             
-            sudo apt-get update && sudo apt-get install -y awscli
+            sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y awscli
             # Login to ECR
             aws ecr-public get-login-password --region us-east-1 | \
               docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
@@ -456,7 +456,7 @@ plugins:
         depends_on: amd-rocm-base-build
         soft_fail: false
         commands:
-          - "sudo apt-get update && sudo apt-get install -y awscli"
+          - "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y awscli"
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
           - "docker pull {{ rocm_base_ecr_commit_tag }} && docker tag {{ rocm_base_ecr_commit_tag }} rocm/vllm-dev:base-ci"
           - >
