@@ -466,25 +466,12 @@ plugins:
         depends_on: amd-rocm-base-build
         soft_fail: false
         commands:
-          - "echo '=== Checking Python ==='"
-          - "which python || echo 'python not found'"
-          - "which python3 || echo 'python3 not found'"
-          - "which python2 || echo 'python2 not found'"
-          - "echo '=== Checking pip ==='"
-          - "which pip || echo 'pip not found'"
-          - "which pip3 || echo 'pip3 not found'"
-          - "echo '=== Checking AWS CLI ==='"
-          - "which aws || echo 'aws not found'"
-          - "echo '=== Checking Docker ==='"
-          - "which docker || echo 'docker not found'"
-          - "docker --version || echo 'docker not working'"
-          - "echo '=== Environment ==='"
-          - "printenv | sort"
-          - "echo '=== PATH ==='"
-          - "echo $PATH"
-          - "echo '=== Available commands ==='"
-          - "ls /usr/bin | grep -E '(python|aws)'"
-          - "ls /usr/local/bin | grep -E '(python|aws)' || true"
+          # Install AWS CLI locally (no sudo needed)
+          # Install through pip because sudo is not available
+          - "python3 -m pip install --user awscli"
+          - "export PATH=$HOME/.local/bin:$PATH"
+          # Verify installation
+          - "aws --version"
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
           - "docker pull {{ rocm_base_ecr_commit_tag }} && docker tag {{ rocm_base_ecr_commit_tag }} rocm/vllm-dev:base-ci"
           - >
