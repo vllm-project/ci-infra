@@ -466,6 +466,7 @@ plugins:
         depends_on: amd-rocm-base-build
         soft_fail: false
         commands:
+          - "pip install awscli"
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
           - "docker pull {{ rocm_base_ecr_commit_tag }} && docker tag {{ rocm_base_ecr_commit_tag }} rocm/vllm-dev:base-ci"
           - >
