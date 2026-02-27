@@ -450,11 +450,7 @@ plugins:
 
             echo "Base image ready: $${ECR_COMMIT_TAG}"
         agents:
-{% if branch == "main" %}
           queue: cpu_queue_postmerge
-{% else %}
-          queue: cpu_queue_premerge
-{% endif %}
         env:
           DOCKER_BUILDKIT: "1"
         retry:
