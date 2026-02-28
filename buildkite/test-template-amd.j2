@@ -473,7 +473,7 @@ plugins:
               -e AWS_SECRET_ACCESS_KEY \
               -e AWS_SESSION_TOKEN \
               -e AWS_DEFAULT_REGION=us-east-1 \
-              amazon/aws-cli:latest \
+              amazon/aws-cli:2.34.0 \
               ecr-public get-login-password --region us-east-1 | \
               docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
           - "docker pull {{ rocm_base_ecr_commit_tag }} && docker tag {{ rocm_base_ecr_commit_tag }} rocm/vllm-dev:base-ci"
