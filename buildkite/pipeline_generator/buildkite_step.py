@@ -299,12 +299,8 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
     if working_dir:
         amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
 
-    # Pass commands via VLLM_TEST_COMMANDS env var instead of positional
-    # argument. This preserves all inner quoting (double quotes from
-    # _prepare_commands' single-to-double conversion, pytest -m/-k
-    # expressions, etc.) because Buildkite sets env vars directly in the
-    # process environment without shell interpretation.
-    amd_command_wrapped = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
+    # Add AMD test script wrapper
+    amd_command_wrapped = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{amd_commands_str}"'
 
     # Extract device name from queue name
     device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
@@ -339,7 +335,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         commands=[amd_command_wrapped],
         depends_on=["image-build-amd"],
         agents={"queue": amd_queue},
-        env={"DOCKER_BUILDKIT": "1", "VLLM_TEST_COMMANDS": amd_commands_str},
+        env={"DOCKER_BUILDKIT": "1"},
         priority=200,
         soft_fail=False,
         retry=amd_retry,
