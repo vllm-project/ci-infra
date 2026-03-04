@@ -495,13 +495,13 @@ plugins:
           DOCKER_BUILDKIT: "1"
         retry:
           automatic:
-            - exit_status: -1
+            - exit_status: -1  # Agent was lost
               limit: 2
-            - exit_status: -10
+            - exit_status: -10  # Agent was lost
               limit: 2
-            - exit_status: 128
+            - exit_status: 128  # Git connectivity issues
               limit: 2
-            - exit_status: 1
+            - exit_status: 1  # Machine occasionally fail
               limit: 1
         agents:
           queue: amd-cpu
@@ -567,94 +567,3 @@ plugins:
               limit: 2
     {% endif %}
     {% endfor %}
-
-{% if branch == "main" %}
-      - label: "AMD: :rocket: Build ROCm nightly release image"
-        depends_on: amd-build
-        key: "amd-nightly-release-image"
-        soft_fail: true
-        agents:
-          queue: amd-cpu
-        commands:
-          - |
-            set -euo pipefail
-            aws ecr-public get-login-password --region us-east-1 | \
-              docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
-            docker pull "{{ rocm_base_ecr_commit_tag }}"
-            docker tag "{{ rocm_base_ecr_commit_tag }}" rocm/vllm-dev:base-ci
-
-            DOCKER_BUILDKIT=1 docker build \
-              --build-arg max_jobs=16 \
-              --build-arg BASE_IMAGE=rocm/vllm-dev:base-ci \
-              --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942' \
-              --build-arg USE_SCCACHE=1 \
-              --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
-              --build-arg SCCACHE_REGION_NAME=us-west-2 \
-              --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
-              --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$$BUILDKITE_COMMIT-rocm \
-              --target vllm-openai \
-              --progress plain \
-              -f docker/Dockerfile.rocm .
-            docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$$BUILDKITE_COMMIT-rocm
-        env:
-          DOCKER_BUILDKIT: "1"
-        retry:
-          automatic:
-            - exit_status: -1
-              limit: 2
-
-      - label: "AMD: :python: Build ROCm nightly wheel"
-        depends_on: amd-rocm-base-build
-        key: "amd-nightly-wheel"
-        soft_fail: true
-        agents:
-          queue: amd-cpu
-        commands:
-          - |
-            set -euo pipefail
-            aws ecr-public get-login-password --region us-east-1 | \
-              docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
-            docker pull "{{ rocm_base_ecr_commit_tag }}"
-            docker tag "{{ rocm_base_ecr_commit_tag }}" rocm/vllm-dev:base-ci
-
-            # Download base wheels from S3 cache
-            PYTHON_VERSION=$$(grep '^ARG PYTHON_VERSION=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTHON_VERSION=//')
-            echo "Using PYTHON_VERSION from Dockerfile.rocm_base: $${PYTHON_VERSION}"
-            export PYTHON_VERSION
-            PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
-            echo "Using PYTORCH_ROCM_ARCH from Dockerfile.rocm_base: $${PYTORCH_ROCM_ARCH}"
-            export PYTORCH_ROCM_ARCH
-            export S3_BUCKET=vllm-wheels
-            .buildkite/scripts/cache-rocm-base-wheels.sh download
-
-            mkdir -p docker/context/base-wheels
-            cp artifacts/rocm-base-wheels/*.whl docker/context/base-wheels/
-
-            git fetch --tags --force origin
-
-            DOCKER_BUILDKIT=1 docker build \
-              --file docker/Dockerfile.rocm \
-              --target export_vllm_wheel_release \
-              --output type=local,dest=rocm-dist \
-              --build-arg BASE_IMAGE=rocm/vllm-dev:base-ci \
-              --build-arg ARG_PYTORCH_ROCM_ARCH="gfx90a;gfx942" \
-              --build-arg REMOTE_VLLM=0 \
-              --build-arg GIT_REPO_CHECK=1 \
-              --build-arg USE_SCCACHE=1 \
-              --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
-              --build-arg SCCACHE_REGION_NAME=us-west-2 \
-              --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
-              .
-
-            mkdir -p artifacts/rocm-vllm-wheel
-            cp rocm-dist/*.whl artifacts/rocm-vllm-wheel/
-            bash .buildkite/scripts/upload-rocm-wheels.sh
-        env:
-          DOCKER_BUILDKIT: "1"
-          ROCM_UPLOAD_WHEELS: "true"
-          S3_BUCKET: "vllm-wheels"
-        retry:
-          automatic:
-            - exit_status: -1
-              limit: 2
-{% endif %}
