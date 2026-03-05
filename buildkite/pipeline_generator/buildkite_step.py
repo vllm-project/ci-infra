@@ -258,6 +258,8 @@ def convert_group_step_to_buildkite_step(
 
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+    if os.getenv("NOAUTO") == "1":
+        return False
     global_config = get_global_config()
     if step.key and step.key.startswith("image-build"):
         return True
