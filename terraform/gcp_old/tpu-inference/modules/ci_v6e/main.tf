@@ -61,6 +61,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"/' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      echo 'cancel-grace-period=30' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
       echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
 

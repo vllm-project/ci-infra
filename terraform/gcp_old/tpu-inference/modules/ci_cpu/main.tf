@@ -80,6 +80,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       sudo sed -i "s/xxx/${local.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="vllm-cpu-vm-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=cpu"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      echo 'cancel-grace-period=30' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
 
       systemctl stop docker
       systemctl start docker
