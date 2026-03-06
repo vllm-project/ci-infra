@@ -315,6 +315,10 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
 
     # Map device type to agent queue
     amd_queue_map = {
+        DeviceType.AMD_MI250_1: AgentQueue.AMD_MI250_1,
+        DeviceType.AMD_MI250_2: AgentQueue.AMD_MI250_2,
+        DeviceType.AMD_MI250_4: AgentQueue.AMD_MI250_4,
+        DeviceType.AMD_MI250_8: AgentQueue.AMD_MI250_8,
         DeviceType.AMD_MI325_1: AgentQueue.AMD_MI325_1,
         DeviceType.AMD_MI325_2: AgentQueue.AMD_MI325_2,
         DeviceType.AMD_MI325_4: AgentQueue.AMD_MI325_4,
