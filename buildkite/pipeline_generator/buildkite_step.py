@@ -366,7 +366,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         agents={"queue": amd_queue},
         env={"DOCKER_BUILDKIT": "1"},
         priority=200,
-        soft_fail=False,
+        soft_fail=True,
         retry=amd_retry,
         parallelism=step.parallelism,
     )
