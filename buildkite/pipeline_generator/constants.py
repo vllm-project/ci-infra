@@ -15,8 +15,13 @@ class DeviceType(str, Enum):
     ASCEND = "ascend_npu"
     AMD_CPU = "amd_cpu"
     AMD_MI325_1 = "mi325_1"
+    AMD_MI325_2 = "mi325_2"
+    AMD_MI325_4 = "mi325_4"
     AMD_MI325_8 = "mi325_8"
-
+    AMD_MI355_1 = "mi355_1"
+    AMD_MI355_2 = "mi355_2"
+    AMD_MI355_4 = "mi355_4"
+    AMD_MI355_8 = "mi355_8"
 
 
 class AgentQueue(str, Enum):
@@ -27,7 +32,7 @@ class AgentQueue(str, Enum):
     GPU_1 = "gpu_1_queue"
     GPU_4 = "gpu_4_queue"
     MITHRIL_H100 = "mithril-h100-pool"
-    SKYLAB_H200 = "nebius-h200"
+    H200 = "H200"
     B200 = "B200"
     SMALL_CPU_PREMERGE = "small_cpu_queue_premerge"
     A100 = "a100_queue"
@@ -41,4 +46,10 @@ class AgentQueue(str, Enum):
     ASCEND = "ascend"
     AMD_CPU = "amd-cpu"
     AMD_MI325_1 = "amd_mi325_1"
+    AMD_MI325_2 = "amd_mi325_2"
+    AMD_MI325_4 = "amd_mi325_4"
     AMD_MI325_8 = "amd_mi325_8"
+    AMD_MI355_1 = "amd_mi355_1"
+    AMD_MI355_2 = "amd_mi355_2"
+    AMD_MI355_4 = "amd_mi355_4"
+    AMD_MI355_8 = "amd_mi355_8"

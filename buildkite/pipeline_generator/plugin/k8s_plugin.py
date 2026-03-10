@@ -74,7 +74,6 @@ h100_plugin_template = {
                     ],
                 }
             ],
-            "nodeSelector": {"node.kubernetes.io/instance-type": "gpu-h100-sxm"},
             "volumes": [
                 {"name": "devshm", "emptyDir": {"medium": "Memory"}},
                 {

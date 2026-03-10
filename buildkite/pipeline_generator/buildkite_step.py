@@ -1,5 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
+import os
+
 from step import Step
 from utils_lib.docker_utils import get_image, get_ecr_cache_registry
 from global_config import get_global_config
@@ -81,7 +83,7 @@ def get_agent_queue(step: Step):
     elif step.device == DeviceType.H100:
         return AgentQueue.MITHRIL_H100
     elif step.device == DeviceType.H200:
-        return AgentQueue.SKYLAB_H200
+        return AgentQueue.H200
     elif step.device == DeviceType.B200:
         return AgentQueue.B200
     elif step.device == DeviceType.INTEL_CPU:
@@ -202,6 +204,7 @@ def convert_group_step_to_buildkite_step(
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
+                priority=10 if os.getenv("PRIORITY", "") == "HIGH" else 100
             )
 
             if block_step:
@@ -255,6 +258,8 @@ def convert_group_step_to_buildkite_step(
 
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+    if os.getenv("NOAUTO") == "1":
+        return False
     global_config = get_global_config()
     if step.key and step.key.startswith("image-build"):
         return True
@@ -303,23 +308,21 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
     device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
     amd_label = f"AMD: {step.label} ({device_type})"
 
-    # Get AMD queue name from device name
-    amd_queue = None
-    if amd_device == DeviceType.AMD_MI325_1:
-        amd_queue = AgentQueue.AMD_MI325_1
-    elif amd_device == DeviceType.AMD_MI325_8:
-        amd_queue = AgentQueue.AMD_MI325_8
-    
-    if not amd_queue:
-        raise ValueError(f"Invalid device: {amd_device}")
-
-    amd_retry = {
-        "automatic": [
-            {"exit_status": -1, "limit": 2},   # Agent was lost
-            {"exit_status": -10, "limit": 2},  # Agent was lost
-            {"exit_status": 128, "limit": 2},  # Git connectivity issues
-        ]
+    # Map device type to agent queue
+    amd_queue_map = {
+        DeviceType.AMD_MI325_1: AgentQueue.AMD_MI325_1,
+        DeviceType.AMD_MI325_2: AgentQueue.AMD_MI325_2,
+        DeviceType.AMD_MI325_4: AgentQueue.AMD_MI325_4,
+        DeviceType.AMD_MI325_8: AgentQueue.AMD_MI325_8,
+        DeviceType.AMD_MI355_1: AgentQueue.AMD_MI355_1,
+        DeviceType.AMD_MI355_2: AgentQueue.AMD_MI355_2,
+        DeviceType.AMD_MI355_4: AgentQueue.AMD_MI355_4,
+        DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
     }
+
+    amd_queue = amd_queue_map.get(amd_device)
+    if not amd_queue:
+        raise ValueError(f"Invalid AMD device: {amd_device}. Valid devices: {list(amd_queue_map.keys())}")
 
     return BuildkiteCommandStep(
         label=amd_label,
@@ -329,6 +332,6 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         env={"DOCKER_BUILDKIT": "1"},
         priority=200,
         soft_fail=False,
-        retry=amd_retry,
+        retry=None,
         parallelism=step.parallelism,
     )

@@ -70,6 +70,10 @@ def read_steps_from_job_dir(job_dir: str):
                         and global_config["github_repo_name"] == "vllm-project/vllm"
                     ):
                         step.working_dir = "/vllm-workspace/tests"
+                    step.source_file_dependencies = getattr(step, "source_file_dependencies", [])
+                    if not step.source_file_dependencies:
+                        step.source_file_dependencies = []
+                    step.source_file_dependencies.append(os.path.relpath(yaml_path))
             steps.extend(file_steps)
     return steps
 

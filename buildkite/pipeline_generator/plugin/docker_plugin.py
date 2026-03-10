@@ -14,6 +14,7 @@ docker_plugin_template = {
         "HF_TOKEN",
         "CODECOV_TOKEN",
         "BUILDKITE_ANALYTICS_TOKEN",
+        "RAY_COMPAT_SLACK_WEBHOOK_URL",
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
