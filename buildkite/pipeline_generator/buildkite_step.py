@@ -130,6 +130,24 @@ def _get_variables_to_inject() -> Dict[str, str]:
     }
 
 
+def _get_image_tag_xpu() -> str:
+    global_config = get_global_config()
+    registry = global_config["registries"]
+    repo = (
+        global_config["repositories"]["main"]
+        if global_config["branch"] == "main"
+        else global_config["repositories"]["premerge"]
+    )
+    return f"{registry}/{repo}:$BUILDKITE_COMMIT-xpu"
+
+
+def _get_image_tag_xpu() -> str:
+    global_config = get_global_config()
+    registry = global_config["registries"]
+    repo = global_config["repositories"]["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"]
+    return f"{registry}/{repo}:$BUILDKITE_COMMIT-xpu"
+
+
 def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
     commands = []
@@ -197,6 +215,9 @@ def convert_group_step_to_buildkite_step(
 
             # command step
             step_commands = _prepare_commands(step, variables_to_inject)
+            # Intel steps opt-in via intel_wrapper to avoid hard-coding device names.
+            if step.intel_wrapper:
+                step_commands = _wrap_intel_commands(step, step_commands)
 
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
@@ -219,6 +240,12 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
+            if step.intel_wrapper:
+                image_tag_xpu = _get_image_tag_xpu()
+                if buildkite_step.env:
+                    buildkite_step.env["IMAGE_TAG_XPU"] = image_tag_xpu
+                else:
+                    buildkite_step.env = {"IMAGE_TAG_XPU": image_tag_xpu}
 
             # add plugin
             if not step.no_plugin and not (
@@ -339,7 +366,15 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         agents={"queue": amd_queue},
         env={"DOCKER_BUILDKIT": "1"},
         priority=200,
-        soft_fail=True,
+        soft_fail=False,
         retry=amd_retry,
         parallelism=step.parallelism,
     )
+
+
+def _wrap_intel_commands(step: Step, original_commands: List[str]) -> List[str]:
+    """Wrap Intel GPU commands with the Intel test runner script."""
+    intel_commands_str = " && ".join(original_commands)
+    if step.working_dir:
+        intel_commands_str = f"cd {step.working_dir} && {intel_commands_str}"
+    return [f'bash .buildkite/scripts/hardware_ci/run-intel-test.sh "{intel_commands_str}"']
