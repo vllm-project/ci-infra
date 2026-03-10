@@ -129,25 +129,6 @@ def _get_variables_to_inject() -> Dict[str, str]:
             else None,
     }
 
-
-def _get_image_tag_xpu() -> str:
-    global_config = get_global_config()
-    registry = global_config["registries"]
-    repo = (
-        global_config["repositories"]["main"]
-        if global_config["branch"] == "main"
-        else global_config["repositories"]["premerge"]
-    )
-    return f"{registry}/{repo}:$BUILDKITE_COMMIT-xpu"
-
-
-def _get_image_tag_xpu() -> str:
-    global_config = get_global_config()
-    registry = global_config["registries"]
-    repo = global_config["repositories"]["main"] if global_config["branch"] == "main" else global_config["repositories"]["premerge"]
-    return f"{registry}/{repo}:$BUILDKITE_COMMIT-xpu"
-
-
 def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
     commands = []
@@ -240,13 +221,6 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
-            if step.intel_wrapper:
-                image_tag_xpu = _get_image_tag_xpu()
-                if buildkite_step.env:
-                    buildkite_step.env["IMAGE_TAG_XPU"] = image_tag_xpu
-                else:
-                    buildkite_step.env = {"IMAGE_TAG_XPU": image_tag_xpu}
-
             # add plugin
             if not step.no_plugin and not (
                 step.label.startswith(":docker:")
