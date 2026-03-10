@@ -129,6 +129,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
             else None,
     }
 
+
 def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
     commands = []
@@ -221,6 +222,7 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
+
             # add plugin
             if not step.no_plugin and not (
                 step.label.startswith(":docker:")
