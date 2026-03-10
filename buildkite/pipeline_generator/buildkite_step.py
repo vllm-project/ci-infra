@@ -324,14 +324,6 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
     if not amd_queue:
         raise ValueError(f"Invalid AMD device: {amd_device}. Valid devices: {list(amd_queue_map.keys())}")
 
-    amd_retry = {
-        "automatic": [
-            {"exit_status": -1, "limit": 2},   # Agent was lost
-            {"exit_status": -10, "limit": 2},  # Agent was lost
-            {"exit_status": 128, "limit": 2},  # Git connectivity issues
-        ]
-    }
-
     return BuildkiteCommandStep(
         label=amd_label,
         commands=[amd_command_wrapped],
@@ -340,6 +332,6 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         env={"DOCKER_BUILDKIT": "1"},
         priority=200,
         soft_fail=False,
-        retry=amd_retry,
+        retry=None,
         parallelism=step.parallelism,
     )
