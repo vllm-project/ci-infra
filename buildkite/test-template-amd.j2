@@ -288,22 +288,20 @@ plugins:
         depends_on: ~
         soft_fail: false
         commands:
-          # Handle the introduction of test target in Dockerfile.rocm
-          - >
-            docker build
-            --build-arg max_jobs=16
-            --build-arg REMOTE_VLLM=1
-            --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx950'
-            --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
-            --tag {{ docker_image_amd }}
-            -f docker/Dockerfile.rocm
-            --target test
-            --no-cache
-            --progress plain .
-          - "docker push {{ docker_image_amd }}"
+          - bash .buildkite/scripts/ci-bake.sh test-rocm-ci
         key: "amd-build"
+        # DOCKERHUB_CACHE_TO is intentionally absent on non-main builds:
+        # hardware test and PR builds must not overwrite :rocm-latest (reserved for main).
         env:
           DOCKER_BUILDKIT: "1"
+          IMAGE_TAG: "{{ docker_image_amd }}"
+          VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
+          PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+          {% if branch == "main" %}
+          IMAGE_TAG_LATEST: "rocm/vllm-ci:latest"
+          DOCKERHUB_CACHE_TO: "rocm/vllm-ci-cache:rocm-latest"
+          {% endif %}
         retry:
           automatic:
             - exit_status: -1  # Agent was lost
