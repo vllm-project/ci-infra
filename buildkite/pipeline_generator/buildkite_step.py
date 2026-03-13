@@ -323,6 +323,27 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
     }
 
+    # Map device type to GPU architecture for per-arch image builds.
+    # When a per-arch build step (image-build-amd-<arch>) exists, prefer it
+    # over the fat all-arch build (image-build-amd) for faster CI.
+    _device_to_arch = {
+        DeviceType.AMD_MI250_1: "gfx90a",
+        DeviceType.AMD_MI250_2: "gfx90a",
+        DeviceType.AMD_MI250_4: "gfx90a",
+        DeviceType.AMD_MI250_8: "gfx90a",
+        DeviceType.AMD_MI325_1: "gfx942",
+        DeviceType.AMD_MI325_2: "gfx942",
+        DeviceType.AMD_MI325_4: "gfx942",
+        DeviceType.AMD_MI325_8: "gfx942",
+        DeviceType.AMD_MI355_1: "gfx950",
+        DeviceType.AMD_MI355_2: "gfx950",
+        DeviceType.AMD_MI355_4: "gfx950",
+        DeviceType.AMD_MI355_8: "gfx950",
+    }
+    arch = _device_to_arch.get(amd_device)
+    arch_build_key = f"image-build-amd-{arch}" if arch else None
+    build_dep = arch_build_key if arch_build_key else "image-build-amd"
+
     amd_queue = amd_queue_map.get(amd_device)
     if not amd_queue:
         raise ValueError(f"Invalid AMD device: {amd_device}. Valid devices: {list(amd_queue_map.keys())}")
@@ -330,7 +351,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
     return BuildkiteCommandStep(
         label=amd_label,
         commands=[amd_command_wrapped],
-        depends_on=["image-build-amd"],
+        depends_on=[build_dep],
         agents={"queue": amd_queue},
         env={"DOCKER_BUILDKIT": "1"},
         priority=200,
