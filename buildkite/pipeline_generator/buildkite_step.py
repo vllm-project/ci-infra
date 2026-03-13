@@ -294,14 +294,21 @@ def _generate_step_key(step_label: str) -> str:
 def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[str, Any]) -> BuildkiteCommandStep:
     """Create an AMD mirrored step from the original step."""
     amd_device = amd["device"]
-    amd_commands = amd.get("commands", original_commands)
-    amd_commands_str = " && ".join(amd_commands)
-    working_dir = amd.get("working_dir", step.working_dir)
-    if working_dir:
-        amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
+    custom_commands = amd.get("commands")
+    if custom_commands:
+        # Custom AMD commands didn't go through _prepare_commands(), need cd
+        amd_commands_str = " && ".join(custom_commands)
+        working_dir = amd.get("working_dir", step.working_dir)
+        if working_dir:
+            amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
+    else:
+        # original_commands already include cd from _prepare_commands()
+        amd_commands_str = " && ".join(original_commands)
 
-    # Add AMD test script wrapper
-    amd_command_wrapped = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{amd_commands_str}"'
+    # Pass commands via VLLM_TEST_COMMANDS env var instead of positional
+    # argument. Buildkite sets env vars directly in the process environment
+    # without shell interpretation, preserving all inner quoting.
+    amd_command_wrapped = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 
     # Extract device name from queue name
     device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
@@ -332,7 +339,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         commands=[amd_command_wrapped],
         depends_on=["image-build-amd"],
         agents={"queue": amd_queue},
-        env={"DOCKER_BUILDKIT": "1"},
+        env={"DOCKER_BUILDKIT": "1", "VLLM_TEST_COMMANDS": amd_commands_str},
         priority=200,
         soft_fail=False,
         retry=None,
