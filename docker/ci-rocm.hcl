@@ -105,8 +105,8 @@ function "get_cache_to_rocm" {
 
 target "_ci-rocm" {
   annotations = [
-    "index,manifest:vllm.buildkite.build_number=${BUILDKITE_BUILD_NUMBER}",
-    "index,manifest:vllm.buildkite.build_id=${BUILDKITE_BUILD_ID}",
+    "manifest:vllm.buildkite.build_number=${BUILDKITE_BUILD_NUMBER}",
+    "manifest:vllm.buildkite.build_id=${BUILDKITE_BUILD_ID}",
   ]
   args = {
     ARG_PYTORCH_ROCM_ARCH = PYTORCH_ROCM_ARCH
@@ -124,4 +124,31 @@ target "test-rocm-ci" {
     IMAGE_TAG_LATEST,
   ])
   output = ["type=registry"]
+}
+
+# Per-architecture CI targets — each builds for a single GPU arch and pushes
+# to the registry so test agents can pull the image.
+# Each per-arch build step sets IMAGE_TAG to e.g. rocm/vllm-ci:<commit>-gfx942
+target "test-rocm-gfx90a-ci" {
+  inherits   = ["test-rocm-gfx90a", "_ci-rocm"]
+  cache-from = get_cache_from_rocm()
+  cache-to   = get_cache_to_rocm()
+  tags       = compact([IMAGE_TAG])
+  output     = ["type=registry"]
+}
+
+target "test-rocm-gfx942-ci" {
+  inherits   = ["test-rocm-gfx942", "_ci-rocm"]
+  cache-from = get_cache_from_rocm()
+  cache-to   = get_cache_to_rocm()
+  tags       = compact([IMAGE_TAG])
+  output     = ["type=registry"]
+}
+
+target "test-rocm-gfx950-ci" {
+  inherits   = ["test-rocm-gfx950", "_ci-rocm"]
+  cache-from = get_cache_from_rocm()
+  cache-to   = get_cache_to_rocm()
+  tags       = compact([IMAGE_TAG])
+  output     = ["type=registry"]
 }
