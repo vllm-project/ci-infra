@@ -227,7 +227,7 @@ plugins:
         containers:
           - image: {{ image }}
             command:
-              - bash -c "{{ '(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe) }}"
+              - bash -c "{{ ('(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe)) }}"
             resources:
               limits:
                 nvidia.com/gpu: {{ step.num_gpus or 1 }}
@@ -260,7 +260,7 @@ plugins:
         containers:
           - image: {{ image }}
             command:
-              - bash -c "{{ '(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe) }}"
+              - bash -c "{{ ('(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe)) }}"
             resources:
               limits:
                 nvidia.com/gpu: {{ step.num_gpus or 1 }}
@@ -426,8 +426,8 @@ plugins:
       {% endif %}
 
       {# Resolve per-arch build key from agent_pool (e.g. mi250_1 → amd-build-gfx90a) #}
-      {% set step_arch = pool_to_arch.get(step.agent_pool, "") %}
-      {% set step_build_key = arch_to_build_key.get(step_arch, "amd-build") %}
+      {% set step_arch = pool_to_arch[step.agent_pool] | default("") %}
+      {% set step_build_key = arch_to_build_key[step_arch] | default("amd-build") %}
 
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
@@ -447,7 +447,7 @@ plugins:
           {% else %}
           queue: amd_mi325_1
           {% endif %}
-        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ (step.command  or (step.commands | join(" && ")) | safe) }}"
         env:
           DOCKER_BUILDKIT: "1"
         priority: 100
