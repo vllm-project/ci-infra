@@ -23,6 +23,11 @@
   "gfx942": "amd-build-gfx942",
   "gfx950": "amd-build-gfx950",
 } %}
+{% set arch_to_image = {
+  "gfx90a": docker_image_amd_gfx90a,
+  "gfx942": docker_image_amd_gfx942,
+  "gfx950": docker_image_amd_gfx950,
+} %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
@@ -450,6 +455,7 @@ plugins:
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           DOCKER_BUILDKIT: "1"
+          DOCKER_IMAGE_NAME: "{{ arch_to_image[step_arch] | default(docker_image_amd) }}"
           VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
         priority: 100
         {% if step.grade and step.grade == "Blocking" %}
