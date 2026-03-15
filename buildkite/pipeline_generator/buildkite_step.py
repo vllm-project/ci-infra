@@ -231,16 +231,17 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
-                amd_block_step = None
+                amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
+                # Block step depends on the same build the mirror step uses
+                # (per-arch when available, fat build otherwise).
+                mirror_build_dep = amd_step.depends_on[0] if amd_step.depends_on else "image-build-amd"
                 amd_block_step = BuildkiteBlockStep(
                     block=f"Run AMD: {step.label}",
-                    depends_on=["image-build-amd"],
+                    depends_on=[mirror_build_dep],
                     key=f"block-amd-{_generate_step_key(step.label)}",
                 )
                 amd_mirror_steps.append(amd_block_step)
-                amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
-                if amd_block_step:
-                    amd_step.depends_on.extend([amd_block_step.key])
+                amd_step.depends_on.append(amd_block_step.key)
                 amd_mirror_steps.append(amd_step)
 
         buildkite_group_steps.append(
@@ -261,6 +262,11 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     global_config = get_global_config()
     if step.key and step.key.startswith("image-build"):
+        # Fat all-arch build (image-build-amd) only auto-runs on main;
+        # on PR branches it gets a block step so it's on-demand.
+        # Per-arch builds (image-build-amd-gfx*) always auto-run.
+        if step.key == "image-build-amd" and global_config["branch"] != "main":
+            return False
         return True
     if global_config["nightly"] == "1":
         return True

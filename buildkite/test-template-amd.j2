@@ -303,14 +303,23 @@ plugins:
   - group: "AMD Tests"
     depends_on: ~
     steps:
-      - label: "AMD: :docker: build image"
+      # Fat multi-arch image: auto-runs on main (for cache warming / release),
+      # blocked behind manual approval on PR / hardware-test builds.
+      {% if branch != "main" %}
+      - block: "Run AMD fat build (all archs)"
+        key: "block-amd-build"
+      {% endif %}
+
+      - label: "AMD: :docker: build image (all archs)"
+        {% if branch == "main" %}
         depends_on: ~
+        {% else %}
+        depends_on: "block-amd-build"
+        {% endif %}
         soft_fail: false
         commands:
           - bash .buildkite/scripts/ci-bake.sh test-rocm-ci
         key: "amd-build"
-        # DOCKERHUB_CACHE_TO is intentionally absent on non-main builds:
-        # hardware test and PR builds must not overwrite :rocm-latest (reserved for main).
         env:
           DOCKER_BUILDKIT: "1"
           IMAGE_TAG: "{{ docker_image_amd }}"
