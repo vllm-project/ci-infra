@@ -333,11 +333,11 @@ plugins:
         retry:
           automatic:
             - exit_status: -1  # Agent was lost
-              limit: 2
+              limit: 1
             - exit_status: -10  # Agent was lost
-              limit: 2
+              limit: 1
             - exit_status: 128  # Git connectivity issues
-              limit: 2
+              limit: 1
             - exit_status: 1  # Machine occasionally fail
               limit: 1
         agents:
@@ -358,11 +358,11 @@ plugins:
         retry:
           automatic:
             - exit_status: -1
-              limit: 2
+              limit: 1
             - exit_status: -10
-              limit: 2
+              limit: 1
             - exit_status: 128
-              limit: 2
+              limit: 1
             - exit_status: 1
               limit: 1
         agents:
@@ -383,11 +383,11 @@ plugins:
         retry:
           automatic:
             - exit_status: -1
-              limit: 2
+              limit: 1
             - exit_status: -10
-              limit: 2
+              limit: 1
             - exit_status: 128
-              limit: 2
+              limit: 1
             - exit_status: 1
               limit: 1
         agents:
@@ -408,11 +408,11 @@ plugins:
         retry:
           automatic:
             - exit_status: -1
-              limit: 2
+              limit: 1
             - exit_status: -10
-              limit: 2
+              limit: 1
             - exit_status: 128
-              limit: 2
+              limit: 1
             - exit_status: 1
               limit: 1
         agents:
@@ -478,10 +478,12 @@ plugins:
         retry:
           automatic:
             - exit_status: -1  # Agent was lost
-              limit: 2
+              limit: 1
             - exit_status: -10  # Agent was lost
-              limit: 2
+              limit: 1
             - exit_status: 128  # Git connectivity issues
-              limit: 2
+              limit: 1
+            - exit_status: 1  # Machine occasionally fail
+              limit: 1
     {% endif %}
     {% endfor %}
