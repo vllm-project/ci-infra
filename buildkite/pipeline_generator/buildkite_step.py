@@ -384,9 +384,16 @@ def _create_torch_nightly_group(
         )
 
     # Docker image build step — delegates to the shell script in vllm repo
-    image_build_commands = [
-        '.buildkite/image_build/image_build_torch_nightly.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $IMAGE_TAG_TORCH_NIGHTLY',
-    ]
+    # Resolve variables at generation time (these commands don't go through
+    # _prepare_commands, so we substitute manually).
+    import re as _re
+    raw_cmd = '.buildkite/image_build/image_build_torch_nightly.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $IMAGE_TAG_TORCH_NIGHTLY'
+    for variable, value in variables_to_inject.items():
+        if not value:
+            continue
+        pattern = _re.escape(variable)
+        raw_cmd = _re.sub(pattern + r'\b', value, raw_cmd)
+    image_build_commands = [raw_cmd]
 
     image_build_step = BuildkiteCommandStep(
         label=":docker: build image torch nightly",
