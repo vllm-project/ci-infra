@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Any, Union
 import os
 
 from step import Step
-from utils_lib.docker_utils import get_image, get_ecr_cache_registry
+from utils_lib.docker_utils import get_image, get_ecr_cache_registry, get_torch_nightly_image
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
@@ -131,6 +131,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:latest"
             if global_config["branch"] == "main"
             else None,
+        "$IMAGE_TAG_TORCH_NIGHTLY": get_torch_nightly_image(),
     }
 
 
@@ -188,6 +189,7 @@ def convert_group_step_to_buildkite_step(
     list_file_diff = global_config["list_file_diff"]
 
     amd_mirror_steps = []
+    torch_nightly_steps_collected = []
 
     for group, steps in group_steps.items():
         group_steps_list = []
@@ -233,6 +235,10 @@ def convert_group_step_to_buildkite_step(
 
             group_steps_list.append(buildkite_step)
 
+            # Collect steps marked for torch nightly testing
+            if step.torch_nightly:
+                torch_nightly_steps_collected.append(step)
+
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
                 amd_block_step = None
@@ -256,6 +262,13 @@ def convert_group_step_to_buildkite_step(
         buildkite_group_steps.append(
             BuildkiteGroupStep(group="Hardware-AMD Tests", steps=amd_mirror_steps)
         )
+
+    # Create torch nightly group if any steps have torch_nightly: true
+    if torch_nightly_steps_collected:
+        nightly_group = _create_torch_nightly_group(
+            torch_nightly_steps_collected, list_file_diff, variables_to_inject
+        )
+        buildkite_group_steps.append(nightly_group)
 
     return buildkite_group_steps
 
@@ -349,3 +362,118 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         retry=None,
         parallelism=step.parallelism,
     )
+
+
+def _create_torch_nightly_group(
+    nightly_steps: List[Step],
+    list_file_diff: List[str],
+    variables_to_inject: Dict[str, str],
+) -> BuildkiteGroupStep:
+    """Create the 'vLLM Against PyTorch Nightly' group with image build + test steps."""
+    global_config = get_global_config()
+    branch = global_config["branch"]
+    auto_run = global_config["nightly"] == "1" or branch == "main"
+
+    nightly_image = get_torch_nightly_image()
+    group_steps_list = []
+
+    # Add manual block step for the image build (unless auto-run)
+    if not auto_run:
+        group_steps_list.append(
+            BuildkiteBlockStep(
+                block="Build torch nightly image",
+                key="block-build-torch-nightly",
+                depends_on=[],
+            )
+        )
+
+    # Docker image build step — delegates to the shell script in vllm repo
+    image_build_commands = [
+        '.buildkite/image_build/image_build_torch_nightly.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $IMAGE_TAG_TORCH_NIGHTLY',
+    ]
+
+    image_build_step = BuildkiteCommandStep(
+        label=":docker: build image torch nightly",
+        key="image-build-torch-nightly",
+        commands=image_build_commands,
+        depends_on=["block-build-torch-nightly"] if not auto_run else [],
+        soft_fail=True,
+        agents={
+            "queue": AgentQueue.CPU_POSTMERGE_US_EAST_1
+            if branch == "main"
+            else AgentQueue.CPU_PREMERGE_US_EAST_1,
+        },
+        env={"DOCKER_BUILDKIT": "1"},
+        retry={
+            "automatic": [
+                {"exit_status": -1, "limit": 2},
+                {"exit_status": -10, "limit": 2},
+            ]
+        },
+    )
+    group_steps_list.append(image_build_step)
+
+    # Create test steps for each torch_nightly step
+    for step in nightly_steps:
+        # Determine if this test step should be auto-run or blocked
+        step_auto_run = auto_run
+        if not step_auto_run and step.source_file_dependencies:
+            for source_file in step.source_file_dependencies:
+                for diff_file in list_file_diff:
+                    if source_file in diff_file:
+                        step_auto_run = True
+                        break
+                if step_auto_run:
+                    break
+        elif not step_auto_run and not step.source_file_dependencies:
+            step_auto_run = True
+
+        blocked = not step_auto_run or (step.optional and not auto_run)
+
+        if blocked:
+            block_key = f"block-torch-nightly-{_generate_step_key(step.label)}"
+            group_steps_list.append(
+                BuildkiteBlockStep(
+                    block=f"Run Torch Nightly {step.label}",
+                    depends_on=["image-build-torch-nightly"],
+                    key=block_key,
+                )
+            )
+
+        # Create the nightly test step using the nightly image
+        nightly_plugin = _get_nightly_step_plugin(step, nightly_image)
+        step_commands = _prepare_commands(step, variables_to_inject)
+
+        nightly_test_step = BuildkiteCommandStep(
+            label=f"Torch Nightly {step.label}",
+            commands=step_commands,
+            depends_on=[block_key] if blocked else ["image-build-torch-nightly"],
+            soft_fail=True,
+            agents={"queue": get_agent_queue(step)},
+            parallelism=step.parallelism,
+            retry={
+                "automatic": [
+                    {"exit_status": -1, "limit": 1},
+                    {"exit_status": -10, "limit": 1},
+                ]
+            },
+        )
+        if not step.no_plugin:
+            nightly_test_step.plugins = [nightly_plugin]
+
+        group_steps_list.append(nightly_test_step)
+
+    return BuildkiteGroupStep(
+        group="vLLM Against PyTorch Nightly", steps=group_steps_list
+    )
+
+
+def _get_nightly_step_plugin(step: Step, nightly_image: str):
+    """Get the Docker plugin config for a torch nightly test step."""
+    use_cpu = step.device == DeviceType.CPU or False
+    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
+        from plugin.k8s_plugin import get_k8s_plugin
+        return get_k8s_plugin(step, nightly_image)
+    else:
+        from plugin.docker_plugin import get_docker_plugin
+        return {"docker#v5.2.0": get_docker_plugin(step, nightly_image)}
