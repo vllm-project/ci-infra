@@ -127,6 +127,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:latest"
             if global_config["branch"] == "main"
             else None,
+        "$IMAGE_TAG_TORCH_NIGHTLY": get_torch_nightly_image(),
     }
 
 
@@ -382,25 +383,9 @@ def _create_torch_nightly_group(
             )
         )
 
-    # Docker image build step
+    # Docker image build step — delegates to the shell script in vllm repo
     image_build_commands = [
-        'aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7',
-        'aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com',
-        'docker buildx create --name vllm-builder --driver docker-container --use',
-        'docker buildx inspect --bootstrap',
-        'docker buildx ls',
-        f'#!/bin/bash\nif [[ -z $(docker manifest inspect {nightly_image}) ]]; then\n  echo "Image not found, proceeding with build..."\nelse\n  echo "Image found"\n  exit 0\nfi',
-        f'docker buildx build --file docker/Dockerfile'
-        f' --build-arg max_jobs=16'
-        f' --build-arg buildkite_commit=$$BUILDKITE_COMMIT'
-        f' --build-arg USE_SCCACHE=1'
-        f' --build-arg PYTORCH_NIGHTLY=1'
-        f' --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0 12.0"'
-        f' --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a 12.0a"'
-        f' --tag {nightly_image}'
-        f' --push'
-        f' --target test'
-        f' --progress plain .',
+        '.buildkite/image_build/image_build_torch_nightly.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $IMAGE_TAG_TORCH_NIGHTLY',
     ]
 
     image_build_step = BuildkiteCommandStep(
