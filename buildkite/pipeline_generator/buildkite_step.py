@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
+import shlex
 import os
 
 from step import Step
@@ -353,4 +354,5 @@ def _wrap_intel_commands(step: Step, original_commands: List[str]) -> List[str]:
     intel_commands_str = " && ".join(original_commands)
     if step.working_dir:
         intel_commands_str = f"cd {step.working_dir} && {intel_commands_str}"
-    return [f'bash .buildkite/scripts/hardware_ci/run-intel-test.sh "{intel_commands_str}"']
+    intel_commands_quoted = shlex.quote(intel_commands_str)
+    return [f"bash .buildkite/scripts/hardware_ci/run-intel-test.sh {intel_commands_quoted}"]
