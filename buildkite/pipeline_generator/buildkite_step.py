@@ -204,7 +204,7 @@ def convert_group_step_to_buildkite_step(
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
-                priority=10 if os.getenv("PRIORITY", "") == "HIGH" else 100
+                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 1
             )
 
             if block_step:
@@ -232,13 +232,12 @@ def convert_group_step_to_buildkite_step(
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
                 amd_block_step = None
-                if not _step_should_run(step, list_file_diff):
-                    amd_block_step = BuildkiteBlockStep(
-                        block=f"Run AMD: {step.label}",
-                        depends_on=["image-build-amd"],
-                        key=f"block-amd-{_generate_step_key(step.label)}",
-                    )
-                    amd_mirror_steps.append(amd_block_step)
+                amd_block_step = BuildkiteBlockStep(
+                    block=f"Run AMD: {step.label}",
+                    depends_on=["image-build-amd"],
+                    key=f"block-amd-{_generate_step_key(step.label)}",
+                )
+                amd_mirror_steps.append(amd_block_step)
                 amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
                 if amd_block_step:
                     amd_step.depends_on.extend([amd_block_step.key])
@@ -295,14 +294,21 @@ def _generate_step_key(step_label: str) -> str:
 def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[str, Any]) -> BuildkiteCommandStep:
     """Create an AMD mirrored step from the original step."""
     amd_device = amd["device"]
-    amd_commands = amd.get("commands", original_commands)
-    amd_commands_str = " && ".join(amd_commands)
-    working_dir = amd.get("working_dir", step.working_dir)
-    if working_dir:
-        amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
+    custom_commands = amd.get("commands")
+    if custom_commands:
+        # Custom AMD commands didn't go through _prepare_commands(), need cd
+        amd_commands_str = " && ".join(custom_commands)
+        working_dir = amd.get("working_dir", step.working_dir)
+        if working_dir:
+            amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
+    else:
+        # original_commands already include cd from _prepare_commands()
+        amd_commands_str = " && ".join(original_commands)
 
-    # Add AMD test script wrapper
-    amd_command_wrapped = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{amd_commands_str}"'
+    # Pass commands via VLLM_TEST_COMMANDS env var instead of positional
+    # argument. Buildkite sets env vars directly in the process environment
+    # without shell interpretation, preserving all inner quoting.
+    amd_command_wrapped = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 
     # Extract device name from queue name
     device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
@@ -310,6 +316,10 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
 
     # Map device type to agent queue
     amd_queue_map = {
+        DeviceType.AMD_MI250_1: AgentQueue.AMD_MI250_1,
+        DeviceType.AMD_MI250_2: AgentQueue.AMD_MI250_2,
+        DeviceType.AMD_MI250_4: AgentQueue.AMD_MI250_4,
+        DeviceType.AMD_MI250_8: AgentQueue.AMD_MI250_8,
         DeviceType.AMD_MI325_1: AgentQueue.AMD_MI325_1,
         DeviceType.AMD_MI325_2: AgentQueue.AMD_MI325_2,
         DeviceType.AMD_MI325_4: AgentQueue.AMD_MI325_4,
@@ -329,7 +339,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         commands=[amd_command_wrapped],
         depends_on=["image-build-amd"],
         agents={"queue": amd_queue},
-        env={"DOCKER_BUILDKIT": "1"},
+        env={"DOCKER_BUILDKIT": "1", "VLLM_TEST_COMMANDS": amd_commands_str},
         priority=200,
         soft_fail=False,
         retry=None,
