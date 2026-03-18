@@ -3,15 +3,6 @@
 # Region: us-east5-b
 # Type: e2-standard-2
 
-data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
-  secret = "projects/${var.project_id}/secrets/tpu_commons_buildkite_agent_token"
-  version = "latest"
-}
-
-locals {
-  buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-}
-
 data "google_client_config" "gcp_client" {
   provider = google-beta
 }
@@ -77,9 +68,10 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-      sudo sed -i "s/xxx/${local.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="vllm-cpu-vm-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=cpu"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
 
       systemctl stop docker
       systemctl start docker
