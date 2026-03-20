@@ -200,6 +200,40 @@ fi
 # Early exit start: skip pipeline if conditions are met
 # ----------------------------------------------------------------------
 
+# Fail if pre-commit check has not passed on the PR
+if [[ "${BUILDKITE_PULL_REQUEST}" != "false" ]]; then
+    MAX_WAIT=600
+    WAIT_INTERVAL=30
+    ELAPSED=0
+    while true; do
+        PRECOMMIT_JSON=$(curl -s "https://api.github.com/repos/vllm-project/vllm/commits/${BUILDKITE_COMMIT}/check-runs" \
+            | jq -r '.check_runs[] | select(.name == "pre-commit") | {status, conclusion}')
+        PRECOMMIT_STATUS=$(echo "$PRECOMMIT_JSON" | jq -r '.status // empty')
+        PRECOMMIT_CONCLUSION=$(echo "$PRECOMMIT_JSON" | jq -r '.conclusion // empty')
+
+        if [[ "$PRECOMMIT_STATUS" == "completed" ]]; then
+            break
+        fi
+
+        if [[ $ELAPSED -ge $MAX_WAIT ]]; then
+            echo "Timed out after ${MAX_WAIT}s waiting for pre-commit check on commit ${BUILDKITE_COMMIT}."
+            buildkite-agent annotate ":warning: Timed out waiting for pre-commit check to complete." --style "warning" || true
+            exit 1
+        fi
+
+        echo "pre-commit check is not yet complete (status: ${PRECOMMIT_STATUS:-not found}). Waiting ${WAIT_INTERVAL}s... (${ELAPSED}/${MAX_WAIT}s)"
+        sleep "$WAIT_INTERVAL"
+        ELAPSED=$((ELAPSED + WAIT_INTERVAL))
+    done
+
+    if [[ "$PRECOMMIT_CONCLUSION" != "success" ]]; then
+        buildkite-agent annotate ":x: pre-commit check has not passed on this PR (conclusion: ${PRECOMMIT_CONCLUSION}). Please fix pre-commit issues before running CI." --style "error" || true
+        echo "pre-commit check failed on commit ${BUILDKITE_COMMIT} (conclusion: ${PRECOMMIT_CONCLUSION}). Aborting pipeline."
+        exit 1
+    fi
+    echo "pre-commit check passed on commit ${BUILDKITE_COMMIT}."
+fi
+
 # skip pipeline if *every* changed file is docs/** OR **/*.md OR mkdocs.yaml
 if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
   if [[ -n "${file_diff:-}" ]]; then
