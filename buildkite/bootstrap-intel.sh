@@ -224,7 +224,7 @@ patterns=(
     "docker/Dockerfile"
     "CMakeLists.txt"
     "requirements/common.txt"
-    "requirements/cuda.txt"
+    "requirements/xpu.txt"
     "requirements/build.txt"
     "requirements/test.txt"
     "setup.py"
