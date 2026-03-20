@@ -84,3 +84,20 @@ module "ci_v7x_8" {
   buildkite_analytics_token_value  = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
   huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
+
+module "ci_cpu_64_core" {
+  source    = "../modules/ci_cpu_64_core"
+  providers = {
+    google-beta = google-beta.us-central1-b
+  }
+
+  project_id              = var.project_id
+  instance_count          = 2
+  machine_type            = "n2-standard-64"
+  disk_size               = 250
+  disk_type               = "pd-balanced"
+  buildkite_queue_name    = "cpu_64_core"
+
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+}
