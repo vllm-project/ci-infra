@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
+import shlex
 import os
 
 from step import Step
@@ -197,6 +198,9 @@ def convert_group_step_to_buildkite_step(
 
             # command step
             step_commands = _prepare_commands(step, variables_to_inject)
+            # Intel steps opt-in via intel_wrapper to avoid hard-coding device names.
+            if step.intel_wrapper:
+                step_commands = _wrap_intel_commands(step, step_commands)
 
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
@@ -345,3 +349,12 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         retry=None,
         parallelism=step.parallelism,
     )
+
+
+def _wrap_intel_commands(step: Step, original_commands: List[str]) -> List[str]:
+    """Wrap Intel GPU commands with the Intel test runner script."""
+    intel_commands_str = " && ".join(original_commands)
+    if step.working_dir:
+        intel_commands_str = f"cd {step.working_dir} && {intel_commands_str}"
+    intel_commands_quoted = shlex.quote(intel_commands_str)
+    return [f"bash .buildkite/scripts/hardware_ci/run-intel-test.sh {intel_commands_quoted}"]
