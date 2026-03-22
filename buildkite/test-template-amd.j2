@@ -9,6 +9,25 @@
 {% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
 {% endif %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
+{# Per-architecture image tags and agent_pool → arch/build-key mapping #}
+{% set docker_image_amd_gfx90a = "rocm/vllm-ci:$BUILDKITE_COMMIT-gfx90a" %}
+{% set docker_image_amd_gfx942 = "rocm/vllm-ci:$BUILDKITE_COMMIT-gfx942" %}
+{% set docker_image_amd_gfx950 = "rocm/vllm-ci:$BUILDKITE_COMMIT-gfx950" %}
+{% set pool_to_arch = {
+  "mi250_1": "gfx90a", "mi250_2": "gfx90a", "mi250_4": "gfx90a", "mi250_8": "gfx90a",
+  "mi325_1": "gfx942", "mi325_2": "gfx942", "mi325_4": "gfx942", "mi325_8": "gfx942",
+  "mi355_1": "gfx950", "mi355_2": "gfx950", "mi355_4": "gfx950", "mi355_8": "gfx950",
+} %}
+{% set arch_to_build_key = {
+  "gfx90a": "amd-build-gfx90a",
+  "gfx942": "amd-build-gfx942",
+  "gfx950": "amd-build-gfx950",
+} %}
+{% set arch_to_image = {
+  "gfx90a": docker_image_amd_gfx90a,
+  "gfx942": docker_image_amd_gfx942,
+  "gfx950": docker_image_amd_gfx950,
+} %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
@@ -213,7 +232,7 @@ plugins:
         containers:
           - image: {{ image }}
             command:
-              - bash -c "{{ '(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe) }}"
+              - bash -c "{{ ('(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe)) }}"
             resources:
               limits:
                 nvidia.com/gpu: {{ step.num_gpus or 1 }}
@@ -246,7 +265,7 @@ plugins:
         containers:
           - image: {{ image }}
             command:
-              - bash -c "{{ '(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe) }}"
+              - bash -c "{{ ('(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe)) }}"
             resources:
               limits:
                 nvidia.com/gpu: {{ step.num_gpus or 1 }}
@@ -284,35 +303,117 @@ plugins:
   - group: "AMD Tests"
     depends_on: ~
     steps:
-      - label: "AMD: :docker: build image"
+      # Fat multi-arch image: auto-runs on main (for cache warming / release),
+      # blocked behind manual approval on PR / hardware-test builds.
+      {% if branch != "main" %}
+      - block: "Run AMD fat build (all archs)"
+        key: "block-amd-build"
+      {% endif %}
+
+      - label: "AMD: :docker: build image (all archs)"
+        {% if branch == "main" %}
         depends_on: ~
+        {% else %}
+        depends_on: "block-amd-build"
+        {% endif %}
         soft_fail: false
         commands:
-          # Handle the introduction of test target in Dockerfile.rocm
-          - >
-            docker build
-            --build-arg max_jobs=16
-            --build-arg REMOTE_VLLM=1
-            --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx950'
-            --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
-            --tag {{ docker_image_amd }}
-            -f docker/Dockerfile.rocm
-            --target test
-            --no-cache
-            --progress plain .
-          - "docker push {{ docker_image_amd }}"
+          - bash .buildkite/scripts/ci-bake.sh test-rocm-ci
         key: "amd-build"
         env:
           DOCKER_BUILDKIT: "1"
+          IMAGE_TAG: "{{ docker_image_amd }}"
+          VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
+          PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+          {% if branch == "main" %}
+          IMAGE_TAG_LATEST: "rocm/vllm-ci:latest"
+          DOCKERHUB_CACHE_TO: "rocm/vllm-ci-cache:rocm-latest"
+          {% endif %}
         retry:
           automatic:
             - exit_status: -1  # Agent was lost
-              limit: 2
+              limit: 1
             - exit_status: -10  # Agent was lost
-              limit: 2
+              limit: 1
             - exit_status: 128  # Git connectivity issues
-              limit: 2
+              limit: 1
             - exit_status: 1  # Machine occasionally fail
+              limit: 1
+        agents:
+          queue: amd-cpu
+
+      - label: "AMD: :docker: build image (gfx90a)"
+        depends_on: ~
+        soft_fail: false
+        commands:
+          - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx90a-ci
+        key: "amd-build-gfx90a"
+        env:
+          DOCKER_BUILDKIT: "1"
+          IMAGE_TAG: "{{ docker_image_amd_gfx90a }}"
+          VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
+          PYTORCH_ROCM_ARCH: "gfx90a"
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 1
+            - exit_status: -10
+              limit: 1
+            - exit_status: 128
+              limit: 1
+            - exit_status: 1
+              limit: 1
+        agents:
+          queue: amd-cpu
+
+      - label: "AMD: :docker: build image (gfx942)"
+        depends_on: ~
+        soft_fail: false
+        commands:
+          - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx942-ci
+        key: "amd-build-gfx942"
+        env:
+          DOCKER_BUILDKIT: "1"
+          IMAGE_TAG: "{{ docker_image_amd_gfx942 }}"
+          VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
+          PYTORCH_ROCM_ARCH: "gfx942"
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 1
+            - exit_status: -10
+              limit: 1
+            - exit_status: 128
+              limit: 1
+            - exit_status: 1
+              limit: 1
+        agents:
+          queue: amd-cpu
+
+      - label: "AMD: :docker: build image (gfx950)"
+        depends_on: ~
+        soft_fail: false
+        commands:
+          - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx950-ci
+        key: "amd-build-gfx950"
+        env:
+          DOCKER_BUILDKIT: "1"
+          IMAGE_TAG: "{{ docker_image_amd_gfx950 }}"
+          VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
+          PYTORCH_ROCM_ARCH: "gfx950"
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 1
+            - exit_status: -10
+              limit: 1
+            - exit_status: 128
+              limit: 1
+            - exit_status: 1
               limit: 1
         agents:
           queue: amd-cpu
@@ -338,9 +439,13 @@ plugins:
         {% set ns.blocked = 0 %}
       {% endif %}
 
+      {# Resolve per-arch build key from agent_pool (e.g. mi250_1 → amd-build-gfx90a) #}
+      {% set step_arch = pool_to_arch[step.agent_pool] | default("") %}
+      {% set step_build_key = arch_to_build_key[step_arch] | default("amd-build") %}
+
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
-        depends_on: amd-build
+        depends_on: {{ step_build_key }}
         key: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
       {% endif %}
 
@@ -348,7 +453,7 @@ plugins:
         {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
         depends_on: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         {% else %}
-        depends_on: amd-build
+        depends_on: {{ step_build_key }}
         {% endif %}
         agents:
           {% if step.agent_pool %}
@@ -359,6 +464,7 @@ plugins:
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           DOCKER_BUILDKIT: "1"
+          DOCKER_IMAGE_NAME: "{{ arch_to_image[step_arch] | default(docker_image_amd) }}"
           VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
         priority: 100
         {% if step.grade and step.grade == "Blocking" %}
@@ -372,10 +478,12 @@ plugins:
         retry:
           automatic:
             - exit_status: -1  # Agent was lost
-              limit: 2
+              limit: 1
             - exit_status: -10  # Agent was lost
-              limit: 2
+              limit: 1
             - exit_status: 128  # Git connectivity issues
-              limit: 2
+              limit: 1
+            - exit_status: 1  # Machine occasionally fail
+              limit: 1
     {% endif %}
     {% endfor %}
