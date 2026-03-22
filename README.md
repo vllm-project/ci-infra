@@ -42,6 +42,26 @@ Components of the stack for each Agent Queue:
     - Periodically polls Buildkite to assess capacity needs for the queue and adjusts the size of the Auto Scaling Group accordingly.
 
 ## How to test changes in this repo
+
+### Automated Testing (Recommended)
+
+When you create a pull request on ci-infra, you can automatically trigger vLLM Buildkite CI builds to test your changes before merging.
+
+**How it works:**
+
+1. Create a feature branch and push your changes to this repo
+2. Open a pull request
+3. Add one of the following labels to your PR:
+   - **`ci-run-all`**: Runs the full vLLM CI suite (recommended for critical changes like bootstrap script updates, template modifications, or infrastructure changes)
+   - **`ci-fast-check-only`**: Runs only the fastcheck pipeline (recommended for quick validation of minor changes)
+
+4. The GitHub Actions workflow will automatically:
+   - Check if a matching branch exists in `vllm-project/vllm` repository
+   - Trigger a Buildkite build on that branch (or `main` if no matching branch exists)
+   - Post a comment on your PR with the build link and details
+
+### Manual Testing
+
 1. Create a feature branch on this repo, say named `my-feature-branch`. If you can't create a feature branch, ping @khluu to add you into the repo.
 2. Once the branch is created, you can start making changes and commit to the branch.
 3. After the changes are pushed to the branch, wait a few minutes, then create a new build on Buildkite with this environment variable `VLLM_CI_BRANCH=my-feature-branch` to test your changes against vLLM codebase.
