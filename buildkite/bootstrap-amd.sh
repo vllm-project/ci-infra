@@ -53,6 +53,25 @@ check_run_all_label() {
     fi
 }
 
+compute_rocm_base_cache_key() {
+    local DOCKERFILE="docker/Dockerfile.rocm_base"
+    local DEFAULT_PYTHON
+    DEFAULT_PYTHON=$(grep '^ARG PYTHON_VERSION=' "$DOCKERFILE" | sed 's/^ARG PYTHON_VERSION=//')
+    local CI_PYTHON_VERSION="${ROCM_CI_PYTHON_VERSION:-$DEFAULT_PYTHON}"
+    local DEFAULT_ARCH
+    DEFAULT_ARCH=$(grep '^ARG PYTORCH_ROCM_ARCH=' "$DOCKERFILE" | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
+    local CI_PYTORCH_ROCM_ARCH="${ROCM_CI_PYTORCH_ROCM_ARCH:-$DEFAULT_ARCH}"
+
+    if [[ ! -f "$DOCKERFILE" ]]; then
+        echo "unknown"
+        return
+    fi
+    local dockerfile_hash=$(sha256sum "$DOCKERFILE" | cut -c1-16)
+    local args_string="${CI_PYTHON_VERSION}|${CI_PYTORCH_ROCM_ARCH}"
+    local args_hash=$(echo "$args_string" | sha256sum | cut -c1-8)
+    echo "${dockerfile_hash}-${args_hash}"
+}
+
 if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
@@ -86,6 +105,9 @@ upload_pipeline() {
     echo "Nightly: $NIGHTLY"
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
+    ROCM_BASE_CACHE_KEY=$(compute_rocm_base_cache_key)
+    echo "ROCm base cache key: $ROCM_BASE_CACHE_KEY"
+
     FAIL_FAST=$(fail_fast)
 
     cd .buildkite
@@ -103,6 +125,8 @@ upload_pipeline() {
             -D vllm_merge_base_commit="$(git merge-base origin/main HEAD)" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D rocm_base_cache_key="$ROCM_BASE_CACHE_KEY" \
+            -D rocm_base_changed="$ROCM_BASE_CHANGED" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -209,6 +233,15 @@ for file in $file_diff; do
             echo "Found changes: $file. Run all tests"
             break
         fi
+    fi
+done
+
+ROCM_BASE_CHANGED=0
+for file in $file_diff; do
+    if [[ "$file" == "docker/Dockerfile.rocm_base" ]]; then
+        ROCM_BASE_CHANGED=1
+        echo "Dockerfile.rocm_base changed in this PR"
+        break
     fi
 done
 
