@@ -78,6 +78,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.SMALL_CPU_PREMERGE
     elif step.device == DeviceType.CPU_SMALL:
         return AgentQueue.SMALL_CPU_PREMERGE
+    elif step.device == DeviceType.CPU_MEDIUM:
+        return AgentQueue.MEDIUM_CPU_PREMERGE
     elif step.device == DeviceType.CPU:
         return AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.device == DeviceType.A100:
