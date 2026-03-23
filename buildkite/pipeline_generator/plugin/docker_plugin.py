@@ -73,7 +73,7 @@ def get_docker_plugin(step: Step, image: str):
 
     if step.label == "Benchmarks" or step.mount_buildkite_agent:
         plugin["mount_buildkite_agent"] = True
-    if step.device == DeviceType.CPU and plugin.get("gpus"):
+    if step.device in (DeviceType.CPU, DeviceType.CPU_SMALL) and plugin.get("gpus"):
         del plugin["gpus"]
     # TODO: Add BUILDKITE_ANALYTICS_TOKEN and pytest addopts for fail_fast
     return plugin
