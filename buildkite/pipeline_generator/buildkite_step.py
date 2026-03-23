@@ -77,7 +77,7 @@ def get_agent_queue(step: Step):
     elif step.label == "Documentation Build":
         return AgentQueue.SMALL_CPU_PREMERGE
     elif step.device == DeviceType.CPU_SMALL:
-        return AgentQueue.SMALL_CPU_PREMERGE_US_EAST_1
+        return AgentQueue.SMALL_CPU_PREMERGE
     elif step.device == DeviceType.CPU:
         return AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.device == DeviceType.A100:

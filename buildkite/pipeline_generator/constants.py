@@ -40,7 +40,6 @@ class AgentQueue(str, Enum):
     H200 = "H200"
     B200 = "B200"
     SMALL_CPU_PREMERGE = "small_cpu_queue_premerge"
-    SMALL_CPU_PREMERGE_US_EAST_1 = "small_cpu_queue_premerge_us_east_1"
     A100 = "a100_queue"
     CPU_PREMERGE_US_EAST_1 = "cpu_queue_premerge_us_east_1"
     CPU_POSTMERGE_US_EAST_1 = "cpu_queue_postmerge_us_east_1"
