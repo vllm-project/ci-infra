@@ -10,7 +10,6 @@
 {% endif %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set rocm_base_ecr_image = "public.ecr.aws/q9t5s3a7/vllm-release-repo" %}
-{% set rocm_base_ecr_commit_tag = rocm_base_ecr_image ~ ":$BUILDKITE_COMMIT-" ~ rocm_base_cache_key ~ "-rocm-base" %}
 {% set rocm_base_ecr_cache_tag = rocm_base_ecr_image ~ ":" ~ rocm_base_cache_key ~ "-rocm-base" %}
 {% set rocm_base_ecr_nightly_tag = rocm_base_ecr_image ~ ":latest-rocm-base-nightly" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
@@ -332,7 +331,6 @@ plugins:
 
             CACHE_KEY="{{ rocm_base_cache_key }}"
             ECR_CACHE_TAG="{{ rocm_base_ecr_cache_tag }}"
-            ECR_COMMIT_TAG="{{ rocm_base_ecr_commit_tag }}"
 {% if branch == "main" %}
             ECR_NIGHTLY_TAG="{{ rocm_base_ecr_nightly_tag }}"
 {% endif %}
@@ -343,7 +341,6 @@ plugins:
             echo "ROCm Base Image Build/Reuse"
             echo "  Cache Key: $${CACHE_KEY}"
             echo "  ECR Cache Tag: $${ECR_CACHE_TAG}"
-            echo "  ECR Commit Tag: $${ECR_COMMIT_TAG}"
 {% if branch == "main" %}
             echo "  ECR Nightly Tag: $${ECR_NIGHTLY_TAG}"
 {% endif %}
@@ -358,97 +355,58 @@ plugins:
             IMAGE_EXISTS=0
             if docker manifest inspect "$${ECR_CACHE_TAG}" > /dev/null 2>&1; then
               IMAGE_EXISTS=1
-              echo "ECR cache HIT: $${ECR_CACHE_TAG}"
             fi
 
             if [ "$$IMAGE_EXISTS" -eq 1 ]; then
               echo "ECR cache HIT: $${ECR_CACHE_TAG}"
-              # Create commit tag directly from cache tag (no pull needed)
-              docker buildx imagetools create --tag "$${ECR_COMMIT_TAG}" "$${ECR_CACHE_TAG}"
-              echo "Tagged $${ECR_CACHE_TAG} as $${ECR_COMMIT_TAG} in ECR (no pull required)"
-{% if branch == "main" %}
-              # On main, also tag as latest nightly (no pull needed)
-              docker buildx imagetools create --tag "$${ECR_NIGHTLY_TAG}" "$${ECR_CACHE_TAG}"
-              echo "Tagged $${ECR_CACHE_TAG} as $${ECR_NIGHTLY_TAG} in ECR (no pull required)"
-{% endif %}
-            else
-              # Tier 2: Check S3 cache
-              S3_IMAGE_EXISTS=0
-              if aws s3 ls "$${S3_CACHE_PATH}/rocm-base-image.tar.gz" > /dev/null 2>&1; then
-                S3_IMAGE_EXISTS=1
-              fi
+            else 
+              echo "CACHE MISS. Building Dockerfile.rocm_base from scratch..."
 
-              if [ "$$S3_IMAGE_EXISTS" -eq 1 ]; then
-                echo "S3 cache HIT. Downloading..."
-                mkdir -p /tmp/rocm-cache
-                aws s3 cp "$${S3_CACHE_PATH}/rocm-base-image.tar.gz" /tmp/rocm-cache/rocm-base-image.tar.gz
-                LOAD_OUTPUT=$$(gunzip -c /tmp/rocm-cache/rocm-base-image.tar.gz | docker load)
-                echo "$$LOAD_OUTPUT"
-                BASE_TAG=$$(echo "$$LOAD_OUTPUT" | grep "Loaded image:" | sed 's/Loaded image: //')
-                docker tag "$$BASE_TAG" "rocm/vllm-dev:base-ci"
-                rm -rf /tmp/rocm-cache
-              else
-                echo "CACHE MISS. Building Dockerfile.rocm_base from scratch..."
+              PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
+              echo "Using PYTORCH_ROCM_ARCH from Dockerfile.rocm_base: $${PYTORCH_ROCM_ARCH}"
+              PYTHON_VERSION=$$(grep '^ARG PYTHON_VERSION=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTHON_VERSION=//')
+              echo "Using PYTHON_VERSION from Dockerfile.rocm_base: $${PYTHON_VERSION}"
 
-                PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
-                echo "Using PYTORCH_ROCM_ARCH from Dockerfile.rocm_base: $${PYTORCH_ROCM_ARCH}"
-                PYTHON_VERSION=$$(grep '^ARG PYTHON_VERSION=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTHON_VERSION=//')
-                echo "Using PYTHON_VERSION from Dockerfile.rocm_base: $${PYTHON_VERSION}"
+              DOCKER_BUILDKIT=1 docker buildx build \
+                --file docker/Dockerfile.rocm_base \
+                --tag "rocm/vllm-dev:base-ci" \
+                --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
+                --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
+                --build-arg USE_SCCACHE=1 \
+                --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+                --build-arg SCCACHE_REGION_NAME=us-west-2 \
+                --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+                --load \
+                --progress plain \
+                .
 
-                DOCKER_BUILDKIT=1 docker buildx build \
-                  --file docker/Dockerfile.rocm_base \
-                  --tag "rocm/vllm-dev:base-ci" \
-                  --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
-                  --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
-                  --build-arg USE_SCCACHE=1 \
-                  --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
-                  --build-arg SCCACHE_REGION_NAME=us-west-2 \
-                  --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
-                  --load \
-                  --progress plain \
-                  .
-
-                # Upload to S3 for future cache hits
-                docker save rocm/vllm-dev:base-ci | gzip > /tmp/rocm-base-image.tar.gz
-                aws s3 cp /tmp/rocm-base-image.tar.gz "$${S3_CACHE_PATH}/rocm-base-image.tar.gz"
-                rm -f /tmp/rocm-base-image.tar.gz
-
-                # Also upload base wheels to S3 cache
-                DOCKER_BUILDKIT=1 docker buildx build \
-                  --file docker/Dockerfile.rocm_base \
-                  --tag rocm-base-debs:ci \
-                  --target debs_wheel_release \
-                  --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
-                  --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
-                  --build-arg USE_SCCACHE=1 \
-                  --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
-                  --build-arg SCCACHE_REGION_NAME=us-west-2 \
-                  --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
-                  --load \
-                  .
-                mkdir -p artifacts/rocm-base-wheels
-                cid=$$(docker create rocm-base-debs:ci)
-                docker cp $${cid}:/app/debs/. artifacts/rocm-base-wheels/
-                docker rm $${cid}
-                export PYTHON_VERSION
-                export PYTORCH_ROCM_ARCH
-                S3_BUCKET=vllm-wheels .buildkite/scripts/cache-rocm-base-wheels.sh upload
-              fi
-
+              # Also upload base wheels to S3 cache
+              DOCKER_BUILDKIT=1 docker buildx build \
+                --file docker/Dockerfile.rocm_base \
+                --tag rocm-base-debs:ci \
+                --target debs_wheel_release \
+                --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
+                --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
+                --build-arg USE_SCCACHE=1 \
+                --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+                --build-arg SCCACHE_REGION_NAME=us-west-2 \
+                --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+                --load \
+                .
+              mkdir -p artifacts/rocm-base-wheels
+              cid=$$(docker create rocm-base-debs:ci)
+              docker cp $${cid}:/app/debs/. artifacts/rocm-base-wheels/
+              docker rm $${cid}
+              export PYTHON_VERSION
+              export PYTORCH_ROCM_ARCH
+              S3_BUCKET=vllm-wheels .buildkite/scripts/cache-rocm-base-wheels.sh upload
+              
               # Push to ECR (cache tag for future lookups + commit tag for traceability)
               docker tag "rocm/vllm-dev:base-ci" "$${ECR_CACHE_TAG}"
               docker push "$${ECR_CACHE_TAG}"
-              docker tag "rocm/vllm-dev:base-ci" "$${ECR_COMMIT_TAG}"
-              docker push "$${ECR_COMMIT_TAG}"
-{% if branch == "main" %}
-              # On main, also tag and push as latest nightly
-              docker tag "rocm/vllm-dev:base-ci" "$${ECR_NIGHTLY_TAG}"
-              docker push "$${ECR_NIGHTLY_TAG}"
-              echo "Pushed nightly tag: $${ECR_NIGHTLY_TAG}"
-{% endif %}
             fi
 
-            echo "Base image ready: $${ECR_COMMIT_TAG}"
+            echo "Base image ready: $${ECR_CACHE_TAG}"
         agents:
           queue: cpu_queue_postmerge
         env:
@@ -476,7 +434,7 @@ plugins:
               amazon/aws-cli:2.34.0 \
               ecr-public get-login-password --region us-east-1 | \
               docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
-          - "docker pull {{ rocm_base_ecr_commit_tag }} && docker tag {{ rocm_base_ecr_commit_tag }} rocm/vllm-dev:base-ci"
+          - "docker pull {{ rocm_base_ecr_cache_tag }} && docker tag {{ rocm_base_ecr_cache_tag }} rocm/vllm-dev:base-ci"
           - >
             docker build
             --build-arg max_jobs=16
