@@ -55,7 +55,7 @@ class BuildkiteGroupStep(BaseModel):
 
 def _get_step_plugin(step: Step):
     # Use K8s plugin
-    use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL)
+    use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
     if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
