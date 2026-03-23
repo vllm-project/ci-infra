@@ -128,6 +128,24 @@ locals {
   }
 
   queues_parameters_release = {
+    small-cpu-queue-release = {
+      BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_release.name
+      BuildkiteQueue                       = "small_cpu_queue_release"
+      InstanceTypes                        = "r6in.large" # Intel Ice Lake with AVX-512 for vLLM CPU backend
+      MaxSize                              = 10
+      ECRAccessPolicy                      = "poweruser"
+      InstanceOperatingSystem              = "linux"
+      OnDemandPercentage                   = 100
+      EnableInstanceStorage                = "false"
+      BuildkiteTerminateInstanceAfterJob   = true
+      VpcId                                = module.vpc_us_east_1.vpc_id
+      SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
+      Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
+      RootVolumeIops                       = 16000
+      RootVolumeThroughput                 = 1000
+      ImageIdParameter                     = "/buildkite/cpu-build-ami/us-east-1"
+    }
+
     cpu-queue-release = {
       BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_release.name
       BuildkiteQueue                       = "cpu_queue_release"
@@ -145,6 +163,23 @@ locals {
       RootVolumeThroughput                 = 1000
       # Use custom AMI from SSM parameter (managed by rebuild-cpu-ami pipeline)
       ImageIdParameter                     = "/buildkite/cpu-build-ami/us-east-1"
+    }
+
+    arm64-cpu-queue-release = {
+      BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_release.name
+      BuildkiteQueue                       = "arm64_cpu_queue_release"
+      InstanceTypes                        = "r7g.16xlarge" # 512GB memory for CUDA kernel compilation
+      MaxSize                              = 10
+      ECRAccessPolicy                      = "poweruser"
+      InstanceOperatingSystem              = "linux"
+      OnDemandPercentage                   = 100
+      EnableInstanceStorage                = "false"
+      BuildkiteTerminateInstanceAfterJob   = true
+      VpcId                                = module.vpc_us_east_1.vpc_id
+      SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
+      Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
+      RootVolumeIops                       = 16000
+      RootVolumeThroughput                 = 1000
     }
   }
 
