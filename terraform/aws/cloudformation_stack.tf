@@ -25,6 +25,17 @@ locals {
       EnableInstanceStorage                = "true"
     }
 
+    medium-cpu-queue-premerge = {
+      BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_ci.name
+      BuildkiteQueue                       = "medium_cpu_queue_premerge"
+      InstanceTypes                        = "r6in.4xlarge"
+      MaxSize                              = 40
+      ECRAccessPolicy                      = "readonly"
+      InstanceOperatingSystem              = "linux"
+      OnDemandPercentage                   = 100
+      EnableInstanceStorage                = "true"
+    }
+
     cpu-queue-premerge = {
       BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "cpu_queue_premerge"
