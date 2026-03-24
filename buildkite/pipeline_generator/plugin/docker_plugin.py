@@ -48,15 +48,14 @@ b200_plugin_template = {
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
-        "HF_HOME=/benchmark-hf-cache",
+        "HF_HOME=/raid",
         "HF_TOKEN",
         "CODECOV_TOKEN",
         "BUILDKITE_ANALYTICS_TOKEN",
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
-        "/data/benchmark-hf-cache:/benchmark-hf-cache",
-        "/data/benchmark-vllm-cache:/root/.cache/vllm",
+        "/raid:/raid",
     ],
 }
 
