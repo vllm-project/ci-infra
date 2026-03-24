@@ -16,7 +16,7 @@ resource "aws_iam_policy" "premerge_ecr_public_read_access_policy" {
         "ecr-public:DescribeRegistries",
         "sts:GetServiceBearerToken"
       ]
-      Resource = "arn:aws:ecr-public::936637512419:repository/vllm-ci-test-repo"
+      Resource = "*"
     }]
   })
 }
@@ -126,7 +126,7 @@ resource "aws_iam_policy" "postmerge_ecr_public_read_access_policy" {
         "ecr-public:DescribeRegistries",
         "sts:GetServiceBearerToken"
       ]
-      Resource = "arn:aws:ecr-public::936637512419:repository/vllm-ci-postmerge-repo"
+      Resource = "*"
     }]
   })
 }
