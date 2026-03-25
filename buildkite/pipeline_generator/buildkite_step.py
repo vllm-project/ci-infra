@@ -86,6 +86,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.A100
     elif step.device == DeviceType.H100:
         return AgentQueue.MITHRIL_H100
+    elif step.device == DeviceType.H200_TEST:
+        return AgentQueue.H200_TEST
     elif step.device == DeviceType.H200:
         return AgentQueue.H200
     elif step.device == DeviceType.B200:

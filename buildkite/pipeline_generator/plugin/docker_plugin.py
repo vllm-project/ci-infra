@@ -22,6 +22,24 @@ docker_plugin_template = {
     ],
 }
 
+h200_test_plugin_template = {
+    "image": "",
+    "always-pull": True,
+    "propagate-environment": True,
+    "environment": [
+        "VLLM_USAGE_SOURCE=ci-test",
+        "NCCL_CUMEM_HOST_ENABLE=0",
+        "HF_TOKEN",
+        "HF_HOME",
+        "CODECOV_TOKEN",
+        "BUILDKITE_ANALYTICS_TOKEN",
+    ],
+    "volumes": [
+        "/dev/shm:/dev/shm",
+        "/mnt/vllm-ci:/mnt/vllm-ci",
+    ],
+}
+
 h200_plugin_template = {
     "image": "",
     "always-pull": True,
@@ -62,6 +80,8 @@ b200_plugin_template = {
 
 def get_docker_plugin(step: Step, image: str):
     plugin = None
+    if step.device == DeviceType.H200_TEST:
+        plugin = copy.deepcopy(h200_test_plugin_template)
     if step.device == DeviceType.H200:
         plugin = copy.deepcopy(h200_plugin_template)
     elif step.device == DeviceType.B200:
