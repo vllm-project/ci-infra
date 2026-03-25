@@ -87,7 +87,7 @@ def get_docker_plugin(step: Step, image: str):
     elif step.device == DeviceType.B200:
         plugin = copy.deepcopy(b200_plugin_template)
     else:
-        plugin = copy.deepcopy(docker_plugin_template)
+        plugin = copy.deepcopy(h200_test_plugin_template)
     plugin["image"] = image
 
     if step.label == "Benchmarks" or step.mount_buildkite_agent:
