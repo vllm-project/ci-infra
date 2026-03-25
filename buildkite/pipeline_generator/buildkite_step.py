@@ -208,7 +208,7 @@ def convert_group_step_to_buildkite_step(
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
-                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 1
+                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0
             )
 
             if block_step:
