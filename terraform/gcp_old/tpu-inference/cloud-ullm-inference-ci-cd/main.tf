@@ -92,7 +92,7 @@ module "ci_cpu_64_core" {
   }
 
   project_id              = var.project_id
-  instance_count          = 2
+  instance_count          = 4
   machine_type            = "n2-standard-64"
   disk_size               = 250
   disk_type               = "pd-balanced"
