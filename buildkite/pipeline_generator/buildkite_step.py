@@ -107,9 +107,9 @@ def get_agent_queue(step: Step):
     elif step.device == DeviceType.ASCEND:
         return AgentQueue.ASCEND
     elif step.num_devices == 2 or step.num_devices == 4:
-        return AgentQueue.GPU_4
+        return AgentQueue.H200_TEST
     else:
-        return AgentQueue.GPU_1
+        return AgentQueue.H200_TEST
 
 
 def _get_variables_to_inject() -> Dict[str, str]:
