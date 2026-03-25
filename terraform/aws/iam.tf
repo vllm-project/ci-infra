@@ -463,6 +463,14 @@ resource "aws_iam_role_policy_attachment" "bk_stack_sccache_bucket_read_write_ac
     {
       for k, v in aws_cloudformation_stack.bk_queue_postmerge_us_east_1 : k => v
       if v.name == "bk-cpu-queue-postmerge-us-east-1"
+    },
+    {
+      for k, v in aws_cloudformation_stack.bk_queue_release : k => v
+      if v.name == "bk-cpu-queue-release"
+    },
+    {
+      for k, v in aws_cloudformation_stack.bk_queue_release : k => v
+      if v.name == "bk-arm64-cpu-queue-release"
     }
   )
   role       = each.value.outputs.InstanceRoleName
