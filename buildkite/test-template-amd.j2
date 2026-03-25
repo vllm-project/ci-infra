@@ -11,7 +11,6 @@
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set rocm_base_ecr_image = "public.ecr.aws/q9t5s3a7/vllm-release-repo" %}
 {% set rocm_base_ecr_cache_tag = rocm_base_ecr_image ~ ":" ~ rocm_base_cache_key ~ "-rocm-base" %}
-{% set rocm_base_ecr_nightly_tag = rocm_base_ecr_image ~ ":latest-rocm-base-nightly" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
@@ -331,9 +330,6 @@ plugins:
 
             CACHE_KEY="{{ rocm_base_cache_key }}"
             ECR_CACHE_TAG="{{ rocm_base_ecr_cache_tag }}"
-{% if branch == "main" %}
-            ECR_NIGHTLY_TAG="{{ rocm_base_ecr_nightly_tag }}"
-{% endif %}
             S3_BUCKET="vllm-wheels"
             S3_CACHE_PATH="s3://$${S3_BUCKET}/rocm/cache/$${CACHE_KEY}"
 
@@ -341,9 +337,6 @@ plugins:
             echo "ROCm Base Image Build/Reuse"
             echo "  Cache Key: $${CACHE_KEY}"
             echo "  ECR Cache Tag: $${ECR_CACHE_TAG}"
-{% if branch == "main" %}
-            echo "  ECR Nightly Tag: $${ECR_NIGHTLY_TAG}"
-{% endif %}
             echo "========================================"
             
             python3 -m pip install awscli
@@ -362,16 +355,9 @@ plugins:
             else 
               echo "CACHE MISS. Building Dockerfile.rocm_base from scratch..."
 
-              PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
-              echo "Using PYTORCH_ROCM_ARCH from Dockerfile.rocm_base: $${PYTORCH_ROCM_ARCH}"
-              PYTHON_VERSION=$$(grep '^ARG PYTHON_VERSION=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTHON_VERSION=//')
-              echo "Using PYTHON_VERSION from Dockerfile.rocm_base: $${PYTHON_VERSION}"
-
               DOCKER_BUILDKIT=1 docker buildx build \
                 --file docker/Dockerfile.rocm_base \
-                --tag "rocm/vllm-dev:base-ci" \
-                --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
-                --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
+                --tag "$${ECR_CACHE_TAG}" \
                 --build-arg USE_SCCACHE=1 \
                 --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
                 --build-arg SCCACHE_REGION_NAME=us-west-2 \
@@ -385,8 +371,6 @@ plugins:
                 --file docker/Dockerfile.rocm_base \
                 --tag rocm-base-debs:ci \
                 --target debs_wheel_release \
-                --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
-                --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
                 --build-arg USE_SCCACHE=1 \
                 --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
                 --build-arg SCCACHE_REGION_NAME=us-west-2 \
@@ -397,12 +381,8 @@ plugins:
               cid=$$(docker create rocm-base-debs:ci)
               docker cp $${cid}:/app/debs/. artifacts/rocm-base-wheels/
               docker rm $${cid}
-              export PYTHON_VERSION
-              export PYTORCH_ROCM_ARCH
               S3_BUCKET=vllm-wheels .buildkite/scripts/cache-rocm-base-wheels.sh upload
-              
-              # Push to ECR (cache tag for future lookups + commit tag for traceability)
-              docker tag "rocm/vllm-dev:base-ci" "$${ECR_CACHE_TAG}"
+
               docker push "$${ECR_CACHE_TAG}"
             fi
 

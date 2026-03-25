@@ -55,21 +55,13 @@ check_run_all_label() {
 
 compute_rocm_base_cache_key() {
     local DOCKERFILE="docker/Dockerfile.rocm_base"
-    local DEFAULT_PYTHON
-    DEFAULT_PYTHON=$(grep '^ARG PYTHON_VERSION=' "$DOCKERFILE" | sed 's/^ARG PYTHON_VERSION=//')
-    local CI_PYTHON_VERSION="${ROCM_CI_PYTHON_VERSION:-$DEFAULT_PYTHON}"
-    local DEFAULT_ARCH
-    DEFAULT_ARCH=$(grep '^ARG PYTORCH_ROCM_ARCH=' "$DOCKERFILE" | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
-    local CI_PYTORCH_ROCM_ARCH="${ROCM_CI_PYTORCH_ROCM_ARCH:-$DEFAULT_ARCH}"
 
     if [[ ! -f "$DOCKERFILE" ]]; then
         echo "unknown"
         return
     fi
     local dockerfile_hash=$(sha256sum "$DOCKERFILE" | cut -c1-16)
-    local args_string="${CI_PYTHON_VERSION}|${CI_PYTORCH_ROCM_ARCH}"
-    local args_hash=$(echo "$args_string" | sha256sum | cut -c1-8)
-    echo "${dockerfile_hash}-${args_hash}"
+    echo "${dockerfile_hash}"
 }
 
 if [[ -z "${COV_ENABLED:-}" ]]; then
