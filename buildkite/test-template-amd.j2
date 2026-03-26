@@ -368,6 +368,7 @@ plugins:
         key: "amd-ci-base-rebuild"
         env:
           DOCKER_BUILDKIT: "1"
+          FORCE_BUILD: "1"
           IMAGE_TAG: "rocm/vllm-dev:ci_base"
           CI_BASE_IMAGE_TAG: "rocm/vllm-dev:ci_base"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
