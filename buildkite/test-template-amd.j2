@@ -47,6 +47,18 @@
 {%- set tests_only = (tests_acc.only_tests and tests_acc.any) %}
 {%- set changed_tests = tests_acc.changed %}
 
+{# Detect when ci_base-affecting files changed — trigger automatic ci_base rebuild #}
+{%- set ci_base_rebuild = namespace(needed=false) %}
+{%- for file in list_file_diff %}
+{%- if file == 'requirements/rocm.txt'
+    or file == 'requirements/rocm-test.txt'
+    or file == 'docker/Dockerfile.rocm'
+    or file == 'docker/Dockerfile.rocm_base'
+    or file == 'tools/install_torchcodec_rocm.sh' %}
+{%- set ci_base_rebuild.needed = true %}
+{%- endif %}
+{%- endfor %}
+
 {% macro add_pytest_coverage(cmd, coverage_file) %}
 {% if "pytest " in cmd %}
 COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report=xml --cov-append --durations=0 ") }} || true
@@ -347,8 +359,41 @@ plugins:
         agents:
           queue: amd-cpu
 
-      - label: "AMD: :docker: build image (gfx90a)"
+      {% if ci_base_rebuild.needed %}
+      - label: "AMD: :docker: rebuild ci_base (requirements changed)"
         depends_on: ~
+        soft_fail: false
+        commands:
+          - bash .buildkite/scripts/ci-bake.sh ci-base-rocm-ci
+        key: "amd-ci-base-rebuild"
+        env:
+          DOCKER_BUILDKIT: "1"
+          IMAGE_TAG: "rocm/vllm-dev:ci_base"
+          CI_BASE_IMAGE_TAG: "rocm/vllm-dev:ci_base"
+          VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
+          PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+          DOCKERHUB_CACHE_TO: "rocm/vllm-ci-cache:rocm-latest"
+          REMOTE_VLLM: "1"
+          VLLM_BRANCH: "$BUILDKITE_COMMIT"
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 1
+            - exit_status: -10
+              limit: 1
+            - exit_status: 128
+              limit: 1
+        agents:
+          queue: amd-cpu
+      {% endif %}
+
+      - label: "AMD: :docker: build image (gfx90a)"
+        {% if ci_base_rebuild.needed %}
+        depends_on: "amd-ci-base-rebuild"
+        {% else %}
+        depends_on: ~
+        {% endif %}
         soft_fail: false
         commands:
           - docker pull rocm/vllm-dev:ci_base
@@ -377,7 +422,11 @@ plugins:
           queue: amd-cpu
 
       - label: "AMD: :docker: build image (gfx942)"
+        {% if ci_base_rebuild.needed %}
+        depends_on: "amd-ci-base-rebuild"
+        {% else %}
         depends_on: ~
+        {% endif %}
         soft_fail: false
         commands:
           - docker pull rocm/vllm-dev:ci_base
@@ -406,7 +455,11 @@ plugins:
           queue: amd-cpu
 
       - label: "AMD: :docker: build image (gfx950)"
+        {% if ci_base_rebuild.needed %}
+        depends_on: "amd-ci-base-rebuild"
+        {% else %}
         depends_on: ~
+        {% endif %}
         soft_fail: false
         commands:
           - docker pull rocm/vllm-dev:ci_base
