@@ -318,6 +318,7 @@ plugins:
         {% endif %}
         soft_fail: false
         commands:
+          - docker pull rocm/vllm-dev:ci_base
           - bash .buildkite/scripts/ci-bake.sh test-rocm-ci
         key: "amd-build"
         env:
@@ -326,6 +327,9 @@ plugins:
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+          CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
+          REMOTE_VLLM: "1"
+          VLLM_BRANCH: "$BUILDKITE_COMMIT"
           {% if branch == "main" %}
           IMAGE_TAG_LATEST: "rocm/vllm-ci:latest"
           DOCKERHUB_CACHE_TO: "rocm/vllm-ci-cache:rocm-latest"
@@ -347,6 +351,7 @@ plugins:
         depends_on: ~
         soft_fail: false
         commands:
+          - docker pull rocm/vllm-dev:ci_base
           - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx90a-ci
         key: "amd-build-gfx90a"
         env:
@@ -355,6 +360,9 @@ plugins:
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a"
+          CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
+          REMOTE_VLLM: "1"
+          VLLM_BRANCH: "$BUILDKITE_COMMIT"
         retry:
           automatic:
             - exit_status: -1
@@ -372,6 +380,7 @@ plugins:
         depends_on: ~
         soft_fail: false
         commands:
+          - docker pull rocm/vllm-dev:ci_base
           - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx942-ci
         key: "amd-build-gfx942"
         env:
@@ -380,6 +389,9 @@ plugins:
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx942"
+          CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
+          REMOTE_VLLM: "1"
+          VLLM_BRANCH: "$BUILDKITE_COMMIT"
         retry:
           automatic:
             - exit_status: -1
@@ -397,6 +409,7 @@ plugins:
         depends_on: ~
         soft_fail: false
         commands:
+          - docker pull rocm/vllm-dev:ci_base
           - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx950-ci
         key: "amd-build-gfx950"
         env:
@@ -405,6 +418,9 @@ plugins:
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx950"
+          CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
+          REMOTE_VLLM: "1"
+          VLLM_BRANCH: "$BUILDKITE_COMMIT"
         retry:
           automatic:
             - exit_status: -1

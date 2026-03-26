@@ -57,6 +57,14 @@ variable "PYTORCH_ROCM_ARCH" {
   default = "gfx90a;gfx942;gfx950"
 }
 
+# Pre-built CI base image (Tier 1). Per-PR builds pull this instead of
+# rebuilding RIXL/DeepEP/torchcodec from scratch. The ci_base stage in
+# Dockerfile.rocm inherits from base, so CI_BASE_IMAGE only affects the test
+# stage and is irrelevant when building --target ci_base itself.
+variable "CI_BASE_IMAGE" {
+  default = "rocm/vllm-dev:ci_base"
+}
+
 # Docker Hub registry cache for AMD builds.
 #
 # A separate repo (rocm/vllm-ci-cache) is used for BuildKit layer cache so
@@ -111,6 +119,7 @@ target "_ci-rocm" {
   args = {
     ARG_PYTORCH_ROCM_ARCH = PYTORCH_ROCM_ARCH
     USE_SCCACHE           = 0
+    CI_BASE_IMAGE         = CI_BASE_IMAGE
   }
 }
 
@@ -151,4 +160,29 @@ target "test-rocm-gfx950-ci" {
   cache-to   = get_cache_to_rocm()
   tags       = compact([IMAGE_TAG])
   output     = ["type=registry"]
+}
+
+# Image tags for the scheduled ci_base build (amd-ci-base.yaml pipeline).
+# CI_BASE_IMAGE_TAG_DATED is set by the pipeline to e.g. rocm/vllm-dev:ci_base-20250330.
+variable "CI_BASE_IMAGE_TAG" {
+  default = "rocm/vllm-dev:ci_base"
+}
+
+variable "CI_BASE_IMAGE_TAG_DATED" {
+  default = ""
+}
+
+# Scheduled target: builds only the ci_base stage (RIXL, DeepEP, torchcodec, etc.)
+# Run weekly by the amd-ci-base pipeline; per-PR builds then pull the result as
+# CI_BASE_IMAGE instead of rebuilding those slow layers on every commit.
+target "ci-base-rocm-ci" {
+  inherits   = ["_common-rocm", "_ci-rocm", "_labels"]
+  target     = "ci_base"
+  cache-from = get_cache_from_rocm()
+  cache-to   = get_cache_to_rocm()
+  tags = compact([
+    CI_BASE_IMAGE_TAG,
+    CI_BASE_IMAGE_TAG_DATED,
+  ])
+  output = ["type=registry"]
 }
