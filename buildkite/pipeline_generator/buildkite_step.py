@@ -266,9 +266,10 @@ def convert_group_step_to_buildkite_step(
                     amd_step.depends_on.extend([amd_block_step.key])
                 amd_mirror_steps.append(amd_step)
 
-        buildkite_group_steps.append(
-            BuildkiteGroupStep(group=group, steps=group_steps_list)
-        )
+        if group_steps_list:
+            buildkite_group_steps.append(
+                BuildkiteGroupStep(group=group, steps=group_steps_list)
+            )
 
     # If AMD mirror step exists, make it a group step
     if amd_mirror_steps:
