@@ -509,9 +509,12 @@ plugins:
         {% set ns.blocked = 0 %}
       {% endif %}
 
-      {# Resolve per-arch build key from agent_pool (e.g. mi250_1 → amd-build-gfx90a) #}
-      {% set step_arch = pool_to_arch[step.agent_pool] | default("") %}
-      {% set step_build_key = arch_to_build_key[step_arch] | default("amd-build") %}
+      {# Resolve per-arch build key from agent_pool (e.g. mi250_1 → amd-build-gfx90a).
+         Default to gfx942 (MI325) when pool is unknown — the all-archs build
+         ("amd-build") is blocked behind manual approval on PRs and would never
+         push, causing test steps to fail with a missing image. #}
+      {% set step_arch = pool_to_arch[step.agent_pool] | default("gfx942") %}
+      {% set step_build_key = arch_to_build_key[step_arch] | default("amd-build-gfx942") %}
 
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
