@@ -33,6 +33,8 @@ h200_test_plugin_template = {
         "HF_HOME",
         "CODECOV_TOKEN",
         "BUILDKITE_ANALYTICS_TOKEN",
+        "CUDA_VISIBLE_DEVICES",
+        "NVIDIA_VISIBLE_DEVICES",
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
