@@ -48,15 +48,14 @@ b200_plugin_template = {
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
-        "HF_HOME=/benchmark-hf-cache",
+        "HF_HOME",
         "HF_TOKEN",
         "CODECOV_TOKEN",
         "BUILDKITE_ANALYTICS_TOKEN",
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
-        "/data/benchmark-hf-cache:/benchmark-hf-cache",
-        "/data/benchmark-vllm-cache:/root/.cache/vllm",
+        "/raid:/raid",
     ],
 }
 
@@ -73,7 +72,7 @@ def get_docker_plugin(step: Step, image: str):
 
     if step.label == "Benchmarks" or step.mount_buildkite_agent:
         plugin["mount_buildkite_agent"] = True
-    if step.device == DeviceType.CPU and plugin.get("gpus"):
+    if step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM) and plugin.get("gpus"):
         del plugin["gpus"]
     # TODO: Add BUILDKITE_ANALYTICS_TOKEN and pytest addopts for fail_fast
     return plugin
