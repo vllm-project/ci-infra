@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
 import os
+import re
 
 from step import Step
 from utils_lib.docker_utils import get_image, get_ecr_cache_registry
@@ -8,6 +9,9 @@ from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
 from constants import DeviceType, AgentQueue
+
+# GPU keywords and multi-GPU patterns to skip
+_SKIP_GPU_KEYWORDS = re.compile(r'\b(H100|B200|H200)\b', re.IGNORECASE)
 
 
 class BuildkiteCommandStep(BaseModel):
@@ -51,6 +55,15 @@ class BuildkiteBlockStep(BaseModel):
 class BuildkiteGroupStep(BaseModel):
     group: str
     steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
+
+
+def _should_skip_step(step: Step) -> bool:
+    """Skip steps that target H100/B200/H200 or require more than 1 GPU."""
+    if _SKIP_GPU_KEYWORDS.search(step.label):
+        return True
+    if step.num_devices and step.num_devices > 1:
+        return True
+    return False
 
 
 def _get_step_plugin(step: Step):
@@ -194,6 +207,10 @@ def convert_group_step_to_buildkite_step(
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
+            # Skip steps targeting H100/B200/H200 or requiring multiple GPUs
+            if _should_skip_step(step):
+                continue
+
             # block step
             block_step = None
             if not _step_should_run(step, list_file_diff):
