@@ -56,6 +56,7 @@ b200_plugin_template = {
     "volumes": [
         "/dev/shm:/dev/shm",
         "/raid:/raid",
+        "/mnt/shared:/mnt/shared",
     ],
 }
 
