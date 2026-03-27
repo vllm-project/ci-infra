@@ -27,8 +27,8 @@ class PipelineGenerator:
                 global_config["commit"], global_config["github_repo_name"]
             )
 
-        # Skip if changes are doc-only
-        if global_config["docs_only_disable"] == "0":
+        # Skip if changes are doc-only (unless RUN_ALL is set)
+        if global_config["docs_only_disable"] == "0" and not global_config["run_all"]:
             if is_docs_only_change(global_config["list_file_diff"]):
                 print("List file diff: ", global_config["list_file_diff"])
                 print("All changes are doc-only, skipping CI.")

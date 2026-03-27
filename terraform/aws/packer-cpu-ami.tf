@@ -79,7 +79,7 @@ resource "aws_security_group" "packer_build" {
 locals {
   queues_parameters_packer = {
     packer-build-queue = {
-      BuildkiteAgentTokenParameterStorePath = aws_ssm_parameter.bk_agent_token_cluster_ci_us_east_1.name
+      BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_ci_us_east_1.name
       BuildkiteQueue                        = "packer_build_queue"
       InstanceTypes                         = "r6in.large"
       MaxSize                               = 2
