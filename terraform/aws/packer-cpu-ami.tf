@@ -104,6 +104,8 @@ locals {
   cpu_build_ami_queues = toset([
     "cpu-queue-premerge-us-east-1",
     "cpu-queue-postmerge-us-east-1",
+    "small-cpu-queue-release",
+    "cpu-queue-release",
   ])
 
 }
@@ -278,7 +280,9 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         ]
         Resource = [
           "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-premerge-us-east-1/*",
-          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-postmerge-us-east-1/*"
+          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-postmerge-us-east-1/*",
+          "arn:aws:cloudformation:us-east-1:*:stack/bk-small-cpu-queue-release/*",
+          "arn:aws:cloudformation:us-east-1:*:stack/bk-cpu-queue-release/*",
         ]
       },
       # EC2 LaunchTemplate permissions - for direct AMI updates
@@ -309,7 +313,9 @@ resource "aws_iam_policy" "packer_ami_builder_policy" {
         Action = "iam:PassRole"
         Resource = [
           "arn:aws:iam::*:role/bk-cpu-queue-premerge-us-east-1-*",
-          "arn:aws:iam::*:role/bk-cpu-queue-postmerge-us-east-1-*"
+          "arn:aws:iam::*:role/bk-cpu-queue-postmerge-us-east-1-*",
+          "arn:aws:iam::*:role/bk-small-cpu-queue-release-*",
+          "arn:aws:iam::*:role/bk-cpu-queue-release-*",
         ]
       }
     ]
