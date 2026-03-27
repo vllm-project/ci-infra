@@ -112,6 +112,13 @@ upload_pipeline() {
     exit 0
 }
 
+# AMD agents use BUILDKITE_GIT_CLONE_FLAGS=--depth=1 to avoid timing out on
+# full clones of the vllm repo (~184k objects). Deepen here so git merge-base
+# has enough history. 50 commits covers all realistic PR branch depths.
+if git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
+    git fetch --depth=50 origin main 2>/dev/null || true
+fi
+
 get_diff() {
     $(git add .)
     echo $(git diff --name-only --diff-filter=ACMDR $(git merge-base origin/main HEAD))

@@ -235,16 +235,17 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
-                amd_block_step = None
+                amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
+                # Block step depends on the same build the mirror step uses
+                # (per-arch when available, fat build otherwise).
+                mirror_build_dep = amd_step.depends_on[0] if amd_step.depends_on else "image-build-amd"
                 amd_block_step = BuildkiteBlockStep(
                     block=f"Run AMD: {step.label}",
-                    depends_on=["image-build-amd"],
+                    depends_on=[mirror_build_dep],
                     key=f"block-amd-{_generate_step_key(step.label)}",
                 )
                 amd_mirror_steps.append(amd_block_step)
-                amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
-                if amd_block_step:
-                    amd_step.depends_on.extend([amd_block_step.key])
+                amd_step.depends_on.append(amd_block_step.key)
                 amd_mirror_steps.append(amd_step)
 
         buildkite_group_steps.append(
@@ -265,6 +266,11 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     global_config = get_global_config()
     if step.key and step.key.startswith("image-build"):
+        # Fat all-arch build (image-build-amd) only auto-runs on main;
+        # on PR branches it gets a block step so it's on-demand.
+        # Per-arch builds (image-build-amd-gfx*) always auto-run.
+        if step.key == "image-build-amd" and global_config["branch"] != "main":
+            return False
         return True
     if global_config["nightly"] == "1":
         return True
@@ -334,6 +340,27 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
     }
 
+    # Map device type to GPU architecture for per-arch image builds.
+    # When a per-arch build step (image-build-amd-<arch>) exists, prefer it
+    # over the fat all-arch build (image-build-amd) for faster CI.
+    _device_to_arch = {
+        DeviceType.AMD_MI250_1: "gfx90a",
+        DeviceType.AMD_MI250_2: "gfx90a",
+        DeviceType.AMD_MI250_4: "gfx90a",
+        DeviceType.AMD_MI250_8: "gfx90a",
+        DeviceType.AMD_MI325_1: "gfx942",
+        DeviceType.AMD_MI325_2: "gfx942",
+        DeviceType.AMD_MI325_4: "gfx942",
+        DeviceType.AMD_MI325_8: "gfx942",
+        DeviceType.AMD_MI355_1: "gfx950",
+        DeviceType.AMD_MI355_2: "gfx950",
+        DeviceType.AMD_MI355_4: "gfx950",
+        DeviceType.AMD_MI355_8: "gfx950",
+    }
+    arch = _device_to_arch.get(amd_device)
+    arch_build_key = f"image-build-amd-{arch}" if arch else None
+    build_dep = arch_build_key if arch_build_key else "image-build-amd"
+
     amd_queue = amd_queue_map.get(amd_device)
     if not amd_queue:
         raise ValueError(f"Invalid AMD device: {amd_device}. Valid devices: {list(amd_queue_map.keys())}")
@@ -341,7 +368,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
     return BuildkiteCommandStep(
         label=amd_label,
         commands=[amd_command_wrapped],
-        depends_on=["image-build-amd"],
+        depends_on=[build_dep],
         agents={"queue": amd_queue},
         env={"DOCKER_BUILDKIT": "1", "VLLM_TEST_COMMANDS": amd_commands_str},
         priority=200,
