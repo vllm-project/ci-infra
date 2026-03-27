@@ -27,6 +27,20 @@ class Step(BaseModel):
     optional: Optional[bool] = False
     no_plugin: Optional[bool] = False
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
+    torch_nightly: Optional[bool] = False
+
+    @model_validator(mode="after")
+    def normalize_torch_nightly_to_mirror(self) -> Self:
+        """Support both `torch_nightly: true` and `mirror: {torch_nightly: {}}`.
+
+        If the legacy `torch_nightly: true` field is set, promote it into the
+        `mirror` dict so the rest of the code only needs to check one place.
+        """
+        if self.torch_nightly:
+            if self.mirror is None:
+                self.mirror = {}
+            self.mirror.setdefault("torch_nightly", {})
+        return self
 
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
