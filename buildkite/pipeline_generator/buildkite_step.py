@@ -235,8 +235,8 @@ def convert_group_step_to_buildkite_step(
 
             group_steps_list.append(buildkite_step)
 
-            # Collect steps marked for torch nightly testing
-            if step.torch_nightly:
+            # Collect steps marked for torch nightly testing via mirror field
+            if step.mirror and step.mirror.get("torch_nightly") is not None:
                 torch_nightly_steps_collected.append(step)
 
             # Create AMD mirror step and its block step if specified/applicable
@@ -263,7 +263,7 @@ def convert_group_step_to_buildkite_step(
             BuildkiteGroupStep(group="Hardware-AMD Tests", steps=amd_mirror_steps)
         )
 
-    # Create torch nightly group if any steps have torch_nightly: true
+    # Create torch nightly group if any steps have mirror.torch_nightly
     if torch_nightly_steps_collected:
         nightly_group = _create_torch_nightly_group(
             torch_nightly_steps_collected, list_file_diff, variables_to_inject

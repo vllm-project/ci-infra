@@ -27,7 +27,6 @@ class Step(BaseModel):
     optional: Optional[bool] = False
     no_plugin: Optional[bool] = False
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
-    torch_nightly: Optional[bool] = False
 
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
