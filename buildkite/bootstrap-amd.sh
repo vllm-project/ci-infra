@@ -23,9 +23,35 @@ if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
     DOCS_ONLY_DISABLE=0
 fi
 
-if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
-    MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD)
+if [[ -z "${COV_ENABLED:-}" ]]; then
+    COV_ENABLED=0
 fi
+
+# ---------------------------------------------------------------------------
+# Git setup: ensure origin/main is available and compute merge base once.
+# On K8s (blobless clones with --filter=blob:none), origin/main may not be
+# fetched yet if the agent only fetched the PR branch. Also mark the repo
+# as safe in case the checkout uid differs from the running uid.
+# ---------------------------------------------------------------------------
+git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+
+if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
+    echo "origin/main not found, fetching..."
+    git fetch origin main --depth=1 2>/dev/null || git fetch origin main || true
+fi
+
+if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
+    MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD 2>/dev/null || echo "")
+    if [[ -z "$MERGE_BASE_COMMIT" ]]; then
+        echo "WARNING: Could not compute merge base, falling back to run_all=1"
+        RUN_ALL=1
+        MERGE_BASE_COMMIT="HEAD"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
 fail_fast() {
     DISABLE_LABEL="ci-no-fail-fast"
@@ -57,10 +83,25 @@ check_run_all_label() {
     fi
 }
 
-if [[ -z "${COV_ENABLED:-}" ]]; then
-    COV_ENABLED=0
-fi
+# ---------------------------------------------------------------------------
+# get_diff: compute changed files between commits only (no index staging).
+#
+# IMPORTANT: Do NOT use "git add ." here. On K8s blobless clones
+# (--filter=blob:none), git add . fetches and stages the entire repo,
+# producing a diff with every file and eventually exceeding ARG_MAX.
+# We only need committed changes between refs.
+# ---------------------------------------------------------------------------
+get_diff() {
+    git diff --name-only --diff-filter=ACMDR "$MERGE_BASE_COMMIT" HEAD 2>/dev/null || echo ""
+}
 
+get_diff_main() {
+    git diff --name-only --diff-filter=ACMDR HEAD~1 HEAD 2>/dev/null || echo ""
+}
+
+# ---------------------------------------------------------------------------
+# upload_pipeline: render and upload the Buildkite pipeline YAML
+# ---------------------------------------------------------------------------
 upload_pipeline() {
     echo "Uploading pipeline..."
     # Install minijinja
@@ -116,16 +157,9 @@ upload_pipeline() {
     exit 0
 }
 
-get_diff() {
-    $(git add .)
-    echo $(git diff --name-only --diff-filter=ACMDR $MERGE_BASE_COMMIT)
-}
-
-get_diff_main() {
-    $(git add .)
-    echo $(git diff --name-only --diff-filter=ACMDR HEAD~1)
-}
-
+# ---------------------------------------------------------------------------
+# Compute file diff
+# ---------------------------------------------------------------------------
 file_diff=$(get_diff)
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
     file_diff=$(get_diff_main)
@@ -238,11 +272,10 @@ else
     echo "No critical changes, using precompiled wheels"
 fi
 
-
-# Reuse file_diff instead of calling get_diff again.
-# When run_all=1, the template ignores list_file_diff entirely, so pass a
-# short sentinel to avoid exceeding ARG_MAX on K8s fresh clones where the
-# diff can be massive.
+# Build LIST_FILE_DIFF from the already-computed file_diff.
+# When run_all=1, the jinja template ignores list_file_diff (all tests are
+# unblocked unconditionally), so use a short sentinel to avoid exceeding
+# ARG_MAX when the diff is large (K8s fresh clones).
 if [[ $RUN_ALL -eq 1 ]]; then
     LIST_FILE_DIFF="run_all"
 else
