@@ -1,0 +1,139 @@
+name: Trigger vLLM Buildkite CI
+
+# This workflow automatically triggers vLLM Buildkite CI builds when ci-infra PRs are labeled.
+# It enables testing ci-infra changes against the vLLM codebase before merging.
+
+on:
+  pull_request:
+    types: [opened, synchronize, labeled, unlabeled]
+
+# Only allow one build per PR to avoid redundant builds
+concurrency:
+  group: trigger-vllm-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check-labels:
+    name: Check for CI trigger labels
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+      pipeline: ${{ steps.check.outputs.pipeline }}
+    steps:
+      - name: Check for opt-in labels
+        id: check
+        run: |
+          # Check if PR has ci-run-all or ci-fast-check-only label
+          LABELS='${{ toJSON(github.event.pull_request.labels.*.name) }}'
+
+          if echo "$LABELS" | grep -q "ci-run-all"; then
+            echo "should-run=true" >> $GITHUB_OUTPUT
+            echo "pipeline=vllm" >> $GITHUB_OUTPUT
+            echo "✅ Found 'ci-run-all' label - will trigger full CI pipeline"
+          elif echo "$LABELS" | grep -q "ci-fast-check-only"; then
+            echo "should-run=true" >> $GITHUB_OUTPUT
+            echo "pipeline=fastcheck" >> $GITHUB_OUTPUT
+            echo "✅ Found 'ci-fast-check-only' label - will trigger fastcheck pipeline"
+          else
+            echo "should-run=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  No CI trigger labels found - skipping"
+            echo "ℹ️  Add 'ci-run-all' or 'ci-fast-check-only' label to trigger CI"
+          fi
+
+  trigger-buildkite:
+    name: Trigger Buildkite Build
+    needs: check-labels
+    if: needs.check-labels.outputs.should-run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for matching vLLM branch
+        id: check-branch
+        run: |
+          BRANCH_NAME="${{ github.head_ref }}"
+          echo "ℹ️  ci-infra PR branch: $BRANCH_NAME"
+
+          # Check if a branch with the same name exists in vllm-project/vllm
+          if gh api repos/vllm-project/vllm/branches/$BRANCH_NAME --silent 2>/dev/null; then
+            echo "vllm_branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
+            echo "✅ Found matching branch in vllm-project/vllm: $BRANCH_NAME"
+            echo "   Will test ci-infra changes against this branch"
+          else
+            echo "vllm_branch=main" >> $GITHUB_OUTPUT
+            echo "ℹ️  No matching branch found in vllm-project/vllm"
+            echo "   Will test ci-infra changes against: main"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Determine pipeline details
+        id: pipeline-info
+        run: |
+          PIPELINE="${{ needs.check-labels.outputs.pipeline }}"
+          if [[ "$PIPELINE" == "vllm" ]]; then
+            echo "pipeline_name=Full CI"
+            echo "pipeline_emoji=📋"
+          else
+            echo "pipeline_name=Fastcheck"
+            echo "pipeline_emoji=⚡"
+          fi
+
+      - name: Trigger Buildkite Build
+        id: trigger
+        uses: buildkite/trigger-pipeline-action@v2.4.1
+        with:
+          buildkite_api_access_token: ${{ secrets.BUILDKITE_API_TOKEN }}
+          pipeline: "vllm-project/${{ needs.check-labels.outputs.pipeline }}"
+          branch: "${{ steps.check-branch.outputs.vllm_branch }}"
+          commit: "HEAD"
+          message: "🔧 Testing ci-infra PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+          build_env_vars: |
+            {
+              "VLLM_CI_BRANCH": "${{ github.head_ref }}"
+            }
+
+      - name: Post build info
+        if: success()
+        run: |
+          echo "✅ Successfully triggered Buildkite build"
+          echo ""
+          echo "📊 Build Details:"
+          echo "  • Pipeline: ${{ needs.check-labels.outputs.pipeline }}"
+          echo "  • vLLM Branch: ${{ steps.check-branch.outputs.vllm_branch }}"
+          echo "  • ci-infra Branch: ${{ github.head_ref }}"
+          echo "  • Build URL: ${{ steps.trigger.outputs.url }}"
+          echo ""
+          echo "🔗 View build: ${{ steps.trigger.outputs.url }}"
+
+      - name: Comment on PR
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pipelineName = '${{ needs.check-labels.outputs.pipeline }}' === 'vllm' ? 'Full CI' : 'Fastcheck';
+            const emoji = '${{ needs.check-labels.outputs.pipeline }}' === 'vllm' ? '📋' : '⚡';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `${emoji} **Buildkite ${pipelineName} Build Triggered**\n\n` +
+                    `Testing ci-infra changes from this PR against vLLM.\n\n` +
+                    `**Build Details:**\n` +
+                    `- **vLLM Branch:** \`${{ steps.check-branch.outputs.vllm_branch }}\`\n` +
+                    `- **ci-infra Branch:** \`${{ github.head_ref }}\`\n` +
+                    `- **Pipeline:** \`${{ needs.check-labels.outputs.pipeline }}\`\n\n` +
+                    `🔗 [View Build](${{ steps.trigger.outputs.url }})`
+            });
+
+      - name: Handle errors
+        if: failure()
+        run: |
+          echo "❌ Failed to trigger Buildkite build"
+          echo ""
+          echo "Common issues:"
+          echo "  1. Check that BUILDKITE_API_TOKEN secret is set correctly"
+          echo "  2. Verify the API token has 'write_builds' scope"
+          echo "  3. Confirm the pipeline name is correct (vllm or fastcheck)"
+          echo ""
+          echo "See job logs above for detailed error information"
+          exit 1
