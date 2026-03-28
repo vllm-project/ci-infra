@@ -23,6 +23,10 @@ if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
     DOCS_ONLY_DISABLE=0
 fi
 
+if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
+    MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD)
+fi
+
 fail_fast() {
     DISABLE_LABEL="ci-no-fail-fast"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
@@ -100,7 +104,7 @@ upload_pipeline() {
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
-            -D vllm_merge_base_commit="$(git merge-base origin/main HEAD)" \
+            -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
             | sed '/^[[:space:]]*$/d' \
@@ -114,7 +118,7 @@ upload_pipeline() {
 
 get_diff() {
     $(git add .)
-    echo $(git diff --name-only --diff-filter=ACMDR $(git merge-base origin/main HEAD))
+    echo $(git diff --name-only --diff-filter=ACMDR $MERGE_BASE_COMMIT)
 }
 
 get_diff_main() {
@@ -131,27 +135,29 @@ fi
 # Early exit start: skip pipeline if conditions are met
 # ----------------------------------------------------------------------
 
-# skip pipeline if all changed files are under docs/
+# skip pipeline if *every* changed file is docs/** OR **/*.md OR mkdocs.yaml
 if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
   if [[ -n "${file_diff:-}" ]]; then
     docs_only=1
-    # Robust iteration over newline-separated file_diff
+    # Iterate robustly over newline-separated paths
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
-      # **Policy:** only skip if *every* path starts with docs/
-      if [[ "$f" != docs/* ]]; then
+      # Match any of: docs/**  OR  **/*.md  OR  mkdocs.yaml
+      if [[ "${f#docs/}" != "$f" || "$f" == *.md || "$f" == "mkdocs.yaml" ]]; then
+        continue
+      else
         docs_only=0
         break
       fi
     done < <(printf '%s\n' "$file_diff" | tr ' ' '\n' | tr -d '\r')
 
     if [[ "$docs_only" -eq 1 ]]; then
-      buildkite-agent annotate ":memo: CI skipped — docs/** only changes detected
+      buildkite-agent annotate ":memo: CI skipped — docs/Markdown/mkdocs-only changes detected
 
 \`\`\`
-${file_diff}
+$(printf '%s\n' "$file_diff" | tr ' ' '\n')
 \`\`\`" --style "info" || true
-      echo "[docs-only] All changes are under docs/. Exiting before pipeline upload."
+      echo "[docs-only] All changes are docs/**, *.md, or mkdocs.yaml. Exiting before pipeline upload."
       exit 0
     fi
   fi
