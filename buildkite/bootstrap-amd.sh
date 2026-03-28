@@ -239,20 +239,14 @@ else
 fi
 
 
-LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
-if [[ $BUILDKITE_BRANCH == "main" ]]; then
-    LIST_FILE_DIFF=$(get_diff_main | tr ' ' '|')
-fi
-
-# On K8s fresh clones the diff against origin/main can be huge and exceed
-# ARG_MAX when passed to minijinja-cli via -D, causing "Argument list too long".
-# Cap the length to stay safely under the limit. If truncated, force run_all
-# since we can't reliably determine which tests to skip.
-MAX_DIFF_LEN=100000
-if [[ ${#LIST_FILE_DIFF} -gt $MAX_DIFF_LEN ]]; then
-    echo "LIST_FILE_DIFF too large (${#LIST_FILE_DIFF} chars), truncating and forcing run_all=1"
+# Reuse file_diff instead of calling get_diff again.
+# When run_all=1, the template ignores list_file_diff entirely, so pass a
+# short sentinel to avoid exceeding ARG_MAX on K8s fresh clones where the
+# diff can be massive.
+if [[ $RUN_ALL -eq 1 ]]; then
     LIST_FILE_DIFF="run_all"
-    RUN_ALL=1
+else
+    LIST_FILE_DIFF=$(echo "$file_diff" | tr ' ' '|')
 fi
 
 upload_pipeline
