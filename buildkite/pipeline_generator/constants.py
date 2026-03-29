@@ -64,3 +64,33 @@ class AgentQueue(str, Enum):
     AMD_MI355_2 = "amd_mi355_2"
     AMD_MI355_4 = "amd_mi355_4"
     AMD_MI355_8 = "amd_mi355_8"
+
+
+DEVICE_TO_QUEUE = {
+    DeviceType.CPU_SMALL: AgentQueue.SMALL_CPU_PREMERGE,
+    DeviceType.CPU_MEDIUM: AgentQueue.MEDIUM_CPU_PREMERGE,
+    DeviceType.CPU: AgentQueue.CPU_PREMERGE_US_EAST_1,
+    DeviceType.A100: AgentQueue.A100,
+    DeviceType.H100: AgentQueue.MITHRIL_H100,
+    DeviceType.H200: AgentQueue.H200,
+    DeviceType.B200: AgentQueue.B200,
+    DeviceType.INTEL_CPU: AgentQueue.INTEL_CPU,
+    DeviceType.INTEL_HPU: AgentQueue.INTEL_HPU,
+    DeviceType.INTEL_GPU: AgentQueue.INTEL_GPU,
+    DeviceType.ARM_CPU: AgentQueue.ARM_CPU,
+    DeviceType.AMD_CPU: AgentQueue.AMD_CPU,
+    DeviceType.GH200: AgentQueue.GH200,
+    DeviceType.ASCEND: AgentQueue.ASCEND,
+    DeviceType.AMD_MI250_1: AgentQueue.AMD_MI250_1,
+    DeviceType.AMD_MI250_2: AgentQueue.AMD_MI250_2,
+    DeviceType.AMD_MI250_4: AgentQueue.AMD_MI250_4,
+    DeviceType.AMD_MI250_8: AgentQueue.AMD_MI250_8,
+    DeviceType.AMD_MI325_1: AgentQueue.AMD_MI325_1,
+    DeviceType.AMD_MI325_2: AgentQueue.AMD_MI325_2,
+    DeviceType.AMD_MI325_4: AgentQueue.AMD_MI325_4,
+    DeviceType.AMD_MI325_8: AgentQueue.AMD_MI325_8,
+    DeviceType.AMD_MI355_1: AgentQueue.AMD_MI355_1,
+    DeviceType.AMD_MI355_2: AgentQueue.AMD_MI355_2,
+    DeviceType.AMD_MI355_4: AgentQueue.AMD_MI355_4,
+    DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
+}
