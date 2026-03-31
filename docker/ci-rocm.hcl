@@ -67,8 +67,11 @@ variable "CI_BASE_IMAGE" {
 
 # Docker Hub registry cache for AMD builds.
 #
-# A separate repo (rocm/vllm-ci-cache) is used for BuildKit layer cache so
-# that mode=max intermediate-stage blobs don't pollute the image repo.
+# A separate repo (rocm/vllm-ci-cache) is used for BuildKit layer cache.
+# cache-to uses mode=min (final layers only) to avoid pushing the large
+# rocm/vllm-dev:base layers (~7.25GB ROCm runtime) which cause Docker Hub
+# upload session timeouts (400 Bad Request). The base layers are already
+# available as a separate image on Docker Hub.
 # Docker Hub auto-creates the repo on first push.
 #
 # DOCKERHUB_CACHE_TO is set by the pipeline only on main-branch builds to
@@ -103,9 +106,9 @@ function "get_cache_to_rocm" {
   params = []
   result = compact([
     # Commit-specific tag for traceability and re-run cache hits
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${BUILDKITE_COMMIT},mode=max,compression=zstd" : "",
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${BUILDKITE_COMMIT},mode=min,compression=zstd" : "",
     # rocm-latest — only set on main-branch builds (controlled by pipeline via DOCKERHUB_CACHE_TO)
-    DOCKERHUB_CACHE_TO != "" ? "type=registry,ref=${DOCKERHUB_CACHE_TO},mode=max,compression=zstd" : "",
+    DOCKERHUB_CACHE_TO != "" ? "type=registry,ref=${DOCKERHUB_CACHE_TO},mode=min,compression=zstd" : "",
   ])
 }
 
