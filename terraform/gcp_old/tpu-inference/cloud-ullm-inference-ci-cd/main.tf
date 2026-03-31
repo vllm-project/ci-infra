@@ -101,3 +101,13 @@ module "ci_cpu_64_core" {
   buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
+
+module "ci_monitoring" {
+  source    = "../modules/ci_monitoring"
+  providers = {
+    google-beta = google-beta.us-central1-b
+  }
+
+  project_id                     = var.project_id
+  buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+}
