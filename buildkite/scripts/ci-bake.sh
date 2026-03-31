@@ -160,3 +160,49 @@ echo "--- :docker: Building ${TARGET}"
 docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
 
 echo "--- :white_check_mark: Build complete"
+
+# ---------------------------------------------------------------------------
+# Wheel artifact upload.
+#
+# If the bake target included export-wheel-rocm (via a *-ci-with-wheel group),
+# the wheel is already extracted to ./wheel-export/. Compress and upload it
+# as a Buildkite artifact so test jobs can assemble images locally from
+# ci_base + wheel instead of pulling large data from Docker Hub.
+#
+# If ./wheel-export/ doesn't exist, this section is a no-op.
+#
+# Artifact path: artifacts/vllm-wheel/*.whl.zst
+# ---------------------------------------------------------------------------
+WHEEL_DIR="./wheel-export"
+if [[ -d "${WHEEL_DIR}" ]] && ls "${WHEEL_DIR}"/*.whl >/dev/null 2>&1; then
+    echo "--- :package: Compressing and uploading vLLM wheel"
+
+    ARTIFACT_DIR="artifacts/vllm-wheel"
+    mkdir -p "${ARTIFACT_DIR}"
+
+    for whl in "${WHEEL_DIR}"/*.whl; do
+        [ -f "${whl}" ] || continue
+        WHL_NAME=$(basename "${whl}")
+        echo "Compressing ${WHL_NAME}..."
+        zstd -19 -T0 "${whl}" -o "${ARTIFACT_DIR}/${WHL_NAME}.zst"
+        echo "  Original: $(du -sh "${whl}" | cut -f1)"
+        echo "  Compressed: $(du -sh "${ARTIFACT_DIR}/${WHL_NAME}.zst" | cut -f1)"
+    done
+
+    if [ -d "${WHEEL_DIR}/requirements" ]; then
+        cp -r "${WHEEL_DIR}/requirements" "${ARTIFACT_DIR}/"
+    fi
+    if [ -d "${WHEEL_DIR}/tests" ]; then
+        tar cf - -C "${WHEEL_DIR}" tests | zstd -9 -T0 -o "${ARTIFACT_DIR}/tests.tar.zst"
+        echo "  Tests archive: $(du -sh "${ARTIFACT_DIR}/tests.tar.zst" | cut -f1)"
+    fi
+
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent artifact upload "${ARTIFACT_DIR}/*"
+        echo "Wheel artifacts uploaded"
+    else
+        echo "Not in Buildkite, skipping artifact upload"
+    fi
+
+    rm -rf "${WHEEL_DIR}"
+fi
