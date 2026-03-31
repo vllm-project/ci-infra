@@ -7,7 +7,7 @@ from utils_lib.docker_utils import get_image, get_ecr_cache_registry
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
-from constants import DeviceType, AgentQueue
+from constants import DeviceType, AgentQueue, DEVICE_TO_QUEUE
 
 
 class BuildkiteCommandStep(BaseModel):
@@ -62,52 +62,24 @@ def _get_step_plugin(step: Step):
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu))}
 
 
-def get_agent_queue(step: Step):
+def get_agent_queue(step: Step) -> str:
+    """Map a step to its Buildkite agent queue."""
     branch = get_global_config()["branch"]
+
+    # Docker image build steps use branch-dependent queues
     if step.label.startswith(":docker:"):
         if "arm64" in step.label:
-            if branch == "main":
-                return AgentQueue.ARM64_CPU_POSTMERGE
-            else:
-                return AgentQueue.ARM64_CPU_PREMERGE
-        if branch == "main":
-            return AgentQueue.CPU_POSTMERGE_US_EAST_1
-        else:
-            return AgentQueue.CPU_PREMERGE_US_EAST_1
-    elif step.label == "Documentation Build":
-        return AgentQueue.SMALL_CPU_PREMERGE
-    elif step.device == DeviceType.CPU_SMALL:
-        return AgentQueue.SMALL_CPU_PREMERGE
-    elif step.device == DeviceType.CPU_MEDIUM:
-        return AgentQueue.MEDIUM_CPU_PREMERGE
-    elif step.device == DeviceType.CPU:
-        return AgentQueue.CPU_PREMERGE_US_EAST_1
-    elif step.device == DeviceType.A100:
-        return AgentQueue.A100
-    elif step.device == DeviceType.H100:
-        return AgentQueue.MITHRIL_H100
-    elif step.device == DeviceType.H200:
-        return AgentQueue.H200
-    elif step.device == DeviceType.B200:
-        return AgentQueue.B200
-    elif step.device == DeviceType.INTEL_CPU:
-        return AgentQueue.INTEL_CPU
-    elif step.device == DeviceType.INTEL_HPU:
-        return AgentQueue.INTEL_HPU
-    elif step.device == DeviceType.INTEL_GPU:
-        return AgentQueue.INTEL_GPU
-    elif step.device == DeviceType.ARM_CPU:
-        return AgentQueue.ARM_CPU
-    elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
-        return AgentQueue.AMD_CPU
-    elif step.device == DeviceType.GH200:
-        return AgentQueue.GH200
-    elif step.device == DeviceType.ASCEND:
-        return AgentQueue.ASCEND
-    elif step.num_devices == 2 or step.num_devices == 4:
+            return AgentQueue.ARM64_CPU_POSTMERGE if branch == "main" else AgentQueue.ARM64_CPU_PREMERGE
+        return AgentQueue.CPU_POSTMERGE_US_EAST_1 if branch == "main" else AgentQueue.CPU_PREMERGE_US_EAST_1
+
+    # Direct device-to-queue lookup
+    if step.device in DEVICE_TO_QUEUE:
+        return DEVICE_TO_QUEUE[step.device]
+
+    # GPU count-based fallback
+    if step.num_devices in (2, 4):
         return AgentQueue.GPU_4
-    else:
-        return AgentQueue.GPU_1
+    return AgentQueue.GPU_1
 
 
 def _get_variables_to_inject() -> Dict[str, str]:
@@ -318,25 +290,10 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
     device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
     amd_label = f"AMD: {step.label} ({device_type})"
 
-    # Map device type to agent queue
-    amd_queue_map = {
-        DeviceType.AMD_MI250_1: AgentQueue.AMD_MI250_1,
-        DeviceType.AMD_MI250_2: AgentQueue.AMD_MI250_2,
-        DeviceType.AMD_MI250_4: AgentQueue.AMD_MI250_4,
-        DeviceType.AMD_MI250_8: AgentQueue.AMD_MI250_8,
-        DeviceType.AMD_MI325_1: AgentQueue.AMD_MI325_1,
-        DeviceType.AMD_MI325_2: AgentQueue.AMD_MI325_2,
-        DeviceType.AMD_MI325_4: AgentQueue.AMD_MI325_4,
-        DeviceType.AMD_MI325_8: AgentQueue.AMD_MI325_8,
-        DeviceType.AMD_MI355_1: AgentQueue.AMD_MI355_1,
-        DeviceType.AMD_MI355_2: AgentQueue.AMD_MI355_2,
-        DeviceType.AMD_MI355_4: AgentQueue.AMD_MI355_4,
-        DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
-    }
-
-    amd_queue = amd_queue_map.get(amd_device)
+    # Map device type to agent queue using centralized mapping
+    amd_queue = DEVICE_TO_QUEUE.get(amd_device)
     if not amd_queue:
-        raise ValueError(f"Invalid AMD device: {amd_device}. Valid devices: {list(amd_queue_map.keys())}")
+        raise ValueError(f"Invalid AMD device: {amd_device}")
 
     return BuildkiteCommandStep(
         label=amd_label,
