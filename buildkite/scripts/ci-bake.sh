@@ -251,18 +251,18 @@ echo "--- :white_check_mark: Build complete"
 #
 # If ./wheel-export/ doesn't exist, this section is a no-op.
 #
-# Artifact paths (arch-namespaced + legacy):
-#   artifacts/vllm-wheel-{arch}/*.whl.zst   (per-arch, e.g. vllm-wheel-gfx942)
-#   artifacts/vllm-wheel-fat/*.whl.zst      (fat multi-arch build)
-#   artifacts/vllm-wheel/*.whl.zst          (legacy path, always written)
+# Artifact paths:
+#   artifacts/vllm-wheel-{arch}/*.whl.zst        (per-arch, e.g. vllm-wheel-gfx942)
+#   artifacts/vllm-wheel-multi-arch/*.whl.zst    (multi-arch build)
+#   artifacts/vllm-wheel/*.whl.zst               (legacy path, always written)
 # ---------------------------------------------------------------------------
 WHEEL_DIR="./wheel-export"
 if [[ -d "${WHEEL_DIR}" ]] && ls "${WHEEL_DIR}"/*.whl >/dev/null 2>&1; then
     echo "--- :package: Compressing and uploading vLLM wheel"
 
     # Determine architecture suffix from PYTORCH_ROCM_ARCH.
-    # Single arch (no semicolons) -> e.g. "gfx942"; multi-arch -> "fat".
-    WHEEL_ARCH_SUFFIX="fat"
+    # Single arch (no semicolons) -> e.g. "gfx942"; multi-arch -> "multi-arch".
+    WHEEL_ARCH_SUFFIX="multi-arch"
     if [[ -n "${PYTORCH_ROCM_ARCH:-}" ]] && [[ "${PYTORCH_ROCM_ARCH}" != *";"* ]]; then
         WHEEL_ARCH_SUFFIX="${PYTORCH_ROCM_ARCH}"
     fi

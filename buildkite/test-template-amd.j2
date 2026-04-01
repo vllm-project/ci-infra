@@ -13,6 +13,7 @@
 {% set docker_image_amd_gfx90a = "rocm/vllm-ci:$BUILDKITE_COMMIT-gfx90a" %}
 {% set docker_image_amd_gfx942 = "rocm/vllm-ci:$BUILDKITE_COMMIT-gfx942" %}
 {% set docker_image_amd_gfx950 = "rocm/vllm-ci:$BUILDKITE_COMMIT-gfx950" %}
+{% set amd_legacy_image_mode = (vllm_rocm_ci_legacy_docker_tag == "1") %}
 {% set pool_to_arch = {
   "mi250_1": "gfx90a", "mi250_2": "gfx90a", "mi250_4": "gfx90a", "mi250_8": "gfx90a",
   "mi325_1": "gfx942", "mi325_2": "gfx942", "mi325_4": "gfx942", "mi325_8": "gfx942",
@@ -332,16 +333,17 @@ plugins:
         agents:
           queue: amd-cpu
 
-      # Fat multi-arch image: auto-runs on main (for cache warming / release),
-      # blocked behind manual approval on PR / hardware-test builds.
-      {% if branch != "main" %}
-      - block: "Run AMD fat build (all archs)"
+      # Multi-arch image: auto-runs on main and in legacy image mode.
+      # On PR / hardware-test builds, it stays behind manual approval unless
+      # legacy image mode is enabled for compatibility with older hooks.
+      {% if branch != "main" and not amd_legacy_image_mode %}
+      - block: "Run AMD multi-arch build"
         depends_on: "amd-ci-base-ready"
         key: "block-amd-build"
       {% endif %}
 
-      - label: "AMD: :docker: build image (all archs)"
-        {% if branch == "main" %}
+      - label: "AMD: :docker: build image (multi-arch)"
+        {% if branch == "main" or amd_legacy_image_mode %}
         depends_on: "amd-ci-base-ready"
         {% else %}
         depends_on: "block-amd-build"
@@ -485,12 +487,16 @@ plugins:
         {% set ns.blocked = 0 %}
       {% endif %}
 
-      {# Resolve per-arch build key from agent_pool (e.g. mi250_1 → amd-build-gfx90a).
-         Default to gfx942 (MI325) when pool is unknown — the all-archs build
-         ("amd-build") is blocked behind manual approval on PRs and would never
-         push, causing test steps to fail with a missing image. #}
+      {# Resolve the build key used by the test step.
+         Legacy image mode forces all tests to wait for the multi-arch build so
+         they stay compatible with older hooks that still warm only the
+         commit-only image tag. Otherwise we use the per-arch build key. #}
       {% set step_arch = pool_to_arch[step.agent_pool] | default("gfx942") %}
+      {% if amd_legacy_image_mode %}
+      {% set step_build_key = "amd-build" %}
+      {% else %}
       {% set step_build_key = arch_to_build_key[step_arch] | default("amd-build-gfx942") %}
+      {% endif %}
 
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
@@ -515,7 +521,7 @@ plugins:
           DOCKER_BUILDKIT: "1"
           DOCKER_IMAGE_NAME: "{{ arch_to_image[step_arch] | default(docker_image_amd) }}"
           VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
-          VLLM_ROCM_CI_LEGACY_DOCKER_TAG: "0"
+          VLLM_ROCM_CI_LEGACY_DOCKER_TAG: "{{ '1' if amd_legacy_image_mode else '0' }}"
           VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
         priority: 100
         {% if step.grade and step.grade == "Blocking" %}

@@ -233,7 +233,7 @@ def convert_group_step_to_buildkite_step(
             if step.mirror and step.mirror.get("amd"):
                 amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
                 # Block step depends on the same build the mirror step uses
-                # (per-arch when available, fat build otherwise).
+                # (per-arch when available, multi-arch build otherwise).
                 mirror_build_dep = amd_step.depends_on[0] if amd_step.depends_on else "image-build-amd"
                 amd_block_step = BuildkiteBlockStep(
                     block=f"Run AMD: {step.label}",
@@ -262,7 +262,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     global_config = get_global_config()
     if step.key and step.key.startswith("image-build"):
-        # Fat all-arch build (image-build-amd) only auto-runs on main;
+        # Multi-arch build (image-build-amd) only auto-runs on main;
         # on PR branches it gets a block step so it's on-demand.
         # Per-arch builds (image-build-amd-gfx*) always auto-run.
         if step.key == "image-build-amd" and global_config["branch"] != "main":
@@ -338,7 +338,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
 
     # Map device type to GPU architecture for per-arch image builds.
     # When a per-arch build step (image-build-amd-<arch>) exists, prefer it
-    # over the fat all-arch build (image-build-amd) for faster CI.
+    # over the multi-arch build (image-build-amd) for faster CI.
     _device_to_arch = {
         DeviceType.AMD_MI250_1: "gfx90a",
         DeviceType.AMD_MI250_2: "gfx90a",
