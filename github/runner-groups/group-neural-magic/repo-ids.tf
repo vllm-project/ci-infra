@@ -13,3 +13,7 @@ variable "speculators_id" {
 variable "vllm_id" {
     default = 599547518
 }
+
+variable "compressed_tensors_id" {
+    default = 781003631
+}
