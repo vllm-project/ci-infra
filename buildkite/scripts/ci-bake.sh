@@ -32,14 +32,61 @@
 set -euo pipefail
 
 # Check if image already exists (skip build if it does)
-if [[ -n "${IMAGE_TAG:-}" ]]; then
+#
+# For commit-tagged images (rocm/vllm-ci:$COMMIT), the tag is unique per
+# commit, so "exists = already built" is correct.
+#
+# For stable-tagged images (rocm/vllm-dev:ci_base), the tag always exists
+# after the first weekly build. To detect staleness, we compare a hash of
+# the ci_base-affecting source files against a label on the remote image.
+# If the hashes match, the image is current and we skip. If they differ
+# (or the label is missing), we rebuild.
+if [[ -n "${IMAGE_TAG:-}" && "${FORCE_BUILD:-0}" != "1" ]]; then
     echo "--- :mag: Checking if image exists"
     if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
-        echo "Image already exists: ${IMAGE_TAG}"
-        echo "Skipping build"
-        exit 0
+        if [[ -n "${CI_BASE_CONTENT_FILES:-}" ]]; then
+            LOCAL_HASH=$(cat ${CI_BASE_CONTENT_FILES} 2>/dev/null | sha256sum | cut -d' ' -f1)
+            echo "Local ci_base content hash: ${LOCAL_HASH:0:16}..."
+
+            REMOTE_HASH=$(docker buildx imagetools inspect "${IMAGE_TAG}" --raw 2>/dev/null \
+                | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    if data.get('manifests'):
+        digest = data['manifests'][0]['digest']
+        import subprocess
+        r = subprocess.run(
+            ['docker', 'buildx', 'imagetools', 'inspect',
+             '${IMAGE_TAG}@' + digest, '--raw'],
+            capture_output=True, text=True)
+        data = json.loads(r.stdout)
+    labels = data.get('config', {}).get('Labels', {})
+    print(labels.get('vllm.ci_base.content_hash', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+
+            if [[ -n "${REMOTE_HASH}" ]]; then
+                echo "Remote ci_base content hash: ${REMOTE_HASH:0:16}..."
+                if [[ "${LOCAL_HASH}" == "${REMOTE_HASH}" ]]; then
+                    echo "Content hashes match -- ci_base is current"
+                    echo "Skipping build"
+                    exit 0
+                else
+                    echo "Content hashes DIFFER -- ci_base is stale, rebuilding"
+                fi
+            else
+                echo "Remote image has no content hash label -- rebuilding to add it"
+            fi
+        else
+            echo "Image already exists: ${IMAGE_TAG}"
+            echo "Skipping build"
+            exit 0
+        fi
+    else
+        echo "Image not found, proceeding with build"
     fi
-    echo "Image not found, proceeding with build"
 fi
 
 # Configuration with defaults
@@ -136,6 +183,14 @@ fi
 echo "Active builder:"
 docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
 
+# Deepen shallow clones so HEAD~1 and merge-base are available.
+# Buildkite agents often clone with --depth=1; without deepening, git rev-parse
+# HEAD~1 and git merge-base both silently fail, disabling the per-commit cache layers.
+if git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
+    echo "Shallow clone detected — deepening for cache key computation"
+    git fetch --deepen=1 origin 2>/dev/null || true
+fi
+
 # Compute parent commit for cache fallback (if not already set)
 if [[ -z "${PARENT_COMMIT:-}" ]]; then
     PARENT_COMMIT=$(git rev-parse HEAD~1 2>/dev/null || echo "")
@@ -147,6 +202,31 @@ if [[ -z "${PARENT_COMMIT:-}" ]]; then
     fi
 else
     echo "Using provided PARENT_COMMIT: ${PARENT_COMMIT}"
+fi
+
+# Compute merge-base with main for an additional cache fallback layer.
+# Useful for long-lived PRs where parent-commit cache may be missing but the
+# merge-base (a real main commit) maps to a warm :rocm-latest snapshot.
+if [[ -z "${VLLM_MERGE_BASE_COMMIT:-}" ]]; then
+    git fetch --depth=1 origin main 2>/dev/null || true
+    VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD origin/main 2>/dev/null || echo "")
+    if [[ -n "${VLLM_MERGE_BASE_COMMIT}" ]]; then
+        echo "Computed merge base commit for cache fallback: ${VLLM_MERGE_BASE_COMMIT}"
+        export VLLM_MERGE_BASE_COMMIT
+    else
+        echo "Could not determine merge base (will skip that cache layer)"
+    fi
+else
+    echo "Using provided VLLM_MERGE_BASE_COMMIT: ${VLLM_MERGE_BASE_COMMIT}"
+fi
+
+# Compute and export ci_base content hash (if content files are specified).
+# This hash gets embedded as a label in the ci_base image via the bake file's
+# CI_BASE_CONTENT_HASH variable, so future builds can compare without rebuilding.
+if [[ -n "${CI_BASE_CONTENT_FILES:-}" ]]; then
+    CI_BASE_CONTENT_HASH=$(cat ${CI_BASE_CONTENT_FILES} 2>/dev/null | sha256sum | cut -d' ' -f1)
+    export CI_BASE_CONTENT_HASH
+    echo "ci_base content hash: ${CI_BASE_CONTENT_HASH:0:16}... (will be embedded as image label)"
 fi
 
 # Print resolved configuration for debugging and save for artifact upload
@@ -171,35 +251,52 @@ echo "--- :white_check_mark: Build complete"
 #
 # If ./wheel-export/ doesn't exist, this section is a no-op.
 #
-# Artifact path: artifacts/vllm-wheel/*.whl.zst
+# Artifact paths (arch-namespaced + legacy):
+#   artifacts/vllm-wheel-{arch}/*.whl.zst   (per-arch, e.g. vllm-wheel-gfx942)
+#   artifacts/vllm-wheel-fat/*.whl.zst      (fat multi-arch build)
+#   artifacts/vllm-wheel/*.whl.zst          (legacy path, always written)
 # ---------------------------------------------------------------------------
 WHEEL_DIR="./wheel-export"
 if [[ -d "${WHEEL_DIR}" ]] && ls "${WHEEL_DIR}"/*.whl >/dev/null 2>&1; then
     echo "--- :package: Compressing and uploading vLLM wheel"
 
-    ARTIFACT_DIR="artifacts/vllm-wheel"
-    mkdir -p "${ARTIFACT_DIR}"
+    # Determine architecture suffix from PYTORCH_ROCM_ARCH.
+    # Single arch (no semicolons) -> e.g. "gfx942"; multi-arch -> "fat".
+    WHEEL_ARCH_SUFFIX="fat"
+    if [[ -n "${PYTORCH_ROCM_ARCH:-}" ]] && [[ "${PYTORCH_ROCM_ARCH}" != *";"* ]]; then
+        WHEEL_ARCH_SUFFIX="${PYTORCH_ROCM_ARCH}"
+    fi
+    echo "Wheel arch suffix: ${WHEEL_ARCH_SUFFIX} (PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-unset})"
+
+    ARTIFACT_DIR="artifacts/vllm-wheel-${WHEEL_ARCH_SUFFIX}"
+    ARTIFACT_DIR_LEGACY="artifacts/vllm-wheel"
+    mkdir -p "${ARTIFACT_DIR}" "${ARTIFACT_DIR_LEGACY}"
 
     for whl in "${WHEEL_DIR}"/*.whl; do
         [ -f "${whl}" ] || continue
         WHL_NAME=$(basename "${whl}")
         echo "Compressing ${WHL_NAME}..."
         zstd -19 -T0 "${whl}" -o "${ARTIFACT_DIR}/${WHL_NAME}.zst"
+        # Also write to legacy path for backward compatibility
+        cp "${ARTIFACT_DIR}/${WHL_NAME}.zst" "${ARTIFACT_DIR_LEGACY}/${WHL_NAME}.zst"
         echo "  Original: $(du -sh "${whl}" | cut -f1)"
         echo "  Compressed: $(du -sh "${ARTIFACT_DIR}/${WHL_NAME}.zst" | cut -f1)"
     done
 
     if [ -d "${WHEEL_DIR}/requirements" ]; then
         cp -r "${WHEEL_DIR}/requirements" "${ARTIFACT_DIR}/"
+        cp -r "${WHEEL_DIR}/requirements" "${ARTIFACT_DIR_LEGACY}/"
     fi
     if [ -d "${WHEEL_DIR}/tests" ]; then
         tar cf - -C "${WHEEL_DIR}" tests | zstd -9 -T0 -o "${ARTIFACT_DIR}/tests.tar.zst"
+        cp "${ARTIFACT_DIR}/tests.tar.zst" "${ARTIFACT_DIR_LEGACY}/tests.tar.zst"
         echo "  Tests archive: $(du -sh "${ARTIFACT_DIR}/tests.tar.zst" | cut -f1)"
     fi
 
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent artifact upload "${ARTIFACT_DIR}/*"
-        echo "Wheel artifacts uploaded"
+        buildkite-agent artifact upload "${ARTIFACT_DIR_LEGACY}/*"
+        echo "Wheel artifacts uploaded to ${ARTIFACT_DIR}/ and ${ARTIFACT_DIR_LEGACY}/"
     else
         echo "Not in Buildkite, skipping artifact upload"
     fi

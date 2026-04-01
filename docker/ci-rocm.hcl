@@ -138,6 +138,12 @@ target "test-rocm-ci" {
   output = ["type=registry"]
 }
 
+# Fat image + wheel export. The group runs both targets in one bake
+# invocation so BuildKit shares the layer cache (wheel export is instant).
+group "test-rocm-ci-with-wheel" {
+  targets = ["test-rocm-ci", "export-wheel-rocm"]
+}
+
 # Per-architecture CI targets — each builds for a single GPU arch and pushes
 # to the registry so test agents can pull the image.
 # Each per-arch build step sets IMAGE_TAG to e.g. rocm/vllm-ci:<commit>-gfx942
