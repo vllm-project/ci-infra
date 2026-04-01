@@ -31,6 +31,39 @@
 
 set -euo pipefail
 
+get_remote_image_label() {
+    local image_ref="$1"
+    local label_key="$2"
+
+    docker buildx imagetools inspect "${image_ref}" --raw 2>/dev/null \
+        | python3 -c '
+import json
+import subprocess
+import sys
+
+image_ref = sys.argv[1]
+label_key = sys.argv[2]
+
+try:
+    data = json.load(sys.stdin)
+    if data.get("manifests"):
+        digest = data["manifests"][0]["digest"]
+        result = subprocess.run(
+            ["docker", "buildx", "imagetools", "inspect", image_ref + "@" + digest, "--raw"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout:
+            raise RuntimeError("digest inspect failed")
+        data = json.loads(result.stdout)
+    labels = data.get("config", {}).get("Labels", {})
+    print(labels.get(label_key, ""))
+except Exception:
+    print("")
+' "${image_ref}" "${label_key}" 2>/dev/null || echo ""
+}
+
 # Check if image already exists (skip build if it does)
 #
 # For commit-tagged images (rocm/vllm-ci:$COMMIT), the tag is unique per
@@ -48,24 +81,7 @@ if [[ -n "${IMAGE_TAG:-}" && "${FORCE_BUILD:-0}" != "1" ]]; then
             LOCAL_HASH=$(cat ${CI_BASE_CONTENT_FILES} 2>/dev/null | sha256sum | cut -d' ' -f1)
             echo "Local ci_base content hash: ${LOCAL_HASH:0:16}..."
 
-            REMOTE_HASH=$(docker buildx imagetools inspect "${IMAGE_TAG}" --raw 2>/dev/null \
-                | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    if data.get('manifests'):
-        digest = data['manifests'][0]['digest']
-        import subprocess
-        r = subprocess.run(
-            ['docker', 'buildx', 'imagetools', 'inspect',
-             '${IMAGE_TAG}@' + digest, '--raw'],
-            capture_output=True, text=True)
-        data = json.loads(r.stdout)
-    labels = data.get('config', {}).get('Labels', {})
-    print(labels.get('vllm.ci_base.content_hash', ''))
-except Exception:
-    print('')
-" 2>/dev/null || echo "")
+            REMOTE_HASH=$(get_remote_image_label "${IMAGE_TAG}" "vllm.ci_base.content_hash")
 
             if [[ -n "${REMOTE_HASH}" ]]; then
                 echo "Remote ci_base content hash: ${REMOTE_HASH:0:16}..."
@@ -235,9 +251,70 @@ BAKE_CONFIG_FILE="bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
 docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
 echo "Saved bake config to ${BAKE_CONFIG_FILE}"
 
-# Run the actual build
+# Run the actual build.
+#
+# BuildKit combines image push and cache export into one command. If the
+# cache export fails, the bake command can return non-zero even though the
+# image itself was pushed successfully.
+#
+# We only treat that case as non-fatal if we can confirm the registry now
+# contains the exact image this build was supposed to publish.
 echo "--- :docker: Building ${TARGET}"
-docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
+BUILD_RC=0
+docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}" || BUILD_RC=$?
+
+if [[ ${BUILD_RC} -ne 0 ]]; then
+    echo ""
+    echo "WARNING: docker buildx bake exited with code ${BUILD_RC}"
+
+    if [[ -n "${IMAGE_TAG:-}" ]]; then
+        echo "Checking if image was pushed successfully..."
+        IMAGE_CONFIRMED=0
+        if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+            if [[ -n "${CI_BASE_CONTENT_HASH:-}" ]]; then
+                REMOTE_HASH=$(get_remote_image_label "${IMAGE_TAG}" "vllm.ci_base.content_hash")
+                if [[ -n "${REMOTE_HASH}" && "${REMOTE_HASH}" == "${CI_BASE_CONTENT_HASH}" ]]; then
+                    IMAGE_CONFIRMED=1
+                else
+                    echo "Remote image exists but does not have the expected ci_base content hash."
+                    echo "  expected: ${CI_BASE_CONTENT_HASH:0:16}..."
+                    echo "  found:    ${REMOTE_HASH:0:16}..."
+                fi
+            elif [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
+                REMOTE_REVISION=$(get_remote_image_label "${IMAGE_TAG}" "org.opencontainers.image.revision")
+                if [[ -n "${REMOTE_REVISION}" && "${REMOTE_REVISION}" == "${BUILDKITE_COMMIT}" ]]; then
+                    IMAGE_CONFIRMED=1
+                else
+                    echo "Remote image exists but revision label does not match ${BUILDKITE_COMMIT}."
+                    echo "  found revision: ${REMOTE_REVISION:-<missing>}"
+                fi
+            else
+                IMAGE_CONFIRMED=1
+            fi
+        fi
+
+        if [[ ${IMAGE_CONFIRMED} -eq 1 ]]; then
+            echo ""
+            echo "WARNING: Build reported failure (rc=${BUILD_RC}) but the"
+            echo "         image was pushed successfully: ${IMAGE_TAG}"
+            echo ""
+            echo "         This is typically caused by a cache export failure."
+            echo "         The image is usable. Cache will be cold on the next"
+            echo "         build but the pipeline can proceed."
+            echo ""
+            BUILD_RC=0
+        else
+            echo ""
+            echo "ERROR: Build failed and image was NOT pushed: ${IMAGE_TAG}"
+            echo "       This is a real build failure, not a cache issue."
+            echo ""
+        fi
+    fi
+fi
+
+if [[ ${BUILD_RC} -ne 0 ]]; then
+    exit ${BUILD_RC}
+fi
 
 echo "--- :white_check_mark: Build complete"
 

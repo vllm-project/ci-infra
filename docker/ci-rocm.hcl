@@ -6,13 +6,7 @@
 # Registry cache: Docker Hub (rocm/vllm-ci-cache) is used exclusively.
 # AMD build agents already have Docker Hub credentials (they push the test
 # image to rocm/vllm-ci), so no additional credential setup is required.
-#
-# sccache is enabled for ROCm CI builds. AMD build agents receive AWS
-# credentials from the runner pod, and buildx forwards them into the Docker
-# build as BuildKit secrets so compiler cache hits can be shared through S3
-# without baking credentials into layers. BuildKit's own registry cache still
-# handles stage-level reuse; sccache only accelerates work inside re-executed
-# compile layers.
+# ROCm CI does not use a separate remote compiler cache.
 
 # CI metadata
 
@@ -66,24 +60,6 @@ variable "PYTORCH_ROCM_ARCH" {
 # stage and is irrelevant when building --target ci_base itself.
 variable "CI_BASE_IMAGE" {
   default = "rocm/vllm-dev:ci_base"
-}
-
-# sccache configuration
-
-variable "USE_SCCACHE" {
-  default = 1
-}
-
-variable "SCCACHE_BUCKET_NAME" {
-  default = "vllm-build-sccache"
-}
-
-variable "SCCACHE_REGION_NAME" {
-  default = "us-west-2"
-}
-
-variable "SCCACHE_S3_NO_CREDENTIALS" {
-  default = 0
 }
 
 # ROCm wheel builds become flaky on 256-core builders when MAX_JOBS is left
@@ -147,16 +123,8 @@ target "_ci-rocm" {
     "manifest:vllm.buildkite.build_number=${BUILDKITE_BUILD_NUMBER}",
     "manifest:vllm.buildkite.build_id=${BUILDKITE_BUILD_ID}",
   ]
-  secret = [
-    "id=aws_access_key_id,env=AWS_ACCESS_KEY_ID",
-    "id=aws_secret_access_key,env=AWS_SECRET_ACCESS_KEY",
-  ]
   args = {
     ARG_PYTORCH_ROCM_ARCH = PYTORCH_ROCM_ARCH
-    USE_SCCACHE           = USE_SCCACHE
-    SCCACHE_BUCKET_NAME   = SCCACHE_BUCKET_NAME
-    SCCACHE_REGION_NAME   = SCCACHE_REGION_NAME
-    SCCACHE_S3_NO_CREDENTIALS = SCCACHE_S3_NO_CREDENTIALS
     CI_BASE_IMAGE         = CI_BASE_IMAGE
     max_jobs              = CI_MAX_JOBS
   }
