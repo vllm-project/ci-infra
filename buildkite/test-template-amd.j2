@@ -308,7 +308,7 @@ plugins:
         depends_on: ~
         soft_fail: false
         commands:
-          - docker pull "$IMAGE_TAG" || echo "ci_base not found yet, building it now"
+          - docker pull "$$IMAGE_TAG" || echo "ci_base not found yet, building it now"
           - bash .buildkite/scripts/ci-bake.sh ci-base-rocm-ci
         key: "amd-ci-base-ready"
         env:
@@ -350,7 +350,7 @@ plugins:
         {% endif %}
         soft_fail: false
         commands:
-          - docker pull "$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
+          - docker pull "$$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
           - bash .buildkite/scripts/ci-bake.sh test-rocm-ci-with-wheel
         key: "amd-build"
         env:
@@ -383,7 +383,7 @@ plugins:
         depends_on: "amd-ci-base-ready"
         soft_fail: false
         commands:
-          - docker pull "$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
+          - docker pull "$$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
           - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx90a-ci-with-wheel
         key: "amd-build-gfx90a"
         env:
@@ -412,7 +412,7 @@ plugins:
         depends_on: "amd-ci-base-ready"
         soft_fail: false
         commands:
-          - docker pull "$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
+          - docker pull "$$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
           - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx942-ci-with-wheel
         key: "amd-build-gfx942"
         env:
@@ -441,7 +441,7 @@ plugins:
         depends_on: "amd-ci-base-ready"
         soft_fail: false
         commands:
-          - docker pull "$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
+          - docker pull "$$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
           - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx950-ci-with-wheel
         key: "amd-build-gfx950"
         env:
