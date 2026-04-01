@@ -322,20 +322,19 @@ echo "--- :white_check_mark: Build complete"
 # Wheel artifact upload.
 #
 # If the bake target included export-wheel-rocm (via a *-ci-with-wheel group),
-# the wheel is already extracted to ./wheel-export/. Compress and upload it
+# the wheel is already extracted to ./wheel-export/. Upload it
 # as a Buildkite artifact so test jobs can assemble images locally from
 # ci_base + wheel instead of pulling large data from Docker Hub.
 #
 # If ./wheel-export/ doesn't exist, this section is a no-op.
 #
 # Artifact paths:
-#   artifacts/vllm-wheel-{arch}/*.whl.zst        (per-arch, e.g. vllm-wheel-gfx942)
-#   artifacts/vllm-wheel-multi-arch/*.whl.zst    (multi-arch build)
-#   artifacts/vllm-wheel/*.whl.zst               (legacy path, always written)
+#   artifacts/vllm-wheel-{arch}/*.whl        (per-arch, e.g. vllm-wheel-gfx942)
+#   artifacts/vllm-wheel-multi-arch/*.whl    (multi-arch build)
 # ---------------------------------------------------------------------------
 WHEEL_DIR="./wheel-export"
 if [[ -d "${WHEEL_DIR}" ]] && ls "${WHEEL_DIR}"/*.whl >/dev/null 2>&1; then
-    echo "--- :package: Compressing and uploading vLLM wheel"
+    echo "--- :package: Uploading vLLM wheel"
 
     # Determine architecture suffix from PYTORCH_ROCM_ARCH.
     # Single arch (no semicolons) -> e.g. "gfx942"; multi-arch -> "multi-arch".
@@ -346,34 +345,18 @@ if [[ -d "${WHEEL_DIR}" ]] && ls "${WHEEL_DIR}"/*.whl >/dev/null 2>&1; then
     echo "Wheel arch suffix: ${WHEEL_ARCH_SUFFIX} (PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-unset})"
 
     ARTIFACT_DIR="artifacts/vllm-wheel-${WHEEL_ARCH_SUFFIX}"
-    ARTIFACT_DIR_LEGACY="artifacts/vllm-wheel"
-    mkdir -p "${ARTIFACT_DIR}" "${ARTIFACT_DIR_LEGACY}"
+    mkdir -p "${ARTIFACT_DIR}"
 
     for whl in "${WHEEL_DIR}"/*.whl; do
         [ -f "${whl}" ] || continue
         WHL_NAME=$(basename "${whl}")
-        echo "Compressing ${WHL_NAME}..."
-        zstd -19 -T0 "${whl}" -o "${ARTIFACT_DIR}/${WHL_NAME}.zst"
-        # Also write to legacy path for backward compatibility
-        cp "${ARTIFACT_DIR}/${WHL_NAME}.zst" "${ARTIFACT_DIR_LEGACY}/${WHL_NAME}.zst"
-        echo "  Original: $(du -sh "${whl}" | cut -f1)"
-        echo "  Compressed: $(du -sh "${ARTIFACT_DIR}/${WHL_NAME}.zst" | cut -f1)"
+        cp "${whl}" "${ARTIFACT_DIR}/${WHL_NAME}"
+        echo "Copied ${WHL_NAME}: $(du -sh "${ARTIFACT_DIR}/${WHL_NAME}" | cut -f1)"
     done
-
-    if [ -d "${WHEEL_DIR}/requirements" ]; then
-        cp -r "${WHEEL_DIR}/requirements" "${ARTIFACT_DIR}/"
-        cp -r "${WHEEL_DIR}/requirements" "${ARTIFACT_DIR_LEGACY}/"
-    fi
-    if [ -d "${WHEEL_DIR}/tests" ]; then
-        tar cf - -C "${WHEEL_DIR}" tests | zstd -9 -T0 -o "${ARTIFACT_DIR}/tests.tar.zst"
-        cp "${ARTIFACT_DIR}/tests.tar.zst" "${ARTIFACT_DIR_LEGACY}/tests.tar.zst"
-        echo "  Tests archive: $(du -sh "${ARTIFACT_DIR}/tests.tar.zst" | cut -f1)"
-    fi
 
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent artifact upload "${ARTIFACT_DIR}/*"
-        buildkite-agent artifact upload "${ARTIFACT_DIR_LEGACY}/*"
-        echo "Wheel artifacts uploaded to ${ARTIFACT_DIR}/ and ${ARTIFACT_DIR_LEGACY}/"
+        echo "Wheel artifacts uploaded to ${ARTIFACT_DIR}/"
     else
         echo "Not in Buildkite, skipping artifact upload"
     fi

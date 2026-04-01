@@ -112,6 +112,18 @@ pytest -v -s {{ matched_targets | join(' ') }}
 {% endif %}
 {% endmacro %}
 
+{% macro amd_infra_retry(indent='') -%}
+{{ indent }}retry:
+{{ indent }}  automatic:
+{{ indent }}    - signal_reason: agent_stop  # Agent host stopped unexpectedly
+{{ indent }}      limit: 1
+{{ indent }}    - signal_reason: agent_refused  # Agent could not accept the job
+{{ indent }}      limit: 1
+{{ indent }}    - exit_status: -1  # Lost contact with the running agent
+{{ indent }}      signal_reason: none
+{{ indent }}      limit: 1
+{%- endmacro %}
+
 {% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
 agents:
   {% if step.label == "Documentation Build" %}
@@ -141,12 +153,7 @@ commands:
 parallelism: {{ step.parallelism }}
 {% endif %}
 
-retry:
-  automatic:
-    - exit_status: -1
-      limit: 1
-    - exit_status: -10
-      limit: 1
+{{ amd_infra_retry() }}
 
 {% if step.num_nodes < 2 %}
 plugins:
@@ -322,14 +329,7 @@ plugins:
           DOCKERHUB_CACHE_TO: "rocm/vllm-ci-cache:rocm-latest"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
-        retry:
-          automatic:
-            - exit_status: -1
-              limit: 1
-            - exit_status: -10
-              limit: 1
-            - exit_status: 128
-              limit: 1
+{{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
 
@@ -366,16 +366,7 @@ plugins:
           IMAGE_TAG_LATEST: "rocm/vllm-ci:latest"
           DOCKERHUB_CACHE_TO: "rocm/vllm-ci-cache:rocm-latest"
           {% endif %}
-        retry:
-          automatic:
-            - exit_status: -1  # Agent was lost
-              limit: 1
-            - exit_status: -10  # Agent was lost
-              limit: 1
-            - exit_status: 128  # Git connectivity issues
-              limit: 1
-            - exit_status: 1  # Machine occasionally fail
-              limit: 1
+{{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
 
@@ -395,16 +386,7 @@ plugins:
           CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
-        retry:
-          automatic:
-            - exit_status: -1
-              limit: 1
-            - exit_status: -10
-              limit: 1
-            - exit_status: 128
-              limit: 1
-            - exit_status: 1
-              limit: 1
+{{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
 
@@ -424,16 +406,7 @@ plugins:
           CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
-        retry:
-          automatic:
-            - exit_status: -1
-              limit: 1
-            - exit_status: -10
-              limit: 1
-            - exit_status: 128
-              limit: 1
-            - exit_status: 1
-              limit: 1
+{{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
 
@@ -453,16 +426,7 @@ plugins:
           CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
-        retry:
-          automatic:
-            - exit_status: -1
-              limit: 1
-            - exit_status: -10
-              limit: 1
-            - exit_status: 128
-              limit: 1
-            - exit_status: 1
-              limit: 1
+{{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
 
@@ -532,15 +496,6 @@ plugins:
         {% if step.parallelism %}
         parallelism: {{ step.parallelism }}
         {% endif %}
-        retry:
-          automatic:
-            - exit_status: -1  # Agent was lost
-              limit: 1
-            - exit_status: -10  # Agent was lost
-              limit: 1
-            - exit_status: 128  # Git connectivity issues
-              limit: 1
-            - exit_status: 1  # Machine occasionally fail
-              limit: 1
+{{ amd_infra_retry('        ') }}
     {% endif %}
     {% endfor %}
