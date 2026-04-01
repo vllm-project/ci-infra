@@ -86,6 +86,13 @@ variable "SCCACHE_S3_NO_CREDENTIALS" {
   default = 0
 }
 
+# ROCm wheel builds become flaky on 256-core builders when MAX_JOBS is left
+# empty and the Dockerfile falls back to $(nproc). Keep CI on the known-safe
+# parallelism level used by the Dockerfile's own default.
+variable "CI_MAX_JOBS" {
+  default = "64"
+}
+
 # Docker Hub registry cache for AMD builds.
 #
 # A separate repo (rocm/vllm-ci-cache) is used for BuildKit layer cache.
@@ -151,6 +158,7 @@ target "_ci-rocm" {
     SCCACHE_REGION_NAME   = SCCACHE_REGION_NAME
     SCCACHE_S3_NO_CREDENTIALS = SCCACHE_S3_NO_CREDENTIALS
     CI_BASE_IMAGE         = CI_BASE_IMAGE
+    max_jobs              = CI_MAX_JOBS
   }
 }
 
