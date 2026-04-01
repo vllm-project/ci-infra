@@ -166,6 +166,18 @@ target "test-rocm-ci" {
   output = ["type=registry"]
 }
 
+# Keep wheel export on the same CI graph as the test image build so the
+# shared build_vllm/export_vllm stages resolve identically within one bake
+# invocation. Without this, export-wheel-rocm uses the plain local target
+# args while test-rocm-*-ci uses CI-only args (e.g. USE_SCCACHE), which can
+# lead to separate cache lineages and inconsistent export_vllm results.
+target "export-wheel-rocm" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "export_vllm"
+  cache-from = get_cache_from_rocm()
+  output     = ["type=local,dest=./wheel-export"]
+}
+
 # Multi-arch image + wheel export. The group runs both targets in one bake
 # invocation so BuildKit shares the layer cache (wheel export is instant).
 group "test-rocm-ci-with-wheel" {
