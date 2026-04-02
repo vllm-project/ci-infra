@@ -1,5 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
+import os
+
 from step import Step
 from utils_lib.docker_utils import get_image, get_ecr_cache_registry
 from global_config import get_global_config
@@ -75,7 +77,7 @@ def _step_passes_filter(step: Step, queue_value: str) -> bool:
 
 def _get_step_plugin(step: Step):
     # Use K8s plugin
-    use_cpu = step.device == DeviceType.CPU or False
+    use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
     if step.device in [DeviceType.A100.value]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
@@ -86,12 +88,21 @@ def get_agent_queue(step: Step):
     global_config = get_global_config()
     branch = global_config["branch"]
     if step.label.startswith(":docker:"):
+        if "arm64" in step.label:
+            if branch == "main":
+                return AgentQueue.ARM64_CPU_POSTMERGE
+            else:
+                return AgentQueue.ARM64_CPU_PREMERGE
         if branch == "main":
             queue = AgentQueue.CPU_POSTMERGE_US_EAST_1
         else:
             queue = AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.label == "Documentation Build":
         queue = AgentQueue.SMALL_CPU_PREMERGE
+    elif step.device == DeviceType.CPU_SMALL:
+        queue = AgentQueue.SMALL_CPU_PREMERGE
+    elif step.device == DeviceType.CPU_MEDIUM:
+        queue = AgentQueue.MEDIUM_CPU_PREMERGE
     elif step.device == DeviceType.CPU:
         queue = AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.device == DeviceType.A100:
@@ -99,7 +110,7 @@ def get_agent_queue(step: Step):
     elif step.device == DeviceType.H100:
         queue = AgentQueue.MITHRIL_H100
     elif step.device == DeviceType.H200:
-        queue = AgentQueue.SKYLAB_H200
+        queue = AgentQueue.H200
     elif step.device == DeviceType.B200:
         queue = AgentQueue.B200
     elif step.device == DeviceType.INTEL_CPU:
@@ -149,8 +160,6 @@ def _get_variables_to_inject() -> Dict[str, str]:
         else global_config["repositories"]["premerge"],
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
         "$BRANCH": global_config["branch"],
-        "$VLLM_USE_PRECOMPILED": "1" if global_config["use_precompiled"] else "0",
-        "$VLLM_MERGE_BASE_COMMIT": global_config["merge_base_commit"],
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
@@ -242,6 +251,7 @@ def convert_group_step_to_buildkite_step(
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": agent_queue},
+                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0
             )
 
             if block_step:
@@ -269,13 +279,12 @@ def convert_group_step_to_buildkite_step(
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
                 amd_block_step = None
-                if not _step_should_run(step, list_file_diff):
-                    amd_block_step = BuildkiteBlockStep(
-                        block=f"Run AMD: {step.label}",
-                        depends_on=["image-build-amd"],
-                        key=f"block-amd-{_generate_step_key(step.label)}",
-                    )
-                    amd_mirror_steps.append(amd_block_step)
+                amd_block_step = BuildkiteBlockStep(
+                    block=f"Run AMD: {step.label}",
+                    depends_on=["image-build-amd"],
+                    key=f"block-amd-{_generate_step_key(step.label)}",
+                )
+                amd_mirror_steps.append(amd_block_step)
                 amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
                 if amd_block_step:
                     amd_step.depends_on.extend([amd_block_step.key])
@@ -299,6 +308,8 @@ def convert_group_step_to_buildkite_step(
 
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+    if os.getenv("NOAUTO") == "1":
+        return False
     global_config = get_global_config()
     if step.key and step.key.startswith("image-build"):
         return True
@@ -334,45 +345,54 @@ def _generate_step_key(step_label: str) -> str:
 def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[str, Any]) -> BuildkiteCommandStep:
     """Create an AMD mirrored step from the original step."""
     amd_device = amd["device"]
-    amd_commands = amd.get("commands", original_commands)
-    amd_commands_str = " && ".join(amd_commands)
-    working_dir = amd.get("working_dir", step.working_dir)
-    if working_dir:
-        amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
+    custom_commands = amd.get("commands")
+    if custom_commands:
+        # Custom AMD commands didn't go through _prepare_commands(), need cd
+        amd_commands_str = " && ".join(custom_commands)
+        working_dir = amd.get("working_dir", step.working_dir)
+        if working_dir:
+            amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
+    else:
+        # original_commands already include cd from _prepare_commands()
+        amd_commands_str = " && ".join(original_commands)
 
-    # Add AMD test script wrapper
-    amd_command_wrapped = f'bash .buildkite/scripts/hardware_ci/run-amd-test.sh "{amd_commands_str}"'
+    # Pass commands via VLLM_TEST_COMMANDS env var instead of positional
+    # argument. Buildkite sets env vars directly in the process environment
+    # without shell interpretation, preserving all inner quoting.
+    amd_command_wrapped = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 
     # Extract device name from queue name
     device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
     amd_label = f"AMD: {step.label} ({device_type})"
 
-    # Get AMD queue name from device name
-    amd_queue = None
-    if amd_device == DeviceType.AMD_MI325_1:
-        amd_queue = AgentQueue.AMD_MI325_1
-    elif amd_device == DeviceType.AMD_MI325_8:
-        amd_queue = AgentQueue.AMD_MI325_8
-    
-    if not amd_queue:
-        raise ValueError(f"Invalid device: {amd_device}")
-
-    amd_retry = {
-        "automatic": [
-            {"exit_status": -1, "limit": 2},   # Agent was lost
-            {"exit_status": -10, "limit": 2},  # Agent was lost
-            {"exit_status": 128, "limit": 2},  # Git connectivity issues
-        ]
+    # Map device type to agent queue
+    amd_queue_map = {
+        DeviceType.AMD_MI250_1: AgentQueue.AMD_MI250_1,
+        DeviceType.AMD_MI250_2: AgentQueue.AMD_MI250_2,
+        DeviceType.AMD_MI250_4: AgentQueue.AMD_MI250_4,
+        DeviceType.AMD_MI250_8: AgentQueue.AMD_MI250_8,
+        DeviceType.AMD_MI325_1: AgentQueue.AMD_MI325_1,
+        DeviceType.AMD_MI325_2: AgentQueue.AMD_MI325_2,
+        DeviceType.AMD_MI325_4: AgentQueue.AMD_MI325_4,
+        DeviceType.AMD_MI325_8: AgentQueue.AMD_MI325_8,
+        DeviceType.AMD_MI355_1: AgentQueue.AMD_MI355_1,
+        DeviceType.AMD_MI355_2: AgentQueue.AMD_MI355_2,
+        DeviceType.AMD_MI355_4: AgentQueue.AMD_MI355_4,
+        DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
     }
+
+    amd_queue = amd_queue_map.get(amd_device)
+    if not amd_queue:
+        raise ValueError(f"Invalid AMD device: {amd_device}. Valid devices: {list(amd_queue_map.keys())}")
 
     return BuildkiteCommandStep(
         label=amd_label,
         commands=[amd_command_wrapped],
         depends_on=["image-build-amd"],
         agents={"queue": amd_queue},
-        env={"DOCKER_BUILDKIT": "1"},
+        env={"DOCKER_BUILDKIT": "1", "VLLM_TEST_COMMANDS": amd_commands_str},
         priority=200,
         soft_fail=False,
-        retry=amd_retry,
+        retry=None,
         parallelism=step.parallelism,
     )

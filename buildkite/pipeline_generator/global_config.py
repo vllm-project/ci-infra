@@ -2,7 +2,6 @@ from typing import TypedDict, List, Dict, Optional
 import yaml
 import os
 import re
-import requests
 from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels
 
 
@@ -120,8 +119,8 @@ def _should_run_all(
         return True
     if "ready-run-all-tests" in pr_labels:
         return True
-    pattern_matched = False
     for file in list_file_diff:
+        pattern_matched = False
         for pattern in run_all_patterns:
             if re.match(pattern, file):
                 pattern_matched = True
@@ -141,20 +140,3 @@ def _should_fail_fast(pr_labels: List[str]) -> bool:
     if "ci-no-fail-fast" in pr_labels:
         return False
     return True
-
-
-def _should_use_precompiled(run_all: bool, merge_base_commit: Optional[str]) -> bool:
-    if os.getenv("VLLM_USE_PRECOMPILED") == "1":
-        return True
-    if run_all:
-        return False
-    wheel_metadata_url = (
-        f"https://wheels.vllm.ai/{merge_base_commit}/vllm/metadata.json"
-    )
-    response = requests.get(wheel_metadata_url)
-    if response.status_code != 200:
-        return False
-    if response.headers:
-        return True
-    else:
-        return False

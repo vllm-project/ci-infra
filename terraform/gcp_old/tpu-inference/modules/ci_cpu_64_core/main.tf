@@ -1,8 +1,3 @@
-# 8 nodes for CI cluster
-# normal e2 instance device each
-# Region: us-east5-b
-# Type: e2-standard-2
-
 data "google_client_config" "gcp_client" {
   provider = google-beta
 }
@@ -10,16 +5,16 @@ data "google_client_config" "gcp_client" {
 resource "google_compute_instance" "buildkite-agent-instance" {
   provider = google-beta
   count    = var.instance_count
-  name     = "vllm-ci-cpu-${count.index}"
+  name     = "vllm-ci-cpu-64-core-${count.index}"
 
   boot_disk {
     auto_delete = true
-    device_name = "vllm-ci-cpu-${count.index}"
+    device_name = "vllm-ci-cpu-64-core-${count.index}"
 
     initialize_params {
       image = "projects/ubuntu-os-cloud/global/images/ubuntu-2404-noble-amd64-v20251021"
-      size  = 100
-      type  = "pd-balanced"
+      size  = var.disk_size
+      type  = var.disk_type
     }
 
     mode = "READ_WRITE"
@@ -32,7 +27,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
   can_ip_forward      = false
   deletion_protection = false
   enable_display      = false
-  machine_type        = "e2-standard-2"
+  machine_type        = var.machine_type
 
   network_interface {
     access_config {
@@ -69,8 +64,8 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
-      sudo sed -i 's/name="%hostname-%spawn"/name="vllm-cpu-vm-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'tags="queue=cpu"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i 's/name="%hostname-%spawn"/name="vllm-cpu-64-core-vm-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
+      echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
 
       systemctl stop docker
@@ -84,6 +79,6 @@ resource "google_compute_instance" "buildkite-agent-instance" {
 
 resource "google_compute_address" "static" {
   provider = google-beta
-  name     = "vllm-ci-cpu-${count.index}-ip"
+  name     = "vllm-ci-cpu-64-core-${count.index}-ip"
   count    = var.instance_count
 }

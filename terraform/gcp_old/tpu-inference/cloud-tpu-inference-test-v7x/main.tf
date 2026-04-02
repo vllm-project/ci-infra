@@ -21,7 +21,7 @@ module "ci_v7x_2" {
 
   accelerator_type                 = "tpu7x-2"
   reserved                         = true
-  instance_count                   = 0
+  instance_count                   = 8
   buildkite_queue_name             = "tpu_v7x_2_queue"
   disk_size                        = 512
   project_id                       = var.project_id
@@ -39,7 +39,7 @@ module "ci_v7x_8" {
 
   accelerator_type                 = "tpu7x-8"
   reserved                         = true
-  instance_count                   = 0
+  instance_count                   = 8
   buildkite_queue_name             = "tpu_v7x_8_queue"
   disk_size                        = 1024
   project_id                       = var.project_id
