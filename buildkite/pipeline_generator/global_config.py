@@ -67,15 +67,7 @@ def init_global_config(pipeline_config_path: str):
         merge_base_commit=merge_base_commit,
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
-        use_precompiled=_should_use_precompiled(
-            _should_run_all(
-                pr_labels,
-                list_file_diff,
-                pipeline_config.get("run_all_patterns", None),
-                pipeline_config.get("run_all_exclude_patterns", None),
-            ),
-            merge_base_commit,
-        ),
+        use_precompiled=False,
         queue_routing=pipeline_config.get("queue_routing", {}),
         step_filter=pipeline_config.get("step_filter", {}),
     )
