@@ -6,7 +6,6 @@ docker_plugin_template = {
     "image": "",
     "always-pull": True,
     "propagate-environment": True,
-    "gpus": "all",
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
@@ -26,7 +25,6 @@ h200_plugin_template = {
     "image": "",
     "always-pull": True,
     "propagate-environment": True,
-    "gpus": "all",
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
