@@ -1,6 +1,5 @@
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
-{% set amd_cache_publish_branches = ["main", "rocm", "EmbeddedLLM"] %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
 {% macro amd_infra_retry(indent='') -%}
@@ -39,14 +38,14 @@
         agents:
           queue: amd-cpu
 
-      {% if branch != "main" %}
+      {% if branch != "main" and nightly != "1" %}
       - block: "Run AMD ROCm image build"
         depends_on: "amd-ci-base-ready"
         key: "block-amd-build"
       {% endif %}
 
       - label: "AMD: :docker: build image"
-        {% if branch == "main" %}
+        {% if branch == "main" or nightly == "1" %}
         depends_on: "amd-ci-base-ready"
         {% else %}
         depends_on: "block-amd-build"
@@ -65,10 +64,10 @@
           CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
-          {% if branch in amd_cache_publish_branches %}
+          {% if branch == "main" %}
           IMAGE_TAG_LATEST: "rocm/vllm-ci:latest"
-          DOCKERHUB_CACHE_TO: "rocm/vllm-ci-cache:rocm-latest"
           {% endif %}
+          DOCKERHUB_CACHE_TO: "rocm/vllm-ci-cache:rocm-latest"
 {{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
@@ -112,7 +111,7 @@
           {% else %}
           queue: amd_mi325_1
           {% endif %}
-        command: bash .buildkite/scripts/hardware_ci/run-amd-ci.sh
+        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           DOCKER_BUILDKIT: "1"
           DOCKER_IMAGE_NAME: "{{ docker_image_amd }}"

@@ -77,8 +77,8 @@ variable "CI_MAX_JOBS" {
 # manifest, including inherited base layers (~7.25GB ROCm runtime).
 # Docker Hub auto-creates the repo on first push.
 #
-# DOCKERHUB_CACHE_TO is set by the pipeline only on main-branch builds to
-# keep the :rocm-latest tag warm for PR builds to pull from.
+# DOCKERHUB_CACHE_TO is set by the pipeline on AMD builds to keep the
+# shared :rocm-latest tag warm for cross-branch cache hits.
 
 variable "DOCKERHUB_CACHE_REPO" {
   default = "rocm/vllm-ci-cache"
@@ -100,7 +100,7 @@ function "get_cache_from_rocm" {
     # Merge-base with main - stable fallback for long-lived or rebased PRs;
     # maps to a real main-branch commit whose cache layers are likely warm
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
-    # Warm baseline - kept current by main-branch builds
+    # Warm baseline - kept current by AMD builds that publish rocm-latest
     "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-latest",
   ])
 }
@@ -110,7 +110,7 @@ function "get_cache_to_rocm" {
   result = compact([
     # Commit-specific tag for traceability and re-run cache hits
     BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${BUILDKITE_COMMIT},mode=min" : "",
-    # rocm-latest - only set on main-branch builds (controlled by pipeline via DOCKERHUB_CACHE_TO)
+    # rocm-latest - enabled when the pipeline provides DOCKERHUB_CACHE_TO
     DOCKERHUB_CACHE_TO != "" ? "type=registry,ref=${DOCKERHUB_CACHE_TO},mode=min" : "",
   ])
 }
