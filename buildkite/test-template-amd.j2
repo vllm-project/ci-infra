@@ -118,7 +118,6 @@
           DOCKER_IMAGE_NAME: "{{ docker_image_amd }}"
           NUM_NODES: "{{ step.num_nodes or 1 }}"
           VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
-          VLLM_HF_CACHE: "/fsx/hf_cache"
           VLLM_CI_CACHE_ROOT: "/fsx/vllm-ci-cache"
           {% if step.num_nodes and step.num_nodes >= 2 %}
           VLLM_CI_EXECUTION_MODE: "multi-node"
