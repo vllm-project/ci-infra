@@ -102,6 +102,12 @@ function "get_cache_from_rocm" {
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
     # Warm baseline - kept current by AMD builds that publish rocm-latest
     "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-latest",
+    # Import the source-scoped native build cache as well so builds whose
+    # Python/package layers changed can still reuse compiled ROCm objects.
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT}" : "",
+    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${PARENT_COMMIT}" : "",
+    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
+    "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-latest",
   ])
 }
 
@@ -112,6 +118,24 @@ function "get_cache_to_rocm" {
     BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${BUILDKITE_COMMIT},mode=min" : "",
     # rocm-latest - enabled when the pipeline provides DOCKERHUB_CACHE_TO
     DOCKERHUB_CACHE_TO != "" ? "type=registry,ref=${DOCKERHUB_CACHE_TO},mode=min" : "",
+  ])
+}
+
+function "get_cache_from_rocm_csrc" {
+  params = []
+  result = compact([
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT}" : "",
+    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${PARENT_COMMIT}" : "",
+    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
+    "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-latest",
+  ])
+}
+
+function "get_cache_to_rocm_csrc" {
+  params = []
+  result = compact([
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT},mode=min" : "",
+    DOCKERHUB_CACHE_TO != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-latest,mode=min" : "",
   ])
 }
 
@@ -141,6 +165,17 @@ target "test-rocm-ci" {
   output = ["type=registry"]
 }
 
+# Cache-only target for the source-scoped ROCm native build stage.
+# This persists the csrc-build stage in the registry cache even though the
+# final test image only consumes it indirectly while packaging the wheel.
+target "csrc-rocm-ci" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "csrc-build"
+  cache-from = get_cache_from_rocm_csrc()
+  cache-to   = get_cache_to_rocm_csrc()
+  output     = ["type=cacheonly"]
+}
+
 # Keep wheel export on the same CI graph as the test image build so the
 # shared build_vllm/export_vllm stages resolve identically within one bake
 # invocation. Without this, export-wheel-rocm uses the plain local target
@@ -154,9 +189,11 @@ target "export-wheel-rocm" {
 }
 
 # Multi-arch image + wheel export. The group runs both targets in one bake
-# invocation so BuildKit shares the layer cache (wheel export is instant).
+# invocation so BuildKit shares the layer cache. csrc-rocm-ci makes the
+# source-scoped native build cache persist across commits even when the final
+# image layers change for unrelated reasons.
 group "test-rocm-ci-with-wheel" {
-  targets = ["test-rocm-ci", "export-wheel-rocm"]
+  targets = ["csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm"]
 }
 
 # Image tags for the scheduled ci_base build (amd-ci-base.yaml pipeline).
