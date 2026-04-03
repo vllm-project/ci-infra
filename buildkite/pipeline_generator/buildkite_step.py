@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
 import os
+import re
 
 from step import Step
 from utils_lib.docker_utils import get_image, get_ecr_cache_registry
@@ -56,7 +57,7 @@ class BuildkiteGroupStep(BaseModel):
 def _get_step_plugin(step: Step):
     # Use K8s plugin
     use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
-    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
+    if step.device in (DeviceType.H100, DeviceType.A100):
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu))}
@@ -155,7 +156,6 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
             if not value:
                 continue
             # Use regex to only replace whole variable matches (not substrings)
-            import re
             # Escape variable (may have $ or special characters)
             pattern = re.escape(variable)
             command = re.sub(pattern + r'\b', value, command)
@@ -169,15 +169,12 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     return final_commands
 
 
-def _create_block_step(step: Step, list_file_diff: List[str]) -> BuildkiteBlockStep:
-    block_step = BuildkiteBlockStep(
+def _create_block_step(step: Step) -> BuildkiteBlockStep:
+    return BuildkiteBlockStep(
         block=f"Run {step.label}",
         depends_on=[],
         key=f"block-{_generate_step_key(step.label)}",
     )
-    if step.label.startswith(":docker:"):
-        block_step.depends_on = []
-    return block_step
 
 
 def convert_group_step_to_buildkite_step(
@@ -185,7 +182,6 @@ def convert_group_step_to_buildkite_step(
 ) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
     variables_to_inject = _get_variables_to_inject()
-    print(variables_to_inject)
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
 
@@ -197,7 +193,7 @@ def convert_group_step_to_buildkite_step(
             # block step
             block_step = None
             if not _step_should_run(step, list_file_diff):
-                block_step = _create_block_step(step, list_file_diff)
+                block_step = _create_block_step(step)
             if block_step:
                 group_steps_list.append(block_step)
 
@@ -237,7 +233,6 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
-                amd_block_step = None
                 amd_block_step = BuildkiteBlockStep(
                     block=f"Run AMD: {step.label}",
                     depends_on=["image-build-amd"],
@@ -245,8 +240,7 @@ def convert_group_step_to_buildkite_step(
                 )
                 amd_mirror_steps.append(amd_block_step)
                 amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
-                if amd_block_step:
-                    amd_step.depends_on.extend([amd_block_step.key])
+                amd_step.depends_on.extend([amd_block_step.key])
                 amd_mirror_steps.append(amd_step)
 
         buildkite_group_steps.append(
