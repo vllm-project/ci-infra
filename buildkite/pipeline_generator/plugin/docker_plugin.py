@@ -22,7 +22,7 @@ docker_plugin_template = {
     ],
 }
 
-h200_1g_18gb_plugin_template = {
+h200_18gb_plugin_template = {
     "image": "",
     "always-pull": True,
     "propagate-environment": True,
@@ -83,8 +83,8 @@ b200_plugin_template = {
 
 def get_docker_plugin(step: Step, image: str):
     plugin = None
-    if step.device == DeviceType.H200_1G_18GB:
-        plugin = copy.deepcopy(h200_1g_18gb_plugin_template)
+    if step.device == DeviceType.H200_18GB:
+        plugin = copy.deepcopy(h200_18gb_plugin_template)
     elif step.device == DeviceType.H200:
         plugin = copy.deepcopy(h200_plugin_template)
     elif step.device == DeviceType.B200:

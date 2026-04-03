@@ -88,8 +88,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.MITHRIL_H100
     elif step.device == DeviceType.H200:
         return AgentQueue.H200
-    elif step.device == DeviceType.H200_1G_18GB:
-        return AgentQueue.H200_1G_18GB
+    elif step.device == DeviceType.H200_18GB:
+        return AgentQueue.H200_18GB
     elif step.device == DeviceType.B200:
         return AgentQueue.B200
     elif step.device == DeviceType.INTEL_CPU:

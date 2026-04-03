@@ -4,7 +4,7 @@ from enum import Enum
 class DeviceType(str, Enum):
     H100 = "h100"
     H200 = "h200"
-    H200_1G_18GB = "h200_1g_18gb"
+    H200_18GB = "h200_18gb"
     B200 = "b200"
     A100 = "a100"
     CPU = "cpu"
@@ -40,7 +40,7 @@ class AgentQueue(str, Enum):
     GPU_4 = "gpu_4_queue"
     MITHRIL_H100 = "mithril-h100-pool"
     H200 = "H200"
-    H200_1G_18GB = "h200_1g_18gb"
+    H200_18GB = "h200_18gb"
     B200 = "B200"
     SMALL_CPU_PREMERGE = "small_cpu_queue_premerge"
     MEDIUM_CPU_PREMERGE = "medium_cpu_queue_premerge"
