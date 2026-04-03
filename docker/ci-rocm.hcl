@@ -77,8 +77,10 @@ variable "CI_MAX_JOBS" {
 # manifest, including inherited base layers (~7.25GB ROCm runtime).
 # Docker Hub auto-creates the repo on first push.
 #
-# DOCKERHUB_CACHE_TO is set by the pipeline on AMD builds to keep the
-# shared :rocm-latest tag warm for cross-branch cache hits.
+# DOCKERHUB_CACHE_TO is used as an opt-in flag for maintaining the shared
+# source-scoped csrc-rocm-latest cache. Final-image cache exports stay
+# commit-scoped to avoid pushing duplicate cache refs in parallel, which has
+# proven flaky against Docker Hub on ROCm builds.
 
 variable "DOCKERHUB_CACHE_REPO" {
   default = "rocm/vllm-ci-cache"
@@ -100,8 +102,6 @@ function "get_cache_from_rocm" {
     # Merge-base with main - stable fallback for long-lived or rebased PRs;
     # maps to a real main-branch commit whose cache layers are likely warm
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
-    # Warm baseline - kept current by AMD builds that publish rocm-latest
-    "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-latest",
     # Import the source-scoped native build cache as well so builds whose
     # Python/package layers changed can still reuse compiled ROCm objects.
     BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT}" : "",
@@ -114,10 +114,10 @@ function "get_cache_from_rocm" {
 function "get_cache_to_rocm" {
   params = []
   result = compact([
-    # Commit-specific tag for traceability and re-run cache hits
+    # Keep the final-image cache commit-scoped. Exporting both rocm-$commit and
+    # rocm-latest from the same bake caused duplicate registry cache exporters
+    # and flaky 400 responses from Docker Hub.
     BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${BUILDKITE_COMMIT},mode=min" : "",
-    # rocm-latest - enabled when the pipeline provides DOCKERHUB_CACHE_TO
-    DOCKERHUB_CACHE_TO != "" ? "type=registry,ref=${DOCKERHUB_CACHE_TO},mode=min" : "",
   ])
 }
 
@@ -134,8 +134,10 @@ function "get_cache_from_rocm_csrc" {
 function "get_cache_to_rocm_csrc" {
   params = []
   result = compact([
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT},mode=min" : "",
+    # Keep one shared source-scoped cache warm for cross-branch native reuse.
+    # When DOCKERHUB_CACHE_TO is not set, fall back to the commit-scoped ref.
     DOCKERHUB_CACHE_TO != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-latest,mode=min" : "",
+    DOCKERHUB_CACHE_TO == "" && BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT},mode=min" : "",
   ])
 }
 
