@@ -27,7 +27,9 @@ class BuildkiteCommandStep(BaseModel):
     def to_yaml(self):
         return {
             "label": self.label,
+            "key": self.key,
             "group": self.group,
+            "agents": self.agents,
             "commands": self.commands,
             "depends_on": self.depends_on,
             "soft_fail": self.soft_fail,
@@ -232,8 +234,7 @@ def convert_group_step_to_buildkite_step(
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
                 amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
-                # Block step depends on the same build the mirror step uses
-                # (per-arch when available, multi-arch build otherwise).
+                # Block step depends on the shared AMD image build.
                 mirror_build_dep = amd_step.depends_on[0] if amd_step.depends_on else "image-build-amd"
                 amd_block_step = BuildkiteBlockStep(
                     block=f"Run AMD: {step.label}",
@@ -262,9 +263,8 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     global_config = get_global_config()
     if step.key and step.key.startswith("image-build"):
-        # Multi-arch build (image-build-amd) only auto-runs on main;
-        # on PR branches it gets a block step so it's on-demand.
-        # Per-arch builds (image-build-amd-gfx*) always auto-run.
+        # The shared AMD image build only auto-runs on main; on PR branches it
+        # stays behind a block step so it's on-demand.
         if step.key == "image-build-amd" and global_config["branch"] != "main":
             return False
         return True
@@ -336,26 +336,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
     }
 
-    # Map device type to GPU architecture for per-arch image builds.
-    # When a per-arch build step (image-build-amd-<arch>) exists, prefer it
-    # over the multi-arch build (image-build-amd) for faster CI.
-    _device_to_arch = {
-        DeviceType.AMD_MI250_1: "gfx90a",
-        DeviceType.AMD_MI250_2: "gfx90a",
-        DeviceType.AMD_MI250_4: "gfx90a",
-        DeviceType.AMD_MI250_8: "gfx90a",
-        DeviceType.AMD_MI325_1: "gfx942",
-        DeviceType.AMD_MI325_2: "gfx942",
-        DeviceType.AMD_MI325_4: "gfx942",
-        DeviceType.AMD_MI325_8: "gfx942",
-        DeviceType.AMD_MI355_1: "gfx950",
-        DeviceType.AMD_MI355_2: "gfx950",
-        DeviceType.AMD_MI355_4: "gfx950",
-        DeviceType.AMD_MI355_8: "gfx950",
-    }
-    arch = _device_to_arch.get(amd_device)
-    arch_build_key = f"image-build-amd-{arch}" if arch else None
-    build_dep = arch_build_key if arch_build_key else "image-build-amd"
+    build_dep = "image-build-amd"
 
     amd_queue = amd_queue_map.get(amd_device)
     if not amd_queue:

@@ -103,7 +103,6 @@ upload_pipeline() {
             -D vllm_merge_base_commit="$(git merge-base origin/main HEAD)" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
-            -D vllm_rocm_ci_legacy_docker_tag="${VLLM_ROCM_CI_LEGACY_DOCKER_TAG:-0}" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )

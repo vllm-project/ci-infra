@@ -1,116 +1,7 @@
-{% set cov_enabled = (cov_enabled == "1") %}
-{% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
-{% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cu118" %}
-{% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-cpu" %}
-{% if branch == "main" %}
-{% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT" %}
-{% set docker_image_latest = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest" %}
-{% set docker_image_cu118 = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cu118" %}
-{% set docker_image_cpu = "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-cpu" %}
-{% endif %}
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
-{# Per-architecture image tags and agent_pool → arch/build-key mapping #}
-{% set docker_image_amd_gfx90a = "rocm/vllm-ci:$BUILDKITE_COMMIT-gfx90a" %}
-{% set docker_image_amd_gfx942 = "rocm/vllm-ci:$BUILDKITE_COMMIT-gfx942" %}
-{% set docker_image_amd_gfx950 = "rocm/vllm-ci:$BUILDKITE_COMMIT-gfx950" %}
-{% set amd_legacy_image_mode = (vllm_rocm_ci_legacy_docker_tag == "1") %}
-{% set pool_to_arch = {
-  "mi250_1": "gfx90a", "mi250_2": "gfx90a", "mi250_4": "gfx90a", "mi250_8": "gfx90a",
-  "mi325_1": "gfx942", "mi325_2": "gfx942", "mi325_4": "gfx942", "mi325_8": "gfx942",
-  "mi355_1": "gfx950", "mi355_2": "gfx950", "mi355_4": "gfx950", "mi355_8": "gfx950",
-} %}
-{% set arch_to_build_key = {
-  "gfx90a": "amd-build-gfx90a",
-  "gfx942": "amd-build-gfx942",
-  "gfx950": "amd-build-gfx950",
-} %}
-{% set arch_to_image = {
-  "gfx90a": docker_image_amd_gfx90a,
-  "gfx942": docker_image_amd_gfx942,
-  "gfx950": docker_image_amd_gfx950,
-} %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
-{% set hf_home = "/root/.cache/huggingface" %}
-{% set hf_home_efs = "/mnt/efs/hf_cache" %}
-{% set hf_home_fsx = "/fsx/hf_cache" %}
+{% set amd_cache_publish_branches = ["main", "rocm", "EmbeddedLLM"] %}
 {% set list_file_diff = list_file_diff | split("|") %}
-
-{# Intelligent test targeting: Detect when only test files changed and collect them #}
-{%- set tests_acc = namespace(only_tests=true, any=false, changed=[]) %}
-{%- for file in list_file_diff %}
-{%- if file[:6] == 'tests/' and '/test_' in file and file[-3:] == '.py' %}
-{%- set tests_acc.any = true %}
-{%- set tests_acc.changed = tests_acc.changed + [file[6:]] %}
-{%- else %}
-{%- set tests_acc.only_tests = false %}
-{%- endif %}
-{%- endfor %}
-{%- set tests_only = (tests_acc.only_tests and tests_acc.any) %}
-{%- set changed_tests = tests_acc.changed %}
-
-{% macro add_pytest_coverage(cmd, coverage_file) %}
-{% if "pytest " in cmd %}
-COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm --cov-report=xml --cov-append --durations=0 ") }} || true
-{% else %}
-{{ cmd }}
-{% endif %}
-{% endmacro %}
-
-{% macro add_docker_pytest_coverage(step, cov_enabled) %}
-{# Compute coverage file id #}
-{% set step_length = step.label | length %}
-{% set step_first = step.label | first | default("x") %}
-{% set coverage_file = ".coverage." + step_length ~ "_" ~ step_first %}
-
-{# Intelligent test targeting: Build matched test targets for this step when only tests changed #}
-{%- set match_ns = namespace(targets=[]) %}
-{%- if tests_only and step.source_file_dependencies %}
-{%- for dep in step.source_file_dependencies %}
-{%- if dep[:6] == 'tests/' %}
-{%- set dep_rel = dep[6:] %}
-{# Handle deps that already end with '/' (e.g., tests/benchmarks/) #}
-{%- if dep_rel[-1:] == '/' %}
-{%- set dep_dir_prefix = dep_rel %}
-{%- set dep_file_name = dep_rel[:-1] ~ '.py' %}
-{%- else %}
-{%- set dep_dir_prefix = dep_rel ~ '/' %}
-{%- set dep_file_name = dep_rel ~ '.py' %}
-{%- endif %}
-{%- for t in changed_tests %}
-{# Check if t starts with dep_dir_prefix (for directories) or equals dep_file_name (for files) #}
-{%- set prefix_len = dep_dir_prefix | length %}
-{%- set t_prefix = t[:prefix_len] %}
-{%- set cond1 = (t | length >= prefix_len and t_prefix == dep_dir_prefix) %}
-{%- set cond2 = (t == dep_file_name) %}
-{%- if cond1 or cond2 %}
-{%- set match_ns.targets = match_ns.targets + [t] %}
-{%- endif %}
-{%- endfor %}
-{%- endif %}
-{%- endfor %}
-{%- endif %}
-{%- set matched_targets = match_ns.targets %}
-
-{# If we have matched targets, run only those specific tests #}
-{% if matched_targets | length > 0 %}
-pytest -v -s {{ matched_targets | join(' ') }}
-{% else %}
-{# Default behavior: preserve original commands with optional coverage injection #}
-{% if cov_enabled %}
-{% set ns = namespace(has_pytest=false) %}
-{% if step.command %}
-{% if "pytest " in step.command %}{% set ns.has_pytest = true %}{% endif %}
-{{ add_pytest_coverage(step.command, coverage_file) }}
-{% else %}
-{% for cmd in step.commands %}
-{% if "pytest " in cmd %}{% set ns.has_pytest = true %}{% endif %}
-{{ add_pytest_coverage(cmd, coverage_file) }}{{ " && " if not loop.last else "" }}{% endfor %}
-{% endif %}{% if ns.has_pytest %} && curl -sSL https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/buildkite/scripts/upload_codecov.sh | bash -s -- \"{{ step.label }}\"{% endif %}
-{% else %}
-{{ step.command or (step.commands | join(' && ')) | safe }}
-{% endif %}
-{% endif %}
-{% endmacro %}
 
 {% macro amd_infra_retry(indent='') -%}
 {{ indent }}retry:
@@ -124,190 +15,6 @@ pytest -v -s {{ matched_targets | join(' ') }}
 {{ indent }}      limit: 1
 {%- endmacro %}
 
-{% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
-agents:
-  {% if step.label == "Documentation Build" %}
-  queue: small_cpu_queue_premerge
-  {% elif step.no_gpu %}
-  queue: cpu_queue_premerge_us_east_1
-  {% elif step.gpu == "a100" %}
-  queue: a100_queue
-  {% elif step.gpu == "h100" %}
-  queue: mithril-h100-pool
-  {% elif step.gpu == "h200" %}
-  queue: skylab-h200
-  {% elif step.gpu == "b200" %}
-  queue: B200
-  {% elif step.num_gpus == 2 or step.num_gpus == 4 %}
-  queue: gpu_4_queue
-  {% else %}
-  queue: gpu_1_queue
-  {% endif %}
-
-{% if step.num_nodes >= 2 %}
-commands:
-  - ./.buildkite/scripts/run-multi-node-test.sh {{ (step.working_dir or default_working_dir) | safe }} {{ step.num_nodes }} {{ step.num_gpus }} {{ image }} {% for command in step.commands %}"{{ (command | join(' && ')) | safe }}" {% endfor %}
-{% endif %}
-
-{% if step.parallelism %}
-parallelism: {{ step.parallelism }}
-{% endif %}
-
-{{ amd_infra_retry() }}
-
-{% if step.num_nodes < 2 %}
-plugins:
-  {% if step.gpu != "a100" and step.gpu != "h100" and step.gpu != "h200" and step.gpu != "b200" %}
-  - docker#v5.2.0:
-      image: {{ image }}
-      always-pull: true
-      propagate-environment: true
-      {% if not step.no_gpu %}
-      gpus: all
-      {% endif %}
-      {% if step.label == "Benchmarks" or step.mount_buildkite_agent or cov_enabled %}
-      mount-buildkite-agent: true
-      {% endif %}
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
-      environment:
-        - VLLM_USAGE_SOURCE=ci-test
-        - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME={{ hf_home_fsx }}
-        - HF_TOKEN
-        - CODECOV_TOKEN
-        {% if fail_fast == "true" %}
-        - PYTEST_ADDOPTS=-x
-        {% endif %}
-        {% if branch == "main" %}
-        - BUILDKITE_ANALYTICS_TOKEN
-        {% endif %}
-        {% if step.label == "Speculative decoding tests" %}
-        - VLLM_ATTENTION_BACKEND=XFORMERS
-        {% endif %}
-      volumes:
-        - /dev/shm:/dev/shm
-        - {{ hf_home_fsx }}:{{ hf_home_fsx }}
-  {% elif step.gpu == "h200" %}
-   - docker#v5.2.0:
-      image: {{ image }}
-      always-pull: true
-      propagate-environment: true
-      gpus: all
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
-      environment:
-        - VLLM_USAGE_SOURCE=ci-test
-        - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/benchmark-hf-cache
-        - HF_TOKEN
-        - CODECOV_TOKEN
-        {% if fail_fast == "true" %}
-        - PYTEST_ADDOPTS=-x
-        {% endif %}
-        {% if branch == "main" %}
-        - BUILDKITE_ANALYTICS_TOKEN
-        {% endif %}
-      volumes:
-        - /dev/shm:/dev/shm
-        - /data/benchmark-hf-cache:/benchmark-hf-cache
-        - /data/benchmark-vllm-cache:/root/.cache/vllm
-  {% elif step.gpu == "b200" %}
-   - docker#v5.2.0:
-      image: {{ image }}
-      always-pull: true
-      propagate-environment: true
-      # gpus will be configured by BUILDKITE_PLUGIN_DOCKER_GPUS in per host environment variable.
-      # gpus: all
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
-      environment:
-        - VLLM_USAGE_SOURCE=ci-test
-        - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/benchmark-hf-cache
-        - HF_TOKEN
-        - CODECOV_TOKEN
-        {% if fail_fast == "true" %}
-        - PYTEST_ADDOPTS=-x
-        {% endif %}
-        {% if branch == "main" %}
-        - BUILDKITE_ANALYTICS_TOKEN
-        {% endif %}
-      volumes:
-        - /dev/shm:/dev/shm
-        - /data/benchmark-hf-cache:/benchmark-hf-cache
-        - /data/benchmark-vllm-cache:/root/.cache/vllm
-  {% elif step.gpu == "h100" %}
-  - kubernetes:
-      podSpec:
-        containers:
-          - image: {{ image }}
-            command:
-              - bash -c "{{ ('(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe)) }}"
-            resources:
-              limits:
-                nvidia.com/gpu: {{ step.num_gpus or 1 }}
-            volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: {{ hf_home }}
-            env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: "0"
-              - name: HF_HOME
-                value: {{ hf_home }}
-        nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
-        volumes:
-          - name: devshm
-            emptyDir:
-              medium: Memory
-          - name: hf-cache
-            hostPath:
-              path: /mnt/hf-cache
-              type: Directory
-  {% else %}
-  - kubernetes:
-      podSpec:
-        priorityClassName: ci
-        containers:
-          - image: {{ image }}
-            command:
-              - bash -c "{{ ('(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe)) }}"
-            resources:
-              limits:
-                nvidia.com/gpu: {{ step.num_gpus or 1 }}
-            volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: {{ hf_home }}
-            env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: "0"
-              - name: HF_HOME
-                value: {{ hf_home }}
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-        nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-        volumes:
-          - name: devshm
-            emptyDir:
-              medium: Memory
-          - name: hf-cache
-            hostPath:
-              path: {{ hf_home }}
-              type: Directory
-  {% endif %}
-{% endif %}
-{% endmacro %}
-
   - group: "AMD Tests"
     depends_on: ~
     steps:
@@ -315,8 +22,8 @@ plugins:
         depends_on: ~
         soft_fail: false
         commands:
-          - docker pull "$$IMAGE_TAG" || echo "ci_base not found yet, building it now"
-          - bash .buildkite/scripts/ci-bake.sh ci-base-rocm-ci
+          - docker pull "rocm/vllm-dev:ci_base" || echo "ci_base not found yet, building it now"
+          - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci
         key: "amd-ci-base-ready"
         env:
           DOCKER_BUILDKIT: "1"
@@ -326,32 +33,28 @@ plugins:
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
-          DOCKERHUB_CACHE_TO: "rocm/vllm-ci-cache:rocm-latest"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
 {{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
 
-      # Multi-arch image: auto-runs on main and in legacy image mode.
-      # On PR / hardware-test builds, it stays behind manual approval unless
-      # legacy image mode is enabled for compatibility with older hooks.
-      {% if branch != "main" and not amd_legacy_image_mode %}
-      - block: "Run AMD multi-arch build"
+      {% if branch != "main" %}
+      - block: "Run AMD ROCm image build"
         depends_on: "amd-ci-base-ready"
         key: "block-amd-build"
       {% endif %}
 
-      - label: "AMD: :docker: build image (multi-arch)"
-        {% if branch == "main" or amd_legacy_image_mode %}
+      - label: "AMD: :docker: build image"
+        {% if branch == "main" %}
         depends_on: "amd-ci-base-ready"
         {% else %}
         depends_on: "block-amd-build"
         {% endif %}
         soft_fail: false
         commands:
-          - docker pull "$$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
-          - bash .buildkite/scripts/ci-bake.sh test-rocm-ci-with-wheel
+          - docker pull "rocm/vllm-dev:ci_base" || echo "ci_base pull failed, continuing with ci-bake-rocm.sh"
+          - bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
         key: "amd-build"
         env:
           DOCKER_BUILDKIT: "1"
@@ -362,70 +65,10 @@ plugins:
           CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
-          {% if branch == "main" %}
+          {% if branch in amd_cache_publish_branches %}
           IMAGE_TAG_LATEST: "rocm/vllm-ci:latest"
           DOCKERHUB_CACHE_TO: "rocm/vllm-ci-cache:rocm-latest"
           {% endif %}
-{{ amd_infra_retry('        ') }}
-        agents:
-          queue: amd-cpu
-
-      - label: "AMD: :docker: build image (gfx90a)"
-        depends_on: "amd-ci-base-ready"
-        soft_fail: false
-        commands:
-          - docker pull "$$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
-          - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx90a-ci-with-wheel
-        key: "amd-build-gfx90a"
-        env:
-          DOCKER_BUILDKIT: "1"
-          IMAGE_TAG: "{{ docker_image_amd_gfx90a }}"
-          VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
-          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
-          PYTORCH_ROCM_ARCH: "gfx90a"
-          CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
-          REMOTE_VLLM: "1"
-          VLLM_BRANCH: "$BUILDKITE_COMMIT"
-{{ amd_infra_retry('        ') }}
-        agents:
-          queue: amd-cpu
-
-      - label: "AMD: :docker: build image (gfx942)"
-        depends_on: "amd-ci-base-ready"
-        soft_fail: false
-        commands:
-          - docker pull "$$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
-          - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx942-ci-with-wheel
-        key: "amd-build-gfx942"
-        env:
-          DOCKER_BUILDKIT: "1"
-          IMAGE_TAG: "{{ docker_image_amd_gfx942 }}"
-          VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
-          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
-          PYTORCH_ROCM_ARCH: "gfx942"
-          CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
-          REMOTE_VLLM: "1"
-          VLLM_BRANCH: "$BUILDKITE_COMMIT"
-{{ amd_infra_retry('        ') }}
-        agents:
-          queue: amd-cpu
-
-      - label: "AMD: :docker: build image (gfx950)"
-        depends_on: "amd-ci-base-ready"
-        soft_fail: false
-        commands:
-          - docker pull "$$CI_BASE_IMAGE" || echo "ci_base pull failed, continuing with ci-bake.sh"
-          - bash .buildkite/scripts/ci-bake.sh test-rocm-gfx950-ci-with-wheel
-        key: "amd-build-gfx950"
-        env:
-          DOCKER_BUILDKIT: "1"
-          IMAGE_TAG: "{{ docker_image_amd_gfx950 }}"
-          VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
-          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
-          PYTORCH_ROCM_ARCH: "gfx950"
-          CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
-          REMOTE_VLLM: "1"
-          VLLM_BRANCH: "$BUILDKITE_COMMIT"
 {{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
@@ -451,20 +94,9 @@ plugins:
         {% set ns.blocked = 0 %}
       {% endif %}
 
-      {# Resolve the build key used by the test step.
-         Legacy image mode forces all tests to wait for the multi-arch build so
-         they stay compatible with older hooks that still warm only the
-         commit-only image tag. Otherwise we use the per-arch build key. #}
-      {% set step_arch = pool_to_arch[step.agent_pool] | default("gfx942") %}
-      {% if amd_legacy_image_mode %}
-      {% set step_build_key = "amd-build" %}
-      {% else %}
-      {% set step_build_key = arch_to_build_key[step_arch] | default("amd-build-gfx942") %}
-      {% endif %}
-
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
-        depends_on: {{ step_build_key }}
+        depends_on: amd-build
         key: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
       {% endif %}
 
@@ -472,7 +104,7 @@ plugins:
         {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
         depends_on: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         {% else %}
-        depends_on: {{ step_build_key }}
+        depends_on: amd-build
         {% endif %}
         agents:
           {% if step.agent_pool %}
@@ -480,13 +112,25 @@ plugins:
           {% else %}
           queue: amd_mi325_1
           {% endif %}
-        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
+        command: bash .buildkite/scripts/hardware_ci/run-amd-ci.sh
         env:
           DOCKER_BUILDKIT: "1"
-          DOCKER_IMAGE_NAME: "{{ arch_to_image[step_arch] | default(docker_image_amd) }}"
+          DOCKER_IMAGE_NAME: "{{ docker_image_amd }}"
+          NUM_NODES: "{{ step.num_nodes or 1 }}"
           VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
-          VLLM_ROCM_CI_LEGACY_DOCKER_TAG: "{{ '1' if amd_legacy_image_mode else '0' }}"
-          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
+          VLLM_HF_CACHE: "/fsx/hf_cache"
+          VLLM_CI_CACHE_ROOT: "/fsx/vllm-ci-cache"
+          {% if step.num_nodes and step.num_nodes >= 2 %}
+          VLLM_CI_EXECUTION_MODE: "multi-node"
+          VLLM_NUM_GPUS_PER_NODE: "{{ step.num_gpus or 1 }}"
+          VLLM_NODE_COMMAND_COUNT: "{{ step.commands | length }}"
+          {% for node_command in step.commands %}
+          VLLM_NODE_COMMAND_{{ loop.index0 }}: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }}-node{{ loop.index0 }} && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ node_command | replace('\"', '\\\"') | safe }}"
+          {% endfor %}
+          {% else %}
+          VLLM_CI_EXECUTION_MODE: "single-node"
+          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
+          {% endif %}
         priority: 100
         {% if step.grade and step.grade == "Blocking" %}
         soft_fail: false

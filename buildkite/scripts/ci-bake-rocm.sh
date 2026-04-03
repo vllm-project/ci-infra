@@ -1,5 +1,5 @@
 #!/bin/bash
-# ci-bake.sh - Wrapper script for Docker buildx bake CI builds
+# ci-bake-rocm.sh - Wrapper script for Docker buildx bake CI builds
 #
 # This script handles the common setup for running docker buildx bake:
 # - Downloads ci.hcl from ci-infra
@@ -9,7 +9,7 @@
 # - Runs the actual build
 #
 # Usage:
-#   ci-bake.sh [TARGET]
+#   ci-bake-rocm.sh [TARGET]
 #
 # Environment variables (all optional, with sensible defaults):
 #   CI_HCL_URL          - URL to ci.hcl (default: from ci-infra main branch)
@@ -167,17 +167,17 @@ echo "--- :buildkite: Setting up buildx builder"
 
 if [[ -S "${BUILDKIT_SOCKET}" ]]; then
     # Custom AMI with standalone buildkitd - use remote driver for warm cache
-    echo "✅ Found local buildkitd socket at ${BUILDKIT_SOCKET}"
+    echo "Found local buildkitd socket at ${BUILDKIT_SOCKET}"
     echo "Using remote driver to connect to buildkitd (warm cache available)"
 
-    # Check if baked-vllm-builder already exists and is using the socket
-    if docker buildx inspect baked-vllm-builder >/dev/null 2>&1; then
-        echo "Using existing baked-vllm-builder"
-        docker buildx use baked-vllm-builder
+    # Check if builder already exists and is using the socket
+    if docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
+        echo "Using existing builder: ${BUILDER_NAME}"
+        docker buildx use "${BUILDER_NAME}"
     else
-        echo "Creating baked-vllm-builder with remote driver"
+        echo "Creating builder '${BUILDER_NAME}' with remote driver"
         docker buildx create \
-            --name baked-vllm-builder \
+            --name "${BUILDER_NAME}" \
             --driver remote \
             --use \
             "unix://${BUILDKIT_SOCKET}"
@@ -203,7 +203,7 @@ docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
 # Buildkite agents often clone with --depth=1; without deepening, git rev-parse
 # HEAD~1 and git merge-base both silently fail, disabling the per-commit cache layers.
 if git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
-    echo "Shallow clone detected — deepening for cache key computation"
+    echo "Shallow clone detected - deepening for cache key computation"
     git fetch --deepen=1 origin 2>/dev/null || true
 fi
 
@@ -245,11 +245,16 @@ if [[ -n "${CI_BASE_CONTENT_FILES:-}" ]]; then
     echo "ci_base content hash: ${CI_BASE_CONTENT_HASH:0:16}... (will be embedded as image label)"
 fi
 
-# Print resolved configuration for debugging and save for artifact upload
+# Print resolved configuration for debugging and upload as a Buildkite artifact
 echo "--- :page_facing_up: Resolved bake configuration"
 BAKE_CONFIG_FILE="bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
 docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
-echo "Saved bake config to ${BAKE_CONFIG_FILE}"
+if command -v buildkite-agent >/dev/null 2>&1 && [[ -n "${BUILDKITE_BUILD_NUMBER:-}" ]]; then
+    buildkite-agent artifact upload "${BAKE_CONFIG_FILE}" || true
+    echo "Uploaded ${BAKE_CONFIG_FILE} as Buildkite artifact"
+else
+    echo "Saved bake config to ${BAKE_CONFIG_FILE} (not in Buildkite, skipping upload)"
+fi
 
 # Run the actual build.
 #
@@ -302,6 +307,23 @@ if [[ ${BUILD_RC} -ne 0 ]]; then
             echo "         The image is usable. Cache will be cold on the next"
             echo "         build but the pipeline can proceed."
             echo ""
+
+            # Post a Buildkite annotation so the warning is visible.
+            if command -v buildkite-agent >/dev/null 2>&1; then
+                buildkite-agent annotate \
+                    --style warning \
+                    --context "cache-export-warning" \
+                    "### :warning: Docker cache export failed (non-fatal)
+
+Image was pushed successfully: \`${IMAGE_TAG}\`
+
+The BuildKit registry cache export failed (likely Docker Hub upload
+session timeout on a large layer). Next build will not benefit from
+registry cache but will still work.
+
+Build exit code: ${BUILD_RC}" 2>/dev/null || true
+            fi
+
             BUILD_RC=0
         else
             echo ""
@@ -328,23 +350,14 @@ echo "--- :white_check_mark: Build complete"
 #
 # If ./wheel-export/ doesn't exist, this section is a no-op.
 #
-# Artifact paths:
-#   artifacts/vllm-wheel-{arch}/*.whl        (per-arch, e.g. vllm-wheel-gfx942)
-#   artifacts/vllm-wheel-multi-arch/*.whl    (multi-arch build)
+# Artifact path:
+#   artifacts/vllm-wheel-rocm/*.whl
 # ---------------------------------------------------------------------------
 WHEEL_DIR="./wheel-export"
 if [[ -d "${WHEEL_DIR}" ]] && ls "${WHEEL_DIR}"/*.whl >/dev/null 2>&1; then
     echo "--- :package: Uploading vLLM wheel"
 
-    # Determine architecture suffix from PYTORCH_ROCM_ARCH.
-    # Single arch (no semicolons) -> e.g. "gfx942"; multi-arch -> "multi-arch".
-    WHEEL_ARCH_SUFFIX="multi-arch"
-    if [[ -n "${PYTORCH_ROCM_ARCH:-}" ]] && [[ "${PYTORCH_ROCM_ARCH}" != *";"* ]]; then
-        WHEEL_ARCH_SUFFIX="${PYTORCH_ROCM_ARCH}"
-    fi
-    echo "Wheel arch suffix: ${WHEEL_ARCH_SUFFIX} (PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-unset})"
-
-    ARTIFACT_DIR="artifacts/vllm-wheel-${WHEEL_ARCH_SUFFIX}"
+    ARTIFACT_DIR="artifacts/vllm-wheel-rocm"
     mkdir -p "${ARTIFACT_DIR}"
 
     for whl in "${WHEEL_DIR}"/*.whl; do
