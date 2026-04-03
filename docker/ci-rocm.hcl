@@ -77,16 +77,27 @@ variable "CI_MAX_JOBS" {
 # manifest, including inherited base layers (~7.25GB ROCm runtime).
 # Docker Hub auto-creates the repo on first push.
 #
-# DOCKERHUB_CACHE_TO is used as an opt-in flag for maintaining the shared
-# source-scoped csrc-rocm-latest cache. Final-image cache exports stay
-# commit-scoped to avoid pushing duplicate cache refs in parallel, which has
-# proven flaky against Docker Hub on ROCm builds.
+# Final-image cache stays commit-scoped. Branch-to-branch reuse for the test
+# image comes from importing the parent and merge-base commit cache refs.
+#
+# The source-scoped native cache is exported both per-commit and per-branch so
+# ROCm extension rebuilds are shareable within the same commit reruns and across
+# consecutive commits on the same branch without depending on a single global
+# latest tag.
 
 variable "DOCKERHUB_CACHE_REPO" {
   default = "rocm/vllm-ci-cache"
 }
 
 variable "DOCKERHUB_CACHE_TO" {
+  default = ""
+}
+
+variable "ROCM_CACHE_BRANCH_TAG" {
+  default = ""
+}
+
+variable "ROCM_CACHE_UPSTREAM_BRANCH_TAG" {
   default = ""
 }
 
@@ -107,7 +118,8 @@ function "get_cache_from_rocm" {
     BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT}" : "",
     PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${PARENT_COMMIT}" : "",
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
-    "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-latest",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
+    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
   ])
 }
 
@@ -127,17 +139,19 @@ function "get_cache_from_rocm_csrc" {
     BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT}" : "",
     PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${PARENT_COMMIT}" : "",
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
-    "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-latest",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
+    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
   ])
 }
 
 function "get_cache_to_rocm_csrc" {
   params = []
   result = compact([
-    # Keep one shared source-scoped cache warm for cross-branch native reuse.
-    # When DOCKERHUB_CACHE_TO is not set, fall back to the commit-scoped ref.
-    DOCKERHUB_CACHE_TO != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-latest,mode=min" : "",
-    DOCKERHUB_CACHE_TO == "" && BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT},mode=min" : "",
+    # Export the exact-commit native cache for same-commit reruns.
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT},mode=min" : "",
+    # Export the branch-scoped native cache so later commits on the same branch
+    # can reuse compiled ROCm objects even when the exact parent cache is absent.
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=min" : "",
   ])
 }
 

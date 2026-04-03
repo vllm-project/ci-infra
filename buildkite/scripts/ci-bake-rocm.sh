@@ -32,6 +32,36 @@
 set -euo pipefail
 
 IMAGE_EXISTED_BEFORE_BUILD=0
+DEFAULT_REPO_SLUG="vllm-project/vllm"
+
+clean_docker_tag() {
+    local input="$1"
+    echo "$input" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-128
+}
+
+parse_repo_slug() {
+    local repo_url="${1:-}"
+    local repo_slug=""
+
+    if [[ -z "${repo_url}" ]]; then
+        printf '%s\n' "${DEFAULT_REPO_SLUG}"
+        return 0
+    fi
+
+    repo_slug=$(echo "${repo_url}" | sed -E 's#(git@|https?://)([^/:]+)[:/]([^/]+/[^/.]+)(\.git)?$#\3#')
+    if [[ "${repo_slug}" != */* ]]; then
+        repo_slug="${DEFAULT_REPO_SLUG}"
+    fi
+    printf '%s\n' "${repo_slug}"
+}
+
+get_buildkite_repo_slug() {
+    parse_repo_slug "${BUILDKITE_PULL_REQUEST_REPO:-${BUILDKITE_REPO:-}}"
+}
+
+get_buildkite_target_repo_slug() {
+    parse_repo_slug "${BUILDKITE_REPO:-}"
+}
 
 get_remote_image_label() {
     local image_ref="$1"
@@ -88,6 +118,71 @@ get_remote_image_label_with_retry() {
     return 0
 }
 
+remote_image_exists() {
+    local image_ref="$1"
+    docker manifest inspect "${image_ref}" >/dev/null 2>&1
+}
+
+use_existing_builder() {
+    echo "Using existing builder: ${BUILDER_NAME}"
+    docker buildx use "${BUILDER_NAME}"
+    docker buildx inspect --bootstrap
+}
+
+create_and_bootstrap_builder() {
+    local driver="$1"
+    local endpoint="${2:-}"
+
+    echo "Creating builder '${BUILDER_NAME}' with ${driver} driver"
+    if [[ -n "${endpoint}" ]]; then
+        docker buildx create \
+            --name "${BUILDER_NAME}" \
+            --driver "${driver}" \
+            --use \
+            "${endpoint}"
+    else
+        docker buildx create --name "${BUILDER_NAME}" --driver "${driver}" --use
+    fi
+    docker buildx inspect --bootstrap
+}
+
+confirm_remote_image_push() {
+    local image_ref="$1"
+
+    if ! remote_image_exists "${image_ref}"; then
+        return 1
+    fi
+
+    if [[ -n "${CI_BASE_CONTENT_HASH:-}" ]]; then
+        local remote_hash=""
+        remote_hash=$(get_remote_image_label_with_retry "${image_ref}" "vllm.ci_base.content_hash")
+        if [[ -n "${remote_hash}" && "${remote_hash}" == "${CI_BASE_CONTENT_HASH}" ]]; then
+            return 0
+        fi
+        echo "Remote image exists but does not have the expected ci_base content hash."
+        echo "  expected: ${CI_BASE_CONTENT_HASH:0:16}..."
+        echo "  found:    ${remote_hash:0:16}..."
+        return 1
+    fi
+
+    if [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
+        local remote_revision=""
+        remote_revision=$(get_remote_image_label_with_retry "${image_ref}" "org.opencontainers.image.revision")
+        if [[ -n "${remote_revision}" && "${remote_revision}" == "${BUILDKITE_COMMIT}" ]]; then
+            return 0
+        fi
+        if [[ ${IMAGE_EXISTED_BEFORE_BUILD} -eq 0 ]]; then
+            echo "Remote image exists under a commit-unique tag; accepting push despite missing revision label."
+            return 0
+        fi
+        echo "Remote image exists but revision label does not match ${BUILDKITE_COMMIT}."
+        echo "  found revision: ${remote_revision:-<missing>}"
+        return 1
+    fi
+
+    return 0
+}
+
 # Check if image already exists (skip build if it does)
 #
 # For commit-tagged images (rocm/vllm-ci:$COMMIT), the tag is unique per
@@ -100,7 +195,7 @@ get_remote_image_label_with_retry() {
 # (or the label is missing), we rebuild.
 if [[ -n "${IMAGE_TAG:-}" && "${FORCE_BUILD:-0}" != "1" ]]; then
     echo "--- :mag: Checking if image exists"
-    if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+    if remote_image_exists "${IMAGE_TAG}"; then
         IMAGE_EXISTED_BEFORE_BUILD=1
         if [[ -n "${CI_BASE_CONTENT_FILES:-}" ]]; then
             LOCAL_HASH=$(cat ${CI_BASE_CONTENT_FILES} 2>/dev/null | sha256sum | cut -d' ' -f1)
@@ -197,27 +292,17 @@ if [[ -S "${BUILDKIT_SOCKET}" ]]; then
 
     # Check if builder already exists and is using the socket
     if docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
-        echo "Using existing builder: ${BUILDER_NAME}"
-        docker buildx use "${BUILDER_NAME}"
+        use_existing_builder
     else
-        echo "Creating builder '${BUILDER_NAME}' with remote driver"
-        docker buildx create \
-            --name "${BUILDER_NAME}" \
-            --driver remote \
-            --use \
-            "unix://${BUILDKIT_SOCKET}"
+        create_and_bootstrap_builder remote "unix://${BUILDKIT_SOCKET}"
     fi
-    docker buildx inspect --bootstrap
 elif docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
     # Existing builder available
-    echo "Using existing builder: ${BUILDER_NAME}"
-    docker buildx use "${BUILDER_NAME}"
-    docker buildx inspect --bootstrap
+    use_existing_builder
 else
     # No local buildkitd, no existing builder - create new docker-container builder
     echo "No local buildkitd found, using docker-container driver"
-    docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
-    docker buildx inspect --bootstrap
+    create_and_bootstrap_builder docker-container
 fi
 
 # Show builder info
@@ -245,9 +330,38 @@ else
     echo "Using provided PARENT_COMMIT: ${PARENT_COMMIT}"
 fi
 
+# Compute a branch-scoped cache tag for the ROCm native build cache.
+# This keeps native cache shareable across commits on the same branch while
+# avoiding collisions between forks that use the same branch name.
+if [[ -z "${ROCM_CACHE_BRANCH_TAG:-}" && -n "${BUILDKITE_BRANCH:-}" ]]; then
+    ROCM_CACHE_REPO_TAG=$(clean_docker_tag "$(get_buildkite_repo_slug)")
+    ROCM_CACHE_BRANCH_TAG="${ROCM_CACHE_REPO_TAG}-$(clean_docker_tag "${BUILDKITE_BRANCH}")"
+    export ROCM_CACHE_BRANCH_TAG
+    echo "Computed ROCm branch cache tag: ${ROCM_CACHE_BRANCH_TAG}"
+elif [[ -n "${ROCM_CACHE_BRANCH_TAG:-}" ]]; then
+    echo "Using provided ROCM_CACHE_BRANCH_TAG: ${ROCM_CACHE_BRANCH_TAG}"
+fi
+
+# Fork PRs can also read from the upstream base branch native cache. This is a
+# read-only fallback so fork branches benefit from warm upstream ROCm objects
+# without polluting the upstream branch cache namespace.
+if [[ -z "${ROCM_CACHE_UPSTREAM_BRANCH_TAG:-}" \
+      && -n "${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-}" \
+      && "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
+    SOURCE_REPO_SLUG=$(get_buildkite_repo_slug)
+    TARGET_REPO_SLUG=$(get_buildkite_target_repo_slug)
+    if [[ "${SOURCE_REPO_SLUG}" != "${TARGET_REPO_SLUG}" ]]; then
+        ROCM_CACHE_UPSTREAM_BRANCH_TAG="$(clean_docker_tag "${TARGET_REPO_SLUG}")-$(clean_docker_tag "${BUILDKITE_PULL_REQUEST_BASE_BRANCH}")"
+        export ROCM_CACHE_UPSTREAM_BRANCH_TAG
+        echo "Computed ROCm upstream branch cache tag: ${ROCM_CACHE_UPSTREAM_BRANCH_TAG}"
+    fi
+elif [[ -n "${ROCM_CACHE_UPSTREAM_BRANCH_TAG:-}" ]]; then
+    echo "Using provided ROCM_CACHE_UPSTREAM_BRANCH_TAG: ${ROCM_CACHE_UPSTREAM_BRANCH_TAG}"
+fi
+
 # Compute merge-base with main for an additional cache fallback layer.
 # Useful for long-lived PRs where parent-commit cache may be missing but the
-# merge-base (a real main commit) maps to a warm :rocm-latest snapshot.
+# merge-base (a real main commit) still maps to a warm mainline cache snapshot.
 if [[ -z "${VLLM_MERGE_BASE_COMMIT:-}" ]]; then
     git fetch --depth=1 origin main 2>/dev/null || true
     VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD origin/main 2>/dev/null || echo "")
@@ -299,34 +413,7 @@ if [[ ${BUILD_RC} -ne 0 ]]; then
 
     if [[ -n "${IMAGE_TAG:-}" ]]; then
         echo "Checking if image was pushed successfully..."
-        IMAGE_CONFIRMED=0
-        if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
-            if [[ -n "${CI_BASE_CONTENT_HASH:-}" ]]; then
-                REMOTE_HASH=$(get_remote_image_label_with_retry "${IMAGE_TAG}" "vllm.ci_base.content_hash")
-                if [[ -n "${REMOTE_HASH}" && "${REMOTE_HASH}" == "${CI_BASE_CONTENT_HASH}" ]]; then
-                    IMAGE_CONFIRMED=1
-                else
-                    echo "Remote image exists but does not have the expected ci_base content hash."
-                    echo "  expected: ${CI_BASE_CONTENT_HASH:0:16}..."
-                    echo "  found:    ${REMOTE_HASH:0:16}..."
-                fi
-            elif [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
-                REMOTE_REVISION=$(get_remote_image_label_with_retry "${IMAGE_TAG}" "org.opencontainers.image.revision")
-                if [[ -n "${REMOTE_REVISION}" && "${REMOTE_REVISION}" == "${BUILDKITE_COMMIT}" ]]; then
-                    IMAGE_CONFIRMED=1
-                elif [[ ${IMAGE_EXISTED_BEFORE_BUILD} -eq 0 ]]; then
-                    echo "Remote image exists under a commit-unique tag; accepting push despite missing revision label."
-                    IMAGE_CONFIRMED=1
-                else
-                    echo "Remote image exists but revision label does not match ${BUILDKITE_COMMIT}."
-                    echo "  found revision: ${REMOTE_REVISION:-<missing>}"
-                fi
-            else
-                IMAGE_CONFIRMED=1
-            fi
-        fi
-
-        if [[ ${IMAGE_CONFIRMED} -eq 1 ]]; then
+        if confirm_remote_image_push "${IMAGE_TAG}"; then
             echo ""
             echo "WARNING: Build reported failure (rc=${BUILD_RC}) but the"
             echo "         image was pushed successfully: ${IMAGE_TAG}"
