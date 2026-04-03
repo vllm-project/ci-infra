@@ -105,8 +105,8 @@ def _should_run_all(
         return True
     if "ready-run-all-tests" in pr_labels:
         return True
-    pattern_matched = False
     for file in list_file_diff:
+        pattern_matched = False
         for pattern in run_all_patterns:
             if re.match(pattern, file):
                 pattern_matched = True

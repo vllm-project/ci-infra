@@ -23,11 +23,68 @@ if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
     DOCS_ONLY_DISABLE=0
 fi
 
+if [[ -z "${COV_ENABLED:-}" ]]; then
+    COV_ENABLED=0
+fi
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+fetch_origin_ref() {
+    local ref="$1"
+    git fetch --no-tags --depth=50 origin "${ref}:refs/remotes/origin/${ref}" >/dev/null 2>&1 || \
+        git fetch --no-tags origin "${ref}:refs/remotes/origin/${ref}" >/dev/null 2>&1
+}
+
+get_pr_labels() {
+    if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
+        return 0
+    fi
+
+    curl -fsSL "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" 2>/dev/null | \
+        jq -r '.labels[].name' 2>/dev/null || true
+}
+
+join_file_diff() {
+    if [[ -z "${1:-}" ]]; then
+        return 0
+    fi
+
+    printf '%s\n' "$1" | tr -d '\r' | paste -sd'|' -
+}
+
+# ---------------------------------------------------------------------------
+# Git setup: ensure origin/main is available and compute merge base once.
+# On K8s (blobless clones with --filter=blob:none), origin/main may not be
+# fetched yet if the agent only fetched the PR branch. Also mark the repo
+# as safe in case the checkout uid differs from the running uid.
+# ---------------------------------------------------------------------------
+git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+
+if git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
+    echo "Shallow repository detected, deepening history..."
+    git fetch --no-tags --deepen=50 origin >/dev/null 2>&1 || true
+fi
+
+if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
+    echo "origin/main not found, fetching..."
+    fetch_origin_ref main || true
+fi
+
+if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
+    MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD 2>/dev/null || echo "")
+    if [[ -z "$MERGE_BASE_COMMIT" ]]; then
+        echo "WARNING: Could not compute merge base, falling back to run_all=1"
+        RUN_ALL=1
+        MERGE_BASE_COMMIT="HEAD"
+    fi
+fi
+
 fail_fast() {
     DISABLE_LABEL="ci-no-fail-fast"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
-        PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+        PR_LABELS=$(get_pr_labels)
         if [[ $PR_LABELS == *"$DISABLE_LABEL"* ]]; then
             echo false
         else
@@ -42,7 +99,7 @@ check_run_all_label() {
     RUN_ALL_LABEL="ready-run-all-tests"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
-        PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+        PR_LABELS=$(get_pr_labels)
         if [[ $PR_LABELS == *"$RUN_ALL_LABEL"* ]]; then
             echo true
         else
@@ -53,23 +110,45 @@ check_run_all_label() {
     fi
 }
 
-if [[ -z "${COV_ENABLED:-}" ]]; then
-    COV_ENABLED=0
-fi
+# ---------------------------------------------------------------------------
+# get_diff: compute changed files between commits only (no index staging).
+#
+# IMPORTANT: Do NOT use "git add ." here. On K8s blobless clones
+# (--filter=blob:none), git add . fetches and stages the entire repo,
+# producing a diff with every file and eventually exceeding ARG_MAX.
+# We only need committed changes between refs.
+# ---------------------------------------------------------------------------
+get_diff() {
+    git diff --name-only --diff-filter=ACMDR "$MERGE_BASE_COMMIT" HEAD 2>/dev/null || echo ""
+}
 
+get_diff_main() {
+    git diff --name-only --diff-filter=ACMDR HEAD~1 HEAD 2>/dev/null || echo ""
+}
+
+# ---------------------------------------------------------------------------
+# upload_pipeline: render and upload the Buildkite pipeline YAML
+# ---------------------------------------------------------------------------
 upload_pipeline() {
     echo "Uploading pipeline..."
     # Install minijinja
     ls .buildkite || buildkite-agent annotate --style error 'Please merge upstream main branch for buildkite CI'
     curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
-    source /var/lib/buildkite-agent/.cargo/env
+    TEMPLATE_PATH=".buildkite/test-template-amd.j2"
+    CARGO_ENV="${CARGO_HOME:-$HOME/.cargo}/env"
+    if [[ ! -f "$CARGO_ENV" ]]; then
+        echo "Error: Cargo env file not found at $CARGO_ENV"
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "$CARGO_ENV"
 
     if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
         AMD_MIRROR_HW="amdtentative"
-        curl -o .buildkite/test-template.j2 \
+        curl -fsSL -o "$TEMPLATE_PATH" \
             "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
     else
-        curl -o .buildkite/test-template.j2 \
+        curl -fsSL -o "$TEMPLATE_PATH" \
             "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
     fi
 
@@ -92,7 +171,7 @@ upload_pipeline() {
     (
         set -x
         # Output pipeline.yaml with all blank lines removed
-        minijinja-cli test-template.j2 test-amd.yaml \
+        minijinja-cli test-template-amd.j2 test-amd.yaml \
             -D branch="$BUILDKITE_BRANCH" \
             -D list_file_diff="$LIST_FILE_DIFF" \
             -D run_all="$RUN_ALL" \
@@ -100,7 +179,7 @@ upload_pipeline() {
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
-            -D vllm_merge_base_commit="$(git merge-base origin/main HEAD)" \
+            -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
             | sed '/^[[:space:]]*$/d' \
@@ -112,53 +191,58 @@ upload_pipeline() {
     exit 0
 }
 
-# AMD agents use BUILDKITE_GIT_CLONE_FLAGS=--depth=1 to avoid timing out on
-# full clones of the vllm repo (~184k objects). Deepen here so git merge-base
-# has enough history. 50 commits covers all realistic PR branch depths.
-if git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
-    git fetch --depth=50 origin main 2>/dev/null || true
+# ---------------------------------------------------------------------------
+# Compute file diff
+# ---------------------------------------------------------------------------
+if [[ $BUILDKITE_BRANCH == "main" ]] && ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+    echo "HEAD~1 not available on main, fetching one more commit..."
+    git fetch --no-tags --deepen=1 origin >/dev/null 2>&1 || true
 fi
 
-get_diff() {
-    $(git add .)
-    echo $(git diff --name-only --diff-filter=ACMDR $(git merge-base origin/main HEAD))
-}
+diff_unavailable=0
+if [[ $BUILDKITE_BRANCH == "main" ]] && ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+    echo "WARNING: Could not resolve HEAD~1 on main, falling back to run_all=1"
+    RUN_ALL=1
+    diff_unavailable=1
+fi
 
-get_diff_main() {
-    $(git add .)
-    echo $(git diff --name-only --diff-filter=ACMDR HEAD~1)
-}
-
-file_diff=$(get_diff)
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
-    file_diff=$(get_diff_main)
+    if [[ $diff_unavailable -eq 1 ]]; then
+        file_diff=""
+    else
+        file_diff=$(get_diff_main)
+    fi
+else
+    file_diff=$(get_diff)
 fi
 
 # ----------------------------------------------------------------------
 # Early exit start: skip pipeline if conditions are met
 # ----------------------------------------------------------------------
 
-# skip pipeline if all changed files are under docs/
+# skip pipeline if *every* changed file is docs/** OR **/*.md OR mkdocs.yaml
 if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
   if [[ -n "${file_diff:-}" ]]; then
     docs_only=1
-    # Robust iteration over newline-separated file_diff
+    # Iterate robustly over newline-separated paths
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
-      # **Policy:** only skip if *every* path starts with docs/
-      if [[ "$f" != docs/* ]]; then
+      # Match any of: docs/**  OR  **/*.md  OR  mkdocs.yaml
+      if [[ "${f#docs/}" != "$f" || "$f" == *.md || "$f" == "mkdocs.yaml" ]]; then
+        continue
+      else
         docs_only=0
         break
       fi
-    done < <(printf '%s\n' "$file_diff" | tr ' ' '\n' | tr -d '\r')
+    done < <(printf '%s\n' "$file_diff" | tr -d '\r')
 
     if [[ "$docs_only" -eq 1 ]]; then
-      buildkite-agent annotate ":memo: CI skipped — docs/** only changes detected
+      buildkite-agent annotate ":memo: CI skipped — docs/Markdown/mkdocs-only changes detected
 
 \`\`\`
-${file_diff}
+$(printf '%s\n' "$file_diff" | tr -d '\r')
 \`\`\`" --style "info" || true
-      echo "[docs-only] All changes are under docs/. Exiting before pipeline upload."
+      echo "[docs-only] All changes are docs/**, *.md, or mkdocs.yaml. Exiting before pipeline upload."
       exit 0
     fi
   fi
@@ -191,7 +275,8 @@ ignore_patterns=(
     "cmake/cpu_extension.cmake"
 )
 
-for file in $file_diff; do
+while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
     # First check if file matches any pattern
     matches_pattern=0
     for pattern in "${patterns[@]}"; do
@@ -217,7 +302,7 @@ for file in $file_diff; do
             break
         fi
     fi
-done
+done < <(printf '%s\n' "$file_diff" | tr -d '\r')
 
 # Check for ready-run-all-tests label
 LABEL_RUN_ALL=$(check_run_all_label)
@@ -239,9 +324,14 @@ else
     echo "No critical changes, using precompiled wheels"
 fi
 
-
-LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
-if [[ $BUILDKITE_BRANCH == "main" ]]; then
-    LIST_FILE_DIFF=$(get_diff_main | tr ' ' '|')
+# Build LIST_FILE_DIFF from the already-computed file_diff.
+# When run_all=1, the jinja template ignores list_file_diff (all tests are
+# unblocked unconditionally), so use a short sentinel to avoid exceeding
+# ARG_MAX when the diff is large (K8s fresh clones).
+if [[ $RUN_ALL -eq 1 ]]; then
+    LIST_FILE_DIFF="run_all"
+else
+    LIST_FILE_DIFF=$(join_file_diff "$file_diff")
 fi
+
 upload_pipeline

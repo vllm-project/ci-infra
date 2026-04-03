@@ -57,7 +57,7 @@ class BuildkiteGroupStep(BaseModel):
 
 def _get_step_plugin(step: Step):
     # Use K8s plugin
-    use_cpu = step.device == DeviceType.CPU or False
+    use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
     if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
@@ -78,6 +78,10 @@ def get_agent_queue(step: Step):
             return AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.label == "Documentation Build":
         return AgentQueue.SMALL_CPU_PREMERGE
+    elif step.device == DeviceType.CPU_SMALL:
+        return AgentQueue.SMALL_CPU_PREMERGE
+    elif step.device == DeviceType.CPU_MEDIUM:
+        return AgentQueue.MEDIUM_CPU_PREMERGE
     elif step.device == DeviceType.CPU:
         return AgentQueue.CPU_PREMERGE_US_EAST_1
     elif step.device == DeviceType.A100:
@@ -206,7 +210,7 @@ def convert_group_step_to_buildkite_step(
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
-                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 1
+                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0
             )
 
             if block_step:
