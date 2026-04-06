@@ -56,7 +56,7 @@ class BuildkiteGroupStep(BaseModel):
 def _get_step_plugin(step: Step):
     # Use K8s plugin
     use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
-    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
+    if step.device in [DeviceType.H100.value, DeviceType.A100.value, DeviceType.B200.value]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu))}
