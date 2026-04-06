@@ -91,7 +91,7 @@ def get_agent_queue(step: Step):
     elif step.device == DeviceType.H200_18GB:
         return AgentQueue.H200_18GB
     elif step.device == DeviceType.B200:
-        return AgentQueue.B200
+        return AgentQueue.B200_K8S
     elif step.device == DeviceType.INTEL_CPU:
         return AgentQueue.INTEL_CPU
     elif step.device == DeviceType.INTEL_HPU:

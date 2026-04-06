@@ -41,7 +41,7 @@ class AgentQueue(str, Enum):
     MITHRIL_H100 = "mithril-h100-pool"
     H200 = "H200"
     H200_18GB = "h200_18gb"
-    B200 = "B200"
+    B200_K8S = "b200_k8s"
     SMALL_CPU_PREMERGE = "small_cpu_queue_premerge"
     MEDIUM_CPU_PREMERGE = "medium_cpu_queue_premerge"
     A100 = "a100_queue"
