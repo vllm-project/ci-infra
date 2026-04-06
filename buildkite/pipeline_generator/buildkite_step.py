@@ -141,11 +141,17 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     commands = []
     # Default setup commands
     if not step.label.startswith(":docker:") and not step.no_plugin:
+        commands.append("echo '--- :nvidia: GPU Info'")
         commands.append("(command nvidia-smi || true)")
+        commands.append("echo '--- :gear: CUDA Coredump Setup'")
         commands.append("export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'")
 
     if step.commands:
-        commands.extend(step.commands)
+        for i, cmd in enumerate(step.commands):
+            # Sanitize command preview for use in echo (remove quotes and special chars)
+            preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
+            commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
+            commands.append(cmd)
 
     final_commands = []
     for command in commands:
