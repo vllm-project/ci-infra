@@ -40,7 +40,7 @@ class AgentQueue(str, Enum):
     GPU_4 = "gpu_4_queue"
     MITHRIL_H100 = "mithril-h100-pool"
     H200 = "H200"
-    H200_TEST = "H200-test"
+    H200_TEST = "h200_18gb"
     B200 = "B200"
     SMALL_CPU_PREMERGE = "small_cpu_queue_premerge"
     MEDIUM_CPU_PREMERGE = "medium_cpu_queue_premerge"
