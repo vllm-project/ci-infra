@@ -85,6 +85,45 @@ h100_plugin_template = {
     }
 }
 
+h100_rh_plugin_template = {
+    "kubernetes": {
+        "podSpec": {
+            "containers": [
+                {
+                    "image": "",
+                    "resources": {"limits": {"nvidia.com/gpu": ""}},
+                    "volumeMounts": [
+                        {"name": "devshm", "mountPath": "/dev/shm"},
+                        {"name": "ci-cache", "mountPath": "/ci-cache"},
+                    ],
+                    "env": [
+                        {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
+                        {"name": "NCCL_CUMEM_HOST_ENABLE", "value": "0"},
+                        {"name": "HF_HOME", "value": "/ci-cache/hf_home"},
+                        {
+                            "name": "HF_TOKEN",
+                            "valueFrom": {
+                                "secretKeyRef": {
+                                    "name": "hf-token-secret",
+                                    "key": "token",
+                                }
+                            },
+                        },
+                    ],
+                }
+            ],
+            "nodeSelector": {"vllm.ci/gpu-pool": "upstream-ci-h100"},
+            "volumes": [
+                {"name": "devshm", "emptyDir": {"medium": "Memory"}},
+                {
+                    "name": "ci-cache",
+                    "hostPath": {"path": "/mnt/ci-cache", "type": "DirectoryOrCreate"},
+                },
+            ],
+        }
+    }
+}
+
 a100_plugin_template = {
     "kubernetes": {
         "podSpec": {
@@ -134,6 +173,8 @@ def get_k8s_plugin(step: Step, image: str):
         plugin = copy.deepcopy(nebius_h200_plugin_template)
     elif step.device == DeviceType.A100.value:
         plugin = copy.deepcopy(a100_plugin_template)
+    elif step.device == DeviceType.REDHAT_OPENSHIFT_H100:
+        plugin = copy.deepcopy(h100_rh_plugin_template)
 
     if step.device == DeviceType.H100:
         image = image.replace("public.ecr.aws", "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache")

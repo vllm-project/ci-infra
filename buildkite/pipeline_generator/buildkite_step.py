@@ -57,7 +57,7 @@ def _get_step_plugin(step: Step):
     # Use K8s plugin
     use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
     use_arm64 = step.device == DeviceType.DGX_SPARK
-    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
+    if step.device in [DeviceType.H100.value, DeviceType.A100.value, DeviceType.REDHAT_OPENSHIFT_H100.value]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
@@ -109,6 +109,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.ASCEND
     elif step.device == DeviceType.DGX_SPARK:
         return AgentQueue.DGX_SPARK
+    elif step.device == DeviceType.REDHAT_OPENSHIFT_H100:
+        return AgentQueue.REDHAT_H100_FRANKFURT
     elif step.num_devices == 2 or step.num_devices == 4:
         return AgentQueue.GPU_4
     else:
