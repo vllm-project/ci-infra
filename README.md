@@ -71,7 +71,7 @@ There are two methods for generating Buildkite pipeline YAML:
 | `bootstrap-intel.sh` | Intel CI | Pipeline generator (via ci-infra) |
 | `bootstrap-amd.sh` | AMD/ROCm CI | Jinja2 template (`test-template-amd.j2`) |
 
-The CUDA/CPU CI pipeline (`ci` / `fastcheck`) uses the pipeline generator bundled in the [vLLM repo](https://github.com/vllm-project/vllm) directly, without a bootstrap script in ci-infra.
+The CUDA/CPU CI pipeline uses the pipeline generator bundled in the [vLLM repo](https://github.com/vllm-project/vllm) directly, without a bootstrap script in ci-infra.
 
 Each bootstrap script handles:
 - **Diff detection**: Computes changed files vs. `origin/main` (PRs) or `HEAD~1` (main branch).
