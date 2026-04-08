@@ -39,11 +39,10 @@ GitHub push/PR
 Buildkite webhook triggers build
     │
     ▼
-Bootstrap step (e.g. buildkite/bootstrap-amd.sh)
-    ├── Detects changed files
-    ├── Determines test scope (subset vs. run-all)
-    ├── Resolves Docker cache layers (ECR)
-    └── Generates and uploads pipeline YAML to Buildkite
+Bootstrap step
+    ├── Installs pipeline-generator from ci-infra
+    ├── Generates pipeline YAML from .buildkite/ci_config.yaml
+    └── Uploads pipeline YAML to Buildkite
     │
     ▼
 Steps dispatched to agent queues
@@ -58,11 +57,25 @@ Results reported back (test results, coverage via Codecov)
 
 ### Pipeline Generation
 
-There are two methods for generating Buildkite pipeline YAML:
+#### Pipeline Generator (primary — CUDA/CPU CI, Intel CI)
 
-**Pipeline Generator** (primary, used by CUDA/CPU CI and Intel CI): A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from YAML files in the vLLM repo (e.g. `.buildkite/test_areas/`, `.buildkite/image_build/`), groups them, and converts them into Buildkite YAML with proper agent queues, Docker/Kubernetes plugins, and environment configuration. It is driven by a YAML config file (e.g. `ci_config.yaml`) that specifies job directories, registries, repositories, and `run_all_patterns`. The CUDA/CPU CI pipeline invokes the generator from the vLLM repo itself, while Intel CI invokes it from ci-infra via `bootstrap-intel.sh`. See the [pipeline generator README](buildkite/pipeline_generator/README.md) for details.
+A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from YAML files in the vLLM repo (e.g. `.buildkite/test_areas/`, `.buildkite/image_build/`), groups them, and converts them into Buildkite YAML with proper agent queues, Docker/Kubernetes plugins, and environment configuration.
 
-**Jinja2 template** (used by AMD CI): `buildkite/test-template-amd.j2` renders vLLM's [`test-pipeline.yaml`](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-pipeline.yaml) into Buildkite YAML using [minijinja-cli](https://github.com/mitsuhiko/minijinja).
+**How it runs:** The bootstrap step installs `pipeline-generator` from ci-infra (`pip install git+...ci-infra.git@main#subdirectory=buildkite/pipeline_generator`) and invokes it with the vLLM repo's `.buildkite/ci_config.yaml`. The `VLLM_CI_BRANCH` environment variable controls which ci-infra branch to install from (defaults to `main`).
+
+**Config:** Driven by a YAML config file (`ci_config.yaml`) that specifies job directories, registries, repositories, and `run_all_patterns`. See the [pipeline generator README](buildkite/pipeline_generator/README.md) for details.
+
+**Features:**
+- **Device types**: CPU, GPU (L4), A100, H100, H200, H200 18GB (MIG), B200, GH200, Intel CPU/HPU/GPU, ARM CPU, Ascend NPU, AMD MI250/MI325/MI355 (1-8 devices)
+- **Plugin generation**: Docker plugin for EC2-based queues, Kubernetes pod specs for H100/H200/A100
+- **AMD mirroring**: Steps can define `mirror.amd` to automatically create parallel AMD test runs
+- **Source file dependencies**: Steps can specify which source files they depend on for intelligent test filtering
+- **Block steps**: Optional tests are gated behind manual approval blocks
+- **Variable injection**: Automatically injects registry URLs, cache tags, and image references into step commands
+
+#### Jinja2 Template (AMD CI)
+
+`buildkite/test-template-amd.j2` renders vLLM's [`test-pipeline.yaml`](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-pipeline.yaml) into Buildkite YAML using [minijinja-cli](https://github.com/mitsuhiko/minijinja).
 
 ### Bootstrap Scripts
 
@@ -71,26 +84,13 @@ There are two methods for generating Buildkite pipeline YAML:
 | `bootstrap-intel.sh` | Intel CI | Pipeline generator (via ci-infra) |
 | `bootstrap-amd.sh` | AMD/ROCm CI | Jinja2 template (`test-template-amd.j2`) |
 
-The CUDA/CPU CI pipeline uses the pipeline generator bundled in the [vLLM repo](https://github.com/vllm-project/vllm) directly, without a bootstrap script in ci-infra.
-
-Each bootstrap script handles:
+The AMD and Intel bootstrap scripts additionally handle:
 - **Diff detection**: Computes changed files vs. `origin/main` (PRs) or `HEAD~1` (main branch).
 - **Docs-only skip**: If all changes are in `docs/`, `*.md`, or `mkdocs.yaml`, CI is skipped entirely.
 - **Run-all detection**: Changes to critical files (`Dockerfile`, `CMakeLists.txt`, `csrc/`, `setup.py`, `requirements/*.txt`) trigger all tests and build wheels from source.
 - **Precompiled wheels**: When no critical files changed, precompiled wheels from the merge-base commit are used if available at `wheels.vllm.ai`.
 - **PR labels**: `ready-run-all-tests` forces all tests including optional/nightly. `ci-no-fail-fast` disables fail-fast mode.
 - **ECR cache resolution**: Resolves multi-layer cache sources with a fallback chain (PR-specific -> base branch -> main).
-
-### Pipeline Generator Features
-
-The pipeline generator (`buildkite/pipeline_generator/`) supports:
-
-- **Device types**: CPU, GPU (L4), A100, H100, H200, H200 18GB (MIG), B200, GH200, Intel CPU/HPU/GPU, ARM CPU, Ascend NPU, AMD MI250/MI325/MI355 (1-8 devices)
-- **Plugin generation**: Docker plugin for EC2-based queues, Kubernetes pod specs for H100/H200/A100
-- **AMD mirroring**: Steps can define `mirror.amd` to automatically create parallel AMD test runs
-- **Source file dependencies**: Steps can specify which source files they depend on for intelligent test filtering
-- **Block steps**: Optional tests are gated behind manual approval blocks
-- **Variable injection**: Automatically injects registry URLs, cache tags, and image references into step commands
 
 ## Infrastructure
 
