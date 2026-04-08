@@ -112,13 +112,13 @@ module "ci_monitoring" {
   buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
 }
 
-resource "google_compute_resource_policy" "v7x221" {
-  name   = "v7x221"
+resource "google_compute_resource_policy" "v7x222" {
+  name   = "v7x222"
   region = "us-central1"
   project = var.project_id  
   workload_policy {
     type                 = "HIGH_THROUGHPUT"
-    accelerator_topology = "2x2x1"
+    accelerator_topology = "2x2x2"
   }
 }
 
@@ -126,7 +126,7 @@ resource "google_container_cluster" "tpu-cluster" {
   name     = "tpu-v7x-cluster"
   location = "us-central1" 
   remove_default_node_pool = true
-  initial_node_count       = 1
+  initial_node_count       = 2
 }
 
 resource "google_container_node_pool" "tpu_v7x_pool" {
@@ -137,12 +137,12 @@ resource "google_container_node_pool" "tpu_v7x_pool" {
   project    = var.project_id
   placement_policy {
     type = "COMPACT"
-    policy_name = google_compute_resource_policy.v7x221.name
+    policy_name = google_compute_resource_policy.v7x222.name
   }
   node_config {
     machine_type = "ct7x-8"
     labels = {
-      "topology" = "2x2x1"
+      "topology" = "2x2x2"
     }
 
     oauth_scopes = [
