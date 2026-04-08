@@ -129,11 +129,36 @@ resource "google_container_cluster" "tpu-cluster" {
   initial_node_count       = 2
 }
 
-resource "google_container_node_pool" "tpu_v7x_pool" {
+resource "google_container_node_pool" "tpu_v7x_pool1" {
   name       = "tpu-v7x-8-pool"
   location   = "us-central1-c"
   cluster    = google_container_cluster.tpu-cluster.name
-  node_count = 2
+  node_count = 1
+  project    = var.project_id
+  placement_policy {
+    type = "COMPACT"
+    policy_name = google_compute_resource_policy.v7x221.name
+  }
+  node_config {
+    machine_type = "ct7x-8"
+    labels = {
+      "topology" = "2x2x1"
+    }
+    reservation_affinity {
+      consume_reservation_type = "ANY_RESERVATION"
+    }
+
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform"
+    ]
+  }
+}
+
+resource "google_container_node_pool" "tpu_v7x_pool2" {
+  name       = "tpu-v7x-8-pool"
+  location   = "us-central1-c"
+  cluster    = google_container_cluster.tpu-cluster.name
+  node_count = 1
   project    = var.project_id
   placement_policy {
     type = "COMPACT"
