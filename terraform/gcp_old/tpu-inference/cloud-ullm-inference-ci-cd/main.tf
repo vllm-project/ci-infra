@@ -111,3 +111,45 @@ module "ci_monitoring" {
   project_id                     = var.project_id
   buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
 }
+
+resource "google_compute_resource_policy" "v7x222" {
+  name   = "v7x222"
+  region = "us-central1"
+  project = var.project_id  
+  workload_policy {
+    type                 = "HIGH_THROUGHPUT"
+    accelerator_topology = "2x2x2"
+  }
+}
+
+resource "google_container_cluster" "tpu-cluster" {
+  name     = "tpu-v7x-cluster"
+  location = "us-central1" 
+  remove_default_node_pool = true
+  initial_node_count       = 2
+}
+
+resource "google_container_node_pool" "tpu_v7x_pool" {
+  name       = "tpu-v7x-8-pool"
+  location   = "us-central1-c"
+  cluster    = google_container_cluster.tpu-cluster.name
+  node_count = 2
+  project    = var.project_id
+  placement_policy {
+    type = "COMPACT"
+    policy_name = google_compute_resource_policy.v7x222.name
+  }
+  node_config {
+    machine_type = "ct7x-8"
+    labels = {
+      "topology" = "2x2x2"
+    }
+    reservation_affinity {
+      consume_reservation_type = "ANY_RESERVATION"
+    }
+
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform"
+    ]
+  }
+}
