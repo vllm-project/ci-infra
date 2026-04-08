@@ -144,6 +144,9 @@ resource "google_container_node_pool" "tpu_v7x_pool" {
     labels = {
       "topology" = "2x2x2"
     }
+    reservation_affinity {
+      consume_reservation_type = "ANY_RESERVATION"
+    }
 
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"
