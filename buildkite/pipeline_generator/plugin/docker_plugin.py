@@ -93,6 +93,9 @@ def get_docker_plugin(step: Step, image: str):
         plugin = copy.deepcopy(docker_plugin_template)
     plugin["image"] = image
 
+    if step.device == DeviceType.H200_18GB:
+        image = image.replace("public.ecr.aws", "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache")
+        plugin["image"] = image
     if step.label == "Benchmarks" or step.mount_buildkite_agent:
         plugin["mount_buildkite_agent"] = True
     if step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM) and plugin.get("gpus"):
