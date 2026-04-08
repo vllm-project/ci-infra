@@ -130,7 +130,7 @@ resource "google_container_cluster" "tpu-cluster" {
 }
 
 resource "google_container_node_pool" "tpu_v7x_pool1" {
-  name       = "tpu-v7x-8-pool"
+  name       = "tpu-v7x-8-pool1"
   location   = "us-central1-c"
   cluster    = google_container_cluster.tpu-cluster.name
   node_count = 1
@@ -155,7 +155,7 @@ resource "google_container_node_pool" "tpu_v7x_pool1" {
 }
 
 resource "google_container_node_pool" "tpu_v7x_pool2" {
-  name       = "tpu-v7x-8-pool"
+  name       = "tpu-v7x-8-pool2"
   location   = "us-central1-c"
   cluster    = google_container_cluster.tpu-cluster.name
   node_count = 1
