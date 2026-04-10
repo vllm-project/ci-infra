@@ -112,13 +112,13 @@ module "ci_monitoring" {
   buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
 }
 
-resource "google_compute_resource_policy" "v7x222" {
-  name   = "v7x222"
+resource "google_compute_resource_policy" "v7x221" {
+  name   = "v7x221"
   region = "us-central1"
   project = var.project_id  
   workload_policy {
     type                 = "HIGH_THROUGHPUT"
-    accelerator_topology = "2x2x2"
+    accelerator_topology = "2x2x1"
   }
 }
 
@@ -129,20 +129,45 @@ resource "google_container_cluster" "tpu-cluster" {
   initial_node_count       = 2
 }
 
-resource "google_container_node_pool" "tpu_v7x_pool" {
-  name       = "tpu-v7x-8-pool"
+resource "google_container_node_pool" "tpu_v7x_pool1" {
+  name       = "tpu-v7x-8-pool1"
   location   = "us-central1-c"
   cluster    = google_container_cluster.tpu-cluster.name
-  node_count = 2
+  node_count = 1
   project    = var.project_id
   placement_policy {
     type = "COMPACT"
-    policy_name = google_compute_resource_policy.v7x222.name
+    policy_name = google_compute_resource_policy.v7x221.name
   }
   node_config {
     machine_type = "ct7x-8"
     labels = {
-      "topology" = "2x2x2"
+      "topology" = "2x2x1"
+    }
+    reservation_affinity {
+      consume_reservation_type = "ANY_RESERVATION"
+    }
+
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform"
+    ]
+  }
+}
+
+resource "google_container_node_pool" "tpu_v7x_pool2" {
+  name       = "tpu-v7x-8-pool2"
+  location   = "us-central1-c"
+  cluster    = google_container_cluster.tpu-cluster.name
+  node_count = 1
+  project    = var.project_id
+  placement_policy {
+    type = "COMPACT"
+    policy_name = google_compute_resource_policy.v7x221.name
+  }
+  node_config {
+    machine_type = "ct7x-8"
+    labels = {
+      "topology" = "2x2x1"
     }
     reservation_affinity {
       consume_reservation_type = "ANY_RESERVATION"
