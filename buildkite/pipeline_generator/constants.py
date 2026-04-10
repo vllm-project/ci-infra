@@ -29,6 +29,7 @@ class DeviceType(str, Enum):
     AMD_MI355_2 = "mi355_2"
     AMD_MI355_4 = "mi355_4"
     AMD_MI355_8 = "mi355_8"
+    DGX_SPARK = "dgx-spark"
 
 
 class AgentQueue(str, Enum):
@@ -66,3 +67,4 @@ class AgentQueue(str, Enum):
     AMD_MI355_2 = "amd_mi355_2"
     AMD_MI355_4 = "amd_mi355_4"
     AMD_MI355_8 = "amd_mi355_8"
+    DGX_SPARK = "dgx-spark"
