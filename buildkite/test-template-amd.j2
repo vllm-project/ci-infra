@@ -22,7 +22,7 @@
         soft_fail: false
         commands:
           - docker pull "rocm/vllm-dev:ci_base" || echo "ci_base not found yet, building it now"
-          - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci
+          - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
         key: "amd-ci-base-ready"
         env:
           DOCKER_BUILDKIT: "1"

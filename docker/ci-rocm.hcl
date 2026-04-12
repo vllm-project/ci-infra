@@ -69,6 +69,25 @@ variable "CI_MAX_JOBS" {
   default = ""
 }
 
+# Upstream dependency commit pins -- extracted from Dockerfile.rocm by
+# ci-bake-rocm.sh at build time. Empty defaults are safe: the cache
+# functions produce no entries when the variable is empty.
+variable "RIXL_BRANCH" {
+  default = ""
+}
+
+variable "UCX_BRANCH" {
+  default = ""
+}
+
+variable "ROCSHMEM_BRANCH" {
+  default = ""
+}
+
+variable "DEEPEP_BRANCH" {
+  default = ""
+}
+
 # Docker Hub registry cache for AMD builds.
 #
 # A separate repo (rocm/vllm-ci-cache) is used for BuildKit layer cache.
@@ -120,16 +139,21 @@ function "get_cache_from_rocm" {
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
     ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
     ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
+    # Branch-scoped full image cache - fallback when parent-commit cache is evicted
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
+    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
   ])
 }
 
 function "get_cache_to_rocm" {
   params = []
   result = compact([
-    # Keep the final-image cache commit-scoped. Exporting both rocm-$commit and
-    # rocm-latest from the same bake caused duplicate registry cache exporters
-    # and flaky 400 responses from Docker Hub.
+    # Commit-scoped cache for exact re-runs.
     BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${BUILDKITE_COMMIT},mode=min" : "",
+    # Branch-scoped cache so later commits on the same branch can reuse the full
+    # image layers when the parent-commit cache is evicted. Unlike the old
+    # rocm-latest tag (which caused duplicate exporter 400s), this is per-branch.
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=min" : "",
   ])
 }
 
@@ -152,6 +176,41 @@ function "get_cache_to_rocm_csrc" {
     # Export the branch-scoped native cache so later commits on the same branch
     # can reuse compiled ROCm objects even when the exact parent cache is absent.
     ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=min" : "",
+  ])
+}
+
+# Cache functions for upstream dependency stages (RIXL/UCX, ROCShmem, DeepEP).
+# These stages are pinned to specific upstream commit hashes, so cache keys use
+# those hashes rather than the Buildkite commit. This means the cache persists
+# across all vLLM commits as long as the upstream dependency pins don't change.
+
+function "get_cache_from_rocm_deps" {
+  params = []
+  result = compact([
+    RIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rixl-rocm-${RIXL_BRANCH}-ucx-${UCX_BRANCH}" : "",
+    ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH}" : "",
+    DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH}" : "",
+  ])
+}
+
+function "get_cache_to_rocm_rixl" {
+  params = []
+  result = compact([
+    RIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rixl-rocm-${RIXL_BRANCH}-ucx-${UCX_BRANCH},mode=min" : "",
+  ])
+}
+
+function "get_cache_to_rocm_rocshmem" {
+  params = []
+  result = compact([
+    ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH},mode=min" : "",
+  ])
+}
+
+function "get_cache_to_rocm_deepep" {
+  params = []
+  result = compact([
+    DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH},mode=min" : "",
   ])
 }
 
@@ -222,6 +281,34 @@ variable "CI_BASE_IMAGE_TAG_DATED" {
   default = ""
 }
 
+# Cache-only targets for upstream dependency stages. These persist each stage
+# in the registry cache keyed by its upstream commit hash. When ci_base rebuilds
+# (e.g., requirements change), these stages are cache hits if their upstream
+# pins haven't changed -- saving ~35min of compilation.
+target "rixl-rocm-ci" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "build_rixl"
+  cache-from = get_cache_from_rocm_deps()
+  cache-to   = get_cache_to_rocm_rixl()
+  output     = ["type=cacheonly"]
+}
+
+target "rocshmem-rocm-ci" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "build_rocshmem"
+  cache-from = get_cache_from_rocm_deps()
+  cache-to   = get_cache_to_rocm_rocshmem()
+  output     = ["type=cacheonly"]
+}
+
+target "deepep-rocm-ci" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "build_deepep"
+  cache-from = get_cache_from_rocm_deps()
+  cache-to   = get_cache_to_rocm_deepep()
+  output     = ["type=cacheonly"]
+}
+
 # Scheduled target: builds only the ci_base stage (RIXL, DeepEP, torchcodec, etc.)
 # Run weekly by the amd-ci-base pipeline; per-PR builds then pull the result as
 # CI_BASE_IMAGE instead of rebuilding those slow layers on every commit.
@@ -231,14 +318,25 @@ variable "CI_BASE_IMAGE_TAG_DATED" {
 target "ci-base-rocm-ci" {
   inherits   = ["_common-rocm", "_ci-rocm", "_labels"]
   target     = "ci_base"
-  cache-from = compact([
-    "type=registry,ref=${CI_BASE_IMAGE_TAG}",
-    CI_BASE_IMAGE_TAG_DATED != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_DATED}" : "",
-  ])
+  cache-from = concat(
+    compact([
+      "type=registry,ref=${CI_BASE_IMAGE_TAG}",
+      CI_BASE_IMAGE_TAG_DATED != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_DATED}" : "",
+    ]),
+    # Import upstream dependency caches so RIXL/ROCShmem/DeepEP stages
+    # are cache hits even when ci_base itself needs rebuilding.
+    get_cache_from_rocm_deps(),
+  )
   cache-to = ["type=inline"]
   tags = compact([
     CI_BASE_IMAGE_TAG,
     CI_BASE_IMAGE_TAG_DATED,
   ])
   output = ["type=registry"]
+}
+
+# Group for ci_base builds -- exports dependency stage caches alongside the
+# ci_base image so future rebuilds can reuse them independently.
+group "ci-base-rocm-ci-with-deps" {
+  targets = ["rixl-rocm-ci", "rocshmem-rocm-ci", "deepep-rocm-ci", "ci-base-rocm-ci"]
 }
