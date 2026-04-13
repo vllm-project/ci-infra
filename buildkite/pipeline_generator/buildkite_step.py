@@ -149,12 +149,23 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
         commands.append("echo '--- :gear: CUDA Coredump Setup'")
         commands.append("export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'")
 
+    continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
+
+    if continue_on_failure:
+        commands.append("__CI_OVERALL_STATUS=0")
+
     if step.commands:
         for i, cmd in enumerate(step.commands):
             # Sanitize command preview for use in echo (remove quotes and special chars)
             preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
             commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
-            commands.append(cmd)
+            if continue_on_failure:
+                commands.append(f"({cmd}) || __CI_OVERALL_STATUS=1")
+            else:
+                commands.append(cmd)
+
+    if continue_on_failure:
+        commands.append("exit $__CI_OVERALL_STATUS")
 
     final_commands = []
     for command in commands:
