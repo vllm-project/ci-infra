@@ -152,7 +152,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
 
     if continue_on_failure:
-        commands.append("__CI_OVERALL_STATUS=0")
+        commands.append("CI_OVERALL_STATUS=0")
 
     if step.commands:
         for i, cmd in enumerate(step.commands):
@@ -160,12 +160,12 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
             preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
             commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
             if continue_on_failure:
-                commands.append(f"({cmd}) || __CI_OVERALL_STATUS=1")
+                commands.append(f"({cmd}) || CI_OVERALL_STATUS=1")
             else:
                 commands.append(cmd)
 
     if continue_on_failure:
-        commands.append("exit $__CI_OVERALL_STATUS")
+        commands.append("exit $$CI_OVERALL_STATUS")
 
     final_commands = []
     for command in commands:
