@@ -261,6 +261,38 @@ resource "aws_iam_policy" "cpu_release_ecr_public_read_write_access_policy" {
   })
 }
 
+resource "aws_iam_policy" "arm64_cpu_release_ecr_public_read_write_access_policy" {
+  name        = "arm64-cpu-release-ecr-public-read-write-access-policy"
+  description = "Policy to push and pull images from arm64 cpu release ECR"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action = [
+        "ecr-public:BatchCheckLayerAvailability",
+        "ecr-public:CompleteLayerUpload",
+        "ecr-public:DescribeImageTags",
+        "ecr-public:DescribeImages",
+        "ecr-public:DescribeRegistries",
+        "ecr-public:DescribeRepositories",
+        "ecr-public:GetAuthorizationToken",
+        "ecr-public:GetRegistryCatalogData",
+        "ecr-public:GetRepositoryCatalogData",
+        "ecr-public:GetRepositoryPolicy",
+        "ecr-public:InitiateLayerUpload",
+        "ecr-public:ListTagsForResource",
+        "ecr-public:PutImage",
+        "ecr-public:PutRegistryCatalogData",
+        "ecr-public:TagResource",
+        "ecr-public:UploadLayerPart",
+        "sts:GetServiceBearerToken"
+      ]
+      Resource = "arn:aws:ecr-public::936637512419:repository/vllm-arm64-cpu-release-repo"
+    }]
+  })
+}
+
 resource "aws_iam_policy" "bk_stack_secrets_access" {
   name = "access-to-bk-stack-secrets"
 
@@ -415,6 +447,16 @@ resource "aws_iam_role_policy_attachment" "cpu_release_ecr_public_read_write_acc
   )
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.cpu_release_ecr_public_read_write_access_policy.arn
+}
+
+resource "aws_iam_role_policy_attachment" "arm64_cpu_release_ecr_public_read_write_access" {
+  for_each   = merge(
+    aws_cloudformation_stack.bk_queue_postmerge,
+    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
+    aws_cloudformation_stack.bk_queue_release,
+  )
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.arm64_cpu_release_ecr_public_read_write_access_policy.arn
 }
 
 resource "aws_iam_role_policy_attachment" "bk_stack_secrets_access" {

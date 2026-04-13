@@ -258,7 +258,7 @@ steps:
 
         echo "New AMI ID: $$NEW_AMI"
 
-        for STACK_NAME in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1; do
+        for STACK_NAME in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1 bk-small-cpu-queue-release bk-cpu-queue-release; do
           echo ""
           echo "--- Processing stack: $$STACK_NAME"
 

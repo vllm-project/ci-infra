@@ -21,6 +21,10 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
   runtime_version  = "v2-alpha-tpu7-ubuntu2404"
   accelerator_type = var.accelerator_type
 
+  labels = {
+    vm_name = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+  }
+
   dynamic "scheduling_config" {    
     for_each = var.reserved ? [1] : []
     content {
@@ -54,6 +58,9 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
       apt-get update
       apt-get install -y buildkite-agent
+      
+      # Force stop the buildkite-agent and start at the end to avoid race condition
+      sudo systemctl stop buildkite-agent
 
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
@@ -89,6 +96,10 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       systemctl start docker
 
       sudo chmod 777 /mnt/disks/persist
+
+      echo "Installing GCP Ops Agent..."
+      curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+      sudo bash add-google-cloud-ops-agent-repo.sh --also-install
 
       systemctl enable buildkite-agent
       systemctl start buildkite-agent

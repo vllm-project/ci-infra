@@ -75,9 +75,9 @@ module "ci_v7x_8" {
 
   accelerator_type                 = "tpu7x-8"
   reserved                         = true
-  instance_count                   = 13
+  instance_count                   = 11
   buildkite_queue_name             = "tpu_v7x_8_queue"
-  disk_size                        = 3072
+  disk_size                        = 4096
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
   buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
@@ -100,4 +100,14 @@ module "ci_cpu_64_core" {
 
   buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+}
+
+module "ci_monitoring" {
+  source    = "../modules/ci_monitoring"
+  providers = {
+    google-beta = google-beta.us-central1-b
+  }
+
+  project_id                     = var.project_id
+  buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
 }
