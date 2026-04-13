@@ -145,12 +145,9 @@ upload_pipeline() {
 
     if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
         AMD_MIRROR_HW="amdtentative"
-        curl -fsSL -o "$TEMPLATE_PATH" \
-            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
-    else
-        curl -fsSL -o "$TEMPLATE_PATH" \
-            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
     fi
+    curl -fsSL -o "$TEMPLATE_PATH" \
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
 
 
     # (WIP) Use pipeline generator instead of jinja template
@@ -257,12 +254,9 @@ patterns=(
     "docker/Dockerfile.rocm_base"
     "CMakeLists.txt"
     "requirements/common.txt"
-    "requirements/cuda.txt"
-    "requirements/build.txt"
-    "requirements/test.txt"
     "requirements/rocm.txt"
-    "requirements/rocm-build.txt"
-    "requirements/rocm-test.txt"
+    "requirements/build/rocm.txt"
+    "requirements/test/rocm.txt"
     "setup.py"
     "csrc/"
     "cmake/"
@@ -270,8 +264,6 @@ patterns=(
 
 ignore_patterns=(
     "csrc/cpu"
-    "csrc/rocm"
-    "cmake/hipify.py"
     "cmake/cpu_extension.cmake"
 )
 

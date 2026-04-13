@@ -189,7 +189,7 @@ confirm_remote_image_push() {
 # commit, so "exists = already built" is correct.
 #
 # For stable-tagged images (rocm/vllm-dev:ci_base), the tag always exists
-# after the first weekly build. To detect staleness, we compare a hash of
+# after the first build. To detect staleness, we compare a hash of
 # the ci_base-affecting source files against a label on the remote image.
 # If the hashes match, the image is current and we skip. If they differ
 # (or the label is missing), we rebuild.

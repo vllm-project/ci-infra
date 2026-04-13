@@ -271,14 +271,10 @@ group "test-rocm-ci-with-wheel" {
   targets = ["csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm"]
 }
 
-# Image tags for the scheduled ci_base build (amd-ci-base.yaml pipeline).
-# CI_BASE_IMAGE_TAG_DATED is set by the pipeline to e.g. rocm/vllm-dev:ci_base-20250330.
+# Image tag for the ci_base build. The ensure-ci-base step (in both the Jinja
+# template and amd.yaml) rebuilds this image when content-hash drift is detected.
 variable "CI_BASE_IMAGE_TAG" {
   default = "rocm/vllm-dev:ci_base"
-}
-
-variable "CI_BASE_IMAGE_TAG_DATED" {
-  default = ""
 }
 
 # Cache-only targets for upstream dependency stages. These persist each stage
@@ -309,30 +305,24 @@ target "deepep-rocm-ci" {
   output     = ["type=cacheonly"]
 }
 
-# Scheduled target: builds only the ci_base stage (RIXL, DeepEP, torchcodec, etc.)
-# Run weekly by the amd-ci-base pipeline; per-PR builds then pull the result as
-# CI_BASE_IMAGE instead of rebuilding those slow layers on every commit.
-# Use inline cache metadata on the ci_base image itself instead of exporting a
-# separate registry cache artifact. That keeps rebuilds warm without duplicating
-# the full ROCm base image into rocm/vllm-ci-cache.
+# Builds only the ci_base stage (RIXL, DeepEP, torchcodec, etc.)
+# Invoked by the ensure-ci-base step when the content hash of ci_base-affecting
+# files drifts from the remote image label. Per-PR builds then pull the result
+# as CI_BASE_IMAGE instead of rebuilding those slow layers on every commit.
+# Uses inline cache metadata on the ci_base image itself instead of exporting a
+# separate registry cache artifact.
 target "ci-base-rocm-ci" {
   inherits   = ["_common-rocm", "_ci-rocm", "_labels"]
   target     = "ci_base"
   cache-from = concat(
-    compact([
-      "type=registry,ref=${CI_BASE_IMAGE_TAG}",
-      CI_BASE_IMAGE_TAG_DATED != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_DATED}" : "",
-    ]),
+    ["type=registry,ref=${CI_BASE_IMAGE_TAG}"],
     # Import upstream dependency caches so RIXL/ROCShmem/DeepEP stages
     # are cache hits even when ci_base itself needs rebuilding.
     get_cache_from_rocm_deps(),
   )
   cache-to = ["type=inline"]
-  tags = compact([
-    CI_BASE_IMAGE_TAG,
-    CI_BASE_IMAGE_TAG_DATED,
-  ])
-  output = ["type=registry"]
+  tags     = [CI_BASE_IMAGE_TAG]
+  output   = ["type=registry"]
 }
 
 # Group for ci_base builds -- exports dependency stage caches alongside the
