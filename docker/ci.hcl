@@ -34,7 +34,7 @@ variable "SCCACHE_REGION_NAME" {
 }
 
 variable "SCCACHE_S3_NO_CREDENTIALS" {
-  default = 0
+  default = 1
 }
 
 # CI build args
