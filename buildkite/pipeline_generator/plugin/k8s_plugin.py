@@ -128,10 +128,18 @@ a100_plugin_template = {
 h100_rh_plugin_template = {
     "kubernetes": {
         "podSpec": {
+            "serviceAccountName": "buildkite-anyuid",
+            "securityContext": {
+                "fsGroup": 0
+            },
             "containers": [
                 {
                     "image": "",
                     "resources": {"limits": {"nvidia.com/gpu": ""}},
+                    "securityContext": {
+                        "runAsUser": 0,
+                        "runAsGroup": 0
+                    },
                     "volumeMounts": [
                         {"name": "devshm", "mountPath": "/dev/shm"},
                         {"name": "ci-cache", "mountPath": "/ci-cache"},
