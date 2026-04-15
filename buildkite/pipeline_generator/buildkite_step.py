@@ -152,7 +152,6 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
 
     if continue_on_failure:
-        commands.append("set +eo pipefail")
         commands.append("CI_OVERALL_STATUS=0")
         commands.append("CI_RESULTS=''")
 
@@ -165,9 +164,12 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
                 safe_preview = preview.replace('\\', '').replace('`', '')
                 tag = f"({i+1}/{len(step.commands)}) {safe_preview}"
                 log_file = f"/tmp/ci_cmd_{i+1}.log"
-                # Use $$ to escape $ from Buildkite pipeline interpolation
+                # Use $$ to escape $ from Buildkite pipeline interpolation.
+                # Capture output to file (for failure details), then cat it so it
+                # still appears in the live log. This avoids tee/PIPESTATUS which
+                # require bash, but Buildkite steps may run under /bin/sh.
                 commands.append(
-                    f"({cmd}) 2>&1 | tee {log_file}; CI_CMD_EXIT=$${{PIPESTATUS[0]}}; "
+                    f"({cmd}) > {log_file} 2>&1; CI_CMD_EXIT=$$?; cat {log_file}; "
                     f"if [ $$CI_CMD_EXIT -ne 0 ]; then "
                     f"CI_OVERALL_STATUS=1; "
                     f'CI_RESULTS="$$CI_RESULTS\\n:x: {tag}"; '
