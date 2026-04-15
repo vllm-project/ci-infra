@@ -152,6 +152,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
 
     if continue_on_failure:
+        commands.append("set +eo pipefail")
         commands.append("__CI_OVERALL_STATUS=0")
         commands.append("__CI_RESULTS=''")
 
@@ -163,11 +164,14 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
             if continue_on_failure:
                 safe_preview = preview.replace('\\', '').replace('`', '')
                 tag = f"({i+1}/{len(step.commands)}) {safe_preview}"
+                log_file = f"/tmp/__ci_cmd_{i+1}.log"
                 commands.append(
-                    f"({cmd}); __CI_CMD_EXIT=$?; "
+                    f"({cmd}) 2>&1 | tee {log_file}; __CI_CMD_EXIT=${{PIPESTATUS[0]}}; "
                     f"if [ $__CI_CMD_EXIT -ne 0 ]; then "
                     f"__CI_OVERALL_STATUS=1; "
                     f'__CI_RESULTS="$__CI_RESULTS\\n:x: {tag}"; '
+                    f'echo "\\n:x: {tag}\\n" >> /tmp/__ci_failures.log; '
+                    f"tail -200 {log_file} >> /tmp/__ci_failures.log; "
                     f"else "
                     f'__CI_RESULTS="$__CI_RESULTS\\n:white_check_mark: {tag}"; '
                     f"fi"
@@ -178,6 +182,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     if continue_on_failure:
         commands.append("echo '+++ :bar_chart: Command Summary'")
         commands.append('echo -e "$__CI_RESULTS"')
+        commands.append('if [ -f /tmp/__ci_failures.log ]; then echo ""; echo "--- Failure Details ---"; cat /tmp/__ci_failures.log; fi')
         commands.append("exit $__CI_OVERALL_STATUS")
 
     final_commands = []
