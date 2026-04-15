@@ -152,8 +152,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
 
     if continue_on_failure:
-        commands.append("__CI_OVERALL_STATUS=0")
-        commands.append("__CI_RESULTS=''")
+        commands.append("CI_OVERALL_STATUS=0")
 
     if step.commands:
         for i, cmd in enumerate(step.commands):
@@ -161,24 +160,12 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
             preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
             commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
             if continue_on_failure:
-                safe_preview = preview.replace('\\', '').replace('`', '')
-                tag = f"({i+1}/{len(step.commands)}) {safe_preview}"
-                commands.append(
-                    f"({cmd}); __CI_CMD_EXIT=$?; "
-                    f"if [ $__CI_CMD_EXIT -ne 0 ]; then "
-                    f"__CI_OVERALL_STATUS=1; "
-                    f'__CI_RESULTS="$__CI_RESULTS\\n:x: {tag}"; '
-                    f"else "
-                    f'__CI_RESULTS="$__CI_RESULTS\\n:white_check_mark: {tag}"; '
-                    f"fi"
-                )
+                commands.append(f"({cmd}) || CI_OVERALL_STATUS=1")
             else:
                 commands.append(cmd)
 
     if continue_on_failure:
-        commands.append("echo '+++ :bar_chart: Command Summary'")
-        commands.append('echo -e "$__CI_RESULTS"')
-        commands.append("exit $__CI_OVERALL_STATUS")
+        commands.append("exit $$CI_OVERALL_STATUS")
 
     final_commands = []
     for command in commands:
