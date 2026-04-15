@@ -153,7 +153,6 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
 
     if continue_on_failure:
         commands.append("CI_OVERALL_STATUS=0")
-        commands.append("CI_RESULTS=''")
 
     if step.commands:
         for i, cmd in enumerate(step.commands):
@@ -161,31 +160,11 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
             preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
             commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
             if continue_on_failure:
-                safe_preview = preview.replace('\\', '').replace('`', '')
-                tag = f"({i+1}/{len(step.commands)}) {safe_preview}"
-                log_file = f"/tmp/ci_cmd_{i+1}.log"
-                # Use $$ to escape $ from Buildkite pipeline interpolation.
-                # Capture output to file (for failure details), then cat it so it
-                # still appears in the live log. This avoids tee/PIPESTATUS which
-                # require bash, but Buildkite steps may run under /bin/sh.
-                commands.append(
-                    f"({cmd}) > {log_file} 2>&1; CI_CMD_EXIT=$$?; cat {log_file}; "
-                    f"if [ $$CI_CMD_EXIT -ne 0 ]; then "
-                    f"CI_OVERALL_STATUS=1; "
-                    f'CI_RESULTS="$$CI_RESULTS\\n:x: {tag}"; '
-                    f'echo "\\n:x: {tag}\\n" >> /tmp/ci_failures.log; '
-                    f"tail -200 {log_file} >> /tmp/ci_failures.log; "
-                    f"else "
-                    f'CI_RESULTS="$$CI_RESULTS\\n:white_check_mark: {tag}"; '
-                    f"fi"
-                )
+                commands.append(f"({cmd}) || CI_OVERALL_STATUS=1")
             else:
                 commands.append(cmd)
 
     if continue_on_failure:
-        commands.append("echo '+++ :bar_chart: Command Summary'")
-        commands.append('echo -e "$$CI_RESULTS"')
-        commands.append('if [ -f /tmp/ci_failures.log ]; then echo ""; echo "--- Failure Details ---"; cat /tmp/ci_failures.log; fi')
         commands.append("exit $$CI_OVERALL_STATUS")
 
     final_commands = []
