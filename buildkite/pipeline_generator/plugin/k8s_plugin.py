@@ -165,7 +165,7 @@ h100_rh_plugin_template = {
                 {"name": "devshm", "emptyDir": {"medium": "Memory"}},
                 {
                     "name": "ci-cache",
-                    "hostPath": {"path": "/mnt/ci-cache", "type": "DirectoryOrCreate"},
+                    "hostPath": {"path": "/var/mnt/ci-cache", "type": "DirectoryOrCreate"},
                 },
             ],
         }
