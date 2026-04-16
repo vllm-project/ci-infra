@@ -68,7 +68,7 @@
         key: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
       {% endif %}
 
-      {% if step.agent_pool == "mi300_8" %}
+      {% if step.agent_pool == "mi300_1" %}
       - label: "amd_shadow: {{ step.label }}"
       {% else %}
       - label: "{{ step.agent_pool }}: {{ step.label }}"
