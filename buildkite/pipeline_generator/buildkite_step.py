@@ -56,10 +56,11 @@ class BuildkiteGroupStep(BaseModel):
 def _get_step_plugin(step: Step):
     # Use K8s plugin
     use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
+    use_arm64 = step.device == DeviceType.DGX_SPARK
     if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
-        return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu))}
+        return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
 
 
 def get_agent_queue(step: Step):
@@ -149,12 +150,23 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
         commands.append("echo '--- :gear: CUDA Coredump Setup'")
         commands.append("export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'")
 
+    continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
+
+    if continue_on_failure:
+        commands.append("CI_OVERALL_STATUS=0")
+
     if step.commands:
         for i, cmd in enumerate(step.commands):
             # Sanitize command preview for use in echo (remove quotes and special chars)
             preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
             commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
-            commands.append(cmd)
+            if continue_on_failure:
+                commands.append(f"({cmd}) || CI_OVERALL_STATUS=1")
+            else:
+                commands.append(cmd)
+
+    if continue_on_failure:
+        commands.append("exit $$CI_OVERALL_STATUS")
 
     final_commands = []
     for command in commands:

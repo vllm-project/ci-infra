@@ -108,6 +108,8 @@ module "ci_monitoring" {
     google-beta = google-beta.us-central1-b
   }
 
-  project_id                     = var.project_id
+  project_id            = var.project_id
+  pipeline_slug         = "tpu-inference-ci"
+  org_slug              = "tpu-commons"
   buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
 }
