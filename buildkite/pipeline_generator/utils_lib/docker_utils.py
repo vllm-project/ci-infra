@@ -23,6 +23,17 @@ def get_image(cpu: bool = False, arm64: bool = False) -> str:
     return image
 
 
+def get_torch_nightly_image() -> str:
+    global_config = get_global_config()
+    commit = "$BUILDKITE_COMMIT"
+    registries = global_config["registries"]
+    repositories = global_config["repositories"]
+    if global_config["branch"] == "main":
+        return f"{registries}/{repositories['main']}:{commit}-torch-nightly"
+    else:
+        return f"{registries}/{repositories['premerge']}:{commit}-torch-nightly"
+
+
 def _clean_docker_tag(tag: str) -> str:
     # Only allows alphanumeric, dashes and underscores for Docker tags, and replaces others with '-'
     return re.sub(r"[^a-zA-Z0-9_.-]", "-", tag or "")
