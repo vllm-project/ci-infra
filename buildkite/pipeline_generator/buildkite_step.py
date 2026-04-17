@@ -88,7 +88,7 @@ def get_agent_queue(step: Step):
     elif step.device == DeviceType.H100:
         # Route multi-GPU H100 tests to RedHat Frankfurt queue
         if step.num_devices is not None and step.num_devices >= 4:
-            return AgentQueue.MITHRIL_H100
+            return AgentQueue.REDHAT_H100_FRANKFURT
         else:
             return AgentQueue.MITHRIL_H100
     elif step.device == DeviceType.H200:
