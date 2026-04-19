@@ -44,3 +44,4 @@ __pycache__/
 
 .cache
 *.log
+.claude/

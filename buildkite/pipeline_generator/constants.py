@@ -4,6 +4,7 @@ from enum import Enum
 class DeviceType(str, Enum):
     H100 = "h100"
     H200 = "h200"
+    H200_18GB = "h200_18gb"
     B200 = "b200"
     A100 = "a100"
     CPU = "cpu"
@@ -28,6 +29,7 @@ class DeviceType(str, Enum):
     AMD_MI355_2 = "mi355_2"
     AMD_MI355_4 = "mi355_4"
     AMD_MI355_8 = "mi355_8"
+    DGX_SPARK = "dgx-spark"
 
 
 class AgentQueue(str, Enum):
@@ -39,6 +41,7 @@ class AgentQueue(str, Enum):
     GPU_4 = "gpu_4_queue"
     MITHRIL_H100 = "mithril-h100-pool"
     H200 = "H200"
+    H200_18GB = "h200_18gb"
     B200 = "B200"
     SMALL_CPU_PREMERGE = "small_cpu_queue_premerge"
     MEDIUM_CPU_PREMERGE = "medium_cpu_queue_premerge"
@@ -64,3 +67,5 @@ class AgentQueue(str, Enum):
     AMD_MI355_2 = "amd_mi355_2"
     AMD_MI355_4 = "amd_mi355_4"
     AMD_MI355_8 = "amd_mi355_8"
+    DGX_SPARK = "dgx-spark"
+    REDHAT_H100_FRANKFURT = "RedHat-H100-Frankfurt"

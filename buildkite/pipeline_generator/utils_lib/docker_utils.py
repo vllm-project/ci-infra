@@ -5,7 +5,7 @@ from typing import Tuple
 from global_config import get_global_config
 
 
-def get_image(cpu: bool = False) -> str:
+def get_image(cpu: bool = False, arm64: bool = False) -> str:
     global_config = get_global_config()
     commit = "$BUILDKITE_COMMIT"
     branch = global_config["branch"]
@@ -18,7 +18,20 @@ def get_image(cpu: bool = False) -> str:
         image = f"{registries}/{repositories['premerge']}:{commit}"
     if cpu:
         image = f"{image}-cpu"
+    if arm64:
+        image = f"{image}-arm64"
     return image
+
+
+def get_torch_nightly_image() -> str:
+    global_config = get_global_config()
+    commit = "$BUILDKITE_COMMIT"
+    registries = global_config["registries"]
+    repositories = global_config["repositories"]
+    if global_config["branch"] == "main":
+        return f"{registries}/{repositories['main']}:{commit}-torch-nightly"
+    else:
+        return f"{registries}/{repositories['premerge']}:{commit}-torch-nightly"
 
 
 def _clean_docker_tag(tag: str) -> str:

@@ -22,6 +22,26 @@ docker_plugin_template = {
     ],
 }
 
+h200_18gb_plugin_template = {
+    "image": "",
+    "always-pull": True,
+    "propagate-environment": True,
+    "environment": [
+        "VLLM_USAGE_SOURCE=ci-test",
+        "NCCL_CUMEM_HOST_ENABLE=0",
+        "HF_TOKEN",
+        "HF_HOME",
+        "CODECOV_TOKEN",
+        "BUILDKITE_ANALYTICS_TOKEN",
+        "CUDA_VISIBLE_DEVICES",
+        "NVIDIA_VISIBLE_DEVICES",
+    ],
+    "volumes": [
+        "/dev/shm:/dev/shm",
+        "/mnt/vllm-ci:/mnt/vllm-ci",
+    ],
+}
+
 h200_plugin_template = {
     "image": "",
     "always-pull": True,
@@ -63,7 +83,9 @@ b200_plugin_template = {
 
 def get_docker_plugin(step: Step, image: str):
     plugin = None
-    if step.device == DeviceType.H200:
+    if step.device == DeviceType.H200_18GB:
+        plugin = copy.deepcopy(h200_18gb_plugin_template)
+    elif step.device == DeviceType.H200:
         plugin = copy.deepcopy(h200_plugin_template)
     elif step.device == DeviceType.B200:
         plugin = copy.deepcopy(b200_plugin_template)
@@ -71,6 +93,9 @@ def get_docker_plugin(step: Step, image: str):
         plugin = copy.deepcopy(docker_plugin_template)
     plugin["image"] = image
 
+    if step.device == DeviceType.H200_18GB:
+        image = image.replace("public.ecr.aws", "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache")
+        plugin["image"] = image
     if step.label == "Benchmarks" or step.mount_buildkite_agent:
         plugin["mount_buildkite_agent"] = True
     if step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM) and plugin.get("gpus"):

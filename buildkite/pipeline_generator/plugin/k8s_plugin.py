@@ -125,6 +125,53 @@ a100_plugin_template = {
     }
 }
 
+h100_rh_plugin_template = {
+    "kubernetes": {
+        "podSpec": {
+            "serviceAccountName": "buildkite-anyuid",
+            "securityContext": {
+                "fsGroup": 0
+            },
+            "containers": [
+                {
+                    "image": "",
+                    "resources": {"limits": {"nvidia.com/gpu": ""}},
+                    "securityContext": {
+                        "runAsUser": 0,
+                        "runAsGroup": 0
+                    },
+                    "volumeMounts": [
+                        {"name": "devshm", "mountPath": "/dev/shm"},
+                        {"name": "ci-cache", "mountPath": "/ci-cache"},
+                    ],
+                    "env": [
+                        {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
+                        {"name": "NCCL_CUMEM_HOST_ENABLE", "value": "0"},
+                        {"name": "HF_HOME", "value": "/ci-cache/hf_home"},
+                        {
+                            "name": "HF_TOKEN",
+                            "valueFrom": {
+                                "secretKeyRef": {
+                                    "name": "hf-token-secret",
+                                    "key": "token",
+                                }
+                            },
+                        },
+                    ],
+                }
+            ],
+            "nodeSelector": {"vllm.ci/gpu-pool": "upstream-ci-h100"},
+            "volumes": [
+                {"name": "devshm", "emptyDir": {"medium": "Memory"}},
+                {
+                    "name": "ci-cache",
+                    "hostPath": {"path": "/var/mnt/ci-cache", "type": "DirectoryOrCreate"},
+                },
+            ],
+        }
+    }
+}
+
 
 def get_k8s_plugin(step: Step, image: str):
     plugin = None
