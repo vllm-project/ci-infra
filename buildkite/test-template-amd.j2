@@ -1,4 +1,5 @@
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
+{% set docker_image_amd_nightly = "rocm/vllm-ci:$BUILDKITE_COMMIT-torch-nightly" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set list_file_diff = list_file_diff | split("|") %}
 
@@ -74,7 +75,7 @@
 
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
-    
+
     {% set ns = namespace(blocked=1) %}
 
     {% if run_all == "1" or nightly == "1" %}
@@ -140,3 +141,78 @@
 {{ amd_infra_retry('        ') }}
     {% endif %}
     {% endfor %}
+
+{# --- Torch-nightly parallel pipeline ------------------------------------- #}
+{# Emit a sibling "AMD Torch Nightly Tests" group only on scheduled nightly  #}
+{# runs (nightly == "1"), and only when at least one step opts in via        #}
+{# `torch_nightly: true` matching the active arch. Reuses the ci_base image  #}
+{# baked by the main group; just layers nightly torch into the test stage.   #}
+{% set ns_nightly = namespace(has_any=false) %}
+{% for step in steps %}
+{% if step.torch_nightly and step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
+{% set ns_nightly.has_any = true %}
+{% endif %}
+{% endfor %}
+
+{% if ns_nightly.has_any and nightly == "1" %}
+  - group: "AMD Torch Nightly Tests"
+    depends_on: ~
+    steps:
+      - label: "AMD nightly: :docker: build image"
+        depends_on: "amd-ci-base-ready"
+        soft_fail: false
+        commands:
+          - docker pull "rocm/vllm-dev:ci_base" || echo "ci_base pull failed, continuing with ci-bake-rocm.sh"
+          - bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
+        key: "amd-nightly-build"
+        env:
+          DOCKER_BUILDKIT: "1"
+          IMAGE_TAG: "{{ docker_image_amd_nightly }}"
+          PYTORCH_NIGHTLY: "1"
+          VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
+          PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+          CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
+          REMOTE_VLLM: "1"
+          VLLM_BRANCH: "$BUILDKITE_COMMIT"
+{{ amd_infra_retry('        ') }}
+        agents:
+          queue: amd-cpu
+
+    {% for step in steps %}
+    {% if step.torch_nightly and step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
+
+      - label: "{{ step.agent_pool }}-nightly: {{ step.label }}"
+        depends_on: amd-nightly-build
+        agents:
+          {% if step.agent_pool %}
+          queue: amd_{{ step.agent_pool }}
+          {% else %}
+          queue: amd_mi325_1
+          {% endif %}
+        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKER_IMAGE_NAME: "{{ docker_image_amd_nightly }}"
+          NUM_NODES: "{{ step.num_nodes or 1 }}"
+          VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
+          {% if step.num_nodes and step.num_nodes >= 2 %}
+          VLLM_CI_EXECUTION_MODE: "multi-node"
+          VLLM_NUM_GPUS_PER_NODE: "{{ step.num_gpus or 1 }}"
+          VLLM_NODE_COMMAND_COUNT: "{{ step.commands | length }}"
+          {% for node_command in step.commands %}
+          VLLM_NODE_COMMAND_{{ loop.index0 }}: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-nightly-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }}-node{{ loop.index0 }} && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ node_command | replace('\"', '\\\"') | safe }}"
+          {% endfor %}
+          {% else %}
+          VLLM_CI_EXECUTION_MODE: "single-node"
+          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-nightly-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
+          {% endif %}
+        priority: 100
+        soft_fail: true
+        {% if step.parallelism %}
+        parallelism: {{ step.parallelism }}
+        {% endif %}
+{{ amd_infra_retry('        ') }}
+    {% endif %}
+    {% endfor %}
+{% endif %}
