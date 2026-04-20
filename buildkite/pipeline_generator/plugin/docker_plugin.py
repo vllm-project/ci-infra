@@ -18,6 +18,7 @@ docker_plugin_template = {
     "volumes": [
         "/dev/shm:/dev/shm",
         "/fsx/hf_cache:/fsx/hf_cache",
+        "/mnt/shared:/mnt/shared",
     ],
 }
 
@@ -36,6 +37,7 @@ h200_plugin_template = {
     "volumes": [
         "/dev/shm:/dev/shm",
         "/mnt/vllm-ci:/mnt/vllm-ci",
+        "/mnt/shared:/mnt/shared",
     ],
 }
 
@@ -46,13 +48,14 @@ b200_plugin_template = {
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
-        "HF_HOME=/dev/shm/",
+        "HF_HOME",
         "HF_TOKEN",
         "CODECOV_TOKEN",
         "BUILDKITE_ANALYTICS_TOKEN",
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
+        "/mnt/shared:/mnt/shared",
     ],
 }
 
