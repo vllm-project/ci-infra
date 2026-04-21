@@ -398,7 +398,7 @@ def _create_torch_nightly_group(
     """Create the 'vLLM Against PyTorch Nightly' group with image build + test steps."""
     global_config = get_global_config()
     branch = global_config["branch"]
-    auto_run = global_config["nightly"] == "1" or branch == "main"
+    auto_run = global_config["nightly"] == "1"
 
     nightly_image = get_torch_nightly_image()
     group_steps_list = []
