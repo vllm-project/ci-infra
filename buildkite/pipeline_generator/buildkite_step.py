@@ -115,6 +115,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.DGX_SPARK
     elif step.num_devices == 2 or step.num_devices == 4:
         return AgentQueue.GPU_4
+    elif step.device == DeviceType.ZEN5:
+        return AgentQueue.ZEN5
     else:
         return AgentQueue.GPU_1
 
