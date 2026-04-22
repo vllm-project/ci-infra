@@ -28,6 +28,32 @@ if [[ -z "${COV_ENABLED:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+fetch_origin_ref() {
+    local ref="$1"
+    git fetch --no-tags --depth=50 origin "${ref}:refs/remotes/origin/${ref}" >/dev/null 2>&1 || \
+        git fetch --no-tags origin "${ref}:refs/remotes/origin/${ref}" >/dev/null 2>&1
+}
+
+get_pr_labels() {
+    if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
+        return 0
+    fi
+
+    curl -fsSL "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" 2>/dev/null | \
+        jq -r '.labels[].name' 2>/dev/null || true
+}
+
+join_file_diff() {
+    if [[ -z "${1:-}" ]]; then
+        return 0
+    fi
+
+    printf '%s\n' "$1" | tr -d '\r' | paste -sd'|' -
+}
+
+# ---------------------------------------------------------------------------
 # Git setup: ensure origin/main is available and compute merge base once.
 # On K8s (blobless clones with --filter=blob:none), origin/main may not be
 # fetched yet if the agent only fetched the PR branch. Also mark the repo
@@ -35,9 +61,14 @@ fi
 # ---------------------------------------------------------------------------
 git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
 
+if git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
+    echo "Shallow repository detected, deepening history..."
+    git fetch --no-tags --deepen=50 origin >/dev/null 2>&1 || true
+fi
+
 if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
     echo "origin/main not found, fetching..."
-    git fetch origin main --depth=1 2>/dev/null || git fetch origin main || true
+    fetch_origin_ref main || true
 fi
 
 if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
@@ -49,15 +80,11 @@ if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
-
 fail_fast() {
     DISABLE_LABEL="ci-no-fail-fast"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
-        PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+        PR_LABELS=$(get_pr_labels)
         if [[ $PR_LABELS == *"$DISABLE_LABEL"* ]]; then
             echo false
         else
@@ -72,7 +99,7 @@ check_run_all_label() {
     RUN_ALL_LABEL="ready-run-all-tests"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
-        PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+        PR_LABELS=$(get_pr_labels)
         if [[ $PR_LABELS == *"$RUN_ALL_LABEL"* ]]; then
             echo true
         else
@@ -107,16 +134,20 @@ upload_pipeline() {
     # Install minijinja
     ls .buildkite || buildkite-agent annotate --style error 'Please merge upstream main branch for buildkite CI'
     curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
-    source "$HOME/.cargo/env"
+    TEMPLATE_PATH=".buildkite/test-template-amd.j2"
+    CARGO_ENV="${CARGO_HOME:-$HOME/.cargo}/env"
+    if [[ ! -f "$CARGO_ENV" ]]; then
+        echo "Error: Cargo env file not found at $CARGO_ENV"
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "$CARGO_ENV"
 
     if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
         AMD_MIRROR_HW="amdtentative"
-        curl -o .buildkite/test-template.j2 \
-            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
-    else
-        curl -o .buildkite/test-template.j2 \
-            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
     fi
+    curl -fsSL -o "$TEMPLATE_PATH" \
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
 
 
     # (WIP) Use pipeline generator instead of jinja template
@@ -137,7 +168,7 @@ upload_pipeline() {
     (
         set -x
         # Output pipeline.yaml with all blank lines removed
-        minijinja-cli test-template.j2 test-amd.yaml \
+        minijinja-cli test-template-amd.j2 test-amd.yaml \
             -D branch="$BUILDKITE_BRANCH" \
             -D list_file_diff="$LIST_FILE_DIFF" \
             -D run_all="$RUN_ALL" \
@@ -160,9 +191,26 @@ upload_pipeline() {
 # ---------------------------------------------------------------------------
 # Compute file diff
 # ---------------------------------------------------------------------------
-file_diff=$(get_diff)
+if [[ $BUILDKITE_BRANCH == "main" ]] && ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+    echo "HEAD~1 not available on main, fetching one more commit..."
+    git fetch --no-tags --deepen=1 origin >/dev/null 2>&1 || true
+fi
+
+diff_unavailable=0
+if [[ $BUILDKITE_BRANCH == "main" ]] && ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+    echo "WARNING: Could not resolve HEAD~1 on main, falling back to run_all=1"
+    RUN_ALL=1
+    diff_unavailable=1
+fi
+
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
-    file_diff=$(get_diff_main)
+    if [[ $diff_unavailable -eq 1 ]]; then
+        file_diff=""
+    else
+        file_diff=$(get_diff_main)
+    fi
+else
+    file_diff=$(get_diff)
 fi
 
 # ----------------------------------------------------------------------
@@ -183,13 +231,13 @@ if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
         docs_only=0
         break
       fi
-    done < <(printf '%s\n' "$file_diff" | tr ' ' '\n' | tr -d '\r')
+    done < <(printf '%s\n' "$file_diff" | tr -d '\r')
 
     if [[ "$docs_only" -eq 1 ]]; then
       buildkite-agent annotate ":memo: CI skipped — docs/Markdown/mkdocs-only changes detected
 
 \`\`\`
-$(printf '%s\n' "$file_diff" | tr ' ' '\n')
+$(printf '%s\n' "$file_diff" | tr -d '\r')
 \`\`\`" --style "info" || true
       echo "[docs-only] All changes are docs/**, *.md, or mkdocs.yaml. Exiting before pipeline upload."
       exit 0
@@ -206,12 +254,9 @@ patterns=(
     "docker/Dockerfile.rocm_base"
     "CMakeLists.txt"
     "requirements/common.txt"
-    "requirements/cuda.txt"
-    "requirements/build.txt"
-    "requirements/test.txt"
     "requirements/rocm.txt"
-    "requirements/rocm-build.txt"
-    "requirements/rocm-test.txt"
+    "requirements/build/rocm.txt"
+    "requirements/test/rocm.txt"
     "setup.py"
     "csrc/"
     "cmake/"
@@ -219,12 +264,11 @@ patterns=(
 
 ignore_patterns=(
     "csrc/cpu"
-    "csrc/rocm"
-    "cmake/hipify.py"
     "cmake/cpu_extension.cmake"
 )
 
-for file in $file_diff; do
+while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
     # First check if file matches any pattern
     matches_pattern=0
     for pattern in "${patterns[@]}"; do
@@ -250,7 +294,7 @@ for file in $file_diff; do
             break
         fi
     fi
-done
+done < <(printf '%s\n' "$file_diff" | tr -d '\r')
 
 # Check for ready-run-all-tests label
 LABEL_RUN_ALL=$(check_run_all_label)
@@ -279,7 +323,7 @@ fi
 if [[ $RUN_ALL -eq 1 ]]; then
     LIST_FILE_DIFF="run_all"
 else
-    LIST_FILE_DIFF=$(echo "$file_diff" | tr ' ' '|')
+    LIST_FILE_DIFF=$(join_file_diff "$file_diff")
 fi
 
 upload_pipeline
