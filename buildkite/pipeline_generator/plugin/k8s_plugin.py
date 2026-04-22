@@ -176,7 +176,11 @@ h100_rh_plugin_template = {
 def get_k8s_plugin(step: Step, image: str):
     plugin = None
     if step.device == DeviceType.H100:
-        plugin = copy.deepcopy(h100_plugin_template)
+        # Use RedHat template for multi-GPU tests (4+ GPUs)
+        if step.num_devices is not None and step.num_devices >= 4:
+            plugin = copy.deepcopy(h100_rh_plugin_template)
+        else:
+            plugin = copy.deepcopy(h100_plugin_template)
     elif step.device == DeviceType.H200:
         plugin = copy.deepcopy(nebius_h200_plugin_template)
     elif step.device == DeviceType.A100.value:
