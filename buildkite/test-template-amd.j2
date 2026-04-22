@@ -1,6 +1,6 @@
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
-{% set list_file_diff = list_file_diff | split("|") %}
+{% set list_file_diff = list_file_diff | replace("\r", "") | replace("\n", "|") | split("|") %}
 
 {% macro amd_infra_retry(indent='') -%}
 {{ indent }}retry:
@@ -14,6 +14,10 @@
 {{ indent }}      limit: 1
 {%- endmacro %}
 
+{% macro amd_step_slug(step) -%}
+{%- if step.agent_pool -%}{{ step.agent_pool }}-{%- endif -%}{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+{%- endmacro %}
+
   - group: "AMD Tests"
     depends_on: ~
     steps:
@@ -22,6 +26,14 @@
         soft_fail: false
         commands:
           # Handle the introduction of test target in Dockerfile.rocm
+          - |
+            #!/bin/bash
+            if docker manifest inspect {{ docker_image_amd }} >/dev/null 2>&1; then
+              echo "Image already exists: {{ docker_image_amd }}"
+              echo "Skipping AMD image build"
+              exit 0
+            fi
+            echo "Image not found, proceeding with build"
           - >
             docker build
             --build-arg REMOTE_VLLM=1
@@ -43,6 +55,8 @@
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
     
     {% set ns = namespace(blocked=1) %}
+    {% set step_slug = amd_step_slug(step) %}
+    {% set container_timeout_s = (step.timeout_in_minutes * 60 - 60) if step.timeout_in_minutes and step.timeout_in_minutes > 1 else (step.timeout_in_minutes * 60 if step.timeout_in_minutes else none) %}
 
     {% if run_all == "1" or nightly == "1" %}
     {% set ns.blocked = 0 %}
@@ -51,7 +65,7 @@
       {% if step.source_file_dependencies %}
         {% for source_file in step.source_file_dependencies %}
           {% for file in list_file_diff %}
-            {% if source_file in file %}
+            {% if file and file[:source_file|length] == source_file %}
               {% set ns.blocked = 0 %}
             {% endif %}
           {% endfor %}
@@ -63,14 +77,17 @@
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
         depends_on: amd-build
-        key: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+        key: block-{{ step_slug }}
       {% endif %}
 
       - label: "{{ step.agent_pool }}: {{ step.label }}"
-        {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
-        depends_on: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+      {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+        depends_on: block-{{ step_slug }}
         {% else %}
         depends_on: amd-build
+        {% endif %}
+        {% if step.timeout_in_minutes %}
+        timeout_in_minutes: {{ step.timeout_in_minutes }}
         {% endif %}
         agents:
           {% if step.agent_pool %}
@@ -81,7 +98,10 @@
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           DOCKER_BUILDKIT: "1"
-          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
+          {% if container_timeout_s %}
+          CONTAINER_TIMEOUT_S: "{{ container_timeout_s }}"
+          {% endif %}
+          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step_slug }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
         priority: 100
         {% if step.grade and step.grade == "Blocking" %}
         soft_fail: false
