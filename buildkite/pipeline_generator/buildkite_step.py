@@ -119,6 +119,15 @@ def get_agent_queue(step: Step):
         return AgentQueue.GPU_1
 
 
+def _get_step_agents(step: Step) -> Dict[str, str]:
+    # Queue is mandatory for routing in current infra; allow step-level
+    # overrides/additional constraints (e.g. device, mem) via `agents`.
+    agents = {"queue": str(get_agent_queue(step))}
+    if step.agents:
+        agents.update(step.agents)
+    return agents
+
+
 def _get_variables_to_inject() -> Dict[str, str]:
     global_config = get_global_config()
     if global_config["name"] != "vllm_ci":
@@ -235,7 +244,7 @@ def convert_group_step_to_buildkite_step(
                 commands=step_commands,
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
-                agents={"queue": get_agent_queue(step)},
+                agents=_get_step_agents(step),
                 priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0
             )
 
