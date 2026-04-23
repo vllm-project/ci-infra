@@ -42,6 +42,52 @@ def _make_multimodal_step():
     )
 
 
+def test_prepare_commands_uses_explicit_setup_profiles():
+    step = Step(
+        label="Profile Check",
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest -q tests/test_profiles.py"],
+    )
+
+    nvidia_commands = buildkite_step_module._prepare_commands(
+        step,
+        {},
+        setup_profile="nvidia",
+    )
+    amd_commands = buildkite_step_module._prepare_commands(
+        step,
+        {},
+        setup_profile="amd",
+    )
+    no_setup_commands = buildkite_step_module._prepare_commands(
+        step,
+        {},
+        setup_profile="none",
+    )
+
+    assert nvidia_commands[:4] == [
+        "cd /vllm-workspace/tests",
+        'echo "--- :nvidia: GPU Info"',
+        "(command nvidia-smi || true)",
+        'echo "--- :gear: CUDA Coredump Setup"',
+    ]
+    assert any("CUDA_ENABLE_COREDUMP_ON_EXCEPTION" in command for command in nvidia_commands)
+
+    assert amd_commands[:3] == [
+        "cd /vllm-workspace/tests",
+        'echo "--- :amd: GPU Info"',
+        "(command amd-smi || true)",
+    ]
+    assert not any("CUDA_ENABLE_COREDUMP_ON_EXCEPTION" in command for command in amd_commands)
+    assert not any("nvidia-smi" in command for command in amd_commands)
+
+    assert no_setup_commands == [
+        "cd /vllm-workspace/tests",
+        'echo "+++ :test_tube: Command (1/1): pytest -q tests/test_profiles.py"',
+        "pytest -q tests/test_profiles.py",
+    ]
+
+
 def test_create_amd_mirror_step_uses_rocm_safe_command_wrapper():
     step = _make_multimodal_step()
 
@@ -63,6 +109,7 @@ def test_create_amd_mirror_step_uses_rocm_safe_command_wrapper():
 
     assert mirrored_commands.startswith("cd /vllm-workspace/tests &&")
     assert "VLLM_TEST_COMMANDS" not in mirrored_commands
+    assert "amd-smi" in mirrored_commands
     assert "nvidia-smi" not in mirrored_commands
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in mirrored_commands
     assert "CUDA_COREDUMP_SHOW_PROGRESS" not in mirrored_commands
@@ -152,5 +199,6 @@ def test_create_amd_mirror_step_respects_custom_amd_commands_and_working_dir():
     assert mirrored_commands.startswith("cd /vllm-workspace/examples &&")
     assert "offline_inference/vision_language.py --model-type qwen2_5_vl" in mirrored_commands
     assert "test_qwen2_vl.py" not in mirrored_commands
+    assert "amd-smi" in mirrored_commands
     assert "nvidia-smi" not in mirrored_commands
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in mirrored_commands

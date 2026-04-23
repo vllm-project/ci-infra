@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Literal
 import os
 
 from step import Step
@@ -8,6 +8,9 @@ from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
 from constants import DeviceType, AgentQueue
+
+
+SetupProfile = Literal["nvidia", "amd", "none"]
 
 
 class BuildkiteCommandStep(BaseModel):
@@ -144,19 +147,34 @@ def _get_variables_to_inject() -> Dict[str, str]:
     }
 
 
+def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
+    if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
+        return []
+
+    if setup_profile == "nvidia":
+        return [
+            "echo '--- :nvidia: GPU Info'",
+            "(command nvidia-smi || true)",
+            "echo '--- :gear: CUDA Coredump Setup'",
+            "export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'",
+        ]
+
+    if setup_profile == "amd":
+        return [
+            "echo '--- :amd: GPU Info'",
+            "(command amd-smi || true)",
+        ]
+
+    raise ValueError(f"Unsupported setup profile: {setup_profile}")
+
+
 def _prepare_commands(
     step: Step,
     variables_to_inject: Dict[str, str],
-    include_gpu_setup: bool = True,
+    setup_profile: SetupProfile = "nvidia",
 ) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
-    commands = []
-    # Default setup commands
-    if include_gpu_setup and not step.label.startswith(":docker:") and not step.no_plugin:
-        commands.append("echo '--- :nvidia: GPU Info'")
-        commands.append("(command nvidia-smi || true)")
-        commands.append("echo '--- :gear: CUDA Coredump Setup'")
-        commands.append("export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'")
+    commands = _get_setup_commands(step, setup_profile)
 
     continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
 
@@ -367,11 +385,11 @@ def _create_amd_mirror_step(
             "working_dir": amd.get("working_dir", step.working_dir),
         })
         amd_commands_str = " && ".join(
-            _prepare_commands(amd_step, variables_to_inject, include_gpu_setup=False)
+            _prepare_commands(amd_step, variables_to_inject, setup_profile="amd")
         )
     else:
         amd_commands_str = " && ".join(
-            _prepare_commands(step, variables_to_inject, include_gpu_setup=False)
+            _prepare_commands(step, variables_to_inject, setup_profile="amd")
         )
 
     # Pass commands via VLLM_TEST_COMMANDS env var instead of positional
