@@ -144,11 +144,15 @@ def _get_variables_to_inject() -> Dict[str, str]:
     }
 
 
-def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[str]:
+def _prepare_commands(
+    step: Step,
+    variables_to_inject: Dict[str, str],
+    include_gpu_setup: bool = True,
+) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
     commands = []
     # Default setup commands
-    if not step.label.startswith(":docker:") and not step.no_plugin:
+    if include_gpu_setup and not step.label.startswith(":docker:") and not step.no_plugin:
         commands.append("echo '--- :nvidia: GPU Info'")
         commands.append("(command nvidia-smi || true)")
         commands.append("echo '--- :gear: CUDA Coredump Setup'")
@@ -205,6 +209,20 @@ def _create_block_step(step: Step, list_file_diff: List[str]) -> BuildkiteBlockS
     return block_step
 
 
+def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
+    normalized = source_file.rstrip("/")
+    if not normalized:
+        return False
+    return diff_file == normalized or diff_file.startswith(f"{normalized}/")
+
+
+def _step_is_blocked(step: Step, list_file_diff: List[str]) -> bool:
+    global_config = get_global_config()
+    return (not _step_should_run(step, list_file_diff) or (
+        step.optional and global_config["nightly"] != "1"
+    ))
+
+
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
@@ -222,7 +240,7 @@ def convert_group_step_to_buildkite_step(
         for step in steps:
             # block step
             block_step = None
-            if not _step_should_run(step, list_file_diff):
+            if _step_is_blocked(step, list_file_diff):
                 block_step = _create_block_step(step, list_file_diff)
             if block_step:
                 group_steps_list.append(block_step)
@@ -236,7 +254,7 @@ def convert_group_step_to_buildkite_step(
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
-                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0
+                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
             )
 
             if block_step:
@@ -268,15 +286,16 @@ def convert_group_step_to_buildkite_step(
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
                 amd_block_step = None
-                amd_block_step = BuildkiteBlockStep(
-                    block=f"Run AMD: {step.label}",
-                    depends_on=["image-build-amd"],
-                    key=f"block-amd-{_generate_step_key(step.label)}",
-                )
-                amd_mirror_steps.append(amd_block_step)
-                amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
+                if _step_is_blocked(step, list_file_diff):
+                    amd_block_step = BuildkiteBlockStep(
+                        block=f"Run AMD: {step.label}",
+                        depends_on=["image-build-amd"],
+                        key=f"block-amd-{_generate_step_key(step.label)}",
+                    )
+                    amd_mirror_steps.append(amd_block_step)
+                amd_step = _create_amd_mirror_step(step, variables_to_inject, step.mirror["amd"])
                 if amd_block_step:
-                    amd_step.depends_on.extend([amd_block_step.key])
+                    amd_step.depends_on.append(amd_block_step.key)
                 amd_mirror_steps.append(amd_step)
 
         buildkite_group_steps.append(
@@ -314,7 +333,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     if step.source_file_dependencies:
         for source_file in step.source_file_dependencies:
             for diff_file in list_file_diff:
-                if source_file in diff_file:
+                if _matches_source_dependency(source_file, diff_file):
                     return True
     return False
 
@@ -334,19 +353,26 @@ def _generate_step_key(step_label: str) -> str:
     )
 
 
-def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[str, Any]) -> BuildkiteCommandStep:
+def _create_amd_mirror_step(
+    step: Step,
+    variables_to_inject: Dict[str, str],
+    amd: Dict[str, Any],
+) -> BuildkiteCommandStep:
     """Create an AMD mirrored step from the original step."""
     amd_device = amd["device"]
     custom_commands = amd.get("commands")
     if custom_commands:
-        # Custom AMD commands didn't go through _prepare_commands(), need cd
-        amd_commands_str = " && ".join(custom_commands)
-        working_dir = amd.get("working_dir", step.working_dir)
-        if working_dir:
-            amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
+        amd_step = step.model_copy(update={
+            "commands": custom_commands,
+            "working_dir": amd.get("working_dir", step.working_dir),
+        })
+        amd_commands_str = " && ".join(
+            _prepare_commands(amd_step, variables_to_inject, include_gpu_setup=False)
+        )
     else:
-        # original_commands already include cd from _prepare_commands()
-        amd_commands_str = " && ".join(original_commands)
+        amd_commands_str = " && ".join(
+            _prepare_commands(step, variables_to_inject, include_gpu_setup=False)
+        )
 
     # Pass commands via VLLM_TEST_COMMANDS env var instead of positional
     # argument. Buildkite sets env vars directly in the process environment
@@ -457,7 +483,7 @@ def _create_torch_nightly_group(
         if not step_auto_run and step.source_file_dependencies:
             for source_file in step.source_file_dependencies:
                 for diff_file in list_file_diff:
-                    if source_file in diff_file:
+                    if _matches_source_dependency(source_file, diff_file):
                         step_auto_run = True
                         break
                 if step_auto_run:
