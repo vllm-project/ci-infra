@@ -49,6 +49,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
 
       apt-get update
       apt-get install -y curl build-essential jq
+      sudo curl -L https://github.com/mikefarah/yq/releases/download/v4.53.2/yq_linux_amd64 -o /usr/bin/yq && sudo chmod +x /usr/bin/yq
 
       curl -o- https://get.docker.com/ | bash -
 
