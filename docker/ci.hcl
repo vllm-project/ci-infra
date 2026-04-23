@@ -34,7 +34,7 @@ variable "SCCACHE_REGION_NAME" {
 }
 
 variable "SCCACHE_S3_NO_CREDENTIALS" {
-  default = 0
+  default = 1
 }
 
 # CI build args
@@ -140,7 +140,6 @@ target "test-ci" {
   inherits   = ["_common", "_ci", "_labels"]
   target     = "test"
   cache-from = get_cache_from()
-  cache-to   = get_cache_to()
   tags = compact([
     IMAGE_TAG,
     IMAGE_TAG_LATEST,
