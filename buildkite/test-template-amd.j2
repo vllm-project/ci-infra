@@ -4,6 +4,7 @@
 {% set hf_home_efs = "/mnt/efs/hf_cache" %}
 {% set hf_home_fsx = "/fsx/hf_cache" %}
 {% set list_file_diff = list_file_diff | split("|") %}
+{% set mi325_repeat_map = {"mi325_1": 6, "mi325_2": 4, "mi325_4": 3, "mi325_8": 10} %}
 
   - group: "AMD Tests"
     depends_on: ~
@@ -43,7 +44,12 @@
 
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
-    
+
+    {% set repeat_count = mi325_repeat_map[step.agent_pool] if step.agent_pool in mi325_repeat_map else 1 %}
+    {% set is_mi325_repeat = step.agent_pool in mi325_repeat_map %}
+    {% for repeat_idx in range(repeat_count) %}
+    {% set repeat_suffix = ("-run-" ~ (repeat_idx + 1)) if repeat_count > 1 else "" %}
+
     {% set ns = namespace(blocked=1) %}
 
     {% if run_all == "1" or nightly == "1" %}
@@ -62,19 +68,19 @@
         {% set ns.blocked = 0 %}
       {% endif %}
 
-      {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
-      - block: "Run {{ step.agent_pool }}: {{ step.label }}"
+      {% if not is_mi325_repeat and (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+      - block: "Run {{ step.agent_pool }}: {{ step.label }}{{ repeat_suffix }}"
         depends_on: amd-build
-        key: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+        key: block-{{ step.agent_pool }}-{{ (step.label ~ repeat_suffix) | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
       {% endif %}
 
       {% if step.agent_pool == "mi300_8" %}
-      - label: "amd_shadow: {{ step.label }}"
+      - label: "amd_shadow: {{ step.label }}{{ repeat_suffix }}"
       {% else %}
-      - label: "{{ step.agent_pool }}: {{ step.label }}"
+      - label: "{{ step.agent_pool }}: {{ step.label }}{{ repeat_suffix }}"
       {% endif %}
-        {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
-        depends_on: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+        {% if not is_mi325_repeat and (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+        depends_on: block-{{ step.agent_pool }}-{{ (step.label ~ repeat_suffix) | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
         {% else %}
         depends_on: amd-build
         {% endif %}
@@ -87,7 +93,7 @@
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           DOCKER_BUILDKIT: "1"
-          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
+          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ (step.label ~ repeat_suffix) | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
         priority: 100
         {% if step.grade and step.grade == "Blocking" %}
         soft_fail: false
@@ -105,5 +111,6 @@
               limit: 2
             - exit_status: 128  # Git connectivity issues
               limit: 2
+    {% endfor %}
     {% endif %}
     {% endfor %}
