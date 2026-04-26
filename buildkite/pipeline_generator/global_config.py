@@ -67,6 +67,7 @@ def init_global_config(pipeline_config_path: str):
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
+        config["nightly"] = "1"
     print("Config:\n")
     for key, value in config.items():
         print(f"{key}: {value}\n")
