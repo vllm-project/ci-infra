@@ -82,6 +82,6 @@ resource "google_compute_instance" "buildkite-agent-instance" {
 
 resource "google_compute_address" "static" {
   provider = google-beta
-  name     = "vllm-ci-cpu-64-core-${count.index}-ip"
+  name     = "vllm-ci-cpu-64-core${var.resource_suffix}-${count.index}-ip"
   count    = var.instance_count
 }
