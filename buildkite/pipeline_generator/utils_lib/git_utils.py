@@ -25,16 +25,15 @@ def get_merge_base_commit() -> Optional[str]:
 def get_list_file_diff(branch: str, merge_base_commit: Optional[str]) -> List[str]:
     """Get list of file paths that get changed between current branch and origin/main."""
     try:
-        subprocess.run(["git", "add", "."], check=True)
         if branch == "main":
             output = subprocess.check_output(
-                ["git", "diff", "--name-only", "--diff-filter=ACMDR", "HEAD~1"],
+                ["git", "diff", "--name-only", "--diff-filter=ACMDR", "HEAD~1", "HEAD"],
                 universal_newlines=True,
             )
         else:
             merge_base = merge_base_commit
             if not merge_base:
-                pass
+                raise RuntimeError("Failed to determine merge base commit for git diff.")
             output = subprocess.check_output(
                 [
                     "git",
@@ -42,15 +41,13 @@ def get_list_file_diff(branch: str, merge_base_commit: Optional[str]) -> List[st
                     "--name-only",
                     "--diff-filter=ACMDR",
                     merge_base.strip(),
+                    "HEAD",
                 ],
                 universal_newlines=True,
             )
         return [line for line in output.split("\n") if line.strip()]
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to get git diff: {e}")
-    except AttributeError:
-        # Case where merge_base_commit is None
-        raise RuntimeError("Failed to determine merge base commit for git diff.")
 
 
 def get_pr_labels(pull_request: str, repo_name: str) -> List[str]:
