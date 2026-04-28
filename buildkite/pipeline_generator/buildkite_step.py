@@ -373,6 +373,10 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         DeviceType.AMD_MI250_2: AgentQueue.AMD_MI250_2,
         DeviceType.AMD_MI250_4: AgentQueue.AMD_MI250_4,
         DeviceType.AMD_MI250_8: AgentQueue.AMD_MI250_8,
+        DeviceType.AMD_MI300_1: AgentQueue.AMD_MI300_1,
+        DeviceType.AMD_MI300_2: AgentQueue.AMD_MI300_2,
+        DeviceType.AMD_MI300_4: AgentQueue.AMD_MI300_4,
+        DeviceType.AMD_MI300_8: AgentQueue.AMD_MI300_8,
         DeviceType.AMD_MI325_1: AgentQueue.AMD_MI325_1,
         DeviceType.AMD_MI325_2: AgentQueue.AMD_MI325_2,
         DeviceType.AMD_MI325_4: AgentQueue.AMD_MI325_4,
@@ -410,7 +414,7 @@ def _create_torch_nightly_group(
     """Create the 'vLLM Against PyTorch Nightly' group with image build + test steps."""
     global_config = get_global_config()
     branch = global_config["branch"]
-    auto_run = global_config["nightly"] == "1" or branch == "main"
+    auto_run = global_config["nightly"] == "1"
 
     nightly_image = get_torch_nightly_image()
     group_steps_list = []

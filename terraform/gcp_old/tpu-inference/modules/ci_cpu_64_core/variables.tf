@@ -43,3 +43,9 @@ variable "huggingface_token_value" {
   description = "Hugging Face token for vLLM model serving usage."
   sensitive   = true
 }
+
+variable "resource_suffix" {
+  description = "Suffix to append to resource names to avoid collisions across zones"
+  type        = string
+  default     = ""
+}
