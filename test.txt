@@ -1,2 +1,0 @@
-# The name of the agent
-name="asjkld=sdf-sdfjdk-"
