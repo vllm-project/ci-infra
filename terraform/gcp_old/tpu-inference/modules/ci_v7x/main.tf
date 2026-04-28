@@ -66,7 +66,13 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
-      sudo sed -i 's/name="%hostname-%spawn"/name="${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"/' /etc/buildkite-agent/buildkite-agent.cfg
+      
+      HOST_NAME_VAL="${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+      # Set the system-wide environment variable
+      echo "HOST_NAME=$HOST_NAME_VAL" | sudo tee -a /etc/environment
+      # Use the same local variable for the sed command
+      sudo sed -i "s/name=\"%hostname-%spawn\"/name=\"$HOST_NAME_VAL\"/" /etc/buildkite-agent/buildkite-agent.cfg
+
       echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
       echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
