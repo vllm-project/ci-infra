@@ -104,7 +104,7 @@ b200_plugin_template = {
     ],
 }
 
-zen5_plugin_template = {
+amd_zen5_plugin_template = {
     "image": "",
     "always-pull": True,
     "propagate-environment": True,
@@ -132,8 +132,8 @@ def get_docker_plugin(step: Step, image: str):
         plugin = copy.deepcopy(h200_plugin_template)
     elif step.device == DeviceType.B200:
         plugin = copy.deepcopy(b200_plugin_template)
-    elif step.device == DeviceType.ZEN5:
-        plugin = copy.deepcopy(zen5_plugin_template)
+    elif step.device == DeviceType.AMD_ZEN5_CPU:
+        plugin = copy.deepcopy(amd_zen5_plugin_template)
     else:
         plugin = copy.deepcopy(docker_plugin_template)
     plugin["image"] = image
