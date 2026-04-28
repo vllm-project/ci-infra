@@ -260,13 +260,18 @@ target "export-wheel-rocm" {
   inherits   = ["_common-rocm", "_ci-rocm"]
   target     = "export_vllm"
   cache-from = get_cache_from_rocm()
+  cache-to   = get_cache_to_rocm()
   output     = ["type=local,dest=./wheel-export"]
 }
 
-# Multi-arch image + wheel export. The group runs both targets in one bake
-# invocation so BuildKit shares the layer cache. csrc-rocm-ci makes the
-# source-scoped native build cache persist across commits even when the final
-# image layers change for unrelated reasons.
+# Artifact-only vLLM build. GPU test jobs consume this artifact on top of
+# ci_base, avoiding a per-commit multi-GB image push/pull.
+group "test-rocm-ci-with-artifacts" {
+  targets = ["csrc-rocm-ci", "export-wheel-rocm"]
+}
+
+# Full test image + wheel export. Kept for fallback/debugging when a pushed
+# per-commit image is useful.
 group "test-rocm-ci-with-wheel" {
   targets = ["csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm"]
 }
