@@ -400,7 +400,12 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         agents={"queue": amd_queue},
         env={
             "DOCKER_BUILDKIT": "1",
+            # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
+            # Keep the hook warmup on ci_base; the runner uses the full image
+            # only if ci_base or artifact setup fails before tests begin.
+            "DOCKER_IMAGE_NAME": "rocm/vllm-dev:ci_base",
             "VLLM_CI_BASE_IMAGE": "rocm/vllm-dev:ci_base",
+            "VLLM_CI_FALLBACK_IMAGE": "rocm/vllm-ci:$BUILDKITE_COMMIT",
             "VLLM_CI_USE_ARTIFACTS": "1",
             "VLLM_CI_ARTIFACT_GLOB": "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz",
             "VLLM_TEST_COMMANDS": amd_commands_str,
