@@ -119,6 +119,7 @@
         env:
           DOCKER_BUILDKIT: "1"
           NUM_NODES: "{{ step.num_nodes or 1 }}"
+          DOCKER_IMAGE_NAME: "rocm/vllm-dev:ci_base"
           VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
           VLLM_CI_USE_ARTIFACTS: "1"
           VLLM_CI_ARTIFACT_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
