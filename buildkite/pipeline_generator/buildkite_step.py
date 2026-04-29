@@ -57,7 +57,11 @@ def _get_step_plugin(step: Step):
     # Use K8s plugin
     use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
     use_arm64 = step.device == DeviceType.DGX_SPARK
-    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
+    if step.device in [
+        DeviceType.H100.value,
+        DeviceType.A100.value,
+        DeviceType.B200.value,
+    ]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
@@ -96,7 +100,7 @@ def get_agent_queue(step: Step):
     elif step.device == DeviceType.H200_18GB:
         return AgentQueue.H200_18GB
     elif step.device == DeviceType.B200:
-        return AgentQueue.B200
+        return AgentQueue.B200_K8S
     elif step.device == DeviceType.INTEL_CPU:
         return AgentQueue.INTEL_CPU
     elif step.device == DeviceType.INTEL_HPU:
@@ -508,7 +512,11 @@ def _create_torch_nightly_group(
 def _get_nightly_step_plugin(step: Step, nightly_image: str):
     """Get the Docker plugin config for a torch nightly test step."""
     use_cpu = step.device == DeviceType.CPU or False
-    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
+    if step.device in [
+        DeviceType.H100.value,
+        DeviceType.A100.value,
+        DeviceType.B200.value,
+    ]:
         from plugin.k8s_plugin import get_k8s_plugin
         return get_k8s_plugin(step, nightly_image)
     else:
