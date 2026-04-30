@@ -74,7 +74,7 @@ def get_agent_queue(step: Step):
         if branch == "main":
             return AgentQueue.CPU_POSTMERGE_US_EAST_1
         else:
-            return AgentQueue.CPU_PREMERGE_US_EAST_1
+            return AgentQueue.CPU_POSTMERGE_US_EAST_1
     elif step.label == "Documentation Build":
         return AgentQueue.SMALL_CPU_PREMERGE
     elif step.device == DeviceType.CPU_SMALL:
