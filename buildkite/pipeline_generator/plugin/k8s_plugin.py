@@ -129,6 +129,8 @@ b200_plugin_template = {
     "kubernetes": {
         "podSpec": {
             "runtimeClassName": "nvidia",
+            "hostNetwork": True,
+            "dnsPolicy": "ClusterFirstWithHostNet",
             "imagePullSecrets": [
                 {"name": "k8s-ecr-login-renew-docker-secret"},
             ],
@@ -136,6 +138,11 @@ b200_plugin_template = {
                 {
                     "image": "",
                     "resources": {"limits": {"nvidia.com/gpu": ""}},
+                    "securityContext": {
+                        "capabilities": {
+                            "add": ["IPC_LOCK", "SYS_RESOURCE"],
+                        },
+                    },
                     "volumeMounts": [
                         {"name": "devshm", "mountPath": "/dev/shm"},
                         {"name": "raid", "mountPath": "/raid"},
