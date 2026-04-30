@@ -374,7 +374,7 @@ resource "aws_iam_role_policy_attachment" "premerge_ecr_public_read_access" {
   for_each   = merge(
     aws_cloudformation_stack.bk_queue_ci_gpu
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.premerge_ecr_public_read_access_policy.arn
 }
 
@@ -387,7 +387,7 @@ resource "aws_iam_role_policy_attachment" "premerge_ecr_public_write_access" {
     aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
     aws_cloudformation_stack.bk_queue_release,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.premerge_ecr_public_write_access_policy.arn
 }
 
@@ -397,7 +397,7 @@ resource "aws_iam_role_policy_attachment" "premerge_ecr_cache_read_write_access"
     aws_cloudformation_stack.bk_queue_premerge,
     aws_cloudformation_stack.bk_queue_premerge_us_east_1,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.premerge_ecr_cache_read_write_access_policy.arn
 }
 
@@ -405,7 +405,7 @@ resource "aws_iam_role_policy_attachment" "postmerge_ecr_public_read_access" {
   for_each   = merge(
     aws_cloudformation_stack.bk_queue_ci_gpu
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.postmerge_ecr_public_read_access_policy.arn
 }
 
@@ -415,7 +415,7 @@ resource "aws_iam_role_policy_attachment" "postmerge_ecr_public_read_write_acces
     aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
     aws_cloudformation_stack.bk_queue_release,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.postmerge_ecr_public_read_write_access_policy.arn
 }
 
@@ -425,7 +425,7 @@ resource "aws_iam_role_policy_attachment" "postmerge_ecr_cache_read_write_access
     aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
     aws_cloudformation_stack.bk_queue_release,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.postmerge_ecr_cache_read_write_access_policy.arn
 }
 
@@ -435,7 +435,7 @@ resource "aws_iam_role_policy_attachment" "release_ecr_public_read_write_access"
     aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
     aws_cloudformation_stack.bk_queue_release,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.release_ecr_public_read_write_access_policy.arn
 }
 
@@ -445,7 +445,7 @@ resource "aws_iam_role_policy_attachment" "cpu_release_ecr_public_read_write_acc
     aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
     aws_cloudformation_stack.bk_queue_release,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.cpu_release_ecr_public_read_write_access_policy.arn
 }
 
@@ -455,7 +455,7 @@ resource "aws_iam_role_policy_attachment" "arm64_cpu_release_ecr_public_read_wri
     aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
     aws_cloudformation_stack.bk_queue_release,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.arm64_cpu_release_ecr_public_read_write_access_policy.arn
 }
 
@@ -469,7 +469,7 @@ resource "aws_iam_role_policy_attachment" "bk_stack_secrets_access" {
     aws_cloudformation_stack.bk_queue_ci_gpu,
     aws_cloudformation_stack.bk_queue_release,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.bk_stack_secrets_access.arn
 }
 
@@ -484,7 +484,7 @@ resource "aws_iam_role_policy_attachment" "bk_stack_sccache_bucket_read_access" 
       if v.name == "bk-arm64-cpu-queue-premerge"
     },
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.bk_stack_sccache_bucket_read_access.arn
 }
 
@@ -515,7 +515,7 @@ resource "aws_iam_role_policy_attachment" "bk_stack_sccache_bucket_read_write_ac
       if v.name == "bk-arm64-cpu-queue-release"
     }
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.bk_stack_sccache_bucket_read_write_access.arn
 }
 
@@ -523,7 +523,7 @@ resource "aws_iam_role_policy_attachment" "vllm_wheels_bucket_read_write_access"
   for_each = {
     for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v
   }
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.vllm_wheels_bucket_read_write_access.arn
 }
 
@@ -532,6 +532,6 @@ resource "aws_iam_role_policy_attachment" "vllm_wheels_bucket_read_write_access_
     { for k, v in aws_cloudformation_stack.bk_queue_postmerge_us_east_1 : k => v },
     { for k, v in aws_cloudformation_stack.bk_queue_release : k => v },
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = "bk-${each.key}-Role"
   policy_arn = aws_iam_policy.vllm_wheels_bucket_read_write_access.arn
 }

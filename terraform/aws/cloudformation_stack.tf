@@ -1,4 +1,8 @@
 locals {
+  # Boot script applied to every stock-AMI EC2 instance. Source: instance-bootstrap.sh.
+  # Update the file in S3 after editing the in-repo source.
+  instance_bootstrap_script_url = "https://vllm-ci.s3.us-west-2.amazonaws.com/instance-bootstrap.sh"
+
   default_parameters = {
     elastic_ci_stack_version              = var.elastic_ci_stack_version
     BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token.name
@@ -23,6 +27,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                   = local.instance_bootstrap_script_url
     }
 
     medium-cpu-queue-premerge = {
@@ -34,6 +39,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                   = local.instance_bootstrap_script_url
     }
 
     cpu-queue-premerge = {
@@ -45,6 +51,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                   = local.instance_bootstrap_script_url
     }
 
     arm64-cpu-queue-premerge = {
@@ -56,6 +63,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                   = local.instance_bootstrap_script_url
     }
   }
 
@@ -90,6 +98,7 @@ locals {
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
       BuildkiteTerminateInstanceAfterJob   = true
+      BootstrapScriptUrl                   = local.instance_bootstrap_script_url
     }
 
     cpu-queue-postmerge = {
@@ -102,6 +111,7 @@ locals {
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
       BuildkiteTerminateInstanceAfterJob   = true
+      BootstrapScriptUrl                   = local.instance_bootstrap_script_url
     }
 
     arm64-cpu-queue-postmerge = {
@@ -114,6 +124,7 @@ locals {
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
       BuildkiteTerminateInstanceAfterJob   = true
+      BootstrapScriptUrl                   = local.instance_bootstrap_script_url
     }
   }
 
@@ -191,6 +202,7 @@ locals {
       Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
       RootVolumeIops                       = 16000
       RootVolumeThroughput                 = 1000
+      BootstrapScriptUrl                   = local.instance_bootstrap_script_url
     }
   }
 
@@ -232,6 +244,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                   = local.instance_bootstrap_script_url
     }
   }
 

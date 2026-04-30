@@ -122,6 +122,11 @@ build {
     script = "scripts/install-build-tools.sh"
   }
 
+  # Disable algif_aead kernel module
+  provisioner "shell" {
+    script = "scripts/disable-algif-aead.sh"
+  }
+
   # Warm the cache by building vLLM image (runs as buildkite-agent)
   provisioner "shell" {
     environment_vars = [
