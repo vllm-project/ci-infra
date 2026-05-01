@@ -6,6 +6,7 @@ class DeviceType(str, Enum):
     H200 = "h200"
     H200_18GB = "h200_18gb"
     B200 = "b200"
+    B200_K8S = "b200-k8s"
     A100 = "a100"
     CPU = "cpu"
     CPU_SMALL = "cpu-small"

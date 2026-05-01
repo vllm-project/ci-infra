@@ -60,7 +60,7 @@ def _get_step_plugin(step: Step):
     if step.device in [
         DeviceType.H100.value,
         DeviceType.A100.value,
-        DeviceType.B200.value,
+        DeviceType.B200_K8S.value,
     ]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
@@ -100,6 +100,8 @@ def get_agent_queue(step: Step):
     elif step.device == DeviceType.H200_18GB:
         return AgentQueue.H200_18GB
     elif step.device == DeviceType.B200:
+        return AgentQueue.B200
+    elif step.device == DeviceType.B200_K8S:
         return AgentQueue.B200_K8S
     elif step.device == DeviceType.INTEL_CPU:
         return AgentQueue.INTEL_CPU
@@ -515,7 +517,7 @@ def _get_nightly_step_plugin(step: Step, nightly_image: str):
     if step.device in [
         DeviceType.H100.value,
         DeviceType.A100.value,
-        DeviceType.B200.value,
+        DeviceType.B200_K8S.value,
     ]:
         from plugin.k8s_plugin import get_k8s_plugin
         return get_k8s_plugin(step, nightly_image)

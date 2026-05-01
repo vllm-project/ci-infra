@@ -235,10 +235,10 @@ def get_k8s_plugin(step: Step, image: str):
         plugin = copy.deepcopy(nebius_h200_plugin_template)
     elif step.device == DeviceType.A100.value:
         plugin = copy.deepcopy(a100_plugin_template)
-    elif step.device == DeviceType.B200:
+    elif step.device == DeviceType.B200_K8S:
         plugin = copy.deepcopy(b200_plugin_template)
 
-    if step.device in (DeviceType.H100, DeviceType.B200):
+    if step.device in (DeviceType.H100, DeviceType.B200_K8S):
         image = image.replace("public.ecr.aws", "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache")
     plugin["kubernetes"]["podSpec"]["containers"][0]["image"] = image
     plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"][
