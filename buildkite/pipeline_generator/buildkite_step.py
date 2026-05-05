@@ -408,6 +408,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
             "VLLM_CI_FALLBACK_IMAGE": "rocm/vllm-ci:$BUILDKITE_COMMIT",
             "VLLM_CI_USE_ARTIFACTS": "1",
             "VLLM_CI_ARTIFACT_GLOB": "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz",
+            "VLLM_CI_RESULTS_ROOT": "/home/buildkite-agent/huggingface/amd-ci-results",
             "VLLM_TEST_COMMANDS": amd_commands_str,
         },
         priority=200,
