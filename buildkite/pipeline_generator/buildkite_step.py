@@ -274,12 +274,13 @@ def convert_group_step_to_buildkite_step(
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
                 amd_block_step = None
-                amd_block_step = BuildkiteBlockStep(
-                    block=f"Run AMD: {step.label}",
-                    depends_on=["image-build-amd"],
-                    key=f"block-amd-{_generate_step_key(step.label)}",
-                )
-                amd_mirror_steps.append(amd_block_step)
+                if not _step_should_run(step, list_file_diff):
+                    amd_block_step = BuildkiteBlockStep(
+                        block=f"Run AMD: {step.label}",
+                        depends_on=["image-build-amd"],
+                        key=f"block-amd-{_generate_step_key(step.label)}",
+                    )
+                    amd_mirror_steps.append(amd_block_step)
                 amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
                 if amd_block_step:
                     amd_step.depends_on.extend([amd_block_step.key])
