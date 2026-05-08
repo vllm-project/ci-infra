@@ -189,12 +189,12 @@ l4_rh_plugin_template = {
                     },
                     "volumeMounts": [
                         {"name": "devshm", "mountPath": "/dev/shm"},
-                        {"name": "ci-cache", "mountPath": "/ci-cache"},
+                        {"name": "model-cache", "mountPath": "/model-cache"},
                     ],
                     "env": [
                         {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
                         {"name": "NCCL_CUMEM_HOST_ENABLE", "value": "0"},
-                        {"name": "HF_HOME", "value": "/ci-cache/hf_home"},
+                        {"name": "HF_HOME", "value": "/model-cache"},
                         {
                             "name": "HF_TOKEN",
                             "valueFrom": {
@@ -207,12 +207,12 @@ l4_rh_plugin_template = {
                     ],
                 }
             ],
-            "nodeSelector": {"vllm.ci/gpu-pool": "upstream-ci-h100"},
+            "nodeSelector": {"vllm.ci/gpu-pool": "upstream-ci-l4"},
             "volumes": [
                 {"name": "devshm", "emptyDir": {"medium": "Memory"}},
                 {
-                    "name": "ci-cache",
-                    "hostPath": {"path": "/var/mnt/ci-cache", "type": "DirectoryOrCreate"},
+                    "name": "model-cache",
+                    "hostPath": {"path": "/var/mnt/model-cache", "type": "DirectoryOrCreate"},
                 },
             ],
         }
