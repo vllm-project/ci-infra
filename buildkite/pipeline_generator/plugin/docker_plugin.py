@@ -29,6 +29,7 @@ h200_18gb_plugin_template = {
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False",
         "HF_TOKEN",
         "HF_HOME",
         "CODECOV_TOKEN",
