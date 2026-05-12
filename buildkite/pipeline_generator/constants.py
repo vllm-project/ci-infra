@@ -78,4 +78,4 @@ class AgentQueue(str, Enum):
     AMD_MI355_4 = "amd_mi355_4"
     AMD_MI355_8 = "amd_mi355_8"
     DGX_SPARK = "dgx-spark"
-    REDHAT_H100_FRANKFURT = "RedHat-H100-Frankfurt"
+    REDHAT_H100_WDC = "RedHat-H100-WDC"
