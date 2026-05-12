@@ -1,6 +1,7 @@
 {% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set list_file_diff = list_file_diff | replace("\r", "") | replace("\n", "|") | split("|") %}
+{% set rocm_ci_custom_image = rocm_ci_custom_image | default("") %}
 
 {% macro amd_infra_retry(indent='') -%}
 {{ indent }}retry:
@@ -28,6 +29,16 @@
           # Handle the introduction of test target in Dockerfile.rocm
           - |
             #!/bin/bash
+            if [[ -n "${ROCM_CI_CUSTOM_IMAGE:-}" ]]; then
+              target_image="{{ docker_image_amd }}"
+              echo "Using custom ROCm CI image: ${ROCM_CI_CUSTOM_IMAGE}"
+              echo "Aliasing ${ROCM_CI_CUSTOM_IMAGE} as ${target_image}"
+              docker pull "${ROCM_CI_CUSTOM_IMAGE}"
+              docker tag "${ROCM_CI_CUSTOM_IMAGE}" "${target_image}"
+              docker push "${target_image}"
+              docker manifest inspect "${target_image}" >/dev/null
+              exit 0
+            fi
             if docker manifest inspect {{ docker_image_amd }} >/dev/null 2>&1; then
               echo "Image already exists: {{ docker_image_amd }}"
               echo "Skipping AMD image build"
@@ -47,6 +58,9 @@
         key: "amd-build"
         env:
           DOCKER_BUILDKIT: "1"
+          {% if rocm_ci_custom_image %}
+          ROCM_CI_CUSTOM_IMAGE: "{{ rocm_ci_custom_image }}"
+          {% endif %}
 {{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu

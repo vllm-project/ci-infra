@@ -130,6 +130,7 @@ upload_pipeline() {
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
+    echo "ROCm CI custom image: ${ROCM_CI_CUSTOM_IMAGE:-<unset>}"
 
     FAIL_FAST=$(fail_fast)
 
@@ -148,6 +149,7 @@ upload_pipeline() {
             -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D rocm_ci_custom_image="${ROCM_CI_CUSTOM_IMAGE:-}" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
