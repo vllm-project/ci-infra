@@ -60,7 +60,11 @@ def _get_step_plugin(step: Step):
     # Use K8s plugin
     use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
     use_arm64 = step.device == DeviceType.DGX_SPARK
-    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
+    if step.device in [
+        DeviceType.H100.value,
+        DeviceType.A100.value,
+        DeviceType.B200_K8S.value,
+    ]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
@@ -100,6 +104,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.H200_18GB
     elif step.device == DeviceType.B200:
         return AgentQueue.B200
+    elif step.device == DeviceType.B200_K8S:
+        return AgentQueue.B200_K8S
     elif step.device == DeviceType.INTEL_CPU:
         return AgentQueue.INTEL_CPU
     elif step.device == DeviceType.INTEL_HPU:
@@ -311,7 +317,9 @@ def convert_group_step_to_buildkite_step(
                         key=f"block-amd-{_generate_step_key(step.label)}",
                     )
                     amd_mirror_steps.append(amd_block_step)
-                amd_step = _create_amd_mirror_step(step, variables_to_inject, step.mirror["amd"])
+                amd_step = _create_amd_mirror_step(
+                    step, variables_to_inject, step.mirror["amd"]
+                )
                 if amd_block_step:
                     amd_step.depends_on.append(amd_block_step.key)
                 amd_mirror_steps.append(amd_step)
@@ -552,7 +560,11 @@ def _create_torch_nightly_group(
 def _get_nightly_step_plugin(step: Step, nightly_image: str):
     """Get the Docker plugin config for a torch nightly test step."""
     use_cpu = step.device == DeviceType.CPU or False
-    if step.device in [DeviceType.H100.value, DeviceType.A100.value]:
+    if step.device in [
+        DeviceType.H100.value,
+        DeviceType.A100.value,
+        DeviceType.B200_K8S.value,
+    ]:
         from plugin.k8s_plugin import get_k8s_plugin
         return get_k8s_plugin(step, nightly_image)
     else:

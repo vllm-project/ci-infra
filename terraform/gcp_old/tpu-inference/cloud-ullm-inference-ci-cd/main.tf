@@ -21,7 +21,7 @@ module "ci_v6e_1" {
 
   accelerator_type                 = "v6e-1"
   reserved                         = true
-  instance_count                   = 16
+  instance_count                   = 30
   disk_size                        = 512
   buildkite_queue_name             = "tpu_v6e_queue"
   project_id                       = var.project_id
@@ -91,6 +91,23 @@ module "ci_cpu_64_core" {
     google-beta = google-beta.us-central1-b
   }
 
+  project_id              = var.project_id
+  instance_count          = 4
+  machine_type            = "n2-standard-64"
+  disk_size               = 250
+  disk_type               = "pd-balanced"
+  buildkite_queue_name    = "cpu_64_core"
+
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+}
+
+module "ci_cpu_64_core_zone_c" {
+  source    = "../modules/ci_cpu_64_core"
+  providers = {
+    google-beta = google-beta.us-central1-c
+  }
+  resource_suffix = "-zone-c"
   project_id              = var.project_id
   instance_count          = 4
   machine_type            = "n2-standard-64"
