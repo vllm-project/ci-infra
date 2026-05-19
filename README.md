@@ -140,7 +140,7 @@ Equivalent postmerge and release queues exist with ECR write access for pushing 
 
 ### Kubernetes
 
-The `infra-k8s/` directory provides Helm-based deployment of the [Buildkite Agent Stack for Kubernetes](https://github.com/buildkite/agent-stack-k8s). Used for specialized hardware (A100, H100, H200) where the pipeline generator creates Kubernetes pod specs with GPU resource requests, node selectors, and shared storage mounts (EFS/FSx for model weights).
+The `infra-k8s/` directory provides Helm-based deployment of the [Buildkite Agent Stack for Kubernetes](https://github.com/buildkite/agent-stack-k8s). Used for specialized hardware (A100, H100, H200, B200) where the pipeline generator creates Kubernetes pod specs with GPU resource requests, node selectors, and shared storage mounts (EFS/FSx for model weights).
 
 ## Caching Strategy
 
