@@ -27,6 +27,10 @@ if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
 
+if [[ -z "${AMD_USE_PIPELINE_GENERATOR:-}" ]]; then
+    AMD_USE_PIPELINE_GENERATOR=0
+fi
+
 # ---------------------------------------------------------------------------
 # Git setup: ensure origin/main is available and compute merge base once.
 # On K8s (blobless clones with --filter=blob:none), origin/main may not be
@@ -119,12 +123,15 @@ upload_pipeline() {
     fi
 
 
-    # (WIP) Use pipeline generator instead of jinja template
     if [ -e ".buildkite/pipeline_generator/pipeline_generator.py" ]; then
-        python -m pip install click pydantic
-        python .buildkite/pipeline_generator/pipeline_generator.py --run_all=$RUN_ALL --list_file_diff="$LIST_FILE_DIFF" --nightly="$NIGHTLY" --mirror_hw="$AMD_MIRROR_HW"
-        buildkite-agent pipeline upload .buildkite/pipeline.yaml
-        exit 0
+        # AMD still uses its dedicated test-amd.yaml + Jinja pipeline model.
+        # The generic Python generator is centered around ci_config.yaml/test_areas
+        # and is not wired up for bootstrap-amd yet.
+        if [[ "$AMD_USE_PIPELINE_GENERATOR" == "1" ]]; then
+            echo "AMD_USE_PIPELINE_GENERATOR=1 requested, but bootstrap-amd still uses the dedicated Jinja pipeline."
+        else
+            echo "Skipping Python pipeline generator for AMD; using the dedicated Jinja pipeline."
+        fi
     fi
     echo "List file diff: $LIST_FILE_DIFF"
     echo "Run all: $RUN_ALL"
