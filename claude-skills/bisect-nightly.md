@@ -209,7 +209,16 @@ This triggers the blocked job to run. Wait for it to complete, then check if it 
 
 When the job **fails** on a suspect commit, always unblock and run the same job on the commit **immediately before it in the commit list**. This confirms the bisect — if the previous commit passes and the suspect fails, the suspect is the culprit.
 
-**Important:** "The commit right before" means the adjacent commit in the `git log` order from step 4a, NOT just any earlier commit. Use the commit list from `gh api repos/vllm-project/vllm/compare/...` and find the line directly above the suspect — that's the commit to test.
+**Critical:** "The commit right before" means the **adjacent** commit in the `git log` order from step 4a — the line directly above the suspect. NOT just any earlier commit.
+
+Why this matters: if there are multiple suspect commits in the range, running a build several commits earlier and seeing it pass only narrows the culprit to "somewhere between that earlier commit and the failing suspect" — it does NOT confirm the specific suspect. To confirm one specific commit, you need its immediate predecessor.
+
+Do NOT mark a bisect as "CONFIRMED" until the truly adjacent commit has been tested. If you only have data from a non-adjacent earlier commit, the status is "narrowed down" — not confirmed.
+
+How to find the adjacent commit:
+1. Get the full commit list from `gh api repos/vllm-project/vllm/compare/<last_pass>...<first_fail> --jq '.commits[] | "\(.sha[:9]) \(.commit.message | split("\n")[0])"'`
+2. Find the line containing your suspect SHA
+3. The commit on the line **directly above** is the adjacent one — use that.
 
 ### 5e. Narrow down
 
