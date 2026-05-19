@@ -1,0 +1,9 @@
+[Unit]
+Description=Report GPU utilization to vLLM Dashboard
+
+[Service]
+Type=oneshot
+Environment=GPU_REPORT_URL=https://your-dashboard.vercel.app/api/gpu/report
+Environment=GPU_REPORT_SECRET=your-secret-here
+ExecStart=/usr/bin/python3 /opt/gpu-reporter/gpu-reporter.py
+TimeoutSec=30
