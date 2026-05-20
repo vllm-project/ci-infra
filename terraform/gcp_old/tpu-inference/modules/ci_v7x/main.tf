@@ -105,6 +105,13 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
       sudo bash add-google-cloud-ops-agent-repo.sh --also-install
 
+      # Inject ultra-strict limit policy for syslog and kern.log (50M, 1 backup)
+      echo "Configuring strict logrotate for syslog and kern.log..."
+      sudo sed -i '1i/var/log/syslog\n/var/log/kern.log\n{\n  size 50M\n  rotate 1\n  missingok\n  notifempty\n  compress\n  delaycompress\n  postrotate\n    /usr/lib/rsyslog/rsyslog-rotate\n  endscript\n}\n' /etc/logrotate.d/rsyslog
+      
+      # Force rotate once
+      sudo logrotate -f /etc/logrotate.conf
+
       systemctl enable buildkite-agent
       systemctl start buildkite-agent
     EOF
