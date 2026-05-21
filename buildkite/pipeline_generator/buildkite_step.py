@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
 import os
+import re as _re_module
 
 from step import Step
 from utils_lib.docker_utils import get_image, get_ecr_cache_registry, get_torch_nightly_image
@@ -152,6 +153,22 @@ def _get_variables_to_inject() -> Dict[str, str]:
     }
 
 
+def _wrap_cmd_with_coverage(cmd: str, step_key: str) -> str:
+    """Wrap a pytest command with coverage.py tracing.
+
+    Replaces 'pytest ...' with 'coverage run --append --data-file=... -m pytest ...'
+    so that source file coverage is recorded for each test step.
+    Non-pytest commands are returned unchanged.
+    """
+    pattern = _re_module.compile(r'^(.*?\b)(pytest)\b(.*)$')
+    match = pattern.match(cmd)
+    if not match:
+        return cmd
+    prefix, _, rest = match.groups()
+    data_file = f".coverage.{step_key}"
+    return f"{prefix}coverage run --append --data-file={data_file} -m pytest{rest}"
+
+
 def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
     commands = []
@@ -163,12 +180,16 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
         commands.append("export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'")
 
     continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
+    collect_coverage = os.getenv("COLLECT_COVERAGE") == "1"
+    step_key = step.key or _generate_step_key(step.label)
 
     if continue_on_failure:
         commands.append("CI_OVERALL_STATUS=0")
 
     if step.commands:
         for i, cmd in enumerate(step.commands):
+            if collect_coverage:
+                cmd = _wrap_cmd_with_coverage(cmd, step_key)
             # Sanitize command preview for use in echo (remove quotes and special chars)
             preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
             commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
@@ -176,6 +197,11 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
                 commands.append(f"({cmd}) || CI_OVERALL_STATUS=1")
             else:
                 commands.append(cmd)
+
+    # Upload coverage data at the end of the step
+    if collect_coverage and not step.label.startswith(":docker:"):
+        commands.append("echo '--- :bar_chart: Uploading coverage data'")
+        commands.append(f"(bash .buildkite/scripts/coverage/upload-step-coverage.sh) || true")
 
     if continue_on_failure:
         commands.append("exit $$CI_OVERALL_STATUS")
