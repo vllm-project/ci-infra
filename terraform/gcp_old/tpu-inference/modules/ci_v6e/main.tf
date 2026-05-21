@@ -105,6 +105,38 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
       sudo bash add-google-cloud-ops-agent-repo.sh --also-install
 
+      # ==========================================
+      # 1. Backward Compatibility & JAX Cache Setup
+      # ==========================================
+      echo "Setting up backward compatibility symlink for JAX cache..."
+      # Create the persistent directory first
+      sudo mkdir -p /mnt/disks/persist/tpu_jax_cache
+      
+      # Forcefully intercept old CI jobs writing to /tmp and redirect them to the persistent disk
+      sudo rm -rf /tmp/tpu_jax_cache
+      sudo ln -s /mnt/disks/persist/tpu_jax_cache /tmp/tpu_jax_cache
+
+      # ==========================================
+      # 2. Automated Disk Garbage Collection (Cron)
+      # ==========================================
+      echo "Setting up daily cron job for JAX cache cleanup..."
+      # Run everyday at 2:00 AM to delete files older than 14 days, and 2:30 AM for empty directories(Keep below flush-left)
+      cat << 'CRONEOF' | sudo tee /etc/cron.d/tpu_cache_cleanup
+0 2 * * * root find /mnt/disks/persist/tpu_jax_cache -type f -mtime +14 -delete > /dev/null 2>&1
+30 2 * * * root find /mnt/disks/persist/tpu_jax_cache -type d -empty -delete > /dev/null 2>&1
+CRONEOF
+      sudo chmod 0644 /etc/cron.d/tpu_cache_cleanup
+
+      # ==========================================
+      # 3. System Log Cleaner
+      # ==========================================
+      # Inject ultra-strict limit policy for syslog and kern.log (50M, 1 backup)
+      echo "Configuring strict logrotate for syslog and kern.log..."
+      sudo sed -i '1i/var/log/syslog\n/var/log/kern.log\n{\n  size 50M\n  rotate 1\n  missingok\n  notifempty\n  compress\n  delaycompress\n  postrotate\n    /usr/lib/rsyslog/rsyslog-rotate\n  endscript\n}\n' /etc/logrotate.d/rsyslog
+      
+      # Force rotate once
+      sudo logrotate -f /etc/logrotate.conf
+
       systemctl enable buildkite-agent
       systemctl start buildkite-agent
     EOF
