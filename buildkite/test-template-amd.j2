@@ -28,13 +28,7 @@
         key: "amd-ci-base-ready"
         env:
           DOCKER_BUILDKIT: "1"
-          CI_BASE_CONTENT_FILES: "requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base tools/install_torchcodec_rocm.sh tests/vllm_test_utils"
-          CI_BASE_DOCKERFILE: "docker/Dockerfile.rocm"
-          CI_BASE_DOCKERFILE_STAGES: "base build_rixl build_rocshmem build_deepep mori_base ci_base"
-          IMAGE_TAG: "rocm/vllm-dev:ci_base"
-          CI_BASE_IMAGE_TAG: "rocm/vllm-dev:ci_base"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
-          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
@@ -67,9 +61,7 @@
         env:
           DOCKER_BUILDKIT: "1"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
-          CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch | default('main') }}/docker/ci-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
-          CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
           IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
