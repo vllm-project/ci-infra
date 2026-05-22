@@ -111,6 +111,7 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       echo "Setting up backward compatibility symlink for JAX cache..."
       # Create the persistent directory first
       sudo mkdir -p /mnt/disks/persist/tpu_jax_cache
+      sudo chmod 777 /mnt/disks/persist/tpu_jax_cache
       
       # Forcefully intercept old CI jobs writing to /tmp and redirect them to the persistent disk
       sudo rm -rf /tmp/tpu_jax_cache
@@ -120,11 +121,7 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       # 2. Automated Disk Garbage Collection (Cron)
       # ==========================================
       echo "Setting up daily cron job for JAX cache cleanup..."
-      # Run everyday at 2:00 AM to delete files older than 31 days, and 2:30 AM for empty directories(Keep below flush-left)
-      cat << 'CRONEOF' | sudo tee /etc/cron.d/tpu_cache_cleanup
-0 2 * * * root find /mnt/disks/persist/tpu_jax_cache -type f -mtime +30 -delete > /dev/null 2>&1
-30 2 * * * root find /mnt/disks/persist/tpu_jax_cache -type d -empty -delete > /dev/null 2>&1
-CRONEOF
+      echo -e '0 2 * * * root find /mnt/disks/persist/tpu_jax_cache -type f -mtime +30 -delete > /dev/null 2>&1\n30 2 * * * root find /mnt/disks/persist/tpu_jax_cache -type d -empty -delete > /dev/null 2>&1' | sudo tee /etc/cron.d/tpu_cache_cleanup
       sudo chmod 0644 /etc/cron.d/tpu_cache_cleanup
 
       # ==========================================
