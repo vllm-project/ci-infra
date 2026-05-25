@@ -214,12 +214,12 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     collect_coverage = os.getenv("COLLECT_COVERAGE") == "1"
     step_key = step.key or _generate_step_key(step.label)
 
-    # K8s pods have buildkite-agent and persistent workdirs — write to ".".
-    # Docker containers lose their filesystem on exit — write to /workdir
-    # (the mounted git checkout volume) so data persists for artifact upload.
+    # Docker: git checkout mounted at /workdir, tests run from /vllm-workspace/.
+    # K8s: git checkout at /workspace/build/buildkite, tests run from /vllm-workspace/.
+    # Both need an absolute path to the checkout dir for .coveragerc and data files.
     _k8s_devices = {DeviceType.H100.value, DeviceType.A100.value, DeviceType.B200_K8S.value}
     uses_docker = step.device not in _k8s_devices and not step.no_plugin
-    coverage_dir = "/workdir" if uses_docker else "."
+    coverage_dir = "/workdir" if uses_docker else "/workspace/build/buildkite"
 
     if continue_on_failure:
         commands.append("CI_OVERALL_STATUS=0")
