@@ -163,6 +163,9 @@ def _wrap_cmd_with_coverage(cmd: str, step_key: str, coverage_dir: str) -> str:
     Replaces 'pytest ...' with 'coverage run --append --data-file=... -m pytest ...'
     so that source file coverage is recorded for each test step.
     Non-pytest commands are returned unchanged.
+
+    Uses --rcfile to point at the .coveragerc in the git checkout, since
+    Docker jobs run from /vllm-workspace/tests (not the checkout dir).
     """
     pattern = _re_module.compile(r'^(.*?\b)(pytest)\b(.*)$')
     match = pattern.match(cmd)
@@ -170,7 +173,8 @@ def _wrap_cmd_with_coverage(cmd: str, step_key: str, coverage_dir: str) -> str:
         return cmd
     prefix, _, rest = match.groups()
     data_file = f"{coverage_dir}/.coverage.{step_key}"
-    return f"{prefix}coverage run --append --data-file={data_file} -m pytest{rest}"
+    rcfile = f"{coverage_dir}/.coveragerc"
+    return f"{prefix}coverage run --rcfile={rcfile} --append --data-file={data_file} -m pytest{rest}"
 
 
 def _coverage_export_commands(step_key: str, coverage_dir: str) -> list[str]:
@@ -181,10 +185,11 @@ def _coverage_export_commands(step_key: str, coverage_dir: str) -> list[str]:
     container exits and Buildkite can upload it via artifact_paths.
     """
     data_file = f"{coverage_dir}/.coverage.{step_key}"
+    rcfile = f"{coverage_dir}/.coveragerc"
     output_json = f"{coverage_dir}/coverage_{step_key}.json"
     return [
         "echo '--- :bar_chart: Exporting coverage data'",
-        f"(test -f {data_file} && coverage json --data-file={data_file} -o {output_json} --omit='*/tests/*,*/test_*,*/__pycache__/*' && echo 'Coverage exported to {output_json}') || echo 'No coverage data to export'",
+        f"(test -f {data_file} && coverage json --rcfile={rcfile} --data-file={data_file} -o {output_json} --omit='*/tests/*,*/test_*,*/__pycache__/*' && echo 'Coverage exported to {output_json}') || echo 'No coverage data to export'",
     ]
 
 
