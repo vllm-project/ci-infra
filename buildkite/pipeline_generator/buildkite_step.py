@@ -24,9 +24,10 @@ class BuildkiteCommandStep(BaseModel):
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
     priority: Optional[int] = None
+    artifact_paths: Optional[List[str]] = None
 
     def to_yaml(self):
-        return {
+        result = {
             "label": self.label,
             "group": self.group,
             "commands": self.commands,
@@ -38,6 +39,9 @@ class BuildkiteCommandStep(BaseModel):
             "parallelism": self.parallelism,
             "priority": self.priority,
         }
+        if self.artifact_paths:
+            result["artifact_paths"] = self.artifact_paths
+        return result
 
 
 class BuildkiteBlockStep(BaseModel):
@@ -153,7 +157,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
     }
 
 
-def _wrap_cmd_with_coverage(cmd: str, step_key: str) -> str:
+def _wrap_cmd_with_coverage(cmd: str, step_key: str, coverage_dir: str) -> str:
     """Wrap a pytest command with coverage.py tracing.
 
     Replaces 'pytest ...' with 'coverage run --append --data-file=... -m pytest ...'
@@ -165,8 +169,23 @@ def _wrap_cmd_with_coverage(cmd: str, step_key: str) -> str:
     if not match:
         return cmd
     prefix, _, rest = match.groups()
-    data_file = f".coverage.{step_key}"
+    data_file = f"{coverage_dir}/.coverage.{step_key}"
     return f"{prefix}coverage run --append --data-file={data_file} -m pytest{rest}"
+
+
+def _coverage_export_commands(step_key: str, coverage_dir: str) -> list[str]:
+    """Generate commands to export coverage data as JSON after tests complete.
+
+    Writes coverage_<step_key>.json to coverage_dir. For Docker-based jobs
+    this must be a mounted volume (/workdir) so the file persists after the
+    container exits and Buildkite can upload it via artifact_paths.
+    """
+    data_file = f"{coverage_dir}/.coverage.{step_key}"
+    output_json = f"{coverage_dir}/coverage_{step_key}.json"
+    return [
+        "echo '--- :bar_chart: Exporting coverage data'",
+        f"(test -f {data_file} && coverage json --data-file={data_file} -o {output_json} --omit='*/tests/*,*/test_*,*/__pycache__/*' && echo 'Coverage exported to {output_json}') || echo 'No coverage data to export'",
+    ]
 
 
 def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[str]:
@@ -183,13 +202,20 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     collect_coverage = os.getenv("COLLECT_COVERAGE") == "1"
     step_key = step.key or _generate_step_key(step.label)
 
+    # K8s pods have buildkite-agent and persistent workdirs — write to ".".
+    # Docker containers lose their filesystem on exit — write to /workdir
+    # (the mounted git checkout volume) so data persists for artifact upload.
+    _k8s_devices = {DeviceType.H100.value, DeviceType.A100.value, DeviceType.B200_K8S.value}
+    uses_docker = step.device not in _k8s_devices and not step.no_plugin
+    coverage_dir = "/workdir" if uses_docker else "."
+
     if continue_on_failure:
         commands.append("CI_OVERALL_STATUS=0")
 
     if step.commands:
         for i, cmd in enumerate(step.commands):
             if collect_coverage:
-                cmd = _wrap_cmd_with_coverage(cmd, step_key)
+                cmd = _wrap_cmd_with_coverage(cmd, step_key, coverage_dir)
             # Sanitize command preview for use in echo (remove quotes and special chars)
             preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
             commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
@@ -198,10 +224,8 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
             else:
                 commands.append(cmd)
 
-    # Upload coverage data at the end of the step
     if collect_coverage and not step.label.startswith(":docker:"):
-        commands.append("echo '--- :bar_chart: Uploading coverage data'")
-        commands.append(f"(bash .buildkite/scripts/coverage/upload-step-coverage.sh) || true")
+        commands.extend(_coverage_export_commands(step_key, coverage_dir))
 
     if continue_on_failure:
         commands.append("exit $$CI_OVERALL_STATUS")
@@ -270,7 +294,8 @@ def convert_group_step_to_buildkite_step(
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
-                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0
+                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
+                artifact_paths=["coverage_*.json"] if os.getenv("COLLECT_COVERAGE") == "1" else None,
             )
 
             if block_step:
