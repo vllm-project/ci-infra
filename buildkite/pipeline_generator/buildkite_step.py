@@ -221,12 +221,16 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     collect_coverage = os.getenv("COLLECT_COVERAGE") == "1"
     step_key = step.key or _generate_step_key(step.label)
 
-    # Docker: git checkout mounted at /workdir, tests run from /vllm-workspace/.
-    # K8s: git checkout at /workspace/build/buildkite, tests run from /vllm-workspace/.
-    # Both need an absolute path to the checkout dir for .coveragerc and data files.
+    # Skip coverage for AMD jobs — they mirror other tests.
+    _amd_devices = {d.value for d in DeviceType if d.name.startswith("AMD")}
+    if collect_coverage and step.device in _amd_devices:
+        collect_coverage = False
+
+    # Docker: git checkout mounted at /workdir.
+    # K8s: checkout path varies by agent — use $BUILDKITE_BUILD_CHECKOUT_PATH.
     _k8s_devices = {DeviceType.H100.value, DeviceType.A100.value, DeviceType.B200_K8S.value}
     uses_docker = step.device not in _k8s_devices and not step.no_plugin
-    coverage_dir = "/workdir" if uses_docker else "/workspace/build/buildkite"
+    coverage_dir = "/workdir" if uses_docker else "$$BUILDKITE_BUILD_CHECKOUT_PATH"
 
     if continue_on_failure:
         commands.append("CI_OVERALL_STATUS=0")
