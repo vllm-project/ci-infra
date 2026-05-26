@@ -189,16 +189,21 @@ def _coverage_export_commands(step_key: str, coverage_dir: str) -> list[str]:
     output_json = f"{coverage_dir}/coverage_{step_key}.json"
     # Export coverage JSON then strip per-line data to reduce artifact size
     # (~12MB -> ~200KB). We only need {file: covered_lines count} for test selection.
-    strip_cmd = (
-        f"python3 -c \""
-        f"import json; d=json.load(open('{output_json}')); "
-        f"d['files']={{f:{{'covered_lines':v['summary']['covered_lines']}} for f,v in d['files'].items()}}; "
-        f"json.dump(d,open('{output_json}','w'))"
-        f"\""
+    # The strip script is base64-encoded to avoid quote-mangling by the pipeline generator.
+    import base64 as _b64
+    strip_script = (
+        "import json,sys\n"
+        "p=sys.argv[1]\n"
+        "d=json.load(open(p))\n"
+        "d['files']={f:{'covered_lines':v['summary']['covered_lines']} for f,v in d['files'].items()}\n"
+        "json.dump(d,open(p,'w'))\n"
     )
+    encoded = _b64.b64encode(strip_script.encode()).decode()
+    strip_cmd = f"echo {encoded} | base64 -d | python3 - {output_json}"
     return [
         "echo '--- :bar_chart: Exporting coverage data'",
-        f"(test -f {data_file} && coverage json --rcfile={rcfile} --data-file={data_file} -o {output_json} --omit='*/tests/*,*/test_*,*/__pycache__/*' && {strip_cmd} && echo 'Coverage exported to {output_json}') || echo 'No coverage data to export'",
+        f"(test -f {data_file} && coverage json --rcfile={rcfile} --data-file={data_file} -o {output_json} --omit='*/tests/*,*/test_*,*/__pycache__/*' && echo 'Coverage exported to {output_json}') || echo 'No coverage data to export'",
+        f"(test -f {output_json} && {strip_cmd} && echo 'Stripped coverage JSON') || true",
     ]
 
 
