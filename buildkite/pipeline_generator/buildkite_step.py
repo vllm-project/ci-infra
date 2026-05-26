@@ -177,20 +177,18 @@ def _wrap_cmd_with_coverage(cmd: str, step_key: str, coverage_dir: str) -> str:
     return f"{prefix}coverage run --rcfile={rcfile} --append --data-file={data_file} -m pytest{rest}"
 
 
-def _coverage_export_commands(step_key: str, coverage_dir: str, uses_k8s: bool = False) -> list[str]:
+def _coverage_export_commands(step_key: str, coverage_dir: str) -> list[str]:
     """Generate commands to export coverage data as JSON after tests complete.
 
-    Writes coverage_<step_key>.json to coverage_dir. For Docker-based jobs
-    this must be a mounted volume (/workdir) so the file persists after the
-    container exits and Buildkite can upload it via artifact_paths.
-    For k8s jobs, uses buildkite-agent to upload directly since artifact_paths
-    collects from the checkout dir, not the working dir.
+    Writes coverage_<step_key>.json to coverage_dir (the git checkout dir).
+    Buildkite's artifact_paths collects from the checkout dir after the step
+    completes, so this works for both Docker and k8s environments.
     """
     data_file = f"{coverage_dir}/.coverage.{step_key}"
     rcfile = f"{coverage_dir}/.coveragerc"
     output_json = f"{coverage_dir}/coverage_{step_key}.json"
     # Export coverage JSON then strip per-line data to reduce artifact size
-    # (~12MB -> ~50KB). We only need {file: covered_lines count} for test selection.
+    # (~12MB -> ~200KB). We only need {file: covered_lines count} for test selection.
     strip_cmd = (
         f"python3 -c \""
         f"import json; d=json.load(open('{output_json}')); "
@@ -198,15 +196,10 @@ def _coverage_export_commands(step_key: str, coverage_dir: str, uses_k8s: bool =
         f"json.dump(d,open('{output_json}','w'))"
         f"\""
     )
-    cmds = [
+    return [
         "echo '--- :bar_chart: Exporting coverage data'",
         f"(test -f {data_file} && coverage json --rcfile={rcfile} --data-file={data_file} -o {output_json} --omit='*/tests/*,*/test_*,*/__pycache__/*' && {strip_cmd} && echo 'Coverage exported to {output_json}') || echo 'No coverage data to export'",
     ]
-    if uses_k8s:
-        # K8s pods have buildkite-agent available but artifact_paths collects
-        # from the checkout dir, not the working dir. Upload explicitly.
-        cmds.append(f"(test -f {output_json} && buildkite-agent artifact upload {output_json}) || true")
-    return cmds
 
 
 def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[str]:
@@ -246,7 +239,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
                 commands.append(cmd)
 
     if collect_coverage and not step.label.startswith(":docker:"):
-        commands.extend(_coverage_export_commands(step_key, coverage_dir, uses_k8s=not uses_docker))
+        commands.extend(_coverage_export_commands(step_key, coverage_dir))
 
     if continue_on_failure:
         commands.append("exit $$CI_OVERALL_STATUS")
