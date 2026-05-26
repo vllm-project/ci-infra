@@ -195,7 +195,9 @@ def _coverage_export_commands(step_key: str, coverage_dir: str) -> list[str]:
         "import json,sys\n"
         "p=sys.argv[1]\n"
         "d=json.load(open(p))\n"
-        "d['files']={f:{'covered_lines':v['summary']['covered_lines']} for f,v in d['files'].items()}\n"
+        "d['files']={f:{'covered_lines':v['summary']['covered_lines'],"
+        "'functions_called':sum(1 for name,info in v.get('functions',{}).items() if name and info['summary']['covered_lines']>0)}"
+        " for f,v in d['files'].items()}\n"
         "json.dump(d,open(p,'w'))\n"
     )
     encoded = _b64.b64encode(strip_script.encode()).decode()
