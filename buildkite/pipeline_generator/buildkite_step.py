@@ -167,7 +167,12 @@ def _wrap_cmd_with_coverage(cmd: str, step_key: str, coverage_dir: str) -> str:
     Uses --rcfile to point at the .coveragerc in the git checkout, since
     Docker jobs run from /vllm-workspace/tests (not the checkout dir).
     """
-    pattern = _re_module.compile(r'^(.*?\b)(pytest)\b(.*)$')
+    # Match 'pytest' as a standalone command, not as part of 'pip install pytest-*'
+    # or 'pytest-timeout'. Requires pytest to be followed by space, end-of-string,
+    # or a flag (-)
+    if cmd.lstrip().startswith("pip "):
+        return cmd
+    pattern = _re_module.compile(r'^(.*?\b)(pytest)(\s+.*)$')
     match = pattern.match(cmd)
     if not match:
         return cmd
@@ -232,7 +237,7 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     # K8s: checkout path varies by agent — use $BUILDKITE_BUILD_CHECKOUT_PATH.
     _k8s_devices = {DeviceType.H100.value, DeviceType.A100.value, DeviceType.B200_K8S.value}
     uses_docker = step.device not in _k8s_devices and not step.no_plugin
-    coverage_dir = "/workdir" if uses_docker else "$$BUILDKITE_BUILD_CHECKOUT_PATH"
+    coverage_dir = "/workdir" if uses_docker else "$BUILDKITE_BUILD_CHECKOUT_PATH"
 
     if continue_on_failure:
         commands.append("CI_OVERALL_STATUS=0")
