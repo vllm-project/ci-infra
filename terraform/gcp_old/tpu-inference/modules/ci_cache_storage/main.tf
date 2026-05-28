@@ -22,4 +22,8 @@ resource "google_storage_bucket" "jax_cache_bucket" {
       project
     ]
   }
+
+  soft_delete_policy {
+    retention_duration_seconds = var.retention_seconds
+  }
 }
