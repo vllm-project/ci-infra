@@ -243,11 +243,12 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     if uses_docker:
         coverage_dir = "/workdir"
     else:
-        coverage_dir = "$COVERAGE_DIR"
-        # Try known k8s checkout paths, fall back to find
+        coverage_dir = "$$COVERAGE_DIR"
+        # Try known k8s checkout paths, fall back to default.
+        # Use $$ to escape $ through Buildkite YAML expansion.
         commands.append(
             "export COVERAGE_DIR="
-            "$({ test -f /workspace/build/buildkite/.coveragerc && echo /workspace/build/buildkite; } || "
+            "$$({ test -f /workspace/build/buildkite/.coveragerc && echo /workspace/build/buildkite; } || "
             "{ test -f /workspace/build/buildkite/vllm/ci/.coveragerc && echo /workspace/build/buildkite/vllm/ci; } || "
             "echo /workspace/build/buildkite)"
         )
