@@ -150,13 +150,6 @@ upload_pipeline() {
         "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
 
 
-    # (WIP) Use pipeline generator instead of jinja template
-    if [ -e ".buildkite/pipeline_generator/pipeline_generator.py" ]; then
-        python -m pip install click pydantic
-        python .buildkite/pipeline_generator/pipeline_generator.py --run_all=$RUN_ALL --list_file_diff="$LIST_FILE_DIFF" --nightly="$NIGHTLY" --mirror_hw="$AMD_MIRROR_HW"
-        buildkite-agent pipeline upload .buildkite/pipeline.yaml
-        exit 0
-    fi
     echo "List file diff: $LIST_FILE_DIFF"
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
