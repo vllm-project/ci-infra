@@ -237,7 +237,13 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     # K8s: checkout path varies by agent — use $BUILDKITE_BUILD_CHECKOUT_PATH.
     _k8s_devices = {DeviceType.H100.value, DeviceType.A100.value, DeviceType.B200_K8S.value}
     uses_docker = step.device not in _k8s_devices and not step.no_plugin
-    coverage_dir = "/workdir" if uses_docker else "$BUILDKITE_BUILD_CHECKOUT_PATH"
+    # Docker: git checkout mounted at /workdir.
+    # K8s: checkout path varies by agent — resolve at runtime.
+    if uses_docker:
+        coverage_dir = "/workdir"
+    else:
+        coverage_dir = "$COVERAGE_DIR"
+        commands.append("COVERAGE_DIR=$(find /workspace -name .coveragerc -maxdepth 4 -print -quit 2>/dev/null | xargs dirname)")
 
     if continue_on_failure:
         commands.append("CI_OVERALL_STATUS=0")
