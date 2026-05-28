@@ -92,4 +92,8 @@ echo "BuildKit storage:"
 du -sh /var/lib/buildkit 2>/dev/null || echo "Cannot access /var/lib/buildkit without sudo"
 
 echo ""
+echo "Logging out from ECR to ensure credentials are not baked into the AMI..."
+docker logout "$ECR_REGISTRY"
+
+echo ""
 echo "=== Cache warming complete ==="
