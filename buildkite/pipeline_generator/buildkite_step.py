@@ -238,12 +238,19 @@ def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[s
     _k8s_devices = {DeviceType.H100.value, DeviceType.A100.value, DeviceType.B200_K8S.value}
     uses_docker = step.device not in _k8s_devices and not step.no_plugin
     # Docker: git checkout mounted at /workdir.
-    # K8s: checkout path varies by agent — resolve at runtime.
+    # K8s: checkout path varies by agent. Resolve once and export so
+    # subshells in (cmd) || CI_OVERALL_STATUS=1 can see it.
     if uses_docker:
         coverage_dir = "/workdir"
     else:
         coverage_dir = "$COVERAGE_DIR"
-        commands.append("COVERAGE_DIR=$(find /workspace -name .coveragerc -maxdepth 4 -print -quit 2>/dev/null | xargs dirname)")
+        # Try known k8s checkout paths, fall back to find
+        commands.append(
+            "export COVERAGE_DIR="
+            "$({ test -f /workspace/build/buildkite/.coveragerc && echo /workspace/build/buildkite; } || "
+            "{ test -f /workspace/build/buildkite/vllm/ci/.coveragerc && echo /workspace/build/buildkite/vllm/ci; } || "
+            "echo /workspace/build/buildkite)"
+        )
 
     if continue_on_failure:
         commands.append("CI_OVERALL_STATUS=0")
