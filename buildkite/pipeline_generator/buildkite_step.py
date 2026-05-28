@@ -443,7 +443,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     matched_by_yaml = False
     matched_by_coverage = False
 
-    # Check 1: existing source_file_dependencies (substring match)
+    # Check source_file_dependencies (substring match) — for logging only
     if step.source_file_dependencies:
         for source_file in step.source_file_dependencies:
             for diff_file in list_file_diff:
@@ -453,7 +453,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
             if matched_by_yaml:
                 break
 
-    # Check 2: coverage map (exact file → step_key match)
+    # Coverage map (exact file → step_key match) — primary trigger
     coverage_map = _load_coverage_map()
     if coverage_map:
         for diff_file in list_file_diff:
@@ -465,10 +465,13 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         print(f"[coverage-map] {step_key} triggered by coverage map "
               f"(not in source_file_dependencies)")
     elif matched_by_yaml and not matched_by_coverage:
-        print(f"[coverage-map] {step_key} triggered by source_file_dependencies only "
-              f"(not in coverage map)")
+        print(f"[coverage-map] {step_key} WOULD have triggered by source_file_dependencies "
+              f"but NOT in coverage map — SKIPPED")
+    elif matched_by_yaml and matched_by_coverage:
+        print(f"[coverage-map] {step_key} triggered (both coverage map and source_file_dependencies)")
 
-    return matched_by_yaml or matched_by_coverage
+    # Only use coverage map for triggering
+    return matched_by_coverage
 
 
 def _generate_step_key(step_label: str) -> str:
