@@ -99,6 +99,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.H200
     elif step.device == DeviceType.H200_18GB:
         return AgentQueue.H200_18GB
+    elif step.device == DeviceType.H200_35GB:
+        return AgentQueue.H200_35GB
     elif step.device == DeviceType.B200:
         return AgentQueue.B200
     elif step.device == DeviceType.B200_K8S:
@@ -395,7 +397,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         agents={"queue": amd_queue},
         env={"DOCKER_BUILDKIT": "1", "VLLM_TEST_COMMANDS": amd_commands_str},
         priority=200,
-        soft_fail=False,
+        soft_fail=amd.get("soft_fail", step.soft_fail or False),
         retry=None,
         parallelism=step.parallelism,
     )

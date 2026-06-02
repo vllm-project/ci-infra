@@ -1,0 +1,9 @@
+[Unit]
+Description=Run GPU reporter every 30 seconds
+
+[Timer]
+OnBootSec=10
+OnUnitActiveSec=30
+
+[Install]
+WantedBy=timers.target
