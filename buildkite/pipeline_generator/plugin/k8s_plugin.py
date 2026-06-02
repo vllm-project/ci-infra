@@ -183,6 +183,9 @@ h100_rh_plugin_template = {
     "kubernetes": {
         "podSpec": {
             "serviceAccountName": "buildkite-anyuid",
+            "imagePullSecrets": [
+                {"name": "ecr-pull-secret"},
+            ],
             "securityContext": {
                 "fsGroup": 0
             },
