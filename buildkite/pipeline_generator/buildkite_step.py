@@ -12,6 +12,23 @@ from constants import DeviceType, AgentQueue
 
 SetupProfile = Literal["nvidia", "amd", "none"]
 
+AMD_ROCM_SOURCE_FILE_DEPENDENCIES = (
+    "docker/Dockerfile.rocm",
+    "docker/Dockerfile.rocm_base",
+    "requirements/rocm.txt",
+    "requirements/build/rocm.txt",
+    "requirements/test/rocm.txt",
+    "requirements/test/rocm.in",
+    "requirements/kv_connectors_rocm.txt",
+    "tools/install_torchcodec_rocm.sh",
+    "tools/vllm-rocm/",
+    "csrc/rocm/",
+    "vllm/_aiter_ops.py",
+    "vllm/platforms/rocm.py",
+    ".buildkite/hardware_tests/amd.yaml",
+    ".buildkite/scripts/hardware_ci/run-amd-test.sh",
+)
+
 
 class BuildkiteCommandStep(BaseModel):
     label: str
@@ -312,7 +329,9 @@ def convert_group_step_to_buildkite_step(
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
                 amd_block_step = None
-                if _step_is_blocked(step, list_file_diff):
+                if not _amd_mirror_should_run(
+                    step, step.mirror["amd"], list_file_diff
+                ):
                     amd_block_step = BuildkiteBlockStep(
                         block=f"Run AMD: {step.label}",
                         depends_on=["image-build-amd"],
@@ -360,6 +379,65 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return True
     if step.source_file_dependencies:
         for source_file in step.source_file_dependencies:
+            for diff_file in list_file_diff:
+                if _matches_source_dependency(source_file, diff_file):
+                    return True
+    return False
+
+
+def _amd_mirror_should_run(
+    step: Step, amd: Dict[str, Any], list_file_diff: List[str]
+) -> bool:
+    if os.getenv("NOAUTO") == "1":
+        return False
+    global_config = get_global_config()
+    if global_config["nightly"] == "1":
+        return True
+    if _source_file_dependencies_match(
+        AMD_ROCM_SOURCE_FILE_DEPENDENCIES, list_file_diff
+    ):
+        return True
+    if step.optional:
+        return False
+    amd_source_file_dependencies = _amd_source_file_dependencies(amd)
+    if _source_file_dependencies_match(
+        amd_source_file_dependencies, list_file_diff
+    ):
+        return True
+    if global_config["run_all"]:
+        return True
+    return _source_file_dependencies_match(
+        step.source_file_dependencies, list_file_diff
+    )
+
+
+def _amd_source_file_dependencies(amd: Dict[str, Any]) -> List[str]:
+    source_file_dependencies = [
+        *AMD_ROCM_SOURCE_FILE_DEPENDENCIES,
+        *(amd.get("source_file_dependencies") or []),
+    ]
+    return _dedupe_source_file_dependencies(source_file_dependencies)
+
+
+def _dedupe_source_file_dependencies(
+    source_file_dependencies: List[str],
+) -> List[str]:
+    seen = set()
+    deduped_source_file_dependencies = []
+    for source_file in source_file_dependencies:
+        normalized_source_file = source_file.rstrip("/")
+        if normalized_source_file in seen:
+            continue
+        seen.add(normalized_source_file)
+        deduped_source_file_dependencies.append(source_file)
+    return deduped_source_file_dependencies
+
+
+def _source_file_dependencies_match(
+    source_file_dependencies: Optional[List[str]], list_file_diff: List[str]
+) -> bool:
+    if source_file_dependencies:
+        for source_file in source_file_dependencies:
             for diff_file in list_file_diff:
                 if _matches_source_dependency(source_file, diff_file):
                     return True

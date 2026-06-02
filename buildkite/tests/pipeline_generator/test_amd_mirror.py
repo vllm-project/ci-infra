@@ -42,6 +42,33 @@ def _make_multimodal_step():
     )
 
 
+def _patch_buildkite_module(monkeypatch, diff_files, run_all=False, nightly="0"):
+    monkeypatch.setattr(
+        buildkite_step_module,
+        "get_global_config",
+        lambda: _make_global_config(diff_files, run_all=run_all, nightly=nightly),
+    )
+    monkeypatch.setattr(
+        buildkite_step_module,
+        "get_ecr_cache_registry",
+        lambda: ("cache-from", "cache-to"),
+    )
+    monkeypatch.setattr(
+        buildkite_step_module,
+        "get_image",
+        lambda *args, **kwargs: "test-image",
+    )
+    monkeypatch.setattr(
+        buildkite_step_module,
+        "get_torch_nightly_image",
+        lambda: "torch-nightly-image",
+    )
+
+
+def _get_amd_group(groups):
+    return next(group for group in groups if group.group == "Hardware-AMD Tests")
+
+
 def test_prepare_commands_uses_explicit_setup_profiles():
     step = Step(
         label="Profile Check",
@@ -171,6 +198,119 @@ def test_convert_group_step_to_buildkite_step_gates_amd_mirror_by_prefix_match(
 
     assert len(blocked_amd_group.steps) == 2
     block_step, blocked_amd_step = blocked_amd_group.steps
+    assert block_step.block == "Run AMD: Multi-Modal Models (Standard) 3: llava + qwen2_vl"
+    assert block_step.depends_on == ["image-build-amd"]
+    assert blocked_amd_step.depends_on == [
+        "image-build-amd",
+        "block-amd-multi-modal-models-standard-3--llava---qwen2_vl",
+    ]
+
+
+def test_convert_group_step_to_buildkite_step_runs_amd_mirror_for_rocm_dependency(
+    monkeypatch,
+):
+    step = _make_multimodal_step()
+    _patch_buildkite_module(
+        monkeypatch, [".buildkite/scripts/hardware_ci/run-amd-test.sh"]
+    )
+
+    groups = buildkite_step_module.convert_group_step_to_buildkite_step(
+        {"Models - Multimodal": [step]}
+    )
+    amd_group = _get_amd_group(groups)
+
+    assert len(amd_group.steps) == 1
+    assert amd_group.steps[0].label.startswith("AMD: Multi-Modal Models")
+    assert amd_group.steps[0].depends_on == ["image-build-amd"]
+
+
+def test_convert_group_step_to_buildkite_step_runs_all_amd_mirrors_for_rocm_dependency(
+    monkeypatch,
+):
+    first_step = _make_multimodal_step().model_copy(
+        update={"label": "AMD Mirror A"}
+    )
+    optional_step = _make_multimodal_step().model_copy(
+        update={"label": "AMD Mirror B", "optional": True}
+    )
+    _patch_buildkite_module(
+        monkeypatch, [".buildkite/scripts/hardware_ci/run-amd-test.sh"]
+    )
+
+    groups = buildkite_step_module.convert_group_step_to_buildkite_step(
+        {"Models - Multimodal": [first_step, optional_step]}
+    )
+    amd_group = _get_amd_group(groups)
+
+    assert [step.label for step in amd_group.steps] == [
+        "AMD: AMD Mirror A (mi300_1)",
+        "AMD: AMD Mirror B (mi300_1)",
+    ]
+    assert [step.depends_on for step in amd_group.steps] == [
+        ["image-build-amd"],
+        ["image-build-amd"],
+    ]
+
+
+def test_convert_group_step_to_buildkite_step_runs_amd_mirror_for_amd_specific_dependency(
+    monkeypatch,
+):
+    step = _make_multimodal_step().model_copy(
+        update={
+            "source_file_dependencies": ["tests/models/multimodal"],
+            "mirror": {
+                "amd": {
+                    "device": "mi300_1",
+                    "source_file_dependencies": ["csrc/quantization/"],
+                }
+            },
+        }
+    )
+    _patch_buildkite_module(monkeypatch, ["csrc/quantization/fp8/foo.cu"])
+
+    groups = buildkite_step_module.convert_group_step_to_buildkite_step(
+        {"Models - Multimodal": [step]}
+    )
+    amd_group = _get_amd_group(groups)
+
+    assert len(amd_group.steps) == 1
+    assert amd_group.steps[0].label.startswith("AMD: Multi-Modal Models")
+    assert amd_group.steps[0].depends_on == ["image-build-amd"]
+
+
+def test_amd_source_file_dependencies_deduplicates_preserving_order():
+    source_file_dependencies = buildkite_step_module._amd_source_file_dependencies(
+        {
+            "source_file_dependencies": [
+                "vllm/platforms/rocm.py",
+                "vllm/platforms/rocm.py",
+                "csrc/rocm",
+                "custom/path",
+                "custom/path/",
+            ],
+        }
+    )
+
+    assert source_file_dependencies.count("vllm/platforms/rocm.py") == 1
+    assert source_file_dependencies.count("csrc/rocm/") == 1
+    assert "csrc/rocm" not in source_file_dependencies
+    assert source_file_dependencies[-1] == "custom/path"
+    assert "custom/path/" not in source_file_dependencies
+
+
+def test_convert_group_step_to_buildkite_step_keeps_optional_amd_mirror_blocked(
+    monkeypatch,
+):
+    step = _make_multimodal_step().model_copy(update={"optional": True})
+    _patch_buildkite_module(monkeypatch, ["vllm/v1/worker/gpu_worker.py"])
+
+    groups = buildkite_step_module.convert_group_step_to_buildkite_step(
+        {"Models - Multimodal": [step]}
+    )
+    amd_group = _get_amd_group(groups)
+
+    assert len(amd_group.steps) == 2
+    block_step, blocked_amd_step = amd_group.steps
     assert block_step.block == "Run AMD: Multi-Modal Models (Standard) 3: llava + qwen2_vl"
     assert block_step.depends_on == ["image-build-amd"]
     assert blocked_amd_step.depends_on == [
