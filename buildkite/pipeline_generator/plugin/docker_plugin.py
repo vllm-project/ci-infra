@@ -29,6 +29,7 @@ h200_18gb_plugin_template = {
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False",
         "HF_TOKEN",
         "HF_HOME",
         "CODECOV_TOKEN",
@@ -39,6 +40,29 @@ h200_18gb_plugin_template = {
     "volumes": [
         "/dev/shm:/dev/shm",
         "/mnt/vllm-ci:/mnt/vllm-ci",
+        "/dev/nvidiactl:/dev/nvidiactl",
+    ],
+}
+
+h200_35gb_plugin_template = {
+    "image": "",
+    "always-pull": True,
+    "propagate-environment": True,
+    "environment": [
+        "VLLM_USAGE_SOURCE=ci-test",
+        "NCCL_CUMEM_HOST_ENABLE=0",
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False",
+        "HF_TOKEN",
+        "HF_HOME",
+        "CODECOV_TOKEN",
+        "BUILDKITE_ANALYTICS_TOKEN",
+        "CUDA_VISIBLE_DEVICES",
+        "NVIDIA_VISIBLE_DEVICES",
+    ],
+    "volumes": [
+        "/dev/shm:/dev/shm",
+        "/mnt/vllm-ci:/mnt/vllm-ci",
+        "/dev/nvidiactl:/dev/nvidiactl",
     ],
 }
 
@@ -85,6 +109,8 @@ def get_docker_plugin(step: Step, image: str):
     plugin = None
     if step.device == DeviceType.H200_18GB:
         plugin = copy.deepcopy(h200_18gb_plugin_template)
+    elif step.device == DeviceType.H200_35GB:
+        plugin = copy.deepcopy(h200_35gb_plugin_template)
     elif step.device == DeviceType.H200:
         plugin = copy.deepcopy(h200_plugin_template)
     elif step.device == DeviceType.B200:
@@ -93,7 +119,7 @@ def get_docker_plugin(step: Step, image: str):
         plugin = copy.deepcopy(docker_plugin_template)
     plugin["image"] = image
 
-    if step.device == DeviceType.H200_18GB:
+    if step.device in (DeviceType.H200_18GB, DeviceType.H200_35GB):
         image = image.replace("public.ecr.aws", "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache")
         plugin["image"] = image
     if step.label == "Benchmarks" or step.mount_buildkite_agent:

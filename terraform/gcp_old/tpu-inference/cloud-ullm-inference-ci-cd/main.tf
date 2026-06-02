@@ -22,7 +22,7 @@ module "ci_v6e_1" {
   accelerator_type                 = "v6e-1"
   reserved                         = true
   instance_count                   = 30
-  disk_size                        = 512
+  disk_size                        = 1024
   buildkite_queue_name             = "tpu_v6e_queue"
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
@@ -129,4 +129,11 @@ module "ci_monitoring" {
   pipeline_slug         = "tpu-inference-ci"
   org_slug              = "tpu-commons"
   buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+}
+
+module "ci_cache_storage" {
+  source = "../modules/ci_cache_storage"
+
+  project_id  = var.project_id
+  bucket_name = "ullm-ci-cache"
 }
