@@ -15,6 +15,26 @@ if [[ -z "${VLLM_CI_BRANCH:-}" ]]; then
     VLLM_CI_BRANCH="main"
 fi
 
+if [[ -z "${VLLM_ROCM_BASE_IMAGE:-}" ]]; then
+    VLLM_ROCM_BASE_IMAGE="rocm/vllm-dev:vllm-base-ubuntu24.04-py3.14-nightlies-device-all-rocm7.14.0a20260531-ad7125a43"
+fi
+
+if [[ -z "${VLLM_ROCM_CI_BASE_IMAGE:-}" ]]; then
+    VLLM_ROCM_CI_BASE_IMAGE='rocm/vllm-dev:ci_base-rocm714-py314-$BUILDKITE_COMMIT'
+fi
+
+if [[ -z "${VLLM_ROCM_CI_BASE_IMAGE_TAG_BASE:-}" ]]; then
+    VLLM_ROCM_CI_BASE_IMAGE_TAG_BASE="rocm/vllm-dev:ci_base-rocm714-py314"
+fi
+
+if [[ -z "${VLLM_ROCM_NIC_BACKEND:-}" ]]; then
+    VLLM_ROCM_NIC_BACKEND="none"
+fi
+
+if [[ -z "${VLLM_ROCM_UBUNTU_CODENAME:-}" ]]; then
+    VLLM_ROCM_UBUNTU_CODENAME="noble"
+fi
+
 if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
     AMD_MIRROR_HW="amdproduction"
 fi
@@ -179,6 +199,11 @@ upload_pipeline() {
             -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D rocm_base_image="$VLLM_ROCM_BASE_IMAGE" \
+            -D rocm_ci_base_image="$VLLM_ROCM_CI_BASE_IMAGE" \
+            -D rocm_ci_base_image_tag_base="$VLLM_ROCM_CI_BASE_IMAGE_TAG_BASE" \
+            -D rocm_nic_backend="$VLLM_ROCM_NIC_BACKEND" \
+            -D rocm_ubuntu_codename="$VLLM_ROCM_UBUNTU_CODENAME" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
