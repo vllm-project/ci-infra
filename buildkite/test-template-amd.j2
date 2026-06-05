@@ -36,18 +36,8 @@
         agents:
           queue: amd-cpu
 
-      {% if branch != "main" and nightly != "1" %}
-      - block: "Run AMD ROCm image build"
-        depends_on: "amd-ci-base-ready"
-        key: "block-amd-build"
-      {% endif %}
-
       - label: "AMD: :docker: build image"
-        {% if branch == "main" or nightly == "1" %}
         depends_on: "amd-ci-base-ready"
-        {% else %}
-        depends_on: "block-amd-build"
-        {% endif %}
         soft_fail: false
         commands:
           - |
