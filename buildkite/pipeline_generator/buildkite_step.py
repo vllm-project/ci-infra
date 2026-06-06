@@ -319,14 +319,6 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     global_config = get_global_config()
     if step.key and step.key.startswith("image-build"):
-        # The shared AMD image build stays on-demand for non-main branches,
-        # except on scheduled nightlies where it should run automatically.
-        if (
-            step.key == "image-build-amd"
-            and global_config["branch"] != "main"
-            and global_config["nightly"] != "1"
-        ):
-            return False
         return True
     if global_config["nightly"] == "1":
         return True
