@@ -24,7 +24,14 @@
         depends_on: ~
         soft_fail: false
         commands:
-          - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
+          - |
+            echo "ROCm BASE_IMAGE: {{ rocm_base_image }}"
+            echo "ROCm CI_BASE_IMAGE_TAG: {{ rocm_ci_base_image_tag_base }}"
+            echo "ROCm CI_BASE_IMAGE: {{ rocm_ci_base_image }}"
+            echo "ROCm NIC_BACKEND: {{ rocm_nic_backend }}"
+            echo "ROCm UBUNTU_CODENAME: {{ rocm_ubuntu_codename }}"
+            echo "Ensuring ci_base via ci-bake-rocm.sh"
+            bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
         key: "amd-ci-base-ready"
         env:
           DOCKER_BUILDKIT: "1"
@@ -32,6 +39,10 @@
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
+          BASE_IMAGE: "{{ rocm_base_image }}"
+          CI_BASE_IMAGE_TAG: "{{ rocm_ci_base_image_tag_base }}"
+          NIC_BACKEND: "{{ rocm_nic_backend }}"
+          UBUNTU_CODENAME: "{{ rocm_ubuntu_codename }}"
 {{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
@@ -41,6 +52,11 @@
         soft_fail: false
         commands:
           - |
+            echo "ROCm BASE_IMAGE: {{ rocm_base_image }}"
+            echo "ROCm CI_BASE_IMAGE_TAG: {{ rocm_ci_base_image_tag_base }}"
+            echo "ROCm CI_BASE_IMAGE: {{ rocm_ci_base_image }}"
+            echo "ROCm NIC_BACKEND: {{ rocm_nic_backend }}"
+            echo "ROCm UBUNTU_CODENAME: {{ rocm_ubuntu_codename }}"
             if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" ]]; then
               echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
               IMAGE_TAG="" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
@@ -55,6 +71,11 @@
           IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
           REMOTE_VLLM: "1"
           VLLM_BRANCH: "$BUILDKITE_COMMIT"
+          BASE_IMAGE: "{{ rocm_base_image }}"
+          CI_BASE_IMAGE_TAG: "{{ rocm_ci_base_image_tag_base }}"
+          CI_BASE_IMAGE: "{{ rocm_ci_base_image }}"
+          NIC_BACKEND: "{{ rocm_nic_backend }}"
+          UBUNTU_CODENAME: "{{ rocm_ubuntu_codename }}"
 {{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
@@ -110,8 +131,8 @@
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
           # Keep the hook warmup on ci_base; the runner uses the full image only
           # if ci_base or artifact setup fails before tests begin.
-          DOCKER_IMAGE_NAME: "rocm/vllm-dev:ci_base"
-          VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
+          DOCKER_IMAGE_NAME: "{{ rocm_ci_base_image }}"
+          VLLM_CI_BASE_IMAGE: "{{ rocm_ci_base_image }}"
           VLLM_CI_FALLBACK_IMAGE: "rocm/vllm-ci:$BUILDKITE_COMMIT"
           VLLM_CI_USE_ARTIFACTS: "1"
           VLLM_CI_ARTIFACT_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
