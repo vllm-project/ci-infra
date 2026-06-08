@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Set, Union
 import os
 
 from step import Step
@@ -215,6 +215,90 @@ def _create_block_step(step: Step, list_file_diff: List[str]) -> BuildkiteBlockS
     return block_step
 
 
+def _normalize_depends_on(
+    depends_on: Optional[Union[str, List[str]]],
+) -> List[str]:
+    if not depends_on:
+        return []
+    if isinstance(depends_on, str):
+        return [depends_on]
+    return list(depends_on)
+
+
+def _source_file_dependencies_match(
+    source_file_dependencies: Optional[List[str]],
+    list_file_diff: List[str],
+) -> bool:
+    if not source_file_dependencies:
+        return False
+    for source_file in source_file_dependencies:
+        for diff_file in list_file_diff:
+            if source_file in diff_file:
+                return True
+    return False
+
+
+def _amd_mirror_should_run(
+    step: Step, amd: Dict[str, Any], list_file_diff: List[str]
+) -> bool:
+    if os.getenv("NOAUTO") == "1":
+        return False
+    global_config = get_global_config()
+    if global_config["nightly"] == "1":
+        return True
+    if amd.get("optional", step.optional):
+        return False
+    if global_config["run_all"]:
+        return True
+    return _source_file_dependencies_match(
+        step.source_file_dependencies, list_file_diff
+    ) or _source_file_dependencies_match(
+        amd.get("source_file_dependencies"), list_file_diff
+    )
+
+
+def _get_amd_build_dependencies(amd: Dict[str, Any]) -> List[str]:
+    return _normalize_depends_on(amd.get("depends_on")) or ["image-build-amd"]
+
+
+def _collect_required_step_keys(
+    group_steps: Dict[str, List[Step]],
+    list_file_diff: List[str],
+) -> Set[str]:
+    steps_by_key = {
+        step.key: step
+        for steps in group_steps.values()
+        for step in steps
+        if step.key
+    }
+
+    required_step_keys: Set[str] = set()
+    for steps in group_steps.values():
+        for step in steps:
+            if _step_should_run(step, list_file_diff) and not (
+                step.key and step.key.startswith("image-build")
+            ):
+                required_step_keys.update(_normalize_depends_on(step.depends_on))
+
+            if step.mirror and step.mirror.get("amd"):
+                amd = step.mirror["amd"]
+                if _amd_mirror_should_run(step, amd, list_file_diff):
+                    required_step_keys.update(_get_amd_build_dependencies(amd))
+
+    pending = list(required_step_keys)
+    while pending:
+        step_key = pending.pop()
+        step = steps_by_key.get(step_key)
+        if not step:
+            continue
+        for dependency in _normalize_depends_on(step.depends_on):
+            if dependency not in required_step_keys:
+                required_step_keys.add(dependency)
+                pending.append(dependency)
+
+    return required_step_keys
+
+
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
@@ -223,6 +307,7 @@ def convert_group_step_to_buildkite_step(
     print(variables_to_inject)
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
+    required_step_keys = _collect_required_step_keys(group_steps, list_file_diff)
 
     amd_mirror_steps = []
     torch_nightly_steps_collected = []
@@ -232,7 +317,10 @@ def convert_group_step_to_buildkite_step(
         for step in steps:
             # block step
             block_step = None
-            if not _step_should_run(step, list_file_diff):
+            if (
+                step.key not in required_step_keys
+                and not _step_should_run(step, list_file_diff)
+            ):
                 block_step = _create_block_step(step, list_file_diff)
             if block_step:
                 group_steps_list.append(block_step)
@@ -277,8 +365,9 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
-                amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
-                if not _step_should_run(step, list_file_diff):
+                amd = step.mirror["amd"]
+                amd_step = _create_amd_mirror_step(step, step_commands, amd)
+                if not _amd_mirror_should_run(step, amd, list_file_diff):
                     # Block step depends on the shared AMD image build.
                     mirror_build_dep = (
                         amd_step.depends_on[0]
@@ -392,7 +481,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
         DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
     }
 
-    build_dep = "image-build-amd"
+    build_deps = _get_amd_build_dependencies(amd)
 
     amd_queue = amd_queue_map.get(amd_device)
     if not amd_queue:
@@ -401,7 +490,7 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
     return BuildkiteCommandStep(
         label=amd_label,
         commands=[amd_command_wrapped],
-        depends_on=[build_dep],
+        depends_on=build_deps,
         agents={"queue": amd_queue},
         env={
             "DOCKER_BUILDKIT": "1",
