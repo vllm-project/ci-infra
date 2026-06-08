@@ -10,9 +10,6 @@ from plugin.docker_plugin import get_docker_plugin
 from constants import DeviceType, AgentQueue
 
 
-_ALWAYS_RUN_STEP_KEYS = {"ensure-ci-base-amd"}
-
-
 class BuildkiteCommandStep(BaseModel):
     label: str
     group: Optional[str] = None
@@ -322,7 +319,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     global_config = get_global_config()
     if step.key and (
-        step.key.startswith("image-build") or step.key in _ALWAYS_RUN_STEP_KEYS
+        step.key.startswith("image-build") or step.key == "ensure-ci-base-amd"
     ):
         return True
     if global_config["nightly"] == "1":
