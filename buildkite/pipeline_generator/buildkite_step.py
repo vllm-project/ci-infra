@@ -30,7 +30,9 @@ class BuildkiteCommandStep(BaseModel):
     def to_yaml(self):
         return {
             "label": self.label,
+            "key": self.key,
             "group": self.group,
+            "agents": self.agents,
             "commands": self.commands,
             "depends_on": self.depends_on,
             "soft_fail": self.soft_fail,
@@ -317,7 +319,7 @@ def convert_group_step_to_buildkite_step(
                 ):
                     amd_block_step = BuildkiteBlockStep(
                         block=f"Run AMD: {step.label}",
-                        depends_on=["image-build-amd"],
+                        depends_on=[mirror_build_dep],
                         key=f"block-amd-{_generate_step_key(step.label)}",
                     )
                     amd_mirror_steps.append(amd_block_step)
@@ -352,7 +354,9 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     if os.getenv("NOAUTO") == "1":
         return False
     global_config = get_global_config()
-    if step.key and step.key.startswith("image-build"):
+    if step.key and (
+        step.key.startswith("image-build") or step.key == "ensure-ci-base-amd"
+    ):
         return True
     if global_config["nightly"] == "1":
         return True
@@ -465,6 +469,8 @@ def _create_amd_mirror_step(
         DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
     }
 
+    build_dep = "image-build-amd"
+
     amd_queue = amd_queue_map.get(amd_device)
     if not amd_queue:
         raise ValueError(f"Invalid AMD device: {amd_device}. Valid devices: {list(amd_queue_map.keys())}")
@@ -472,9 +478,21 @@ def _create_amd_mirror_step(
     return BuildkiteCommandStep(
         label=amd_label,
         commands=[amd_command_wrapped],
-        depends_on=["image-build-amd"],
+        depends_on=[build_dep],
         agents={"queue": amd_queue},
-        env={"DOCKER_BUILDKIT": "1", "VLLM_TEST_COMMANDS": amd_commands_str},
+        env={
+            "DOCKER_BUILDKIT": "1",
+            # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
+            # Keep the hook warmup on ci_base; the runner uses the full image
+            # only if ci_base or artifact setup fails before tests begin.
+            "DOCKER_IMAGE_NAME": "rocm/vllm-dev:ci_base",
+            "VLLM_CI_BASE_IMAGE": "rocm/vllm-dev:ci_base",
+            "VLLM_CI_FALLBACK_IMAGE": "rocm/vllm-ci:$BUILDKITE_COMMIT",
+            "VLLM_CI_USE_ARTIFACTS": "1",
+            "VLLM_CI_ARTIFACT_GLOB": "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz",
+            "VLLM_CI_RESULTS_ROOT": "/home/buildkite-agent/huggingface/amd-ci-results",
+            "VLLM_TEST_COMMANDS": amd_commands_str,
+        },
         priority=200,
         soft_fail=amd.get("soft_fail", step.soft_fail or False),
         retry=None,
