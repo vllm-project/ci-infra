@@ -244,13 +244,6 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
     return diff_file == normalized or diff_file.startswith(f"{normalized}/")
 
 
-def _step_is_blocked(step: Step, list_file_diff: List[str]) -> bool:
-    global_config = get_global_config()
-    return (not _step_should_run(step, list_file_diff) or (
-        step.optional and global_config["nightly"] != "1"
-    ))
-
-
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
@@ -268,7 +261,7 @@ def convert_group_step_to_buildkite_step(
         for step in steps:
             # block step
             block_step = None
-            if _step_is_blocked(step, list_file_diff):
+            if not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(step, list_file_diff)
             if block_step:
                 group_steps_list.append(block_step)
@@ -313,19 +306,24 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
+                amd = step.mirror["amd"]
+                amd_step = _create_amd_mirror_step(
+                    step, variables_to_inject, amd
+                )
                 amd_block_step = None
-                if not _amd_mirror_should_run(
-                    step, step.mirror["amd"], list_file_diff
-                ):
+                if not _amd_mirror_should_run(step, amd, list_file_diff):
+                    # Block step depends on the shared AMD image build.
+                    mirror_build_dep = (
+                        amd_step.depends_on[0]
+                        if amd_step.depends_on
+                        else "image-build-amd"
+                    )
                     amd_block_step = BuildkiteBlockStep(
                         block=f"Run AMD: {step.label}",
                         depends_on=[mirror_build_dep],
                         key=f"block-amd-{_generate_step_key(step.label)}",
                     )
                     amd_mirror_steps.append(amd_block_step)
-                amd_step = _create_amd_mirror_step(
-                    step, variables_to_inject, step.mirror["amd"]
-                )
                 if amd_block_step:
                     amd_step.depends_on.append(amd_block_step.key)
                 amd_mirror_steps.append(amd_step)
@@ -380,7 +378,7 @@ def _amd_mirror_should_run(
     global_config = get_global_config()
     if global_config["nightly"] == "1":
         return True
-    if step.optional:
+    if amd.get("optional", step.optional):
         return False
     if _source_file_dependencies_match(
         amd.get("source_file_dependencies"), list_file_diff

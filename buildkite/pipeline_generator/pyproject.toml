@@ -21,6 +21,7 @@ py-modules = [
     "pipeline_generator",
     "buildkite_step",
     "step",
+    "utils",
     "global_config",
     "constants",
 ]
