@@ -19,8 +19,10 @@ touch final.yaml
 
 merge () {
   # append $1 to final.yaml, and resolve anchors
-  $vllm_root_directory/yq_linux_amd64 -n "load(\"final.yaml\") *+ (load(\"$1\") | explode(.))" > temp.yaml
-  mv temp.yaml final.yaml
+  local temp_file
+  temp_file=$(mktemp /tmp/benchmark-pipeline.XXXXXX.yaml)
+  $vllm_root_directory/yq_linux_amd64 -n "load(\"final.yaml\") *+ (load(\"$1\") | explode(.))" > "$temp_file"
+  mv "$temp_file" final.yaml
 }
 
 
