@@ -128,7 +128,7 @@ module "ci_monitoring" {
   project_id            = var.project_id
   pipeline_slug         = "tpu-inference-ci"
   org_slug              = "tpu-commons"
-  buildkite_token_value = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_token_secret_id = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret
 }
 
 module "ci_cache_storage" {
