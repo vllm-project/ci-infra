@@ -129,6 +129,21 @@ def get_agent_queue(step: Step):
         return AgentQueue.GPU_1
 
 
+def _should_soft_fail(step: Step) -> bool:
+    """Whether the step should be soft-failed.
+
+    Soft-fail any job that runs on the Intel CPU queue or whose label starts
+    with "CPU-", in addition to steps that already opt into soft_fail.
+    """
+    if step.soft_fail:
+        return True
+    if get_agent_queue(step) == AgentQueue.INTEL_CPU:
+        return True
+    if step.label.startswith("CPU-"):
+        return True
+    return False
+
+
 def _get_variables_to_inject() -> Dict[str, str]:
     global_config = get_global_config()
     if global_config["name"] != "vllm_ci":
@@ -244,7 +259,7 @@ def convert_group_step_to_buildkite_step(
                 label=step.label,
                 commands=step_commands,
                 depends_on=step.depends_on,
-                soft_fail=step.soft_fail,
+                soft_fail=_should_soft_fail(step),
                 agents={"queue": get_agent_queue(step)},
                 priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0
             )
