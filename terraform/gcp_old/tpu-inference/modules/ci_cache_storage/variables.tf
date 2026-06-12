@@ -16,7 +16,7 @@ variable "location" {
 
 variable "lifecycle_age_days" {
   type        = number
-  default     = 7
+  default     = 4
   description = "Number of days before stale cache folders/files are automatically deleted by GCS GC."
 }
 
