@@ -69,6 +69,7 @@ resource "google_tpu_v2_vm" "tpu_v5" {
       sudo sed -i 's/name="%hostname-%spawn"/name="vllm-tpu-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=tpu_v5_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${local.huggingface_token_value}' | sudo tee -a /etc/environment
+      echo 'TPU_VERSION=tpu5' | sudo tee -a /etc/environment
 
       sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
       sudo mkdir -p /mnt/disks/persist
@@ -78,6 +79,52 @@ resource "google_tpu_v2_vm" "tpu_v5" {
       systemctl stop docker
       systemctl daemon-reload
       systemctl start docker
+
+      # ==========================================
+      # 1. JAX Cache Setup via GCS FUSE
+      # ==========================================
+      echo "Installing gcsfuse..."
+      export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
+      curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo tee /usr/share/keyrings/google-cloud.asc > /dev/null
+      echo "deb [signed-by=/usr/share/keyrings/google-cloud.asc] https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | sudo tee /etc/apt/sources.list.d/gcsfuse.list
+
+      sudo apt-get update
+      sudo apt-get install -y gcsfuse
+
+      # Configure FUSE to allow other users (CI Agent / Docker Containers)
+      sudo sed -i 's/#user_allow_other/user_allow_other/g' /etc/fuse.conf
+
+      # Create local buffer cache directory on the local disk
+      sudo mkdir -p /var/cache/gcsfuse
+      sudo chmod 777 /var/cache/gcsfuse
+
+      # Create target mount point and apply Safety Lock (immutable attribute)
+      # This prevents any writes from falling back to the persistent disk if FUSE drops.
+      sudo mkdir -p /mnt/disks/persist/tpu_jax_cache
+      sudo chmod 777 /mnt/disks/persist/tpu_jax_cache
+      sudo chattr +i /mnt/disks/persist/tpu_jax_cache
+
+      # Setting up backward compatibility symlink for legacy CI jobs
+      sudo rm -rf /tmp/tpu_jax_cache
+      sudo ln -s /mnt/disks/persist/tpu_jax_cache /tmp/tpu_jax_cache
+
+      echo "Mounting GCS bucket: ullm-ci-cache..."
+      if sudo gcsfuse \
+          --implicit-dirs \
+          --file-cache-max-size-mb=10240 \
+          --cache-dir=/var/cache/gcsfuse \
+          --dir-mode=777 \
+          --file-mode=777 \
+          -o allow_other \
+          ullm-ci-cache \
+          /mnt/disks/persist/tpu_jax_cache; then
+        
+        echo "GCS FUSE mount successful."
+        echo 'CI_CACHE_FUSE_MOUNTED=1' | sudo tee -a /etc/environment
+      else
+        echo "ERROR: Failed to mount GCS FUSE bucket."
+        exit 1
+      fi
 
       systemctl enable buildkite-agent
       systemctl start buildkite-agent

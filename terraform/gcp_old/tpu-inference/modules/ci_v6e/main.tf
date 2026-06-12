@@ -74,6 +74,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
       echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
+      echo 'TPU_VERSION=tpu6e' | sudo tee -a /etc/environment
 
       sudo mkdir -p /mnt/disks/persist
 
@@ -106,16 +107,50 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       sudo bash add-google-cloud-ops-agent-repo.sh --also-install
 
       # ==========================================
-      # 1. Backward Compatibility & JAX Cache Setup
+      # 1. JAX Cache Setup via GCS FUSE
       # ==========================================
-      echo "Setting up backward compatibility symlink for JAX cache..."
-      # Create the persistent directory first
+      echo "Installing gcsfuse..."
+      export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
+      curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo tee /usr/share/keyrings/google-cloud.asc > /dev/null
+      echo "deb [signed-by=/usr/share/keyrings/google-cloud.asc] https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | sudo tee /etc/apt/sources.list.d/gcsfuse.list
+
+      sudo apt-get update
+      sudo apt-get install -y gcsfuse
+
+      # Configure FUSE to allow other users (CI Agent / Docker Containers)
+      sudo sed -i 's/#user_allow_other/user_allow_other/g' /etc/fuse.conf
+
+      # Create local buffer cache directory on the local disk
+      sudo mkdir -p /var/cache/gcsfuse
+      sudo chmod 777 /var/cache/gcsfuse
+
+      # Create target mount point and apply Safety Lock (immutable attribute)
+      # This prevents any writes from falling back to the persistent disk if FUSE drops.
       sudo mkdir -p /mnt/disks/persist/tpu_jax_cache
       sudo chmod 777 /mnt/disks/persist/tpu_jax_cache
-      
-      # Forcefully intercept old CI jobs writing to /tmp and redirect them to the persistent disk
+      sudo chattr +i /mnt/disks/persist/tpu_jax_cache
+
+      # Setting up backward compatibility symlink for legacy CI jobs
       sudo rm -rf /tmp/tpu_jax_cache
       sudo ln -s /mnt/disks/persist/tpu_jax_cache /tmp/tpu_jax_cache
+
+      echo "Mounting GCS bucket: ullm-ci-cache..."
+      if sudo gcsfuse \
+          --implicit-dirs \
+          --file-cache-max-size-mb=10240 \
+          --cache-dir=/var/cache/gcsfuse \
+          --dir-mode=777 \
+          --file-mode=777 \
+          -o allow_other \
+          ullm-ci-cache \
+          /mnt/disks/persist/tpu_jax_cache; then
+        
+        echo "GCS FUSE mount successful."
+        echo 'CI_CACHE_FUSE_MOUNTED=1' | sudo tee -a /etc/environment
+      else
+        echo "ERROR: Failed to mount GCS FUSE bucket."
+        exit 1
+      fi
 
       # ==========================================
       # 2. Automated Disk Garbage Collection (Cron)
