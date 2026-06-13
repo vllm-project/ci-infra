@@ -110,11 +110,15 @@ resource "google_tpu_v2_vm" "tpu_v5" {
 
       echo "Mounting GCS bucket: ullm-ci-cache..."
       if sudo gcsfuse \
-          --implicit-dirs \
           --file-cache-max-size-mb=10240 \
           --cache-dir=/var/cache/gcsfuse \
           --dir-mode=777 \
           --file-mode=777 \
+          --metadata-cache-ttl-secs=-1 \
+          --kernel-list-cache-ttl-secs=-1 \
+          --metadata-cache-negative-ttl-secs=0 \
+          --stat-cache-max-size-mb=-1 \
+          --type-cache-max-size-mb=-1 \
           -o allow_other \
           ullm-ci-cache \
           /mnt/disks/persist/tpu_jax_cache; then
