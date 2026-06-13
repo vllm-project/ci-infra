@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Literal
 import os
 
 from step import Step
@@ -8,6 +8,9 @@ from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
 from constants import DeviceType, AgentQueue
+
+
+SetupProfile = Literal["nvidia", "amd", "none"]
 
 
 class BuildkiteCommandStep(BaseModel):
@@ -154,15 +157,34 @@ def _get_variables_to_inject() -> Dict[str, str]:
     }
 
 
-def _prepare_commands(step: Step, variables_to_inject: Dict[str, str]) -> List[str]:
+def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
+    if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
+        return []
+
+    if setup_profile == "nvidia":
+        return [
+            "echo '--- :nvidia: GPU Info'",
+            "(command nvidia-smi || true)",
+            "echo '--- :gear: CUDA Coredump Setup'",
+            "export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'",
+        ]
+
+    if setup_profile == "amd":
+        return [
+            "echo '--- :amd: GPU Info'",
+            "(command amd-smi || true)",
+        ]
+
+    raise ValueError(f"Unsupported setup profile: {setup_profile}")
+
+
+def _prepare_commands(
+    step: Step,
+    variables_to_inject: Dict[str, str],
+    setup_profile: SetupProfile = "nvidia",
+) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
-    commands = []
-    # Default setup commands
-    if not step.label.startswith(":docker:") and not step.no_plugin:
-        commands.append("echo '--- :nvidia: GPU Info'")
-        commands.append("(command nvidia-smi || true)")
-        commands.append("echo '--- :gear: CUDA Coredump Setup'")
-        commands.append("export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'")
+    commands = _get_setup_commands(step, setup_profile)
 
     continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
 
@@ -215,6 +237,13 @@ def _create_block_step(step: Step, list_file_diff: List[str]) -> BuildkiteBlockS
     return block_step
 
 
+def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
+    normalized = source_file.rstrip("/")
+    if not normalized:
+        return False
+    return diff_file == normalized or diff_file.startswith(f"{normalized}/")
+
+
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
@@ -246,7 +275,7 @@ def convert_group_step_to_buildkite_step(
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents={"queue": get_agent_queue(step)},
-                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0
+                priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
             )
 
             if block_step:
@@ -277,8 +306,12 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
-                amd_step = _create_amd_mirror_step(step, step_commands, step.mirror["amd"])
-                if not _step_should_run(step, list_file_diff):
+                amd = step.mirror["amd"]
+                amd_step = _create_amd_mirror_step(
+                    step, variables_to_inject, amd
+                )
+                amd_block_step = None
+                if not _amd_mirror_should_run(step, amd, list_file_diff):
                     # Block step depends on the shared AMD image build.
                     mirror_build_dep = (
                         amd_step.depends_on[0]
@@ -291,6 +324,7 @@ def convert_group_step_to_buildkite_step(
                         key=f"block-amd-{_generate_step_key(step.label)}",
                     )
                     amd_mirror_steps.append(amd_block_step)
+                if amd_block_step:
                     amd_step.depends_on.append(amd_block_step.key)
                 amd_mirror_steps.append(amd_step)
 
@@ -331,7 +365,39 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     if step.source_file_dependencies:
         for source_file in step.source_file_dependencies:
             for diff_file in list_file_diff:
-                if source_file in diff_file:
+                if _matches_source_dependency(source_file, diff_file):
+                    return True
+    return False
+
+
+def _amd_mirror_should_run(
+    step: Step, amd: Dict[str, Any], list_file_diff: List[str]
+) -> bool:
+    if os.getenv("NOAUTO") == "1":
+        return False
+    global_config = get_global_config()
+    if global_config["nightly"] == "1":
+        return True
+    if amd.get("optional", step.optional):
+        return False
+    if _source_file_dependencies_match(
+        amd.get("source_file_dependencies"), list_file_diff
+    ):
+        return True
+    if global_config["run_all"]:
+        return True
+    return _source_file_dependencies_match(
+        step.source_file_dependencies, list_file_diff
+    )
+
+
+def _source_file_dependencies_match(
+    source_file_dependencies: Optional[List[str]], list_file_diff: List[str]
+) -> bool:
+    if source_file_dependencies:
+        for source_file in source_file_dependencies:
+            for diff_file in list_file_diff:
+                if _matches_source_dependency(source_file, diff_file):
                     return True
     return False
 
@@ -351,19 +417,26 @@ def _generate_step_key(step_label: str) -> str:
     )
 
 
-def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[str, Any]) -> BuildkiteCommandStep:
+def _create_amd_mirror_step(
+    step: Step,
+    variables_to_inject: Dict[str, str],
+    amd: Dict[str, Any],
+) -> BuildkiteCommandStep:
     """Create an AMD mirrored step from the original step."""
     amd_device = amd["device"]
     custom_commands = amd.get("commands")
     if custom_commands:
-        # Custom AMD commands didn't go through _prepare_commands(), need cd
-        amd_commands_str = " && ".join(custom_commands)
-        working_dir = amd.get("working_dir", step.working_dir)
-        if working_dir:
-            amd_commands_str = f"cd {working_dir} && {amd_commands_str}"
+        amd_step = step.model_copy(update={
+            "commands": custom_commands,
+            "working_dir": amd.get("working_dir", step.working_dir),
+        })
+        amd_commands_str = " && ".join(
+            _prepare_commands(amd_step, variables_to_inject, setup_profile="amd")
+        )
     else:
-        # original_commands already include cd from _prepare_commands()
-        amd_commands_str = " && ".join(original_commands)
+        amd_commands_str = " && ".join(
+            _prepare_commands(step, variables_to_inject, setup_profile="amd")
+        )
 
     # Pass commands via VLLM_TEST_COMMANDS env var instead of positional
     # argument. Buildkite sets env vars directly in the process environment
@@ -488,7 +561,7 @@ def _create_torch_nightly_group(
         if not step_auto_run and step.source_file_dependencies:
             for source_file in step.source_file_dependencies:
                 for diff_file in list_file_diff:
-                    if source_file in diff_file:
+                    if _matches_source_dependency(source_file, diff_file):
                         step_auto_run = True
                         break
                 if step_auto_run:
