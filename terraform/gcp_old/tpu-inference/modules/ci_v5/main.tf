@@ -1,10 +1,10 @@
 data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
-  secret = "projects/${var.project_id}/secrets/buildkite_agent_token_ci_cluster"
+  secret  = "projects/${var.project_id}/secrets/buildkite_agent_token_ci_cluster"
   version = "latest"
 }
 
 data "google_secret_manager_secret_version" "huggingface_token" {
-  secret = "projects/${var.project_id}/secrets/huggingface_token"
+  secret  = "projects/${var.project_id}/secrets/huggingface_token"
   version = "latest"
 }
 
@@ -15,19 +15,19 @@ locals {
 
 resource "google_compute_disk" "disk_v5" {
   provider = google-beta.us-south1-a
-  count = 7
+  count    = 7
 
-  name  = "tpu-disk-south1-a-${count.index + 1}"
-  size  = 512
-  type  = "pd-ssd"
-  zone  = "us-south1-a"
+  name = "tpu-disk-south1-a-${count.index + 1}"
+  size = 512
+  type = "pd-ssd"
+  zone = "us-south1-a"
 }
 
 resource "google_tpu_v2_vm" "tpu_v5" {
   provider = google-beta.us-south1-a
-  count = 7
-  name = "vllm-tpu-v5-${count.index + 1}"
-  zone = "us-south1-a"
+  count    = 7
+  name     = "vllm-tpu-v5-${count.index + 1}"
+  zone     = "us-south1-a"
 
   runtime_version = "v2-alpha-tpuv5-lite"
 
@@ -35,11 +35,11 @@ resource "google_tpu_v2_vm" "tpu_v5" {
 
   data_disks {
     source_disk = google_compute_disk.disk_v5[count.index].id
-    mode = "READ_WRITE"
+    mode        = "READ_WRITE"
   }
 
   network_config {
-    network   = "projects/${var.project_id}/global/networks/default"
+    network             = "projects/${var.project_id}/global/networks/default"
     enable_external_ips = true
   }
 
@@ -81,50 +81,16 @@ resource "google_tpu_v2_vm" "tpu_v5" {
       systemctl start docker
 
       # ==========================================
-      # 1. JAX Cache Setup via GCS FUSE
+      # 1. Backward Compatibility & JAX Cache Setup
       # ==========================================
-      echo "Installing gcsfuse..."
-      export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
-      curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo tee /usr/share/keyrings/google-cloud.asc > /dev/null
-      echo "deb [signed-by=/usr/share/keyrings/google-cloud.asc] https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | sudo tee /etc/apt/sources.list.d/gcsfuse.list
-
-      sudo apt-get update
-      sudo apt-get install -y gcsfuse
-
-      # Configure FUSE to allow other users (CI Agent / Docker Containers)
-      sudo sed -i 's/#user_allow_other/user_allow_other/g' /etc/fuse.conf
-
-      # Create local buffer cache directory on the local disk
-      sudo mkdir -p /var/cache/gcsfuse
-      sudo chmod 777 /var/cache/gcsfuse
-
-      # Create target mount point and apply Safety Lock (immutable attribute)
-      # This prevents any writes from falling back to the persistent disk if FUSE drops.
+      echo "Setting up backward compatibility symlink for JAX cache..."
+      # Create the persistent directory first
       sudo mkdir -p /mnt/disks/persist/tpu_jax_cache
       sudo chmod 777 /mnt/disks/persist/tpu_jax_cache
-      sudo chattr +i /mnt/disks/persist/tpu_jax_cache
-
-      # Setting up backward compatibility symlink for legacy CI jobs
+      
+      # Forcefully intercept old CI jobs writing to /tmp and redirect them to the persistent disk
       sudo rm -rf /tmp/tpu_jax_cache
       sudo ln -s /mnt/disks/persist/tpu_jax_cache /tmp/tpu_jax_cache
-
-      echo "Mounting GCS bucket: ullm-ci-cache..."
-      if sudo gcsfuse \
-          --implicit-dirs \
-          --file-cache-max-size-mb=10240 \
-          --cache-dir=/var/cache/gcsfuse \
-          --dir-mode=777 \
-          --file-mode=777 \
-          -o allow_other \
-          ullm-ci-cache \
-          /mnt/disks/persist/tpu_jax_cache; then
-        
-        echo "GCS FUSE mount successful."
-        echo 'CI_CACHE_FUSE_MOUNTED=1' | sudo tee -a /etc/environment
-      else
-        echo "ERROR: Failed to mount GCS FUSE bucket."
-        exit 1
-      fi
 
       systemctl enable buildkite-agent
       systemctl start buildkite-agent
