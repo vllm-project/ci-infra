@@ -17,6 +17,58 @@
 {%- if step.agent_pool -%}{{ step.agent_pool }}-{%- endif -%}{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
 {%- endmacro %}
 
+{% macro aiter_env_passthrough_patch(indent='') -%}
+{{ indent }}set -euo pipefail
+{{ indent }}patch_aiter_env_passthrough() {
+{{ indent }}  local file="$1"
+{{ indent }}  local anchor="$2"
+{{ indent }}  local insert="$3"
+{{ indent }}  if [[ ! -f "$file" ]]; then
+{{ indent }}    echo "Skipping AITER env passthrough patch; $file not found"
+{{ indent }}    return 0
+{{ indent }}  fi
+{{ indent }}  if grep -q "VLLM_ROCM_USE_AITER" "$file"; then
+{{ indent }}    echo "AITER env passthrough already present in $file"
+{{ indent }}    return 0
+{{ indent }}  fi
+{{ indent }}  local tmp="${file}.aiter-env"
+{{ indent }}  awk -v anchor="$anchor" -v insert="$insert" '
+{{ indent }}    $0 == anchor && !done { print insert; done = 1 }
+{{ indent }}    { print }
+{{ indent }}    END { if (!done) exit 42 }
+{{ indent }}  ' "$file" > "$tmp"
+{{ indent }}  mv "$tmp" "$file"
+{{ indent }}  chmod +x "$file"
+{{ indent }}  echo "Patched AITER env passthrough into $file"
+{{ indent }}}
+{{ indent }}patch_aiter_env_passthrough \
+{{ indent }}  ".buildkite/scripts/hardware_ci/run-amd-test.sh" \
+{{ indent }}  '    -e "PYTORCH_ROCM_ARCH=" \' \
+{{ indent }}  '    -e "VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}" \'
+{{ indent }}patch_aiter_env_passthrough \
+{{ indent }}  ".buildkite/scripts/run-multi-node-test.sh" \
+{{ indent }}  '            -v ~/.cache/huggingface:/root/.cache/huggingface --name "node$node" \' \
+{{ indent }}  '            -e "VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}" \'
+{%- endmacro %}
+
+{% macro checkout_workload_commit(indent='') -%}
+{{ indent }}set -euo pipefail
+{{ indent }}checkout_workload_commit() {
+{{ indent }}  local commit="{{ vllm_ci_workload_commit }}"
+{{ indent }}  if [[ -z "$commit" || "$commit" == "${BUILDKITE_COMMIT:-}" ]]; then
+{{ indent }}    return 0
+{{ indent }}  fi
+{{ indent }}  local ref="${VLLM_CI_SNAPSHOT_REF:-main}"
+{{ indent }}  local depth="${VLLM_CI_SNAPSHOT_FETCH_DEPTH:-2000}"
+{{ indent }}  git fetch --no-tags --depth="${depth}" origin "${ref}:refs/remotes/origin/${ref}" >/dev/null 2>&1 \
+{{ indent }}    || git fetch --no-tags origin "${commit}" >/dev/null 2>&1 \
+{{ indent }}    || true
+{{ indent }}  git checkout --force "$commit"
+{{ indent }}  echo "Checked out workload commit: $(git rev-parse HEAD)"
+{{ indent }}}
+{{ indent }}checkout_workload_commit
+{%- endmacro %}
+
   - group: "AMD Tests"
     depends_on: ~
     steps:
@@ -24,14 +76,16 @@
         depends_on: ~
         soft_fail: false
         commands:
-          - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
+          - |
+{{ checkout_workload_commit('            ') }}
+            BUILDKITE_COMMIT="{{ vllm_ci_workload_commit }}" COMMIT="{{ vllm_ci_workload_commit }}" bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
         key: "amd-ci-base-ready"
         env:
           DOCKER_BUILDKIT: "1"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           REMOTE_VLLM: "1"
-          VLLM_BRANCH: "$BUILDKITE_COMMIT"
+          VLLM_BRANCH: "{{ vllm_ci_workload_commit }}"
 {{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
@@ -41,20 +95,21 @@
         soft_fail: false
         commands:
           - |
+{{ checkout_workload_commit('            ') }}
             if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" ]]; then
               echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
-              IMAGE_TAG="" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
+              IMAGE_TAG="" BUILDKITE_COMMIT="{{ vllm_ci_workload_commit }}" COMMIT="{{ vllm_ci_workload_commit }}" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
             else
-              bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
+              BUILDKITE_COMMIT="{{ vllm_ci_workload_commit }}" COMMIT="{{ vllm_ci_workload_commit }}" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
             fi
         key: "amd-build"
         env:
           DOCKER_BUILDKIT: "1"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
-          IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
+          IMAGE_TAG: "{{ vllm_ci_workload_image }}"
           REMOTE_VLLM: "1"
-          VLLM_BRANCH: "$BUILDKITE_COMMIT"
+          VLLM_BRANCH: "{{ vllm_ci_workload_commit }}"
 {{ amd_infra_retry('        ') }}
         agents:
           queue: amd-cpu
@@ -103,7 +158,10 @@
           {% else %}
           queue: amd_mi300
           {% endif %}
-        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
+        command: |
+{{ checkout_workload_commit('          ') }}
+{{ aiter_env_passthrough_patch('          ') }}
+          bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           DOCKER_BUILDKIT: "1"
           NUM_NODES: "{{ step.num_nodes or 1 }}"
@@ -112,7 +170,7 @@
           # if ci_base or artifact setup fails before tests begin.
           DOCKER_IMAGE_NAME: "rocm/vllm-dev:ci_base"
           VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
-          VLLM_CI_FALLBACK_IMAGE: "rocm/vllm-ci:$BUILDKITE_COMMIT"
+          VLLM_CI_FALLBACK_IMAGE: "{{ vllm_ci_workload_image }}"
           VLLM_CI_USE_ARTIFACTS: "1"
           VLLM_CI_ARTIFACT_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
           VLLM_CI_RESULTS_ROOT: "/home/buildkite-agent/huggingface/amd-ci-results"

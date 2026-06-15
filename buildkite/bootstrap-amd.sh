@@ -27,6 +27,26 @@ if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
 
+if [[ -z "${VLLM_CI_SNAPSHOT_ENABLED:-}" ]]; then
+    if [[ "${BUILDKITE_SOURCE:-}" == "schedule" ]]; then
+        VLLM_CI_SNAPSHOT_ENABLED=1
+    else
+        VLLM_CI_SNAPSHOT_ENABLED=0
+    fi
+fi
+
+if [[ -z "${VLLM_CI_SNAPSHOT_REF:-}" ]]; then
+    VLLM_CI_SNAPSHOT_REF="main"
+fi
+
+if [[ -z "${VLLM_CI_SNAPSHOT_CLOCK:-}" ]]; then
+    VLLM_CI_SNAPSHOT_CLOCK="04:00:00"
+fi
+
+if [[ -z "${VLLM_CI_SNAPSHOT_TIMEZONE:-}" ]]; then
+    VLLM_CI_SNAPSHOT_TIMEZONE="America/Chicago"
+fi
+
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
@@ -53,6 +73,64 @@ join_file_diff() {
     printf '%s\n' "$1" | tr -d '\r' | paste -sd'|' -
 }
 
+fetch_snapshot_ref() {
+    local ref="$1"
+    local depth="${VLLM_CI_SNAPSHOT_FETCH_DEPTH:-2000}"
+    local remote_ref="refs/remotes/origin/${ref}"
+
+    git fetch --no-tags --depth="${depth}" origin "${ref}:${remote_ref}" >/dev/null 2>&1 || \
+        git fetch --no-tags origin "${ref}:${remote_ref}" >/dev/null 2>&1
+}
+
+resolve_snapshot_commit() {
+    local ref="${VLLM_CI_SNAPSHOT_REF}"
+    local snapshot_tz="${VLLM_CI_SNAPSHOT_TIMEZONE}"
+    local snapshot_clock="${VLLM_CI_SNAPSHOT_CLOCK}"
+    local snapshot_date=""
+    local cutoff_epoch=""
+    local cutoff_utc=""
+    local remote_ref="refs/remotes/origin/${ref}"
+    local commit=""
+
+    if [[ -n "${VLLM_CI_SNAPSHOT_DATE:-}" ]]; then
+        snapshot_date="${VLLM_CI_SNAPSHOT_DATE}"
+    else
+        snapshot_date=$(TZ="${snapshot_tz}" date +%F)
+    fi
+
+    cutoff_epoch=$(TZ="${snapshot_tz}" date -d "${snapshot_date} ${snapshot_clock}" '+%s')
+    cutoff_utc=$(date -u -d "@${cutoff_epoch}" '+%Y-%m-%dT%H:%M:%SZ')
+    echo "Resolving ${ref} snapshot at ${snapshot_date} ${snapshot_clock} ${snapshot_tz} (${cutoff_utc})" >&2
+
+    fetch_snapshot_ref "${ref}"
+    commit=$(git rev-list -n 1 --before="${cutoff_utc}" "${remote_ref}" 2>/dev/null || true)
+
+    if [[ -z "${commit}" ]]; then
+        echo "Snapshot commit not found in fetched history; deepening ${ref} and retrying..." >&2
+        git fetch --no-tags origin "${ref}:${remote_ref}" >/dev/null 2>&1 || true
+        commit=$(git rev-list -n 1 --before="${cutoff_utc}" "${remote_ref}" 2>/dev/null || true)
+    fi
+
+    if [[ -z "${commit}" ]]; then
+        echo "ERROR: Could not resolve ${ref} before ${cutoff_utc}" >&2
+        exit 1
+    fi
+
+    printf '%s\n' "${commit}"
+}
+
+checkout_workload_commit() {
+    local commit="$1"
+
+    if [[ -z "${commit}" ]]; then
+        return 0
+    fi
+
+    git fetch --no-tags --depth=1 origin "${commit}" >/dev/null 2>&1 || true
+    git checkout --force "${commit}"
+    echo "Checked out workload commit: $(git rev-parse HEAD)"
+}
+
 # ---------------------------------------------------------------------------
 # Git setup: ensure origin/main is available and compute merge base once.
 # On K8s (blobless clones with --filter=blob:none), origin/main may not be
@@ -70,6 +148,22 @@ if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
     echo "origin/main not found, fetching..."
     fetch_origin_ref main || true
 fi
+
+if [[ "${VLLM_CI_SNAPSHOT_ENABLED}" == "1" ]]; then
+    if [[ -z "${VLLM_CI_SNAPSHOT_COMMIT:-}" ]]; then
+        VLLM_CI_SNAPSHOT_COMMIT=$(resolve_snapshot_commit)
+    fi
+    VLLM_CI_WORKLOAD_COMMIT="${VLLM_CI_SNAPSHOT_COMMIT}"
+    echo "Using scheduled workload snapshot commit: ${VLLM_CI_WORKLOAD_COMMIT}"
+    checkout_workload_commit "${VLLM_CI_WORKLOAD_COMMIT}"
+else
+    VLLM_CI_WORKLOAD_COMMIT="${VLLM_CI_WORKLOAD_COMMIT:-${BUILDKITE_COMMIT:-HEAD}}"
+fi
+
+VLLM_CI_WORKLOAD_IMAGE="${VLLM_CI_WORKLOAD_IMAGE:-rocm/vllm-ci:${VLLM_CI_WORKLOAD_COMMIT}}"
+export VLLM_CI_SNAPSHOT_COMMIT="${VLLM_CI_SNAPSHOT_COMMIT:-}"
+export VLLM_CI_WORKLOAD_COMMIT
+export VLLM_CI_WORKLOAD_IMAGE
 
 if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
     MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD 2>/dev/null || echo "")
@@ -161,6 +255,8 @@ upload_pipeline() {
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
+    echo "Workload commit: $VLLM_CI_WORKLOAD_COMMIT"
+    echo "Workload image: $VLLM_CI_WORKLOAD_IMAGE"
 
     FAIL_FAST=$(fail_fast)
 
@@ -179,6 +275,8 @@ upload_pipeline() {
             -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D vllm_ci_workload_commit="$VLLM_CI_WORKLOAD_COMMIT" \
+            -D vllm_ci_workload_image="$VLLM_CI_WORKLOAD_IMAGE" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )

@@ -10,6 +10,40 @@ from plugin.docker_plugin import get_docker_plugin
 from constants import DeviceType, AgentQueue
 
 
+AMD_AITER_ENV_PASSTHROUGH_PATCH = r'''set -euo pipefail
+patch_aiter_env_passthrough() {
+  local file="$1"
+  local anchor="$2"
+  local insert="$3"
+  if [[ ! -f "$file" ]]; then
+    echo "Skipping AITER env passthrough patch; $file not found"
+    return 0
+  fi
+  if grep -q "VLLM_ROCM_USE_AITER" "$file"; then
+    echo "AITER env passthrough already present in $file"
+    return 0
+  fi
+  local tmp="${file}.aiter-env"
+  awk -v anchor="$anchor" -v insert="$insert" '
+    $0 == anchor && !done { print insert; done = 1 }
+    { print }
+    END { if (!done) exit 42 }
+  ' "$file" > "$tmp"
+  mv "$tmp" "$file"
+  chmod +x "$file"
+  echo "Patched AITER env passthrough into $file"
+}
+patch_aiter_env_passthrough \
+  ".buildkite/scripts/hardware_ci/run-amd-test.sh" \
+  '    -e "PYTORCH_ROCM_ARCH=" \' \
+  '    -e "VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}" \'
+patch_aiter_env_passthrough \
+  ".buildkite/scripts/run-multi-node-test.sh" \
+  '            -v ~/.cache/huggingface:/root/.cache/huggingface --name "node$node" \' \
+  '            -e "VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}" \'
+'''
+
+
 def _get_step_agents(step: Step) -> Dict[str, str]:
     agents = {"queue": get_agent_queue(step)}
     if step.device == DeviceType.INTEL_GPU and step.agent_tags:
@@ -377,7 +411,10 @@ def _create_amd_mirror_step(step: Step, original_commands: List[str], amd: Dict[
     # Pass commands via VLLM_TEST_COMMANDS env var instead of positional
     # argument. Buildkite sets env vars directly in the process environment
     # without shell interpretation, preserving all inner quoting.
-    amd_command_wrapped = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
+    amd_command_wrapped = (
+        AMD_AITER_ENV_PASSTHROUGH_PATCH
+        + "\nbash .buildkite/scripts/hardware_ci/run-amd-test.sh"
+    )
 
     # Extract device name from queue name
     device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
