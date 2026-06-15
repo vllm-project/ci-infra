@@ -10,6 +10,15 @@ from plugin.docker_plugin import get_docker_plugin
 from constants import DeviceType, AgentQueue
 
 
+def _get_step_agents(step: Step) -> Dict[str, str]:
+    agents = {"queue": get_agent_queue(step)}
+    if step.device == DeviceType.INTEL_GPU and step.agent_tags:
+        agents.update(
+            {key: value for key, value in step.agent_tags.items() if key != "queue"}
+        )
+    return agents
+
+
 class BuildkiteCommandStep(BaseModel):
     label: str
     group: Optional[str] = None
@@ -245,7 +254,7 @@ def convert_group_step_to_buildkite_step(
                 commands=step_commands,
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
-                agents={"queue": get_agent_queue(step)},
+                agents=_get_step_agents(step),
                 priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0
             )
 
@@ -517,7 +526,7 @@ def _create_torch_nightly_group(
             commands=step_commands,
             depends_on=[block_key] if blocked else ["image-build-torch-nightly"],
             soft_fail=True,
-            agents={"queue": get_agent_queue(step)},
+            agents=_get_step_agents(step),
             parallelism=step.parallelism,
             retry={
                 "automatic": [
