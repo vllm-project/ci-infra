@@ -59,7 +59,7 @@ def check_precommit_passed(commit: str, repo_name: str) -> None:
 
     Raises RuntimeError if the check fails, times out, or is not found.
     """
-    max_wait = 600
+    max_wait = 1500
     wait_interval = 30
     elapsed = 0
     api_url = f"https://api.github.com/repos/{repo_name}/commits/{commit}/check-runs"
