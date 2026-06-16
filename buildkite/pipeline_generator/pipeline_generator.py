@@ -48,18 +48,21 @@ class PipelineGenerator:
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
+        buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
 
         # Run pre-commit as a dedicated step in parallel with the image build.
         # Steps that depend on the image build also wait for pre-commit to pass.
+        # Place it first so it shows up right after the bootstrap step.
         if global_config["pull_request"] and global_config["pull_request"] != "false":
             add_precommit_dependency(buildkite_group_steps)
-            buildkite_group_steps.append(
+            buildkite_group_steps.insert(
+                0,
                 create_precommit_group_step(
                     global_config["github_repo_name"], global_config["commit"]
-                )
+                ),
             )
 
-        buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
+
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
             buildkite_steps_dict["steps"].append(
