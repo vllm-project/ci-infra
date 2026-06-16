@@ -3,9 +3,12 @@ import yaml
 import subprocess
 import os
 from step import read_steps_from_job_dir, group_steps
-from buildkite_step import convert_group_step_to_buildkite_step
+from buildkite_step import (
+    convert_group_step_to_buildkite_step,
+    add_precommit_dependency,
+    create_precommit_group_step,
+)
 from global_config import init_global_config, get_global_config
-from utils_lib.git_utils import check_precommit_passed
 
 
 class PipelineGenerator:
@@ -20,12 +23,6 @@ class PipelineGenerator:
 
     def generate(self):
         global_config = get_global_config()
-
-        # Fail if pre-commit check has not passed on the PR
-        if global_config["pull_request"] and global_config["pull_request"] != "false":
-            check_precommit_passed(
-                global_config["commit"], global_config["github_repo_name"]
-            )
 
         # Skip if changes are doc-only (unless RUN_ALL is set)
         if global_config["docs_only_disable"] == "0" and not global_config["run_all"]:
@@ -51,6 +48,17 @@ class PipelineGenerator:
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
+
+        # Run pre-commit as a dedicated step in parallel with the image build.
+        # Steps that depend on the image build also wait for pre-commit to pass.
+        if global_config["pull_request"] and global_config["pull_request"] != "false":
+            add_precommit_dependency(buildkite_group_steps)
+            buildkite_group_steps.append(
+                create_precommit_group_step(
+                    global_config["github_repo_name"], global_config["commit"]
+                )
+            )
+
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:

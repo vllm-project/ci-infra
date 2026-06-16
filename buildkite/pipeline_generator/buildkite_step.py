@@ -9,6 +9,90 @@ from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
 from constants import DeviceType, AgentQueue
 
+# Key for the dedicated pre-commit step. Test steps that depend on an image
+# build also depend on this so pre-commit and image build can run in parallel.
+PRECOMMIT_STEP_KEY = "pre-commit"
+PRECOMMIT_MAX_WAIT = 1500
+PRECOMMIT_WAIT_INTERVAL = 30
+
+# Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
+# commit/repo at generation time and run on a CI agent as its own step, so it
+# carries no shell variables (nothing for `buildkite-agent pipeline upload` to
+# interpolate) and needs no third-party Python packages on the agent.
+_PRECOMMIT_POLL_PROGRAM = """\
+import json, subprocess, time, urllib.request
+commit = "{commit}"
+repo = "{repo}"
+api_url = "https://api.github.com/repos/" + repo + "/commits/" + commit + "/check-runs"
+max_wait = {max_wait}
+wait_interval = {wait_interval}
+elapsed = 0
+while True:
+    request = urllib.request.Request(api_url)
+    request.add_header("User-Agent", "vllm-ci-precommit-check")
+    request.add_header("Accept", "application/vnd.github+json")
+    with urllib.request.urlopen(request) as response:
+        check_runs = json.load(response).get("check_runs", [])
+    precommit_run = next((run for run in check_runs if run["name"] == "pre-commit"), None)
+    if precommit_run and precommit_run["status"] == "completed":
+        conclusion = precommit_run["conclusion"]
+        if conclusion == "success":
+            print("pre-commit check passed on commit " + commit + ".")
+            raise SystemExit(0)
+        subprocess.run(["buildkite-agent", "annotate", ":x: pre-commit check has not passed on this PR (conclusion: " + str(conclusion) + "). Please fix pre-commit issues before running CI.", "--style", "error"], check=False)
+        raise SystemExit("pre-commit check failed on commit " + commit + " (conclusion: " + str(conclusion) + ").")
+    if elapsed >= max_wait:
+        subprocess.run(["buildkite-agent", "annotate", ":warning: Timed out waiting for pre-commit check to complete.", "--style", "warning"], check=False)
+        raise SystemExit("Timed out after " + str(max_wait) + "s waiting for pre-commit check on commit " + commit + ".")
+    status = precommit_run["status"] if precommit_run else "not found"
+    print("pre-commit check is not yet complete (status: " + status + "). Waiting " + str(wait_interval) + "s... (" + str(elapsed) + "/" + str(max_wait) + "s)")
+    time.sleep(wait_interval)
+    elapsed += wait_interval
+"""
+
+
+def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupStep":
+    """Dedicated step that waits for the pre-commit GitHub Actions check to pass.
+
+    It has no dependencies so it runs in parallel with the image build.
+    """
+    program = _PRECOMMIT_POLL_PROGRAM.format(
+        commit=commit,
+        repo=repo_name,
+        max_wait=PRECOMMIT_MAX_WAIT,
+        wait_interval=PRECOMMIT_WAIT_INTERVAL,
+    )
+    precommit_step = BuildkiteCommandStep(
+        label=":lint-roller: pre-commit",
+        key=PRECOMMIT_STEP_KEY,
+        commands=["python3 -c '" + program + "'"],
+        depends_on=[],
+        agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
+        priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
+    )
+    return BuildkiteGroupStep(group="Pre-commit", steps=[precommit_step])
+
+
+def add_precommit_dependency(
+    buildkite_group_steps: List["BuildkiteGroupStep"],
+) -> None:
+    """Make every step that depends on an image build also depend on pre-commit.
+
+    Image build steps themselves are left untouched so they keep running in
+    parallel with pre-commit.
+    """
+    for group_step in buildkite_group_steps:
+        for step in group_step.steps:
+            if not isinstance(step, BuildkiteCommandStep) or not step.depends_on:
+                continue
+            # Don't gate the image build steps themselves on pre-commit.
+            if step.key and "image-build" in step.key:
+                continue
+            if not any("image-build" in dep for dep in step.depends_on):
+                continue
+            if PRECOMMIT_STEP_KEY not in step.depends_on:
+                step.depends_on.append(PRECOMMIT_STEP_KEY)
+
 
 def _get_step_agents(step: Step) -> Dict[str, str]:
     agents = {"queue": get_agent_queue(step)}
