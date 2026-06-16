@@ -10,37 +10,46 @@ from plugin.docker_plugin import get_docker_plugin
 from constants import DeviceType, AgentQueue
 
 
-AMD_AITER_ENV_PASSTHROUGH_PATCH = r'''set -euo pipefail
+AMD_AITER_ENV_PASSTHROUGH_PATCH = r'''set -eu
 patch_aiter_env_passthrough() {
-  local file="$1"
-  local anchor="$2"
-  local insert="$3"
-  if [[ ! -f "$file" ]]; then
-    echo "Skipping AITER env passthrough patch; $file not found"
+  file="$$1"
+  anchor="$$2"
+  insert="$$3"
+  if [ ! -f "$$file" ]; then
+    echo "Skipping AITER env passthrough patch; $$file not found"
     return 0
   fi
-  if grep -q "VLLM_ROCM_USE_AITER" "$file"; then
-    echo "AITER env passthrough already present in $file"
+  if grep -q "VLLM_ROCM_USE_AITER" "$$file"; then
+    echo "AITER env passthrough already present in $$file"
     return 0
   fi
-  local tmp="${file}.aiter-env"
-  awk -v anchor="$anchor" -v insert="$insert" '
-    $0 == anchor && !done { print insert; done = 1 }
-    { print }
-    END { if (!done) exit 42 }
-  ' "$file" > "$tmp"
-  mv "$tmp" "$file"
-  chmod +x "$file"
-  echo "Patched AITER env passthrough into $file"
+  tmp="$${file}.aiter-env"
+  found=0
+  line=""
+  while IFS= read -r line || [ -n "$$line" ]; do
+    if [ "$$found" -eq 0 ] && [ "$$line" = "$$anchor" ]; then
+      printf '%s\n' "$$insert"
+      found=1
+    fi
+    printf '%s\n' "$$line"
+  done < "$$file" > "$$tmp"
+  if [ "$$found" -eq 0 ]; then
+    rm -f "$$tmp"
+    echo "Failed to patch AITER env passthrough; anchor not found in $$file"
+    return 42
+  fi
+  mv "$$tmp" "$$file"
+  chmod +x "$$file"
+  echo "Patched AITER env passthrough into $$file"
 }
 patch_aiter_env_passthrough \
   ".buildkite/scripts/hardware_ci/run-amd-test.sh" \
   '    -e "PYTORCH_ROCM_ARCH=" \' \
-  '    -e "VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}" \'
+  '    -e "VLLM_ROCM_USE_AITER=$${VLLM_ROCM_USE_AITER:-1}" \'
 patch_aiter_env_passthrough \
   ".buildkite/scripts/run-multi-node-test.sh" \
-  '            -v ~/.cache/huggingface:/root/.cache/huggingface --name "node$node" \' \
-  '            -e "VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}" \'
+  '            -v ~/.cache/huggingface:/root/.cache/huggingface --name "node$$node" \' \
+  '            -e "VLLM_ROCM_USE_AITER=$${VLLM_ROCM_USE_AITER:-1}" \'
 '''
 
 

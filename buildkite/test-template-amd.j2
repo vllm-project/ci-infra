@@ -18,53 +18,62 @@
 {%- endmacro %}
 
 {% macro aiter_env_passthrough_patch(indent='') -%}
-{{ indent }}set -euo pipefail
+{{ indent }}set -eu
 {{ indent }}patch_aiter_env_passthrough() {
-{{ indent }}  local file="$1"
-{{ indent }}  local anchor="$2"
-{{ indent }}  local insert="$3"
-{{ indent }}  if [[ ! -f "$file" ]]; then
-{{ indent }}    echo "Skipping AITER env passthrough patch; $file not found"
+{{ indent }}  file="$$1"
+{{ indent }}  anchor="$$2"
+{{ indent }}  insert="$$3"
+{{ indent }}  if [ ! -f "$$file" ]; then
+{{ indent }}    echo "Skipping AITER env passthrough patch; $$file not found"
 {{ indent }}    return 0
 {{ indent }}  fi
-{{ indent }}  if grep -q "VLLM_ROCM_USE_AITER" "$file"; then
-{{ indent }}    echo "AITER env passthrough already present in $file"
+{{ indent }}  if grep -q "VLLM_ROCM_USE_AITER" "$$file"; then
+{{ indent }}    echo "AITER env passthrough already present in $$file"
 {{ indent }}    return 0
 {{ indent }}  fi
-{{ indent }}  local tmp="${file}.aiter-env"
-{{ indent }}  awk -v anchor="$anchor" -v insert="$insert" '
-{{ indent }}    $0 == anchor && !done { print insert; done = 1 }
-{{ indent }}    { print }
-{{ indent }}    END { if (!done) exit 42 }
-{{ indent }}  ' "$file" > "$tmp"
-{{ indent }}  mv "$tmp" "$file"
-{{ indent }}  chmod +x "$file"
-{{ indent }}  echo "Patched AITER env passthrough into $file"
+{{ indent }}  tmp="$${file}.aiter-env"
+{{ indent }}  found=0
+{{ indent }}  line=""
+{{ indent }}  while IFS= read -r line || [ -n "$$line" ]; do
+{{ indent }}    if [ "$$found" -eq 0 ] && [ "$$line" = "$$anchor" ]; then
+{{ indent }}      printf '%s\n' "$$insert"
+{{ indent }}      found=1
+{{ indent }}    fi
+{{ indent }}    printf '%s\n' "$$line"
+{{ indent }}  done < "$$file" > "$$tmp"
+{{ indent }}  if [ "$$found" -eq 0 ]; then
+{{ indent }}    rm -f "$$tmp"
+{{ indent }}    echo "Failed to patch AITER env passthrough; anchor not found in $$file"
+{{ indent }}    return 42
+{{ indent }}  fi
+{{ indent }}  mv "$$tmp" "$$file"
+{{ indent }}  chmod +x "$$file"
+{{ indent }}  echo "Patched AITER env passthrough into $$file"
 {{ indent }}}
 {{ indent }}patch_aiter_env_passthrough \
 {{ indent }}  ".buildkite/scripts/hardware_ci/run-amd-test.sh" \
 {{ indent }}  '    -e "PYTORCH_ROCM_ARCH=" \' \
-{{ indent }}  '    -e "VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}" \'
+{{ indent }}  '    -e "VLLM_ROCM_USE_AITER=$${VLLM_ROCM_USE_AITER:-1}" \'
 {{ indent }}patch_aiter_env_passthrough \
 {{ indent }}  ".buildkite/scripts/run-multi-node-test.sh" \
-{{ indent }}  '            -v ~/.cache/huggingface:/root/.cache/huggingface --name "node$node" \' \
-{{ indent }}  '            -e "VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}" \'
+{{ indent }}  '            -v ~/.cache/huggingface:/root/.cache/huggingface --name "node$$node" \' \
+{{ indent }}  '            -e "VLLM_ROCM_USE_AITER=$${VLLM_ROCM_USE_AITER:-1}" \'
 {%- endmacro %}
 
 {% macro checkout_workload_commit(indent='') -%}
-{{ indent }}set -euo pipefail
+{{ indent }}set -eu
 {{ indent }}checkout_workload_commit() {
-{{ indent }}  local commit="{{ vllm_ci_workload_commit }}"
-{{ indent }}  if [[ -z "$commit" || "$commit" == "${BUILDKITE_COMMIT:-}" ]]; then
+{{ indent }}  commit="{{ vllm_ci_workload_commit }}"
+{{ indent }}  if [ -z "$$commit" ] || [ "$$commit" = "$${BUILDKITE_COMMIT:-}" ]; then
 {{ indent }}    return 0
 {{ indent }}  fi
-{{ indent }}  local ref="${VLLM_CI_SNAPSHOT_REF:-main}"
-{{ indent }}  local depth="${VLLM_CI_SNAPSHOT_FETCH_DEPTH:-2000}"
-{{ indent }}  git fetch --no-tags --depth="${depth}" origin "${ref}:refs/remotes/origin/${ref}" >/dev/null 2>&1 \
-{{ indent }}    || git fetch --no-tags origin "${commit}" >/dev/null 2>&1 \
+{{ indent }}  ref="$${VLLM_CI_SNAPSHOT_REF:-main}"
+{{ indent }}  depth="$${VLLM_CI_SNAPSHOT_FETCH_DEPTH:-2000}"
+{{ indent }}  git fetch --no-tags --depth="$$depth" origin "$${ref}:refs/remotes/origin/$${ref}" >/dev/null 2>&1 \
+{{ indent }}    || git fetch --no-tags origin "$$commit" >/dev/null 2>&1 \
 {{ indent }}    || true
-{{ indent }}  git checkout --force "$commit"
-{{ indent }}  echo "Checked out workload commit: $(git rev-parse HEAD)"
+{{ indent }}  git checkout --force "$$commit"
+{{ indent }}  echo "Checked out workload commit: $$(git rev-parse HEAD)"
 {{ indent }}}
 {{ indent }}checkout_workload_commit
 {%- endmacro %}
@@ -96,7 +105,7 @@
         commands:
           - |
 {{ checkout_workload_commit('            ') }}
-            if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" ]]; then
+            if [ "${ROCM_CI_ARTIFACT_ONLY:-0}" = "1" ]; then
               echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
               IMAGE_TAG="" BUILDKITE_COMMIT="{{ vllm_ci_workload_commit }}" COMMIT="{{ vllm_ci_workload_commit }}" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
             else
