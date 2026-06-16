@@ -64,16 +64,17 @@
 {{ indent }}set -eu
 {{ indent }}checkout_workload_commit() {
 {{ indent }}  commit="{{ vllm_ci_workload_commit }}"
-{{ indent }}  if [ -z "$$commit" ] || [ "$$commit" = "$${BUILDKITE_COMMIT:-}" ]; then
+{{ indent }}  if [ -z "$$commit" ] || [ "$$commit" = "HEAD" ] || [ "$$commit" = "$${BUILDKITE_COMMIT:-}" ]; then
 {{ indent }}    return 0
 {{ indent }}  fi
 {{ indent }}  ref="$${VLLM_CI_SNAPSHOT_REF:-main}"
 {{ indent }}  depth="$${VLLM_CI_SNAPSHOT_FETCH_DEPTH:-2000}"
-{{ indent }}  git fetch --no-tags --depth="$$depth" origin "$${ref}:refs/remotes/origin/$${ref}" >/dev/null 2>&1 \
-{{ indent }}    || git fetch --no-tags origin "$$commit" >/dev/null 2>&1 \
+{{ indent }}  repo_dir="$$(pwd)"
+{{ indent }}  git -c safe.directory="$$repo_dir" fetch --no-tags --depth="$$depth" origin "$${ref}:refs/remotes/origin/$${ref}" >/dev/null 2>&1 \
+{{ indent }}    || git -c safe.directory="$$repo_dir" fetch --no-tags origin "$$commit" >/dev/null 2>&1 \
 {{ indent }}    || true
-{{ indent }}  git checkout --force "$$commit"
-{{ indent }}  echo "Checked out workload commit: $$(git rev-parse HEAD)"
+{{ indent }}  git -c safe.directory="$$repo_dir" checkout --force "$$commit"
+{{ indent }}  echo "Checked out workload commit: $$(git -c safe.directory="$$repo_dir" rev-parse HEAD)"
 {{ indent }}}
 {{ indent }}checkout_workload_commit
 {%- endmacro %}
