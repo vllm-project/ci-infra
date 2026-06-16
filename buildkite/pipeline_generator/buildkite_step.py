@@ -12,8 +12,8 @@ from constants import DeviceType, AgentQueue
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
 PRECOMMIT_STEP_KEY = "pre-commit"
-PRECOMMIT_MAX_WAIT = 1800  # 30 minutes
-PRECOMMIT_WAIT_INTERVAL = 30
+PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
+PRECOMMIT_WAIT_INTERVAL = 60
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
 # commit/repo at generation time and run on a CI agent as its own step, so it
