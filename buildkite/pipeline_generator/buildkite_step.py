@@ -63,14 +63,16 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         wait_interval=PRECOMMIT_WAIT_INTERVAL,
     )
     precommit_step = BuildkiteCommandStep(
-        label=":lint-roller: pre-commit",
+        label=":github: GitHub pre-commit check",
         key=PRECOMMIT_STEP_KEY,
         commands=["python3 -c '" + program + "'"],
         depends_on=[],
         agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
     )
-    return BuildkiteGroupStep(group="Pre-commit", steps=[precommit_step])
+    return BuildkiteGroupStep(
+        group="GitHub pre-commit check", steps=[precommit_step]
+    )
 
 
 def add_precommit_dependency(
