@@ -39,11 +39,21 @@ while True:
         if conclusion == "success":
             print("pre-commit check passed on commit " + commit + ".")
             raise SystemExit(0)
-        subprocess.run(["buildkite-agent", "annotate", ":x: pre-commit check has not passed on this PR (conclusion: " + str(conclusion) + "). Please fix pre-commit issues before running CI.", "--style", "error"], check=False)
-        raise SystemExit("pre-commit check failed on commit " + commit + " (conclusion: " + str(conclusion) + ").")
+        # Only block downstream tests on a confirmed pre-commit failure. Other
+        # conclusions (skipped, cancelled, neutral, stale, ...) are not real
+        # failures, and pre-commit is also a required check on the PR, so let CI
+        # proceed rather than false-failing the whole build.
+        if conclusion in ("failure", "timed_out", "action_required"):
+            subprocess.run(["buildkite-agent", "annotate", ":x: pre-commit check failed on this PR (conclusion: " + str(conclusion) + "). Please fix pre-commit issues before running CI.", "--style", "error"], check=False)
+            raise SystemExit("pre-commit check failed on commit " + commit + " (conclusion: " + str(conclusion) + ").")
+        print("pre-commit check did not fail (conclusion: " + str(conclusion) + "); allowing CI to proceed.")
+        raise SystemExit(0)
     if elapsed >= max_wait:
-        subprocess.run(["buildkite-agent", "annotate", ":warning: Timed out waiting for pre-commit check to complete.", "--style", "warning"], check=False)
-        raise SystemExit("Timed out after " + str(max_wait) + "s waiting for pre-commit check on commit " + commit + ".")
+        # Do not block CI if the check never completes; the pre-commit check on
+        # the PR still surfaces a genuine failure independently.
+        subprocess.run(["buildkite-agent", "annotate", ":warning: Timed out waiting for the pre-commit check to complete; allowing CI to proceed. See the pre-commit check on the PR for its status.", "--style", "warning"], check=False)
+        print("Timed out after " + str(max_wait) + "s waiting for pre-commit check on commit " + commit + "; allowing CI to proceed.")
+        raise SystemExit(0)
     status = precommit_run["status"] if precommit_run else "not found"
     print("pre-commit check is not yet complete (status: " + status + "). Waiting " + str(wait_interval) + "s... (" + str(elapsed) + "/" + str(max_wait) + "s)")
     time.sleep(wait_interval)
@@ -52,9 +62,12 @@ while True:
 
 
 def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupStep":
-    """Dedicated step that waits for the pre-commit GitHub Actions check to pass.
+    """Dedicated step that waits on the pre-commit GitHub Actions check.
 
-    It has no dependencies so it runs in parallel with the image build.
+    It has no dependencies so it runs in parallel with the image build. It only
+    fails (and so blocks the downstream tests that depend on it) on a confirmed
+    pre-commit failure; benign conclusions (skipped, cancelled, ...) and a poll
+    timeout let CI proceed, since pre-commit is also a required check on the PR.
     """
     program = _PRECOMMIT_POLL_PROGRAM.format(
         commit=commit,
