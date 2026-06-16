@@ -31,8 +31,14 @@ own Terraform state (`github-runners/terraform.tfstate`), in the account's
 
 Org **Settings → Developer settings → GitHub Apps → New GitHub App**:
 
-- **Webhook**: leave the URL blank for now (the `webhook_github_app` submodule
-  sets it after the first apply); set a **secret** (you'll reuse it below).
+- **Webhook**: there's **nothing to fill in yet** — the URL only exists after
+  `terraform apply`. Per the upstream guide, **disable the webhook** during
+  creation (uncheck *Active*). You generate your own webhook **secret** (any
+  random string), store it in SSM below, and the `webhook_github_app` submodule
+  pushes the real URL **and** that secret onto the App at apply. (If you'd
+  rather the submodule "just work" without re-enabling later, leave *Active*
+  checked with a placeholder URL like `https://example.com` so the App already
+  has a hook config to update.)
 - **Permissions**
   - Repository → **Actions**: Read-only
   - Organization → **Self-hosted runners**: Read and write  *(needed for org runners + runner groups)*
@@ -50,7 +56,7 @@ aws ssm put-parameter --region us-west-2 --name /github-runners/key-base64 \
   --type SecureString --value "$(base64 -i path/to/app.private-key.pem)"
 
 aws ssm put-parameter --region us-west-2 --name /github-runners/webhook-secret \
-  --type SecureString --value "<the webhook secret from step 1>"
+  --type SecureString --value "$(openssl rand -hex 32)"   # generate the webhook secret; the submodule pushes it to the App
 ```
 
 > `key-base64` must be the **base64 of the `.pem` file**, not its contents.
@@ -66,12 +72,23 @@ group is managed like the others under `github/runner-groups/`.
 ```bash
 cd terraform/github-runners
 terraform init -backend-config=backend.hcl
-terraform plan      # review the ~40 resources
+
+# First run only: download the Lambda zips locally. The download-lambda module
+# writes them at apply time, but the Lambda resources hash the files during the
+# plan phase, so they must exist first. (Equivalent to the upstream guide's
+# "Download lambdas" step; subsequent applies don't need this.)
+terraform apply -target=module.lambdas
+
+terraform plan      # review (~110 resources)
 terraform apply
 ```
 
-The `webhook_github_app` submodule wires the App's webhook URL automatically.
-Trigger a workflow that targets the group and watch instances appear/terminate.
+After apply, the `webhook_github_app` submodule has pushed the API Gateway URL
++ secret onto the App. Confirm the App's **webhook is Active** and pointed at
+`terraform output -raw webhook_endpoint` (check the App's *Advanced* tab for a
+delivered ping). If you skipped the submodule, enable the webhook and paste the
+URL + the SSM `webhook-secret` value by hand. Then trigger a workflow targeting
+the group and watch instances appear/terminate.
 
 ## Runner image (read this — it's the Python-3.12 fix)
 
