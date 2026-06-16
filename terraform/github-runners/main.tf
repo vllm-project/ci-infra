@@ -39,13 +39,13 @@ locals {
 # Download the prebuilt Lambda artifacts that match the module version, instead
 # of building them locally. Order here defines the index used below.
 module "lambdas" {
-  source  = "philips-labs/github-runner/aws//modules/download-lambda"
-  version = "6.1.0"
+  source  = "github-aws-runners/github-runner/aws//modules/download-lambda"
+  version = "7.7.1"
 
   lambdas = [
-    { name = "webhook", tag = "v6.1.0" },
-    { name = "runners", tag = "v6.1.0" },
-    { name = "runner-binaries-syncer", tag = "v6.1.0" },
+    { name = "webhook", tag = "v7.7.1" },
+    { name = "runners", tag = "v7.7.1" },
+    { name = "runner-binaries-syncer", tag = "v7.7.1" },
   ]
 }
 
@@ -53,8 +53,8 @@ module "lambdas" {
 # GitHub `workflow_job` webhook -> API Gateway -> Lambda -> one EC2 instance per
 # queued job (JIT runner) -> runs a single job -> instance is terminated.
 module "runners" {
-  source  = "philips-labs/github-runner/aws"
-  version = "6.1.0"
+  source  = "github-aws-runners/github-runner/aws"
+  version = "7.7.1"
 
   aws_region = var.aws_region
   vpc_id     = data.aws_vpc.default.id
@@ -122,8 +122,8 @@ module "runners" {
 # Automatically points the GitHub App's webhook at the API Gateway endpoint
 # created above (so you don't paste the URL into the App by hand).
 module "webhook_github_app" {
-  source     = "philips-labs/github-runner/aws//modules/webhook-github-app"
-  version    = "6.1.0"
+  source     = "github-aws-runners/github-runner/aws//modules/webhook-github-app"
+  version    = "7.7.1"
   depends_on = [module.runners]
 
   github_app       = local.github_app

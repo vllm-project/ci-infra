@@ -1,8 +1,9 @@
 # Autoscaling GitHub Actions runners on EC2
 
 Event-driven, **ephemeral** self-hosted GitHub Actions runners on AWS, built on
-[`philips-labs/github-runner/aws`](https://registry.terraform.io/modules/philips-labs/github-runner/aws/latest)
-(v6.1.0). A GitHub App webhook drives autoscaling:
+[`github-aws-runners/github-runner/aws`](https://registry.terraform.io/modules/github-aws-runners/github-runner/aws/latest)
+(v7.7.1; requires the AWS provider >= 6.33). A GitHub App webhook drives
+autoscaling:
 
 ```
 workflow_job (queued)  ->  API Gateway  ->  scale-up Lambda

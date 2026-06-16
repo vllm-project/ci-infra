@@ -5,7 +5,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0" # module v7 requires the AWS provider >= 6.33
     }
   }
 }

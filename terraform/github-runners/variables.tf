@@ -11,9 +11,9 @@ variable "prefix" {
 }
 
 variable "module_version" {
-  description = "Pinned version of philips-labs/github-runner/aws. Keep in sync with the module/submodule version literals and the lambda tags."
+  description = "Pinned version of github-aws-runners/github-runner/aws. Keep in sync with the module/submodule version literals and the lambda tags."
   type        = string
-  default     = "6.1.0"
+  default     = "7.7.1"
 }
 
 variable "enable_organization_runners" {
