@@ -49,7 +49,7 @@ variable "instance_target_capacity_type" {
 variable "runners_maximum_count" {
   description = "Max concurrent runner instances (autoscaling upper bound)."
   type        = number
-  default     = 20
+  default     = 50
 }
 
 # SSM SecureString/String parameters holding the GitHub App credentials.
