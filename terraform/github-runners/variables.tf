@@ -35,9 +35,9 @@ variable "runner_extra_labels" {
 }
 
 variable "instance_types" {
-  description = "Candidate EC2 instance types (x86_64). First match with capacity wins."
+  description = "Candidate EC2 instance types (x86_64). 8 vCPU / 32 GiB so the full --all-files pre-commit (mypy over the whole repo) doesn't OOM; 4 GiB (c7i.large) did."
   type        = list(string)
-  default     = ["m7i.large", "m6i.large", "c7i.large"]
+  default     = ["m7i.2xlarge", "m6i.2xlarge", "m5.2xlarge"]
 }
 
 variable "instance_target_capacity_type" {
