@@ -98,25 +98,23 @@ module "runners" {
   # ----------------------------------------------------------------------------
   # Runner image (AMI)
   # ----------------------------------------------------------------------------
-  # The module default AMI is Amazon Linux 2023. That reproduces the
-  # `actions/setup-python` failure we hit on the bare vllm-runners box
-  # ("version '3.12' ... not found for this operating system"), because
-  # actions/python-versions only ships prebuilt CPython for Ubuntu.
-  #
-  # Before relying on this for the pre-commit gate, point `ami` at a custom AMI
-  # that ships Python 3.12 + git + shellcheck (+ wget/xz), ideally with the
-  # versions pre-seeded in /opt/hostedtoolcache so setup-python is instant.
-  # Build it with Packer (see packer/) or mirror actions/runner-images.
-  #
-  # ami = {
-  #   filter = { name = ["vllm-gha-runner-*"], state = ["available"] }
-  #   owners = [data.aws_caller_identity.current.account_id]
-  # }
-  #
-  # As a stop-gap on the default AMI, install packages at boot:
-  # userdata_pre_install = <<-EOF
-  #   dnf install -y git wget xz jq
-  # EOF
+  # Stock Ubuntu 24.04 (Canonical) instead of the module default (Amazon Linux
+  # 2023). Ubuntu 24.04 ships Python 3.12 as the system python3 AND
+  # actions/setup-python has prebuilt CPython for Ubuntu, so the pre-commit
+  # workflow works unchanged (the AL2023 default fails `setup-python`).
+  # Pairs with the custom Ubuntu userdata template and runner_run_as below.
+  ami = {
+    filter = {
+      name  = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+      state = ["available"]
+    }
+    owners = ["099720109477"] # Canonical
+  }
+  userdata_template = "${path.module}/templates/user-data-ubuntu.sh"
+  runner_run_as     = "ubuntu" # Ubuntu's default user (module default is ec2-user)
+
+  # Ubuntu's stock AMI has no CloudWatch agent; skip it to keep the image clean.
+  enable_cloudwatch_agent = false
 }
 
 # Automatically points the GitHub App's webhook at the API Gateway endpoint
