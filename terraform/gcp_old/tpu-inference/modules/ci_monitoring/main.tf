@@ -10,7 +10,6 @@ resource "google_compute_instance" "monitoring_instance" {
   name         = "vllm-ci-monitoring-cpu-0"
   machine_type = "e2-micro"
 
-  # Use the default Compute Engine Service Account to maintain consistency with existing setup
   service_account {
     scopes = ["cloud-platform"]
   }
@@ -25,7 +24,6 @@ resource "google_compute_instance" "monitoring_instance" {
   }
 
   network_interface {
-    # Allocate an ephemeral public IP so the instance can download binaries and call the Buildkite REST API
     access_config {}
     subnetwork = "projects/${var.project_id}/regions/us-central1/subnetworks/default"
   }
@@ -39,6 +37,8 @@ resource "google_compute_instance" "monitoring_instance" {
       wget -q https://github.com/buildkite/buildkite-agent-metrics/releases/download/v5.5.0/buildkite-agent-metrics-linux-amd64 -O /usr/local/bin/buildkite-agent-metrics
       chmod +x /usr/local/bin/buildkite-agent-metrics
 
+      BK_TOKEN=$(gcloud secrets versions access latest --secret="${var.buildkite_token_secret_id}")
+
       # Step 2: Configure Systemd background service
       cat << 'SERVICE_EOF' > /etc/systemd/system/bk-metrics.service
       [Unit]
@@ -47,11 +47,10 @@ resource "google_compute_instance" "monitoring_instance" {
 
       [Service]
       Type=simple
-      # Use GCP backend. The binary will automatically use the default Service Account's credentials to write to Cloud Monitoring.
       ExecStart=/usr/local/bin/buildkite-agent-metrics \
         -backend stackdriver \
         -stackdriver-projectid ${var.project_id} \
-        -token ${var.buildkite_token_value} \
+        -token $${BK_TOKEN} \
         -interval 15s
       Restart=always
       RestartSec=10
@@ -75,7 +74,7 @@ resource "google_compute_instance" "monitoring_instance" {
 resource "google_bigquery_dataset" "ci_analytics" {
   dataset_id  = "ci_efficiency_metrics"
   project     = var.project_id
-  location    = "us-central1" # Regional location for compliance
+  location    = "us-central1"
   description = "Analytical store for Buildkite execution performance"
 }
 
@@ -126,7 +125,6 @@ resource "google_storage_bucket_object" "source_object" {
 
 # =====================================================================
 # PART 4: SECURITY & PERMISSIONS (IAM)
-# Fetching the API Access Token from Secret Manager
 # =====================================================================
 
 data "google_secret_manager_secret_version" "webhook_secret_val" {
@@ -156,7 +154,6 @@ resource "google_secret_manager_secret_iam_member" "secret_access" {
 
 # =====================================================================
 # PART 5: THE PULLER (Cloud Functions v2)
-# Internal function triggered by Scheduler (No public internet access)
 # =====================================================================
 
 resource "google_cloudfunctions2_function" "webhook_receiver" {
@@ -183,10 +180,16 @@ resource "google_cloudfunctions2_function" "webhook_receiver" {
     service_account_email = google_service_account.function_sa.email
 
     environment_variables = {
-      BQ_TABLE_ID    = "${var.project_id}.${google_bigquery_dataset.ci_analytics.dataset_id}.${google_bigquery_table.step_logs.table_id}"
-      WEBHOOK_SECRET = data.google_secret_manager_secret_version.webhook_secret_val.secret_data
-      PIPELINE_SLUG  = var.pipeline_slug
-      ORG_SLUG       = var.org_slug
+      BQ_TABLE_ID   = "${var.project_id}.${google_bigquery_dataset.ci_analytics.dataset_id}.${google_bigquery_table.step_logs.table_id}"
+      PIPELINE_SLUG = var.pipeline_slug
+      ORG_SLUG      = var.org_slug
+    }
+
+    secret_environment_variables {
+      key        = "WEBHOOK_SECRET"
+      project_id = var.project_id
+      secret     = data.google_secret_manager_secret_version.webhook_secret_val.secret
+      version    = "latest"
     }
   }
 }
