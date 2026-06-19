@@ -452,7 +452,7 @@ def convert_group_step_to_buildkite_step(
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
 
-    amd_mirror_steps = []
+    amd_hardware_steps = []
     torch_nightly_steps_collected = []
 
     for group, steps in group_steps.items():
@@ -466,9 +466,9 @@ def convert_group_step_to_buildkite_step(
                         depends_on=amd_step.depends_on,
                         key=f"block-amd-{_generate_step_key(step.key or step.label)}",
                     )
-                    group_steps_list.append(block_step)
+                    amd_hardware_steps.append(block_step)
                     amd_step.depends_on = [*amd_step.depends_on, block_step.key]
-                group_steps_list.append(amd_step)
+                amd_hardware_steps.append(amd_step)
                 continue
 
             # block step
@@ -535,19 +535,20 @@ def convert_group_step_to_buildkite_step(
                         depends_on=[mirror_build_dep],
                         key=f"block-amd-{_generate_step_key(step.label)}",
                     )
-                    amd_mirror_steps.append(amd_block_step)
+                    amd_hardware_steps.append(amd_block_step)
                 if amd_block_step:
                     amd_step.depends_on.append(amd_block_step.key)
-                amd_mirror_steps.append(amd_step)
+                amd_hardware_steps.append(amd_step)
 
-        buildkite_group_steps.append(
-            BuildkiteGroupStep(group=group, steps=group_steps_list)
-        )
+        if group_steps_list:
+            buildkite_group_steps.append(
+                BuildkiteGroupStep(group=group, steps=group_steps_list)
+            )
 
-    # If AMD mirror step exists, make it a group step
-    if amd_mirror_steps:
+    # If AMD hardware steps exist, make them a group step.
+    if amd_hardware_steps:
         buildkite_group_steps.append(
-            BuildkiteGroupStep(group="Hardware-AMD Tests", steps=amd_mirror_steps)
+            BuildkiteGroupStep(group="Hardware-AMD Tests", steps=amd_hardware_steps)
         )
 
     # Create torch nightly group if any steps have mirror.torch_nightly

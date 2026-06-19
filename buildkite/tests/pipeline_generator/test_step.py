@@ -54,10 +54,9 @@ def fake_global_config(monkeypatch):
 
 
 def _render_single_step(step):
-    group_step = buildkite_step.convert_group_step_to_buildkite_step({
+    return buildkite_step.convert_group_step_to_buildkite_step({
         step.group: [step],
     })[0]
-    return group_step.steps
 
 
 def test_read_steps_from_job_dir():
@@ -114,8 +113,10 @@ def test_direct_amd_gpu_steps_use_amd_ci_path(device, queue):
         commands=["pytest tests/foo.py"],
     )
 
-    block_step, command_step = _render_single_step(step)
+    group_step = _render_single_step(step)
+    block_step, command_step = group_step.steps
 
+    assert group_step.group == "Hardware-AMD Tests"
     assert block_step.block == f"Run AMD: AMD direct test ({device})"
     assert block_step.depends_on == ["image-build-amd"]
     assert command_step.label == f"AMD: AMD direct test ({device})"
