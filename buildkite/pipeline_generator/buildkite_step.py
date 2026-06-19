@@ -15,6 +15,35 @@ PRECOMMIT_STEP_KEY = "pre-commit"
 PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
+AMD_GPU_QUEUE_MAP = {
+    DeviceType.AMD_MI250_1.value: AgentQueue.AMD_MI250_1,
+    DeviceType.AMD_MI250_2.value: AgentQueue.AMD_MI250_2,
+    DeviceType.AMD_MI250_4.value: AgentQueue.AMD_MI250_4,
+    DeviceType.AMD_MI250_8.value: AgentQueue.AMD_MI250_8,
+    DeviceType.AMD_MI300_1.value: AgentQueue.AMD_MI300_1,
+    DeviceType.AMD_MI300_2.value: AgentQueue.AMD_MI300_2,
+    DeviceType.AMD_MI300_4.value: AgentQueue.AMD_MI300_4,
+    DeviceType.AMD_MI300_8.value: AgentQueue.AMD_MI300_8,
+    DeviceType.AMD_MI325_1.value: AgentQueue.AMD_MI325_1,
+    DeviceType.AMD_MI325_2.value: AgentQueue.AMD_MI325_2,
+    DeviceType.AMD_MI325_4.value: AgentQueue.AMD_MI325_4,
+    DeviceType.AMD_MI325_8.value: AgentQueue.AMD_MI325_8,
+    DeviceType.AMD_MI355_1.value: AgentQueue.AMD_MI355_1,
+    DeviceType.AMD_MI355_2.value: AgentQueue.AMD_MI355_2,
+    DeviceType.AMD_MI355_4.value: AgentQueue.AMD_MI355_4,
+    DeviceType.AMD_MI355_8.value: AgentQueue.AMD_MI355_8,
+}
+
+AMD_RETRY = {
+    "automatic": [
+        {
+            "exit_status": [-1, 1, 128],
+            "signal_reason": ["none", "agent_stop", "agent_refused"],
+            "limit": 1,
+        },
+    ],
+}
+
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
 # commit/repo at generation time and run on a CI agent as its own step, so it
 # carries no shell variables (nothing for `buildkite-agent pipeline upload` to
@@ -240,6 +269,68 @@ def get_agent_queue(step: Step):
         return AgentQueue.GPU_1
 
 
+def _is_amd_gpu_device(device: Optional[str]) -> bool:
+    return device in AMD_GPU_QUEUE_MAP
+
+
+def _get_amd_queue(amd_device: str) -> AgentQueue:
+    amd_queue = AMD_GPU_QUEUE_MAP.get(amd_device)
+    if not amd_queue:
+        raise ValueError(
+            f"Invalid AMD device: {amd_device}. "
+            f"Valid devices: {list(AMD_GPU_QUEUE_MAP.keys())}"
+        )
+    return amd_queue
+
+
+def _get_amd_label(label: str, amd_device: str) -> str:
+    device_type = (
+        amd_device.replace("amd_", "")
+        if amd_device.startswith("amd_")
+        else amd_device
+    )
+    return f"AMD: {label} ({device_type})"
+
+
+def _normalize_amd_depends_on(depends_on: Optional[List[str]]) -> List[str]:
+    normalized = []
+    for dependency in depends_on or []:
+        if dependency == "image-build":
+            dependency = "image-build-amd"
+        if dependency not in normalized:
+            normalized.append(dependency)
+    if "image-build-amd" not in normalized:
+        normalized.insert(0, "image-build-amd")
+    return normalized
+
+
+def _get_amd_env(
+    commands: str,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    env = dict(extra_env or {})
+    env.update(
+        {
+            "DOCKER_BUILDKIT": "1",
+            # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
+            # Keep the hook warmup on ci_base; the runner uses the full image
+            # only if ci_base or artifact setup fails before tests begin.
+            "DOCKER_IMAGE_NAME": "rocm/vllm-dev:ci_base",
+            "VLLM_CI_BASE_IMAGE": "rocm/vllm-dev:ci_base",
+            "VLLM_CI_FALLBACK_IMAGE": "rocm/vllm-ci:$BUILDKITE_COMMIT",
+            "VLLM_CI_USE_ARTIFACTS": "1",
+            "VLLM_CI_ARTIFACT_GLOB": (
+                "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
+            ),
+            "VLLM_CI_RESULTS_ROOT": (
+                "/home/buildkite-agent/huggingface/amd-ci-results"
+            ),
+            "VLLM_TEST_COMMANDS": commands,
+        }
+    )
+    return env
+
+
 def _get_variables_to_inject() -> Dict[str, str]:
     global_config = get_global_config()
     if global_config["name"] != "vllm_ci":
@@ -367,6 +458,19 @@ def convert_group_step_to_buildkite_step(
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
+            if _is_amd_gpu_device(step.device):
+                amd_step = _create_amd_direct_step(step, variables_to_inject)
+                if not _step_should_run(step, list_file_diff):
+                    block_step = BuildkiteBlockStep(
+                        block=f"Run {amd_step.label}",
+                        depends_on=amd_step.depends_on,
+                        key=f"block-amd-{_generate_step_key(step.key or step.label)}",
+                    )
+                    group_steps_list.append(block_step)
+                    amd_step.depends_on = [*amd_step.depends_on, block_step.key]
+                group_steps_list.append(amd_step)
+                continue
+
             # block step
             block_step = None
             if not _step_should_run(step, list_file_diff):
@@ -525,6 +629,33 @@ def _generate_step_key(step_label: str) -> str:
     )
 
 
+def _create_amd_direct_step(
+    step: Step,
+    variables_to_inject: Dict[str, str],
+) -> BuildkiteCommandStep:
+    """Create an AMD-only command step from a top-level test-area step."""
+    amd_device = step.device
+    amd_commands = [
+        f"export VLLM_TEST_GROUP_NAME={_generate_step_key(step.key or step.label)}"
+    ]
+    amd_commands.extend(
+        _prepare_commands(step, variables_to_inject, setup_profile="amd")
+    )
+
+    return BuildkiteCommandStep(
+        label=_get_amd_label(step.label, amd_device),
+        key=step.key,
+        commands=["bash .buildkite/scripts/hardware_ci/run-amd-test.sh"],
+        depends_on=_normalize_amd_depends_on(step.depends_on),
+        agents={"queue": _get_amd_queue(amd_device)},
+        env=_get_amd_env(" && ".join(amd_commands), step.env),
+        priority=200,
+        soft_fail=step.soft_fail or False,
+        retry=AMD_RETRY,
+        parallelism=step.parallelism,
+    )
+
+
 def _create_amd_mirror_step(
     step: Step,
     variables_to_inject: Dict[str, str],
@@ -534,10 +665,12 @@ def _create_amd_mirror_step(
     amd_device = amd["device"]
     custom_commands = amd.get("commands")
     if custom_commands:
-        amd_step = step.model_copy(update={
-            "commands": custom_commands,
-            "working_dir": amd.get("working_dir", step.working_dir),
-        })
+        amd_step = step.model_copy(
+            update={
+                "commands": custom_commands,
+                "working_dir": amd.get("working_dir", step.working_dir),
+            }
+        )
         amd_commands_str = " && ".join(
             _prepare_commands(amd_step, variables_to_inject, setup_profile="amd")
         )
@@ -551,57 +684,18 @@ def _create_amd_mirror_step(
     # without shell interpretation, preserving all inner quoting.
     amd_command_wrapped = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 
-    # Extract device name from queue name
-    device_type = amd_device.replace("amd_", "") if amd_device.startswith("amd_") else amd_device
-    amd_label = f"AMD: {step.label} ({device_type})"
-
-    # Map device type to agent queue
-    amd_queue_map = {
-        DeviceType.AMD_MI250_1: AgentQueue.AMD_MI250_1,
-        DeviceType.AMD_MI250_2: AgentQueue.AMD_MI250_2,
-        DeviceType.AMD_MI250_4: AgentQueue.AMD_MI250_4,
-        DeviceType.AMD_MI250_8: AgentQueue.AMD_MI250_8,
-        DeviceType.AMD_MI300_1: AgentQueue.AMD_MI300_1,
-        DeviceType.AMD_MI300_2: AgentQueue.AMD_MI300_2,
-        DeviceType.AMD_MI300_4: AgentQueue.AMD_MI300_4,
-        DeviceType.AMD_MI300_8: AgentQueue.AMD_MI300_8,
-        DeviceType.AMD_MI325_1: AgentQueue.AMD_MI325_1,
-        DeviceType.AMD_MI325_2: AgentQueue.AMD_MI325_2,
-        DeviceType.AMD_MI325_4: AgentQueue.AMD_MI325_4,
-        DeviceType.AMD_MI325_8: AgentQueue.AMD_MI325_8,
-        DeviceType.AMD_MI355_1: AgentQueue.AMD_MI355_1,
-        DeviceType.AMD_MI355_2: AgentQueue.AMD_MI355_2,
-        DeviceType.AMD_MI355_4: AgentQueue.AMD_MI355_4,
-        DeviceType.AMD_MI355_8: AgentQueue.AMD_MI355_8,
-    }
-
-    build_dep = "image-build-amd"
-
-    amd_queue = amd_queue_map.get(amd_device)
-    if not amd_queue:
-        raise ValueError(f"Invalid AMD device: {amd_device}. Valid devices: {list(amd_queue_map.keys())}")
+    extra_env = dict(step.env or {})
+    extra_env.update(amd.get("env", {}))
 
     return BuildkiteCommandStep(
-        label=amd_label,
+        label=_get_amd_label(step.label, amd_device),
         commands=[amd_command_wrapped],
-        depends_on=[build_dep],
-        agents={"queue": amd_queue},
-        env={
-            "DOCKER_BUILDKIT": "1",
-            # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
-            # Keep the hook warmup on ci_base; the runner uses the full image
-            # only if ci_base or artifact setup fails before tests begin.
-            "DOCKER_IMAGE_NAME": "rocm/vllm-dev:ci_base",
-            "VLLM_CI_BASE_IMAGE": "rocm/vllm-dev:ci_base",
-            "VLLM_CI_FALLBACK_IMAGE": "rocm/vllm-ci:$BUILDKITE_COMMIT",
-            "VLLM_CI_USE_ARTIFACTS": "1",
-            "VLLM_CI_ARTIFACT_GLOB": "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz",
-            "VLLM_CI_RESULTS_ROOT": "/home/buildkite-agent/huggingface/amd-ci-results",
-            "VLLM_TEST_COMMANDS": amd_commands_str,
-        },
+        depends_on=_normalize_amd_depends_on(amd.get("depends_on")),
+        agents={"queue": _get_amd_queue(amd_device)},
+        env=_get_amd_env(amd_commands_str, extra_env),
         priority=200,
         soft_fail=amd.get("soft_fail", step.soft_fail or False),
-        retry=None,
+        retry=AMD_RETRY,
         parallelism=step.parallelism,
     )
 
