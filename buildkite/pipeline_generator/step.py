@@ -21,6 +21,7 @@ class Step(BaseModel):
     num_nodes: Optional[int] = None
     source_file_dependencies: Optional[List[str]] = None
     soft_fail: Optional[bool] = False
+    timeout_in_minutes: Optional[int] = None
     parallelism: Optional[int] = None
     mount_buildkite_agent: Optional[bool] = False
     env: Optional[Dict[str, str]] = None

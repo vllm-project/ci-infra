@@ -43,6 +43,16 @@ AMD_RETRY = {
         },
     ],
 }
+AMD_DEFAULT_TIMEOUT_IN_MINUTES = 180
+ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
+ROCM_DEBUG_AGENT_SETUP_COMMAND = (
+    f"if [ -f {ROCM_DEBUG_AGENT_LIB} ]; then "
+    f"export HSA_TOOLS_LIB={ROCM_DEBUG_AGENT_LIB} && export HSA_ENABLE_DEBUG=1 "
+    f"&& echo ROCm debug agent enabled: {ROCM_DEBUG_AGENT_LIB}; "
+    f"else echo WARNING: ROCm debug agent not found at {ROCM_DEBUG_AGENT_LIB}; "
+    "skipping coredump setup; "
+    "fi"
+)
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
 # commit/repo at generation time and run on a CI agent as its own step, so it
@@ -163,6 +173,7 @@ class BuildkiteCommandStep(BaseModel):
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
     priority: Optional[int] = None
+    timeout_in_minutes: Optional[int] = None
 
     def to_yaml(self):
         return {
@@ -178,6 +189,7 @@ class BuildkiteCommandStep(BaseModel):
             "env": self.env,
             "parallelism": self.parallelism,
             "priority": self.priority,
+            "timeout_in_minutes": self.timeout_in_minutes,
         }
 
 
@@ -307,6 +319,7 @@ def _normalize_amd_depends_on(depends_on: Optional[List[str]]) -> List[str]:
 def _get_amd_env(
     commands: str,
     extra_env: Optional[Dict[str, str]] = None,
+    timeout_in_minutes: Optional[int] = None,
 ) -> Dict[str, str]:
     env = dict(extra_env or {})
     env.update(
@@ -328,7 +341,28 @@ def _get_amd_env(
             "VLLM_TEST_COMMANDS": commands,
         }
     )
+    container_timeout_s = _get_amd_container_timeout_s(timeout_in_minutes)
+    if container_timeout_s:
+        env["CONTAINER_TIMEOUT_S"] = container_timeout_s
     return env
+
+
+def _get_amd_timeout_in_minutes(
+    step: Step,
+    amd: Optional[Dict[str, Any]] = None,
+) -> int:
+    if amd and amd.get("timeout_in_minutes") is not None:
+        return amd["timeout_in_minutes"]
+    return step.timeout_in_minutes or AMD_DEFAULT_TIMEOUT_IN_MINUTES
+
+
+def _get_amd_container_timeout_s(timeout_in_minutes: Optional[int]) -> Optional[str]:
+    if not timeout_in_minutes:
+        return None
+    timeout_s = timeout_in_minutes * 60
+    if timeout_in_minutes > 1:
+        timeout_s -= 60
+    return str(timeout_s)
 
 
 def _get_variables_to_inject() -> Dict[str, str]:
@@ -372,6 +406,8 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
         return [
             "echo '--- :amd: GPU Info'",
             "(command amd-smi || true)",
+            "echo '--- :gear: ROCm Debug Agent Setup'",
+            ROCM_DEBUG_AGENT_SETUP_COMMAND,
         ]
 
     raise ValueError(f"Unsupported setup profile: {setup_profile}")
@@ -636,6 +672,7 @@ def _create_amd_direct_step(
 ) -> BuildkiteCommandStep:
     """Create an AMD-only command step from a top-level test-area step."""
     amd_device = step.device
+    timeout_in_minutes = _get_amd_timeout_in_minutes(step)
     amd_commands = [
         f"export VLLM_TEST_GROUP_NAME={_generate_step_key(step.key or step.label)}"
     ]
@@ -649,11 +686,12 @@ def _create_amd_direct_step(
         commands=["bash .buildkite/scripts/hardware_ci/run-amd-test.sh"],
         depends_on=_normalize_amd_depends_on(step.depends_on),
         agents={"queue": _get_amd_queue(amd_device)},
-        env=_get_amd_env(" && ".join(amd_commands), step.env),
+        env=_get_amd_env(" && ".join(amd_commands), step.env, timeout_in_minutes),
         priority=200,
         soft_fail=step.soft_fail or False,
         retry=AMD_RETRY,
         parallelism=step.parallelism,
+        timeout_in_minutes=timeout_in_minutes,
     )
 
 
@@ -687,17 +725,19 @@ def _create_amd_mirror_step(
 
     extra_env = dict(step.env or {})
     extra_env.update(amd.get("env", {}))
+    timeout_in_minutes = _get_amd_timeout_in_minutes(step, amd)
 
     return BuildkiteCommandStep(
         label=_get_amd_label(step.label, amd_device),
         commands=[amd_command_wrapped],
         depends_on=_normalize_amd_depends_on(amd.get("depends_on")),
         agents={"queue": _get_amd_queue(amd_device)},
-        env=_get_amd_env(amd_commands_str, extra_env),
+        env=_get_amd_env(amd_commands_str, extra_env, timeout_in_minutes),
         priority=200,
         soft_fail=amd.get("soft_fail", step.soft_fail or False),
         retry=AMD_RETRY,
         parallelism=step.parallelism,
+        timeout_in_minutes=timeout_in_minutes,
     )
 
 
