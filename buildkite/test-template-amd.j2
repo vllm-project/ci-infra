@@ -1,7 +1,7 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set default_amd_timeout_in_minutes = 180 %}
 {% set list_file_diff = list_file_diff | replace("\r", "") | replace("\n", "|") | split("|") %}
-{% set rocm_debug_agent_setup = "if [ -f /opt/rocm/lib/librocm-debug-agent.so.2 ]; then export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2 && export HSA_ENABLE_DEBUG=1 && echo ROCm debug agent enabled: /opt/rocm/lib/librocm-debug-agent.so.2; else echo WARNING: ROCm debug agent not found at /opt/rocm/lib/librocm-debug-agent.so.2; skipping coredump setup; fi" %}
+{% set rocm_debug_agent_setup = "if test -f /opt/rocm/lib/librocm-debug-agent.so.2; then export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2 && export HSA_ENABLE_DEBUG=1 && echo ROCm debug agent enabled: /opt/rocm/lib/librocm-debug-agent.so.2; else echo 'WARNING: ROCm debug agent not found at /opt/rocm/lib/librocm-debug-agent.so.2; skipping coredump setup'; fi" %}
 
 {% macro amd_infra_retry(indent='') -%}
 {{ indent }}retry:

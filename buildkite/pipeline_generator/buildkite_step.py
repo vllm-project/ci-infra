@@ -46,11 +46,11 @@ AMD_RETRY = {
 AMD_DEFAULT_TIMEOUT_IN_MINUTES = 180
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
 ROCM_DEBUG_AGENT_SETUP_COMMAND = (
-    f"if [ -f {ROCM_DEBUG_AGENT_LIB} ]; then "
+    f"if test -f {ROCM_DEBUG_AGENT_LIB}; then "
     f"export HSA_TOOLS_LIB={ROCM_DEBUG_AGENT_LIB} && export HSA_ENABLE_DEBUG=1 "
     f"&& echo ROCm debug agent enabled: {ROCM_DEBUG_AGENT_LIB}; "
-    f"else echo WARNING: ROCm debug agent not found at {ROCM_DEBUG_AGENT_LIB}; "
-    "skipping coredump setup; "
+    f"else echo 'WARNING: ROCm debug agent not found at {ROCM_DEBUG_AGENT_LIB}; "
+    "skipping coredump setup'; "
     "fi"
 )
 

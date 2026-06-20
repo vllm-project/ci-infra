@@ -137,6 +137,8 @@ def test_direct_amd_gpu_steps_use_amd_ci_path(device, queue):
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")
     assert "(command amd-smi || true)" in test_commands
+    assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
+    assert "[ -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
     assert "/opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
     assert (
         "export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2"
