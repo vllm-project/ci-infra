@@ -361,6 +361,13 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.depends_on = [block_step.key]
                 if step.depends_on:
                     buildkite_step.depends_on.extend(step.depends_on)
+            # DGX Spark runs the arm64 image, so depend on the arm64 image
+            # build rather than the default x86 image-build.
+            if step.device == DeviceType.DGX_SPARK and buildkite_step.depends_on:
+                buildkite_step.depends_on = [
+                    "arm64-image-build" if dep == "image-build" else dep
+                    for dep in buildkite_step.depends_on
+                ]
             if step.env:
                 buildkite_step.env = step.env
             if step.retry:
