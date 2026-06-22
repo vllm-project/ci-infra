@@ -67,6 +67,7 @@
     {% set ns = namespace(blocked=1) %}
     {% set step_slug = amd_step_slug(step) %}
     {% set step_timeout_in_minutes = step.timeout_in_minutes or default_amd_timeout_in_minutes %}
+    {# Time out the container a minute before Buildkite times out the job. #}
     {% set container_timeout_s = (step_timeout_in_minutes * 60 - 60) if step_timeout_in_minutes > 1 else step_timeout_in_minutes * 60 %}
 
     {% if run_all == "1" or nightly == "1" %}

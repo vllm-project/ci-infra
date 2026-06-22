@@ -51,6 +51,7 @@ def fake_global_config(monkeypatch):
         "get_torch_nightly_image",
         lambda: "torch-nightly-image",
     )
+    return config
 
 
 def _render_single_step(step):
@@ -128,11 +129,6 @@ def test_direct_amd_gpu_steps_use_amd_ci_path(device, queue):
     assert command_step.plugins is None
     assert command_step.retry == buildkite_step.AMD_RETRY
     assert len(command_step.retry["automatic"]) == 1
-    assert (
-        command_step.timeout_in_minutes
-        == buildkite_step.AMD_DEFAULT_TIMEOUT_IN_MINUTES
-    )
-    assert command_step.env["CONTAINER_TIMEOUT_S"] == "10740"
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")
@@ -152,20 +148,23 @@ def test_direct_amd_gpu_steps_use_amd_ci_path(device, queue):
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
 
 
-def test_amd_mirror_timeout_does_not_change_default_step_timeout():
+def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
+    fake_global_config,
+):
+    fake_global_config["list_file_diff"] = ["vllm/model_executor/foo.py"]
     step = Step(
         label="Mirrored test",
         group="Mirrors",
         key="mirrored-test",
         depends_on=["image-build"],
-        timeout_in_minutes=50,
         working_dir="/vllm-workspace/tests",
         commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
         mirror={
             "amd": {
                 "device": "mi325_1",
                 "depends_on": ["image-build-amd"],
-                "timeout_in_minutes": 80,
+                "source_file_dependencies": ["amd-only/"],
             }
         },
     )
@@ -186,9 +185,10 @@ def test_amd_mirror_timeout_does_not_change_default_step_timeout():
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
-    assert default_command_step.timeout_in_minutes is None
-    assert amd_command_step.timeout_in_minutes == 80
-    assert amd_command_step.env["CONTAINER_TIMEOUT_S"] == "4740"
+    assert default_command_step.depends_on == ["image-build"]
+    assert len(amd_group.steps) == 1
+    assert amd_command_step.depends_on == ["image-build-amd"]
+    assert amd_command_step.agents == {"queue": AgentQueue.AMD_MI325_1}
     assert "export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2" in (
         amd_command_step.env["VLLM_TEST_COMMANDS"]
     )

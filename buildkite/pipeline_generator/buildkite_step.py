@@ -15,25 +15,7 @@ PRECOMMIT_STEP_KEY = "pre-commit"
 PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
-AMD_GPU_QUEUE_MAP = {
-    DeviceType.AMD_MI250_1.value: AgentQueue.AMD_MI250_1,
-    DeviceType.AMD_MI250_2.value: AgentQueue.AMD_MI250_2,
-    DeviceType.AMD_MI250_4.value: AgentQueue.AMD_MI250_4,
-    DeviceType.AMD_MI250_8.value: AgentQueue.AMD_MI250_8,
-    DeviceType.AMD_MI300_1.value: AgentQueue.AMD_MI300_1,
-    DeviceType.AMD_MI300_2.value: AgentQueue.AMD_MI300_2,
-    DeviceType.AMD_MI300_4.value: AgentQueue.AMD_MI300_4,
-    DeviceType.AMD_MI300_8.value: AgentQueue.AMD_MI300_8,
-    DeviceType.AMD_MI325_1.value: AgentQueue.AMD_MI325_1,
-    DeviceType.AMD_MI325_2.value: AgentQueue.AMD_MI325_2,
-    DeviceType.AMD_MI325_4.value: AgentQueue.AMD_MI325_4,
-    DeviceType.AMD_MI325_8.value: AgentQueue.AMD_MI325_8,
-    DeviceType.AMD_MI355_1.value: AgentQueue.AMD_MI355_1,
-    DeviceType.AMD_MI355_2.value: AgentQueue.AMD_MI355_2,
-    DeviceType.AMD_MI355_4.value: AgentQueue.AMD_MI355_4,
-    DeviceType.AMD_MI355_8.value: AgentQueue.AMD_MI355_8,
-}
-
+AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_RETRY = {
     "automatic": [
         {
@@ -43,7 +25,6 @@ AMD_RETRY = {
         },
     ],
 }
-AMD_DEFAULT_TIMEOUT_IN_MINUTES = 180
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
 ROCM_DEBUG_AGENT_SETUP_COMMAND = (
     f"if test -f {ROCM_DEBUG_AGENT_LIB}; then "
@@ -173,7 +154,6 @@ class BuildkiteCommandStep(BaseModel):
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
     priority: Optional[int] = None
-    timeout_in_minutes: Optional[int] = None
 
     def to_yaml(self):
         return {
@@ -189,7 +169,6 @@ class BuildkiteCommandStep(BaseModel):
             "env": self.env,
             "parallelism": self.parallelism,
             "priority": self.priority,
-            "timeout_in_minutes": self.timeout_in_minutes,
         }
 
 
@@ -219,6 +198,22 @@ def _get_step_plugin(step: Step):
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
+
+
+def _device_value(device: Optional[str]) -> Optional[str]:
+    if isinstance(device, DeviceType):
+        return device.value
+    return device
+
+
+def _get_amd_gpu_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
+    device_value = _device_value(device)
+    if not device_value:
+        return None
+    try:
+        return AgentQueue(f"amd_{device_value}")
+    except ValueError:
+        return None
 
 
 def get_agent_queue(step: Step):
@@ -269,6 +264,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.ARM_CPU
     elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
         return AgentQueue.AMD_CPU
+    elif amd_gpu_queue := _get_amd_gpu_agent_queue(step.device):
+        return amd_gpu_queue
     elif step.device == DeviceType.GH200:
         return AgentQueue.GH200
     elif step.device == DeviceType.ASCEND:
@@ -282,24 +279,23 @@ def get_agent_queue(step: Step):
 
 
 def _is_amd_gpu_device(device: Optional[str]) -> bool:
-    return device in AMD_GPU_QUEUE_MAP
+    return _get_amd_gpu_agent_queue(device) is not None
 
 
-def _get_amd_queue(amd_device: str) -> AgentQueue:
-    amd_queue = AMD_GPU_QUEUE_MAP.get(amd_device)
-    if not amd_queue:
-        raise ValueError(
-            f"Invalid AMD device: {amd_device}. "
-            f"Valid devices: {list(AMD_GPU_QUEUE_MAP.keys())}"
-        )
-    return amd_queue
+def _valid_amd_gpu_devices() -> List[str]:
+    return [
+        device.value
+        for device in DeviceType
+        if _get_amd_gpu_agent_queue(device.value) is not None
+    ]
 
 
-def _get_amd_label(label: str, amd_device: str) -> str:
+def _get_amd_label(label: str, amd_device: Optional[str]) -> str:
+    device_value = _device_value(amd_device) or ""
     device_type = (
-        amd_device.replace("amd_", "")
-        if amd_device.startswith("amd_")
-        else amd_device
+        device_value.replace("amd_", "")
+        if device_value.startswith("amd_")
+        else device_value
     )
     return f"AMD: {label} ({device_type})"
 
@@ -319,7 +315,6 @@ def _normalize_amd_depends_on(depends_on: Optional[List[str]]) -> List[str]:
 def _get_amd_env(
     commands: str,
     extra_env: Optional[Dict[str, str]] = None,
-    timeout_in_minutes: Optional[int] = None,
 ) -> Dict[str, str]:
     env = dict(extra_env or {})
     env.update(
@@ -341,28 +336,7 @@ def _get_amd_env(
             "VLLM_TEST_COMMANDS": commands,
         }
     )
-    container_timeout_s = _get_amd_container_timeout_s(timeout_in_minutes)
-    if container_timeout_s:
-        env["CONTAINER_TIMEOUT_S"] = container_timeout_s
     return env
-
-
-def _get_amd_timeout_in_minutes(
-    step: Step,
-    amd: Optional[Dict[str, Any]] = None,
-) -> int:
-    if amd and amd.get("timeout_in_minutes") is not None:
-        return amd["timeout_in_minutes"]
-    return step.timeout_in_minutes or AMD_DEFAULT_TIMEOUT_IN_MINUTES
-
-
-def _get_amd_container_timeout_s(timeout_in_minutes: Optional[int]) -> Optional[str]:
-    if not timeout_in_minutes:
-        return None
-    timeout_s = timeout_in_minutes * 60
-    if timeout_in_minutes > 1:
-        timeout_s -= 60
-    return str(timeout_s)
 
 
 def _get_variables_to_inject() -> Dict[str, str]:
@@ -461,14 +435,36 @@ def _prepare_commands(
     return final_commands
 
 
-def _create_block_step(step: Step, list_file_diff: List[str]) -> BuildkiteBlockStep:
+def _create_block_step(
+    *,
+    block: str,
+    key: str,
+    command_step: BuildkiteCommandStep,
+    depends_on: Optional[Union[str, List[str]]] = None,
+    append_to_command_depends_on: bool = True,
+) -> BuildkiteBlockStep:
+    if isinstance(depends_on, list):
+        block_depends_on = list(depends_on)
+    else:
+        block_depends_on = depends_on
     block_step = BuildkiteBlockStep(
-        block=f"Run {step.label}",
-        depends_on=[],
-        key=f"block-{_generate_step_key(step.label)}",
+        block=block,
+        depends_on=block_depends_on,
+        key=key,
     )
-    if step.label.startswith(":docker:"):
-        block_step.depends_on = []
+    command_depends_on = list(command_step.depends_on or [])
+    if not append_to_command_depends_on:
+        command_depends_on = [
+            block_step.key,
+            *[
+                dependency
+                for dependency in command_depends_on
+                if dependency != block_step.key
+            ],
+        ]
+    elif block_step.key not in command_depends_on:
+        command_depends_on.append(block_step.key)
+    command_step.depends_on = command_depends_on
     return block_step
 
 
@@ -495,24 +491,37 @@ def convert_group_step_to_buildkite_step(
         group_steps_list = []
         for step in steps:
             if _is_amd_gpu_device(step.device):
-                amd_step = _create_amd_direct_step(step, variables_to_inject)
+                amd_commands = [
+                    "export VLLM_TEST_GROUP_NAME="
+                    f"{_generate_step_key(step.key or step.label)}"
+                ]
+                amd_commands.extend(
+                    _prepare_commands(
+                        step,
+                        variables_to_inject,
+                        setup_profile="amd",
+                    )
+                )
+                amd_step = _create_amd_step(
+                    label=step.label,
+                    key=step.key,
+                    device=step.device,
+                    commands_str=" && ".join(amd_commands),
+                    depends_on=step.depends_on,
+                    extra_env=step.env,
+                    soft_fail=step.soft_fail,
+                    parallelism=step.parallelism,
+                )
                 if not _step_should_run(step, list_file_diff):
-                    block_step = BuildkiteBlockStep(
+                    block_step = _create_block_step(
                         block=f"Run {amd_step.label}",
-                        depends_on=amd_step.depends_on,
                         key=f"block-amd-{_generate_step_key(step.key or step.label)}",
+                        command_step=amd_step,
+                        depends_on=amd_step.depends_on,
                     )
                     amd_hardware_steps.append(block_step)
-                    amd_step.depends_on = [*amd_step.depends_on, block_step.key]
                 amd_hardware_steps.append(amd_step)
                 continue
-
-            # block step
-            block_step = None
-            if not _step_should_run(step, list_file_diff):
-                block_step = _create_block_step(step, list_file_diff)
-            if block_step:
-                group_steps_list.append(block_step)
 
             # command step
             step_commands = _prepare_commands(step, variables_to_inject)
@@ -526,10 +535,6 @@ def convert_group_step_to_buildkite_step(
                 priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
             )
 
-            if block_step:
-                buildkite_step.depends_on = [block_step.key]
-                if step.depends_on:
-                    buildkite_step.depends_on.extend(step.depends_on)
             if step.env:
                 buildkite_step.env = step.env
             if step.retry:
@@ -538,6 +543,16 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
+
+            if not _step_should_run(step, list_file_diff):
+                block_step = _create_block_step(
+                    block=f"Run {step.label}",
+                    key=f"block-{_generate_step_key(step.label)}",
+                    command_step=buildkite_step,
+                    depends_on=[],
+                    append_to_command_depends_on=False,
+                )
+                group_steps_list.append(block_step)
 
             # add plugin
             if not step.no_plugin and not (
@@ -555,25 +570,57 @@ def convert_group_step_to_buildkite_step(
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
                 amd = step.mirror["amd"]
-                amd_step = _create_amd_mirror_step(
-                    step, variables_to_inject, amd
+                custom_commands = amd.get("commands")
+                if custom_commands:
+                    amd_command_step = step.model_copy(
+                        update={
+                            "commands": custom_commands,
+                            "working_dir": amd.get("working_dir", step.working_dir),
+                        }
+                    )
+                    amd_commands_str = " && ".join(
+                        _prepare_commands(
+                            amd_command_step,
+                            variables_to_inject,
+                            setup_profile="amd",
+                        )
+                    )
+                else:
+                    amd_commands_str = " && ".join(
+                        _prepare_commands(
+                            step,
+                            variables_to_inject,
+                            setup_profile="amd",
+                        )
+                    )
+
+                extra_env = dict(step.env or {})
+                extra_env.update(amd.get("env", {}))
+                amd_step = _create_amd_step(
+                    label=step.label,
+                    device=amd["device"],
+                    commands_str=amd_commands_str,
+                    depends_on=amd.get("depends_on"),
+                    extra_env=extra_env,
+                    soft_fail=amd.get("soft_fail", step.soft_fail or False),
+                    parallelism=step.parallelism,
                 )
-                amd_block_step = None
-                if not _amd_mirror_should_run(step, amd, list_file_diff):
+                if not _step_should_run(
+                    _get_amd_mirror_effective_step(step, amd), list_file_diff
+                ):
                     # Block step depends on the shared AMD image build.
                     mirror_build_dep = (
                         amd_step.depends_on[0]
                         if amd_step.depends_on
                         else "image-build-amd"
                     )
-                    amd_block_step = BuildkiteBlockStep(
+                    amd_block_step = _create_block_step(
                         block=f"Run AMD: {step.label}",
-                        depends_on=[mirror_build_dep],
                         key=f"block-amd-{_generate_step_key(step.label)}",
+                        command_step=amd_step,
+                        depends_on=[mirror_build_dep],
                     )
                     amd_hardware_steps.append(amd_block_step)
-                if amd_block_step:
-                    amd_step.depends_on.append(amd_block_step.key)
                 amd_hardware_steps.append(amd_step)
 
         if group_steps_list:
@@ -611,32 +658,25 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     if global_config["run_all"]:
         return True
-    if step.source_file_dependencies:
-        for source_file in step.source_file_dependencies:
-            for diff_file in list_file_diff:
-                if _matches_source_dependency(source_file, diff_file):
-                    return True
-    return False
-
-
-def _amd_mirror_should_run(
-    step: Step, amd: Dict[str, Any], list_file_diff: List[str]
-) -> bool:
-    if os.getenv("NOAUTO") == "1":
-        return False
-    global_config = get_global_config()
-    if global_config["nightly"] == "1":
-        return True
-    if amd.get("optional", step.optional):
-        return False
-    if _source_file_dependencies_match(
-        amd.get("source_file_dependencies"), list_file_diff
-    ):
-        return True
-    if global_config["run_all"]:
-        return True
     return _source_file_dependencies_match(
         step.source_file_dependencies, list_file_diff
+    )
+
+
+def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
+    source_file_dependencies = list(amd.get("source_file_dependencies") or [])
+    for dependency in step.source_file_dependencies or []:
+        if dependency not in source_file_dependencies:
+            source_file_dependencies.append(dependency)
+    if not source_file_dependencies:
+        source_file_dependencies = None
+
+    return step.model_copy(
+        update={
+            "key": None,
+            "optional": amd.get("optional", step.optional),
+            "source_file_dependencies": source_file_dependencies,
+        }
     )
 
 
@@ -666,78 +706,36 @@ def _generate_step_key(step_label: str) -> str:
     )
 
 
-def _create_amd_direct_step(
-    step: Step,
-    variables_to_inject: Dict[str, str],
+def _create_amd_step(
+    *,
+    label: str,
+    device: Optional[str],
+    commands_str: str,
+    depends_on: Optional[List[str]],
+    extra_env: Optional[Dict[str, str]],
+    soft_fail: Optional[bool],
+    parallelism: Optional[int],
+    key: Optional[str] = None,
 ) -> BuildkiteCommandStep:
-    """Create an AMD-only command step from a top-level test-area step."""
-    amd_device = step.device
-    timeout_in_minutes = _get_amd_timeout_in_minutes(step)
-    amd_commands = [
-        f"export VLLM_TEST_GROUP_NAME={_generate_step_key(step.key or step.label)}"
-    ]
-    amd_commands.extend(
-        _prepare_commands(step, variables_to_inject, setup_profile="amd")
-    )
+    """Create a Buildkite command step that runs through the AMD CI wrapper."""
+    if not _is_amd_gpu_device(device):
+        raise ValueError(
+            f"Invalid AMD device: {device}. "
+            f"Valid devices: {_valid_amd_gpu_devices()}"
+        )
+    queue_step = Step(label=label, device=_device_value(device))
 
     return BuildkiteCommandStep(
-        label=_get_amd_label(step.label, amd_device),
-        key=step.key,
-        commands=["bash .buildkite/scripts/hardware_ci/run-amd-test.sh"],
-        depends_on=_normalize_amd_depends_on(step.depends_on),
-        agents={"queue": _get_amd_queue(amd_device)},
-        env=_get_amd_env(" && ".join(amd_commands), step.env, timeout_in_minutes),
+        label=_get_amd_label(label, device),
+        key=key,
+        commands=[AMD_TEST_COMMAND],
+        depends_on=_normalize_amd_depends_on(depends_on),
+        agents={"queue": get_agent_queue(queue_step)},
+        env=_get_amd_env(commands_str, extra_env),
         priority=200,
-        soft_fail=step.soft_fail or False,
+        soft_fail=soft_fail or False,
         retry=AMD_RETRY,
-        parallelism=step.parallelism,
-        timeout_in_minutes=timeout_in_minutes,
-    )
-
-
-def _create_amd_mirror_step(
-    step: Step,
-    variables_to_inject: Dict[str, str],
-    amd: Dict[str, Any],
-) -> BuildkiteCommandStep:
-    """Create an AMD mirrored step from the original step."""
-    amd_device = amd["device"]
-    custom_commands = amd.get("commands")
-    if custom_commands:
-        amd_step = step.model_copy(
-            update={
-                "commands": custom_commands,
-                "working_dir": amd.get("working_dir", step.working_dir),
-            }
-        )
-        amd_commands_str = " && ".join(
-            _prepare_commands(amd_step, variables_to_inject, setup_profile="amd")
-        )
-    else:
-        amd_commands_str = " && ".join(
-            _prepare_commands(step, variables_to_inject, setup_profile="amd")
-        )
-
-    # Pass commands via VLLM_TEST_COMMANDS env var instead of positional
-    # argument. Buildkite sets env vars directly in the process environment
-    # without shell interpretation, preserving all inner quoting.
-    amd_command_wrapped = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
-
-    extra_env = dict(step.env or {})
-    extra_env.update(amd.get("env", {}))
-    timeout_in_minutes = _get_amd_timeout_in_minutes(step, amd)
-
-    return BuildkiteCommandStep(
-        label=_get_amd_label(step.label, amd_device),
-        commands=[amd_command_wrapped],
-        depends_on=_normalize_amd_depends_on(amd.get("depends_on")),
-        agents={"queue": _get_amd_queue(amd_device)},
-        env=_get_amd_env(amd_commands_str, extra_env, timeout_in_minutes),
-        priority=200,
-        soft_fail=amd.get("soft_fail", step.soft_fail or False),
-        retry=AMD_RETRY,
-        parallelism=step.parallelism,
-        timeout_in_minutes=timeout_in_minutes,
+        parallelism=parallelism,
     )
 
 
