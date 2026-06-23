@@ -128,24 +128,49 @@ def test_direct_amd_gpu_steps_use_amd_ci_path(device, queue):
     ]
     assert command_step.plugins is None
     assert command_step.retry == buildkite_step.AMD_RETRY
-    assert len(command_step.retry["automatic"]) == 1
+    assert len(command_step.retry["automatic"]) == 5
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")
     assert "(command amd-smi || true)" in test_commands
-    assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
+    assert "ROCm debug agent disabled" in test_commands
+    assert buildkite_step.ROCM_DEBUG_AGENT_ENV_VAR in test_commands
+    assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
     assert "[ -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
-    assert "/opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
+    assert "export HSA_TOOLS_LIB=" not in test_commands
+    assert "HSA_ENABLE_DEBUG=1" not in test_commands
+    assert "WARNING: ROCm debug agent not found at" not in test_commands
+    assert "cd /vllm-workspace/tests" in test_commands
+    assert "pytest tests/foo.py" in test_commands
+    assert "nvidia-smi" not in test_commands
+    assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
+
+
+def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
+    monkeypatch.setenv(buildkite_step.ROCM_DEBUG_AGENT_ENV_VAR, "1")
+    step = Step(
+        label="AMD debug test",
+        group="Direct AMD",
+        key="amd-debug",
+        depends_on=["image-build"],
+        device="mi300_4",
+        optional=True,
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/debug.py"],
+    )
+
+    group_step = _render_single_step(step)
+    _, command_step = group_step.steps
+
+    test_commands = command_step.env["VLLM_TEST_COMMANDS"]
+    assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
     assert (
         "export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2"
         in test_commands
     )
     assert "HSA_ENABLE_DEBUG=1" in test_commands
+    assert "ROCm debug agent enabled" in test_commands
     assert "WARNING: ROCm debug agent not found at" in test_commands
-    assert "cd /vllm-workspace/tests" in test_commands
-    assert "pytest tests/foo.py" in test_commands
-    assert "nvidia-smi" not in test_commands
-    assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
 
 
 def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
@@ -189,7 +214,7 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert len(amd_group.steps) == 1
     assert amd_command_step.depends_on == ["image-build-amd"]
     assert amd_command_step.agents == {"queue": AgentQueue.AMD_MI325_1}
-    assert "export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2" in (
+    assert "ROCm debug agent disabled" in (
         amd_command_step.env["VLLM_TEST_COMMANDS"]
     )
 
