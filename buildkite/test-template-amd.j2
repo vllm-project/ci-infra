@@ -1,5 +1,7 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
+{% set default_amd_timeout_in_minutes = 180 %}
 {% set list_file_diff = list_file_diff | replace("\r", "") | replace("\n", "|") | split("|") %}
+{% set rocm_debug_agent_setup = "if test -f /opt/rocm/lib/librocm-debug-agent.so.2; then export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2 && export HSA_ENABLE_DEBUG=1 && echo ROCm debug agent enabled: /opt/rocm/lib/librocm-debug-agent.so.2; else echo 'WARNING: ROCm debug agent not found at /opt/rocm/lib/librocm-debug-agent.so.2; skipping coredump setup'; fi" %}
 
 {% macro amd_infra_retry(indent='') -%}
 {{ indent }}retry:
@@ -64,7 +66,9 @@
 
     {% set ns = namespace(blocked=1) %}
     {% set step_slug = amd_step_slug(step) %}
-    {% set container_timeout_s = (step.timeout_in_minutes * 60 - 60) if step.timeout_in_minutes and step.timeout_in_minutes > 1 else (step.timeout_in_minutes * 60 if step.timeout_in_minutes else none) %}
+    {% set step_timeout_in_minutes = step.timeout_in_minutes or default_amd_timeout_in_minutes %}
+    {# Time out the container a minute before Buildkite times out the job. #}
+    {% set container_timeout_s = (step_timeout_in_minutes * 60 - 60) if step_timeout_in_minutes > 1 else step_timeout_in_minutes * 60 %}
 
     {% if run_all == "1" or nightly == "1" %}
     {% set ns.blocked = 0 %}
@@ -94,9 +98,7 @@
         {% else %}
         depends_on: amd-build
         {% endif %}
-        {% if step.timeout_in_minutes %}
-        timeout_in_minutes: {{ step.timeout_in_minutes }}
-        {% endif %}
+        timeout_in_minutes: {{ step_timeout_in_minutes }}
         agents:
           {% if step.agent_pool %}
           queue: amd_{{ step.agent_pool }}
@@ -124,11 +126,11 @@
           VLLM_NUM_GPUS_PER_NODE: "{{ step.num_gpus or 1 }}"
           VLLM_NODE_COMMAND_COUNT: "{{ step.commands | length }}"
           {% for node_command in step.commands %}
-          VLLM_NODE_COMMAND_{{ loop.index0 }}: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step_slug }}-node{{ loop.index0 }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ node_command | replace('\"', '\\\"') | safe }}"
+          VLLM_NODE_COMMAND_{{ loop.index0 }}: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && export VLLM_TEST_GROUP_NAME={{ step_slug }}-node{{ loop.index0 }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ node_command | replace('\"', '\\\"') | safe }}"
           {% endfor %}
           {% else %}
           VLLM_CI_EXECUTION_MODE: "single-node"
-          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step_slug }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
+          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && export VLLM_TEST_GROUP_NAME={{ step_slug }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
           {% endif %}
         priority: 100
         {% if step.grade and step.grade == "Blocking" %}

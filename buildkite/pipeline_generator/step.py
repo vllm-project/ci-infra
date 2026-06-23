@@ -16,6 +16,7 @@ class Step(BaseModel):
     depends_on: Optional[List[str]] = None
     commands: Optional[List[str]] = None
     device: Optional[str] = None
+    agent_tags: Optional[Dict[str, str]] = None
     num_devices: Optional[int] = None
     num_nodes: Optional[int] = None
     source_file_dependencies: Optional[List[str]] = None
