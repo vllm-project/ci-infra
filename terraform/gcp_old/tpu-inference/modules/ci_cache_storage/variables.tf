@@ -26,3 +26,9 @@ variable "retention_seconds" {
   description = "Number of seconds for the objects to be kept within GCS after the deletion."
 }
 
+variable "cache_zones" {
+  type        = list(string)
+  default     = []
+  description = "The zones where Rapid Cache (Anywhere Cache) should be enabled for the bucket."
+}
+

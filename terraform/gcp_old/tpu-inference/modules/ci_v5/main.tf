@@ -1,10 +1,10 @@
 data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
-  secret = "projects/${var.project_id}/secrets/buildkite_agent_token_ci_cluster"
+  secret  = "projects/${var.project_id}/secrets/buildkite_agent_token_ci_cluster"
   version = "latest"
 }
 
 data "google_secret_manager_secret_version" "huggingface_token" {
-  secret = "projects/${var.project_id}/secrets/huggingface_token"
+  secret  = "projects/${var.project_id}/secrets/huggingface_token"
   version = "latest"
 }
 
@@ -15,19 +15,19 @@ locals {
 
 resource "google_compute_disk" "disk_v5" {
   provider = google-beta.us-south1-a
-  count = 7
+  count    = 7
 
-  name  = "tpu-disk-south1-a-${count.index + 1}"
-  size  = 512
-  type  = "pd-ssd"
-  zone  = "us-south1-a"
+  name = "tpu-disk-south1-a-${count.index + 1}"
+  size = 512
+  type = "pd-ssd"
+  zone = "us-south1-a"
 }
 
 resource "google_tpu_v2_vm" "tpu_v5" {
   provider = google-beta.us-south1-a
-  count = 7
-  name = "vllm-tpu-v5-${count.index + 1}"
-  zone = "us-south1-a"
+  count    = 7
+  name     = "vllm-tpu-v5-${count.index + 1}"
+  zone     = "us-south1-a"
 
   runtime_version = "v2-alpha-tpuv5-lite"
 
@@ -35,11 +35,11 @@ resource "google_tpu_v2_vm" "tpu_v5" {
 
   data_disks {
     source_disk = google_compute_disk.disk_v5[count.index].id
-    mode = "READ_WRITE"
+    mode        = "READ_WRITE"
   }
 
   network_config {
-    network   = "projects/${var.project_id}/global/networks/default"
+    network             = "projects/${var.project_id}/global/networks/default"
     enable_external_ips = true
   }
 
@@ -69,6 +69,7 @@ resource "google_tpu_v2_vm" "tpu_v5" {
       sudo sed -i 's/name="%hostname-%spawn"/name="vllm-tpu-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=tpu_v5_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${local.huggingface_token_value}' | sudo tee -a /etc/environment
+      echo 'TPU_VERSION=tpu5' | sudo tee -a /etc/environment
 
       sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
       sudo mkdir -p /mnt/disks/persist
@@ -78,6 +79,18 @@ resource "google_tpu_v2_vm" "tpu_v5" {
       systemctl stop docker
       systemctl daemon-reload
       systemctl start docker
+
+      # ==========================================
+      # 1. Backward Compatibility & JAX Cache Setup
+      # ==========================================
+      echo "Setting up backward compatibility symlink for JAX cache..."
+      # Create the persistent directory first
+      sudo mkdir -p /mnt/disks/persist/tpu_jax_cache
+      sudo chmod 777 /mnt/disks/persist/tpu_jax_cache
+      
+      # Forcefully intercept old CI jobs writing to /tmp and redirect them to the persistent disk
+      sudo rm -rf /tmp/tpu_jax_cache
+      sudo ln -s /mnt/disks/persist/tpu_jax_cache /tmp/tpu_jax_cache
 
       systemctl enable buildkite-agent
       systemctl start buildkite-agent
