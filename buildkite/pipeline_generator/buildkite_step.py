@@ -18,22 +18,34 @@ PRECOMMIT_WAIT_INTERVAL = 60
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_RETRY = {
     "automatic": [
-        {
-            "exit_status": [-1, 1, 128],
-            "signal_reason": ["none", "agent_stop", "agent_refused"],
-            "limit": 1,
-        },
+        {"exit_status": -1, "limit": 1},
+        {"exit_status": 1, "limit": 1},
+        {"exit_status": 128, "limit": 1},
+        {"signal_reason": "agent_stop", "limit": 1},
+        {"signal_reason": "agent_refused", "limit": 1},
     ],
 }
+ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
-ROCM_DEBUG_AGENT_SETUP_COMMAND = (
-    f"if test -f {ROCM_DEBUG_AGENT_LIB}; then "
-    f"export HSA_TOOLS_LIB={ROCM_DEBUG_AGENT_LIB} && export HSA_ENABLE_DEBUG=1 "
-    f"&& echo ROCm debug agent enabled: {ROCM_DEBUG_AGENT_LIB}; "
-    f"else echo 'WARNING: ROCm debug agent not found at {ROCM_DEBUG_AGENT_LIB}; "
-    "skipping coredump setup'; "
-    "fi"
-)
+
+
+def _get_rocm_debug_agent_setup_command() -> str:
+    if os.getenv(ROCM_DEBUG_AGENT_ENV_VAR, "0") != "1":
+        return (
+            "echo 'ROCm debug agent disabled; set "
+            f"{ROCM_DEBUG_AGENT_ENV_VAR}=1 at pipeline generation time "
+            "to enable coredump setup'"
+        )
+
+    return (
+        f"if test -f {ROCM_DEBUG_AGENT_LIB}; then "
+        f"export HSA_TOOLS_LIB={ROCM_DEBUG_AGENT_LIB} && export HSA_ENABLE_DEBUG=1 "
+        f"&& echo ROCm debug agent enabled: {ROCM_DEBUG_AGENT_LIB}; "
+        f"else echo 'WARNING: ROCm debug agent not found at {ROCM_DEBUG_AGENT_LIB}; "
+        "skipping coredump setup'; "
+        "fi"
+    )
+
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
 # commit/repo at generation time and run on a CI agent as its own step, so it
@@ -381,7 +393,7 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
             "echo '--- :amd: GPU Info'",
             "(command amd-smi || true)",
             "echo '--- :gear: ROCm Debug Agent Setup'",
-            ROCM_DEBUG_AGENT_SETUP_COMMAND,
+            _get_rocm_debug_agent_setup_command(),
         ]
 
     raise ValueError(f"Unsupported setup profile: {setup_profile}")
