@@ -25,7 +25,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
     vm_name = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
   }
 
-  dynamic "scheduling_config" {    
+  dynamic "scheduling_config" {
     for_each = var.reserved ? [1] : []
     content {
       reserved = var.reserved
@@ -74,6 +74,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
       echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
+      echo 'TPU_VERSION=tpu6e' | sudo tee -a /etc/environment
 
       sudo mkdir -p /mnt/disks/persist
 
