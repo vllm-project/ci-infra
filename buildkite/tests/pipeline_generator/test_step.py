@@ -30,6 +30,7 @@ def fake_global_config(monkeypatch):
         "pull_request": "false",
         "docs_only_disable": "1",
         "nightly": "0",
+        "torch_nightly": "0",
         "run_all": False,
         "list_file_diff": [],
         "fail_fast": False,
@@ -192,6 +193,48 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert "export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2" in (
         amd_command_step.env["VLLM_TEST_COMMANDS"]
     )
+
+
+def test_torch_nightly_flag_runs_full_suite_unblocked(fake_global_config):
+    # TORCH_NIGHTLY=1 promotes every step into the torch nightly group and
+    # auto-runs it, even when the step is not tagged with mirror.torch_nightly.
+    fake_global_config["torch_nightly"] = "1"
+    step = Step(
+        label="Untagged test",
+        group="Some Group",
+        key="untagged-test",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/untagged.py"],
+        source_file_dependencies=["tests/untagged.py"],
+        device="h200_18gb",
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
+        step.group: [step],
+    })
+    nightly_group = next(
+        g for g in group_steps if g.group == "vLLM Against PyTorch Nightly"
+    )
+
+    # Image build is auto-run (no manual block step gating it).
+    image_build = next(
+        s for s in nightly_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+        and s.key == "image-build-torch-nightly"
+    )
+    assert image_build.depends_on == []
+    assert not any(
+        isinstance(s, buildkite_step.BuildkiteBlockStep) for s in nightly_group.steps
+    )
+
+    # The untagged test is present and depends directly on the nightly image.
+    nightly_test = next(
+        s for s in nightly_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+        and s.label == "Torch Nightly Untagged test"
+    )
+    assert nightly_test.depends_on == ["image-build-torch-nightly"]
 
 
 if __name__ == "__main__":

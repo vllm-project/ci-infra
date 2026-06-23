@@ -488,6 +488,9 @@ def convert_group_step_to_buildkite_step(
 
     amd_hardware_steps = []
     torch_nightly_steps_collected = []
+    # When TORCH_NIGHTLY=1, run the *entire* suite against torch nightly rather
+    # than only the curated steps tagged with mirror.torch_nightly.
+    torch_nightly_all = global_config["torch_nightly"] == "1"
 
     for group, steps in group_steps.items():
         group_steps_list = []
@@ -565,8 +568,11 @@ def convert_group_step_to_buildkite_step(
 
             group_steps_list.append(buildkite_step)
 
-            # Collect steps marked for torch nightly testing via mirror field
-            if step.mirror and step.mirror.get("torch_nightly") is not None:
+            # Collect steps marked for torch nightly testing via mirror field.
+            # With TORCH_NIGHTLY=1, collect every command step for a full run.
+            if torch_nightly_all or (
+                step.mirror and step.mirror.get("torch_nightly") is not None
+            ):
                 torch_nightly_steps_collected.append(step)
 
             # Create AMD mirror step and its block step if specified/applicable
@@ -749,7 +755,9 @@ def _create_torch_nightly_group(
     """Create the 'vLLM Against PyTorch Nightly' group with image build + test steps."""
     global_config = get_global_config()
     branch = global_config["branch"]
-    auto_run = global_config["nightly"] == "1"
+    auto_run = (
+        global_config["nightly"] == "1" or global_config["torch_nightly"] == "1"
+    )
 
     nightly_image = get_torch_nightly_image()
     group_steps_list = []
