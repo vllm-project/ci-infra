@@ -3,9 +3,9 @@ variable "project_id" {
   description = "The GCP project ID where the instance and metrics will live."
 }
 
-variable "buildkite_token_value" {
+variable "buildkite_token_secret_id" {
   type        = string
-  description = "The Agent Registration Token used to query Buildkite metrics."
+  description = "The Secret Manager ID for the Agent Registration Token (e.g., projects/.../secrets/...)"
 }
 
 variable "pipeline_slug" {

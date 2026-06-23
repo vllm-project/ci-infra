@@ -27,3 +27,12 @@ resource "google_storage_bucket" "jax_cache_bucket" {
     retention_duration_seconds = var.retention_seconds
   }
 }
+
+resource "google_storage_anywhere_cache" "jax_cache" {
+  provider = google-beta
+  for_each = toset(var.cache_zones)
+
+  bucket = google_storage_bucket.jax_cache_bucket.name
+  zone   = each.value
+  ttl    = "86400s"
+}
