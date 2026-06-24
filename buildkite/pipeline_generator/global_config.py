@@ -37,6 +37,11 @@ def init_global_config(pipeline_config_path: str):
         pipeline_config["github_repo_name"] = "vllm-project/vllm"
 
     branch = os.getenv("BUILDKITE_BRANCH")
+    if branch:
+        if not re.match(r"^[a-zA-Z0-9._/-]+$", branch):
+            raise ValueError(
+                f"Invalid branch name: {branch}. Contains disallowed characters."
+            )
     pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
     merge_base_commit = get_merge_base_commit()
     list_file_diff = get_list_file_diff(branch, merge_base_commit)
