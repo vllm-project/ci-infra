@@ -197,6 +197,42 @@ resource "aws_iam_policy" "postmerge_ecr_cache_read_write_access_policy" {
   })
 }
 
+resource "aws_iam_policy" "release_ecr_cache_read_write_access_policy" {
+  name        = "release_ecr_cache_read_write_access_policy"
+  description = "Policy to read and write cache to release cache repo"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:CompleteLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:InitiateLayerUpload",
+          "ecr:PutImage",
+          "ecr:GetAuthorizationToken",
+          "sts:GetServiceBearerToken"
+        ]
+        Resource = [
+          "arn:aws:ecr:us-east-1:936637512419:repository/vllm-release-cache"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "sts:GetServiceBearerToken"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_policy" "release_ecr_public_read_write_access_policy" {
   name        = "release-ecr-public-read-write-access-policy"
   description = "Policy to push and pull images from release ECR"
@@ -427,6 +463,16 @@ resource "aws_iam_role_policy_attachment" "postmerge_ecr_cache_read_write_access
   )
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.postmerge_ecr_cache_read_write_access_policy.arn
+}
+
+resource "aws_iam_role_policy_attachment" "release_ecr_cache_read_write_access" {
+  for_each = merge(
+    aws_cloudformation_stack.bk_queue_postmerge,
+    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
+    aws_cloudformation_stack.bk_queue_release,
+  )
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.release_ecr_cache_read_write_access_policy.arn
 }
 
 resource "aws_iam_role_policy_attachment" "release_ecr_public_read_write_access" {

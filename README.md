@@ -156,6 +156,18 @@ The bootstrap script resolves cache sources with a fallback chain:
 
 Cache is stored as registry refs in private ECR repositories with 14-day expiration.
 
+CUDA release image builds export BuildKit registry cache to a separate private
+ECR cache repository:
+
+- **Release image cache**:
+  `936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-release-cache:{variant}`
+
+Use a stable architecture/CUDA/Ubuntu variant key, for example
+`x86_64-cu130-ubuntu2204`. Release jobs can import the ordinary CI cache
+fallback chain with additional `--cache-from` flags, but should write
+release-specific layers only to `vllm-release-cache` so they do not churn the CI
+test or postmerge cache repositories.
+
 ### Warm-Cache AMI
 
 A daily Buildkite pipeline (`.buildkite/pipelines/rebuild-cpu-ami.yml`, scheduled at 3 AM PST) builds custom EC2 AMIs with pre-warmed Docker layer caches:
