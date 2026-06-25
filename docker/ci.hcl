@@ -84,8 +84,14 @@ variable "CACHE_FROM" {
   default = ""
 }
 
+# Compatibility alias for older callers. Prefer CACHE_FROM_BASE_BRANCH, which
+# matches the value resolved by vLLM's image build wrapper.
 variable "CACHE_FROM_BASE" {
   default = ""
+}
+
+variable "CACHE_FROM_BASE_BRANCH" {
+  default = CACHE_FROM_BASE
 }
 
 variable "CACHE_FROM_MAIN" {
@@ -105,7 +111,7 @@ function "get_cache_from" {
     PARENT_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${PARENT_COMMIT},mode=max" : "",
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${VLLM_MERGE_BASE_COMMIT},mode=max" : "",
     CACHE_FROM != "" ? "type=registry,ref=${CACHE_FROM},mode=max" : "",
-    CACHE_FROM_BASE != "" ? "type=registry,ref=${CACHE_FROM_BASE},mode=max" : "",
+    CACHE_FROM_BASE_BRANCH != "" ? "type=registry,ref=${CACHE_FROM_BASE_BRANCH},mode=max" : "",
     CACHE_FROM_MAIN != "" ? "type=registry,ref=${CACHE_FROM_MAIN},mode=max" : "",
   ])
 }
