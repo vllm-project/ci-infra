@@ -43,7 +43,7 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
   }
 
   metadata = {
-    "startup-script" = <<-EOF
+    "startup-script" = <<-STARTUP_SCRIPT
       #!/bin/bash
 
       apt-get update
@@ -58,12 +58,33 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
       apt-get update
       apt-get install -y buildkite-agent
-      
+       
       # Force stop the buildkite-agent and start at the end to avoid race condition
       sudo systemctl stop buildkite-agent
 
+%{if var.github_deploy_key_value != null && var.github_deploy_key_value != ""}
+      mkdir -p /var/lib/buildkite-agent/.ssh
+
+      # Write the private deploy key directly from Terraform
+      cat <<EOF > /var/lib/buildkite-agent/.ssh/id_rsa
+${var.github_deploy_key_value}
+EOF
+
+      # Prevent strict host checking on first clone
+      cat <<EOF > /var/lib/buildkite-agent/.ssh/config
+      Host github.com
+        StrictHostKeyChecking accept-new
+EOF
+
+      # Secure permissions and hand ownership to buildkite-agent
+      chmod 600 /var/lib/buildkite-agent/.ssh/id_rsa
+      chmod 600 /var/lib/buildkite-agent/.ssh/config
+      chown -R buildkite-agent:buildkite-agent /var/lib/buildkite-agent/.ssh
+%{endif}
+
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
       sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       
@@ -100,7 +121,7 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       systemctl daemon-reload
       systemctl start docker
 
-      sudo chmod 777 /mnt/disks/persist
+      sudo chmod 777 /mnt/disks/persist
 
       echo "Installing GCP Ops Agent..."
       curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
@@ -137,6 +158,6 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
 
       systemctl enable buildkite-agent
       systemctl start buildkite-agent
-    EOF
+    STARTUP_SCRIPT
   }
 }

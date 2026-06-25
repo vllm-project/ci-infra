@@ -17,3 +17,9 @@ variable "huggingface_token_value" {
   description = "Hugging Face token for vLLM model serving usage."
 }
 
+variable "github_deploy_key_value" {
+  type        = string
+  description = "Github deploy key for private repo access"
+  default     = null
+  sensitive   = true
+}

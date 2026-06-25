@@ -48,3 +48,10 @@ variable "buildkite_analytics_token_value" {
   type        = string
   description = "Analytics token used to push test data to Buildkite."
 }
+
+variable "github_deploy_key_value" {
+  type        = string
+  description = "Github deploy key for private repo access"
+  default     = null
+  sensitive   = true
+}
