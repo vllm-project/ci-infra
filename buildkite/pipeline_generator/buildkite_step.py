@@ -420,7 +420,7 @@ def _prepare_commands(
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
-                commands.append(f"{{ {cmd}\n}} || __CI_OVERALL_STATUS=1")
+                commands.append(f"{{ {cmd}\n}} || CI_OVERALL_STATUS=1")
             else:
                 commands.append(cmd)
 

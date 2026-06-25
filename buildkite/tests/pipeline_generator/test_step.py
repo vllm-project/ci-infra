@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from pathlib import Path
 
@@ -171,6 +172,38 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     assert "HSA_ENABLE_DEBUG=1" in test_commands
     assert "ROCm debug agent enabled" in test_commands
     assert "WARNING: ROCm debug agent not found at" in test_commands
+
+
+def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):
+    monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
+    step = Step(
+        label="Continue on failure",
+        group="Failure handling",
+        commands=[
+            "echo before",
+            "false",
+            "echo after",
+        ],
+    )
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+    script = " && ".join(commands).replace("$$CI_OVERALL_STATUS", "$CI_OVERALL_STATUS")
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "__CI_OVERALL_STATUS" not in script
+    assert "CI_OVERALL_STATUS=1" in script
+    assert "after" in result.stdout
+    assert result.returncode == 1
 
 
 def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
