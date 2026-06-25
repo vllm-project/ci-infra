@@ -253,9 +253,10 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     )
 
 
-def test_torch_nightly_flag_runs_full_suite_unblocked(fake_global_config):
-    # TORCH_NIGHTLY=1 promotes every step into the torch nightly group and
-    # auto-runs it, even when the step is not tagged with mirror.torch_nightly.
+def test_torch_nightly_flag_no_separate_group(fake_global_config):
+    # TORCH_NIGHTLY=1 now runs the entire existing pipeline against the nightly
+    # base image (built by image_build.sh when TORCH_NIGHTLY=1, CUDA/GPU lane).
+    # It must NOT synthesize a separate "vLLM Against PyTorch Nightly" group.
     fake_global_config["torch_nightly"] = "1"
     step = Step(
         label="Untagged test",
@@ -271,28 +272,20 @@ def test_torch_nightly_flag_runs_full_suite_unblocked(fake_global_config):
     group_steps = buildkite_step.convert_group_step_to_buildkite_step({
         step.group: [step],
     })
-    nightly_group = next(
-        g for g in group_steps if g.group == "vLLM Against PyTorch Nightly"
-    )
 
-    # Image build is auto-run (no manual block step gating it).
-    image_build = next(
-        s for s in nightly_group.steps
-        if isinstance(s, buildkite_step.BuildkiteCommandStep)
-        and s.key == "image-build-torch-nightly"
-    )
-    assert image_build.depends_on == []
+    # No dedicated torch-nightly group is synthesized anymore.
     assert not any(
-        isinstance(s, buildkite_step.BuildkiteBlockStep) for s in nightly_group.steps
+        g.group == "vLLM Against PyTorch Nightly" for g in group_steps
     )
 
-    # The untagged test is present and depends directly on the nightly image.
-    nightly_test = next(
-        s for s in nightly_group.steps
+    # The step stays in its normal group and is built once (no nightly duplicate).
+    normal_group = next(g for g in group_steps if g.group == "Some Group")
+    labels = [
+        s.label for s in normal_group.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
-        and s.label == "Torch Nightly Untagged test"
-    )
-    assert nightly_test.depends_on == ["image-build-torch-nightly"]
+    ]
+    assert "Untagged test" in labels
+    assert not any(lbl.startswith("Torch Nightly ") for lbl in labels)
 
 
 if __name__ == "__main__":
