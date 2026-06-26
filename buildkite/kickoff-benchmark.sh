@@ -26,6 +26,10 @@ merge () {
 
 # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
 if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+  echo "Fetching main branch to ensure trusted pipeline definitions..."
+  git fetch origin main
+  git checkout origin/main -- .buildkite/nightly-benchmarks/
+
   PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
 
   # put nightly benchmark in the front, as it contains a blocking step.
