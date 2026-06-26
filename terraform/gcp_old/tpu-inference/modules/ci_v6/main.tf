@@ -86,7 +86,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       systemctl daemon-reload
       systemctl start docker
 
-      sudo chmod 777 /mnt/disks/persist
+      sudo chmod 777 /mnt/disks/persist
 
       systemctl enable buildkite-agent
       systemctl start buildkite-agent

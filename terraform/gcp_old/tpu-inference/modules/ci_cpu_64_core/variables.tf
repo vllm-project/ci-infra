@@ -49,3 +49,10 @@ variable "resource_suffix" {
   type        = string
   default     = ""
 }
+
+variable "github_deploy_key_value" {
+  type        = string
+  description = "Github deploy key for private repo access"
+  default     = null
+  sensitive   = true
+}

@@ -39,7 +39,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
   metadata = {
     enable-osconfig  = "TRUE"
     enable-oslogin   = "true"
-    "startup-script" = <<-EOF
+    "startup-script" = <<-STARTUP_SCRIPT
       #!/bin/bash
 
       apt-get update
@@ -63,8 +63,29 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       # Force stop the buildkite-agent and start at the end to avoid race condition
       sudo systemctl stop buildkite-agent
 
+%{if var.github_deploy_key_value != null && var.github_deploy_key_value != ""}
+      mkdir -p /var/lib/buildkite-agent/.ssh
+
+      # Write the private deploy key directly from Terraform
+      cat <<EOF > /var/lib/buildkite-agent/.ssh/id_rsa
+${var.github_deploy_key_value}
+EOF
+
+      # Prevent strict host checking on first clone
+      cat <<EOF > /var/lib/buildkite-agent/.ssh/config
+      Host github.com
+        StrictHostKeyChecking accept-new
+EOF
+
+      # Secure permissions and hand ownership to buildkite-agent
+      chmod 600 /var/lib/buildkite-agent/.ssh/id_rsa
+      chmod 600 /var/lib/buildkite-agent/.ssh/config
+      chown -R buildkite-agent:buildkite-agent /var/lib/buildkite-agent/.ssh
+%{endif}
+
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
       sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="vllm-cpu-64-core-vm-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
@@ -76,7 +97,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
 
       systemctl enable buildkite-agent
       systemctl start buildkite-agent
-    EOF
+    STARTUP_SCRIPT
   }
 }
 

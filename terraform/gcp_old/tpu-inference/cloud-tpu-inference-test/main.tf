@@ -23,21 +23,27 @@ data "google_secret_manager_secret_version" "buildkite_analytics_token_ci_cluste
   version = "latest"
 }
 
+data "google_secret_manager_secret_version" "github_deploy_key" {
+  secret  = "projects/${var.project_id}/secrets/tpu_commons_buildkite_vllm_torchtpu_deploy_key"
+  version = "latest"
+}
+
 module "ci_v6e_1" {
   source = "../modules/ci_v6e"
   providers = {
     google-beta = google-beta.us-east5-b
   }
 
-  accelerator_type                 = "v6e-1"
-  reserved                         = false
-  instance_count                   = 0
-  buildkite_queue_name             = "tpu_v6e_queue"
-  project_id                       = var.project_id
-  project_short_name               = var.project_short_name
-  buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-  buildkite_analytics_token_value  = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
-  huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                = "v6e-1"
+  reserved                        = false
+  instance_count                  = 0
+  buildkite_queue_name            = "tpu_v6e_queue"
+  project_id                      = var.project_id
+  project_short_name              = var.project_short_name
+  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
+  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  github_deploy_key_value         = data.google_secret_manager_secret_version.github_deploy_key.secret_data
 }
 
 module "ci_v6e_8" {
@@ -46,27 +52,29 @@ module "ci_v6e_8" {
     google-beta = google-beta.southamerica-west1-a
   }
 
-  accelerator_type                 = "v6e-8"
-  reserved                         = true
-  instance_count                   = 9
-  disk_size                        = 4096
-  buildkite_queue_name             = "tpu_v6e_8_queue"
-  project_id                       = var.project_id
-  project_short_name               = var.project_short_name
-  buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-  buildkite_analytics_token_value  = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
-  huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                = "v6e-8"
+  reserved                        = true
+  instance_count                  = 9
+  disk_size                       = 4096
+  buildkite_queue_name            = "tpu_v6e_8_queue"
+  project_id                      = var.project_id
+  project_short_name              = var.project_short_name
+  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
+  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  github_deploy_key_value         = data.google_secret_manager_secret_version.github_deploy_key.secret_data
 }
 
 module "ci_cpu" {
-  source    = "../modules/ci_cpu"
+  source = "../modules/ci_cpu"
   providers = {
     google-beta = google-beta.us-east5-b
   }
-  project_id                       = var.project_id
-  instance_count                   = 8
-  buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-  huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  project_id              = var.project_id
+  instance_count          = 8
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  github_deploy_key_value = data.google_secret_manager_secret_version.github_deploy_key.secret_data
 }
 
 # module "ci_v5" {
