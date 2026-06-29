@@ -49,9 +49,8 @@ variable "buildkite_analytics_token_value" {
   description = "Analytics token used to push test data to Buildkite."
 }
 
-variable "github_deploy_key_value" {
+variable "github_app_secret_name" {
   type        = string
-  description = "Github deploy key for private repo access"
-  default     = null
-  sensitive   = true
+  description = "The Buildkite secret name for the GitHub App PEM key."
+  default     = "GITHUB_CI_BOT_PEM"
 }

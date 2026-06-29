@@ -29,7 +29,7 @@ resource "google_compute_instance" "monitoring_instance" {
   }
 
   metadata = {
-    enable-oslogin = "true"
+    enable-oslogin   = "true"
     "startup-script" = <<-EOF
       #!/bin/bash
       
@@ -82,7 +82,7 @@ resource "google_bigquery_table" "step_logs" {
   dataset_id          = google_bigquery_dataset.ci_analytics.dataset_id
   project             = var.project_id
   table_id            = "step_execution_logs"
-  deletion_protection = true 
+  deletion_protection = true
 
   schema = <<EOF
 [
