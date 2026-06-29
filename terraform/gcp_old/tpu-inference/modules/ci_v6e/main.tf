@@ -47,7 +47,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       #!/bin/bash
 
       apt-get update
-      apt-get install -y curl build-essential jq
+      apt-get install -y curl build-essential jq git python3 python3-pip
 
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
       /root/.cargo/bin/cargo install minijinja-cli
@@ -62,25 +62,60 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       # Force stop the buildkite-agent and start at the end to avoid race condition
       sudo systemctl stop buildkite-agent
 
-%{if var.github_deploy_key_value != null && var.github_deploy_key_value != ""}
-      mkdir -p /var/lib/buildkite-agent/.ssh
+      # ==========================================
+      # Setup In-Memory GitHub App Authentication
+      # ==========================================
+      pip3 install pyjwt requests cryptography --break-system-packages || pip3 install pyjwt requests cryptography
 
-      # Write the private deploy key directly from Terraform
-      cat <<EOF > /var/lib/buildkite-agent/.ssh/id_rsa
-${var.github_deploy_key_value}
-EOF
+      # 1. Create the Python script
+      cat <<'EOF' > /etc/buildkite-agent/get_github_token.py
+      import os, time, requests, jwt
 
-      # Prevent strict host checking on first clone
-      cat <<EOF > /var/lib/buildkite-agent/.ssh/config
-      Host github.com
-        StrictHostKeyChecking accept-new
-EOF
+      APP_ID = "4156238"
+      INSTALLATION_ID = "142868369"
 
-      # Secure permissions and hand ownership to buildkite-agent
-      chmod 600 /var/lib/buildkite-agent/.ssh/id_rsa
-      chmod 600 /var/lib/buildkite-agent/.ssh/config
-      chown -R buildkite-agent:buildkite-agent /var/lib/buildkite-agent/.ssh
-%{endif}
+      signing_key = os.environ['_BK_TEMP_GITHUB_APP_PEM'].encode('utf-8')
+
+      payload = { 'iat': int(time.time()), 'exp': int(time.time()) + 600, 'iss': APP_ID }
+      encoded_jwt = jwt.encode(payload, signing_key, algorithm='RS256')
+
+      response = requests.post(
+          f'https://api.github.com/app/installations/{INSTALLATION_ID}/access_tokens',
+          headers={'Authorization': f'Bearer {encoded_jwt}', 'Accept': 'application/vnd.github.v3+json'}
+      )
+      response.raise_for_status()
+      print(response.json()['token'])
+      EOF
+
+      mkdir -p /etc/buildkite-agent/hooks
+
+      # 2. Create the Buildkite pre-checkout hook
+      cat <<'EOF' > /etc/buildkite-agent/hooks/pre-checkout
+      #!/bin/bash
+      set -e
+
+      echo "--- 🔐 Generating temporary GitHub token"
+
+      export _BK_TEMP_GITHUB_APP_PEM=$(buildkite-agent secret get ${var.github_app_secret_name})
+
+      if [ -z "$_BK_TEMP_GITHUB_APP_PEM" ]; then
+          echo "🚨 Error: Failed to fetch secret from Buildkite Secrets. Does the secret exist?"
+          exit 1
+      fi
+
+      GITHUB_TOKEN=$(python3 /etc/buildkite-agent/get_github_token.py)
+      unset _BK_TEMP_GITHUB_APP_PEM
+
+      # Static URL rewrite for SSH to HTTPS, and Basic Auth header for HTTPS authentication
+      git config --global url."https://github.com/".insteadOf "git@github.com:"
+      AUTH_TOKEN=$(echo -n "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')
+      git config --global http.https://github.com/.extraheader "Authorization: Basic $AUTH_TOKEN"
+      EOF
+
+      chmod 500 /etc/buildkite-agent/get_github_token.py
+      chmod +x /etc/buildkite-agent/hooks/pre-checkout
+      chown -R buildkite-agent:buildkite-agent /etc/buildkite-agent/
+      # ==========================================
 
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
