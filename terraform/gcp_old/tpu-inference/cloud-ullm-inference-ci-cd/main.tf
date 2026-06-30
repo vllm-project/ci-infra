@@ -86,6 +86,24 @@ module "ci_v7x_8" {
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
+module "ci_v7x_16" {
+  source = "../modules/ci_v7x_multi"
+  providers = {
+    google-beta = google-beta.us-central1-c
+  }
+
+  accelerator_type                = "tpu7x-16"
+  reserved                        = true
+  instance_count                  = 1
+  buildkite_queue_name            = "tpu_v7x_16_queue"
+  disk_size                       = 4096
+  project_id                      = var.project_id
+  project_short_name              = var.project_short_name
+  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
+  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+}
+
 module "ci_cpu_64_core" {
   source = "../modules/ci_cpu_64_core"
   providers = {
