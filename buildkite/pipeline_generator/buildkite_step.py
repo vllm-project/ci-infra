@@ -27,6 +27,11 @@ AMD_RETRY = {
 }
 ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
+ALWAYS_RUN_STEP_KEYS = {
+    "ensure-ci-base-amd",
+    "refresh-rocm-base-amd",
+    "trigger-upstream-ci-rocm-base",
+}
 
 
 def _get_rocm_debug_agent_setup_command() -> str:
@@ -663,7 +668,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     global_config = get_global_config()
     if step.key and (
-        step.key.startswith("image-build") or step.key == "ensure-ci-base-amd"
+        step.key.startswith("image-build") or step.key in ALWAYS_RUN_STEP_KEYS
     ):
         return True
     if global_config["nightly"] == "1":
