@@ -11,6 +11,10 @@ if [[ -z "${NIGHTLY:-}" ]]; then
     NIGHTLY=0
 fi
 
+if [[ -z "${TORCH_NIGHTLY:-}" ]]; then
+    TORCH_NIGHTLY=0
+fi
+
 if [[ -z "${VLLM_CI_BRANCH:-}" ]]; then
     VLLM_CI_BRANCH="main"
 fi
@@ -110,6 +114,20 @@ check_run_all_label() {
     fi
 }
 
+check_torch_nightly_label() {
+    TORCH_NIGHTLY_LABEL="ready-torch-nightly"
+    if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+        PR_LABELS=$(get_pr_labels)
+        if [[ $PR_LABELS == *"$TORCH_NIGHTLY_LABEL"* ]]; then
+            echo true
+        else
+            echo false
+        fi
+    else
+        echo false  # not a PR or BUILDKITE_PULL_REQUEST not set
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # get_diff: compute changed files between commits only (no index staging).
 #
@@ -153,13 +171,14 @@ upload_pipeline() {
     # (WIP) Use pipeline generator instead of jinja template
     if [ -e ".buildkite/pipeline_generator/pipeline_generator.py" ]; then
         python -m pip install click pydantic
-        python .buildkite/pipeline_generator/pipeline_generator.py --run_all=$RUN_ALL --list_file_diff="$LIST_FILE_DIFF" --nightly="$NIGHTLY" --mirror_hw="$AMD_MIRROR_HW"
+        python .buildkite/pipeline_generator/pipeline_generator.py --run_all=$RUN_ALL --list_file_diff="$LIST_FILE_DIFF" --nightly="$NIGHTLY" --torch_nightly="$TORCH_NIGHTLY" --mirror_hw="$AMD_MIRROR_HW"
         buildkite-agent pipeline upload .buildkite/pipeline.yaml
         exit 0
     fi
     echo "List file diff: $LIST_FILE_DIFF"
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
+    echo "Torch Nightly: $TORCH_NIGHTLY"
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     FAIL_FAST=$(fail_fast)
@@ -173,6 +192,7 @@ upload_pipeline() {
             -D list_file_diff="$LIST_FILE_DIFF" \
             -D run_all="$RUN_ALL" \
             -D nightly="$NIGHTLY" \
+            -D torch_nightly="$TORCH_NIGHTLY" \
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
@@ -302,6 +322,15 @@ if [[ $LABEL_RUN_ALL == true ]]; then
     RUN_ALL=1
     NIGHTLY=1
     echo "Found 'ready-run-all-tests' label. Running all tests including optional tests."
+fi
+
+# Check for ready-torch-nightly label: full CI built and tested against torch
+# nightly, plus a full run on the pinned torch.
+LABEL_TORCH_NIGHTLY=$(check_torch_nightly_label)
+if [[ $LABEL_TORCH_NIGHTLY == true ]]; then
+    TORCH_NIGHTLY=1
+    RUN_ALL=1
+    echo "Found 'ready-torch-nightly' label. Running the full suite against torch nightly."
 fi
 
 # Decide whether to use precompiled wheels
