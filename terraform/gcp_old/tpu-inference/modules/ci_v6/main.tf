@@ -6,19 +6,19 @@
 
 resource "google_compute_disk" "disk_east5_b" {
   provider = google-beta.us-east5-b
-  count = 24
+  count    = 24
 
-  name  = "tpu-disk-east5-b-${count.index}"
-  size  = 2048
-  type  = "hyperdisk-balanced"
-  zone  = "us-east5-b"
+  name = "tpu-disk-east5-b-${count.index}"
+  size = 2048
+  type = "hyperdisk-balanced"
+  zone = "us-east5-b"
 }
 
 resource "google_tpu_v2_vm" "tpu_v6_ci" {
   provider = google-beta.us-east5-b
-  count = 24
-  name = "vllm-tpu-v6-ci-${count.index}"
-  zone = "us-east5-b" 
+  count    = 24
+  name     = "vllm-tpu-v6-ci-${count.index}"
+  zone     = "us-east5-b"
 
   runtime_version = "v2-alpha-tpuv6e"
 
@@ -31,7 +31,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
 
   data_disks {
     source_disk = google_compute_disk.disk_east5_b[count.index].id
-    mode = "READ_WRITE"
+    mode        = "READ_WRITE"
   }
 
   metadata = {
@@ -39,7 +39,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       #!/bin/bash
 
       apt-get update
-      apt-get install -y curl build-essential jq
+      apt-get install -y curl build-essential jq git python3 python3-pip
 
       curl -o- https://get.docker.com/ | bash -
 
@@ -52,6 +52,64 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
       apt-get update
       apt-get install -y buildkite-agent
+
+      # Force stop the buildkite-agent and start at the end to avoid race condition
+      sudo systemctl stop buildkite-agent
+
+      # ==========================================
+      # Setup In-Memory GitHub App Authentication
+      # ==========================================
+      pip3 install pyjwt requests cryptography --break-system-packages || pip3 install pyjwt requests cryptography
+
+      # 1. Create the Python script
+      cat <<'EOF' > /etc/buildkite-agent/get_github_token.py
+      import os, time, requests, jwt
+
+      APP_ID = "4156238"
+      INSTALLATION_ID = "142868369"
+
+      signing_key = os.environ['_BK_TEMP_GITHUB_APP_PEM'].encode('utf-8')
+
+      payload = { 'iat': int(time.time()), 'exp': int(time.time()) + 600, 'iss': APP_ID }
+      encoded_jwt = jwt.encode(payload, signing_key, algorithm='RS256')
+
+      response = requests.post(
+          f'https://api.github.com/app/installations/{INSTALLATION_ID}/access_tokens',
+          headers={'Authorization': f'Bearer {encoded_jwt}', 'Accept': 'application/vnd.github.v3+json'}
+      )
+      response.raise_for_status()
+      print(response.json()['token'])
+      EOF
+
+      mkdir -p /etc/buildkite-agent/hooks
+
+      # 2. Create the Buildkite pre-checkout hook
+      cat <<'EOF' > /etc/buildkite-agent/hooks/pre-checkout
+      #!/bin/bash
+      set -e
+
+      echo "--- 🔐 Generating temporary GitHub token"
+
+      export _BK_TEMP_GITHUB_APP_PEM=$(buildkite-agent secret get ${var.github_app_secret_name})
+
+      if [ -z "$_BK_TEMP_GITHUB_APP_PEM" ]; then
+          echo "🚨 Error: Failed to fetch secret from Buildkite Secrets. Does the secret exist?"
+          exit 1
+      fi
+
+      GITHUB_TOKEN=$(python3 /etc/buildkite-agent/get_github_token.py)
+      unset _BK_TEMP_GITHUB_APP_PEM
+
+      # Static URL rewrite for SSH to HTTPS, and Basic Auth header for HTTPS authentication
+      git config --global url."https://github.com/".insteadOf "git@github.com:"
+      AUTH_TOKEN=$(echo -n "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')
+      git config --global http.https://github.com/.extraheader "Authorization: Basic $AUTH_TOKEN"
+      EOF
+
+      chmod 500 /etc/buildkite-agent/get_github_token.py
+      chmod +x /etc/buildkite-agent/hooks/pre-checkout
+      chown -R buildkite-agent:buildkite-agent /etc/buildkite-agent/
+      # ==========================================
 
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
