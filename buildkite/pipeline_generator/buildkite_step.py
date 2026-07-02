@@ -30,7 +30,6 @@ ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
 ALWAYS_RUN_STEP_KEYS = {
     "ensure-ci-base-amd",
     "refresh-rocm-base-amd",
-    "trigger-upstream-ci-rocm-base",
 }
 
 
