@@ -5,14 +5,6 @@ data "google_client_config" "config" {
   provider = google-beta
 }
 
-resource "google_compute_disk" "tpu_disk" {
-  provider = google-beta
-  count    = var.instance_count
-  name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}-disk"
-  size     = var.disk_size
-  type     = "hyperdisk-balanced"
-}
-
 resource "google_tpu_v2_vm" "tpu_v7x_ci" {
   provider = google-beta
   count    = var.instance_count
@@ -35,11 +27,6 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
   network_config {
     network             = "projects/${var.project_id}/global/networks/default"
     enable_external_ips = true
-  }
-
-  data_disks {
-    source_disk = google_compute_disk.tpu_disk[count.index].id
-    mode        = "READ_WRITE"
   }
 
   metadata = {
@@ -123,6 +110,9 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
 
       sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       
+      # Worker ID is provided by GCP metadata for Multi-host slices.
+      WORKER_ID=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/agent-worker-number 2>/dev/null || echo "0")
+
       HOST_NAME_VAL="${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
       # Set the system-wide environment variable, avoid using the default HOSTNAME because it's too vague to be useful. For example, t1v-n-01667781-w-0
       echo "HOST_NAME=$HOST_NAME_VAL" | sudo tee -a /etc/environment
@@ -132,24 +122,14 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
       echo 'TPU_VERSION=tpu7x' | sudo tee -a /etc/environment
 
+      # ==========================================
+      # Silence Protocol: Suppress MOTD to prevent 'Bad Packet Length'
+      # ==========================================
+      mkdir -p /var/lib/buildkite-agent/
+      touch /var/lib/buildkite-agent/.hushlogin
+      chown buildkite-agent:buildkite-agent /var/lib/buildkite-agent/.hushlogin
+
       sudo mkdir -p /mnt/disks/persist
-
-      # Format if not already formatted
-      if ! blkid /dev/nvme1n1; then
-        echo "Formatting /dev/nvme1n1 as ext4..."
-        sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme1n1
-      fi
-
-      # Add to /etc/fstab using UUID
-      disk_uuid=$(blkid -s UUID -o value /dev/nvme1n1)
-      if ! grep -q "/mnt/disks/persist" /etc/fstab; then
-       echo "UUID=$disk_uuid /mnt/disks/persist ext4 defaults,discard 0 2" | sudo tee -a /etc/fstab
-      fi
-
-      # Only mount if not already mounted (first boot or recovery)
-      if ! mountpoint -q /mnt/disks/persist; then
-        sudo mount /mnt/disks/persist
-      fi
 
       jq ". + {\"data-root\": \"/mnt/disks/persist\"}" /etc/docker/daemon.json > /tmp/daemon.json.tmp && mv /tmp/daemon.json.tmp /etc/docker/daemon.json
       systemctl stop docker
@@ -191,8 +171,16 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       # Force rotate once
       sudo logrotate -f /etc/logrotate.conf
 
-      systemctl enable buildkite-agent
-      systemctl start buildkite-agent
+      # TPU Multi-host logic: Only start the agent on worker 0
+      if [ "$WORKER_ID" == "0" ]; then
+        echo "Host 0: Starting Buildkite Agent..."
+        systemctl enable buildkite-agent
+        systemctl start buildkite-agent
+      else
+        echo "Host $WORKER_ID: Dependencies installed, skipping Agent startup."
+        systemctl disable buildkite-agent
+        systemctl stop buildkite-agent
+      fi
     STARTUP_SCRIPT
   }
 }

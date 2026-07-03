@@ -14,11 +14,6 @@ variable "instance_count" {
   description = "Number of TPU instance"
 }
 
-variable "disk_size" {
-  type        = number
-  description = "The large disk size"
-}
-
 variable "buildkite_queue_name" {
   type        = string
   description = "The Buildkite agent queue name that the agents will join."
