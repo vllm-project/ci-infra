@@ -70,11 +70,6 @@ def init_global_config(pipeline_config_path: str):
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
         config["nightly"] = "1"
-    if "ready-torch-nightly" in pr_labels:
-        # Full CI run built and tested against PyTorch nightly. Also force a
-        # full run on the pinned-torch image so both signals are produced.
-        config["torch_nightly"] = "1"
-        config["run_all"] = True
     print("Config:\n")
     for key, value in config.items():
         print(f"{key}: {value}\n")
