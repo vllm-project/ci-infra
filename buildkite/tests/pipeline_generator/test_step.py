@@ -31,6 +31,7 @@ def fake_global_config(monkeypatch):
         "pull_request": "false",
         "docs_only_disable": "1",
         "nightly": "0",
+        "torch_nightly": "0",
         "run_all": False,
         "list_file_diff": [],
         "fail_fast": False,
@@ -250,6 +251,41 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert "ROCm debug agent disabled" in (
         amd_command_step.env["VLLM_TEST_COMMANDS"]
     )
+
+
+def test_torch_nightly_flag_no_separate_group(fake_global_config):
+    # TORCH_NIGHTLY=1 now runs the entire existing pipeline against the nightly
+    # base image (built by image_build.sh when TORCH_NIGHTLY=1, CUDA/GPU lane).
+    # It must NOT synthesize a separate "vLLM Against PyTorch Nightly" group.
+    fake_global_config["torch_nightly"] = "1"
+    step = Step(
+        label="Untagged test",
+        group="Some Group",
+        key="untagged-test",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/untagged.py"],
+        source_file_dependencies=["tests/untagged.py"],
+        device="h200_18gb",
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
+        step.group: [step],
+    })
+
+    # No dedicated torch-nightly group is synthesized anymore.
+    assert not any(
+        g.group == "vLLM Against PyTorch Nightly" for g in group_steps
+    )
+
+    # The step stays in its normal group and is built once (no nightly duplicate).
+    normal_group = next(g for g in group_steps if g.group == "Some Group")
+    labels = [
+        s.label for s in normal_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    ]
+    assert "Untagged test" in labels
+    assert not any(lbl.startswith("Torch Nightly ") for lbl in labels)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ class GlobalConfig(TypedDict):
     run_all_patterns: Optional[List[str]] = None
     run_all_exclude_patterns: Optional[List[str]] = None
     nightly: Optional[str] = "0"
+    torch_nightly: Optional[str] = "0"
     run_all: bool = False
     docs_only_disable: Optional[str] = "0"
     merge_base_commit: Optional[str] = None
@@ -55,6 +56,7 @@ def init_global_config(pipeline_config_path: str):
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
+        torch_nightly=os.getenv("TORCH_NIGHTLY", "0"),
         run_all=_should_run_all(
             pr_labels,
             list_file_diff,
@@ -102,6 +104,9 @@ def _should_run_all(
 ) -> bool:
     """Determine if the pipeline should run all tests."""
     if os.getenv("RUN_ALL") == "1":
+        return True
+    if os.getenv("TORCH_NIGHTLY") == "1":
+        # A full torch-nightly run also runs the full suite on the pinned torch.
         return True
     if "ready-run-all-tests" in pr_labels:
         return True

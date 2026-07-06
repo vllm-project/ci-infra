@@ -10,6 +10,10 @@ if [[ -z "${NIGHTLY:-}" ]]; then
     NIGHTLY=0
 fi
 
+if [[ -z "${TORCH_NIGHTLY:-}" ]]; then
+    TORCH_NIGHTLY=0
+fi
+
 if [[ -z "${VLLM_CI_BRANCH:-}" ]]; then
     VLLM_CI_BRANCH="main"
 fi
@@ -156,6 +160,7 @@ upload_pipeline() {
     echo "List file diff: $LIST_FILE_DIFF"
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
+    echo "Torch Nightly: $TORCH_NIGHTLY"
 
     FAIL_FAST=$(fail_fast)
 
