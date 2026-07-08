@@ -127,6 +127,20 @@ def test_direct_amd_gpu_steps_use_amd_ci_path(device, queue):
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
     assert command_step.plugins is None
+    assert (
+        command_step.env["DOCKER_IMAGE_NAME"]
+        == buildkite_step.AMD_STABLE_CI_BASE_IMAGE
+    )
+    assert (
+        command_step.env["VLLM_CI_BASE_IMAGE"]
+        == buildkite_step.AMD_STABLE_CI_BASE_IMAGE
+    )
+    assert (
+        command_step.env["VLLM_CI_FALLBACK_IMAGE"]
+        == buildkite_step.AMD_FALLBACK_CI_IMAGE
+    )
+    assert "AMD_CI_RUNTIME" not in command_step.env
+    assert "NATIVE_CI" not in command_step.env
     assert command_step.retry == buildkite_step.AMD_RETRY
     assert len(command_step.retry["automatic"]) == 5
 
@@ -144,6 +158,75 @@ def test_direct_amd_gpu_steps_use_amd_ci_path(device, queue):
     assert "pytest tests/foo.py" in test_commands
     assert "nvidia-smi" not in test_commands
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
+
+
+def test_native_amd_steps_patch_container_image_and_env(fake_global_config):
+    fake_global_config["run_all"] = True
+    step = Step(
+        label="AMD native test",
+        group="Direct AMD",
+        key="amd-native",
+        depends_on=["image-build"],
+        device="mi300_4",
+        native_ci=True,
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/native.py"],
+    )
+
+    group_step = _render_single_step(step)
+    (command_step,) = group_step.steps
+
+    assert command_step.depends_on == ["image-build-amd"]
+    assert command_step.plugins is not None
+    pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
+    assert pod_patch["imagePullSecrets"] == [{"name": "docker-config"}]
+    container = pod_patch["containers"][0]
+    assert container["name"] == "container-0"
+    assert container["image"] == buildkite_step.AMD_NATIVE_CI_BASE_IMAGE
+    assert container["resources"]["limits"]["amd.com/gpu"] == "4"
+    assert container["resources"]["requests"]["amd.com/gpu"] == "4"
+    assert {"name": "AMD_CI_RUNTIME", "value": "native"} in container["env"]
+    assert {"name": "NATIVE_CI", "value": "true"} in container["env"]
+
+    assert (
+        command_step.env["DOCKER_IMAGE_NAME"]
+        == buildkite_step.AMD_NATIVE_CI_BASE_IMAGE
+    )
+    assert (
+        command_step.env["VLLM_CI_BASE_IMAGE"]
+        == buildkite_step.AMD_NATIVE_CI_BASE_IMAGE
+    )
+    assert command_step.env["AMD_CI_RUNTIME"] == "native"
+    assert command_step.env["NATIVE_CI"] == "true"
+    assert (
+        command_step.env["VLLM_CI_FALLBACK_IMAGE"]
+        == buildkite_step.AMD_FALLBACK_CI_IMAGE
+    )
+    assert "pytest tests/native.py" in command_step.env["VLLM_TEST_COMMANDS"]
+
+
+def test_amd_no_plugin_steps_skip_wrapper_and_default_env(fake_global_config):
+    fake_global_config["run_all"] = True
+    step = Step(
+        label="AMD no plugin test",
+        group="Direct AMD",
+        key="amd-no-plugin",
+        depends_on=["image-build"],
+        device="mi300_1",
+        no_plugin=True,
+        env={"CUSTOM_ENV": "enabled"},
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/no_plugin.py"],
+    )
+
+    group_step = _render_single_step(step)
+    (command_step,) = group_step.steps
+
+    assert command_step.commands != [buildkite_step.AMD_TEST_COMMAND]
+    assert "pytest tests/no_plugin.py" in command_step.commands[0]
+    assert command_step.env == {"CUSTOM_ENV": "enabled"}
+    assert command_step.plugins is None
+    assert command_step.depends_on == ["image-build-amd"]
 
 
 def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):

@@ -16,6 +16,11 @@ PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
+AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
+AMD_NATIVE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT"
+AMD_FALLBACK_CI_IMAGE = "rocm/vllm-ci:$BUILDKITE_COMMIT"
+AMD_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
+AMD_RESULTS_ROOT = "/home/buildkite-agent/huggingface/amd-ci-results"
 AMD_RETRY = {
     "automatic": [
         {"exit_status": -1, "limit": 1},
@@ -340,30 +345,68 @@ def _normalize_amd_depends_on(depends_on: Optional[List[str]]) -> List[str]:
     return normalized
 
 
+def _infer_amd_gpu_count(device: Optional[str], num_devices: Optional[int]) -> int:
+    if num_devices is not None:
+        return num_devices
+    device_value = _device_value(device) or ""
+    suffix = device_value.rsplit("_", 1)[-1]
+    if suffix.isdigit():
+        return int(suffix)
+    return 1
+
+
+def _get_amd_native_k8s_plugin(
+    device: Optional[str],
+    num_devices: Optional[int],
+) -> Dict[str, Any]:
+    gpu_count = str(_infer_amd_gpu_count(device, num_devices))
+    return {
+        "kubernetes": {
+            "podSpecPatch": {
+                "imagePullSecrets": [{"name": "docker-config"}],
+                "containers": [
+                    {
+                        "name": "container-0",
+                        "image": AMD_NATIVE_CI_BASE_IMAGE,
+                        "resources": {
+                            "limits": {"amd.com/gpu": gpu_count},
+                            "requests": {"amd.com/gpu": gpu_count},
+                        },
+                        "env": [
+                            {"name": "AMD_CI_RUNTIME", "value": "native"},
+                            {"name": "NATIVE_CI", "value": "true"},
+                        ],
+                    }
+                ],
+            }
+        }
+    }
+
+
 def _get_amd_env(
     commands: str,
     extra_env: Optional[Dict[str, str]] = None,
+    native_ci: bool = False,
 ) -> Dict[str, str]:
     env = dict(extra_env or {})
+    base_image = AMD_NATIVE_CI_BASE_IMAGE if native_ci else AMD_STABLE_CI_BASE_IMAGE
     env.update(
         {
             "DOCKER_BUILDKIT": "1",
             # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
-            # Keep the hook warmup on ci_base; the runner uses the full image
-            # only if ci_base or artifact setup fails before tests begin.
-            "DOCKER_IMAGE_NAME": "rocm/vllm-dev:ci_base",
-            "VLLM_CI_BASE_IMAGE": "rocm/vllm-dev:ci_base",
-            "VLLM_CI_FALLBACK_IMAGE": "rocm/vllm-ci:$BUILDKITE_COMMIT",
+            # DinD uses stable ci_base. Native in-pod jobs use the per-commit
+            # ci_base image injected into container-0 by podSpecPatch.
+            "DOCKER_IMAGE_NAME": base_image,
+            "VLLM_CI_BASE_IMAGE": base_image,
+            "VLLM_CI_FALLBACK_IMAGE": AMD_FALLBACK_CI_IMAGE,
             "VLLM_CI_USE_ARTIFACTS": "1",
-            "VLLM_CI_ARTIFACT_GLOB": (
-                "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
-            ),
-            "VLLM_CI_RESULTS_ROOT": (
-                "/home/buildkite-agent/huggingface/amd-ci-results"
-            ),
+            "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
+            "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
             "VLLM_TEST_COMMANDS": commands,
         }
     )
+    if native_ci:
+        env.update({"AMD_CI_RUNTIME": "native", "NATIVE_CI": "true"})
     return env
 
 
@@ -560,9 +603,12 @@ def convert_group_step_to_buildkite_step(
                     label=step.label,
                     key=step.key,
                     device=step.device,
+                    num_devices=step.num_devices,
                     commands_str=" && ".join(amd_commands),
                     depends_on=step.depends_on,
                     extra_env=step.env,
+                    native_ci=step.native_ci or False,
+                    no_plugin=step.no_plugin or False,
                     soft_fail=step.soft_fail,
                     parallelism=step.parallelism,
                     timeout_in_minutes=step.timeout_in_minutes,
@@ -625,12 +671,14 @@ def convert_group_step_to_buildkite_step(
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
                 amd = step.mirror["amd"]
+                amd_no_plugin = amd.get("no_plugin", False)
                 custom_commands = amd.get("commands")
                 if custom_commands:
                     amd_command_step = step.model_copy(
                         update={
                             "commands": custom_commands,
                             "working_dir": amd.get("working_dir", step.working_dir),
+                            "no_plugin": amd_no_plugin,
                         }
                     )
                     amd_commands_str = " && ".join(
@@ -641,9 +689,12 @@ def convert_group_step_to_buildkite_step(
                         )
                     )
                 else:
+                    amd_command_step = step.model_copy(
+                        update={"no_plugin": amd_no_plugin}
+                    )
                     amd_commands_str = " && ".join(
                         _prepare_commands(
-                            step,
+                            amd_command_step,
                             variables_to_inject,
                             setup_profile="amd",
                         )
@@ -654,10 +705,13 @@ def convert_group_step_to_buildkite_step(
                 amd_step = _create_amd_step(
                     label=step.label,
                     device=amd["device"],
+                    num_devices=amd.get("num_devices") or amd.get("num_gpus"),
                     commands_str=amd_commands_str,
                     depends_on=amd.get("depends_on"),
                     extra_env=extra_env,
-                    soft_fail=True,
+                    native_ci=amd.get("native_ci", False),
+                    no_plugin=amd_no_plugin,
+                    soft_fail=amd.get("soft_fail", step.soft_fail or False),
                     parallelism=step.parallelism,
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                 )
@@ -759,9 +813,12 @@ def _create_amd_step(
     *,
     label: str,
     device: Optional[str],
+    num_devices: Optional[int],
     commands_str: str,
     depends_on: Optional[List[str]],
     extra_env: Optional[Dict[str, str]],
+    native_ci: bool,
+    no_plugin: bool,
     soft_fail: Optional[bool],
     parallelism: Optional[int],
     key: Optional[str] = None,
@@ -774,6 +831,25 @@ def _create_amd_step(
             f"Valid devices: {_valid_amd_gpu_devices()}"
         )
     queue_step = Step(label=label, device=_device_value(device))
+    plugins = (
+        [_get_amd_native_k8s_plugin(device, num_devices)] if native_ci else None
+    )
+
+    if no_plugin:
+        env = dict(extra_env or {})
+        return BuildkiteCommandStep(
+            label=_get_amd_label(label, device),
+            key=key,
+            commands=[commands_str],
+            depends_on=_normalize_amd_depends_on(depends_on),
+            agents={"queue": get_agent_queue(queue_step)},
+            env=env or None,
+            plugins=plugins,
+            priority=200,
+            soft_fail=soft_fail or False,
+            retry=AMD_RETRY,
+            parallelism=parallelism,
+        )
 
     return BuildkiteCommandStep(
         label=_get_amd_label(label, device),
@@ -781,7 +857,8 @@ def _create_amd_step(
         commands=[AMD_TEST_COMMAND],
         depends_on=_normalize_amd_depends_on(depends_on),
         agents={"queue": get_agent_queue(queue_step)},
-        env=_get_amd_env(commands_str, extra_env),
+        env=_get_amd_env(commands_str, extra_env, native_ci=native_ci),
+        plugins=plugins,
         priority=200,
         soft_fail=soft_fail or False,
         retry=AMD_RETRY,

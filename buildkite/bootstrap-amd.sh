@@ -19,6 +19,21 @@ if [[ -z "${VLLM_CI_BRANCH:-}" ]]; then
     VLLM_CI_BRANCH="main"
 fi
 
+if [[ -z "${VLLM_CI_REPO:-}" ]]; then
+    VLLM_CI_REPO="vllm-project/ci-infra"
+fi
+
+ci_infra_template_raw_url() {
+    local branch="${VLLM_CI_BRANCH}"
+    local repo="${VLLM_CI_REPO}"
+    # Optional fork shorthand: VLLM_CI_BRANCH=<github-user>:<branch>
+    if [[ "$branch" == *:* ]]; then
+        repo="${branch%%:*}/ci-infra"
+        branch="${branch#*:}"
+    fi
+    printf 'https://raw.githubusercontent.com/%s/%s/buildkite/test-template-amd.j2\n' "$repo" "$branch"
+}
+
 if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
     AMD_MIRROR_HW="amdproduction"
 fi
@@ -150,8 +165,9 @@ upload_pipeline() {
     if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
         AMD_MIRROR_HW="amdtentative"
     fi
-    curl -fsSL -o "$TEMPLATE_PATH" \
-        "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
+    template_url="$(ci_infra_template_raw_url)?$(date +%s)"
+    echo "Fetching AMD template from ${template_url%\?*}"
+    curl -fsSL -o "$TEMPLATE_PATH" "$template_url"
 
 
     # (WIP) Use pipeline generator instead of jinja template

@@ -22,6 +22,32 @@
 {%- if step.agent_pool -%}{{ step.agent_pool }}-{%- endif -%}{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
 {%- endmacro %}
 
+{# Native in-pod ROCm CI: per-job container-0 image via kubernetes podSpecPatch. #}
+{% macro amd_native_ci_base_image() -%}
+rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
+{%- endmacro %}
+
+{% macro amd_native_k8s_plugin(step) %}
+        plugins:
+          - kubernetes:
+              podSpecPatch:
+                imagePullSecrets:
+                  - name: docker-config
+                containers:
+                  - name: container-0
+                    image: {{ amd_native_ci_base_image() | safe }}
+                    resources:
+                      limits:
+                        amd.com/gpu: "{{ step.num_gpus or 1 }}"
+                      requests:
+                        amd.com/gpu: "{{ step.num_gpus or 1 }}"
+                    env:
+                      - name: AMD_CI_RUNTIME
+                        value: native
+                      - name: NATIVE_CI
+                        value: "true"
+{%- endmacro %}
+
   - group: "AMD Tests"
     depends_on: ~
     steps:
@@ -121,15 +147,34 @@
           {% else %}
           queue: amd_mi300
           {% endif %}
+        {% if step.native_ci %}
+{{ amd_native_k8s_plugin(step) }}
+        {% endif %}
+        {% if step.no_plugin %}
+        command: {{ (step.command or (step.commands | join(' && '))) | safe }}
+        {% if step.env %}
+        env:
+          {% for key, value in step.env | items %}
+          {{ key }}: {{ value | safe }}
+          {% endfor %}
+        {% endif %}
+        {% else %}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           DOCKER_BUILDKIT: "1"
           NUM_NODES: "{{ step.num_nodes or 1 }}"
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
-          # Keep the hook warmup on ci_base; the runner uses the full image only
-          # if ci_base or artifact setup fails before tests begin.
+          {% if step.native_ci %}
+          # Native: podSpecPatch sets container-0 to ci_base-<commit> from ensure-ci-base-amd.
+          DOCKER_IMAGE_NAME: "{{ amd_native_ci_base_image() | safe }}"
+          VLLM_CI_BASE_IMAGE: "{{ amd_native_ci_base_image() | safe }}"
+          AMD_CI_RUNTIME: "native"
+          NATIVE_CI: "true"
+          {% else %}
+          # DinD: hook warm-up uses stable ci_base; docker run uses fallback image if needed.
           DOCKER_IMAGE_NAME: "rocm/vllm-dev:ci_base"
           VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
+          {% endif %}
           VLLM_CI_FALLBACK_IMAGE: "rocm/vllm-ci:$BUILDKITE_COMMIT"
           VLLM_CI_USE_ARTIFACTS: "1"
           VLLM_CI_ARTIFACT_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
@@ -148,6 +193,7 @@
           VLLM_CI_EXECUTION_MODE: "single-node"
           VLLM_TEST_COMMANDS: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && export VLLM_TEST_GROUP_NAME={{ step_slug }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
           {% endif %}
+        {% endif %}
         priority: 100
         {% if step.grade and step.grade == "Blocking" %}
         soft_fail: false
