@@ -257,7 +257,6 @@ fi
 
 patterns=(
     "docker/Dockerfile.rocm"
-    "docker/Dockerfile.rocm_base"
     "CMakeLists.txt"
     "requirements/common.txt"
     "requirements/rocm.txt"
@@ -273,8 +272,25 @@ ignore_patterns=(
     "cmake/cpu_extension.cmake"
 )
 
+nightly_patterns=(
+    "docker/Dockerfile.rocm_base"
+)
+
 while IFS= read -r file; do
     [[ -z "$file" ]] && continue
+    matches_nightly=0
+    for pattern in "${nightly_patterns[@]}"; do
+        if [[ $file == $pattern* ]] || [[ $file == $pattern ]]; then
+            matches_nightly=1
+            NIGHTLY=1
+            echo "Found changes: $file. Running nightly AMD coverage"
+            break
+        fi
+    done
+    if [[ $matches_nightly -eq 1 ]]; then
+        continue
+    fi
+
     # First check if file matches any pattern
     matches_pattern=0
     for pattern in "${patterns[@]}"; do
@@ -314,20 +330,21 @@ fi
 # Relies on existing patterns array as a basis.
 if [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
     echo "VLLM_USE_PRECOMPILED is already set to: $VLLM_USE_PRECOMPILED"
-elif [[ $RUN_ALL -eq 1 ]]; then
+elif [[ $RUN_ALL -eq 1 || $NIGHTLY -eq 1 ]]; then
     export VLLM_USE_PRECOMPILED=0
-    echo "Detected critical changes, building wheels from source"
+    echo "Detected full AMD coverage, building wheels from source"
 else
     export VLLM_USE_PRECOMPILED=1
     echo "No critical changes, using precompiled wheels"
 fi
 
 # Build LIST_FILE_DIFF from the already-computed file_diff.
-# When run_all=1, the jinja template ignores list_file_diff (all tests are
-# unblocked unconditionally), so use a short sentinel to avoid exceeding
-# ARG_MAX when the diff is large (K8s fresh clones).
+# When run_all=1 or nightly=1, the jinja template ignores list_file_diff, so
+# use a short sentinel for the active mode instead of passing a large diff.
 if [[ $RUN_ALL -eq 1 ]]; then
     LIST_FILE_DIFF="run_all"
+elif [[ $NIGHTLY -eq 1 ]]; then
+    LIST_FILE_DIFF="nightly"
 else
     LIST_FILE_DIFF=$(join_file_diff "$file_diff")
 fi

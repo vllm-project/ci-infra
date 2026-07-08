@@ -25,14 +25,30 @@
   - group: "AMD Tests"
     depends_on: ~
     steps:
-      - label: "AMD: :docker: ensure ci_base"
+      - label: "AMD: :docker: refresh ROCm base"
         depends_on: ~
         soft_fail: false
         commands:
-          - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
-        key: "amd-ci-base-ready"
+          - bash .buildkite/scripts/rocm/refresh-base-image.sh
+        key: "refresh-rocm-base-amd"
         env:
           DOCKER_BUILDKIT: "1"
+          BUILDKIT_PROGRESS: "tty"
+          TERM: "xterm-256color"
+{{ amd_infra_retry('        ') }}
+        agents:
+          queue: amd-cpu
+
+      - label: "AMD: :docker: ensure ci_base"
+        depends_on: "refresh-rocm-base-amd"
+        soft_fail: false
+        commands:
+          - bash .buildkite/scripts/rocm/build-ci-base.sh
+        key: "ensure-ci-base-amd"
+        env:
+          DOCKER_BUILDKIT: "1"
+          BUILDKIT_PROGRESS: "tty"
+          TERM: "xterm-256color"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           REMOTE_VLLM: "1"
@@ -41,20 +57,17 @@
         agents:
           queue: amd-cpu
 
-      - label: "AMD: :docker: build image"
-        depends_on: "amd-ci-base-ready"
+      - label: "AMD: :docker: build test image and artifacts"
+        depends_on: "ensure-ci-base-amd"
         soft_fail: false
         commands:
-          - |
-            if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" ]]; then
-              echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
-              IMAGE_TAG="" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
-            else
-              bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
-            fi
-        key: "amd-build"
+          - bash .buildkite/scripts/rocm/build-test-image.sh
+          - bash .buildkite/scripts/rocm/smoke-test-image.sh
+        key: "image-build-amd"
         env:
           DOCKER_BUILDKIT: "1"
+          BUILDKIT_PROGRESS: "tty"
+          TERM: "xterm-256color"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
@@ -91,7 +104,7 @@
 
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
-        depends_on: amd-build
+        depends_on: image-build-amd
         key: block-{{ step_slug }}
       {% endif %}
 
@@ -99,7 +112,7 @@
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
         depends_on: block-{{ step_slug }}
         {% else %}
-        depends_on: amd-build
+        depends_on: image-build-amd
         {% endif %}
         timeout_in_minutes: {{ step_timeout_in_minutes }}
         agents:
