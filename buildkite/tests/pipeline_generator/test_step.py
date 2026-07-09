@@ -206,6 +206,64 @@ def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):
     assert result.returncode == 1
 
 
+def test_multi_gpu_step_dumps_nvidia_topology():
+    step = Step(
+        label="Distributed Comm Ops Test",
+        group="Distributed",
+        key="distributed-comm-ops",
+        depends_on=["image-build"],
+        device="h100",
+        num_devices=2,
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/distributed/test_comm_ops.py"],
+    )
+
+    commands = buildkite_step._prepare_commands(step, variables_to_inject={})
+
+    assert '(command nvidia-smi topo -m || true)' in commands
+    # Topology dump comes after the base GPU info and before coredump setup.
+    topo_index = commands.index('(command nvidia-smi topo -m || true)')
+    smi_index = commands.index('(command nvidia-smi || true)')
+    assert smi_index < topo_index
+
+
+def test_multi_node_step_dumps_nvidia_topology():
+    step = Step(
+        label="Multi-node Test",
+        group="Distributed",
+        key="multi-node",
+        depends_on=["image-build"],
+        device="h100",
+        num_nodes=2,
+        num_devices=4,
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/distributed/test_multi_node.py"],
+    )
+
+    commands = buildkite_step._prepare_commands(step, variables_to_inject={})
+
+    assert '(command nvidia-smi topo -m || true)' in commands
+
+
+def test_single_gpu_step_skips_nvidia_topology():
+    step = Step(
+        label="Single GPU Test",
+        group="Single",
+        key="single-gpu",
+        depends_on=["image-build"],
+        device="h100",
+        num_devices=1,
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/basic.py"],
+    )
+
+    commands = buildkite_step._prepare_commands(step, variables_to_inject={})
+
+    # Base GPU info is still emitted, but the topology dump is multi-GPU only.
+    assert '(command nvidia-smi || true)' in commands
+    assert '(command nvidia-smi topo -m || true)' not in commands
+
+
 def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     fake_global_config,
 ):

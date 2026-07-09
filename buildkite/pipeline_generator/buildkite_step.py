@@ -376,17 +376,42 @@ def _get_variables_to_inject() -> Dict[str, str]:
     }
 
 
+def _is_multi_gpu_step(step: Step) -> bool:
+    """Whether a step exercises more than one GPU.
+
+    Multi-GPU (tensor/pipeline parallel) and multi-node steps rely on the
+    cross-GPU fabric (NVLink/NVSwitch) and P2P being healthy on whichever node
+    they land on. Single-GPU steps don't, so the topology dump is only worth the
+    log noise for these.
+    """
+    if step.num_nodes and step.num_nodes >= 2:
+        return True
+    return bool(step.num_devices and step.num_devices >= 2)
+
+
 def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
     if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
         return []
 
     if setup_profile == "nvidia":
-        return [
+        commands = [
             "echo '--- :nvidia: GPU Info'",
             "(command nvidia-smi || true)",
+        ]
+        if _is_multi_gpu_step(step):
+            # Dump the GPU/NVLink topology for multi-GPU jobs so infra flakes on
+            # a node with a degraded fabric (unhealthy NVSwitch/fabric-manager,
+            # missing P2P) are visible in the log and distinguishable from real
+            # regressions. Cheap and never fails the step.
+            commands += [
+                "echo '--- :nvidia: GPU Topology'",
+                "(command nvidia-smi topo -m || true)",
+            ]
+        commands += [
             "echo '--- :gear: CUDA Coredump Setup'",
             "export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'",
         ]
+        return commands
 
     if setup_profile == "amd":
         return [
