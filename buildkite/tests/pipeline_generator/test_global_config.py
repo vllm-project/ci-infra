@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch
-from buildkite.pipeline_generator.global_config import _validate_pipeline_config
+from global_config import _validate_pipeline_config
 
 
 def test_validate_pipeline_config_valid_repo():
