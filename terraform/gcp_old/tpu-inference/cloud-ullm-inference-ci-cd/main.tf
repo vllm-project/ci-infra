@@ -87,7 +87,7 @@ module "ci_v7x_8" {
 }
 
 module "ci_v7x_16" {
-  source = "../modules/ci_v7x_multi"
+  source = "../modules/ci_v7x"
   providers = {
     google-beta = google-beta.us-central1-c
   }
@@ -101,6 +101,7 @@ module "ci_v7x_16" {
   buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
   buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  # disk_size defaults to 0, disable attached disk
 }
 
 module "ci_cpu_64_core" {
