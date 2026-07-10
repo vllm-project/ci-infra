@@ -169,6 +169,7 @@ class BuildkiteCommandStep(BaseModel):
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
+    timeout_in_minutes: Optional[int] = None
     priority: Optional[int] = None
 
     def to_yaml(self):
@@ -184,6 +185,7 @@ class BuildkiteCommandStep(BaseModel):
             "plugins": self.plugins,
             "env": self.env,
             "parallelism": self.parallelism,
+            "timeout_in_minutes": self.timeout_in_minutes,
             "priority": self.priority,
         }
 
@@ -528,6 +530,7 @@ def convert_group_step_to_buildkite_step(
                     extra_env=step.env,
                     soft_fail=step.soft_fail,
                     parallelism=step.parallelism,
+                    timeout_in_minutes=step.timeout_in_minutes,
                 )
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
@@ -560,6 +563,8 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
+            if step.timeout_in_minutes:
+                buildkite_step.timeout_in_minutes = step.timeout_in_minutes
 
             if not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(
@@ -617,6 +622,7 @@ def convert_group_step_to_buildkite_step(
                     extra_env=extra_env,
                     soft_fail=amd.get("soft_fail", step.soft_fail or False),
                     parallelism=step.parallelism,
+                    timeout_in_minutes=amd.get("timeout_in_minutes"),
                 )
                 if not _step_should_run(
                     _get_amd_mirror_effective_step(step, amd), list_file_diff
@@ -722,6 +728,7 @@ def _create_amd_step(
     soft_fail: Optional[bool],
     parallelism: Optional[int],
     key: Optional[str] = None,
+    timeout_in_minutes: Optional[int] = None,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
     if not _is_amd_gpu_device(device):
@@ -742,4 +749,5 @@ def _create_amd_step(
         soft_fail=soft_fail or False,
         retry=AMD_RETRY,
         parallelism=parallelism,
+        timeout_in_minutes=timeout_in_minutes,
     )
