@@ -17,7 +17,7 @@ locals {
   has_attached_disk = var.disk_size > 0
 }
 
-# Generate an ephemeral SSH key pair for internal multi-host communication
+# Generate a SSH key pair for internal multi-host communication
 resource "tls_private_key" "internal_ssh_key" {
   count     = local.is_multi_host ? var.instance_count : 0
   algorithm = "RSA"
