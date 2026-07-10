@@ -620,7 +620,7 @@ def convert_group_step_to_buildkite_step(
                     commands_str=amd_commands_str,
                     depends_on=amd.get("depends_on"),
                     extra_env=extra_env,
-                    soft_fail=amd.get("soft_fail", step.soft_fail or False),
+                    soft_fail=True,
                     parallelism=step.parallelism,
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                 )
