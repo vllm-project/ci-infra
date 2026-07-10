@@ -232,66 +232,60 @@ def _get_amd_gpu_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
         return None
 
 
-def get_agent_queue(step: Step):
+DEVICE_AGENT_QUEUES = {
+    DeviceType.CPU_SMALL.value: AgentQueue.SMALL_CPU_PREMERGE,
+    DeviceType.CPU_MEDIUM.value: AgentQueue.MEDIUM_CPU_PREMERGE,
+    DeviceType.CPU.value: AgentQueue.CPU_PREMERGE_US_EAST_1,
+    DeviceType.A100.value: AgentQueue.A100,
+    DeviceType.H100.value: AgentQueue.MITHRIL_H100,
+    DeviceType.H200.value: AgentQueue.H200,
+    DeviceType.H200_18GB.value: AgentQueue.H200_18GB,
+    DeviceType.H200_35GB.value: AgentQueue.H200_35GB,
+    DeviceType.B200.value: AgentQueue.B200,
+    DeviceType.B200_K8S.value: AgentQueue.B200_K8S,
+    DeviceType.INTEL_CPU.value: AgentQueue.INTEL_CPU,
+    DeviceType.INTEL_HPU.value: AgentQueue.INTEL_HPU,
+    DeviceType.INTEL_GPU.value: AgentQueue.INTEL_GPU,
+    DeviceType.ARM_CPU.value: AgentQueue.ARM_CPU,
+    DeviceType.AMD_CPU.value: AgentQueue.AMD_CPU,
+    DeviceType.GH200.value: AgentQueue.GH200,
+    DeviceType.ASCEND.value: AgentQueue.ASCEND,
+    DeviceType.DGX_SPARK.value: AgentQueue.DGX_SPARK,
+}
+
+
+def _get_docker_agent_queue(label: str, branch: str) -> AgentQueue:
+    if "arm64" in label:
+        return (
+            AgentQueue.ARM64_CPU_POSTMERGE
+            if branch == "main"
+            else AgentQueue.ARM64_CPU_PREMERGE
+        )
+    return (
+        AgentQueue.CPU_POSTMERGE_US_EAST_1
+        if branch == "main"
+        else AgentQueue.CPU_PREMERGE_US_EAST_1
+    )
+
+
+def get_agent_queue(step: Step) -> AgentQueue:
     branch = get_global_config()["branch"]
+
+    # Labels encode pipeline roles, so they take precedence over device metadata.
     if step.label.startswith(":docker:"):
-        if "arm64" in step.label:
-            if branch == "main":
-                return AgentQueue.ARM64_CPU_POSTMERGE
-            else:
-                return AgentQueue.ARM64_CPU_PREMERGE
-        if branch == "main":
-            return AgentQueue.CPU_POSTMERGE_US_EAST_1
-        else:
-            return AgentQueue.CPU_PREMERGE_US_EAST_1
-    elif step.label == "Documentation Build":
+        return _get_docker_agent_queue(step.label, branch)
+    if step.label == "Documentation Build":
         return AgentQueue.SMALL_CPU_PREMERGE
-    elif step.device == DeviceType.CPU_SMALL:
-        return AgentQueue.SMALL_CPU_PREMERGE
-    elif step.device == DeviceType.CPU_MEDIUM:
-        return AgentQueue.MEDIUM_CPU_PREMERGE
-    elif step.device == DeviceType.CPU:
-        return AgentQueue.CPU_PREMERGE_US_EAST_1
-    elif step.device == DeviceType.A100:
-        return AgentQueue.A100
-    elif step.device == DeviceType.H100:
-        # Route multi-GPU H100 tests to RedHat Frankfurt queue
-        if step.num_devices is not None and step.num_devices >= 4:
-            return AgentQueue.MITHRIL_H100
-        else:
-            return AgentQueue.MITHRIL_H100
-    elif step.device == DeviceType.H200:
-        return AgentQueue.H200
-    elif step.device == DeviceType.H200_18GB:
-        return AgentQueue.H200_18GB
-    elif step.device == DeviceType.H200_35GB:
-        return AgentQueue.H200_35GB
-    elif step.device == DeviceType.B200:
-        return AgentQueue.B200
-    elif step.device == DeviceType.B200_K8S:
-        return AgentQueue.B200_K8S
-    elif step.device == DeviceType.INTEL_CPU:
-        return AgentQueue.INTEL_CPU
-    elif step.device == DeviceType.INTEL_HPU:
-        return AgentQueue.INTEL_HPU
-    elif step.device == DeviceType.INTEL_GPU:
-        return AgentQueue.INTEL_GPU
-    elif step.device == DeviceType.ARM_CPU:
-        return AgentQueue.ARM_CPU
-    elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
-        return AgentQueue.AMD_CPU
-    elif amd_gpu_queue := _get_amd_gpu_agent_queue(step.device):
+
+    if amd_gpu_queue := _get_amd_gpu_agent_queue(step.device):
         return amd_gpu_queue
-    elif step.device == DeviceType.GH200:
-        return AgentQueue.GH200
-    elif step.device == DeviceType.ASCEND:
-        return AgentQueue.ASCEND
-    elif step.device == DeviceType.DGX_SPARK:
-        return AgentQueue.DGX_SPARK
-    elif step.num_devices == 2 or step.num_devices == 4:
+
+    if device_queue := DEVICE_AGENT_QUEUES.get(_device_value(step.device)):
+        return device_queue
+
+    if step.num_devices in (2, 4):
         return AgentQueue.GPU_4
-    else:
-        return AgentQueue.GPU_1
+    return AgentQueue.GPU_1
 
 
 def _is_amd_gpu_device(device: Optional[str]) -> bool:
