@@ -288,5 +288,149 @@ def test_torch_nightly_flag_no_separate_group(fake_global_config):
     assert not any(lbl.startswith("Torch Nightly ") for lbl in labels)
 
 
+def test_timeout_in_minutes_propagates_to_command_step():
+    step = Step(
+        label="Timed test",
+        group="Timing",
+        key="timed-test",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/timed.py"],
+        device="h200_18gb",
+        timeout_in_minutes=42,
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.timeout_in_minutes == 42
+
+
+def test_missing_timeout_in_minutes_is_omitted_from_pipeline():
+    step = Step(
+        label="Untimed test",
+        group="Timing",
+        key="untimed-test",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/untimed.py"],
+        device="h200_18gb",
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.timeout_in_minutes is None
+    # exclude_none is used when dumping the pipeline, so an unset timeout must
+    # not surface as a key at all.
+    assert "timeout_in_minutes" not in command_step.dict(exclude_none=True)
+
+
+def test_direct_amd_gpu_step_propagates_timeout():
+    step = Step(
+        label="AMD direct timed",
+        group="Direct AMD",
+        key="amd-direct-timed",
+        depends_on=["image-build"],
+        device="mi300_4",
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/foo.py"],
+        timeout_in_minutes=90,
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.timeout_in_minutes == 90
+
+
+def test_amd_mirror_uses_its_own_timeout_in_minutes(fake_global_config):
+    fake_global_config["list_file_diff"] = ["vllm/foo.py"]
+    step = Step(
+        label="Mirrored timed test",
+        group="Mirrors",
+        key="mirrored-timed",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        timeout_in_minutes=40,
+        mirror={
+            "amd": {
+                "device": "mi325_1",
+                "depends_on": ["image-build-amd"],
+                "timeout_in_minutes": 75,
+            }
+        },
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
+        step.group: [step],
+    })
+    default_group = next(group for group in group_steps if group.group == "Mirrors")
+    default_command_step = next(
+        s for s in default_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+    amd_command_step = next(
+        s for s in amd_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    # The main step keeps its own timeout; the AMD mirror uses the (larger)
+    # timeout declared on the mirror block.
+    assert default_command_step.timeout_in_minutes == 40
+    assert amd_command_step.timeout_in_minutes == 75
+
+
+def test_amd_mirror_without_timeout_stays_unbounded(fake_global_config):
+    fake_global_config["list_file_diff"] = ["vllm/foo.py"]
+    step = Step(
+        label="Mirrored untimed test",
+        group="Mirrors",
+        key="mirrored-untimed",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        timeout_in_minutes=40,
+        mirror={
+            "amd": {
+                "device": "mi325_1",
+                "depends_on": ["image-build-amd"],
+            }
+        },
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
+        step.group: [step],
+    })
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+    amd_command_step = next(
+        s for s in amd_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    # An AMD mirror without its own timeout must not inherit the shorter main
+    # timeout (AMD runs slower); it stays unbounded until one is declared.
+    assert amd_command_step.timeout_in_minutes is None
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
