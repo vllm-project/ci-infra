@@ -4,9 +4,6 @@ from pathlib import Path
 
 import pytest
 
-PIPELINE_GENERATOR_DIR = Path(__file__).resolve().parents[2] / "pipeline_generator"
-sys.path.insert(0, str(PIPELINE_GENERATOR_DIR))
-
 import buildkite_step
 import step as step_module
 from constants import AgentQueue
