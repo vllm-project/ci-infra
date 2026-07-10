@@ -1,12 +1,5 @@
-# Credentials for the macOS wheel builder (the `macmini` Buildkite queue).
-#
-# The Linux release builders are EC2 instances and get S3 write to vllm-wheels
-# from their instance role (see vllm_wheels_bucket_read_write_access in iam.tf).
-# The mac mini is a self-hosted agent with no instance profile, so it uses an
-# IAM user access key instead, reusing that same least-privilege policy.
-#
-# The generated key is a long-lived secret and lands in Terraform state. After
-# apply, retrieve it once and place it on the agent (see terraform/aws/README).
+# S3 write access to vllm-wheels for the self-hosted macOS wheel builder (the
+# `macmini` queue), which has no EC2 instance role. See terraform/aws/README.
 
 resource "aws_iam_user" "macmini_wheel_uploader" {
   name = "bk-macmini-wheel-uploader"

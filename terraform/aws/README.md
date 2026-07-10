@@ -54,29 +54,14 @@ The current state (`terraform.tfstate`) after applying will be updated in the re
 
 ## macOS wheel builder (`macmini` queue) credentials
 
-The Linux release builders get S3 write to `vllm-wheels` from their EC2 instance
-role. The mac mini is a self-hosted agent with no instance profile, so
-`macmini-wheel-uploader.tf` provisions an IAM user with the same
-`vllm_wheels_bucket_read_write_access` policy and an access key.
-
-After `terraform apply`, retrieve the key and place it on the mac mini for the
-`buildkite-agent` user:
+`macmini-wheel-uploader.tf` provisions an IAM user with S3 write to
+`vllm-wheels` for the self-hosted mac mini agent. After `apply`, write the key
+to `~/.aws/credentials` (region `us-east-1`) for the `buildkite-agent` user:
 
 ```bash
 terraform output -raw macmini_wheel_uploader_access_key_id
 terraform output -raw macmini_wheel_uploader_secret_access_key
 ```
 
-On the agent, write `~/.aws/credentials` (or export the vars from the agent's
-`hooks/environment`):
-
-```ini
-[default]
-aws_access_key_id = <access_key_id>
-aws_secret_access_key = <secret_access_key>
-region = us-east-1
-```
-
-`upload-nightly-wheels.sh` then uploads via the `aws` CLI like the Linux
-builders. To rotate, taint `aws_iam_access_key.macmini_wheel_uploader`,
-re-apply, and update the agent.
+To rotate, taint `aws_iam_access_key.macmini_wheel_uploader`, re-apply, and
+update the agent.
