@@ -29,7 +29,6 @@ AMD_ARTIFACT_STEP = "image-build-amd"
 AMD_RESULTS_ROOT = "/home/buildkite-agent/huggingface/amd-ci-results"
 AMD_HF_HOME = "/home/buildkite-agent/huggingface"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
-AMD_NATIVE_DEVICE_PREFIX = "mi300_"
 AMD_NATIVE_SHM_SIZE = "16Gi"
 AMD_RETRY = {
     "automatic": [
@@ -361,40 +360,15 @@ def _first_configured(*values: Optional[int]) -> Optional[int]:
     return next((value for value in values if value is not None), None)
 
 
-def _amd_device_gpu_count(device: Optional[str]) -> int:
-    device_value = _device_value(device) or ""
-    suffix = device_value.rsplit("_", 1)[-1]
-    if suffix.isdigit():
-        return int(suffix)
-    return 1
-
-
-def _infer_amd_gpu_count(device: Optional[str], num_devices: Optional[int]) -> int:
-    return num_devices if num_devices is not None else _amd_device_gpu_count(device)
-
-
-def _is_amd_native_device(device: Optional[str]) -> bool:
-    return (_device_value(device) or "").startswith(AMD_NATIVE_DEVICE_PREFIX)
-
-
-def _resolve_amd_native_ci(device: Optional[str], requested: Optional[bool]) -> bool:
-    expected = _is_amd_native_device(device)
-    if requested is not None and requested != expected:
-        requested_mode = "native" if requested else "legacy DinD"
-        expected_mode = "native" if expected else "legacy DinD"
-        raise ValueError(
-            f"AMD device {device} requested {requested_mode}, but it must use "
-            f"{expected_mode}. MI300 is native-only; other AMD devices remain legacy."
-        )
-    return expected
+def _infer_amd_gpu_count(num_devices: Optional[int]) -> int:
+    return num_devices if num_devices is not None else 1
 
 
 def _get_amd_native_k8s_plugin(
-    device: Optional[str],
     num_devices: Optional[int],
     no_gpu: bool,
 ) -> Dict[str, Any]:
-    gpu_count = 0 if no_gpu else _infer_amd_gpu_count(device, num_devices)
+    gpu_count = 0 if no_gpu else _infer_amd_gpu_count(num_devices)
     # The Buildkite controller decodes podSpecPatch into a typed PodSpec before
     # merging it. An explicit zero therefore overrides the controller's GPU
     # default reliably; omitting the key would preserve the inherited request.
@@ -469,14 +443,14 @@ def _get_amd_env(
     env = dict(extra_env or {})
     if native_ci:
         # Do not set DOCKER_IMAGE_NAME for native jobs. AMD agent hooks use it
-        # to warm Docker images, and the MI300 controller intentionally has no
+        # to warm Docker images, and the native AMD controller has no
         # DinD sidecar.
         env.pop("DOCKER_IMAGE_NAME", None)
         env.pop("DOCKER_BUILDKIT", None)
         env.pop("VLLM_CI_FALLBACK_IMAGE", None)
         env.setdefault("VLLM_CI_ARTIFACT_STEP", AMD_ARTIFACT_STEP)
         env.setdefault("VLLM_CI_ARTIFACT_CHECKSUM_GLOB", AMD_ARTIFACT_CHECKSUM_GLOB)
-        # The MI300 controller owns the model-cache PVC. The runner verifies
+        # The native AMD controller owns the model-cache PVC. The runner verifies
         # that the controller-level mount survived the per-step patch before
         # downloading models.
         env.setdefault("VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE", "1")
@@ -715,7 +689,7 @@ def convert_group_step_to_buildkite_step(
                     commands_str=" && ".join(amd_commands),
                     depends_on=step.depends_on,
                     extra_env=step.env,
-                    native_ci=step.native_ci,
+                    native_ci=step.native_ci or False,
                     no_plugin=step.no_plugin or False,
                     no_gpu=step.no_gpu or False,
                     num_nodes=step.num_nodes,
@@ -825,7 +799,7 @@ def convert_group_step_to_buildkite_step(
                     commands_str=amd_commands_str,
                     depends_on=amd.get("depends_on"),
                     extra_env=extra_env,
-                    native_ci=amd.get("native_ci"),
+                    native_ci=amd.get("native_ci", False),
                     no_plugin=amd_no_plugin,
                     no_gpu=amd_no_gpu,
                     num_nodes=amd.get("num_nodes", step.num_nodes),
@@ -935,7 +909,7 @@ def _create_amd_step(
     commands_str: str,
     depends_on: Optional[List[str]],
     extra_env: Optional[Dict[str, str]],
-    native_ci: Optional[bool],
+    native_ci: bool,
     no_plugin: bool,
     no_gpu: bool,
     num_nodes: Optional[int],
@@ -949,28 +923,19 @@ def _create_amd_step(
         raise ValueError(
             f"Invalid AMD device: {device}. Valid devices: {_valid_amd_gpu_devices()}"
         )
-    resolved_native_ci = _resolve_amd_native_ci(device, native_ci)
-    if resolved_native_ci and no_plugin:
+    if not isinstance(native_ci, bool):
+        raise ValueError("AMD native_ci must be a boolean.")
+    if native_ci and no_plugin:
         raise ValueError(
             "Native AMD jobs cannot use no_plugin; the wrapper installs the test artifact."
         )
-    if resolved_native_ci and num_nodes and num_nodes > 1:
+    if native_ci and num_nodes and num_nodes > 1:
         raise ValueError("Native AMD jobs do not support multi-node execution.")
 
-    device_gpu_count = _amd_device_gpu_count(device)
-    if num_devices is not None and num_devices != device_gpu_count:
-        raise ValueError(
-            f"AMD device {device} requests {num_devices} GPUs, but its queue suffix "
-            f"requires {device_gpu_count}."
-        )
-    gpu_count = 0 if no_gpu else _infer_amd_gpu_count(device, num_devices)
+    gpu_count = 0 if no_gpu else _infer_amd_gpu_count(num_devices)
 
     queue_step = Step(label=label, device=_device_value(device))
-    plugins = (
-        [_get_amd_native_k8s_plugin(device, num_devices, no_gpu)]
-        if resolved_native_ci
-        else None
-    )
+    plugins = [_get_amd_native_k8s_plugin(num_devices, no_gpu)] if native_ci else None
 
     if no_plugin:
         env = dict(extra_env or {})
@@ -998,7 +963,7 @@ def _create_amd_step(
         env=_get_amd_env(
             commands_str,
             extra_env,
-            native_ci=resolved_native_ci,
+            native_ci=native_ci,
             gpu_count=gpu_count,
         ),
         plugins=plugins,

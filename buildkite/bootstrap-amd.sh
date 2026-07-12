@@ -57,20 +57,6 @@ join_file_diff() {
     printf '%s\n' "$1" | tr -d '\r' | paste -sd'|' -
 }
 
-validate_legacy_amd_native_policy() {
-    local validator_path=""
-
-    if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-        python3 -m pip install --quiet pyyaml
-    fi
-
-    validator_path=$(mktemp -t validate-amd-native-policy.XXXXXX.py)
-    trap 'rm -f "${validator_path:-}"' RETURN
-    curl -fsSL -o "${validator_path}" \
-        "https://raw.githubusercontent.com/vllm-project/ci-infra/${VLLM_CI_BRANCH}/buildkite/validate-amd-native-policy.py?$(date +%s)"
-    python3 "${validator_path}" .buildkite/test-amd.yaml
-}
-
 # ---------------------------------------------------------------------------
 # Git setup: ensure origin/main is available and compute merge base once.
 # On K8s (blobless clones with --filter=blob:none), origin/main may not be
@@ -175,7 +161,6 @@ upload_pipeline() {
         buildkite-agent pipeline upload .buildkite/pipeline.yaml
         exit 0
     fi
-    validate_legacy_amd_native_policy
     echo "List file diff: $LIST_FILE_DIFF"
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
