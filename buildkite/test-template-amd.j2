@@ -31,21 +31,62 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         plugins:
           - kubernetes:
               podSpecPatch:
+                automountServiceAccountToken: false
+                securityContext:
+                  seccompProfile:
+                    type: RuntimeDefault
                 imagePullSecrets:
                   - name: docker-config
                 containers:
                   - name: container-0
                     image: {{ amd_native_ci_base_image() | safe }}
+                    imagePullPolicy: Always
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      capabilities:
+                        add:
+                          - IPC_LOCK
                     resources:
                       limits:
+                        {% if step.no_gpu %}
+                        {# Explicit zero overrides the typed controller PodSpec's inherited GPU request. #}
+                        amd.com/gpu: "0"
+                        {% else %}
                         amd.com/gpu: "{{ step.num_gpus or 1 }}"
+                        {% endif %}
                       requests:
+                        {% if step.no_gpu %}
+                        amd.com/gpu: "0"
+                        {% else %}
                         amd.com/gpu: "{{ step.num_gpus or 1 }}"
+                        {% endif %}
+                    volumeMounts:
+                      - name: devshm
+                        mountPath: /dev/shm
+                      - name: vllm-workspace
+                        mountPath: /vllm-workspace
                     env:
                       - name: AMD_CI_RUNTIME
                         value: native
                       - name: NATIVE_CI
                         value: "true"
+                      - name: VLLM_CI_DOCKER_DISABLED
+                        value: "1"
+                      - name: VLLM_CI_EXPECTED_GPU_COUNT
+                        value: "{{ 0 if step.no_gpu else (step.num_gpus or 1) }}"
+                      - name: VLLM_CI_WORKSPACE
+                        value: /vllm-workspace
+                      - name: VLLM_CI_REQUIRE_WORKSPACE_MOUNT
+                        value: "1"
+                      - name: PYTORCH_ROCM_ARCH
+                        value: ""
+                volumes:
+                  - name: devshm
+                    emptyDir:
+                      medium: Memory
+                      sizeLimit: 16Gi
+                  - name: vllm-workspace
+                    emptyDir: {}
 {%- endmacro %}
 
   - group: "AMD Tests"
@@ -161,21 +202,31 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         {% else %}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
-          DOCKER_BUILDKIT: "1"
           NUM_NODES: "{{ step.num_nodes or 1 }}"
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
           {% if step.native_ci %}
           # Native: podSpecPatch sets container-0 to ci_base-<commit> from ensure-ci-base-amd.
-          DOCKER_IMAGE_NAME: "{{ amd_native_ci_base_image() | safe }}"
           VLLM_CI_BASE_IMAGE: "{{ amd_native_ci_base_image() | safe }}"
           AMD_CI_RUNTIME: "native"
           NATIVE_CI: "true"
+          VLLM_CI_DOCKER_DISABLED: "1"
+          VLLM_CI_EXPECTED_GPU_COUNT: "{{ 0 if step.no_gpu else (step.num_gpus or 1) }}"
+          VLLM_CI_ARTIFACT_STEP: "image-build-amd"
+          VLLM_CI_ARTIFACT_CHECKSUM_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz.sha256"
+          VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE: "1"
+          VLLM_CI_WORKSPACE: "/vllm-workspace"
+          VLLM_CI_REQUIRE_WORKSPACE_MOUNT: "1"
+          HF_HOME: "/home/buildkite-agent/huggingface"
+          HF_HUB_DOWNLOAD_TIMEOUT: "300"
+          HF_HUB_ETAG_TIMEOUT: "60"
+          PYTORCH_ROCM_ARCH: ""
           {% else %}
           # DinD: hook warm-up uses stable ci_base; docker run uses fallback image if needed.
+          DOCKER_BUILDKIT: "1"
           DOCKER_IMAGE_NAME: "rocm/vllm-dev:ci_base"
           VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
-          {% endif %}
           VLLM_CI_FALLBACK_IMAGE: "rocm/vllm-ci:$BUILDKITE_COMMIT"
+          {% endif %}
           VLLM_CI_USE_ARTIFACTS: "1"
           VLLM_CI_ARTIFACT_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
           VLLM_CI_RESULTS_ROOT: "/home/buildkite-agent/huggingface/amd-ci-results"
@@ -195,11 +246,7 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
           {% endif %}
         {% endif %}
         priority: 100
-        {% if step.grade and step.grade == "Blocking" %}
-        soft_fail: false
-        {% else %}
         soft_fail: true
-        {% endif %}
         {% if step.parallelism %}
         parallelism: {{ step.parallelism }}
         {% endif %}
