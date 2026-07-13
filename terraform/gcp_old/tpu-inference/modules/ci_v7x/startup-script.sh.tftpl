@@ -131,14 +131,17 @@ echo 'TPU_VERSION=tpu7x' | sudo tee -a /etc/environment
 %{ if has_attached_disk ~}
 sudo mkdir -p /mnt/disks/persist
 
+DISK_NAME=$(lsblk -d -o NAME,SIZE -b | grep -i "${disk_size_bytes}" | awk '{print $1}')
+DISK_NAME=$${DISK_NAME:-nvme0n1}
+
 # Format if not already formatted
-if ! blkid /dev/nvme1n1; then
-  echo "Formatting /dev/nvme1n1 as ext4..."
-  sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme1n1
+if ! blkid /dev/$DISK_NAME; then
+  echo "Formatting /dev/$DISK_NAME as ext4..."
+  sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/$DISK_NAME
 fi
 
 # Add to /etc/fstab using UUID
-disk_uuid=$(blkid -s UUID -o value /dev/nvme1n1)
+disk_uuid=$(blkid -s UUID -o value /dev/$DISK_NAME)
 if ! grep -q "/mnt/disks/persist" /etc/fstab; then
   echo "UUID=$disk_uuid /mnt/disks/persist ext4 defaults,discard 0 2" | sudo tee -a /etc/fstab
 fi

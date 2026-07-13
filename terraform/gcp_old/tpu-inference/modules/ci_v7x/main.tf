@@ -79,6 +79,7 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       private_key_pem                 = local.is_multi_host ? tls_private_key.internal_ssh_key[count.index].private_key_pem : ""
       public_key_openssh              = local.is_multi_host ? tls_private_key.internal_ssh_key[count.index].public_key_openssh : ""
       has_attached_disk               = local.has_attached_disk
+      disk_size_bytes                 = var.disk_size * 1073741824
     })
   }
 }
