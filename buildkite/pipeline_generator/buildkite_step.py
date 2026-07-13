@@ -10,16 +10,12 @@ from amd import (
     get_amd_setup_commands,
     is_amd_gpu_device,
 )
-from constants import AgentQueue, DeviceType
-from global_config import get_global_config
-from plugin.docker_plugin import get_docker_plugin
-from plugin.k8s_plugin import get_k8s_plugin
 from step import Step
-from utils_lib.docker_utils import (
-    get_image,
-    get_ecr_cache_registry,
-    get_torch_nightly_image,
-)
+from utils_lib.docker_utils import get_image, get_ecr_cache_registry, get_torch_nightly_image
+from global_config import get_global_config
+from plugin.k8s_plugin import get_k8s_plugin
+from plugin.docker_plugin import get_docker_plugin
+from constants import DeviceType, AgentQueue
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -98,7 +94,9 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
     )
-    return BuildkiteGroupStep(group="GitHub pre-commit check", steps=[precommit_step])
+    return BuildkiteGroupStep(
+        group="GitHub pre-commit check", steps=[precommit_step]
+    )
 
 
 def add_precommit_dependency(
@@ -192,11 +190,7 @@ class BuildkiteGroupStep(BaseModel):
 
 def _get_step_plugin(step: Step):
     # Use K8s plugin
-    use_cpu = step.device in (
-        DeviceType.CPU,
-        DeviceType.CPU_SMALL,
-        DeviceType.CPU_MEDIUM,
-    )
+    use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
     use_arm64 = step.device == DeviceType.DGX_SPARK
     if step.device in [
         DeviceType.H100.value,
@@ -290,11 +284,11 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
         "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
-        if global_config["branch"] == "main"
-        else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT",
+            if global_config["branch"] == "main"
+            else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT",
         "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:latest"
-        if global_config["branch"] == "main"
-        else None,
+            if global_config["branch"] == "main"
+            else None,
         "$IMAGE_TAG_TORCH_NIGHTLY": get_torch_nightly_image(),
     }
 
@@ -358,10 +352,8 @@ def _prepare_commands(
     if step.commands:
         for i, cmd in enumerate(step.commands):
             # Sanitize command preview for use in echo (remove quotes and special chars)
-            preview = cmd[:80].replace("'", "").replace('"', "").replace("$", "")
-            commands.append(
-                f"echo '+++ :test_tube: Command ({i + 1}/{len(step.commands)}): {preview}'"
-            )
+            preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
+            commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
@@ -381,10 +373,9 @@ def _prepare_commands(
                 continue
             # Use regex to only replace whole variable matches (not substrings)
             import re
-
             # Escape variable (may have $ or special characters)
             pattern = re.escape(variable)
-            command = re.sub(pattern + r"\b", value, command)
+            command = re.sub(pattern + r'\b', value, command)
         final_commands.append(command)
 
     if step.working_dir and not (
