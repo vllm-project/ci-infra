@@ -27,6 +27,7 @@ AMD_RETRY = {
 }
 ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
+SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 ALWAYS_RUN_STEP_KEYS = {
     "ensure-ci-base-amd",
     "refresh-rocm-base-amd",
@@ -155,6 +156,15 @@ def _get_step_agents(step: Step) -> Dict[str, str]:
 
 
 SetupProfile = Literal["nvidia", "amd", "none"]
+
+
+def _get_timeout_in_minutes(
+    timeout_in_minutes: Optional[int],
+) -> Optional[int]:
+    """Return the timeout unless per-step timeout fields should be omitted."""
+    if os.getenv(SKIP_TIMEOUT_ENV_VAR) == "1":
+        return None
+    return timeout_in_minutes
 
 
 class BuildkiteCommandStep(BaseModel):
@@ -589,7 +599,9 @@ def convert_group_step_to_buildkite_step(
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
             if step.timeout_in_minutes:
-                buildkite_step.timeout_in_minutes = step.timeout_in_minutes
+                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
+                    step.timeout_in_minutes
+                )
 
             if not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(
@@ -774,5 +786,5 @@ def _create_amd_step(
         soft_fail=soft_fail or False,
         retry=AMD_RETRY,
         parallelism=parallelism,
-        timeout_in_minutes=timeout_in_minutes,
+        timeout_in_minutes=_get_timeout_in_minutes(timeout_in_minutes),
     )

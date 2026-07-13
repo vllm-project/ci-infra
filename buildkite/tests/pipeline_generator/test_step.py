@@ -14,6 +14,7 @@ TEST_JOB_DIR = Path(__file__).resolve().parent / "test_files" / "test_jobs"
 
 @pytest.fixture(autouse=True)
 def fake_global_config(monkeypatch):
+    monkeypatch.delenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, raising=False)
     config = {
         "name": "vllm_ci",
         "github_repo_name": "vllm-project/vllm",
@@ -367,6 +368,26 @@ def test_timeout_in_minutes_propagates_to_command_step():
     assert command_step.timeout_in_minutes == 42
 
 
+def test_skip_timeout_omits_timeout_from_command_step(monkeypatch):
+    monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
+    step = Step(
+        label="Skipped timeout",
+        group="Timing",
+        commands=["pytest tests/timed.py"],
+        device="h200_18gb",
+        timeout_in_minutes=42,
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.timeout_in_minutes is None
+    assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
+
+
 def test_missing_timeout_in_minutes_is_omitted_from_pipeline():
     step = Step(
         label="Untimed test",
@@ -387,7 +408,7 @@ def test_missing_timeout_in_minutes_is_omitted_from_pipeline():
     assert command_step.timeout_in_minutes is None
     # exclude_none is used when dumping the pipeline, so an unset timeout must
     # not surface as a key at all.
-    assert "timeout_in_minutes" not in command_step.dict(exclude_none=True)
+    assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
 
 
 def test_direct_amd_gpu_step_propagates_timeout():
@@ -409,6 +430,26 @@ def test_direct_amd_gpu_step_propagates_timeout():
     )
 
     assert command_step.timeout_in_minutes == 90
+
+
+def test_skip_timeout_omits_direct_amd_timeout(monkeypatch):
+    monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
+    step = Step(
+        label="AMD direct skipped timeout",
+        group="Direct AMD",
+        device="mi300_4",
+        commands=["pytest tests/foo.py"],
+        timeout_in_minutes=90,
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.timeout_in_minutes is None
+    assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
 
 
 def test_amd_mirror_uses_its_own_timeout_in_minutes(fake_global_config):
@@ -452,6 +493,45 @@ def test_amd_mirror_uses_its_own_timeout_in_minutes(fake_global_config):
     # timeout declared on the mirror block.
     assert default_command_step.timeout_in_minutes == 40
     assert amd_command_step.timeout_in_minutes == 75
+
+
+def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
+    monkeypatch, fake_global_config,
+):
+    monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
+    fake_global_config["list_file_diff"] = ["vllm/foo.py"]
+    step = Step(
+        label="Mirrored skipped timeout",
+        group="Mirrors",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        timeout_in_minutes=40,
+        mirror={
+            "amd": {
+                "device": "mi325_1",
+                "depends_on": ["image-build-amd"],
+                "timeout_in_minutes": 75,
+            }
+        },
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
+        step.group: [step],
+    })
+    command_steps = [
+        command_step
+        for group_step in group_steps
+        for command_step in group_step.steps
+        if isinstance(command_step, buildkite_step.BuildkiteCommandStep)
+    ]
+
+    assert len(command_steps) == 2
+    assert all(step.timeout_in_minutes is None for step in command_steps)
+    assert all(
+        "timeout_in_minutes" not in step.model_dump(exclude_none=True)
+        for step in command_steps
+    )
 
 
 def test_amd_mirror_without_timeout_stays_unbounded(fake_global_config):
