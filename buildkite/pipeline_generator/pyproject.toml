@@ -24,6 +24,7 @@ py-modules = [
     "utils",
     "global_config",
     "constants",
+    "amd_ci",
 ]
 
 [tool.setuptools.packages.find]

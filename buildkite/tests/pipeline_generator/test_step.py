@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import amd_ci
 import buildkite_step
 import step as step_module
 from constants import AgentQueue
@@ -55,9 +56,11 @@ def fake_global_config(monkeypatch):
 
 
 def _render_single_step(step):
-    return buildkite_step.convert_group_step_to_buildkite_step({
-        step.group: [step],
-    })[0]
+    return buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )[0]
 
 
 def test_read_steps_from_job_dir():
@@ -95,19 +98,24 @@ def test_group_steps_sorts_steps_within_each_group():
 
 
 @pytest.mark.parametrize(
-    ("device", "queue"),
+    ("device", "queue", "native_ci", "expected_gpu_count"),
     [
-        ("mi300_4", AgentQueue.AMD_MI300_4),
-        ("mi300_8", AgentQueue.AMD_MI300_8),
+        ("mi300_4", AgentQueue.AMD_MI300_4, True, "4"),
+        ("mi300_4", AgentQueue.AMD_MI300_4, False, "4"),
+        ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
+        ("mi325_1", AgentQueue.AMD_MI325_1, False, "1"),
     ],
 )
-def test_direct_amd_gpu_steps_use_amd_ci_path(device, queue):
+def test_direct_amd_gpu_steps_use_tagged_runtime_policy(
+    device, queue, native_ci, expected_gpu_count
+):
     step = Step(
         label="AMD direct test",
         group="Direct AMD",
         key=f"amd-direct-{device}",
         depends_on=["image-build"],
         device=device,
+        native_ci=native_ci,
         optional=True,
         soft_fail=True,
         working_dir="/vllm-workspace/tests",
@@ -126,15 +134,28 @@ def test_direct_amd_gpu_steps_use_amd_ci_path(device, queue):
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
-    assert command_step.plugins is None
-    assert command_step.retry == buildkite_step.AMD_RETRY
+    if native_ci:
+        assert command_step.plugins is not None
+        pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
+        container = pod_patch["containers"][0]
+        assert container["resources"]["limits"]["amd.com/gpu"] == (expected_gpu_count)
+        assert container["resources"]["requests"]["amd.com/gpu"] == (expected_gpu_count)
+        assert command_step.env["AMD_CI_RUNTIME"] == "native"
+        assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
+        assert "DOCKER_IMAGE_NAME" not in command_step.env
+    else:
+        assert command_step.plugins is None
+        assert "AMD_CI_RUNTIME" not in command_step.env
+        assert command_step.env["DOCKER_IMAGE_NAME"] == amd_ci.AMD_STABLE_CI_BASE_IMAGE
+
+    assert command_step.retry == amd_ci.AMD_RETRY
     assert len(command_step.retry["automatic"]) == 5
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")
     assert "(command amd-smi || true)" in test_commands
     assert "ROCm debug agent disabled" in test_commands
-    assert buildkite_step.ROCM_DEBUG_AGENT_ENV_VAR in test_commands
+    assert amd_ci.ROCM_DEBUG_AGENT_ENV_VAR in test_commands
     assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
     assert "[ -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
     assert "export HSA_TOOLS_LIB=" not in test_commands
@@ -146,8 +167,24 @@ def test_direct_amd_gpu_steps_use_amd_ci_path(device, queue):
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
 
 
+def test_amd_device_rejects_conflicting_gpu_count():
+    step = Step(
+        label="AMD GPU count mismatch",
+        group="Direct AMD",
+        device="mi300_4",
+        num_devices=2,
+        commands=["pytest tests/example.py"],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"AMD device mi300_4 provides 4 GPUs, but num_devices=2",
+    ):
+        _render_single_step(step)
+
+
 def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
-    monkeypatch.setenv(buildkite_step.ROCM_DEBUG_AGENT_ENV_VAR, "1")
+    monkeypatch.setenv(amd_ci.ROCM_DEBUG_AGENT_ENV_VAR, "1")
     step = Step(
         label="AMD debug test",
         group="Direct AMD",
@@ -165,8 +202,7 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
     assert (
-        "export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2"
-        in test_commands
+        "export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
     )
     assert "HSA_ENABLE_DEBUG=1" in test_commands
     assert "ROCm debug agent enabled" in test_commands
@@ -219,10 +255,10 @@ def test_multi_gpu_step_dumps_nvidia_topology():
 
     commands = buildkite_step._prepare_commands(step, variables_to_inject={})
 
-    assert '(command nvidia-smi topo -m || true)' in commands
+    assert "(command nvidia-smi topo -m || true)" in commands
     # Topology dump comes after the base GPU info and before coredump setup.
-    topo_index = commands.index('(command nvidia-smi topo -m || true)')
-    smi_index = commands.index('(command nvidia-smi || true)')
+    topo_index = commands.index("(command nvidia-smi topo -m || true)")
+    smi_index = commands.index("(command nvidia-smi || true)")
     assert smi_index < topo_index
 
 
@@ -241,7 +277,7 @@ def test_multi_node_step_dumps_nvidia_topology():
 
     commands = buildkite_step._prepare_commands(step, variables_to_inject={})
 
-    assert '(command nvidia-smi topo -m || true)' in commands
+    assert "(command nvidia-smi topo -m || true)" in commands
 
 
 def test_single_gpu_step_skips_nvidia_topology():
@@ -259,8 +295,8 @@ def test_single_gpu_step_skips_nvidia_topology():
     commands = buildkite_step._prepare_commands(step, variables_to_inject={})
 
     # Base GPU info is still emitted, but the topology dump is multi-GPU only.
-    assert '(command nvidia-smi || true)' in commands
-    assert '(command nvidia-smi topo -m || true)' not in commands
+    assert "(command nvidia-smi || true)" in commands
+    assert "(command nvidia-smi topo -m || true)" not in commands
 
 
 def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
@@ -285,20 +321,22 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
         },
     )
 
-    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
-        step.group: [step],
-    })
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )
     default_group = next(group for group in group_steps if group.group == "Mirrors")
     default_command_step = next(
-        s for s in default_group.steps
+        s
+        for s in default_group.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
     amd_group = next(
         group for group in group_steps if group.group == "Hardware-AMD Tests"
     )
     amd_command_step = next(
-        s for s in amd_group.steps
-        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+        s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
     assert default_command_step.depends_on == ["image-build"]
@@ -307,9 +345,70 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert amd_command_step.depends_on == ["image-build-amd"]
     assert amd_command_step.agents == {"queue": AgentQueue.AMD_MI325_1}
     assert amd_command_step.soft_fail is True
-    assert "ROCm debug agent disabled" in (
-        amd_command_step.env["VLLM_TEST_COMMANDS"]
+    assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
+
+
+def test_native_tagged_mirror_uses_native_runner_gating(
+    fake_global_config,
+):
+    fake_global_config["list_file_diff"] = [
+        ".buildkite/scripts/hardware_ci/run-amd-test.sh"
+    ]
+    step = Step(
+        label="Native mirrored test",
+        group="Mirrors",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        mirror={"amd": {"device": "mi325_1", "native_ci": True}},
     )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )
+    default_group = next(group for group in group_steps if group.group == "Mirrors")
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+
+    assert isinstance(default_group.steps[0], buildkite_step.BuildkiteBlockStep)
+    assert len(amd_group.steps) == 1
+    amd_command_step = amd_group.steps[0]
+    assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
+    assert amd_command_step.plugins is not None
+
+
+def test_untagged_mi300_mirror_does_not_use_native_runner_gating(
+    fake_global_config,
+):
+    fake_global_config["list_file_diff"] = [
+        ".buildkite/scripts/hardware_ci/run-amd-test.sh"
+    ]
+    step = Step(
+        label="DinD mirrored test",
+        group="Mirrors",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        mirror={"amd": {"device": "mi300_1"}},
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+
+    assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteBlockStep)
+    amd_command_step = amd_group.steps[1]
+    assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
+    assert amd_command_step.plugins is None
+    assert amd_command_step.env["DOCKER_IMAGE_NAME"] == amd_ci.AMD_STABLE_CI_BASE_IMAGE
 
 
 def test_torch_nightly_flag_no_separate_group(fake_global_config):
@@ -328,19 +427,20 @@ def test_torch_nightly_flag_no_separate_group(fake_global_config):
         device="h200_18gb",
     )
 
-    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
-        step.group: [step],
-    })
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )
 
     # No dedicated torch-nightly group is synthesized anymore.
-    assert not any(
-        g.group == "vLLM Against PyTorch Nightly" for g in group_steps
-    )
+    assert not any(g.group == "vLLM Against PyTorch Nightly" for g in group_steps)
 
     # The step stays in its normal group and is built once (no nightly duplicate).
     normal_group = next(g for g in group_steps if g.group == "Some Group")
     labels = [
-        s.label for s in normal_group.steps
+        s.label
+        for s in normal_group.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     ]
     assert "Untagged test" in labels
@@ -361,7 +461,8 @@ def test_timeout_in_minutes_propagates_to_command_step():
 
     group_step = _render_single_step(step)
     command_step = next(
-        s for s in group_step.steps
+        s
+        for s in group_step.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
@@ -380,7 +481,8 @@ def test_skip_timeout_omits_timeout_from_command_step(monkeypatch):
 
     group_step = _render_single_step(step)
     command_step = next(
-        s for s in group_step.steps
+        s
+        for s in group_step.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
@@ -401,7 +503,8 @@ def test_missing_timeout_in_minutes_is_omitted_from_pipeline():
 
     group_step = _render_single_step(step)
     command_step = next(
-        s for s in group_step.steps
+        s
+        for s in group_step.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
@@ -425,7 +528,8 @@ def test_direct_amd_gpu_step_propagates_timeout():
 
     group_step = _render_single_step(step)
     command_step = next(
-        s for s in group_step.steps
+        s
+        for s in group_step.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
@@ -444,7 +548,8 @@ def test_skip_timeout_omits_direct_amd_timeout(monkeypatch):
 
     group_step = _render_single_step(step)
     command_step = next(
-        s for s in group_step.steps
+        s
+        for s in group_step.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
@@ -473,20 +578,22 @@ def test_amd_mirror_uses_its_own_timeout_in_minutes(fake_global_config):
         },
     )
 
-    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
-        step.group: [step],
-    })
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )
     default_group = next(group for group in group_steps if group.group == "Mirrors")
     default_command_step = next(
-        s for s in default_group.steps
+        s
+        for s in default_group.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
     amd_group = next(
         group for group in group_steps if group.group == "Hardware-AMD Tests"
     )
     amd_command_step = next(
-        s for s in amd_group.steps
-        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+        s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
     # The main step keeps its own timeout; the AMD mirror uses the (larger)
@@ -496,7 +603,8 @@ def test_amd_mirror_uses_its_own_timeout_in_minutes(fake_global_config):
 
 
 def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
-    monkeypatch, fake_global_config,
+    monkeypatch,
+    fake_global_config,
 ):
     monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
     fake_global_config["list_file_diff"] = ["vllm/foo.py"]
@@ -516,9 +624,11 @@ def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
         },
     )
 
-    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
-        step.group: [step],
-    })
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )
     command_steps = [
         command_step
         for group_step in group_steps
@@ -554,15 +664,16 @@ def test_amd_mirror_without_timeout_stays_unbounded(fake_global_config):
         },
     )
 
-    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
-        step.group: [step],
-    })
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )
     amd_group = next(
         group for group in group_steps if group.group == "Hardware-AMD Tests"
     )
     amd_command_step = next(
-        s for s in amd_group.steps
-        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+        s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
     # An AMD mirror without its own timeout must not inherit the shorter main

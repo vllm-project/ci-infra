@@ -2,16 +2,24 @@ from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 import os
 
+from amd_ci import (
+    AMD_ALWAYS_RUN_STEP_KEYS,
+    AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
+    build_amd_step_options,
+    get_amd_agent_queue,
+    get_amd_setup_commands,
+    is_amd_gpu_device,
+)
+from constants import AgentQueue, DeviceType
+from global_config import get_global_config
+from plugin.docker_plugin import get_docker_plugin
+from plugin.k8s_plugin import get_k8s_plugin
 from step import Step
 from utils_lib.docker_utils import (
     get_image,
     get_ecr_cache_registry,
     get_torch_nightly_image,
 )
-from global_config import get_global_config
-from plugin.k8s_plugin import get_k8s_plugin
-from plugin.docker_plugin import get_docker_plugin
-from constants import DeviceType, AgentQueue
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -19,54 +27,7 @@ PRECOMMIT_STEP_KEY = "pre-commit"
 PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
-AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
-AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
-AMD_NATIVE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT"
-AMD_FALLBACK_CI_IMAGE = "rocm/vllm-ci:$BUILDKITE_COMMIT"
-AMD_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
-AMD_ARTIFACT_CHECKSUM_GLOB = f"{AMD_ARTIFACT_GLOB}.sha256"
-AMD_ARTIFACT_STEP = "image-build-amd"
-AMD_RESULTS_ROOT = "/home/buildkite-agent/huggingface/amd-ci-results"
-AMD_HF_HOME = "/home/buildkite-agent/huggingface"
-AMD_NATIVE_WORKSPACE = "/vllm-workspace"
-AMD_NATIVE_SHM_SIZE = "16Gi"
-AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = [
-    ".buildkite/scripts/hardware_ci/run-amd-test.sh",
-]
-AMD_RETRY = {
-    "automatic": [
-        {"exit_status": -1, "limit": 1},
-        {"exit_status": 1, "limit": 1},
-        {"exit_status": 128, "limit": 1},
-        {"signal_reason": "agent_stop", "limit": 1},
-        {"signal_reason": "agent_refused", "limit": 1},
-    ],
-}
-ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
-ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
-ALWAYS_RUN_STEP_KEYS = {
-    "ensure-ci-base-amd",
-    "refresh-rocm-base-amd",
-}
-
-
-def _get_rocm_debug_agent_setup_command() -> str:
-    if os.getenv(ROCM_DEBUG_AGENT_ENV_VAR, "0") != "1":
-        return (
-            "echo 'ROCm debug agent disabled; set "
-            f"{ROCM_DEBUG_AGENT_ENV_VAR}=1 at pipeline generation time "
-            "to enable coredump setup'"
-        )
-
-    return (
-        f"if test -f {ROCM_DEBUG_AGENT_LIB}; then "
-        f"export HSA_TOOLS_LIB={ROCM_DEBUG_AGENT_LIB} && export HSA_ENABLE_DEBUG=1 "
-        f"&& echo ROCm debug agent enabled: {ROCM_DEBUG_AGENT_LIB}; "
-        f"else echo 'WARNING: ROCm debug agent not found at {ROCM_DEBUG_AGENT_LIB}; "
-        "skipping coredump setup'; "
-        "fi"
-    )
 
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
@@ -247,22 +208,6 @@ def _get_step_plugin(step: Step):
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
 
 
-def _device_value(device: Optional[str]) -> Optional[str]:
-    if isinstance(device, DeviceType):
-        return device.value
-    return device
-
-
-def _get_amd_gpu_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
-    device_value = _device_value(device)
-    if not device_value:
-        return None
-    try:
-        return AgentQueue(f"amd_{device_value}")
-    except ValueError:
-        return None
-
-
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
     if step.label.startswith(":docker:"):
@@ -311,7 +256,7 @@ def get_agent_queue(step: Step):
         return AgentQueue.ARM_CPU
     elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
         return AgentQueue.AMD_CPU
-    elif amd_gpu_queue := _get_amd_gpu_agent_queue(step.device):
+    elif amd_gpu_queue := get_amd_agent_queue(step.device):
         return amd_gpu_queue
     elif step.device == DeviceType.GH200:
         return AgentQueue.GH200
@@ -325,199 +270,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.GPU_1
 
 
-def _is_amd_gpu_device(device: Optional[str]) -> bool:
-    return _get_amd_gpu_agent_queue(device) is not None
-
-
-def _valid_amd_gpu_devices() -> List[str]:
-    return [
-        device.value
-        for device in DeviceType
-        if _get_amd_gpu_agent_queue(device.value) is not None
-    ]
-
-
-def _get_amd_label(label: str, amd_device: Optional[str]) -> str:
-    device_value = _device_value(amd_device) or ""
-    device_type = (
-        device_value.replace("amd_", "")
-        if device_value.startswith("amd_")
-        else device_value
-    )
-    return f"AMD: {label} ({device_type})"
-
-
-def _normalize_amd_depends_on(depends_on: Optional[List[str]]) -> List[str]:
-    normalized = []
-    for dependency in depends_on or []:
-        if dependency == "image-build":
-            dependency = "image-build-amd"
-        if dependency not in normalized:
-            normalized.append(dependency)
-    if "image-build-amd" not in normalized:
-        normalized.insert(0, "image-build-amd")
-    return normalized
-
-
 def _first_configured(*values: Optional[int]) -> Optional[int]:
     return next((value for value in values if value is not None), None)
-
-
-def _infer_amd_gpu_count(num_devices: Optional[int]) -> int:
-    return num_devices if num_devices is not None else 1
-
-
-def _get_amd_agents(
-    queue_step: Step,
-    agent_tags: Optional[Dict[str, str]],
-    native_ci: bool,
-) -> Dict[str, str]:
-    agents = {"queue": get_agent_queue(queue_step)}
-    if agent_tags is not None and not isinstance(agent_tags, dict):
-        raise ValueError("AMD agent_tags must be a mapping.")
-    if not agent_tags:
-        return agents
-    if not native_ci:
-        raise ValueError("AMD agent_tags are only supported for native_ci jobs.")
-
-    for key, value in agent_tags.items():
-        if (
-            not isinstance(key, str)
-            or not key.strip()
-            or not isinstance(value, str)
-            or not value.strip()
-        ):
-            raise ValueError(
-                "AMD agent_tags keys and values must be non-empty strings."
-            )
-        if key != "queue":
-            agents[key] = value
-    return agents
-
-
-def _get_amd_native_k8s_plugin(
-    num_devices: Optional[int],
-    no_gpu: bool,
-) -> Dict[str, Any]:
-    gpu_count = 0 if no_gpu else _infer_amd_gpu_count(num_devices)
-    # The Buildkite controller decodes podSpecPatch into a typed PodSpec before
-    # merging it. An explicit zero therefore overrides the controller's GPU
-    # default reliably; omitting the key would preserve the inherited request.
-    gpu_resource = str(gpu_count)
-    return {
-        "kubernetes": {
-            "podSpecPatch": {
-                "automountServiceAccountToken": False,
-                "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
-                "imagePullSecrets": [{"name": "docker-config"}],
-                "containers": [
-                    {
-                        "name": "container-0",
-                        "image": AMD_NATIVE_CI_BASE_IMAGE,
-                        "imagePullPolicy": "Always",
-                        "securityContext": {
-                            "allowPrivilegeEscalation": False,
-                            "capabilities": {"add": ["IPC_LOCK"]},
-                        },
-                        "resources": {
-                            "limits": {"amd.com/gpu": gpu_resource},
-                            "requests": {"amd.com/gpu": gpu_resource},
-                        },
-                        "volumeMounts": [
-                            {"name": "devshm", "mountPath": "/dev/shm"},
-                            {
-                                "name": "vllm-workspace",
-                                "mountPath": "/vllm-workspace",
-                            },
-                        ],
-                        "env": [
-                            {"name": "AMD_CI_RUNTIME", "value": "native"},
-                            {"name": "NATIVE_CI", "value": "true"},
-                            {"name": "VLLM_CI_DOCKER_DISABLED", "value": "1"},
-                            {
-                                "name": "VLLM_CI_EXPECTED_GPU_COUNT",
-                                "value": str(gpu_count),
-                            },
-                            {
-                                "name": "VLLM_CI_WORKSPACE",
-                                "value": AMD_NATIVE_WORKSPACE,
-                            },
-                            {
-                                "name": "VLLM_CI_REQUIRE_WORKSPACE_MOUNT",
-                                "value": "1",
-                            },
-                            {"name": "PYTORCH_ROCM_ARCH", "value": ""},
-                        ],
-                    }
-                ],
-                "volumes": [
-                    {
-                        "name": "devshm",
-                        "emptyDir": {
-                            "medium": "Memory",
-                            "sizeLimit": AMD_NATIVE_SHM_SIZE,
-                        },
-                    },
-                    {"name": "vllm-workspace", "emptyDir": {}},
-                ],
-            }
-        }
-    }
-
-
-def _get_amd_env(
-    commands: str,
-    extra_env: Optional[Dict[str, str]] = None,
-    native_ci: bool = False,
-    gpu_count: int = 1,
-) -> Dict[str, str]:
-    env = dict(extra_env or {})
-    if native_ci:
-        # Do not set DOCKER_IMAGE_NAME for native jobs. AMD agent hooks use it
-        # to warm Docker images, and the native AMD controller has no
-        # DinD sidecar.
-        env.pop("DOCKER_IMAGE_NAME", None)
-        env.pop("DOCKER_BUILDKIT", None)
-        env.pop("VLLM_CI_FALLBACK_IMAGE", None)
-        env.setdefault("VLLM_CI_ARTIFACT_STEP", AMD_ARTIFACT_STEP)
-        env.setdefault("VLLM_CI_ARTIFACT_CHECKSUM_GLOB", AMD_ARTIFACT_CHECKSUM_GLOB)
-        # The native AMD controller owns the model-cache PVC. The runner verifies
-        # that the controller-level mount survived the per-step patch before
-        # downloading models.
-        env.setdefault("VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE", "1")
-        env.setdefault("HF_HOME", AMD_HF_HOME)
-        env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
-        env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
-        env.update(
-            {
-                "VLLM_CI_BASE_IMAGE": AMD_NATIVE_CI_BASE_IMAGE,
-                "VLLM_CI_USE_ARTIFACTS": "1",
-                "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
-                "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
-                "VLLM_CI_EXPECTED_GPU_COUNT": str(gpu_count),
-                "VLLM_CI_WORKSPACE": AMD_NATIVE_WORKSPACE,
-                "VLLM_CI_REQUIRE_WORKSPACE_MOUNT": "1",
-                "VLLM_TEST_COMMANDS": commands,
-                "AMD_CI_RUNTIME": "native",
-                "NATIVE_CI": "true",
-                "VLLM_CI_DOCKER_DISABLED": "1",
-                "PYTORCH_ROCM_ARCH": "",
-            }
-        )
-    else:
-        env.update(
-            {
-                "DOCKER_BUILDKIT": "1",
-                "DOCKER_IMAGE_NAME": AMD_STABLE_CI_BASE_IMAGE,
-                "VLLM_CI_BASE_IMAGE": AMD_STABLE_CI_BASE_IMAGE,
-                "VLLM_CI_FALLBACK_IMAGE": AMD_FALLBACK_CI_IMAGE,
-                "VLLM_CI_USE_ARTIFACTS": "1",
-                "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
-                "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
-                "VLLM_TEST_COMMANDS": commands,
-            }
-        )
-    return env
 
 
 def _get_variables_to_inject() -> Dict[str, str]:
@@ -583,12 +337,7 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
         return commands
 
     if setup_profile == "amd":
-        return [
-            "echo '--- :amd: GPU Info'",
-            "(command amd-smi || true)",
-            "echo '--- :gear: ROCm Debug Agent Setup'",
-            _get_rocm_debug_agent_setup_command(),
-        ]
+        return get_amd_setup_commands()
 
     raise ValueError(f"Unsupported setup profile: {setup_profile}")
 
@@ -700,7 +449,7 @@ def convert_group_step_to_buildkite_step(
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
-            if _is_amd_gpu_device(step.device):
+            if is_amd_gpu_device(step.device):
                 amd_commands = [
                     "export VLLM_TEST_GROUP_NAME="
                     f"{_generate_step_key(step.key or step.label)}"
@@ -877,7 +626,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     global_config = get_global_config()
     if step.key and (
-        step.key.startswith("image-build") or step.key in ALWAYS_RUN_STEP_KEYS
+        step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
     ):
         return True
     if global_config["nightly"] == "1":
@@ -906,6 +655,7 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
     return step.model_copy(
         update={
             "key": None,
+            "device": amd["device"],
             "native_ci": amd.get("native_ci", False),
             "optional": amd.get("optional", step.optional),
             "source_file_dependencies": source_file_dependencies,
@@ -958,58 +708,27 @@ def _create_amd_step(
     agent_tags: Optional[Dict[str, str]] = None,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
-    if not _is_amd_gpu_device(device):
-        raise ValueError(
-            f"Invalid AMD device: {device}. Valid devices: {_valid_amd_gpu_devices()}"
-        )
-    if not isinstance(native_ci, bool):
-        raise ValueError("AMD native_ci must be a boolean.")
-    if native_ci and no_plugin:
-        raise ValueError(
-            "Native AMD jobs cannot use no_plugin; the wrapper installs the test artifact."
-        )
-    if native_ci and num_nodes and num_nodes > 1:
-        raise ValueError("Native AMD jobs do not support multi-node execution.")
-
-    gpu_count = 0 if no_gpu else _infer_amd_gpu_count(num_devices)
-
-    queue_step = Step(label=label, device=_device_value(device))
-    agents = _get_amd_agents(queue_step, agent_tags, native_ci)
-    plugins = [_get_amd_native_k8s_plugin(num_devices, no_gpu)] if native_ci else None
-
-    if no_plugin:
-        env = dict(extra_env or {})
-        return BuildkiteCommandStep(
-            label=_get_amd_label(label, device),
-            key=key,
-            commands=[commands_str],
-            depends_on=_normalize_amd_depends_on(depends_on),
-            agents=agents,
-            env=env or None,
-            plugins=plugins,
-            priority=200,
-            soft_fail=soft_fail or False,
-            retry=AMD_RETRY,
-            parallelism=parallelism,
-            timeout_in_minutes=timeout_in_minutes,
-        )
-
+    options = build_amd_step_options(
+        label=label,
+        device=device,
+        num_devices=num_devices,
+        commands=commands_str,
+        depends_on=depends_on,
+        extra_env=extra_env,
+        native_ci=native_ci,
+        no_plugin=no_plugin,
+        no_gpu=no_gpu,
+        num_nodes=num_nodes,
+        agent_tags=agent_tags,
+    )
     return BuildkiteCommandStep(
-        label=_get_amd_label(label, device),
+        **options,
         key=key,
-        commands=[AMD_TEST_COMMAND],
-        depends_on=_normalize_amd_depends_on(depends_on),
-        agents=agents,
-        env=_get_amd_env(
-            commands_str,
-            extra_env,
-            native_ci=native_ci,
-            gpu_count=gpu_count,
-        ),
-        plugins=plugins,
-        priority=200,
         soft_fail=soft_fail or False,
-        retry=AMD_RETRY,
         parallelism=parallelism,
-        timeout_in_minutes=_get_timeout_in_minutes(timeout_in_minutes),
+        timeout_in_minutes=(
+            timeout_in_minutes
+            if no_plugin
+            else _get_timeout_in_minutes(timeout_in_minutes)
+        ),
     )
