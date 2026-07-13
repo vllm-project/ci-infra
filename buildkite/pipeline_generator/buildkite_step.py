@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 import os
 
-from amd_ci import (
+from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
     build_amd_step_options,

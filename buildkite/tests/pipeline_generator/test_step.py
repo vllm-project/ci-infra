@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import amd_ci
+import amd
 import buildkite_step
 import step as step_module
 from constants import AgentQueue
@@ -146,16 +146,16 @@ def test_direct_amd_gpu_steps_use_tagged_runtime_policy(
     else:
         assert command_step.plugins is None
         assert "AMD_CI_RUNTIME" not in command_step.env
-        assert command_step.env["DOCKER_IMAGE_NAME"] == amd_ci.AMD_STABLE_CI_BASE_IMAGE
+        assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
 
-    assert command_step.retry == amd_ci.AMD_RETRY
+    assert command_step.retry == amd.AMD_RETRY
     assert len(command_step.retry["automatic"]) == 5
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")
     assert "(command amd-smi || true)" in test_commands
     assert "ROCm debug agent disabled" in test_commands
-    assert amd_ci.ROCM_DEBUG_AGENT_ENV_VAR in test_commands
+    assert amd.ROCM_DEBUG_AGENT_ENV_VAR in test_commands
     assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
     assert "[ -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
     assert "export HSA_TOOLS_LIB=" not in test_commands
@@ -184,7 +184,7 @@ def test_amd_device_rejects_conflicting_gpu_count():
 
 
 def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
-    monkeypatch.setenv(amd_ci.ROCM_DEBUG_AGENT_ENV_VAR, "1")
+    monkeypatch.setenv(amd.ROCM_DEBUG_AGENT_ENV_VAR, "1")
     step = Step(
         label="AMD debug test",
         group="Direct AMD",
@@ -408,7 +408,7 @@ def test_untagged_mi300_mirror_does_not_use_native_runner_gating(
     amd_command_step = amd_group.steps[1]
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
     assert amd_command_step.plugins is None
-    assert amd_command_step.env["DOCKER_IMAGE_NAME"] == amd_ci.AMD_STABLE_CI_BASE_IMAGE
+    assert amd_command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
 
 
 def test_torch_nightly_flag_no_separate_group(fake_global_config):
