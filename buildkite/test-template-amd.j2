@@ -165,6 +165,13 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
             {% endif %}
           {% endfor %}
         {% endfor %}
+        {% if step.native_ci %}
+          {% for file in list_file_diff %}
+            {% if file == ".buildkite/scripts/hardware_ci/run-amd-test.sh" %}
+              {% set ns.blocked = 0 %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
       {% else %}
         {% set ns.blocked = 0 %}
       {% endif %}

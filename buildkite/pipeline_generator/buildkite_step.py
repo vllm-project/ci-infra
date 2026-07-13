@@ -30,6 +30,9 @@ AMD_RESULTS_ROOT = "/home/buildkite-agent/huggingface/amd-ci-results"
 AMD_HF_HOME = "/home/buildkite-agent/huggingface"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_SHM_SIZE = "16Gi"
+AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = [
+    ".buildkite/scripts/hardware_ci/run-amd-test.sh",
+]
 AMD_RETRY = {
     "automatic": [
         {"exit_status": -1, "limit": 1},
@@ -851,6 +854,10 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return True
     if step.optional:
         return False
+    if step.native_ci and _source_file_dependencies_match(
+        AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES, list_file_diff
+    ):
+        return True
     if global_config["run_all"]:
         return True
     return _source_file_dependencies_match(
@@ -869,6 +876,7 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
     return step.model_copy(
         update={
             "key": None,
+            "native_ci": amd.get("native_ci", False),
             "optional": amd.get("optional", step.optional),
             "source_file_dependencies": source_file_dependencies,
         }
