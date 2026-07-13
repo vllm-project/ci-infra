@@ -195,6 +195,13 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
           {% else %}
           queue: amd_mi300
           {% endif %}
+          {% if step.native_ci and step.agent_tags %}
+            {% for key, value in step.agent_tags | items %}
+              {% if key != "queue" and key and value %}
+          {{ key }}: "{{ value }}"
+              {% endif %}
+            {% endfor %}
+          {% endif %}
         {% if step.native_ci %}
 {{ amd_native_k8s_plugin(step) }}
         {% endif %}

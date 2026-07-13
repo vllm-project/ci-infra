@@ -367,6 +367,34 @@ def _infer_amd_gpu_count(num_devices: Optional[int]) -> int:
     return num_devices if num_devices is not None else 1
 
 
+def _get_amd_agents(
+    queue_step: Step,
+    agent_tags: Optional[Dict[str, str]],
+    native_ci: bool,
+) -> Dict[str, str]:
+    agents = {"queue": get_agent_queue(queue_step)}
+    if agent_tags is not None and not isinstance(agent_tags, dict):
+        raise ValueError("AMD agent_tags must be a mapping.")
+    if not agent_tags:
+        return agents
+    if not native_ci:
+        raise ValueError("AMD agent_tags are only supported for native_ci jobs.")
+
+    for key, value in agent_tags.items():
+        if (
+            not isinstance(key, str)
+            or not key.strip()
+            or not isinstance(value, str)
+            or not value.strip()
+        ):
+            raise ValueError(
+                "AMD agent_tags keys and values must be non-empty strings."
+            )
+        if key != "queue":
+            agents[key] = value
+    return agents
+
+
 def _get_amd_native_k8s_plugin(
     num_devices: Optional[int],
     no_gpu: bool,
@@ -699,6 +727,7 @@ def convert_group_step_to_buildkite_step(
                     soft_fail=step.soft_fail,
                     parallelism=step.parallelism,
                     timeout_in_minutes=step.timeout_in_minutes,
+                    agent_tags=step.agent_tags,
                 )
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
@@ -809,6 +838,7 @@ def convert_group_step_to_buildkite_step(
                     soft_fail=True,
                     parallelism=step.parallelism,
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
+                    agent_tags=amd.get("agent_tags"),
                 )
                 if not _step_should_run(
                     _get_amd_mirror_effective_step(step, amd), list_file_diff
@@ -925,6 +955,7 @@ def _create_amd_step(
     parallelism: Optional[int],
     key: Optional[str] = None,
     timeout_in_minutes: Optional[int] = None,
+    agent_tags: Optional[Dict[str, str]] = None,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
     if not _is_amd_gpu_device(device):
@@ -943,6 +974,7 @@ def _create_amd_step(
     gpu_count = 0 if no_gpu else _infer_amd_gpu_count(num_devices)
 
     queue_step = Step(label=label, device=_device_value(device))
+    agents = _get_amd_agents(queue_step, agent_tags, native_ci)
     plugins = [_get_amd_native_k8s_plugin(num_devices, no_gpu)] if native_ci else None
 
     if no_plugin:
@@ -952,7 +984,7 @@ def _create_amd_step(
             key=key,
             commands=[commands_str],
             depends_on=_normalize_amd_depends_on(depends_on),
-            agents={"queue": get_agent_queue(queue_step)},
+            agents=agents,
             env=env or None,
             plugins=plugins,
             priority=200,
@@ -967,7 +999,7 @@ def _create_amd_step(
         key=key,
         commands=[AMD_TEST_COMMAND],
         depends_on=_normalize_amd_depends_on(depends_on),
-        agents={"queue": get_agent_queue(queue_step)},
+        agents=agents,
         env=_get_amd_env(
             commands_str,
             extra_env,
