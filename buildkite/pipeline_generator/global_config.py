@@ -39,7 +39,10 @@ def init_global_config(pipeline_config_path: str):
 
     branch = os.getenv("BUILDKITE_BRANCH")
     if branch:
-        if not re.match(r"^[a-zA-Z0-9._/-]+$", branch):
+        # Fork PRs arrive as "owner:branch" (e.g. "octocat:my-feature"), so the
+        # colon must be allowed. It is not a shell metacharacter, so permitting
+        # it does not reintroduce command-injection risk.
+        if not re.match(r"^[a-zA-Z0-9._/:-]+$", branch):
             raise ValueError(
                 f"Invalid branch name: {branch}. Contains disallowed characters."
             )
