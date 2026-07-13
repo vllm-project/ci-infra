@@ -17,6 +17,7 @@ class GlobalConfig(TypedDict):
     run_all_patterns: Optional[List[str]] = None
     run_all_exclude_patterns: Optional[List[str]] = None
     nightly: Optional[str] = "0"
+    torch_nightly: Optional[str] = "0"
     run_all: bool = False
     docs_only_disable: Optional[str] = "0"
     merge_base_commit: Optional[str] = None
@@ -60,6 +61,7 @@ def init_global_config(pipeline_config_path: str):
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
+        torch_nightly=os.getenv("TORCH_NIGHTLY", "0"),
         run_all=_should_run_all(
             pr_labels,
             list_file_diff,
@@ -94,6 +96,12 @@ def _validate_pipeline_config(pipeline_config: Dict):
         raise ValueError("Registries are required")
     if not pipeline_config["repositories"]:
         raise ValueError("Repositories are required")
+    if "github_repo_name" in pipeline_config:
+        repo_name = pipeline_config["github_repo_name"]
+        if not re.match(r"^vllm-project/[a-zA-Z0-9._-]+$", repo_name):
+            raise ValueError(
+                f"Invalid github_repo_name: {repo_name}. Must be in format vllm-project/repo_name"
+            )
     for job_dir in pipeline_config["job_dirs"]:
         if not os.path.exists(job_dir):
             raise ValueError(f"Job directory not found: {job_dir}")
@@ -107,6 +115,9 @@ def _should_run_all(
 ) -> bool:
     """Determine if the pipeline should run all tests."""
     if os.getenv("RUN_ALL") == "1":
+        return True
+    if os.getenv("TORCH_NIGHTLY") == "1":
+        # A full torch-nightly run also runs the full suite on the pinned torch.
         return True
     if "ready-run-all-tests" in pr_labels:
         return True

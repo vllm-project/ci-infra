@@ -72,7 +72,9 @@ The generator relies on several environment variables, typically provided by Bui
 *   `BUILDKITE_COMMIT`: Current commit hash.
 *   `BUILDKITE_PULL_REQUEST`: Pull request number (or "false").
 *   `BUILDKITE_PULL_REQUEST_BASE_BRANCH`: Base branch for PRs.
-*   `NIGHTLY`: Set to "1" to force run nightly steps.
+*   `NIGHTLY`: Set to "1" to auto-run the curated torch-nightly steps (those tagged `mirror.torch_nightly`).
+*   `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build.
 *   `RUN_ALL`: Set to "1" to force run all steps.
+*   `SKIP_TIMEOUT`: Set to "1" at pipeline generation time to omit all configured step timeouts.
 *   `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.
 *   `VLLM_USE_PRECOMPILED`: Set to "1" to force use of precompiled wheels.

@@ -10,8 +10,16 @@ if [[ -z "${NIGHTLY:-}" ]]; then
     NIGHTLY=0
 fi
 
+if [[ -z "${TORCH_NIGHTLY:-}" ]]; then
+    TORCH_NIGHTLY=0
+fi
+
 if [[ -z "${VLLM_CI_BRANCH:-}" ]]; then
     VLLM_CI_BRANCH="main"
+fi
+
+if [[ -z "${VLLM_CI_REPO:-}" ]]; then
+    VLLM_CI_REPO="vllm-project/ci-infra"
 fi
 
 if [[ -z "${AMD_MIRROR_HW:-}" ]]; then
@@ -20,10 +28,6 @@ fi
 
 if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
     DOCS_ONLY_DISABLE=0
-fi
-
-if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
-    MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD)
 fi
 
 if [[ -z "${COV_ENABLED:-}" ]]; then
@@ -71,6 +75,31 @@ clean_docker_tag() {
     local input="$1"
     echo "$input" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-128
 }
+
+fetch_origin_ref() {
+    local ref="$1"
+    git fetch --no-tags --depth=50 origin "${ref}:refs/remotes/origin/${ref}" >/dev/null 2>&1 || \
+        git fetch --no-tags origin "${ref}:refs/remotes/origin/${ref}" >/dev/null 2>&1
+}
+
+git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+
+BASE_BRANCH="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
+if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
+    BASE_BRANCH="main"
+fi
+
+fetch_origin_ref "$BASE_BRANCH" || true
+
+if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
+    MERGE_BASE_COMMIT=$(git merge-base "origin/${BASE_BRANCH}" HEAD 2>/dev/null || echo "")
+    if [[ -z "$MERGE_BASE_COMMIT" ]]; then
+        echo "WARNING: Could not compute merge base, falling back to run_all=1"
+        RUN_ALL=1
+        MERGE_BASE_COMMIT="HEAD"
+    fi
+fi
+export MERGE_BASE_COMMIT
 
 resolve_ecr_cache_vars() {
     # Resolve ECR cache-from, cache-to using buildkite environment variables:
@@ -131,6 +160,7 @@ upload_pipeline() {
     echo "List file diff: $LIST_FILE_DIFF"
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
+    echo "Torch Nightly: $TORCH_NIGHTLY"
 
     FAIL_FAST=$(fail_fast)
 
@@ -169,13 +199,11 @@ upload_pipeline() {
 }
 
 get_diff() {
-    $(git add .)
-    echo $(git diff --name-only --diff-filter=ACMDR $(git merge-base origin/main HEAD))
+    git diff --name-only --diff-filter=ACMDR "$MERGE_BASE_COMMIT" HEAD 2>/dev/null || echo ""
 }
 
 get_diff_main() {
-    $(git add .)
-    echo $(git diff --name-only --diff-filter=ACMDR HEAD~1)
+    git diff --name-only --diff-filter=ACMDR HEAD~1 HEAD 2>/dev/null || echo ""
 }
 
 file_diff=$(get_diff)
@@ -302,9 +330,10 @@ else
     fi
 fi
 
-LIST_FILE_DIFF=$(get_diff | tr ' ' '|')
-if [[ $BUILDKITE_BRANCH == "main" ]]; then
-    LIST_FILE_DIFF=$(get_diff_main | tr ' ' '|')
+if [[ $RUN_ALL -eq 1 ]]; then
+    LIST_FILE_DIFF="run_all"
+else
+    LIST_FILE_DIFF=$(printf '%s\n' "$file_diff" | tr -d '\r' | paste -sd'|' -)
 fi
 
 upload_pipeline

@@ -27,6 +27,11 @@ AMD_RETRY = {
 }
 ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
+SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
+ALWAYS_RUN_STEP_KEYS = {
+    "ensure-ci-base-amd",
+    "refresh-rocm-base-amd",
+}
 
 
 def _get_rocm_debug_agent_setup_command() -> str:
@@ -153,6 +158,15 @@ def _get_step_agents(step: Step) -> Dict[str, str]:
 SetupProfile = Literal["nvidia", "amd", "none"]
 
 
+def _get_timeout_in_minutes(
+    timeout_in_minutes: Optional[int],
+) -> Optional[int]:
+    """Return the timeout unless per-step timeout fields should be omitted."""
+    if os.getenv(SKIP_TIMEOUT_ENV_VAR) == "1":
+        return None
+    return timeout_in_minutes
+
+
 class BuildkiteCommandStep(BaseModel):
     label: str
     group: Optional[str] = None
@@ -165,6 +179,7 @@ class BuildkiteCommandStep(BaseModel):
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
+    timeout_in_minutes: Optional[int] = None
     priority: Optional[int] = None
 
     def to_yaml(self):
@@ -180,6 +195,7 @@ class BuildkiteCommandStep(BaseModel):
             "plugins": self.plugins,
             "env": self.env,
             "parallelism": self.parallelism,
+            "timeout_in_minutes": self.timeout_in_minutes,
             "priority": self.priority,
         }
 
@@ -376,17 +392,42 @@ def _get_variables_to_inject() -> Dict[str, str]:
     }
 
 
+def _is_multi_gpu_step(step: Step) -> bool:
+    """Whether a step exercises more than one GPU.
+
+    Multi-GPU (tensor/pipeline parallel) and multi-node steps rely on the
+    cross-GPU fabric (NVLink/NVSwitch) and P2P being healthy on whichever node
+    they land on. Single-GPU steps don't, so the topology dump is only worth the
+    log noise for these.
+    """
+    if step.num_nodes and step.num_nodes >= 2:
+        return True
+    return bool(step.num_devices and step.num_devices >= 2)
+
+
 def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
     if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
         return []
 
     if setup_profile == "nvidia":
-        return [
+        commands = [
             "echo '--- :nvidia: GPU Info'",
             "(command nvidia-smi || true)",
+        ]
+        if _is_multi_gpu_step(step):
+            # Dump the GPU/NVLink topology for multi-GPU jobs so infra flakes on
+            # a node with a degraded fabric (unhealthy NVSwitch/fabric-manager,
+            # missing P2P) are visible in the log and distinguishable from real
+            # regressions. Cheap and never fails the step.
+            commands += [
+                "echo '--- :nvidia: GPU Topology'",
+                "(command nvidia-smi topo -m || true)",
+            ]
+        commands += [
             "echo '--- :gear: CUDA Coredump Setup'",
             "export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'",
         ]
+        return commands
 
     if setup_profile == "amd":
         return [
@@ -420,7 +461,7 @@ def _prepare_commands(
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
-                commands.append(f"{{ {cmd}\n}} || __CI_OVERALL_STATUS=1")
+                commands.append(f"{{ {cmd}\n}} || CI_OVERALL_STATUS=1")
             else:
                 commands.append(cmd)
 
@@ -499,7 +540,6 @@ def convert_group_step_to_buildkite_step(
     list_file_diff = global_config["list_file_diff"]
 
     amd_hardware_steps = []
-    torch_nightly_steps_collected = []
 
     for group, steps in group_steps.items():
         group_steps_list = []
@@ -525,6 +565,7 @@ def convert_group_step_to_buildkite_step(
                     extra_env=step.env,
                     soft_fail=step.soft_fail,
                     parallelism=step.parallelism,
+                    timeout_in_minutes=step.timeout_in_minutes,
                 )
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
@@ -557,6 +598,10 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
+            if step.timeout_in_minutes:
+                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
+                    step.timeout_in_minutes
+                )
 
             if not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(
@@ -576,10 +621,6 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.plugins = [_get_step_plugin(step)]
 
             group_steps_list.append(buildkite_step)
-
-            # Collect steps marked for torch nightly testing via mirror field
-            if step.mirror and step.mirror.get("torch_nightly") is not None:
-                torch_nightly_steps_collected.append(step)
 
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
@@ -616,8 +657,9 @@ def convert_group_step_to_buildkite_step(
                     commands_str=amd_commands_str,
                     depends_on=amd.get("depends_on"),
                     extra_env=extra_env,
-                    soft_fail=amd.get("soft_fail", step.soft_fail or False),
+                    soft_fail=True,
                     parallelism=step.parallelism,
+                    timeout_in_minutes=amd.get("timeout_in_minutes"),
                 )
                 if not _step_should_run(
                     _get_amd_mirror_effective_step(step, amd), list_file_diff
@@ -648,13 +690,6 @@ def convert_group_step_to_buildkite_step(
             BuildkiteGroupStep(group="Hardware-AMD Tests", steps=amd_hardware_steps)
         )
 
-    # Create torch nightly group if any steps have mirror.torch_nightly
-    if torch_nightly_steps_collected:
-        nightly_group = _create_torch_nightly_group(
-            torch_nightly_steps_collected, list_file_diff, variables_to_inject
-        )
-        buildkite_group_steps.append(nightly_group)
-
     return buildkite_group_steps
 
 
@@ -663,7 +698,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     global_config = get_global_config()
     if step.key and (
-        step.key.startswith("image-build") or step.key == "ensure-ci-base-amd"
+        step.key.startswith("image-build") or step.key in ALWAYS_RUN_STEP_KEYS
     ):
         return True
     if global_config["nightly"] == "1":
@@ -730,6 +765,7 @@ def _create_amd_step(
     soft_fail: Optional[bool],
     parallelism: Optional[int],
     key: Optional[str] = None,
+    timeout_in_minutes: Optional[int] = None,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
     if not _is_amd_gpu_device(device):
@@ -750,130 +786,5 @@ def _create_amd_step(
         soft_fail=soft_fail or False,
         retry=AMD_RETRY,
         parallelism=parallelism,
+        timeout_in_minutes=_get_timeout_in_minutes(timeout_in_minutes),
     )
-
-
-def _create_torch_nightly_group(
-    nightly_steps: List[Step],
-    list_file_diff: List[str],
-    variables_to_inject: Dict[str, str],
-) -> BuildkiteGroupStep:
-    """Create the 'vLLM Against PyTorch Nightly' group with image build + test steps."""
-    global_config = get_global_config()
-    branch = global_config["branch"]
-    auto_run = global_config["nightly"] == "1"
-
-    nightly_image = get_torch_nightly_image()
-    group_steps_list = []
-
-    # Add manual block step for the image build (unless auto-run)
-    if not auto_run:
-        group_steps_list.append(
-            BuildkiteBlockStep(
-                block="Build torch nightly image",
-                key="block-build-torch-nightly",
-                depends_on=[],
-            )
-        )
-
-    # Docker image build step — delegates to the shell script in vllm repo.
-    # Resolve variables at generation time (these commands don't go through
-    # _prepare_commands, so we substitute manually).
-    import re as _re
-    raw_cmd = '.buildkite/image_build/image_build_torch_nightly.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $IMAGE_TAG_TORCH_NIGHTLY'
-    for variable, value in variables_to_inject.items():
-        if not value:
-            continue
-        pattern = _re.escape(variable)
-        raw_cmd = _re.sub(pattern + r'\b', value, raw_cmd)
-    image_build_commands = [raw_cmd]
-
-    image_build_step = BuildkiteCommandStep(
-        label=":docker: build image torch nightly",
-        key="image-build-torch-nightly",
-        commands=image_build_commands,
-        depends_on=["block-build-torch-nightly"] if not auto_run else [],
-        soft_fail=True,
-        agents={
-            "queue": AgentQueue.CPU_POSTMERGE_US_EAST_1
-            if branch == "main"
-            else AgentQueue.CPU_PREMERGE_US_EAST_1,
-        },
-        env={"DOCKER_BUILDKIT": "1"},
-        retry={
-            "automatic": [
-                {"exit_status": -1, "limit": 2},
-                {"exit_status": -10, "limit": 2},
-            ]
-        },
-    )
-    group_steps_list.append(image_build_step)
-
-    # Create test steps for each torch_nightly step
-    for step in nightly_steps:
-        # Determine if this test step should be auto-run or blocked
-        step_auto_run = auto_run
-        if not step_auto_run and step.source_file_dependencies:
-            for source_file in step.source_file_dependencies:
-                for diff_file in list_file_diff:
-                    if _matches_source_dependency(source_file, diff_file):
-                        step_auto_run = True
-                        break
-                if step_auto_run:
-                    break
-        elif not step_auto_run and not step.source_file_dependencies:
-            step_auto_run = True
-
-        blocked = not step_auto_run or (step.optional and not auto_run)
-
-        if blocked:
-            block_key = f"block-torch-nightly-{_generate_step_key(step.label)}"
-            group_steps_list.append(
-                BuildkiteBlockStep(
-                    block=f"Run Torch Nightly {step.label}",
-                    depends_on=["image-build-torch-nightly"],
-                    key=block_key,
-                )
-            )
-
-        # Create the nightly test step using the nightly image
-        nightly_plugin = _get_nightly_step_plugin(step, nightly_image)
-        step_commands = _prepare_commands(step, variables_to_inject)
-
-        nightly_test_step = BuildkiteCommandStep(
-            label=f"Torch Nightly {step.label}",
-            commands=step_commands,
-            depends_on=[block_key] if blocked else ["image-build-torch-nightly"],
-            soft_fail=True,
-            agents=_get_step_agents(step),
-            parallelism=step.parallelism,
-            retry={
-                "automatic": [
-                    {"exit_status": -1, "limit": 1},
-                    {"exit_status": -10, "limit": 1},
-                ]
-            },
-        )
-        if not step.no_plugin:
-            nightly_test_step.plugins = [nightly_plugin]
-
-        group_steps_list.append(nightly_test_step)
-
-    return BuildkiteGroupStep(
-        group="vLLM Against PyTorch Nightly", steps=group_steps_list
-    )
-
-
-def _get_nightly_step_plugin(step: Step, nightly_image: str):
-    """Get the Docker plugin config for a torch nightly test step."""
-    use_cpu = step.device == DeviceType.CPU or False
-    if step.device in [
-        DeviceType.H100.value,
-        DeviceType.A100.value,
-        DeviceType.B200_K8S.value,
-    ]:
-        from plugin.k8s_plugin import get_k8s_plugin
-        return get_k8s_plugin(step, nightly_image)
-    else:
-        from plugin.docker_plugin import get_docker_plugin
-        return {"docker#v5.2.0": get_docker_plugin(step, nightly_image)}

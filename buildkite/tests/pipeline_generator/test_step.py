@@ -1,10 +1,8 @@
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-
-PIPELINE_GENERATOR_DIR = Path(__file__).resolve().parents[2] / "pipeline_generator"
-sys.path.insert(0, str(PIPELINE_GENERATOR_DIR))
 
 import buildkite_step
 import step as step_module
@@ -16,6 +14,7 @@ TEST_JOB_DIR = Path(__file__).resolve().parent / "test_files" / "test_jobs"
 
 @pytest.fixture(autouse=True)
 def fake_global_config(monkeypatch):
+    monkeypatch.delenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, raising=False)
     config = {
         "name": "vllm_ci",
         "github_repo_name": "vllm-project/vllm",
@@ -30,6 +29,7 @@ def fake_global_config(monkeypatch):
         "pull_request": "false",
         "docs_only_disable": "1",
         "nightly": "0",
+        "torch_nightly": "0",
         "run_all": False,
         "list_file_diff": [],
         "fail_fast": False,
@@ -173,6 +173,96 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     assert "WARNING: ROCm debug agent not found at" in test_commands
 
 
+def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):
+    monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
+    step = Step(
+        label="Continue on failure",
+        group="Failure handling",
+        commands=[
+            "echo before",
+            "false",
+            "echo after",
+        ],
+    )
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+    script = " && ".join(commands).replace("$$CI_OVERALL_STATUS", "$CI_OVERALL_STATUS")
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "__CI_OVERALL_STATUS" not in script
+    assert "CI_OVERALL_STATUS=1" in script
+    assert "after" in result.stdout
+    assert result.returncode == 1
+
+
+def test_multi_gpu_step_dumps_nvidia_topology():
+    step = Step(
+        label="Distributed Comm Ops Test",
+        group="Distributed",
+        key="distributed-comm-ops",
+        depends_on=["image-build"],
+        device="h100",
+        num_devices=2,
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/distributed/test_comm_ops.py"],
+    )
+
+    commands = buildkite_step._prepare_commands(step, variables_to_inject={})
+
+    assert '(command nvidia-smi topo -m || true)' in commands
+    # Topology dump comes after the base GPU info and before coredump setup.
+    topo_index = commands.index('(command nvidia-smi topo -m || true)')
+    smi_index = commands.index('(command nvidia-smi || true)')
+    assert smi_index < topo_index
+
+
+def test_multi_node_step_dumps_nvidia_topology():
+    step = Step(
+        label="Multi-node Test",
+        group="Distributed",
+        key="multi-node",
+        depends_on=["image-build"],
+        device="h100",
+        num_nodes=2,
+        num_devices=4,
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/distributed/test_multi_node.py"],
+    )
+
+    commands = buildkite_step._prepare_commands(step, variables_to_inject={})
+
+    assert '(command nvidia-smi topo -m || true)' in commands
+
+
+def test_single_gpu_step_skips_nvidia_topology():
+    step = Step(
+        label="Single GPU Test",
+        group="Single",
+        key="single-gpu",
+        depends_on=["image-build"],
+        device="h100",
+        num_devices=1,
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/basic.py"],
+    )
+
+    commands = buildkite_step._prepare_commands(step, variables_to_inject={})
+
+    # Base GPU info is still emitted, but the topology dump is multi-GPU only.
+    assert '(command nvidia-smi || true)' in commands
+    assert '(command nvidia-smi topo -m || true)' not in commands
+
+
 def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     fake_global_config,
 ):
@@ -189,6 +279,7 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
             "amd": {
                 "device": "mi325_1",
                 "depends_on": ["image-build-amd"],
+                "soft_fail": False,
                 "source_file_dependencies": ["amd-only/"],
             }
         },
@@ -211,12 +302,272 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     )
 
     assert default_command_step.depends_on == ["image-build"]
+    assert default_command_step.soft_fail is False
     assert len(amd_group.steps) == 1
     assert amd_command_step.depends_on == ["image-build-amd"]
     assert amd_command_step.agents == {"queue": AgentQueue.AMD_MI325_1}
+    assert amd_command_step.soft_fail is True
     assert "ROCm debug agent disabled" in (
         amd_command_step.env["VLLM_TEST_COMMANDS"]
     )
+
+
+def test_torch_nightly_flag_no_separate_group(fake_global_config):
+    # TORCH_NIGHTLY=1 now runs the entire existing pipeline against the nightly
+    # base image (built by image_build.sh when TORCH_NIGHTLY=1, CUDA/GPU lane).
+    # It must NOT synthesize a separate "vLLM Against PyTorch Nightly" group.
+    fake_global_config["torch_nightly"] = "1"
+    step = Step(
+        label="Untagged test",
+        group="Some Group",
+        key="untagged-test",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/untagged.py"],
+        source_file_dependencies=["tests/untagged.py"],
+        device="h200_18gb",
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
+        step.group: [step],
+    })
+
+    # No dedicated torch-nightly group is synthesized anymore.
+    assert not any(
+        g.group == "vLLM Against PyTorch Nightly" for g in group_steps
+    )
+
+    # The step stays in its normal group and is built once (no nightly duplicate).
+    normal_group = next(g for g in group_steps if g.group == "Some Group")
+    labels = [
+        s.label for s in normal_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    ]
+    assert "Untagged test" in labels
+    assert not any(lbl.startswith("Torch Nightly ") for lbl in labels)
+
+
+def test_timeout_in_minutes_propagates_to_command_step():
+    step = Step(
+        label="Timed test",
+        group="Timing",
+        key="timed-test",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/timed.py"],
+        device="h200_18gb",
+        timeout_in_minutes=42,
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.timeout_in_minutes == 42
+
+
+def test_skip_timeout_omits_timeout_from_command_step(monkeypatch):
+    monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
+    step = Step(
+        label="Skipped timeout",
+        group="Timing",
+        commands=["pytest tests/timed.py"],
+        device="h200_18gb",
+        timeout_in_minutes=42,
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.timeout_in_minutes is None
+    assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
+
+
+def test_missing_timeout_in_minutes_is_omitted_from_pipeline():
+    step = Step(
+        label="Untimed test",
+        group="Timing",
+        key="untimed-test",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/untimed.py"],
+        device="h200_18gb",
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.timeout_in_minutes is None
+    # exclude_none is used when dumping the pipeline, so an unset timeout must
+    # not surface as a key at all.
+    assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
+
+
+def test_direct_amd_gpu_step_propagates_timeout():
+    step = Step(
+        label="AMD direct timed",
+        group="Direct AMD",
+        key="amd-direct-timed",
+        depends_on=["image-build"],
+        device="mi300_4",
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/foo.py"],
+        timeout_in_minutes=90,
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.timeout_in_minutes == 90
+
+
+def test_skip_timeout_omits_direct_amd_timeout(monkeypatch):
+    monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
+    step = Step(
+        label="AMD direct skipped timeout",
+        group="Direct AMD",
+        device="mi300_4",
+        commands=["pytest tests/foo.py"],
+        timeout_in_minutes=90,
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.timeout_in_minutes is None
+    assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
+
+
+def test_amd_mirror_uses_its_own_timeout_in_minutes(fake_global_config):
+    fake_global_config["list_file_diff"] = ["vllm/foo.py"]
+    step = Step(
+        label="Mirrored timed test",
+        group="Mirrors",
+        key="mirrored-timed",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        timeout_in_minutes=40,
+        mirror={
+            "amd": {
+                "device": "mi325_1",
+                "depends_on": ["image-build-amd"],
+                "timeout_in_minutes": 75,
+            }
+        },
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
+        step.group: [step],
+    })
+    default_group = next(group for group in group_steps if group.group == "Mirrors")
+    default_command_step = next(
+        s for s in default_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+    amd_command_step = next(
+        s for s in amd_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    # The main step keeps its own timeout; the AMD mirror uses the (larger)
+    # timeout declared on the mirror block.
+    assert default_command_step.timeout_in_minutes == 40
+    assert amd_command_step.timeout_in_minutes == 75
+
+
+def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
+    monkeypatch, fake_global_config,
+):
+    monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
+    fake_global_config["list_file_diff"] = ["vllm/foo.py"]
+    step = Step(
+        label="Mirrored skipped timeout",
+        group="Mirrors",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        timeout_in_minutes=40,
+        mirror={
+            "amd": {
+                "device": "mi325_1",
+                "depends_on": ["image-build-amd"],
+                "timeout_in_minutes": 75,
+            }
+        },
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
+        step.group: [step],
+    })
+    command_steps = [
+        command_step
+        for group_step in group_steps
+        for command_step in group_step.steps
+        if isinstance(command_step, buildkite_step.BuildkiteCommandStep)
+    ]
+
+    assert len(command_steps) == 2
+    assert all(step.timeout_in_minutes is None for step in command_steps)
+    assert all(
+        "timeout_in_minutes" not in step.model_dump(exclude_none=True)
+        for step in command_steps
+    )
+
+
+def test_amd_mirror_without_timeout_stays_unbounded(fake_global_config):
+    fake_global_config["list_file_diff"] = ["vllm/foo.py"]
+    step = Step(
+        label="Mirrored untimed test",
+        group="Mirrors",
+        key="mirrored-untimed",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        timeout_in_minutes=40,
+        mirror={
+            "amd": {
+                "device": "mi325_1",
+                "depends_on": ["image-build-amd"],
+            }
+        },
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
+        step.group: [step],
+    })
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+    amd_command_step = next(
+        s for s in amd_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    # An AMD mirror without its own timeout must not inherit the shorter main
+    # timeout (AMD runs slower); it stays unbounded until one is declared.
+    assert amd_command_step.timeout_in_minutes is None
 
 
 if __name__ == "__main__":
