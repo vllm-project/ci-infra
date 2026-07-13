@@ -252,11 +252,11 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
           VLLM_NUM_GPUS_PER_NODE: "{{ step.num_gpus or 1 }}"
           VLLM_NODE_COMMAND_COUNT: "{{ step.commands | length }}"
           {% for node_command in step.commands %}
-          VLLM_NODE_COMMAND_{{ loop.index0 }}: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && export VLLM_TEST_GROUP_NAME={{ step_slug }}-node{{ loop.index0 }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ node_command | replace('\"', '\\\"') | safe }}"
+          VLLM_NODE_COMMAND_{{ loop.index0 }}: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ node_command | replace('\"', '\\\"') | safe }}"
           {% endfor %}
           {% else %}
           VLLM_CI_EXECUTION_MODE: "single-node"
-          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && export VLLM_TEST_GROUP_NAME={{ step_slug }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
+          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
           {% endif %}
         {% endif %}
         priority: 100
