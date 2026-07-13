@@ -6,7 +6,7 @@ import pytest
 
 import buildkite_step
 import step as step_module
-from constants import AgentQueue
+from constants import AgentQueue, DeviceType
 from step import Step, group_steps, read_steps_from_job_dir
 
 TEST_JOB_DIR = Path(__file__).resolve().parent / "test_files" / "test_jobs"
@@ -92,6 +92,70 @@ def test_group_steps_sorts_steps_within_each_group():
         "Test C",
         "Test D",
     ]
+
+
+@pytest.mark.parametrize(
+    ("device", "queue"),
+    [
+        (DeviceType.CPU_SMALL, AgentQueue.SMALL_CPU_PREMERGE),
+        (DeviceType.CPU_MEDIUM, AgentQueue.MEDIUM_CPU_PREMERGE),
+        (DeviceType.CPU, AgentQueue.CPU_PREMERGE_US_EAST_1),
+        (DeviceType.A100, AgentQueue.A100),
+        (DeviceType.H100, AgentQueue.MITHRIL_H100),
+        (DeviceType.H200, AgentQueue.H200),
+        (DeviceType.H200_18GB, AgentQueue.H200_18GB),
+        (DeviceType.H200_35GB, AgentQueue.H200_35GB),
+        (DeviceType.B200, AgentQueue.B200),
+        (DeviceType.B200_K8S, AgentQueue.B200_K8S),
+        (DeviceType.INTEL_CPU, AgentQueue.INTEL_CPU),
+        (DeviceType.INTEL_HPU, AgentQueue.INTEL_HPU),
+        (DeviceType.INTEL_GPU, AgentQueue.INTEL_GPU),
+        (DeviceType.ARM_CPU, AgentQueue.ARM_CPU),
+        (DeviceType.AMD_CPU, AgentQueue.AMD_CPU),
+        (DeviceType.GH200, AgentQueue.GH200),
+        (DeviceType.ASCEND, AgentQueue.ASCEND),
+        (DeviceType.DGX_SPARK, AgentQueue.DGX_SPARK),
+    ],
+)
+def test_device_agent_queue_routing(device, queue):
+    assert buildkite_step.get_agent_queue(Step(label="test", device=device)) == queue
+
+
+@pytest.mark.parametrize(
+    ("branch", "label", "queue"),
+    [
+        ("main", ":docker: build", AgentQueue.CPU_POSTMERGE_US_EAST_1),
+        ("feature", ":docker: build", AgentQueue.CPU_PREMERGE_US_EAST_1),
+        ("main", ":docker: build arm64", AgentQueue.ARM64_CPU_POSTMERGE),
+        ("feature", ":docker: build arm64", AgentQueue.ARM64_CPU_PREMERGE),
+    ],
+)
+def test_docker_agent_queue_routing(fake_global_config, branch, label, queue):
+    fake_global_config["branch"] = branch
+
+    assert buildkite_step.get_agent_queue(Step(label=label)) == queue
+
+
+@pytest.mark.parametrize(
+    ("step", "queue"),
+    [
+        (Step(label="Documentation Build"), AgentQueue.SMALL_CPU_PREMERGE),
+        (
+            Step(label="Documentation Build", device=DeviceType.H100),
+            AgentQueue.SMALL_CPU_PREMERGE,
+        ),
+        (
+            Step(label="test", device=DeviceType.H100, num_devices=4),
+            AgentQueue.MITHRIL_H100,
+        ),
+        (Step(label="test", num_devices=2), AgentQueue.GPU_4),
+        (Step(label="test", num_devices=4), AgentQueue.GPU_4),
+        (Step(label="test", num_devices=1), AgentQueue.GPU_1),
+        (Step(label="test"), AgentQueue.GPU_1),
+    ],
+)
+def test_special_and_fallback_agent_queue_routing(step, queue):
+    assert buildkite_step.get_agent_queue(step) == queue
 
 
 @pytest.mark.parametrize(
