@@ -24,6 +24,8 @@ py-modules = [
     "utils",
     "global_config",
     "constants",
+    "change_detection",
+    "pipeline_renderer",
 ]
 
 [tool.setuptools.packages.find]

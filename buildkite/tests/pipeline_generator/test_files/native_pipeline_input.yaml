@@ -1,0 +1,51 @@
+env:
+  GLOBAL_FLAG: "1"
+notify:
+  - github_commit_status:
+      context: vllm/generic-renderer
+steps:
+  - group: GPU tests
+    key: gpu-tests
+    depends_on:
+      - image-build
+    if: build.branch != "docs"
+    source_file_dependencies:
+      - src/
+    steps:
+      - label: H100 unit tests
+        key: h100-unit
+        timeout_in_minutes: 45
+        command:
+          - pytest -q tests/gpu
+        agents:
+          queue: mithril-h100-pool
+        plugins:
+          - "docker#v5.13.0":
+              image: example.com/project/test:latest
+              propagate-environment: true
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 2
+        artifact_paths:
+          - test-results/**/*.xml
+        matrix:
+          setup:
+            shard:
+              - 0
+              - 1
+        env:
+          TEST_KIND: gpu
+        source_file_dependencies:
+          - src/gpu/
+      - label: CPU unit tests
+        command: pytest -q tests/cpu
+        agents:
+          queue: cpu_queue_premerge
+        source_file_dependencies:
+          - src/cpu/
+  - wait: ~
+  - label: Always run validation
+    command: python -m compileall src
+    agents:
+      queue: cpu_queue_premerge
