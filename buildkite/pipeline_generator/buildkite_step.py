@@ -575,7 +575,7 @@ def convert_group_step_to_buildkite_step(
                     no_plugin=amd_no_plugin,
                     no_gpu=amd_no_gpu,
                     num_nodes=amd.get("num_nodes", step.num_nodes),
-                    soft_fail=True,
+                    soft_fail=amd.get("soft_fail", step.soft_fail or False),
                     parallelism=step.parallelism,
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),

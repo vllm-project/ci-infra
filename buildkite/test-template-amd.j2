@@ -190,11 +190,7 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         {% endif %}
         timeout_in_minutes: {{ step_timeout_in_minutes }}
         agents:
-          {% if step.agent_pool %}
           queue: amd_{{ step.agent_pool }}
-          {% else %}
-          queue: amd_mi300
-          {% endif %}
           {% if step.dind == false and step.agent_tags %}
             {% for key, value in step.agent_tags | items %}
               {% if key != "queue" and key and value %}
