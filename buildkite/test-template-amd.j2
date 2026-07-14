@@ -22,17 +22,100 @@
 {%- if step.agent_pool -%}{{ step.agent_pool }}-{%- endif -%}{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
 {%- endmacro %}
 
+{# Native in-pod ROCm CI: per-job container-0 image via kubernetes podSpecPatch. #}
+{% macro amd_native_base_image() -%}
+rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
+{%- endmacro %}
+
+{% macro amd_native_k8s_plugin(step) %}
+        plugins:
+          - kubernetes:
+              podSpecPatch:
+                automountServiceAccountToken: false
+                securityContext:
+                  seccompProfile:
+                    type: RuntimeDefault
+                imagePullSecrets:
+                  - name: docker-config
+                containers:
+                  - name: container-0
+                    image: {{ amd_native_base_image() | safe }}
+                    imagePullPolicy: Always
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      capabilities:
+                        add:
+                          - IPC_LOCK
+                    resources:
+                      limits:
+                        {% if step.no_gpu %}
+                        {# Explicit zero overrides the typed controller PodSpec's inherited GPU request. #}
+                        amd.com/gpu: "0"
+                        {% else %}
+                        amd.com/gpu: "{{ step.num_gpus or 1 }}"
+                        {% endif %}
+                      requests:
+                        {% if step.no_gpu %}
+                        amd.com/gpu: "0"
+                        {% else %}
+                        amd.com/gpu: "{{ step.num_gpus or 1 }}"
+                        {% endif %}
+                    volumeMounts:
+                      - name: devshm
+                        mountPath: /dev/shm
+                      - name: vllm-workspace
+                        mountPath: /vllm-workspace
+                    env:
+                      - name: AMD_CI_RUNTIME
+                        value: native
+                      - name: NATIVE_CI
+                        value: "true"
+                      - name: VLLM_CI_DOCKER_DISABLED
+                        value: "1"
+                      - name: VLLM_CI_EXPECTED_GPU_COUNT
+                        value: "{{ 0 if step.no_gpu else (step.num_gpus or 1) }}"
+                      - name: VLLM_CI_WORKSPACE
+                        value: /vllm-workspace
+                      - name: VLLM_CI_REQUIRE_WORKSPACE_MOUNT
+                        value: "1"
+                      - name: PYTORCH_ROCM_ARCH
+                        value: ""
+                volumes:
+                  - name: devshm
+                    emptyDir:
+                      medium: Memory
+                      sizeLimit: 16Gi
+                  - name: vllm-workspace
+                    emptyDir: {}
+{%- endmacro %}
+
   - group: "AMD Tests"
     depends_on: ~
     steps:
-      - label: "AMD: :docker: ensure ci_base"
+      - label: "AMD: :docker: refresh ROCm base"
         depends_on: ~
         soft_fail: false
         commands:
-          - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
-        key: "amd-ci-base-ready"
+          - bash .buildkite/scripts/rocm/refresh-base-image.sh
+        key: "refresh-rocm-base-amd"
         env:
           DOCKER_BUILDKIT: "1"
+          BUILDKIT_PROGRESS: "tty"
+          TERM: "xterm-256color"
+{{ amd_infra_retry('        ') }}
+        agents:
+          queue: amd-cpu
+
+      - label: "AMD: :docker: ensure ci_base"
+        depends_on: "refresh-rocm-base-amd"
+        soft_fail: false
+        commands:
+          - bash .buildkite/scripts/rocm/build-ci-base.sh
+        key: "ensure-ci-base-amd"
+        env:
+          DOCKER_BUILDKIT: "1"
+          BUILDKIT_PROGRESS: "tty"
+          TERM: "xterm-256color"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           REMOTE_VLLM: "1"
@@ -41,20 +124,17 @@
         agents:
           queue: amd-cpu
 
-      - label: "AMD: :docker: build image"
-        depends_on: "amd-ci-base-ready"
+      - label: "AMD: :docker: build test image and artifacts"
+        depends_on: "ensure-ci-base-amd"
         soft_fail: false
         commands:
-          - |
-            if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" ]]; then
-              echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
-              IMAGE_TAG="" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
-            else
-              bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
-            fi
-        key: "amd-build"
+          - bash .buildkite/scripts/rocm/build-test-image.sh
+          - bash .buildkite/scripts/rocm/smoke-test-image.sh
+        key: "image-build-amd"
         env:
           DOCKER_BUILDKIT: "1"
+          BUILDKIT_PROGRESS: "tty"
+          TERM: "xterm-256color"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
@@ -85,13 +165,20 @@
             {% endif %}
           {% endfor %}
         {% endfor %}
+        {% if step.dind == false %}
+          {% for file in list_file_diff %}
+            {% if file == ".buildkite/scripts/hardware_ci/run-amd-test.sh" %}
+              {% set ns.blocked = 0 %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
       {% else %}
         {% set ns.blocked = 0 %}
       {% endif %}
 
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
-        depends_on: amd-build
+        depends_on: image-build-amd
         key: block-{{ step_slug }}
       {% endif %}
 
@@ -99,7 +186,7 @@
       {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
         depends_on: block-{{ step_slug }}
         {% else %}
-        depends_on: amd-build
+        depends_on: image-build-amd
         {% endif %}
         timeout_in_minutes: {{ step_timeout_in_minutes }}
         agents:
@@ -108,16 +195,52 @@
           {% else %}
           queue: amd_mi300
           {% endif %}
+          {% if step.dind == false and step.agent_tags %}
+            {% for key, value in step.agent_tags | items %}
+              {% if key != "queue" and key and value %}
+          {{ key }}: "{{ value }}"
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+        {% if step.dind == false %}
+{{ amd_native_k8s_plugin(step) }}
+        {% endif %}
+        {% if step.no_plugin %}
+        command: {{ (step.command or (step.commands | join(' && '))) | safe }}
+        {% if step.env %}
+        env:
+          {% for key, value in step.env | items %}
+          {{ key }}: {{ value | safe }}
+          {% endfor %}
+        {% endif %}
+        {% else %}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
-          DOCKER_BUILDKIT: "1"
           NUM_NODES: "{{ step.num_nodes or 1 }}"
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
-          # Keep the hook warmup on ci_base; the runner uses the full image only
-          # if ci_base or artifact setup fails before tests begin.
+          {% if step.dind == false %}
+          # Native: podSpecPatch sets container-0 to ci_base-<commit> from ensure-ci-base-amd.
+          VLLM_CI_BASE_IMAGE: "{{ amd_native_base_image() | safe }}"
+          AMD_CI_RUNTIME: "native"
+          NATIVE_CI: "true"
+          VLLM_CI_DOCKER_DISABLED: "1"
+          VLLM_CI_EXPECTED_GPU_COUNT: "{{ 0 if step.no_gpu else (step.num_gpus or 1) }}"
+          VLLM_CI_ARTIFACT_STEP: "image-build-amd"
+          VLLM_CI_ARTIFACT_CHECKSUM_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz.sha256"
+          VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE: "1"
+          VLLM_CI_WORKSPACE: "/vllm-workspace"
+          VLLM_CI_REQUIRE_WORKSPACE_MOUNT: "1"
+          HF_HOME: "/home/buildkite-agent/huggingface"
+          HF_HUB_DOWNLOAD_TIMEOUT: "300"
+          HF_HUB_ETAG_TIMEOUT: "60"
+          PYTORCH_ROCM_ARCH: ""
+          {% else %}
+          # DinD: hook warm-up uses stable ci_base; docker run uses fallback image if needed.
+          DOCKER_BUILDKIT: "1"
           DOCKER_IMAGE_NAME: "rocm/vllm-dev:ci_base"
           VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
           VLLM_CI_FALLBACK_IMAGE: "rocm/vllm-ci:$BUILDKITE_COMMIT"
+          {% endif %}
           VLLM_CI_USE_ARTIFACTS: "1"
           VLLM_CI_ARTIFACT_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
           VLLM_CI_RESULTS_ROOT: "/home/buildkite-agent/huggingface/amd-ci-results"
@@ -129,18 +252,15 @@
           VLLM_NUM_GPUS_PER_NODE: "{{ step.num_gpus or 1 }}"
           VLLM_NODE_COMMAND_COUNT: "{{ step.commands | length }}"
           {% for node_command in step.commands %}
-          VLLM_NODE_COMMAND_{{ loop.index0 }}: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && export VLLM_TEST_GROUP_NAME={{ step_slug }}-node{{ loop.index0 }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ node_command | replace('\"', '\\\"') | safe }}"
+          VLLM_NODE_COMMAND_{{ loop.index0 }}: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ node_command | replace('\"', '\\\"') | safe }}"
           {% endfor %}
           {% else %}
           VLLM_CI_EXECUTION_MODE: "single-node"
-          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && export VLLM_TEST_GROUP_NAME={{ step_slug }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
+          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && {{ rocm_debug_agent_setup | safe }} && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
           {% endif %}
-        priority: 100
-        {% if step.grade and step.grade == "Blocking" %}
-        soft_fail: false
-        {% else %}
-        soft_fail: true
         {% endif %}
+        priority: 100
+        soft_fail: true
         {% if step.parallelism %}
         parallelism: {{ step.parallelism }}
         {% endif %}
