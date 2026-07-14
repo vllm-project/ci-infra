@@ -177,6 +177,20 @@ def test_torch_nightly_flag_no_separate_group(fake_global_config):
     assert not any(lbl.startswith("Torch Nightly ") for lbl in labels)
 
 
+def test_image_tag_matches_get_image_and_latest_suppressed_on_nightly(fake_global_config):
+    fake_global_config["branch"] = "main"
+    # Build target ($IMAGE_TAG) mirrors what test steps pull (get_image()).
+    vars_ = buildkite_step._get_variables_to_inject()
+    assert vars_["$IMAGE_TAG"] == buildkite_step.get_image()
+    assert vars_["$IMAGE_TAG_LATEST"] == "example.com/vllm/vllm-ci-postmerge-repo:latest"
+
+    # A nightly run must not publish :latest (and still mirrors get_image()).
+    fake_global_config["torch_nightly"] = "1"
+    vars_ = buildkite_step._get_variables_to_inject()
+    assert vars_["$IMAGE_TAG"] == buildkite_step.get_image()
+    assert vars_["$IMAGE_TAG_LATEST"] is None
+
+
 def test_timeout_in_minutes_propagates_to_command_step():
     step = Step(
         label="Timed test",

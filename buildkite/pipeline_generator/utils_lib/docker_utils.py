@@ -16,6 +16,11 @@ def get_image(cpu: bool = False, arm64: bool = False) -> str:
         image = f"{registries}/{repositories['main']}:{commit}"
     else:
         image = f"{registries}/{repositories['premerge']}:{commit}"
+    # In the full torch-nightly run, every step must use the nightly image. Use
+    # the dedicated -torch-nightly tag so it never collides with the shared
+    # postmerge tag (no overwrite / race with the regular postmerge image).
+    if global_config.get("torch_nightly") == "1":
+        image = f"{image}-torch-nightly"
     if cpu:
         image = f"{image}-cpu"
     if arm64:

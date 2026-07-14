@@ -274,21 +274,30 @@ def _get_variables_to_inject() -> Dict[str, str]:
         return {}
 
     cache_from_tag, cache_to_tag = get_ecr_cache_registry()
+    registries = global_config["registries"]
+    repositories = global_config["repositories"]
+    repo = repositories["main"] if global_config["branch"] == "main" else repositories["premerge"]
+
+    # Build target ($IMAGE_TAG) must match what the test steps pull (get_image()).
+    # get_image() already switches to the dedicated -torch-nightly tag when
+    # torch_nightly==1, so the whole run uses a distinct tag that can't overwrite
+    # or race with the shared postmerge image. Don't publish :latest from nightly.
+    image_tag = get_image()
+    image_tag_latest = (
+        f"{registries}/{repositories['main']}:latest"
+        if global_config["branch"] == "main" and global_config["torch_nightly"] != "1"
+        else None
+    )
+
     return {
-        "$REGISTRY": global_config["registries"],
-        "$REPO": global_config["repositories"]["main"]
-        if global_config["branch"] == "main"
-        else global_config["repositories"]["premerge"],
+        "$REGISTRY": registries,
+        "$REPO": repo,
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
         "$BRANCH": global_config["branch"],
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
-        "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
-            if global_config["branch"] == "main"
-            else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT",
-        "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:latest"
-            if global_config["branch"] == "main"
-            else None,
+        "$IMAGE_TAG": image_tag,
+        "$IMAGE_TAG_LATEST": image_tag_latest,
         "$IMAGE_TAG_TORCH_NIGHTLY": get_torch_nightly_image(),
     }
 
