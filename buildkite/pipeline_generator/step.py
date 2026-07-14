@@ -29,7 +29,7 @@ class Step(BaseModel):
     optional: Optional[bool] = False
     no_plugin: Optional[bool] = False
     no_gpu: Optional[bool] = False
-    native_ci: Optional[bool] = False
+    dind: bool = True
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
 
     @model_validator(mode="after")

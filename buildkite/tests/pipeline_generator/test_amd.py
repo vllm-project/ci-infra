@@ -17,16 +17,16 @@ def _render_single_step(step):
 
 
 @pytest.mark.parametrize(
-    ("device", "queue", "native_ci", "expected_gpu_count"),
+    ("device", "queue", "dind", "expected_gpu_count"),
     [
-        ("mi300_4", AgentQueue.AMD_MI300_4, True, "4"),
         ("mi300_4", AgentQueue.AMD_MI300_4, False, "4"),
-        ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
+        ("mi300_4", AgentQueue.AMD_MI300_4, True, "4"),
         ("mi325_1", AgentQueue.AMD_MI325_1, False, "1"),
+        ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
     ],
 )
-def test_direct_amd_gpu_steps_use_tagged_runtime_policy(
-    device, queue, native_ci, expected_gpu_count
+def test_direct_amd_gpu_steps_use_dind_flag(
+    device, queue, dind, expected_gpu_count
 ):
     step = Step(
         label="AMD direct test",
@@ -34,7 +34,7 @@ def test_direct_amd_gpu_steps_use_tagged_runtime_policy(
         key=f"amd-direct-{device}",
         depends_on=["image-build"],
         device=device,
-        native_ci=native_ci,
+        dind=dind,
         optional=True,
         soft_fail=True,
         working_dir="/vllm-workspace/tests",
@@ -53,7 +53,7 @@ def test_direct_amd_gpu_steps_use_tagged_runtime_policy(
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
-    if native_ci:
+    if not dind:
         assert command_step.plugins is not None
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
@@ -177,9 +177,7 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
 
 
-def test_native_tagged_mirror_uses_native_runner_gating(
-    fake_global_config,
-):
+def test_dind_false_mirror_uses_native_runner_gating(fake_global_config):
     fake_global_config["list_file_diff"] = [
         ".buildkite/scripts/hardware_ci/run-amd-test.sh"
     ]
@@ -189,7 +187,7 @@ def test_native_tagged_mirror_uses_native_runner_gating(
         commands=["pytest tests/mirror.py"],
         source_file_dependencies=["vllm/"],
         device="h200_18gb",
-        mirror={"amd": {"device": "mi325_1", "native_ci": True}},
+        mirror={"amd": {"device": "mi325_1", "dind": False}},
     )
 
     group_steps = buildkite_step.convert_group_step_to_buildkite_step(
@@ -209,7 +207,7 @@ def test_native_tagged_mirror_uses_native_runner_gating(
     assert amd_command_step.plugins is not None
 
 
-def test_untagged_mi300_mirror_does_not_use_native_runner_gating(
+def test_untagged_mirror_defaults_to_dind(
     fake_global_config,
 ):
     fake_global_config["list_file_diff"] = [

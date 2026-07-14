@@ -460,7 +460,7 @@ def convert_group_step_to_buildkite_step(
                     commands_str=" && ".join(amd_commands),
                     depends_on=step.depends_on,
                     extra_env=step.env,
-                    native_ci=step.native_ci or False,
+                    dind=step.dind,
                     no_plugin=step.no_plugin or False,
                     no_gpu=step.no_gpu or False,
                     num_nodes=step.num_nodes,
@@ -571,7 +571,7 @@ def convert_group_step_to_buildkite_step(
                     commands_str=amd_commands_str,
                     depends_on=amd.get("depends_on"),
                     extra_env=extra_env,
-                    native_ci=amd.get("native_ci", False),
+                    dind=amd.get("dind", True),
                     no_plugin=amd_no_plugin,
                     no_gpu=amd_no_gpu,
                     num_nodes=amd.get("num_nodes", step.num_nodes),
@@ -624,8 +624,12 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return True
     if step.optional:
         return False
-    if step.native_ci and _source_file_dependencies_match(
-        AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES, list_file_diff
+    if (
+        is_amd_gpu_device(step.device)
+        and not step.dind
+        and _source_file_dependencies_match(
+            AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES, list_file_diff
+        )
     ):
         return True
     if global_config["run_all"]:
@@ -647,7 +651,7 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
         update={
             "key": None,
             "device": amd["device"],
-            "native_ci": amd.get("native_ci", False),
+            "dind": amd.get("dind", True),
             "optional": amd.get("optional", step.optional),
             "source_file_dependencies": source_file_dependencies,
         }
@@ -688,7 +692,7 @@ def _create_amd_step(
     commands_str: str,
     depends_on: Optional[List[str]],
     extra_env: Optional[Dict[str, str]],
-    native_ci: bool,
+    dind: bool,
     no_plugin: bool,
     no_gpu: bool,
     num_nodes: Optional[int],
@@ -706,7 +710,7 @@ def _create_amd_step(
         commands=commands_str,
         depends_on=depends_on,
         extra_env=extra_env,
-        native_ci=native_ci,
+        dind=dind,
         no_plugin=no_plugin,
         no_gpu=no_gpu,
         num_nodes=num_nodes,

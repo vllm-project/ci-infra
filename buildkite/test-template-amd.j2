@@ -23,7 +23,7 @@
 {%- endmacro %}
 
 {# Native in-pod ROCm CI: per-job container-0 image via kubernetes podSpecPatch. #}
-{% macro amd_native_ci_base_image() -%}
+{% macro amd_native_base_image() -%}
 rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
 {%- endmacro %}
 
@@ -39,7 +39,7 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
                   - name: docker-config
                 containers:
                   - name: container-0
-                    image: {{ amd_native_ci_base_image() | safe }}
+                    image: {{ amd_native_base_image() | safe }}
                     imagePullPolicy: Always
                     securityContext:
                       allowPrivilegeEscalation: false
@@ -165,7 +165,7 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
             {% endif %}
           {% endfor %}
         {% endfor %}
-        {% if step.native_ci %}
+        {% if step.dind == false %}
           {% for file in list_file_diff %}
             {% if file == ".buildkite/scripts/hardware_ci/run-amd-test.sh" %}
               {% set ns.blocked = 0 %}
@@ -195,14 +195,14 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
           {% else %}
           queue: amd_mi300
           {% endif %}
-          {% if step.native_ci and step.agent_tags %}
+          {% if step.dind == false and step.agent_tags %}
             {% for key, value in step.agent_tags | items %}
               {% if key != "queue" and key and value %}
           {{ key }}: "{{ value }}"
               {% endif %}
             {% endfor %}
           {% endif %}
-        {% if step.native_ci %}
+        {% if step.dind == false %}
 {{ amd_native_k8s_plugin(step) }}
         {% endif %}
         {% if step.no_plugin %}
@@ -218,9 +218,9 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         env:
           NUM_NODES: "{{ step.num_nodes or 1 }}"
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
-          {% if step.native_ci %}
+          {% if step.dind == false %}
           # Native: podSpecPatch sets container-0 to ci_base-<commit> from ensure-ci-base-amd.
-          VLLM_CI_BASE_IMAGE: "{{ amd_native_ci_base_image() | safe }}"
+          VLLM_CI_BASE_IMAGE: "{{ amd_native_base_image() | safe }}"
           AMD_CI_RUNTIME: "native"
           NATIVE_CI: "true"
           VLLM_CI_DOCKER_DISABLED: "1"

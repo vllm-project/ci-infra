@@ -6,7 +6,7 @@ from constants import AgentQueue, DeviceType
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
-AMD_NATIVE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT"
+AMD_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT"
 AMD_FALLBACK_CI_IMAGE = "rocm/vllm-ci:$BUILDKITE_COMMIT"
 AMD_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
 AMD_ARTIFACT_CHECKSUM_GLOB = f"{AMD_ARTIFACT_GLOB}.sha256"
@@ -137,7 +137,7 @@ def resolve_amd_gpu_count(
 def get_amd_agents(
     device: Optional[str],
     agent_tags: Optional[Dict[str, str]],
-    native_ci: bool,
+    dind: bool,
 ) -> Dict[str, str]:
     config = get_amd_device_config(device)
     if config is None:
@@ -150,7 +150,7 @@ def get_amd_agents(
         raise ValueError("AMD agent_tags must be a mapping.")
     if not agent_tags:
         return agents
-    if not native_ci:
+    if dind:
         raise ValueError("AMD agent_tags are only supported for native CI jobs.")
 
     for key, value in agent_tags.items():
@@ -199,11 +199,11 @@ def _get_amd_env(
     *,
     commands: str,
     extra_env: Optional[Dict[str, str]],
-    native_ci: bool,
+    dind: bool,
     gpu_count: int,
 ) -> Dict[str, str]:
     env = dict(extra_env or {})
-    if native_ci:
+    if not dind:
         # Native agents have no DinD sidecar, so Docker hook inputs must not
         # escape into this execution mode.
         env.pop("DOCKER_IMAGE_NAME", None)
@@ -217,7 +217,7 @@ def _get_amd_env(
         env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
         env.update(
             {
-                "VLLM_CI_BASE_IMAGE": AMD_NATIVE_CI_BASE_IMAGE,
+                "VLLM_CI_BASE_IMAGE": AMD_NATIVE_BASE_IMAGE,
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
@@ -316,7 +316,7 @@ def build_amd_step_options(
     commands: str,
     depends_on: Optional[List[str]],
     extra_env: Optional[Dict[str, str]],
-    native_ci: bool,
+    dind: bool,
     no_plugin: bool,
     no_gpu: bool,
     num_nodes: Optional[int],
@@ -328,19 +328,18 @@ def build_amd_step_options(
             f"Invalid AMD device: {device}. Valid devices: {valid_amd_gpu_devices()}"
         )
 
-    if not isinstance(native_ci, bool):
-        raise ValueError("AMD native_ci must be a boolean.")
-    native_runtime = native_ci
-    if native_runtime and no_plugin:
+    if not isinstance(dind, bool):
+        raise ValueError("AMD dind must be a boolean.")
+    if not dind and no_plugin:
         raise ValueError(
             "Native AMD jobs cannot use no_plugin; the wrapper installs the test artifact."
         )
-    if native_runtime and num_nodes and num_nodes > 1:
+    if not dind and num_nodes and num_nodes > 1:
         raise ValueError("Native AMD jobs do not support multi-node execution.")
 
     gpu_count = resolve_amd_gpu_count(device, num_devices, no_gpu)
     plugins = None
-    if native_runtime:
+    if not dind:
         container_env = {
             "AMD_CI_RUNTIME": "native",
             "NATIVE_CI": "true",
@@ -352,7 +351,7 @@ def build_amd_step_options(
         }
         plugins = [
             get_amd_k8s_plugin(
-                image=AMD_NATIVE_CI_BASE_IMAGE,
+                image=AMD_NATIVE_BASE_IMAGE,
                 gpu_count=gpu_count,
                 workspace=AMD_NATIVE_WORKSPACE,
                 workspace_volume_name=AMD_NATIVE_WORKSPACE_VOLUME,
@@ -368,7 +367,7 @@ def build_amd_step_options(
         env = _get_amd_env(
             commands=commands,
             extra_env=extra_env,
-            native_ci=native_ci,
+            dind=dind,
             gpu_count=gpu_count,
         )
         step_commands = [AMD_TEST_COMMAND]
@@ -377,7 +376,7 @@ def build_amd_step_options(
         "label": get_amd_label(label, device),
         "commands": step_commands,
         "depends_on": normalize_amd_depends_on(depends_on),
-        "agents": get_amd_agents(device, agent_tags, native_runtime),
+        "agents": get_amd_agents(device, agent_tags, dind),
         "env": env,
         "plugins": plugins,
         "priority": 200,
