@@ -98,7 +98,7 @@ The AMD and Intel bootstrap scripts additionally handle:
 
 Managed via Terraform in `terraform/aws/`. Uses the [Buildkite Elastic CI Stack for AWS](https://github.com/buildkite/elastic-ci-stack-for-aws) (v6.21.0) to deploy autoscaling agent clusters as CloudFormation stacks.
 
-**Regions**: us-west-2 (GPU + CPU queues), us-east-1 (CPU build queues with warm-cache AMI, release queues)
+**Regions**: us-west-2 (GPU + CPU queues), us-east-1 (additional multi-GPU capacity, CPU build queues with warm-cache AMI, release queues)
 
 #### Agent Queues
 
@@ -110,7 +110,7 @@ Managed via Terraform in `terraform/aws/`. Uses the [Buildkite Elastic CI Stack 
 | `cpu_queue_premerge_us_east_1` | r6in.16xlarge (512GB) | 20 | CPU builds (warm-cache AMI) |
 | `arm64_cpu_queue_premerge` | r7g.16xlarge | 10 | ARM64 builds |
 | `gpu_1_queue` | g6.4xlarge (1x L4) | 208 | Single-GPU tests |
-| `gpu_4_queue` | g6.12xlarge (4x L4) | 64 | Multi-GPU tests |
+| `gpu_4_queue` (us-west-2 + us-east-1) | g6.12xlarge (4x L4) | 64 west / 19 east | Multi-GPU tests |
 
 Equivalent postmerge and release queues exist with ECR write access for pushing images. Specialized hardware (H100, H200, B200, A100) is managed via Kubernetes or dedicated pools.
 

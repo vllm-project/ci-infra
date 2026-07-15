@@ -222,6 +222,26 @@ locals {
     }
   }
 
+  # Intentionally shares gpu_4_queue with us-west-2 for regional capacity failover.
+  # Both Elastic CI Stack autoscalers may scale for the same queued jobs.
+  ci_gpu_queues_parameters_us_east_1 = {
+    gpu-4-queue-ci-us-east-1 = {
+      BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_ci_us_east_1.name
+      BuildkiteQueue                       = "gpu_4_queue"
+      InstanceTypes                        = "g6.12xlarge" # 4 Nvidia L4 GPUs, 192GB memory
+      MaxSize                              = 19 # Limited by the us-east-1 G/VT on-demand vCPU quota (920 / 48)
+      ECRAccessPolicy                      = "readonly"
+      InstanceOperatingSystem              = "linux"
+      OnDemandPercentage                   = 100
+      ImageId                              = aws_ami_copy.gpu_us_east_1.id # Custom AMI with Nvidia driver 570.133.20
+      BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
+      BuildkiteTerminateInstanceAfterJob   = true
+      VpcId                                = module.vpc_us_east_1.vpc_id
+      SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
+      Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
+    }
+  }
+
   queues_parameters = {
     bootstrap = {
       BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_perf_benchmark.name
@@ -271,6 +291,11 @@ locals {
 
   merged_parameters_ci_gpu = {
     for name, params in local.ci_gpu_queues_parameters :
+    name => merge(local.default_parameters, params)
+  }
+
+  merged_parameters_ci_gpu_us_east_1 = {
+    for name, params in local.ci_gpu_queues_parameters_us_east_1 :
     name => merge(local.default_parameters, params)
   }
 
@@ -380,6 +405,24 @@ resource "aws_cloudformation_stack" "bk_queue_ci_gpu" {
       tags_all["AppManagerCFNStackKey"],
     ]
   }
+}
+
+resource "aws_cloudformation_stack" "bk_queue_ci_gpu_us_east_1" {
+  for_each   = local.merged_parameters_ci_gpu_us_east_1
+  name       = "bk-${each.key}"
+  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
+
+  template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
+  capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
+
+  lifecycle {
+    ignore_changes = [
+      tags["AppManagerCFNStackKey"],
+      tags_all["AppManagerCFNStackKey"],
+    ]
+  }
+
+  provider = aws.us_east_1
 }
 
 resource "aws_cloudformation_stack" "bk_queue" {
