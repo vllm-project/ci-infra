@@ -378,7 +378,7 @@ resource "aws_iam_role_policy_attachment" "premerge_ecr_public_read_access" {
     aws_cloudformation_stack.bk_queue_ci_gpu,
     aws_cloudformation_stack.bk_queue_ci_gpu_us_east_1,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = each.key == "gpu-4-queue-ci-us-east-1" ? "bk-gpu-4-queue-ci-us-east-1-Role" : each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.premerge_ecr_public_read_access_policy.arn
 }
 
@@ -410,7 +410,7 @@ resource "aws_iam_role_policy_attachment" "postmerge_ecr_public_read_access" {
     aws_cloudformation_stack.bk_queue_ci_gpu,
     aws_cloudformation_stack.bk_queue_ci_gpu_us_east_1,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = each.key == "gpu-4-queue-ci-us-east-1" ? "bk-gpu-4-queue-ci-us-east-1-Role" : each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.postmerge_ecr_public_read_access_policy.arn
 }
 
@@ -475,7 +475,7 @@ resource "aws_iam_role_policy_attachment" "bk_stack_secrets_access" {
     aws_cloudformation_stack.bk_queue_ci_gpu_us_east_1,
     aws_cloudformation_stack.bk_queue_release,
   )
-  role       = each.value.outputs.InstanceRoleName
+  role       = each.key == "gpu-4-queue-ci-us-east-1" ? "bk-gpu-4-queue-ci-us-east-1-Role" : each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.bk_stack_secrets_access.arn
 }
 

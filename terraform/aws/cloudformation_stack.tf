@@ -238,6 +238,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       ImageId                              = aws_ami_copy.gpu_us_east_1.id # Custom AMI with Nvidia driver 570.133.20
+      RootVolumeEncrypted                  = true
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
       BuildkiteTerminateInstanceAfterJob   = true
       VpcId                                = module.vpc_us_east_1.vpc_id
