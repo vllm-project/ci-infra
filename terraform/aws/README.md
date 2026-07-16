@@ -3,11 +3,11 @@
 This setup is for the Buildkite Elastic CI Stack on AWS.
 Services used:
 - VPC with 4 subnets (each subnet carries 16384 IP addresses)
-- 4 CloudFormation stacks: `small-cpu-queue`, `cpu-queue`, `gpu-1-queue`, and `gpu-4-queue` which has corresponding Buildkite agent queue
+- CloudFormation stacks for `small-cpu-queue`, `cpu-queue`, `gpu-1-queue`, and `gpu-4-queue`, each with a corresponding Buildkite agent queue
     - `small_cpu_queue` is for running small CPU jobs like bootstrapping CI build or building documentation
     - `cpu_queue` is for heavier CPU jobs like building vLLM Docker image or running CPU tests
     - `gpu_1_queue` is for running all GPU tests that require 1 GPU
-    - `gpu_4_queue` is for running all GPU tests that require 2 or 4 GPUs
+    - `gpu_4_queue` is for running all GPU tests that require 2 or 4 GPUs; stacks in us-west-2 and us-east-1 both serve this queue
 - Each stack has access to write/read from ECR public repo (that stores vLLM Docker images) and AWS Secrets Manager that stores Huggingface token used for testing.
 
 ## Setup with Terraform
