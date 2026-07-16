@@ -123,7 +123,7 @@ HOST_NAME_VAL="${accelerator_type}-ci-${instance_index}-${project_short_name}-${
 # Set the system-wide environment variable, avoid using the default HOSTNAME because it's too vague to be useful. For example, t1v-n-01667781-w-0
 echo "HOST_NAME=$HOST_NAME_VAL" | sudo tee -a /etc/environment
 sudo sed -i "s/name=\"%hostname-%spawn\"/name=\"$HOST_NAME_VAL\"/" /etc/buildkite-agent/buildkite-agent.cfg
-echo 'tags="queue=${buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+echo 'tags="queue=${buildkite_queue_name},hostname='"$HOST_NAME_VAL"'"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
 echo 'HF_TOKEN=${huggingface_token_value}' | sudo tee -a /etc/environment
 echo 'BUILDKITE_ANALYTICS_TOKEN=${buildkite_analytics_token_value}' | sudo tee -a /etc/environment
 echo 'TPU_VERSION=tpu7x' | sudo tee -a /etc/environment

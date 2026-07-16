@@ -15,6 +15,8 @@ locals {
   is_multi_host  = local.tpu_core_size > 8
 
   has_attached_disk = var.disk_size > 0
+  # Use "ci-bk" for multi-host to avoid naming conflicts with existing v7x TPU resources
+  ci_tmp = local.is_multi_host ? "ci-bk" : "ci"
 }
 
 # Generate a SSH key pair for internal multi-host communication
@@ -36,12 +38,12 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
   provider = google-beta
   count    = var.instance_count
 
-  name             = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+  name             = "${var.accelerator_type}-${local.ci_tmp}-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
   runtime_version  = "v2-alpha-tpu7-ubuntu2404"
   accelerator_type = var.accelerator_type
 
   labels = {
-    vm_name = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+    vm_name = "${var.accelerator_type}-${local.ci_tmp}-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
   }
 
   dynamic "scheduling_config" {
