@@ -23,6 +23,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/instance-bootstrap.sh"
     }
 
     medium-cpu-queue-premerge = {
@@ -34,6 +35,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/instance-bootstrap.sh"
     }
 
     cpu-queue-premerge = {
@@ -45,6 +47,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/instance-bootstrap.sh"
     }
 
     arm64-cpu-queue-premerge = {
@@ -56,6 +59,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/instance-bootstrap.sh"
     }
   }
 
@@ -252,6 +256,7 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/instance-bootstrap.sh"
     }
   }
 
