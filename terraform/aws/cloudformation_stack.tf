@@ -205,7 +205,8 @@ locals {
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
-      BuildkiteTerminateInstanceAfterJob   = true
+      # Reuse scarce GPU capacity instead of terminating and replacing it after every job.
+      BuildkiteTerminateInstanceAfterJob   = false
     }
 
     gpu-4-queue-ci = {
@@ -218,7 +219,8 @@ locals {
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
-      BuildkiteTerminateInstanceAfterJob   = true
+      # Reuse scarce GPU capacity instead of terminating and replacing it after every job.
+      BuildkiteTerminateInstanceAfterJob   = false
     }
   }
 
