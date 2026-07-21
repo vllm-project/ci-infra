@@ -1,13 +1,34 @@
 # 1 TPU device each
+# TPU v7x CI Module (Unified Single/Multi-host)
 # Runtime: v2-alpha-tpu7-ubuntu2404
 
 data "google_client_config" "config" {
   provider = google-beta
 }
 
+locals {
+  # Detect multi-host based on accelerator_type suffix
+  # Expected format: tpu7x-N where N is the number of cores.
+  # For v7x, usually 8 cores/ 4 chips per host. (there're 2 core per chip for v7x)
+  tpu_size_parts = split("-", var.accelerator_type)
+  tpu_core_size  = length(local.tpu_size_parts) > 1 ? tonumber(local.tpu_size_parts[1]) : 0
+  is_multi_host  = local.tpu_core_size > 8
+
+  has_attached_disk = var.disk_size > 0
+  # Use "ci-bk" for multi-host to avoid naming conflicts with existing v7x TPU resources
+  ci_tmp = local.is_multi_host ? "ci-bk" : "ci"
+}
+
+# Generate a SSH key pair for internal multi-host communication
+resource "tls_private_key" "internal_ssh_key" {
+  count     = local.is_multi_host ? var.instance_count : 0
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
 resource "google_compute_disk" "tpu_disk" {
   provider = google-beta
-  count    = var.instance_count
+  count    = local.has_attached_disk ? var.instance_count : 0
   name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}-disk"
   size     = var.disk_size
   type     = "hyperdisk-balanced"
@@ -17,12 +38,12 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
   provider = google-beta
   count    = var.instance_count
 
-  name             = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+  name             = "${var.accelerator_type}-${local.ci_tmp}-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
   runtime_version  = "v2-alpha-tpu7-ubuntu2404"
   accelerator_type = var.accelerator_type
 
   labels = {
-    vm_name = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+    vm_name = "${var.accelerator_type}-${local.ci_tmp}-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
   }
 
   dynamic "scheduling_config" {
@@ -37,162 +58,30 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
     enable_external_ips = true
   }
 
-  data_disks {
-    source_disk = google_compute_disk.tpu_disk[count.index].id
-    mode        = "READ_WRITE"
+  dynamic "data_disks" {
+    for_each = local.has_attached_disk ? [1] : []
+    content {
+      source_disk = google_compute_disk.tpu_disk[count.index].id
+      mode        = "READ_WRITE"
+    }
   }
 
   metadata = {
-    "startup-script" = <<-STARTUP_SCRIPT
-      #!/bin/bash
-
-      apt-get update
-      apt-get install -y curl build-essential jq git python3 python3-pip
-
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-      /root/.cargo/bin/cargo install minijinja-cli
-      cp /root/.cargo/bin/minijinja-cli /usr/bin/minijinja-cli
-      chmod 777 /usr/bin/minijinja-cli
-
-      curl -fsSL https://keys.openpgp.org/vks/v1/by-fingerprint/32A37959C2FA5C3C99EFBC32A79206696452D198 | sudo gpg --dearmor -o /usr/share/keyrings/buildkite-agent-archive-keyring.gpg
-      echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
-      apt-get update
-      apt-get install -y buildkite-agent
-       
-      # Force stop the buildkite-agent and start at the end to avoid race condition
-      sudo systemctl stop buildkite-agent
-
-      # ==========================================
-      # Setup In-Memory GitHub App Authentication
-      # ==========================================
-      pip3 install pyjwt requests cryptography --break-system-packages || pip3 install pyjwt requests cryptography
-
-      # 1. Create the Python script
-      cat <<'EOF' > /etc/buildkite-agent/get_github_token.py
-      import os, time, requests, jwt
-
-      APP_ID = "4156238"
-      INSTALLATION_ID = "142868369"
-
-      signing_key = os.environ['_BK_TEMP_GITHUB_APP_PEM'].encode('utf-8')
-
-      payload = { 'iat': int(time.time()), 'exp': int(time.time()) + 600, 'iss': APP_ID }
-      encoded_jwt = jwt.encode(payload, signing_key, algorithm='RS256')
-
-      response = requests.post(
-          f'https://api.github.com/app/installations/{INSTALLATION_ID}/access_tokens',
-          headers={'Authorization': f'Bearer {encoded_jwt}', 'Accept': 'application/vnd.github.v3+json'}
-      )
-      response.raise_for_status()
-      print(response.json()['token'])
-      EOF
-
-      mkdir -p /etc/buildkite-agent/hooks
-
-      # 2. Create the Buildkite pre-checkout hook
-      cat <<'EOF' > /etc/buildkite-agent/hooks/pre-checkout
-      #!/bin/bash
-      set -e
-
-      echo "--- 🔐 Generating temporary GitHub token"
-
-      export _BK_TEMP_GITHUB_APP_PEM=$(buildkite-agent secret get ${var.github_app_secret_name})
-
-      if [ -z "$_BK_TEMP_GITHUB_APP_PEM" ]; then
-          echo "🚨 Error: Failed to fetch secret from Buildkite Secrets. Does the secret exist?"
-          exit 1
-      fi
-
-      GITHUB_TOKEN=$(python3 /etc/buildkite-agent/get_github_token.py)
-      unset _BK_TEMP_GITHUB_APP_PEM
-
-      # Static URL rewrite for SSH to HTTPS, and Basic Auth header for HTTPS authentication
-      git config --global url."https://github.com/".insteadOf "git@github.com:"
-      AUTH_TOKEN=$(echo -n "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')
-      git config --global http.https://github.com/.extraheader "Authorization: Basic $AUTH_TOKEN"
-      EOF
-
-      chmod 500 /etc/buildkite-agent/get_github_token.py
-      chmod +x /etc/buildkite-agent/hooks/pre-checkout
-      chown -R buildkite-agent:buildkite-agent /etc/buildkite-agent/
-      # ==========================================
-
-      sudo usermod -a -G docker buildkite-agent
-      sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
-      sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
-
-      sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
-      
-      HOST_NAME_VAL="${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
-      # Set the system-wide environment variable, avoid using the default HOSTNAME because it's too vague to be useful. For example, t1v-n-01667781-w-0
-      echo "HOST_NAME=$HOST_NAME_VAL" | sudo tee -a /etc/environment
-      sudo sed -i "s/name=\"%hostname-%spawn\"/name=\"$HOST_NAME_VAL\"/" /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
-      echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
-      echo 'TPU_VERSION=tpu7x' | sudo tee -a /etc/environment
-
-      sudo mkdir -p /mnt/disks/persist
-
-      # Format if not already formatted
-      if ! blkid /dev/nvme1n1; then
-        echo "Formatting /dev/nvme1n1 as ext4..."
-        sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/nvme1n1
-      fi
-
-      # Add to /etc/fstab using UUID
-      disk_uuid=$(blkid -s UUID -o value /dev/nvme1n1)
-      if ! grep -q "/mnt/disks/persist" /etc/fstab; then
-       echo "UUID=$disk_uuid /mnt/disks/persist ext4 defaults,discard 0 2" | sudo tee -a /etc/fstab
-      fi
-
-      # Only mount if not already mounted (first boot or recovery)
-      if ! mountpoint -q /mnt/disks/persist; then
-        sudo mount /mnt/disks/persist
-      fi
-
-      jq ". + {\"data-root\": \"/mnt/disks/persist\"}" /etc/docker/daemon.json > /tmp/daemon.json.tmp && mv /tmp/daemon.json.tmp /etc/docker/daemon.json
-      systemctl stop docker
-      systemctl daemon-reload
-      systemctl start docker
-
-      sudo chmod 777 /mnt/disks/persist
-
-      echo "Installing GCP Ops Agent..."
-      curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
-      sudo bash add-google-cloud-ops-agent-repo.sh --also-install
-
-      # ==========================================
-      # 1. Backward Compatibility & JAX Cache Setup
-      # ==========================================
-      echo "Setting up backward compatibility symlink for JAX cache..."
-      # Create the persistent directory first
-      sudo mkdir -p /mnt/disks/persist/tpu_jax_cache
-      sudo chmod 777 /mnt/disks/persist/tpu_jax_cache
-      
-      # Forcefully intercept old CI jobs writing to /tmp and redirect them to the persistent disk
-      sudo rm -rf /tmp/tpu_jax_cache
-      sudo ln -s /mnt/disks/persist/tpu_jax_cache /tmp/tpu_jax_cache
-
-      # ==========================================
-      # 2. Automated Disk Garbage Collection (Cron)
-      # ==========================================
-      echo "Setting up daily cron job for JAX cache cleanup..."
-      echo -e '0 2 * * * root find /mnt/disks/persist/tpu_jax_cache -type f -mtime +30 -delete > /dev/null 2>&1\n30 2 * * * root find /mnt/disks/persist/tpu_jax_cache -type d -empty -delete > /dev/null 2>&1' | sudo tee /etc/cron.d/tpu_cache_cleanup
-      sudo chmod 0644 /etc/cron.d/tpu_cache_cleanup
-
-      # ==========================================
-      # 3. System Log Cleaner
-      # ==========================================
-      # Inject ultra-strict limit policy for syslog and kern.log (50M, 1 backup)
-      echo "Configuring strict logrotate for syslog and kern.log..."
-      sudo sed -i '1i/var/log/syslog\n/var/log/kern.log\n{\n  size 50M\n  rotate 1\n  missingok\n  notifempty\n  compress\n  delaycompress\n  postrotate\n    /usr/lib/rsyslog/rsyslog-rotate\n  endscript\n}\n' /etc/logrotate.d/rsyslog
-      
-      # Force rotate once
-      sudo logrotate -f /etc/logrotate.conf
-
-      systemctl enable buildkite-agent
-      systemctl start buildkite-agent
-    STARTUP_SCRIPT
+    "startup-script" = templatefile("${path.module}/startup-script.sh.tftpl", {
+      buildkite_token_value           = var.buildkite_token_value
+      huggingface_token_value         = var.huggingface_token_value
+      buildkite_analytics_token_value = var.buildkite_analytics_token_value
+      buildkite_queue_name            = var.buildkite_queue_name
+      github_app_secret_name          = var.github_app_secret_name
+      is_multi_host                   = local.is_multi_host
+      accelerator_type                = var.accelerator_type
+      project_short_name              = var.project_short_name
+      instance_index                  = count.index
+      zone                            = data.google_client_config.config.zone
+      private_key_pem                 = local.is_multi_host ? tls_private_key.internal_ssh_key[count.index].private_key_pem : ""
+      public_key_openssh              = local.is_multi_host ? tls_private_key.internal_ssh_key[count.index].public_key_openssh : ""
+      has_attached_disk               = local.has_attached_disk
+      disk_size_bytes                 = var.disk_size * 1073741824
+    })
   }
 }
