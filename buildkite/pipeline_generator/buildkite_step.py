@@ -5,8 +5,10 @@ import os
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
+    AMD_ROCM_BASE_REFRESH_STEP_KEY,
     build_amd_step_options,
     get_amd_agent_queue,
+    get_rocm_base_refresh_timeout,
     get_amd_setup_commands,
     is_amd_gpu_device,
 )
@@ -512,6 +514,10 @@ def convert_group_step_to_buildkite_step(
             if step.timeout_in_minutes:
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
                     step.timeout_in_minutes
+                )
+            if step.key == AMD_ROCM_BASE_REFRESH_STEP_KEY:
+                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
+                    get_rocm_base_refresh_timeout(list_file_diff)
                 )
 
             if not _step_should_run(step, list_file_diff):

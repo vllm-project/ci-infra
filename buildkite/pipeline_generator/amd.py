@@ -19,14 +19,19 @@ AMD_NATIVE_SHM_SIZE = "16Gi"
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
     ".buildkite/scripts/hardware_ci/run-amd-test.sh",
 )
+AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
+AMD_ROCM_BASE_DOCKERFILE = "docker/Dockerfile.rocm_base"
+AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES = 9 * 60
+AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES = 15
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
     {
         "ensure-ci-base-amd",
-        "refresh-rocm-base-amd",
+        AMD_ROCM_BASE_REFRESH_STEP_KEY,
     }
 )
 AMD_RETRY = {
     "automatic": [
+        {"signal_reason": "stack_error", "limit": 1},
         {"exit_status": -1, "limit": 1},
         {"exit_status": 1, "limit": 1},
         {"exit_status": 128, "limit": 1},
@@ -36,6 +41,17 @@ AMD_RETRY = {
 }
 ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
+
+
+def get_rocm_base_refresh_timeout(list_file_diff: List[str]) -> int:
+    if os.getenv("ROCM_BASE_REFRESH_SKIP", "0") == "1":
+        return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
+    if (
+        os.getenv("ROCM_BASE_REFRESH_FORCE", "0") == "1"
+        or AMD_ROCM_BASE_DOCKERFILE in list_file_diff
+    ):
+        return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
+    return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
 
 
 @dataclass(frozen=True)
