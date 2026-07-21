@@ -116,7 +116,11 @@ def test_direct_amd_gpu_steps_use_dind_flag(
         assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
 
     assert command_step.retry == amd.AMD_RETRY
-    assert len(command_step.retry["automatic"]) == 5
+    assert len(command_step.retry["automatic"]) == 6
+    assert command_step.retry["automatic"][0] == {
+        "signal_reason": "stack_error",
+        "limit": 1,
+    }
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")

@@ -9,6 +9,8 @@
 {% macro amd_infra_retry(indent='', retry_exit_status_one=false) -%}
 {{ indent }}retry:
 {{ indent }}  automatic:
+{{ indent }}    - signal_reason: stack_error  # Kubernetes pod/stack provisioning failed
+{{ indent }}      limit: 1
 {% if retry_exit_status_one %}
 {{ indent }}    - exit_status: 1  # Transient Docker/BuildKit failure
 {{ indent }}      limit: 1

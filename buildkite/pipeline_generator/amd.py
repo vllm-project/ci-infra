@@ -31,6 +31,7 @@ AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
 )
 AMD_RETRY = {
     "automatic": [
+        {"signal_reason": "stack_error", "limit": 1},
         {"exit_status": -1, "limit": 1},
         {"exit_status": 1, "limit": 1},
         {"exit_status": 128, "limit": 1},
