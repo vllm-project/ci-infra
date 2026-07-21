@@ -89,32 +89,36 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
 
       mkdir -p /etc/buildkite-agent/hooks
 
-      # 2. Create the Buildkite pre-checkout hook
-      cat <<'EOF' > /etc/buildkite-agent/hooks/pre-checkout
+      # 2. Create the on-demand Git Credential Helper for GitHub App tokens
+      cat <<'EOF' > /etc/buildkite-agent/git-credential-github-app
       #!/bin/bash
-      set -e
-
-      echo "--- 🔐 Generating temporary GitHub token"
-
-      export _BK_TEMP_GITHUB_APP_PEM=$(buildkite-agent secret get ${var.github_app_secret_name})
-
-      if [ -z "$_BK_TEMP_GITHUB_APP_PEM" ]; then
-          echo "🚨 Error: Failed to fetch secret from Buildkite Secrets. Does the secret exist?"
-          exit 1
+      if [ "$1" = "get" ]; then
+          export _BK_TEMP_GITHUB_APP_PEM=$(buildkite-agent secret get ${var.github_app_secret_name})
+          if [ -n "$_BK_TEMP_GITHUB_APP_PEM" ]; then
+              GITHUB_TOKEN=$(python3 /etc/buildkite-agent/get_github_token.py 2>/dev/null || true)
+              unset _BK_TEMP_GITHUB_APP_PEM
+              if [ -n "$GITHUB_TOKEN" ]; then
+                  echo "username=x-access-token"
+                  echo "password=$GITHUB_TOKEN"
+              fi
+          fi
       fi
-
-      GITHUB_TOKEN=$(python3 /etc/buildkite-agent/get_github_token.py)
-      unset _BK_TEMP_GITHUB_APP_PEM
-
-      # Static URL rewrite for SSH to HTTPS, and Basic Auth header for HTTPS authentication
-      git config --global url."https://github.com/".insteadOf "git@github.com:"
-      AUTH_TOKEN=$(echo -n "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')
-      git config --global http.https://github.com/.extraheader "Authorization: Basic $AUTH_TOKEN"
       EOF
 
       chmod 500 /etc/buildkite-agent/get_github_token.py
-      chmod +x /etc/buildkite-agent/hooks/pre-checkout
+      chmod +x /etc/buildkite-agent/git-credential-github-app
       chown -R buildkite-agent:buildkite-agent /etc/buildkite-agent/
+
+      # Configure Git system-wide (/etc/gitconfig) and globally to use the credential helper and redirect SSH to HTTPS
+      git config --system credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
+      git config --system --add url."https://github.com/".insteadOf "git@github.com:"
+      git config --system --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+      sudo -H -u buildkite-agent git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
+      sudo -H -u buildkite-agent git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+      sudo -H -u buildkite-agent git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+      HOME=/root git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
+      HOME=/root git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+      HOME=/root git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
       # ==========================================
 
       sudo usermod -a -G docker buildkite-agent
