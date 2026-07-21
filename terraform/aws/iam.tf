@@ -224,7 +224,10 @@ resource "aws_iam_policy" "release_ecr_public_read_write_access_policy" {
         "ecr-public:UploadLayerPart",
         "sts:GetServiceBearerToken"
       ]
-      Resource = "arn:aws:ecr-public::936637512419:repository/vllm-release-repo"
+      Resource = [
+        "arn:aws:ecr-public::936637512419:repository/vllm-release-repo",
+        "arn:aws:ecr-public::936637512419:repository/vllm-omni-release-repo",
+      ]
     }]
   })
 }
