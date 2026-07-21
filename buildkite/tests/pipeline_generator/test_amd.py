@@ -16,6 +16,54 @@ def _render_single_step(step):
     )[0]
 
 
+def _rocm_base_refresh_step():
+    return Step(
+        label="AMD: :docker: refresh ROCm base",
+        group="Hardware - AMD Build",
+        key=amd.AMD_ROCM_BASE_REFRESH_STEP_KEY,
+        device="amd_cpu",
+        no_plugin=True,
+        commands=["bash .buildkite/scripts/rocm/refresh-base-image.sh"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("list_file_diff", "expected_timeout"),
+    [
+        ([], 15),
+        (["vllm/config.py"], 15),
+        ([amd.AMD_ROCM_BASE_DOCKERFILE], 540),
+    ],
+)
+def test_rocm_base_refresh_timeout_tracks_dockerfile_change(
+    fake_global_config, list_file_diff, expected_timeout
+):
+    fake_global_config["list_file_diff"] = list_file_diff
+
+    command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
+
+    assert command_step.timeout_in_minutes == expected_timeout
+
+
+def test_rocm_base_refresh_force_uses_build_timeout(monkeypatch):
+    monkeypatch.setenv("ROCM_BASE_REFRESH_FORCE", "1")
+
+    command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
+
+    assert command_step.timeout_in_minutes == 540
+
+
+def test_skip_timeout_omits_rocm_base_refresh_timeout(
+    fake_global_config, monkeypatch
+):
+    monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
+    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+
+    command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
+
+    assert command_step.timeout_in_minutes is None
+
+
 @pytest.mark.parametrize(
     ("device", "queue", "dind", "expected_gpu_count"),
     [
