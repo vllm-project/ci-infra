@@ -71,7 +71,7 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 - **AMD mirroring**: Steps can define `mirror.amd` to automatically create parallel AMD test runs
 - **Source file dependencies**: Steps can specify which source files they depend on for intelligent test filtering
 - **Block steps**: Optional tests are gated behind manual approval blocks
-- **Variable injection**: Automatically injects registry URLs, cache tags, and image references into step commands
+- **Variable injection**: Automatically injects registry URLs and image references into step commands
 
 #### Jinja2 Template (AMD CI)
 

@@ -191,6 +191,13 @@ def test_image_tag_matches_get_image_and_latest_suppressed_on_nightly(fake_globa
     assert vars_["$IMAGE_TAG_LATEST"] is None
 
 
+def test_variable_injection_omits_cache_tags_owned_by_image_build():
+    vars_ = buildkite_step._get_variables_to_inject()
+
+    assert "$CACHE_FROM" not in vars_
+    assert "$CACHE_TO" not in vars_
+
+
 def test_timeout_in_minutes_propagates_to_command_step():
     step = Step(
         label="Timed test",

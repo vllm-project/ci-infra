@@ -13,7 +13,7 @@ from amd import (
     is_amd_gpu_device,
 )
 from step import Step
-from utils_lib.docker_utils import get_image, get_ecr_cache_registry, get_torch_nightly_image
+from utils_lib.docker_utils import get_image, get_torch_nightly_image
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
@@ -277,7 +277,6 @@ def _get_variables_to_inject() -> Dict[str, str]:
     if global_config["name"] != "vllm_ci":
         return {}
 
-    cache_from_tag, cache_to_tag = get_ecr_cache_registry()
     registries = global_config["registries"]
     repositories = global_config["repositories"]
     repo = repositories["main"] if global_config["branch"] == "main" else repositories["premerge"]
@@ -298,8 +297,6 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$REPO": repo,
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
         "$BRANCH": global_config["branch"],
-        "$CACHE_FROM": cache_from_tag,
-        "$CACHE_TO": cache_to_tag,
         "$IMAGE_TAG": image_tag,
         "$IMAGE_TAG_LATEST": image_tag_latest,
         "$IMAGE_TAG_TORCH_NIGHTLY": get_torch_nightly_image(),
