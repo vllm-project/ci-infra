@@ -7,6 +7,7 @@ import step as step_module
 @pytest.fixture
 def fake_global_config(monkeypatch):
     monkeypatch.delenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, raising=False)
+    monkeypatch.delenv("VLLM_CI_HF_HUB_MODE", raising=False)
     config = {
         "name": "vllm_ci",
         "github_repo_name": "vllm-project/vllm",
