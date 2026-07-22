@@ -191,11 +191,57 @@ def test_image_tag_matches_get_image_and_latest_suppressed_on_nightly(fake_globa
     assert vars_["$IMAGE_TAG_LATEST"] is None
 
 
-def test_variable_injection_omits_cache_tags_owned_by_image_build():
+def test_variable_injection_omits_cache_tags_by_default():
     vars_ = buildkite_step._get_variables_to_inject()
 
     assert "$CACHE_FROM" not in vars_
     assert "$CACHE_TO" not in vars_
+
+
+def test_cache_tags_are_resolved_only_when_referenced(monkeypatch):
+    calls = []
+
+    def fake_cache_registry():
+        calls.append(True)
+        return "cache-from", "cache-to"
+
+    monkeypatch.setattr(
+        buildkite_step,
+        "get_ecr_cache_registry",
+        fake_cache_registry,
+    )
+    regular_step = Step(
+        label="Regular image build",
+        group="Build",
+        commands=["echo $IMAGE_TAG"],
+    )
+    regular_group = _render_single_step(regular_step)
+
+    assert calls == []
+    assert all(
+        "$CACHE_FROM" not in command and "$CACHE_TO" not in command
+        for step in regular_group.steps
+        if isinstance(step, buildkite_step.BuildkiteCommandStep)
+        for command in step.commands
+    )
+
+    legacy_step = Step(
+        label="Legacy image build",
+        group="Build",
+        commands=["build --cache-from $CACHE_FROM --cache-to $CACHE_TO"],
+    )
+    legacy_group = _render_single_step(legacy_step)
+    legacy_commands = next(
+        step.commands
+        for step in legacy_group.steps
+        if isinstance(step, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert calls == [True]
+    assert any(
+        "build --cache-from cache-from --cache-to cache-to" in command
+        for command in legacy_commands
+    )
 
 
 def test_timeout_in_minutes_propagates_to_command_step():

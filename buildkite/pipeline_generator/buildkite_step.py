@@ -13,7 +13,11 @@ from amd import (
     is_amd_gpu_device,
 )
 from step import Step
-from utils_lib.docker_utils import get_image, get_torch_nightly_image
+from utils_lib.docker_utils import (
+    get_ecr_cache_registry,
+    get_image,
+    get_torch_nightly_image,
+)
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
@@ -272,14 +276,39 @@ def _first_configured(*values: Optional[int]) -> Optional[int]:
     return next((value for value in values if value is not None), None)
 
 
-def _get_variables_to_inject() -> Dict[str, str]:
+_CACHE_TAG_VARIABLES = ("$CACHE_FROM", "$CACHE_TO")
+
+
+def _uses_cache_tag_variables(group_steps: Dict[str, List[Step]]) -> bool:
+    """Return whether any generated command needs legacy cache tag injection."""
+    for steps in group_steps.values():
+        for step in steps:
+            commands = list(step.commands or [])
+            if step.mirror and step.mirror.get("amd"):
+                commands.extend(step.mirror["amd"].get("commands") or [])
+            if any(
+                variable in command
+                for command in commands
+                for variable in _CACHE_TAG_VARIABLES
+            ):
+                return True
+    return False
+
+
+def _get_variables_to_inject(
+    include_cache_tags: bool = False,
+) -> Dict[str, str]:
     global_config = get_global_config()
     if global_config["name"] != "vllm_ci":
         return {}
 
     registries = global_config["registries"]
     repositories = global_config["repositories"]
-    repo = repositories["main"] if global_config["branch"] == "main" else repositories["premerge"]
+    repo = (
+        repositories["main"]
+        if global_config["branch"] == "main"
+        else repositories["premerge"]
+    )
 
     # Build target ($IMAGE_TAG) must match what the test steps pull (get_image()).
     # get_image() already switches to the dedicated -torch-nightly tag when
@@ -292,7 +321,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
         else None
     )
 
-    return {
+    variables = {
         "$REGISTRY": registries,
         "$REPO": repo,
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
@@ -301,6 +330,19 @@ def _get_variables_to_inject() -> Dict[str, str]:
         "$IMAGE_TAG_LATEST": image_tag_latest,
         "$IMAGE_TAG_TORCH_NIGHTLY": get_torch_nightly_image(),
     }
+    # Cache-tag resolution is retained for pipeline configs that still reference
+    # these placeholders (e.g. private/internal or older branches not visible
+    # here). It runs lazily, only when a command actually references them, so the
+    # current vLLM pipeline does not pay for the ECR lookup.
+    if include_cache_tags:
+        cache_from_tag, cache_to_tag = get_ecr_cache_registry()
+        variables.update(
+            {
+                "$CACHE_FROM": cache_from_tag,
+                "$CACHE_TO": cache_to_tag,
+            }
+        )
+    return variables
 
 
 def _is_multi_gpu_step(step: Step) -> bool:
@@ -440,7 +482,9 @@ def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
     buildkite_group_steps = []
-    variables_to_inject = _get_variables_to_inject()
+    variables_to_inject = _get_variables_to_inject(
+        include_cache_tags=_uses_cache_tag_variables(group_steps)
+    )
     print(variables_to_inject)
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]

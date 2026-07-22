@@ -30,6 +30,11 @@ def fake_global_config(monkeypatch):
     monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
     monkeypatch.setattr(
         buildkite_step,
+        "get_ecr_cache_registry",
+        lambda: ("cache-from", "cache-to"),
+    )
+    monkeypatch.setattr(
+        buildkite_step,
         "get_image",
         lambda cpu=False, arm64=False: "test-image",
     )
