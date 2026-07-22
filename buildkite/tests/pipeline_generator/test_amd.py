@@ -225,7 +225,7 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert len(amd_group.steps) == 1
     assert amd_command_step.depends_on == ["image-build-amd"]
     assert amd_command_step.agents == {"queue": AgentQueue.AMD_MI325_1}
-    assert amd_command_step.soft_fail is True
+    assert amd_command_step.soft_fail is False
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
 
 
