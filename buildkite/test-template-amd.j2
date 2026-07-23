@@ -157,6 +157,15 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
     {% set ns = namespace(blocked=1) %}
     {% set step_slug = amd_step_slug(step) %}
     {% set step_timeout_in_minutes = step.timeout_in_minutes or default_amd_timeout_in_minutes %}
+    {# Non-boolean values fail closed instead of inheriting an enabled default. #}
+    {% set hf_offline_retry_default = hf_offline_retry is boolean and hf_offline_retry == true %}
+    {% set step_hf_offline_retry = step.hf_offline_retry %}
+    {% set hf_offline_retry_requested =
+        (step_hf_offline_retry is boolean and step_hf_offline_retry == true)
+        or (step_hf_offline_retry is undefined and hf_offline_retry_default)
+    %}
+    {# The AMD pilot currently covers only single-node jobs using run-amd-test.sh. #}
+    {% set hf_offline_retry_enabled = hf_offline_retry_requested and not step.no_plugin and not (step.num_nodes and step.num_nodes >= 2) %}
     {# Time out the container a minute before Buildkite times out the job. #}
     {% set container_timeout_s = (step_timeout_in_minutes * 60 - 60) if step_timeout_in_minutes > 1 else step_timeout_in_minutes * 60 %}
 
@@ -220,6 +229,7 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           NUM_NODES: "{{ step.num_nodes or 1 }}"
+          VLLM_CI_HF_OFFLINE_RETRY: "{{ 1 if hf_offline_retry_enabled else 0 }}"
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
           {% if step.dind == false %}
           # Native: podSpecPatch sets container-0 to ci_base-<commit> from ensure-ci-base-amd.

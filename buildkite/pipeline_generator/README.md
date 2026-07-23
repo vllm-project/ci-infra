@@ -64,6 +64,19 @@ repositories:
   premerge: "vllm-ci-test-repo"     # Used for PR/pre-merge builds
 ```
 
+### AMD Hugging Face Offline Retry
+
+AMD GPU jobs that use `run-amd-test.sh` run once with Hugging Face offline
+environment variables, then retry eligible test failures once online. This is
+enabled by default for both native and Docker-in-Docker AMD jobs. Direct AMD
+steps can opt out with `hf_offline_retry: false`; mirrored steps can use
+`mirror.amd.hf_offline_retry: false`.
+
+Direct-command (`no_plugin`) and multi-node AMD jobs do not enable this policy.
+The runner retries exit statuses `1`, `2`, and `123`; other statuses propagate.
+The generator emits an explicit `1` or `0` for every wrapper-backed AMD job so
+agent-level environment cannot override the resolved policy.
+
 ## Environment Variables
 
 The generator relies on several environment variables, typically provided by Buildkite or set by user:
