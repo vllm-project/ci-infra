@@ -32,7 +32,11 @@ def _rocm_base_refresh_step():
     [
         ([], 15),
         (["vllm/config.py"], 15),
+        (["run_all"], 15),
+        (["nightly"], 15),
         ([amd.AMD_ROCM_BASE_DOCKERFILE], 540),
+        (["run_all", amd.AMD_ROCM_BASE_DOCKERFILE], 540),
+        (["nightly", amd.AMD_ROCM_BASE_DOCKERFILE], 540),
     ],
 )
 def test_rocm_base_refresh_timeout_tracks_dockerfile_change(
@@ -62,6 +66,7 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
 
     assert command_step.timeout_in_minutes is None
+    assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
 
 
 @pytest.mark.parametrize(

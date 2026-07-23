@@ -219,6 +219,16 @@ else
     file_diff=$(get_diff)
 fi
 
+ROCM_BASE_DOCKERFILE="docker/Dockerfile.rocm_base"
+ROCM_BASE_DOCKERFILE_CHANGED=0
+while IFS= read -r file; do
+    file="${file%$'\r'}"
+    if [[ $file == "$ROCM_BASE_DOCKERFILE" ]]; then
+        ROCM_BASE_DOCKERFILE_CHANGED=1
+        break
+    fi
+done < <(printf '%s\n' "${file_diff:-}")
+
 # ----------------------------------------------------------------------
 # Early exit start: skip pipeline if conditions are met
 # ----------------------------------------------------------------------
@@ -273,7 +283,7 @@ ignore_patterns=(
 )
 
 nightly_patterns=(
-    "docker/Dockerfile.rocm_base"
+    "$ROCM_BASE_DOCKERFILE"
 )
 
 while IFS= read -r file; do
@@ -338,15 +348,20 @@ else
     echo "No critical changes, using precompiled wheels"
 fi
 
-# Build LIST_FILE_DIFF from the already-computed file_diff.
-# When run_all=1 or nightly=1, the jinja template ignores list_file_diff, so
-# use a short sentinel for the active mode instead of passing a large diff.
+# Build LIST_FILE_DIFF from the already-computed file_diff. Use a short sentinel
+# for full-coverage modes instead of passing a potentially large diff, but retain
+# the ROCm base Dockerfile marker used to select the refresh step timeout.
 if [[ $RUN_ALL -eq 1 ]]; then
     LIST_FILE_DIFF="run_all"
 elif [[ $NIGHTLY -eq 1 ]]; then
     LIST_FILE_DIFF="nightly"
 else
     LIST_FILE_DIFF=$(join_file_diff "$file_diff")
+fi
+
+if [[ $ROCM_BASE_DOCKERFILE_CHANGED -eq 1 && \
+      ( $LIST_FILE_DIFF == "run_all" || $LIST_FILE_DIFF == "nightly" ) ]]; then
+    LIST_FILE_DIFF+="|$ROCM_BASE_DOCKERFILE"
 fi
 
 upload_pipeline
