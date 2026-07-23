@@ -1,6 +1,7 @@
+import copy
+import os
 from step import Step
 from constants import DeviceType
-import copy
 
 docker_plugin_template = {
     "image": "",
@@ -145,5 +146,20 @@ def get_docker_plugin(step: Step, image: str):
         plugin["mount_buildkite_agent"] = True
     if step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM) and plugin.get("gpus"):
         del plugin["gpus"]
+
+    pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
+    if pull_request and pull_request != "false" and "volumes" in plugin:
+        new_volumes = []
+        for vol in plugin["volumes"]:
+            parts = vol.split(":")
+            if len(parts) >= 2:
+                host_path, container_path = parts[0], parts[1]
+                if host_path not in ("/dev/shm", "/dev/nvidiactl") and not host_path.endswith("_pr") and not host_path.endswith("-pr"):
+                    host_path = f"{host_path}_pr"
+                new_volumes.append(f"{host_path}:{container_path}")
+            else:
+                new_volumes.append(vol)
+        plugin["volumes"] = new_volumes
+
     # TODO: Add BUILDKITE_ANALYTICS_TOKEN and pytest addopts for fail_fast
     return plugin
