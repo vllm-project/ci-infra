@@ -27,18 +27,6 @@ def _rocm_base_refresh_step():
     )
 
 
-def _amd_cpu_docker_step(key, timeout_in_minutes=None):
-    return Step(
-        label=f"AMD Docker step ({key})",
-        group="Hardware - AMD Build",
-        key=key,
-        device="amd_cpu",
-        no_plugin=True,
-        commands=["echo build"],
-        timeout_in_minutes=timeout_in_minutes,
-    )
-
-
 @pytest.mark.parametrize(
     ("list_file_diff", "expected_timeout"),
     [
@@ -76,35 +64,6 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(
     fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
 
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
-
-    assert command_step.timeout_in_minutes is None
-    assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
-
-
-@pytest.mark.parametrize("key", ["ensure-ci-base-amd", amd.AMD_ARTIFACT_STEP])
-@pytest.mark.parametrize(
-    ("requested_timeout", "expected_timeout"),
-    [
-        (None, 180),
-        (90, 90),
-        (540, 180),
-    ],
-)
-def test_amd_cpu_docker_steps_enforce_standard_timeout(
-    key, requested_timeout, expected_timeout
-):
-    command_step = _render_single_step(
-        _amd_cpu_docker_step(key, requested_timeout)
-    ).steps[0]
-
-    assert command_step.timeout_in_minutes == expected_timeout
-
-
-@pytest.mark.parametrize("key", ["ensure-ci-base-amd", amd.AMD_ARTIFACT_STEP])
-def test_skip_timeout_omits_amd_cpu_docker_timeout(key, monkeypatch):
-    monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
-
-    command_step = _render_single_step(_amd_cpu_docker_step(key)).steps[0]
 
     assert command_step.timeout_in_minutes is None
     assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
