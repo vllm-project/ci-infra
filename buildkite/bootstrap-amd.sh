@@ -31,6 +31,8 @@ if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
 
+ROCM_BASE_DOCKERFILE="docker/Dockerfile.rocm_base"
+
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
@@ -57,6 +59,106 @@ join_file_diff() {
     printf '%s\n' "$1" | tr -d '\r' | paste -sd'|' -
 }
 
+classify_amd_changes() {
+    local file_diff="${1:-}"
+    local file=""
+    local pattern=""
+    local ignore=""
+    local matches_nightly=0
+    local matches_pattern=0
+    local matches_ignore=0
+    local -a patterns=(
+        "docker/Dockerfile.rocm"
+        "CMakeLists.txt"
+        "requirements/common.txt"
+        "requirements/rocm.txt"
+        "requirements/build/rocm.txt"
+        "requirements/test/rocm.txt"
+        "setup.py"
+        "csrc/"
+        "cmake/"
+    )
+    local -a ignore_patterns=(
+        "csrc/cpu"
+        "cmake/cpu_extension.cmake"
+    )
+    local -a nightly_patterns=(
+        "$ROCM_BASE_DOCKERFILE"
+    )
+
+    ROCM_BASE_DOCKERFILE_CHANGED=0
+    while IFS= read -r file; do
+        file="${file%$'\r'}"
+        [[ -z "$file" ]] && continue
+
+        if [[ $file == "$ROCM_BASE_DOCKERFILE" ]]; then
+            ROCM_BASE_DOCKERFILE_CHANGED=1
+        fi
+
+        matches_nightly=0
+        for pattern in "${nightly_patterns[@]}"; do
+            if [[ $file == "$pattern"* ]] || [[ $file == "$pattern" ]]; then
+                matches_nightly=1
+                NIGHTLY=1
+                echo "Found changes: $file. Running nightly AMD coverage"
+                break
+            fi
+        done
+        if [[ $matches_nightly -eq 1 ]]; then
+            continue
+        fi
+
+        matches_pattern=0
+        for pattern in "${patterns[@]}"; do
+            if [[ $file == "$pattern"* ]] || [[ $file == "$pattern" ]]; then
+                matches_pattern=1
+                break
+            fi
+        done
+
+        if [[ $matches_pattern -eq 1 ]]; then
+            matches_ignore=0
+            for ignore in "${ignore_patterns[@]}"; do
+                if [[ $file == "$ignore"* ]] || [[ $file == "$ignore" ]]; then
+                    matches_ignore=1
+                    break
+                fi
+            done
+
+            if [[ $matches_ignore -eq 0 ]]; then
+                RUN_ALL=1
+                echo "Found changes: $file. Run all tests"
+            fi
+        fi
+    done < <(printf '%s\n' "$file_diff" | tr -d '\r')
+}
+
+build_amd_list_file_diff() {
+    local file_diff="${1:-}"
+    local list_file_diff=""
+
+    if [[ $RUN_ALL -eq 1 ]]; then
+        list_file_diff="run_all"
+    elif [[ $NIGHTLY -eq 1 ]]; then
+        list_file_diff="nightly"
+    else
+        list_file_diff=$(join_file_diff "$file_diff")
+    fi
+
+    if [[ $ROCM_BASE_DOCKERFILE_CHANGED -eq 1 && \
+          ( $list_file_diff == "run_all" || $list_file_diff == "nightly" ) ]]; then
+        list_file_diff+="|$ROCM_BASE_DOCKERFILE"
+    fi
+
+    printf '%s\n' "$list_file_diff"
+}
+
+# Sourcing the bootstrap exposes its pure change-classification helpers for
+# regression tests without performing git, network, or Buildkite operations.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+
 # ---------------------------------------------------------------------------
 # Git setup: ensure origin/main is available and compute merge base once.
 # On K8s (blobless clones with --filter=blob:none), origin/main may not be
@@ -75,11 +177,13 @@ if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
     fetch_origin_ref main || true
 fi
 
+diff_unavailable=0
 if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
     MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD 2>/dev/null || echo "")
     if [[ -z "$MERGE_BASE_COMMIT" ]]; then
         echo "WARNING: Could not compute merge base, falling back to run_all=1"
         RUN_ALL=1
+        diff_unavailable=1
         MERGE_BASE_COMMIT="HEAD"
     fi
 fi
@@ -123,11 +227,11 @@ check_run_all_label() {
 # We only need committed changes between refs.
 # ---------------------------------------------------------------------------
 get_diff() {
-    git diff --name-only --diff-filter=ACMDR "$MERGE_BASE_COMMIT" HEAD 2>/dev/null || echo ""
+    git diff --name-only --diff-filter=ACMDR "$MERGE_BASE_COMMIT" HEAD 2>/dev/null
 }
 
 get_diff_main() {
-    git diff --name-only --diff-filter=ACMDR HEAD~1 HEAD 2>/dev/null || echo ""
+    git diff --name-only --diff-filter=ACMDR HEAD~1 HEAD 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -185,6 +289,9 @@ upload_pipeline() {
             -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
+            -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
+            -D rocm_base_refresh_diff_unavailable="${ROCM_BASE_REFRESH_DIFF_UNAVAILABLE:-0}" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -202,7 +309,6 @@ if [[ $BUILDKITE_BRANCH == "main" ]] && ! git rev-parse --verify HEAD~1 >/dev/nu
     git fetch --no-tags --deepen=1 origin >/dev/null 2>&1 || true
 fi
 
-diff_unavailable=0
 if [[ $BUILDKITE_BRANCH == "main" ]] && ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
     echo "WARNING: Could not resolve HEAD~1 on main, falling back to run_all=1"
     RUN_ALL=1
@@ -212,22 +318,26 @@ fi
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
     if [[ $diff_unavailable -eq 1 ]]; then
         file_diff=""
+    elif ! file_diff=$(get_diff_main); then
+        echo "WARNING: Could not compute main commit diff, falling back to run_all=1"
+        RUN_ALL=1
+        diff_unavailable=1
+        file_diff=""
     else
-        file_diff=$(get_diff_main)
+        :
     fi
+elif [[ $diff_unavailable -eq 1 ]]; then
+    file_diff=""
+elif ! file_diff=$(get_diff); then
+    echo "WARNING: Could not compute branch diff, falling back to run_all=1"
+    RUN_ALL=1
+    diff_unavailable=1
+    file_diff=""
 else
-    file_diff=$(get_diff)
+    :
 fi
 
-ROCM_BASE_DOCKERFILE="docker/Dockerfile.rocm_base"
-ROCM_BASE_DOCKERFILE_CHANGED=0
-while IFS= read -r file; do
-    file="${file%$'\r'}"
-    if [[ $file == "$ROCM_BASE_DOCKERFILE" ]]; then
-        ROCM_BASE_DOCKERFILE_CHANGED=1
-        break
-    fi
-done < <(printf '%s\n' "${file_diff:-}")
+classify_amd_changes "$file_diff"
 
 # ----------------------------------------------------------------------
 # Early exit start: skip pipeline if conditions are met
@@ -265,69 +375,6 @@ fi
 # Early exit end
 # ----------------------------------------------------------------------
 
-patterns=(
-    "docker/Dockerfile.rocm"
-    "CMakeLists.txt"
-    "requirements/common.txt"
-    "requirements/rocm.txt"
-    "requirements/build/rocm.txt"
-    "requirements/test/rocm.txt"
-    "setup.py"
-    "csrc/"
-    "cmake/"
-)
-
-ignore_patterns=(
-    "csrc/cpu"
-    "cmake/cpu_extension.cmake"
-)
-
-nightly_patterns=(
-    "$ROCM_BASE_DOCKERFILE"
-)
-
-while IFS= read -r file; do
-    [[ -z "$file" ]] && continue
-    matches_nightly=0
-    for pattern in "${nightly_patterns[@]}"; do
-        if [[ $file == $pattern* ]] || [[ $file == $pattern ]]; then
-            matches_nightly=1
-            NIGHTLY=1
-            echo "Found changes: $file. Running nightly AMD coverage"
-            break
-        fi
-    done
-    if [[ $matches_nightly -eq 1 ]]; then
-        continue
-    fi
-
-    # First check if file matches any pattern
-    matches_pattern=0
-    for pattern in "${patterns[@]}"; do
-        if [[ $file == $pattern* ]] || [[ $file == $pattern ]]; then
-            matches_pattern=1
-            break
-        fi
-    done
-
-    # If file matches pattern, check it's not in ignore patterns
-    if [[ $matches_pattern -eq 1 ]]; then
-        matches_ignore=0
-        for ignore in "${ignore_patterns[@]}"; do
-            if [[ $file == $ignore* ]] || [[ $file == $ignore ]]; then
-                matches_ignore=1
-                break
-            fi
-        done
-
-        if [[ $matches_ignore -eq 0 ]]; then
-            RUN_ALL=1
-            echo "Found changes: $file. Run all tests"
-            break
-        fi
-    fi
-done < <(printf '%s\n' "$file_diff" | tr -d '\r')
-
 # Check for ready-run-all-tests label
 LABEL_RUN_ALL=$(check_run_all_label)
 if [[ $LABEL_RUN_ALL == true ]]; then
@@ -336,8 +383,7 @@ if [[ $LABEL_RUN_ALL == true ]]; then
     echo "Found 'ready-run-all-tests' label. Running all tests including optional tests."
 fi
 
-# Decide whether to use precompiled wheels
-# Relies on existing patterns array as a basis.
+# Decide whether to use precompiled wheels.
 if [[ -n "${VLLM_USE_PRECOMPILED:-}" ]]; then
     echo "VLLM_USE_PRECOMPILED is already set to: $VLLM_USE_PRECOMPILED"
 elif [[ $RUN_ALL -eq 1 || $NIGHTLY -eq 1 ]]; then
@@ -351,17 +397,7 @@ fi
 # Build LIST_FILE_DIFF from the already-computed file_diff. Use a short sentinel
 # for full-coverage modes instead of passing a potentially large diff, but retain
 # the ROCm base Dockerfile marker used to select the refresh step timeout.
-if [[ $RUN_ALL -eq 1 ]]; then
-    LIST_FILE_DIFF="run_all"
-elif [[ $NIGHTLY -eq 1 ]]; then
-    LIST_FILE_DIFF="nightly"
-else
-    LIST_FILE_DIFF=$(join_file_diff "$file_diff")
-fi
-
-if [[ $ROCM_BASE_DOCKERFILE_CHANGED -eq 1 && \
-      ( $LIST_FILE_DIFF == "run_all" || $LIST_FILE_DIFF == "nightly" ) ]]; then
-    LIST_FILE_DIFF+="|$ROCM_BASE_DOCKERFILE"
-fi
+LIST_FILE_DIFF=$(build_amd_list_file_diff "$file_diff")
+export ROCM_BASE_REFRESH_DIFF_UNAVAILABLE="$diff_unavailable"
 
 upload_pipeline

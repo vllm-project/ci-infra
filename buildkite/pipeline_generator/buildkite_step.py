@@ -7,9 +7,11 @@ from amd import (
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
     build_amd_step_options,
+    ensure_amd_stack_error_retry,
     get_amd_agent_queue,
     get_amd_setup_commands,
     get_amd_timeout_in_minutes,
+    get_rocm_base_refresh_env,
     get_rocm_base_refresh_timeout,
     is_amd_gpu_device,
 )
@@ -514,7 +516,17 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
+            if (
+                step.device == DeviceType.AMD_CPU
+                or step.device == DeviceType.AMD_CPU.value
+            ):
+                buildkite_step.retry = ensure_amd_stack_error_retry(
+                    buildkite_step.retry
+                )
             if step.key == AMD_ROCM_BASE_REFRESH_STEP_KEY:
+                refresh_env = dict(buildkite_step.env or {})
+                refresh_env.update(get_rocm_base_refresh_env())
+                buildkite_step.env = refresh_env
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
                     get_rocm_base_refresh_timeout(list_file_diff)
                 )

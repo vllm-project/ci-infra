@@ -27,7 +27,7 @@ def _rocm_base_refresh_step():
     )
 
 
-def _amd_cpu_docker_step(key, timeout_in_minutes=None):
+def _amd_cpu_docker_step(key, timeout_in_minutes=None, retry=None):
     return Step(
         label=f"AMD Docker step ({key})",
         group="Hardware - AMD Build",
@@ -36,6 +36,7 @@ def _amd_cpu_docker_step(key, timeout_in_minutes=None):
         no_plugin=True,
         commands=["echo build"],
         timeout_in_minutes=timeout_in_minutes,
+        retry=retry,
     )
 
 
@@ -67,6 +68,30 @@ def test_rocm_base_refresh_force_uses_build_timeout(monkeypatch):
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
 
     assert command_step.timeout_in_minutes == 540
+    assert command_step.env["ROCM_BASE_REFRESH_FORCE"] == "1"
+    assert command_step.env["ROCM_BASE_REFRESH_SKIP"] == "0"
+
+
+def test_rocm_base_refresh_unknown_diff_uses_build_timeout(monkeypatch):
+    monkeypatch.setenv("ROCM_BASE_REFRESH_DIFF_UNAVAILABLE", "1")
+
+    command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
+
+    assert command_step.timeout_in_minutes == 540
+
+
+def test_rocm_base_refresh_skip_wins_and_is_propagated(
+    fake_global_config, monkeypatch
+):
+    monkeypatch.setenv("ROCM_BASE_REFRESH_FORCE", "1")
+    monkeypatch.setenv("ROCM_BASE_REFRESH_SKIP", "1")
+    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+
+    command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
+
+    assert command_step.timeout_in_minutes == 15
+    assert command_step.env["ROCM_BASE_REFRESH_FORCE"] == "1"
+    assert command_step.env["ROCM_BASE_REFRESH_SKIP"] == "1"
 
 
 def test_skip_timeout_omits_rocm_base_refresh_timeout(
@@ -108,6 +133,158 @@ def test_skip_timeout_omits_amd_cpu_docker_timeout(key, monkeypatch):
 
     assert command_step.timeout_in_minutes is None
     assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
+
+
+@pytest.mark.parametrize(
+    ("key", "list_file_diff", "expected_timeout"),
+    [
+        (
+            amd.AMD_ROCM_BASE_REFRESH_STEP_KEY,
+            [amd.AMD_ROCM_BASE_DOCKERFILE],
+            540,
+        ),
+        ("ensure-ci-base-amd", [], 180),
+        (amd.AMD_ARTIFACT_STEP, [], 180),
+    ],
+)
+def test_amd_cpu_docker_steps_merge_retry_without_changing_timeout_policy(
+    fake_global_config, key, list_file_diff, expected_timeout
+):
+    fake_global_config["list_file_diff"] = list_file_diff
+    configured_retry = {
+        "automatic": [
+            {"exit_status": 1, "limit": 2},
+            {"exit_status": -1, "limit": 3},
+        ],
+        "manual": {"allowed": False},
+    }
+
+    command_step = _render_single_step(
+        _amd_cpu_docker_step(key, retry=configured_retry)
+    ).steps[0]
+
+    assert command_step.timeout_in_minutes == expected_timeout
+    assert command_step.retry == {
+        "automatic": [
+            {"signal_reason": "stack_error", "limit": 1},
+            {"exit_status": 1, "limit": 2},
+            {"exit_status": -1, "limit": 3},
+        ],
+        "manual": {"allowed": False},
+    }
+    assert configured_retry == {
+        "automatic": [
+            {"exit_status": 1, "limit": 2},
+            {"exit_status": -1, "limit": 3},
+        ],
+        "manual": {"allowed": False},
+    }
+
+
+def test_amd_stack_error_retry_merge_is_idempotent_and_non_mutating():
+    configured_retry = {
+        "automatic": [
+            {
+                "signal_reason": "stack_error",
+                "limit": 2,
+                "extra": "preserved",
+            },
+            {"exit_status": -10, "limit": 1},
+        ],
+        "manual": {"allowed": True},
+    }
+
+    merged_retry = amd.ensure_amd_stack_error_retry(configured_retry)
+    merged_again = amd.ensure_amd_stack_error_retry(merged_retry)
+
+    assert merged_again == merged_retry == {
+        "automatic": [
+            {
+                "signal_reason": "stack_error",
+                "limit": 2,
+                "extra": "preserved",
+            },
+            {"exit_status": -10, "limit": 1},
+        ],
+        "manual": {"allowed": True},
+    }
+    assert configured_retry["automatic"][0]["limit"] == 2
+    merged_retry["manual"]["allowed"] = False
+    assert configured_retry["manual"] == {"allowed": True}
+
+
+def test_amd_cpu_step_without_yaml_retry_gets_stack_error_retry():
+    command_step = _render_single_step(
+        _amd_cpu_docker_step("ensure-ci-base-amd")
+    ).steps[0]
+
+    assert command_step.retry == {
+        "automatic": [{"signal_reason": "stack_error", "limit": 1}]
+    }
+
+
+@pytest.mark.parametrize(
+    ("automatic", "expected"),
+    [
+        (True, True),
+        (
+            False,
+            [{"signal_reason": "stack_error", "limit": 1}],
+        ),
+        (
+            {"exit_status": 1, "limit": 2},
+            [
+                {"signal_reason": "stack_error", "limit": 1},
+                {"exit_status": 1, "limit": 2},
+            ],
+        ),
+        (
+            {"signal_reason": "stack_error", "limit": 2},
+            {"signal_reason": "stack_error", "limit": 2},
+        ),
+    ],
+)
+def test_amd_stack_error_retry_preserves_valid_automatic_shapes(
+    automatic, expected
+):
+    configured_retry = {
+        "automatic": automatic,
+        "manual": {"allowed": False},
+    }
+
+    merged_retry = amd.ensure_amd_stack_error_retry(configured_retry)
+
+    assert merged_retry == {
+        "automatic": expected,
+        "manual": {"allowed": False},
+    }
+    assert configured_retry["automatic"] == automatic
+
+
+def test_amd_stack_error_retry_rejects_invalid_automatic_policy():
+    with pytest.raises(
+        ValueError,
+        match="AMD retry.automatic must be a boolean, mapping, or list",
+    ):
+        amd.ensure_amd_stack_error_retry({"automatic": "invalid"})
+
+
+def test_non_amd_cpu_step_keeps_yaml_retry_unchanged():
+    configured_retry = {
+        "automatic": [{"exit_status": 1, "limit": 2}],
+        "manual": {"allowed": False},
+    }
+    step = Step(
+        label="Non-AMD CPU step",
+        group="CPU",
+        device="cpu",
+        commands=["echo test"],
+        retry=configured_retry,
+    )
+
+    command_step = _render_single_step(step).steps[-1]
+
+    assert command_step.retry == configured_retry
 
 
 @pytest.mark.parametrize(

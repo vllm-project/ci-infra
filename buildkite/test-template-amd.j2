@@ -1,6 +1,8 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set default_amd_timeout_in_minutes = 180 %}
 {% set list_file_diff = list_file_diff | replace("\r", "") | replace("\n", "|") | split("|") %}
+{% set rocm_base_refresh_needs_build = rocm_base_refresh_force == "1" or rocm_base_refresh_diff_unavailable == "1" or "docker/Dockerfile.rocm_base" in list_file_diff %}
+{% set rocm_base_refresh_timeout_in_minutes = 15 if rocm_base_refresh_skip == "1" else (540 if rocm_base_refresh_needs_build else 15) %}
 {# TODO: Re-enable after validating the ROCm debug agent setup.
 {% set rocm_debug_agent_setup = "if test -f /opt/rocm/lib/librocm-debug-agent.so.2; then export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2 && export HSA_ENABLE_DEBUG=1 && echo ROCm debug agent enabled: /opt/rocm/lib/librocm-debug-agent.so.2; else echo 'WARNING: ROCm debug agent not found at /opt/rocm/lib/librocm-debug-agent.so.2; skipping coredump setup'; fi" %}
 #}
@@ -104,8 +106,10 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         commands:
           - bash .buildkite/scripts/rocm/refresh-base-image.sh
         key: "refresh-rocm-base-amd"
-        timeout_in_minutes: {{ 540 if "docker/Dockerfile.rocm_base" in list_file_diff else 15 }}
+        timeout_in_minutes: {{ rocm_base_refresh_timeout_in_minutes }}
         env:
+          ROCM_BASE_REFRESH_SKIP: "{{ rocm_base_refresh_skip }}"
+          ROCM_BASE_REFRESH_FORCE: "{{ rocm_base_refresh_force }}"
           DOCKER_BUILDKIT: "1"
           BUILDKIT_PROGRESS: "tty"
           TERM: "xterm-256color"
