@@ -119,6 +119,7 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         commands:
           - bash .buildkite/scripts/rocm/build-ci-base.sh
         key: "ensure-ci-base-amd"
+        timeout_in_minutes: {{ default_amd_timeout_in_minutes }}
         env:
           DOCKER_BUILDKIT: "1"
           BUILDKIT_PROGRESS: "tty"
@@ -138,6 +139,7 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
           - bash .buildkite/scripts/rocm/build-test-image.sh
           - bash .buildkite/scripts/rocm/smoke-test-image.sh
         key: "image-build-amd"
+        timeout_in_minutes: {{ default_amd_timeout_in_minutes }}
         env:
           DOCKER_BUILDKIT: "1"
           BUILDKIT_PROGRESS: "tty"
@@ -156,7 +158,8 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
 
     {% set ns = namespace(blocked=1) %}
     {% set step_slug = amd_step_slug(step) %}
-    {% set step_timeout_in_minutes = step.timeout_in_minutes or default_amd_timeout_in_minutes %}
+    {% set requested_timeout_in_minutes = step.timeout_in_minutes or default_amd_timeout_in_minutes %}
+    {% set step_timeout_in_minutes = requested_timeout_in_minutes if requested_timeout_in_minutes <= default_amd_timeout_in_minutes else default_amd_timeout_in_minutes %}
     {# Time out the container a minute before Buildkite times out the job. #}
     {% set container_timeout_s = (step_timeout_in_minutes * 60 - 60) if step_timeout_in_minutes > 1 else step_timeout_in_minutes * 60 %}
 

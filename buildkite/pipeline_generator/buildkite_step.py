@@ -8,8 +8,9 @@ from amd import (
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
     build_amd_step_options,
     get_amd_agent_queue,
-    get_rocm_base_refresh_timeout,
     get_amd_setup_commands,
+    get_amd_timeout_in_minutes,
+    get_rocm_base_refresh_timeout,
     is_amd_gpu_device,
 )
 from step import Step
@@ -513,13 +514,20 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
-            if step.timeout_in_minutes:
-                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
-                    step.timeout_in_minutes
-                )
             if step.key == AMD_ROCM_BASE_REFRESH_STEP_KEY:
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
                     get_rocm_base_refresh_timeout(list_file_diff)
+                )
+            elif (
+                step.device == DeviceType.AMD_CPU
+                or step.device == DeviceType.AMD_CPU.value
+            ):
+                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
+                    get_amd_timeout_in_minutes(step.timeout_in_minutes)
+                )
+            elif step.timeout_in_minutes:
+                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
+                    step.timeout_in_minutes
                 )
 
             if not _step_should_run(step, list_file_diff):
@@ -738,9 +746,7 @@ def _create_amd_step(
         key=key,
         soft_fail=soft_fail or False,
         parallelism=parallelism,
-        timeout_in_minutes=(
-            timeout_in_minutes
-            if no_plugin
-            else _get_timeout_in_minutes(timeout_in_minutes)
+        timeout_in_minutes=_get_timeout_in_minutes(
+            get_amd_timeout_in_minutes(timeout_in_minutes)
         ),
     )

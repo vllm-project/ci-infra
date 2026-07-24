@@ -19,6 +19,7 @@ AMD_NATIVE_SHM_SIZE = "16Gi"
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
     ".buildkite/scripts/hardware_ci/run-amd-test.sh",
 )
+AMD_STANDARD_TIMEOUT_MINUTES = 3 * 60
 AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
 AMD_ROCM_BASE_DOCKERFILE = "docker/Dockerfile.rocm_base"
 AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES = 9 * 60
@@ -41,6 +42,16 @@ AMD_RETRY = {
 }
 ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
+
+
+def get_amd_timeout_in_minutes(timeout_in_minutes: Optional[int]) -> int:
+    """Default and cap standard AMD jobs at three hours."""
+    requested_timeout = (
+        AMD_STANDARD_TIMEOUT_MINUTES
+        if timeout_in_minutes is None
+        else timeout_in_minutes
+    )
+    return min(requested_timeout, AMD_STANDARD_TIMEOUT_MINUTES)
 
 
 def get_rocm_base_refresh_timeout(list_file_diff: List[str]) -> int:
