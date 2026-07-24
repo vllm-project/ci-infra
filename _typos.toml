@@ -1,0 +1,4 @@
+[default.extend-identifiers]
+HSA = "HSA"
+HSA_ENABLE_DEBUG = "HSA_ENABLE_DEBUG"
+HSA_TOOLS_LIB = "HSA_TOOLS_LIB"

@@ -1,11 +1,31 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from typing import Optional, List, Dict, Any
 from pydantic import model_validator
-from typing_extensions import Self
+from typing_extensions import Self, TypedDict
 from collections import defaultdict
 from global_config import get_global_config
 import os
 import yaml
+
+
+class AmdMirrorOptions(TypedDict, total=False):
+    agent_tags: Dict[str, str]
+    commands: List[str]
+    depends_on: List[str]
+    device: str
+    dind: bool
+    env: Dict[str, str]
+    hf_offline_retry: StrictBool
+    no_gpu: bool
+    no_plugin: bool
+    num_devices: int
+    num_gpus: int
+    num_nodes: int
+    optional: bool
+    soft_fail: bool
+    source_file_dependencies: List[str]
+    timeout_in_minutes: int
+    working_dir: str
 
 
 class Step(BaseModel):
@@ -30,12 +50,25 @@ class Step(BaseModel):
     no_plugin: Optional[bool] = False
     no_gpu: Optional[bool] = False
     dind: bool = True
+    # AMD-only runner policy. Non-AMD steps ignore this field.
+    hf_offline_retry: StrictBool = True
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
 
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
         if self.num_nodes and not self.num_devices:
             raise ValueError("'num_devices' must be defined if 'num_nodes' is defined.")
+        return self
+
+    @model_validator(mode="after")
+    def validate_amd_hf_offline_retry(self) -> Self:
+        amd_options = (self.mirror or {}).get("amd")
+        if (
+            amd_options
+            and "hf_offline_retry" in amd_options
+            and not isinstance(amd_options["hf_offline_retry"], bool)
+        ):
+            raise ValueError("mirror.amd.hf_offline_retry must be a valid boolean.")
         return self
 
     @classmethod
@@ -74,7 +107,9 @@ def read_steps_from_job_dir(job_dir: str):
                         and global_config["github_repo_name"] == "vllm-project/vllm"
                     ):
                         step.working_dir = "/vllm-workspace/tests"
-                    step.source_file_dependencies = getattr(step, "source_file_dependencies", [])
+                    step.source_file_dependencies = getattr(
+                        step, "source_file_dependencies", []
+                    )
                     if not step.source_file_dependencies:
                         step.source_file_dependencies = []
                     step.source_file_dependencies.append(os.path.relpath(yaml_path))
