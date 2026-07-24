@@ -6,24 +6,24 @@ Infrastructure-as-Code and bootstrap scripts for vLLM's continuous integration p
 
 ```
 ci-infra/
-├── .buildkite/            # Scheduled Buildkite pipelines (e.g. daily AMI rebuild)
-├── buildkite/             # Bootstrap scripts, pipeline generation, and build helpers
-│   ├── bootstrap-amd.sh   # AMD/ROCm CI entry point
-│   ├── bootstrap-intel.sh # Intel CI entry point
+├── .buildkite/              # Scheduled Buildkite pipelines (e.g. daily AMI rebuild)
+├── buildkite/               # Bootstrap scripts, pipeline generation, and build helpers
+│   ├── bootstrap-amd.sh     # AMD/ROCm CI entry point
+│   ├── bootstrap-intel.sh   # Intel CI entry point
 │   ├── pipeline_generator/  # Python-based pipeline generator
-│   ├── test-template-amd.j2  # AMD/ROCm Jinja2 pipeline template
-│   └── scripts/           # Helper scripts (Docker bake, Codecov upload)
-├── docker/                # Docker buildx bake configuration (ci.hcl)
+│   ├── test-template-amd.j2 # AMD/ROCm Jinja2 pipeline template
+│   └── scripts/             # Helper scripts (Docker bake, Codecov upload)
+├── docker/                  # Docker Buildx Bake configuration (ci.hcl)
 ├── terraform/
-│   ├── aws/               # AWS infrastructure (primary, active)
-│   ├── gcp/               # GCP GKE cluster and compute instances
-│   └── gcp_old/           # GCP TPU infrastructure (v5, v6e, v7x)
+│   ├── aws/                   # AWS infrastructure (primary, active)
+│   ├── gcp/                   # GCP GKE cluster and compute instances
+│   └── gcp_old/               # GCP TPU infrastructure (v5, v6e, v7x)
 ├── packer/
-│   ├── cpu/               # CPU build AMI with warm Docker cache
-│   └── gpu/               # GPU AMI with NVIDIA drivers
-├── infra-k8s/             # Kubernetes-based Buildkite agent deployment
-├── github/                # GitHub Actions runner groups (Neural Magic, IBM)
-└── usage-stats/           # Usage telemetry collection (Vector)
+│   ├── cpu/                   # CPU build AMI with warm Docker cache
+│   └── gpu/                   # GPU AMI with NVIDIA drivers
+├── infra-k8s/               # Kubernetes-based Buildkite agent deployment
+├── github/                  # GitHub Actions runner groups (Neural Magic, IBM)
+└── usage-stats/             # Usage telemetry collection (Vector)
 ```
 
 ## How CI Works
@@ -75,7 +75,7 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 
 #### Jinja2 Template (AMD CI)
 
-`buildkite/test-template-amd.j2` renders vLLM's [`test-pipeline.yaml`](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-pipeline.yaml) into Buildkite YAML using [minijinja-cli](https://github.com/mitsuhiko/minijinja).
+`buildkite/test-template-amd.j2` renders vLLM's [`.buildkite/test-amd.yaml`](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-amd.yaml) into Buildkite YAML using [minijinja-cli](https://github.com/mitsuhiko/minijinja).
 
 ### Bootstrap Scripts
 
@@ -202,18 +202,19 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 
 ### Key Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `VLLM_CI_BRANCH` | ci-infra branch to use for templates (default: `main`) |
-| `RUN_ALL` | Force all tests to run |
-| `SKIP_TIMEOUT` | Omit configured step timeouts from Python-generated pipelines when set to `1` |
-| `NIGHTLY` | Include optional nightly tests |
-| `VLLM_USE_PRECOMPILED` | Use precompiled wheels (`1`) or build from source (`0`) |
-| `COV_ENABLED` | Enable pytest coverage collection and Codecov upload |
-| `DOCS_ONLY_DISABLE` | Skip docs-only detection (always run CI) |
-| `AMD_MIRROR_HW` | AMD hardware mirror target (default: `amdproduction`) |
-| `NOAUTO` | Set to `1` to gate all steps behind manual approval blocks |
-| `PRIORITY` | Set to `HIGH` for high-priority pipeline scheduling |
+| Variable               | Default         | Description                                                                                                     |
+|------------------------|-----------------|-----------------------------------------------------------------------------------------------------------------|
+| `VLLM_CI_BRANCH`       | `main`          | ci-infra branch to use for templates and generator code                                                         |
+| `RUN_ALL`              | `0`             | Force all tests with `1`; also enabled by critical changes, `TORCH_NIGHTLY`, or the `ready-run-all-tests` label |
+| `SKIP_TIMEOUT`         | Not set         | Omit configured step timeouts from Python-generated pipelines when set to `1`; otherwise retain them            |
+| `NIGHTLY`              | `0`             | Include optional nightly tests with `1`; may also be enabled by PR labels or AMD-specific changes               |
+| `TORCH_NIGHTLY`        | `0`             | Build against PyTorch nightly and force the full test suite when set to `1`                                     |
+| `VLLM_USE_PRECOMPILED` | Automatic       | Bootstrap selects precompiled wheels when eligible or source builds when required; the HCL fallback is `0`      |
+| `COV_ENABLED`          | `0`             | Enable pytest coverage collection and Codecov upload when set to `1`                                            |
+| `DOCS_ONLY_DISABLE`    | `0`             | Disable docs-only detection and always run CI when set to `1`                                                   |
+| `AMD_MIRROR_HW`        | `amdproduction` | AMD hardware mirror target; the legacy fastcheck path overrides it with `amdtentative`                          |
+| `NOAUTO`               | Not set         | Gate all steps behind manual approval blocks when set to `1`; otherwise use automatic test selection            |
+| `PRIORITY`             | Not set         | Assign priority `1000` when set to `HIGH`; otherwise use priority `0`                                           |
 
 ### Pre-commit Hooks
 
