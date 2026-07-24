@@ -29,6 +29,8 @@ AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
         AMD_ROCM_BASE_REFRESH_STEP_KEY,
     }
 )
+# Must match vllm_test_utils.hf_hub.HF_HUB_RETRY_EXIT_STATUS.
+AMD_HF_HUB_RETRY_EXIT_STATUS = 75
 AMD_RETRY = {
     "automatic": [
         {"signal_reason": "stack_error", "limit": 1},
@@ -337,6 +339,7 @@ def build_amd_step_options(
     no_gpu: bool,
     num_nodes: Optional[int],
     agent_tags: Optional[Dict[str, str]],
+    hf_hub_mode: Optional[str] = None,
 ) -> AmdStepOptions:
     config = get_amd_device_config(device)
     if config is None:
@@ -376,6 +379,7 @@ def build_amd_step_options(
             )
         ]
 
+    retry = AMD_RETRY
     if no_plugin:
         env = dict(extra_env or {}) or None
         step_commands = [commands]
@@ -387,6 +391,14 @@ def build_amd_step_options(
             gpu_count=gpu_count,
         )
         step_commands = [AMD_TEST_COMMAND]
+        if hf_hub_mode:
+            env["VLLM_CI_HF_HUB_MODE"] = hf_hub_mode
+            retry = {
+                "automatic": [
+                    *AMD_RETRY["automatic"],
+                    {"exit_status": AMD_HF_HUB_RETRY_EXIT_STATUS, "limit": 1},
+                ]
+            }
 
     return {
         "label": get_amd_label(label, device),
@@ -396,5 +408,5 @@ def build_amd_step_options(
         "env": env,
         "plugins": plugins,
         "priority": 200,
-        "retry": AMD_RETRY,
+        "retry": retry,
     }

@@ -179,6 +179,7 @@ upload_pipeline() {
             -D run_all="$RUN_ALL" \
             -D nightly="$NIGHTLY" \
             -D torch_nightly="$TORCH_NIGHTLY" \
+            -D hf_hub_mode="${VLLM_CI_HF_HUB_MODE:-}" \
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \

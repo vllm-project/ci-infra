@@ -447,6 +447,11 @@ def convert_group_step_to_buildkite_step(
     print(variables_to_inject)
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
+    amd_hf_hub_mode = os.getenv("VLLM_CI_HF_HUB_MODE")
+    if amd_hf_hub_mode and (
+        global_config["nightly"] == "1" or global_config["torch_nightly"] == "1"
+    ):
+        amd_hf_hub_mode = "online"
 
     amd_hardware_steps = []
 
@@ -481,6 +486,7 @@ def convert_group_step_to_buildkite_step(
                     parallelism=step.parallelism,
                     timeout_in_minutes=step.timeout_in_minutes,
                     agent_tags=step.agent_tags,
+                    hf_hub_mode=amd_hf_hub_mode,
                 )
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
@@ -596,6 +602,7 @@ def convert_group_step_to_buildkite_step(
                     parallelism=step.parallelism,
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
+                    hf_hub_mode=amd_hf_hub_mode,
                 )
                 if not _step_should_run(
                     _get_amd_mirror_effective_step(step, amd), list_file_diff
@@ -715,6 +722,7 @@ def _create_amd_step(
     num_nodes: Optional[int],
     soft_fail: Optional[bool],
     parallelism: Optional[int],
+    hf_hub_mode: Optional[str] = None,
     key: Optional[str] = None,
     timeout_in_minutes: Optional[int] = None,
     agent_tags: Optional[Dict[str, str]] = None,
@@ -732,6 +740,7 @@ def _create_amd_step(
         no_gpu=no_gpu,
         num_nodes=num_nodes,
         agent_tags=agent_tags,
+        hf_hub_mode=hf_hub_mode,
     )
     return BuildkiteCommandStep(
         **options,

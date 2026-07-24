@@ -1,12 +1,15 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set default_amd_timeout_in_minutes = 180 %}
 {% set list_file_diff = list_file_diff | replace("\r", "") | replace("\n", "|") | split("|") %}
+{% set requested_hf_hub_mode = hf_hub_mode | default("") %}
+{% set effective_hf_hub_mode = "online" if requested_hf_hub_mode and (nightly == "1" or torch_nightly == "1") else requested_hf_hub_mode %}
+{% set hf_retry_exit_status = 75 %}
 {# TODO: Re-enable after validating the ROCm debug agent setup.
 {% set rocm_debug_agent_setup = "if test -f /opt/rocm/lib/librocm-debug-agent.so.2; then export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2 && export HSA_ENABLE_DEBUG=1 && echo ROCm debug agent enabled: /opt/rocm/lib/librocm-debug-agent.so.2; else echo 'WARNING: ROCm debug agent not found at /opt/rocm/lib/librocm-debug-agent.so.2; skipping coredump setup'; fi" %}
 #}
 {% set rocm_debug_agent_setup = "echo 'ROCm debug agent disabled; re-enable rocm_debug_agent_setup in test-template-amd.j2 after validating coredump setup'" %}
 
-{% macro amd_infra_retry(indent='', retry_exit_status_one=false) -%}
+{% macro amd_infra_retry(indent='', retry_exit_status_one=false, hf_online_retry=false) -%}
 {{ indent }}retry:
 {{ indent }}  automatic:
 {{ indent }}    - signal_reason: stack_error  # Kubernetes pod/stack provisioning failed
@@ -22,6 +25,10 @@
 {{ indent }}    - exit_status: -1  # Lost contact with the running agent
 {{ indent }}      signal_reason: none
 {{ indent }}      limit: 1
+{% if hf_online_retry %}
+{{ indent }}    - exit_status: {{ hf_retry_exit_status }}  # Retry an HF-related failure once
+{{ indent }}      limit: 1
+{% endif %}
 {%- endmacro %}
 
 {% macro amd_step_slug(step) -%}
@@ -156,6 +163,7 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
 
     {% set ns = namespace(blocked=1) %}
     {% set step_slug = amd_step_slug(step) %}
+    {% set hf_monitored = requested_hf_hub_mode and not step.no_plugin %}
     {% set step_timeout_in_minutes = step.timeout_in_minutes or default_amd_timeout_in_minutes %}
     {# Time out the container a minute before Buildkite times out the job. #}
     {% set container_timeout_s = (step_timeout_in_minutes * 60 - 60) if step_timeout_in_minutes > 1 else step_timeout_in_minutes * 60 %}
@@ -220,6 +228,9 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           NUM_NODES: "{{ step.num_nodes or 1 }}"
+          {% if hf_monitored %}
+          VLLM_CI_HF_HUB_MODE: "{{ effective_hf_hub_mode }}"
+          {% endif %}
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
           {% if step.dind == false %}
           # Native: podSpecPatch sets container-0 to ci_base-<commit> from ensure-ci-base-amd.
@@ -267,6 +278,6 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         {% if step.parallelism %}
         parallelism: {{ step.parallelism }}
         {% endif %}
-{{ amd_infra_retry('        ') }}
+{{ amd_infra_retry('        ', hf_online_retry=hf_monitored) }}
     {% endif %}
     {% endfor %}
