@@ -112,6 +112,14 @@ def test_direct_amd_gpu_steps_use_dind_flag(
         container = pod_patch["containers"][0]
         assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
         assert container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
+        assert (
+            container["resources"]["limits"]["memory"]
+            == amd.AMD_NATIVE_MEMORY_LIMIT
+        )
+        assert (
+            container["resources"]["requests"]["memory"]
+            == amd.AMD_NATIVE_MEMORY_REQUEST
+        )
         assert command_step.env["AMD_CI_RUNTIME"] == "native"
         assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
         assert "DOCKER_IMAGE_NAME" not in command_step.env
@@ -262,6 +270,15 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config):
     amd_command_step = amd_group.steps[0]
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
     assert amd_command_step.plugins is not None
+    container = amd_command_step.plugins[0]["kubernetes"]["podSpecPatch"]["containers"][0]
+    assert (
+        container["resources"]["requests"]["memory"]
+        == amd.AMD_NATIVE_MEMORY_REQUEST
+    )
+    assert (
+        container["resources"]["limits"]["memory"]
+        == amd.AMD_NATIVE_MEMORY_LIMIT
+    )
 
 
 def test_untagged_mirror_defaults_to_dind(

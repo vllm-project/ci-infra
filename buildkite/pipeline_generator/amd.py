@@ -17,6 +17,8 @@ AMD_HF_HOME = "/home/buildkite-agent/huggingface"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_WORKSPACE_VOLUME = "vllm-workspace"
 AMD_NATIVE_SHM_SIZE = "16Gi"
+AMD_NATIVE_MEMORY_REQUEST = "288Gi"
+AMD_NATIVE_MEMORY_LIMIT = "320Gi"
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
     ".buildkite/scripts/hardware_ci/run-amd-test.sh",
 )
@@ -353,8 +355,14 @@ def get_amd_k8s_plugin(
                             "capabilities": {"add": ["IPC_LOCK"]},
                         },
                         "resources": {
-                            "limits": {"amd.com/gpu": gpu_resource},
-                            "requests": {"amd.com/gpu": gpu_resource},
+                            "limits": {
+                                "amd.com/gpu": gpu_resource,
+                                "memory": AMD_NATIVE_MEMORY_LIMIT,
+                            },
+                            "requests": {
+                                "amd.com/gpu": gpu_resource,
+                                "memory": AMD_NATIVE_MEMORY_REQUEST,
+                            },
                         },
                         "volumeMounts": [
                             {"name": "devshm", "mountPath": "/dev/shm"},
