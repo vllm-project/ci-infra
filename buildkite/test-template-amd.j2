@@ -1,7 +1,5 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set default_amd_timeout_in_minutes = 180 %}
-{% set default_amd_memory_request = "288Gi" %}
-{% set default_amd_memory_limit = "320Gi" %}
 {% set list_file_diff = list_file_diff | replace("\r", "") | replace("\n", "|") | split("|") %}
 {% set rocm_base_refresh_needs_build = rocm_base_refresh_force == "1" or rocm_base_refresh_diff_unavailable == "1" or "docker/Dockerfile.rocm_base" in list_file_diff %}
 {% set rocm_base_refresh_timeout_in_minutes = 15 if rocm_base_refresh_skip == "1" else (540 if rocm_base_refresh_needs_build else 15) %}
@@ -58,7 +56,6 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
                           - IPC_LOCK
                     resources:
                       limits:
-                        memory: "{{ default_amd_memory_limit }}"
                         {% if step.no_gpu %}
                         {# Explicit zero overrides the typed controller PodSpec's inherited GPU request. #}
                         amd.com/gpu: "0"
@@ -66,7 +63,6 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
                         amd.com/gpu: "{{ step.num_gpus or 1 }}"
                         {% endif %}
                       requests:
-                        memory: "{{ default_amd_memory_request }}"
                         {% if step.no_gpu %}
                         amd.com/gpu: "0"
                         {% else %}
