@@ -75,11 +75,13 @@ if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
     fetch_origin_ref main || true
 fi
 
+diff_unavailable=0
 if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
     MERGE_BASE_COMMIT=$(git merge-base origin/main HEAD 2>/dev/null || echo "")
     if [[ -z "$MERGE_BASE_COMMIT" ]]; then
         echo "WARNING: Could not compute merge base, falling back to run_all=1"
         RUN_ALL=1
+        diff_unavailable=1
         MERGE_BASE_COMMIT="HEAD"
     fi
 fi
@@ -123,11 +125,11 @@ check_run_all_label() {
 # We only need committed changes between refs.
 # ---------------------------------------------------------------------------
 get_diff() {
-    git diff --name-only --diff-filter=ACMDR "$MERGE_BASE_COMMIT" HEAD 2>/dev/null || echo ""
+    git diff --name-only --diff-filter=ACMDR "$MERGE_BASE_COMMIT" HEAD 2>/dev/null
 }
 
 get_diff_main() {
-    git diff --name-only --diff-filter=ACMDR HEAD~1 HEAD 2>/dev/null || echo ""
+    git diff --name-only --diff-filter=ACMDR HEAD~1 HEAD 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -185,6 +187,9 @@ upload_pipeline() {
             -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
             -D cov_enabled="$COV_ENABLED" \
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
+            -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
+            -D rocm_base_refresh_diff_unavailable="${ROCM_BASE_REFRESH_DIFF_UNAVAILABLE:-0}" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -202,7 +207,6 @@ if [[ $BUILDKITE_BRANCH == "main" ]] && ! git rev-parse --verify HEAD~1 >/dev/nu
     git fetch --no-tags --deepen=1 origin >/dev/null 2>&1 || true
 fi
 
-diff_unavailable=0
 if [[ $BUILDKITE_BRANCH == "main" ]] && ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
     echo "WARNING: Could not resolve HEAD~1 on main, falling back to run_all=1"
     RUN_ALL=1
@@ -212,11 +216,23 @@ fi
 if [[ $BUILDKITE_BRANCH == "main" ]]; then
     if [[ $diff_unavailable -eq 1 ]]; then
         file_diff=""
+    elif ! file_diff=$(get_diff_main); then
+        echo "WARNING: Could not compute main commit diff, falling back to run_all=1"
+        RUN_ALL=1
+        diff_unavailable=1
+        file_diff=""
     else
-        file_diff=$(get_diff_main)
+        :
     fi
+elif [[ $diff_unavailable -eq 1 ]]; then
+    file_diff=""
+elif ! file_diff=$(get_diff); then
+    echo "WARNING: Could not compute branch diff, falling back to run_all=1"
+    RUN_ALL=1
+    diff_unavailable=1
+    file_diff=""
 else
-    file_diff=$(get_diff)
+    :
 fi
 
 ROCM_BASE_DOCKERFILE="docker/Dockerfile.rocm_base"
@@ -323,7 +339,6 @@ while IFS= read -r file; do
         if [[ $matches_ignore -eq 0 ]]; then
             RUN_ALL=1
             echo "Found changes: $file. Run all tests"
-            break
         fi
     fi
 done < <(printf '%s\n' "$file_diff" | tr -d '\r')
@@ -363,5 +378,7 @@ if [[ $ROCM_BASE_DOCKERFILE_CHANGED -eq 1 && \
       ( $LIST_FILE_DIFF == "run_all" || $LIST_FILE_DIFF == "nightly" ) ]]; then
     LIST_FILE_DIFF+="|$ROCM_BASE_DOCKERFILE"
 fi
+
+export ROCM_BASE_REFRESH_DIFF_UNAVAILABLE="$diff_unavailable"
 
 upload_pipeline
