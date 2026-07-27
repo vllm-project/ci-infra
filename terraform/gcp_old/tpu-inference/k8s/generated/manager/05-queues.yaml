@@ -1,0 +1,81 @@
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: v6e-1-1x1
+spec:
+  cohortName: v6e
+  preemption:
+    reclaimWithinCohort: Any
+    withinClusterQueue: LowerPriority
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  admissionChecksStrategy:
+    admissionChecks:
+      - name: v6e-multikueue-dispatch
+  resourceGroups:
+    - coveredResources:
+        - google.com/tpu
+        # cpu and memory are included in coveredResources so Kueue admits pods whose
+        # initContainers or helper containers (e.g., buildkite bootstrap/imagecheck) request CPU/memory.
+        - cpu
+        - memory
+      flavors:
+        - name: v6e
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 2
+            # Unconstrained quotas for helper CPU and memory to ensure TPU quota remains the sole scheduling constraint
+            - name: cpu
+              nominalQuota: "10000"
+            - name: memory
+              nominalQuota: 10000Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: v6e-1-1x1
+  namespace: buildkite
+spec:
+  clusterQueue: v6e-1-1x1
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: v6e-8-2x4
+spec:
+  cohortName: v6e
+  preemption:
+    reclaimWithinCohort: Any
+    withinClusterQueue: LowerPriority
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  admissionChecksStrategy:
+    admissionChecks:
+      - name: v6e-multikueue-dispatch
+  resourceGroups:
+    - coveredResources:
+        - google.com/tpu
+        # cpu and memory are included in coveredResources so Kueue admits pods whose
+        # initContainers or helper containers (e.g., buildkite bootstrap/imagecheck) request CPU/memory.
+        - cpu
+        - memory
+      flavors:
+        - name: v6e
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 8
+            # Unconstrained quotas for helper CPU and memory to ensure TPU quota remains the sole scheduling constraint
+            - name: cpu
+              nominalQuota: "10000"
+            - name: memory
+              nominalQuota: 10000Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: v6e-8-2x4
+  namespace: buildkite
+spec:
+  clusterQueue: v6e-8-2x4

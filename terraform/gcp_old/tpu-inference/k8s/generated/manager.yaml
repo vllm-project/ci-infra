@@ -1,0 +1,150 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buildkite
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: gcp-secret-manager
+spec:
+  provider:
+    gcpsm:
+      projectID: "cloud-ullm-inference-ci-cd"
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: agent-stack-k8s-secret
+  namespace: buildkite
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: gcp-secret-manager
+  target:
+    name: agent-stack-k8s-secret
+    creationPolicy: Owner
+  data:
+    - secretKey: BUILDKITE_AGENT_TOKEN
+      remoteRef:
+        key: buildkite-tpu-ci-agent-dev-token
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueCluster
+metadata:
+  name: tpu-ci-southamerica-west1-a
+spec:
+  clusterSource:
+    clusterProfileRef:
+      name: tpu-ci-southamerica-west1-a-global
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueConfig
+metadata:
+  name: v6e-workers
+spec:
+  clusters:
+    - tpu-ci-southamerica-west1-a
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: AdmissionCheck
+metadata:
+  name: v6e-multikueue-dispatch
+spec:
+  controllerName: kueue.x-k8s.io/multikueue
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: MultiKueueConfig
+    name: v6e-workers
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: v6e
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: v6e-1-1x1
+spec:
+  cohortName: v6e
+  preemption:
+    reclaimWithinCohort: Any
+    withinClusterQueue: LowerPriority
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  admissionChecksStrategy:
+    admissionChecks:
+      - name: v6e-multikueue-dispatch
+  resourceGroups:
+    - coveredResources:
+        - google.com/tpu
+        # cpu and memory are included in coveredResources so Kueue admits pods whose
+        # initContainers or helper containers (e.g., buildkite bootstrap/imagecheck) request CPU/memory.
+        - cpu
+        - memory
+      flavors:
+        - name: v6e
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 2
+            # Unconstrained quotas for helper CPU and memory to ensure TPU quota remains the sole scheduling constraint
+            - name: cpu
+              nominalQuota: "10000"
+            - name: memory
+              nominalQuota: 10000Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: v6e-1-1x1
+  namespace: buildkite
+spec:
+  clusterQueue: v6e-1-1x1
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: v6e-8-2x4
+spec:
+  cohortName: v6e
+  preemption:
+    reclaimWithinCohort: Any
+    withinClusterQueue: LowerPriority
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  admissionChecksStrategy:
+    admissionChecks:
+      - name: v6e-multikueue-dispatch
+  resourceGroups:
+    - coveredResources:
+        - google.com/tpu
+        # cpu and memory are included in coveredResources so Kueue admits pods whose
+        # initContainers or helper containers (e.g., buildkite bootstrap/imagecheck) request CPU/memory.
+        - cpu
+        - memory
+      flavors:
+        - name: v6e
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 8
+            # Unconstrained quotas for helper CPU and memory to ensure TPU quota remains the sole scheduling constraint
+            - name: cpu
+              nominalQuota: "10000"
+            - name: memory
+              nominalQuota: 10000Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: v6e-8-2x4
+  namespace: buildkite
+spec:
+  clusterQueue: v6e-8-2x4
