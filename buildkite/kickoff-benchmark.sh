@@ -19,13 +19,19 @@ touch final.yaml
 
 merge () {
   # append $1 to final.yaml, and resolve anchors
-  $vllm_root_directory/yq_linux_amd64 -n "load(\"final.yaml\") *+ (load(\"$1\") | explode(.))" > temp.yaml
-  mv temp.yaml final.yaml
+  local temp_file
+  temp_file=$(mktemp /tmp/benchmark-pipeline.XXXXXX.yaml)
+  $vllm_root_directory/yq_linux_amd64 -n "load(\"final.yaml\") *+ (load(\"$1\") | explode(.))" > "$temp_file"
+  mv "$temp_file" final.yaml
 }
 
 
 # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
 if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+  echo "Fetching main branch to ensure trusted pipeline definitions..."
+  git fetch origin main
+  git checkout origin/main -- .buildkite/nightly-benchmarks/
+
   PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
 
   # put nightly benchmark in the front, as it contains a blocking step.

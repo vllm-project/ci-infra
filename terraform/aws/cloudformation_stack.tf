@@ -205,6 +205,7 @@ locals {
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
+      # Recycle each GPU instance after a single job completes.
       BuildkiteTerminateInstanceAfterJob   = true
     }
 
@@ -218,6 +219,7 @@ locals {
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
+      # Recycle each GPU instance after a single job completes.
       BuildkiteTerminateInstanceAfterJob   = true
     }
   }

@@ -22,11 +22,14 @@ class Step(BaseModel):
     source_file_dependencies: Optional[List[str]] = None
     soft_fail: Optional[bool] = False
     parallelism: Optional[int] = None
+    timeout_in_minutes: Optional[int] = None
     mount_buildkite_agent: Optional[bool] = False
     env: Optional[Dict[str, str]] = None
     retry: Optional[Dict[str, Any]] = None
     optional: Optional[bool] = False
     no_plugin: Optional[bool] = False
+    no_gpu: Optional[bool] = False
+    dind: bool = True
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
 
     @model_validator(mode="after")

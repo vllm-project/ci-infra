@@ -38,6 +38,14 @@ def init_global_config(pipeline_config_path: str):
         pipeline_config["github_repo_name"] = "vllm-project/vllm"
 
     branch = os.getenv("BUILDKITE_BRANCH")
+    if branch:
+        # Fork PRs arrive as "owner:branch" (e.g. "octocat:my-feature"), so the
+        # colon must be allowed. It is not a shell metacharacter, so permitting
+        # it does not reintroduce command-injection risk.
+        if not re.match(r"^[a-zA-Z0-9._/:-]+$", branch):
+            raise ValueError(
+                f"Invalid branch name: {branch}. Contains disallowed characters."
+            )
     pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
     merge_base_commit = get_merge_base_commit()
     list_file_diff = get_list_file_diff(branch, merge_base_commit)
@@ -91,6 +99,12 @@ def _validate_pipeline_config(pipeline_config: Dict):
         raise ValueError("Registries are required")
     if not pipeline_config["repositories"]:
         raise ValueError("Repositories are required")
+    if "github_repo_name" in pipeline_config:
+        repo_name = pipeline_config["github_repo_name"]
+        if not re.match(r"^vllm-project/[a-zA-Z0-9._-]+$", repo_name):
+            raise ValueError(
+                f"Invalid github_repo_name: {repo_name}. Must be in format vllm-project/repo_name"
+            )
     for job_dir in pipeline_config["job_dirs"]:
         if not os.path.exists(job_dir):
             raise ValueError(f"Job directory not found: {job_dir}")

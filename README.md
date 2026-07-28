@@ -206,6 +206,7 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 |----------|-------------|
 | `VLLM_CI_BRANCH` | ci-infra branch to use for templates (default: `main`) |
 | `RUN_ALL` | Force all tests to run |
+| `SKIP_TIMEOUT` | Omit configured step timeouts from Python-generated pipelines when set to `1` |
 | `NIGHTLY` | Include optional nightly tests |
 | `VLLM_USE_PRECOMPILED` | Use precompiled wheels (`1`) or build from source (`0`) |
 | `COV_ENABLED` | Enable pytest coverage collection and Codecov upload |

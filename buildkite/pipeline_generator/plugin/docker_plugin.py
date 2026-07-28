@@ -104,6 +104,23 @@ b200_plugin_template = {
     ],
 }
 
+amd_zen5_plugin_template = {
+    "image": "",
+    "always-pull": True,
+    "propagate-environment": True,
+    "environment": [
+        "VLLM_USAGE_SOURCE=ci-test",
+        "NCCL_CUMEM_HOST_ENABLE=0",
+        "HF_HOME",
+        "HF_TOKEN",
+        "CODECOV_TOKEN",
+        "BUILDKITE_ANALYTICS_TOKEN",
+    ],
+    "volumes": [
+        "/dev/shm:/dev/shm",
+        "/mnt/ci-cache:/mnt/ci-cache",
+    ],
+}
 
 def get_docker_plugin(step: Step, image: str):
     plugin = None
@@ -115,6 +132,8 @@ def get_docker_plugin(step: Step, image: str):
         plugin = copy.deepcopy(h200_plugin_template)
     elif step.device == DeviceType.B200:
         plugin = copy.deepcopy(b200_plugin_template)
+    elif step.device == DeviceType.AMD_ZEN5_CPU:
+        plugin = copy.deepcopy(amd_zen5_plugin_template)
     else:
         plugin = copy.deepcopy(docker_plugin_template)
     plugin["image"] = image

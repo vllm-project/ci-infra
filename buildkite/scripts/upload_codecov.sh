@@ -83,15 +83,17 @@ fi
 TOTAL_FILES=$(grep -c '<class.*filename=' coverage.xml || echo "0")
 echo "Generated coverage.xml with $TOTAL_FILES files"
 
-# Download codecov CLI if not present
-if [ ! -f codecov ]; then
-    echo "Downloading codecov CLI..."
-    if ! curl -Os https://cli.codecov.io/latest/linux/codecov; then
-        echo "Warning: Failed to download codecov CLI"
-        exit 1
-    fi
-    chmod +x codecov
+# Create a secure temporary directory for the codecov binary
+CODECOV_BIN_DIR=$(mktemp -d /tmp/codecov-bin.XXXXXX)
+# Ensure cleanup on exit
+trap 'rm -rf "$CODECOV_BIN_DIR"' EXIT
+
+echo "Downloading codecov CLI..."
+if ! curl -sS -o "$CODECOV_BIN_DIR/codecov" https://cli.codecov.io/latest/linux/codecov; then
+    echo "Warning: Failed to download codecov CLI"
+    exit 1
 fi
+chmod +x "$CODECOV_BIN_DIR/codecov"
 
 # Determine slug (handle fork PRs)
 DEFAULT_SLUG="vllm-project/vllm"
@@ -132,6 +134,6 @@ fi
 
 # Upload to codecov
 echo "Uploading to codecov..."
-./codecov "${CODECOV_ARGS[@]}" || echo "Warning: codecov upload failed"
+"$CODECOV_BIN_DIR/codecov" "${CODECOV_ARGS[@]}" || echo "Warning: codecov upload failed"
 
 exit 0

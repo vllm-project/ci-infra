@@ -1,7 +1,21 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
+from copy import deepcopy
 import os
 
+from amd import (
+    AMD_ALWAYS_RUN_STEP_KEYS,
+    AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
+    AMD_ROCM_BASE_REFRESH_STEP_KEY,
+    build_amd_step_options,
+    ensure_amd_stack_error_retry,
+    get_amd_agent_queue,
+    get_amd_setup_commands,
+    get_amd_timeout_in_minutes,
+    get_rocm_base_refresh_env,
+    get_rocm_base_refresh_timeout,
+    is_amd_gpu_device,
+)
 from step import Step
 from utils_lib.docker_utils import get_image, get_ecr_cache_registry, get_torch_nightly_image
 from global_config import get_global_config
@@ -15,40 +29,8 @@ PRECOMMIT_STEP_KEY = "pre-commit"
 PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
-AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
-AMD_RETRY = {
-    "automatic": [
-        {"exit_status": -1, "limit": 1},
-        {"exit_status": 1, "limit": 1},
-        {"exit_status": 128, "limit": 1},
-        {"signal_reason": "agent_stop", "limit": 1},
-        {"signal_reason": "agent_refused", "limit": 1},
-    ],
-}
-ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
-ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
-ALWAYS_RUN_STEP_KEYS = {
-    "ensure-ci-base-amd",
-    "refresh-rocm-base-amd",
-}
-
-
-def _get_rocm_debug_agent_setup_command() -> str:
-    if os.getenv(ROCM_DEBUG_AGENT_ENV_VAR, "0") != "1":
-        return (
-            "echo 'ROCm debug agent disabled; set "
-            f"{ROCM_DEBUG_AGENT_ENV_VAR}=1 at pipeline generation time "
-            "to enable coredump setup'"
-        )
-
-    return (
-        f"if test -f {ROCM_DEBUG_AGENT_LIB}; then "
-        f"export HSA_TOOLS_LIB={ROCM_DEBUG_AGENT_LIB} && export HSA_ENABLE_DEBUG=1 "
-        f"&& echo ROCm debug agent enabled: {ROCM_DEBUG_AGENT_LIB}; "
-        f"else echo 'WARNING: ROCm debug agent not found at {ROCM_DEBUG_AGENT_LIB}; "
-        "skipping coredump setup'; "
-        "fi"
-    )
+SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
+EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
@@ -157,6 +139,15 @@ def _get_step_agents(step: Step) -> Dict[str, str]:
 SetupProfile = Literal["nvidia", "amd", "none"]
 
 
+def _get_timeout_in_minutes(
+    timeout_in_minutes: Optional[int],
+) -> Optional[int]:
+    """Return the timeout unless per-step timeout fields should be omitted."""
+    if os.getenv(SKIP_TIMEOUT_ENV_VAR) == "1":
+        return None
+    return timeout_in_minutes
+
+
 class BuildkiteCommandStep(BaseModel):
     label: str
     group: Optional[str] = None
@@ -169,6 +160,7 @@ class BuildkiteCommandStep(BaseModel):
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
+    timeout_in_minutes: Optional[int] = None
     priority: Optional[int] = None
 
     def to_yaml(self):
@@ -184,6 +176,7 @@ class BuildkiteCommandStep(BaseModel):
             "plugins": self.plugins,
             "env": self.env,
             "parallelism": self.parallelism,
+            "timeout_in_minutes": self.timeout_in_minutes,
             "priority": self.priority,
         }
 
@@ -214,22 +207,6 @@ def _get_step_plugin(step: Step):
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
-
-
-def _device_value(device: Optional[str]) -> Optional[str]:
-    if isinstance(device, DeviceType):
-        return device.value
-    return device
-
-
-def _get_amd_gpu_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
-    device_value = _device_value(device)
-    if not device_value:
-        return None
-    try:
-        return AgentQueue(f"amd_{device_value}")
-    except ValueError:
-        return None
 
 
 def get_agent_queue(step: Step):
@@ -280,7 +257,7 @@ def get_agent_queue(step: Step):
         return AgentQueue.ARM_CPU
     elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
         return AgentQueue.AMD_CPU
-    elif amd_gpu_queue := _get_amd_gpu_agent_queue(step.device):
+    elif amd_gpu_queue := get_amd_agent_queue(step.device):
         return amd_gpu_queue
     elif step.device == DeviceType.GH200:
         return AgentQueue.GH200
@@ -290,69 +267,14 @@ def get_agent_queue(step: Step):
         return AgentQueue.DGX_SPARK
     elif step.num_devices == 2 or step.num_devices == 4:
         return AgentQueue.GPU_4
+    elif step.device == DeviceType.AMD_ZEN5_CPU:
+        return AgentQueue.AMD_ZEN5_CPU
     else:
         return AgentQueue.GPU_1
 
 
-def _is_amd_gpu_device(device: Optional[str]) -> bool:
-    return _get_amd_gpu_agent_queue(device) is not None
-
-
-def _valid_amd_gpu_devices() -> List[str]:
-    return [
-        device.value
-        for device in DeviceType
-        if _get_amd_gpu_agent_queue(device.value) is not None
-    ]
-
-
-def _get_amd_label(label: str, amd_device: Optional[str]) -> str:
-    device_value = _device_value(amd_device) or ""
-    device_type = (
-        device_value.replace("amd_", "")
-        if device_value.startswith("amd_")
-        else device_value
-    )
-    return f"AMD: {label} ({device_type})"
-
-
-def _normalize_amd_depends_on(depends_on: Optional[List[str]]) -> List[str]:
-    normalized = []
-    for dependency in depends_on or []:
-        if dependency == "image-build":
-            dependency = "image-build-amd"
-        if dependency not in normalized:
-            normalized.append(dependency)
-    if "image-build-amd" not in normalized:
-        normalized.insert(0, "image-build-amd")
-    return normalized
-
-
-def _get_amd_env(
-    commands: str,
-    extra_env: Optional[Dict[str, str]] = None,
-) -> Dict[str, str]:
-    env = dict(extra_env or {})
-    env.update(
-        {
-            "DOCKER_BUILDKIT": "1",
-            # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
-            # Keep the hook warmup on ci_base; the runner uses the full image
-            # only if ci_base or artifact setup fails before tests begin.
-            "DOCKER_IMAGE_NAME": "rocm/vllm-dev:ci_base",
-            "VLLM_CI_BASE_IMAGE": "rocm/vllm-dev:ci_base",
-            "VLLM_CI_FALLBACK_IMAGE": "rocm/vllm-ci:$BUILDKITE_COMMIT",
-            "VLLM_CI_USE_ARTIFACTS": "1",
-            "VLLM_CI_ARTIFACT_GLOB": (
-                "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
-            ),
-            "VLLM_CI_RESULTS_ROOT": (
-                "/home/buildkite-agent/huggingface/amd-ci-results"
-            ),
-            "VLLM_TEST_COMMANDS": commands,
-        }
-    )
-    return env
+def _first_configured(*values: Optional[int]) -> Optional[int]:
+    return next((value for value in values if value is not None), None)
 
 
 def _get_variables_to_inject() -> Dict[str, str]:
@@ -361,23 +283,45 @@ def _get_variables_to_inject() -> Dict[str, str]:
         return {}
 
     cache_from_tag, cache_to_tag = get_ecr_cache_registry()
+    registries = global_config["registries"]
+    repositories = global_config["repositories"]
+    repo = repositories["main"] if global_config["branch"] == "main" else repositories["premerge"]
+
+    # Build target ($IMAGE_TAG) must match what the test steps pull (get_image()).
+    # get_image() already switches to the dedicated -torch-nightly tag when
+    # torch_nightly==1, so the whole run uses a distinct tag that can't overwrite
+    # or race with the shared postmerge image. Don't publish :latest from nightly.
+    image_tag = get_image()
+    image_tag_latest = (
+        f"{registries}/{repositories['main']}:latest"
+        if global_config["branch"] == "main" and global_config["torch_nightly"] != "1"
+        else None
+    )
+
     return {
-        "$REGISTRY": global_config["registries"],
-        "$REPO": global_config["repositories"]["main"]
-        if global_config["branch"] == "main"
-        else global_config["repositories"]["premerge"],
+        "$REGISTRY": registries,
+        "$REPO": repo,
         "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
         "$BRANCH": global_config["branch"],
         "$CACHE_FROM": cache_from_tag,
         "$CACHE_TO": cache_to_tag,
-        "$IMAGE_TAG": f"{global_config['registries']}/{global_config['repositories']['main']}:$BUILDKITE_COMMIT"
-            if global_config["branch"] == "main"
-            else f"{global_config['registries']}/{global_config['repositories']['premerge']}:$BUILDKITE_COMMIT",
-        "$IMAGE_TAG_LATEST": f"{global_config['registries']}/{global_config['repositories']['main']}:latest"
-            if global_config["branch"] == "main"
-            else None,
+        "$IMAGE_TAG": image_tag,
+        "$IMAGE_TAG_LATEST": image_tag_latest,
         "$IMAGE_TAG_TORCH_NIGHTLY": get_torch_nightly_image(),
     }
+
+
+def _is_multi_gpu_step(step: Step) -> bool:
+    """Whether a step exercises more than one GPU.
+
+    Multi-GPU (tensor/pipeline parallel) and multi-node steps rely on the
+    cross-GPU fabric (NVLink/NVSwitch) and P2P being healthy on whichever node
+    they land on. Single-GPU steps don't, so the topology dump is only worth the
+    log noise for these.
+    """
+    if step.num_nodes and step.num_nodes >= 2:
+        return True
+    return bool(step.num_devices and step.num_devices >= 2)
 
 
 def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
@@ -385,20 +329,27 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
         return []
 
     if setup_profile == "nvidia":
-        return [
+        commands = [
             "echo '--- :nvidia: GPU Info'",
             "(command nvidia-smi || true)",
+        ]
+        if _is_multi_gpu_step(step):
+            # Dump the GPU/NVLink topology for multi-GPU jobs so infra flakes on
+            # a node with a degraded fabric (unhealthy NVSwitch/fabric-manager,
+            # missing P2P) are visible in the log and distinguishable from real
+            # regressions. Cheap and never fails the step.
+            commands += [
+                "echo '--- :nvidia: GPU Topology'",
+                "(command nvidia-smi topo -m || true)",
+            ]
+        commands += [
             "echo '--- :gear: CUDA Coredump Setup'",
             "export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'",
         ]
+        return commands
 
     if setup_profile == "amd":
-        return [
-            "echo '--- :amd: GPU Info'",
-            "(command amd-smi || true)",
-            "echo '--- :gear: ROCm Debug Agent Setup'",
-            _get_rocm_debug_agent_setup_command(),
-        ]
+        return get_amd_setup_commands()
 
     raise ValueError(f"Unsupported setup profile: {setup_profile}")
 
@@ -493,6 +444,41 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
     return diff_file == normalized or diff_file.startswith(f"{normalized}/")
 
 
+def ensure_exit_status_negative_one_retry(
+    retry: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Add a one-time retry for jobs that lose their agent."""
+    retry_policy = deepcopy(retry or {})
+    automatic = retry_policy.get("automatic")
+
+    if automatic is True:
+        return retry_policy
+
+    if automatic is None or automatic is False:
+        automatic_conditions = []
+    elif isinstance(automatic, dict):
+        if automatic.get("exit_status") == -1:
+            return retry_policy
+        automatic_conditions = [automatic]
+    elif isinstance(automatic, list):
+        automatic_conditions = automatic
+        if any(
+            isinstance(condition, dict) and condition.get("exit_status") == -1
+            for condition in automatic_conditions
+        ):
+            return retry_policy
+    else:
+        raise ValueError(
+            "retry.automatic must be a boolean, mapping, or list."
+        )
+
+    retry_policy["automatic"] = [
+        dict(EXIT_STATUS_NEGATIVE_ONE_RETRY),
+        *automatic_conditions,
+    ]
+    return retry_policy
+
+
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
@@ -507,7 +493,7 @@ def convert_group_step_to_buildkite_step(
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
-            if _is_amd_gpu_device(step.device):
+            if is_amd_gpu_device(step.device):
                 amd_commands = [
                     "export VLLM_TEST_GROUP_NAME="
                     f"{_generate_step_key(step.key or step.label)}"
@@ -523,11 +509,18 @@ def convert_group_step_to_buildkite_step(
                     label=step.label,
                     key=step.key,
                     device=step.device,
+                    num_devices=step.num_devices,
                     commands_str=" && ".join(amd_commands),
                     depends_on=step.depends_on,
                     extra_env=step.env,
+                    dind=step.dind,
+                    no_plugin=step.no_plugin or False,
+                    no_gpu=step.no_gpu or False,
+                    num_nodes=step.num_nodes,
                     soft_fail=step.soft_fail,
                     parallelism=step.parallelism,
+                    timeout_in_minutes=step.timeout_in_minutes,
+                    agent_tags=step.agent_tags,
                 )
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
@@ -556,10 +549,38 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.env = step.env
             if step.retry:
                 buildkite_step.retry = step.retry
+            buildkite_step.retry = ensure_exit_status_negative_one_retry(
+                buildkite_step.retry
+            )
             if step.key:
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
+            if (
+                step.device == DeviceType.AMD_CPU
+                or step.device == DeviceType.AMD_CPU.value
+            ):
+                buildkite_step.retry = ensure_amd_stack_error_retry(
+                    buildkite_step.retry
+                )
+            if step.key == AMD_ROCM_BASE_REFRESH_STEP_KEY:
+                refresh_env = dict(buildkite_step.env or {})
+                refresh_env.update(get_rocm_base_refresh_env())
+                buildkite_step.env = refresh_env
+                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
+                    get_rocm_base_refresh_timeout(list_file_diff)
+                )
+            elif (
+                step.device == DeviceType.AMD_CPU
+                or step.device == DeviceType.AMD_CPU.value
+            ):
+                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
+                    get_amd_timeout_in_minutes(step.timeout_in_minutes)
+                )
+            elif step.timeout_in_minutes:
+                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
+                    step.timeout_in_minutes
+                )
 
             if not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(
@@ -583,12 +604,20 @@ def convert_group_step_to_buildkite_step(
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
                 amd = step.mirror["amd"]
+                amd_no_plugin = amd.get("no_plugin", False)
+                amd_no_gpu = amd.get("no_gpu", step.no_gpu or False)
+                amd_num_devices = _first_configured(
+                    amd.get("num_devices"),
+                    amd.get("num_gpus"),
+                    step.num_devices,
+                )
                 custom_commands = amd.get("commands")
                 if custom_commands:
                     amd_command_step = step.model_copy(
                         update={
                             "commands": custom_commands,
                             "working_dir": amd.get("working_dir", step.working_dir),
+                            "no_plugin": amd_no_plugin,
                         }
                     )
                     amd_commands_str = " && ".join(
@@ -599,9 +628,12 @@ def convert_group_step_to_buildkite_step(
                         )
                     )
                 else:
+                    amd_command_step = step.model_copy(
+                        update={"no_plugin": amd_no_plugin}
+                    )
                     amd_commands_str = " && ".join(
                         _prepare_commands(
-                            step,
+                            amd_command_step,
                             variables_to_inject,
                             setup_profile="amd",
                         )
@@ -612,11 +644,18 @@ def convert_group_step_to_buildkite_step(
                 amd_step = _create_amd_step(
                     label=step.label,
                     device=amd["device"],
+                    num_devices=amd_num_devices,
                     commands_str=amd_commands_str,
                     depends_on=amd.get("depends_on"),
                     extra_env=extra_env,
+                    dind=amd.get("dind", True),
+                    no_plugin=amd_no_plugin,
+                    no_gpu=amd_no_gpu,
+                    num_nodes=amd.get("num_nodes", step.num_nodes),
                     soft_fail=amd.get("soft_fail", step.soft_fail or False),
                     parallelism=step.parallelism,
+                    timeout_in_minutes=amd.get("timeout_in_minutes"),
+                    agent_tags=amd.get("agent_tags"),
                 )
                 if not _step_should_run(
                     _get_amd_mirror_effective_step(step, amd), list_file_diff
@@ -655,13 +694,21 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     global_config = get_global_config()
     if step.key and (
-        step.key.startswith("image-build") or step.key in ALWAYS_RUN_STEP_KEYS
+        step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
     ):
         return True
     if global_config["nightly"] == "1":
         return True
     if step.optional:
         return False
+    if (
+        is_amd_gpu_device(step.device)
+        and not step.dind
+        and _source_file_dependencies_match(
+            AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES, list_file_diff
+        )
+    ):
+        return True
     if global_config["run_all"]:
         return True
     return _source_file_dependencies_match(
@@ -680,6 +727,8 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
     return step.model_copy(
         update={
             "key": None,
+            "device": amd["device"],
+            "dind": amd.get("dind", True),
             "optional": amd.get("optional", step.optional),
             "source_file_dependencies": source_file_dependencies,
         }
@@ -716,30 +765,40 @@ def _create_amd_step(
     *,
     label: str,
     device: Optional[str],
+    num_devices: Optional[int],
     commands_str: str,
     depends_on: Optional[List[str]],
     extra_env: Optional[Dict[str, str]],
+    dind: bool,
+    no_plugin: bool,
+    no_gpu: bool,
+    num_nodes: Optional[int],
     soft_fail: Optional[bool],
     parallelism: Optional[int],
     key: Optional[str] = None,
+    timeout_in_minutes: Optional[int] = None,
+    agent_tags: Optional[Dict[str, str]] = None,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
-    if not _is_amd_gpu_device(device):
-        raise ValueError(
-            f"Invalid AMD device: {device}. "
-            f"Valid devices: {_valid_amd_gpu_devices()}"
-        )
-    queue_step = Step(label=label, device=_device_value(device))
-
+    options = build_amd_step_options(
+        label=label,
+        device=device,
+        num_devices=num_devices,
+        commands=commands_str,
+        depends_on=depends_on,
+        extra_env=extra_env,
+        dind=dind,
+        no_plugin=no_plugin,
+        no_gpu=no_gpu,
+        num_nodes=num_nodes,
+        agent_tags=agent_tags,
+    )
     return BuildkiteCommandStep(
-        label=_get_amd_label(label, device),
+        **options,
         key=key,
-        commands=[AMD_TEST_COMMAND],
-        depends_on=_normalize_amd_depends_on(depends_on),
-        agents={"queue": get_agent_queue(queue_step)},
-        env=_get_amd_env(commands_str, extra_env),
-        priority=200,
         soft_fail=soft_fail or False,
-        retry=AMD_RETRY,
         parallelism=parallelism,
+        timeout_in_minutes=_get_timeout_in_minutes(
+            get_amd_timeout_in_minutes(timeout_in_minutes)
+        ),
     )
