@@ -1,0 +1,21 @@
+[Unit]
+Description=Post the vLLM nightly perf-eval regression report
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@@SERVICE_USER@@
+Group=@@SERVICE_GROUP@@
+WorkingDirectory=@@SKILL_DIR@@
+EnvironmentFile=@@ENV_FILE@@
+ExecStart=@@PYTHON@@ -m vllm_perf_eval report --state-dir @@STATE_DIR@@
+TimeoutStartSec=300
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=@@STATE_DIR@@
+RestrictSUIDSGID=true
