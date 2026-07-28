@@ -22,6 +22,8 @@ import httpx
 BUILDKITE_API = "https://api.buildkite.com/v2/organizations/vllm/pipelines"
 DASHBOARD_API = "https://ci.vllm.ai/api"
 RELEASE_IMAGE_PREFIX = "public.ecr.aws/q9t5s3a7/vllm-release-repo:"
+RELEASE_IMAGE_JOB_NAME = "Build release image - x86_64 - CUDA 13.0"
+RELEASE_BUILD_LOOKBACK_PAGES = 10
 TERMINAL_BUILD_STATES = {"passed", "failed"}
 REGRESSION_SIGMA = 2.0
 REGRESSION_RELATIVE = 0.01
@@ -682,26 +684,44 @@ def _buildkite_get(path: str, token: str) -> Any:
     return _request(f"{BUILDKITE_API}/{path}", token=token)
 
 
+def _latest_release_with_cuda_image(token: str) -> dict[str, Any] | None:
+    for page in range(1, RELEASE_BUILD_LOOKBACK_PAGES + 1):
+        release_builds = _buildkite_get(
+            f"release-v2/builds?branch=main&per_page=100&exclude_jobs=true&page={page}",
+            token,
+        )
+        if not release_builds:
+            break
+        for build in release_builds:
+            if (
+                str(build.get("message", "")).strip().lower() != "nightly release"
+                or build.get("source") != "schedule"
+            ):
+                continue
+            details = _buildkite_get(f"release-v2/builds/{build['number']}", token)
+            image_job = next(
+                (
+                    job
+                    for job in details.get("jobs", [])
+                    if job.get("name") == RELEASE_IMAGE_JOB_NAME
+                ),
+                None,
+            )
+            if image_job is not None and image_job.get("state") == "passed":
+                return build
+    return None
+
+
 def run_trigger(state_dir: Path, *, dry_run: bool) -> int:
     token = os.environ.get("BUILDKITE_API_TOKEN", "")
     if not token:
         raise RuntimeError("BUILDKITE_API_TOKEN is required")
-    release_builds = _buildkite_get(
-        "release-v2/builds?branch=main&per_page=100&exclude_jobs=true",
-        token,
-    )
-    nightly = next(
-        (
-            build
-            for build in release_builds
-            if str(build.get("message", "")).strip().lower() == "nightly release"
-            and build.get("source") == "schedule"
-            and build.get("state") == "passed"
-        ),
-        None,
-    )
+    nightly = _latest_release_with_cuda_image(token)
     if nightly is None:
-        print("SKIP: no passed scheduled Nightly release build found")
+        print(
+            "SKIP: no scheduled Nightly release has a passed "
+            f"{RELEASE_IMAGE_JOB_NAME} job"
+        )
         return 0
 
     vllm_commit = str(nightly["commit"])
@@ -732,7 +752,7 @@ def run_trigger(state_dir: Path, *, dry_run: bool) -> int:
         "message": f"Nightly run {local_date}: commit {vllm_commit}",
         "env": {
             "VLLM_COMMIT": vllm_commit,
-            "VLLM_IMAGE": f"{RELEASE_IMAGE_PREFIX}{vllm_commit}",
+            "VLLM_IMAGE": f"{RELEASE_IMAGE_PREFIX}{vllm_commit}-x86_64",
             "NIGHTLY": "1",
         },
     }

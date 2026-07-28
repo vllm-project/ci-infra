@@ -7,8 +7,9 @@ description: Install, migrate, operate, or diagnose the portable vLLM nightly pe
 
 Operate the two deterministic jobs bundled with this skill:
 
-- `trigger`: start `vllm/perf-eval` for the latest passed scheduled
-  `release-v2` nightly.
+- `trigger`: start `vllm/perf-eval` for the latest scheduled `release-v2`
+  nightly whose `Build release image - x86_64 - CUDA 13.0` job passed. The
+  aggregate release build may fail.
 - `report`: compare the latest completed perf-eval run with rolling history and
   post the Block Kit report to Slack.
 
@@ -42,8 +43,9 @@ journalctl -u vllm-nightly-perf-trigger.service -n 100 --no-pager
 journalctl -u vllm-nightly-perf-report.service -n 100 --no-pager
 ```
 
-Treat `SKIP` as a successful no-op. Common reasons are no newer passed release,
-an existing perf-eval build for the commit, or an already-reported build.
+Treat `SKIP` as a successful no-op. Common reasons are no scheduled release
+with a passed x86_64 CUDA 13.0 image job, an existing perf-eval build for the
+commit, or an already-reported build.
 
 ## Run safely
 

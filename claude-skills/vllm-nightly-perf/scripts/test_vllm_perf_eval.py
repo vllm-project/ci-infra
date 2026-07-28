@@ -13,6 +13,7 @@ from vllm_perf_eval import (
     build_slack_payload,
     calculate_statistic,
     run_adopt,
+    run_trigger,
 )
 
 
@@ -118,3 +119,88 @@ def test_adopt_records_only_the_latest_reportable_build(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="not the latest reportable build"):
         run_adopt(tmp_path, build_number=308)
+
+
+def test_trigger_accepts_failed_release_when_cuda_image_job_passed(
+    monkeypatch, tmp_path, capsys
+):
+    commit = "a" * 40
+
+    def fake_buildkite_get(path, _token):
+        if path.endswith("page=1"):
+            return [
+                {
+                    "number": 400,
+                    "state": "failed",
+                    "source": "schedule",
+                    "message": "Nightly release",
+                    "commit": commit,
+                }
+            ]
+        if path == "release-v2/builds/400":
+            return {
+                "jobs": [
+                    {
+                        "name": "Build release image - x86_64 - CUDA 13.0",
+                        "state": "passed",
+                    }
+                ]
+            }
+        if path.startswith("perf-eval/builds?"):
+            return []
+        raise AssertionError(f"Unexpected Buildkite path: {path}")
+
+    monkeypatch.setenv("BUILDKITE_API_TOKEN", "test-token")
+    monkeypatch.setattr("vllm_perf_eval._buildkite_get", fake_buildkite_get)
+
+    assert run_trigger(tmp_path, dry_run=True) == 0
+
+    payload = json.loads((tmp_path / "vllm_perf_eval_trigger_payload.json").read_text())
+    assert payload["env"]["VLLM_COMMIT"] == commit
+    assert payload["env"]["VLLM_IMAGE"].endswith(f"{commit}-x86_64")
+    assert "release-v2 build #400" in capsys.readouterr().out
+
+
+def test_trigger_uses_older_nightly_when_newest_cuda_image_failed(
+    monkeypatch, tmp_path
+):
+    newest_commit = "a" * 40
+    eligible_commit = "b" * 40
+
+    def fake_buildkite_get(path, _token):
+        if path.endswith("page=1"):
+            return [
+                {
+                    "number": 401,
+                    "source": "schedule",
+                    "message": "Nightly release",
+                    "commit": newest_commit,
+                },
+                {
+                    "number": 400,
+                    "source": "schedule",
+                    "message": "Nightly release",
+                    "commit": eligible_commit,
+                },
+            ]
+        if path.startswith("release-v2/builds/"):
+            build_number = int(path.rsplit("/", 1)[1])
+            return {
+                "jobs": [
+                    {
+                        "name": "Build release image - x86_64 - CUDA 13.0",
+                        "state": "failed" if build_number == 401 else "passed",
+                    }
+                ]
+            }
+        if path.startswith("perf-eval/builds?"):
+            return []
+        raise AssertionError(f"Unexpected Buildkite path: {path}")
+
+    monkeypatch.setenv("BUILDKITE_API_TOKEN", "test-token")
+    monkeypatch.setattr("vllm_perf_eval._buildkite_get", fake_buildkite_get)
+
+    assert run_trigger(tmp_path, dry_run=True) == 0
+
+    payload = json.loads((tmp_path / "vllm_perf_eval_trigger_payload.json").read_text())
+    assert payload["env"]["VLLM_COMMIT"] == eligible_commit
