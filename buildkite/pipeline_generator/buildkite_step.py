@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
+from copy import deepcopy
 import os
 
 from amd import (
@@ -29,6 +30,7 @@ PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
+EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
@@ -442,6 +444,41 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
     return diff_file == normalized or diff_file.startswith(f"{normalized}/")
 
 
+def ensure_exit_status_negative_one_retry(
+    retry: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Add a one-time retry for jobs that lose their agent."""
+    retry_policy = deepcopy(retry or {})
+    automatic = retry_policy.get("automatic")
+
+    if automatic is True:
+        return retry_policy
+
+    if automatic is None or automatic is False:
+        automatic_conditions = []
+    elif isinstance(automatic, dict):
+        if automatic.get("exit_status") == -1:
+            return retry_policy
+        automatic_conditions = [automatic]
+    elif isinstance(automatic, list):
+        automatic_conditions = automatic
+        if any(
+            isinstance(condition, dict) and condition.get("exit_status") == -1
+            for condition in automatic_conditions
+        ):
+            return retry_policy
+    else:
+        raise ValueError(
+            "retry.automatic must be a boolean, mapping, or list."
+        )
+
+    retry_policy["automatic"] = [
+        dict(EXIT_STATUS_NEGATIVE_ONE_RETRY),
+        *automatic_conditions,
+    ]
+    return retry_policy
+
+
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
@@ -512,6 +549,9 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.env = step.env
             if step.retry:
                 buildkite_step.retry = step.retry
+            buildkite_step.retry = ensure_exit_status_negative_one_retry(
+                buildkite_step.retry
+            )
             if step.key:
                 buildkite_step.key = step.key
             if step.parallelism:

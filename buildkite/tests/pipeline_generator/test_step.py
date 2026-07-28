@@ -84,6 +84,42 @@ def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):
     assert result.returncode == 1
 
 
+def test_generated_steps_retry_when_the_agent_is_lost():
+    step = Step(
+        label="Agent retry",
+        group="Failure handling",
+        key="image-build-agent-retry",
+        device="h100",
+        commands=["pytest tests/basic.py"],
+    )
+
+    command_step = _render_single_step(step).steps[0]
+
+    assert command_step.retry == {
+        "automatic": [{"exit_status": -1, "limit": 1}],
+    }
+
+
+def test_agent_lost_retry_preserves_step_retry_conditions():
+    step = Step(
+        label="Agent retry with policy",
+        group="Failure handling",
+        key="image-build-agent-retry-with-policy",
+        device="h100",
+        commands=["pytest tests/basic.py"],
+        retry={"automatic": {"exit_status": 143, "limit": 2}},
+    )
+
+    command_step = _render_single_step(step).steps[0]
+
+    assert command_step.retry == {
+        "automatic": [
+            {"exit_status": -1, "limit": 1},
+            {"exit_status": 143, "limit": 2},
+        ],
+    }
+
+
 def test_multi_gpu_step_dumps_nvidia_topology():
     step = Step(
         label="Distributed Comm Ops Test",
