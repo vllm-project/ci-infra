@@ -229,9 +229,23 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert default_command_step.soft_fail is False
     assert len(amd_group.steps) == 1
     assert amd_command_step.depends_on == ["image-build-amd"]
+    assert amd_command_step.key == "mirrored-test-amd"
     assert amd_command_step.agents == {"queue": AgentQueue.AMD_MI325_1}
     assert amd_command_step.soft_fail is False
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
+
+
+def test_amd_mirror_requires_an_explicit_stable_key():
+    step = Step(
+        label="Unkeyed mirror",
+        group="Mirrors",
+        commands=["pytest tests/mirror.py"],
+        device="h200_18gb",
+        mirror={"amd": {"device": "mi300_1"}},
+    )
+
+    with pytest.raises(ValueError, match="explicit stable key"):
+        _render_single_step(step)
 
 
 def test_dind_false_mirror_uses_native_runner_gating(fake_global_config):
@@ -241,6 +255,7 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config):
     step = Step(
         label="Native mirrored test",
         group="Mirrors",
+        key="native-mirrored-test",
         commands=["pytest tests/mirror.py"],
         source_file_dependencies=["vllm/"],
         device="h200_18gb",
@@ -273,6 +288,7 @@ def test_untagged_mirror_defaults_to_dind(
     step = Step(
         label="DinD mirrored test",
         group="Mirrors",
+        key="dind-mirrored-test",
         commands=["pytest tests/mirror.py"],
         source_file_dependencies=["vllm/"],
         device="h200_18gb",
@@ -413,6 +429,7 @@ def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
     step = Step(
         label="Mirrored skipped timeout",
         group="Mirrors",
+        key="mirrored-skipped-timeout",
         commands=["pytest tests/mirror.py"],
         source_file_dependencies=["vllm/"],
         device="h200_18gb",

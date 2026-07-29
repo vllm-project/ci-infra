@@ -603,6 +603,10 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
+                if not step.key:
+                    raise ValueError(
+                        "AMD mirrored steps require an explicit stable key."
+                    )
                 amd = step.mirror["amd"]
                 amd_no_plugin = amd.get("no_plugin", False)
                 amd_no_gpu = amd.get("no_gpu", step.no_gpu or False)
@@ -643,6 +647,7 @@ def convert_group_step_to_buildkite_step(
                 extra_env.update(amd.get("env", {}))
                 amd_step = _create_amd_step(
                     label=step.label,
+                    key=f"{step.key}-amd",
                     device=amd["device"],
                     num_devices=amd_num_devices,
                     commands_str=amd_commands_str,
@@ -668,7 +673,7 @@ def convert_group_step_to_buildkite_step(
                     )
                     amd_block_step = _create_block_step(
                         block=f"Run AMD: {step.label}",
-                        key=f"block-amd-{_generate_step_key(step.label)}",
+                        key=f"block-amd-{step.key}",
                         command_step=amd_step,
                         depends_on=[mirror_build_dep],
                     )

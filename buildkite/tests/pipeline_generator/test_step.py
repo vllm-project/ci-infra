@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 import buildkite_step
 from step import Step, group_steps, read_steps_from_job_dir
@@ -50,6 +51,36 @@ def test_group_steps_sorts_steps_within_each_group():
         "Test C",
         "Test D",
     ]
+
+
+def test_ci_control_metadata_is_typed_but_not_execution_configuration():
+    step = Step.from_yaml(
+        {
+            "label": "CPU models",
+            "key": "cpu-models",
+            "commands": ["pytest tests/models"],
+            "ci_control": {
+                "groups": ["cpu"],
+                "areas": ["models"],
+                "selectable": True,
+            },
+        }
+    )
+
+    assert step.ci_control is not None
+    assert step.ci_control.groups == ["cpu"]
+    assert step.ci_control.areas == ["models"]
+
+
+def test_ci_control_metadata_rejects_unknown_fields():
+    with pytest.raises(ValidationError, match="unknown"):
+        Step.from_yaml(
+            {
+                "label": "CPU models",
+                "commands": ["pytest tests/models"],
+                "ci_control": {"unknown": True},
+            }
+        )
 
 
 def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):

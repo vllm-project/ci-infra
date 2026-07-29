@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-ci-control"
+version = "0.1.0"
+description = "Domain foundation for the vLLM CI control plane"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+repository-validation = ["PyYAML>=6.0.2,<7"]
+
+[dependency-groups]
+dev = [
+  "click==8.1.7",
+  "pydantic==2.9.2",
+  "pytest>=8.3,<10",
+  "requests>=2.32,<3",
+  "ruff==0.14.0",
+]
+
+[project.scripts]
+vllm-ci-catalog = "vllm_ci_control.repository_catalog:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any
 from pydantic import model_validator
 from typing_extensions import Self
@@ -6,6 +6,16 @@ from collections import defaultdict
 from global_config import get_global_config
 import os
 import yaml
+
+
+class CiControlMetadata(BaseModel):
+    """Repository-owned semantic metadata for the `/ci` catalog."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    groups: Optional[List[str]] = None
+    areas: Optional[List[str]] = None
+    selectable: bool = True
 
 
 class Step(BaseModel):
@@ -31,6 +41,7 @@ class Step(BaseModel):
     no_gpu: Optional[bool] = False
     dind: bool = True
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
+    ci_control: Optional[CiControlMetadata] = None
 
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:

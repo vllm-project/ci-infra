@@ -1,0 +1,40 @@
+name: Validate vLLM CI control catalog
+description: Compile and validate trusted vLLM `/ci` policy and job metadata
+
+inputs:
+  repository-root:
+    description: Path to the checked-out vLLM repository
+    required: false
+    default: .
+  baseline-repository-root:
+    description: Optional base checkout for selector compatibility validation
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+      with:
+        python-version: "3.12"
+
+    - name: Compile trusted CI catalog
+      shell: bash
+      env:
+        CI_CONTROL_REPOSITORY_ROOT: ${{ inputs.repository-root }}
+        CI_CONTROL_BASELINE_ROOT: ${{ inputs.baseline-repository-root }}
+      run: |
+        catalog_args=("$CI_CONTROL_REPOSITORY_ROOT")
+        if [[ -n "$CI_CONTROL_BASELINE_ROOT" ]]; then
+          if [[ -f "$CI_CONTROL_BASELINE_ROOT/.buildkite/ci_control.toml" ]]; then
+            catalog_args+=(--baseline "$CI_CONTROL_BASELINE_ROOT")
+          else
+            echo "Baseline predates ci_control.toml; validating bootstrap catalog only."
+          fi
+        fi
+        uv run \
+          --project "$GITHUB_ACTION_PATH/../../../services/ci-control" \
+          --frozen \
+          --extra repository-validation \
+          vllm-ci-catalog "${catalog_args[@]}"

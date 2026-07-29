@@ -23,6 +23,8 @@ ci-infra/
 │   └── gpu/               # GPU AMI with NVIDIA drivers
 ├── infra-k8s/             # Kubernetes-based Buildkite agent deployment
 ├── github/                # GitHub Actions runner groups (Neural Magic, IBM)
+├── services/
+│   └── ci-control/        # Modular `/ci` control plane and domain contracts
 ├── claude-skills/         # Portable CI automations and investigation skills
 └── usage-stats/           # Usage telemetry collection (Vector)
 ```
@@ -37,6 +39,10 @@ source-of-truth inventory of:
 - installation, failover, validation, and operational commands;
 - host-local automations that are not portable yet;
 - investigation skills that do not run on a schedule.
+
+The pull-request `/ci` control-plane foundation, compute-credit model,
+main-failure reconciliation, and PR validation architecture are documented in
+[`services/ci-control/README.md`](services/ci-control/README.md).
 
 ## How CI Works
 

@@ -1,0 +1,54 @@
+name: CI control service
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/ci-control-validate/**"
+      - ".github/workflows/ci-control.yml"
+      - "buildkite/pipeline_generator/**"
+      - "buildkite/tests/pipeline_generator/**"
+      - "services/ci-control/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/actions/ci-control-validate/**"
+      - ".github/workflows/ci-control.yml"
+      - "buildkite/pipeline_generator/**"
+      - "buildkite/tests/pipeline_generator/**"
+      - "services/ci-control/**"
+
+permissions:
+  contents: read
+
+jobs:
+  service:
+    name: Domain and adapter tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.12"
+      - name: Test
+        run: >-
+          uv run --frozen --group dev --extra repository-validation
+          pytest -q
+        working-directory: services/ci-control
+      - name: Test pipeline generator integration
+        run: >-
+          uv run --project services/ci-control --frozen
+          --group dev --extra repository-validation
+          pytest -q buildkite/tests
+      - name: Lint
+        run: >-
+          uv run --frozen --group dev --extra repository-validation
+          ruff check src tests
+        working-directory: services/ci-control
+      - name: Check formatting
+        run: >-
+          uv run --frozen --group dev --extra repository-validation
+          ruff format --check src tests
+        working-directory: services/ci-control
