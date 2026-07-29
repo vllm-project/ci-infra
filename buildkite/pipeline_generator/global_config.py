@@ -22,9 +22,22 @@ class GlobalConfig(TypedDict):
     docs_only_disable: Optional[str] = "0"
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
+    amd_hf_offline_retry: bool = False
+    disable_hf_offline_retry: bool = False
 
 
 config = None
+HF_OFFLINE_RETRY_CAPABILITY_KEY = "amd_hf_offline_retry"
+HF_OFFLINE_RETRY_KILL_SWITCH_ENV = "VLLM_CI_DISABLE_HF_OFFLINE_RETRY"
+
+
+def _read_strict_bool_env(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+    if value not in {"0", "1"}:
+        raise ValueError(f"{name} must be exactly '0' or '1', got {value!r}.")
+    return value == "1"
 
 
 def init_global_config(pipeline_config_path: str):
@@ -33,6 +46,9 @@ def init_global_config(pipeline_config_path: str):
         return
     pipeline_config = yaml.safe_load(open(pipeline_config_path, "r"))
     _validate_pipeline_config(pipeline_config)
+    disable_hf_offline_retry = _read_strict_bool_env(
+        HF_OFFLINE_RETRY_KILL_SWITCH_ENV
+    )
 
     if "github_repo_name" not in pipeline_config:
         pipeline_config["github_repo_name"] = "vllm-project/vllm"
@@ -74,6 +90,10 @@ def init_global_config(pipeline_config_path: str):
         merge_base_commit=merge_base_commit,
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
+        amd_hf_offline_retry=pipeline_config.get(
+            HF_OFFLINE_RETRY_CAPABILITY_KEY, False
+        ),
+        disable_hf_offline_retry=disable_hf_offline_retry,
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
@@ -99,6 +119,9 @@ def _validate_pipeline_config(pipeline_config: Dict):
         raise ValueError("Registries are required")
     if not pipeline_config["repositories"]:
         raise ValueError("Repositories are required")
+    amd_hf_offline_retry = pipeline_config.get(HF_OFFLINE_RETRY_CAPABILITY_KEY, False)
+    if type(amd_hf_offline_retry) is not bool:
+        raise ValueError(f"{HF_OFFLINE_RETRY_CAPABILITY_KEY} must be a boolean.")
     if "github_repo_name" in pipeline_config:
         repo_name = pipeline_config["github_repo_name"]
         if not re.match(r"^vllm-project/[a-zA-Z0-9._-]+$", repo_name):

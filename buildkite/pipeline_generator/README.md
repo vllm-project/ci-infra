@@ -62,20 +62,36 @@ registries: public.ecr.aws/q9t5s3a7
 repositories:
   main: "vllm-ci-postmerge-repo"    # Used for main branch builds
   premerge: "vllm-ci-test-repo"     # Used for PR/pre-merge builds
+
+# Capability gate for the narrow AMD HF cache retry cohort.
+amd_hf_offline_retry: false
 ```
 
 ### AMD Hugging Face Offline Retry
 
-AMD GPU jobs that use `run-amd-test.sh` run once with Hugging Face offline
-environment variables, then retry eligible test failures once online. This is
-enabled by default for both native and Docker-in-Docker AMD jobs. Direct AMD
-steps can opt out with `hf_offline_retry: false`; mirrored steps can use
-`mirror.amd.hf_offline_retry: false`.
+This policy is off by default. A pipeline must set the strict boolean
+`amd_hf_offline_retry: true`, and each selected direct AMD step must also set
+`hf_offline_retry: true` (or `mirror.amd.hf_offline_retry: true` for a mirror).
+Only single-node jobs using `run-amd-test.sh` are eligible; direct-command
+(`no_plugin`), multi-node, nightly, and torch-nightly jobs remain disabled.
 
-Direct-command (`no_plugin`) and multi-node AMD jobs do not enable this policy.
-The runner retries exit statuses `1`, `2`, and `123`; other statuses propagate.
-The generator emits an explicit `1` or `0` for every wrapper-backed AMD job so
-agent-level environment cannot override the resolved policy.
+When `BUILDKITE_RETRY_COUNT=0`, the vLLM runner sets the Hugging Face Hub and
+Transformers cache-only flags. This does not isolate the job's network or block
+direct HTTP and other clients. Exit status `1` triggers the intended Buildkite
+fallback in a fresh job. Conservatively, any retry count greater than zero
+(including a manual, infrastructure, or other automatic retry) lets those
+Hugging Face clients use the network. Statuses `2` and `123` are not retry
+signals for this policy. At generation time, the pipeline emits the resolved
+`VLLM_CI_HF_OFFLINE_RETRY=1` or `0` on every wrapper-backed AMD job.
+
+Set `VLLM_CI_DISABLE_HF_OFFLINE_RETRY=1` to disable the cohort in newly
+generated pipelines. The vLLM runner also reads this switch at job start, so a
+runtime agent or repository hook can disable queued or newly started jobs whose
+pipeline was already generated. The runner then clears the variable before
+running commands. Changing only a pipeline-generation setting does not mutate
+an existing build, and the switch cannot change a command that is already
+running. It accepts only `0` or `1`; invalid values stop pipeline generation or
+job startup.
 
 ## Environment Variables
 
@@ -89,5 +105,6 @@ The generator relies on several environment variables, typically provided by Bui
 *   `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build.
 *   `RUN_ALL`: Set to "1" to force run all steps.
 *   `SKIP_TIMEOUT`: Set to "1" at pipeline generation time to omit all configured step timeouts.
+*   `VLLM_CI_DISABLE_HF_OFFLINE_RETRY`: Strict `0`/`1` emergency switch read during pipeline generation and AMD job startup.
 *   `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.
 *   `VLLM_USE_PRECOMPILED`: Set to "1" to force use of precompiled wheels.

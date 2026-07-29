@@ -47,19 +47,38 @@ ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
 
 
-def get_amd_retry(hf_offline_retry_enabled: bool) -> Dict[str, List[Dict[str, Any]]]:
-    """Return a fresh retry policy for an AMD job.
+def resolve_amd_hf_offline_retry(
+    *,
+    capability_enabled: bool,
+    requested: bool,
+    disabled: bool,
+    no_plugin: bool,
+    num_nodes: Optional[int],
+    nightly: bool,
+    torch_nightly: bool,
+) -> bool:
+    """Resolve the narrowly scoped AMD Hugging Face retry cohort."""
+    bool_fields = {
+        "capability_enabled": capability_enabled,
+        "requested": requested,
+        "disabled": disabled,
+        "no_plugin": no_plugin,
+        "nightly": nightly,
+        "torch_nightly": torch_nightly,
+    }
+    for name, value in bool_fields.items():
+        if type(value) is not bool:
+            raise ValueError(f"AMD HF offline retry {name} must be a boolean.")
 
-    The runner handles exit status 1 when offline retry is enabled. Retrying
-    that status again at the Buildkite level would repeat the full
-    offline/online pair.
-    """
-    automatic = []
-    for rule in AMD_RETRY["automatic"]:
-        if hf_offline_retry_enabled and rule.get("exit_status") == 1:
-            continue
-        automatic.append(dict(rule))
-    return {"automatic": automatic}
+    return (
+        capability_enabled
+        and requested
+        and not disabled
+        and not no_plugin
+        and not (num_nodes and num_nodes >= 2)
+        and not nightly
+        and not torch_nightly
+    )
 
 
 def get_amd_timeout_in_minutes(timeout_in_minutes: Optional[int]) -> int:
@@ -337,8 +356,8 @@ def _get_amd_env(
                 "VLLM_TEST_COMMANDS": commands,
             }
         )
-    # This is authoritative so inherited agent or step environment cannot
-    # accidentally enable a job that is explicitly ineligible or opted out.
+    # Replace any YAML-supplied value with the generation-time policy result.
+    # Runtime hooks may still override ordinary Buildkite step environment.
     env[AMD_HF_OFFLINE_RETRY_ENV] = "1" if hf_offline_retry_enabled else "0"
     return env
 
@@ -418,6 +437,10 @@ def build_amd_step_options(
     num_nodes: Optional[int],
     agent_tags: Optional[Dict[str, str]],
     hf_offline_retry: bool,
+    hf_offline_retry_capability: bool,
+    hf_offline_retry_disabled: bool,
+    nightly: bool,
+    torch_nightly: bool,
 ) -> AmdStepOptions:
     config = get_amd_device_config(device)
     if config is None:
@@ -437,8 +460,14 @@ def build_amd_step_options(
         raise ValueError("AMD hf_offline_retry must be a boolean.")
 
     gpu_count = resolve_amd_gpu_count(device, num_devices, no_gpu)
-    hf_offline_retry_enabled = (
-        hf_offline_retry and not no_plugin and not (num_nodes and num_nodes >= 2)
+    hf_offline_retry_enabled = resolve_amd_hf_offline_retry(
+        capability_enabled=hf_offline_retry_capability,
+        requested=hf_offline_retry,
+        disabled=hf_offline_retry_disabled,
+        no_plugin=no_plugin,
+        num_nodes=num_nodes,
+        nightly=nightly,
+        torch_nightly=torch_nightly,
     )
     plugins = None
     if not dind:
@@ -483,5 +512,5 @@ def build_amd_step_options(
         "env": env,
         "plugins": plugins,
         "priority": 200,
-        "retry": get_amd_retry(hf_offline_retry_enabled),
+        "retry": deepcopy(AMD_RETRY),
     }

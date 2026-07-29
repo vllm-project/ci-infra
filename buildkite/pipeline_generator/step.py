@@ -1,31 +1,50 @@
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from typing import Optional, List, Dict, Any
 from pydantic import model_validator
-from typing_extensions import Self, TypedDict
+from typing_extensions import Annotated, Self
 from collections import defaultdict
 from global_config import get_global_config
 import os
 import yaml
 
 
-class AmdMirrorOptions(TypedDict, total=False):
-    agent_tags: Dict[str, str]
-    commands: List[str]
-    depends_on: List[str]
+PositiveStrictInt = Annotated[int, Field(strict=True, gt=0)]
+
+
+class AmdMirrorOptions(BaseModel):
+    """Runtime-validated schema for the AMD half of a mirrored step."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_tags: Optional[Dict[str, str]] = None
+    commands: Optional[List[str]] = None
+    depends_on: Optional[List[str]] = None
     device: str
-    dind: bool
-    env: Dict[str, str]
-    hf_offline_retry: StrictBool
-    no_gpu: bool
-    no_plugin: bool
-    num_devices: int
-    num_gpus: int
-    num_nodes: int
-    optional: bool
-    soft_fail: bool
-    source_file_dependencies: List[str]
-    timeout_in_minutes: int
-    working_dir: str
+    dind: Optional[StrictBool] = None
+    env: Optional[Dict[str, str]] = None
+    hf_offline_retry: Optional[StrictBool] = None
+    no_gpu: Optional[StrictBool] = None
+    no_plugin: Optional[StrictBool] = None
+    num_devices: Optional[PositiveStrictInt] = None
+    num_gpus: Optional[PositiveStrictInt] = None
+    num_nodes: Optional[PositiveStrictInt] = None
+    optional: Optional[StrictBool] = None
+    soft_fail: Optional[StrictBool] = None
+    source_file_dependencies: Optional[List[str]] = None
+    timeout_in_minutes: Optional[PositiveStrictInt] = None
+    working_dir: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_explicit_nulls(cls, data):
+        if isinstance(data, dict):
+            null_fields = [name for name, value in data.items() if value is None]
+            if null_fields:
+                raise ValueError(
+                    "AMD mirror options cannot be null: "
+                    + ", ".join(sorted(null_fields))
+                )
+        return data
 
 
 class Step(BaseModel):
@@ -51,24 +70,29 @@ class Step(BaseModel):
     no_gpu: Optional[bool] = False
     dind: bool = True
     # AMD-only runner policy. Non-AMD steps ignore this field.
-    hf_offline_retry: StrictBool = True
+    hf_offline_retry: StrictBool = False
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_amd_mirror_options(cls, data):
+        if not isinstance(data, dict):
+            return data
+        mirror = data.get("mirror")
+        if not isinstance(mirror, dict) or "amd" not in mirror:
+            return data
+
+        validated_amd = AmdMirrorOptions.model_validate(mirror["amd"])
+        normalized = dict(data)
+        normalized_mirror = dict(mirror)
+        normalized_mirror["amd"] = validated_amd.model_dump(exclude_unset=True)
+        normalized["mirror"] = normalized_mirror
+        return normalized
 
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
         if self.num_nodes and not self.num_devices:
             raise ValueError("'num_devices' must be defined if 'num_nodes' is defined.")
-        return self
-
-    @model_validator(mode="after")
-    def validate_amd_hf_offline_retry(self) -> Self:
-        amd_options = (self.mirror or {}).get("amd")
-        if (
-            amd_options
-            and "hf_offline_retry" in amd_options
-            and not isinstance(amd_options["hf_offline_retry"], bool)
-        ):
-            raise ValueError("mirror.amd.hf_offline_retry must be a valid boolean.")
         return self
 
     @classmethod
@@ -107,9 +131,7 @@ def read_steps_from_job_dir(job_dir: str):
                         and global_config["github_repo_name"] == "vllm-project/vllm"
                     ):
                         step.working_dir = "/vllm-workspace/tests"
-                    step.source_file_dependencies = getattr(
-                        step, "source_file_dependencies", []
-                    )
+                    step.source_file_dependencies = getattr(step, "source_file_dependencies", [])
                     if not step.source_file_dependencies:
                         step.source_file_dependencies = []
                     step.source_file_dependencies.append(os.path.relpath(yaml_path))

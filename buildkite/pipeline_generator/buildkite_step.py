@@ -1,6 +1,6 @@
 from pydantic import BaseModel
+from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
-from typing import Any, Dict, List, Literal, Optional, Union, cast
 import os
 
 from amd import (
@@ -16,12 +16,8 @@ from amd import (
     get_rocm_base_refresh_timeout,
     is_amd_gpu_device,
 )
-from step import AmdMirrorOptions, Step
-from utils_lib.docker_utils import (
-    get_image,
-    get_ecr_cache_registry,
-    get_torch_nightly_image,
-)
+from step import Step
+from utils_lib.docker_utils import get_image, get_ecr_cache_registry, get_torch_nightly_image
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
@@ -105,7 +101,9 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
     )
-    return BuildkiteGroupStep(group="GitHub pre-commit check", steps=[precommit_step])
+    return BuildkiteGroupStep(
+        group="GitHub pre-commit check", steps=[precommit_step]
+    )
 
 
 def add_precommit_dependency(
@@ -199,11 +197,7 @@ class BuildkiteGroupStep(BaseModel):
 
 def _get_step_plugin(step: Step):
     # Use K8s plugin
-    use_cpu = step.device in (
-        DeviceType.CPU,
-        DeviceType.CPU_SMALL,
-        DeviceType.CPU_MEDIUM,
-    )
+    use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
     use_arm64 = step.device == DeviceType.DGX_SPARK
     if step.device in [
         DeviceType.H100.value,
@@ -291,11 +285,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
     cache_from_tag, cache_to_tag = get_ecr_cache_registry()
     registries = global_config["registries"]
     repositories = global_config["repositories"]
-    repo = (
-        repositories["main"]
-        if global_config["branch"] == "main"
-        else repositories["premerge"]
-    )
+    repo = repositories["main"] if global_config["branch"] == "main" else repositories["premerge"]
 
     # Build target ($IMAGE_TAG) must match what the test steps pull (get_image()).
     # get_image() already switches to the dedicated -torch-nightly tag when
@@ -380,10 +370,8 @@ def _prepare_commands(
     if step.commands:
         for i, cmd in enumerate(step.commands):
             # Sanitize command preview for use in echo (remove quotes and special chars)
-            preview = cmd[:80].replace("'", "").replace('"', "").replace("$", "")
-            commands.append(
-                f"echo '+++ :test_tube: Command ({i + 1}/{len(step.commands)}): {preview}'"
-            )
+            preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
+            commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
@@ -403,10 +391,9 @@ def _prepare_commands(
                 continue
             # Use regex to only replace whole variable matches (not substrings)
             import re
-
             # Escape variable (may have $ or special characters)
             pattern = re.escape(variable)
-            command = re.sub(pattern + r"\b", value, command)
+            command = re.sub(pattern + r'\b', value, command)
         final_commands.append(command)
 
     if step.working_dir and not (
@@ -617,7 +604,7 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step and its block step if specified/applicable
             if step.mirror and step.mirror.get("amd"):
-                amd = cast(AmdMirrorOptions, step.mirror["amd"])
+                amd = step.mirror["amd"]
                 amd_no_plugin = amd.get("no_plugin", False)
                 amd_no_gpu = amd.get("no_gpu", step.no_gpu or False)
                 amd_num_devices = _first_configured(
@@ -670,7 +657,7 @@ def convert_group_step_to_buildkite_step(
                     parallelism=step.parallelism,
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
-                    hf_offline_retry=amd.get("hf_offline_retry", step.hf_offline_retry),
+                    hf_offline_retry=amd.get("hf_offline_retry", False),
                 )
                 if not _step_should_run(
                     _get_amd_mirror_effective_step(step, amd), list_file_diff
@@ -731,7 +718,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     )
 
 
-def _get_amd_mirror_effective_step(step: Step, amd: AmdMirrorOptions) -> Step:
+def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
     source_file_dependencies = list(amd.get("source_file_dependencies") or [])
     for dependency in step.source_file_dependencies or []:
         if dependency not in source_file_dependencies:
@@ -796,6 +783,7 @@ def _create_amd_step(
     hf_offline_retry: bool,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
+    global_config = get_global_config()
     options = build_amd_step_options(
         label=label,
         device=device,
@@ -809,6 +797,14 @@ def _create_amd_step(
         num_nodes=num_nodes,
         agent_tags=agent_tags,
         hf_offline_retry=hf_offline_retry,
+        hf_offline_retry_capability=global_config.get(
+            "amd_hf_offline_retry", False
+        ),
+        hf_offline_retry_disabled=global_config.get(
+            "disable_hf_offline_retry", False
+        ),
+        nightly=global_config.get("nightly", "0") == "1",
+        torch_nightly=global_config.get("torch_nightly", "0") == "1",
     )
     return BuildkiteCommandStep(
         **options,
