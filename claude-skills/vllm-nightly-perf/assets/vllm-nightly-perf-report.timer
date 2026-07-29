@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for vLLM nightly perf-eval results twice daily
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 America/Los_Angeles
+OnCalendar=*-*-* 19:00:00 America/Los_Angeles
+Persistent=true
+AccuracySec=1min
+Unit=vllm-nightly-perf-report.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-fast-ci-failure-alert"
+version = "0.1.0"
+description = "Alert Slack when vLLM CI jobs fail in 30 seconds or less"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+vllm-fast-ci-failure-alert = "fast_ci_failure_alert:main"
+
+[dependency-groups]
+dev = [
+  "pytest==9.0.2",
+  "ruff==0.15.8",
+]
+
+[tool.setuptools]
+py-modules = ["fast_ci_failure_alert"]
+package-dir = {"" = "scripts"}
+
+[tool.pytest.ini_options]
+pythonpath = ["scripts"]
+testpaths = ["scripts"]

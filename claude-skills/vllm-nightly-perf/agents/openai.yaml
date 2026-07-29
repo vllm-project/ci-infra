@@ -1,0 +1,4 @@
+interface:
+  display_name: "vLLM Nightly Perf Automation"
+  short_description: "Install and operate nightly perf reports"
+  default_prompt: "Use $vllm-nightly-perf to install or diagnose the portable nightly perf automation."
