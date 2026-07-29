@@ -16,7 +16,8 @@ variable "instance_count" {
 
 variable "disk_size" {
   type        = number
-  description = "The large disk size"
+  description = "The large disk size (0 to disable for multi-host)"
+  default     = 0
 }
 
 variable "buildkite_queue_name" {

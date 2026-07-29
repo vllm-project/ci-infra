@@ -1,0 +1,21 @@
+[Unit]
+Description=vLLM fast CI failure Slack alert
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@@SERVICE_USER@@
+Group=@@SERVICE_GROUP@@
+WorkingDirectory=@@SKILL_DIR@@
+EnvironmentFile=@@ENV_FILE@@
+ExecStart=@@PYTHON@@ -m fast_ci_failure_alert --state-path @@STATE_PATH@@
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=@@STATE_DIR@@
+RestrictSUIDSGID=true

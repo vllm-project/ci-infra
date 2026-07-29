@@ -1,5 +1,6 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union, Literal, cast
+from copy import deepcopy
+from typing import Any, Dict, List, Literal, Optional, Union, cast
 import os
 
 from amd import (
@@ -7,9 +8,12 @@ from amd import (
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
     build_amd_step_options,
+    ensure_amd_stack_error_retry,
     get_amd_agent_queue,
-    get_rocm_base_refresh_timeout,
     get_amd_setup_commands,
+    get_amd_timeout_in_minutes,
+    get_rocm_base_refresh_env,
+    get_rocm_base_refresh_timeout,
     is_amd_gpu_device,
 )
 from step import AmdMirrorOptions, Step
@@ -30,6 +34,7 @@ PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
+EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
@@ -452,6 +457,41 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
     return diff_file == normalized or diff_file.startswith(f"{normalized}/")
 
 
+def ensure_exit_status_negative_one_retry(
+    retry: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Add a one-time retry for jobs that lose their agent."""
+    retry_policy = deepcopy(retry or {})
+    automatic = retry_policy.get("automatic")
+
+    if automatic is True:
+        return retry_policy
+
+    if automatic is None or automatic is False:
+        automatic_conditions = []
+    elif isinstance(automatic, dict):
+        if automatic.get("exit_status") == -1:
+            return retry_policy
+        automatic_conditions = [automatic]
+    elif isinstance(automatic, list):
+        automatic_conditions = automatic
+        if any(
+            isinstance(condition, dict) and condition.get("exit_status") == -1
+            for condition in automatic_conditions
+        ):
+            return retry_policy
+    else:
+        raise ValueError(
+            "retry.automatic must be a boolean, mapping, or list."
+        )
+
+    retry_policy["automatic"] = [
+        dict(EXIT_STATUS_NEGATIVE_ONE_RETRY),
+        *automatic_conditions,
+    ]
+    return retry_policy
+
+
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
@@ -523,17 +563,37 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.env = step.env
             if step.retry:
                 buildkite_step.retry = step.retry
+            buildkite_step.retry = ensure_exit_status_negative_one_retry(
+                buildkite_step.retry
+            )
             if step.key:
                 buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
-            if step.timeout_in_minutes:
-                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
-                    step.timeout_in_minutes
+            if (
+                step.device == DeviceType.AMD_CPU
+                or step.device == DeviceType.AMD_CPU.value
+            ):
+                buildkite_step.retry = ensure_amd_stack_error_retry(
+                    buildkite_step.retry
                 )
             if step.key == AMD_ROCM_BASE_REFRESH_STEP_KEY:
+                refresh_env = dict(buildkite_step.env or {})
+                refresh_env.update(get_rocm_base_refresh_env())
+                buildkite_step.env = refresh_env
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
                     get_rocm_base_refresh_timeout(list_file_diff)
+                )
+            elif (
+                step.device == DeviceType.AMD_CPU
+                or step.device == DeviceType.AMD_CPU.value
+            ):
+                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
+                    get_amd_timeout_in_minutes(step.timeout_in_minutes)
+                )
+            elif step.timeout_in_minutes:
+                buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
+                    step.timeout_in_minutes
                 )
 
             if not _step_should_run(step, list_file_diff):
@@ -606,7 +666,7 @@ def convert_group_step_to_buildkite_step(
                     no_plugin=amd_no_plugin,
                     no_gpu=amd_no_gpu,
                     num_nodes=amd.get("num_nodes", step.num_nodes),
-                    soft_fail=True,
+                    soft_fail=amd.get("soft_fail", step.soft_fail or False),
                     parallelism=step.parallelism,
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
@@ -755,9 +815,7 @@ def _create_amd_step(
         key=key,
         soft_fail=soft_fail or False,
         parallelism=parallelism,
-        timeout_in_minutes=(
-            timeout_in_minutes
-            if no_plugin
-            else _get_timeout_in_minutes(timeout_in_minutes)
+        timeout_in_minutes=_get_timeout_in_minutes(
+            get_amd_timeout_in_minutes(timeout_in_minutes)
         ),
     )

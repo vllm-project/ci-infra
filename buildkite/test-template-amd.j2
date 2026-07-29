@@ -1,6 +1,8 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set default_amd_timeout_in_minutes = 180 %}
 {% set list_file_diff = list_file_diff | replace("\r", "") | replace("\n", "|") | split("|") %}
+{% set rocm_base_refresh_needs_build = rocm_base_refresh_force == "1" or rocm_base_refresh_diff_unavailable == "1" or "docker/Dockerfile.rocm_base" in list_file_diff %}
+{% set rocm_base_refresh_timeout_in_minutes = 15 if rocm_base_refresh_skip == "1" else (540 if rocm_base_refresh_needs_build else 15) %}
 {# TODO: Re-enable after validating the ROCm debug agent setup.
 {% set rocm_debug_agent_setup = "if test -f /opt/rocm/lib/librocm-debug-agent.so.2; then export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2 && export HSA_ENABLE_DEBUG=1 && echo ROCm debug agent enabled: /opt/rocm/lib/librocm-debug-agent.so.2; else echo 'WARNING: ROCm debug agent not found at /opt/rocm/lib/librocm-debug-agent.so.2; skipping coredump setup'; fi" %}
 #}
@@ -104,8 +106,10 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         commands:
           - bash .buildkite/scripts/rocm/refresh-base-image.sh
         key: "refresh-rocm-base-amd"
-        timeout_in_minutes: {{ 540 if "docker/Dockerfile.rocm_base" in list_file_diff else 15 }}
+        timeout_in_minutes: {{ rocm_base_refresh_timeout_in_minutes }}
         env:
+          ROCM_BASE_REFRESH_SKIP: "{{ rocm_base_refresh_skip }}"
+          ROCM_BASE_REFRESH_FORCE: "{{ rocm_base_refresh_force }}"
           DOCKER_BUILDKIT: "1"
           BUILDKIT_PROGRESS: "tty"
           TERM: "xterm-256color"
@@ -119,14 +123,14 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
         commands:
           - bash .buildkite/scripts/rocm/build-ci-base.sh
         key: "ensure-ci-base-amd"
+        timeout_in_minutes: {{ default_amd_timeout_in_minutes }}
         env:
           DOCKER_BUILDKIT: "1"
           BUILDKIT_PROGRESS: "tty"
           TERM: "xterm-256color"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
-          REMOTE_VLLM: "1"
-          VLLM_BRANCH: "$BUILDKITE_COMMIT"
+          REMOTE_VLLM: "0"
 {{ amd_infra_retry('        ', true) }}
         agents:
           queue: amd-cpu
@@ -138,6 +142,7 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
           - bash .buildkite/scripts/rocm/build-test-image.sh
           - bash .buildkite/scripts/rocm/smoke-test-image.sh
         key: "image-build-amd"
+        timeout_in_minutes: {{ default_amd_timeout_in_minutes }}
         env:
           DOCKER_BUILDKIT: "1"
           BUILDKIT_PROGRESS: "tty"
@@ -156,7 +161,8 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
 
     {% set ns = namespace(blocked=1) %}
     {% set step_slug = amd_step_slug(step) %}
-    {% set step_timeout_in_minutes = step.timeout_in_minutes or default_amd_timeout_in_minutes %}
+    {% set requested_timeout_in_minutes = step.timeout_in_minutes or default_amd_timeout_in_minutes %}
+    {% set step_timeout_in_minutes = requested_timeout_in_minutes if requested_timeout_in_minutes <= default_amd_timeout_in_minutes else default_amd_timeout_in_minutes %}
     {# Non-boolean values fail closed instead of inheriting an enabled default. #}
     {% set hf_offline_retry_default = hf_offline_retry is boolean and hf_offline_retry == true %}
     {% set step_hf_offline_retry = step.hf_offline_retry %}

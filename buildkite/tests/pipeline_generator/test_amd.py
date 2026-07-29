@@ -91,7 +91,11 @@ def _rocm_base_refresh_step():
     [
         ([], 15),
         (["vllm/config.py"], 15),
+        (["run_all"], 15),
+        (["nightly"], 15),
         ([amd.AMD_ROCM_BASE_DOCKERFILE], 540),
+        (["run_all", amd.AMD_ROCM_BASE_DOCKERFILE], 540),
+        (["nightly", amd.AMD_ROCM_BASE_DOCKERFILE], 540),
     ],
 )
 def test_rocm_base_refresh_timeout_tracks_dockerfile_change(
@@ -119,6 +123,7 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkey
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
 
     assert command_step.timeout_in_minutes is None
+    assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
 
 
 @pytest.mark.parametrize(
@@ -360,7 +365,7 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert len(amd_group.steps) == 1
     assert amd_command_step.depends_on == ["image-build-amd"]
     assert amd_command_step.agents == {"queue": AgentQueue.AMD_MI325_1}
-    assert amd_command_step.soft_fail is True
+    assert amd_command_step.soft_fail is False
     assert amd_command_step.env[amd.AMD_HF_OFFLINE_RETRY_ENV] == "1"
     assert 1 not in _retry_exit_statuses(amd_command_step)
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
@@ -470,7 +475,17 @@ def test_untagged_mirror_defaults_to_dind(
     assert amd_command_step.env[amd.AMD_HF_OFFLINE_RETRY_ENV] == "1"
 
 
-def test_direct_amd_gpu_step_propagates_timeout():
+@pytest.mark.parametrize(
+    ("requested_timeout", "expected_timeout"),
+    [
+        (None, 180),
+        (90, 90),
+        (540, 180),
+    ],
+)
+def test_direct_amd_gpu_step_enforces_standard_timeout(
+    requested_timeout, expected_timeout
+):
     step = Step(
         label="AMD direct timed",
         group="Direct AMD",
@@ -479,7 +494,7 @@ def test_direct_amd_gpu_step_propagates_timeout():
         device="mi300_4",
         working_dir="/vllm-workspace/tests",
         commands=["pytest tests/foo.py"],
-        timeout_in_minutes=90,
+        timeout_in_minutes=requested_timeout,
     )
 
     group_step = _render_single_step(step)
@@ -489,10 +504,11 @@ def test_direct_amd_gpu_step_propagates_timeout():
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
-    assert command_step.timeout_in_minutes == 90
+    assert command_step.timeout_in_minutes == expected_timeout
 
 
-def test_skip_timeout_omits_direct_amd_timeout(monkeypatch):
+@pytest.mark.parametrize("no_plugin", [False, True])
+def test_skip_timeout_omits_direct_amd_timeout(monkeypatch, no_plugin):
     monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
     step = Step(
         label="AMD direct skipped timeout",
@@ -500,6 +516,7 @@ def test_skip_timeout_omits_direct_amd_timeout(monkeypatch):
         device="mi300_4",
         commands=["pytest tests/foo.py"],
         timeout_in_minutes=90,
+        no_plugin=no_plugin,
     )
 
     group_step = _render_single_step(step)
@@ -513,7 +530,16 @@ def test_skip_timeout_omits_direct_amd_timeout(monkeypatch):
     assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
 
 
-def test_amd_mirror_uses_its_own_timeout_in_minutes(fake_global_config):
+@pytest.mark.parametrize(
+    ("mirror_timeout", "expected_timeout"),
+    [
+        (75, 75),
+        (540, 180),
+    ],
+)
+def test_amd_mirror_enforces_its_own_timeout(
+    fake_global_config, mirror_timeout, expected_timeout
+):
     fake_global_config["list_file_diff"] = ["vllm/foo.py"]
     step = Step(
         label="Mirrored timed test",
@@ -529,7 +555,7 @@ def test_amd_mirror_uses_its_own_timeout_in_minutes(fake_global_config):
             "amd": {
                 "device": "mi325_1",
                 "depends_on": ["image-build-amd"],
-                "timeout_in_minutes": 75,
+                "timeout_in_minutes": mirror_timeout,
             }
         },
     )
@@ -552,10 +578,10 @@ def test_amd_mirror_uses_its_own_timeout_in_minutes(fake_global_config):
         s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
-    # The main step keeps its own timeout; the AMD mirror uses the (larger)
-    # timeout declared on the mirror block.
+    # The main step keeps its own timeout; the AMD mirror uses its declared
+    # timeout up to the standard AMD limit.
     assert default_command_step.timeout_in_minutes == 40
-    assert amd_command_step.timeout_in_minutes == 75
+    assert amd_command_step.timeout_in_minutes == expected_timeout
 
 
 def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
@@ -600,7 +626,7 @@ def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
     )
 
 
-def test_amd_mirror_without_timeout_stays_unbounded(fake_global_config):
+def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
     fake_global_config["list_file_diff"] = ["vllm/foo.py"]
     step = Step(
         label="Mirrored untimed test",
@@ -632,6 +658,6 @@ def test_amd_mirror_without_timeout_stays_unbounded(fake_global_config):
         s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
-    # An AMD mirror without its own timeout must not inherit the shorter main
-    # timeout (AMD runs slower); it stays unbounded until one is declared.
-    assert amd_command_step.timeout_in_minutes is None
+    # An AMD mirror without its own timeout does not inherit the shorter main
+    # timeout (AMD runs slower); it receives the standard AMD timeout.
+    assert amd_command_step.timeout_in_minutes == 180

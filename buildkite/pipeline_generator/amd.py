@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
@@ -20,6 +21,7 @@ AMD_NATIVE_SHM_SIZE = "16Gi"
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
     ".buildkite/scripts/hardware_ci/run-amd-test.sh",
 )
+AMD_STANDARD_TIMEOUT_MINUTES = 3 * 60
 AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
 AMD_ROCM_BASE_DOCKERFILE = "docker/Dockerfile.rocm_base"
 AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES = 9 * 60
@@ -30,9 +32,10 @@ AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
         AMD_ROCM_BASE_REFRESH_STEP_KEY,
     }
 )
+AMD_STACK_ERROR_RETRY = {"signal_reason": "stack_error", "limit": 1}
 AMD_RETRY = {
     "automatic": [
-        {"signal_reason": "stack_error", "limit": 1},
+        dict(AMD_STACK_ERROR_RETRY),
         {"exit_status": -1, "limit": 1},
         {"exit_status": 1, "limit": 1},
         {"exit_status": 128, "limit": 1},
@@ -59,15 +62,72 @@ def get_amd_retry(hf_offline_retry_enabled: bool) -> Dict[str, List[Dict[str, An
     return {"automatic": automatic}
 
 
+def get_amd_timeout_in_minutes(timeout_in_minutes: Optional[int]) -> int:
+    """Default and cap standard AMD jobs at three hours."""
+    requested_timeout = (
+        AMD_STANDARD_TIMEOUT_MINUTES
+        if timeout_in_minutes is None
+        else timeout_in_minutes
+    )
+    return min(requested_timeout, AMD_STANDARD_TIMEOUT_MINUTES)
+
+
+def ensure_amd_stack_error_retry(
+    retry: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Add the AMD stack provisioning retry without replacing YAML policy."""
+    retry_policy = deepcopy(dict(retry or {}))
+    automatic = retry_policy.get("automatic")
+
+    # Buildkite accepts a boolean, one condition, or a list of conditions.
+    # `true` already covers infrastructure failures, including stack errors.
+    if automatic is True:
+        return retry_policy
+
+    if automatic is None or automatic is False:
+        automatic_conditions = []
+    elif isinstance(automatic, Mapping):
+        if automatic.get("signal_reason") == "stack_error":
+            return retry_policy
+        automatic_conditions = [automatic]
+    elif isinstance(automatic, list):
+        automatic_conditions = automatic
+        if any(
+            isinstance(condition, Mapping)
+            and condition.get("signal_reason") == "stack_error"
+            for condition in automatic_conditions
+        ):
+            return retry_policy
+    else:
+        raise ValueError(
+            "AMD retry.automatic must be a boolean, mapping, or list."
+        )
+
+    retry_policy["automatic"] = [
+        dict(AMD_STACK_ERROR_RETRY),
+        *automatic_conditions,
+    ]
+    return retry_policy
+
+
 def get_rocm_base_refresh_timeout(list_file_diff: List[str]) -> int:
     if os.getenv("ROCM_BASE_REFRESH_SKIP", "0") == "1":
         return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
     if (
         os.getenv("ROCM_BASE_REFRESH_FORCE", "0") == "1"
+        or os.getenv("ROCM_BASE_REFRESH_DIFF_UNAVAILABLE", "0") == "1"
         or AMD_ROCM_BASE_DOCKERFILE in list_file_diff
     ):
         return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
     return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
+
+
+def get_rocm_base_refresh_env() -> Dict[str, str]:
+    """Bind the refresh script controls to the timeout decision."""
+    return {
+        "ROCM_BASE_REFRESH_SKIP": os.getenv("ROCM_BASE_REFRESH_SKIP", "0"),
+        "ROCM_BASE_REFRESH_FORCE": os.getenv("ROCM_BASE_REFRESH_FORCE", "0"),
+    }
 
 
 @dataclass(frozen=True)

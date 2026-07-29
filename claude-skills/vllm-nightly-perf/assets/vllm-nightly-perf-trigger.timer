@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the vLLM nightly perf-eval trigger at 11 PM Pacific
+
+[Timer]
+OnCalendar=*-*-* 23:00:00 America/Los_Angeles
+Persistent=true
+AccuracySec=1min
+Unit=vllm-nightly-perf-trigger.service
+
+[Install]
+WantedBy=timers.target
