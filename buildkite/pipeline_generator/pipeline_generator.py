@@ -1,14 +1,16 @@
-from typing import List
-import yaml
-import subprocess
 import os
-from step import read_steps_from_job_dir, group_steps
+import subprocess
+from typing import FrozenSet, List, Optional, Tuple
+
+import yaml
+
 from buildkite_step import (
-    convert_group_step_to_buildkite_step,
     add_precommit_dependency,
+    convert_group_step_to_buildkite_step,
     create_precommit_group_step,
 )
-from global_config import init_global_config, get_global_config
+from global_config import get_global_config, init_global_config
+from step import Step, group_steps, read_steps_from_job_dir
 
 
 class PipelineGenerator:
@@ -25,7 +27,11 @@ class PipelineGenerator:
         global_config = get_global_config()
 
         # Skip if changes are doc-only (unless RUN_ALL is set)
-        if global_config["docs_only_disable"] == "0" and not global_config["run_all"]:
+        if (
+            global_config["docs_only_disable"] == "0"
+            and not global_config["run_all"]
+            and global_config["only_step_keys"] is None
+        ):
             if is_docs_only_change(global_config["list_file_diff"]):
                 print("List file diff: ", global_config["list_file_diff"])
                 print("All changes are doc-only, skipping CI.")
@@ -45,6 +51,10 @@ class PipelineGenerator:
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+        steps, selected_step_keys = select_steps_and_dependencies(
+            steps, global_config["only_step_keys"]
+        )
+        global_config["only_step_keys"] = selected_step_keys
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
@@ -62,7 +72,6 @@ class PipelineGenerator:
                 ),
             )
 
-
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
             buildkite_steps_dict["steps"].append(
@@ -73,6 +82,42 @@ class PipelineGenerator:
                 buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
             )
         return
+
+
+def select_steps_and_dependencies(
+    steps: List[Step],
+    requested_step_keys: Optional[FrozenSet[str]],
+) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
+    if requested_step_keys is None:
+        return steps, None
+
+    steps_by_key = {}
+    for step in steps:
+        if not step.key:
+            continue
+        if step.key in steps_by_key:
+            raise ValueError(f"Duplicate CI step key: {step.key}")
+        steps_by_key[step.key] = step
+
+    missing = requested_step_keys - steps_by_key.keys()
+    if missing:
+        raise ValueError("Unknown CI step key(s): " + ", ".join(sorted(missing)))
+
+    selected_step_keys = set(requested_step_keys)
+    pending = list(requested_step_keys)
+    while pending:
+        step_key = pending.pop()
+        for dependency in steps_by_key[step_key].depends_on or []:
+            if dependency not in steps_by_key:
+                raise ValueError(
+                    f"CI step {step_key} depends on unknown step {dependency}."
+                )
+            if dependency not in selected_step_keys:
+                selected_step_keys.add(dependency)
+                pending.append(dependency)
+
+    selected = [step for step in steps if step.key in selected_step_keys]
+    return selected, frozenset(selected_step_keys)
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:
