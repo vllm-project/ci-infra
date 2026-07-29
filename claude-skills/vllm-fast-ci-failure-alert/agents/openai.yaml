@@ -1,0 +1,4 @@
+interface:
+  display_name: "vLLM Fast CI Failure Alert"
+  short_description: "Install and operate fast CI failure alerts"
+  default_prompt: "Use $vllm-fast-ci-failure-alert to install, migrate, or diagnose the portable fast CI failure alert."

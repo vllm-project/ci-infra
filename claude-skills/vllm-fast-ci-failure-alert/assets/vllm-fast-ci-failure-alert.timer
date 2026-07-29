@@ -1,0 +1,11 @@
+[Unit]
+Description=Check every 15 minutes for fast vLLM CI failures
+
+[Timer]
+OnCalendar=*-*-* *:03/15:00
+Persistent=true
+AccuracySec=30s
+Unit=vllm-fast-ci-failure-alert.service
+
+[Install]
+WantedBy=timers.target
