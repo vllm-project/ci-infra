@@ -23,8 +23,20 @@ ci-infra/
 │   └── gpu/               # GPU AMI with NVIDIA drivers
 ├── infra-k8s/             # Kubernetes-based Buildkite agent deployment
 ├── github/                # GitHub Actions runner groups (Neural Magic, IBM)
+├── claude-skills/         # Portable CI automations and investigation skills
 └── usage-stats/           # Usage telemetry collection (Vector)
 ```
+
+## CI Automations and Alerts
+
+See [claude-skills/AUTOMATIONS.md](claude-skills/AUTOMATIONS.md) for the
+source-of-truth inventory of:
+
+- portable scheduled automations and their destinations;
+- systemd services, timers, schedules, credentials, and persistent state;
+- installation, failover, validation, and operational commands;
+- host-local automations that are not portable yet;
+- investigation skills that do not run on a schedule.
 
 ## How CI Works
 
