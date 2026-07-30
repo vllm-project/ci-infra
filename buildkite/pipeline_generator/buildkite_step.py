@@ -674,10 +674,11 @@ def convert_group_step_to_buildkite_step(
                     agent_tags=amd.get("agent_tags"),
                 )
                 if not _amd_mirror_should_run(
-                    step,
-                    amd,
+                    _step_should_run(
+                        _get_amd_mirror_effective_step(step, amd),
+                        list_file_diff,
+                    ),
                     list_file_diff,
-                    _step_should_run,
                 ):
                     # Block step depends on the shared AMD image build.
                     mirror_build_dep = (
@@ -708,19 +709,12 @@ def convert_group_step_to_buildkite_step(
     return buildkite_group_steps
 
 
-def _step_should_run(
-    step: Step,
-    list_file_diff: List[str],
-    *,
-    force_auto_run: bool = False,
-) -> bool:
+def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     if os.getenv("NOAUTO") == "1":
         return False
     global_config = get_global_config()
     if global_config["only_step_keys"] is not None:
         return step.key in global_config["only_step_keys"]
-    if force_auto_run:
-        return True
     if step.key and (
         step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
     ):
@@ -741,6 +735,25 @@ def _step_should_run(
         return True
     return _source_file_dependencies_match(
         step.source_file_dependencies, list_file_diff
+    )
+
+
+def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
+    source_file_dependencies = list(amd.get("source_file_dependencies") or [])
+    for dependency in step.source_file_dependencies or []:
+        if dependency not in source_file_dependencies:
+            source_file_dependencies.append(dependency)
+    if not source_file_dependencies:
+        source_file_dependencies = None
+
+    return step.model_copy(
+        update={
+            "key": None,
+            "device": amd["device"],
+            "dind": amd.get("dind", True),
+            "optional": amd.get("optional", step.optional),
+            "source_file_dependencies": source_file_dependencies,
+        }
     )
 
 

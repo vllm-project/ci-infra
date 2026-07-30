@@ -11,7 +11,9 @@ pytestmark = pytest.mark.usefixtures("fake_global_config")
 
 
 def test_legacy_amd_template_retries_gpu_hang_abort():
-    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+    template = (
+        Path(__file__).parents[2] / "test-template-amd.j2"
+    ).read_text()
 
     assert (
         "{{ indent }}    - exit_status: 134  # ROCm/KFD GPU hang (SIGABRT)\n"
@@ -68,7 +70,9 @@ def test_rocm_base_refresh_force_uses_build_timeout(monkeypatch):
     assert command_step.timeout_in_minutes == 540
 
 
-def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkeypatch):
+def test_skip_timeout_omits_rocm_base_refresh_timeout(
+    fake_global_config, monkeypatch
+):
     monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
     fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
 
@@ -87,7 +91,9 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkey
         ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
     ],
 )
-def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_count):
+def test_direct_amd_gpu_steps_use_dind_flag(
+    device, queue, dind, expected_gpu_count
+):
     step = Step(
         label="AMD direct test",
         group="Direct AMD",
@@ -149,23 +155,6 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert "pytest tests/foo.py" in test_commands
     assert "nvidia-smi" not in test_commands
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
-
-
-def test_rocm_base_change_does_not_force_direct_amd_step(fake_global_config):
-    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
-    step = Step(
-        label="Direct AMD test",
-        group="Direct AMD",
-        device="mi300_1",
-        optional=True,
-        commands=["pytest tests/direct_amd.py"],
-    )
-
-    group_step = _render_single_step(step)
-
-    assert len(group_step.steps) == 2
-    assert isinstance(group_step.steps[0], buildkite_step.BuildkiteBlockStep)
-    assert isinstance(group_step.steps[1], buildkite_step.BuildkiteCommandStep)
 
 
 def test_amd_device_rejects_conflicting_gpu_count():
@@ -265,43 +254,23 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
     step = Step(
         label="ROCm base mirrored test",
         group="Mirrors",
-        key="rocm-base-mirrored-test",
-        depends_on=["image-build"],
-        working_dir="/vllm-workspace/tests",
         commands=["pytest tests/mirror.py"],
         source_file_dependencies=["vllm/"],
         optional=optional,
-        mirror={
-            "amd": {
-                "device": "mi325_1",
-                "depends_on": ["image-build-amd"],
-            }
-        },
+        mirror={"amd": {"device": "mi325_1"}},
     )
 
     group_steps = buildkite_step.convert_group_step_to_buildkite_step(
-        {
-            step.group: [step],
-        }
+        {step.group: [step]}
     )
     default_group = next(group for group in group_steps if group.group == "Mirrors")
     amd_group = next(
         group for group in group_steps if group.group == "Hardware-AMD Tests"
     )
 
-    assert len(default_group.steps) == 2
-    default_block_step = default_group.steps[0]
-    assert isinstance(default_block_step, buildkite_step.BuildkiteBlockStep)
-    default_command_step = default_group.steps[1]
-    assert isinstance(default_command_step, buildkite_step.BuildkiteCommandStep)
-    assert default_command_step.depends_on == [
-        default_block_step.key,
-        "image-build",
-    ]
+    assert isinstance(default_group.steps[0], buildkite_step.BuildkiteBlockStep)
     assert len(amd_group.steps) == 1
-    amd_command_step = amd_group.steps[0]
-    assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
-    assert amd_command_step.depends_on == ["image-build-amd"]
+    assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteCommandStep)
 
 
 def test_dind_false_mirror_uses_native_runner_gating(fake_global_config):

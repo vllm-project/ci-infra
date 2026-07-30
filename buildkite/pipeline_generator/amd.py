@@ -1,10 +1,9 @@
 import os
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional, TypedDict
+from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 from constants import AgentQueue, DeviceType
-from step import Step
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
@@ -86,7 +85,9 @@ def ensure_amd_stack_error_retry(
         ):
             return retry_policy
     else:
-        raise ValueError("AMD retry.automatic must be a boolean, mapping, or list.")
+        raise ValueError(
+            "AMD retry.automatic must be a boolean, mapping, or list."
+        )
 
     retry_policy["automatic"] = [
         dict(AMD_STACK_ERROR_RETRY),
@@ -107,35 +108,12 @@ def get_rocm_base_refresh_timeout(list_file_diff: List[str]) -> int:
     return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
 
 
-def _get_amd_mirror_effective_step(step: Step, amd: Mapping[str, Any]) -> Step:
-    source_file_dependencies = list(amd.get("source_file_dependencies") or [])
-    for dependency in step.source_file_dependencies or []:
-        if dependency not in source_file_dependencies:
-            source_file_dependencies.append(dependency)
-    if not source_file_dependencies:
-        source_file_dependencies = None
-
-    return step.model_copy(
-        update={
-            "key": None,
-            "device": amd["device"],
-            "dind": amd.get("dind", True),
-            "optional": amd.get("optional", step.optional),
-            "source_file_dependencies": source_file_dependencies,
-        }
-    )
-
-
 def _amd_mirror_should_run(
-    step: Step,
-    amd: Mapping[str, Any],
-    list_file_diff: List[str],
-    step_should_run: Callable[..., bool],
+    default_should_run: bool, list_file_diff: List[str]
 ) -> bool:
-    return step_should_run(
-        _get_amd_mirror_effective_step(step, amd),
-        list_file_diff,
-        force_auto_run=AMD_ROCM_BASE_DOCKERFILE in list_file_diff,
+    return default_should_run or (
+        os.getenv("NOAUTO") != "1"
+        and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
     )
 
 
