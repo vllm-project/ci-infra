@@ -88,12 +88,13 @@ job.
 
 Set `VLLM_CI_DISABLE_HF_OFFLINE_RETRY=1` to disable the cohort in newly
 generated pipelines. The vLLM runner also reads this switch at job start, so a
-runtime agent or repository hook can disable queued or newly started jobs whose
-pipeline was already generated. The runner then clears the variable before
-running commands. Changing only a pipeline-generation setting does not mutate
-an existing build, and the switch cannot change a command that is already
-running. It accepts only `0` or `1`; invalid values stop pipeline generation or
-job startup.
+runtime agent or repository hook can disable the client-mode override for
+queued or newly started jobs whose pipeline was already generated. A runtime
+switch cannot remove an exit-status retry already serialized into that
+pipeline; regenerate the pipeline to remove the retry rule. The runner clears
+the variable before running commands. The switch cannot change a command that
+is already running. It accepts only `0` or `1`; invalid values stop pipeline
+generation or job startup.
 
 ## Environment Variables
 
