@@ -73,16 +73,18 @@ This policy is off by default. A pipeline must set the strict boolean
 `amd_hf_offline_retry: true`, and each selected direct AMD step must also set
 `hf_offline_retry: true` (or `mirror.amd.hf_offline_retry: true` for a mirror).
 Only single-node jobs using `run-amd-test.sh` are eligible; direct-command
-(`no_plugin`), multi-node, nightly, and torch-nightly jobs remain disabled.
+(`no_plugin`) and multi-node jobs remain disabled.
 
-When `BUILDKITE_RETRY_COUNT=0`, the vLLM runner sets the Hugging Face Hub and
-Transformers cache-only flags. This does not isolate the job's network or block
-direct HTTP and other clients. Exit status `1` triggers the intended Buildkite
-fallback in a fresh job. Conservatively, any retry count greater than zero
-(including a manual, infrastructure, or other automatic retry) lets those
-Hugging Face clients use the network. Statuses `2` and `123` are not retry
-signals for this policy. At generation time, the pipeline emits the resolved
-`VLLM_CI_HF_OFFLINE_RETRY=1` or `0` on every wrapper-backed AMD job.
+On the first presubmit attempt, the vLLM runner sets the Hugging Face Hub and
+Transformers cache-only flags. Scheduled `NIGHTLY=1` and `TORCH_NIGHTLY=1`
+attempts start online so their caches can refresh. This does not isolate the
+job's network or block direct HTTP and other clients. Exit status `1` triggers
+the intended Buildkite fallback in a fresh job. Conservatively, any retry count
+greater than zero (including a manual, infrastructure, or other automatic
+retry) lets those Hugging Face clients use the network. Statuses `2` and `123`
+are not retry signals for this policy. At generation time, the pipeline emits
+the resolved `VLLM_CI_HF_OFFLINE_RETRY=1` or `0` on every wrapper-backed AMD
+job.
 
 Set `VLLM_CI_DISABLE_HF_OFFLINE_RETRY=1` to disable the cohort in newly
 generated pipelines. The vLLM runner also reads this switch at job start, so a

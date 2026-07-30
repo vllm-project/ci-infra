@@ -110,11 +110,11 @@ HF_RETRY_CASES = {
     ),
     "nightly": (
         {"capability": True, "step_request": True, "nightly": "1"},
-        "0",
+        "1",
     ),
     "torch-nightly": (
         {"capability": True, "step_request": True, "torch_nightly": "1"},
-        "0",
+        "1",
     ),
     "kill-switch": (
         {"capability": True, "step_request": True, "kill_switch": "1"},

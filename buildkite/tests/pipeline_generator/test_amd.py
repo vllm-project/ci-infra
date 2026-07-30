@@ -255,13 +255,13 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         pytest.param(
             {"amd_hf_offline_retry": True, "nightly": "1"},
             True,
-            "0",
+            "1",
             id="nightly",
         ),
         pytest.param(
             {"amd_hf_offline_retry": True, "torch_nightly": "1"},
             True,
-            "0",
+            "1",
             id="torch-nightly",
         ),
         pytest.param(

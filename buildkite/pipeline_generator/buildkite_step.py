@@ -803,8 +803,6 @@ def _create_amd_step(
         hf_offline_retry_disabled=global_config.get(
             "disable_hf_offline_retry", False
         ),
-        nightly=global_config.get("nightly", "0") == "1",
-        torch_nightly=global_config.get("torch_nightly", "0") == "1",
     )
     return BuildkiteCommandStep(
         **options,

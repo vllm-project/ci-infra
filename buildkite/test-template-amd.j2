@@ -168,14 +168,12 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
     {% set hf_offline_retry_capability = amd_hf_offline_retry is boolean and amd_hf_offline_retry == true %}
     {% set hf_offline_retry_requested = step.hf_offline_retry is boolean and step.hf_offline_retry == true %}
     {% set hf_offline_retry_kill_switch_allows = vllm_ci_disable_hf_offline_retry == "0" %}
-    {# The pilot covers only ordinary single-node wrapper jobs. Scheduled
-       nightly variants stay outside the cohort. #}
+    {# The pilot covers only single-node wrapper jobs. The vLLM runner keeps
+       scheduled jobs online and applies cache-only mode to presubmits. #}
     {% set hf_offline_retry_enabled =
         hf_offline_retry_capability
         and hf_offline_retry_requested
         and hf_offline_retry_kill_switch_allows
-        and nightly != "1"
-        and torch_nightly != "1"
         and not step.no_plugin
         and not (step.num_nodes and step.num_nodes >= 2)
     %}

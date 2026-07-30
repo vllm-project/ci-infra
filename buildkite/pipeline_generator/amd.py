@@ -54,8 +54,6 @@ def resolve_amd_hf_offline_retry(
     disabled: bool,
     no_plugin: bool,
     num_nodes: Optional[int],
-    nightly: bool,
-    torch_nightly: bool,
 ) -> bool:
     """Resolve the narrowly scoped AMD Hugging Face retry cohort."""
     bool_fields = {
@@ -63,8 +61,6 @@ def resolve_amd_hf_offline_retry(
         "requested": requested,
         "disabled": disabled,
         "no_plugin": no_plugin,
-        "nightly": nightly,
-        "torch_nightly": torch_nightly,
     }
     for name, value in bool_fields.items():
         if type(value) is not bool:
@@ -76,8 +72,6 @@ def resolve_amd_hf_offline_retry(
         and not disabled
         and not no_plugin
         and not (num_nodes and num_nodes >= 2)
-        and not nightly
-        and not torch_nightly
     )
 
 
@@ -439,8 +433,6 @@ def build_amd_step_options(
     hf_offline_retry: bool,
     hf_offline_retry_capability: bool,
     hf_offline_retry_disabled: bool,
-    nightly: bool,
-    torch_nightly: bool,
 ) -> AmdStepOptions:
     config = get_amd_device_config(device)
     if config is None:
@@ -466,8 +458,6 @@ def build_amd_step_options(
         disabled=hf_offline_retry_disabled,
         no_plugin=no_plugin,
         num_nodes=num_nodes,
-        nightly=nightly,
-        torch_nightly=torch_nightly,
     )
     plugins = None
     if not dind:
