@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import buildkite_step
+from pipeline_generator import select_steps_and_dependencies
 from step import Step, group_steps, read_steps_from_job_dir
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
@@ -13,9 +14,11 @@ TEST_JOB_DIR = Path(__file__).resolve().parent / "test_files" / "test_jobs"
 
 
 def _render_single_step(step):
-    return buildkite_step.convert_group_step_to_buildkite_step({
-        step.group: [step],
-    })[0]
+    return buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )[0]
 
 
 def test_read_steps_from_job_dir():
@@ -50,6 +53,68 @@ def test_group_steps_sorts_steps_within_each_group():
         "Test C",
         "Test D",
     ]
+
+
+def test_selected_steps_include_transitive_dependencies():
+    steps = [
+        Step(label="Image", key="image-build", commands=["build"]),
+        Step(
+            label="Prepare",
+            key="prepare",
+            depends_on=["image-build"],
+            commands=["prepare"],
+        ),
+        Step(
+            label="Test",
+            key="test",
+            depends_on=["prepare"],
+            commands=["test"],
+        ),
+        Step(label="Other", key="other", commands=["other"]),
+    ]
+
+    selected, selected_keys = select_steps_and_dependencies(steps, frozenset({"test"}))
+
+    assert [step.key for step in selected] == [
+        "image-build",
+        "prepare",
+        "test",
+    ]
+    assert selected_keys == frozenset({"image-build", "prepare", "test"})
+
+
+def test_selected_steps_reject_unknown_key():
+    with pytest.raises(ValueError, match="Unknown CI step key.*missing"):
+        select_steps_and_dependencies(
+            [Step(label="Test", key="test", commands=["test"])],
+            frozenset({"missing"}),
+        )
+
+
+def test_selected_steps_reject_unknown_dependency():
+    step = Step(
+        label="Test",
+        key="test",
+        depends_on=["missing"],
+        commands=["test"],
+    )
+
+    with pytest.raises(
+        ValueError, match="CI step test depends on unknown step missing"
+    ):
+        select_steps_and_dependencies([step], frozenset({"test"}))
+
+
+def test_selected_step_runs_without_source_match(fake_global_config):
+    fake_global_config["only_step_keys"] = frozenset({"selected"})
+    step = Step(
+        label="Selected",
+        key="selected",
+        source_file_dependencies=["unrelated.py"],
+        commands=["test"],
+    )
+
+    assert buildkite_step._step_should_run(step, ["changed.py"])
 
 
 def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):
@@ -134,10 +199,10 @@ def test_multi_gpu_step_dumps_nvidia_topology():
 
     commands = buildkite_step._prepare_commands(step, variables_to_inject={})
 
-    assert '(command nvidia-smi topo -m || true)' in commands
+    assert "(command nvidia-smi topo -m || true)" in commands
     # Topology dump comes after the base GPU info and before coredump setup.
-    topo_index = commands.index('(command nvidia-smi topo -m || true)')
-    smi_index = commands.index('(command nvidia-smi || true)')
+    topo_index = commands.index("(command nvidia-smi topo -m || true)")
+    smi_index = commands.index("(command nvidia-smi || true)")
     assert smi_index < topo_index
 
 
@@ -156,7 +221,7 @@ def test_multi_node_step_dumps_nvidia_topology():
 
     commands = buildkite_step._prepare_commands(step, variables_to_inject={})
 
-    assert '(command nvidia-smi topo -m || true)' in commands
+    assert "(command nvidia-smi topo -m || true)" in commands
 
 
 def test_single_gpu_step_skips_nvidia_topology():
@@ -174,8 +239,8 @@ def test_single_gpu_step_skips_nvidia_topology():
     commands = buildkite_step._prepare_commands(step, variables_to_inject={})
 
     # Base GPU info is still emitted, but the topology dump is multi-GPU only.
-    assert '(command nvidia-smi || true)' in commands
-    assert '(command nvidia-smi topo -m || true)' not in commands
+    assert "(command nvidia-smi || true)" in commands
+    assert "(command nvidia-smi topo -m || true)" not in commands
 
 
 def test_torch_nightly_flag_no_separate_group(fake_global_config):
@@ -194,31 +259,36 @@ def test_torch_nightly_flag_no_separate_group(fake_global_config):
         device="h200_18gb",
     )
 
-    group_steps = buildkite_step.convert_group_step_to_buildkite_step({
-        step.group: [step],
-    })
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )
 
     # No dedicated torch-nightly group is synthesized anymore.
-    assert not any(
-        g.group == "vLLM Against PyTorch Nightly" for g in group_steps
-    )
+    assert not any(g.group == "vLLM Against PyTorch Nightly" for g in group_steps)
 
     # The step stays in its normal group and is built once (no nightly duplicate).
     normal_group = next(g for g in group_steps if g.group == "Some Group")
     labels = [
-        s.label for s in normal_group.steps
+        s.label
+        for s in normal_group.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     ]
     assert "Untagged test" in labels
     assert not any(lbl.startswith("Torch Nightly ") for lbl in labels)
 
 
-def test_image_tag_matches_get_image_and_latest_suppressed_on_nightly(fake_global_config):
+def test_image_tag_matches_get_image_and_latest_suppressed_on_nightly(
+    fake_global_config,
+):
     fake_global_config["branch"] = "main"
     # Build target ($IMAGE_TAG) mirrors what test steps pull (get_image()).
     vars_ = buildkite_step._get_variables_to_inject()
     assert vars_["$IMAGE_TAG"] == buildkite_step.get_image()
-    assert vars_["$IMAGE_TAG_LATEST"] == "example.com/vllm/vllm-ci-postmerge-repo:latest"
+    assert (
+        vars_["$IMAGE_TAG_LATEST"] == "example.com/vllm/vllm-ci-postmerge-repo:latest"
+    )
 
     # A nightly run must not publish :latest (and still mirrors get_image()).
     fake_global_config["torch_nightly"] = "1"
@@ -241,7 +311,8 @@ def test_timeout_in_minutes_propagates_to_command_step():
 
     group_step = _render_single_step(step)
     command_step = next(
-        s for s in group_step.steps
+        s
+        for s in group_step.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
@@ -260,7 +331,8 @@ def test_skip_timeout_omits_timeout_from_command_step(monkeypatch):
 
     group_step = _render_single_step(step)
     command_step = next(
-        s for s in group_step.steps
+        s
+        for s in group_step.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
@@ -281,7 +353,8 @@ def test_missing_timeout_in_minutes_is_omitted_from_pipeline():
 
     group_step = _render_single_step(step)
     command_step = next(
-        s for s in group_step.steps
+        s
+        for s in group_step.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 

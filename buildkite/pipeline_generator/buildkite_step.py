@@ -17,7 +17,11 @@ from amd import (
     is_amd_gpu_device,
 )
 from step import Step
-from utils_lib.docker_utils import get_image, get_ecr_cache_registry, get_torch_nightly_image
+from utils_lib.docker_utils import (
+    get_image,
+    get_ecr_cache_registry,
+    get_torch_nightly_image,
+)
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import get_docker_plugin
@@ -101,9 +105,7 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
     )
-    return BuildkiteGroupStep(
-        group="GitHub pre-commit check", steps=[precommit_step]
-    )
+    return BuildkiteGroupStep(group="GitHub pre-commit check", steps=[precommit_step])
 
 
 def add_precommit_dependency(
@@ -197,7 +199,11 @@ class BuildkiteGroupStep(BaseModel):
 
 def _get_step_plugin(step: Step):
     # Use K8s plugin
-    use_cpu = step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM)
+    use_cpu = step.device in (
+        DeviceType.CPU,
+        DeviceType.CPU_SMALL,
+        DeviceType.CPU_MEDIUM,
+    )
     use_arm64 = step.device == DeviceType.DGX_SPARK
     if step.device in [
         DeviceType.H100.value,
@@ -285,7 +291,11 @@ def _get_variables_to_inject() -> Dict[str, str]:
     cache_from_tag, cache_to_tag = get_ecr_cache_registry()
     registries = global_config["registries"]
     repositories = global_config["repositories"]
-    repo = repositories["main"] if global_config["branch"] == "main" else repositories["premerge"]
+    repo = (
+        repositories["main"]
+        if global_config["branch"] == "main"
+        else repositories["premerge"]
+    )
 
     # Build target ($IMAGE_TAG) must match what the test steps pull (get_image()).
     # get_image() already switches to the dedicated -torch-nightly tag when
@@ -370,8 +380,10 @@ def _prepare_commands(
     if step.commands:
         for i, cmd in enumerate(step.commands):
             # Sanitize command preview for use in echo (remove quotes and special chars)
-            preview = cmd[:80].replace("'", "").replace('"', '').replace('$', '')
-            commands.append(f"echo '+++ :test_tube: Command ({i+1}/{len(step.commands)}): {preview}'")
+            preview = cmd[:80].replace("'", "").replace('"', "").replace("$", "")
+            commands.append(
+                f"echo '+++ :test_tube: Command ({i + 1}/{len(step.commands)}): {preview}'"
+            )
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
@@ -391,9 +403,10 @@ def _prepare_commands(
                 continue
             # Use regex to only replace whole variable matches (not substrings)
             import re
+
             # Escape variable (may have $ or special characters)
             pattern = re.escape(variable)
-            command = re.sub(pattern + r'\b', value, command)
+            command = re.sub(pattern + r"\b", value, command)
         final_commands.append(command)
 
     if step.working_dir and not (
@@ -468,9 +481,7 @@ def ensure_exit_status_negative_one_retry(
         ):
             return retry_policy
     else:
-        raise ValueError(
-            "retry.automatic must be a boolean, mapping, or list."
-        )
+        raise ValueError("retry.automatic must be a boolean, mapping, or list.")
 
     retry_policy["automatic"] = [
         dict(EXIT_STATUS_NEGATIVE_ONE_RETRY),
@@ -602,7 +613,11 @@ def convert_group_step_to_buildkite_step(
             group_steps_list.append(buildkite_step)
 
             # Create AMD mirror step and its block step if specified/applicable
-            if step.mirror and step.mirror.get("amd"):
+            if (
+                step.mirror
+                and step.mirror.get("amd")
+                and global_config["only_step_keys"] is None
+            ):
                 amd = step.mirror["amd"]
                 amd_no_plugin = amd.get("no_plugin", False)
                 amd_no_gpu = amd.get("no_gpu", step.no_gpu or False)
@@ -693,6 +708,8 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     if os.getenv("NOAUTO") == "1":
         return False
     global_config = get_global_config()
+    if global_config["only_step_keys"] is not None:
+        return step.key in global_config["only_step_keys"]
     if step.key and (
         step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
     ):
