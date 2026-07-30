@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 import amd
@@ -6,6 +8,17 @@ from constants import AgentQueue
 from step import Step
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
+
+
+def test_legacy_amd_template_retries_gpu_hang_abort():
+    template = (
+        Path(__file__).parents[2] / "test-template-amd.j2"
+    ).read_text()
+
+    assert (
+        "{{ indent }}    - exit_status: 134  # ROCm/KFD GPU hang (SIGABRT)\n"
+        "{{ indent }}      limit: 1"
+    ) in template
 
 
 def _render_single_step(step):
@@ -225,10 +238,12 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
 
     assert command_step.env[amd.AMD_HF_OFFLINE_RETRY_ENV] == "0"
     _assert_exact_amd_retry(command_step)
+    assert len(command_step.retry["automatic"]) == 7
     assert command_step.retry["automatic"][0] == {
         "signal_reason": "stack_error",
         "limit": 1,
     }
+    assert {"exit_status": 134, "limit": 1} in command_step.retry["automatic"]
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")

@@ -15,6 +15,7 @@ BASE_RETRY = [
     {"signal_reason": "agent_stop", "limit": 1},
     {"signal_reason": "agent_refused", "limit": 1},
     {"exit_status": -1, "signal_reason": "none", "limit": 1},
+    {"exit_status": 134, "limit": 1},
 ]
 ENABLED_RETRY = [
     BASE_RETRY[0],

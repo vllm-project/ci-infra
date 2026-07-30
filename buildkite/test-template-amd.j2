@@ -24,6 +24,8 @@
 {{ indent }}    - exit_status: -1  # Lost contact with the running agent
 {{ indent }}      signal_reason: none
 {{ indent }}      limit: 1
+{{ indent }}    - exit_status: 134  # ROCm/KFD GPU hang (SIGABRT)
+{{ indent }}      limit: 1
 {%- endmacro %}
 
 {% macro amd_step_slug(step) -%}
