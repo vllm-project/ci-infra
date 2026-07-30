@@ -117,6 +117,17 @@ def test_selected_step_runs_without_source_match(fake_global_config):
     assert buildkite_step._step_should_run(step, ["changed.py"])
 
 
+def test_noauto_blocks_forced_steps(monkeypatch):
+    monkeypatch.setenv("NOAUTO", "1")
+    step = Step(label="Forced", commands=["test"])
+
+    assert not buildkite_step._step_should_run(
+        step,
+        ["changed.py"],
+        force_auto_run=True,
+    )
+
+
 def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):
     monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
     step = Step(
