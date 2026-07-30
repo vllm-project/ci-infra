@@ -257,7 +257,7 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
         commands=["pytest tests/mirror.py"],
         source_file_dependencies=["vllm/"],
         optional=optional,
-        mirror={"amd": {"device": "mi325_1"}},
+        mirror={"amd": {"device": "mi300_1"}},
     )
 
     group_steps = buildkite_step.convert_group_step_to_buildkite_step(
