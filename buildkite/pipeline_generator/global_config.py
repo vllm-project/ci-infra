@@ -1,8 +1,15 @@
-from typing import TypedDict, List, Dict, Optional
-import yaml
+import json
 import os
 import re
+from typing import Dict, FrozenSet, List, Optional, TypedDict
+
+import yaml
+
 from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels
+
+
+ONLY_STEP_KEYS_ENV_VAR = "VLLM_CI_ONLY_STEP_KEYS"
+STEP_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 class GlobalConfig(TypedDict):
@@ -24,6 +31,7 @@ class GlobalConfig(TypedDict):
     fail_fast: bool = False
     amd_hf_offline_retry: bool = False
     disable_hf_offline_retry: bool = False
+    only_step_keys: Optional[FrozenSet[str]] = None
 
 
 config = None
@@ -46,9 +54,7 @@ def init_global_config(pipeline_config_path: str):
         return
     pipeline_config = yaml.safe_load(open(pipeline_config_path, "r"))
     _validate_pipeline_config(pipeline_config)
-    disable_hf_offline_retry = _read_strict_bool_env(
-        HF_OFFLINE_RETRY_KILL_SWITCH_ENV
-    )
+    disable_hf_offline_retry = _read_strict_bool_env(HF_OFFLINE_RETRY_KILL_SWITCH_ENV)
 
     if "github_repo_name" not in pipeline_config:
         pipeline_config["github_repo_name"] = "vllm-project/vllm"
@@ -94,6 +100,7 @@ def init_global_config(pipeline_config_path: str):
             HF_OFFLINE_RETRY_CAPABILITY_KEY, False
         ),
         disable_hf_offline_retry=disable_hf_offline_retry,
+        only_step_keys=_parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR)),
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
@@ -108,6 +115,27 @@ def get_global_config():
     if not config:
         raise ValueError("Global config not initialized")
     return config
+
+
+def _parse_only_step_keys(value: Optional[str]) -> Optional[FrozenSet[str]]:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"{ONLY_STEP_KEYS_ENV_VAR} must be a JSON array of step keys."
+        ) from error
+    if not isinstance(parsed, list) or not parsed:
+        raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} must be a non-empty JSON array.")
+    if any(
+        not isinstance(key, str) or not STEP_KEY_PATTERN.fullmatch(key)
+        for key in parsed
+    ):
+        raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} contains an invalid step key.")
+    if len(set(parsed)) != len(parsed):
+        raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} contains duplicate step keys.")
+    return frozenset(parsed)
 
 
 def _validate_pipeline_config(pipeline_config: Dict):

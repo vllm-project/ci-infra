@@ -110,3 +110,6 @@ The generator relies on several environment variables, typically provided by Bui
 *   `VLLM_CI_DISABLE_HF_OFFLINE_RETRY`: Strict `0`/`1` emergency switch read during pipeline generation and AMD job startup.
 *   `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.
 *   `VLLM_USE_PRECOMPILED`: Set to "1" to force use of precompiled wheels.
+*   `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
+    set, the generator emits those steps and their transitive dependencies,
+    ignoring normal source-file selection. Unknown keys fail generation.

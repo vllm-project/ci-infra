@@ -27,6 +27,7 @@ def fake_global_config(monkeypatch):
         "run_all": False,
         "list_file_diff": [],
         "fail_fast": False,
+        "only_step_keys": None,
     }
     monkeypatch.setattr(step_module, "get_global_config", lambda: config)
     monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
