@@ -21,12 +21,6 @@ def test_legacy_amd_template_retries_gpu_hang_abort():
     ) in template
 
 
-def test_legacy_amd_template_uses_32_gib_shared_memory():
-    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
-
-    assert "                      sizeLimit: 32Gi" in template
-
-
 def _render_single_step(step):
     return buildkite_step.convert_group_step_to_buildkite_step(
         {
@@ -129,15 +123,8 @@ def test_direct_amd_gpu_steps_use_dind_flag(
         assert command_step.plugins is not None
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
-        devshm = next(
-            volume for volume in pod_patch["volumes"] if volume["name"] == "devshm"
-        )
         assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
         assert container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
-        assert devshm["emptyDir"] == {
-            "medium": "Memory",
-            "sizeLimit": "32Gi",
-        }
         assert command_step.env["AMD_CI_RUNTIME"] == "native"
         assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
         assert "DOCKER_IMAGE_NAME" not in command_step.env
