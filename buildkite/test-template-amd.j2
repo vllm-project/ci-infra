@@ -94,7 +94,7 @@ rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
                   - name: devshm
                     emptyDir:
                       medium: Memory
-                      sizeLimit: 16Gi
+                      sizeLimit: 32Gi
                   - name: vllm-workspace
                     emptyDir: {}
 {%- endmacro %}

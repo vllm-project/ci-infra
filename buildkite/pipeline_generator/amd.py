@@ -16,7 +16,7 @@ AMD_RESULTS_ROOT = "/home/buildkite-agent/huggingface/amd-ci-results"
 AMD_HF_HOME = "/home/buildkite-agent/huggingface"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_WORKSPACE_VOLUME = "vllm-workspace"
-AMD_NATIVE_SHM_SIZE = "16Gi"
+AMD_NATIVE_SHM_SIZE = "32Gi"
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
     ".buildkite/scripts/hardware_ci/run-amd-test.sh",
 )
