@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -13,6 +14,7 @@ from vllm_perf_eval import (
     build_slack_payload,
     calculate_statistic,
     run_adopt,
+    run_report,
     run_trigger,
 )
 
@@ -119,6 +121,107 @@ def test_adopt_records_only_the_latest_reportable_build(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="not the latest reportable build"):
         run_adopt(tmp_path, build_number=308)
+
+
+def test_report_uses_full_comparison_when_nightly_perf_preview_omits_throughput(
+    monkeypatch, tmp_path
+):
+    commit = "c" * 40
+    previous_commit = "b" * 40
+    model = "org/model"
+    image = f"public.ecr.aws/vllm-release-repo:{commit}-x86_64"
+    previous_image = f"public.ecr.aws/vllm-release-repo:{previous_commit}-x86_64"
+    current = {
+        "commit": commit,
+        "date": "2026-08-03T06:00:00Z",
+        "sourceImage": image,
+        "perfEval": {
+            "build": {
+                "number": "361",
+                "state": "failed",
+                "web_url": "https://buildkite.com/vllm/perf-eval/builds/361",
+            }
+        },
+        "deltaVsPrev": {
+            "prevSourceImage": previous_image,
+            "perfDeltas": [
+                {
+                    "model": model,
+                    "metric": "p99_ttft",
+                    "key": f"{model}|h200|8|128|8192|1024|fp8|p99_ttft",
+                }
+            ],
+            "evalDeltas": [],
+        },
+    }
+    previous = {
+        "commit": previous_commit,
+        "sourceImage": previous_image,
+        "perfEval": {"build": {"number": "360", "state": "failed"}},
+    }
+    throughput_delta = {
+        "model": model,
+        "metric": "tput_per_gpu",
+        "key": f"{model}|h200|8|128|8192|1024|fp8|tput_per_gpu",
+        "dimension": "h200 - TP 8 - conc 128 - ISL 8192 - OSL 1024 - fp8",
+        "candidateRun": "2026-08-03 09:34:32",
+        "candidateValue": 105.0,
+        "higherIsBetter": True,
+    }
+
+    def fake_request(url, **_kwargs):
+        if url.endswith("/nightly?limit=30"):
+            return {"nightlies": [current, previous]}
+        if "/compare?" in url:
+            query = parse_qs(urlparse(url).query)
+            assert query == {
+                "baseline": [previous_image],
+                "candidate": [image],
+                "device": ["h200"],
+            }
+            return {"perf": {"deltas": [throughput_delta]}}
+        raise AssertionError(f"Unexpected dashboard URL: {url}")
+
+    history = [
+        {
+            "model": model,
+            "device": "h200",
+            "tp": "8",
+            "conc": "128",
+            "isl": "8192",
+            "osl": "1024",
+            "precision": "fp8",
+            "date": "2026-08-02 09:34:32",
+            "image": previous_image,
+            "tput_per_gpu": 100.0,
+        },
+        {
+            "model": model,
+            "device": "h200",
+            "tp": "8",
+            "conc": "128",
+            "isl": "8192",
+            "osl": "1024",
+            "precision": "fp8",
+            "date": "2026-08-03 09:34:32",
+            "image": image,
+            "tput_per_gpu": 105.0,
+        },
+    ]
+
+    monkeypatch.setattr("vllm_perf_eval._request", fake_request)
+    monkeypatch.setattr(
+        "vllm_perf_eval._load_histories",
+        lambda models: {model: (history, [])} if models == {model} else {},
+    )
+
+    assert run_report(tmp_path, dry_run=True) == 0
+
+    rows = json.loads((tmp_path / "vllm_perf_eval_report_rows.json").read_text())
+    assert rows["build_number"] == 361
+    assert len(rows["perf"]) == 1
+    assert rows["perf"][0]["model"] == model
+    assert rows["perf"][0]["current"] == 105.0
 
 
 def test_trigger_accepts_failed_release_when_cuda_image_job_passed(
