@@ -297,6 +297,27 @@ def _load_histories(models: set[str]) -> dict[str, HistoryRows]:
     return histories
 
 
+def _load_full_perf_deltas(current: dict[str, Any]) -> list[dict[str, Any]]:
+    """Load complete H200 deltas; the nightly endpoint contains an 8-row UI preview."""
+    source_image = str(current.get("sourceImage", ""))
+    previous_image = str(current.get("deltaVsPrev", {}).get("prevSourceImage", ""))
+    if not source_image or not previous_image:
+        raise RuntimeError("Nightly data is missing perf comparison image references")
+
+    query = urllib.parse.urlencode(
+        {
+            "baseline": previous_image,
+            "candidate": source_image,
+            "device": "h200",
+        }
+    )
+    comparison = _request(f"{DASHBOARD_API}/compare?{query}")
+    deltas = comparison.get("perf", {}).get("deltas")
+    if not isinstance(deltas, list):
+        raise RuntimeError("Dashboard comparison is missing full perf deltas")
+    return deltas
+
+
 def _current_observation(delta: dict[str, Any], commit: str) -> Observation:
     return Observation(
         commit=commit,
@@ -306,13 +327,18 @@ def _current_observation(delta: dict[str, Any], commit: str) -> Observation:
 
 
 def _make_rows(
-    current: dict[str, Any], histories: dict[str, HistoryRows]
+    current: dict[str, Any],
+    histories: dict[str, HistoryRows],
+    *,
+    perf_deltas: list[dict[str, Any]] | None = None,
 ) -> tuple[list[ReportRow], list[ReportRow]]:
     commit = str(current["commit"]).lower()
     deltas = current["deltaVsPrev"]
     perf_deltas = [
         item
-        for item in deltas.get("perfDeltas", [])
+        for item in (
+            perf_deltas if perf_deltas is not None else deltas.get("perfDeltas", [])
+        )
         if item.get("metric") == "tput_per_gpu" and "|h200|" in str(item.get("key"))
     ]
     eval_deltas = list(deltas.get("evalDeltas", []))
@@ -621,13 +647,16 @@ def run_report(state_dir: Path, *, dry_run: bool) -> int:
         print(f"SKIP: perf-eval build #{build_number} was already reported")
         return 0
 
-    all_deltas = [
-        *current["deltaVsPrev"].get("perfDeltas", []),
-        *current["deltaVsPrev"].get("evalDeltas", []),
-    ]
+    perf_deltas = _load_full_perf_deltas(current)
+    eval_deltas = current["deltaVsPrev"].get("evalDeltas", [])
+    all_deltas = [*perf_deltas, *eval_deltas]
     models = {str(item["model"]) for item in all_deltas}
     histories = _load_histories(models)
-    perf_rows, eval_rows = _make_rows(current, histories)
+    perf_rows, eval_rows = _make_rows(
+        current,
+        histories,
+        perf_deltas=perf_deltas,
+    )
     if not perf_rows and not eval_rows:
         raise RuntimeError(f"No rolling statistics available for build #{build_number}")
 
