@@ -11,9 +11,7 @@ pytestmark = pytest.mark.usefixtures("fake_global_config")
 
 
 def test_legacy_amd_template_retries_gpu_hang_abort():
-    template = (
-        Path(__file__).parents[2] / "test-template-amd.j2"
-    ).read_text()
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
 
     assert (
         "{{ indent }}    - exit_status: 134  # ROCm/KFD GPU hang (SIGABRT)\n"
@@ -40,19 +38,25 @@ def _rocm_base_refresh_step():
     )
 
 
+def test_amd_ci_base_consumer_image_is_build_scoped():
+    assert (
+        amd.AMD_BUILD_CI_BASE_IMAGE == "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
+    )
+
+
 @pytest.mark.parametrize(
     ("list_file_diff", "expected_timeout"),
     [
-        ([], 15),
-        (["vllm/config.py"], 15),
-        (["run_all"], 15),
-        (["nightly"], 15),
-        ([amd.AMD_ROCM_BASE_DOCKERFILE], 540),
-        (["run_all", amd.AMD_ROCM_BASE_DOCKERFILE], 540),
-        (["nightly", amd.AMD_ROCM_BASE_DOCKERFILE], 540),
+        ([], 540),
+        (["vllm/config.py"], 540),
+        (["run_all"], 540),
+        (["nightly"], 540),
+        (["docker/Dockerfile.rocm_base"], 540),
+        (["run_all", "docker/Dockerfile.rocm_base"], 540),
+        (["nightly", "docker/Dockerfile.rocm_base"], 540),
     ],
 )
-def test_rocm_base_refresh_timeout_tracks_dockerfile_change(
+def test_rocm_base_refresh_has_self_healing_build_timeout(
     fake_global_config, list_file_diff, expected_timeout
 ):
     fake_global_config["list_file_diff"] = list_file_diff
@@ -60,21 +64,35 @@ def test_rocm_base_refresh_timeout_tracks_dockerfile_change(
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
 
     assert command_step.timeout_in_minutes == expected_timeout
+    assert command_step.env["ROCM_BASE_REFRESH_FORCE"] == "0"
 
 
-def test_rocm_base_refresh_force_uses_build_timeout(monkeypatch):
+def test_rocm_stable_promotion_always_runs(fake_global_config):
+    fake_global_config["list_file_diff"] = ["vllm/config.py"]
+    step = Step(
+        label="AMD: promote stable ROCm images",
+        group="Hardware - AMD Build",
+        key=amd.AMD_STABLE_IMAGE_PROMOTION_STEP_KEY,
+        device="amd_cpu",
+        no_plugin=True,
+        commands=["promote"],
+    )
+
+    assert buildkite_step._step_should_run(step, fake_global_config["list_file_diff"])
+
+
+def test_rocm_base_refresh_force_continues_to_pass_through(monkeypatch):
     monkeypatch.setenv("ROCM_BASE_REFRESH_FORCE", "1")
 
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
 
+    assert command_step.env["ROCM_BASE_REFRESH_FORCE"] == "1"
     assert command_step.timeout_in_minutes == 540
 
 
-def test_skip_timeout_omits_rocm_base_refresh_timeout(
-    fake_global_config, monkeypatch
-):
+def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkeypatch):
     monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
-    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+    fake_global_config["list_file_diff"] = ["docker/Dockerfile.rocm_base"]
 
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
 
@@ -91,9 +109,7 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(
         ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
     ],
 )
-def test_direct_amd_gpu_steps_use_dind_flag(
-    device, queue, dind, expected_gpu_count
-):
+def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_count):
     step = Step(
         label="AMD direct test",
         group="Direct AMD",
@@ -103,6 +119,9 @@ def test_direct_amd_gpu_steps_use_dind_flag(
         dind=dind,
         optional=True,
         soft_fail=True,
+        concurrency=2,
+        concurrency_group="vllm/test/direct-amd",
+        if_condition="build.branch == pipeline.default_branch",
         working_dir="/vllm-workspace/tests",
         commands=["pytest tests/foo.py"],
     )
@@ -116,6 +135,9 @@ def test_direct_amd_gpu_steps_use_dind_flag(
     assert command_step.label == f"AMD: AMD direct test ({device})"
     assert command_step.depends_on == ["image-build-amd", block_step.key]
     assert command_step.agents == {"queue": queue}
+    assert command_step.concurrency == 2
+    assert command_step.concurrency_group == "vllm/test/direct-amd"
+    assert command_step.if_condition == "build.branch == pipeline.default_branch"
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
@@ -123,6 +145,7 @@ def test_direct_amd_gpu_steps_use_dind_flag(
         assert command_step.plugins is not None
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
+        assert container["image"] == amd.AMD_BUILD_CI_BASE_IMAGE
         assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
         assert container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
         assert command_step.env["AMD_CI_RUNTIME"] == "native"
@@ -131,7 +154,9 @@ def test_direct_amd_gpu_steps_use_dind_flag(
     else:
         assert command_step.plugins is None
         assert "AMD_CI_RUNTIME" not in command_step.env
-        assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
+        assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_BUILD_CI_BASE_IMAGE
+
+    assert command_step.env["VLLM_CI_BASE_IMAGE"] == amd.AMD_BUILD_CI_BASE_IMAGE
 
     assert command_step.retry == amd.AMD_RETRY
     assert len(command_step.retry["automatic"]) == 7
@@ -306,7 +331,7 @@ def test_untagged_mirror_defaults_to_dind(
     amd_command_step = amd_group.steps[1]
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
     assert amd_command_step.plugins is None
-    assert amd_command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
+    assert amd_command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_BUILD_CI_BASE_IMAGE
 
 
 @pytest.mark.parametrize(
