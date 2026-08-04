@@ -10,13 +10,36 @@ from step import Step
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
 
-def test_legacy_amd_template_retries_gpu_hang_abort():
+@pytest.fixture(autouse=True)
+def build_scoped_rocm_capability(tmp_path, monkeypatch):
+    promotion_script = tmp_path / "promote-stable-images.sh"
+    promotion_script.touch()
+    monkeypatch.setattr(amd, "AMD_ROCM_PROMOTION_SCRIPT", promotion_script)
+
+
+def test_amd_template_and_bootstrap_preserve_build_scoped_contract():
     template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+    bootstrap = (Path(__file__).parents[2] / "bootstrap-amd.sh").read_text()
 
     assert (
         "{{ indent }}    - exit_status: 134  # ROCm/KFD GPU hang (SIGABRT)\n"
         "{{ indent }}      limit: 1"
     ) in template
+    assert "exit_status: 2  # Transient git/registry identity failure" in template
+    assert "ci_base-build-$BUILDKITE_BUILD_ID" in template
+    assert 'key: "promote-stable-rocm-images-amd"' in template
+    assert "if: build.branch == pipeline.default_branch" in template
+    assert 'concurrency_group: "vllm/rocm/stable-image-promotion"' in template
+    assert 'IMAGE_TAG: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"' in template
+    assert 'IMAGE_TAG_LATEST: "rocm/vllm-ci:$BUILDKITE_COMMIT"' in template
+    assert 'VLLM_CI_SMOKE_IMAGE: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"' in template
+    assert (
+        'VLLM_CI_FALLBACK_IMAGE: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"' in template
+    )
+    assert 'REMOTE_VLLM: "0"' in template
+    assert 'REMOTE_VLLM: "1"' not in template
+    assert '[[ -f ".buildkite/scripts/rocm/promote-stable-images.sh" ]]' in bootstrap
+    assert "-D rocm_build_scoped_handoff=" in bootstrap
 
 
 def _render_single_step(step):
@@ -38,10 +61,16 @@ def _rocm_base_refresh_step():
     )
 
 
-def test_amd_ci_base_consumer_image_is_build_scoped():
+def test_amd_ci_base_consumer_image_is_capability_gated(monkeypatch, tmp_path):
     assert (
-        amd.AMD_BUILD_CI_BASE_IMAGE == "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
+        amd.get_amd_ci_base_image(dind=False)
+        == "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
     )
+    assert amd.get_amd_fallback_ci_image() == amd.AMD_BUILD_FALLBACK_CI_IMAGE
+    monkeypatch.setattr(amd, "AMD_ROCM_PROMOTION_SCRIPT", tmp_path / "missing")
+    assert amd.get_amd_ci_base_image(dind=False) == amd.AMD_NATIVE_BASE_IMAGE
+    assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_STABLE_CI_BASE_IMAGE
+    assert amd.get_amd_fallback_ci_image() == amd.AMD_FALLBACK_CI_IMAGE
 
 
 @pytest.mark.parametrize(
@@ -65,6 +94,19 @@ def test_rocm_base_refresh_has_self_healing_build_timeout(
 
     assert command_step.timeout_in_minutes == expected_timeout
     assert command_step.env["ROCM_BASE_REFRESH_FORCE"] == "0"
+
+
+def test_legacy_rocm_base_refresh_keeps_diff_based_timeout(
+    fake_global_config, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(amd, "AMD_ROCM_PROMOTION_SCRIPT", tmp_path / "missing")
+    fake_global_config["list_file_diff"] = ["vllm/config.py"]
+    command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
+    assert command_step.timeout_in_minutes == 15
+
+    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+    command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
+    assert command_step.timeout_in_minutes == 540
 
 
 def test_rocm_stable_promotion_always_runs(fake_global_config):
@@ -155,6 +197,10 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         assert command_step.plugins is None
         assert "AMD_CI_RUNTIME" not in command_step.env
         assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_BUILD_CI_BASE_IMAGE
+        assert (
+            command_step.env["VLLM_CI_FALLBACK_IMAGE"]
+            == amd.AMD_BUILD_FALLBACK_CI_IMAGE
+        )
 
     assert command_step.env["VLLM_CI_BASE_IMAGE"] == amd.AMD_BUILD_CI_BASE_IMAGE
 

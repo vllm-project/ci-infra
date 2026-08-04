@@ -12,3 +12,7 @@ include = ["buildkite*"]
 
 [tool.pytest.ini_options]
 pythonpath = [".", "buildkite/pipeline_generator"]
+
+[tool.typos.default.extend-identifiers]
+HSA_ENABLE_DEBUG = "HSA_ENABLE_DEBUG"
+HSA_TOOLS_LIB = "HSA_TOOLS_LIB"

@@ -136,7 +136,14 @@ get_diff_main() {
 # upload_pipeline: render and upload the Buildkite pipeline YAML
 # ---------------------------------------------------------------------------
 upload_pipeline() {
+    local rocm_build_scoped_handoff=0
+
+    if [[ -f ".buildkite/scripts/rocm/promote-stable-images.sh" ]]; then
+        rocm_build_scoped_handoff=1
+    fi
+
     echo "Uploading pipeline..."
+    echo "ROCm build-scoped image handoff: ${rocm_build_scoped_handoff}"
     # Install minijinja
     ls .buildkite || buildkite-agent annotate --style error 'Please merge upstream main branch for buildkite CI'
     curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
@@ -190,6 +197,7 @@ upload_pipeline() {
             -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
             -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
             -D rocm_base_refresh_diff_unavailable="${ROCM_BASE_REFRESH_DIFF_UNAVAILABLE:-0}" \
+            -D rocm_build_scoped_handoff="${rocm_build_scoped_handoff}" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )

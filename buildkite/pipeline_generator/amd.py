@@ -1,13 +1,18 @@
 import os
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 from constants import AgentQueue, DeviceType
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
+AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
+AMD_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT"
 AMD_BUILD_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
+AMD_ROCM_PROMOTION_SCRIPT = Path(".buildkite/scripts/rocm/promote-stable-images.sh")
 AMD_FALLBACK_CI_IMAGE = "rocm/vllm-ci:$BUILDKITE_COMMIT"
+AMD_BUILD_FALLBACK_CI_IMAGE = "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
 AMD_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
 AMD_ARTIFACT_CHECKSUM_GLOB = f"{AMD_ARTIFACT_GLOB}.sha256"
 AMD_ARTIFACT_STEP = "image-build-amd"
@@ -22,6 +27,7 @@ AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
 AMD_STANDARD_TIMEOUT_MINUTES = 3 * 60
 AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
 AMD_STABLE_IMAGE_PROMOTION_STEP_KEY = "promote-stable-rocm-images-amd"
+AMD_ROCM_BASE_DOCKERFILE = "docker/Dockerfile.rocm_base"
 AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES = 9 * 60
 AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES = 15
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
@@ -46,6 +52,25 @@ AMD_RETRY = {
 }
 ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
+
+
+def supports_build_scoped_rocm_images() -> bool:
+    """Whether the checked-out vLLM revision publishes build-scoped aliases."""
+    return AMD_ROCM_PROMOTION_SCRIPT.is_file()
+
+
+def get_amd_ci_base_image(*, dind: bool) -> str:
+    if supports_build_scoped_rocm_images():
+        return AMD_BUILD_CI_BASE_IMAGE
+    if dind:
+        return AMD_STABLE_CI_BASE_IMAGE
+    return AMD_NATIVE_BASE_IMAGE
+
+
+def get_amd_fallback_ci_image() -> str:
+    if supports_build_scoped_rocm_images():
+        return AMD_BUILD_FALLBACK_CI_IMAGE
+    return AMD_FALLBACK_CI_IMAGE
 
 
 def get_amd_timeout_in_minutes(timeout_in_minutes: Optional[int]) -> int:
@@ -94,12 +119,16 @@ def ensure_amd_stack_error_retry(
     return retry_policy
 
 
-def get_rocm_base_refresh_timeout(_list_file_diff: List[str]) -> int:
+def get_rocm_base_refresh_timeout(list_file_diff: List[str]) -> int:
     if os.getenv("ROCM_BASE_REFRESH_SKIP", "0") == "1":
         return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
-    # Every selection performs an exact registry lookup. A missing tag or a
-    # changed parent digest can turn any lookup into a self-healing build.
-    return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
+    if supports_build_scoped_rocm_images() or (
+        os.getenv("ROCM_BASE_REFRESH_FORCE", "0") == "1"
+        or os.getenv("ROCM_BASE_REFRESH_DIFF_UNAVAILABLE", "0") == "1"
+        or AMD_ROCM_BASE_DOCKERFILE in list_file_diff
+    ):
+        return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
+    return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
 
 
 def get_rocm_base_refresh_env() -> Dict[str, str]:
@@ -275,6 +304,7 @@ def _get_amd_env(
     gpu_count: int,
 ) -> Dict[str, str]:
     env = dict(extra_env or {})
+    ci_base_image = get_amd_ci_base_image(dind=dind)
     if not dind:
         # Native agents have no DinD sidecar, so Docker hook inputs must not
         # escape into this execution mode.
@@ -289,7 +319,7 @@ def _get_amd_env(
         env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
         env.update(
             {
-                "VLLM_CI_BASE_IMAGE": AMD_BUILD_CI_BASE_IMAGE,
+                "VLLM_CI_BASE_IMAGE": ci_base_image,
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
@@ -307,9 +337,9 @@ def _get_amd_env(
         env.update(
             {
                 "DOCKER_BUILDKIT": "1",
-                "DOCKER_IMAGE_NAME": AMD_BUILD_CI_BASE_IMAGE,
-                "VLLM_CI_BASE_IMAGE": AMD_BUILD_CI_BASE_IMAGE,
-                "VLLM_CI_FALLBACK_IMAGE": AMD_FALLBACK_CI_IMAGE,
+                "DOCKER_IMAGE_NAME": ci_base_image,
+                "VLLM_CI_BASE_IMAGE": ci_base_image,
+                "VLLM_CI_FALLBACK_IMAGE": get_amd_fallback_ci_image(),
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
@@ -412,6 +442,7 @@ def build_amd_step_options(
     gpu_count = resolve_amd_gpu_count(device, num_devices, no_gpu)
     plugins = None
     if not dind:
+        ci_base_image = get_amd_ci_base_image(dind=False)
         container_env = {
             "AMD_CI_RUNTIME": "native",
             "NATIVE_CI": "true",
@@ -423,7 +454,7 @@ def build_amd_step_options(
         }
         plugins = [
             get_amd_k8s_plugin(
-                image=AMD_BUILD_CI_BASE_IMAGE,
+                image=ci_base_image,
                 gpu_count=gpu_count,
                 workspace=AMD_NATIVE_WORKSPACE,
                 workspace_volume_name=AMD_NATIVE_WORKSPACE_VOLUME,
