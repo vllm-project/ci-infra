@@ -136,6 +136,18 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
       echo 'TPU_VERSION=tpu6e' | sudo tee -a /etc/environment
 
+      # Also provide HF_TOKEN and BUILDKITE_ANALYTICS_TOKEN through the agent's
+      # own environment hook, matching how the newer machines are provisioned.
+      # The agent only knows about variables set in its hooks; /etc/environment
+      # is opaque to it.
+      sudo mkdir -p /etc/buildkite-agent/hooks
+      sudo touch /etc/buildkite-agent/hooks/environment
+      sudo chown root:buildkite-agent /etc/buildkite-agent/hooks/environment
+      sudo chmod 750 /etc/buildkite-agent/hooks/environment
+      printf '#!/bin/bash\nexport HF_TOKEN=%q\nexport BUILDKITE_ANALYTICS_TOKEN=%q\n' \
+        '${var.huggingface_token_value}' '${var.buildkite_analytics_token_value}' \
+        | sudo tee /etc/buildkite-agent/hooks/environment > /dev/null
+
       sudo mkdir -p /mnt/disks/persist
 
       # Format if not already formatted
