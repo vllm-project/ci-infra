@@ -8,15 +8,16 @@ autoscaling:
 ```
 workflow_job (queued)  ->  API Gateway  ->  scale-up Lambda
    ->  one EC2 instance per job (JIT, ephemeral)  ->  runs a single job  ->  terminated
+
+pool scheduler (every minute)  ->  keep 5 idle JIT runners ready
 ```
 
 This is the recommended pattern over a CPU-metric Auto Scaling Group: scaling
 tracks the job queue, and one job per throwaway instance is required for safely
 running public-repo PR code.
 
-> **Status: not yet applied.** This is a reviewed scaffold. It has not been
-> `terraform apply`-ed (it needs the GitHub App + SSM secrets below). Run
-> `terraform plan` and review before applying.
+> **Status: deployed in `us-west-2`.** Review `terraform plan` against the
+> remote state before applying changes.
 
 ## What it creates
 
@@ -117,6 +118,9 @@ jobs:
 
 ## Cost / scaling
 
+- `runners_minimum_idle_count = 5` keeps five idle runners ready 24/7. The pool
+  scheduler replenishes consumed ephemeral runners every minute, and the idle
+  configuration prevents scale-down from reaping the warm capacity.
 - `runners_maximum_count` caps concurrent instances.
 - `instance_target_capacity_type = "on-demand"` for gating-check reliability;
   switch to `"spot"` for cost (set `create_service_linked_role_spot = true`).

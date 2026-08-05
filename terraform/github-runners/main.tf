@@ -81,6 +81,20 @@ module "runners" {
   enable_job_queued_check  = true
   runners_maximum_count    = var.runners_maximum_count
 
+  # Keep a 24/7 pool of ready runners. The pool reconciler replaces ephemeral
+  # runners after jobs consume them, while idle_config prevents scale-down from
+  # reaping the ready capacity between jobs.
+  pool_runner_owner = var.runner_pool_owner
+  pool_config = [{
+    size                = var.runners_minimum_idle_count
+    schedule_expression = "cron(* * * * ? *)"
+  }]
+  idle_config = [{
+    cron      = "* * * * * *"
+    timeZone  = "UTC"
+    idleCount = var.runners_minimum_idle_count
+  }]
+
   # Reap stuck/idle instances; keep brief minimum lifetime to avoid churn.
   minimum_running_time_in_minutes = 5
   scale_down_schedule_expression  = "cron(* * * * ? *)"
