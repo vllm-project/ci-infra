@@ -364,5 +364,50 @@ def test_missing_timeout_in_minutes_is_omitted_from_pipeline():
     assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
 
 
+def test_source_file_dependencies_match_without_exclusions():
+    deps = ["vllm/", "tests/models/multimodal"]
+    assert buildkite_step._source_file_dependencies_match(
+        deps, ["vllm/model_executor/models/llama.py"]
+    )
+    assert not buildkite_step._source_file_dependencies_match(deps, ["docs/foo.md"])
+
+
+def test_exclusion_carves_out_subtree_from_broad_include():
+    deps = ["vllm/", "!vllm/distributed/kv_transfer/"]
+    # A change confined to the excluded subtree does not select the step.
+    assert not buildkite_step._source_file_dependencies_match(
+        deps, ["vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py"]
+    )
+    # A change elsewhere under the broad include still selects it.
+    assert buildkite_step._source_file_dependencies_match(
+        deps, ["vllm/model_executor/models/llama.py"]
+    )
+    # Sibling distributed code (not under the exclusion) still selects it.
+    assert buildkite_step._source_file_dependencies_match(
+        deps, ["vllm/distributed/parallel_state.py"]
+    )
+
+
+def test_exclusion_only_applies_per_file():
+    # A diff touching both an excluded file and an included file still matches:
+    # the included file is enough on its own.
+    deps = ["vllm/", "!vllm/distributed/kv_transfer/"]
+    assert buildkite_step._source_file_dependencies_match(
+        deps,
+        [
+            "vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py",
+            "vllm/config/__init__.py",
+        ],
+    )
+
+
+def test_step_explicitly_listing_excluded_subtree_still_matches():
+    # A dedicated step that includes the subtree directly is unaffected.
+    deps = ["vllm/distributed/kv_transfer/kv_connector/v1/nixl/"]
+    assert buildkite_step._source_file_dependencies_match(
+        deps, ["vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py"]
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
