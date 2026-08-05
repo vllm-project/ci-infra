@@ -26,11 +26,17 @@ steps:
         set -euo pipefail
         cd packer/cpu
 
-        # Install yq if not available (Amazon Linux 2)
+        # Install a pinned standalone yq if not available. The PyPI yq package
+        # has unbounded dependencies that can drop support for the agent's Python.
+        export PATH="$$HOME/.local/bin:$$PATH"
         if ! command -v yq &> /dev/null; then
           echo "Installing yq..."
-          pip3 install yq
-          export PATH="$$HOME/.local/bin:$$PATH"
+          YQ_VERSION="v4.44.3"
+          mkdir -p "$$HOME/.local/bin"
+          curl -fsSL \
+            "https://github.com/mikefarah/yq/releases/download/$${YQ_VERSION}/yq_linux_amd64" \
+            -o "$$HOME/.local/bin/yq"
+          chmod +x "$$HOME/.local/bin/yq"
         fi
 
         # Install packer if not available
@@ -130,8 +136,11 @@ steps:
         echo "--- :buildkite: Fetching bake config from CI build #$$CI_BUILD_NUMBER"
         CONFIG_FILE="bake-config-build-$$CI_BUILD_NUMBER.json"
 
-        # Download the artifact using the build UUID from the annotation
-        buildkite-agent artifact download "$$CONFIG_FILE" . --build "$$CI_BUILD_ID" || {
+        # The AMD image step uploads an artifact with the same filename. Scope the
+        # query to the NVIDIA image step that published POSTMERGE_IMAGE.
+        buildkite-agent artifact download "$$CONFIG_FILE" . \
+          --build "$$CI_BUILD_ID" \
+          --step "image-build" || {
           echo "ERROR: Failed to download artifact $$CONFIG_FILE from build #$$CI_BUILD_NUMBER"
           echo "The CI build may not have published the bake config artifact."
           exit 1
