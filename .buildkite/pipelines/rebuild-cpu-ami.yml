@@ -208,7 +208,7 @@ steps:
     retry:
       automatic:
         - exit_status: -1  # Agent/infrastructure failures only
-          limit: 1
+          limit: 3
 
   - label: ":aws: Update SSM Parameter"
     key: update-ssm

@@ -161,7 +161,7 @@ def test_generated_steps_retry_when_the_agent_is_lost():
     command_step = _render_single_step(step).steps[0]
 
     assert command_step.retry == {
-        "automatic": [{"exit_status": -1, "limit": 1}],
+        "automatic": [{"exit_status": -1, "limit": 3}],
     }
 
 
@@ -179,10 +179,60 @@ def test_agent_lost_retry_preserves_step_retry_conditions():
 
     assert command_step.retry == {
         "automatic": [
-            {"exit_status": -1, "limit": 1},
+            {"exit_status": -1, "limit": 3},
             {"exit_status": 143, "limit": 2},
         ],
     }
+
+
+def test_generated_steps_cap_custom_retry_limits_at_three():
+    step = Step(
+        label="Capped retry policy",
+        group="Failure handling",
+        key="capped-retry-policy",
+        device="h100",
+        commands=["pytest tests/basic.py"],
+        retry={
+            "automatic": [
+                {"exit_status": 143, "limit": 10},
+                {"exit_status": 255, "limit": 2},
+            ],
+            "manual": {"allowed": False},
+        },
+    )
+
+    command_step = next(
+        generated_step
+        for generated_step in _render_single_step(step).steps
+        if isinstance(generated_step, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.retry == {
+        "automatic": [
+            {"exit_status": -1, "limit": 3},
+            {"exit_status": 143, "limit": 3},
+            {"exit_status": 255, "limit": 2},
+        ],
+        "manual": {"allowed": False},
+    }
+
+
+@pytest.mark.parametrize("limit", [-1, 1.5, True])
+def test_generated_steps_reject_invalid_retry_limits(limit):
+    step = Step(
+        label="Invalid retry policy",
+        group="Failure handling",
+        key="invalid-retry-policy",
+        device="h100",
+        commands=["pytest tests/basic.py"],
+        retry={"automatic": {"exit_status": 143, "limit": limit}},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="retry.automatic limit must be a non-negative integer",
+    ):
+        _render_single_step(step)
 
 
 def test_multi_gpu_step_dumps_nvidia_topology():

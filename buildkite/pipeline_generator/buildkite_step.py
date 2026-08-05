@@ -34,7 +34,11 @@ PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
-EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
+MAX_AUTOMATIC_RETRIES_PER_RULE = 3
+EXIT_STATUS_NEGATIVE_ONE_RETRY = {
+    "exit_status": -1,
+    "limit": MAX_AUTOMATIC_RETRIES_PER_RULE,
+}
 
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
@@ -460,7 +464,7 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
 def ensure_exit_status_negative_one_retry(
     retry: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Add a one-time retry for jobs that lose their agent."""
+    """Retry jobs that lose their agent, up to the global retry ceiling."""
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -487,6 +491,45 @@ def ensure_exit_status_negative_one_retry(
         dict(EXIT_STATUS_NEGATIVE_ONE_RETRY),
         *automatic_conditions,
     ]
+    return retry_policy
+
+
+def cap_automatic_retry_limits(
+    retry: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Cap every explicit automatic retry rule at three retries.
+
+    Buildkite tracks the limit of each automatic retry rule independently. This
+    preserves narrower per-rule limits while preventing a job definition from
+    requesting more than the repository-wide ceiling for any one rule.
+    """
+    if retry is None:
+        return None
+
+    retry_policy = deepcopy(retry)
+    automatic = retry_policy.get("automatic")
+    if automatic is None or isinstance(automatic, bool):
+        # Buildkite's `automatic: true` default is two retries.
+        return retry_policy
+
+    if isinstance(automatic, dict):
+        conditions = [automatic]
+    elif isinstance(automatic, list):
+        conditions = automatic
+    else:
+        raise ValueError("retry.automatic must be a boolean, mapping, or list.")
+
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            raise ValueError("retry.automatic conditions must be mappings.")
+        limit = condition.get("limit")
+        if limit is None:
+            # Buildkite defaults an omitted rule limit to two retries.
+            continue
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("retry.automatic limit must be a non-negative integer.")
+        condition["limit"] = min(limit, MAX_AUTOMATIC_RETRIES_PER_RULE)
+
     return retry_policy
 
 
@@ -574,6 +617,7 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.retry = ensure_amd_stack_error_retry(
                     buildkite_step.retry
                 )
+            buildkite_step.retry = cap_automatic_retry_limits(buildkite_step.retry)
             if step.key == AMD_ROCM_BASE_REFRESH_STEP_KEY:
                 refresh_env = dict(buildkite_step.env or {})
                 refresh_env.update(get_rocm_base_refresh_env())
@@ -810,6 +854,7 @@ def _create_amd_step(
         num_nodes=num_nodes,
         agent_tags=agent_tags,
     )
+    options["retry"] = cap_automatic_retry_limits(options["retry"])
     return BuildkiteCommandStep(
         **options,
         key=key,
