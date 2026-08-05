@@ -14,7 +14,7 @@ timer enabled.
 | Automation | Purpose | Schedule | External action | systemd unit |
 | --- | --- | --- | --- | --- |
 | Nightly perf trigger | Start `vllm/perf-eval` from the newest scheduled `release-v2` build whose x86_64 CUDA 13.0 image job passed | Daily at 23:00 America/Los_Angeles | Create a Buildkite `perf-eval` build | `vllm-nightly-perf-trigger.{service,timer}` |
-| Nightly perf report | Compare the latest completed perf/eval nightly against rolling history | Daily at 09:00 and 19:00 America/Los_Angeles | Post to `#ci-notifications` (`C0ABTNM9L5U`) | `vllm-nightly-perf-report.{service,timer}` |
+| Nightly perf report | Compare H200 throughput/GPU, p99 TTFT latency, and eval accuracy against rolling history | Daily at 09:00 and 19:00 America/Los_Angeles | Post to `#ci-notifications` (`C0ABTNM9L5U`) | `vllm-nightly-perf-report.{service,timer}` |
 | Fast CI failure alert | Find Databricks-ingested CI script jobs that failed in 30 seconds or less during the previous 30 minutes | Every 15 minutes at `:03`, `:18`, `:33`, and `:48` | Post to `#ci-alert` (`C0ANHBE642Y`) | `vllm-fast-ci-failure-alert.{service,timer}` |
 
 ### Nightly perf trigger and report
