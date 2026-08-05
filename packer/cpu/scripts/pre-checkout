@@ -1,0 +1,8 @@
+#!/bin/bash
+set -eu -o pipefail
+
+if [[ "${BUILDKITE_STEP_KEY:-}" == "image-build" ]]; then
+  echo "--- :git: Configuring blobless checkout"
+  export BUILDKITE_GIT_CLONE_FLAGS="-v --filter=blob:none --no-checkout"
+  export BUILDKITE_GIT_FETCH_FLAGS="-v --prune --filter=blob:none"
+fi
