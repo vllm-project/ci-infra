@@ -1,0 +1,42 @@
+name: Pipeline generator tests
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/pipeline-generator-tests.yml"
+      - "buildkite/pipeline_generator/**"
+      - "buildkite/tests/**"
+      - "pyproject.toml"
+      - "requirements.txt"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on:
+      group: vllm-runners
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest ./buildkite/pipeline_generator
+
+      - name: Run tests
+        run: python -m pytest buildkite/tests
