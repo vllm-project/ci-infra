@@ -18,8 +18,7 @@ permissions:
 
 jobs:
   test:
-    runs-on:
-      group: vllm-runners
+    runs-on: [self-hosted, linux, x64, vllm-runners]
     timeout-minutes: 10
 
     steps:
