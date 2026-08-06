@@ -165,6 +165,56 @@ def test_generated_steps_retry_when_the_agent_is_lost():
     }
 
 
+def test_generated_steps_raise_on_logit_nans_by_default():
+    step = Step(
+        label="NaN detection",
+        group="Correctness",
+        commands=["pytest tests/basic.py"],
+    )
+
+    command_step = next(
+        rendered_step
+        for rendered_step in _render_single_step(step).steps
+        if isinstance(rendered_step, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.env["VLLM_RAISE_ON_LOGIT_NANS"] == "1"
+
+
+def test_step_environment_can_disable_raise_on_logit_nans():
+    step = Step(
+        label="Expected NaNs",
+        group="Correctness",
+        commands=["pytest tests/expected_nans.py"],
+        env={"VLLM_RAISE_ON_LOGIT_NANS": "0"},
+    )
+
+    command_step = next(
+        rendered_step
+        for rendered_step in _render_single_step(step).steps
+        if isinstance(rendered_step, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.env["VLLM_RAISE_ON_LOGIT_NANS"] == "0"
+
+
+def test_amd_steps_raise_on_logit_nans_by_default():
+    step = Step(
+        label="AMD NaN detection",
+        group="Correctness",
+        device="mi300_4",
+        commands=["pytest tests/basic.py"],
+    )
+
+    command_step = next(
+        rendered_step
+        for rendered_step in _render_single_step(step).steps
+        if isinstance(rendered_step, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.env["VLLM_RAISE_ON_LOGIT_NANS"] == "1"
+
+
 def test_agent_lost_retry_preserves_step_retry_conditions():
     step = Step(
         label="Agent retry with policy",
