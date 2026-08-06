@@ -25,6 +25,7 @@ py-modules = [
     "global_config",
     "constants",
     "amd",
+    "fnrec_payload",
 ]
 
 [tool.setuptools.packages.find]

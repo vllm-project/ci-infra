@@ -16,6 +16,7 @@ from amd import (
     get_rocm_base_refresh_timeout,
     is_amd_gpu_device,
 )
+from fnrec_payload import fnrec_enabled, install_blob, upload_blob
 from step import Step
 from utils_lib.docker_utils import (
     get_image,
@@ -334,12 +335,49 @@ def _is_multi_gpu_step(step: Step) -> bool:
     return bool(step.num_devices and step.num_devices >= 2)
 
 
+def _get_fnrec_setup_commands(step: Step) -> List[str]:
+    """Install the function recorder and arrange for its output to be uploaded.
+
+    Payloads are gzipped base64 because `_prepare_commands` rewrites every
+    apostrophe to a double quote, and a `$` must be written `$$` to survive
+    upload interpolation.
+
+    The EXIT trap still fires when tests fail, but not on SIGKILL, so a step that
+    times out loses its recording.
+    """
+    # Multi-node steps get no plugin at all, so their commands run on the agent
+    # host: installing there would write into a long-lived shared interpreter.
+    if not fnrec_enabled() or (step.num_nodes and step.num_nodes >= 2):
+        return []
+
+    return [
+        "echo '--- :dna: fnrec setup'",
+        f"echo {install_blob()} | base64 -d | gunzip > /tmp/fnrec_install.py",
+        # Container-private. Shared host mounts are visible to co-tenant
+        # containers with their own PID namespaces, so per-pid file names would
+        # silently merge one job's recording into another's.
+        "export FNREC_OUT=/tmp/fnrec/$$BUILDKITE_JOB_ID",
+        "mkdir -p $$FNREC_OUT",
+        # The installer prints where vllm's code is; assembling it from the
+        # install target is wrong under an editable install. Its stderr is the
+        # only thing separating a failed install from a job that genuinely runs
+        # no vLLM code, since both leave an empty recording. Keep `export`: it
+        # masks the substitution's status, so a crash cannot fail the step.
+        "export FNREC_ROOT=$$(python3 /tmp/fnrec_install.py 2>$$FNREC_OUT/install.err)",
+        f"echo {upload_blob()} | base64 -d | gunzip > /tmp/fnrec_upload.sh",
+        "chmod +x /tmp/fnrec_upload.sh",
+        # Guarded: an EXIT trap's status replaces the shell's, so a truncated or
+        # missing uploader turns a passing job red and masks a failing one.
+        "trap '/tmp/fnrec_upload.sh || true' EXIT",
+    ]
+
+
 def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
     if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
         return []
 
     if setup_profile == "nvidia":
-        commands = [
+        commands = _get_fnrec_setup_commands(step) + [
             "echo '--- :nvidia: GPU Info'",
             "(command nvidia-smi || true)",
         ]
