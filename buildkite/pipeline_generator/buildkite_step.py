@@ -757,11 +757,19 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
 def _source_file_dependencies_match(
     source_file_dependencies: Optional[List[str]], list_file_diff: List[str]
 ) -> bool:
-    if source_file_dependencies:
-        for source_file in source_file_dependencies:
-            for diff_file in list_file_diff:
-                if _matches_source_dependency(source_file, diff_file):
-                    return True
+    if not source_file_dependencies:
+        return False
+    # A "!"-prefixed entry is an exclusion: a changed file that matches an
+    # exclusion does not count as a match, even if it also matches an include.
+    # This lets a broad include like "vllm/" skip a self-contained subtree that
+    # has its own dedicated CI, e.g. "!vllm/distributed/kv_transfer/".
+    includes = [d for d in source_file_dependencies if not d.startswith("!")]
+    excludes = [d[1:] for d in source_file_dependencies if d.startswith("!")]
+    for diff_file in list_file_diff:
+        if any(
+            _matches_source_dependency(inc, diff_file) for inc in includes
+        ) and not any(_matches_source_dependency(exc, diff_file) for exc in excludes):
+            return True
     return False
 
 

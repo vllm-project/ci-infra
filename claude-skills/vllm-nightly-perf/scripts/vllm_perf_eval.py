@@ -29,6 +29,7 @@ REGRESSION_SIGMA = 2.0
 REGRESSION_RELATIVE = 0.01
 HTTP_ATTEMPTS = 3
 HTTP_TIMEOUT = 90
+LATENCY_METRICS = {"p99_ttft": ("p99 TTFT", 1000.0)}
 HistoryRows = tuple[list[dict[str, Any]], list[dict[str, Any]]]
 
 
@@ -297,6 +298,27 @@ def _load_histories(models: set[str]) -> dict[str, HistoryRows]:
     return histories
 
 
+def _load_full_perf_deltas(current: dict[str, Any]) -> list[dict[str, Any]]:
+    """Load complete H200 deltas; the nightly endpoint contains an 8-row UI preview."""
+    source_image = str(current.get("sourceImage", ""))
+    previous_image = str(current.get("deltaVsPrev", {}).get("prevSourceImage", ""))
+    if not source_image or not previous_image:
+        raise RuntimeError("Nightly data is missing perf comparison image references")
+
+    query = urllib.parse.urlencode(
+        {
+            "baseline": previous_image,
+            "candidate": source_image,
+            "device": "h200",
+        }
+    )
+    comparison = _request(f"{DASHBOARD_API}/compare?{query}")
+    deltas = comparison.get("perf", {}).get("deltas")
+    if not isinstance(deltas, list):
+        raise RuntimeError("Dashboard comparison is missing full perf deltas")
+    return deltas
+
+
 def _current_observation(delta: dict[str, Any], commit: str) -> Observation:
     return Observation(
         commit=commit,
@@ -305,21 +327,45 @@ def _current_observation(delta: dict[str, Any], commit: str) -> Observation:
     )
 
 
+def _scale_statistic(statistic: Statistic, factor: float) -> Statistic:
+    return Statistic(
+        peak=statistic.peak * factor,
+        average=statistic.average * factor,
+        sigma=statistic.sigma * factor,
+        delta_average=statistic.delta_average,
+        delta_peak=statistic.delta_peak,
+        status=statistic.status,
+        baseline_count=statistic.baseline_count,
+    )
+
+
 def _make_rows(
-    current: dict[str, Any], histories: dict[str, HistoryRows]
-) -> tuple[list[ReportRow], list[ReportRow]]:
+    current: dict[str, Any],
+    histories: dict[str, HistoryRows],
+    *,
+    perf_deltas: list[dict[str, Any]] | None = None,
+) -> tuple[list[ReportRow], list[ReportRow], list[ReportRow]]:
     commit = str(current["commit"]).lower()
     deltas = current["deltaVsPrev"]
-    perf_deltas = [
+    all_perf_deltas = (
+        perf_deltas if perf_deltas is not None else deltas.get("perfDeltas", [])
+    )
+    throughput_deltas = [
         item
-        for item in deltas.get("perfDeltas", [])
+        for item in all_perf_deltas
         if item.get("metric") == "tput_per_gpu" and "|h200|" in str(item.get("key"))
     ]
+    latency_deltas = [
+        item
+        for item in all_perf_deltas
+        if item.get("metric") in LATENCY_METRICS and "|h200|" in str(item.get("key"))
+    ]
     eval_deltas = list(deltas.get("evalDeltas", []))
-    perf_rows: list[ReportRow] = []
+    throughput_rows: list[ReportRow] = []
+    latency_rows: list[ReportRow] = []
     eval_rows: list[ReportRow] = []
 
-    for delta in perf_deltas:
+    for delta in throughput_deltas:
         model = str(delta["model"])
         raw_perf = histories.get(model, ([], []))[0]
         current_value = _current_observation(delta, commit)
@@ -332,9 +378,39 @@ def _make_rows(
             continue
         dimension_parts = str(delta["dimension"]).split(" - ")
         config = " · ".join(dimension_parts[:2]).upper()
-        perf_rows.append(
+        throughput_rows.append(
             ReportRow(
-                "perf", model, config, "token/s/gpu", current_value.value, statistic
+                "throughput",
+                model,
+                config,
+                "token/s/gpu",
+                current_value.value,
+                statistic,
+            )
+        )
+
+    for delta in latency_deltas:
+        model = str(delta["model"])
+        raw_perf = histories.get(model, ([], []))[0]
+        current_value = _current_observation(delta, commit)
+        statistic = calculate_statistic(
+            _perf_observations(delta, raw_perf),
+            current=current_value,
+            higher_is_better=bool(delta.get("higherIsBetter", False)),
+        )
+        if statistic is None:
+            continue
+        metric_label, scale = LATENCY_METRICS[str(delta["metric"])]
+        dimension_parts = str(delta["dimension"]).split(" - ")
+        config = " · ".join(dimension_parts[:2]).upper()
+        latency_rows.append(
+            ReportRow(
+                "latency",
+                model,
+                config,
+                metric_label,
+                current_value.value * scale,
+                _scale_statistic(statistic, scale),
             )
         )
 
@@ -357,11 +433,16 @@ def _make_rows(
         )
 
     status_order = {"regression": 0, "improvement": 1, "steady": 2}
-    perf_rows.sort(key=lambda row: (status_order[row.statistic.status], row.model))
+    throughput_rows.sort(
+        key=lambda row: (status_order[row.statistic.status], row.model)
+    )
+    latency_rows.sort(
+        key=lambda row: (status_order[row.statistic.status], row.model, row.metric)
+    )
     eval_rows.sort(
         key=lambda row: (status_order[row.statistic.status], row.model, row.metric)
     )
-    return perf_rows, eval_rows
+    return throughput_rows, latency_rows, eval_rows
 
 
 def _short_model(model: str, width: int) -> str:
@@ -389,8 +470,28 @@ def _format_percent(value: float) -> str:
 
 def _perf_table(rows: list[ReportRow]) -> list[str]:
     lines = [
-        "●  Model                        Config     Peak    7d avg ±σ       "
-        "Current  Δ avg   Δ peak",
+        "●  Model                        Config     Best    7d avg ±σ       "
+        "Current  Δ avg   Δ best",
+        "-- ---------------------------- ---------- ------- --------------- "
+        "-------- ------- --------",
+    ]
+    for row in rows:
+        stat = row.statistic
+        average = f"{_format_number(stat.average)} ±{_format_number(stat.sigma)}"
+        lines.append(
+            f"{_icon(stat.status)} {_short_model(row.model, 28):<28} "
+            f"{row.dimension:<10} {_format_number(stat.peak):>7} "
+            f"{average:>15} {_format_number(row.current):>8} "
+            f"{_format_percent(stat.delta_average):>7} "
+            f"{_format_percent(stat.delta_peak):>8}"
+        )
+    return lines
+
+
+def _latency_table(rows: list[ReportRow]) -> list[str]:
+    lines = [
+        "●  Model                        Config       Best    7d avg ±σ       "
+        "Current  Δ avg   Δ best",
         "-- ---------------------------- ---------- ------- --------------- "
         "-------- ------- --------",
     ]
@@ -409,8 +510,8 @@ def _perf_table(rows: list[ReportRow]) -> list[str]:
 
 def _eval_table(rows: list[ReportRow]) -> list[str]:
     lines = [
-        "●  Model                    Task · Metric                    Peak  "
-        "7d avg ±σ     Now  Δ avg  Δ peak",
+        "●  Model                    Task · Metric                    Best  "
+        "7d avg ±σ     Now  Δ avg  Δ best",
         "-- ------------------------ -------------------------------- ------- "
         "------------- ------- ------ -------",
     ]
@@ -456,7 +557,8 @@ def _counts(rows: list[ReportRow]) -> dict[str, int]:
 def build_slack_payload(
     current: dict[str, Any],
     previous: dict[str, Any],
-    perf_rows: list[ReportRow],
+    throughput_rows: list[ReportRow],
+    latency_rows: list[ReportRow],
     eval_rows: list[ReportRow],
 ) -> dict[str, Any]:
     """Build a webhook-compatible Block Kit rendering of the Canvas template."""
@@ -468,11 +570,15 @@ def build_slack_payload(
     commit = str(current["commit"])
     previous_commit = str(previous["commit"])
     build = current["perfEval"]["build"]
-    perf_counts = _counts(perf_rows)
+    throughput_counts = _counts(throughput_rows)
+    latency_counts = _counts(latency_rows)
     eval_counts = _counts(eval_rows)
     summary = (
-        f"> *Perf:* 🔴 {perf_counts['regression']} · 🟢 "
-        f"{perf_counts['improvement']} improved · {perf_counts['steady']} steady · "
+        f"> *Throughput:* 🔴 {throughput_counts['regression']} · 🟢 "
+        f"{throughput_counts['improvement']} improved · "
+        f"{throughput_counts['steady']} steady · "
+        f"*Latency:* 🔴 {latency_counts['regression']} · 🟢 "
+        f"{latency_counts['improvement']} improved · {latency_counts['steady']} steady · "
         f"*Eval:* 🔴 {eval_counts['regression']} · 🟢 "
         f"{eval_counts['improvement']} improved · {eval_counts['steady']} steady"
     )
@@ -486,7 +592,7 @@ def build_slack_payload(
     )
     legend = (
         "🔴 = regression vs 7-day avg (≥2σ & ≥1%), 🟢 = otherwise. "
-        "Δ vs avg and Δ vs peak are relative %. Peak over 30d; avg ±σ over "
+        "Δ vs avg and Δ vs best are relative %. Best over 30d; avg ±σ over "
         "the prior 7 days."
     )
     blocks: list[dict[str, Any]] = [
@@ -510,7 +616,20 @@ def build_slack_payload(
             },
         },
     ]
-    blocks.extend(_table_blocks(_perf_table(perf_rows)))
+    blocks.extend(_table_blocks(_perf_table(throughput_rows)))
+    blocks.extend(
+        [
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Latency — p99 TTFT*\n_ms · lower is better_",
+                },
+            },
+        ]
+    )
+    blocks.extend(_table_blocks(_latency_table(latency_rows)))
     blocks.extend(
         [
             {"type": "divider"},
@@ -527,7 +646,10 @@ def build_slack_payload(
         ]
     )
     blocks.extend(_table_blocks(_eval_table(eval_rows)))
-    min_perf = min((row.statistic.baseline_count for row in perf_rows), default=0)
+    min_throughput = min(
+        (row.statistic.baseline_count for row in throughput_rows), default=0
+    )
+    min_latency = min((row.statistic.baseline_count for row in latency_rows), default=0)
     min_eval = min((row.statistic.baseline_count for row in eval_rows), default=0)
     blocks.append(
         {
@@ -537,7 +659,8 @@ def build_slack_payload(
                     "type": "mrkdwn",
                     "text": (
                         f"Source: <https://ci.vllm.ai/nightly|vLLM CI dashboard> · "
-                        f"minimum 7d samples: perf {min_perf}, eval {min_eval}"
+                        f"minimum 7d samples: throughput {min_throughput}, "
+                        f"latency {min_latency}, eval {min_eval}"
                     ),
                 }
             ],
@@ -621,17 +744,26 @@ def run_report(state_dir: Path, *, dry_run: bool) -> int:
         print(f"SKIP: perf-eval build #{build_number} was already reported")
         return 0
 
-    all_deltas = [
-        *current["deltaVsPrev"].get("perfDeltas", []),
-        *current["deltaVsPrev"].get("evalDeltas", []),
-    ]
+    perf_deltas = _load_full_perf_deltas(current)
+    eval_deltas = current["deltaVsPrev"].get("evalDeltas", [])
+    all_deltas = [*perf_deltas, *eval_deltas]
     models = {str(item["model"]) for item in all_deltas}
     histories = _load_histories(models)
-    perf_rows, eval_rows = _make_rows(current, histories)
-    if not perf_rows and not eval_rows:
+    throughput_rows, latency_rows, eval_rows = _make_rows(
+        current,
+        histories,
+        perf_deltas=perf_deltas,
+    )
+    if not throughput_rows and not latency_rows and not eval_rows:
         raise RuntimeError(f"No rolling statistics available for build #{build_number}")
 
-    payload = build_slack_payload(current, previous, perf_rows, eval_rows)
+    payload = build_slack_payload(
+        current,
+        previous,
+        throughput_rows,
+        latency_rows,
+        eval_rows,
+    )
     report_path = state_dir / "vllm_perf_eval_report_payload.json"
     details_path = state_dir / "vllm_perf_eval_report_rows.json"
     _write_json(report_path, payload)
@@ -640,7 +772,8 @@ def run_report(state_dir: Path, *, dry_run: bool) -> int:
         {
             "build_number": build_number,
             "commit": current["commit"],
-            "perf": [asdict(row) for row in perf_rows],
+            "perf": [asdict(row) for row in throughput_rows],
+            "latency": [asdict(row) for row in latency_rows],
             "eval": [asdict(row) for row in eval_rows],
         },
     )
@@ -648,7 +781,8 @@ def run_report(state_dir: Path, *, dry_run: bool) -> int:
     if dry_run:
         print(
             f"DRY RUN: generated build #{build_number} report with "
-            f"{len(perf_rows)} perf and {len(eval_rows)} eval rows"
+            f"{len(throughput_rows)} throughput, {len(latency_rows)} latency, "
+            f"and {len(eval_rows)} eval rows"
         )
         return 0
 
