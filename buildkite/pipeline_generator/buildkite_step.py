@@ -16,7 +16,7 @@ from amd import (
     get_rocm_base_refresh_timeout,
     is_amd_gpu_device,
 )
-from step import Step
+from step import Step, generate_step_key
 from utils_lib.docker_utils import (
     get_image,
     get_ecr_cache_registry,
@@ -507,7 +507,7 @@ def convert_group_step_to_buildkite_step(
             if is_amd_gpu_device(step.device):
                 amd_commands = [
                     "export VLLM_TEST_GROUP_NAME="
-                    f"{_generate_step_key(step.key or step.label)}"
+                    f"{generate_step_key(step.key or step.label)}"
                 ]
                 amd_commands.extend(
                     _prepare_commands(
@@ -536,7 +536,7 @@ def convert_group_step_to_buildkite_step(
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
                         block=f"Run {amd_step.label}",
-                        key=f"block-amd-{_generate_step_key(step.key or step.label)}",
+                        key=f"block-amd-{generate_step_key(step.key or step.label)}",
                         command_step=amd_step,
                         depends_on=amd_step.depends_on,
                     )
@@ -596,7 +596,7 @@ def convert_group_step_to_buildkite_step(
             if not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(
                     block=f"Run {step.label}",
-                    key=f"block-{_generate_step_key(step.label)}",
+                    key=f"block-{generate_step_key(step.label)}",
                     command_step=buildkite_step,
                     depends_on=[],
                     append_to_command_depends_on=False,
@@ -658,7 +658,7 @@ def convert_group_step_to_buildkite_step(
                 extra_env.update(amd.get("env", {}))
                 amd_step = _create_amd_step(
                     label=step.label,
-                    key=f"amd-{_generate_step_key(step.key or step.label)}",
+                    key=f"amd-{generate_step_key(step.key or step.label)}",
                     device=amd["device"],
                     num_devices=amd_num_devices,
                     commands_str=amd_commands_str,
@@ -684,7 +684,7 @@ def convert_group_step_to_buildkite_step(
                     )
                     amd_block_step = _create_block_step(
                         block=f"Run AMD: {step.label}",
-                        key=f"block-amd-{_generate_step_key(step.label)}",
+                        key=f"block-amd-{generate_step_key(step.label)}",
                         command_step=amd_step,
                         depends_on=[mirror_build_dep],
                     )
@@ -770,21 +770,6 @@ def _source_file_dependencies_match(
         ) and not any(_matches_source_dependency(exc, diff_file) for exc in excludes):
             return True
     return False
-
-
-def _generate_step_key(step_label: str) -> str:
-    return (
-        step_label.replace(" ", "-")
-        .lower()
-        .replace("(", "")
-        .replace(")", "")
-        .replace("%", "")
-        .replace(",", "-")
-        .replace("+", "-")
-        .replace(":", "-")
-        .replace(".", "-")
-        .replace("/", "-")
-    )
 
 
 def _create_amd_step(

@@ -6,7 +6,13 @@ import pytest
 
 import buildkite_step
 from pipeline_generator import select_steps_and_dependencies
-from step import Step, group_steps, read_steps_from_job_dir
+from step import (
+    Step,
+    generate_step_key,
+    group_steps,
+    parse_steps_from_yaml,
+    read_steps_from_job_dir,
+)
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
@@ -34,6 +40,52 @@ def test_read_steps_from_job_dir():
     assert steps_by_label["Test D"].num_nodes == 2
     assert steps_by_label["Test D"].num_devices == 4
     assert steps_by_label["Test E"].group == "a"
+
+
+def test_missing_step_keys_are_derived_from_the_label():
+    steps = parse_steps_from_yaml(
+        {
+            "steps": [
+                {"label": "CPU-Distributed Tests (DP+TP)"},
+                {"label": "Already Keyed", "key": "explicit-key"},
+            ]
+        }
+    )
+
+    assert [step.key for step in steps] == [
+        "cpu-distributed-tests-dp-tp",
+        "explicit-key",
+    ]
+
+
+def test_generate_step_key_is_idempotent():
+    """Once a key is derived, `step.key or step.label` slugs an already-slugged
+    string. Those sites feed the AMD mirror key, the block step key, and
+    VLLM_TEST_GROUP_NAME, so the second pass has to be a no-op.
+    """
+    label = "A B(C)%D,E+F:G.H/I"
+
+    assert generate_step_key(generate_step_key(label)) == generate_step_key(label)
+
+
+def test_a_label_deriving_an_invalid_key_is_rejected():
+    with pytest.raises(ValueError, match="Bad & Label"):
+        parse_steps_from_yaml({"steps": [{"label": "Bad & Label"}]})
+
+
+def test_a_folded_yaml_label_does_not_derive_a_broken_key():
+    # `label: >` appends a newline, which survives every character replacement.
+    steps = parse_steps_from_yaml({"steps": [{"label": "Kernels Attention\n"}]})
+
+    assert [step.key for step in steps] == ["kernels-attention"]
+
+
+def test_steps_read_from_a_job_dir_all_have_keys():
+    steps = read_steps_from_job_dir(str(TEST_JOB_DIR))
+
+    assert {step.label: step.key for step in steps} == {
+        f"Test {letter}": f"test-{letter.lower()}" for letter in "ABCDEFGH"
+    }
 
 
 def test_group_steps_sorts_steps_within_each_group():
