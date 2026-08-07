@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Any
 from pydantic import model_validator
 from typing_extensions import Self
 from collections import defaultdict
-from global_config import get_global_config
+from global_config import get_global_config, STEP_KEY_PATTERN
 import os
 import yaml
 
@@ -43,6 +43,42 @@ class Step(BaseModel):
         return cls(**yaml_data)
 
 
+def generate_step_key(step_label: str) -> str:
+    return (
+        step_label.strip()
+        .replace(" ", "-")
+        .lower()
+        .replace("(", "")
+        .replace(")", "")
+        .replace("%", "")
+        .replace(",", "-")
+        .replace("+", "-")
+        .replace(":", "-")
+        .replace(".", "-")
+        .replace("/", "-")
+    )
+
+
+def _derive_missing_step_keys(steps: List[Step]) -> None:
+    """Key every step the YAML left keyless, deriving one from its label.
+
+    Must stay exactly generate_step_key(label). The `step.key or step.label`
+    call sites in buildkite_step slug it a second time, which is a no-op only
+    for keys STEP_KEY_PATTERN accepts below, so a prefix or a dedup suffix here
+    would move the AMD mirror and block step keys.
+    """
+    for step in steps:
+        if step.key:
+            continue
+        key = generate_step_key(step.label)
+        if not STEP_KEY_PATTERN.fullmatch(key):
+            raise ValueError(
+                f"Step label {step.label!r} derives an invalid step key {key!r}. "
+                f"Add an explicit 'key:' to this step."
+            )
+        step.key = key
+
+
 def parse_steps_from_yaml(yaml_data: dict):
     group = yaml_data.get("group", None)
     yaml_steps = yaml_data.get("steps", [])
@@ -50,6 +86,7 @@ def parse_steps_from_yaml(yaml_data: dict):
     if group:
         for step in steps:
             step.group = group
+    _derive_missing_step_keys(steps)
     return steps
 
 

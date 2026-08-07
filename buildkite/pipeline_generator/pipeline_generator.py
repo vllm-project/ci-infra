@@ -8,6 +8,7 @@ from buildkite_step import (
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
     create_precommit_group_step,
+    validate_unique_step_keys,
 )
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
@@ -71,6 +72,9 @@ class PipelineGenerator:
                     global_config["github_repo_name"], global_config["commit"]
                 ),
             )
+
+        # Last point where every emitted key exists, pre-commit included.
+        validate_unique_step_keys(buildkite_group_steps)
 
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:

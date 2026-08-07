@@ -6,7 +6,13 @@ import pytest
 
 import buildkite_step
 from pipeline_generator import select_steps_and_dependencies
-from step import Step, group_steps, read_steps_from_job_dir
+from step import (
+    Step,
+    generate_step_key,
+    group_steps,
+    parse_steps_from_yaml,
+    read_steps_from_job_dir,
+)
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
@@ -19,6 +25,18 @@ def _render_single_step(step):
             step.group: [step],
         }
     )[0]
+
+
+def _group(name, *steps):
+    return buildkite_step.BuildkiteGroupStep(group=name, steps=list(steps))
+
+
+def _command(label, key):
+    return buildkite_step.BuildkiteCommandStep(label=label, key=key)
+
+
+def _block(block, key):
+    return buildkite_step.BuildkiteBlockStep(block=block, key=key)
 
 
 def test_read_steps_from_job_dir():
@@ -34,6 +52,99 @@ def test_read_steps_from_job_dir():
     assert steps_by_label["Test D"].num_nodes == 2
     assert steps_by_label["Test D"].num_devices == 4
     assert steps_by_label["Test E"].group == "a"
+
+
+def test_missing_step_keys_are_derived_from_the_label():
+    steps = parse_steps_from_yaml(
+        {
+            "steps": [
+                {"label": "CPU-Distributed Tests (DP+TP)"},
+                {"label": "Already Keyed", "key": "explicit-key"},
+            ]
+        }
+    )
+
+    assert [step.key for step in steps] == [
+        "cpu-distributed-tests-dp-tp",
+        "explicit-key",
+    ]
+
+
+def test_generate_step_key_is_idempotent():
+    """Once a key is derived, `step.key or step.label` slugs an already-slugged
+    string. Those sites feed the AMD mirror key, the block step key, and
+    VLLM_TEST_GROUP_NAME, so the second pass has to be a no-op.
+    """
+    label = "A B(C)%D,E+F:G.H/I"
+
+    assert generate_step_key(generate_step_key(label)) == generate_step_key(label)
+
+
+def test_a_label_deriving_an_invalid_key_is_rejected():
+    with pytest.raises(ValueError, match="Bad & Label"):
+        parse_steps_from_yaml({"steps": [{"label": "Bad & Label"}]})
+
+
+def test_a_folded_yaml_label_does_not_derive_a_broken_key():
+    # `label: >` appends a newline, which survives every character replacement.
+    steps = parse_steps_from_yaml({"steps": [{"label": "Kernels Attention\n"}]})
+
+    assert [step.key for step in steps] == ["kernels-attention"]
+
+
+def test_steps_read_from_a_job_dir_all_have_keys():
+    steps = read_steps_from_job_dir(str(TEST_JOB_DIR))
+
+    assert {step.label: step.key for step in steps} == {
+        f"Test {letter}": f"test-{letter.lower()}" for letter in "ABCDEFGH"
+    }
+
+
+def test_duplicate_step_keys_are_rejected_naming_both_steps():
+    group_steps = [
+        _group("Models", _command("Language Models", "models")),
+        _group("Kernels", _command("Kernel Tests", "models")),
+    ]
+
+    with pytest.raises(ValueError, match="Models/Language Models and Kernels/Kernel"):
+        buildkite_step.validate_unique_step_keys(group_steps)
+
+
+def test_a_command_key_colliding_with_a_block_key_is_rejected():
+    # A step labelled "Block Kernel Tests" derives the key the generator already
+    # mints for the block step gating "Kernel Tests".
+    group_steps = [
+        _group(
+            "Kernels",
+            _block("Run Kernel Tests", "block-kernel-tests"),
+            _command("Block Kernel Tests", "block-kernel-tests"),
+        )
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="Kernels/Run Kernel Tests and Kernels/Block Kernel Tests",
+    ):
+        buildkite_step.validate_unique_step_keys(group_steps)
+
+
+def test_keyless_steps_do_not_count_as_a_collision():
+    # Defensive: the emitted models still allow a null key even though every
+    # step now carries one.
+    group_steps = [
+        _group("Kernels", _command("A", None), _command("B", None)),
+    ]
+
+    buildkite_step.validate_unique_step_keys(group_steps)
+
+
+def test_distinct_step_keys_pass_validation():
+    group_steps = [
+        _group("Models", _command("Language Models", "models")),
+        _group("Kernels", _block("Run Kernels", "block-kernels"), _command("K", "k")),
+    ]
+
+    buildkite_step.validate_unique_step_keys(group_steps)
 
 
 def test_group_steps_sorts_steps_within_each_group():
