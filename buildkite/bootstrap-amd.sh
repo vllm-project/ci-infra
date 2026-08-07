@@ -170,6 +170,11 @@ upload_pipeline() {
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     FAIL_FAST=$(fail_fast)
+    ROCM_BUILD_SCOPED_IMAGES=0
+    if grep -q 'CI_BASE_IMAGE_TAG_BUILD_REF' \
+        .buildkite/scripts/ci-bake-rocm.sh 2>/dev/null; then
+        ROCM_BUILD_SCOPED_IMAGES=1
+    fi
 
     cd .buildkite
     (
@@ -189,7 +194,7 @@ upload_pipeline() {
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
             -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
             -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
-            -D rocm_base_refresh_diff_unavailable="${ROCM_BASE_REFRESH_DIFF_UNAVAILABLE:-0}" \
+            -D rocm_build_scoped_images="$ROCM_BUILD_SCOPED_IMAGES" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -236,14 +241,6 @@ else
 fi
 
 ROCM_BASE_DOCKERFILE="docker/Dockerfile.rocm_base"
-ROCM_BASE_DOCKERFILE_CHANGED=0
-while IFS= read -r file; do
-    file="${file%$'\r'}"
-    if [[ $file == "$ROCM_BASE_DOCKERFILE" ]]; then
-        ROCM_BASE_DOCKERFILE_CHANGED=1
-        break
-    fi
-done < <(printf '%s\n' "${file_diff:-}")
 
 # ----------------------------------------------------------------------
 # Early exit start: skip pipeline if conditions are met
@@ -364,8 +361,7 @@ else
 fi
 
 # Build LIST_FILE_DIFF from the already-computed file_diff. Use a short sentinel
-# for full-coverage modes instead of passing a potentially large diff, but retain
-# the ROCm base Dockerfile marker used to select the refresh step timeout.
+# for full-coverage modes instead of passing a potentially large diff.
 if [[ $RUN_ALL -eq 1 ]]; then
     LIST_FILE_DIFF="run_all"
 elif [[ $NIGHTLY -eq 1 ]]; then
@@ -373,12 +369,5 @@ elif [[ $NIGHTLY -eq 1 ]]; then
 else
     LIST_FILE_DIFF=$(join_file_diff "$file_diff")
 fi
-
-if [[ $ROCM_BASE_DOCKERFILE_CHANGED -eq 1 && \
-      ( $LIST_FILE_DIFF == "run_all" || $LIST_FILE_DIFF == "nightly" ) ]]; then
-    LIST_FILE_DIFF+="|$ROCM_BASE_DOCKERFILE"
-fi
-
-export ROCM_BASE_REFRESH_DIFF_UNAVAILABLE="$diff_unavailable"
 
 upload_pipeline

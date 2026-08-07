@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from pydantic import model_validator
 from typing_extensions import Self
@@ -22,6 +22,8 @@ class Step(BaseModel):
     source_file_dependencies: Optional[List[str]] = None
     soft_fail: Optional[bool] = False
     parallelism: Optional[int] = None
+    concurrency: Optional[int] = Field(default=None, gt=0, strict=True)
+    concurrency_group: Optional[str] = None
     timeout_in_minutes: Optional[int] = None
     mount_buildkite_agent: Optional[bool] = False
     env: Optional[Dict[str, str]] = None
@@ -36,6 +38,12 @@ class Step(BaseModel):
     def validate_multi_node(self) -> Self:
         if self.num_nodes and not self.num_devices:
             raise ValueError("'num_devices' must be defined if 'num_nodes' is defined.")
+        if (self.concurrency is None) != (self.concurrency_group is None):
+            raise ValueError(
+                "'concurrency' and 'concurrency_group' must be defined together."
+            )
+        if self.concurrency_group is not None and not self.concurrency_group.strip():
+            raise ValueError("'concurrency_group' must be a nonempty string.")
         return self
 
     @classmethod
