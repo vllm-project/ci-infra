@@ -376,8 +376,10 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
     if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
         return []
 
+    fnrec_commands = _get_fnrec_setup_commands(step)
+
     if setup_profile == "nvidia":
-        commands = _get_fnrec_setup_commands(step) + [
+        commands = fnrec_commands + [
             "echo '--- :nvidia: GPU Info'",
             "(command nvidia-smi || true)",
         ]
@@ -397,7 +399,10 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
         return commands
 
     if setup_profile == "amd":
-        return get_amd_setup_commands()
+        # These are joined into VLLM_TEST_COMMANDS and re-run after the wheel is
+        # installed, so the recorder lands in the interpreter that runs the tests.
+        # The legacy dind path has no agent to upload from and loses its recording.
+        return fnrec_commands + get_amd_setup_commands()
 
     raise ValueError(f"Unsupported setup profile: {setup_profile}")
 

@@ -37,13 +37,22 @@ def _step(**kwargs):
     return Step(**defaults)
 
 
-def _run_trap(tmp_path, uploader: str | None, step_exit: int) -> int:
-    """Arm the generated trap around a step that exits `step_exit`."""
+def _run_trap(monkeypatch, tmp_path, uploader: str | None, step_exit: int) -> int:
+    """Arm the generator's own EXIT trap around a step that exits `step_exit`.
+
+    The trap is lifted from the emitted commands rather than rewritten here, so
+    dropping the `|| true` guard from the generator fails the test that uses this.
+    Only the uploader path is substituted.
+    """
     target = tmp_path / "fnrec_upload.sh"
     if uploader is not None:
         target.write_text(uploader)
         target.chmod(0o755)
-    trap = f"trap '{target} || true' EXIT"
+    monkeypatch.setenv("FNREC", "1")
+    commands = buildkite_step._prepare_commands(_step(), variables_to_inject={})
+    trap = next((c for c in commands if c.startswith("trap ")), None)
+    assert trap is not None, commands
+    trap = trap.replace("/tmp/fnrec_upload.sh", str(target))
     return subprocess.run(
         ["bash", "-e", "-c", f"{trap}; exit {step_exit}"], capture_output=True
     ).returncode
@@ -125,13 +134,24 @@ def test_skipped_where_the_profile_is_skipped(monkeypatch, step_kwargs):
     assert not any("fnrec" in c.lower() for c in commands)
 
 
-@pytest.mark.parametrize("profile", ["amd", "none"])
-def test_confined_to_the_nvidia_profile(monkeypatch, profile):
-    # AMD renders from a separate template and pulls its own image, so the
-    # recorder would not be installed there even if the commands were emitted.
+def test_reaches_the_amd_profile(monkeypatch):
+    # The trap has to be armed before the ROCm setup, or a crash in that setup
+    # exits before there is anything to upload from.
     monkeypatch.setenv("FNREC", "1")
     commands = buildkite_step._prepare_commands(
-        _step(), variables_to_inject={}, setup_profile=profile
+        _step(), variables_to_inject={}, setup_profile="amd"
+    )
+    armed = [i for i, c in enumerate(commands) if c.startswith("export FNREC_OUT=")]
+    trapped = [i for i, c in enumerate(commands) if c.startswith("trap ")]
+    rocm = [i for i, c in enumerate(commands) if "amd-smi" in c]
+    assert armed and trapped and rocm, commands
+    assert armed[0] < trapped[0] < rocm[0]
+
+
+def test_absent_from_the_none_profile(monkeypatch):
+    monkeypatch.setenv("FNREC", "1")
+    commands = buildkite_step._prepare_commands(
+        _step(), variables_to_inject={}, setup_profile="none"
     )
     assert not any("fnrec" in c.lower() for c in commands)
 
@@ -230,13 +250,14 @@ def test_agent_is_mounted_only_when_enabled(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("step_exit", [0, 3])
-def test_trap_never_changes_the_step_status(tmp_path, uploader, step_exit):
-    """An EXIT trap's exit status replaces the shell's.
+def test_trap_never_changes_the_step_status(monkeypatch, tmp_path, uploader, step_exit):
+    """Under `set -e`, a failing EXIT trap's status becomes the shell's.
 
-    Without the `|| true` guard a broken uploader turns a passing job red and
-    overwrites the real exit code of a failing one, and both are silent.
+    So without the `|| true` guard a broken uploader turns a passing job red and
+    overwrites the real exit code of a failing one, both silently. Plain bash
+    discards the trap's status, which is why the shell here runs with `-e`.
     """
-    assert _run_trap(tmp_path, uploader, step_exit) == step_exit
+    assert _run_trap(monkeypatch, tmp_path, uploader, step_exit) == step_exit
 
 
 def test_blobs_round_trip_through_yaml(monkeypatch):
