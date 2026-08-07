@@ -59,12 +59,13 @@ def generate_step_key(step_label: str) -> str:
     )
 
 
-def derive_missing_step_keys(steps: List[Step]) -> None:
+def _derive_missing_step_keys(steps: List[Step]) -> None:
     """Key every step the YAML left keyless, deriving one from its label.
 
     Must stay exactly generate_step_key(label). The `step.key or step.label`
-    call sites in buildkite_step rely on that being idempotent, so a prefix or
-    a dedup suffix here would move the AMD mirror and block step keys.
+    call sites in buildkite_step slug it a second time, which is a no-op only
+    for keys STEP_KEY_PATTERN accepts below, so a prefix or a dedup suffix here
+    would move the AMD mirror and block step keys.
     """
     for step in steps:
         if step.key:
@@ -85,7 +86,7 @@ def parse_steps_from_yaml(yaml_data: dict):
     if group:
         for step in steps:
             step.group = group
-    derive_missing_step_keys(steps)
+    _derive_missing_step_keys(steps)
     return steps
 
 

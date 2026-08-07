@@ -129,6 +129,8 @@ def test_a_command_key_colliding_with_a_block_key_is_rejected():
 
 
 def test_keyless_steps_do_not_count_as_a_collision():
+    # Defensive: the emitted models still allow a null key even though every
+    # step now carries one.
     group_steps = [
         _group("Kernels", _command("A", None), _command("B", None)),
     ]

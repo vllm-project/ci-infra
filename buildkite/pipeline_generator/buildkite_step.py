@@ -202,18 +202,15 @@ def validate_unique_step_keys(
 ) -> None:
     """Reject a pipeline in which two steps share a key.
 
-    Command, block, AMD mirror and pre-commit keys share one namespace, so a
-    collision makes depends_on ambiguous and Buildkite rejects the upload
-    without naming the steps that clashed.
+    Command, block, AMD mirror and pre-commit keys share one namespace, and a
+    collision makes every depends_on edge referencing that key ambiguous.
     """
     seen: Dict[str, str] = {}
     for group_step in buildkite_group_steps:
         for step in group_step.steps:
             if not step.key:
                 continue
-            label = (
-                step.label if isinstance(step, BuildkiteCommandStep) else step.block
-            )
+            label = step.label if isinstance(step, BuildkiteCommandStep) else step.block
             origin = f"{group_step.group}/{label}"
             if step.key in seen:
                 raise ValueError(
