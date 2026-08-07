@@ -1,4 +1,5 @@
 import copy
+import os
 from step import Step
 from constants import DeviceType
 
@@ -244,4 +245,12 @@ def get_k8s_plugin(step: Step, image: str):
     plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"][
         "nvidia.com/gpu"
     ] = step.num_devices or 1
+
+    pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
+    if pull_request and pull_request != "false":
+        for vol in plugin["kubernetes"]["podSpec"].get("volumes", []):
+            if "hostPath" in vol and "path" in vol["hostPath"]:
+                path = vol["hostPath"]["path"]
+                if not path.endswith("-pr"):
+                    vol["hostPath"]["path"] = f"{path}-pr"
     return plugin
