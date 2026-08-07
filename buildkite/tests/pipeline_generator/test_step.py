@@ -27,6 +27,18 @@ def _render_single_step(step):
     )[0]
 
 
+def _group(name, *steps):
+    return buildkite_step.BuildkiteGroupStep(group=name, steps=list(steps))
+
+
+def _command(label, key):
+    return buildkite_step.BuildkiteCommandStep(label=label, key=key)
+
+
+def _block(block, key):
+    return buildkite_step.BuildkiteBlockStep(block=block, key=key)
+
+
 def test_read_steps_from_job_dir():
     steps = read_steps_from_job_dir(str(TEST_JOB_DIR))
     steps_by_label = {step.label: step for step in steps}
@@ -86,6 +98,51 @@ def test_steps_read_from_a_job_dir_all_have_keys():
     assert {step.label: step.key for step in steps} == {
         f"Test {letter}": f"test-{letter.lower()}" for letter in "ABCDEFGH"
     }
+
+
+def test_duplicate_step_keys_are_rejected_naming_both_steps():
+    group_steps = [
+        _group("Models", _command("Language Models", "models")),
+        _group("Kernels", _command("Kernel Tests", "models")),
+    ]
+
+    with pytest.raises(ValueError, match="Models/Language Models and Kernels/Kernel"):
+        buildkite_step.validate_unique_step_keys(group_steps)
+
+
+def test_a_command_key_colliding_with_a_block_key_is_rejected():
+    # A step labelled "Block Kernel Tests" derives the key the generator already
+    # mints for the block step gating "Kernel Tests".
+    group_steps = [
+        _group(
+            "Kernels",
+            _block("Run Kernel Tests", "block-kernel-tests"),
+            _command("Block Kernel Tests", "block-kernel-tests"),
+        )
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="Kernels/Run Kernel Tests and Kernels/Block Kernel Tests",
+    ):
+        buildkite_step.validate_unique_step_keys(group_steps)
+
+
+def test_keyless_steps_do_not_count_as_a_collision():
+    group_steps = [
+        _group("Kernels", _command("A", None), _command("B", None)),
+    ]
+
+    buildkite_step.validate_unique_step_keys(group_steps)
+
+
+def test_distinct_step_keys_pass_validation():
+    group_steps = [
+        _group("Models", _command("Language Models", "models")),
+        _group("Kernels", _block("Run Kernels", "block-kernels"), _command("K", "k")),
+    ]
+
+    buildkite_step.validate_unique_step_keys(group_steps)
 
 
 def test_group_steps_sorts_steps_within_each_group():

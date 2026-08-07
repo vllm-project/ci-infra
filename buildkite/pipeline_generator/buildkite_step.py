@@ -197,6 +197,32 @@ class BuildkiteGroupStep(BaseModel):
     steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
 
 
+def validate_unique_step_keys(
+    buildkite_group_steps: List[BuildkiteGroupStep],
+) -> None:
+    """Reject a pipeline in which two steps share a key.
+
+    Command, block, AMD mirror and pre-commit keys share one namespace, so a
+    collision makes depends_on ambiguous and Buildkite rejects the upload
+    without naming the steps that clashed.
+    """
+    seen: Dict[str, str] = {}
+    for group_step in buildkite_group_steps:
+        for step in group_step.steps:
+            if not step.key:
+                continue
+            label = (
+                step.label if isinstance(step, BuildkiteCommandStep) else step.block
+            )
+            origin = f"{group_step.group}/{label}"
+            if step.key in seen:
+                raise ValueError(
+                    f"Duplicate CI step key {step.key!r}: "
+                    f"{seen[step.key]} and {origin}."
+                )
+            seen[step.key] = origin
+
+
 def _get_step_plugin(step: Step):
     # Use K8s plugin
     use_cpu = step.device in (
