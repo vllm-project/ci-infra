@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-
 MINIJINJA = shutil.which("minijinja-cli")
 TEMPLATE = Path(__file__).parents[1] / "test-template-amd.j2"
 BOOTSTRAP = Path(__file__).parents[1] / "bootstrap-amd.sh"
@@ -34,7 +33,8 @@ def _render_amd_step(
     torch_nightly="0",
     kill_switch="0",
 ):
-    assert MINIJINJA is not None, "minijinja-cli is required for template tests"
+    if MINIJINJA is None:
+        pytest.skip("minijinja-cli is required for template rendering tests")
     step = {
         "label": "Minimal AMD test",
         "mirror_hardwares": ["amdexperimental"],
@@ -166,11 +166,30 @@ def test_bootstrap_validates_and_passes_generation_kill_switch():
     )
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".buildkite/scripts/hardware_ci/run-amd-test.sh",
+        ".buildkite/scripts/hardware_ci/amd-hf-client-mode.sh",
+        ".buildkite/scripts/hardware_ci/amd-hf-client-mode-self-test.sh",
+    ],
+)
+def test_legacy_bootstrap_runs_all_amd_jobs_for_runner_policy_changes(path):
+    bootstrap = BOOTSTRAP.read_text()
+    _, marker, remainder = bootstrap.partition("patterns=(")
+    assert marker
+    patterns, marker, _ = remainder.partition("\n)")
+    assert marker
+
+    assert f'    "{path}"' in patterns
+
+
 @pytest.mark.parametrize("value", ["", "true", "2"])
 def test_bootstrap_rejects_invalid_generation_kill_switch(value):
     result = subprocess.run(
         ["bash", str(BOOTSTRAP)],
         env={**os.environ, "VLLM_CI_DISABLE_HF_OFFLINE_RETRY": value},
+        check=False,
         capture_output=True,
         text=True,
     )

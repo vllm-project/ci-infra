@@ -290,6 +290,10 @@ fi
 
 patterns=(
     "docker/Dockerfile.rocm"
+    # Runner and client-mode policy changes affect every legacy AMD test step.
+    ".buildkite/scripts/hardware_ci/run-amd-test.sh"
+    ".buildkite/scripts/hardware_ci/amd-hf-client-mode.sh"
+    ".buildkite/scripts/hardware_ci/amd-hf-client-mode-self-test.sh"
     "CMakeLists.txt"
     "requirements/common.txt"
     "requirements/rocm.txt"
