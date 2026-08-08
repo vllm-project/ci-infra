@@ -1,11 +1,50 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from typing import Optional, List, Dict, Any
 from pydantic import model_validator
-from typing_extensions import Self
+from typing_extensions import Annotated, Self
 from collections import defaultdict
 from global_config import get_global_config
 import os
 import yaml
+
+
+PositiveStrictInt = Annotated[int, Field(strict=True, gt=0)]
+
+
+class AmdMirrorOptions(BaseModel):
+    """Runtime-validated schema for the AMD half of a mirrored step."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_tags: Optional[Dict[str, str]] = None
+    commands: Optional[List[str]] = None
+    depends_on: Optional[List[str]] = None
+    device: str
+    dind: Optional[StrictBool] = None
+    env: Optional[Dict[str, str]] = None
+    hf_offline_retry: Optional[StrictBool] = None
+    no_gpu: Optional[StrictBool] = None
+    no_plugin: Optional[StrictBool] = None
+    num_devices: Optional[PositiveStrictInt] = None
+    num_gpus: Optional[PositiveStrictInt] = None
+    num_nodes: Optional[PositiveStrictInt] = None
+    optional: Optional[StrictBool] = None
+    soft_fail: Optional[StrictBool] = None
+    source_file_dependencies: Optional[List[str]] = None
+    timeout_in_minutes: Optional[PositiveStrictInt] = None
+    working_dir: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_explicit_nulls(cls, data):
+        if isinstance(data, dict):
+            null_fields = [name for name, value in data.items() if value is None]
+            if null_fields:
+                raise ValueError(
+                    "AMD mirror options cannot be null: "
+                    + ", ".join(sorted(null_fields))
+                )
+        return data
 
 
 class Step(BaseModel):
@@ -30,7 +69,25 @@ class Step(BaseModel):
     no_plugin: Optional[bool] = False
     no_gpu: Optional[bool] = False
     dind: bool = True
+    # AMD-only runner policy. Non-AMD steps ignore this field.
+    hf_offline_retry: StrictBool = False
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_amd_mirror_options(cls, data):
+        if not isinstance(data, dict):
+            return data
+        mirror = data.get("mirror")
+        if not isinstance(mirror, dict) or "amd" not in mirror:
+            return data
+
+        validated_amd = AmdMirrorOptions.model_validate(mirror["amd"])
+        normalized = dict(data)
+        normalized_mirror = dict(mirror)
+        normalized_mirror["amd"] = validated_amd.model_dump(exclude_unset=True)
+        normalized["mirror"] = normalized_mirror
+        return normalized
 
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:

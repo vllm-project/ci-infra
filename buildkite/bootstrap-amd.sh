@@ -31,6 +31,19 @@ if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
 
+if [[ -z "${VLLM_CI_DISABLE_HF_OFFLINE_RETRY+x}" ]]; then
+    VLLM_CI_DISABLE_HF_OFFLINE_RETRY=0
+fi
+
+case "$VLLM_CI_DISABLE_HF_OFFLINE_RETRY" in
+    0|1) ;;
+    *)
+        echo "VLLM_CI_DISABLE_HF_OFFLINE_RETRY must be exactly 0 or 1" >&2
+        exit 2
+        ;;
+esac
+export VLLM_CI_DISABLE_HF_OFFLINE_RETRY
+
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
@@ -183,6 +196,7 @@ upload_pipeline() {
             -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
             -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
             -D rocm_base_refresh_diff_unavailable="${ROCM_BASE_REFRESH_DIFF_UNAVAILABLE:-0}" \
+            -D vllm_ci_disable_hf_offline_retry="$VLLM_CI_DISABLE_HF_OFFLINE_RETRY" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )

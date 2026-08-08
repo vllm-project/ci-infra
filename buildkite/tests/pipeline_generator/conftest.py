@@ -22,6 +22,8 @@ def fake_global_config(monkeypatch):
         "docs_only_disable": "1",
         "nightly": "0",
         "torch_nightly": "0",
+        "amd_hf_offline_retry": False,
+        "disable_hf_offline_retry": False,
         "run_all": False,
         "list_file_diff": [],
         "fail_fast": False,

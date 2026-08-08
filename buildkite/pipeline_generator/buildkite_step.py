@@ -532,6 +532,7 @@ def convert_group_step_to_buildkite_step(
                     parallelism=step.parallelism,
                     timeout_in_minutes=step.timeout_in_minutes,
                     agent_tags=step.agent_tags,
+                    hf_offline_retry=step.hf_offline_retry,
                 )
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
@@ -672,6 +673,7 @@ def convert_group_step_to_buildkite_step(
                     parallelism=step.parallelism,
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
+                    hf_offline_retry=amd.get("hf_offline_retry", False),
                 )
                 if not _step_should_run(
                     _get_amd_mirror_effective_step(step, amd), list_file_diff
@@ -804,8 +806,10 @@ def _create_amd_step(
     key: Optional[str] = None,
     timeout_in_minutes: Optional[int] = None,
     agent_tags: Optional[Dict[str, str]] = None,
+    hf_offline_retry: bool,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
+    global_config = get_global_config()
     options = build_amd_step_options(
         label=label,
         device=device,
@@ -818,6 +822,9 @@ def _create_amd_step(
         no_gpu=no_gpu,
         num_nodes=num_nodes,
         agent_tags=agent_tags,
+        hf_offline_retry=hf_offline_retry,
+        hf_offline_retry_capability=global_config.get("amd_hf_offline_retry", False),
+        hf_offline_retry_disabled=global_config.get("disable_hf_offline_retry", False),
     )
     return BuildkiteCommandStep(
         **options,

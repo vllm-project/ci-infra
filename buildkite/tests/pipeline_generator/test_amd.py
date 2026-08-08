@@ -29,6 +29,113 @@ def _render_single_step(step):
     )[0]
 
 
+def _assert_exact_amd_retry(command_step):
+    assert command_step.retry == amd.AMD_RETRY
+    assert command_step.retry is not amd.AMD_RETRY
+    assert command_step.retry["automatic"] is not amd.AMD_RETRY["automatic"]
+
+
+def _render_command_step(step):
+    return next(
+        item
+        for item in _render_single_step(step).steps
+        if isinstance(item, buildkite_step.BuildkiteCommandStep)
+    )
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_hf_offline_retry_is_strictly_typed_for_direct_and_amd_mirror(value):
+    direct = Step.from_yaml(
+        {
+            "label": "Direct AMD",
+            "device": "mi300_1",
+            "commands": ["pytest tests/example.py"],
+            "hf_offline_retry": value,
+        }
+    )
+    mirrored = Step.from_yaml(
+        {
+            "label": "AMD mirror",
+            "device": "h200_18gb",
+            "commands": ["pytest tests/example.py"],
+            "mirror": {
+                "amd": {
+                    "device": "mi300_1",
+                    "hf_offline_retry": value,
+                }
+            },
+        }
+    )
+
+    assert direct.hf_offline_retry is value
+    assert mirrored.mirror["amd"]["hf_offline_retry"] is value
+
+
+def test_hf_offline_retry_defaults_off_for_direct_and_mirrored_steps():
+    direct = Step.from_yaml({"label": "Direct AMD"})
+    mirrored = Step.from_yaml(
+        {
+            "label": "AMD mirror",
+            "mirror": {"amd": {"device": "mi300_1"}},
+        }
+    )
+
+    assert direct.hf_offline_retry is False
+    assert "hf_offline_retry" not in mirrored.mirror["amd"]
+
+
+@pytest.mark.parametrize(
+    "yaml_data",
+    [
+        {
+            "label": "Invalid direct AMD policy",
+            "hf_offline_retry": "sometimes",
+        },
+        {
+            "label": "Invalid AMD mirror policy",
+            "mirror": {
+                "amd": {
+                    "device": "mi300_1",
+                    "hf_offline_retry": "sometimes",
+                }
+            },
+        },
+    ],
+)
+def test_hf_offline_retry_rejects_non_boolean_values(yaml_data):
+    with pytest.raises(ValueError, match="valid boolean"):
+        Step.from_yaml(yaml_data)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("no_plugin", "false"),
+        ("no_plugin", None),
+        ("dind", 1),
+        ("num_nodes", "2"),
+        ("num_nodes", True),
+        ("num_devices", 0),
+        ("timeout_in_minutes", -1),
+        ("device", 300),
+        ("hf_offline_rety", True),
+    ],
+)
+def test_amd_mirror_runtime_schema_rejects_malformed_fields(field, value):
+    with pytest.raises(ValueError):
+        Step.from_yaml(
+            {
+                "label": "Invalid AMD mirror",
+                "mirror": {
+                    "amd": {
+                        "device": "mi300_1",
+                        field: value,
+                    }
+                },
+            }
+        )
+
+
 def _rocm_base_refresh_step():
     return Step(
         label="AMD: :docker: refresh ROCm base",
@@ -70,9 +177,7 @@ def test_rocm_base_refresh_force_uses_build_timeout(monkeypatch):
     assert command_step.timeout_in_minutes == 540
 
 
-def test_skip_timeout_omits_rocm_base_refresh_timeout(
-    fake_global_config, monkeypatch
-):
+def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkeypatch):
     monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
     fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
 
@@ -91,9 +196,7 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(
         ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
     ],
 )
-def test_direct_amd_gpu_steps_use_dind_flag(
-    device, queue, dind, expected_gpu_count
-):
+def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_count):
     step = Step(
         label="AMD direct test",
         group="Direct AMD",
@@ -133,7 +236,8 @@ def test_direct_amd_gpu_steps_use_dind_flag(
         assert "AMD_CI_RUNTIME" not in command_step.env
         assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
 
-    assert command_step.retry == amd.AMD_RETRY
+    assert command_step.env[amd.AMD_HF_OFFLINE_RETRY_ENV] == "0"
+    _assert_exact_amd_retry(command_step)
     assert len(command_step.retry["automatic"]) == 7
     assert command_step.retry["automatic"][0] == {
         "signal_reason": "stack_error",
@@ -155,6 +259,103 @@ def test_direct_amd_gpu_steps_use_dind_flag(
     assert "pytest tests/foo.py" in test_commands
     assert "nvidia-smi" not in test_commands
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
+
+
+@pytest.mark.parametrize(
+    ("config_overrides", "step_request", "expected_value"),
+    [
+        pytest.param({"amd_hf_offline_retry": True}, True, "1", id="enabled"),
+        pytest.param({}, True, "0", id="no-capability"),
+        pytest.param({"amd_hf_offline_retry": True}, False, "0", id="no-request"),
+        pytest.param(
+            {"amd_hf_offline_retry": True, "nightly": "1"},
+            True,
+            "1",
+            id="nightly",
+        ),
+        pytest.param(
+            {"amd_hf_offline_retry": True, "torch_nightly": "1"},
+            True,
+            "1",
+            id="torch-nightly",
+        ),
+        pytest.param(
+            {
+                "amd_hf_offline_retry": True,
+                "disable_hf_offline_retry": True,
+            },
+            True,
+            "0",
+            id="kill-switch",
+        ),
+    ],
+)
+def test_direct_amd_hf_offline_retry_is_authoritative(
+    fake_global_config,
+    config_overrides,
+    step_request,
+    expected_value,
+):
+    fake_global_config.update(config_overrides)
+    step = Step(
+        label="AMD retry policy",
+        group="Direct AMD",
+        device="mi300_1",
+        commands=["pytest tests/example.py"],
+        env={
+            amd.AMD_HF_OFFLINE_RETRY_ENV: "0" if expected_value == "1" else "1"
+        },
+        hf_offline_retry=step_request,
+    )
+
+    command_step = _render_command_step(step)
+
+    assert command_step.env[amd.AMD_HF_OFFLINE_RETRY_ENV] == expected_value
+    _assert_exact_amd_retry(command_step)
+
+
+@pytest.mark.parametrize(
+    ("step_overrides", "uses_wrapper"),
+    [
+        pytest.param(
+            {
+                "commands": ["bash tests/standalone_tests/example.sh"],
+                "no_plugin": True,
+            },
+            False,
+            id="direct-command",
+        ),
+        pytest.param(
+            {
+                "commands": ["pytest tests/distributed/example.py"],
+                "num_devices": 1,
+                "num_nodes": 2,
+            },
+            True,
+            id="multi-node",
+        ),
+    ],
+)
+def test_ineligible_amd_jobs_do_not_enable_hf_offline_retry(
+    fake_global_config, step_overrides, uses_wrapper
+):
+    fake_global_config["amd_hf_offline_retry"] = True
+    step = Step(
+        label="Ineligible AMD retry policy",
+        group="Direct AMD",
+        device="mi300_1",
+        hf_offline_retry=True,
+        **step_overrides,
+    )
+
+    command_step = _render_command_step(step)
+
+    assert (command_step.commands == [amd.AMD_TEST_COMMAND]) is uses_wrapper
+    if uses_wrapper:
+        assert command_step.env[amd.AMD_HF_OFFLINE_RETRY_ENV] == "0"
+    else:
+        assert command_step.env is None
+    _assert_exact_amd_retry(command_step)
 
 
 def test_amd_device_rejects_conflicting_gpu_count():
@@ -203,6 +404,7 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     fake_global_config,
 ):
     fake_global_config["list_file_diff"] = ["vllm/model_executor/foo.py"]
+    fake_global_config["amd_hf_offline_retry"] = True
     step = Step(
         label="Mirrored test",
         group="Mirrors",
@@ -217,6 +419,7 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
                 "depends_on": ["image-build-amd"],
                 "soft_fail": False,
                 "source_file_dependencies": ["amd-only/"],
+                "hf_offline_retry": True,
             }
         },
     )
@@ -246,6 +449,8 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert amd_command_step.depends_on == ["image-build-amd"]
     assert amd_command_step.agents == {"queue": AgentQueue.AMD_MI325_1}
     assert amd_command_step.soft_fail is False
+    assert amd_command_step.env[amd.AMD_HF_OFFLINE_RETRY_ENV] == "1"
+    _assert_exact_amd_retry(amd_command_step)
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
 
 
@@ -278,11 +483,14 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config):
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
     assert amd_command_step.key == "amd-native-mirrored-test"
     assert amd_command_step.plugins is not None
+    assert amd_command_step.env[amd.AMD_HF_OFFLINE_RETRY_ENV] == "0"
+    _assert_exact_amd_retry(amd_command_step)
 
 
 def test_untagged_mirror_defaults_to_dind(
     fake_global_config,
 ):
+    fake_global_config["amd_hf_offline_retry"] = True
     fake_global_config["list_file_diff"] = [
         ".buildkite/scripts/hardware_ci/run-amd-test.sh"
     ]
@@ -292,6 +500,7 @@ def test_untagged_mirror_defaults_to_dind(
         commands=["pytest tests/mirror.py"],
         source_file_dependencies=["vllm/"],
         device="h200_18gb",
+        hf_offline_retry=True,
         mirror={"amd": {"device": "mi300_1"}},
     )
 
@@ -309,6 +518,9 @@ def test_untagged_mirror_defaults_to_dind(
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
     assert amd_command_step.plugins is None
     assert amd_command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
+    # A mirror must opt in under mirror.amd; the parent step flag is not inherited.
+    assert amd_command_step.env[amd.AMD_HF_OFFLINE_RETRY_ENV] == "0"
+    _assert_exact_amd_retry(amd_command_step)
 
 
 @pytest.mark.parametrize(
