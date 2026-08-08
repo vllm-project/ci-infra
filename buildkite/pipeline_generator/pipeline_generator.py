@@ -75,7 +75,7 @@ class PipelineGenerator:
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
             buildkite_steps_dict["steps"].append(
-                buildkite_group_step.dict(exclude_none=True)
+                buildkite_group_step.model_dump(exclude_none=True, by_alias=True)
             )
         with open(self.output_file_path, "w") as f:
             yaml.dump(

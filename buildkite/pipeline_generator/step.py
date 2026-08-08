@@ -1,6 +1,5 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
-from pydantic import model_validator
 from typing_extensions import Self
 from collections import defaultdict
 from global_config import get_global_config
@@ -22,6 +21,9 @@ class Step(BaseModel):
     source_file_dependencies: Optional[List[str]] = None
     soft_fail: Optional[bool] = False
     parallelism: Optional[int] = None
+    concurrency: Optional[int] = Field(default=None, gt=0, strict=True)
+    concurrency_group: Optional[str] = Field(default=None, min_length=1)
+    if_condition: Optional[str] = None
     timeout_in_minutes: Optional[int] = None
     mount_buildkite_agent: Optional[bool] = False
     env: Optional[Dict[str, str]] = None
@@ -36,7 +38,18 @@ class Step(BaseModel):
     def validate_multi_node(self) -> Self:
         if self.num_nodes and not self.num_devices:
             raise ValueError("'num_devices' must be defined if 'num_nodes' is defined.")
+        if (self.concurrency is None) != (self.concurrency_group is None):
+            raise ValueError(
+                "'concurrency' and 'concurrency_group' must be defined together."
+            )
         return self
+
+    @field_validator("concurrency_group")
+    @classmethod
+    def validate_concurrency_group(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("'concurrency_group' must be a nonempty string.")
+        return value
 
     @classmethod
     def from_yaml(cls, yaml_data: dict):
@@ -74,7 +87,9 @@ def read_steps_from_job_dir(job_dir: str):
                         and global_config["github_repo_name"] == "vllm-project/vllm"
                     ):
                         step.working_dir = "/vllm-workspace/tests"
-                    step.source_file_dependencies = getattr(step, "source_file_dependencies", [])
+                    step.source_file_dependencies = getattr(
+                        step, "source_file_dependencies", []
+                    )
                     if not step.source_file_dependencies:
                         step.source_file_dependencies = []
                     step.source_file_dependencies.append(os.path.relpath(yaml_path))
