@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -13,6 +14,7 @@ from vllm_perf_eval import (
     build_slack_payload,
     calculate_statistic,
     run_adopt,
+    run_report,
     run_trigger,
 )
 
@@ -76,6 +78,17 @@ def test_canvas_shaped_slack_payload_stays_within_block_limits():
         )
         for index in range(8)
     ]
+    latency_rows = [
+        ReportRow(
+            "latency",
+            f"org/model-{index}",
+            "H200 · TP8",
+            "p99 TTFT",
+            120.0,
+            Statistic(90.0, 100.0, 5.0, 0.20, 0.33, "regression", 6),
+        )
+        for index in range(8)
+    ]
     eval_rows = [
         ReportRow(
             "eval",
@@ -88,16 +101,18 @@ def test_canvas_shaped_slack_payload_stays_within_block_limits():
         for index in range(16)
     ]
 
-    payload = build_slack_payload(current, previous, perf_rows, eval_rows)
+    payload = build_slack_payload(current, previous, perf_rows, latency_rows, eval_rows)
 
     _validate_payload_limits(payload)
     rendered = "\n".join(
         block.get("text", {}).get("text", "") for block in payload["blocks"]
     )
     assert "Throughput / GPU" in rendered
+    assert "Latency — p99 TTFT" in rendered
+    assert "ms · lower is better" in rendered
     assert "Eval accuracy" in rendered
     assert "7d avg" in rendered
-    assert "Δ peak" in rendered
+    assert "Δ best" in rendered
 
 
 def test_adopt_records_only_the_latest_reportable_build(monkeypatch, tmp_path):
@@ -119,6 +134,121 @@ def test_adopt_records_only_the_latest_reportable_build(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="not the latest reportable build"):
         run_adopt(tmp_path, build_number=308)
+
+
+def test_report_uses_full_comparison_for_throughput_and_latency(monkeypatch, tmp_path):
+    commit = "c" * 40
+    previous_commit = "b" * 40
+    model = "org/model"
+    image = f"public.ecr.aws/vllm-release-repo:{commit}-x86_64"
+    previous_image = f"public.ecr.aws/vllm-release-repo:{previous_commit}-x86_64"
+    current = {
+        "commit": commit,
+        "date": "2026-08-03T06:00:00Z",
+        "sourceImage": image,
+        "perfEval": {
+            "build": {
+                "number": "361",
+                "state": "failed",
+                "web_url": "https://buildkite.com/vllm/perf-eval/builds/361",
+            }
+        },
+        "deltaVsPrev": {
+            "prevSourceImage": previous_image,
+            "perfDeltas": [
+                {
+                    "model": model,
+                    "metric": "p99_ttft",
+                    "key": f"{model}|h200|8|128|8192|1024|fp8|p99_ttft",
+                }
+            ],
+            "evalDeltas": [],
+        },
+    }
+    previous = {
+        "commit": previous_commit,
+        "sourceImage": previous_image,
+        "perfEval": {"build": {"number": "360", "state": "failed"}},
+    }
+    throughput_delta = {
+        "model": model,
+        "metric": "tput_per_gpu",
+        "key": f"{model}|h200|8|128|8192|1024|fp8|tput_per_gpu",
+        "dimension": "h200 - TP 8 - conc 128 - ISL 8192 - OSL 1024 - fp8",
+        "candidateRun": "2026-08-03 09:34:32",
+        "candidateValue": 105.0,
+        "higherIsBetter": True,
+    }
+    latency_delta = {
+        "model": model,
+        "metric": "p99_ttft",
+        "key": f"{model}|h200|8|128|8192|1024|fp8|p99_ttft",
+        "dimension": "h200 - TP 8 - conc 128 - ISL 8192 - OSL 1024 - fp8",
+        "candidateRun": "2026-08-03 09:34:32",
+        "candidateValue": 0.12,
+        "higherIsBetter": False,
+    }
+
+    def fake_request(url, **_kwargs):
+        if url.endswith("/nightly?limit=30"):
+            return {"nightlies": [current, previous]}
+        if "/compare?" in url:
+            query = parse_qs(urlparse(url).query)
+            assert query == {
+                "baseline": [previous_image],
+                "candidate": [image],
+                "device": ["h200"],
+            }
+            return {"perf": {"deltas": [throughput_delta, latency_delta]}}
+        raise AssertionError(f"Unexpected dashboard URL: {url}")
+
+    history = [
+        {
+            "model": model,
+            "device": "h200",
+            "tp": "8",
+            "conc": "128",
+            "isl": "8192",
+            "osl": "1024",
+            "precision": "fp8",
+            "date": "2026-08-02 09:34:32",
+            "image": previous_image,
+            "tput_per_gpu": 100.0,
+            "p99_ttft": 0.10,
+        },
+        {
+            "model": model,
+            "device": "h200",
+            "tp": "8",
+            "conc": "128",
+            "isl": "8192",
+            "osl": "1024",
+            "precision": "fp8",
+            "date": "2026-08-03 09:34:32",
+            "image": image,
+            "tput_per_gpu": 105.0,
+            "p99_ttft": 0.12,
+        },
+    ]
+
+    monkeypatch.setattr("vllm_perf_eval._request", fake_request)
+    monkeypatch.setattr(
+        "vllm_perf_eval._load_histories",
+        lambda models: {model: (history, [])} if models == {model} else {},
+    )
+
+    assert run_report(tmp_path, dry_run=True) == 0
+
+    rows = json.loads((tmp_path / "vllm_perf_eval_report_rows.json").read_text())
+    assert rows["build_number"] == 361
+    assert len(rows["perf"]) == 1
+    assert rows["perf"][0]["model"] == model
+    assert rows["perf"][0]["current"] == 105.0
+    assert len(rows["latency"]) == 1
+    assert rows["latency"][0]["model"] == model
+    assert rows["latency"][0]["metric"] == "p99 TTFT"
+    assert rows["latency"][0]["current"] == pytest.approx(120.0)
+    assert rows["latency"][0]["statistic"]["status"] == "regression"
 
 
 def test_trigger_accepts_failed_release_when_cuda_image_job_passed(
