@@ -659,6 +659,7 @@ def convert_group_step_to_buildkite_step(
                 extra_env.update(amd.get("env", {}))
                 amd_step = _create_amd_step(
                     label=step.label,
+                    key=f"amd-{_generate_step_key(step.key or step.label)}",
                     device=amd["device"],
                     num_devices=amd_num_devices,
                     commands_str=amd_commands_str,
