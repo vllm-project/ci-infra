@@ -249,6 +249,31 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
 
 
+@pytest.mark.parametrize("optional", [False, True])
+def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
+    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+    step = Step(
+        label="ROCm base mirrored test",
+        group="Mirrors",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        optional=optional,
+        mirror={"amd": {"device": "mi300_1"}},
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {step.group: [step]}
+    )
+    default_group = next(group for group in group_steps if group.group == "Mirrors")
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+
+    assert isinstance(default_group.steps[0], buildkite_step.BuildkiteBlockStep)
+    assert len(amd_group.steps) == 1
+    assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteCommandStep)
+
+
 def test_dind_false_mirror_uses_native_runner_gating(fake_global_config):
     fake_global_config["list_file_diff"] = [
         ".buildkite/scripts/hardware_ci/run-amd-test.sh"
