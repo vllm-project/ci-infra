@@ -1,3 +1,4 @@
+import os
 from step import Step
 from constants import DeviceType
 import copy
@@ -145,5 +146,16 @@ def get_docker_plugin(step: Step, image: str):
         plugin["mount_buildkite_agent"] = True
     if step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM) and plugin.get("gpus"):
         del plugin["gpus"]
+
+    pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
+    if pull_request and pull_request != "false":
+        plugin["propagate-environment"] = False
+        sensitive_tokens = {"HF_TOKEN", "CODECOV_TOKEN", "BUILDKITE_ANALYTICS_TOKEN", "RAY_COMPAT_SLACK_WEBHOOK_URL"}
+        if "environment" in plugin:
+            plugin["environment"] = [
+                env_var for env_var in plugin["environment"]
+                if env_var.split("=")[0] not in sensitive_tokens
+            ]
+
     # TODO: Add BUILDKITE_ANALYTICS_TOKEN and pytest addopts for fail_fast
     return plugin
