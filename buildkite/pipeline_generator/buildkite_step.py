@@ -7,6 +7,7 @@ from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
+    _amd_mirror_should_run,
     build_amd_step_options,
     ensure_amd_stack_error_retry,
     get_amd_agent_queue,
@@ -666,6 +667,7 @@ def convert_group_step_to_buildkite_step(
                 extra_env.update(amd.get("env", {}))
                 amd_step = _create_amd_step(
                     label=step.label,
+                    key=f"amd-{_generate_step_key(step.key or step.label)}",
                     device=amd["device"],
                     num_devices=amd_num_devices,
                     commands_str=amd_commands_str,
@@ -684,8 +686,12 @@ def convert_group_step_to_buildkite_step(
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
                 )
-                if not _step_should_run(
-                    _get_amd_mirror_effective_step(step, amd), list_file_diff
+                if not _amd_mirror_should_run(
+                    _step_should_run(
+                        _get_amd_mirror_effective_step(step, amd),
+                        list_file_diff,
+                    ),
+                    list_file_diff,
                 ):
                     # Block step depends on the shared AMD image build.
                     mirror_build_dep = (

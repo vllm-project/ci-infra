@@ -48,6 +48,7 @@ AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
 )
 AMD_STANDARD_TIMEOUT_MINUTES = 3 * 60
 AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
+AMD_ROCM_BASE_DOCKERFILE = "docker/Dockerfile.rocm_base"
 AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES = 9 * 60
 AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES = 15
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
@@ -125,6 +126,15 @@ def get_rocm_base_refresh_timeout() -> int:
     if os.getenv("ROCM_BASE_REFRESH_SKIP", "0") == "1":
         return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
     return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
+
+
+def _amd_mirror_should_run(
+    default_should_run: bool, list_file_diff: List[str]
+) -> bool:
+    return default_should_run or (
+        os.getenv("NOAUTO") != "1"
+        and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
+    )
 
 
 def get_rocm_base_refresh_env() -> Dict[str, str]:
