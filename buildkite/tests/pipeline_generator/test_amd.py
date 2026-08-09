@@ -10,6 +10,20 @@ from step import Step
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
 
+def test_build_scoped_image_capability(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    assert amd.get_amd_native_base_image() == amd.AMD_LEGACY_NATIVE_BASE_IMAGE
+    assert amd.get_amd_ci_image() == amd.AMD_LEGACY_CI_IMAGE
+
+    producer = tmp_path / ".buildkite/scripts/ci-bake-rocm.sh"
+    producer.parent.mkdir(parents=True)
+    producer.write_text("CI_BASE_IMAGE_TAG_BUILD_REF=enabled")
+
+    assert amd.get_amd_native_base_image() == amd.AMD_BUILD_NATIVE_BASE_IMAGE
+    assert amd.get_amd_ci_image() == amd.AMD_BUILD_CI_IMAGE
+
+
 def test_legacy_amd_template_retries_gpu_hang_abort():
     template = (
         Path(__file__).parents[2] / "test-template-amd.j2"
@@ -19,6 +33,15 @@ def test_legacy_amd_template_retries_gpu_hang_abort():
         "{{ indent }}    - exit_status: 134  # ROCm/KFD GPU hang (SIGABRT)\n"
         "{{ indent }}      limit: 1"
     ) in template
+
+
+def test_legacy_amd_template_configures_gpu_diagnostics():
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+
+    assert 'VLLM_CI_DIAGNOSTICS_DIR: "artifacts/amd-gpu-diagnostics"' in template
+    for name, field_path in amd.AMD_NATIVE_POD_IDENTITY_ENV.items():
+        assert f"- name: {name}" in template
+        assert f"fieldPath: {field_path}" in template
 
 
 def _render_single_step(step):
@@ -37,44 +60,24 @@ def _rocm_base_refresh_step():
         device="amd_cpu",
         no_plugin=True,
         commands=["bash .buildkite/scripts/rocm/refresh-base-image.sh"],
+        concurrency=1,
+        concurrency_group="vllm/rocm/base-build/$BUILDKITE_COMMIT",
     )
 
 
-@pytest.mark.parametrize(
-    ("list_file_diff", "expected_timeout"),
-    [
-        ([], 15),
-        (["vllm/config.py"], 15),
-        (["run_all"], 15),
-        (["nightly"], 15),
-        ([amd.AMD_ROCM_BASE_DOCKERFILE], 540),
-        (["run_all", amd.AMD_ROCM_BASE_DOCKERFILE], 540),
-        (["nightly", amd.AMD_ROCM_BASE_DOCKERFILE], 540),
-    ],
-)
-def test_rocm_base_refresh_timeout_tracks_dockerfile_change(
-    fake_global_config, list_file_diff, expected_timeout
-):
-    fake_global_config["list_file_diff"] = list_file_diff
-
-    command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
-
-    assert command_step.timeout_in_minutes == expected_timeout
-
-
-def test_rocm_base_refresh_force_uses_build_timeout(monkeypatch):
-    monkeypatch.setenv("ROCM_BASE_REFRESH_FORCE", "1")
-
+def test_rocm_base_selector_keeps_build_timeout():
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
 
     assert command_step.timeout_in_minutes == 540
+    assert command_step.concurrency == 1
+    assert command_step.concurrency_group.endswith("/$BUILDKITE_COMMIT")
 
 
 def test_skip_timeout_omits_rocm_base_refresh_timeout(
     fake_global_config, monkeypatch
 ):
     monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
-    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+    fake_global_config["list_file_diff"] = ["docker/Dockerfile.rocm_base"]
 
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
 
@@ -119,19 +122,34 @@ def test_direct_amd_gpu_steps_use_dind_flag(
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
+    assert command_step.env["VLLM_CI_DIAGNOSTICS_DIR"] == amd.AMD_DIAGNOSTICS_DIR
+    assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
     if not dind:
         assert command_step.plugins is not None
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
+        assert container["image"] == amd.get_amd_native_base_image()
         assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
         assert container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
         assert command_step.env["AMD_CI_RUNTIME"] == "native"
-        assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
         assert "DOCKER_IMAGE_NAME" not in command_step.env
+        container_env = {entry["name"]: entry for entry in container["env"]}
+        for name, field_path in amd.AMD_NATIVE_POD_IDENTITY_ENV.items():
+            assert container_env[name] == {
+                "name": name,
+                "valueFrom": {"fieldRef": {"fieldPath": field_path}},
+            }
     else:
         assert command_step.plugins is None
         assert "AMD_CI_RUNTIME" not in command_step.env
         assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
+        assert command_step.env["VLLM_CI_FALLBACK_IMAGE"] == amd.get_amd_ci_image()
+
+    assert command_step.env["VLLM_CI_BASE_IMAGE"] == (
+        amd.get_amd_native_base_image()
+        if not dind
+        else amd.AMD_STABLE_CI_BASE_IMAGE
+    )
 
     assert command_step.retry == amd.AMD_RETRY
     assert len(command_step.retry["automatic"]) == 7
