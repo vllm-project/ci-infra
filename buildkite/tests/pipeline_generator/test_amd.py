@@ -35,6 +35,15 @@ def test_legacy_amd_template_retries_gpu_hang_abort():
     ) in template
 
 
+def test_legacy_amd_template_configures_gpu_diagnostics():
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+
+    assert 'VLLM_CI_DIAGNOSTICS_DIR: "artifacts/amd-gpu-diagnostics"' in template
+    for name, field_path in amd.AMD_NATIVE_POD_IDENTITY_ENV.items():
+        assert f"- name: {name}" in template
+        assert f"fieldPath: {field_path}" in template
+
+
 def _render_single_step(step):
     return buildkite_step.convert_group_step_to_buildkite_step(
         {
@@ -113,6 +122,8 @@ def test_direct_amd_gpu_steps_use_dind_flag(
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
+    assert command_step.env["VLLM_CI_DIAGNOSTICS_DIR"] == amd.AMD_DIAGNOSTICS_DIR
+    assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
     if not dind:
         assert command_step.plugins is not None
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
@@ -121,8 +132,13 @@ def test_direct_amd_gpu_steps_use_dind_flag(
         assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
         assert container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
         assert command_step.env["AMD_CI_RUNTIME"] == "native"
-        assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
         assert "DOCKER_IMAGE_NAME" not in command_step.env
+        container_env = {entry["name"]: entry for entry in container["env"]}
+        for name, field_path in amd.AMD_NATIVE_POD_IDENTITY_ENV.items():
+            assert container_env[name] == {
+                "name": name,
+                "valueFrom": {"fieldRef": {"fieldPath": field_path}},
+            }
     else:
         assert command_step.plugins is None
         assert "AMD_CI_RUNTIME" not in command_step.env

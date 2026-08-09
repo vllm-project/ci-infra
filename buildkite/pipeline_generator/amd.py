@@ -39,10 +39,14 @@ AMD_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
 AMD_ARTIFACT_CHECKSUM_GLOB = f"{AMD_ARTIFACT_GLOB}.sha256"
 AMD_ARTIFACT_STEP = "image-build-amd"
 AMD_RESULTS_ROOT = "/home/buildkite-agent/huggingface/amd-ci-results"
+AMD_DIAGNOSTICS_DIR = "artifacts/amd-gpu-diagnostics"
 AMD_HF_HOME = "/home/buildkite-agent/huggingface"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_WORKSPACE_VOLUME = "vllm-workspace"
 AMD_NATIVE_SHM_SIZE = "16Gi"
+AMD_NATIVE_POD_IDENTITY_ENV = {
+    "VLLM_CI_K8S_NODE_NAME": "spec.nodeName",
+}
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
     ".buildkite/scripts/hardware_ci/run-amd-test.sh",
 )
@@ -310,6 +314,8 @@ def _get_amd_env(
     gpu_count: int,
 ) -> Dict[str, str]:
     env = dict(extra_env or {})
+    env["VLLM_CI_DIAGNOSTICS_DIR"] = AMD_DIAGNOSTICS_DIR
+    env["VLLM_CI_EXPECTED_GPU_COUNT"] = str(gpu_count)
     if not dind:
         # Native agents have no DinD sidecar, so Docker hook inputs must not
         # escape into this execution mode.
@@ -328,7 +334,6 @@ def _get_amd_env(
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
-                "VLLM_CI_EXPECTED_GPU_COUNT": str(gpu_count),
                 "VLLM_CI_WORKSPACE": AMD_NATIVE_WORKSPACE,
                 "VLLM_CI_REQUIRE_WORKSPACE_MOUNT": "1",
                 "VLLM_TEST_COMMANDS": commands,
@@ -395,8 +400,21 @@ def get_amd_k8s_plugin(
                             },
                         ],
                         "env": [
-                            {"name": name, "value": value}
-                            for name, value in container_env.items()
+                            *(
+                                {"name": name, "value": value}
+                                for name, value in container_env.items()
+                            ),
+                            *(
+                                {
+                                    "name": name,
+                                    "valueFrom": {
+                                        "fieldRef": {"fieldPath": field_path}
+                                    },
+                                }
+                                for name, field_path in (
+                                    AMD_NATIVE_POD_IDENTITY_ENV.items()
+                                )
+                            ),
                         ],
                     }
                 ],
