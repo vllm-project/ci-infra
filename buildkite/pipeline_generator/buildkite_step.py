@@ -7,6 +7,7 @@ from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
+    _amd_mirror_should_run,
     build_amd_step_options,
     ensure_amd_stack_error_retry,
     get_amd_agent_queue,
@@ -162,6 +163,8 @@ class BuildkiteCommandStep(BaseModel):
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
+    concurrency: Optional[int] = None
+    concurrency_group: Optional[str] = None
     timeout_in_minutes: Optional[int] = None
     priority: Optional[int] = None
 
@@ -178,6 +181,8 @@ class BuildkiteCommandStep(BaseModel):
             "plugins": self.plugins,
             "env": self.env,
             "parallelism": self.parallelism,
+            "concurrency": self.concurrency,
+            "concurrency_group": self.concurrency_group,
             "timeout_in_minutes": self.timeout_in_minutes,
             "priority": self.priority,
         }
@@ -530,6 +535,8 @@ def convert_group_step_to_buildkite_step(
                     num_nodes=step.num_nodes,
                     soft_fail=step.soft_fail,
                     parallelism=step.parallelism,
+                    concurrency=step.concurrency,
+                    concurrency_group=step.concurrency_group,
                     timeout_in_minutes=step.timeout_in_minutes,
                     agent_tags=step.agent_tags,
                 )
@@ -554,6 +561,8 @@ def convert_group_step_to_buildkite_step(
                 soft_fail=step.soft_fail,
                 agents=_get_step_agents(step),
                 priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
+                concurrency=step.concurrency,
+                concurrency_group=step.concurrency_group,
             )
 
             if step.env:
@@ -579,7 +588,7 @@ def convert_group_step_to_buildkite_step(
                 refresh_env.update(get_rocm_base_refresh_env())
                 buildkite_step.env = refresh_env
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
-                    get_rocm_base_refresh_timeout(list_file_diff)
+                    get_rocm_base_refresh_timeout()
                 )
             elif (
                 step.device == DeviceType.AMD_CPU
@@ -670,11 +679,19 @@ def convert_group_step_to_buildkite_step(
                     num_nodes=amd.get("num_nodes", step.num_nodes),
                     soft_fail=amd.get("soft_fail", step.soft_fail or False),
                     parallelism=step.parallelism,
+                    concurrency=amd.get("concurrency", step.concurrency),
+                    concurrency_group=amd.get(
+                        "concurrency_group", step.concurrency_group
+                    ),
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
                 )
-                if not _step_should_run(
-                    _get_amd_mirror_effective_step(step, amd), list_file_diff
+                if not _amd_mirror_should_run(
+                    _step_should_run(
+                        _get_amd_mirror_effective_step(step, amd),
+                        list_file_diff,
+                    ),
+                    list_file_diff,
                 ):
                     # Block step depends on the shared AMD image build.
                     mirror_build_dep = (
@@ -801,6 +818,8 @@ def _create_amd_step(
     num_nodes: Optional[int],
     soft_fail: Optional[bool],
     parallelism: Optional[int],
+    concurrency: Optional[int],
+    concurrency_group: Optional[str],
     key: Optional[str] = None,
     timeout_in_minutes: Optional[int] = None,
     agent_tags: Optional[Dict[str, str]] = None,
@@ -824,6 +843,8 @@ def _create_amd_step(
         key=key,
         soft_fail=soft_fail or False,
         parallelism=parallelism,
+        concurrency=concurrency,
+        concurrency_group=concurrency_group,
         timeout_in_minutes=_get_timeout_in_minutes(
             get_amd_timeout_in_minutes(timeout_in_minutes)
         ),
