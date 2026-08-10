@@ -258,6 +258,7 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     )
 
     assert default_command_step.depends_on == ["image-build"]
+    assert default_command_step.key == "mirrored-test"
     assert default_command_step.soft_fail is False
     assert len(amd_group.steps) == 1
     assert amd_command_step.key == "amd-mirrored-test"

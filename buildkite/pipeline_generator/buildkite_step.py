@@ -154,7 +154,7 @@ def _get_timeout_in_minutes(
 class BuildkiteCommandStep(BaseModel):
     label: str
     group: Optional[str] = None
-    key: Optional[str] = None
+    key: str
     agents: Dict[str, str] = {}
     commands: List[str] = []
     depends_on: Optional[List[str]] = None
@@ -191,7 +191,7 @@ class BuildkiteCommandStep(BaseModel):
 class BuildkiteBlockStep(BaseModel):
     block: str
     depends_on: Optional[Union[str, List[str]]] = None
-    key: Optional[str] = None
+    key: str
 
     def to_yaml(self):
         return {"block": self.block, "depends_on": self.depends_on, "key": self.key}
@@ -509,10 +509,10 @@ def convert_group_step_to_buildkite_step(
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
+            step_key = step.key or _generate_step_key(step.label)
             if is_amd_gpu_device(step.device):
                 amd_commands = [
-                    "export VLLM_TEST_GROUP_NAME="
-                    f"{_generate_step_key(step.key or step.label)}"
+                    f"export VLLM_TEST_GROUP_NAME={step_key}"
                 ]
                 amd_commands.extend(
                     _prepare_commands(
@@ -523,7 +523,7 @@ def convert_group_step_to_buildkite_step(
                 )
                 amd_step = _create_amd_step(
                     label=step.label,
-                    key=step.key,
+                    key=step_key,
                     device=step.device,
                     num_devices=step.num_devices,
                     commands_str=" && ".join(amd_commands),
@@ -543,7 +543,7 @@ def convert_group_step_to_buildkite_step(
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
                         block=f"Run {amd_step.label}",
-                        key=f"block-amd-{_generate_step_key(step.key or step.label)}",
+                        key=f"block-amd-{step_key}",
                         command_step=amd_step,
                         depends_on=amd_step.depends_on,
                     )
@@ -556,6 +556,7 @@ def convert_group_step_to_buildkite_step(
 
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
+                key=step_key,
                 commands=step_commands,
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
@@ -572,8 +573,6 @@ def convert_group_step_to_buildkite_step(
             buildkite_step.retry = ensure_exit_status_negative_one_retry(
                 buildkite_step.retry
             )
-            if step.key:
-                buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
             if (
@@ -605,7 +604,7 @@ def convert_group_step_to_buildkite_step(
             if not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(
                     block=f"Run {step.label}",
-                    key=f"block-{_generate_step_key(step.label)}",
+                    key=f"block-{step_key}",
                     command_step=buildkite_step,
                     depends_on=[],
                     append_to_command_depends_on=False,
@@ -667,7 +666,7 @@ def convert_group_step_to_buildkite_step(
                 extra_env.update(amd.get("env", {}))
                 amd_step = _create_amd_step(
                     label=step.label,
-                    key=f"amd-{_generate_step_key(step.key or step.label)}",
+                    key=f"amd-{step_key}",
                     device=amd["device"],
                     num_devices=amd_num_devices,
                     commands_str=amd_commands_str,
@@ -701,7 +700,7 @@ def convert_group_step_to_buildkite_step(
                     )
                     amd_block_step = _create_block_step(
                         block=f"Run AMD: {step.label}",
-                        key=f"block-amd-{_generate_step_key(step.label)}",
+                        key=f"block-amd-{step_key}",
                         command_step=amd_step,
                         depends_on=[mirror_build_dep],
                     )
@@ -820,7 +819,7 @@ def _create_amd_step(
     parallelism: Optional[int],
     concurrency: Optional[int],
     concurrency_group: Optional[str],
-    key: Optional[str] = None,
+    key: str,
     timeout_in_minutes: Optional[int] = None,
     agent_tags: Optional[Dict[str, str]] = None,
 ) -> BuildkiteCommandStep:
