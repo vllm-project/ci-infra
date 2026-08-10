@@ -83,6 +83,7 @@ The generator relies on several environment variables, typically provided by Bui
     ignoring normal source-file selection. Unknown keys fail generation.
 
 Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
-`buildkite-analytics-token-secret` Secret's `token` key. Provision it in each
-Buildkite job namespace with `infra-k8s/create-buildkite-analytics-secret.sh`
-before deploying a generator version that references the Secret.
+`buildkite-analytics-token-secret` Secret's `token` key when it is available.
+The Secret is optional, so missing credentials do not prevent jobs from running.
+Provision it in a Buildkite job namespace with
+`infra-k8s/create-buildkite-analytics-secret.sh` to enable test result uploads.

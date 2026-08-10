@@ -10,6 +10,7 @@ def get_buildkite_analytics_token_env():
             "secretKeyRef": {
                 "name": BUILDKITE_ANALYTICS_SECRET,
                 "key": "token",
+                "optional": True,
             }
         },
     }

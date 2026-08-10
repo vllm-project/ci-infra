@@ -41,6 +41,7 @@ def test_standard_k8s_templates_inject_buildkite_analytics_token(template):
             "secretKeyRef": {
                 "name": BUILDKITE_ANALYTICS_SECRET,
                 "key": "token",
+                "optional": True,
             }
         },
     }
