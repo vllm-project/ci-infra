@@ -36,6 +36,11 @@ PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
+DEFAULT_CI_ENV = {"VLLM_RAISE_ON_LOGIT_NANS": "1"}
+
+
+def _with_default_ci_env(env: Optional[Dict[str, str]]) -> Dict[str, str]:
+    return {**DEFAULT_CI_ENV, **(env or {})}
 
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
@@ -561,13 +566,12 @@ def convert_group_step_to_buildkite_step(
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents=_get_step_agents(step),
+                env=_with_default_ci_env(step.env),
                 priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
                 concurrency=step.concurrency,
                 concurrency_group=step.concurrency_group,
             )
 
-            if step.env:
-                buildkite_step.env = step.env
             if step.retry:
                 buildkite_step.retry = step.retry
             buildkite_step.retry = ensure_exit_status_negative_one_retry(
@@ -837,7 +841,7 @@ def _create_amd_step(
         num_nodes=num_nodes,
         agent_tags=agent_tags,
     )
-    return BuildkiteCommandStep(
+    buildkite_step = BuildkiteCommandStep(
         **options,
         key=key,
         soft_fail=soft_fail or False,
@@ -848,3 +852,5 @@ def _create_amd_step(
             get_amd_timeout_in_minutes(timeout_in_minutes)
         ),
     )
+    buildkite_step.env = _with_default_ci_env(buildkite_step.env)
+    return buildkite_step
