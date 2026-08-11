@@ -47,15 +47,4 @@ locals {
     ]) : item.key => item
   }
 
-  buildkite_queues = merge([
-    for worker_name, worker in var.worker_clusters : {
-      for profile_name, pool in worker.tpu_pools : profile_name => {
-        queue             = profile_name
-        topology          = pool.topology
-        machine_type      = pool.machine_type
-        accelerator       = pool.accelerator
-        accelerator_label = pool.accelerator_label
-      }
-    }
-  ]...)
 }

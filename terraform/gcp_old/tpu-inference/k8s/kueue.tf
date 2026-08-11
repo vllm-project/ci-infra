@@ -3,7 +3,7 @@ resource "helm_release" "kueue_manager" {
   name             = "kueue"
   repository       = "oci://registry.k8s.io/kueue/charts"
   chart            = "kueue"
-  version          = "0.19.0"
+  version          = var.kueue_version
   namespace        = "kueue-system"
   create_namespace = true
   wait             = false
@@ -28,14 +28,23 @@ resource "helm_release" "kueue_manager" {
       }
     })
   ]
+
+  # The jobset.x-k8s.io/jobset integration only registers if the JobSet CRDs
+  # already exist when the Kueue controller starts.
+  depends_on = [helm_release.jobset_manager]
 }
 
 resource "null_resource" "kueue_worker" {
   for_each = var.worker_clusters
 
   triggers = {
-    version  = "0.19.0"
+    version  = var.kueue_version
     endpoint = google_container_cluster.worker[each.key].endpoint
+    # local-exec only re-runs when a trigger changes, so the config content has
+    # to be one. Without this, editing worker-config.yaml - adding the JobSet
+    # integration, for instance - silently leaves every worker on the old
+    # config while terraform reports no changes.
+    config = filemd5("${path.module}/kueue/worker-config.yaml")
   }
 
   provisioner "local-exec" {
@@ -45,7 +54,7 @@ resource "null_resource" "kueue_worker" {
         --project ${each.value.project}
 
       helm upgrade --install kueue oci://registry.k8s.io/kueue/charts/kueue \
-        --version 0.19.0 \
+        --version ${var.kueue_version} \
         --namespace kueue-system --create-namespace \
         --set-file managerConfig.controllerManagerConfigYaml=${path.module}/kueue/worker-config.yaml
 
@@ -55,4 +64,7 @@ resource "null_resource" "kueue_worker" {
         --dry-run=client -o yaml | kubectl apply -f -
     EOT
   }
+
+  # Same CRD ordering requirement as the manager.
+  depends_on = [null_resource.jobset_worker]
 }
