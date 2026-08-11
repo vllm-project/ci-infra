@@ -105,6 +105,24 @@ variable "buildkite_queue" {
   default     = "kube"
 }
 
+variable "buildkite_agent_stack_chart_version" {
+  type        = string
+  description = "Helm chart version for agent-stack-k8s. 0.47.0 is the first release containing the podless-Job cancellation fix (buildkite/agent-stack-k8s#933), so the stock controller image is sufficient from here on."
+  default     = "0.47.0"
+}
+
+variable "buildkite_agent_stack_debug" {
+  type        = bool
+  description = "Verbose controller logging"
+  default     = true
+}
+
+variable "tpu_job_max_runtime_seconds" {
+  type        = number
+  description = "Wall-clock cap for a TPU workload, applied to the launcher Job and to the submitted workload so the two deadlines cannot drift apart."
+  default     = 10800
+}
+
 variable "create_service_accounts" {
   type        = bool
   description = "Whether to create dedicated GKE node service accounts via Terraform"
