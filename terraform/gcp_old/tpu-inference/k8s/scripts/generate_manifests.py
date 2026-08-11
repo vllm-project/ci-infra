@@ -61,6 +61,9 @@ def parse_tfvars(file_path):
         "manager_cluster": f"{name_prefix}-manager",
         "secret_project": secret_project,
         "secret_id": secret_id,
+        # Model downloads need a Hugging Face token; same Secret Manager entry
+        # the bare-metal agents use, so there is one place to rotate it.
+        "hf_secret_id": clean_val(data.get("hf_secret_id", "bm-agent-hf-token")),
         "namespace": "buildkite",
         "worker_clusters": worker_clusters
     }
@@ -117,6 +120,7 @@ def generate_manager_parts(config, templates):
         NAMESPACE=config["namespace"],
         SECRET_PROJECT=config["secret_project"],
         SECRET_ID=config["secret_id"],
+        HF_SECRET_ID=config["hf_secret_id"],
         CLUSTER_LOCATION=config["manager_region"],
         CLUSTER_NAME=config["manager_cluster"]
     ).strip() + "\n"
@@ -192,6 +196,7 @@ def generate_worker_parts(config, worker_key, templates):
         NAMESPACE=config["namespace"],
         SECRET_PROJECT=config["secret_project"],
         SECRET_ID=config["secret_id"],
+        HF_SECRET_ID=config["hf_secret_id"],
         CLUSTER_LOCATION=wconf["location"],
         CLUSTER_NAME=wconf["cluster_name"]
     ).strip() + "\n"
