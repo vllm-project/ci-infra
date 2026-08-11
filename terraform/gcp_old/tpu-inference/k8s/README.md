@@ -68,6 +68,17 @@ A `batch/v1` Job cannot span hosts, so multi-host slices and prefill/decode disa
 ### G. Physical shapes constrain borrowing
 Node pools are single-shape, so with a 10-chip reservation one 8-chip node leaves room for at most two 1-chip nodes. Quota borrowing across shapes is therefore not free: reclaiming chips means draining and deleting nodes of one shape before nodes of the other can be created. Measured on this cluster, that costs roughly 300s on top of the ~110s node scale-up. Worth knowing before tuning quotas - the cost is physical, not a Kueue setting.
 
+### H. The workload launcher
+Every TPU step runs `/opt/launcher/launch`, a CPU-only pod that submits the real workload and owns its lifecycle. It exists because agent-stack-k8s can only create a `batch/v1` Job; routing single-pod work through it as well keeps one code path and, more importantly, keeps the Buildkite agent *outside* the Kueue workload. That is what lets a preempted run pause and resume instead of failing, and stops the Buildkite job sitting reserved through a node scale-up.
+
+Cluster-side it is a ServiceAccount, a Role, two ConfigMaps and a PodTemplate, all in `06-launcher.yaml`, plus a ClusterRole per worker (`04-launcher-rbac.yaml`) letting it read pod logs over Connect Gateway.
+
+The split of responsibility: the **profile registry** is generated here from the same tfvars that builds the node pools, so chip count, topology, node labels and queue names cannot drift from the queues they target. The **workload manifest** lives in the repo under test, so the shape of a job is a PR rather than an infrastructure change. A pipeline names a profile; it cannot invent placement.
+
+Two behaviours worth knowing when reading the launcher:
+- Pod logs are **polled**, not followed. Connect Gateway resets the long-lived HTTP/2 stream `kubectl logs -f` needs (`stream error ... INTERNAL_ERROR`), while short requests through it are reliable.
+- Logs are filed **per owning Job**, not per pod, and uploaded as Buildkite artifacts. A pod does not survive preemption; the Job does, so keying on it gives one continuous log across a preempt-and-resume cycle.
+
 ---
 
 ## 3. Workflow & Usage

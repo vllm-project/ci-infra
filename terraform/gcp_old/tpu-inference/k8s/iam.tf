@@ -166,3 +166,16 @@ resource "google_service_account_iam_member" "external_secrets_workload_identity
   role               = each.value.role
   member             = "serviceAccount:${each.value.project}.svc.id.goog[external-secrets/external-secrets]"
 }
+
+# Workload Identity for the TPU workload launcher.
+#
+# The launcher runs as ServiceAccount buildkite/tpu-launcher and impersonates
+# the manager node SA, which is the identity Connect Gateway presents to the
+# worker clusters and the one their tpu-launcher-log-reader binding names.
+resource "google_service_account_iam_member" "launcher_workload_identity" {
+  count = var.create_service_accounts && var.manager_node_service_account == null ? 1 : 0
+
+  service_account_id = google_service_account.manager_nodes[0].name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[buildkite/tpu-launcher]"
+}

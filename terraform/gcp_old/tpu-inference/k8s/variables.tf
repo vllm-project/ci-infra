@@ -123,10 +123,16 @@ variable "buildkite_agent_stack_debug" {
   default     = true
 }
 
-variable "tpu_job_max_runtime_seconds" {
+variable "tpu_test_max_seconds" {
   type        = number
-  description = "Wall-clock cap for a TPU workload, applied to the launcher Job and to the submitted workload so the two deadlines cannot drift apart."
-  default     = 10800
+  description = "How long a TPU test may run once it has chips, applied to the submitted workload as activeDeadlineSeconds. The only deadline that bounds a hung test, because waiting in the queue cannot consume it."
+  default     = 10800 # 3h
+}
+
+variable "tpu_total_max_seconds" {
+  type        = number
+  description = "How long a step may take end to end: waiting for chips plus running. Every other deadline is derived from this and tpu_test_max_seconds, so these two are the only ones to set. Note that Buildkite contributes no queue time of its own - the agent pod starts almost immediately and then waits - so this whole budget is spent inside the step."
+  default     = 28800 # 8h
 }
 
 variable "create_service_accounts" {

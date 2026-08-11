@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from string import Template
 import hcl2
+import yaml
 
 def clean_val(val):
     """Clean hcl2 string quotes."""
@@ -44,6 +45,13 @@ def parse_tfvars(file_path):
                 "max_nodes": max_nodes,
                 "quota": chips * nominal_nodes,
                 "accelerator": accelerator,
+                # Consumed by the launcher: what a pipeline naming this profile
+                # actually gets placed on.
+                "topology": clean_val(pdata["topology"]),
+                "accelerator_label": clean_val(pdata["accelerator_label"]),
+                # Hosts in the slice. Single-host today; a multi-host topology
+                # sets this so the JobSet parallelism matches the node count.
+                "hosts": int(pdata.get("hosts", 1)),
             }
             
         worker_clusters[key] = {
@@ -61,10 +69,27 @@ def parse_tfvars(file_path):
         "manager_cluster": f"{name_prefix}-manager",
         "secret_project": secret_project,
         "secret_id": secret_id,
-        # Model downloads need a Hugging Face token; same Secret Manager entry
-        # the bare-metal agents use, so there is one place to rotate it.
-        "hf_secret_id": clean_val(data.get("hf_secret_id", "bm-agent-hf-token")),
         "namespace": "buildkite",
+        # The launcher impersonates the manager node SA (see iam.tf), which
+        # holds gkehub.gatewayEditor on the fleet host project and is the
+        # identity worker clusters authorise for pod log reads.
+        "launcher_gsa": clean_val(data.get(
+            "launcher_gsa", f"{name_prefix}-mgr-node@{project_id}.iam.gserviceaccount.com")),
+        "launcher_image": clean_val(data.get(
+            "launcher_image", "gcr.io/google.com/cloudsdktool/google-cloud-cli:debian_component_based")),
+        # Mirrors var.tpu_test_max_seconds; both the launcher Job and the
+        # submitted workload are bounded by it so the deadlines cannot drift.
+        "max_runtime_seconds": int(clean_val(data.get("tpu_test_max_seconds", 10800))),
+        # The launcher derives how long to wait for admission from these two:
+        # whatever is left of the total once a full-length run is allowed for.
+        "total_max_seconds": int(clean_val(data.get("tpu_total_max_seconds", 28800))),
+        # Registry prefixes a workload image may come from. WORKLOAD_IMAGE is
+        # set by the pipeline, which in a public repo means a PR can name any
+        # image; this is the boundary. Empty means unrestricted - populate it
+        # before opening the queue to fork PRs.
+        "allowed_image_repos": [
+            clean_val(r) for r in data.get("allowed_image_repos", [])
+        ],
         "worker_clusters": worker_clusters
     }
 
@@ -76,6 +101,67 @@ def clean_doc(doc_str):
     while s.endswith("---"):
         s = s[:-3].strip()
     return s
+
+def _indent(text, spaces):
+    pad = " " * spaces
+    return "\n".join((pad + line) if line.strip() else "" for line in text.splitlines())
+
+def render_launcher(template, k8s_dir, config):
+    """Launcher ServiceAccount/RBAC/ConfigMaps/PodTemplate.
+
+    The script is kept as a real file under kueue/launcher/ so it can be
+    linted and tested, and is indented into a ConfigMap here. It must not go
+    through Template.substitute, being full of shell and Python $VAR.
+
+    Workload manifests are deliberately not here: they live in the repo under
+    test, so the shape of a job sits with the people writing tests. Only the
+    profile registry is cluster-side, because chips, topology and queue names
+    are facts about the hardware rather than about any one test.
+    """
+    launcher_dir = k8s_dir / "kueue" / "launcher"
+    script = (launcher_dir / "launch.py").read_text()
+
+    # profiles.yaml: what a pipeline may ask for, and what it resolves to.
+    profiles = {}
+    for wconf in config["worker_clusters"].values():
+        for name, pool in wconf["pools"].items():
+            profiles[name] = {
+                "queue": name,
+                "chips": pool["chips"],
+                "hosts": pool.get("hosts", 1),
+                "topology": pool["topology"],
+                "accelerator_label": pool["accelerator_label"],
+                "max_runtime_seconds": config["max_runtime_seconds"],
+            }
+    # Wrapped rather than a bare profile map: the launcher also needs the
+    # image allowlist, and a step's WORKLOAD_IMAGE is repo-controlled.
+    # Kueue reports the admitted cluster as Workload.status.clusterName, which
+    # is the MultiKueueCluster name and also the Fleet membership id. The
+    # memberships live in the manager (fleet host) project, not the worker's.
+    workers = {
+        wconf["cluster_name"]: {
+            "membership": wconf["cluster_name"],
+            "project": config["project_id"],
+        }
+        for wconf in config["worker_clusters"].values()
+    }
+    profiles_yaml = yaml.safe_dump(
+        {
+            "allowed_image_repos": config["allowed_image_repos"],
+            "total_max_seconds": config["total_max_seconds"],
+            "workers": dict(sorted(workers.items())),
+            "profiles": dict(sorted(profiles.items())),
+        },
+        sort_keys=False,
+    )
+
+    return Template(template).substitute(
+        NAMESPACE=config["namespace"],
+        LAUNCHER_GSA=config["launcher_gsa"],
+        LAUNCHER_IMAGE=config["launcher_image"],
+        LAUNCHER_SCRIPT=_indent(script, 4),
+        LAUNCHER_PROFILES=_indent(profiles_yaml, 4),
+    )
 
 def format_admission_checks(accelerator):
     """MultiKueue dispatch block appended to a ClusterQueue spec.
@@ -111,7 +197,7 @@ def render_queue_group(template, pools, namespace, with_admission_checks):
         for name, info in sorted(pools.items())
     ]
 
-def generate_manager_parts(config, templates):
+def generate_manager_parts(config, templates, k8s_dir):
     parts = {}
     
     # 1. Base (Namespace, ClusterSecretStore, ExternalSecret)
@@ -120,7 +206,6 @@ def generate_manager_parts(config, templates):
         NAMESPACE=config["namespace"],
         SECRET_PROJECT=config["secret_project"],
         SECRET_ID=config["secret_id"],
-        HF_SECRET_ID=config["hf_secret_id"],
         CLUSTER_LOCATION=config["manager_region"],
         CLUSTER_NAME=config["manager_cluster"]
     ).strip() + "\n"
@@ -184,6 +269,12 @@ def generate_manager_parts(config, templates):
     )
     parts["05-queues.yaml"] = "\n---\n".join(queue_docs) + "\n"
 
+    # 6. Launcher (manager only; the workload it submits is mirrored onto a
+    #    worker by MultiKueue).
+    parts["06-launcher.yaml"] = render_launcher(
+        templates["launcher"], k8s_dir, config
+    ).strip() + "\n"
+
     return parts
 
 def generate_worker_parts(config, worker_key, templates):
@@ -196,7 +287,6 @@ def generate_worker_parts(config, worker_key, templates):
         NAMESPACE=config["namespace"],
         SECRET_PROJECT=config["secret_project"],
         SECRET_ID=config["secret_id"],
-        HF_SECRET_ID=config["hf_secret_id"],
         CLUSTER_LOCATION=wconf["location"],
         CLUSTER_NAME=wconf["cluster_name"]
     ).strip() + "\n"
@@ -214,6 +304,11 @@ def generate_worker_parts(config, worker_key, templates):
     )
     parts["03-queues.yaml"] = "\n---\n".join(queue_docs) + "\n"
 
+    # 4. Let the manager-side launcher read pod logs here over Connect Gateway.
+    parts["04-launcher-rbac.yaml"] = Template(
+        templates["launcher_rbac_worker"]
+    ).substitute(LAUNCHER_GSA=config["launcher_gsa"]).strip() + "\n"
+
     return parts
 
 def load_templates(templates_dir):
@@ -224,6 +319,8 @@ def load_templates(templates_dir):
     templates["admission_check"] = (templates_dir / "admission_check.yaml.tpl").read_text()
     templates["resource_flavor"] = (templates_dir / "resource_flavor.yaml.tpl").read_text()
     templates["queue_group"] = (templates_dir / "queue_group.yaml.tpl").read_text()
+    templates["launcher"] = (templates_dir / "launcher.yaml.tpl").read_text()
+    templates["launcher_rbac_worker"] = (templates_dir / "launcher_rbac_worker.yaml.tpl").read_text()
     return templates
 
 def main():
@@ -247,7 +344,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Generate Manager Manifests (Modular directory + Consolidated file)
-    mgr_parts = generate_manager_parts(config, templates)
+    mgr_parts = generate_manager_parts(config, templates, k8s_dir)
     mgr_dir = out_dir / "manager"
     mgr_dir.mkdir(parents=True, exist_ok=True)
     
