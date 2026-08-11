@@ -87,6 +87,12 @@ variable "kueue_version" {
   default     = "0.19.0"
 }
 
+variable "jobset_version" {
+  type        = string
+  description = "Helm chart version for the JobSet operator. Must be identical on manager and workers; MultiKueue mirrors JobSet objects across them. The chart has no 'latest' tag, so this is required."
+  default     = "0.12.0"
+}
+
 variable "buildkite_secret_project" {
   type        = string
   description = "GCP Project ID containing the Buildkite agent token secret"
