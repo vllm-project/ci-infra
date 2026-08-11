@@ -87,6 +87,12 @@ variable "kueue_version" {
   default     = "0.19.0"
 }
 
+variable "jobset_version" {
+  type        = string
+  description = "Helm chart version for the JobSet operator. Must be identical on manager and workers; MultiKueue mirrors JobSet objects across them. The chart has no 'latest' tag, so this is required."
+  default     = "0.12.0"
+}
+
 variable "buildkite_secret_project" {
   type        = string
   description = "GCP Project ID containing the Buildkite agent token secret"
@@ -103,6 +109,24 @@ variable "buildkite_queue" {
   type        = string
   description = "Buildkite queue name for Agent Stack"
   default     = "kube"
+}
+
+variable "buildkite_agent_stack_chart_version" {
+  type        = string
+  description = "Helm chart version for agent-stack-k8s. 0.47.0 is the first release containing the podless-Job cancellation fix (buildkite/agent-stack-k8s#933), so the stock controller image is sufficient from here on."
+  default     = "0.47.0"
+}
+
+variable "buildkite_agent_stack_debug" {
+  type        = bool
+  description = "Verbose controller logging"
+  default     = true
+}
+
+variable "tpu_job_max_runtime_seconds" {
+  type        = number
+  description = "Wall-clock cap for a TPU workload, applied to the launcher Job and to the submitted workload so the two deadlines cannot drift apart."
+  default     = 10800
 }
 
 variable "create_service_accounts" {

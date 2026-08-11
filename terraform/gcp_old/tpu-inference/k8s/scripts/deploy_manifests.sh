@@ -17,32 +17,28 @@ gcloud container clusters get-credentials tpu-ci-manager \
   --location us-central1 \
   --project cloud-ullm-inference-ci-cd
 
-if [[ -d "${GENERATED_DIR}/manager" ]]; then
-  kubectl apply -f "${GENERATED_DIR}/manager"
-else
-  kubectl apply -f "${GENERATED_DIR}/manager.yaml"
-fi
+# kubectl reads a directory in lexical order, which is what the NN- prefixes
+# encode: 01-base carries the Namespace that everything else is created into.
+# The rest is soft ordering - a ClusterQueue naming a ResourceFlavor that does
+# not exist yet goes inactive and recovers when it appears - so applying the
+# directory in one call is equivalent to applying the files in sequence.
+kubectl apply -f "${GENERATED_DIR}/manager"
 kubectl patch deployment kueue-controller-manager -n kueue-system --patch-file "${K8S_DIR}/kueue/manager-auth-plugin-patch.yaml"
 
 echo ""
 echo "========================================================="
 echo "Deploying Kubernetes Manifests to Worker Clusters"
 echo "========================================================="
-for worker_file in "${GENERATED_DIR}"/worker-*.yaml; do
-  if [[ -f "${worker_file}" ]]; then
-    worker_key=$(basename "${worker_file}" | sed -e 's/worker-//' -e 's/\.yaml//')
-    echo "Applying manifests for worker: ${worker_key}"
-    
-    gcloud container clusters get-credentials "tpu-ci-${worker_key}" \
-      --location "${worker_key}" \
-      --project cloud-tpu-inference-test
-      
-    if [[ -d "${GENERATED_DIR}/worker-${worker_key}" ]]; then
-      kubectl apply -f "${GENERATED_DIR}/worker-${worker_key}"
-    else
-      kubectl apply -f "${worker_file}"
-    fi
-  fi
+for worker_dir in "${GENERATED_DIR}"/worker-*/; do
+  [[ -d "${worker_dir}" ]] || continue
+  worker_key=$(basename "${worker_dir}" | sed -e 's/^worker-//')
+  echo "Applying manifests for worker: ${worker_key}"
+
+  gcloud container clusters get-credentials "tpu-ci-${worker_key}" \
+    --location "${worker_key}" \
+    --project cloud-tpu-inference-test
+
+  kubectl apply -f "${worker_dir}"
 done
 
 echo ""

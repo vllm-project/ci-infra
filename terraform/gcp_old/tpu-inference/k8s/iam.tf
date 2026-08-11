@@ -121,6 +121,14 @@ resource "google_project_iam_member" "connect_gateway_manager" {
   member  = "serviceAccount:${google_service_account.manager_nodes[0].email}"
 }
 
+# Listing Fleet memberships, which resolving a Connect Gateway target requires.
+resource "google_project_iam_member" "gkehub_viewer_manager" {
+  count   = var.create_service_accounts && var.manager_node_service_account == null ? 1 : 0
+  project = var.project_id
+  role    = "roles/gkehub.viewer"
+  member  = "serviceAccount:${google_service_account.manager_nodes[0].email}"
+}
+
 resource "google_project_iam_member" "connect_gateway_kueue_wi" {
   project = var.project_id
   role    = "roles/gkehub.gatewayAdmin"

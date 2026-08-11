@@ -24,9 +24,15 @@ def parse_tfvars(file_path):
     secret_id = clean_val(data.get("buildkite_secret_id", "buildkite-tpu-ci-agent-dev-token"))
     
     worker_clusters = {}
-    for key, wdata in data["worker_clusters"].items():
+    # hcl2 keeps the surrounding quotes on object keys that are written quoted
+    # in tfvars, and these keys become Kubernetes object names. Without this a
+    # quoted key yields a ClusterQueue literally named "v6e-1-1x1", which fails
+    # far from its cause.
+    for raw_key, wdata in data["worker_clusters"].items():
+        key = clean_val(raw_key)
         pools = {}
-        for pk, pdata in wdata["tpu_pools"].items():
+        for raw_pk, pdata in wdata["tpu_pools"].items():
+            pk = clean_val(raw_pk)
             chips = int(pdata["chips_per_node"])
             nominal_nodes = int(pdata.get("nominal_nodes", pdata["max_nodes"]))
             max_nodes = int(pdata["max_nodes"])
@@ -67,6 +73,40 @@ def clean_doc(doc_str):
     while s.endswith("---"):
         s = s[:-3].strip()
     return s
+
+def format_admission_checks(accelerator):
+    """MultiKueue dispatch block appended to a ClusterQueue spec.
+
+    Only the manager dispatches; worker ClusterQueues admit locally and render
+    this empty. This is the sole difference between the manager and worker
+    forms of queue_group.yaml.tpl.
+    """
+    if not accelerator:
+        return ""
+    return (
+        "\n  admissionChecksStrategy:"
+        "\n    admissionChecks:"
+        f"\n      - name: {accelerator}-multikueue-dispatch"
+    )
+
+def render_queue_group(template, pools, namespace, with_admission_checks):
+    """One ClusterQueue + LocalQueue per pool, sorted for stable output.
+
+    pools maps queue name -> {"quota", "accelerator"}.
+    """
+    tmpl = Template(template)
+    return [
+        clean_doc(tmpl.substitute(
+            QUEUE_NAME=name,
+            ACCELERATOR=info["accelerator"],
+            NAMESPACE=namespace,
+            NOMINAL_QUOTA=info["quota"],
+            ADMISSION_CHECKS=format_admission_checks(
+                info["accelerator"] if with_admission_checks else None
+            ),
+        ))
+        for name, info in sorted(pools.items())
+    ]
 
 def generate_manager_parts(config, templates):
     parts = {}
@@ -127,23 +167,17 @@ def generate_manager_parts(config, templates):
     parts["04-resource-flavors.yaml"] = "\n---\n".join(rf_docs) + "\n"
 
     # 5. ClusterQueue, LocalQueue per pool across all workers
-    queue_mgr_tmpl = Template(templates["queue_group_manager"])
     pool_data = {}
-    
-    for wk, wconf in config["worker_clusters"].items():
+    for wconf in config["worker_clusters"].values():
         for pk, pconf in wconf["pools"].items():
             if pk not in pool_data:
                 pool_data[pk] = {"quota": 0, "accelerator": pconf["accelerator"]}
             pool_data[pk]["quota"] += pconf["quota"]
 
-    queue_docs = []
-    for pk, pinfo in sorted(pool_data.items()):
-        queue_docs.append(clean_doc(queue_mgr_tmpl.substitute(
-            QUEUE_NAME=pk,
-            ACCELERATOR=pinfo["accelerator"],
-            NAMESPACE=config["namespace"],
-            NOMINAL_QUOTA=pinfo["quota"]
-        )))
+    queue_docs = render_queue_group(
+        templates["queue_group"], pool_data, config["namespace"],
+        with_admission_checks=True,
+    )
     parts["05-queues.yaml"] = "\n---\n".join(queue_docs) + "\n"
 
     return parts
@@ -169,15 +203,10 @@ def generate_worker_parts(config, worker_key, templates):
     parts["02-resource-flavors.yaml"] = "\n---\n".join(rf_docs) + "\n"
 
     # 3. ClusterQueue, LocalQueue per pool profile in worker
-    queue_wkr_tmpl = Template(templates["queue_group_worker"])
-    queue_docs = []
-    for pk, pconf in sorted(wconf["pools"].items()):
-        queue_docs.append(clean_doc(queue_wkr_tmpl.substitute(
-            QUEUE_NAME=pk,
-            ACCELERATOR=pconf["accelerator"],
-            NAMESPACE=config["namespace"],
-            NOMINAL_QUOTA=pconf["quota"]
-        )))
+    queue_docs = render_queue_group(
+        templates["queue_group"], wconf["pools"], config["namespace"],
+        with_admission_checks=False,
+    )
     parts["03-queues.yaml"] = "\n---\n".join(queue_docs) + "\n"
 
     return parts
@@ -189,8 +218,7 @@ def load_templates(templates_dir):
     templates["multikueue_config"] = (templates_dir / "multikueue_config.yaml.tpl").read_text()
     templates["admission_check"] = (templates_dir / "admission_check.yaml.tpl").read_text()
     templates["resource_flavor"] = (templates_dir / "resource_flavor.yaml.tpl").read_text()
-    templates["queue_group_manager"] = (templates_dir / "queue_group_manager.yaml.tpl").read_text()
-    templates["queue_group_worker"] = (templates_dir / "queue_group_worker.yaml.tpl").read_text()
+    templates["queue_group"] = (templates_dir / "queue_group.yaml.tpl").read_text()
     return templates
 
 def main():
@@ -218,15 +246,9 @@ def main():
     mgr_dir = out_dir / "manager"
     mgr_dir.mkdir(parents=True, exist_ok=True)
     
-    consolidated_mgr = []
     for filename in sorted(mgr_parts.keys()):
-        content = mgr_parts[filename]
-        (mgr_dir / filename).write_text(content)
-        consolidated_mgr.append(content.strip())
+        (mgr_dir / filename).write_text(mgr_parts[filename])
         print(f"Generated: manager/{filename}")
-        
-    (out_dir / "manager.yaml").write_text("\n---\n".join(consolidated_mgr) + "\n")
-    print(f"Generated Consolidated: manager.yaml")
 
     # 2. Generate Worker Manifests (Modular directory + Consolidated file)
     for worker_key in config["worker_clusters"].keys():
@@ -234,17 +256,11 @@ def main():
         wkr_dir = out_dir / f"worker-{worker_key}"
         wkr_dir.mkdir(parents=True, exist_ok=True)
         
-        consolidated_wkr = []
         for filename in sorted(wkr_parts.keys()):
-            content = wkr_parts[filename]
-            (wkr_dir / filename).write_text(content)
-            consolidated_wkr.append(content.strip())
+            (wkr_dir / filename).write_text(wkr_parts[filename])
             print(f"Generated: worker-{worker_key}/{filename}")
-            
-        (out_dir / f"worker-{worker_key}.yaml").write_text("\n---\n".join(consolidated_wkr) + "\n")
-        print(f"Generated Consolidated: worker-{worker_key}.yaml")
 
-    print("\nGeneration Complete! Manifests available as modular files and consolidated bundles in k8s/generated/.")
+    print("\nGeneration Complete! Apply a whole directory with kubectl apply -f, or\nfile by file - the numeric prefixes are the order kubectl uses either way.")
 
 if __name__ == "__main__":
     main()

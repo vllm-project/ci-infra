@@ -13,6 +13,12 @@ leaderElection:
 integrations:
   frameworks:
     - batch/job
+    # Multi-pod workloads (multi-host TPU slices, prefill/decode disagg).
+    # Must be enabled identically on manager and workers for MultiKueue.
+    - jobset.x-k8s.io/jobset
 waitForPodsReady:
+  # NOTE: inert without `enable: true`. Left off deliberately - turning it on
+  # adds readiness-timeout eviction and requeue accounting, which interacts
+  # with preemption testing. Enable once that behaviour is wanted.
   blockAdmission: false
   timeout: 10800s

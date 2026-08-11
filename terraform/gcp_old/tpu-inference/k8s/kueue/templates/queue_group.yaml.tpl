@@ -10,10 +10,7 @@ spec:
     withinClusterQueue: LowerPriority
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: ${NAMESPACE}
-  admissionChecksStrategy:
-    admissionChecks:
-      - name: ${ACCELERATOR}-multikueue-dispatch
+      kubernetes.io/metadata.name: ${NAMESPACE}${ADMISSION_CHECKS}
   resourceGroups:
     - coveredResources:
         - google.com/tpu

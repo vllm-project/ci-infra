@@ -1,0 +1,4 @@
+# Dependencies for generate_manifests.py.
+#
+#   python3 -m pip install -r scripts/requirements.txt
+python-hcl2>=8,<9
