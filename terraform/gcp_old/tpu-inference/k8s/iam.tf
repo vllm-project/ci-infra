@@ -53,7 +53,14 @@ resource "google_project_iam_member" "manager_nodes_worker_project" {
   for_each = {
     for item in flatten([
       for worker_key, worker in var.worker_clusters : [
-        for role in ["roles/artifactregistry.reader", "roles/gkehub.gatewayAdmin"] : {
+        for role in [
+          "roles/artifactregistry.reader",
+          "roles/gkehub.gatewayAdmin",
+          # The launcher reads workload pod logs from Cloud Logging.
+          # Those pods run in the worker cluster, so kubectl logs
+          # against the manager returns nothing.
+          "roles/logging.viewer",
+          ] : {
           key        = "${worker_key}/${role}"
           worker_key = worker_key
           project    = worker.project
@@ -157,4 +164,16 @@ resource "google_service_account_iam_member" "external_secrets_workload_identity
   service_account_id = google_service_account.worker_nodes[each.value.worker_key].name
   role               = each.value.role
   member             = "serviceAccount:${each.value.project}.svc.id.goog[external-secrets/external-secrets]"
+}
+
+# Workload Identity for the TPU workload launcher.
+#
+# The launcher runs as ServiceAccount buildkite/tpu-launcher and impersonates
+# the manager node SA to read worker-project Cloud Logging.
+resource "google_service_account_iam_member" "launcher_workload_identity" {
+  count = var.create_service_accounts && var.manager_node_service_account == null ? 1 : 0
+
+  service_account_id = google_service_account.manager_nodes[0].name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[buildkite/tpu-launcher]"
 }

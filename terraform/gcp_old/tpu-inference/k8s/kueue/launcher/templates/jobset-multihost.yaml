@@ -1,0 +1,71 @@
+# Multi-host slice: one pod per host, admitted as a gang or not at all.
+#
+# Requires a profile whose node pool is a multi-host topology; NUM_HOSTS must
+# match that topology's host count. A single-host profile will simply never
+# find two nodes in the slice.
+#
+# Index 0 runs the command; the other hosts join it and exit when it finishes.
+# For vLLM that means Ray - TPU_MULTIHOST_BACKEND=ray is the only multi-host
+# backend implemented, and its executor requires the process running the engine
+# to sit on a TPU node with rank 0 pinned to that same node. So index 0 is both
+# the Ray head and a TPU worker, matching the bare-metal layout rather than
+# using a separate CPU head.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+spec:
+  ttlSecondsAfterFinished: 600
+  network:
+    # Stable per-pod DNS names; the Ray head address depends on it.
+    enableDNSHostnames: true
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+      - hosts
+  replicatedJobs:
+    - name: hosts
+      replicas: 1
+      template:
+        spec:
+          parallelism: ${NUM_HOSTS}
+          completions: ${NUM_HOSTS}
+          completionMode: Indexed
+          backoffLimit: 0
+          activeDeadlineSeconds: ${MAX_RUNTIME}
+          template:
+            spec:
+              restartPolicy: Never
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: ${ACCELERATOR_LABEL}
+                cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
+              tolerations:
+                - key: "google.com/tpu"
+                  operator: "Equal"
+                  value: "present"
+                  effect: "NoSchedule"
+              containers:
+                - name: workload
+                  image: ${IMAGE}
+                  command: ["/bin/bash", "-lc"]
+                  env:
+                    - name: TPU_MULTIHOST_BACKEND
+                      value: "ray"
+                    - name: NUM_HOSTS
+                      value: "${NUM_HOSTS}"
+                    # JobSet's headless service gives every pod a stable name,
+                    # so the Ray head needs no IP discovery - which is most of
+                    # what the bare-metal harness exists to do.
+                    - name: RAY_HEAD_ADDR
+                      value: "${WORKLOAD_NAME}-hosts-0-0.${WORKLOAD_NAME}"
+                  resources:
+                    limits:
+                      google.com/tpu: "${CHIPS}"
+                    requests:
+                      google.com/tpu: "${CHIPS}"
+                  volumeMounts:
+                    - name: dshm
+                      mountPath: /dev/shm
+              volumes:
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 16Gi

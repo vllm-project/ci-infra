@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from string import Template
 import hcl2
+import yaml
 
 def clean_val(val):
     """Clean hcl2 string quotes."""
@@ -44,6 +45,13 @@ def parse_tfvars(file_path):
                 "max_nodes": max_nodes,
                 "quota": chips * nominal_nodes,
                 "accelerator": accelerator,
+                # Consumed by the launcher: what a pipeline naming this profile
+                # actually gets placed on.
+                "topology": clean_val(pdata["topology"]),
+                "accelerator_label": clean_val(pdata["accelerator_label"]),
+                # Hosts in the slice. Single-host today; a multi-host topology
+                # sets this so the JobSet parallelism matches the node count.
+                "hosts": int(pdata.get("hosts", 1)),
             }
             
         worker_clusters[key] = {
@@ -62,6 +70,22 @@ def parse_tfvars(file_path):
         "secret_project": secret_project,
         "secret_id": secret_id,
         "namespace": "buildkite",
+        # The launcher impersonates the manager node SA (see iam.tf) to read
+        # worker-project Cloud Logging.
+        "launcher_gsa": clean_val(data.get(
+            "launcher_gsa", f"{name_prefix}-mgr-node@{project_id}.iam.gserviceaccount.com")),
+        "launcher_image": clean_val(data.get(
+            "launcher_image", "gcr.io/google.com/cloudsdktool/google-cloud-cli:stable")),
+        # Mirrors var.tpu_job_max_runtime_seconds; both the launcher Job and the
+        # submitted workload are bounded by it so the deadlines cannot drift.
+        "max_runtime_seconds": int(clean_val(data.get("tpu_job_max_runtime_seconds", 10800))),
+        # Registry prefixes a workload image may come from. WORKLOAD_IMAGE is
+        # set by the pipeline, which in a public repo means a PR can name any
+        # image; this is the boundary. Empty means unrestricted - populate it
+        # before opening the queue to fork PRs.
+        "allowed_image_repos": [
+            clean_val(r) for r in data.get("allowed_image_repos", [])
+        ],
         "worker_clusters": worker_clusters
     }
 
@@ -73,6 +97,59 @@ def clean_doc(doc_str):
     while s.endswith("---"):
         s = s[:-3].strip()
     return s
+
+def _indent(text, spaces):
+    pad = " " * spaces
+    return "\n".join((pad + line) if line.strip() else "" for line in text.splitlines())
+
+def render_launcher(template, k8s_dir, config):
+    """Launcher ServiceAccount/RBAC/ConfigMaps/PodTemplate.
+
+    The script and the workload templates are kept as real files under
+    kueue/launcher/ so they can be linted and tested, and are indented into
+    ConfigMaps here. They must not go through Template.substitute: the script
+    is full of shell and Python $VAR, and the workload templates carry
+    ${CHIPS}-style placeholders that the launcher resolves at submit time
+    against the profile.
+    """
+    launcher_dir = k8s_dir / "kueue" / "launcher"
+    script = (launcher_dir / "launch.py").read_text()
+
+    # profiles.yaml: what a pipeline may ask for, and what it resolves to.
+    profiles = {}
+    for wconf in config["worker_clusters"].values():
+        for name, pool in wconf["pools"].items():
+            profiles[name] = {
+                "queue": name,
+                "chips": pool["chips"],
+                "hosts": pool.get("hosts", 1),
+                "topology": pool["topology"],
+                "accelerator_label": pool["accelerator_label"],
+                "max_runtime_seconds": config["max_runtime_seconds"],
+            }
+    # Wrapped rather than a bare profile map: the launcher also needs the
+    # image allowlist, and a step's WORKLOAD_IMAGE is repo-controlled.
+    profiles_yaml = yaml.safe_dump(
+        {
+            "allowed_image_repos": config["allowed_image_repos"],
+            "profiles": dict(sorted(profiles.items())),
+        },
+        sort_keys=False,
+    )
+
+    template_files = sorted((launcher_dir / "templates").glob("*.yaml"))
+    templates_block = "\n".join(
+        f"  {f.name}: |\n{_indent(f.read_text(), 4)}" for f in template_files
+    )
+
+    return Template(template).substitute(
+        NAMESPACE=config["namespace"],
+        LAUNCHER_GSA=config["launcher_gsa"],
+        LAUNCHER_IMAGE=config["launcher_image"],
+        LAUNCHER_SCRIPT=_indent(script, 4),
+        LAUNCHER_PROFILES=_indent(profiles_yaml, 4),
+        LAUNCHER_TEMPLATES=templates_block,
+    )
 
 def format_admission_checks(accelerator):
     """MultiKueue dispatch block appended to a ClusterQueue spec.
@@ -108,7 +185,7 @@ def render_queue_group(template, pools, namespace, with_admission_checks):
         for name, info in sorted(pools.items())
     ]
 
-def generate_manager_parts(config, templates):
+def generate_manager_parts(config, templates, k8s_dir):
     parts = {}
     
     # 1. Base (Namespace, ClusterSecretStore, ExternalSecret)
@@ -180,6 +257,12 @@ def generate_manager_parts(config, templates):
     )
     parts["05-queues.yaml"] = "\n---\n".join(queue_docs) + "\n"
 
+    # 6. Launcher (manager only; the workload it submits is mirrored onto a
+    #    worker by MultiKueue).
+    parts["06-launcher.yaml"] = render_launcher(
+        templates["launcher"], k8s_dir, config
+    ).strip() + "\n"
+
     return parts
 
 def generate_worker_parts(config, worker_key, templates):
@@ -219,6 +302,7 @@ def load_templates(templates_dir):
     templates["admission_check"] = (templates_dir / "admission_check.yaml.tpl").read_text()
     templates["resource_flavor"] = (templates_dir / "resource_flavor.yaml.tpl").read_text()
     templates["queue_group"] = (templates_dir / "queue_group.yaml.tpl").read_text()
+    templates["launcher"] = (templates_dir / "launcher.yaml.tpl").read_text()
     return templates
 
 def main():
@@ -242,7 +326,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Generate Manager Manifests (Modular directory + Consolidated file)
-    mgr_parts = generate_manager_parts(config, templates)
+    mgr_parts = generate_manager_parts(config, templates, k8s_dir)
     mgr_dir = out_dir / "manager"
     mgr_dir.mkdir(parents=True, exist_ok=True)
     

@@ -1,0 +1,44 @@
+# Default template: one pod, one host.
+#
+# The launcher fills in metadata.name, namespace, the Kueue queue label,
+# correlation labels and the ownerReference, and sets the args of the container
+# named "workload" to the step's command.
+apiVersion: batch/v1
+kind: Job
+spec:
+  parallelism: 1
+  completions: 1
+  # No pod-level retry: a retried pod would re-run a test whose result
+  # Buildkite has already been told about.
+  backoffLimit: 0
+  # Enforced by the worker cluster, so it still bounds the run if the manager
+  # becomes unreachable and nothing upstream can clean up.
+  activeDeadlineSeconds: ${MAX_RUNTIME}
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: ${ACCELERATOR_LABEL}
+        cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
+      tolerations:
+        - key: "google.com/tpu"
+          operator: "Equal"
+          value: "present"
+          effect: "NoSchedule"
+      containers:
+        - name: workload
+          image: ${IMAGE}
+          command: ["/bin/bash", "-lc"]
+          resources:
+            limits:
+              google.com/tpu: "${CHIPS}"
+            requests:
+              google.com/tpu: "${CHIPS}"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
