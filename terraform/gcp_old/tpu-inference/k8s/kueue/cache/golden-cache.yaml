@@ -1,0 +1,87 @@
+# The golden compilation cache: one volume per worker cluster, populated once
+# from GCS and then mounted read-only by every TPU workload.
+#
+# Applied into a worker cluster, not the manager. MultiKueue copies the Job it
+# manages and nothing else, so a claim created on the manager would not exist
+# in the cluster the pod is dispatched to and the pod would sit Pending on a
+# claim that never appears.
+#
+# Substitutions: ${NAMESPACE} ${CACHE_SIZE} ${CACHE_GSA} ${GCS_CACHE_PATH}
+---
+# Retain, so deleting the populate claim leaves the disk behind. That is what
+# makes the volume golden: the claim is scaffolding, the PV is the artifact.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: tpu-cache-retain
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-balanced
+reclaimPolicy: Retain
+# The disk is zonal and the populate pod decides the zone, so binding has to
+# wait for that pod to be scheduled. Binding earlier can place the disk in a
+# zone with no TPU nodes, where nothing can ever mount it.
+volumeBindingMode: WaitForFirstConsumer
+---
+# The populate job writes through this claim. Read-write, single node, and
+# deliberately short-lived: once the disk holds the cache this claim is deleted
+# and the Retain policy keeps the PV.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tpu-cache-populate
+  namespace: ${NAMESPACE}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: tpu-cache-retain
+  resources:
+    requests:
+      storage: ${CACHE_SIZE}
+---
+# Identity for the populate job. The pods run under Workload Identity, so
+# without the annotation they authenticate as the cluster's WI pool principal
+# and get 403 on the bucket - which is exactly what a probe of the default
+# service account showed.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tpu-cache-populate
+  namespace: ${NAMESPACE}
+  annotations:
+    iam.gke.io/gcp-service-account: ${CACHE_GSA}
+---
+# Pulls the shared JAX compilation cache onto the volume. No TPU: this is a
+# copy, so it must not sit in the Kueue queue competing with tests for chips.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tpu-cache-populate
+  namespace: ${NAMESPACE}
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: tpu-cache-populate
+      containers:
+        - name: populate
+          image: google/cloud-sdk:slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "identity: $(gcloud auth list --filter=status:ACTIVE --format='value(account)')"
+              mkdir -p /cache
+              # Mirrors run_in_docker.sh: same bucket, same layout, so a pod
+              # reading this volume sees what a bare-metal VM sees on disk.
+              gcloud storage rsync --recursive --no-clobber \
+                --exclude='.*_.gstmp$' \
+                "${GCS_CACHE_PATH}" /cache
+              echo "populated $(du -sh /cache | cut -f1) across $(find /cache -type f | wc -l) files"
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: tpu-cache-populate
