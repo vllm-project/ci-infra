@@ -1,7 +1,8 @@
 # Golden compilation cache
 
-A read-only volume per worker cluster, populated once from
-`gs://ullm-ci-cache/jax_cache` and mounted by every TPU workload.
+A VolumeSnapshot per worker cluster, taken once from a disk populated out of
+`gs://ullm-ci-cache/jax_cache`. Every test clones its own writable volume from
+it.
 
 ## Why
 
@@ -54,16 +55,28 @@ Once per worker cluster. The volume does not follow a workload: MultiKueue
 dispatches to whichever cluster has capacity, and a disk in one region is
 invisible from another.
 
-## What it does, and why it is four steps
+## What it does
 
 1. **populate** — a ReadWriteOnce claim, filled from the bucket by a Job
-2. **release** — delete the claim; the `Retain` policy leaves the disk behind
-3. **rebind** — clear the `claimRef` and re-advertise the PV `ReadOnlyMany`
-4. **publish** — a `ReadOnlyMany` claim every workload can mount at once
+2. **snapshot** — a VolumeSnapshot of it; this is the golden artifact
+3. **release** — delete the claim and the Job; the snapshot stands alone
 
-Steps 2–4 are GCE Persistent Disk semantics, not ceremony: a disk may be
-attached read-only to many nodes, but only while nothing holds it read-write.
-The writer has to let go before the readers can arrive.
+## How tests consume it
+
+Not by mounting it. `manifests/test.yaml` in tpu-inference declares a **generic
+ephemeral volume** whose `dataSource` is this snapshot, so each pod gets a
+private writable clone that is created with it and deleted with it.
+
+Two problems fall away as a result. The PVC is created by the controller in
+whichever cluster the pod was dispatched to, so MultiKueue copying only the Job
+stops mattering. And the clone is writable, so a test can write the entries it
+compiles — a shared read-only cache would have left every test recompiling
+whatever the golden copy lacked, forever.
+
+`pod_entrypoint.sh` then pushes those new entries to GCS on success, so the
+bucket stays the source of truth and the snapshot is a fast local head start.
+That is the same division of labour bare metal has between GCS and its own
+persistent disk.
 
 ## Things that will bite
 
@@ -75,12 +88,16 @@ rerun with the new `--jax-version` or the volume quietly stops helping.
 the disk is created in the zone the populate pod landed in; if TPU node pools
 later move zones, the volume is stranded and has to be rebuilt.
 
-**Staleness.** This volume is a snapshot in time. New entries compiled by tests
-go nowhere, because it is mounted read-only. Bare metal avoids that by pushing
-to GCS on exit 0, and `pod_entrypoint.sh` does the same — so the bucket stays
-the source of truth and this volume is a fast local copy of it. Re-run the
-script periodically to refresh, or the gap widens as tests change.
+**Staleness.** The snapshot is a point in time and never updates itself. New
+entries do reach GCS via `pod_entrypoint.sh`, so nothing is lost — but the head
+start decays as tests change, and re-running this script is what refreshes it.
 
-**It is not free.** A retained PD per worker cluster, sized for the whole cache.
-Weigh that against `gs://` directly, which costs nothing extra and may be fast
-enough.
+**Chips idle while the clone provisions.** The volume is created after Kueue
+admits the workload, so the pod already holds its chips while the disk is
+hydrated from the snapshot. On a 10-chip cohort that is the most expensive
+place in the system to add latency, and it is the number to watch when judging
+whether this beats pointing JAX at `gs://` directly.
+
+**It is not free.** A retained snapshot per worker cluster, plus a short-lived
+disk per test. Weigh that against `gs://` directly, which costs nothing extra
+and may be fast enough.

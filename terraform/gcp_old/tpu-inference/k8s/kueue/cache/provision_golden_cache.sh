@@ -15,19 +15,21 @@
 # disk. Pointing JAX straight at gs:// works but turns every cache lookup into
 # a network round trip, which is a different performance profile from bare
 # metal - and the point of running these tests here is to compare the two.
-# A read-only volume, populated once from the same bucket, reproduces the
-# bare-metal shape: local reads, shared content.
+# A private clone per test, hydrated from a snapshot of the same bucket content,
+# reproduces the bare-metal shape exactly: warm local reads, local writes, and
+# new entries published to GCS at the end of a successful run.
 #
 # WHAT IT DOES
 #
 #   1. populate  a ReadWriteOnce claim, filled from the bucket by a Job
-#   2. release   delete the claim; Retain leaves the disk behind
-#   3. rebind    clear the claimRef and re-advertise the PV ReadOnlyMany
-#   4. publish   a ReadOnlyMany claim every workload can mount at once
+#   2. snapshot  take a VolumeSnapshot of it - this is the golden artifact
+#   3. release   delete the claim and the job; the snapshot stands alone
 #
-# Steps 2-4 are the price of GCE Persistent Disk semantics: a disk may be
-# attached read-only to many nodes, but only while nothing holds it read-write.
-# So the writer has to let go before the readers can arrive.
+# Tests do not mount this. Each one clones its own writable volume from the
+# snapshot through a generic ephemeral volume, so it reads warm, writes the
+# entries it compiles locally, and pod_entrypoint.sh pushes those to GCS on
+# success. A shared read-only volume would have made every test recompile
+# whatever the golden copy lacked, forever.
 #
 # PREREQUISITE, and currently the blocker: the service account passed as --gsa
 # must be able to read the cache bucket. Workload Identity is enforced on the
@@ -52,7 +54,7 @@ CACHE_SIZE="${CACHE_SIZE:-200Gi}"
 GCS_CACHE_BASE="${GCS_CACHE_BASE:-gs://ullm-ci-cache/jax_cache}"
 JAX_VERSION="${JAX_VERSION:-}"
 TPU_VERSION="${TPU_VERSION:-tpu6e}"
-GOLDEN_CLAIM="${GOLDEN_CLAIM:-tpu-cache-golden}"
+GOLDEN_SNAPSHOT="${GOLDEN_SNAPSHOT:-tpu-cache-golden}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -85,13 +87,13 @@ kube() { kubectl --context "connectgateway_${PROJECT}_${CLUSTER}" "$@"; }
 echo "==> credentials for ${CLUSTER}"
 gcloud container fleet memberships get-credentials "$CLUSTER" --project "$PROJECT"
 
-if kube -n "$NAMESPACE" get pvc "$GOLDEN_CLAIM" >/dev/null 2>&1; then
-  echo "==> ${GOLDEN_CLAIM} already exists in ${CLUSTER}; nothing to do."
-  echo "    Delete it and its PV to rebuild from ${GCS_CACHE_PATH}."
+if kube -n "$NAMESPACE" get volumesnapshot "$GOLDEN_SNAPSHOT" >/dev/null 2>&1; then
+  echo "==> ${GOLDEN_SNAPSHOT} already exists in ${CLUSTER}; nothing to do."
+  echo "    Delete it to rebuild from ${GCS_CACHE_PATH}."
   exit 0
 fi
 
-echo "==> 1/4 populate from ${GCS_CACHE_PATH}"
+echo "==> 1/3 populate from ${GCS_CACHE_PATH}"
 NAMESPACE="$NAMESPACE" CACHE_SIZE="$CACHE_SIZE" CACHE_GSA="$GSA" \
   GCS_CACHE_PATH="$GCS_CACHE_PATH" \
   envsubst < "${here}/golden-cache.yaml" | kube apply -f -
@@ -101,39 +103,31 @@ NAMESPACE="$NAMESPACE" CACHE_SIZE="$CACHE_SIZE" CACHE_GSA="$GSA" \
 kube -n "$NAMESPACE" wait --for=condition=complete --timeout=60m job/tpu-cache-populate
 kube -n "$NAMESPACE" logs job/tpu-cache-populate --tail=5
 
-PV="$(kube -n "$NAMESPACE" get pvc tpu-cache-populate -o jsonpath='{.spec.volumeName}')"
-echo "==> populated ${PV}"
-
-echo "==> 2/4 release the writer"
-kube -n "$NAMESPACE" delete job tpu-cache-populate --wait=true
-kube -n "$NAMESPACE" delete pvc tpu-cache-populate --wait=true
-
-echo "==> 3/4 make ${PV} available read-only to many nodes"
-# Released still carries the old claimRef, which blocks rebinding; and the PV
-# advertises only the access mode its first claim asked for.
-kube patch pv "$PV" --type=merge -p '{"spec":{"claimRef":null}}'
-kube patch pv "$PV" --type=merge \
-  -p '{"spec":{"accessModes":["ReadOnlyMany"]}}'
-
-echo "==> 4/4 publish ${GOLDEN_CLAIM}"
+echo "==> 2/3 snapshot as ${GOLDEN_SNAPSHOT}"
 cat <<EOF | kube apply -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
 metadata:
-  name: ${GOLDEN_CLAIM}
+  name: ${GOLDEN_SNAPSHOT}
   namespace: ${NAMESPACE}
   labels:
     cache-namespace: "${CACHE_NAMESPACE}"
 spec:
-  accessModes: ["ReadOnlyMany"]
-  storageClassName: tpu-cache-retain
-  volumeName: ${PV}
-  resources:
-    requests:
-      storage: ${CACHE_SIZE}
+  volumeSnapshotClassName: tpu-cache
+  source:
+    persistentVolumeClaimName: tpu-cache-populate
 EOF
 
-kube -n "$NAMESPACE" get pvc "$GOLDEN_CLAIM"
+kube -n "$NAMESPACE" wait --for=jsonpath='{.status.readyToUse}'=true \
+  --timeout=60m "volumesnapshot/${GOLDEN_SNAPSHOT}"
+
+echo "==> 3/3 release the scaffolding"
+# deletionPolicy: Retain on the snapshot class means the snapshot survives its
+# source claim. Without that, this step would destroy what we just made.
+kube -n "$NAMESPACE" delete job tpu-cache-populate --wait=true
+kube -n "$NAMESPACE" delete pvc tpu-cache-populate --wait=true
+
+kube -n "$NAMESPACE" get volumesnapshot "$GOLDEN_SNAPSHOT"
 echo
-echo "Done. Workloads in ${CLUSTER} can now mount ${GOLDEN_CLAIM} read-only."
+echo "Done. Tests in ${CLUSTER} clone their own volume from ${GOLDEN_SNAPSHOT}."
 echo "Cache namespace: ${CACHE_NAMESPACE} - rerun with a new --jax-version after a JAX bump."
