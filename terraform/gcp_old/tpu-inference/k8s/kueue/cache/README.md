@@ -98,6 +98,13 @@ hydrated from the snapshot. On a 10-chip cohort that is the most expensive
 place in the system to add latency, and it is the number to watch when judging
 whether this beats pointing JAX at `gs://` directly.
 
-**It is not free.** A retained snapshot per worker cluster, plus a short-lived
-disk per test. Weigh that against `gs://` directly, which costs nothing extra
-and may be fast enough.
+**It is not free, and the clones are the expensive part.** A retained snapshot
+per worker cluster is cheap. The short-lived disk per test is not: at 800Gi a
+clone, a saturated cohort running fifteen workloads at once asks for roughly
+12TB of Persistent Disk at the same time. That is transient, but it is real
+capacity — check the project's PD quota in each worker region before turning
+this on, because hitting it does not fail the disk politely, it leaves pods
+Pending until `LAUNCHER_START_TIMEOUT` gives up.
+
+Weigh all of it against `gs://` directly, which costs nothing extra and may be
+fast enough.
