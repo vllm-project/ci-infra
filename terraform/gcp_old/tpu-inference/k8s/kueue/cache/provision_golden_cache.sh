@@ -16,8 +16,8 @@
 # a network round trip, which is a different performance profile from bare
 # metal - and the point of running these tests here is to compare the two.
 # A private clone per test, hydrated from a snapshot of the same bucket content,
-# reproduces the bare-metal shape exactly: warm local reads, local writes, and
-# new entries published to GCS at the end of a successful run.
+# reproduces the bare-metal shape where it counts: warm local reads and local
+# writes, at disk speed, for the entries bare metal would also have had.
 #
 # WHAT IT DOES
 #
@@ -25,11 +25,10 @@
 #   2. snapshot  take a VolumeSnapshot of it - this is the golden artifact
 #   3. release   delete the claim and the job; the snapshot stands alone
 #
-# Tests do not mount this. Each one clones its own writable volume from the
-# snapshot through a generic ephemeral volume, so it reads warm, writes the
-# entries it compiles locally, and pod_entrypoint.sh pushes those to GCS on
-# success. A shared read-only volume would have made every test recompile
-# whatever the golden copy lacked, forever.
+# Tests do not mount this. Each clones its own writable volume from the snapshot
+# through a generic ephemeral volume, reads it warm, writes locally, and throws
+# the copy away when it ends. Nothing syncs back, so this job is the only thing
+# in the system that needs to read the bucket.
 #
 # PREREQUISITE, and currently the blocker: the service account passed as --gsa
 # must be able to read the cache bucket. Workload Identity is enforced on the

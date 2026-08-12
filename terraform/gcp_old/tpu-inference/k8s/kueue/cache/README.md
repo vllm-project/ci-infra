@@ -18,11 +18,9 @@ answer "is this platform equivalent?", and a cold cache makes that question
 unanswerable.
 
 Pointing `JAX_COMPILATION_CACHE_DIR` at `gs://` directly also works and needs no
-volume at all. It is the right first step, and it is what `pod_entrypoint.sh` in
-the tpu-inference repo does. But every lookup becomes a network round trip,
-which is a different performance shape from bare metal. This volume reproduces
-the bare-metal shape — local reads, shared content — for when that difference
-turns out to matter.
+volume at all, but every lookup becomes a network round trip — a different
+performance shape from bare metal, which reads from a local disk. A clone gives
+the bare-metal shape: local reads and local writes, at disk speed.
 
 ## Prerequisite
 
@@ -73,10 +71,11 @@ stops mattering. And the clone is writable, so a test can write the entries it
 compiles — a shared read-only cache would have left every test recompiling
 whatever the golden copy lacked, forever.
 
-`pod_entrypoint.sh` then pushes those new entries to GCS on success, so the
-bucket stays the source of truth and the snapshot is a fast local head start.
-That is the same division of labour bare metal has between GCS and its own
-persistent disk.
+Nothing is written back. Entries a test compiles beyond the snapshot live only
+for that pod, and the next test starts from the snapshot again. That is the
+deliberate simplification: no credentials in workloads, no write races, no
+partially-synced cache after a crash. The cost is that the snapshot only
+improves when this script is re-run.
 
 ## Things that will bite
 
@@ -88,9 +87,10 @@ rerun with the new `--jax-version` or the volume quietly stops helping.
 the disk is created in the zone the populate pod landed in; if TPU node pools
 later move zones, the volume is stranded and has to be rebuilt.
 
-**Staleness.** The snapshot is a point in time and never updates itself. New
-entries do reach GCS via `pod_entrypoint.sh`, so nothing is lost — but the head
-start decays as tests change, and re-running this script is what refreshes it.
+**Staleness.** The snapshot is a point in time and never updates itself, and
+with no write-back nothing else updates it either. As tests change, more of each
+run is spent recompiling. Re-running this script against a bucket the
+bare-metal fleet keeps warm is the only thing that refreshes it.
 
 **Chips idle while the clone provisions.** The volume is created after Kueue
 admits the workload, so the pod already holds its chips while the disk is

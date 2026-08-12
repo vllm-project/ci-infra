@@ -3,11 +3,11 @@
 # from it.
 #
 # The snapshot is the artifact, not a volume. A shared read-only volume cannot
-# accept the entries a test compiles, so every test would keep recompiling
-# whatever the golden copy happens to lack, and the cache would only ever get
-# staler. A clone per test is writable, so a test reads warm and writes locally,
-# and pod_entrypoint.sh pushes the new entries to GCS on success - which is what
-# the next refresh of this snapshot picks up.
+# accept the entries a test compiles, so a test would recompile whatever the
+# golden copy lacks and then fail to write it down. A clone per test is
+# writable: the test reads warm, writes locally, and the copy is discarded with
+# the pod. Nothing is synced back, so no workload needs credentials for the
+# bucket - only this populate job does, and it runs once.
 #
 # Applied into a worker cluster, not the manager. MultiKueue copies the Job it
 # manages and nothing else.
