@@ -108,6 +108,7 @@ _ROOT_ENV = os.environ.get("FNREC_ROOT")
 # HF_TOKEN, and this file is uploaded.
 _ENV_KEYS = (
     "BUILDKITE_JOB_ID",
+    "BUILDKITE_PIPELINE_SLUG",
     "BUILDKITE_STEP_KEY",
     "BUILDKITE_LABEL",
     "BUILDKITE_RETRY_COUNT",
