@@ -117,6 +117,38 @@ def test_selected_step_runs_without_source_match(fake_global_config):
     assert buildkite_step._step_should_run(step, ["changed.py"])
 
 
+def test_every_generated_job_has_a_unique_key():
+    steps = read_steps_from_job_dir(str(TEST_JOB_DIR))
+
+    buildkite_groups = buildkite_step.convert_group_step_to_buildkite_step(
+        group_steps(steps)
+    )
+    jobs = [job for group in buildkite_groups for job in group.steps]
+    keys = [job.key for job in jobs]
+
+    assert all(keys)
+    assert len(keys) == len(set(keys))
+    assert "test-a" in keys
+    assert "block-test-a" in keys
+
+
+def test_explicit_step_key_is_preserved():
+    step = Step(
+        label="Label-derived key should not win",
+        group="Keys",
+        key="configured-key",
+        commands=["true"],
+    )
+
+    command_step = next(
+        job
+        for job in _render_single_step(step).steps
+        if isinstance(job, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.key == "configured-key"
+
+
 def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):
     monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
     step = Step(

@@ -81,3 +81,9 @@ The generator relies on several environment variables, typically provided by Bui
 *   `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
     set, the generator emits those steps and their transitive dependencies,
     ignoring normal source-file selection. Unknown keys fail generation.
+
+Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
+`buildkite-analytics-token-secret` Secret's `token` key when it is available.
+The Secret is optional, so missing credentials do not prevent jobs from running.
+Provision it in a Buildkite job namespace with
+`infra-k8s/create-buildkite-analytics-secret.sh` to enable test result uploads.

@@ -7,6 +7,7 @@ from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
+    _amd_mirror_should_run,
     build_amd_step_options,
     ensure_amd_stack_error_retry,
     get_amd_agent_queue,
@@ -154,7 +155,7 @@ def _get_timeout_in_minutes(
 class BuildkiteCommandStep(BaseModel):
     label: str
     group: Optional[str] = None
-    key: Optional[str] = None
+    key: str
     agents: Dict[str, str] = {}
     commands: List[str] = []
     depends_on: Optional[List[str]] = None
@@ -163,6 +164,8 @@ class BuildkiteCommandStep(BaseModel):
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
     parallelism: Optional[int] = None
+    concurrency: Optional[int] = None
+    concurrency_group: Optional[str] = None
     timeout_in_minutes: Optional[int] = None
     priority: Optional[int] = None
 
@@ -179,6 +182,8 @@ class BuildkiteCommandStep(BaseModel):
             "plugins": self.plugins,
             "env": self.env,
             "parallelism": self.parallelism,
+            "concurrency": self.concurrency,
+            "concurrency_group": self.concurrency_group,
             "timeout_in_minutes": self.timeout_in_minutes,
             "priority": self.priority,
         }
@@ -187,7 +192,7 @@ class BuildkiteCommandStep(BaseModel):
 class BuildkiteBlockStep(BaseModel):
     block: str
     depends_on: Optional[Union[str, List[str]]] = None
-    key: Optional[str] = None
+    key: str
 
     def to_yaml(self):
         return {"block": self.block, "depends_on": self.depends_on, "key": self.key}
@@ -547,10 +552,10 @@ def convert_group_step_to_buildkite_step(
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
+            step_key = step.key or _generate_step_key(step.label)
             if is_amd_gpu_device(step.device):
                 amd_commands = [
-                    "export VLLM_TEST_GROUP_NAME="
-                    f"{_generate_step_key(step.key or step.label)}"
+                    f"export VLLM_TEST_GROUP_NAME={step_key}"
                 ]
                 amd_commands.extend(
                     _prepare_commands(
@@ -561,7 +566,7 @@ def convert_group_step_to_buildkite_step(
                 )
                 amd_step = _create_amd_step(
                     label=step.label,
-                    key=step.key,
+                    key=step_key,
                     device=step.device,
                     num_devices=step.num_devices,
                     commands_str=" && ".join(amd_commands),
@@ -573,13 +578,15 @@ def convert_group_step_to_buildkite_step(
                     num_nodes=step.num_nodes,
                     soft_fail=step.soft_fail,
                     parallelism=step.parallelism,
+                    concurrency=step.concurrency,
+                    concurrency_group=step.concurrency_group,
                     timeout_in_minutes=step.timeout_in_minutes,
                     agent_tags=step.agent_tags,
                 )
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
                         block=f"Run {amd_step.label}",
-                        key=f"block-amd-{_generate_step_key(step.key or step.label)}",
+                        key=f"block-amd-{step_key}",
                         command_step=amd_step,
                         depends_on=amd_step.depends_on,
                     )
@@ -592,11 +599,14 @@ def convert_group_step_to_buildkite_step(
 
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
+                key=step_key,
                 commands=step_commands,
                 depends_on=step.depends_on,
                 soft_fail=step.soft_fail,
                 agents=_get_step_agents(step),
                 priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
+                concurrency=step.concurrency,
+                concurrency_group=step.concurrency_group,
             )
 
             if step.env:
@@ -606,8 +616,6 @@ def convert_group_step_to_buildkite_step(
             buildkite_step.retry = ensure_exit_status_negative_one_retry(
                 buildkite_step.retry
             )
-            if step.key:
-                buildkite_step.key = step.key
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
             if (
@@ -622,7 +630,7 @@ def convert_group_step_to_buildkite_step(
                 refresh_env.update(get_rocm_base_refresh_env())
                 buildkite_step.env = refresh_env
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
-                    get_rocm_base_refresh_timeout(list_file_diff)
+                    get_rocm_base_refresh_timeout()
                 )
             elif (
                 step.device == DeviceType.AMD_CPU
@@ -639,7 +647,7 @@ def convert_group_step_to_buildkite_step(
             if not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(
                     block=f"Run {step.label}",
-                    key=f"block-{_generate_step_key(step.label)}",
+                    key=f"block-{step_key}",
                     command_step=buildkite_step,
                     depends_on=[],
                     append_to_command_depends_on=False,
@@ -701,7 +709,7 @@ def convert_group_step_to_buildkite_step(
                 extra_env.update(amd.get("env", {}))
                 amd_step = _create_amd_step(
                     label=step.label,
-                    key=f"amd-{_generate_step_key(step.key or step.label)}",
+                    key=f"amd-{step_key}",
                     device=amd["device"],
                     num_devices=amd_num_devices,
                     commands_str=amd_commands_str,
@@ -713,11 +721,19 @@ def convert_group_step_to_buildkite_step(
                     num_nodes=amd.get("num_nodes", step.num_nodes),
                     soft_fail=amd.get("soft_fail", step.soft_fail or False),
                     parallelism=step.parallelism,
+                    concurrency=amd.get("concurrency", step.concurrency),
+                    concurrency_group=amd.get(
+                        "concurrency_group", step.concurrency_group
+                    ),
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
                 )
-                if not _step_should_run(
-                    _get_amd_mirror_effective_step(step, amd), list_file_diff
+                if not _amd_mirror_should_run(
+                    _step_should_run(
+                        _get_amd_mirror_effective_step(step, amd),
+                        list_file_diff,
+                    ),
+                    list_file_diff,
                 ):
                     # Block step depends on the shared AMD image build.
                     mirror_build_dep = (
@@ -727,7 +743,7 @@ def convert_group_step_to_buildkite_step(
                     )
                     amd_block_step = _create_block_step(
                         block=f"Run AMD: {step.label}",
-                        key=f"block-amd-{_generate_step_key(step.label)}",
+                        key=f"block-amd-{step_key}",
                         command_step=amd_step,
                         depends_on=[mirror_build_dep],
                     )
@@ -844,7 +860,9 @@ def _create_amd_step(
     num_nodes: Optional[int],
     soft_fail: Optional[bool],
     parallelism: Optional[int],
-    key: Optional[str] = None,
+    concurrency: Optional[int],
+    concurrency_group: Optional[str],
+    key: str,
     timeout_in_minutes: Optional[int] = None,
     agent_tags: Optional[Dict[str, str]] = None,
 ) -> BuildkiteCommandStep:
@@ -867,6 +885,8 @@ def _create_amd_step(
         key=key,
         soft_fail=soft_fail or False,
         parallelism=parallelism,
+        concurrency=concurrency,
+        concurrency_group=concurrency_group,
         timeout_in_minutes=_get_timeout_in_minutes(
             get_amd_timeout_in_minutes(timeout_in_minutes)
         ),
