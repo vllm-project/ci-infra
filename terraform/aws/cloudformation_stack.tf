@@ -214,13 +214,13 @@ locals {
       BuildkiteQueue                       = "gpu_4_queue"
       InstanceTypes                        = "g6.12xlarge" # 4 Nvidia L4 GPUs, 192GB memory
       MinSize                              = 10
-      MaxSize                              = 10
+      MaxSize                              = 40
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
-      # Keep scarce GPU capacity once AWS fulfills it.
+      # Keep a persistent baseline while allowing demand-based scale-out.
       BuildkiteTerminateInstanceAfterJob   = false
     }
   }
