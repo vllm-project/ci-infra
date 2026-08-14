@@ -10,22 +10,55 @@ from step import Step
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
 
-@pytest.fixture(autouse=True)
-def build_scoped_rocm_capability(tmp_path, monkeypatch):
+def test_build_scoped_image_capability(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    assert amd.get_amd_native_base_image() == amd.AMD_LEGACY_NATIVE_BASE_IMAGE
+    assert amd.get_amd_ci_image() == amd.AMD_LEGACY_CI_IMAGE
+    assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_STABLE_CI_BASE_IMAGE
+
+    producer = tmp_path / ".buildkite/scripts/ci-bake-rocm.sh"
+    producer.parent.mkdir(parents=True)
+    producer.write_text("CI_BASE_IMAGE_TAG_BUILD_REF=enabled")
+
+    assert amd.get_amd_native_base_image() == amd.AMD_BUILD_NATIVE_BASE_IMAGE
+    assert amd.get_amd_ci_image() == amd.AMD_BUILD_CI_IMAGE
+    assert amd.get_amd_ci_base_image(dind=False) == amd.AMD_BUILD_NATIVE_BASE_IMAGE
+    assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_STABLE_CI_BASE_IMAGE
+
+
+def test_stable_image_promotion_capability_uses_build_scoped_dind_base(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    producer = tmp_path / ".buildkite/scripts/ci-bake-rocm.sh"
+    producer.parent.mkdir(parents=True)
+    producer.write_text("CI_BASE_IMAGE_TAG_BUILD_REF=enabled")
     promotion_script = tmp_path / "promote-stable-images.sh"
     promotion_script.touch()
     monkeypatch.setattr(amd, "AMD_ROCM_PROMOTION_SCRIPT", promotion_script)
 
+    assert amd.supports_build_scoped_images()
+    assert amd.supports_stable_image_promotion()
+    assert amd.get_amd_ci_base_image(dind=False) == amd.AMD_BUILD_NATIVE_BASE_IMAGE
+    assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_BUILD_NATIVE_BASE_IMAGE
+    assert amd.get_amd_ci_image() == amd.AMD_BUILD_CI_IMAGE
 
-def test_amd_template_and_bootstrap_preserve_build_scoped_contract():
+
+def test_legacy_amd_template_retries_gpu_hang_abort():
     template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
-    bootstrap = (Path(__file__).parents[2] / "bootstrap-amd.sh").read_text()
 
     assert (
         "{{ indent }}    - exit_status: 134  # ROCm/KFD GPU hang (SIGABRT)\n"
         "{{ indent }}      limit: 1"
     ) in template
-    assert "exit_status: 2  # Transient git/registry identity failure" in template
+    assert "exit_status: 2  # Exact image found but registry handoff failed" in template
+
+
+def test_amd_template_and_bootstrap_preserve_promotion_contract():
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+    bootstrap = (Path(__file__).parents[2] / "bootstrap-amd.sh").read_text()
+
     assert "ci_base-build-$BUILDKITE_BUILD_ID" in template
     assert 'key: "promote-stable-rocm-images-amd"' in template
     assert "if: build.branch == pipeline.default_branch" in template
@@ -39,7 +72,17 @@ def test_amd_template_and_bootstrap_preserve_build_scoped_contract():
     assert 'REMOTE_VLLM: "0"' in template
     assert 'REMOTE_VLLM: "1"' not in template
     assert '[[ -f ".buildkite/scripts/rocm/promote-stable-images.sh" ]]' in bootstrap
-    assert "-D rocm_build_scoped_handoff=" in bootstrap
+    assert "-D rocm_build_scoped_images=" in bootstrap
+    assert "-D rocm_stable_image_promotion=" in bootstrap
+
+
+def test_legacy_amd_template_configures_gpu_diagnostics():
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+
+    assert 'VLLM_CI_DIAGNOSTICS_DIR: "artifacts/amd-gpu-diagnostics"' in template
+    for name, field_path in amd.AMD_NATIVE_POD_IDENTITY_ENV.items():
+        assert f"- name: {name}" in template
+        assert f"fieldPath: {field_path}" in template
 
 
 def _render_single_step(step):
@@ -58,55 +101,30 @@ def _rocm_base_refresh_step():
         device="amd_cpu",
         no_plugin=True,
         commands=["bash .buildkite/scripts/rocm/refresh-base-image.sh"],
+        concurrency=1,
+        concurrency_group="vllm/rocm/base-build/$BUILDKITE_COMMIT",
     )
-
-
-def test_amd_ci_base_consumer_image_is_capability_gated(monkeypatch, tmp_path):
-    assert (
-        amd.get_amd_ci_base_image(dind=False)
-        == "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
-    )
-    assert amd.get_amd_fallback_ci_image() == amd.AMD_BUILD_FALLBACK_CI_IMAGE
-    monkeypatch.setattr(amd, "AMD_ROCM_PROMOTION_SCRIPT", tmp_path / "missing")
-    assert amd.get_amd_ci_base_image(dind=False) == amd.AMD_NATIVE_BASE_IMAGE
-    assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_STABLE_CI_BASE_IMAGE
-    assert amd.get_amd_fallback_ci_image() == amd.AMD_FALLBACK_CI_IMAGE
 
 
 @pytest.mark.parametrize(
-    ("list_file_diff", "expected_timeout"),
+    "list_file_diff",
     [
-        ([], 540),
-        (["vllm/config.py"], 540),
-        (["run_all"], 540),
-        (["nightly"], 540),
-        (["docker/Dockerfile.rocm_base"], 540),
-        (["run_all", "docker/Dockerfile.rocm_base"], 540),
-        (["nightly", "docker/Dockerfile.rocm_base"], 540),
+        [],
+        ["vllm/config.py"],
+        ["run_all"],
+        ["nightly"],
+        ["docker/Dockerfile.rocm_base"],
     ],
 )
-def test_rocm_base_refresh_has_self_healing_build_timeout(
-    fake_global_config, list_file_diff, expected_timeout
-):
+def test_rocm_base_selector_keeps_build_timeout(fake_global_config, list_file_diff):
     fake_global_config["list_file_diff"] = list_file_diff
 
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
 
-    assert command_step.timeout_in_minutes == expected_timeout
-    assert command_step.env["ROCM_BASE_REFRESH_FORCE"] == "0"
-
-
-def test_legacy_rocm_base_refresh_keeps_diff_based_timeout(
-    fake_global_config, monkeypatch, tmp_path
-):
-    monkeypatch.setattr(amd, "AMD_ROCM_PROMOTION_SCRIPT", tmp_path / "missing")
-    fake_global_config["list_file_diff"] = ["vllm/config.py"]
-    command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
-    assert command_step.timeout_in_minutes == 15
-
-    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
-    command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
     assert command_step.timeout_in_minutes == 540
+    assert command_step.env["ROCM_BASE_REFRESH_FORCE"] == "0"
+    assert command_step.concurrency == 1
+    assert command_step.concurrency_group.endswith("/$BUILDKITE_COMMIT")
 
 
 def test_rocm_stable_promotion_always_runs(fake_global_config):
@@ -183,26 +201,32 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
+    assert command_step.env["VLLM_CI_DIAGNOSTICS_DIR"] == amd.AMD_DIAGNOSTICS_DIR
+    assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
     if not dind:
         assert command_step.plugins is not None
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
-        assert container["image"] == amd.AMD_BUILD_CI_BASE_IMAGE
+        assert container["image"] == amd.get_amd_native_base_image()
         assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
         assert container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
         assert command_step.env["AMD_CI_RUNTIME"] == "native"
-        assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
         assert "DOCKER_IMAGE_NAME" not in command_step.env
+        container_env = {entry["name"]: entry for entry in container["env"]}
+        for name, field_path in amd.AMD_NATIVE_POD_IDENTITY_ENV.items():
+            assert container_env[name] == {
+                "name": name,
+                "valueFrom": {"fieldRef": {"fieldPath": field_path}},
+            }
     else:
         assert command_step.plugins is None
         assert "AMD_CI_RUNTIME" not in command_step.env
-        assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_BUILD_CI_BASE_IMAGE
-        assert (
-            command_step.env["VLLM_CI_FALLBACK_IMAGE"]
-            == amd.AMD_BUILD_FALLBACK_CI_IMAGE
-        )
+        assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
+        assert command_step.env["VLLM_CI_FALLBACK_IMAGE"] == amd.get_amd_ci_image()
 
-    assert command_step.env["VLLM_CI_BASE_IMAGE"] == amd.AMD_BUILD_CI_BASE_IMAGE
+    assert command_step.env["VLLM_CI_BASE_IMAGE"] == (
+        amd.get_amd_native_base_image() if not dind else amd.AMD_STABLE_CI_BASE_IMAGE
+    )
 
     assert command_step.retry == amd.AMD_RETRY
     assert len(command_step.retry["automatic"]) == 7
@@ -282,12 +306,17 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
         working_dir="/vllm-workspace/tests",
         commands=["pytest tests/mirror.py"],
         source_file_dependencies=["vllm/"],
+        concurrency=2,
+        concurrency_group="vllm/test/mirrored",
+        if_condition="build.branch == pipeline.default_branch",
         mirror={
             "amd": {
                 "device": "mi325_1",
                 "depends_on": ["image-build-amd"],
                 "soft_fail": False,
                 "source_file_dependencies": ["amd-only/"],
+                "concurrency": 1,
+                "concurrency_group": "vllm/test/amd-mirrored",
             }
         },
     )
@@ -311,12 +340,47 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     )
 
     assert default_command_step.depends_on == ["image-build"]
+    assert default_command_step.key == "mirrored-test"
     assert default_command_step.soft_fail is False
+    assert default_command_step.concurrency == 2
+    assert default_command_step.concurrency_group == "vllm/test/mirrored"
+    assert (
+        default_command_step.if_condition == "build.branch == pipeline.default_branch"
+    )
     assert len(amd_group.steps) == 1
+    assert amd_command_step.key == "amd-mirrored-test"
     assert amd_command_step.depends_on == ["image-build-amd"]
     assert amd_command_step.agents == {"queue": AgentQueue.AMD_MI325_1}
     assert amd_command_step.soft_fail is False
+    assert amd_command_step.concurrency == 1
+    assert amd_command_step.concurrency_group == "vllm/test/amd-mirrored"
+    assert amd_command_step.if_condition == "build.branch == pipeline.default_branch"
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
+    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+    step = Step(
+        label="ROCm base mirrored test",
+        group="Mirrors",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        optional=optional,
+        mirror={"amd": {"device": "mi300_1"}},
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {step.group: [step]}
+    )
+    default_group = next(group for group in group_steps if group.group == "Mirrors")
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+
+    assert isinstance(default_group.steps[0], buildkite_step.BuildkiteBlockStep)
+    assert len(amd_group.steps) == 1
+    assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteCommandStep)
 
 
 def test_dind_false_mirror_uses_native_runner_gating(fake_global_config):
@@ -346,6 +410,7 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config):
     assert len(amd_group.steps) == 1
     amd_command_step = amd_group.steps[0]
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
+    assert amd_command_step.key == "amd-native-mirrored-test"
     assert amd_command_step.plugins is not None
 
 
@@ -377,7 +442,7 @@ def test_untagged_mirror_defaults_to_dind(
     amd_command_step = amd_group.steps[1]
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
     assert amd_command_step.plugins is None
-    assert amd_command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_BUILD_CI_BASE_IMAGE
+    assert amd_command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
 
 
 @pytest.mark.parametrize(

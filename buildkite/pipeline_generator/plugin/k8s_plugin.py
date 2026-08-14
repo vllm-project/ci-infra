@@ -1,6 +1,7 @@
 import copy
 from step import Step
 from constants import DeviceType
+from plugin.analytics import get_buildkite_analytics_token_env
 
 HF_HOME = "/root/.cache/huggingface"
 
@@ -32,6 +33,7 @@ nebius_h200_plugin_template = {
                                 }
                             },
                         },
+                        get_buildkite_analytics_token_env(),
                     ],
                 }
             ],
@@ -71,6 +73,7 @@ h100_plugin_template = {
                                 }
                             },
                         },
+                        get_buildkite_analytics_token_env(),
                     ],
                 }
             ],
@@ -110,6 +113,7 @@ a100_plugin_template = {
                                 }
                             },
                         },
+                        get_buildkite_analytics_token_env(),
                     ],
                 }
             ],
@@ -161,6 +165,7 @@ b200_plugin_template = {
                                 }
                             },
                         },
+                        get_buildkite_analytics_token_env(),
                     ],
                 }
             ],
@@ -211,6 +216,7 @@ h100_rh_plugin_template = {
                                 }
                             },
                         },
+                        get_buildkite_analytics_token_env(),
                     ],
                 }
             ],

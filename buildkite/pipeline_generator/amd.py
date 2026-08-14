@@ -8,19 +8,46 @@ from constants import AgentQueue, DeviceType
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
-AMD_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT"
-AMD_BUILD_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
+AMD_LEGACY_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT"
+AMD_BUILD_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
+AMD_LEGACY_CI_IMAGE = "rocm/vllm-ci:$BUILDKITE_COMMIT"
+AMD_BUILD_CI_IMAGE = "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
 AMD_ROCM_PROMOTION_SCRIPT = Path(".buildkite/scripts/rocm/promote-stable-images.sh")
-AMD_FALLBACK_CI_IMAGE = "rocm/vllm-ci:$BUILDKITE_COMMIT"
-AMD_BUILD_FALLBACK_CI_IMAGE = "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
+
+
+def supports_build_scoped_images() -> bool:
+    producer = Path(".buildkite/scripts/ci-bake-rocm.sh")
+    return producer.is_file() and "CI_BASE_IMAGE_TAG_BUILD_REF" in producer.read_text()
+
+
+def supports_stable_image_promotion() -> bool:
+    return AMD_ROCM_PROMOTION_SCRIPT.is_file()
+
+
+def get_amd_native_base_image() -> str:
+    return (
+        AMD_BUILD_NATIVE_BASE_IMAGE
+        if supports_build_scoped_images()
+        else AMD_LEGACY_NATIVE_BASE_IMAGE
+    )
+
+
+def get_amd_ci_image() -> str:
+    return AMD_BUILD_CI_IMAGE if supports_build_scoped_images() else AMD_LEGACY_CI_IMAGE
+
+
 AMD_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
 AMD_ARTIFACT_CHECKSUM_GLOB = f"{AMD_ARTIFACT_GLOB}.sha256"
 AMD_ARTIFACT_STEP = "image-build-amd"
 AMD_RESULTS_ROOT = "/home/buildkite-agent/huggingface/amd-ci-results"
+AMD_DIAGNOSTICS_DIR = "artifacts/amd-gpu-diagnostics"
 AMD_HF_HOME = "/home/buildkite-agent/huggingface"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_WORKSPACE_VOLUME = "vllm-workspace"
 AMD_NATIVE_SHM_SIZE = "16Gi"
+AMD_NATIVE_POD_IDENTITY_ENV = {
+    "VLLM_CI_K8S_NODE_NAME": "spec.nodeName",
+}
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
     ".buildkite/scripts/hardware_ci/run-amd-test.sh",
 )
@@ -54,23 +81,10 @@ ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
 
 
-def supports_build_scoped_rocm_images() -> bool:
-    """Whether the checked-out vLLM revision publishes build-scoped aliases."""
-    return AMD_ROCM_PROMOTION_SCRIPT.is_file()
-
-
 def get_amd_ci_base_image(*, dind: bool) -> str:
-    if supports_build_scoped_rocm_images():
-        return AMD_BUILD_CI_BASE_IMAGE
-    if dind:
-        return AMD_STABLE_CI_BASE_IMAGE
-    return AMD_NATIVE_BASE_IMAGE
-
-
-def get_amd_fallback_ci_image() -> str:
-    if supports_build_scoped_rocm_images():
-        return AMD_BUILD_FALLBACK_CI_IMAGE
-    return AMD_FALLBACK_CI_IMAGE
+    if dind and supports_stable_image_promotion():
+        return AMD_BUILD_NATIVE_BASE_IMAGE
+    return AMD_STABLE_CI_BASE_IMAGE if dind else get_amd_native_base_image()
 
 
 def get_amd_timeout_in_minutes(timeout_in_minutes: Optional[int]) -> int:
@@ -119,16 +133,16 @@ def ensure_amd_stack_error_retry(
     return retry_policy
 
 
-def get_rocm_base_refresh_timeout(list_file_diff: List[str]) -> int:
+def get_rocm_base_refresh_timeout() -> int:
     if os.getenv("ROCM_BASE_REFRESH_SKIP", "0") == "1":
         return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
-    if supports_build_scoped_rocm_images() or (
-        os.getenv("ROCM_BASE_REFRESH_FORCE", "0") == "1"
-        or os.getenv("ROCM_BASE_REFRESH_DIFF_UNAVAILABLE", "0") == "1"
-        or AMD_ROCM_BASE_DOCKERFILE in list_file_diff
-    ):
-        return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
-    return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
+    return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
+
+
+def _amd_mirror_should_run(default_should_run: bool, list_file_diff: List[str]) -> bool:
+    return default_should_run or (
+        os.getenv("NOAUTO") != "1" and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
+    )
 
 
 def get_rocm_base_refresh_env() -> Dict[str, str]:
@@ -304,6 +318,8 @@ def _get_amd_env(
     gpu_count: int,
 ) -> Dict[str, str]:
     env = dict(extra_env or {})
+    env["VLLM_CI_DIAGNOSTICS_DIR"] = AMD_DIAGNOSTICS_DIR
+    env["VLLM_CI_EXPECTED_GPU_COUNT"] = str(gpu_count)
     ci_base_image = get_amd_ci_base_image(dind=dind)
     if not dind:
         # Native agents have no DinD sidecar, so Docker hook inputs must not
@@ -323,7 +339,6 @@ def _get_amd_env(
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
-                "VLLM_CI_EXPECTED_GPU_COUNT": str(gpu_count),
                 "VLLM_CI_WORKSPACE": AMD_NATIVE_WORKSPACE,
                 "VLLM_CI_REQUIRE_WORKSPACE_MOUNT": "1",
                 "VLLM_TEST_COMMANDS": commands,
@@ -339,7 +354,7 @@ def _get_amd_env(
                 "DOCKER_BUILDKIT": "1",
                 "DOCKER_IMAGE_NAME": ci_base_image,
                 "VLLM_CI_BASE_IMAGE": ci_base_image,
-                "VLLM_CI_FALLBACK_IMAGE": get_amd_fallback_ci_image(),
+                "VLLM_CI_FALLBACK_IMAGE": get_amd_ci_image(),
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
@@ -390,8 +405,21 @@ def get_amd_k8s_plugin(
                             },
                         ],
                         "env": [
-                            {"name": name, "value": value}
-                            for name, value in container_env.items()
+                            *(
+                                {"name": name, "value": value}
+                                for name, value in container_env.items()
+                            ),
+                            *(
+                                {
+                                    "name": name,
+                                    "valueFrom": {
+                                        "fieldRef": {"fieldPath": field_path}
+                                    },
+                                }
+                                for name, field_path in (
+                                    AMD_NATIVE_POD_IDENTITY_ENV.items()
+                                )
+                            ),
                         ],
                     }
                 ],

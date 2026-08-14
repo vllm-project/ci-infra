@@ -117,6 +117,38 @@ def test_selected_step_runs_without_source_match(fake_global_config):
     assert buildkite_step._step_should_run(step, ["changed.py"])
 
 
+def test_every_generated_job_has_a_unique_key():
+    steps = read_steps_from_job_dir(str(TEST_JOB_DIR))
+
+    buildkite_groups = buildkite_step.convert_group_step_to_buildkite_step(
+        group_steps(steps)
+    )
+    jobs = [job for group in buildkite_groups for job in group.steps]
+    keys = [job.key for job in jobs]
+
+    assert all(keys)
+    assert len(keys) == len(set(keys))
+    assert "test-a" in keys
+    assert "block-test-a" in keys
+
+
+def test_explicit_step_key_is_preserved():
+    step = Step(
+        label="Label-derived key should not win",
+        group="Keys",
+        key="configured-key",
+        commands=["true"],
+    )
+
+    command_step = next(
+        job
+        for job in _render_single_step(step).steps
+        if isinstance(job, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.key == "configured-key"
+
+
 def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):
     monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
     step = Step(
@@ -425,6 +457,51 @@ def test_missing_timeout_in_minutes_is_omitted_from_pipeline():
     # exclude_none is used when dumping the pipeline, so an unset timeout must
     # not surface as a key at all.
     assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
+
+
+def test_source_file_dependencies_match_without_exclusions():
+    deps = ["vllm/", "tests/models/multimodal"]
+    assert buildkite_step._source_file_dependencies_match(
+        deps, ["vllm/model_executor/models/llama.py"]
+    )
+    assert not buildkite_step._source_file_dependencies_match(deps, ["docs/foo.md"])
+
+
+def test_exclusion_carves_out_subtree_from_broad_include():
+    deps = ["vllm/", "!vllm/distributed/kv_transfer/"]
+    # A change confined to the excluded subtree does not select the step.
+    assert not buildkite_step._source_file_dependencies_match(
+        deps, ["vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py"]
+    )
+    # A change elsewhere under the broad include still selects it.
+    assert buildkite_step._source_file_dependencies_match(
+        deps, ["vllm/model_executor/models/llama.py"]
+    )
+    # Sibling distributed code (not under the exclusion) still selects it.
+    assert buildkite_step._source_file_dependencies_match(
+        deps, ["vllm/distributed/parallel_state.py"]
+    )
+
+
+def test_exclusion_only_applies_per_file():
+    # A diff touching both an excluded file and an included file still matches:
+    # the included file is enough on its own.
+    deps = ["vllm/", "!vllm/distributed/kv_transfer/"]
+    assert buildkite_step._source_file_dependencies_match(
+        deps,
+        [
+            "vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py",
+            "vllm/config/__init__.py",
+        ],
+    )
+
+
+def test_step_explicitly_listing_excluded_subtree_still_matches():
+    # A dedicated step that includes the subtree directly is unaffected.
+    deps = ["vllm/distributed/kv_transfer/kv_connector/v1/nixl/"]
+    assert buildkite_step._source_file_dependencies_match(
+        deps, ["vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py"]
+    )
 
 
 if __name__ == "__main__":

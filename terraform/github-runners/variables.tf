@@ -52,6 +52,23 @@ variable "runners_maximum_count" {
   default     = 50
 }
 
+variable "runners_minimum_idle_count" {
+  description = "Minimum number of idle runners kept ready at all times."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.runners_minimum_idle_count >= 0
+    error_message = "runners_minimum_idle_count must be zero or greater."
+  }
+}
+
+variable "runner_pool_owner" {
+  description = "GitHub organization that owns the pre-provisioned runner pool."
+  type        = string
+  default     = "vllm-project"
+}
+
 # SSM SecureString/String parameters holding the GitHub App credentials.
 # Create these manually before the first apply (see README.md).
 variable "github_app_id_ssm_name" {

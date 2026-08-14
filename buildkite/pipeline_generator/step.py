@@ -1,5 +1,6 @@
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
+from pydantic import model_validator
 from typing_extensions import Self
 from collections import defaultdict
 from global_config import get_global_config
@@ -22,7 +23,7 @@ class Step(BaseModel):
     soft_fail: Optional[bool] = False
     parallelism: Optional[int] = None
     concurrency: Optional[int] = Field(default=None, gt=0, strict=True)
-    concurrency_group: Optional[str] = Field(default=None, min_length=1)
+    concurrency_group: Optional[str] = None
     if_condition: Optional[str] = None
     timeout_in_minutes: Optional[int] = None
     mount_buildkite_agent: Optional[bool] = False
@@ -42,14 +43,9 @@ class Step(BaseModel):
             raise ValueError(
                 "'concurrency' and 'concurrency_group' must be defined together."
             )
-        return self
-
-    @field_validator("concurrency_group")
-    @classmethod
-    def validate_concurrency_group(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and not value.strip():
+        if self.concurrency_group is not None and not self.concurrency_group.strip():
             raise ValueError("'concurrency_group' must be a nonempty string.")
-        return value
+        return self
 
     @classmethod
     def from_yaml(cls, yaml_data: dict):
