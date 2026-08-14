@@ -44,7 +44,7 @@ AMD_DIAGNOSTICS_DIR = "artifacts/amd-gpu-diagnostics"
 AMD_HF_HOME = "/home/buildkite-agent/huggingface"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_WORKSPACE_VOLUME = "vllm-workspace"
-AMD_NATIVE_SHM_SIZE = "16Gi"
+AMD_NATIVE_SHM_SIZE = "32Gi"
 AMD_NATIVE_POD_IDENTITY_ENV = {
     "VLLM_CI_K8S_NODE_NAME": "spec.nodeName",
 }
