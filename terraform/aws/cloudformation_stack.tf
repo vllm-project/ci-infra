@@ -213,8 +213,8 @@ locals {
       BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "gpu_4_queue"
       InstanceTypes                        = "g6.12xlarge" # 4 Nvidia L4 GPUs, 192GB memory
-      MinSize                              = 40
-      MaxSize                              = 40
+      MinSize                              = 10
+      MaxSize                              = 10
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
