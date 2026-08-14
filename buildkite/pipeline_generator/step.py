@@ -18,6 +18,8 @@ class AmdMirrorOptions(BaseModel):
 
     agent_tags: Optional[Dict[str, str]] = None
     commands: Optional[List[str]] = None
+    concurrency: Optional[PositiveStrictInt] = None
+    concurrency_group: Optional[str] = None
     depends_on: Optional[List[str]] = None
     device: str
     dind: Optional[StrictBool] = None
@@ -46,6 +48,12 @@ class AmdMirrorOptions(BaseModel):
                 )
         return data
 
+    @model_validator(mode="after")
+    def validate_concurrency_group(self) -> Self:
+        if self.concurrency_group is not None and not self.concurrency_group.strip():
+            raise ValueError("'concurrency_group' must be a nonempty string.")
+        return self
+
 
 class Step(BaseModel):
     label: str
@@ -61,6 +69,8 @@ class Step(BaseModel):
     source_file_dependencies: Optional[List[str]] = None
     soft_fail: Optional[bool] = False
     parallelism: Optional[int] = None
+    concurrency: Optional[int] = Field(default=None, gt=0, strict=True)
+    concurrency_group: Optional[str] = None
     timeout_in_minutes: Optional[int] = None
     mount_buildkite_agent: Optional[bool] = False
     env: Optional[Dict[str, str]] = None
@@ -85,7 +95,19 @@ class Step(BaseModel):
         validated_amd = AmdMirrorOptions.model_validate(mirror["amd"])
         normalized = dict(data)
         normalized_mirror = dict(mirror)
-        normalized_mirror["amd"] = validated_amd.model_dump(exclude_unset=True)
+        normalized_amd = validated_amd.model_dump(exclude_unset=True)
+        effective_concurrency = normalized_amd.get(
+            "concurrency", data.get("concurrency")
+        )
+        effective_concurrency_group = normalized_amd.get(
+            "concurrency_group", data.get("concurrency_group")
+        )
+        if (effective_concurrency is None) != (effective_concurrency_group is None):
+            raise ValueError(
+                "'concurrency' and 'concurrency_group' must be defined together "
+                "after applying AMD mirror overrides."
+            )
+        normalized_mirror["amd"] = normalized_amd
         normalized["mirror"] = normalized_mirror
         return normalized
 
@@ -93,6 +115,12 @@ class Step(BaseModel):
     def validate_multi_node(self) -> Self:
         if self.num_nodes and not self.num_devices:
             raise ValueError("'num_devices' must be defined if 'num_nodes' is defined.")
+        if (self.concurrency is None) != (self.concurrency_group is None):
+            raise ValueError(
+                "'concurrency' and 'concurrency_group' must be defined together."
+            )
+        if self.concurrency_group is not None and not self.concurrency_group.strip():
+            raise ValueError("'concurrency_group' must be a nonempty string.")
         return self
 
     @classmethod
@@ -131,7 +159,9 @@ def read_steps_from_job_dir(job_dir: str):
                         and global_config["github_repo_name"] == "vllm-project/vllm"
                     ):
                         step.working_dir = "/vllm-workspace/tests"
-                    step.source_file_dependencies = getattr(step, "source_file_dependencies", [])
+                    step.source_file_dependencies = getattr(
+                        step, "source_file_dependencies", []
+                    )
                     if not step.source_file_dependencies:
                         step.source_file_dependencies = []
                     step.source_file_dependencies.append(os.path.relpath(yaml_path))

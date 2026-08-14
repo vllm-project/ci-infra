@@ -1,23 +1,49 @@
 import os
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 from constants import AgentQueue, DeviceType
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
-AMD_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT"
-AMD_FALLBACK_CI_IMAGE = "rocm/vllm-ci:$BUILDKITE_COMMIT"
+AMD_LEGACY_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT"
+AMD_BUILD_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
+AMD_LEGACY_CI_IMAGE = "rocm/vllm-ci:$BUILDKITE_COMMIT"
+AMD_BUILD_CI_IMAGE = "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
+
+
+def supports_build_scoped_images() -> bool:
+    producer = Path(".buildkite/scripts/ci-bake-rocm.sh")
+    return producer.is_file() and "CI_BASE_IMAGE_TAG_BUILD_REF" in producer.read_text()
+
+
+def get_amd_native_base_image() -> str:
+    return (
+        AMD_BUILD_NATIVE_BASE_IMAGE
+        if supports_build_scoped_images()
+        else AMD_LEGACY_NATIVE_BASE_IMAGE
+    )
+
+
+def get_amd_ci_image() -> str:
+    return AMD_BUILD_CI_IMAGE if supports_build_scoped_images() else AMD_LEGACY_CI_IMAGE
+
+
 AMD_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
 AMD_ARTIFACT_CHECKSUM_GLOB = f"{AMD_ARTIFACT_GLOB}.sha256"
 AMD_ARTIFACT_STEP = "image-build-amd"
 AMD_RESULTS_ROOT = "/home/buildkite-agent/huggingface/amd-ci-results"
+AMD_DIAGNOSTICS_DIR = "artifacts/amd-gpu-diagnostics"
 AMD_HF_HOME = "/home/buildkite-agent/huggingface"
 AMD_HF_OFFLINE_RETRY_ENV = "VLLM_CI_HF_OFFLINE_RETRY"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_WORKSPACE_VOLUME = "vllm-workspace"
 AMD_NATIVE_SHM_SIZE = "16Gi"
+AMD_NATIVE_POD_IDENTITY_ENV = {
+    "VLLM_CI_K8S_NODE_NAME": "spec.nodeName",
+}
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
     ".buildkite/scripts/hardware_ci/run-amd-test.sh",
 )
@@ -114,9 +140,7 @@ def ensure_amd_stack_error_retry(
         ):
             return retry_policy
     else:
-        raise ValueError(
-            "AMD retry.automatic must be a boolean, mapping, or list."
-        )
+        raise ValueError("AMD retry.automatic must be a boolean, mapping, or list.")
 
     retry_policy["automatic"] = [
         dict(AMD_STACK_ERROR_RETRY),
@@ -125,16 +149,16 @@ def ensure_amd_stack_error_retry(
     return retry_policy
 
 
-def get_rocm_base_refresh_timeout(list_file_diff: List[str]) -> int:
+def get_rocm_base_refresh_timeout() -> int:
     if os.getenv("ROCM_BASE_REFRESH_SKIP", "0") == "1":
         return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
-    if (
-        os.getenv("ROCM_BASE_REFRESH_FORCE", "0") == "1"
-        or os.getenv("ROCM_BASE_REFRESH_DIFF_UNAVAILABLE", "0") == "1"
-        or AMD_ROCM_BASE_DOCKERFILE in list_file_diff
-    ):
-        return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
-    return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
+    return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
+
+
+def _amd_mirror_should_run(default_should_run: bool, list_file_diff: List[str]) -> bool:
+    return default_should_run or (
+        os.getenv("NOAUTO") != "1" and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
+    )
 
 
 def get_rocm_base_refresh_env() -> Dict[str, str]:
@@ -311,6 +335,8 @@ def _get_amd_env(
     hf_offline_retry_enabled: bool,
 ) -> Dict[str, str]:
     env = dict(extra_env or {})
+    env["VLLM_CI_DIAGNOSTICS_DIR"] = AMD_DIAGNOSTICS_DIR
+    env["VLLM_CI_EXPECTED_GPU_COUNT"] = str(gpu_count)
     if not dind:
         # Native agents have no DinD sidecar, so Docker hook inputs must not
         # escape into this execution mode.
@@ -325,11 +351,10 @@ def _get_amd_env(
         env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
         env.update(
             {
-                "VLLM_CI_BASE_IMAGE": AMD_NATIVE_BASE_IMAGE,
+                "VLLM_CI_BASE_IMAGE": get_amd_native_base_image(),
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
-                "VLLM_CI_EXPECTED_GPU_COUNT": str(gpu_count),
                 "VLLM_CI_WORKSPACE": AMD_NATIVE_WORKSPACE,
                 "VLLM_CI_REQUIRE_WORKSPACE_MOUNT": "1",
                 "VLLM_TEST_COMMANDS": commands,
@@ -345,7 +370,7 @@ def _get_amd_env(
                 "DOCKER_BUILDKIT": "1",
                 "DOCKER_IMAGE_NAME": AMD_STABLE_CI_BASE_IMAGE,
                 "VLLM_CI_BASE_IMAGE": AMD_STABLE_CI_BASE_IMAGE,
-                "VLLM_CI_FALLBACK_IMAGE": AMD_FALLBACK_CI_IMAGE,
+                "VLLM_CI_FALLBACK_IMAGE": get_amd_ci_image(),
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
@@ -399,8 +424,21 @@ def get_amd_k8s_plugin(
                             },
                         ],
                         "env": [
-                            {"name": name, "value": value}
-                            for name, value in container_env.items()
+                            *(
+                                {"name": name, "value": value}
+                                for name, value in container_env.items()
+                            ),
+                            *(
+                                {
+                                    "name": name,
+                                    "valueFrom": {
+                                        "fieldRef": {"fieldPath": field_path}
+                                    },
+                                }
+                                for name, field_path in (
+                                    AMD_NATIVE_POD_IDENTITY_ENV.items()
+                                )
+                            ),
                         ],
                     }
                 ],
@@ -474,7 +512,7 @@ def build_amd_step_options(
         }
         plugins = [
             get_amd_k8s_plugin(
-                image=AMD_NATIVE_BASE_IMAGE,
+                image=get_amd_native_base_image(),
                 gpu_count=gpu_count,
                 workspace=AMD_NATIVE_WORKSPACE,
                 workspace_volume_name=AMD_NATIVE_WORKSPACE_VOLUME,

@@ -23,7 +23,7 @@ ENABLED_RETRY = [
 ]
 
 
-def _render_amd_step(
+def _render_amd_pipeline(
     *,
     capability=None,
     step_request=None,
@@ -67,7 +67,7 @@ def _render_amd_step(
         "vllm_ci_disable_hf_offline_retry": kill_switch,
         "rocm_base_refresh_skip": "0",
         "rocm_base_refresh_force": "0",
-        "rocm_base_refresh_diff_unavailable": "0",
+        "rocm_build_scoped_images": "0",
     }
     command = [MINIJINJA, str(TEMPLATE), "-", "--format", "yaml"]
     for name, value in definitions.items():
@@ -80,12 +80,33 @@ def _render_amd_step(
         capture_output=True,
         text=True,
     )
-    pipeline = yaml.safe_load(result.stdout)
+    return yaml.safe_load(result.stdout)
+
+
+def _render_amd_step(**overrides):
+    pipeline = _render_amd_pipeline(**overrides)
     return next(
         step
         for step in pipeline[0]["steps"]
         if step["label"] == "mi300_1: Minimal AMD test"
     )
+
+
+def test_image_build_steps_retain_registry_handoff_retry():
+    pipeline = _render_amd_pipeline()
+    steps_by_key = {step["key"]: step for step in pipeline[0]["steps"] if "key" in step}
+
+    for key in (
+        "refresh-rocm-base-amd",
+        "ensure-ci-base-amd",
+        "image-build-amd",
+    ):
+        exit_statuses = {
+            condition["exit_status"]
+            for condition in steps_by_key[key]["retry"]["automatic"]
+            if "exit_status" in condition
+        }
+        assert {1, 2} <= exit_statuses
 
 
 HF_RETRY_CASES = {
