@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
+import base64
 import os
 
 from amd import (
@@ -376,6 +377,13 @@ def _prepare_commands(
 ) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
     commands = _get_setup_commands(step, setup_profile)
+    # AMD mirrors use a different runtime and do not mount the agent binary
+    # that mints the short-lived upload credential.
+    trace_commands = step.otel_tracing_enabled() and setup_profile != "amd"
+    if trace_commands:
+        commands.append(
+            "source /vllm-workspace/.buildkite/scripts/ci_otel.sh"
+        )
 
     continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
 
@@ -389,12 +397,26 @@ def _prepare_commands(
             commands.append(
                 f"echo '+++ :test_tube: Command ({i + 1}/{len(step.commands)}): {preview}'"
             )
+            prepared_command = cmd
+            if trace_commands:
+                # Buildkite's final command rendering rewrites single quotes,
+                # so shell quoting is not stable here. Base64 keeps arbitrary
+                # command text opaque until ci_otel_run evaluates it in-job.
+                encoded_preview = base64.b64encode(preview.encode()).decode()
+                encoded_command = base64.b64encode(cmd.encode()).decode()
+                prepared_command = "ci_otel_run {} {} {}".format(
+                    i + 1,
+                    encoded_preview,
+                    encoded_command,
+                )
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
-                commands.append(f"{{ {cmd}\n}} || CI_OVERALL_STATUS=1")
+                commands.append(
+                    f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1"
+                )
             else:
-                commands.append(cmd)
+                commands.append(prepared_command)
 
     if continue_on_failure:
         commands.append("exit $$CI_OVERALL_STATUS")

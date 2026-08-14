@@ -26,6 +26,7 @@ class Step(BaseModel):
     concurrency_group: Optional[str] = None
     timeout_in_minutes: Optional[int] = None
     mount_buildkite_agent: Optional[bool] = False
+    otel_trace: bool = False
     env: Optional[Dict[str, str]] = None
     retry: Optional[Dict[str, Any]] = None
     optional: Optional[bool] = False
@@ -33,6 +34,14 @@ class Step(BaseModel):
     no_gpu: Optional[bool] = False
     dind: bool = True
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
+
+    def otel_tracing_enabled(self) -> bool:
+        config = get_global_config()
+        return bool(
+            self.otel_trace
+            and config["branch"] == "main"
+            and config["pull_request"] == "false"
+        )
 
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:

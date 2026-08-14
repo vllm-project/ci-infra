@@ -1,3 +1,4 @@
+import base64
 import subprocess
 import sys
 from pathlib import Path
@@ -179,6 +180,57 @@ def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):
     assert "CI_OVERALL_STATUS=1" in script
     assert "after" in result.stdout
     assert result.returncode == 1
+
+
+def test_otel_trace_wraps_commands_only_on_trusted_main(fake_global_config):
+    fake_global_config["branch"] = "main"
+    step = Step(
+        label="Traced",
+        group="Tracing",
+        commands=["export VALUE=ready", 'test "$VALUE" = ready'],
+        otel_trace=True,
+    )
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    assert commands[0] == "source /vllm-workspace/.buildkite/scripts/ci_otel.sh"
+    assert commands[2].startswith("ci_otel_run 1 ")
+    assert commands[4].startswith("ci_otel_run 2 ")
+    _, _, encoded_label, encoded_command = commands[4].split(" ")
+    assert base64.b64decode(encoded_label).decode() == "test VALUE = ready"
+    assert base64.b64decode(encoded_command).decode() == 'test "$VALUE" = ready'
+    assert "'" not in commands[4]
+
+
+def test_otel_trace_is_disabled_for_amd_mirror(fake_global_config):
+    fake_global_config["branch"] = "main"
+    step = Step(label="AMD mirror", commands=["pytest tests"], otel_trace=True)
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="amd",
+    )
+
+    assert not any("ci_otel" in command for command in commands)
+
+
+def test_otel_trace_is_disabled_for_pull_requests(fake_global_config):
+    fake_global_config["branch"] = "main"
+    fake_global_config["pull_request"] = "123"
+    step = Step(label="Untrusted", commands=["pytest tests"], otel_trace=True)
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    assert not any("ci_otel" in command for command in commands)
 
 
 def test_generated_steps_retry_when_the_agent_is_lost():

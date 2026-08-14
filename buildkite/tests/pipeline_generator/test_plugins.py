@@ -5,6 +5,7 @@ from plugin.analytics import (
     BUILDKITE_ANALYTICS_SECRET,
     BUILDKITE_ANALYTICS_TOKEN,
 )
+from step import Step
 
 
 @pytest.mark.parametrize(
@@ -19,6 +20,15 @@ from plugin.analytics import (
 )
 def test_standard_docker_templates_forward_buildkite_analytics_token(template):
     assert BUILDKITE_ANALYTICS_TOKEN in template["environment"]
+
+
+def test_traced_main_step_mounts_buildkite_agent(fake_global_config):
+    fake_global_config["branch"] = "main"
+    step = Step(label="Traced", device="h200_35gb", otel_trace=True)
+
+    plugin = docker_plugin.get_docker_plugin(step, "example/image:latest")
+
+    assert plugin["mount_buildkite_agent"] is True
 
 
 @pytest.mark.parametrize(
