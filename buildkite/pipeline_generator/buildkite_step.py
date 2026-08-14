@@ -511,7 +511,9 @@ def convert_group_step_to_buildkite_step(
         for step in steps:
             step_key = step.key or _generate_step_key(step.label)
             if is_amd_gpu_device(step.device):
-                amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
+                amd_commands = [
+                    f"export VLLM_TEST_GROUP_NAME={step_key}"
+                ]
                 amd_commands.extend(
                     _prepare_commands(
                         step,
@@ -822,10 +824,9 @@ def _create_amd_step(
     key: str,
     timeout_in_minutes: Optional[int] = None,
     agent_tags: Optional[Dict[str, str]] = None,
-    hf_offline_retry: bool,
+    hf_offline_retry: bool = False,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
-    global_config = get_global_config()
     options = build_amd_step_options(
         label=label,
         device=device,
@@ -839,8 +840,6 @@ def _create_amd_step(
         num_nodes=num_nodes,
         agent_tags=agent_tags,
         hf_offline_retry=hf_offline_retry,
-        hf_offline_retry_capability=global_config.get("amd_hf_offline_retry", False),
-        hf_offline_retry_disabled=global_config.get("disable_hf_offline_retry", False),
     )
     return BuildkiteCommandStep(
         **options,

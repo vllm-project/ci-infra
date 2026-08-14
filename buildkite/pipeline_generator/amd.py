@@ -28,7 +28,11 @@ def get_amd_native_base_image() -> str:
 
 
 def get_amd_ci_image() -> str:
-    return AMD_BUILD_CI_IMAGE if supports_build_scoped_images() else AMD_LEGACY_CI_IMAGE
+    return (
+        AMD_BUILD_CI_IMAGE
+        if supports_build_scoped_images()
+        else AMD_LEGACY_CI_IMAGE
+    )
 
 
 AMD_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
@@ -37,7 +41,6 @@ AMD_ARTIFACT_STEP = "image-build-amd"
 AMD_RESULTS_ROOT = "/home/buildkite-agent/huggingface/amd-ci-results"
 AMD_DIAGNOSTICS_DIR = "artifacts/amd-gpu-diagnostics"
 AMD_HF_HOME = "/home/buildkite-agent/huggingface"
-AMD_HF_OFFLINE_RETRY_ENV = "VLLM_CI_HF_OFFLINE_RETRY"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_WORKSPACE_VOLUME = "vllm-workspace"
 AMD_NATIVE_SHM_SIZE = "16Gi"
@@ -73,34 +76,6 @@ AMD_RETRY = {
 }
 ROCM_DEBUG_AGENT_ENV_VAR = "VLLM_CI_ENABLE_ROCM_DEBUG_AGENT"
 ROCM_DEBUG_AGENT_LIB = "/opt/rocm/lib/librocm-debug-agent.so.2"
-
-
-def resolve_amd_hf_offline_retry(
-    *,
-    capability_enabled: bool,
-    requested: bool,
-    disabled: bool,
-    no_plugin: bool,
-    num_nodes: Optional[int],
-) -> bool:
-    """Resolve the narrowly scoped AMD Hugging Face retry cohort."""
-    bool_fields = {
-        "capability_enabled": capability_enabled,
-        "requested": requested,
-        "disabled": disabled,
-        "no_plugin": no_plugin,
-    }
-    for name, value in bool_fields.items():
-        if type(value) is not bool:
-            raise ValueError(f"AMD HF offline retry {name} must be a boolean.")
-
-    return (
-        capability_enabled
-        and requested
-        and not disabled
-        and not no_plugin
-        and not (num_nodes and num_nodes >= 2)
-    )
 
 
 def get_amd_timeout_in_minutes(timeout_in_minutes: Optional[int]) -> int:
@@ -140,7 +115,9 @@ def ensure_amd_stack_error_retry(
         ):
             return retry_policy
     else:
-        raise ValueError("AMD retry.automatic must be a boolean, mapping, or list.")
+        raise ValueError(
+            "AMD retry.automatic must be a boolean, mapping, or list."
+        )
 
     retry_policy["automatic"] = [
         dict(AMD_STACK_ERROR_RETRY),
@@ -155,9 +132,12 @@ def get_rocm_base_refresh_timeout() -> int:
     return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
 
 
-def _amd_mirror_should_run(default_should_run: bool, list_file_diff: List[str]) -> bool:
+def _amd_mirror_should_run(
+    default_should_run: bool, list_file_diff: List[str]
+) -> bool:
     return default_should_run or (
-        os.getenv("NOAUTO") != "1" and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
+        os.getenv("NOAUTO") != "1"
+        and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
     )
 
 
@@ -332,7 +312,6 @@ def _get_amd_env(
     extra_env: Optional[Dict[str, str]],
     dind: bool,
     gpu_count: int,
-    hf_offline_retry_enabled: bool,
 ) -> Dict[str, str]:
     env = dict(extra_env or {})
     env["VLLM_CI_DIAGNOSTICS_DIR"] = AMD_DIAGNOSTICS_DIR
@@ -377,9 +356,6 @@ def _get_amd_env(
                 "VLLM_TEST_COMMANDS": commands,
             }
         )
-    # Replace any YAML-supplied value with the generation-time policy result.
-    # Runtime hooks may still override ordinary Buildkite step environment.
-    env[AMD_HF_OFFLINE_RETRY_ENV] = "1" if hf_offline_retry_enabled else "0"
     return env
 
 
@@ -470,9 +446,7 @@ def build_amd_step_options(
     no_gpu: bool,
     num_nodes: Optional[int],
     agent_tags: Optional[Dict[str, str]],
-    hf_offline_retry: bool,
-    hf_offline_retry_capability: bool,
-    hf_offline_retry_disabled: bool,
+    hf_offline_retry: bool = False,
 ) -> AmdStepOptions:
     config = get_amd_device_config(device)
     if config is None:
@@ -488,17 +462,8 @@ def build_amd_step_options(
         )
     if not dind and num_nodes and num_nodes > 1:
         raise ValueError("Native AMD jobs do not support multi-node execution.")
-    if not isinstance(hf_offline_retry, bool):
-        raise ValueError("AMD hf_offline_retry must be a boolean.")
 
     gpu_count = resolve_amd_gpu_count(device, num_devices, no_gpu)
-    hf_offline_retry_enabled = resolve_amd_hf_offline_retry(
-        capability_enabled=hf_offline_retry_capability,
-        requested=hf_offline_retry,
-        disabled=hf_offline_retry_disabled,
-        no_plugin=no_plugin,
-        num_nodes=num_nodes,
-    )
     plugins = None
     if not dind:
         container_env = {
@@ -530,8 +495,9 @@ def build_amd_step_options(
             extra_env=extra_env,
             dind=dind,
             gpu_count=gpu_count,
-            hf_offline_retry_enabled=hf_offline_retry_enabled,
         )
+        if hf_offline_retry is True and not (num_nodes and num_nodes >= 2):
+            env["VLLM_CI_HF_OFFLINE_RETRY"] = "1"
         step_commands = [AMD_TEST_COMMAND]
 
     return {
@@ -542,5 +508,5 @@ def build_amd_step_options(
         "env": env,
         "plugins": plugins,
         "priority": 200,
-        "retry": deepcopy(AMD_RETRY),
+        "retry": AMD_RETRY,
     }

@@ -188,18 +188,8 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
     {% set step_slug = amd_step_slug(step) %}
     {% set requested_timeout_in_minutes = step.timeout_in_minutes or default_amd_timeout_in_minutes %}
     {% set step_timeout_in_minutes = requested_timeout_in_minutes if requested_timeout_in_minutes <= default_amd_timeout_in_minutes else default_amd_timeout_in_minutes %}
-    {# Both the pipeline capability and the per-step request are explicit
-       booleans. Invalid or missing values fail closed. #}
-    {% set hf_offline_retry_capability = amd_hf_offline_retry is boolean and amd_hf_offline_retry == true %}
-    {% set hf_offline_retry_requested = step.hf_offline_retry is boolean and step.hf_offline_retry == true %}
-    {% set hf_offline_retry_kill_switch_allows = vllm_ci_disable_hf_offline_retry == "0" %}
-    {# The pilot covers only single-node wrapper jobs. The vLLM runner keeps
-       main/postmerge and scheduled jobs online and applies cache-only mode to
-       presubmits. #}
     {% set hf_offline_retry_enabled =
-        hf_offline_retry_capability
-        and hf_offline_retry_requested
-        and hf_offline_retry_kill_switch_allows
+        step.hf_offline_retry == true
         and not step.no_plugin
         and not (step.num_nodes and step.num_nodes >= 2)
     %}
@@ -266,7 +256,9 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           NUM_NODES: "{{ step.num_nodes or 1 }}"
-          VLLM_CI_HF_OFFLINE_RETRY: "{{ 1 if hf_offline_retry_enabled else 0 }}"
+          {% if hf_offline_retry_enabled %}
+          VLLM_CI_HF_OFFLINE_RETRY: "1"
+          {% endif %}
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
           {% if step.dind == false %}
           # Native: podSpecPatch uses the ci_base alias owned by this build.
