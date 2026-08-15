@@ -213,14 +213,15 @@ locals {
       BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "gpu_4_queue"
       InstanceTypes                        = "g6.12xlarge" # 4 Nvidia L4 GPUs, 192GB memory
-      MaxSize                              = 64
+      MinSize                              = 10
+      MaxSize                              = 40
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
-      # Recycle each GPU instance after a single job completes.
-      BuildkiteTerminateInstanceAfterJob   = true
+      # Keep a persistent baseline while allowing demand-based scale-out.
+      BuildkiteTerminateInstanceAfterJob   = false
     }
   }
 
@@ -373,7 +374,9 @@ resource "aws_cloudformation_stack" "bk_queue_ci_gpu" {
   name       = "bk-${each.key}"
   parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
 
-  template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
+  # v6.21.0 forces a blue/green ASG replacement for parameter updates. That
+  # cannot converge for gpu_4_queue when scarce capacity is already in use.
+  template_url = each.key == "gpu-4-queue-ci" ? "https://vllm-ci.s3.us-west-2.amazonaws.com/infra/buildkite-aws-stack/v6.21.0/aws-stack-fixed-capacity-b77222719ba6.yml" : "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
 
   lifecycle {
