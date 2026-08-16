@@ -28,11 +28,7 @@ def get_amd_native_base_image() -> str:
 
 
 def get_amd_ci_image() -> str:
-    return (
-        AMD_BUILD_CI_IMAGE
-        if supports_build_scoped_images()
-        else AMD_LEGACY_CI_IMAGE
-    )
+    return AMD_BUILD_CI_IMAGE if supports_build_scoped_images() else AMD_LEGACY_CI_IMAGE
 
 
 AMD_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
@@ -40,6 +36,7 @@ AMD_ARTIFACT_CHECKSUM_GLOB = f"{AMD_ARTIFACT_GLOB}.sha256"
 AMD_ARTIFACT_STEP = "image-build-amd"
 AMD_RESULTS_ROOT = "/home/buildkite-agent/huggingface/amd-ci-results"
 AMD_DIAGNOSTICS_DIR = "artifacts/amd-gpu-diagnostics"
+AMD_DIAGNOSTICS_ARTIFACT_GLOB = f"{AMD_DIAGNOSTICS_DIR}/*/diagnostics.log"
 AMD_HF_HOME = "/home/buildkite-agent/huggingface"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_WORKSPACE_VOLUME = "vllm-workspace"
@@ -115,9 +112,7 @@ def ensure_amd_stack_error_retry(
         ):
             return retry_policy
     else:
-        raise ValueError(
-            "AMD retry.automatic must be a boolean, mapping, or list."
-        )
+        raise ValueError("AMD retry.automatic must be a boolean, mapping, or list.")
 
     retry_policy["automatic"] = [
         dict(AMD_STACK_ERROR_RETRY),
@@ -132,12 +127,9 @@ def get_rocm_base_refresh_timeout() -> int:
     return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
 
 
-def _amd_mirror_should_run(
-    default_should_run: bool, list_file_diff: List[str]
-) -> bool:
+def _amd_mirror_should_run(default_should_run: bool, list_file_diff: List[str]) -> bool:
     return default_should_run or (
-        os.getenv("NOAUTO") != "1"
-        and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
+        os.getenv("NOAUTO") != "1" and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
     )
 
 
@@ -182,6 +174,7 @@ class AmdStepOptions(TypedDict):
     agents: Dict[str, str]
     env: Optional[Dict[str, str]]
     plugins: Optional[List[Dict[str, Any]]]
+    artifact_paths: Optional[List[str]]
     priority: int
     retry: Dict[str, List[Dict[str, Any]]]
 
@@ -504,6 +497,7 @@ def build_amd_step_options(
         "agents": get_amd_agents(device, agent_tags, dind),
         "env": env,
         "plugins": plugins,
+        "artifact_paths": (None if no_plugin else [AMD_DIAGNOSTICS_ARTIFACT_GLOB]),
         "priority": 200,
         "retry": AMD_RETRY,
     }

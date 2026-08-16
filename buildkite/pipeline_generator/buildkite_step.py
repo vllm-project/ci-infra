@@ -162,6 +162,7 @@ class BuildkiteCommandStep(BaseModel):
     retry: Optional[Dict[str, Any]] = None
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
+    artifact_paths: Optional[List[str]] = None
     parallelism: Optional[int] = None
     concurrency: Optional[int] = None
     concurrency_group: Optional[str] = None
@@ -180,6 +181,7 @@ class BuildkiteCommandStep(BaseModel):
             "retry": self.retry,
             "plugins": self.plugins,
             "env": self.env,
+            "artifact_paths": self.artifact_paths,
             "parallelism": self.parallelism,
             "concurrency": self.concurrency,
             "concurrency_group": self.concurrency_group,
@@ -511,9 +513,7 @@ def convert_group_step_to_buildkite_step(
         for step in steps:
             step_key = step.key or _generate_step_key(step.label)
             if is_amd_gpu_device(step.device):
-                amd_commands = [
-                    f"export VLLM_TEST_GROUP_NAME={step_key}"
-                ]
+                amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
                     _prepare_commands(
                         step,

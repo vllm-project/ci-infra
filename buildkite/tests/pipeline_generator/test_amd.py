@@ -25,9 +25,7 @@ def test_build_scoped_image_capability(tmp_path, monkeypatch):
 
 
 def test_legacy_amd_template_retries_gpu_hang_abort():
-    template = (
-        Path(__file__).parents[2] / "test-template-amd.j2"
-    ).read_text()
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
 
     assert (
         "{{ indent }}    - exit_status: 134  # ROCm/KFD GPU hang (SIGABRT)\n"
@@ -39,6 +37,13 @@ def test_legacy_amd_template_configures_gpu_diagnostics():
     template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
 
     assert 'VLLM_CI_DIAGNOSTICS_DIR: "artifacts/amd-gpu-diagnostics"' in template
+    assert (
+        "        {% else %}\n"
+        "        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh\n"
+        "        artifact_paths:\n"
+        '          - "artifacts/amd-gpu-diagnostics/*/diagnostics.log"\n'
+        "        env:"
+    ) in template
     for name, field_path in amd.AMD_NATIVE_POD_IDENTITY_ENV.items():
         assert f"- name: {name}" in template
         assert f"fieldPath: {field_path}" in template
@@ -73,9 +78,7 @@ def test_rocm_base_selector_keeps_build_timeout():
     assert command_step.concurrency_group.endswith("/$BUILDKITE_COMMIT")
 
 
-def test_skip_timeout_omits_rocm_base_refresh_timeout(
-    fake_global_config, monkeypatch
-):
+def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkeypatch):
     monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
     fake_global_config["list_file_diff"] = ["docker/Dockerfile.rocm_base"]
 
@@ -94,9 +97,7 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(
         ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
     ],
 )
-def test_direct_amd_gpu_steps_use_dind_flag(
-    device, queue, dind, expected_gpu_count
-):
+def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_count):
     step = Step(
         label="AMD direct test",
         group="Direct AMD",
@@ -122,6 +123,10 @@ def test_direct_amd_gpu_steps_use_dind_flag(
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
+    assert command_step.artifact_paths == [amd.AMD_DIAGNOSTICS_ARTIFACT_GLOB]
+    assert command_step.model_dump(exclude_none=True)["artifact_paths"] == (
+        command_step.artifact_paths
+    )
     assert command_step.env["VLLM_CI_DIAGNOSTICS_DIR"] == amd.AMD_DIAGNOSTICS_DIR
     assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
     if not dind:
@@ -146,9 +151,7 @@ def test_direct_amd_gpu_steps_use_dind_flag(
         assert command_step.env["VLLM_CI_FALLBACK_IMAGE"] == amd.get_amd_ci_image()
 
     assert command_step.env["VLLM_CI_BASE_IMAGE"] == (
-        amd.get_amd_native_base_image()
-        if not dind
-        else amd.AMD_STABLE_CI_BASE_IMAGE
+        amd.get_amd_native_base_image() if not dind else amd.AMD_STABLE_CI_BASE_IMAGE
     )
 
     assert command_step.retry == amd.AMD_RETRY
@@ -408,6 +411,14 @@ def test_skip_timeout_omits_direct_amd_timeout(monkeypatch, no_plugin):
 
     assert command_step.timeout_in_minutes is None
     assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
+    assert command_step.artifact_paths == (
+        None if no_plugin else [amd.AMD_DIAGNOSTICS_ARTIFACT_GLOB]
+    )
+    serialized_step = command_step.model_dump(exclude_none=True)
+    if no_plugin:
+        assert "artifact_paths" not in serialized_step
+    else:
+        assert serialized_step["artifact_paths"] == command_step.artifact_paths
 
 
 @pytest.mark.parametrize(

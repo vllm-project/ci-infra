@@ -247,6 +247,8 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
         {% endif %}
         {% else %}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
+        artifact_paths:
+          - "artifacts/amd-gpu-diagnostics/*/diagnostics.log"
         env:
           NUM_NODES: "{{ step.num_nodes or 1 }}"
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
@@ -275,7 +277,7 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
           VLLM_CI_USE_ARTIFACTS: "1"
           VLLM_CI_ARTIFACT_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
           VLLM_CI_RESULTS_ROOT: "/home/buildkite-agent/huggingface/amd-ci-results"
-          # The runner uploads diagnostics immediately; keep them out of shared HF/NFS storage.
+          # Keep failure diagnostics out of shared HF/NFS storage.
           VLLM_CI_DIAGNOSTICS_DIR: "artifacts/amd-gpu-diagnostics"
           VLLM_CI_EXPECTED_GPU_COUNT: "{{ 0 if step.no_gpu else (step.num_gpus or 1) }}"
           {% if container_timeout_s %}
