@@ -37,6 +37,7 @@ def test_legacy_amd_template_configures_gpu_diagnostics():
     template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
 
     assert 'VLLM_CI_DIAGNOSTICS_DIR: "artifacts/amd-gpu-diagnostics"' in template
+    assert 'BUILDKITE_ARTIFACT_UPLOAD_SKIP_SYMLINKS: "true"' in template
     assert (
         "        {% else %}\n"
         "        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh\n"
@@ -124,6 +125,7 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
     assert command_step.artifact_paths == [amd.AMD_DIAGNOSTICS_ARTIFACT_GLOB]
+    assert command_step.env["BUILDKITE_ARTIFACT_UPLOAD_SKIP_SYMLINKS"] == "true"
     assert command_step.model_dump(exclude_none=True)["artifact_paths"] == (
         command_step.artifact_paths
     )

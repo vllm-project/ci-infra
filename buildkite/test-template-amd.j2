@@ -104,6 +104,14 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
                       - name: PYTORCH_ROCM_ARCH
                         value: ""
                       # Correlate in-pod GPU/BDF diagnostics with the K8s host.
+                      - name: VLLM_CI_K8S_POD_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.name
+                      - name: VLLM_CI_K8S_NAMESPACE
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.namespace
                       - name: VLLM_CI_K8S_NODE_NAME
                         valueFrom:
                           fieldRef:
@@ -250,6 +258,7 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
         artifact_paths:
           - "artifacts/amd-gpu-diagnostics/*/diagnostics.log"
         env:
+          BUILDKITE_ARTIFACT_UPLOAD_SKIP_SYMLINKS: "true"
           NUM_NODES: "{{ step.num_nodes or 1 }}"
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
           {% if step.dind == false %}

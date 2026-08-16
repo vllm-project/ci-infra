@@ -42,6 +42,8 @@ AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_WORKSPACE_VOLUME = "vllm-workspace"
 AMD_NATIVE_SHM_SIZE = "16Gi"
 AMD_NATIVE_POD_IDENTITY_ENV = {
+    "VLLM_CI_K8S_POD_NAME": "metadata.name",
+    "VLLM_CI_K8S_NAMESPACE": "metadata.namespace",
     "VLLM_CI_K8S_NODE_NAME": "spec.nodeName",
 }
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
@@ -307,6 +309,7 @@ def _get_amd_env(
     gpu_count: int,
 ) -> Dict[str, str]:
     env = dict(extra_env or {})
+    env["BUILDKITE_ARTIFACT_UPLOAD_SKIP_SYMLINKS"] = "true"
     env["VLLM_CI_DIAGNOSTICS_DIR"] = AMD_DIAGNOSTICS_DIR
     env["VLLM_CI_EXPECTED_GPU_COUNT"] = str(gpu_count)
     if not dind:
