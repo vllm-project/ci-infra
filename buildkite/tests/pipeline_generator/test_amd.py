@@ -10,21 +10,7 @@ from step import Step
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
 
-def test_build_scoped_image_capability(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-
-    assert amd.get_amd_native_base_image() == amd.AMD_LEGACY_NATIVE_BASE_IMAGE
-    assert amd.get_amd_ci_image() == amd.AMD_LEGACY_CI_IMAGE
-
-    producer = tmp_path / ".buildkite/scripts/ci-bake-rocm.sh"
-    producer.parent.mkdir(parents=True)
-    producer.write_text("CI_BASE_IMAGE_TAG_BUILD_REF=enabled")
-
-    assert amd.get_amd_native_base_image() == amd.AMD_BUILD_NATIVE_BASE_IMAGE
-    assert amd.get_amd_ci_image() == amd.AMD_BUILD_CI_IMAGE
-
-
-def test_legacy_amd_template_retries_gpu_hang_abort():
+def test_amd_template_retries_gpu_hang_abort():
     template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
 
     assert (
@@ -33,7 +19,15 @@ def test_legacy_amd_template_retries_gpu_hang_abort():
     ) in template
 
 
-def test_legacy_amd_template_configures_gpu_diagnostics():
+def test_amd_template_uses_build_scoped_images():
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+
+    assert amd.AMD_NATIVE_BASE_IMAGE in template
+    assert amd.AMD_CI_IMAGE in template
+    assert "rocm_build_scoped_images" not in template
+
+
+def test_amd_template_configures_gpu_diagnostics():
     template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
 
     assert 'VLLM_CI_DIAGNOSTICS_DIR: "artifacts/amd-gpu-diagnostics"' in template
@@ -135,7 +129,7 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         assert command_step.plugins is not None
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
-        assert container["image"] == amd.get_amd_native_base_image()
+        assert container["image"] == amd.AMD_NATIVE_BASE_IMAGE
         assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
         assert container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
         assert command_step.env["AMD_CI_RUNTIME"] == "native"
@@ -150,10 +144,10 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         assert command_step.plugins is None
         assert "AMD_CI_RUNTIME" not in command_step.env
         assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
-        assert command_step.env["VLLM_CI_FALLBACK_IMAGE"] == amd.get_amd_ci_image()
+        assert command_step.env["VLLM_CI_FALLBACK_IMAGE"] == amd.AMD_CI_IMAGE
 
     assert command_step.env["VLLM_CI_BASE_IMAGE"] == (
-        amd.get_amd_native_base_image() if not dind else amd.AMD_STABLE_CI_BASE_IMAGE
+        amd.AMD_NATIVE_BASE_IMAGE if not dind else amd.AMD_STABLE_CI_BASE_IMAGE
     )
 
     assert command_step.retry == amd.AMD_RETRY

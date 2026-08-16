@@ -35,19 +35,11 @@
 
 {# Native in-pod ROCm CI: per-job container-0 image via kubernetes podSpecPatch. #}
 {% macro amd_native_base_image() -%}
-{% if rocm_build_scoped_images == "1" -%}
 rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID
-{%- else -%}
-rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
-{%- endif %}
 {%- endmacro %}
 
 {% macro amd_ci_image() -%}
-{% if rocm_build_scoped_images == "1" -%}
 rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
-{%- else -%}
-rocm/vllm-ci:$BUILDKITE_COMMIT
-{%- endif %}
 {%- endmacro %}
 
 {% macro amd_native_k8s_plugin(step) %}

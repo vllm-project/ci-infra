@@ -1,34 +1,14 @@
 import os
 from copy import deepcopy
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 from constants import AgentQueue, DeviceType
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
-AMD_LEGACY_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT"
-AMD_BUILD_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
-AMD_LEGACY_CI_IMAGE = "rocm/vllm-ci:$BUILDKITE_COMMIT"
-AMD_BUILD_CI_IMAGE = "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
-
-
-def supports_build_scoped_images() -> bool:
-    producer = Path(".buildkite/scripts/ci-bake-rocm.sh")
-    return producer.is_file() and "CI_BASE_IMAGE_TAG_BUILD_REF" in producer.read_text()
-
-
-def get_amd_native_base_image() -> str:
-    return (
-        AMD_BUILD_NATIVE_BASE_IMAGE
-        if supports_build_scoped_images()
-        else AMD_LEGACY_NATIVE_BASE_IMAGE
-    )
-
-
-def get_amd_ci_image() -> str:
-    return AMD_BUILD_CI_IMAGE if supports_build_scoped_images() else AMD_LEGACY_CI_IMAGE
+AMD_NATIVE_BASE_IMAGE = "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
+AMD_CI_IMAGE = "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
 
 
 AMD_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
@@ -326,7 +306,7 @@ def _get_amd_env(
         env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
         env.update(
             {
-                "VLLM_CI_BASE_IMAGE": get_amd_native_base_image(),
+                "VLLM_CI_BASE_IMAGE": AMD_NATIVE_BASE_IMAGE,
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
@@ -345,7 +325,7 @@ def _get_amd_env(
                 "DOCKER_BUILDKIT": "1",
                 "DOCKER_IMAGE_NAME": AMD_STABLE_CI_BASE_IMAGE,
                 "VLLM_CI_BASE_IMAGE": AMD_STABLE_CI_BASE_IMAGE,
-                "VLLM_CI_FALLBACK_IMAGE": get_amd_ci_image(),
+                "VLLM_CI_FALLBACK_IMAGE": AMD_CI_IMAGE,
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
@@ -472,7 +452,7 @@ def build_amd_step_options(
         }
         plugins = [
             get_amd_k8s_plugin(
-                image=get_amd_native_base_image(),
+                image=AMD_NATIVE_BASE_IMAGE,
                 gpu_count=gpu_count,
                 workspace=AMD_NATIVE_WORKSPACE,
                 workspace_volume_name=AMD_NATIVE_WORKSPACE_VOLUME,
