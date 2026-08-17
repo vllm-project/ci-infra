@@ -1,7 +1,14 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
+import base64
+from functools import lru_cache
+import gzip
+from io import BytesIO
 import os
+from pathlib import Path
+import re
+import tarfile
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
@@ -36,6 +43,48 @@ PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
+
+OTEL_HELPERS_DIR = Path(__file__).resolve().parent / "otel_helpers"
+OTEL_HELPER_FILES = (
+    "ci_otel.py",
+    "ci_otel.sh",
+    "ci_pytest.sh",
+    "ci_pytest_otel.py",
+)
+
+
+@lru_cache(maxsize=1)
+def _otel_helpers_bundle() -> str:
+    """Return a deterministic compressed bundle for injection into CI jobs."""
+    archive = BytesIO()
+    with gzip.GzipFile(
+        fileobj=archive, mode="wb", compresslevel=9, mtime=0
+    ) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as bundle:
+            for name in OTEL_HELPER_FILES:
+                contents = (OTEL_HELPERS_DIR / name).read_bytes()
+                info = tarfile.TarInfo(name=name)
+                info.size = len(contents)
+                info.mode = 0o755 if name.endswith(".sh") else 0o644
+                info.mtime = 0
+                bundle.addfile(info, BytesIO(contents))
+    return base64.b64encode(archive.getvalue()).decode()
+
+
+def _otel_setup_command() -> str:
+    """Best-effort install of ci-infra-owned tracing helpers."""
+    bundle = _otel_helpers_bundle()
+    return (
+        "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; "
+        "if CI_INFRA_OTEL_DIR=$$(mktemp -d 2>/dev/null) && "
+        "export CI_INFRA_OTEL_DIR && "
+        f'printf "%s" "{bundle}" | base64 --decode | '
+        'tar -xz -C "$$CI_INFRA_OTEL_DIR" && '
+        'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
+        '. "$$CI_INFRA_OTEL_DIR/ci_otel.sh"; then :; else '
+        'echo "vLLM CI OTel: tracing setup skipped" >&2 || :; '
+        "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; fi; :"
+    )
 
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
@@ -378,6 +427,12 @@ def _prepare_commands(
 ) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
     commands = _get_setup_commands(step, setup_profile)
+    # AMD mirrors use a separate runtime and do not expose the agent binary
+    # needed to mint the short-lived upload credential. Native agent tracing
+    # still covers those jobs; command/test spans are injected elsewhere.
+    trace_commands = step.otel_tracing_enabled() and setup_profile != "amd"
+    if trace_commands:
+        commands.append(_otel_setup_command())
 
     continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
 
@@ -391,12 +446,30 @@ def _prepare_commands(
             commands.append(
                 f"echo '+++ :test_tube: Command ({i + 1}/{len(step.commands)}): {preview}'"
             )
+            prepared_command = cmd
+            if trace_commands:
+                # Run the original command directly. Tracing only brackets it
+                # with best-effort start/finish calls, so OTel never owns command
+                # execution and cannot change shell state or failure semantics.
+                encoded_preview = base64.b64encode(preview.encode()).decode()
+                prepared_command = (
+                    'if [ "$${CI_INFRA_OTEL_READY:-0}" = "1" ] && '
+                    "command -v ci_otel_start >/dev/null 2>&1; then "
+                    f"ci_otel_start {i + 1} {encoded_preview} || :; fi\n"
+                    f"{cmd}\n"
+                    "_CI_INFRA_OTEL_COMMAND_STATUS=$$?\n"
+                    "if command -v ci_otel_finish >/dev/null 2>&1; then "
+                    "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :; fi\n"
+                    "(exit $$_CI_INFRA_OTEL_COMMAND_STATUS)"
+                )
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
-                commands.append(f"{{ {cmd}\n}} || CI_OVERALL_STATUS=1")
+                commands.append(
+                    f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1"
+                )
             else:
-                commands.append(cmd)
+                commands.append(prepared_command)
 
     if continue_on_failure:
         commands.append("exit $$CI_OVERALL_STATUS")
@@ -409,8 +482,6 @@ def _prepare_commands(
             if not value:
                 continue
             # Use regex to only replace whole variable matches (not substrings)
-            import re
-
             # Escape variable (may have $ or special characters)
             pattern = re.escape(variable)
             command = re.sub(pattern + r"\b", value, command)
