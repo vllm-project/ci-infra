@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import binascii
+import json
 import os
 import subprocess
 import sys
@@ -79,7 +80,7 @@ def test_spans_are_spooled_without_requesting_credentials(monkeypatch, tmp_path)
     monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
     monkeypatch.setattr(
         ci_otel,
-        "_ingest_token",
+        "_oidc_token",
         lambda deadline: (_ for _ in ()).throw(AssertionError("unexpected upload")),
     )
     span = Span(
@@ -112,7 +113,7 @@ def test_export_mints_one_token_for_multiple_batches(monkeypatch):
     monkeypatch.setattr(ci_otel, "MAX_BATCH_SIZE", 1)
     monkeypatch.setattr(
         ci_otel,
-        "_ingest_token",
+        "_oidc_token",
         lambda deadline: token_calls.append(deadline) or "token",
     )
 
@@ -149,7 +150,7 @@ def test_export_mints_one_token_for_multiple_batches(monkeypatch):
     assert all(0 < timeout <= 0.5 for timeout in request_timeouts)
 
 
-def test_export_deadline_bounds_secret_request(monkeypatch, tmp_path):
+def test_export_deadline_bounds_oidc_request(monkeypatch):
     for name, value in {
         "BUILDKITE": "true",
         "BUILDKITE_ORGANIZATION_SLUG": "vllm",
@@ -160,10 +161,13 @@ def test_export_deadline_bounds_secret_request(monkeypatch, tmp_path):
         "BUILDKITE_BRANCH": "main",
     }.items():
         monkeypatch.setenv(name, value)
-    agent = tmp_path / "buildkite-agent"
-    agent.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
-    agent.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    monkeypatch.setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "agent-token")
+
+    def open_request(request, timeout):
+        assert 0 < timeout <= 0.1
+        raise TimeoutError("request timed out")
+
+    monkeypatch.setattr(ci_otel.urllib.request, "urlopen", open_request)
     span = Span(
         trace_id="01" * 16,
         span_id="02" * 8,
@@ -180,51 +184,50 @@ def test_export_deadline_bounds_secret_request(monkeypatch, tmp_path):
     assert time.monotonic() - started < 0.5
 
 
-def test_ingest_token_uses_buildkite_cluster_secret(monkeypatch):
+def test_oidc_token_uses_buildkite_job_api(monkeypatch):
+    monkeypatch.setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "agent-token")
+    monkeypatch.setenv("BUILDKITE_JOB_ID", "job-id")
+    monkeypatch.setenv("BUILDKITE_AGENT_ENDPOINT", "https://agent.example/v3/")
     observed = {}
 
     class Result:
-        stdout = "token\n"
+        def read(self):
+            return b'{"token":"oidc-token"}'
 
-    def run(command, **kwargs):
-        observed["command"] = command
-        observed["kwargs"] = kwargs
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def open_request(request, timeout):
+        observed["request"] = request
+        observed["timeout"] = timeout
         return Result()
 
-    monkeypatch.setattr(ci_otel.subprocess, "run", run)
+    monkeypatch.setattr(ci_otel.urllib.request, "urlopen", open_request)
 
-    assert ci_otel._ingest_token(time.monotonic() + 1) == "token"
-    assert observed["command"] == [
-        "buildkite-agent",
-        "secret",
-        "get",
-        "CI_OTEL_INGEST_TOKEN",
-    ]
-    assert observed["kwargs"]["check"] is True
+    assert ci_otel._oidc_token(time.monotonic() + 1) == "oidc-token"
+    request = observed["request"]
+    assert request.full_url == "https://agent.example/v3/jobs/job-id/oidc/tokens"
+    assert request.get_header("Authorization") == "Token agent-token"
+    assert json.loads(request.data) == {
+        "audience": "https://ci.vllm.ai/api/otel",
+        "lifetime": 300,
+    }
+    assert 0 < observed["timeout"] <= 1
 
 
-def test_secret_failure_reports_bounded_stderr(monkeypatch):
-    def run(command, **kwargs):
-        raise subprocess.CalledProcessError(
-            1,
-            command,
-            stderr="agent request failed\n" + ("x" * 1_000),
-        )
-
-    monkeypatch.setattr(ci_otel.subprocess, "run", run)
+def test_oidc_token_requires_job_credentials(monkeypatch):
+    monkeypatch.delenv("BUILDKITE_AGENT_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("BUILDKITE_JOB_ID", raising=False)
 
     try:
-        ci_otel._ingest_token(time.monotonic() + 1)
+        ci_otel._oidc_token(time.monotonic() + 1)
     except RuntimeError as error:
-        message = str(error)
+        assert str(error) == "Buildkite job credentials are unavailable"
     else:
-        raise AssertionError("secret failure should be reported")
-
-    assert message.startswith(
-        "Buildkite secret request failed (exit 1): agent request failed"
-    )
-    assert message.endswith("...")
-    assert len(message) < 600
+        raise AssertionError("missing job credentials should be reported")
 
 
 def test_invalid_upload_timeout_cannot_break_plugin_import():
@@ -256,7 +259,7 @@ def test_export_contains_unexpected_internal_errors(monkeypatch):
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(
         ci_otel,
-        "_ingest_token",
+        "_oidc_token",
         lambda deadline: (_ for _ in ()).throw(ValueError("broken exporter")),
     )
     span = Span(

@@ -11,7 +11,6 @@ import json
 import os
 import secrets
 import struct
-import subprocess
 import sys
 import time
 import urllib.request
@@ -20,7 +19,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 ENDPOINT = os.getenv("CI_INFRA_OTEL_ENDPOINT", "https://ci.vllm.ai/api/otel/v1/traces")
-SECRET_KEY = os.getenv("CI_INFRA_OTEL_SECRET_KEY", "CI_OTEL_INGEST_TOKEN")
+AUDIENCE = os.getenv("CI_INFRA_OTEL_AUDIENCE", "https://ci.vllm.ai/api/otel")
 MAX_BATCH_SIZE = 2_000
 
 
@@ -215,30 +214,33 @@ def _remaining_seconds(deadline: float) -> float:
     return remaining
 
 
-def _ingest_token(deadline: float) -> str:
-    command = [
-        "buildkite-agent",
-        "secret",
-        "get",
-        SECRET_KEY,
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=_remaining_seconds(deadline),
-        )
-    except subprocess.CalledProcessError as error:
-        detail = " ".join((error.stderr or "").split())
-        if len(detail) > 500:
-            detail = f"{detail[:497]}..."
-        suffix = f": {detail}" if detail else ""
-        raise RuntimeError(
-            f"Buildkite secret request failed (exit {error.returncode}){suffix}"
-        ) from None
-    return result.stdout.strip()
+def _oidc_token(deadline: float) -> str:
+    access_token = os.getenv("BUILDKITE_AGENT_ACCESS_TOKEN", "")
+    job_id = os.getenv("BUILDKITE_JOB_ID", "")
+    if not access_token or not job_id:
+        raise RuntimeError("Buildkite job credentials are unavailable")
+
+    agent_endpoint = os.getenv(
+        "BUILDKITE_AGENT_ENDPOINT", "https://agent.buildkite.com/v3"
+    ).rstrip("/")
+    request = urllib.request.Request(
+        f"{agent_endpoint}/jobs/{job_id}/oidc/tokens",
+        data=json.dumps({"audience": AUDIENCE, "lifetime": 300}).encode(),
+        method="POST",
+        headers={
+            "Authorization": f"Token {access_token}",
+            "Content-Type": "application/json",
+            "User-Agent": "vllm-ci-otel/1",
+        },
+    )
+    with urllib.request.urlopen(
+        request, timeout=_remaining_seconds(deadline)
+    ) as response:
+        body = json.loads(response.read())
+    token = body.get("token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("Buildkite OIDC response did not contain a token")
+    return token
 
 
 def export_spans(
@@ -259,7 +261,7 @@ def export_spans(
 
     try:
         deadline = time.monotonic() + max(timeout_seconds, 0.1)
-        token = _ingest_token(deadline)
+        token = _oidc_token(deadline)
         for offset in range(0, len(spans), MAX_BATCH_SIZE):
             payload = encode_request(spans[offset : offset + MAX_BATCH_SIZE])
             request = urllib.request.Request(
