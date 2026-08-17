@@ -28,7 +28,4 @@ py-modules = [
 ]
 
 [tool.setuptools.packages.find]
-include = [".", "otel_helpers", "plugin", "utils_lib"]
-
-[tool.setuptools.package-data]
-otel_helpers = ["*.sh"]
+include = [".", "plugin", "utils_lib"]
