@@ -43,8 +43,11 @@ ci_otel_run() {
     eval "${command_text}"
     return $?
   fi
-  read -r trace_id span_id parent_span_id <<<"${context}"
-  [[ "${parent_span_id}" == "-" ]] && parent_span_id=""
+  set -- ${context}
+  trace_id="$1"
+  span_id="$2"
+  parent_span_id="$3"
+  [ "${parent_span_id}" = "-" ] && parent_span_id=""
   start_ns="$(date +%s%N)"
 
   local VLLM_CI_TRACE_ID="${trace_id}"

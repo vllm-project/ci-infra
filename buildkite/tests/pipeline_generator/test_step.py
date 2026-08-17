@@ -197,7 +197,7 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
     )
 
     assert "VLLM_CI_OTEL_DIR=$$(mktemp -d)" in commands[0]
-    assert 'source "$$VLLM_CI_OTEL_DIR/ci_otel.sh"' in commands[0]
+    assert '. "$$VLLM_CI_OTEL_DIR/ci_otel.sh"' in commands[0]
     assert commands[2].startswith("ci_otel_run 1 ")
     assert commands[4].startswith("ci_otel_run 2 ")
     _, _, encoded_label, encoded_command = commands[4].split(" ")
@@ -240,6 +240,24 @@ def test_otel_helper_bundle_installs_and_sources():
             + " && test -f \"$VLLM_CI_OTEL_DIR/ci_otel.py\""
             + " && test -f \"$VLLM_CI_OTEL_DIR/ci_pytest_otel.py\""
             + " && type ci_otel_run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_otel_helper_bundle_runs_under_posix_shell():
+    command = buildkite_step._otel_setup_command().replace("$$", "$")
+    result = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            command
+            + " && ci_otel_run 1 dHJ1ZQ== dHJ1ZQ=="
+            + ' && test -n "$(find "$VLLM_CI_OTEL_SPOOL_DIR" -name spans-\\*.jsonl -size +0c -print -quit)"',
         ],
         check=False,
         capture_output=True,

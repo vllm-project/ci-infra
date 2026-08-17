@@ -73,7 +73,7 @@ def _otel_setup_command() -> str:
         "export VLLM_CI_OTEL_DIR=$$(mktemp -d) && "
         f'printf "%s" "{bundle}" | base64 --decode | '
         'tar -xz -C "$$VLLM_CI_OTEL_DIR" && '
-        'source "$$VLLM_CI_OTEL_DIR/ci_otel.sh"'
+        '. "$$VLLM_CI_OTEL_DIR/ci_otel.sh"'
     )
 
 
