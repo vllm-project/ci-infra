@@ -64,6 +64,13 @@ repositories:
   premerge: "vllm-ci-test-repo"     # Used for PR/pre-merge builds
 ```
 
+### AMD Hugging Face cache fallback
+
+Set `hf_offline_retry: true` on a single-node AMD step (or under `mirror.amd`)
+to try cached Hugging Face files on its first presubmit attempt, then retry
+online in a fresh job after exit status 1. Main, `NIGHTLY=1`, and
+`TORCH_NIGHTLY=1` jobs start online. This is not network isolation.
+
 ## Environment Variables
 
 The generator relies on several environment variables, typically provided by Buildkite or set by user:

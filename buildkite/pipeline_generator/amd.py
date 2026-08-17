@@ -446,6 +446,7 @@ def build_amd_step_options(
     no_gpu: bool,
     num_nodes: Optional[int],
     agent_tags: Optional[Dict[str, str]],
+    hf_offline_retry: bool = False,
 ) -> AmdStepOptions:
     config = get_amd_device_config(device)
     if config is None:
@@ -495,6 +496,8 @@ def build_amd_step_options(
             dind=dind,
             gpu_count=gpu_count,
         )
+        if hf_offline_retry is True and not (num_nodes and num_nodes >= 2):
+            env["VLLM_CI_HF_OFFLINE_RETRY"] = "1"
         step_commands = [AMD_TEST_COMMAND]
 
     return {

@@ -7,14 +7,16 @@
 #}
 {% set rocm_debug_agent_setup = "echo 'ROCm debug agent disabled; re-enable rocm_debug_agent_setup in test-template-amd.j2 after validating coredump setup'" %}
 
-{% macro amd_infra_retry(indent='', retry_exit_status_one=false) -%}
+{% macro amd_infra_retry(indent='', retry_exit_status_one=false, retry_exit_status_two=false) -%}
 {{ indent }}retry:
 {{ indent }}  automatic:
 {{ indent }}    - signal_reason: stack_error  # Kubernetes pod/stack provisioning failed
 {{ indent }}      limit: 1
 {% if retry_exit_status_one %}
-{{ indent }}    - exit_status: 1  # Transient Docker/BuildKit failure
+{{ indent }}    - exit_status: 1  # Retry once in a fresh job
 {{ indent }}      limit: 1
+{% endif %}
+{% if retry_exit_status_two %}
 {{ indent }}    - exit_status: 2  # Exact image found but registry handoff failed
 {{ indent }}      limit: 1
 {% endif %}
@@ -135,7 +137,7 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
           DOCKER_BUILDKIT: "1"
           BUILDKIT_PROGRESS: "tty"
           TERM: "xterm-256color"
-{{ amd_infra_retry('        ', true) }}
+{{ amd_infra_retry('        ', true, true) }}
         agents:
           queue: amd-cpu
 
@@ -155,7 +157,7 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           REMOTE_VLLM: "0"
-{{ amd_infra_retry('        ', true) }}
+{{ amd_infra_retry('        ', true, true) }}
         agents:
           queue: amd-cpu
 
@@ -175,7 +177,7 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           IMAGE_TAG: "{{ amd_ci_image() | safe }}"
           REMOTE_VLLM: "0"
-{{ amd_infra_retry('        ', true) }}
+{{ amd_infra_retry('        ', true, true) }}
         agents:
           queue: amd-cpu
 
@@ -186,6 +188,11 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
     {% set step_slug = amd_step_slug(step) %}
     {% set requested_timeout_in_minutes = step.timeout_in_minutes or default_amd_timeout_in_minutes %}
     {% set step_timeout_in_minutes = requested_timeout_in_minutes if requested_timeout_in_minutes <= default_amd_timeout_in_minutes else default_amd_timeout_in_minutes %}
+    {% set hf_offline_retry_enabled =
+        step.hf_offline_retry == true
+        and not step.no_plugin
+        and not (step.num_nodes and step.num_nodes >= 2)
+    %}
     {# Time out the container a minute before Buildkite times out the job. #}
     {% set container_timeout_s = (step_timeout_in_minutes * 60 - 60) if step_timeout_in_minutes > 1 else step_timeout_in_minutes * 60 %}
 
@@ -249,6 +256,9 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
           NUM_NODES: "{{ step.num_nodes or 1 }}"
+          {% if hf_offline_retry_enabled %}
+          VLLM_CI_HF_OFFLINE_RETRY: "1"
+          {% endif %}
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
           {% if step.dind == false %}
           # Native: podSpecPatch uses the ci_base alias owned by this build.
@@ -298,6 +308,6 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
         {% if step.parallelism %}
         parallelism: {{ step.parallelism }}
         {% endif %}
-{{ amd_infra_retry('        ') }}
+{{ amd_infra_retry('        ', retry_exit_status_one=hf_offline_retry_enabled) }}
     {% endif %}
     {% endfor %}

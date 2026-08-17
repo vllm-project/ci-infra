@@ -32,6 +32,7 @@ class Step(BaseModel):
     no_plugin: Optional[bool] = False
     no_gpu: Optional[bool] = False
     dind: bool = True
+    hf_offline_retry: bool = False
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
 
     def otel_tracing_enabled(self) -> bool:

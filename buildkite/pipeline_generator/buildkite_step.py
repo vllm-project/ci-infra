@@ -605,6 +605,7 @@ def convert_group_step_to_buildkite_step(
                     concurrency_group=step.concurrency_group,
                     timeout_in_minutes=step.timeout_in_minutes,
                     agent_tags=step.agent_tags,
+                    hf_offline_retry=step.hf_offline_retry,
                 )
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
@@ -750,6 +751,7 @@ def convert_group_step_to_buildkite_step(
                     ),
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
+                    hf_offline_retry=amd.get("hf_offline_retry", False),
                 )
                 if not _amd_mirror_should_run(
                     _step_should_run(
@@ -888,6 +890,7 @@ def _create_amd_step(
     key: str,
     timeout_in_minutes: Optional[int] = None,
     agent_tags: Optional[Dict[str, str]] = None,
+    hf_offline_retry: bool = False,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
     options = build_amd_step_options(
@@ -902,6 +905,7 @@ def _create_amd_step(
         no_gpu=no_gpu,
         num_nodes=num_nodes,
         agent_tags=agent_tags,
+        hf_offline_retry=hf_offline_retry,
     )
     return BuildkiteCommandStep(
         **options,
