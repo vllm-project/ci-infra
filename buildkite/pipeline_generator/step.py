@@ -34,6 +34,14 @@ class Step(BaseModel):
     dind: bool = True
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
 
+    def otel_tracing_enabled(self) -> bool:
+        config = get_global_config()
+        return bool(
+            config["github_repo_name"] == "vllm-project/vllm"
+            and config["branch"] == "main"
+            and config["pull_request"] == "false"
+        )
+
     @model_validator(mode="after")
     def validate_multi_node(self) -> Self:
         if self.num_nodes and not self.num_devices:
