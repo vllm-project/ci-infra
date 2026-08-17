@@ -97,6 +97,12 @@ trusted `vllm-project/vllm` main-branch builds. It injects the helpers in
 emits one `pytest.test` child span per test. Job YAML does not need an opt-in
 field.
 
+Command and pytest spans are written to an ephemeral local spool while tests
+run. An `EXIT` trap uploads the complete job batch once, preserving the job's
+original exit status. The exporter has a three-second total network deadline
+and the shell enforces a four-second hard stop, so an unavailable telemetry
+receiver cannot add an unbounded delay to every command.
+
 Pull-request containers are deliberately excluded from this fine-grained
 instrumentation because exporting spans currently requires access to the
 Buildkite agent binary to mint a short-lived OIDC token. Mounting that binary

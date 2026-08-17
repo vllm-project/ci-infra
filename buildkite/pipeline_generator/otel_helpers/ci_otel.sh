@@ -3,6 +3,21 @@
 _VLLM_CI_OTEL_DIR="${VLLM_CI_OTEL_DIR:?VLLM_CI_OTEL_DIR must point to the injected CI tracing helpers}"
 export PYTHONPATH="${_VLLM_CI_OTEL_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -p ci_pytest_otel"
+export VLLM_CI_OTEL_SPOOL_DIR="${VLLM_CI_OTEL_SPOOL_DIR:-${_VLLM_CI_OTEL_DIR}/spans}"
+mkdir -p "${VLLM_CI_OTEL_SPOOL_DIR}" || true
+
+_ci_otel_on_exit() {
+  local command_status=$?
+  trap - EXIT
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 4s python3 "${_VLLM_CI_OTEL_DIR}/ci_otel.py" flush || true
+  else
+    python3 "${_VLLM_CI_OTEL_DIR}/ci_otel.py" flush || true
+  fi
+  exit "${command_status}"
+}
+
+trap _ci_otel_on_exit EXIT
 
 ci_otel_run() {
   local command_index="$1"
@@ -42,7 +57,7 @@ ci_otel_run() {
   fi
   end_ns="$(date +%s%N)"
 
-  python3 "${_VLLM_CI_OTEL_DIR}/ci_otel.py" command \
+  python3 "${_VLLM_CI_OTEL_DIR}/ci_otel.py" record-command \
     --trace-id "${trace_id}" \
     --span-id "${span_id}" \
     --parent-span-id "${parent_span_id}" \

@@ -9,7 +9,7 @@ import os
 import time
 from dataclasses import dataclass
 
-from ci_otel import Span, export_spans
+from ci_otel import Span, record_spans
 
 
 @dataclass
@@ -77,5 +77,5 @@ def pytest_sessionfinish(session, exitstatus: int):
     for nodeid, run in list(_runs.items()):
         _spans.append(_test_span(nodeid, run))
     _runs.clear()
-    export_spans(_spans)
+    record_spans(_spans)
     _spans.clear()

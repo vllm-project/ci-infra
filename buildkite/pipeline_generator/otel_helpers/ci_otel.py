@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
@@ -8,19 +7,23 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import secrets
 import struct
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 ENDPOINT = os.getenv("VLLM_CI_OTEL_ENDPOINT", "https://ci.vllm.ai/api/otel/v1/traces")
 AUDIENCE = os.getenv("VLLM_CI_OTEL_AUDIENCE", "https://ci.vllm.ai/api/otel")
-MAX_BATCH_SIZE = 250
+MAX_BATCH_SIZE = 2_000
+UPLOAD_TIMEOUT_SECONDS = float(os.getenv("VLLM_CI_OTEL_UPLOAD_TIMEOUT", "3"))
 
 
 @dataclass(frozen=True)
@@ -156,7 +159,54 @@ def new_context() -> tuple[str, str, str | None]:
     return trace_id, secrets.token_hex(8), parent_span_id
 
 
-def _oidc_token() -> str:
+def _spool_dir() -> Path | None:
+    value = os.getenv("VLLM_CI_OTEL_SPOOL_DIR")
+    return Path(value) if value else None
+
+
+def record_spans(spans: Iterable[Span]) -> bool:
+    """Append spans to a process-local spool file without doing network I/O."""
+    spool_dir = _spool_dir()
+    records = [json.dumps(asdict(span), separators=(",", ":")) for span in spans]
+    if spool_dir is None or not records:
+        return False
+    try:
+        spool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        spool_file = spool_dir / f"spans-{os.getpid()}.jsonl"
+        with spool_file.open("a", encoding="utf-8") as output:
+            output.write("\n".join(records) + "\n")
+        return True
+    except OSError as error:
+        print(f"CI timing spool skipped: {error}", file=sys.stderr)
+        return False
+
+
+def load_spans() -> list[Span]:
+    spool_dir = _spool_dir()
+    if spool_dir is None or not spool_dir.is_dir():
+        return []
+    spans: list[Span] = []
+    for spool_file in sorted(spool_dir.glob("spans-*.jsonl")):
+        try:
+            with spool_file.open(encoding="utf-8") as records:
+                for record in records:
+                    if record.strip():
+                        spans.append(Span(**json.loads(record)))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            print(
+                f"CI timing spool ignored {spool_file.name}: {error}", file=sys.stderr
+            )
+    return spans
+
+
+def _remaining_seconds(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("CI timing upload deadline exceeded")
+    return remaining
+
+
+def _oidc_token(deadline: float) -> str:
     result = subprocess.run(
         [
             "buildkite-agent",
@@ -172,12 +222,14 @@ def _oidc_token() -> str:
         check=True,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=_remaining_seconds(deadline),
     )
     return result.stdout.strip()
 
 
-def export_spans(spans: list[Span]) -> bool:
+def export_spans(
+    spans: list[Span], timeout_seconds: float = UPLOAD_TIMEOUT_SECONDS
+) -> bool:
     if not spans or os.getenv("BUILDKITE", "") != "true":
         return False
     required = (
@@ -192,7 +244,8 @@ def export_spans(spans: list[Span]) -> bool:
         return False
 
     try:
-        token = _oidc_token()
+        deadline = time.monotonic() + max(timeout_seconds, 0.1)
+        token = _oidc_token(deadline)
         for offset in range(0, len(spans), MAX_BATCH_SIZE):
             payload = encode_request(spans[offset : offset + MAX_BATCH_SIZE])
             request = urllib.request.Request(
@@ -205,7 +258,9 @@ def export_spans(spans: list[Span]) -> bool:
                     "User-Agent": "vllm-ci-otel/1",
                 },
             )
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with urllib.request.urlopen(
+                request, timeout=_remaining_seconds(deadline)
+            ) as response:
                 if response.status != 200:
                     raise RuntimeError(f"OTLP endpoint returned {response.status}")
         return True
@@ -213,6 +268,7 @@ def export_spans(spans: list[Span]) -> bool:
         OSError,
         RuntimeError,
         subprocess.SubprocessError,
+        TimeoutError,
         urllib.error.URLError,
     ) as error:
         print(f"CI timing upload skipped: {error}", file=sys.stderr)
@@ -242,7 +298,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("new-context")
-    command = subparsers.add_parser("command")
+    subparsers.add_parser("flush")
+    command = subparsers.add_parser("record-command")
     command.add_argument("--trace-id", required=True)
     command.add_argument("--span-id", required=True)
     command.add_argument("--parent-span-id", default="")
@@ -257,7 +314,12 @@ def main() -> int:
         trace_id, span_id, parent_span_id = new_context()
         print(trace_id, span_id, parent_span_id or "-")
         return 0
-    export_spans([_command_span(args)])
+    if args.command == "record-command":
+        record_spans([_command_span(args)])
+        return 0
+    if args.command == "flush":
+        export_spans(load_spans())
+        return 0
     return 0
 
 
