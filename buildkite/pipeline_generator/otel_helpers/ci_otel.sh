@@ -20,6 +20,40 @@ _ci_otel_python() {
   fi
 }
 
+_ci_otel_pytest_is_compatible() {
+  if [ -z "${CI_INFRA_OTEL_REAL_PYTEST:-}" ] ||
+    [ ! -x "${CI_INFRA_OTEL_REAL_PYTEST}" ]; then
+    return 1
+  fi
+
+  # Isolate the probe from repository pytest configuration and third-party
+  # plugin autoload. Exit 5 means collection succeeded but found no tests.
+  if command -v timeout >/dev/null 2>&1; then
+    if PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+      PYTHONPATH="${_CI_INFRA_OTEL_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+      timeout 3s "${CI_INFRA_OTEL_REAL_PYTEST}" -q --collect-only \
+      -c /dev/null --rootdir "${_CI_INFRA_OTEL_DIR}" \
+      --confcutdir "${_CI_INFRA_OTEL_DIR}" \
+      "${_CI_INFRA_OTEL_DIR}/ci_pytest_otel.py" -p ci_pytest_otel \
+      >/dev/null 2>&1; then
+      return 0
+    else
+      probe_status=$?
+    fi
+  elif PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+    PYTHONPATH="${_CI_INFRA_OTEL_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${CI_INFRA_OTEL_REAL_PYTEST}" -q --collect-only \
+    -c /dev/null --rootdir "${_CI_INFRA_OTEL_DIR}" \
+    --confcutdir "${_CI_INFRA_OTEL_DIR}" \
+    "${_CI_INFRA_OTEL_DIR}/ci_pytest_otel.py" -p ci_pytest_otel \
+    >/dev/null 2>&1; then
+    return 0
+  else
+    probe_status=$?
+  fi
+  [ "${probe_status}" -eq 5 ]
+}
+
 _ci_otel_on_exit() {
   _CI_INFRA_OTEL_EXIT_STATUS=$?
   trap - 0
@@ -114,17 +148,18 @@ if command -v python3 >/dev/null 2>&1 &&
   mkdir -p "${CI_INFRA_OTEL_SPOOL_DIR}" &&
   (
     export PYTHONPATH="${_CI_INFRA_OTEL_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
-    python3 -c "import ci_otel, ci_pytest_otel" >/dev/null 2>&1
+    _ci_otel_python -c "import ci_otel, ci_pytest_otel" >/dev/null 2>&1
   ) &&
   sh -n "${_CI_INFRA_OTEL_DIR}/ci_pytest.sh"; then
   CI_INFRA_OTEL_REAL_PYTEST="$(command -v pytest 2>/dev/null || :)"
   export CI_INFRA_OTEL_REAL_PYTEST
-  if [ -n "${CI_INFRA_OTEL_REAL_PYTEST}" ] &&
-    [ -x "${CI_INFRA_OTEL_REAL_PYTEST}" ] &&
+  if _ci_otel_pytest_is_compatible &&
     mkdir -p "${_CI_INFRA_OTEL_DIR}/bin" &&
     ln -s "${_CI_INFRA_OTEL_DIR}/ci_pytest.sh" "${_CI_INFRA_OTEL_DIR}/bin/pytest"; then
     PATH="${_CI_INFRA_OTEL_DIR}/bin:${PATH}"
     export PATH
+  elif [ -n "${CI_INFRA_OTEL_REAL_PYTEST}" ]; then
+    echo "vLLM CI OTel: pytest tracing unavailable; command tracing remains enabled" >&2 || :
   fi
   CI_INFRA_OTEL_READY=1
   export CI_INFRA_OTEL_READY

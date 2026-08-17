@@ -15,16 +15,16 @@ fi
 
 otel_pythonpath="${helper_dir}${PYTHONPATH:+:${PYTHONPATH}}"
 
-# Validate plugin startup using the same pytest executable and PYTHONPATH as
-# the real command. If anything about tracing is incompatible, retry without
-# any tracing-specific arguments or environment changes.
+# Setup already validated plugin registration with this pytest executable.
+# Recheck that the helper modules remain importable under the command's
+# effective PYTHONPATH. This catches deleted or hidden helpers without paying
+# for a second pytest startup on every invocation.
 if command -v timeout >/dev/null 2>&1; then
   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH="${otel_pythonpath}" \
-    timeout 2s "${real_pytest}" --help -p ci_pytest_otel \
-    >/dev/null 2>&1
+    timeout 2s python3 -c "import ci_otel, ci_pytest_otel" >/dev/null 2>&1
 else
   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH="${otel_pythonpath}" \
-    "${real_pytest}" --help -p ci_pytest_otel >/dev/null 2>&1
+    python3 -c "import ci_otel, ci_pytest_otel" >/dev/null 2>&1
 fi
 preflight_status=$?
 
