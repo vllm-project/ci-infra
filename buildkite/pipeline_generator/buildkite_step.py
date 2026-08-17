@@ -162,6 +162,7 @@ class BuildkiteCommandStep(BaseModel):
     retry: Optional[Dict[str, Any]] = None
     plugins: Optional[List[Dict[str, Any]]] = None
     env: Optional[Dict[str, str]] = None
+    artifact_paths: Optional[List[str]] = None
     parallelism: Optional[int] = None
     concurrency: Optional[int] = Field(default=None, gt=0, strict=True)
     concurrency_group: Optional[str] = Field(default=None, min_length=1)
@@ -196,6 +197,7 @@ class BuildkiteCommandStep(BaseModel):
             "retry": self.retry,
             "plugins": self.plugins,
             "env": self.env,
+            "artifact_paths": self.artifact_paths,
             "parallelism": self.parallelism,
             "concurrency": self.concurrency,
             "concurrency_group": self.concurrency_group,

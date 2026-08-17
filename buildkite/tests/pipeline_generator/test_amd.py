@@ -10,23 +10,6 @@ from step import Step
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
 
-def test_build_scoped_image_capability(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-
-    assert amd.get_amd_native_base_image() == amd.AMD_LEGACY_NATIVE_BASE_IMAGE
-    assert amd.get_amd_ci_image() == amd.AMD_LEGACY_CI_IMAGE
-    assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_STABLE_CI_BASE_IMAGE
-
-    producer = tmp_path / ".buildkite/scripts/ci-bake-rocm.sh"
-    producer.parent.mkdir(parents=True)
-    producer.write_text("CI_BASE_IMAGE_TAG_BUILD_REF=enabled")
-
-    assert amd.get_amd_native_base_image() == amd.AMD_BUILD_NATIVE_BASE_IMAGE
-    assert amd.get_amd_ci_image() == amd.AMD_BUILD_CI_IMAGE
-    assert amd.get_amd_ci_base_image(dind=False) == amd.AMD_BUILD_NATIVE_BASE_IMAGE
-    assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_STABLE_CI_BASE_IMAGE
-
-
 def test_stable_image_promotion_capability_uses_build_scoped_dind_base(
     tmp_path, monkeypatch
 ):
@@ -36,20 +19,20 @@ def test_stable_image_promotion_capability_uses_build_scoped_dind_base(
     monkeypatch.setattr(amd, "AMD_ROCM_PROMOTION_SCRIPT", promotion_script)
 
     assert not amd.supports_stable_image_promotion()
+    assert amd.get_amd_ci_base_image(dind=False) == amd.AMD_NATIVE_BASE_IMAGE
     assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_STABLE_CI_BASE_IMAGE
 
     producer = tmp_path / ".buildkite/scripts/ci-bake-rocm.sh"
     producer.parent.mkdir(parents=True)
     producer.write_text("CI_BASE_IMAGE_TAG_BUILD_REF=enabled")
+    monkeypatch.setattr(amd, "AMD_ROCM_BASE_PRODUCER", producer)
 
-    assert amd.supports_build_scoped_images()
     assert amd.supports_stable_image_promotion()
-    assert amd.get_amd_ci_base_image(dind=False) == amd.AMD_BUILD_NATIVE_BASE_IMAGE
-    assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_BUILD_NATIVE_BASE_IMAGE
-    assert amd.get_amd_ci_image() == amd.AMD_BUILD_CI_IMAGE
+    assert amd.get_amd_ci_base_image(dind=False) == amd.AMD_NATIVE_BASE_IMAGE
+    assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_NATIVE_BASE_IMAGE
 
 
-def test_legacy_amd_template_retries_gpu_hang_abort():
+def test_amd_template_retries_gpu_hang_abort():
     template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
 
     assert (
@@ -79,14 +62,30 @@ def test_amd_template_and_bootstrap_preserve_promotion_contract():
     promotion_gate = bootstrap.split("local rocm_stable_image_promotion=0", 1)[1]
     promotion_gate = promotion_gate.split("rocm_stable_image_promotion=1", 1)[0]
     assert "CI_BASE_IMAGE_TAG_BUILD_REF" in promotion_gate
-    assert "-D rocm_build_scoped_images=" in bootstrap
+    assert "-D rocm_build_scoped_images=" not in bootstrap
     assert "-D rocm_stable_image_promotion=" in bootstrap
 
 
-def test_legacy_amd_template_configures_gpu_diagnostics():
+def test_amd_template_uses_build_scoped_images():
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+
+    assert amd.AMD_NATIVE_BASE_IMAGE in template
+    assert amd.AMD_CI_IMAGE in template
+    assert "rocm_build_scoped_images" not in template
+
+
+def test_amd_template_configures_gpu_diagnostics():
     template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
 
     assert 'VLLM_CI_DIAGNOSTICS_DIR: "artifacts/amd-gpu-diagnostics"' in template
+    assert 'BUILDKITE_ARTIFACT_UPLOAD_SKIP_SYMLINKS: "true"' in template
+    assert (
+        "        {% else %}\n"
+        "        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh\n"
+        "        artifact_paths:\n"
+        '          - "artifacts/amd-gpu-diagnostics/*/diagnostics.log"\n'
+        "        env:"
+    ) in template
     for name, field_path in amd.AMD_NATIVE_POD_IDENTITY_ENV.items():
         assert f"- name: {name}" in template
         assert f"fieldPath: {field_path}" in template
@@ -208,13 +207,18 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
+    assert command_step.artifact_paths == [amd.AMD_DIAGNOSTICS_ARTIFACT_GLOB]
+    assert command_step.env["BUILDKITE_ARTIFACT_UPLOAD_SKIP_SYMLINKS"] == "true"
+    assert command_step.model_dump(exclude_none=True)["artifact_paths"] == (
+        command_step.artifact_paths
+    )
     assert command_step.env["VLLM_CI_DIAGNOSTICS_DIR"] == amd.AMD_DIAGNOSTICS_DIR
     assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
     if not dind:
         assert command_step.plugins is not None
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
-        assert container["image"] == amd.get_amd_native_base_image()
+        assert container["image"] == amd.AMD_NATIVE_BASE_IMAGE
         assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
         assert container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
         assert command_step.env["AMD_CI_RUNTIME"] == "native"
@@ -229,10 +233,10 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         assert command_step.plugins is None
         assert "AMD_CI_RUNTIME" not in command_step.env
         assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
-        assert command_step.env["VLLM_CI_FALLBACK_IMAGE"] == amd.get_amd_ci_image()
+        assert command_step.env["VLLM_CI_FALLBACK_IMAGE"] == amd.AMD_CI_IMAGE
 
     assert command_step.env["VLLM_CI_BASE_IMAGE"] == (
-        amd.get_amd_native_base_image() if not dind else amd.AMD_STABLE_CI_BASE_IMAGE
+        amd.AMD_NATIVE_BASE_IMAGE if not dind else amd.AMD_STABLE_CI_BASE_IMAGE
     )
 
     assert command_step.retry == amd.AMD_RETRY
@@ -505,6 +509,14 @@ def test_skip_timeout_omits_direct_amd_timeout(monkeypatch, no_plugin):
 
     assert command_step.timeout_in_minutes is None
     assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
+    assert command_step.artifact_paths == (
+        None if no_plugin else [amd.AMD_DIAGNOSTICS_ARTIFACT_GLOB]
+    )
+    serialized_step = command_step.model_dump(exclude_none=True)
+    if no_plugin:
+        assert "artifact_paths" not in serialized_step
+    else:
+        assert serialized_step["artifact_paths"] == command_step.artifact_paths
 
 
 @pytest.mark.parametrize(
