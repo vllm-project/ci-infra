@@ -31,12 +31,16 @@ def test_stable_image_promotion_capability_uses_build_scoped_dind_base(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
-    producer = tmp_path / ".buildkite/scripts/ci-bake-rocm.sh"
-    producer.parent.mkdir(parents=True)
-    producer.write_text("CI_BASE_IMAGE_TAG_BUILD_REF=enabled")
     promotion_script = tmp_path / "promote-stable-images.sh"
     promotion_script.touch()
     monkeypatch.setattr(amd, "AMD_ROCM_PROMOTION_SCRIPT", promotion_script)
+
+    assert not amd.supports_stable_image_promotion()
+    assert amd.get_amd_ci_base_image(dind=True) == amd.AMD_STABLE_CI_BASE_IMAGE
+
+    producer = tmp_path / ".buildkite/scripts/ci-bake-rocm.sh"
+    producer.parent.mkdir(parents=True)
+    producer.write_text("CI_BASE_IMAGE_TAG_BUILD_REF=enabled")
 
     assert amd.supports_build_scoped_images()
     assert amd.supports_stable_image_promotion()
@@ -64,7 +68,7 @@ def test_amd_template_and_bootstrap_preserve_promotion_contract():
     assert "if: build.branch == pipeline.default_branch" in template
     assert 'concurrency_group: "vllm/rocm/stable-image-promotion"' in template
     assert 'IMAGE_TAG: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"' in template
-    assert 'IMAGE_TAG_LATEST: "rocm/vllm-ci:$BUILDKITE_COMMIT"' in template
+    assert "IMAGE_TAG_LATEST:" not in template
     assert 'VLLM_CI_SMOKE_IMAGE: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"' in template
     assert (
         'VLLM_CI_FALLBACK_IMAGE: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"' in template
@@ -72,6 +76,9 @@ def test_amd_template_and_bootstrap_preserve_promotion_contract():
     assert 'REMOTE_VLLM: "0"' in template
     assert 'REMOTE_VLLM: "1"' not in template
     assert '[[ -f ".buildkite/scripts/rocm/promote-stable-images.sh" ]]' in bootstrap
+    promotion_gate = bootstrap.split("local rocm_stable_image_promotion=0", 1)[1]
+    promotion_gate = promotion_gate.split("rocm_stable_image_promotion=1", 1)[0]
+    assert "CI_BASE_IMAGE_TAG_BUILD_REF" in promotion_gate
     assert "-D rocm_build_scoped_images=" in bootstrap
     assert "-D rocm_stable_image_promotion=" in bootstrap
 

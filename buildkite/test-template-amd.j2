@@ -175,7 +175,6 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           {% if rocm_stable_image_promotion == "1" %}
           IMAGE_TAG: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
-          IMAGE_TAG_LATEST: "rocm/vllm-ci:$BUILDKITE_COMMIT"
           VLLM_CI_SMOKE_IMAGE: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
           {% else %}
           IMAGE_TAG: "{{ amd_ci_image() | safe }}"

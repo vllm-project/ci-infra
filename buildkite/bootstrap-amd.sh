@@ -138,7 +138,9 @@ get_diff_main() {
 upload_pipeline() {
     local rocm_stable_image_promotion=0
 
-    if [[ -f ".buildkite/scripts/rocm/promote-stable-images.sh" ]]; then
+    if [[ -f ".buildkite/scripts/rocm/promote-stable-images.sh" ]] \
+        && grep -q 'CI_BASE_IMAGE_TAG_BUILD_REF' \
+            .buildkite/scripts/ci-bake-rocm.sh 2>/dev/null; then
         rocm_stable_image_promotion=1
     fi
 

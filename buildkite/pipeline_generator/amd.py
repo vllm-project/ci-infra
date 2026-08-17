@@ -21,7 +21,7 @@ def supports_build_scoped_images() -> bool:
 
 
 def supports_stable_image_promotion() -> bool:
-    return AMD_ROCM_PROMOTION_SCRIPT.is_file()
+    return AMD_ROCM_PROMOTION_SCRIPT.is_file() and supports_build_scoped_images()
 
 
 def get_amd_native_base_image() -> str:
