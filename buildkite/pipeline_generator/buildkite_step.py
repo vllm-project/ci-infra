@@ -67,13 +67,18 @@ def _otel_helpers_bundle() -> str:
 
 
 def _otel_setup_command() -> str:
-    """Install ci-infra-owned tracing helpers in an ephemeral job directory."""
+    """Best-effort install of ci-infra-owned tracing helpers."""
     bundle = _otel_helpers_bundle()
     return (
-        "export VLLM_CI_OTEL_DIR=$$(mktemp -d) && "
+        "VLLM_CI_OTEL_READY=0; export VLLM_CI_OTEL_READY; "
+        "if VLLM_CI_OTEL_DIR=$$(mktemp -d 2>/dev/null) && "
+        "export VLLM_CI_OTEL_DIR && "
         f'printf "%s" "{bundle}" | base64 --decode | '
         'tar -xz -C "$$VLLM_CI_OTEL_DIR" && '
-        '. "$$VLLM_CI_OTEL_DIR/ci_otel.sh"'
+        'sh -n "$$VLLM_CI_OTEL_DIR/ci_otel.sh" && '
+        '. "$$VLLM_CI_OTEL_DIR/ci_otel.sh"; then :; else '
+        'echo "vLLM CI OTel: tracing setup skipped" >&2 || :; '
+        "VLLM_CI_OTEL_READY=0; export VLLM_CI_OTEL_READY; fi; :"
     )
 
 
@@ -436,28 +441,19 @@ def _prepare_commands(
             )
             prepared_command = cmd
             if trace_commands:
-                # Buildkite's final command rendering rewrites single quotes,
-                # so shell quoting is not stable here. Base64 keeps arbitrary
-                # command text opaque until ci_otel_run evaluates it in-job.
-                # Inject generator-owned variables before encoding because the
-                # final replacement pass cannot see inside base64. Buildkite's
-                # $$ escaping is unnecessary inside the encoded payload and
-                # would expand to the shell PID when ci_otel_run evaluates it.
-                traced_command = cmd
-                for variable, value in variables_to_inject.items():
-                    if not value:
-                        continue
-                    pattern = re.escape(variable)
-                    runtime_value = value.replace("$$", "$")
-                    traced_command = re.sub(
-                        pattern + r"\b", runtime_value, traced_command
-                    )
+                # Run the original command directly. Tracing only brackets it
+                # with best-effort start/finish calls, so OTel never owns command
+                # execution and cannot change shell state or failure semantics.
                 encoded_preview = base64.b64encode(preview.encode()).decode()
-                encoded_command = base64.b64encode(traced_command.encode()).decode()
-                prepared_command = "ci_otel_run {} {} {}".format(
-                    i + 1,
-                    encoded_preview,
-                    encoded_command,
+                prepared_command = (
+                    'if [ "$${VLLM_CI_OTEL_READY:-0}" = "1" ] && '
+                    "command -v ci_otel_start >/dev/null 2>&1; then "
+                    f"ci_otel_start {i + 1} {encoded_preview} || :; fi\n"
+                    f"{cmd}\n"
+                    "_VLLM_CI_OTEL_COMMAND_STATUS=$$?\n"
+                    "if command -v ci_otel_finish >/dev/null 2>&1; then "
+                    "ci_otel_finish $$_VLLM_CI_OTEL_COMMAND_STATUS || :; fi\n"
+                    "(exit $$_VLLM_CI_OTEL_COMMAND_STATUS)"
                 )
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands

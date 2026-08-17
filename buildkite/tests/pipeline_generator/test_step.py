@@ -1,4 +1,6 @@
 import base64
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -196,17 +198,22 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
         setup_profile="none",
     )
 
-    assert "VLLM_CI_OTEL_DIR=$$(mktemp -d)" in commands[0]
+    assert "VLLM_CI_OTEL_DIR=$$(mktemp -d 2>/dev/null)" in commands[0]
+    assert commands[0].endswith("fi; :")
     assert '. "$$VLLM_CI_OTEL_DIR/ci_otel.sh"' in commands[0]
-    assert commands[2].startswith("ci_otel_run 1 ")
-    assert commands[4].startswith("ci_otel_run 2 ")
-    _, _, encoded_label, encoded_command = commands[4].split(" ")
+    assert "ci_otel_start 1 " in commands[2]
+    assert "export VALUE=ready" in commands[2]
+    assert "ci_otel_finish" in commands[2]
+    assert "ci_otel_start 2 " in commands[4]
+    assert 'test "$VALUE" = ready' in commands[4]
+    match = re.search(r"ci_otel_start 2 (\S+)", commands[4])
+    assert match is not None
+    (encoded_label,) = match.groups()
     assert base64.b64decode(encoded_label).decode() == "test VALUE = ready"
-    assert base64.b64decode(encoded_command).decode() == 'test "$VALUE" = ready'
     assert "'" not in commands[4]
 
 
-def test_otel_trace_injects_generator_variables_before_encoding(fake_global_config):
+def test_otel_trace_preserves_generator_variable_injection(fake_global_config):
     fake_global_config["branch"] = "main"
     step = Step(
         label="Traced image build",
@@ -224,10 +231,7 @@ def test_otel_trace_injects_generator_variables_before_encoding(fake_global_conf
         setup_profile="none",
     )
 
-    _, _, _, encoded_command = commands[2].split(" ")
-    assert base64.b64decode(encoded_command).decode() == (
-        "build registry.example.com vllm-ci $BUILDKITE_COMMIT"
-    )
+    assert "build registry.example.com vllm-ci $$BUILDKITE_COMMIT" in commands[2]
 
 
 def test_otel_helper_bundle_installs_and_sources():
@@ -239,7 +243,9 @@ def test_otel_helper_bundle_installs_and_sources():
             command
             + " && test -f \"$VLLM_CI_OTEL_DIR/ci_otel.py\""
             + " && test -f \"$VLLM_CI_OTEL_DIR/ci_pytest_otel.py\""
-            + " && type ci_otel_run",
+            + ' && test "$VLLM_CI_OTEL_READY" = 1'
+            + " && type ci_otel_start"
+            + " && type ci_otel_finish",
         ],
         check=False,
         capture_output=True,
@@ -249,6 +255,104 @@ def test_otel_helper_bundle_installs_and_sources():
     assert result.returncode == 0, result.stderr
 
 
+def test_otel_setup_failure_is_soft_and_direct_command_runs(
+    fake_global_config, tmp_path
+):
+    fake_global_config["branch"] = "main"
+    output = tmp_path / "command-ran"
+    step = Step(
+        label="Traced",
+        group="Tracing",
+        commands=['printf ran > "$OUTPUT_FILE"'],
+    )
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+    script = "mktemp() { return 1; };\n" + "\n".join(commands).replace("$$", "$")
+
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "OUTPUT_FILE": str(output)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "ran"
+    assert "tracing setup skipped" in result.stderr
+
+
+def test_otel_import_failure_leaves_test_environment_untouched(
+    fake_global_config, tmp_path
+):
+    fake_global_config["branch"] = "main"
+    output = tmp_path / "command-ran"
+    step = Step(
+        label="Traced",
+        group="Tracing",
+        commands=['printf ran > "$OUTPUT_FILE"'],
+    )
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+    script = (
+        "python3() { return 1; };\n"
+        + "\n".join(commands).replace("$$", "$")
+        + '\ntest "$VLLM_CI_OTEL_READY" = 0'
+        + '\ntest "$PYTHONPATH" = original-pythonpath'
+        + '\ntest "$PYTEST_ADDOPTS" = original-pytest-options'
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "OUTPUT_FILE": str(output),
+            "PYTHONPATH": "original-pythonpath",
+            "PYTEST_ADDOPTS": "original-pytest-options",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "ran"
+    assert "tracing disabled" in result.stderr
+
+
+def test_otel_does_not_change_errexit_behavior(fake_global_config, tmp_path):
+    fake_global_config["branch"] = "main"
+    output = tmp_path / "must-not-run"
+    step = Step(
+        label="Traced failure",
+        group="Tracing",
+        commands=['false\nprintf bad > "$OUTPUT_FILE"'],
+    )
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+    script = "\n".join(commands).replace("$$", "$")
+
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "OUTPUT_FILE": str(output)},
+    )
+
+    assert result.returncode == 1
+    assert not output.exists()
+
+
 def test_otel_helper_bundle_runs_under_posix_shell():
     command = buildkite_step._otel_setup_command().replace("$$", "$")
     result = subprocess.run(
@@ -256,7 +360,8 @@ def test_otel_helper_bundle_runs_under_posix_shell():
             "/bin/sh",
             "-c",
             command
-            + " && ci_otel_run 1 dHJ1ZQ== dHJ1ZQ=="
+            + " && ci_otel_start 1 dHJ1ZQ=="
+            + " && true && ci_otel_finish 0"
             + ' && test -n "$(find "$VLLM_CI_OTEL_SPOOL_DIR" -name spans-\\*.jsonl -size +0c -print -quit)"',
         ],
         check=False,

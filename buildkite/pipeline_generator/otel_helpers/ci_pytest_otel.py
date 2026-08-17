@@ -23,33 +23,50 @@ _runs: dict[str, TestRun] = {}
 _spans: list[Span] = []
 
 
+def _soft_fail(action):
+    """Contain every tracing exception so pytest owns the job outcome."""
+    try:
+        action()
+    except Exception:
+        return
+
+
 def _enabled() -> bool:
     return bool(os.getenv("VLLM_CI_TRACE_ID") and os.getenv("VLLM_CI_COMMAND_SPAN_ID"))
 
 
 def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]):
-    if _enabled():
-        _runs[nodeid] = TestRun(start_ns=time.time_ns())
+    def record_start():
+        if _enabled():
+            _runs[nodeid] = TestRun(start_ns=time.time_ns())
+
+    _soft_fail(record_start)
 
 
 def pytest_runtest_logreport(report):
-    run = _runs.get(report.nodeid)
-    if not run:
-        return
-    if report.failed:
-        run.outcome = "failed"
-    elif report.skipped and run.outcome != "failed":
-        run.outcome = "skipped"
-    elif report.when == "call" and run.outcome == "unknown":
-        run.outcome = "passed"
+    def record_report():
+        run = _runs.get(report.nodeid)
+        if not run:
+            return
+        if report.failed:
+            run.outcome = "failed"
+        elif report.skipped and run.outcome != "failed":
+            run.outcome = "skipped"
+        elif report.when == "call" and run.outcome == "unknown":
+            run.outcome = "passed"
+
+    _soft_fail(record_report)
 
 
 def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str]):
-    run = _runs.pop(nodeid, None)
-    if not run:
-        return
-    run.end_ns = time.time_ns()
-    _spans.append(_test_span(nodeid, run))
+    def record_finish():
+        run = _runs.pop(nodeid, None)
+        if not run:
+            return
+        run.end_ns = time.time_ns()
+        _spans.append(_test_span(nodeid, run))
+
+    _soft_fail(record_finish)
 
 
 def _test_span(nodeid: str, run: TestRun) -> Span:
@@ -72,10 +89,13 @@ def _test_span(nodeid: str, run: TestRun) -> Span:
 
 
 def pytest_sessionfinish(session, exitstatus: int):
-    if not _enabled():
-        return
-    for nodeid, run in list(_runs.items()):
-        _spans.append(_test_span(nodeid, run))
-    _runs.clear()
-    record_spans(_spans)
-    _spans.clear()
+    def finish_session():
+        if not _enabled():
+            return
+        for nodeid, run in list(_runs.items()):
+            _spans.append(_test_span(nodeid, run))
+        _runs.clear()
+        record_spans(_spans)
+        _spans.clear()
+
+    _soft_fail(finish_session)

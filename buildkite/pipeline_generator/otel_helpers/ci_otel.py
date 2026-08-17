@@ -14,7 +14,6 @@ import struct
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -23,7 +22,17 @@ from pathlib import Path
 ENDPOINT = os.getenv("VLLM_CI_OTEL_ENDPOINT", "https://ci.vllm.ai/api/otel/v1/traces")
 AUDIENCE = os.getenv("VLLM_CI_OTEL_AUDIENCE", "https://ci.vllm.ai/api/otel")
 MAX_BATCH_SIZE = 2_000
-UPLOAD_TIMEOUT_SECONDS = float(os.getenv("VLLM_CI_OTEL_UPLOAD_TIMEOUT", "3"))
+
+
+def _upload_timeout_seconds() -> float:
+    try:
+        value = float(os.getenv("VLLM_CI_OTEL_UPLOAD_TIMEOUT", "3"))
+        return value if value > 0 else 3.0
+    except (TypeError, ValueError):
+        return 3.0
+
+
+UPLOAD_TIMEOUT_SECONDS = _upload_timeout_seconds()
 
 
 @dataclass(frozen=True)
@@ -166,17 +175,17 @@ def _spool_dir() -> Path | None:
 
 def record_spans(spans: Iterable[Span]) -> bool:
     """Append spans to a process-local spool file without doing network I/O."""
-    spool_dir = _spool_dir()
-    records = [json.dumps(asdict(span), separators=(",", ":")) for span in spans]
-    if spool_dir is None or not records:
-        return False
     try:
+        spool_dir = _spool_dir()
+        records = [json.dumps(asdict(span), separators=(",", ":")) for span in spans]
+        if spool_dir is None or not records:
+            return False
         spool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         spool_file = spool_dir / f"spans-{os.getpid()}.jsonl"
         with spool_file.open("a", encoding="utf-8") as output:
             output.write("\n".join(records) + "\n")
         return True
-    except OSError as error:
+    except Exception as error:
         print(f"CI timing spool skipped: {error}", file=sys.stderr)
         return False
 
@@ -264,13 +273,7 @@ def export_spans(
                 if response.status != 200:
                     raise RuntimeError(f"OTLP endpoint returned {response.status}")
         return True
-    except (
-        OSError,
-        RuntimeError,
-        subprocess.SubprocessError,
-        TimeoutError,
-        urllib.error.URLError,
-    ) as error:
+    except Exception as error:
         print(f"CI timing upload skipped: {error}", file=sys.stderr)
         return False
 
