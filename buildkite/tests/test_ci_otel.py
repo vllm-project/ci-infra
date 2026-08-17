@@ -206,6 +206,30 @@ def test_oidc_token_uses_only_standard_audience(monkeypatch):
     assert observed["kwargs"]["check"] is True
 
 
+def test_oidc_failure_reports_bounded_stderr(monkeypatch):
+    def run(command, **kwargs):
+        raise subprocess.CalledProcessError(
+            1,
+            command,
+            stderr="agent request failed\n" + ("x" * 1_000),
+        )
+
+    monkeypatch.setattr(ci_otel.subprocess, "run", run)
+
+    try:
+        ci_otel._oidc_token(time.monotonic() + 1)
+    except RuntimeError as error:
+        message = str(error)
+    else:
+        raise AssertionError("OIDC failure should be reported")
+
+    assert message.startswith(
+        "Buildkite OIDC request failed (exit 1): agent request failed"
+    )
+    assert message.endswith("...")
+    assert len(message) < 600
+
+
 def test_invalid_upload_timeout_cannot_break_plugin_import():
     result = subprocess.run(
         [sys.executable, "-c", "import ci_otel, ci_pytest_otel"],

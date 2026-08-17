@@ -216,21 +216,31 @@ def _remaining_seconds(deadline: float) -> float:
 
 
 def _oidc_token(deadline: float) -> str:
-    result = subprocess.run(
-        [
-            "buildkite-agent",
-            "oidc",
-            "request-token",
-            "--audience",
-            AUDIENCE,
-            "--lifetime",
-            "300",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=_remaining_seconds(deadline),
-    )
+    command = [
+        "buildkite-agent",
+        "oidc",
+        "request-token",
+        "--audience",
+        AUDIENCE,
+        "--lifetime",
+        "300",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_remaining_seconds(deadline),
+        )
+    except subprocess.CalledProcessError as error:
+        detail = " ".join((error.stderr or "").split())
+        if len(detail) > 500:
+            detail = f"{detail[:497]}..."
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(
+            f"Buildkite OIDC request failed (exit {error.returncode}){suffix}"
+        ) from None
     return result.stdout.strip()
 
 
