@@ -7,6 +7,7 @@ import gzip
 from io import BytesIO
 import os
 from pathlib import Path
+import re
 import tarfile
 
 from amd import (
@@ -438,8 +439,21 @@ def _prepare_commands(
                 # Buildkite's final command rendering rewrites single quotes,
                 # so shell quoting is not stable here. Base64 keeps arbitrary
                 # command text opaque until ci_otel_run evaluates it in-job.
+                # Inject generator-owned variables before encoding because the
+                # final replacement pass cannot see inside base64. Buildkite's
+                # $$ escaping is unnecessary inside the encoded payload and
+                # would expand to the shell PID when ci_otel_run evaluates it.
+                traced_command = cmd
+                for variable, value in variables_to_inject.items():
+                    if not value:
+                        continue
+                    pattern = re.escape(variable)
+                    runtime_value = value.replace("$$", "$")
+                    traced_command = re.sub(
+                        pattern + r"\b", runtime_value, traced_command
+                    )
                 encoded_preview = base64.b64encode(preview.encode()).decode()
-                encoded_command = base64.b64encode(cmd.encode()).decode()
+                encoded_command = base64.b64encode(traced_command.encode()).decode()
                 prepared_command = "ci_otel_run {} {} {}".format(
                     i + 1,
                     encoded_preview,
@@ -465,8 +479,6 @@ def _prepare_commands(
             if not value:
                 continue
             # Use regex to only replace whole variable matches (not substrings)
-            import re
-
             # Escape variable (may have $ or special characters)
             pattern = re.escape(variable)
             command = re.sub(pattern + r"\b", value, command)

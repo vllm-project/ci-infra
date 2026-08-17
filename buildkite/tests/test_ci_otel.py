@@ -15,8 +15,8 @@ SCRIPTS_DIR = (
 )
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-import ci_otel
-from ci_otel import (
+import ci_otel  # noqa: E402
+from ci_otel import (  # noqa: E402
     Span,
     encode_request,
     export_spans,
@@ -194,6 +194,30 @@ def test_shell_wrapper_preserves_command_state_and_quoting(tmp_path):
         text=True,
         env={
             **os.environ,
+            "VLLM_CI_OTEL_DIR": str(SCRIPTS_DIR),
+            "VLLM_CI_OTEL_SPOOL_DIR": str(tmp_path),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_shell_wrapper_expands_runtime_environment_arguments(tmp_path):
+    script = SCRIPTS_DIR / "ci_otel.sh"
+    command_text = 'test "$REGISTRY" = registry.example.com && test "$COMMIT" = abc123'
+    command = "ci_otel_run 1 {} {}".format(
+        _encoded("check generated variables"),
+        _encoded(command_text),
+    )
+    result = subprocess.run(
+        ["bash", "-c", f'source "{script}"; {command}'],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "REGISTRY": "registry.example.com",
+            "COMMIT": "abc123",
             "VLLM_CI_OTEL_DIR": str(SCRIPTS_DIR),
             "VLLM_CI_OTEL_SPOOL_DIR": str(tmp_path),
         },

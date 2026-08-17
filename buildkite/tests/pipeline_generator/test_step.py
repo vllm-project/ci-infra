@@ -206,6 +206,30 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
     assert "'" not in commands[4]
 
 
+def test_otel_trace_injects_generator_variables_before_encoding(fake_global_config):
+    fake_global_config["branch"] = "main"
+    step = Step(
+        label="Traced image build",
+        group="Tracing",
+        commands=["build $REGISTRY $REPO $BUILDKITE_COMMIT"],
+    )
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={
+            "$REGISTRY": "registry.example.com",
+            "$REPO": "vllm-ci",
+            "$BUILDKITE_COMMIT": "$$BUILDKITE_COMMIT",
+        },
+        setup_profile="none",
+    )
+
+    _, _, _, encoded_command = commands[2].split(" ")
+    assert base64.b64decode(encoded_command).decode() == (
+        "build registry.example.com vllm-ci $BUILDKITE_COMMIT"
+    )
+
+
 def test_otel_helper_bundle_installs_and_sources():
     command = buildkite_step._otel_setup_command().replace("$$", "$")
     result = subprocess.run(
