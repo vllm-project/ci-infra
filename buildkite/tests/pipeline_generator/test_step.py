@@ -422,6 +422,11 @@ def test_otel_import_failure_leaves_test_environment_untouched(
 ):
     fake_global_config["branch"] = "main"
     output = tmp_path / "command-ran"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_python = fake_bin / "python3"
+    fake_python.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake_python.chmod(0o755)
     step = Step(
         label="Traced",
         group="Tracing",
@@ -433,8 +438,7 @@ def test_otel_import_failure_leaves_test_environment_untouched(
         setup_profile="none",
     )
     script = (
-        "python3() { return 1; };\n"
-        + "\n".join(commands).replace("$$", "$")
+        "\n".join(commands).replace("$$", "$")
         + '\ntest "$CI_INFRA_OTEL_READY" = 0'
         + '\ntest "$PYTHONPATH" = original-pythonpath'
         + '\ntest "$PYTEST_ADDOPTS" = original-pytest-options'
@@ -448,6 +452,7 @@ def test_otel_import_failure_leaves_test_environment_untouched(
         env={
             **os.environ,
             "OUTPUT_FILE": str(output),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "PYTHONPATH": "original-pythonpath",
             "PYTEST_ADDOPTS": "original-pytest-options",
         },
