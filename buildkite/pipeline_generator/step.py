@@ -26,7 +26,6 @@ class Step(BaseModel):
     concurrency_group: Optional[str] = None
     timeout_in_minutes: Optional[int] = None
     mount_buildkite_agent: Optional[bool] = False
-    otel_trace: bool = False
     env: Optional[Dict[str, str]] = None
     retry: Optional[Dict[str, Any]] = None
     optional: Optional[bool] = False
@@ -38,7 +37,7 @@ class Step(BaseModel):
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
         return bool(
-            self.otel_trace
+            config["github_repo_name"] == "vllm-project/vllm"
             and config["branch"] == "main"
             and config["pull_request"] == "false"
         )

@@ -22,13 +22,23 @@ def test_standard_docker_templates_forward_buildkite_analytics_token(template):
     assert BUILDKITE_ANALYTICS_TOKEN in template["environment"]
 
 
-def test_traced_main_step_mounts_buildkite_agent(fake_global_config):
+def test_every_trusted_main_step_mounts_buildkite_agent(fake_global_config):
     fake_global_config["branch"] = "main"
-    step = Step(label="Traced", device="h200_35gb", otel_trace=True)
+    step = Step(label="Traced", device="h200_35gb")
 
     plugin = docker_plugin.get_docker_plugin(step, "example/image:latest")
 
     assert plugin["mount_buildkite_agent"] is True
+
+
+def test_pull_request_step_does_not_mount_agent_for_tracing(fake_global_config):
+    fake_global_config["branch"] = "main"
+    fake_global_config["pull_request"] = "123"
+    step = Step(label="Untrusted", device="h200_35gb")
+
+    plugin = docker_plugin.get_docker_plugin(step, "example/image:latest")
+
+    assert not plugin.get("mount_buildkite_agent", False)
 
 
 @pytest.mark.parametrize(

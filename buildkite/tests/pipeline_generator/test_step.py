@@ -182,13 +182,12 @@ def test_continue_on_failure_exits_nonzero_after_command_failure(monkeypatch):
     assert result.returncode == 1
 
 
-def test_otel_trace_wraps_commands_only_on_trusted_main(fake_global_config):
+def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
     fake_global_config["branch"] = "main"
     step = Step(
         label="Traced",
         group="Tracing",
         commands=["export VALUE=ready", 'test "$VALUE" = ready'],
-        otel_trace=True,
     )
 
     commands = buildkite_step._prepare_commands(
@@ -197,7 +196,8 @@ def test_otel_trace_wraps_commands_only_on_trusted_main(fake_global_config):
         setup_profile="none",
     )
 
-    assert commands[0] == "source /vllm-workspace/.buildkite/scripts/ci_otel.sh"
+    assert "VLLM_CI_OTEL_DIR=$$(mktemp -d)" in commands[0]
+    assert 'source "$$VLLM_CI_OTEL_DIR/ci_otel.sh"' in commands[0]
     assert commands[2].startswith("ci_otel_run 1 ")
     assert commands[4].startswith("ci_otel_run 2 ")
     _, _, encoded_label, encoded_command = commands[4].split(" ")
@@ -206,9 +206,28 @@ def test_otel_trace_wraps_commands_only_on_trusted_main(fake_global_config):
     assert "'" not in commands[4]
 
 
+def test_otel_helper_bundle_installs_and_sources():
+    command = buildkite_step._otel_setup_command().replace("$$", "$")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            command
+            + " && test -f \"$VLLM_CI_OTEL_DIR/ci_otel.py\""
+            + " && test -f \"$VLLM_CI_OTEL_DIR/ci_pytest_otel.py\""
+            + " && type ci_otel_run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_otel_trace_is_disabled_for_amd_mirror(fake_global_config):
     fake_global_config["branch"] = "main"
-    step = Step(label="AMD mirror", commands=["pytest tests"], otel_trace=True)
+    step = Step(label="AMD mirror", commands=["pytest tests"])
 
     commands = buildkite_step._prepare_commands(
         step,
@@ -222,7 +241,21 @@ def test_otel_trace_is_disabled_for_amd_mirror(fake_global_config):
 def test_otel_trace_is_disabled_for_pull_requests(fake_global_config):
     fake_global_config["branch"] = "main"
     fake_global_config["pull_request"] = "123"
-    step = Step(label="Untrusted", commands=["pytest tests"], otel_trace=True)
+    step = Step(label="Untrusted", commands=["pytest tests"])
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    assert not any("ci_otel" in command for command in commands)
+
+
+def test_otel_trace_is_disabled_for_non_vllm_pipelines(fake_global_config):
+    fake_global_config["branch"] = "main"
+    fake_global_config["github_repo_name"] = "vllm-project/other"
+    step = Step(label="Other repository", commands=["pytest tests"])
 
     commands = buildkite_step._prepare_commands(
         step,

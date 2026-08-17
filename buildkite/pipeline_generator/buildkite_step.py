@@ -2,7 +2,12 @@ from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
 import base64
+from functools import lru_cache
+import gzip
+from io import BytesIO
 import os
+from pathlib import Path
+import tarfile
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
@@ -37,6 +42,38 @@ PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
+
+OTEL_HELPERS_DIR = Path(__file__).resolve().parent / "otel_helpers"
+OTEL_HELPER_FILES = ("ci_otel.py", "ci_otel.sh", "ci_pytest_otel.py")
+
+
+@lru_cache(maxsize=1)
+def _otel_helpers_bundle() -> str:
+    """Return a deterministic compressed bundle for injection into CI jobs."""
+    archive = BytesIO()
+    with gzip.GzipFile(
+        fileobj=archive, mode="wb", compresslevel=9, mtime=0
+    ) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as bundle:
+            for name in OTEL_HELPER_FILES:
+                contents = (OTEL_HELPERS_DIR / name).read_bytes()
+                info = tarfile.TarInfo(name=name)
+                info.size = len(contents)
+                info.mode = 0o755 if name.endswith(".sh") else 0o644
+                info.mtime = 0
+                bundle.addfile(info, BytesIO(contents))
+    return base64.b64encode(archive.getvalue()).decode()
+
+
+def _otel_setup_command() -> str:
+    """Install ci-infra-owned tracing helpers in an ephemeral job directory."""
+    bundle = _otel_helpers_bundle()
+    return (
+        "export VLLM_CI_OTEL_DIR=$$(mktemp -d) && "
+        f'printf "%s" "{bundle}" | base64 --decode | '
+        'tar -xz -C "$$VLLM_CI_OTEL_DIR" && '
+        'source "$$VLLM_CI_OTEL_DIR/ci_otel.sh"'
+    )
 
 
 # Self-contained poll of the pre-commit GitHub Actions check run. Baked with the
@@ -377,13 +414,12 @@ def _prepare_commands(
 ) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
     commands = _get_setup_commands(step, setup_profile)
-    # AMD mirrors use a different runtime and do not mount the agent binary
-    # that mints the short-lived upload credential.
+    # AMD mirrors use a separate runtime and do not expose the agent binary
+    # needed to mint the short-lived upload credential. Native agent tracing
+    # still covers those jobs; command/test spans are injected elsewhere.
     trace_commands = step.otel_tracing_enabled() and setup_profile != "amd"
     if trace_commands:
-        commands.append(
-            "source /vllm-workspace/.buildkite/scripts/ci_otel.sh"
-        )
+        commands.append(_otel_setup_command())
 
     continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
 
