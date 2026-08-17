@@ -79,7 +79,7 @@ def test_spans_are_spooled_without_requesting_credentials(monkeypatch, tmp_path)
     monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
     monkeypatch.setattr(
         ci_otel,
-        "_oidc_token",
+        "_ingest_token",
         lambda deadline: (_ for _ in ()).throw(AssertionError("unexpected upload")),
     )
     span = Span(
@@ -112,7 +112,7 @@ def test_export_mints_one_token_for_multiple_batches(monkeypatch):
     monkeypatch.setattr(ci_otel, "MAX_BATCH_SIZE", 1)
     monkeypatch.setattr(
         ci_otel,
-        "_oidc_token",
+        "_ingest_token",
         lambda deadline: token_calls.append(deadline) or "token",
     )
 
@@ -149,7 +149,7 @@ def test_export_mints_one_token_for_multiple_batches(monkeypatch):
     assert all(0 < timeout <= 0.5 for timeout in request_timeouts)
 
 
-def test_export_deadline_bounds_oidc_request(monkeypatch, tmp_path):
+def test_export_deadline_bounds_secret_request(monkeypatch, tmp_path):
     for name, value in {
         "BUILDKITE": "true",
         "BUILDKITE_ORGANIZATION_SLUG": "vllm",
@@ -180,7 +180,7 @@ def test_export_deadline_bounds_oidc_request(monkeypatch, tmp_path):
     assert time.monotonic() - started < 0.5
 
 
-def test_oidc_token_uses_only_standard_audience(monkeypatch):
+def test_ingest_token_uses_buildkite_cluster_secret(monkeypatch):
     observed = {}
 
     class Result:
@@ -193,20 +193,17 @@ def test_oidc_token_uses_only_standard_audience(monkeypatch):
 
     monkeypatch.setattr(ci_otel.subprocess, "run", run)
 
-    assert ci_otel._oidc_token(time.monotonic() + 1) == "token"
+    assert ci_otel._ingest_token(time.monotonic() + 1) == "token"
     assert observed["command"] == [
         "buildkite-agent",
-        "oidc",
-        "request-token",
-        "--audience",
-        "https://ci.vllm.ai/api/otel",
-        "--lifetime",
-        "300",
+        "secret",
+        "get",
+        "CI_OTEL_INGEST_TOKEN",
     ]
     assert observed["kwargs"]["check"] is True
 
 
-def test_oidc_failure_reports_bounded_stderr(monkeypatch):
+def test_secret_failure_reports_bounded_stderr(monkeypatch):
     def run(command, **kwargs):
         raise subprocess.CalledProcessError(
             1,
@@ -217,14 +214,14 @@ def test_oidc_failure_reports_bounded_stderr(monkeypatch):
     monkeypatch.setattr(ci_otel.subprocess, "run", run)
 
     try:
-        ci_otel._oidc_token(time.monotonic() + 1)
+        ci_otel._ingest_token(time.monotonic() + 1)
     except RuntimeError as error:
         message = str(error)
     else:
-        raise AssertionError("OIDC failure should be reported")
+        raise AssertionError("secret failure should be reported")
 
     assert message.startswith(
-        "Buildkite OIDC request failed (exit 1): agent request failed"
+        "Buildkite secret request failed (exit 1): agent request failed"
     )
     assert message.endswith("...")
     assert len(message) < 600
@@ -259,7 +256,7 @@ def test_export_contains_unexpected_internal_errors(monkeypatch):
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(
         ci_otel,
-        "_oidc_token",
+        "_ingest_token",
         lambda deadline: (_ for _ in ()).throw(ValueError("broken exporter")),
     )
     span = Span(

@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 ENDPOINT = os.getenv("CI_INFRA_OTEL_ENDPOINT", "https://ci.vllm.ai/api/otel/v1/traces")
-AUDIENCE = os.getenv("CI_INFRA_OTEL_AUDIENCE", "https://ci.vllm.ai/api/otel")
+SECRET_KEY = os.getenv("CI_INFRA_OTEL_SECRET_KEY", "CI_OTEL_INGEST_TOKEN")
 MAX_BATCH_SIZE = 2_000
 
 
@@ -215,15 +215,12 @@ def _remaining_seconds(deadline: float) -> float:
     return remaining
 
 
-def _oidc_token(deadline: float) -> str:
+def _ingest_token(deadline: float) -> str:
     command = [
         "buildkite-agent",
-        "oidc",
-        "request-token",
-        "--audience",
-        AUDIENCE,
-        "--lifetime",
-        "300",
+        "secret",
+        "get",
+        SECRET_KEY,
     ]
     try:
         result = subprocess.run(
@@ -239,7 +236,7 @@ def _oidc_token(deadline: float) -> str:
             detail = f"{detail[:497]}..."
         suffix = f": {detail}" if detail else ""
         raise RuntimeError(
-            f"Buildkite OIDC request failed (exit {error.returncode}){suffix}"
+            f"Buildkite secret request failed (exit {error.returncode}){suffix}"
         ) from None
     return result.stdout.strip()
 
@@ -262,7 +259,7 @@ def export_spans(
 
     try:
         deadline = time.monotonic() + max(timeout_seconds, 0.1)
-        token = _oidc_token(deadline)
+        token = _ingest_token(deadline)
         for offset in range(0, len(spans), MAX_BATCH_SIZE):
             payload = encode_request(spans[offset : offset + MAX_BATCH_SIZE])
             request = urllib.request.Request(
