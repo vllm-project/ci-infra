@@ -36,9 +36,15 @@ class Step(BaseModel):
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
+        treatment_branch = os.getenv("CI_INFRA_OTEL_TREATMENT_BRANCH", "")
+        trusted_branch = config["branch"] == "main" or bool(
+            treatment_branch
+            and treatment_branch == config["branch"]
+            and os.getenv("BUILDKITE_SOURCE") == "api"
+        )
         return bool(
             config["github_repo_name"] == "vllm-project/vllm"
-            and config["branch"] == "main"
+            and trusted_branch
             and config["pull_request"] == "false"
         )
 

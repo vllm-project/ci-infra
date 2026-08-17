@@ -226,6 +226,40 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
     assert "'" not in commands[4]
 
 
+def test_otel_trace_allows_exact_api_treatment_branch(
+    fake_global_config, monkeypatch
+):
+    fake_global_config["branch"] = "khluu/otel"
+    monkeypatch.setenv("BUILDKITE_SOURCE", "api")
+    monkeypatch.setenv("CI_INFRA_OTEL_TREATMENT_BRANCH", "khluu/otel")
+    step = Step(label="Treatment", commands=["pytest tests"])
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    assert any("ci_otel_start" in command for command in commands)
+
+
+def test_otel_trace_rejects_non_api_treatment_branch(
+    fake_global_config, monkeypatch
+):
+    fake_global_config["branch"] = "khluu/otel"
+    monkeypatch.setenv("BUILDKITE_SOURCE", "webhook")
+    monkeypatch.setenv("CI_INFRA_OTEL_TREATMENT_BRANCH", "khluu/otel")
+    step = Step(label="Untrusted treatment", commands=["pytest tests"])
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    assert not any("ci_otel" in command for command in commands)
+
+
 def test_otel_trace_preserves_generator_variable_injection(fake_global_config):
     fake_global_config["branch"] = "main"
     step = Step(
