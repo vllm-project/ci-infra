@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import secrets
 import struct
 import sys
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -243,6 +245,31 @@ def _oidc_token(deadline: float) -> str:
     return token
 
 
+def _safe_oidc_claims(token: str) -> str:
+    """Describe non-secret identity claims without logging the signed token."""
+    try:
+        payload = token.split(".", 2)[1]
+        padding = "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload + padding))
+        names = (
+            "iss",
+            "aud",
+            "organization_slug",
+            "pipeline_slug",
+            "build_branch",
+            "build_source",
+            "build_number",
+            "job_id",
+        )
+        return json.dumps(
+            {name: claims.get(name) for name in names},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except Exception:
+        return "unavailable"
+
+
 def export_spans(
     spans: list[Span], timeout_seconds: float = UPLOAD_TIMEOUT_SECONDS
 ) -> bool:
@@ -274,11 +301,21 @@ def export_spans(
                     "User-Agent": "vllm-ci-otel/1",
                 },
             )
-            with urllib.request.urlopen(
-                request, timeout=_remaining_seconds(deadline)
-            ) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"OTLP endpoint returned {response.status}")
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=_remaining_seconds(deadline)
+                ) as response:
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"OTLP endpoint returned {response.status}"
+                        )
+            except urllib.error.HTTPError as error:
+                if error.code == 401:
+                    raise RuntimeError(
+                        "OTLP endpoint returned 401; OIDC claims: "
+                        f"{_safe_oidc_claims(token)}"
+                    ) from error
+                raise
         return True
     except Exception as error:
         print(f"CI timing upload skipped: {error}", file=sys.stderr)

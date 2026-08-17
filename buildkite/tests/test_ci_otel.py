@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import binascii
 import json
 import os
@@ -228,6 +229,28 @@ def test_oidc_token_requires_job_credentials(monkeypatch):
         assert str(error) == "Buildkite job credentials are unavailable"
     else:
         raise AssertionError("missing job credentials should be reported")
+
+
+def test_safe_oidc_claims_reports_identity_without_token():
+    payload = {
+        "iss": "https://agent.buildkite.com",
+        "aud": "https://ci.vllm.ai/api/otel",
+        "organization_slug": "vllm",
+        "pipeline_slug": "ci",
+        "build_branch": "khluu/otel",
+        "build_number": 42,
+        "job_id": "job-id",
+        "private": "must-not-be-logged",
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=")
+    token = f"header.{encoded.decode()}.signature"
+
+    claims = ci_otel._safe_oidc_claims(token)
+
+    assert '"build_branch":"khluu/otel"' in claims
+    assert '"build_source":null' in claims
+    assert "must-not-be-logged" not in claims
+    assert token not in claims
 
 
 def test_invalid_upload_timeout_cannot_break_plugin_import():
