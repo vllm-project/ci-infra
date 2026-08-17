@@ -1,6 +1,7 @@
 import base64
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,18 @@ def _render_single_step(step):
             step.group: [step],
         }
     )[0]
+
+
+def _make_pytest_bin(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "pytest-bin"
+    bin_dir.mkdir()
+    pytest_executable = bin_dir / "pytest"
+    pytest_executable.write_text(
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m pytest "$@"\n',
+        encoding="utf-8",
+    )
+    pytest_executable.chmod(0o755)
+    return bin_dir
 
 
 def test_read_steps_from_job_dir():
@@ -198,9 +211,9 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
         setup_profile="none",
     )
 
-    assert "VLLM_CI_OTEL_DIR=$$(mktemp -d 2>/dev/null)" in commands[0]
+    assert "CI_INFRA_OTEL_DIR=$$(mktemp -d 2>/dev/null)" in commands[0]
     assert commands[0].endswith("fi; :")
-    assert '. "$$VLLM_CI_OTEL_DIR/ci_otel.sh"' in commands[0]
+    assert '. "$$CI_INFRA_OTEL_DIR/ci_otel.sh"' in commands[0]
     assert "ci_otel_start 1 " in commands[2]
     assert "export VALUE=ready" in commands[2]
     assert "ci_otel_finish" in commands[2]
@@ -241,18 +254,103 @@ def test_otel_helper_bundle_installs_and_sources():
             "bash",
             "-c",
             command
-            + " && test -f \"$VLLM_CI_OTEL_DIR/ci_otel.py\""
-            + " && test -f \"$VLLM_CI_OTEL_DIR/ci_pytest_otel.py\""
-            + ' && test "$VLLM_CI_OTEL_READY" = 1'
+            + ' && test -f "$CI_INFRA_OTEL_DIR/ci_otel.py"'
+            + ' && test -f "$CI_INFRA_OTEL_DIR/ci_pytest.sh"'
+            + ' && test -f "$CI_INFRA_OTEL_DIR/ci_pytest_otel.py"'
+            + ' && test "$CI_INFRA_OTEL_READY" = 1'
+            + ' && test "$PYTHONPATH" = original-pythonpath'
+            + ' && test "$PYTEST_ADDOPTS" = original-pytest-options'
             + " && type ci_otel_start"
             + " && type ci_otel_finish",
         ],
         check=False,
         capture_output=True,
         text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": "original-pythonpath",
+            "PYTEST_ADDOPTS": "original-pytest-options",
+        },
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_pytest_shim_traces_with_command_level_pythonpath_override(
+    fake_global_config, tmp_path
+):
+    fake_global_config["branch"] = "main"
+    test_file = tmp_path / "test_sample.py"
+    test_file.write_text("def test_sample():\n    assert True\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    pytest_bin = _make_pytest_bin(tmp_path)
+    step = Step(
+        label="PYTHONPATH override",
+        group="Tracing",
+        commands=[
+            f"PYTHONPATH={shlex.quote(str(workspace))} "
+            f"pytest -q {shlex.quote(str(test_file))}"
+        ],
+    )
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    script = (
+        "\n".join(commands).replace("$$", "$")
+        + '\ngrep -q \'"name":"pytest.test"\' '
+        + '"$CI_INFRA_OTEL_SPOOL_DIR"/spans-*.jsonl'
+    )
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{pytest_bin}:{os.environ['PATH']}",
+            "PYTEST_ADDOPTS": "",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "1 passed" in result.stdout
+    assert "No module named 'ci_pytest_otel'" not in result.stderr
+
+
+def test_pytest_shim_falls_back_when_plugin_disappears(tmp_path):
+    test_file = tmp_path / "test_sample.py"
+    test_file.write_text("def test_sample():\n    assert True\n", encoding="utf-8")
+    pytest_bin = _make_pytest_bin(tmp_path)
+    missing_helpers = tmp_path / "missing-helpers"
+    missing_helpers.mkdir()
+    command = buildkite_step._otel_setup_command().replace("$$", "$")
+    shell = (
+        command
+        + "\nci_otel_start 1 dGVzdA=="
+        + f"\nCI_INFRA_OTEL_DIR={shlex.quote(str(missing_helpers))}"
+        + "\nexport CI_INFRA_OTEL_DIR"
+        + f"\npytest -q {shlex.quote(str(test_file))}"
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{pytest_bin}:{os.environ['PATH']}",
+            "PYTEST_ADDOPTS": "",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "1 passed" in result.stdout
+    assert "pytest tracing skipped; running pytest normally" in result.stderr
 
 
 def test_otel_setup_failure_is_soft_and_direct_command_runs(
@@ -303,7 +401,7 @@ def test_otel_import_failure_leaves_test_environment_untouched(
     script = (
         "python3() { return 1; };\n"
         + "\n".join(commands).replace("$$", "$")
-        + '\ntest "$VLLM_CI_OTEL_READY" = 0'
+        + '\ntest "$CI_INFRA_OTEL_READY" = 0'
         + '\ntest "$PYTHONPATH" = original-pythonpath'
         + '\ntest "$PYTEST_ADDOPTS" = original-pytest-options'
     )
@@ -362,7 +460,7 @@ def test_otel_helper_bundle_runs_under_posix_shell():
             command
             + " && ci_otel_start 1 dHJ1ZQ=="
             + " && true && ci_otel_finish 0"
-            + ' && test -n "$(find "$VLLM_CI_OTEL_SPOOL_DIR" -name spans-\\*.jsonl -size +0c -print -quit)"',
+            + ' && test -n "$(find "$CI_INFRA_OTEL_SPOOL_DIR" -name spans-\\*.jsonl -size +0c -print -quit)"',
         ],
         check=False,
         capture_output=True,

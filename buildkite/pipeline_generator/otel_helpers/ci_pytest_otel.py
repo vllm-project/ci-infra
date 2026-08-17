@@ -32,7 +32,9 @@ def _soft_fail(action):
 
 
 def _enabled() -> bool:
-    return bool(os.getenv("VLLM_CI_TRACE_ID") and os.getenv("VLLM_CI_COMMAND_SPAN_ID"))
+    return bool(
+        os.getenv("CI_INFRA_TRACE_ID") and os.getenv("CI_INFRA_COMMAND_SPAN_ID")
+    )
 
 
 def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]):
@@ -72,9 +74,9 @@ def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str])
 def _test_span(nodeid: str, run: TestRun) -> Span:
     outcome = run.outcome
     return Span(
-        trace_id=os.environ["VLLM_CI_TRACE_ID"],
+        trace_id=os.environ["CI_INFRA_TRACE_ID"],
         span_id=os.urandom(8).hex(),
-        parent_span_id=os.environ["VLLM_CI_COMMAND_SPAN_ID"],
+        parent_span_id=os.environ["CI_INFRA_COMMAND_SPAN_ID"],
         name="pytest.test",
         start_ns=run.start_ns,
         end_ns=run.end_ns or time.time_ns(),

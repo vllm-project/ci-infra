@@ -76,7 +76,7 @@ def test_export_is_disabled_outside_buildkite(monkeypatch):
 
 
 def test_spans_are_spooled_without_requesting_credentials(monkeypatch, tmp_path):
-    monkeypatch.setenv("VLLM_CI_OTEL_SPOOL_DIR", str(tmp_path))
+    monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
     monkeypatch.setattr(
         ci_otel,
         "_oidc_token",
@@ -180,6 +180,32 @@ def test_export_deadline_bounds_oidc_request(monkeypatch, tmp_path):
     assert time.monotonic() - started < 0.5
 
 
+def test_oidc_token_uses_only_standard_audience(monkeypatch):
+    observed = {}
+
+    class Result:
+        stdout = "token\n"
+
+    def run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return Result()
+
+    monkeypatch.setattr(ci_otel.subprocess, "run", run)
+
+    assert ci_otel._oidc_token(time.monotonic() + 1) == "token"
+    assert observed["command"] == [
+        "buildkite-agent",
+        "oidc",
+        "request-token",
+        "--audience",
+        "https://ci.vllm.ai/api/otel",
+        "--lifetime",
+        "300",
+    ]
+    assert observed["kwargs"]["check"] is True
+
+
 def test_invalid_upload_timeout_cannot_break_plugin_import():
     result = subprocess.run(
         [sys.executable, "-c", "import ci_otel, ci_pytest_otel"],
@@ -189,7 +215,7 @@ def test_invalid_upload_timeout_cannot_break_plugin_import():
         env={
             **os.environ,
             "PYTHONPATH": str(SCRIPTS_DIR),
-            "VLLM_CI_OTEL_UPLOAD_TIMEOUT": "not-a-number",
+            "CI_INFRA_OTEL_UPLOAD_TIMEOUT": "not-a-number",
         },
     )
 
@@ -226,7 +252,7 @@ def test_export_contains_unexpected_internal_errors(monkeypatch):
 
 
 def test_record_spans_contains_serialization_errors(monkeypatch, tmp_path):
-    monkeypatch.setenv("VLLM_CI_OTEL_SPOOL_DIR", str(tmp_path))
+    monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
     span = Span(
         trace_id="01" * 16,
         span_id="02" * 8,
@@ -255,8 +281,8 @@ def test_shell_wrapper_preserves_command_state_and_quoting(tmp_path):
         text=True,
         env={
             **os.environ,
-            "VLLM_CI_OTEL_DIR": str(SCRIPTS_DIR),
-            "VLLM_CI_OTEL_SPOOL_DIR": str(tmp_path),
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path),
         },
     )
 
@@ -276,8 +302,8 @@ def test_shell_wrapper_expands_runtime_environment_arguments(tmp_path):
             **os.environ,
             "REGISTRY": "registry.example.com",
             "COMMIT": "abc123",
-            "VLLM_CI_OTEL_DIR": str(SCRIPTS_DIR),
-            "VLLM_CI_OTEL_SPOOL_DIR": str(tmp_path),
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path),
         },
     )
 
@@ -299,8 +325,8 @@ def test_shell_wrapper_preserves_failure_status(tmp_path):
         text=True,
         env={
             **os.environ,
-            "VLLM_CI_OTEL_DIR": str(SCRIPTS_DIR),
-            "VLLM_CI_OTEL_SPOOL_DIR": str(tmp_path),
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path),
         },
     )
 
@@ -323,8 +349,8 @@ def test_shell_wrapper_runs_command_when_context_creation_fails(tmp_path):
         env={
             **os.environ,
             "OUTPUT_FILE": str(tmp_path / "ran"),
-            "VLLM_CI_OTEL_DIR": str(SCRIPTS_DIR),
-            "VLLM_CI_OTEL_SPOOL_DIR": str(tmp_path / "spans"),
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path / "spans"),
         },
     )
 
@@ -355,8 +381,8 @@ def test_shell_wrapper_ignores_recording_failure(tmp_path):
         text=True,
         env={
             **os.environ,
-            "VLLM_CI_OTEL_DIR": str(SCRIPTS_DIR),
-            "VLLM_CI_OTEL_SPOOL_DIR": str(tmp_path),
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path),
         },
     )
 
@@ -380,8 +406,8 @@ def test_exit_flush_failure_preserves_success_and_failure(tmp_path):
             text=True,
             env={
                 **os.environ,
-                "VLLM_CI_OTEL_DIR": str(SCRIPTS_DIR),
-                "VLLM_CI_OTEL_SPOOL_DIR": str(tmp_path / f"spans-{status}"),
+                "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+                "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path / f"spans-{status}"),
             },
         )
 
@@ -390,8 +416,8 @@ def test_exit_flush_failure_preserves_success_and_failure(tmp_path):
 
 
 def test_pytest_hooks_contain_all_tracing_errors(monkeypatch):
-    monkeypatch.setenv("VLLM_CI_TRACE_ID", "01" * 16)
-    monkeypatch.setenv("VLLM_CI_COMMAND_SPAN_ID", "02" * 8)
+    monkeypatch.setenv("CI_INFRA_TRACE_ID", "01" * 16)
+    monkeypatch.setenv("CI_INFRA_COMMAND_SPAN_ID", "02" * 8)
     ci_pytest_otel._runs.clear()
     ci_pytest_otel._spans.clear()
     monkeypatch.setattr(
@@ -418,9 +444,9 @@ def test_real_pytest_passes_when_otel_spool_is_unwritable(tmp_path):
             **os.environ,
             "PYTHONPATH": str(SCRIPTS_DIR),
             "PYTEST_ADDOPTS": "-p ci_pytest_otel",
-            "VLLM_CI_TRACE_ID": "01" * 16,
-            "VLLM_CI_COMMAND_SPAN_ID": "02" * 8,
-            "VLLM_CI_OTEL_SPOOL_DIR": "/dev/null/spans",
+            "CI_INFRA_TRACE_ID": "01" * 16,
+            "CI_INFRA_COMMAND_SPAN_ID": "02" * 8,
+            "CI_INFRA_OTEL_SPOOL_DIR": "/dev/null/spans",
         },
     )
 

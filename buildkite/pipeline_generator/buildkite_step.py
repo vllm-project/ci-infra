@@ -45,7 +45,12 @@ SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 
 OTEL_HELPERS_DIR = Path(__file__).resolve().parent / "otel_helpers"
-OTEL_HELPER_FILES = ("ci_otel.py", "ci_otel.sh", "ci_pytest_otel.py")
+OTEL_HELPER_FILES = (
+    "ci_otel.py",
+    "ci_otel.sh",
+    "ci_pytest.sh",
+    "ci_pytest_otel.py",
+)
 
 
 @lru_cache(maxsize=1)
@@ -70,15 +75,15 @@ def _otel_setup_command() -> str:
     """Best-effort install of ci-infra-owned tracing helpers."""
     bundle = _otel_helpers_bundle()
     return (
-        "VLLM_CI_OTEL_READY=0; export VLLM_CI_OTEL_READY; "
-        "if VLLM_CI_OTEL_DIR=$$(mktemp -d 2>/dev/null) && "
-        "export VLLM_CI_OTEL_DIR && "
+        "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; "
+        "if CI_INFRA_OTEL_DIR=$$(mktemp -d 2>/dev/null) && "
+        "export CI_INFRA_OTEL_DIR && "
         f'printf "%s" "{bundle}" | base64 --decode | '
-        'tar -xz -C "$$VLLM_CI_OTEL_DIR" && '
-        'sh -n "$$VLLM_CI_OTEL_DIR/ci_otel.sh" && '
-        '. "$$VLLM_CI_OTEL_DIR/ci_otel.sh"; then :; else '
+        'tar -xz -C "$$CI_INFRA_OTEL_DIR" && '
+        'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
+        '. "$$CI_INFRA_OTEL_DIR/ci_otel.sh"; then :; else '
         'echo "vLLM CI OTel: tracing setup skipped" >&2 || :; '
-        "VLLM_CI_OTEL_READY=0; export VLLM_CI_OTEL_READY; fi; :"
+        "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; fi; :"
     )
 
 
@@ -446,14 +451,14 @@ def _prepare_commands(
                 # execution and cannot change shell state or failure semantics.
                 encoded_preview = base64.b64encode(preview.encode()).decode()
                 prepared_command = (
-                    'if [ "$${VLLM_CI_OTEL_READY:-0}" = "1" ] && '
+                    'if [ "$${CI_INFRA_OTEL_READY:-0}" = "1" ] && '
                     "command -v ci_otel_start >/dev/null 2>&1; then "
                     f"ci_otel_start {i + 1} {encoded_preview} || :; fi\n"
                     f"{cmd}\n"
-                    "_VLLM_CI_OTEL_COMMAND_STATUS=$$?\n"
+                    "_CI_INFRA_OTEL_COMMAND_STATUS=$$?\n"
                     "if command -v ci_otel_finish >/dev/null 2>&1; then "
-                    "ci_otel_finish $$_VLLM_CI_OTEL_COMMAND_STATUS || :; fi\n"
-                    "(exit $$_VLLM_CI_OTEL_COMMAND_STATUS)"
+                    "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :; fi\n"
+                    "(exit $$_CI_INFRA_OTEL_COMMAND_STATUS)"
                 )
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands

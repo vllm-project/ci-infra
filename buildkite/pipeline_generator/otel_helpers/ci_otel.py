@@ -19,14 +19,14 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-ENDPOINT = os.getenv("VLLM_CI_OTEL_ENDPOINT", "https://ci.vllm.ai/api/otel/v1/traces")
-AUDIENCE = os.getenv("VLLM_CI_OTEL_AUDIENCE", "https://ci.vllm.ai/api/otel")
+ENDPOINT = os.getenv("CI_INFRA_OTEL_ENDPOINT", "https://ci.vllm.ai/api/otel/v1/traces")
+AUDIENCE = os.getenv("CI_INFRA_OTEL_AUDIENCE", "https://ci.vllm.ai/api/otel")
 MAX_BATCH_SIZE = 2_000
 
 
 def _upload_timeout_seconds() -> float:
     try:
-        value = float(os.getenv("VLLM_CI_OTEL_UPLOAD_TIMEOUT", "3"))
+        value = float(os.getenv("CI_INFRA_OTEL_UPLOAD_TIMEOUT", "3"))
         return value if value > 0 else 3.0
     except (TypeError, ValueError):
         return 3.0
@@ -169,7 +169,7 @@ def new_context() -> tuple[str, str, str | None]:
 
 
 def _spool_dir() -> Path | None:
-    value = os.getenv("VLLM_CI_OTEL_SPOOL_DIR")
+    value = os.getenv("CI_INFRA_OTEL_SPOOL_DIR")
     return Path(value) if value else None
 
 
@@ -225,8 +225,6 @@ def _oidc_token(deadline: float) -> str:
             AUDIENCE,
             "--lifetime",
             "300",
-            "--claim",
-            "build_id",
         ],
         check=True,
         capture_output=True,
