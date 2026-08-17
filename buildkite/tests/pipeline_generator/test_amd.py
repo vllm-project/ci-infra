@@ -548,3 +548,58 @@ def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
     # An AMD mirror without its own timeout does not inherit the shorter main
     # timeout (AMD runs slower); it receives the standard AMD timeout.
     assert amd_command_step.timeout_in_minutes == 180
+
+
+@pytest.mark.parametrize(
+    "amd_label,expected_amd_label",
+    [
+        (None, "AMD: Mirrored label test (mi300_1)"),
+        (
+            ":amd: MI300 Attention Kernels",
+            ":amd: MI300 Attention Kernels",
+        ),
+    ],
+)
+def test_amd_mirror_label_override(fake_global_config, amd_label, expected_amd_label):
+    fake_global_config["list_file_diff"] = ["vllm/foo.py"]
+    amd_mirror = {
+        "device": "mi300_1",
+        "depends_on": ["image-build-amd"],
+    }
+    if amd_label is not None:
+        amd_mirror["label"] = amd_label
+    step = Step(
+        label="Mirrored label test",
+        group="Mirrors",
+        key="mirrored-label",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        mirror={"amd": amd_mirror},
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+    amd_command_step = next(
+        s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+    default_group = next(group for group in group_steps if group.group == "Mirrors")
+    default_command_step = next(
+        s
+        for s in default_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    # A mirror-level label is used verbatim; without one the derived
+    # "AMD: <label> (<device>)" form is unchanged. The NVIDIA label is
+    # never affected either way.
+    assert amd_command_step.label == expected_amd_label
+    assert default_command_step.label == "Mirrored label test"

@@ -755,6 +755,7 @@ def convert_group_step_to_buildkite_step(
                     ),
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
+                    display_label=amd.get("label"),
                 )
                 if not _amd_mirror_should_run(
                     _step_should_run(
@@ -770,7 +771,9 @@ def convert_group_step_to_buildkite_step(
                         else "image-build-amd"
                     )
                     amd_block_step = _create_block_step(
-                        block=f"Run AMD: {step.label}",
+                        block=f"Run {amd_step.label}"
+                        if amd.get("label")
+                        else f"Run AMD: {step.label}",
                         key=f"block-amd-{step_key}",
                         command_step=amd_step,
                         depends_on=[mirror_build_dep],
@@ -893,6 +896,7 @@ def _create_amd_step(
     key: str,
     timeout_in_minutes: Optional[int] = None,
     agent_tags: Optional[Dict[str, str]] = None,
+    display_label: Optional[str] = None,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
     options = build_amd_step_options(
@@ -908,6 +912,8 @@ def _create_amd_step(
         num_nodes=num_nodes,
         agent_tags=agent_tags,
     )
+    if display_label:
+        options["label"] = display_label
     return BuildkiteCommandStep(
         **options,
         key=key,
