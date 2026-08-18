@@ -61,6 +61,9 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                       capabilities:
                         add:
                           - IPC_LOCK
+                    {# DPX agents allocate one partition via DRA resourceClaims on the
+                       controller. Setting amd.com/gpu here creates a second claim #}
+                    {% if step.agent_pool != "dpx" %}
                     resources:
                       limits:
                         {% if step.no_gpu %}
@@ -75,6 +78,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                         {% else %}
                         amd.com/gpu: "{{ step.num_gpus or 1 }}"
                         {% endif %}
+                    {% endif %}
                     volumeMounts:
                       - name: devshm
                         mountPath: /dev/shm
