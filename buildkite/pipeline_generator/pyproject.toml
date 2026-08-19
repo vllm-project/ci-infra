@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "pipeline-generator"
 version = "0.1.0"
 dependencies = [
+    "boto3>=1.36.0,<2",
+    "botocore>=1.36.26,<2",
     "pyyaml",
     "click",
     "pydantic>=2.0",
@@ -14,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 pipeline-generator = "main:main"
+vllm-test-selection = "test_selection.cli:main"
 
 [tool.setuptools]
 py-modules = [
@@ -28,7 +31,8 @@ py-modules = [
 ]
 
 [tool.setuptools.packages.find]
-include = [".", "otel_helpers", "plugin", "utils_lib"]
+include = [".", "otel_helpers", "plugin", "test_selection*", "utils_lib"]
 
 [tool.setuptools.package-data]
 otel_helpers = ["*.sh"]
+"test_selection.collector" = ["*.sh"]

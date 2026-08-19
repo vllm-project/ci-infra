@@ -4,6 +4,7 @@ from unittest.mock import mock_open, patch
 import pytest
 
 from buildkite.pipeline_generator.global_config import (
+    DEFAULT_VLLM_TRACE_BUCKET,
     ONLY_STEP_KEYS_ENV_VAR,
     _parse_only_step_keys,
     _validate_pipeline_config,
@@ -143,6 +144,40 @@ def test_init_global_config_reads_only_step_keys(
         init_global_config("dummy_path")
 
     assert global_config.config["only_step_keys"] == frozenset({"selected-step"})
+
+
+@patch(
+    "buildkite.pipeline_generator.global_config.get_merge_base_commit",
+    return_value="sha",
+)
+@patch(
+    "buildkite.pipeline_generator.global_config.get_list_file_diff",
+    return_value=[],
+)
+@patch("buildkite.pipeline_generator.global_config.get_pr_labels", return_value=[])
+@patch(
+    "builtins.open",
+    new_callable=mock_open,
+    read_data="name: test\njob_dirs: [/tmp]\nregistries: reg\nrepositories: {main: repo}",
+)
+@patch("os.path.exists", return_value=True)
+def test_main_nightly_uses_the_ci_infra_owned_trace_bucket(
+    mock_exists, mock_open, mock_pr_labels, mock_diff, mock_mb
+):
+    import buildkite.pipeline_generator.global_config as global_config
+
+    with patch.dict(
+        os.environ,
+        {
+            "BUILDKITE_BRANCH": "main",
+            "BUILDKITE_PULL_REQUEST": "false",
+            "NIGHTLY": "1",
+        },
+        clear=True,
+    ):
+        init_global_config("dummy_path")
+
+    assert global_config.config["trace_s3_bucket"] == DEFAULT_VLLM_TRACE_BUCKET
 
 
 def test_validate_pipeline_config_valid_repo():

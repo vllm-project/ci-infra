@@ -1,11 +1,11 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from pydantic import model_validator
-from typing_extensions import Self
-from collections import defaultdict
-from global_config import get_global_config
 import os
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
+
 import yaml
+from global_config import get_global_config
+from pydantic import BaseModel, Field, model_validator
+from typing_extensions import Self
 
 
 class Step(BaseModel):
@@ -33,6 +33,9 @@ class Step(BaseModel):
     no_gpu: Optional[bool] = False
     dind: bool = True
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
+    trace_represented_job_key: Optional[str] = None
+    trace_gpu: bool = False
+    trace_collector_sha256: Optional[str] = None
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
@@ -96,7 +99,9 @@ def read_steps_from_job_dir(job_dir: str):
                         and global_config["github_repo_name"] == "vllm-project/vllm"
                     ):
                         step.working_dir = "/vllm-workspace/tests"
-                    step.source_file_dependencies = getattr(step, "source_file_dependencies", [])
+                    step.source_file_dependencies = getattr(
+                        step, "source_file_dependencies", []
+                    )
                     if not step.source_file_dependencies:
                         step.source_file_dependencies = []
                     step.source_file_dependencies.append(os.path.relpath(yaml_path))

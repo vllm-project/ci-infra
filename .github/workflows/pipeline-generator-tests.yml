@@ -35,7 +35,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install -r requirements.txt
-          python -m pip install pytest ./buildkite/pipeline_generator
+          python -m pip install pytest pytest-cov ./buildkite/pipeline_generator
 
       - name: Run tests
         run: python -m pytest buildkite/tests

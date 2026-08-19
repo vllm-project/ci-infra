@@ -4,11 +4,12 @@ import re
 from typing import Dict, FrozenSet, List, Optional, TypedDict
 
 import yaml
-
-from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels
-
+from utils_lib.git_utils import get_list_file_diff, get_merge_base_commit, get_pr_labels
 
 ONLY_STEP_KEYS_ENV_VAR = "VLLM_CI_ONLY_STEP_KEYS"
+TRACE_S3_BUCKET_ENV_VAR = "VLLM_CI_TRACE_S3_BUCKET"
+TRACE_S3_PREFIX_ENV_VAR = "VLLM_CI_TRACE_S3_PREFIX"
+DEFAULT_VLLM_TRACE_BUCKET = "vllm-ci-test-selection-traces-936637512419-us-east-1"
 STEP_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -30,6 +31,8 @@ class GlobalConfig(TypedDict):
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
     only_step_keys: Optional[FrozenSet[str]] = None
+    trace_s3_bucket: Optional[str] = None
+    trace_s3_prefix: str = "test-selection/vllm"
 
 
 config = None
@@ -59,6 +62,26 @@ def init_global_config(pipeline_config_path: str):
     list_file_diff = get_list_file_diff(branch, merge_base_commit)
     pr_labels = get_pr_labels(pull_request, pipeline_config["github_repo_name"])
 
+    only_step_keys = _parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR))
+    nightly = os.getenv("NIGHTLY", "0")
+    commit = os.getenv("BUILDKITE_COMMIT")
+    trace_s3_bucket = os.getenv(TRACE_S3_BUCKET_ENV_VAR)
+    if (
+        pipeline_config["github_repo_name"] == "vllm-project/vllm"
+        and nightly == "1"
+        and branch == "main"
+        and pull_request in (None, "false")
+    ):
+        trace_s3_bucket = trace_s3_bucket or DEFAULT_VLLM_TRACE_BUCKET
+    if trace_s3_bucket and not re.fullmatch(
+        r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", trace_s3_bucket
+    ):
+        raise ValueError(f"{TRACE_S3_BUCKET_ENV_VAR} is invalid.")
+    trace_s3_prefix = os.getenv(TRACE_S3_PREFIX_ENV_VAR, "test-selection/vllm")
+    if not re.fullmatch(r"[a-zA-Z0-9._/-]+", trace_s3_prefix) or any(
+        part in ("", ".", "..") for part in trace_s3_prefix.split("/")
+    ):
+        raise ValueError(f"{TRACE_S3_PREFIX_ENV_VAR} is invalid.")
     config = GlobalConfig(
         name=pipeline_config["name"],
         github_repo_name=pipeline_config["github_repo_name"],
@@ -66,12 +89,12 @@ def init_global_config(pipeline_config_path: str):
         registries=pipeline_config["registries"],
         repositories=pipeline_config["repositories"],
         branch=branch,
-        commit=os.getenv("BUILDKITE_COMMIT"),
+        commit=commit,
         pull_request=pull_request,
         docs_only_disable=os.getenv("DOCS_ONLY_DISABLE", "0"),
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
-        nightly=os.getenv("NIGHTLY", "0"),
+        nightly=nightly,
         torch_nightly=os.getenv("TORCH_NIGHTLY", "0"),
         run_all=_should_run_all(
             pr_labels,
@@ -82,7 +105,9 @@ def init_global_config(pipeline_config_path: str):
         merge_base_commit=merge_base_commit,
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
-        only_step_keys=_parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR)),
+        only_step_keys=only_step_keys,
+        trace_s3_bucket=trace_s3_bucket,
+        trace_s3_prefix=trace_s3_prefix,
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
@@ -100,23 +125,29 @@ def get_global_config():
 
 
 def _parse_only_step_keys(value: Optional[str]) -> Optional[FrozenSet[str]]:
+    return _parse_step_keys(value, ONLY_STEP_KEYS_ENV_VAR)
+
+
+def _parse_step_keys(
+    value: Optional[str], environment_variable: str
+) -> Optional[FrozenSet[str]]:
     if value is None:
         return None
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as error:
         raise ValueError(
-            f"{ONLY_STEP_KEYS_ENV_VAR} must be a JSON array of step keys."
+            f"{environment_variable} must be a JSON array of step keys."
         ) from error
     if not isinstance(parsed, list) or not parsed:
-        raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} must be a non-empty JSON array.")
+        raise ValueError(f"{environment_variable} must be a non-empty JSON array.")
     if any(
         not isinstance(key, str) or not STEP_KEY_PATTERN.fullmatch(key)
         for key in parsed
     ):
-        raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} contains an invalid step key.")
+        raise ValueError(f"{environment_variable} contains an invalid step key.")
     if len(set(parsed)) != len(parsed):
-        raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} contains duplicate step keys.")
+        raise ValueError(f"{environment_variable} contains duplicate step keys.")
     return frozenset(parsed)
 
 
