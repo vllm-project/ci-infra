@@ -30,7 +30,14 @@ def _write(path: Path, value) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _job(root: Path, key: str, *, healthy: bool = True, shard: int = 0) -> None:
+def _job(
+    root: Path,
+    key: str,
+    *,
+    healthy: bool = True,
+    shard: int = 0,
+    failure_reason: str | None = None,
+) -> None:
     directory = root / key / str(shard)
     trace = directory / "commands/000/python-trace.jsonl"
     rows = [
@@ -47,6 +54,7 @@ def _job(root: Path, key: str, *, healthy: bool = True, shard: int = 0) -> None:
         directory / "commands/000/job.json",
         {
             "created_at": CREATED,
+            "failure_reason": failure_reason,
             "healthy": healthy,
             "node_ids": ["tests/test_model.py::test_forward"],
             "python_trace": trace.name,
@@ -61,6 +69,7 @@ def _job(root: Path, key: str, *, healthy: bool = True, shard: int = 0) -> None:
             "capture_mode": "python-only",
             "collector_sha256": COLLECTOR,
             "created_at": CREATED,
+            "failure_reason": failure_reason,
             "healthy": healthy,
             "parallel_job": shard,
             "parallel_job_count": 1,
@@ -140,6 +149,25 @@ def test_missing_job_is_recorded_and_always_runs(tmp_path: Path):
 
     assert metadata["missing_jobs"] == ["missing"]
     assert job_coverage(graph, current)["uncovered_step_keys"] == ["missing"]
+
+
+def test_unhealthy_summary_preserves_specific_failure_reason(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    _job(evidence, "healthy")
+    _job(
+        evidence,
+        "import-failed",
+        healthy=False,
+        failure_reason="collector_import_failed",
+    )
+
+    metadata = build_fleet_graph(
+        evidence,
+        _inventory(tmp_path / "inventory.json", "healthy", "import-failed"),
+        tmp_path / "graph.sqlite",
+    )
+
+    assert metadata["unhealthy_reasons"] == {"import-failed": "collector_import_failed"}
 
 
 def test_bad_checksum_fails_closed(tmp_path: Path):

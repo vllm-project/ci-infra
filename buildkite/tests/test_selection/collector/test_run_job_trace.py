@@ -2,18 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
+import io
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import pytest
 
 import test_selection.collector.nvtx_test_ranges as nvtx_test_ranges
 import test_selection.collector.pytest_trace_plugin as pytest_trace_plugin
 import test_selection.collector.run_job_trace as run_job_trace
+from test_selection.collector_bundle import bundle_bytes
 from test_selection.collector.nvtx_test_ranges import _configured_nvtx
 from test_selection.collector.run_job_trace import decode_commands
 
@@ -146,6 +149,78 @@ def test_python_only_job_collects_unordered_lines_and_exact_collector(
     assert summary["healthy"] is True
 
 
+def test_command_local_pythonpath_keeps_pytest_plugins_importable(tmp_path: Path):
+    repo = tmp_path / "repo"
+    package = repo / "vllm"
+    tests = repo / "tests"
+    package.mkdir(parents=True)
+    tests.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "sample.py").write_text(
+        "def answer():\n    return 42\n", encoding="utf-8"
+    )
+    (tests / "test_first.py").write_text(
+        "from vllm.sample import answer\n\n"
+        "def test_first():\n    assert answer() == 42\n",
+        encoding="utf-8",
+    )
+    (tests / "test_second.py").write_text(
+        "from vllm.sample import answer\n\n"
+        "def test_second():\n    assert answer() == 42\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "trace"
+    collector_root = tmp_path / "collector"
+    with ZipFile(io.BytesIO(bundle_bytes())) as archive:
+        archive.extractall(collector_root)
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "BUILDKITE_COMMIT": "b" * 40,
+            "PATH": f"{Path(sys.executable).parent}:{environment['PATH']}",
+            "PYTHONPATH": str(collector_root),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ci_test_selection.run_job_trace",
+            "--output-dir",
+            str(output),
+            "--job-key",
+            "unit",
+            "--represented-job-key",
+            "unit",
+            "--commands-base64",
+            _payload(
+                [
+                    "pytest -q tests/test_first.py",
+                    f"PYTHONPATH={repo} pytest -q tests/test_second.py",
+                ]
+            ),
+            "--repo-root",
+            str(repo),
+            "--python-only",
+            "--preserve-command-exit-code",
+        ],
+        cwd=repo,
+        env=environment,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    summary = json.loads((output / "trace-job.json").read_text())
+    assert summary["healthy"] is True
+    assert summary["failure_reason"] is None
+    assert [row["healthy"] for row in summary["command_results"]] == [True, True]
+    assert [row["fallback_uninstrumented"] for row in summary["command_results"]] == [
+        False,
+        False,
+    ]
+
+
 @pytest.mark.parametrize(
     "command,expected_status",
     [("echo original-command-ran", 0), ("exit 7", 7)],
@@ -230,6 +305,10 @@ def test_in_place_collection_falls_back_only_before_command_start(tmp_path: Path
     assert (repo / "original-ran").is_file()
     summary = json.loads((output / "trace-job.json").read_text())
     assert summary["command_results"][0]["fallback_uninstrumented"] is True
+    assert summary["command_results"][0]["failure_reason"] == (
+        "collector_import_failed"
+    )
+    assert summary["failure_reason"] == "collector_import_failed"
 
 
 def test_finished_command_is_not_rerun_after_collector_failure(

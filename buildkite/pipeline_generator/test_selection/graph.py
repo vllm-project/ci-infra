@@ -213,7 +213,17 @@ def _materialize(
                 document.get("healthy") is not True
                 for _path, document in summaries[key].values()
             ):
-                status, reason = "unhealthy", invalid.get(key, "collector_unhealthy")
+                summary_reasons = {
+                    str(document["failure_reason"])
+                    for _path, document in summaries[key].values()
+                    if document.get("failure_reason")
+                }
+                reason = invalid.get(key) or (
+                    next(iter(summary_reasons))
+                    if len(summary_reasons) == 1
+                    else "collector_unhealthy"
+                )
+                status = "unhealthy"
                 unhealthy.append(key)
             else:
                 try:

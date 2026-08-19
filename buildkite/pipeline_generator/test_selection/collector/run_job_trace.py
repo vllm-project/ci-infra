@@ -188,6 +188,13 @@ def main() -> int:
             and command_status.get("command_executed") is True
             and command_status.get("phase") in ("started", "finished")
         )
+        failure_reason = (
+            str(shard_job["failure_reason"])
+            if shard_job and shard_job.get("failure_reason")
+            else "collector_runtime_error"
+            if collector_error
+            else None
+        )
         fallback_uninstrumented = False
         if (
             args.preserve_command_exit_code
@@ -210,6 +217,7 @@ def main() -> int:
                 "collector_error": collector_error,
                 "collector_exit_code": collector_exit_code,
                 "command_exit_code": command_exit_code,
+                "failure_reason": failure_reason,
                 "fallback_uninstrumented": fallback_uninstrumented,
                 "healthy": bool(
                     collector_exit_code == 0
@@ -226,6 +234,18 @@ def main() -> int:
         result["command_exit_code"] == 0 and result["healthy"]
         for result in command_results
     )
+    failure_reasons = sorted(
+        {
+            result["failure_reason"]
+            for result in command_results
+            if result["failure_reason"]
+        }
+    )
+    failure_reason = None
+    if not healthy:
+        failure_reason = (
+            failure_reasons[0] if len(failure_reasons) == 1 else "collector_unhealthy"
+        )
     summary_path = output_dir / "trace-job.json"
     try:
         parallel_job = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
@@ -241,6 +261,7 @@ def main() -> int:
                 "command_count": len(commands),
                 "command_results": command_results,
                 "created_at": datetime.now(UTC).isoformat(),
+                "failure_reason": failure_reason,
                 "healthy": healthy,
                 "job_key": args.job_key,
                 "parallel_job": parallel_job,

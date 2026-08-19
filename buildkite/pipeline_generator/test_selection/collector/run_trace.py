@@ -10,6 +10,8 @@ import base64
 import hashlib
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -204,6 +206,38 @@ def _command_environment(
     return environment
 
 
+def _collector_import_root() -> Path:
+    """Return the path that makes this collector's top-level package importable."""
+
+    package = __package__ or "ci_test_selection"
+    return Path(__file__).resolve().parents[len(package.split("."))]
+
+
+def _install_pytest_launcher(
+    directory: Path,
+    environment: dict[str, str],
+) -> None:
+    """Keep collector plugins importable across command-local PYTHONPATH changes."""
+
+    real_pytest = shutil.which("pytest", path=environment.get("PATH"))
+    if real_pytest:
+        target = f'{shlex.quote(real_pytest)} "$@"'
+    else:
+        target = f'{shlex.quote(sys.executable)} -m pytest "$@"'
+    collector_root = shlex.quote(str(_collector_import_root()))
+    launcher = directory / "pytest"
+    launcher.write_text(
+        "#!/bin/sh\n"
+        f"export PYTHONPATH={collector_root}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+        f"exec {target}\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    environment["PATH"] = os.pathsep.join(
+        value for value in (str(directory), environment.get("PATH")) if value
+    )
+
+
 _IMPORT_PREFLIGHT = r"""
 import importlib
 import json
@@ -309,11 +343,21 @@ def validate_import_environment(
             pytest_environment["VLLM_CI_TEST_SELECTION_NODEIDS"] = str(
                 pytest_preflight_dir / "pytest-nodes.json"
             )
+            # Exercise the same direct ``pytest`` launcher used by production
+            # commands after replacing PYTHONPATH, which catches command-local
+            # assignments such as ``PYTHONPATH=/vllm-workspace pytest ...``.
+            pytest_environment["PYTHONPATH"] = str(repo_root.resolve())
+            pytest_launcher = shutil.which(
+                "pytest", path=pytest_environment.get("PATH")
+            )
+            preflight_command = (
+                [pytest_launcher]
+                if pytest_launcher
+                else [sys.executable, "-m", "pytest"]
+            )
             pytest_result = subprocess.run(
                 [
-                    sys.executable,
-                    "-m",
-                    "pytest",
+                    *preflight_command,
                     "--collect-only",
                     "--quiet",
                     str(pytest_target),
@@ -380,54 +424,64 @@ def main() -> int:
     command_status_file = output_dir / "command-status.json"
     repository_sha = _git_sha(args.repo_root)
 
-    environment = _command_environment(
-        coverage_file=coverage_file,
-        node_file=node_file,
-        repo_root=args.repo_root,
-        auto_load_pytest=bool(args.command_base64),
-    )
-    command_cwd = (args.command_cwd or args.repo_root).resolve()
-    if args.command_base64:
-        command_text = _decode_command(args.command_base64)
-        command = ["bash", "-lc", command_text]
-    else:
-        command_text = None
-        command = pytest_command(tests)
-    preflight_status = validate_import_environment(
-        command_cwd=command_cwd,
-        environment=environment,
-        output_path=output_dir / "import-environment.json",
-        repo_root=args.repo_root,
-    )
-    if preflight_status == 0:
-        _atomic_json(
-            command_status_file,
-            {
-                "command_executed": True,
-                "created_at": datetime.now(UTC).isoformat(),
-                "exit_code": None,
-                "phase": "started",
-            },
+    with tempfile.TemporaryDirectory(
+        prefix=".pytest-launcher-", dir=output_dir
+    ) as launcher_directory:
+        environment = _command_environment(
+            coverage_file=coverage_file,
+            node_file=node_file,
+            repo_root=args.repo_root,
+            auto_load_pytest=bool(args.command_base64),
         )
-        result = subprocess.run(
-            command,
-            cwd=command_cwd,
-            env=environment,
-            check=False,
+        command_cwd = (args.command_cwd or args.repo_root).resolve()
+        if args.command_base64:
+            command_text = _decode_command(args.command_base64)
+            launcher_path = Path(launcher_directory)
+            _install_pytest_launcher(launcher_path, environment)
+            command = [
+                "bash",
+                "-lc",
+                f'export PATH={shlex.quote(str(launcher_path))}:"$PATH"; '
+                + command_text,
+            ]
+        else:
+            command_text = None
+            command = pytest_command(tests)
+        preflight_status = validate_import_environment(
+            command_cwd=command_cwd,
+            environment=environment,
+            output_path=output_dir / "import-environment.json",
+            repo_root=args.repo_root,
         )
-        command_exit_code = _shell_exit_code(result.returncode)
-        _atomic_json(
-            command_status_file,
-            {
-                "command_executed": True,
-                "created_at": datetime.now(UTC).isoformat(),
-                "exit_code": command_exit_code,
-                "phase": "finished",
-            },
-        )
-    else:
-        result = subprocess.CompletedProcess(command, preflight_status)
-        command_exit_code = preflight_status
+        if preflight_status == 0:
+            _atomic_json(
+                command_status_file,
+                {
+                    "command_executed": True,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "exit_code": None,
+                    "phase": "started",
+                },
+            )
+            result = subprocess.run(
+                command,
+                cwd=command_cwd,
+                env=environment,
+                check=False,
+            )
+            command_exit_code = _shell_exit_code(result.returncode)
+            _atomic_json(
+                command_status_file,
+                {
+                    "command_executed": True,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "exit_code": command_exit_code,
+                    "phase": "finished",
+                },
+            )
+        else:
+            result = subprocess.CompletedProcess(command, preflight_status)
+            command_exit_code = preflight_status
     command_executed = preflight_status == 0
 
     rows = (
@@ -447,6 +501,11 @@ def main() -> int:
         and bool(node_document["collected"])
         and coverage_file.exists()
     )
+    failure_reason = None
+    if preflight_status != 0:
+        failure_reason = "collector_import_failed"
+    elif not healthy:
+        failure_reason = "collector_unhealthy"
     _atomic_json(
         job_file,
         {
@@ -460,6 +519,7 @@ def main() -> int:
             "command_cwd": str(command_cwd),
             "command_executed": command_executed,
             "created_at": datetime.now(UTC).isoformat(),
+            "failure_reason": failure_reason,
             "healthy": healthy,
             "image_tag": os.environ.get("IMAGE_TAG"),
             "import_preflight_exit_code": preflight_status,
