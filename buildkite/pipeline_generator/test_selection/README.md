@@ -49,6 +49,8 @@ The recovery step downloads the source build's evidence, publishes with the
 current ci-infra revision, and verifies a fresh read-back before any trial.
 This path is intended only for trusted operators recovering immutable evidence,
 not for normal nightly or pull-request execution.
+Do not set any republish variable on a normal nightly: its presence deliberately
+replaces the full generated fleet with the single recovery step.
 
 Snapshot manifests are produced by this trusted publisher. Readers enforce the
 publisher-declared decompression bound and both compressed and logical hashes;
