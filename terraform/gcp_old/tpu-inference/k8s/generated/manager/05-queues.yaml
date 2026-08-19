@@ -1,0 +1,71 @@
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: v6e-1-1x1
+spec:
+  cohortName: v6e
+  preemption:
+    reclaimWithinCohort: Any
+    withinClusterQueue: LowerPriority
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  admissionChecksStrategy:
+    admissionChecks:
+      - name: v6e-multikueue-dispatch
+  resourceGroups:
+    # google.com/tpu is the only resource under quota. cpu and memory requested
+    # by the workload, its gcsfuse sidecar and any helper containers are ignored
+    # by admission (quotaCheckStrategy: IgnoreUndeclared in the controller
+    # config) and enforced by the kube scheduler against node capacity instead.
+    - coveredResources:
+        - google.com/tpu
+      flavors:
+        - name: v6e
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 10
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: v6e-1-1x1
+  namespace: buildkite
+spec:
+  clusterQueue: v6e-1-1x1
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: v6e-8-2x4
+spec:
+  cohortName: v6e
+  preemption:
+    reclaimWithinCohort: Any
+    withinClusterQueue: LowerPriority
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  admissionChecksStrategy:
+    admissionChecks:
+      - name: v6e-multikueue-dispatch
+  resourceGroups:
+    # google.com/tpu is the only resource under quota. cpu and memory requested
+    # by the workload, its gcsfuse sidecar and any helper containers are ignored
+    # by admission (quotaCheckStrategy: IgnoreUndeclared in the controller
+    # config) and enforced by the kube scheduler against node capacity instead.
+    - coveredResources:
+        - google.com/tpu
+      flavors:
+        - name: v6e
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 8
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: v6e-8-2x4
+  namespace: buildkite
+spec:
+  clusterQueue: v6e-8-2x4
