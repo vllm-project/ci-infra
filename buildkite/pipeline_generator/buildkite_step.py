@@ -53,23 +53,16 @@ K8S_RETRY = {
 
 def _otel_setup_command() -> str:
     """Best-effort activation of the tracing helpers in the vLLM checkout."""
+    # No-ops keep every generated wrapper safe when setup is unavailable.
     return (
-        "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; "
-        'if [ -z "$${CI_INFRA_OTEL_DIR:-}" ]; then '
-        "for _CI_INFRA_OTEL_CANDIDATE in "
-        '"$$(git rev-parse --show-toplevel 2>/dev/null)/'
-        '.buildkite/scripts/ci-otel" '
-        '"/vllm-workspace/.buildkite/scripts/ci-otel" '
-        '"/workspace/.buildkite/scripts/ci-otel" '
-        '"/workdir/.buildkite/scripts/ci-otel"; do '
-        'if [ -f "$$_CI_INFRA_OTEL_CANDIDATE/ci_otel.sh" ]; then '
-        'CI_INFRA_OTEL_DIR="$$_CI_INFRA_OTEL_CANDIDATE"; break; fi; done; fi; '
-        "export CI_INFRA_OTEL_DIR; "
-        'if [ -n "$${CI_INFRA_OTEL_DIR:-}" ] && '
+        "ci_otel_start() { :; }; ci_otel_finish() { :; }; "
+        'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
+        "$$(git rev-parse --show-toplevel 2>/dev/null)/"
+        '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
+        'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
         '. "$$CI_INFRA_OTEL_DIR/ci_otel.sh"; then :; else '
-        'echo "vLLM CI OTel: tracing setup skipped" >&2 || :; '
-        "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; fi; :"
+        'echo "vLLM CI OTel: tracing setup skipped" >&2 || :; fi'
     )
 
 
@@ -437,18 +430,12 @@ def _prepare_commands(
             )
             prepared_command = cmd
             if trace_commands:
-                # Run the original command directly. Tracing only brackets it
-                # with best-effort start/finish calls, so OTel never owns command
-                # execution and cannot change shell state or failure semantics.
                 encoded_preview = base64.b64encode(preview.encode()).decode()
                 prepared_command = (
-                    'if [ "$${CI_INFRA_OTEL_READY:-0}" = "1" ] && '
-                    "command -v ci_otel_start >/dev/null 2>&1; then "
-                    f"ci_otel_start {i + 1} {encoded_preview} || :; fi\n"
+                    f"ci_otel_start {i + 1} {encoded_preview} || :\n"
                     f"{cmd}\n"
                     "_CI_INFRA_OTEL_COMMAND_STATUS=$$?\n"
-                    "if command -v ci_otel_finish >/dev/null 2>&1; then "
-                    "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :; fi\n"
+                    "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :\n"
                     "(exit $$_CI_INFRA_OTEL_COMMAND_STATUS)"
                 )
             if continue_on_failure:
