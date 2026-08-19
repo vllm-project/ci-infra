@@ -124,3 +124,41 @@ resource "google_project_iam_member" "connect_gateway_kueue_worker_project" {
   role    = "roles/gkehub.gatewayEditor"
   member  = "serviceAccount:${var.project_id}.svc.id.goog[kueue-system/kueue-controller-manager]"
 }
+
+# Connect Gateway for the launcher, which only reads pod logs on the workers.
+# Its ClusterRole there is pods and pods/log with get, list and watch - no
+# write verb at all - so gatewayReader matches what it can actually do.
+resource "google_project_iam_member" "connect_gateway_launcher_wi" {
+  for_each = toset(["roles/gkehub.gatewayReader", "roles/gkehub.viewer"])
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${var.project_id}.svc.id.goog[buildkite/tpu-launcher]"
+}
+
+resource "google_project_iam_member" "connect_gateway_launcher_worker_project" {
+  for_each = var.worker_clusters
+
+  project = each.value.project
+  role    = "roles/gkehub.gatewayReader"
+  member  = "serviceAccount:${var.project_id}.svc.id.goog[buildkite/tpu-launcher]"
+}
+
+# The Buildkite Test Engine token, read by run.sh in the launcher pod so a
+# step's results reach the suite.
+#
+# On bare metal this comes from the agent environment on the VM; the
+# agent-stack pods have no equivalent, so every Kubernetes run so far has
+# logged "No BUILDKITE_ANALYTICS_TOKEN environment variable present" and Test
+# Engine has received nothing.
+#
+# Scoped to the one secret rather than granted on the project. The launcher
+# already reaches these projects for Connect Gateway, and secretAccessor at
+# project level would let it read every secret they hold - including the
+# agent tokens - to fetch one string.
+resource "google_secret_manager_secret_iam_member" "launcher_analytics_token" {
+  project   = var.analytics_token_secret_project
+  secret_id = var.analytics_token_secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${var.project_id}.svc.id.goog[buildkite/tpu-launcher]"
+}
