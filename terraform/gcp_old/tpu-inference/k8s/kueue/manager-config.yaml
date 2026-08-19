@@ -1,0 +1,43 @@
+apiVersion: config.kueue.x-k8s.io/v1beta2
+kind: Configuration
+manageJobsWithoutQueueName: false
+featureGates:
+  MultiKueueClusterProfile: true
+health:
+  healthProbeBindAddress: :8081
+metrics:
+  bindAddress: :8443
+webhook:
+  port: 9443
+leaderElection:
+  leaderElect: true
+  resourceName: c1f6bfd2.kueue.x-k8s.io
+resources:
+  # Only resources a ClusterQueue declares are checked against quota; anything
+  # else a pod requests (cpu, memory, ephemeral-storage from the workload, the
+  # gcsfuse sidecar, agent-stack-k8s helper containers) is left to the kube
+  # scheduler. Without this, Kueue's default BlockUndeclared refuses to admit a
+  # workload that requests a resource the ClusterQueue does not cover, which
+  # is why the queues used to carry cpu/memory quotas of 10000. Kueue 0.19:
+  # feature gate QuotaCheckStrategy is beta and on by default.
+  quotaCheckStrategy: IgnoreUndeclared
+integrations:
+  frameworks:
+    - batch/job
+    # Multi-pod workloads (multi-host TPU slices, prefill/decode disagg).
+    # Must be enabled identically on manager and workers for MultiKueue.
+    - jobset.x-k8s.io/jobset
+multiKueue:
+  clusterProfile:
+    accessProviders:
+      - name: google
+        execConfig:
+          apiVersion: client.authentication.k8s.io/v1beta1
+          command: /plugins/gcp-auth-plugin
+          interactiveMode: Never
+waitForPodsReady:
+  # NOTE: inert without `enable: true`. Left off deliberately - turning it on
+  # adds readiness-timeout eviction and requeue accounting, which interacts
+  # with preemption testing. Enable once that behaviour is wanted.
+  blockAdmission: false
+  timeout: 10800s

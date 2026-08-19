@@ -1,0 +1,61 @@
+# What the manager's Kueue controller may do in this worker cluster.
+#
+# It previously held cluster-admin here, granted by a kubectl line in kueue.tf.
+# That is the largest privilege in the system: full control of a cluster that
+# runs untrusted-ish workload images, held by a controller in another project
+# reached over Connect Gateway.
+#
+# MultiKueue's manager only mirrors objects. It creates the Job or JobSet here,
+# watches it, copies status back, and deletes it when the workload finishes or
+# is evicted. Everything below is that and nothing else.
+#
+# If dispatch breaks after this lands, the symptom will be workloads admitted
+# on the manager but no pods appearing here, and the Kueue controller logging
+# a forbidden error naming the verb it wanted. Add that verb rather than
+# reaching for cluster-admin again.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kueue-multikueue-remote
+rules:
+  # The mirrored workload objects themselves.
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["workloads"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["workloads/status", "workloads/finalizers"]
+    verbs: ["get", "update", "patch"]
+  # The two job kinds this fleet dispatches. Both integrations are enabled in
+  # worker-config.yaml and must match the manager's.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs/status"]
+    verbs: ["get"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets/status"]
+    verbs: ["get"]
+  # Status reporting: why a workload is pending, and which pods it produced.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kueue-multikueue-remote
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kueue-multikueue-remote
+subjects:
+  - kind: User
+    name: serviceAccount:cloud-ullm-inference-ci-cd.svc.id.goog[kueue-system/kueue-controller-manager]
+    apiGroup: rbac.authorization.k8s.io
