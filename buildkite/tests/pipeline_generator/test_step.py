@@ -200,8 +200,7 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
 
     assert ".buildkite/scripts/ci-otel" in commands[0]
     assert "base64 --decode" not in commands[0]
-    assert len(commands[0]) < 1_000
-    assert commands[0].endswith("fi; :")
+    assert len(commands[0]) < 500
     assert '. "$$CI_INFRA_OTEL_DIR/ci_otel.sh"' in commands[0]
     assert "ci_otel_start 1 " in commands[2]
     assert "export VALUE=ready" in commands[2]
@@ -269,8 +268,7 @@ def test_otel_trace_preserves_generator_variable_injection(fake_global_config):
 def test_otel_setup_sources_repo_helpers(tmp_path):
     helper = tmp_path / "ci_otel.sh"
     helper.write_text(
-        "CI_INFRA_OTEL_READY=1; export CI_INFRA_OTEL_READY; "
-        "ci_otel_start() { :; }; ci_otel_finish() { :; }; :\n",
+        "ci_otel_start() { return 11; }; ci_otel_finish() { return 12; }; :\n",
         encoding="utf-8",
     )
     command = buildkite_step._otel_setup_command().replace("$$", "$")
@@ -279,11 +277,10 @@ def test_otel_setup_sources_repo_helpers(tmp_path):
             "bash",
             "-c",
             command
-            + ' && test "$CI_INFRA_OTEL_READY" = 1'
             + ' && test "$PYTHONPATH" = original-pythonpath'
             + ' && test "$PYTEST_ADDOPTS" = original-pytest-options'
-            + " && type ci_otel_start"
-            + " && type ci_otel_finish",
+            + " && ci_otel_start; test $? = 11"
+            + " && ci_otel_finish; test $? = 12",
         ],
         check=False,
         capture_output=True,
