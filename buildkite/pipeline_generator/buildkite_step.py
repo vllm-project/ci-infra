@@ -2,13 +2,8 @@ from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
 import base64
-from functools import lru_cache
-import gzip
-from io import BytesIO
 import os
-from pathlib import Path
 import re
-import tarfile
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
@@ -44,46 +39,19 @@ PRECOMMIT_WAIT_INTERVAL = 60
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 
-OTEL_HELPERS_DIR = Path(__file__).resolve().parent / "otel_helpers"
-OTEL_HELPER_FILES = (
-    "ci_otel.py",
-    "ci_otel.sh",
-    "ci_pytest.sh",
-    "ci_pytest_otel.py",
-)
-
-
-@lru_cache(maxsize=1)
-def _otel_helpers_bundle() -> str:
-    """Return a deterministic compressed bundle for injection into CI jobs."""
-    archive = BytesIO()
-    with gzip.GzipFile(
-        fileobj=archive, mode="wb", compresslevel=9, mtime=0
-    ) as compressed:
-        with tarfile.open(fileobj=compressed, mode="w") as bundle:
-            for name in OTEL_HELPER_FILES:
-                contents = (OTEL_HELPERS_DIR / name).read_bytes()
-                info = tarfile.TarInfo(name=name)
-                info.size = len(contents)
-                info.mode = 0o755 if name.endswith(".sh") else 0o644
-                info.mtime = 0
-                bundle.addfile(info, BytesIO(contents))
-    return base64.b64encode(archive.getvalue()).decode()
-
 
 def _otel_setup_command() -> str:
-    """Best-effort install of ci-infra-owned tracing helpers."""
-    bundle = _otel_helpers_bundle()
+    """Best-effort activation of the tracing helpers in the vLLM checkout."""
+    # No-ops keep every generated wrapper safe when setup is unavailable.
     return (
-        "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; "
-        "if CI_INFRA_OTEL_DIR=$$(mktemp -d 2>/dev/null) && "
-        "export CI_INFRA_OTEL_DIR && "
-        f'printf "%s" "{bundle}" | base64 --decode | '
-        'tar -xz -C "$$CI_INFRA_OTEL_DIR" && '
+        "ci_otel_start() { :; }; ci_otel_finish() { :; }; "
+        'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
+        "$$(git rev-parse --show-toplevel 2>/dev/null)/"
+        '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
+        'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
         '. "$$CI_INFRA_OTEL_DIR/ci_otel.sh"; then :; else '
-        'echo "vLLM CI OTel: tracing setup skipped" >&2 || :; '
-        "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; fi; :"
+        'echo "vLLM CI OTel: tracing setup skipped" >&2 || :; fi'
     )
 
 
@@ -448,26 +416,18 @@ def _prepare_commands(
             )
             prepared_command = cmd
             if trace_commands:
-                # Run the original command directly. Tracing only brackets it
-                # with best-effort start/finish calls, so OTel never owns command
-                # execution and cannot change shell state or failure semantics.
                 encoded_preview = base64.b64encode(preview.encode()).decode()
                 prepared_command = (
-                    'if [ "$${CI_INFRA_OTEL_READY:-0}" = "1" ] && '
-                    "command -v ci_otel_start >/dev/null 2>&1; then "
-                    f"ci_otel_start {i + 1} {encoded_preview} || :; fi\n"
+                    f"ci_otel_start {i + 1} {encoded_preview} || :\n"
                     f"{cmd}\n"
                     "_CI_INFRA_OTEL_COMMAND_STATUS=$$?\n"
-                    "if command -v ci_otel_finish >/dev/null 2>&1; then "
-                    "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :; fi\n"
+                    "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :\n"
                     "(exit $$_CI_INFRA_OTEL_COMMAND_STATUS)"
                 )
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
-                commands.append(
-                    f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1"
-                )
+                commands.append(f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1")
             else:
                 commands.append(prepared_command)
 
