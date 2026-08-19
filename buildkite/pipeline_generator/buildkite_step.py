@@ -2,13 +2,8 @@ from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
 import base64
-from functools import lru_cache
-import gzip
-from io import BytesIO
 import os
-from pathlib import Path
 import re
-import tarfile
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
@@ -56,42 +51,21 @@ K8S_RETRY = {
     ],
 }
 
-OTEL_HELPERS_DIR = Path(__file__).resolve().parent / "otel_helpers"
-OTEL_HELPER_FILES = (
-    "ci_otel.py",
-    "ci_otel.sh",
-    "ci_pytest.sh",
-    "ci_pytest_otel.py",
-)
-
-
-@lru_cache(maxsize=1)
-def _otel_helpers_bundle() -> str:
-    """Return a deterministic compressed bundle for injection into CI jobs."""
-    archive = BytesIO()
-    with gzip.GzipFile(
-        fileobj=archive, mode="wb", compresslevel=9, mtime=0
-    ) as compressed:
-        with tarfile.open(fileobj=compressed, mode="w") as bundle:
-            for name in OTEL_HELPER_FILES:
-                contents = (OTEL_HELPERS_DIR / name).read_bytes()
-                info = tarfile.TarInfo(name=name)
-                info.size = len(contents)
-                info.mode = 0o755 if name.endswith(".sh") else 0o644
-                info.mtime = 0
-                bundle.addfile(info, BytesIO(contents))
-    return base64.b64encode(archive.getvalue()).decode()
-
-
 def _otel_setup_command() -> str:
-    """Best-effort install of ci-infra-owned tracing helpers."""
-    bundle = _otel_helpers_bundle()
+    """Best-effort activation of the tracing helpers in the vLLM checkout."""
     return (
         "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; "
-        "if CI_INFRA_OTEL_DIR=$$(mktemp -d 2>/dev/null) && "
-        "export CI_INFRA_OTEL_DIR && "
-        f'printf "%s" "{bundle}" | base64 --decode | '
-        'tar -xz -C "$$CI_INFRA_OTEL_DIR" && '
+        'if [ -z "$${CI_INFRA_OTEL_DIR:-}" ]; then '
+        "for _CI_INFRA_OTEL_CANDIDATE in "
+        '"$$(git rev-parse --show-toplevel 2>/dev/null)/'
+        '.buildkite/scripts/ci-otel" '
+        '"/vllm-workspace/.buildkite/scripts/ci-otel" '
+        '"/workspace/.buildkite/scripts/ci-otel" '
+        '"/workdir/.buildkite/scripts/ci-otel"; do '
+        'if [ -f "$$_CI_INFRA_OTEL_CANDIDATE/ci_otel.sh" ]; then '
+        'CI_INFRA_OTEL_DIR="$$_CI_INFRA_OTEL_CANDIDATE"; break; fi; done; fi; '
+        "export CI_INFRA_OTEL_DIR; "
+        'if [ -n "$${CI_INFRA_OTEL_DIR:-}" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
         '. "$$CI_INFRA_OTEL_DIR/ci_otel.sh"; then :; else '
         'echo "vLLM CI OTel: tracing setup skipped" >&2 || :; '
@@ -480,9 +454,7 @@ def _prepare_commands(
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
-                commands.append(
-                    f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1"
-                )
+                commands.append(f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1")
             else:
                 commands.append(prepared_command)
 
