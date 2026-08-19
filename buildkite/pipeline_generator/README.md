@@ -87,3 +87,26 @@ Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
 The Secret is optional, so missing credentials do not prevent jobs from running.
 Provision it in a Buildkite job namespace with
 `infra-k8s/create-buildkite-analytics-secret.sh` to enable test result uploads.
+
+## OpenTelemetry command and test timing
+
+The generator automatically instruments every standard NVIDIA and CPU job in
+trusted `vllm-project/vllm` main-branch builds. It injects the helpers in
+`otel_helpers/`, emits one
+`ci.command` span for each configured command, and loads a pytest plugin that
+emits one `pytest.test` child span per test. Job YAML does not need an opt-in
+field.
+
+Command and pytest spans are written to an ephemeral local spool while tests
+run. An `EXIT` trap uploads the complete job batch once, preserving the job's
+original exit status. The exporter has a three-second total network deadline
+and the shell enforces a four-second hard stop, so an unavailable telemetry
+receiver cannot add an unbounded delay to every command.
+
+Pull-request containers are deliberately excluded from this fine-grained
+instrumentation because exporting spans currently requires access to the
+Buildkite agent binary to mint a short-lived OIDC token. Mounting that binary
+into a container running untrusted PR code would cross the CI trust boundary.
+AMD mirrors are also excluded because their remote runtime does not expose the
+agent binary. Native Buildkite agent tracing can still cover job phases for
+both cases when it is enabled on those agents.

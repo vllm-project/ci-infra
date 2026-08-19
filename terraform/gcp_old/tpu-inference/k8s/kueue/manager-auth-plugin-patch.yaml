@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kueue-controller-manager
+  namespace: kueue-system
+spec:
+  template:
+    spec:
+      volumes:
+        - name: clusterprofile-plugins
+          emptyDir: {}
+      initContainers:
+        - name: add-gcp-auth-plugin
+          image: us-central1-docker.pkg.dev/cloud-tpu-inference-test/mhhua-dev/gcp-auth-plugin:latest
+          command:
+            - cp
+          args:
+            - /gcp-auth-plugin
+            - /plugins/gcp-auth-plugin
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: clusterprofile-plugins
+              mountPath: /plugins
+      containers:
+        - name: manager
+          volumeMounts:
+            - name: clusterprofile-plugins
+              mountPath: /plugins
+              readOnly: true

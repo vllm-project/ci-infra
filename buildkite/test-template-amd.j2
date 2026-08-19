@@ -35,19 +35,11 @@
 
 {# Native in-pod ROCm CI: per-job container-0 image via kubernetes podSpecPatch. #}
 {% macro amd_native_base_image() -%}
-{% if rocm_build_scoped_images == "1" -%}
 rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID
-{%- else -%}
-rocm/vllm-dev:ci_base-$BUILDKITE_COMMIT
-{%- endif %}
 {%- endmacro %}
 
 {% macro amd_ci_image() -%}
-{% if rocm_build_scoped_images == "1" -%}
 rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
-{%- else -%}
-rocm/vllm-ci:$BUILDKITE_COMMIT
-{%- endif %}
 {%- endmacro %}
 
 {% macro amd_native_k8s_plugin(step) %}
@@ -104,6 +96,14 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
                       - name: PYTORCH_ROCM_ARCH
                         value: ""
                       # Correlate in-pod GPU/BDF diagnostics with the K8s host.
+                      - name: VLLM_CI_K8S_POD_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.name
+                      - name: VLLM_CI_K8S_NAMESPACE
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.namespace
                       - name: VLLM_CI_K8S_NODE_NAME
                         valueFrom:
                           fieldRef:
@@ -247,7 +247,10 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
         {% endif %}
         {% else %}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
+        artifact_paths:
+          - "artifacts/amd-gpu-diagnostics/*/diagnostics.log"
         env:
+          BUILDKITE_ARTIFACT_UPLOAD_SKIP_SYMLINKS: "true"
           NUM_NODES: "{{ step.num_nodes or 1 }}"
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
           {% if step.dind == false %}
@@ -275,7 +278,7 @@ rocm/vllm-ci:$BUILDKITE_COMMIT
           VLLM_CI_USE_ARTIFACTS: "1"
           VLLM_CI_ARTIFACT_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
           VLLM_CI_RESULTS_ROOT: "/home/buildkite-agent/huggingface/amd-ci-results"
-          # The runner uploads diagnostics immediately; keep them out of shared HF/NFS storage.
+          # Keep failure diagnostics out of shared HF/NFS storage.
           VLLM_CI_DIAGNOSTICS_DIR: "artifacts/amd-gpu-diagnostics"
           VLLM_CI_EXPECTED_GPU_COUNT: "{{ 0 if step.no_gpu else (step.num_gpus or 1) }}"
           {% if container_timeout_s %}
