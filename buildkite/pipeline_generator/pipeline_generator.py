@@ -154,6 +154,7 @@ _K8S_TRACE_DEVICES = {
 TRACE_COLLECTOR_STEP_KEY = "test-selection-collector"
 REPUBLISH_INVENTORY_ENV = "VLLM_CI_REPUBLISH_INVENTORY_B64"
 REPUBLISH_SOURCE_BUILD_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD"
+REPUBLISH_SOURCE_BUILD_ID_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD_ID"
 REPUBLISH_TRIALS_ENV = "VLLM_CI_REPUBLISH_TRIALS_JSON"
 
 # Full-fleet canary #84324 measured prohibitive Python-coverage overhead for
@@ -447,6 +448,7 @@ def _snapshot_republish_requested() -> bool:
         for name in (
             REPUBLISH_INVENTORY_ENV,
             REPUBLISH_SOURCE_BUILD_ENV,
+            REPUBLISH_SOURCE_BUILD_ID_ENV,
             REPUBLISH_TRIALS_ENV,
         )
     )
@@ -459,13 +461,19 @@ def _snapshot_republish_inputs(global_config: dict) -> dict:
         )
     encoded_inventory = os.getenv(REPUBLISH_INVENTORY_ENV)
     source_build = os.getenv(REPUBLISH_SOURCE_BUILD_ENV)
-    if not encoded_inventory or not source_build:
+    source_build_id = os.getenv(REPUBLISH_SOURCE_BUILD_ID_ENV)
+    if not encoded_inventory or not source_build or not source_build_id:
         raise ValueError(
-            f"{REPUBLISH_INVENTORY_ENV} and {REPUBLISH_SOURCE_BUILD_ENV} "
-            "must both be set"
+            f"{REPUBLISH_INVENTORY_ENV}, {REPUBLISH_SOURCE_BUILD_ENV}, and "
+            f"{REPUBLISH_SOURCE_BUILD_ID_ENV} must all be set"
         )
     if not re.fullmatch(r"[1-9][0-9]*", source_build):
         raise ValueError(f"{REPUBLISH_SOURCE_BUILD_ENV} must be a build number")
+    if not re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        source_build_id,
+    ):
+        raise ValueError(f"{REPUBLISH_SOURCE_BUILD_ID_ENV} must be a build UUID")
     try:
         inventory_bytes = base64.b64decode(encoded_inventory, validate=True)
         inventory = json.loads(inventory_bytes)
@@ -562,6 +570,7 @@ def _snapshot_republish_inputs(global_config: dict) -> dict:
         "inventory_sha256": hashlib.sha256(inventory_bytes).hexdigest(),
         "repository_sha": repository_sha,
         "source_build": source_build,
+        "source_build_id": source_build_id,
         "trials": normalized_trials,
     }
 
@@ -574,6 +583,7 @@ def create_snapshot_republish_group_step(global_config: dict) -> BuildkiteGroupS
     bucket = shlex.quote(str(global_config["trace_s3_bucket"]))
     prefix = shlex.quote(str(global_config["trace_s3_prefix"]))
     source_build = inputs["source_build"]
+    source_build_id = inputs["source_build_id"]
     repository_sha = inputs["repository_sha"]
     command = [
         "set -euo pipefail",
@@ -607,7 +617,7 @@ def create_snapshot_republish_group_step(global_config: dict) -> BuildkiteGroupS
         ),
         (
             'buildkite-agent artifact download "trace-output/**/*" '
-            f'"$$D/evidence" --build {shlex.quote(source_build)}'
+            f'"$$D/evidence" --build {shlex.quote(source_build_id)}'
         ),
         (
             '"$$D/venv/bin/vllm-test-selection" publish-snapshot '
@@ -630,6 +640,7 @@ def create_snapshot_republish_group_step(global_config: dict) -> BuildkiteGroupS
         'cp "$$D/readback.sqlite.sha256" "$$D/results/"',
         f"printf '%s\\n' {revision} > \"$$D/results/publisher-revision.txt\"",
         f"printf '%s\\n' {source_build} > \"$$D/results/source-build.txt\"",
+        (f"printf '%s\\n' {source_build_id} > \"$$D/results/source-build-id.txt\""),
         "TRIAL_STATUS=0",
     ]
     for trial in inputs["trials"]:

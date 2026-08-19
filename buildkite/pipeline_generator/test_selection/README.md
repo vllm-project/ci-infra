@@ -38,7 +38,10 @@ omitted by the selector.
 
 If publication fails after a nightly has collected its evidence, a trusted
 main-nightly build can set `VLLM_CI_REPUBLISH_INVENTORY_B64` and
-`VLLM_CI_REPUBLISH_SOURCE_BUILD` to enter the fail-closed recovery path. The
+`VLLM_CI_REPUBLISH_SOURCE_BUILD` plus
+`VLLM_CI_REPUBLISH_SOURCE_BUILD_ID` to enter the fail-closed recovery path.
+The source build number is retained for human-readable provenance; the source
+build UUID is required by `buildkite-agent artifact download --build`. The
 generator validates the canonical inventory against the build commit and emits
 exactly one CPU postmerge step; it does not render or rerun the fleet. Optional
 `VLLM_CI_REPUBLISH_TRIALS_JSON` entries pin shadow trials to exact PR heads.

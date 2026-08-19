@@ -13,6 +13,7 @@ from pipeline_generator import (
     PipelineGenerator,
     REPUBLISH_INVENTORY_ENV,
     REPUBLISH_SOURCE_BUILD_ENV,
+    REPUBLISH_SOURCE_BUILD_ID_ENV,
     REPUBLISH_TRIALS_ENV,
     configure_test_tracing,
     create_snapshot_republish_group_step,
@@ -60,6 +61,10 @@ def _set_republish_env(monkeypatch):
     raw = (json.dumps(inventory, sort_keys=True, separators=(",", ":")) + "\n").encode()
     monkeypatch.setenv(REPUBLISH_INVENTORY_ENV, base64.b64encode(raw).decode())
     monkeypatch.setenv(REPUBLISH_SOURCE_BUILD_ENV, "84585")
+    monkeypatch.setenv(
+        REPUBLISH_SOURCE_BUILD_ID_ENV,
+        "01a0199a-ca8a-44c4-89cc-f387790befd5",
+    )
     monkeypatch.setenv(
         REPUBLISH_TRIALS_ENV,
         json.dumps(
@@ -113,7 +118,10 @@ def test_republish_renders_exactly_one_pinned_step(
     assert step["timeout_in_minutes"] == 180
     command = step["commands"][0]
     assert "wait-for-steps" not in command
-    assert "--build 84585" in command
+    assert "--build 01a0199a-ca8a-44c4-89cc-f387790befd5" in command
+    assert "--build 84585" not in command
+    assert "source-build.txt" in command
+    assert "source-build-id.txt" in command
     assert "@" + "f" * 40 in command
     assert base64.b64encode(raw).decode() in command
     assert "refs/pull/50227/head" in command
@@ -138,6 +146,11 @@ def test_republish_rejects_malformed_or_untrusted_inputs(
     _set_republish_env(monkeypatch)
     with pytest.raises(ValueError, match="trusted vLLM main nightly"):
         create_snapshot_republish_group_step({**config, "branch": "feature"})
+
+    _set_republish_env(monkeypatch)
+    monkeypatch.setenv(REPUBLISH_SOURCE_BUILD_ID_ENV, "84585")
+    with pytest.raises(ValueError, match="SOURCE_BUILD_ID.*build UUID"):
+        create_snapshot_republish_group_step(config)
 
 
 def test_republish_rejects_incomplete_wait_accounting(fake_global_config, monkeypatch):
