@@ -4,6 +4,13 @@ network                  = "projects/cloud-ullm-inference-ci-cd/global/networks/
 buildkite_secret_project = "cloud-ullm-inference-ci-cd"
 buildkite_queue          = "kube"
 
+# Registry prefixes a workload image may come from. The image is the
+# pipeline's choice - CI images are built per commit - which in a public repo
+# means a pull request's choice; the launcher rejects anything outside this
+# list before submitting. The CI images live in the manager project's
+# Artifact Registry.
+allowed_image_repos = ["us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/"]
+
 manager_region                 = "us-central1"
 manager_zones                  = ["us-central1-a", "us-central1-b", "us-central1-c"]
 manager_subnetwork             = "projects/cloud-ullm-inference-ci-cd/regions/us-central1/subnetworks/default"
