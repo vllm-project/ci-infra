@@ -123,12 +123,6 @@ variable "buildkite_agent_stack_debug" {
   default     = true
 }
 
-variable "tpu_job_max_runtime_seconds" {
-  type        = number
-  description = "Deadline for the agent pod agent-stack-k8s creates per Buildkite job (job-active-deadline-seconds). Must outlast the longest TPU step end to end."
-  default     = 28800 # 8h
-}
-
 variable "tpu_test_max_seconds" {
   type        = number
   description = "How long a TPU test may run once it has chips, applied to the submitted workload as activeDeadlineSeconds. The only deadline that bounds a hung test, because waiting in the queue cannot consume it."
@@ -182,4 +176,42 @@ variable "models_lifecycle_age_days" {
     that alters its HLO; a model is expensive to fetch, comes from a third party
     with a request quota, and does not change at all once its commit is pinned.
   EOT
+}
+
+variable "analytics_token_secret_project" {
+  description = "Project holding the Buildkite Test Engine token secret."
+  type        = string
+  default     = "cloud-tpu-inference-test"
+}
+
+variable "analytics_token_secret_id" {
+  description = "Secret Manager id of the Buildkite Test Engine token."
+  type        = string
+  default     = "tpu_commons_buildkite_analytics_token"
+}
+
+variable "allowed_image_repos" {
+  type        = list(string)
+  description = <<-EOT
+    Registry prefixes a workload image may come from.
+
+    Nothing in Terraform reads this. It is declared because prod.auto.tfvars is
+    auto-loaded, so an undeclared key there is a warning on every plan and
+    apply, and a warning nobody can act on is one people learn to scroll past.
+    The value is consumed by scripts/generate_manifests.py, which parses the
+    same tfvars directly and bakes the list into the launcher's registry
+    ConfigMap.
+
+    Declaring it buys one thing beyond quiet: no default, so dropping the key
+    fails the plan. Without that, launch.py falls back to accepting any image
+    and says so in a build log nobody reads.
+  EOT
+
+  validation {
+    # launch.py prefix-matches with str.startswith, so a prefix that does not
+    # end in / matches any repository that merely starts with those characters:
+    # ".../cloud-ullm-inference-ci-cd" would also admit ".../cloud-ullm-inference-ci-cd-scratch".
+    condition     = alltrue([for repo in var.allowed_image_repos : endswith(repo, "/")])
+    error_message = "Each prefix must end in '/', so that it matches a whole repository path rather than any path beginning with the same characters."
+  }
 }
