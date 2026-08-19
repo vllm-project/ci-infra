@@ -30,7 +30,7 @@
 {%- endmacro %}
 
 {% macro amd_step_slug(step) -%}
-{%- if step.agent_pool -%}{{ step.agent_pool }}-{%- endif -%}{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+{%- if step.agent_pool -%}{{ step.agent_pool }}-{%- endif -%}{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") | replace("/", "-") | replace(".", "-") }}
 {%- endmacro %}
 
 {# Native in-pod ROCm CI: per-job container-0 image via kubernetes podSpecPatch. #}

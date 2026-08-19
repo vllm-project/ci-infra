@@ -27,6 +27,13 @@ def test_amd_template_uses_build_scoped_images():
     assert "rocm_build_scoped_images" not in template
 
 
+def test_amd_template_sanitizes_step_slug_for_buildkite_keys():
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+
+    assert '| replace("/", "-")' in template
+    assert '| replace(".", "-")' in template
+
+
 def test_amd_template_configures_gpu_diagnostics():
     template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
 
