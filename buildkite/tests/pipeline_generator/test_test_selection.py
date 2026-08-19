@@ -1,16 +1,75 @@
 import base64
 import json
 import re
+import subprocess
 
 import pytest
+import yaml
 
 import buildkite_step
 from constants import DeviceType
-from pipeline_generator import configure_test_tracing, should_trace_nightly
+import pipeline_generator as pipeline_module
+from pipeline_generator import (
+    PipelineGenerator,
+    REPUBLISH_INVENTORY_ENV,
+    REPUBLISH_SOURCE_BUILD_ENV,
+    REPUBLISH_TRIALS_ENV,
+    configure_test_tracing,
+    create_snapshot_republish_group_step,
+    should_trace_nightly,
+)
 from step import Step
 
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
+
+
+def _republish_config(fake_global_config):
+    return {
+        **fake_global_config,
+        "branch": "main",
+        "commit": "a" * 40,
+        "nightly": "1",
+        "trace_s3_bucket": "vllm-ci-test-selection",
+        "trace_s3_prefix": "test-selection/vllm",
+    }
+
+
+def _set_republish_env(monkeypatch):
+    inventory = {
+        "always_run": [{"key": "plain-job", "reason": "policy"}],
+        "ci_infra_revision": "b" * 40,
+        "collector_sha256": "c" * 64,
+        "jobs": [
+            {
+                "expected_shards": 1,
+                "key": "traced-job",
+                "mode": "python-only",
+            }
+        ],
+        "repository_sha": "a" * 40,
+        "schema_version": 1,
+        "wait_results": {
+            "traced-job": {
+                "outcome": "passed",
+                "state": "finished",
+                "status": "terminal",
+            }
+        },
+    }
+    raw = (json.dumps(inventory, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    monkeypatch.setenv(REPUBLISH_INVENTORY_ENV, base64.b64encode(raw).decode())
+    monkeypatch.setenv(REPUBLISH_SOURCE_BUILD_ENV, "84585")
+    monkeypatch.setenv(
+        REPUBLISH_TRIALS_ENV,
+        json.dumps(
+            [
+                {"head": "d" * 40, "pull_request": 50227},
+                {"head": "e" * 40, "pull_request": 48939},
+            ]
+        ),
+    )
+    return raw
 
 
 def test_only_trusted_vllm_main_nightly_traces(fake_global_config):
@@ -29,6 +88,70 @@ def test_only_trusted_vllm_main_nightly_traces(fake_global_config):
         ("trace_s3_bucket", None),
     ):
         assert not should_trace_nightly({**config, field: value})
+
+
+def test_republish_renders_exactly_one_pinned_step(
+    fake_global_config, monkeypatch, tmp_path
+):
+    config = _republish_config(fake_global_config)
+    raw = _set_republish_env(monkeypatch)
+    monkeypatch.setattr(pipeline_module, "_ci_infra_revision", lambda: "f" * 40)
+    monkeypatch.setattr(pipeline_module, "get_global_config", lambda: config)
+    output = tmp_path / "pipeline.yaml"
+    generator = PipelineGenerator.__new__(PipelineGenerator)
+    generator.output_file_path = str(output)
+
+    generator.generate()
+
+    document = yaml.safe_load(output.read_text())
+    assert len(document["steps"]) == 1
+    group = document["steps"][0]
+    assert group["group"] == "Test selection snapshot republish"
+    assert len(group["steps"]) == 1
+    step = group["steps"][0]
+    assert step["agents"] == {"queue": "cpu_queue_postmerge_us_east_1"}
+    assert step["timeout_in_minutes"] == 180
+    command = step["commands"][0]
+    assert "wait-for-steps" not in command
+    assert "--build 84585" in command
+    assert "@" + "f" * 40 in command
+    assert base64.b64encode(raw).decode() in command
+    assert "refs/pull/50227/head" in command
+    assert "refs/pull/48939/head" in command
+    subprocess.run(
+        ["bash", "-n"],
+        input=command.replace("$$", "$"),
+        check=True,
+        text=True,
+    )
+
+
+def test_republish_rejects_malformed_or_untrusted_inputs(
+    fake_global_config, monkeypatch
+):
+    config = _republish_config(fake_global_config)
+    _set_republish_env(monkeypatch)
+    monkeypatch.setenv(REPUBLISH_INVENTORY_ENV, "not-base64")
+    with pytest.raises(ValueError, match="INVENTORY.*invalid"):
+        create_snapshot_republish_group_step(config)
+
+    _set_republish_env(monkeypatch)
+    with pytest.raises(ValueError, match="trusted vLLM main nightly"):
+        create_snapshot_republish_group_step({**config, "branch": "feature"})
+
+
+def test_republish_rejects_incomplete_wait_accounting(fake_global_config, monkeypatch):
+    config = _republish_config(fake_global_config)
+    raw = _set_republish_env(monkeypatch)
+    inventory = json.loads(raw)
+    inventory["wait_results"] = {}
+    invalid = (
+        json.dumps(inventory, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    monkeypatch.setenv(REPUBLISH_INVENTORY_ENV, base64.b64encode(invalid).decode())
+
+    with pytest.raises(ValueError, match="wait results are incomplete"):
+        create_snapshot_republish_group_step(config)
 
 
 def test_test_area_pytest_jobs_are_enrolled_without_yaml_trace_policy():

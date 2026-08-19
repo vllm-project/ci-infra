@@ -36,6 +36,22 @@ bytes; readers verify the compressed object before bounded decompression, then
 verify the SQLite checksum sidecar. Missing and unhealthy jobs are never
 omitted by the selector.
 
+If publication fails after a nightly has collected its evidence, a trusted
+main-nightly build can set `VLLM_CI_REPUBLISH_INVENTORY_B64` and
+`VLLM_CI_REPUBLISH_SOURCE_BUILD` to enter the fail-closed recovery path. The
+generator validates the canonical inventory against the build commit and emits
+exactly one CPU postmerge step; it does not render or rerun the fleet. Optional
+`VLLM_CI_REPUBLISH_TRIALS_JSON` entries pin shadow trials to exact PR heads.
+The recovery step downloads the source build's evidence, publishes with the
+current ci-infra revision, and verifies a fresh read-back before any trial.
+This path is intended only for trusted operators recovering immutable evidence,
+not for normal nightly or pull-request execution.
+
+Snapshot manifests are produced by this trusted publisher. Readers enforce the
+publisher-declared decompression bound and both compressed and logical hashes;
+they must not treat an untrusted manifest's size declaration as an independent
+resource limit.
+
 ## PR selection
 
 The PR path fetches the newest fresh snapshot whose commit is an ancestor of

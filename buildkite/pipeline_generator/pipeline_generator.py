@@ -1,4 +1,6 @@
 import base64
+import binascii
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -39,6 +41,17 @@ class PipelineGenerator:
 
     def generate(self):
         global_config = get_global_config()
+
+        if _snapshot_republish_requested():
+            republish_step = create_snapshot_republish_group_step(global_config)
+            with open(self.output_file_path, "w") as output:
+                yaml.dump(
+                    {"steps": [republish_step.dict(exclude_none=True)]},
+                    output,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+            return
 
         # Skip if changes are doc-only (unless RUN_ALL is set)
         if (
@@ -139,6 +152,9 @@ _K8S_TRACE_DEVICES = {
     DeviceType.H100,
 }
 TRACE_COLLECTOR_STEP_KEY = "test-selection-collector"
+REPUBLISH_INVENTORY_ENV = "VLLM_CI_REPUBLISH_INVENTORY_B64"
+REPUBLISH_SOURCE_BUILD_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD"
+REPUBLISH_TRIALS_ENV = "VLLM_CI_REPUBLISH_TRIALS_JSON"
 
 # Full-fleet canary #84324 measured prohibitive Python-coverage overhead for
 # these exact jobs. Keep the evidence-based keys visible in the inventory but
@@ -420,6 +436,239 @@ def create_collector_group_step(
                 retry={"automatic": [{"exit_status": -1, "limit": 1}]},
                 soft_fail=True,
                 timeout_in_minutes=10,
+            )
+        ],
+    )
+
+
+def _snapshot_republish_requested() -> bool:
+    return any(
+        os.getenv(name) is not None
+        for name in (
+            REPUBLISH_INVENTORY_ENV,
+            REPUBLISH_SOURCE_BUILD_ENV,
+            REPUBLISH_TRIALS_ENV,
+        )
+    )
+
+
+def _snapshot_republish_inputs(global_config: dict) -> dict:
+    if not should_trace_nightly(global_config):
+        raise ValueError(
+            "test-selection republish requires a trusted vLLM main nightly"
+        )
+    encoded_inventory = os.getenv(REPUBLISH_INVENTORY_ENV)
+    source_build = os.getenv(REPUBLISH_SOURCE_BUILD_ENV)
+    if not encoded_inventory or not source_build:
+        raise ValueError(
+            f"{REPUBLISH_INVENTORY_ENV} and {REPUBLISH_SOURCE_BUILD_ENV} "
+            "must both be set"
+        )
+    if not re.fullmatch(r"[1-9][0-9]*", source_build):
+        raise ValueError(f"{REPUBLISH_SOURCE_BUILD_ENV} must be a build number")
+    try:
+        inventory_bytes = base64.b64decode(encoded_inventory, validate=True)
+        inventory = json.loads(inventory_bytes)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{REPUBLISH_INVENTORY_ENV} is invalid") from error
+    if not isinstance(inventory, dict):
+        raise ValueError("republish inventory must be an object")
+    canonical_inventory = (
+        json.dumps(inventory, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    if inventory_bytes != canonical_inventory:
+        raise ValueError("republish inventory must be canonical JSON with a newline")
+    repository_sha = str(inventory.get("repository_sha", ""))
+    if repository_sha != global_config["commit"] or not re.fullmatch(
+        r"[0-9a-f]{40}", repository_sha
+    ):
+        raise ValueError("republish inventory repository SHA must match the build")
+    if inventory.get("schema_version") != 1:
+        raise ValueError("republish inventory schema is unsupported")
+    if not re.fullmatch(
+        r"[0-9a-f]{40}", str(inventory.get("ci_infra_revision", ""))
+    ) or not re.fullmatch(r"[0-9a-f]{64}", str(inventory.get("collector_sha256", ""))):
+        raise ValueError("republish inventory identity is invalid")
+    jobs = inventory.get("jobs")
+    always_run = inventory.get("always_run")
+    wait_results = inventory.get("wait_results")
+    if (
+        not isinstance(jobs, list)
+        or not jobs
+        or not isinstance(always_run, list)
+        or not isinstance(wait_results, dict)
+    ):
+        raise ValueError("republish inventory accounting is invalid")
+    if not all(
+        isinstance(row, dict)
+        and re.fullmatch(r"[a-zA-Z0-9_-]+", str(row.get("key", "")))
+        and isinstance(row.get("expected_shards"), int)
+        and not isinstance(row.get("expected_shards"), bool)
+        and row["expected_shards"] > 0
+        and row.get("mode") in ("python-only", "kernel-set")
+        for row in jobs
+    ) or not all(
+        isinstance(row, dict)
+        and re.fullmatch(r"[a-zA-Z0-9_-]+", str(row.get("key", "")))
+        and isinstance(row.get("reason"), str)
+        and row["reason"]
+        for row in always_run
+    ):
+        raise ValueError("republish inventory job rows are invalid")
+    job_keys = [str(row["key"]) for row in jobs]
+    current_jobs = sorted(job_keys + [str(row["key"]) for row in always_run])
+    if len(current_jobs) != len(set(current_jobs)):
+        raise ValueError("republish inventory contains duplicate job keys")
+    if set(wait_results) != set(job_keys) or not all(
+        isinstance(result, dict)
+        and result.get("status") in ("terminal", "poll_timeout")
+        for result in wait_results.values()
+    ):
+        raise ValueError("republish inventory wait results are incomplete")
+
+    trials_text = os.getenv(REPUBLISH_TRIALS_ENV, "[]")
+    try:
+        trials = json.loads(trials_text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{REPUBLISH_TRIALS_ENV} is invalid") from error
+    if not isinstance(trials, list) or len(trials) > 10:
+        raise ValueError("republish trials must be a list of at most 10 entries")
+    normalized_trials = []
+    for row in trials:
+        if not isinstance(row, dict):
+            raise ValueError("republish trial entry must be an object")
+        pull_request = row.get("pull_request")
+        head = str(row.get("head", ""))
+        if (
+            not isinstance(pull_request, int)
+            or isinstance(pull_request, bool)
+            or pull_request < 1
+            or not re.fullmatch(r"[0-9a-f]{40}", head)
+        ):
+            raise ValueError("republish trial entry is invalid")
+        normalized_trials.append({"head": head, "pull_request": pull_request})
+    if len({row["pull_request"] for row in normalized_trials}) != len(
+        normalized_trials
+    ):
+        raise ValueError("republish trials contain duplicate pull requests")
+
+    current_jobs_bytes = (
+        json.dumps(current_jobs, separators=(",", ":")) + "\n"
+    ).encode()
+    return {
+        "current_jobs_base64": base64.b64encode(current_jobs_bytes).decode(),
+        "current_jobs_sha256": hashlib.sha256(current_jobs_bytes).hexdigest(),
+        "inventory_base64": base64.b64encode(inventory_bytes).decode(),
+        "inventory_sha256": hashlib.sha256(inventory_bytes).hexdigest(),
+        "repository_sha": repository_sha,
+        "source_build": source_build,
+        "trials": normalized_trials,
+    }
+
+
+def create_snapshot_republish_group_step(global_config: dict) -> BuildkiteGroupStep:
+    """Render one fail-closed cross-build snapshot republisher and verifier."""
+
+    inputs = _snapshot_republish_inputs(global_config)
+    revision = _ci_infra_revision()
+    bucket = shlex.quote(str(global_config["trace_s3_bucket"]))
+    prefix = shlex.quote(str(global_config["trace_s3_prefix"]))
+    source_build = inputs["source_build"]
+    repository_sha = inputs["repository_sha"]
+    command = [
+        "set -euo pipefail",
+        f'test "$$BUILDKITE_COMMIT" = {shlex.quote(repository_sha)}',
+        f'test "$$BUILDKITE_BUILD_NUMBER" != {shlex.quote(source_build)}',
+        'D="$$(mktemp -d)"',
+        "trap 'rm -rf \"$$D\"' EXIT",
+        'mkdir -p "$$D/evidence" "$$D/results"',
+        (
+            f"printf '%s' {shlex.quote(inputs['inventory_base64'])} | base64 -d "
+            '> "$$D/inventory.json"'
+        ),
+        (
+            'test "$$(sha256sum "$$D/inventory.json" | awk \'{print $$1}\')" = '
+            f"{inputs['inventory_sha256']}"
+        ),
+        (
+            f"printf '%s' {shlex.quote(inputs['current_jobs_base64'])} | base64 -d "
+            '> "$$D/results/current-jobs.json"'
+        ),
+        (
+            'test "$$(sha256sum "$$D/results/current-jobs.json" | '
+            "awk '{print $$1}')\" = "
+            f"{inputs['current_jobs_sha256']}"
+        ),
+        'python3 -m venv "$$D/venv"',
+        (
+            '"$$D/venv/bin/pip" install --quiet '
+            '"git+https://github.com/vllm-project/ci-infra.git@'
+            f'{revision}#subdirectory=buildkite/pipeline_generator"'
+        ),
+        (
+            'buildkite-agent artifact download "trace-output/**/*" '
+            f'"$$D/evidence" --build {shlex.quote(source_build)}'
+        ),
+        (
+            '"$$D/venv/bin/vllm-test-selection" publish-snapshot '
+            '--input "$$D/evidence" --inventory "$$D/inventory.json" '
+            f'--bucket {bucket} --prefix {prefix} | tee "$$D/results/publish.json"'
+        ),
+        (
+            '"$$D/venv/bin/vllm-test-selection" fetch-snapshot '
+            f'--bucket {bucket} --prefix {prefix} --repo "$$PWD" '
+            f'--base {repository_sha} --output "$$D/readback.sqlite" '
+            '--max-snapshot-age-days 1 | tee "$$D/results/fetch.json"'
+        ),
+        (
+            '"$$D/venv/bin/vllm-test-selection" inspect-graph '
+            '--graph "$$D/readback.sqlite" --metadata | '
+            'tee "$$D/results/metadata.json"'
+        ),
+        'sha256sum "$$D/readback.sqlite" | tee "$$D/results/readback.sha256"',
+        'cp "$$D/inventory.json" "$$D/results/source-inventory.json"',
+        'cp "$$D/readback.sqlite.sha256" "$$D/results/"',
+        f"printf '%s\\n' {revision} > \"$$D/results/publisher-revision.txt\"",
+        f"printf '%s\\n' {source_build} > \"$$D/results/source-build.txt\"",
+        "TRIAL_STATUS=0",
+    ]
+    for trial in inputs["trials"]:
+        pull_request = trial["pull_request"]
+        head = trial["head"]
+        remote = f"origin/pr-{pull_request}"
+        command.extend(
+            [
+                (
+                    "git fetch --force origin "
+                    f"refs/pull/{pull_request}/head:refs/remotes/{remote}"
+                ),
+                f'test "$$(git rev-parse {remote})" = {head}',
+                (
+                    '"$$D/venv/bin/vllm-test-selection" select '
+                    '--graph "$$D/readback.sqlite" --repo "$$PWD" '
+                    f"--base {repository_sha} --head {remote} "
+                    '--current-jobs "$$D/results/current-jobs.json" '
+                    f'> "$$D/results/pr-{pull_request}.json" || TRIAL_STATUS=$$?'
+                ),
+            ]
+        )
+    command.extend(
+        [
+            'buildkite-agent artifact upload "$$D/results/*"',
+            'test "$$TRIAL_STATUS" -eq 0',
+        ]
+    )
+    return BuildkiteGroupStep(
+        group="Test selection snapshot republish",
+        steps=[
+            BuildkiteCommandStep(
+                agents={"queue": AgentQueue.CPU_POSTMERGE_US_EAST_1.value},
+                commands=["\n".join(command)],
+                key="test-selection-snapshot-republish",
+                label=":database: Republish test-selection snapshot",
+                priority=-100,
+                retry={"automatic": [{"exit_status": -1, "limit": 1}]},
+                timeout_in_minutes=180,
             )
         ],
     )
