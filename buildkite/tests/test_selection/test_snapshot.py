@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import test_selection.snapshot as snapshot
 from test_selection.graph import GraphError, SCHEMA, write_checksum
 from test_selection.snapshot import (
     build_snapshot_manifest,
@@ -120,6 +121,56 @@ def test_publish_and_fetch_round_trip(tmp_path: Path):
     assert fetched == entry
     assert output.read_bytes() == graph.read_bytes()
     assert output.with_suffix(".sqlite.sha256").is_file()
+    assert json.loads(manifest.read_text())["schema_version"] == 2
+    root = f"test-selection/vllm/snapshots/{repository_sha}"
+    assert f"{root}/graph.sqlite.gz" in store.objects
+    assert f"{root}/graph.sqlite" not in store.objects
+
+
+def test_compressed_graph_is_byte_deterministic(tmp_path: Path):
+    graph = _graph(tmp_path / "graph.sqlite")
+    first_manifest = tmp_path / "first-manifest.json"
+    second_manifest = tmp_path / "second-manifest.json"
+
+    build_snapshot_manifest(graph, first_manifest)
+    first_bytes = graph.with_suffix(".sqlite.gz").read_bytes()
+    graph.with_suffix(".sqlite.gz").unlink()
+    build_snapshot_manifest(graph, second_manifest)
+
+    assert graph.with_suffix(".sqlite.gz").read_bytes() == first_bytes
+    assert first_manifest.read_bytes() == second_manifest.read_bytes()
+
+
+def test_compression_keeps_large_logical_graph_under_single_put_limit(
+    tmp_path: Path, monkeypatch
+):
+    graph = _graph(tmp_path / "graph.sqlite")
+    connection = sqlite3.connect(graph)
+    connection.execute("CREATE TABLE padding (value BLOB NOT NULL)")
+    connection.execute("INSERT INTO padding VALUES (zeroblob(2097152))")
+    connection.commit()
+    connection.close()
+    write_checksum(graph)
+    manifest = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest)
+    compressed = graph.with_suffix(".sqlite.gz")
+    assert graph.stat().st_size > 1024 * 1024
+    assert compressed.stat().st_size < 1024 * 1024
+    monkeypatch.setattr(snapshot, "S3_SINGLE_PUT_MAX_BYTES", 1024 * 1024)
+
+    publish_snapshot(MemoryStore(), "test-selection/vllm", graph, manifest)
+
+
+def test_publish_rejects_compressed_graph_over_single_put_limit(
+    tmp_path: Path, monkeypatch
+):
+    graph = _graph(tmp_path / "graph.sqlite")
+    manifest = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest)
+    monkeypatch.setattr(snapshot, "S3_SINGLE_PUT_MAX_BYTES", 1)
+
+    with pytest.raises(GraphError, match="single-PUT size limit"):
+        publish_snapshot(MemoryStore(), "test-selection/vllm", graph, manifest)
 
 
 def test_publish_rejects_conflicting_immutable_graph(tmp_path: Path):
@@ -128,11 +179,87 @@ def test_publish_rejects_conflicting_immutable_graph(tmp_path: Path):
     build_snapshot_manifest(graph, manifest)
     store = MemoryStore()
     publish_snapshot(store, "test-selection/vllm", graph, manifest)
-    key = f"test-selection/vllm/snapshots/{SHA}/graph.sqlite"
+    key = f"test-selection/vllm/snapshots/{SHA}/graph.sqlite.gz"
     store.objects[key]["data"] += b"corrupt"
 
     with pytest.raises(GraphError, match="immutable"):
         publish_snapshot(store, "test-selection/vllm", graph, manifest)
+
+
+def test_fetch_verifies_compressed_bytes_before_decompression(
+    tmp_path: Path, monkeypatch
+):
+    repo, repository_sha = _repo(tmp_path)
+    graph = _graph(tmp_path / "graph.sqlite", repository_sha)
+    manifest = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest)
+    store = MemoryStore()
+    publish_snapshot(store, "test-selection/vllm", graph, manifest)
+    key = f"test-selection/vllm/snapshots/{repository_sha}/graph.sqlite.gz"
+    corrupt = bytearray(store.objects[key]["data"])
+    corrupt[-1] ^= 1
+    store.objects[key]["data"] = bytes(corrupt)
+    monkeypatch.setattr(
+        snapshot,
+        "_decompress_graph",
+        lambda *_args, **_kwargs: pytest.fail("unverified object was decompressed"),
+    )
+
+    with pytest.raises(GraphError, match="compressed graph checksum mismatch"):
+        fetch_snapshot(
+            store,
+            "test-selection/vllm",
+            repo,
+            repository_sha,
+            tmp_path / "out.sqlite",
+        )
+
+
+def test_decompression_verifies_logical_checksum(tmp_path: Path):
+    graph = _graph(tmp_path / "graph.sqlite")
+    manifest = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest)
+
+    with pytest.raises(GraphError, match="decompressed snapshot graph checksum"):
+        snapshot._decompress_graph(
+            graph.with_suffix(".sqlite.gz"),
+            tmp_path / "out.sqlite",
+            expected_bytes=graph.stat().st_size,
+            expected_sha256="0" * 64,
+        )
+
+
+def test_fetch_supports_legacy_uncompressed_manifest(tmp_path: Path):
+    repo, repository_sha = _repo(tmp_path)
+    graph = _graph(tmp_path / "graph.sqlite", repository_sha)
+    generated = tmp_path / "generated-manifest.json"
+    manifest = tmp_path / "manifest.json"
+    document = build_snapshot_manifest(graph, generated)
+    document["schema_version"] = 1
+    document["files"].pop("graph.sqlite.gz")
+    document["files"]["graph.sqlite"] = {
+        "bytes": graph.stat().st_size,
+        "sha256": snapshot.sha256_file(graph),
+    }
+    manifest.write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    store = MemoryStore()
+    entry = publish_snapshot(store, "test-selection/vllm", graph, manifest)
+
+    output = tmp_path / "legacy.sqlite"
+    assert (
+        fetch_snapshot(
+            store,
+            "test-selection/vllm",
+            repo,
+            repository_sha,
+            output,
+        )
+        == entry
+    )
+    assert output.read_bytes() == graph.read_bytes()
 
 
 def test_fetch_rejects_corrupt_manifest(tmp_path: Path):

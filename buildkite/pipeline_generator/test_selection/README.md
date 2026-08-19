@@ -24,14 +24,17 @@ artifacts, and builds `graph.sqlite`. It publishes immutable objects under:
 
 ```text
 test-selection/vllm/snapshots/<main-sha>/
-  graph.sqlite
+  graph.sqlite.gz
   graph.sqlite.sha256
   manifest.json
 test-selection/vllm/index.json
 ```
 
 The manifest accounts for every discovered pytest job as healthy, missing, or
-unhealthy. Missing and unhealthy jobs are never omitted by the selector.
+unhealthy. It binds both the deterministic gzip object and the logical SQLite
+bytes; readers verify the compressed object before bounded decompression, then
+verify the SQLite checksum sidecar. Missing and unhealthy jobs are never
+omitted by the selector.
 
 ## PR selection
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import re
@@ -22,6 +23,10 @@ from test_selection.graph import (
     sha256_file,
     verify_checksum,
 )
+
+
+S3_SINGLE_PUT_MAX_BYTES = 5 * 1024**3
+SNAPSHOT_MANIFEST_SCHEMA_VERSION = 2
 
 
 class ObjectStore(Protocol):
@@ -143,10 +148,70 @@ def _prefix(value: str) -> str:
     return value
 
 
+def _compressed_graph_path(graph: Path) -> Path:
+    return graph.with_suffix(graph.suffix + ".gz")
+
+
+def _compress_graph(graph: Path, output: Path) -> None:
+    """Write a byte-deterministic gzip stream for the immutable graph."""
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    try:
+        with graph.open("rb") as source, temporary.open("wb") as destination:
+            with gzip.GzipFile(
+                filename="",
+                mode="wb",
+                compresslevel=6,
+                fileobj=destination,
+                mtime=0,
+            ) as compressed:
+                shutil.copyfileobj(source, compressed, length=1024 * 1024)
+        os.replace(temporary, output)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise GraphError("snapshot graph compression failed") from error
+
+
+def _decompress_graph(
+    source: Path,
+    output: Path,
+    *,
+    expected_bytes: int,
+    expected_sha256: str,
+) -> None:
+    """Expand a verified gzip object with bounds and logical checks."""
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    written = 0
+    try:
+        with gzip.open(source, "rb") as compressed, temporary.open("wb") as graph:
+            while True:
+                chunk = compressed.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > expected_bytes:
+                    raise GraphError(
+                        "decompressed snapshot graph exceeds declared byte count"
+                    )
+                graph.write(chunk)
+        if written != expected_bytes:
+            raise GraphError("decompressed snapshot graph byte count mismatch")
+        if sha256_file(temporary) != expected_sha256:
+            raise GraphError("decompressed snapshot graph checksum mismatch")
+        os.replace(temporary, output)
+    except (OSError, EOFError) as error:
+        temporary.unlink(missing_ok=True)
+        raise GraphError("snapshot graph decompression failed") from error
+    except GraphError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def build_snapshot_manifest(graph: Path, output: Path) -> dict[str, Any]:
     verify_checksum(graph)
     metadata = graph_metadata(graph)
     checksum = sha256_file(graph)
+    compressed_graph = _compressed_graph_path(graph)
+    _compress_graph(graph, compressed_graph)
     document = {
         "always_run": metadata.get("always_run", []),
         "ci_infra_revision": metadata["ci_infra_revision"],
@@ -156,9 +221,12 @@ def build_snapshot_manifest(graph: Path, output: Path) -> dict[str, Any]:
         "data_through": metadata["data_through"],
         "expected_jobs": metadata["expected_jobs"],
         "files": {
-            "graph.sqlite": {
-                "bytes": graph.stat().st_size,
-                "sha256": checksum,
+            "graph.sqlite.gz": {
+                "bytes": compressed_graph.stat().st_size,
+                "compression": "gzip",
+                "content_bytes": graph.stat().st_size,
+                "content_sha256": checksum,
+                "sha256": sha256_file(compressed_graph),
             },
             "graph.sqlite.sha256": {
                 "bytes": graph.with_suffix(graph.suffix + ".sha256").stat().st_size,
@@ -170,7 +238,7 @@ def build_snapshot_manifest(graph: Path, output: Path) -> dict[str, Any]:
         "missing_jobs": metadata.get("missing_jobs", []),
         "missing_reasons": metadata.get("missing_reasons", {}),
         "repository_sha": metadata["repository_sha"],
-        "schema_version": 1,
+        "schema_version": SNAPSHOT_MANIFEST_SCHEMA_VERSION,
         "unhealthy_jobs": metadata.get("unhealthy_jobs", []),
         "unhealthy_reasons": metadata.get("unhealthy_reasons", {}),
         "wait_results": metadata.get("wait_results", {}),
@@ -238,6 +306,8 @@ def _validate_index_entry(
 def _validate_file_record(document: Any, path: Path, label: str) -> None:
     if not isinstance(document, dict):
         raise GraphError(f"snapshot manifest {label} record is invalid")
+    if not path.is_file():
+        raise GraphError(f"snapshot manifest {label} file is missing")
     if document.get("bytes") != path.stat().st_size:
         raise GraphError(f"snapshot manifest {label} byte count mismatch")
     if document.get("sha256") != sha256_file(path):
@@ -258,6 +328,8 @@ def _publish_immutable(
                 "immutable snapshot object already exists with different bytes"
             )
         return
+    if source.stat().st_size > S3_SINGLE_PUT_MAX_BYTES:
+        raise GraphError("immutable snapshot object exceeds S3 single-PUT size limit")
     try:
         store.upload(key, source, sha256=checksum, if_none_match=True)
     except GraphError:
@@ -284,10 +356,9 @@ def publish_snapshot(
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise GraphError("snapshot manifest is not valid JSON") from error
-    if (
-        manifest.get("kind") != "vllm-test-selection-snapshot"
-        or manifest.get("schema_version") != 1
-    ):
+    if manifest.get("kind") != "vllm-test-selection-snapshot" or manifest.get(
+        "schema_version"
+    ) not in (1, 2):
         raise GraphError("unsupported snapshot manifest schema")
     repository_sha = str(manifest.get("repository_sha", ""))
     if not re.fullmatch(r"[0-9a-f]{40}", repository_sha):
@@ -299,17 +370,30 @@ def publish_snapshot(
     files = manifest.get("files")
     if not isinstance(files, dict):
         raise GraphError("snapshot manifest files are invalid")
-    _validate_file_record(files.get("graph.sqlite"), graph, "graph")
+    root = f"{prefix}/snapshots/{repository_sha}"
     _validate_file_record(files.get("graph.sqlite.sha256"), sidecar, "checksum sidecar")
+    if manifest["schema_version"] == 1:
+        _validate_file_record(files.get("graph.sqlite"), graph, "graph")
+        graph_objects = {f"{root}/graph.sqlite": graph}
+    else:
+        compressed_graph = _compressed_graph_path(graph)
+        graph_record = files.get("graph.sqlite.gz")
+        _validate_file_record(graph_record, compressed_graph, "compressed graph")
+        if (
+            graph_record.get("compression") != "gzip"
+            or graph_record.get("content_bytes") != graph.stat().st_size
+            or graph_record.get("content_sha256") != sha256_file(graph)
+        ):
+            raise GraphError("snapshot manifest compressed graph content is invalid")
+        graph_objects = {f"{root}/graph.sqlite.gz": compressed_graph}
     if manifest.get("data_through") != metadata["data_through"]:
         raise GraphError("snapshot graph and manifest evidence watermark disagree")
     for field in ("created_at", "data_through"):
         if not isinstance(manifest.get(field), str):
             raise GraphError(f"snapshot manifest {field} is invalid")
         _timestamp(manifest[field])
-    root = f"{prefix}/snapshots/{repository_sha}"
     objects = {
-        f"{root}/graph.sqlite": graph,
+        **graph_objects,
         f"{root}/graph.sqlite.sha256": sidecar,
         f"{root}/manifest.json": manifest_path,
     }
@@ -472,10 +556,9 @@ def fetch_snapshot(
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as error:
             raise GraphError("snapshot manifest is not valid JSON") from error
-        if (
-            manifest.get("kind") != "vllm-test-selection-snapshot"
-            or manifest.get("schema_version") != 1
-        ):
+        if manifest.get("kind") != "vllm-test-selection-snapshot" or manifest.get(
+            "schema_version"
+        ) not in (1, 2):
             raise GraphError("unsupported snapshot manifest schema")
         if manifest.get("repository_sha") != entry["repository_sha"]:
             raise GraphError("snapshot manifest disagrees with index")
@@ -487,23 +570,50 @@ def fetch_snapshot(
         root = entry["manifest_key"].removesuffix("/manifest.json")
         graph = directory / "graph.sqlite"
         sidecar = directory / "graph.sqlite.sha256"
-        store.download(f"{root}/graph.sqlite", graph)
         store.download(f"{root}/graph.sqlite.sha256", sidecar)
         files = manifest.get("files")
         if not isinstance(files, dict):
             raise GraphError("snapshot manifest files are invalid")
-        expected = files.get("graph.sqlite", {})
         expected_sidecar = files.get("graph.sqlite.sha256", {})
-        if not isinstance(expected, dict) or not isinstance(expected_sidecar, dict):
+        if not isinstance(expected_sidecar, dict):
             raise GraphError("snapshot manifest file records are invalid")
-        if graph.stat().st_size != expected.get("bytes"):
-            raise GraphError("downloaded graph byte count mismatch")
-        if sha256_file(graph) != expected.get("sha256"):
-            raise GraphError("downloaded graph checksum mismatch")
         if sidecar.stat().st_size != expected_sidecar.get("bytes"):
             raise GraphError("downloaded checksum sidecar byte count mismatch")
         if sha256_file(sidecar) != expected_sidecar.get("sha256"):
             raise GraphError("downloaded checksum sidecar mismatch")
+        if manifest["schema_version"] == 1:
+            expected = files.get("graph.sqlite", {})
+            if not isinstance(expected, dict):
+                raise GraphError("snapshot manifest graph record is invalid")
+            store.download(f"{root}/graph.sqlite", graph)
+            if graph.stat().st_size != expected.get("bytes"):
+                raise GraphError("downloaded graph byte count mismatch")
+            if sha256_file(graph) != expected.get("sha256"):
+                raise GraphError("downloaded graph checksum mismatch")
+        else:
+            expected = files.get("graph.sqlite.gz", {})
+            if (
+                not isinstance(expected, dict)
+                or expected.get("compression") != "gzip"
+                or not isinstance(expected.get("content_bytes"), int)
+                or expected["content_bytes"] < 1
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(expected.get("content_sha256", ""))
+                )
+            ):
+                raise GraphError("snapshot manifest compressed graph record is invalid")
+            compressed_graph = directory / "graph.sqlite.gz"
+            store.download(f"{root}/graph.sqlite.gz", compressed_graph)
+            if compressed_graph.stat().st_size != expected.get("bytes"):
+                raise GraphError("downloaded compressed graph byte count mismatch")
+            if sha256_file(compressed_graph) != expected.get("sha256"):
+                raise GraphError("downloaded compressed graph checksum mismatch")
+            _decompress_graph(
+                compressed_graph,
+                graph,
+                expected_bytes=expected["content_bytes"],
+                expected_sha256=expected["content_sha256"],
+            )
         verify_checksum(graph)
         metadata = graph_metadata(graph)
         if metadata["repository_sha"] != entry["repository_sha"]:
