@@ -89,7 +89,8 @@ The generator relies on several environment variables, typically provided by Bui
     The only valid value is `1`; on the exact authorized mirror branch/commit,
     it emits one step that copies the two pinned postmerge image manifests to
     their premerge tags and verifies the resulting public digests. It cannot be
-    combined with targeted-step or snapshot-republish modes.
+    combined with targeted-step or snapshot-republish modes, and
+    `VLLM_CI_BRANCH` must identify the running generator by exact commit SHA.
 
 Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
 `buildkite-analytics-token-secret` Secret's `token` key when it is available.

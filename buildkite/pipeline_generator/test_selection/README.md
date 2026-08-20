@@ -113,7 +113,9 @@ mirror branch's premerge tags and verifies both public destination digests.
 The mode accepts only the exact `ci-tsel-main-mirror-eac636a7` branch and
 `eac636a7fa476983cdae34b45a984e9852aad375` commit with their paired trace
 canary authorization. It rejects PRs, other repositories or registries,
-`VLLM_CI_ONLY_STEP_KEYS`, and every republish variable.
+`VLLM_CI_ONLY_STEP_KEYS`, and every republish variable. `VLLM_CI_BRANCH` must
+be the exact 40-hex ci-infra commit actually running the generator; a mutable
+branch name is rejected.
 
 This is a frozen recovery vehicle, not a general image-copy API. Run it only
 after any build writing the same premerge tags is terminal. The subsequent

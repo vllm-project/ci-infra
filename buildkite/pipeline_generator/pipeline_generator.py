@@ -490,7 +490,7 @@ def _recovery_image_copy_requested() -> bool:
     return os.getenv(RECOVERY_IMAGE_COPY_ENV) is not None
 
 
-def _validate_recovery_image_copy(global_config: dict) -> None:
+def _validate_recovery_image_copy(global_config: dict) -> str:
     if os.getenv(RECOVERY_IMAGE_COPY_ENV) != "1":
         raise ValueError(f"{RECOVERY_IMAGE_COPY_ENV} must equal 1")
     if (
@@ -520,13 +520,19 @@ def _validate_recovery_image_copy(global_config: dict) -> None:
         or repositories.get("premerge") != RECOVERY_IMAGE_DESTINATION_REPO
     ):
         raise ValueError("recovery image copy repository mapping is not trusted")
+    requested_revision = os.getenv("VLLM_CI_BRANCH", "")
+    revision = _ci_infra_revision()
+    if not re.fullmatch(r"[0-9a-f]{40}", requested_revision):
+        raise ValueError("recovery image copy requires VLLM_CI_BRANCH as an exact SHA")
+    if requested_revision != revision:
+        raise ValueError("recovery image copy generator revision does not match")
+    return revision
 
 
 def create_recovery_image_copy_group_step(global_config: dict) -> BuildkiteGroupStep:
     """Carbon-copy #84714's pinned images for the exact mirror recovery."""
 
-    _validate_recovery_image_copy(global_config)
-    revision = _ci_infra_revision()
+    revision = _validate_recovery_image_copy(global_config)
     source = f"{RECOVERY_IMAGE_REGISTRY}/{RECOVERY_IMAGE_SOURCE_REPO}"
     destination = f"{RECOVERY_IMAGE_REGISTRY}/{RECOVERY_IMAGE_DESTINATION_REPO}"
     amd64_destination = f"{destination}:{RECOVERY_IMAGE_COMMIT}"

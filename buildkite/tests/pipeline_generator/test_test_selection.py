@@ -198,6 +198,7 @@ def test_recovery_image_copy_renders_one_exact_step(
 ):
     config = _recovery_image_copy_config(fake_global_config)
     monkeypatch.setenv(RECOVERY_IMAGE_COPY_ENV, "1")
+    monkeypatch.setenv("VLLM_CI_BRANCH", "f" * 40)
     monkeypatch.setattr(pipeline_module, "_ci_infra_revision", lambda: "f" * 40)
     monkeypatch.setattr(pipeline_module, "get_global_config", lambda: config)
     output = tmp_path / "pipeline.yaml"
@@ -237,6 +238,8 @@ def test_recovery_image_copy_rejects_untrusted_or_ambiguous_inputs(
     fake_global_config, monkeypatch
 ):
     config = _recovery_image_copy_config(fake_global_config)
+    monkeypatch.setenv("VLLM_CI_BRANCH", "f" * 40)
+    monkeypatch.setattr(pipeline_module, "_ci_infra_revision", lambda: "f" * 40)
     monkeypatch.setenv(RECOVERY_IMAGE_COPY_ENV, "yes")
     with pytest.raises(ValueError, match="must equal 1"):
         create_recovery_image_copy_group_step(config)
@@ -264,6 +267,15 @@ def test_recovery_image_copy_rejects_untrusted_or_ambiguous_inputs(
                 },
             }
         )
+
+    monkeypatch.setenv("VLLM_CI_BRANCH", "lonnie/fix-node-export-merge")
+    with pytest.raises(ValueError, match="VLLM_CI_BRANCH as an exact SHA"):
+        create_recovery_image_copy_group_step(config)
+
+    monkeypatch.setenv("VLLM_CI_BRANCH", "e" * 40)
+    with pytest.raises(ValueError, match="generator revision does not match"):
+        create_recovery_image_copy_group_step(config)
+    monkeypatch.setenv("VLLM_CI_BRANCH", "f" * 40)
 
     with pytest.raises(ValueError, match="cannot be combined"):
         create_recovery_image_copy_group_step(
