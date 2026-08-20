@@ -113,6 +113,16 @@ def _insert_python(
         raise GraphError(f"{manifest_path} repository SHA mismatch")
     if manifest.get("represented_job_key") != job_key or not manifest.get("healthy"):
         raise GraphError(f"{manifest_path} is not healthy evidence for {job_key}")
+    started = manifest.get("pytest_invocations_started")
+    exported = manifest.get("pytest_invocations_exported")
+    if (
+        type(started) is not int
+        or started < 1
+        or type(exported) is not int
+        or exported != started
+        or manifest.get("pytest_node_exports_complete") is not True
+    ):
+        raise GraphError(f"{manifest_path} has incomplete pytest node exports")
     trace = manifest_path.parent / str(manifest.get("python_trace", ""))
     if not trace.is_file() or sha256_file(trace) != manifest.get("python_trace_sha256"):
         raise GraphError(f"{manifest_path} Python trace checksum mismatch")

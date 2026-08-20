@@ -228,7 +228,34 @@ def _install_pytest_launcher(
     launcher = directory / "pytest"
     launcher.write_text(
         "#!/bin/sh\n"
+        "set -eu\n"
         f"export PYTHONPATH={collector_root}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+        "node_file=${VLLM_CI_TEST_SELECTION_NODEIDS:?}\n"
+        'counter_file="${node_file}.invocations"\n'
+        'lock_dir="${counter_file}.lock"\n'
+        "attempt=0\n"
+        'while ! mkdir "$lock_dir" 2>/dev/null; do\n'
+        "  attempt=$((attempt + 1))\n"
+        '  if [ "$attempt" -ge 500 ]; then\n'
+        '    echo "timed out allocating pytest invocation id" >&2\n'
+        "    exit 70\n"
+        "  fi\n"
+        "  sleep 0.01\n"
+        "done\n"
+        "trap 'rmdir \"$lock_dir\" 2>/dev/null || true' EXIT HUP INT TERM\n"
+        "count=0\n"
+        'if [ -s "$counter_file" ]; then IFS= read -r count < "$counter_file"; fi\n'
+        'case "$count" in\n'
+        "  ''|*[!0-9]*) echo \"invalid pytest invocation counter\" >&2; exit 70 ;;\n"
+        "esac\n"
+        "next=$((count + 1))\n"
+        'temporary="${counter_file}.tmp.$$"\n'
+        'printf \'%s\\n\' "$next" > "$temporary"\n'
+        'mv "$temporary" "$counter_file"\n'
+        'rmdir "$lock_dir"\n'
+        "trap - EXIT HUP INT TERM\n"
+        "VLLM_CI_TEST_SELECTION_PYTEST_INVOCATION=$(printf '%03d' \"$count\")\n"
+        "export VLLM_CI_TEST_SELECTION_PYTEST_INVOCATION\n"
         f"exec {target}\n",
         encoding="utf-8",
     )
@@ -381,12 +408,33 @@ def validate_import_environment(
     return status
 
 
-def _merge_node_documents(output_dir: Path, node_file: Path) -> dict[str, Any]:
+def _pytest_invocations_started(node_file: Path) -> int:
+    counter = Path(str(node_file) + ".invocations")
+    if not counter.is_file():
+        return 0
+    try:
+        value = int(counter.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError) as error:
+        raise RuntimeError("pytest invocation counter is invalid") from error
+    if value < 0:
+        raise RuntimeError("pytest invocation counter is negative")
+    return value
+
+
+def _merge_node_documents(
+    output_dir: Path, node_file: Path
+) -> tuple[dict[str, Any], set[str]]:
     documents = []
+    invocation_ids: set[str] = set()
     for path in sorted(output_dir.glob("pytest-nodes*.json")):
+        if path == node_file:
+            invocation_ids.add("direct")
+        else:
+            tail = path.name[len(node_file.stem) + 1 : -len(node_file.suffix)]
+            invocation_ids.add(tail.split(".", 1)[0])
         documents.append(json.loads(path.read_text(encoding="utf-8")))
     if not documents:
-        return {"collected": [], "exit_status": None, "outcomes": {}}
+        return {"collected": [], "exit_status": None, "outcomes": {}}, set()
 
     collected: set[str] = set()
     outcomes: dict[str, dict[str, str]] = {}
@@ -404,7 +452,7 @@ def _merge_node_documents(output_dir: Path, node_file: Path) -> dict[str, Any]:
         "outcomes": {node_id: outcomes[node_id] for node_id in sorted(outcomes)},
     }
     _atomic_json(node_file, merged)
-    return merged
+    return merged, invocation_ids
 
 
 def main() -> int:
@@ -470,13 +518,18 @@ def main() -> int:
                 check=False,
             )
             command_exit_code = _shell_exit_code(result.returncode)
+            command_finished_at = datetime.now(UTC).isoformat()
+            invocations_at_finish = (
+                _pytest_invocations_started(node_file) if args.command_base64 else 1
+            )
             _atomic_json(
                 command_status_file,
                 {
                     "command_executed": True,
-                    "created_at": datetime.now(UTC).isoformat(),
+                    "created_at": command_finished_at,
                     "exit_code": command_exit_code,
                     "phase": "finished",
+                    "pytest_invocations_started": invocations_at_finish,
                 },
             )
         else:
@@ -495,15 +548,38 @@ def main() -> int:
         else []
     )
     _atomic_jsonl(trace_file, rows)
-    node_document = _merge_node_documents(output_dir, node_file)
+    node_document, exported_invocations = _merge_node_documents(output_dir, node_file)
+    if args.command_base64:
+        started_invocations = _pytest_invocations_started(node_file)
+        expected_invocations = {f"{index:03d}" for index in range(started_invocations)}
+    else:
+        started_invocations = 1
+        expected_invocations = {"direct"}
+    node_exports_complete = exported_invocations == expected_invocations
+    if command_executed:
+        _atomic_json(
+            command_status_file,
+            {
+                "command_executed": True,
+                "created_at": command_finished_at,
+                "exit_code": command_exit_code,
+                "phase": "finished",
+                "pytest_invocations_exported": len(exported_invocations),
+                "pytest_invocations_started": started_invocations,
+                "pytest_node_exports_complete": node_exports_complete,
+            },
+        )
     healthy = (
         command_exit_code == 0
         and bool(node_document["collected"])
         and coverage_file.exists()
+        and node_exports_complete
     )
     failure_reason = None
     if preflight_status != 0:
         failure_reason = "collector_import_failed"
+    elif not node_exports_complete:
+        failure_reason = "pytest_node_export_incomplete"
     elif not healthy:
         failure_reason = "collector_unhealthy"
     _atomic_json(
@@ -526,6 +602,9 @@ def main() -> int:
             "job_key": args.job_key,
             "node_ids": node_document["collected"],
             "pytest_exit_code": command_exit_code,
+            "pytest_invocations_exported": len(exported_invocations),
+            "pytest_invocations_started": started_invocations,
+            "pytest_node_exports_complete": node_exports_complete,
             "python_trace": trace_file.name,
             "python_trace_rows": len(rows),
             "python_trace_sha256": _sha256(trace_file),

@@ -57,6 +57,9 @@ def _job(
             "failure_reason": failure_reason,
             "healthy": healthy,
             "node_ids": ["tests/test_model.py::test_forward"],
+            "pytest_invocations_exported": 1,
+            "pytest_invocations_started": 1,
+            "pytest_node_exports_complete": True,
             "python_trace": trace.name,
             "python_trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(),
             "repository_sha": SHA,
@@ -168,6 +171,31 @@ def test_unhealthy_summary_preserves_specific_failure_reason(tmp_path: Path):
     )
 
     assert metadata["unhealthy_reasons"] == {"import-failed": "collector_import_failed"}
+
+
+def test_materializer_rejects_incomplete_pytest_node_exports(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    _job(evidence, "unit-tests")
+    _job(evidence, "healthy-control")
+    manifest_path = evidence / "unit-tests/0/commands/000/job.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        {
+            "pytest_invocations_exported": 1,
+            "pytest_invocations_started": 2,
+            "pytest_node_exports_complete": False,
+        }
+    )
+    _write(manifest_path, manifest)
+
+    metadata = build_fleet_graph(
+        evidence,
+        _inventory(tmp_path / "inventory.json", "unit-tests", "healthy-control"),
+        tmp_path / "graph.sqlite",
+    )
+
+    assert metadata["healthy_jobs"] == ["healthy-control"]
+    assert metadata["unhealthy_reasons"] == {"unit-tests": "GraphError"}
 
 
 def test_bad_checksum_fails_closed(tmp_path: Path):

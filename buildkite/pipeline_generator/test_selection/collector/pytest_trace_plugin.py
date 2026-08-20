@@ -30,6 +30,17 @@ def pytest_runtest_logreport(report: Any) -> None:
     outcomes[report.when] = report.outcome
 
 
+def _node_output_path(output: str) -> Path:
+    path = Path(output)
+    invocation = os.environ.get("VLLM_CI_TEST_SELECTION_PYTEST_INVOCATION")
+    if invocation:
+        path = path.with_name(f"{path.stem}.{invocation}{path.suffix}")
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker:
+        path = path.with_name(f"{path.stem}.{worker}{path.suffix}")
+    return path
+
+
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     output = os.environ.get("VLLM_CI_TEST_SELECTION_NODEIDS")
     if not output:
@@ -44,10 +55,7 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
                 for nodeid in sorted(_STATE["outcomes"])
             },
         }
-        path = Path(output)
-        worker = os.environ.get("PYTEST_XDIST_WORKER")
-        if worker:
-            path = path.with_name(f"{path.stem}.{worker}{path.suffix}")
+        path = _node_output_path(output)
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(

@@ -149,6 +149,72 @@ def test_python_only_job_collects_unordered_lines_and_exact_collector(
     assert summary["healthy"] is True
 
 
+def test_one_command_merges_every_sequential_pytest_invocation(tmp_path: Path):
+    repo = tmp_path / "repo"
+    package = repo / "vllm"
+    tests = repo / "tests"
+    package.mkdir(parents=True)
+    tests.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "sample.py").write_text(
+        "def answer():\n    return 42\n", encoding="utf-8"
+    )
+    for name in ("first", "second"):
+        (tests / f"test_{name}.py").write_text(
+            "from vllm.sample import answer\n\n"
+            f"def test_{name}():\n"
+            "    assert answer() == 42\n",
+            encoding="utf-8",
+        )
+    output = tmp_path / "trace"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "BUILDKITE_COMMIT": "a" * 40,
+            "PATH": f"{Path(sys.executable).parent}:{environment['PATH']}",
+            "PYTHONPATH": str(_module_root()),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "test_selection.collector.run_job_trace",
+            "--output-dir",
+            str(output),
+            "--job-key",
+            "unit",
+            "--represented-job-key",
+            "unit",
+            "--commands-base64",
+            _payload(
+                ["pytest -q tests/test_first.py && pytest -q tests/test_second.py"]
+            ),
+            "--repo-root",
+            str(repo),
+            "--python-only",
+        ],
+        cwd=repo,
+        env=environment,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    shard = output / "commands/000"
+    manifest = json.loads((shard / "job.json").read_text(encoding="utf-8"))
+    assert manifest["healthy"] is True
+    assert manifest["pytest_invocations_started"] == 2
+    assert manifest["pytest_invocations_exported"] == 2
+    assert manifest["pytest_node_exports_complete"] is True
+    assert set(manifest["node_ids"]) == {
+        "tests/test_first.py::test_first",
+        "tests/test_second.py::test_second",
+    }
+    assert (shard / "pytest-nodes.000.json").is_file()
+    assert (shard / "pytest-nodes.001.json").is_file()
+
+
 def test_command_local_pythonpath_keeps_pytest_plugins_importable(tmp_path: Path):
     repo = tmp_path / "repo"
     package = repo / "vllm"
