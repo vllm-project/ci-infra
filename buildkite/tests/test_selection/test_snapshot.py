@@ -143,11 +143,20 @@ def test_publish_built_graph_constructs_and_publishes_manifest(tmp_path: Path):
     assert "test-selection/vllm/canary/index.json" in store.objects
 
 
-def test_publish_built_graph_rejects_production_prefix(tmp_path: Path):
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "test-selection/vllm",
+        "test-selection/vllm/staging",
+        "custom/production",
+        "test-selection/vllm/canaryish",
+    ],
+)
+def test_publish_built_graph_rejects_non_canary_prefix(tmp_path: Path, prefix: str):
     graph = _graph(tmp_path / "graph.sqlite")
 
-    with pytest.raises(GraphError, match="isolated non-production prefix"):
-        publish_built_graph(graph, MemoryStore(), "test-selection/vllm")
+    with pytest.raises(GraphError, match="explicit canary prefix"):
+        publish_built_graph(graph, MemoryStore(), prefix)
 
 
 def test_snapshot_manifest_records_mixed_collector_identity(tmp_path: Path):

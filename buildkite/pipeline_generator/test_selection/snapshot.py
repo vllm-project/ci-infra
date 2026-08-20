@@ -694,9 +694,9 @@ def publish_built_graph(
 
     graph = graph.resolve()
     prefix = _prefix(prefix)
-    if prefix == "test-selection/vllm":
+    if "canary" not in prefix.split("/"):
         raise GraphError(
-            "already-built graph publication requires an isolated non-production prefix"
+            "already-built graph publication requires an explicit canary prefix"
         )
     with tempfile.TemporaryDirectory(prefix="built-snapshot-") as directory_name:
         manifest_path = Path(directory_name) / "manifest.json"

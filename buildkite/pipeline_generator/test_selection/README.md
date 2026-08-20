@@ -91,7 +91,9 @@ job and replacement job has byte-equivalent logical evidence. A mixed-source
 graph records both collector hashes and leaves the legacy singular collector
 field null. The provenance binds both source Buildkite UUIDs, both collector
 and inventory hashes, the exact merger revision, and the merged graph hash.
-Publish only after reviewing it, always to a new isolated prefix:
+Publish only after reviewing it, always to a new isolated prefix containing an
+explicit `canary` path component (the recovery-only publisher rejects every
+other prefix):
 
 ```bash
 vllm-test-selection publish-graph \
