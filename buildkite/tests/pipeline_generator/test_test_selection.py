@@ -221,7 +221,12 @@ def test_recovery_image_copy_renders_one_exact_step(
     assert RECOVERY_IMAGE_ARM64_DIGEST in command
     assert "vllm-ci-postmerge-repo@sha256:" in command
     assert "vllm-ci-test-repo:" + RECOVERY_IMAGE_COMMIT in command
-    assert "imagetools create --prefer-index=false" in command
+    assert "buildx-v0.15.1.linux-amd64" in command
+    assert pipeline_module.RECOVERY_BUILDX_SHA256 in command
+    assert (
+        '"$D/docker-buildx" imagetools create --prefer-index=false'
+        in command.replace("$$", "$")
+    )
     assert "image-copy-provenance.txt" in command
     assert "pytest" not in command
     assert "aws s3" not in command.lower()

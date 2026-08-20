@@ -182,6 +182,10 @@ RECOVERY_IMAGE_AMD64_DIGEST = (
 RECOVERY_IMAGE_ARM64_DIGEST = (
     "sha256:41490e868bf2ceee1a6d4c5b3bd1434c4d4959cf694dd5ffec8ebf6916cefe83"
 )
+RECOVERY_BUILDX_VERSION = "v0.15.1"
+RECOVERY_BUILDX_SHA256 = (
+    "8d486f0088b7407a90ad675525ba4a17d0a537741b9b33fe3391a88cafa2dd0b"
+)
 
 # Full-fleet canary #84324 measured prohibitive Python-coverage overhead for
 # these exact jobs. Keep the evidence-based keys visible in the inventory but
@@ -548,17 +552,31 @@ def create_recovery_image_copy_group_step(global_config: dict) -> BuildkiteGroup
         ),
         f'test "$$BUILDKITE_BRANCH" = {shlex.quote(RECOVERY_IMAGE_BRANCH)}',
         f'test "$$BUILDKITE_COMMIT" = {shlex.quote(RECOVERY_IMAGE_COMMIT)}',
+        'D="$$(mktemp -d)"',
+        "trap 'rm -rf \"$$D\"' EXIT",
+        (
+            "curl --fail --location --proto '=https' --tlsv1.2 "
+            f'--output "$$D/docker-buildx" https://github.com/docker/buildx/'
+            f"releases/download/{RECOVERY_BUILDX_VERSION}/"
+            f"buildx-{RECOVERY_BUILDX_VERSION}.linux-amd64"
+        ),
+        (
+            f"printf '%s  %s\\n' {RECOVERY_BUILDX_SHA256} "
+            '"$$D/docker-buildx" | sha256sum -c -'
+        ),
+        'chmod 0755 "$$D/docker-buildx"',
+        '"$$D/docker-buildx" version',
         (
             "aws ecr-public get-login-password --region us-east-1 | "
             f"docker login --username AWS --password-stdin {RECOVERY_IMAGE_REGISTRY}"
         ),
         (
-            "docker buildx imagetools create --prefer-index=false "
+            '"$$D/docker-buildx" imagetools create --prefer-index=false '
             f"--tag {amd64_destination} "
             f"{source}@{RECOVERY_IMAGE_AMD64_DIGEST}"
         ),
         (
-            "docker buildx imagetools create --prefer-index=false "
+            '"$$D/docker-buildx" imagetools create --prefer-index=false '
             f"--tag {arm64_destination} "
             f"{source}@{RECOVERY_IMAGE_ARM64_DIGEST}"
         ),
@@ -566,7 +584,7 @@ def create_recovery_image_copy_group_step(global_config: dict) -> BuildkiteGroup
         '  local image="$$1" expected="$$2" observed=""',
         "  for attempt in $$(seq 1 12); do",
         (
-            "    observed=$$(docker buildx imagetools inspect "
+            '    observed=$$("$$D/docker-buildx" imagetools inspect '
             "--format '{{.Manifest.Digest}}' \"$$image\" 2>/dev/null || true)"
         ),
         '    if [[ "$$observed" = "$$expected" ]]; then',
@@ -581,8 +599,6 @@ def create_recovery_image_copy_group_step(global_config: dict) -> BuildkiteGroup
         ),
         "  return 1",
         "}",
-        'D="$$(mktemp -d)"',
-        "trap 'rm -rf \"$$D\"' EXIT",
         (
             f"wait_for_digest {amd64_destination} {RECOVERY_IMAGE_AMD64_DIGEST} "
             '| tee "$$D/image-copy-provenance.txt"'
