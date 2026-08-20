@@ -105,6 +105,7 @@ def test_python_only_job_collects_unordered_lines_and_exact_collector(
     environment.update(
         {
             "BUILDKITE_COMMIT": "a" * 40,
+            "BUILDKITE_RETRY_COUNT": "2",
             "PATH": f"{Path(sys.executable).parent}:{environment['PATH']}",
             "PYTHONPATH": str(_module_root()),
             "VLLM_CI_TEST_SELECTION_COLLECTOR_SHA256": collector_sha256,
@@ -147,6 +148,8 @@ def test_python_only_job_collects_unordered_lines_and_exact_collector(
     assert summary["capture_mode"] == "python-only"
     assert summary["collector_sha256"] == collector_sha256
     assert summary["healthy"] is True
+    assert summary["retry_count"] == 2
+    assert json.loads((shard / "job.json").read_text())["retry_count"] == 2
 
 
 def test_one_command_merges_every_sequential_pytest_invocation(tmp_path: Path):

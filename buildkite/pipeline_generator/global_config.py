@@ -7,6 +7,8 @@ import yaml
 from utils_lib.git_utils import get_list_file_diff, get_merge_base_commit, get_pr_labels
 
 ONLY_STEP_KEYS_ENV_VAR = "VLLM_CI_ONLY_STEP_KEYS"
+TRACE_CANARY_BRANCH_ENV_VAR = "VLLM_CI_TRACE_CANARY_BRANCH"
+TRACE_CANARY_COMMIT_ENV_VAR = "VLLM_CI_TRACE_CANARY_COMMIT"
 TRACE_S3_BUCKET_ENV_VAR = "VLLM_CI_TRACE_S3_BUCKET"
 TRACE_S3_PREFIX_ENV_VAR = "VLLM_CI_TRACE_S3_PREFIX"
 DEFAULT_VLLM_TRACE_BUCKET = "vllm-ci-test-selection-traces-936637512419-us-east-1"
@@ -31,6 +33,8 @@ class GlobalConfig(TypedDict):
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
     only_step_keys: Optional[FrozenSet[str]] = None
+    trace_canary_branch: Optional[str] = None
+    trace_canary_commit: Optional[str] = None
     trace_s3_bucket: Optional[str] = None
     trace_s3_prefix: str = "test-selection/vllm"
 
@@ -65,6 +69,12 @@ def init_global_config(pipeline_config_path: str):
     only_step_keys = _parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR))
     nightly = os.getenv("NIGHTLY", "0")
     commit = os.getenv("BUILDKITE_COMMIT")
+    trace_canary_branch, trace_canary_commit = _parse_trace_canary_override(
+        branch,
+        commit,
+        os.getenv(TRACE_CANARY_BRANCH_ENV_VAR),
+        os.getenv(TRACE_CANARY_COMMIT_ENV_VAR),
+    )
     trace_s3_bucket = os.getenv(TRACE_S3_BUCKET_ENV_VAR)
     if (
         pipeline_config["github_repo_name"] == "vllm-project/vllm"
@@ -82,6 +92,19 @@ def init_global_config(pipeline_config_path: str):
         part in ("", ".", "..") for part in trace_s3_prefix.split("/")
     ):
         raise ValueError(f"{TRACE_S3_PREFIX_ENV_VAR} is invalid.")
+    if trace_canary_branch:
+        if (
+            pipeline_config["github_repo_name"] != "vllm-project/vllm"
+            or nightly != "1"
+            or pull_request not in (None, "false")
+            or not trace_s3_bucket
+        ):
+            raise ValueError(
+                "trace canary override requires a trusted vLLM non-PR nightly "
+                "with an explicit trace bucket"
+            )
+        if trace_s3_prefix == "test-selection/vllm":
+            raise ValueError("trace canary override requires an isolated S3 prefix")
     config = GlobalConfig(
         name=pipeline_config["name"],
         github_repo_name=pipeline_config["github_repo_name"],
@@ -106,6 +129,8 @@ def init_global_config(pipeline_config_path: str):
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
         only_step_keys=only_step_keys,
+        trace_canary_branch=trace_canary_branch,
+        trace_canary_commit=trace_canary_commit,
         trace_s3_bucket=trace_s3_bucket,
         trace_s3_prefix=trace_s3_prefix,
     )
@@ -126,6 +151,34 @@ def get_global_config():
 
 def _parse_only_step_keys(value: Optional[str]) -> Optional[FrozenSet[str]]:
     return _parse_step_keys(value, ONLY_STEP_KEYS_ENV_VAR)
+
+
+def _parse_trace_canary_override(
+    branch: Optional[str],
+    commit: Optional[str],
+    allowed_branch: Optional[str],
+    allowed_commit: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    if (allowed_branch is None) != (allowed_commit is None):
+        raise ValueError(
+            f"{TRACE_CANARY_BRANCH_ENV_VAR} and {TRACE_CANARY_COMMIT_ENV_VAR} "
+            "must be set together."
+        )
+    if allowed_branch is None:
+        return None, None
+    if branch == "main":
+        raise ValueError("trace canary overrides are forbidden on main")
+    if allowed_branch != branch:
+        raise ValueError(
+            f"{TRACE_CANARY_BRANCH_ENV_VAR} must exactly match BUILDKITE_BRANCH."
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", allowed_commit or ""):
+        raise ValueError(f"{TRACE_CANARY_COMMIT_ENV_VAR} must be one 40-hex SHA.")
+    if allowed_commit != commit:
+        raise ValueError(
+            f"{TRACE_CANARY_COMMIT_ENV_VAR} must exactly match BUILDKITE_COMMIT."
+        )
+    return allowed_branch, allowed_commit
 
 
 def _parse_step_keys(

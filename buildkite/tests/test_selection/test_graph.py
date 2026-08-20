@@ -11,6 +11,7 @@ from test_selection.graph import (
     current_jobs_from_pipeline,
     graph_metadata,
     job_coverage,
+    merge_fleet_graph,
     paths_to_jobs,
     select_jobs,
 )
@@ -19,6 +20,8 @@ from test_selection.graph import (
 SHA = "a" * 40
 COLLECTOR = "b" * 64
 CREATED = "2026-08-19T09:00:00+00:00"
+BASE_BUILD_ID = "11111111-1111-4111-8111-111111111111"
+RETRY_BUILD_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def _write(path: Path, value) -> None:
@@ -37,12 +40,18 @@ def _job(
     healthy: bool = True,
     shard: int = 0,
     failure_reason: str | None = None,
+    retry_count: int = 0,
+    attempt_scoped: bool = False,
+    source: str = "vllm/model.py",
 ) -> None:
-    directory = root / key / str(shard)
+    directory = root / key
+    if attempt_scoped:
+        directory /= f"attempt-{retry_count}"
+    directory /= str(shard)
     trace = directory / "commands/000/python-trace.jsonl"
     rows = [
         {
-            "file": "vllm/model.py",
+            "file": source,
             "job_key": key,
             "line": 7,
             "repository_sha": SHA,
@@ -64,6 +73,7 @@ def _job(
             "python_trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(),
             "repository_sha": SHA,
             "represented_job_key": key,
+            "retry_count": retry_count,
         },
     )
     _write(
@@ -78,11 +88,16 @@ def _job(
             "parallel_job_count": 1,
             "repository_sha": SHA,
             "represented_job_key": key,
+            "retry_count": retry_count,
         },
     )
 
 
-def _inventory(path: Path, *keys: str) -> Path:
+def _inventory(
+    path: Path,
+    *keys: str,
+    wait_results: dict | None = None,
+) -> Path:
     _write(
         path,
         {
@@ -94,7 +109,7 @@ def _inventory(path: Path, *keys: str) -> Path:
                 for key in keys
             ],
             "repository_sha": SHA,
-            "wait_results": {},
+            "wait_results": wait_results or {},
         },
     )
     return path
@@ -171,6 +186,148 @@ def test_unhealthy_summary_preserves_specific_failure_reason(tmp_path: Path):
     )
 
     assert metadata["unhealthy_reasons"] == {"import-failed": "collector_import_failed"}
+
+
+def test_materializer_uses_latest_automatic_retry_attempt(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    _job(
+        evidence,
+        "retried",
+        healthy=False,
+        failure_reason="collector_unhealthy",
+        retry_count=0,
+        attempt_scoped=True,
+    )
+    _job(
+        evidence,
+        "retried",
+        retry_count=1,
+        attempt_scoped=True,
+    )
+
+    metadata = build_fleet_graph(
+        evidence,
+        _inventory(tmp_path / "inventory.json", "retried"),
+        tmp_path / "graph.sqlite",
+    )
+
+    assert metadata["healthy_jobs"] == ["retried"]
+    assert metadata["unhealthy_jobs"] == []
+
+
+def test_materializer_latest_invalid_retry_fails_closed(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    _job(evidence, "healthy-control")
+    _job(evidence, "retried", retry_count=0, attempt_scoped=True)
+    _job(evidence, "retried", retry_count=1, attempt_scoped=True)
+    summary_path = evidence / "retried/attempt-1/0/trace-job.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["repository_sha"] = "d" * 40
+    _write(summary_path, summary)
+
+    metadata = build_fleet_graph(
+        evidence,
+        _inventory(tmp_path / "inventory.json", "healthy-control", "retried"),
+        tmp_path / "graph.sqlite",
+    )
+
+    assert metadata["healthy_jobs"] == ["healthy-control"]
+    assert metadata["unhealthy_reasons"] == {"retried": "invalid_summary"}
+
+
+def test_terminal_job_without_artifact_is_not_reported_as_poll_timeout(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    _job(evidence, "healthy")
+    inventory = _inventory(
+        tmp_path / "inventory.json",
+        "healthy",
+        "terminal-missing",
+        wait_results={
+            "healthy": {"status": "terminal"},
+            "terminal-missing": {"status": "terminal"},
+        },
+    )
+
+    metadata = build_fleet_graph(evidence, inventory, tmp_path / "graph.sqlite")
+
+    assert metadata["missing_reasons"] == {"terminal-missing": "terminal_missing_shard"}
+
+
+def test_merge_fleet_graph_replaces_only_healthy_retry_jobs(tmp_path: Path):
+    base = tmp_path / "base"
+    retry = tmp_path / "retry"
+    _job(base, "stable", source="vllm/stable.py")
+    _job(base, "fixed", healthy=False, failure_reason="collector_unhealthy")
+    _job(base, "still-red", healthy=False, failure_reason="collector_unhealthy")
+    _job(retry, "fixed", source="vllm/fixed.py")
+    _job(
+        retry,
+        "still-red",
+        healthy=False,
+        failure_reason="collector_unhealthy",
+        source="vllm/retry-red.py",
+    )
+    base_inventory = _inventory(
+        tmp_path / "base-inventory.json",
+        "stable",
+        "fixed",
+        "still-red",
+        wait_results={
+            key: {"status": "terminal"} for key in ("stable", "fixed", "still-red")
+        },
+    )
+    retry_inventory = _inventory(
+        tmp_path / "retry-inventory.json",
+        "fixed",
+        "still-red",
+        wait_results={key: {"status": "terminal"} for key in ("fixed", "still-red")},
+    )
+    graph = tmp_path / "merged.sqlite"
+    provenance = tmp_path / "merge-provenance.json"
+
+    result = merge_fleet_graph(
+        base,
+        base_inventory,
+        retry,
+        retry_inventory,
+        graph,
+        provenance,
+        base_source_build_id=BASE_BUILD_ID,
+        retry_source_build_id=RETRY_BUILD_ID,
+        merge_revision="d" * 40,
+    )
+
+    assert result["metadata"]["healthy_jobs"] == ["fixed", "stable"]
+    assert result["metadata"]["unhealthy_jobs"] == ["still-red"]
+    assert paths_to_jobs(graph, "vllm/fixed.py")[0][-1]["name"] == "fixed"
+    assert paths_to_jobs(graph, "vllm/stable.py")[0][-1]["name"] == "stable"
+    assert paths_to_jobs(graph, "vllm/retry-red.py") == []
+    provenance_document = json.loads(provenance.read_text(encoding="utf-8"))
+    assert provenance_document["base_source_build_id"] == BASE_BUILD_ID
+    assert provenance_document["retry_source_build_id"] == RETRY_BUILD_ID
+    assert provenance_document["merge_revision"] == "d" * 40
+    assert (
+        provenance_document["merged_graph_sha256"]
+        == hashlib.sha256(graph.read_bytes()).hexdigest()
+    )
+    assert provenance_document["replacement_jobs"] == ["fixed"]
+
+
+def test_merge_fleet_graph_requires_distinct_canonical_source_build_ids(
+    tmp_path: Path,
+):
+    with pytest.raises(GraphError, match="must differ"):
+        merge_fleet_graph(
+            tmp_path / "base",
+            tmp_path / "base-inventory.json",
+            tmp_path / "retry",
+            tmp_path / "retry-inventory.json",
+            tmp_path / "merged.sqlite",
+            tmp_path / "provenance.json",
+            base_source_build_id=BASE_BUILD_ID,
+            retry_source_build_id=BASE_BUILD_ID,
+            merge_revision="d" * 40,
+        )
 
 
 def test_materializer_rejects_incomplete_pytest_node_exports(tmp_path: Path):

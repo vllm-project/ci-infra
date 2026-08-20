@@ -12,6 +12,7 @@ from test_selection.graph import GraphError, SCHEMA, write_checksum
 from test_selection.snapshot import (
     build_snapshot_manifest,
     fetch_snapshot,
+    publish_built_graph,
     publish_snapshot,
     select_snapshot,
 )
@@ -125,6 +126,24 @@ def test_publish_and_fetch_round_trip(tmp_path: Path):
     root = f"test-selection/vllm/snapshots/{repository_sha}"
     assert f"{root}/graph.sqlite.gz" in store.objects
     assert f"{root}/graph.sqlite" not in store.objects
+
+
+def test_publish_built_graph_constructs_and_publishes_manifest(tmp_path: Path):
+    graph = _graph(tmp_path / "graph.sqlite")
+    store = MemoryStore()
+
+    result = publish_built_graph(graph, store, "test-selection/vllm/canary")
+
+    assert result["snapshot"]["repository_sha"] == SHA
+    assert result["metadata"]["repository_sha"] == SHA
+    assert "test-selection/vllm/canary/index.json" in store.objects
+
+
+def test_publish_built_graph_rejects_production_prefix(tmp_path: Path):
+    graph = _graph(tmp_path / "graph.sqlite")
+
+    with pytest.raises(GraphError, match="isolated non-production prefix"):
+        publish_built_graph(graph, MemoryStore(), "test-selection/vllm")
 
 
 def test_compressed_graph_is_byte_deterministic(tmp_path: Path):

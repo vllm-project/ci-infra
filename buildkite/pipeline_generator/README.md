@@ -81,6 +81,10 @@ The generator relies on several environment variables, typically provided by Bui
 *   `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
     set, the generator emits those steps and their transitive dependencies,
     ignoring normal source-file selection. Unknown keys fail generation.
+*   `VLLM_CI_TRACE_CANARY_BRANCH` and `VLLM_CI_TRACE_CANARY_COMMIT`: Paired
+    operator gate for a non-main mirror-branch trace canary. Both must exactly
+    match the Buildkite branch and 40-hex commit; a trusted non-PR nightly,
+    explicit trace bucket, and isolated non-production prefix are required.
 
 Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
 `buildkite-analytics-token-secret` Secret's `token` key when it is available.

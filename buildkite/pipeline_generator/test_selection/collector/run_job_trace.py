@@ -266,6 +266,7 @@ def main() -> int:
                 "job_key": args.job_key,
                 "parallel_job": parallel_job,
                 "parallel_job_count": parallel_job_count,
+                "retry_count": int(os.environ.get("BUILDKITE_RETRY_COUNT", "0")),
                 "repository_sha": os.environ.get("BUILDKITE_COMMIT"),
                 "represented_job_key": args.represented_job_key,
             },

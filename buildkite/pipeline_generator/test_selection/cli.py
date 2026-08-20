@@ -13,6 +13,7 @@ from test_selection.graph import (
     current_jobs_from_pipeline,
     graph_metadata,
     job_coverage,
+    merge_fleet_graph,
     paths_to_jobs,
     select_jobs,
 )
@@ -20,6 +21,7 @@ from test_selection.snapshot import (
     Boto3ObjectStore,
     build_and_publish,
     fetch_snapshot,
+    publish_built_graph,
 )
 from test_selection.wait import wait_for_steps
 
@@ -35,6 +37,17 @@ def _parser() -> argparse.ArgumentParser:
     materialize = commands.add_parser("build-graph")
     materialize.add_argument("--input", type=Path, required=True)
     materialize.add_argument("--output", type=Path, required=True)
+
+    merge = commands.add_parser("merge-fleet-graph")
+    merge.add_argument("--base-input", type=Path, required=True)
+    merge.add_argument("--base-inventory", type=Path, required=True)
+    merge.add_argument("--retry-input", type=Path, required=True)
+    merge.add_argument("--retry-inventory", type=Path, required=True)
+    merge.add_argument("--output", type=Path, required=True)
+    merge.add_argument("--provenance-output", type=Path, required=True)
+    merge.add_argument("--base-source-build-id", required=True)
+    merge.add_argument("--retry-source-build-id", required=True)
+    merge.add_argument("--merge-revision", required=True)
 
     inventory = commands.add_parser("current-jobs")
     inventory.add_argument("--pipeline", type=Path, required=True)
@@ -67,6 +80,11 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--bucket", required=True)
     publish.add_argument("--prefix", default="test-selection/vllm")
 
+    publish_graph = commands.add_parser("publish-graph")
+    publish_graph.add_argument("--graph", type=Path, required=True)
+    publish_graph.add_argument("--bucket", required=True)
+    publish_graph.add_argument("--prefix", required=True)
+
     wait = commands.add_parser("wait-for-steps")
     wait.add_argument("--inventory", type=Path, required=True)
     wait.add_argument("--timeout-seconds", type=float, required=True)
@@ -87,6 +105,20 @@ def main() -> int:
     try:
         if args.command == "build-graph":
             _print(build_graph(args.input, args.output))
+        elif args.command == "merge-fleet-graph":
+            _print(
+                merge_fleet_graph(
+                    args.base_input,
+                    args.base_inventory,
+                    args.retry_input,
+                    args.retry_inventory,
+                    args.output,
+                    args.provenance_output,
+                    base_source_build_id=args.base_source_build_id,
+                    retry_source_build_id=args.retry_source_build_id,
+                    merge_revision=args.merge_revision,
+                )
+            )
         elif args.command == "current-jobs":
             keys = current_jobs_from_pipeline(args.pipeline)
             temporary = args.output.with_suffix(args.output.suffix + ".tmp")
@@ -127,6 +159,14 @@ def main() -> int:
                 build_and_publish(
                     args.input,
                     args.inventory,
+                    Boto3ObjectStore(args.bucket),
+                    args.prefix,
+                )
+            )
+        elif args.command == "publish-graph":
+            _print(
+                publish_built_graph(
+                    args.graph,
                     Boto3ObjectStore(args.bucket),
                     args.prefix,
                 )

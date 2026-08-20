@@ -639,3 +639,24 @@ def build_and_publish(
         build_snapshot_manifest(graph, manifest_path)
         entry = publish_snapshot(store, prefix, graph, manifest_path)
     return {"metadata": metadata, "snapshot": entry}
+
+
+def publish_built_graph(
+    graph: Path,
+    store: ObjectStore,
+    prefix: str,
+) -> dict[str, Any]:
+    """Publish an already materialized and checksum-verified graph."""
+
+    graph = graph.resolve()
+    prefix = _prefix(prefix)
+    if prefix == "test-selection/vllm":
+        raise GraphError(
+            "already-built graph publication requires an isolated non-production prefix"
+        )
+    with tempfile.TemporaryDirectory(prefix="built-snapshot-") as directory_name:
+        manifest_path = Path(directory_name) / "manifest.json"
+        metadata = graph_metadata(graph)
+        build_snapshot_manifest(graph, manifest_path)
+        entry = publish_snapshot(store, prefix, graph, manifest_path)
+    return {"metadata": metadata, "snapshot": entry}

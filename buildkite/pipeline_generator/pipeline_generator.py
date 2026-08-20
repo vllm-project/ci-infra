@@ -85,17 +85,20 @@ class PipelineGenerator:
         publish_trace_snapshot = should_trace_nightly(global_config)
         collector = bundle_bytes() if publish_trace_snapshot else b""
         collector_sha256 = bundle_sha256(collector) if collector else None
-        steps, trace_inventory = configure_test_tracing(
-            steps,
-            test_area_keys if publish_trace_snapshot else set(),
-            global_config["commit"],
-            _ci_infra_revision() if publish_trace_snapshot else None,
-            collector_sha256,
-        )
         steps, selected_step_keys = select_steps_and_dependencies(
             steps, global_config["only_step_keys"]
         )
         global_config["only_step_keys"] = selected_step_keys
+        selected_test_area_keys = set(test_area_keys)
+        if selected_step_keys is not None:
+            selected_test_area_keys &= set(selected_step_keys)
+        steps, trace_inventory = configure_test_tracing(
+            steps,
+            selected_test_area_keys if publish_trace_snapshot else set(),
+            global_config["commit"],
+            _ci_infra_revision() if publish_trace_snapshot else None,
+            collector_sha256,
+        )
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
@@ -230,12 +233,15 @@ _FLEET_COLLECTOR_COMPATIBILITY_ALWAYS_RUN = frozenset(
 
 
 def should_trace_nightly(global_config: dict) -> bool:
-    """Trace vLLM test-area pytest jobs on trusted main nightlies."""
+    """Trace vLLM jobs on a trusted nightly or exact mirror-branch canary."""
 
     return bool(
         global_config["github_repo_name"] == "vllm-project/vllm"
         and global_config["nightly"] == "1"
-        and global_config["branch"] == "main"
+        and (
+            global_config["branch"] == "main"
+            or global_config.get("trace_canary_branch") == global_config["branch"]
+        )
         and global_config["pull_request"] in (None, "false")
         and global_config["trace_s3_bucket"]
     )
@@ -457,7 +463,8 @@ def _snapshot_republish_requested() -> bool:
 def _snapshot_republish_inputs(global_config: dict) -> dict:
     if not should_trace_nightly(global_config):
         raise ValueError(
-            "test-selection republish requires a trusted vLLM main nightly"
+            "test-selection republish requires a trusted vLLM nightly or "
+            "exact mirror-branch canary"
         )
     encoded_inventory = os.getenv(REPUBLISH_INVENTORY_ENV)
     source_build = os.getenv(REPUBLISH_SOURCE_BUILD_ENV)
@@ -585,8 +592,22 @@ def create_snapshot_republish_group_step(global_config: dict) -> BuildkiteGroupS
     source_build = inputs["source_build"]
     source_build_id = inputs["source_build_id"]
     repository_sha = inputs["repository_sha"]
+    canary_branch = global_config.get("trace_canary_branch")
+    canary_commit = global_config.get("trace_canary_commit")
+    if canary_branch:
+        canary_identity = f"{canary_branch}@{canary_commit}"
+        group = f":warning: SNAPSHOT REPUBLISH CANARY {canary_identity}"
+        label = f":warning: Republish CANARY snapshot ({canary_identity})"
+        canary_banner = "echo " + shlex.quote(
+            "+++ :warning: SNAPSHOT REPUBLISH CANARY authorized for " + canary_identity
+        )
+    else:
+        group = "Test selection snapshot republish"
+        label = ":database: Republish test-selection snapshot"
+        canary_banner = None
     command = [
         "set -euo pipefail",
+        *([canary_banner] if canary_banner else []),
         f'test "$$BUILDKITE_COMMIT" = {shlex.quote(repository_sha)}',
         f'test "$$BUILDKITE_BUILD_NUMBER" != {shlex.quote(source_build)}',
         'D="$$(mktemp -d)"',
@@ -670,13 +691,13 @@ def create_snapshot_republish_group_step(global_config: dict) -> BuildkiteGroupS
         ]
     )
     return BuildkiteGroupStep(
-        group="Test selection snapshot republish",
+        group=group,
         steps=[
             BuildkiteCommandStep(
                 agents={"queue": AgentQueue.CPU_POSTMERGE_US_EAST_1.value},
                 commands=["\n".join(command)],
                 key="test-selection-snapshot-republish",
-                label=":database: Republish test-selection snapshot",
+                label=label,
                 priority=-100,
                 retry={"automatic": [{"exit_status": -1, "limit": 1}]},
                 timeout_in_minutes=180,
@@ -696,11 +717,23 @@ def create_snapshot_group_step(
     bucket = shlex.quote(global_config["trace_s3_bucket"])
     prefix = shlex.quote(global_config["trace_s3_prefix"])
     revision = inventory["ci_infra_revision"]
-    group = "Test selection snapshot"
-    label = ":database: Publish test-selection snapshot"
+    canary_branch = global_config.get("trace_canary_branch")
+    canary_commit = global_config.get("trace_canary_commit")
+    if canary_branch:
+        canary_identity = f"{canary_branch}@{canary_commit}"
+        group = f":warning: TEST-SELECTION CANARY {canary_identity}"
+        label = f":warning: Publish CANARY snapshot ({canary_identity})"
+        canary_banner = "echo " + shlex.quote(
+            "+++ :warning: TEST-SELECTION CANARY authorized for " + canary_identity
+        )
+    else:
+        group = "Test selection snapshot"
+        label = ":database: Publish test-selection snapshot"
+        canary_banner = None
     command = "\n".join(
         [
             "set -euo pipefail",
+            *([canary_banner] if canary_banner else []),
             'SNAPSHOT_DIR="$$(mktemp -d)"',
             "trap 'rm -rf \"$$SNAPSHOT_DIR\"' EXIT",
             'mkdir -p "$$SNAPSHOT_DIR/evidence"',

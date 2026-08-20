@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 import buildkite_step
+from buildkite_step import convert_group_step_to_buildkite_step
 from constants import DeviceType
 import pipeline_generator as pipeline_module
 from pipeline_generator import (
@@ -17,9 +18,12 @@ from pipeline_generator import (
     REPUBLISH_TRIALS_ENV,
     configure_test_tracing,
     create_snapshot_republish_group_step,
+    create_snapshot_group_step,
+    finalize_trace_inventory,
+    select_steps_and_dependencies,
     should_trace_nightly,
 )
-from step import Step
+from step import Step, group_steps
 
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
@@ -85,6 +89,14 @@ def test_only_trusted_vllm_main_nightly_traces(fake_global_config):
         "trace_s3_bucket": "vllm-ci-test-selection",
     }
     assert should_trace_nightly(config)
+    assert should_trace_nightly(
+        {
+            **config,
+            "branch": "ci-tsel-main-mirror",
+            "trace_canary_branch": "ci-tsel-main-mirror",
+            "trace_canary_commit": "a" * 40,
+        }
+    )
 
     for field, value in (
         ("branch", "feature"),
@@ -93,6 +105,73 @@ def test_only_trusted_vllm_main_nightly_traces(fake_global_config):
         ("trace_s3_bucket", None),
     ):
         assert not should_trace_nightly({**config, field: value})
+
+
+def test_targeted_nightly_inventory_matches_dependency_closure():
+    steps = [
+        Step(label="Image", key="image-build", commands=["bash image.sh"]),
+        Step(
+            label="First",
+            key="first-tests",
+            commands=["pytest tests/first"],
+            depends_on=["image-build"],
+        ),
+        Step(
+            label="Second",
+            key="second-tests",
+            commands=["pytest tests/second"],
+            depends_on=["image-build"],
+        ),
+        Step(label="Other", key="other-tests", commands=["pytest tests/other"]),
+    ]
+    selected, selected_keys = select_steps_and_dependencies(
+        steps, frozenset({"first-tests", "second-tests"})
+    )
+    selected_test_area_keys = {
+        "first-tests",
+        "second-tests",
+        "other-tests",
+    } & set(selected_keys or ())
+
+    selected, inventory = configure_test_tracing(
+        selected,
+        selected_test_area_keys,
+        "a" * 40,
+        "b" * 40,
+        "c" * 64,
+    )
+    rendered = convert_group_step_to_buildkite_step(group_steps(selected))
+    finalize_trace_inventory(inventory, rendered)
+
+    assert selected_keys == frozenset({"first-tests", "second-tests", "image-build"})
+    assert [row["key"] for row in inventory["jobs"]] == [
+        "first-tests",
+        "second-tests",
+    ]
+    assert inventory["always_run"] == [
+        {"key": "image-build", "reason": "rendered_uninstrumented_step"}
+    ]
+
+
+def test_mirror_branch_snapshot_has_loud_canary_identity(fake_global_config):
+    inventory = {
+        "ci_infra_revision": "b" * 40,
+        "jobs": [{"key": "tests"}],
+    }
+    config = {
+        **fake_global_config,
+        "trace_canary_branch": "ci-tsel-main-mirror",
+        "trace_canary_commit": "a" * 40,
+        "trace_s3_bucket": "vllm-ci-test-selection",
+        "trace_s3_prefix": "test-selection/vllm/canary/retry",
+    }
+
+    group = create_snapshot_group_step(inventory, config)
+
+    identity = "ci-tsel-main-mirror@" + "a" * 40
+    assert identity in group.group
+    assert identity in group.steps[0].label
+    assert "TEST-SELECTION CANARY authorized" in group.steps[0].commands[0]
 
 
 def test_republish_renders_exactly_one_pinned_step(
@@ -134,6 +213,26 @@ def test_republish_renders_exactly_one_pinned_step(
     )
 
 
+def test_mirror_branch_republish_has_loud_canary_identity(
+    fake_global_config, monkeypatch
+):
+    _set_republish_env(monkeypatch)
+    config = {
+        **_republish_config(fake_global_config),
+        "branch": "ci-tsel-main-mirror",
+        "trace_canary_branch": "ci-tsel-main-mirror",
+        "trace_canary_commit": "a" * 40,
+    }
+    monkeypatch.setattr(pipeline_module, "_ci_infra_revision", lambda: "f" * 40)
+
+    group = create_snapshot_republish_group_step(config)
+
+    identity = "ci-tsel-main-mirror@" + "a" * 40
+    assert identity in group.group
+    assert identity in group.steps[0].label
+    assert "SNAPSHOT REPUBLISH CANARY authorized" in group.steps[0].commands[0]
+
+
 def test_republish_rejects_malformed_or_untrusted_inputs(
     fake_global_config, monkeypatch
 ):
@@ -144,7 +243,7 @@ def test_republish_rejects_malformed_or_untrusted_inputs(
         create_snapshot_republish_group_step(config)
 
     _set_republish_env(monkeypatch)
-    with pytest.raises(ValueError, match="trusted vLLM main nightly"):
+    with pytest.raises(ValueError, match="trusted vLLM nightly or"):
         create_snapshot_republish_group_step({**config, "branch": "feature"})
 
     _set_republish_env(monkeypatch)
@@ -269,6 +368,7 @@ def test_trace_wrapper_preserves_the_original_command_list_as_one_script(
 
     rendered = buildkite_step._prepare_commands(step, {})
     wrapper = rendered[-1]
+    assert "trace-output/tests/attempt-$${BUILDKITE_RETRY_COUNT:-0}" in wrapper
     match = re.search(r"--commands-base64 ([A-Za-z0-9+/=]+)", wrapper)
     assert match is not None
     commands = json.loads(base64.b64decode(match.group(1)))

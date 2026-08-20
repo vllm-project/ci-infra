@@ -608,6 +608,7 @@ def main() -> int:
             "python_trace": trace_file.name,
             "python_trace_rows": len(rows),
             "python_trace_sha256": _sha256(trace_file),
+            "retry_count": int(os.environ.get("BUILDKITE_RETRY_COUNT", "0")),
             "repository_sha": repository_sha,
             "represented_job_key": args.represented_job_key,
         },

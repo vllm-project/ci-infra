@@ -7,6 +7,9 @@ import json
 import re
 import sqlite3
 import subprocess
+import tempfile
+import uuid
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -102,15 +105,29 @@ def _sha(value: Any) -> str:
     return value
 
 
+def _uuid(value: Any, field: str) -> str:
+    value = str(value)
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as error:
+        raise GraphError(f"{field} must be a canonical UUID") from error
+    if str(parsed) != value:
+        raise GraphError(f"{field} must be a canonical UUID")
+    return value
+
+
 def _insert_python(
     connection: sqlite3.Connection,
     manifest_path: Path,
     repository_sha: str,
     job_key: str,
+    retry_count: int,
 ) -> None:
     manifest = _json(manifest_path)
     if manifest.get("repository_sha") != repository_sha:
         raise GraphError(f"{manifest_path} repository SHA mismatch")
+    if manifest.get("retry_count", 0) != retry_count:
+        raise GraphError(f"{manifest_path} retry count mismatch")
     if manifest.get("represented_job_key") != job_key or not manifest.get("healthy"):
         raise GraphError(f"{manifest_path} is not healthy evidence for {job_key}")
     started = manifest.get("pytest_invocations_started")
@@ -168,20 +185,20 @@ def _insert_gpu(
     return count
 
 
-def _materialize(
+def _collect_summaries(
     input_dir: Path,
-    output: Path,
-    inventory: dict[str, Any],
-) -> dict[str, Any]:
-    repository_sha = _sha(inventory.get("repository_sha"))
-    collector_sha = str(inventory.get("collector_sha256", ""))
-    policies = {str(row["key"]): row for row in inventory.get("jobs", [])}
-    if not policies:
-        raise GraphError("trace inventory contains no jobs")
-    wait_results = inventory.get("wait_results", {})
-    summaries: dict[str, dict[int, tuple[Path, dict[str, Any]]]] = {
-        key: {} for key in policies
-    }
+    policies: dict[str, Any],
+    repository_sha: str,
+    collector_sha: str,
+) -> tuple[
+    dict[str, dict[int, tuple[Path, dict[str, Any]]]],
+    dict[str, str],
+]:
+    """Select the highest automatic retry for every represented shard."""
+
+    candidates: dict[
+        str, dict[int, dict[int, list[tuple[Path, dict[str, Any], bool]]]]
+    ] = {key: {} for key in policies}
     invalid: dict[str, str] = {}
     for path in sorted(input_dir.rglob("trace-job.json")):
         document = _json(path)
@@ -189,17 +206,74 @@ def _materialize(
         if key not in policies:
             continue
         shard = document.get("parallel_job")
-        expected = policies[key].get("expected_shards")
+        retry_count = document.get("retry_count", 0)
         if (
-            document.get("repository_sha") != repository_sha
-            or document.get("collector_sha256") != collector_sha
-            or not isinstance(shard, int)
-            or document.get("parallel_job_count") != expected
-            or shard in summaries[key]
+            not isinstance(shard, int)
+            or isinstance(shard, bool)
+            or not isinstance(retry_count, int)
+            or isinstance(retry_count, bool)
+            or retry_count < 0
         ):
             invalid[key] = "invalid_summary"
             continue
-        summaries[key][shard] = (path, document)
+        expected = policies[key].get("expected_shards")
+        identity_valid = bool(
+            document.get("repository_sha") == repository_sha
+            and document.get("collector_sha256") == collector_sha
+            and document.get("parallel_job_count") == expected
+        )
+        candidates[key].setdefault(shard, {}).setdefault(retry_count, []).append(
+            (path, document, identity_valid)
+        )
+
+    summaries: dict[str, dict[int, tuple[Path, dict[str, Any]]]] = {
+        key: {} for key in policies
+    }
+    for key, shard_candidates in candidates.items():
+        for shard, retries in shard_candidates.items():
+            latest = max(retries)
+            rows = retries[latest]
+            if len(rows) != 1:
+                invalid[key] = "duplicate_retry_summary"
+                continue
+            path, document, identity_valid = rows[0]
+            if not identity_valid:
+                invalid[key] = "invalid_summary"
+                continue
+            summaries[key][shard] = (path, document)
+    return summaries, invalid
+
+
+def _materialize(
+    input_dir: Path,
+    output: Path,
+    inventory: dict[str, Any],
+    replacement_inputs: dict[str, Path] | None = None,
+) -> dict[str, Any]:
+    repository_sha = _sha(inventory.get("repository_sha"))
+    collector_sha = str(inventory.get("collector_sha256", ""))
+    policies = {str(row["key"]): row for row in inventory.get("jobs", [])}
+    if not policies:
+        raise GraphError("trace inventory contains no jobs")
+    wait_results = inventory.get("wait_results", {})
+    summaries, invalid = _collect_summaries(
+        input_dir, policies, repository_sha, collector_sha
+    )
+    replacements_by_root: dict[Path, set[str]] = {}
+    for key, root in (replacement_inputs or {}).items():
+        if key not in policies:
+            raise GraphError(f"replacement evidence contains unknown job {key}")
+        replacements_by_root.setdefault(root, set()).add(key)
+    for root, keys in replacements_by_root.items():
+        replacement_policies = {key: policies[key] for key in keys}
+        replacement_summaries, replacement_invalid = _collect_summaries(
+            root, replacement_policies, repository_sha, collector_sha
+        )
+        for key in keys:
+            summaries[key] = replacement_summaries[key]
+            invalid.pop(key, None)
+            if key in replacement_invalid:
+                invalid[key] = replacement_invalid[key]
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
@@ -216,10 +290,21 @@ def _materialize(
             expected = set(range(int(policy["expected_shards"])))
             actual = set(summaries[key])
             wait = wait_results.get(key, {})
-            if wait.get("status") == "poll_timeout" or actual != expected:
-                status, reason = "missing", "poll_timeout" if wait else "missing_shard"
+            if wait.get("status") == "poll_timeout":
+                status, reason = "missing", "poll_timeout"
                 missing.append(key)
-            elif key in invalid or any(
+            elif key in invalid:
+                status, reason = "unhealthy", invalid[key]
+                unhealthy.append(key)
+            elif actual != expected:
+                status = "missing"
+                reason = (
+                    "terminal_missing_shard"
+                    if wait.get("status") == "terminal"
+                    else "missing_shard"
+                )
+                missing.append(key)
+            elif any(
                 document.get("healthy") is not True
                 for _path, document in summaries[key].values()
             ):
@@ -228,7 +313,7 @@ def _materialize(
                     for _path, document in summaries[key].values()
                     if document.get("failure_reason")
                 }
-                reason = invalid.get(key) or (
+                reason = (
                     next(iter(summary_reasons))
                     if len(summary_reasons) == 1
                     else "collector_unhealthy"
@@ -241,7 +326,13 @@ def _materialize(
                     for summary_path, document in summaries[key].values():
                         evidence_times.append(_timestamp(document.get("created_at")))
                         for manifest in sorted(summary_path.parent.rglob("job.json")):
-                            _insert_python(connection, manifest, repository_sha, key)
+                            _insert_python(
+                                connection,
+                                manifest,
+                                repository_sha,
+                                key,
+                                document.get("retry_count", 0),
+                            )
                         if policy.get("mode") == "kernel-set" and not _insert_gpu(
                             connection, summary_path.parent, repository_sha, key
                         ):
@@ -304,6 +395,144 @@ def _materialize(
 
 def build_fleet_graph(input_dir: Path, inventory: Path, output: Path) -> dict[str, Any]:
     return _materialize(input_dir.resolve(), output.resolve(), _json(inventory))
+
+
+def _job_evidence_digest(graph: Path, job_key: str) -> str:
+    digest = hashlib.sha256()
+    with sqlite3.connect(f"file:{graph.resolve()}?mode=ro", uri=True) as connection:
+        for row in connection.execute(
+            "SELECT source_kind, source, test_id, job_key, line "
+            "FROM evidence WHERE job_key = ? ORDER BY 1, 2, 3, 4, 5",
+            (job_key,),
+        ):
+            digest.update(json.dumps(row, separators=(",", ":")).encode())
+            digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def merge_fleet_graph(
+    base_input: Path,
+    base_inventory: Path,
+    retry_input: Path,
+    retry_inventory: Path,
+    output: Path,
+    provenance_output: Path,
+    *,
+    base_source_build_id: str,
+    retry_source_build_id: str,
+    merge_revision: str,
+) -> dict[str, Any]:
+    """Overlay only materializer-proven healthy retry jobs onto a base fleet."""
+
+    base_source_build_id = _uuid(base_source_build_id, "base source build ID")
+    retry_source_build_id = _uuid(retry_source_build_id, "retry source build ID")
+    merge_revision = _sha(merge_revision)
+    if base_source_build_id == retry_source_build_id:
+        raise GraphError("base and retry source build IDs must differ")
+    base_document = _json(base_inventory)
+    retry_document = _json(retry_inventory)
+    for field in ("repository_sha", "collector_sha256"):
+        if base_document.get(field) != retry_document.get(field):
+            raise GraphError(f"base and retry inventories disagree on {field}")
+    base_policies = {str(row.get("key")): row for row in base_document.get("jobs", [])}
+    retry_policies = {
+        str(row.get("key")): row for row in retry_document.get("jobs", [])
+    }
+    if not retry_policies or not set(retry_policies) <= set(base_policies):
+        raise GraphError("retry inventory jobs must be a nonempty base subset")
+    if any(retry_policies[key] != base_policies[key] for key in retry_policies):
+        raise GraphError("retry inventory changes a base job policy")
+
+    output = output.resolve()
+    provenance_output = provenance_output.resolve()
+    output_sidecar = output.with_suffix(output.suffix + ".sha256")
+    if output.exists() or output_sidecar.exists() or provenance_output.exists():
+        raise GraphError("merge outputs must not already exist")
+    try:
+        with tempfile.TemporaryDirectory(prefix="fleet-graph-merge-") as directory_name:
+            directory = Path(directory_name)
+            base_graph = directory / "base.sqlite"
+            retry_graph = directory / "retry.sqlite"
+            base_metadata = _materialize(
+                base_input.resolve(), base_graph, base_document
+            )
+            retry_metadata = _materialize(
+                retry_input.resolve(), retry_graph, retry_document
+            )
+            replacements = set(retry_metadata["healthy_jobs"])
+            unresolved_base = set(base_metadata["missing_jobs"]) | set(
+                base_metadata["unhealthy_jobs"]
+            )
+            if not replacements <= unresolved_base:
+                raise GraphError(
+                    "retry may replace only missing or unhealthy base jobs"
+                )
+
+            merged_inventory = deepcopy(base_document)
+            for key in replacements:
+                wait_result = retry_document.get("wait_results", {}).get(key)
+                if (
+                    not isinstance(wait_result, dict)
+                    or wait_result.get("status") != "terminal"
+                ):
+                    raise GraphError(
+                        f"healthy retry job {key} has no terminal wait result"
+                    )
+                merged_inventory["wait_results"][key] = wait_result
+            merged_metadata = _materialize(
+                base_input.resolve(),
+                output,
+                merged_inventory,
+                {key: retry_input.resolve() for key in replacements},
+            )
+
+            expected_healthy = set(base_metadata["healthy_jobs"]) | replacements
+            if set(merged_metadata["healthy_jobs"]) != expected_healthy:
+                raise GraphError(
+                    "merged healthy job set is not the exact expected union"
+                )
+            for key in base_metadata["healthy_jobs"]:
+                if _job_evidence_digest(base_graph, key) != _job_evidence_digest(
+                    output, key
+                ):
+                    raise GraphError(f"merged evidence changed healthy base job {key}")
+            for key in replacements:
+                if _job_evidence_digest(retry_graph, key) != _job_evidence_digest(
+                    output, key
+                ):
+                    raise GraphError(f"merged evidence disagrees with retry job {key}")
+
+            provenance = {
+                "base_source_build_id": base_source_build_id,
+                "base_inventory_sha256": sha256_file(base_inventory),
+                "base_metadata": base_metadata,
+                "collector_sha256": base_document.get("collector_sha256"),
+                "kind": "vllm-test-selection-evidence-merge",
+                "merge_revision": merge_revision,
+                "merged_graph_sha256": sha256_file(output),
+                "merged_metadata": merged_metadata,
+                "replacement_jobs": sorted(replacements),
+                "repository_sha": base_document.get("repository_sha"),
+                "retry_source_build_id": retry_source_build_id,
+                "retry_inventory_sha256": sha256_file(retry_inventory),
+                "retry_metadata": retry_metadata,
+                "schema_version": 1,
+            }
+            provenance_output.parent.mkdir(parents=True, exist_ok=True)
+            temporary = provenance_output.with_suffix(provenance_output.suffix + ".tmp")
+            temporary.write_text(
+                json.dumps(provenance, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(provenance_output)
+    except Exception:
+        output.unlink(missing_ok=True)
+        output_sidecar.unlink(missing_ok=True)
+        provenance_output.with_suffix(provenance_output.suffix + ".tmp").unlink(
+            missing_ok=True
+        )
+        raise
+    return {"metadata": merged_metadata, "provenance": provenance}
 
 
 def build_graph(input_dir: Path, output: Path) -> dict[str, Any]:

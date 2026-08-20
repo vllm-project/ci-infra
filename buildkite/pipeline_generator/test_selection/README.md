@@ -3,6 +3,15 @@
 The vLLM main nightly automatically traces pytest jobs loaded from
 `.buildkite/test_areas`. vLLM job YAML has no tracing fields.
 
+Operator canaries must run on a non-main mirror branch. Set
+`VLLM_CI_TRACE_CANARY_BRANCH` and `VLLM_CI_TRACE_CANARY_COMMIT` together; each
+must exactly match the Buildkite branch/40-hex commit, `NIGHTLY=1` and a
+non-production `VLLM_CI_TRACE_S3_PREFIX` are required, and pull requests are
+rejected. The snapshot step renders a loud canary banner. For a bounded retry,
+also set `VLLM_CI_ONLY_STEP_KEYS` to the exact failed/missing keys; the
+generator keeps only their dependency closure and inventories only the traced
+keys in that closure.
+
 ## Evidence
 
 Each pytest job records presence-only edges:
@@ -56,6 +65,39 @@ Snapshot manifests are produced by this trusted publisher. Readers enforce the
 publisher-declared decompression bound and both compressed and logical hashes;
 they must not treat an untrusted manifest's size declaration as an independent
 resource limit.
+
+## Healthy-only retry merge
+
+Automatic retry artifacts are attempt-scoped and carry
+`BUILDKITE_RETRY_COUNT`; the materializer selects the highest attempt per shard
+and fails closed on a corrupt or duplicate latest attempt. To accumulate a
+separate targeted retry without editing an immutable snapshot, download the
+base and retry builds into separate roots and run:
+
+```bash
+vllm-test-selection merge-fleet-graph \
+  --base-input base --base-inventory base-inventory.json \
+  --retry-input retry --retry-inventory retry-inventory.json \
+  --base-source-build-id "$BASE_BUILDKITE_BUILD_ID" \
+  --retry-source-build-id "$RETRY_BUILDKITE_BUILD_ID" \
+  --merge-revision "$CI_INFRA_REVISION" \
+  --output merged.sqlite --provenance-output merge-provenance.json
+```
+
+The command independently materializes both inputs, permits retry policies only
+as an exact subset of the base, overlays only retry jobs proven healthy, and
+verifies that every retained base job and replacement job has byte-equivalent
+logical evidence. The provenance binds both source Buildkite UUIDs, both
+inventory hashes, the exact merger revision, and the merged graph hash. Publish
+only after reviewing it, always to a new isolated prefix:
+
+```bash
+vllm-test-selection publish-graph \
+  --graph merged.sqlite --bucket "$VLLM_CI_TRACE_S3_BUCKET" \
+  --prefix test-selection/vllm/canary/<new-generation>
+```
+
+Never reuse either source prefix or the production prefix for a retry merge.
 
 ## PR selection
 

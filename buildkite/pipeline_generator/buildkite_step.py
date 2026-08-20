@@ -476,7 +476,13 @@ for command in commands:
             f"{fallback_script} {payload}"
         )
         in_place = step.key == step.trace_represented_job_key
-        trace_root = f"trace-output/{step.trace_represented_job_key}"
+        # Buildkite retains artifacts from every automatic retry. Keep each
+        # attempt in a distinct directory so a later download cannot mix an
+        # old failed attempt with the final passing attempt.
+        trace_root = (
+            f"trace-output/{step.trace_represented_job_key}/"
+            "attempt-$${BUILDKITE_RETRY_COUNT:-0}"
+        )
         output_dir = (
             f"{trace_root}/$$BUILDKITE_PARALLEL_JOB" if step.parallelism else trace_root
         )
@@ -493,6 +499,7 @@ document={
     "job_key":base64.b64decode(sys.argv[5]).decode(),
     "parallel_job":int(os.environ.get("BUILDKITE_PARALLEL_JOB","0")),
     "parallel_job_count":int(os.environ.get("BUILDKITE_PARALLEL_JOB_COUNT","1")),
+    "retry_count":int(os.environ.get("BUILDKITE_RETRY_COUNT","0")),
     "repository_sha":os.environ.get("BUILDKITE_COMMIT",""),
     "represented_job_key":base64.b64decode(sys.argv[6]).decode(),
 }
