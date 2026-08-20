@@ -145,7 +145,10 @@ target "test-ci" {
     IMAGE_TAG,
     IMAGE_TAG_LATEST,
   ])
-  output = ["type=registry"]
+  # zstd is faster to decompress than the default gzip (multi-threaded), which
+  # is the bottleneck when agents pull this ~30GB image. The cache exports above
+  # already use zstd; apply it to the pushed image too.
+  output = ["type=registry,compression=zstd,force-compression=true,oci-mediatypes=true"]
 }
 
 target "cache-warm" {
