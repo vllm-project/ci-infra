@@ -160,6 +160,54 @@ def test_targeted_nightly_inventory_matches_dependency_closure():
     ]
 
 
+def test_exact_recovery_wave_uses_frozen_timeout_budgets(fake_global_config):
+    selected_keys = set(pipeline_module.RECOVERY_TRACE_TIMEOUTS)
+    config = {
+        **fake_global_config,
+        "github_repo_name": "vllm-project/vllm",
+        "branch": RECOVERY_IMAGE_BRANCH,
+        "commit": RECOVERY_IMAGE_COMMIT,
+        "pull_request": "false",
+        "nightly": "1",
+        "trace_canary_branch": RECOVERY_IMAGE_BRANCH,
+        "trace_canary_commit": RECOVERY_IMAGE_COMMIT,
+    }
+    overrides = pipeline_module._recovery_trace_timeout_overrides(config, selected_keys)
+    assert overrides == pipeline_module.RECOVERY_TRACE_TIMEOUTS
+    assert (
+        pipeline_module._recovery_trace_timeout_overrides(
+            {**config, "commit": "a" * 40}, selected_keys
+        )
+        == {}
+    )
+    assert (
+        pipeline_module._recovery_trace_timeout_overrides(
+            config, selected_keys - {"rayexecutorv2-4-gpus"}
+        )
+        == {}
+    )
+
+    steps = [
+        Step(
+            label=key,
+            key=key,
+            commands=["pytest tests/recovery"],
+            device=DeviceType.H100,
+            timeout_in_minutes=45,
+        )
+        for key in sorted(selected_keys)
+    ]
+    configure_test_tracing(
+        steps,
+        selected_keys,
+        RECOVERY_IMAGE_COMMIT,
+        "b" * 40,
+        "c" * 64,
+        overrides,
+    )
+    assert {step.key: step.timeout_in_minutes for step in steps} == overrides
+
+
 def test_mirror_branch_snapshot_has_loud_canary_identity(fake_global_config):
     inventory = {
         "ci_infra_revision": "b" * 40,

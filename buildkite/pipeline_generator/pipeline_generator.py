@@ -109,6 +109,10 @@ class PipelineGenerator:
             global_config["commit"],
             _ci_infra_revision() if publish_trace_snapshot else None,
             collector_sha256,
+            _recovery_trace_timeout_overrides(
+                global_config,
+                selected_test_area_keys if publish_trace_snapshot else set(),
+            ),
         )
         grouped_steps = group_steps(steps)
 
@@ -186,6 +190,14 @@ RECOVERY_BUILDX_VERSION = "v0.15.1"
 RECOVERY_BUILDX_SHA256 = (
     "8d486f0088b7407a90ad675525ba4a17d0a537741b9b33fe3391a88cafa2dd0b"
 )
+RECOVERY_TRACE_TIMEOUTS = {
+    "batch-invariance-b200": 120,
+    "distributed-compile-unit-tests-2xh100": 120,
+    "lm-eval-humming-act-a100": 90,
+    "lm-eval-large-models-8xh200": 90,
+    "model-executor": 150,
+    "rayexecutorv2-4-gpus": 75,
+}
 
 # Full-fleet canary #84324 measured prohibitive Python-coverage overhead for
 # these exact jobs. Keep the evidence-based keys visible in the inventory but
@@ -277,6 +289,24 @@ def should_trace_nightly(global_config: dict) -> bool:
     )
 
 
+def _recovery_trace_timeout_overrides(
+    global_config: dict, selected_test_area_keys: Set[str]
+) -> dict[str, int]:
+    """Return the frozen budgets only for the exact six-key eac recovery wave."""
+
+    trusted = bool(
+        global_config["github_repo_name"] == "vllm-project/vllm"
+        and global_config["branch"] == RECOVERY_IMAGE_BRANCH
+        and global_config["commit"] == RECOVERY_IMAGE_COMMIT
+        and global_config.get("trace_canary_branch") == RECOVERY_IMAGE_BRANCH
+        and global_config.get("trace_canary_commit") == RECOVERY_IMAGE_COMMIT
+        and global_config["nightly"] == "1"
+        and global_config["pull_request"] in (None, "false")
+        and frozenset(selected_test_area_keys) == frozenset(RECOVERY_TRACE_TIMEOUTS)
+    )
+    return dict(RECOVERY_TRACE_TIMEOUTS) if trusted else {}
+
+
 def _ci_infra_revision() -> str:
     """Resolve the exact generator commit so the fan-in cannot branch-drift."""
 
@@ -329,6 +359,7 @@ def configure_test_tracing(
     repository_sha: Optional[str] = None,
     ci_infra_revision: Optional[str] = None,
     collector_sha256: Optional[str] = None,
+    timeout_overrides: Optional[dict[str, int]] = None,
 ) -> Tuple[List[Step], dict]:
     """Instrument selected existing jobs with the exact ci-infra collector."""
 
@@ -356,7 +387,9 @@ def configure_test_tracing(
             rejected[step_key] = rejection
             continue
         timeout = step.timeout_in_minutes
-        if timeout is not None:
+        if timeout_overrides and step_key in timeout_overrides:
+            timeout = timeout_overrides[step_key]
+        elif timeout is not None:
             timeout = max(timeout + 15, ceil(timeout * 1.5))
         mode = (
             "kernel-set"
