@@ -583,10 +583,13 @@ def create_recovery_image_copy_group_step(global_config: dict) -> BuildkiteGroup
         "wait_for_digest() {",
         '  local image="$$1" expected="$$2" observed=""',
         "  for attempt in $$(seq 1 12); do",
+        '    if "$$D/docker-buildx" imagetools inspect --raw "$$image" '
+        '> "$$D/manifest.json" 2>/dev/null; then',
         (
-            '    observed=$$("$$D/docker-buildx" imagetools inspect '
-            "--format '{{.Manifest.Digest}}' \"$$image\" 2>/dev/null || true)"
+            '      observed="sha256:$$(sha256sum "$$D/manifest.json" '
+            "| awk '{print $$1}')\""
         ),
+        "    fi",
         '    if [[ "$$observed" = "$$expected" ]]; then',
         '      printf \'%s\\t%s\\n\' "$$image" "$$observed"',
         "      return 0",
