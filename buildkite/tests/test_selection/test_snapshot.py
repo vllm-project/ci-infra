@@ -136,6 +136,10 @@ def test_publish_built_graph_constructs_and_publishes_manifest(tmp_path: Path):
 
     assert result["snapshot"]["repository_sha"] == SHA
     assert result["metadata"]["repository_sha"] == SHA
+    manifest_key = result["snapshot"]["manifest_key"]
+    manifest = json.loads(store.objects[manifest_key]["data"])
+    assert manifest["collector_sha256"] == "c" * 64
+    assert manifest["collector_sha256s"] == ["c" * 64]
     assert "test-selection/vllm/canary/index.json" in store.objects
 
 
@@ -144,6 +148,29 @@ def test_publish_built_graph_rejects_production_prefix(tmp_path: Path):
 
     with pytest.raises(GraphError, match="isolated non-production prefix"):
         publish_built_graph(graph, MemoryStore(), "test-selection/vllm")
+
+
+def test_snapshot_manifest_records_mixed_collector_identity(tmp_path: Path):
+    graph = _graph(tmp_path / "graph.sqlite")
+    collectors = ["c" * 64, "d" * 64]
+    connection = sqlite3.connect(graph)
+    connection.execute(
+        "UPDATE metadata SET value=? WHERE key='collector_sha256'",
+        (json.dumps(None),),
+    )
+    connection.execute(
+        "INSERT INTO metadata VALUES ('collector_sha256s', ?)",
+        (json.dumps(collectors),),
+    )
+    connection.commit()
+    connection.close()
+    write_checksum(graph)
+    manifest_path = tmp_path / "manifest.json"
+
+    manifest = build_snapshot_manifest(graph, manifest_path)
+
+    assert manifest["collector_sha256"] is None
+    assert manifest["collector_sha256s"] == collectors
 
 
 def test_compressed_graph_is_byte_deterministic(tmp_path: Path):

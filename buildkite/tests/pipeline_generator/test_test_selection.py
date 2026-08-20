@@ -100,6 +100,7 @@ def test_only_trusted_vllm_main_nightly_traces(fake_global_config):
 
     for field, value in (
         ("branch", "feature"),
+        ("branch", None),
         ("nightly", "0"),
         ("pull_request", "123"),
         ("trace_s3_bucket", None),

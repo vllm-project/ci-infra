@@ -240,7 +240,10 @@ def should_trace_nightly(global_config: dict) -> bool:
         and global_config["nightly"] == "1"
         and (
             global_config["branch"] == "main"
-            or global_config.get("trace_canary_branch") == global_config["branch"]
+            or (
+                global_config.get("trace_canary_branch") is not None
+                and global_config["trace_canary_branch"] == global_config["branch"]
+            )
         )
         and global_config["pull_request"] in (None, "false")
         and global_config["trace_s3_bucket"]

@@ -19,6 +19,7 @@ from test_selection.graph import (
 
 SHA = "a" * 40
 COLLECTOR = "b" * 64
+RETRY_COLLECTOR = "e" * 64
 CREATED = "2026-08-19T09:00:00+00:00"
 BASE_BUILD_ID = "11111111-1111-4111-8111-111111111111"
 RETRY_BUILD_ID = "22222222-2222-4222-8222-222222222222"
@@ -43,6 +44,7 @@ def _job(
     retry_count: int = 0,
     attempt_scoped: bool = False,
     source: str = "vllm/model.py",
+    collector_sha256: str = COLLECTOR,
 ) -> None:
     directory = root / key
     if attempt_scoped:
@@ -80,7 +82,7 @@ def _job(
         directory / "trace-job.json",
         {
             "capture_mode": "python-only",
-            "collector_sha256": COLLECTOR,
+            "collector_sha256": collector_sha256,
             "created_at": CREATED,
             "failure_reason": failure_reason,
             "healthy": healthy,
@@ -97,13 +99,14 @@ def _inventory(
     path: Path,
     *keys: str,
     wait_results: dict | None = None,
+    collector_sha256: str = COLLECTOR,
 ) -> Path:
     _write(
         path,
         {
             "always_run": [],
             "ci_infra_revision": "c" * 40,
-            "collector_sha256": COLLECTOR,
+            "collector_sha256": collector_sha256,
             "jobs": [
                 {"expected_shards": 1, "key": key, "mode": "python-only"}
                 for key in keys
@@ -259,13 +262,19 @@ def test_merge_fleet_graph_replaces_only_healthy_retry_jobs(tmp_path: Path):
     _job(base, "stable", source="vllm/stable.py")
     _job(base, "fixed", healthy=False, failure_reason="collector_unhealthy")
     _job(base, "still-red", healthy=False, failure_reason="collector_unhealthy")
-    _job(retry, "fixed", source="vllm/fixed.py")
+    _job(
+        retry,
+        "fixed",
+        source="vllm/fixed.py",
+        collector_sha256=RETRY_COLLECTOR,
+    )
     _job(
         retry,
         "still-red",
         healthy=False,
         failure_reason="collector_unhealthy",
         source="vllm/retry-red.py",
+        collector_sha256=RETRY_COLLECTOR,
     )
     base_inventory = _inventory(
         tmp_path / "base-inventory.json",
@@ -281,6 +290,7 @@ def test_merge_fleet_graph_replaces_only_healthy_retry_jobs(tmp_path: Path):
         "fixed",
         "still-red",
         wait_results={key: {"status": "terminal"} for key in ("fixed", "still-red")},
+        collector_sha256=RETRY_COLLECTOR,
     )
     graph = tmp_path / "merged.sqlite"
     provenance = tmp_path / "merge-provenance.json"
@@ -299,12 +309,17 @@ def test_merge_fleet_graph_replaces_only_healthy_retry_jobs(tmp_path: Path):
 
     assert result["metadata"]["healthy_jobs"] == ["fixed", "stable"]
     assert result["metadata"]["unhealthy_jobs"] == ["still-red"]
+    assert result["metadata"]["collector_sha256"] is None
+    assert result["metadata"]["collector_sha256s"] == [COLLECTOR, RETRY_COLLECTOR]
     assert paths_to_jobs(graph, "vllm/fixed.py")[0][-1]["name"] == "fixed"
     assert paths_to_jobs(graph, "vllm/stable.py")[0][-1]["name"] == "stable"
     assert paths_to_jobs(graph, "vllm/retry-red.py") == []
     provenance_document = json.loads(provenance.read_text(encoding="utf-8"))
     assert provenance_document["base_source_build_id"] == BASE_BUILD_ID
     assert provenance_document["retry_source_build_id"] == RETRY_BUILD_ID
+    assert provenance_document["base_collector_sha256"] == COLLECTOR
+    assert provenance_document["retry_collector_sha256"] == RETRY_COLLECTOR
+    assert provenance_document["collector_sha256s"] == [COLLECTOR, RETRY_COLLECTOR]
     assert provenance_document["merge_revision"] == "d" * 40
     assert (
         provenance_document["merged_graph_sha256"]

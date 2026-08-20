@@ -105,6 +105,13 @@ def _sha(value: Any) -> str:
     return value
 
 
+def _sha256(value: Any, field: str) -> str:
+    value = str(value)
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise GraphError(f"{field} must be exact lowercase 64-hex")
+    return value
+
+
 def _uuid(value: Any, field: str) -> str:
     value = str(value)
     try:
@@ -248,10 +255,10 @@ def _materialize(
     input_dir: Path,
     output: Path,
     inventory: dict[str, Any],
-    replacement_inputs: dict[str, Path] | None = None,
+    replacement_inputs: dict[str, tuple[Path, str]] | None = None,
 ) -> dict[str, Any]:
     repository_sha = _sha(inventory.get("repository_sha"))
-    collector_sha = str(inventory.get("collector_sha256", ""))
+    collector_sha = _sha256(inventory.get("collector_sha256", ""), "collector SHA-256")
     policies = {str(row["key"]): row for row in inventory.get("jobs", [])}
     if not policies:
         raise GraphError("trace inventory contains no jobs")
@@ -259,15 +266,22 @@ def _materialize(
     summaries, invalid = _collect_summaries(
         input_dir, policies, repository_sha, collector_sha
     )
-    replacements_by_root: dict[Path, set[str]] = {}
-    for key, root in (replacement_inputs or {}).items():
+    replacements_by_source: dict[tuple[Path, str], set[str]] = {}
+    for key, (root, replacement_collector_sha) in (replacement_inputs or {}).items():
         if key not in policies:
             raise GraphError(f"replacement evidence contains unknown job {key}")
-        replacements_by_root.setdefault(root, set()).add(key)
-    for root, keys in replacements_by_root.items():
+        source = (
+            root,
+            _sha256(replacement_collector_sha, "replacement collector SHA-256"),
+        )
+        replacements_by_source.setdefault(source, set()).add(key)
+    for (root, replacement_collector_sha), keys in replacements_by_source.items():
         replacement_policies = {key: policies[key] for key in keys}
         replacement_summaries, replacement_invalid = _collect_summaries(
-            root, replacement_policies, repository_sha, collector_sha
+            root,
+            replacement_policies,
+            repository_sha,
+            replacement_collector_sha,
         )
         for key in keys:
             summaries[key] = replacement_summaries[key]
@@ -359,10 +373,20 @@ def _materialize(
         if not healthy:
             raise GraphError("trace generation contains no healthy jobs")
         data_through = min(evidence_times).isoformat()
+        collector_sha256s = sorted(
+            {collector_sha}
+            | {
+                replacement_collector_sha
+                for _root, replacement_collector_sha in replacements_by_source
+            }
+        )
         metadata = {
             "always_run": inventory.get("always_run", []),
             "ci_infra_revision": inventory.get("ci_infra_revision"),
-            "collector_sha256": collector_sha,
+            "collector_sha256": (
+                collector_sha256s[0] if len(collector_sha256s) == 1 else None
+            ),
+            "collector_sha256s": collector_sha256s,
             "created_at": data_through,
             "data_through": data_through,
             "expected_jobs": sorted(policies),
@@ -431,9 +455,14 @@ def merge_fleet_graph(
         raise GraphError("base and retry source build IDs must differ")
     base_document = _json(base_inventory)
     retry_document = _json(retry_inventory)
-    for field in ("repository_sha", "collector_sha256"):
-        if base_document.get(field) != retry_document.get(field):
-            raise GraphError(f"base and retry inventories disagree on {field}")
+    if base_document.get("repository_sha") != retry_document.get("repository_sha"):
+        raise GraphError("base and retry inventories disagree on repository_sha")
+    base_collector_sha = _sha256(
+        base_document.get("collector_sha256"), "base collector SHA-256"
+    )
+    retry_collector_sha = _sha256(
+        retry_document.get("collector_sha256"), "retry collector SHA-256"
+    )
     base_policies = {str(row.get("key")): row for row in base_document.get("jobs", [])}
     retry_policies = {
         str(row.get("key")): row for row in retry_document.get("jobs", [])
@@ -483,7 +512,10 @@ def merge_fleet_graph(
                 base_input.resolve(),
                 output,
                 merged_inventory,
-                {key: retry_input.resolve() for key in replacements},
+                {
+                    key: (retry_input.resolve(), retry_collector_sha)
+                    for key in replacements
+                },
             )
 
             expected_healthy = set(base_metadata["healthy_jobs"]) | replacements
@@ -505,8 +537,9 @@ def merge_fleet_graph(
             provenance = {
                 "base_source_build_id": base_source_build_id,
                 "base_inventory_sha256": sha256_file(base_inventory),
+                "base_collector_sha256": base_collector_sha,
                 "base_metadata": base_metadata,
-                "collector_sha256": base_document.get("collector_sha256"),
+                "collector_sha256s": sorted({base_collector_sha, retry_collector_sha}),
                 "kind": "vllm-test-selection-evidence-merge",
                 "merge_revision": merge_revision,
                 "merged_graph_sha256": sha256_file(output),
@@ -514,6 +547,7 @@ def merge_fleet_graph(
                 "replacement_jobs": sorted(replacements),
                 "repository_sha": base_document.get("repository_sha"),
                 "retry_source_build_id": retry_source_build_id,
+                "retry_collector_sha256": retry_collector_sha,
                 "retry_inventory_sha256": sha256_file(retry_inventory),
                 "retry_metadata": retry_metadata,
                 "schema_version": 1,

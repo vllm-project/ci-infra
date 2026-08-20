@@ -84,12 +84,14 @@ vllm-test-selection merge-fleet-graph \
   --output merged.sqlite --provenance-output merge-provenance.json
 ```
 
-The command independently materializes both inputs, permits retry policies only
-as an exact subset of the base, overlays only retry jobs proven healthy, and
-verifies that every retained base job and replacement job has byte-equivalent
-logical evidence. The provenance binds both source Buildkite UUIDs, both
-inventory hashes, the exact merger revision, and the merged graph hash. Publish
-only after reviewing it, always to a new isolated prefix:
+The command independently materializes both inputs against their own exact
+collector hashes, permits retry policies only as an exact subset of the base,
+overlays only retry jobs proven healthy, and verifies that every retained base
+job and replacement job has byte-equivalent logical evidence. A mixed-source
+graph records both collector hashes and leaves the legacy singular collector
+field null. The provenance binds both source Buildkite UUIDs, both collector
+and inventory hashes, the exact merger revision, and the merged graph hash.
+Publish only after reviewing it, always to a new isolated prefix:
 
 ```bash
 vllm-test-selection publish-graph \

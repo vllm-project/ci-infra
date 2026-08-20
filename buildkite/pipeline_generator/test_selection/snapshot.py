@@ -148,6 +148,28 @@ def _prefix(value: str) -> str:
     return value
 
 
+def _collector_identity(
+    document: dict[str, Any], label: str
+) -> tuple[Optional[str], list[str]] | None:
+    singular = document.get("collector_sha256")
+    values = document.get("collector_sha256s")
+    if values is None:
+        if singular is None:
+            return None
+        values = [singular]
+    if (
+        not isinstance(values, list)
+        or not values
+        or values != sorted(set(values))
+        or not all(re.fullmatch(r"[0-9a-f]{64}", str(value)) for value in values)
+    ):
+        raise GraphError(f"{label} collector SHA-256 set is invalid")
+    expected_singular = values[0] if len(values) == 1 else None
+    if singular != expected_singular:
+        raise GraphError(f"{label} collector SHA-256 fields disagree")
+    return singular, [str(value) for value in values]
+
+
 def _compressed_graph_path(graph: Path) -> Path:
     return graph.with_suffix(graph.suffix + ".gz")
 
@@ -209,12 +231,18 @@ def _decompress_graph(
 def build_snapshot_manifest(graph: Path, output: Path) -> dict[str, Any]:
     verify_checksum(graph)
     metadata = graph_metadata(graph)
+    collector_identity = _collector_identity(metadata, "graph metadata")
+    if collector_identity is None:
+        raise GraphError("graph metadata has no collector identity")
+    collector_sha256, collector_sha256s = collector_identity
     checksum = sha256_file(graph)
     compressed_graph = _compressed_graph_path(graph)
     _compress_graph(graph, compressed_graph)
     document = {
         "always_run": metadata.get("always_run", []),
         "ci_infra_revision": metadata["ci_infra_revision"],
+        "collector_sha256": collector_sha256,
+        "collector_sha256s": collector_sha256s,
         # A retry of the same generation must produce byte-identical immutable
         # objects, so use the evidence watermark rather than wall-clock time.
         "created_at": metadata["data_through"],
@@ -366,6 +394,13 @@ def publish_snapshot(
     metadata = graph_metadata(graph)
     if metadata["repository_sha"] != repository_sha:
         raise GraphError("snapshot graph and manifest repository SHA disagree")
+    manifest_collector_identity = _collector_identity(manifest, "snapshot manifest")
+    if (
+        manifest_collector_identity is not None
+        and manifest_collector_identity
+        != _collector_identity(metadata, "graph metadata")
+    ):
+        raise GraphError("snapshot graph and manifest collector identities disagree")
     sidecar = graph.with_suffix(graph.suffix + ".sha256")
     files = manifest.get("files")
     if not isinstance(files, dict):
@@ -618,6 +653,15 @@ def fetch_snapshot(
         metadata = graph_metadata(graph)
         if metadata["repository_sha"] != entry["repository_sha"]:
             raise GraphError("downloaded graph repository SHA mismatch")
+        manifest_collector_identity = _collector_identity(manifest, "snapshot manifest")
+        if (
+            manifest_collector_identity is not None
+            and manifest_collector_identity
+            != _collector_identity(metadata, "downloaded graph metadata")
+        ):
+            raise GraphError(
+                "downloaded graph and manifest collector identities disagree"
+            )
         if metadata["data_through"] != manifest.get("data_through"):
             raise GraphError("downloaded graph evidence watermark mismatch")
         os.replace(graph, output)
