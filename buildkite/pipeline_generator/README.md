@@ -85,6 +85,11 @@ The generator relies on several environment variables, typically provided by Bui
     operator gate for a non-main mirror-branch trace canary. Both must exactly
     match the Buildkite branch and 40-hex commit; a trusted non-PR nightly,
     explicit trace bucket, and isolated non-production prefix are required.
+*   `VLLM_CI_RECOVERY_IMAGE_COPY`: Frozen, fail-closed #84714 recovery mode.
+    The only valid value is `1`; on the exact authorized mirror branch/commit,
+    it emits one step that copies the two pinned postmerge image manifests to
+    their premerge tags and verifies the resulting public digests. It cannot be
+    combined with targeted-step or snapshot-republish modes.
 
 Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
 `buildkite-analytics-token-secret` Secret's `token` key when it is available.

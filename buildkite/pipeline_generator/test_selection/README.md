@@ -103,6 +103,23 @@ vllm-test-selection publish-graph \
 
 Never reuse either source prefix or the production prefix for a retry merge.
 
+## Frozen #84714 image recovery
+
+The non-main mirror branch resolves commit images from the premerge repository,
+while #84714 ran on the postmerge repository. For the bounded #84714 recovery,
+`VLLM_CI_RECOVERY_IMAGE_COPY=1` replaces the pipeline with one premerge CPU
+step that carbon-copies the two hard-pinned #84714 postmerge manifests into the
+mirror branch's premerge tags and verifies both public destination digests.
+The mode accepts only the exact `ci-tsel-main-mirror-eac636a7` branch and
+`eac636a7fa476983cdae34b45a984e9852aad375` commit with their paired trace
+canary authorization. It rejects PRs, other repositories or registries,
+`VLLM_CI_ONLY_STEP_KEYS`, and every republish variable.
+
+This is a frozen recovery vehicle, not a general image-copy API. Run it only
+after any build writing the same premerge tags is terminal. The subsequent
+instrumented retry must verify both destination digests and require its normal
+image steps to log `Image already exists` / `Skipping build`.
+
 ## PR selection
 
 The PR path fetches the newest fresh snapshot whose commit is an ancestor of

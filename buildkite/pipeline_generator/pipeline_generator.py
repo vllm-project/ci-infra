@@ -42,6 +42,17 @@ class PipelineGenerator:
     def generate(self):
         global_config = get_global_config()
 
+        if _recovery_image_copy_requested():
+            copy_step = create_recovery_image_copy_group_step(global_config)
+            with open(self.output_file_path, "w") as output:
+                yaml.dump(
+                    {"steps": [copy_step.dict(exclude_none=True)]},
+                    output,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+            return
+
         if _snapshot_republish_requested():
             republish_step = create_snapshot_republish_group_step(global_config)
             with open(self.output_file_path, "w") as output:
@@ -159,6 +170,18 @@ REPUBLISH_INVENTORY_ENV = "VLLM_CI_REPUBLISH_INVENTORY_B64"
 REPUBLISH_SOURCE_BUILD_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD"
 REPUBLISH_SOURCE_BUILD_ID_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD_ID"
 REPUBLISH_TRIALS_ENV = "VLLM_CI_REPUBLISH_TRIALS_JSON"
+RECOVERY_IMAGE_COPY_ENV = "VLLM_CI_RECOVERY_IMAGE_COPY"
+RECOVERY_IMAGE_BRANCH = "ci-tsel-main-mirror-eac636a7"
+RECOVERY_IMAGE_COMMIT = "eac636a7fa476983cdae34b45a984e9852aad375"
+RECOVERY_IMAGE_REGISTRY = "public.ecr.aws/q9t5s3a7"
+RECOVERY_IMAGE_SOURCE_REPO = "vllm-ci-postmerge-repo"
+RECOVERY_IMAGE_DESTINATION_REPO = "vllm-ci-test-repo"
+RECOVERY_IMAGE_AMD64_DIGEST = (
+    "sha256:530a18dfb04c66cdb4ebb939b111d84c47b902abf21b3e7d3fded2deac8b556a"
+)
+RECOVERY_IMAGE_ARM64_DIGEST = (
+    "sha256:41490e868bf2ceee1a6d4c5b3bd1434c4d4959cf694dd5ffec8ebf6916cefe83"
+)
 
 # Full-fleet canary #84324 measured prohibitive Python-coverage overhead for
 # these exact jobs. Keep the evidence-based keys visible in the inventory but
@@ -460,6 +483,126 @@ def _snapshot_republish_requested() -> bool:
             REPUBLISH_SOURCE_BUILD_ID_ENV,
             REPUBLISH_TRIALS_ENV,
         )
+    )
+
+
+def _recovery_image_copy_requested() -> bool:
+    return os.getenv(RECOVERY_IMAGE_COPY_ENV) is not None
+
+
+def _validate_recovery_image_copy(global_config: dict) -> None:
+    if os.getenv(RECOVERY_IMAGE_COPY_ENV) != "1":
+        raise ValueError(f"{RECOVERY_IMAGE_COPY_ENV} must equal 1")
+    if (
+        _snapshot_republish_requested()
+        or global_config.get("only_step_keys") is not None
+    ):
+        raise ValueError(
+            "recovery image copy cannot be combined with another recovery mode"
+        )
+    required = {
+        "name": "vllm_ci",
+        "github_repo_name": "vllm-project/vllm",
+        "branch": RECOVERY_IMAGE_BRANCH,
+        "commit": RECOVERY_IMAGE_COMMIT,
+        "pull_request": "false",
+        "nightly": "1",
+        "trace_canary_branch": RECOVERY_IMAGE_BRANCH,
+        "trace_canary_commit": RECOVERY_IMAGE_COMMIT,
+        "registries": RECOVERY_IMAGE_REGISTRY,
+    }
+    for field, expected in required.items():
+        if global_config.get(field) != expected:
+            raise ValueError(f"recovery image copy requires {field}={expected!r}")
+    repositories = global_config.get("repositories") or {}
+    if (
+        repositories.get("main") != RECOVERY_IMAGE_SOURCE_REPO
+        or repositories.get("premerge") != RECOVERY_IMAGE_DESTINATION_REPO
+    ):
+        raise ValueError("recovery image copy repository mapping is not trusted")
+
+
+def create_recovery_image_copy_group_step(global_config: dict) -> BuildkiteGroupStep:
+    """Carbon-copy #84714's pinned images for the exact mirror recovery."""
+
+    _validate_recovery_image_copy(global_config)
+    revision = _ci_infra_revision()
+    source = f"{RECOVERY_IMAGE_REGISTRY}/{RECOVERY_IMAGE_SOURCE_REPO}"
+    destination = f"{RECOVERY_IMAGE_REGISTRY}/{RECOVERY_IMAGE_DESTINATION_REPO}"
+    amd64_destination = f"{destination}:{RECOVERY_IMAGE_COMMIT}"
+    arm64_destination = f"{destination}:{RECOVERY_IMAGE_COMMIT}-arm64"
+    command = [
+        "set -euo pipefail",
+        (
+            "echo "
+            + shlex.quote(
+                "+++ :warning: EXACT IMAGE COPY authorized for "
+                f"{RECOVERY_IMAGE_BRANCH}@{RECOVERY_IMAGE_COMMIT}"
+            )
+        ),
+        f'test "$$BUILDKITE_BRANCH" = {shlex.quote(RECOVERY_IMAGE_BRANCH)}',
+        f'test "$$BUILDKITE_COMMIT" = {shlex.quote(RECOVERY_IMAGE_COMMIT)}',
+        (
+            "aws ecr-public get-login-password --region us-east-1 | "
+            f"docker login --username AWS --password-stdin {RECOVERY_IMAGE_REGISTRY}"
+        ),
+        (
+            "docker buildx imagetools create --prefer-index=false "
+            f"--tag {amd64_destination} "
+            f"{source}@{RECOVERY_IMAGE_AMD64_DIGEST}"
+        ),
+        (
+            "docker buildx imagetools create --prefer-index=false "
+            f"--tag {arm64_destination} "
+            f"{source}@{RECOVERY_IMAGE_ARM64_DIGEST}"
+        ),
+        "wait_for_digest() {",
+        '  local image="$$1" expected="$$2" observed=""',
+        "  for attempt in $$(seq 1 12); do",
+        (
+            "    observed=$$(docker buildx imagetools inspect "
+            "--format '{{.Manifest.Digest}}' \"$$image\" 2>/dev/null || true)"
+        ),
+        '    if [[ "$$observed" = "$$expected" ]]; then',
+        '      printf \'%s\\t%s\\n\' "$$image" "$$observed"',
+        "      return 0",
+        "    fi",
+        "    sleep 5",
+        "  done",
+        (
+            '  echo "digest mismatch for $$image: expected $$expected, '
+            'observed $$observed" >&2'
+        ),
+        "  return 1",
+        "}",
+        'D="$$(mktemp -d)"',
+        "trap 'rm -rf \"$$D\"' EXIT",
+        (
+            f"wait_for_digest {amd64_destination} {RECOVERY_IMAGE_AMD64_DIGEST} "
+            '| tee "$$D/image-copy-provenance.txt"'
+        ),
+        (
+            f"wait_for_digest {arm64_destination} {RECOVERY_IMAGE_ARM64_DIGEST} "
+            '| tee -a "$$D/image-copy-provenance.txt"'
+        ),
+        (
+            f"printf 'ci_infra_revision\\t%s\\nsource_repository\\t%s\\n' "
+            f'{revision} {source} >> "$$D/image-copy-provenance.txt"'
+        ),
+        'buildkite-agent artifact upload "$$D/image-copy-provenance.txt"',
+    ]
+    return BuildkiteGroupStep(
+        group=":warning: Exact recovery image copy",
+        steps=[
+            BuildkiteCommandStep(
+                agents={"queue": AgentQueue.CPU_PREMERGE_US_EAST_1.value},
+                commands=["\n".join(command)],
+                key="test-selection-recovery-image-copy",
+                label=":warning: Copy pinned #84714 images",
+                retry={"automatic": [{"exit_status": -1, "limit": 1}]},
+                timeout_in_minutes=20,
+            )
+        ],
     )
 
 

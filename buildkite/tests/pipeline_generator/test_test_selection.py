@@ -12,11 +12,17 @@ from constants import DeviceType
 import pipeline_generator as pipeline_module
 from pipeline_generator import (
     PipelineGenerator,
+    RECOVERY_IMAGE_AMD64_DIGEST,
+    RECOVERY_IMAGE_ARM64_DIGEST,
+    RECOVERY_IMAGE_BRANCH,
+    RECOVERY_IMAGE_COMMIT,
+    RECOVERY_IMAGE_COPY_ENV,
     REPUBLISH_INVENTORY_ENV,
     REPUBLISH_SOURCE_BUILD_ENV,
     REPUBLISH_SOURCE_BUILD_ID_ENV,
     REPUBLISH_TRIALS_ENV,
     configure_test_tracing,
+    create_recovery_image_copy_group_step,
     create_snapshot_republish_group_step,
     create_snapshot_group_step,
     finalize_trace_inventory,
@@ -173,6 +179,100 @@ def test_mirror_branch_snapshot_has_loud_canary_identity(fake_global_config):
     assert identity in group.group
     assert identity in group.steps[0].label
     assert "TEST-SELECTION CANARY authorized" in group.steps[0].commands[0]
+
+
+def _recovery_image_copy_config(fake_global_config):
+    return {
+        **fake_global_config,
+        "branch": RECOVERY_IMAGE_BRANCH,
+        "commit": RECOVERY_IMAGE_COMMIT,
+        "nightly": "1",
+        "trace_canary_branch": RECOVERY_IMAGE_BRANCH,
+        "trace_canary_commit": RECOVERY_IMAGE_COMMIT,
+        "registries": "public.ecr.aws/q9t5s3a7",
+    }
+
+
+def test_recovery_image_copy_renders_one_exact_step(
+    fake_global_config, monkeypatch, tmp_path
+):
+    config = _recovery_image_copy_config(fake_global_config)
+    monkeypatch.setenv(RECOVERY_IMAGE_COPY_ENV, "1")
+    monkeypatch.setattr(pipeline_module, "_ci_infra_revision", lambda: "f" * 40)
+    monkeypatch.setattr(pipeline_module, "get_global_config", lambda: config)
+    output = tmp_path / "pipeline.yaml"
+    generator = PipelineGenerator.__new__(PipelineGenerator)
+    generator.output_file_path = str(output)
+
+    generator.generate()
+
+    document = yaml.safe_load(output.read_text())
+    assert len(document["steps"]) == 1
+    group = document["steps"][0]
+    assert group["group"] == ":warning: Exact recovery image copy"
+    assert len(group["steps"]) == 1
+    step = group["steps"][0]
+    assert step["key"] == "test-selection-recovery-image-copy"
+    assert step["agents"] == {"queue": "cpu_queue_premerge_us_east_1"}
+    assert step["timeout_in_minutes"] == 20
+    command = step["commands"][0]
+    assert RECOVERY_IMAGE_AMD64_DIGEST in command
+    assert RECOVERY_IMAGE_ARM64_DIGEST in command
+    assert "vllm-ci-postmerge-repo@sha256:" in command
+    assert "vllm-ci-test-repo:" + RECOVERY_IMAGE_COMMIT in command
+    assert "imagetools create --prefer-index=false" in command
+    assert "image-copy-provenance.txt" in command
+    assert "pytest" not in command
+    assert "aws s3" not in command.lower()
+    assert "trace-output" not in command
+    subprocess.run(
+        ["bash", "-n"],
+        input=command.replace("$$", "$"),
+        check=True,
+        text=True,
+    )
+
+
+def test_recovery_image_copy_rejects_untrusted_or_ambiguous_inputs(
+    fake_global_config, monkeypatch
+):
+    config = _recovery_image_copy_config(fake_global_config)
+    monkeypatch.setenv(RECOVERY_IMAGE_COPY_ENV, "yes")
+    with pytest.raises(ValueError, match="must equal 1"):
+        create_recovery_image_copy_group_step(config)
+
+    monkeypatch.setenv(RECOVERY_IMAGE_COPY_ENV, "1")
+    for field, value in (
+        ("branch", "main"),
+        ("commit", "a" * 40),
+        ("pull_request", "123"),
+        ("nightly", "0"),
+        ("trace_canary_branch", None),
+        ("trace_canary_commit", None),
+        ("registries", "example.invalid"),
+    ):
+        with pytest.raises(ValueError, match="recovery image copy requires"):
+            create_recovery_image_copy_group_step({**config, field: value})
+
+    with pytest.raises(ValueError, match="repository mapping is not trusted"):
+        create_recovery_image_copy_group_step(
+            {
+                **config,
+                "repositories": {
+                    "main": "vllm-ci-test-repo",
+                    "premerge": "vllm-ci-postmerge-repo",
+                },
+            }
+        )
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        create_recovery_image_copy_group_step(
+            {**config, "only_step_keys": frozenset({"image-build"})}
+        )
+
+    monkeypatch.setenv(REPUBLISH_SOURCE_BUILD_ENV, "84714")
+    with pytest.raises(ValueError, match="cannot be combined"):
+        create_recovery_image_copy_group_step(config)
 
 
 def test_republish_renders_exactly_one_pinned_step(
