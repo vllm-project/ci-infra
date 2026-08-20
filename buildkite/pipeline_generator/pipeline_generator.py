@@ -292,7 +292,10 @@ def should_trace_nightly(global_config: dict) -> bool:
 def _recovery_trace_timeout_overrides(
     global_config: dict, selected_test_area_keys: Set[str]
 ) -> dict[str, int]:
-    """Return the frozen budgets only for the exact six-key eac recovery wave."""
+    """Return frozen budgets for a nonempty subset of the eac recovery wave."""
+
+    selected_keys = frozenset(selected_test_area_keys)
+    recovery_keys = frozenset(RECOVERY_TRACE_TIMEOUTS)
 
     trusted = bool(
         global_config["github_repo_name"] == "vllm-project/vllm"
@@ -302,9 +305,12 @@ def _recovery_trace_timeout_overrides(
         and global_config.get("trace_canary_commit") == RECOVERY_IMAGE_COMMIT
         and global_config["nightly"] == "1"
         and global_config["pull_request"] in (None, "false")
-        and frozenset(selected_test_area_keys) == frozenset(RECOVERY_TRACE_TIMEOUTS)
+        and selected_keys
+        and selected_keys <= recovery_keys
     )
-    return dict(RECOVERY_TRACE_TIMEOUTS) if trusted else {}
+    return (
+        {key: RECOVERY_TRACE_TIMEOUTS[key] for key in selected_keys} if trusted else {}
+    )
 
 
 def _ci_infra_revision() -> str:

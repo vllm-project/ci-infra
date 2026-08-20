@@ -46,6 +46,19 @@ def _republish_config(fake_global_config):
     }
 
 
+def _recovery_config(fake_global_config):
+    return {
+        **fake_global_config,
+        "github_repo_name": "vllm-project/vllm",
+        "branch": RECOVERY_IMAGE_BRANCH,
+        "commit": RECOVERY_IMAGE_COMMIT,
+        "pull_request": "false",
+        "nightly": "1",
+        "trace_canary_branch": RECOVERY_IMAGE_BRANCH,
+        "trace_canary_commit": RECOVERY_IMAGE_COMMIT,
+    }
+
+
 def _set_republish_env(monkeypatch):
     inventory = {
         "always_run": [{"key": "plain-job", "reason": "policy"}],
@@ -160,18 +173,9 @@ def test_targeted_nightly_inventory_matches_dependency_closure():
     ]
 
 
-def test_exact_recovery_wave_uses_frozen_timeout_budgets(fake_global_config):
+def test_recovery_wave_subsets_use_frozen_timeout_budgets(fake_global_config):
     selected_keys = set(pipeline_module.RECOVERY_TRACE_TIMEOUTS)
-    config = {
-        **fake_global_config,
-        "github_repo_name": "vllm-project/vllm",
-        "branch": RECOVERY_IMAGE_BRANCH,
-        "commit": RECOVERY_IMAGE_COMMIT,
-        "pull_request": "false",
-        "nightly": "1",
-        "trace_canary_branch": RECOVERY_IMAGE_BRANCH,
-        "trace_canary_commit": RECOVERY_IMAGE_COMMIT,
-    }
+    config = _recovery_config(fake_global_config)
     overrides = pipeline_module._recovery_trace_timeout_overrides(config, selected_keys)
     assert overrides == pipeline_module.RECOVERY_TRACE_TIMEOUTS
     assert (
@@ -180,12 +184,32 @@ def test_exact_recovery_wave_uses_frozen_timeout_budgets(fake_global_config):
         )
         == {}
     )
-    assert (
-        pipeline_module._recovery_trace_timeout_overrides(
-            config, selected_keys - {"rayexecutorv2-4-gpus"}
+    proper_subset = {"batch-invariance-b200", "model-executor"}
+    assert pipeline_module._recovery_trace_timeout_overrides(config, proper_subset) == {
+        key: pipeline_module.RECOVERY_TRACE_TIMEOUTS[key] for key in proper_subset
+    }
+    assert pipeline_module._recovery_trace_timeout_overrides(
+        config, {"lm-eval-large-models-8xh200"}
+    ) == {"lm-eval-large-models-8xh200": 90}
+
+    solo_steps = [
+        Step(
+            label="8xH200",
+            key="lm-eval-large-models-8xh200",
+            commands=["pytest tests/recovery"],
+            device=DeviceType.H200,
+            timeout_in_minutes=50,
         )
-        == {}
+    ]
+    configure_test_tracing(
+        solo_steps,
+        {"lm-eval-large-models-8xh200"},
+        RECOVERY_IMAGE_COMMIT,
+        "b" * 40,
+        "c" * 64,
+        {"lm-eval-large-models-8xh200": 90},
     )
+    assert solo_steps[0].timeout_in_minutes == 90
 
     steps = [
         Step(
@@ -206,6 +230,24 @@ def test_exact_recovery_wave_uses_frozen_timeout_budgets(fake_global_config):
         overrides,
     )
     assert {step.key: step.timeout_in_minutes for step in steps} == overrides
+
+
+def test_recovery_timeout_overrides_reject_empty_or_outsider(fake_global_config):
+    config = _recovery_config(fake_global_config)
+
+    assert pipeline_module._recovery_trace_timeout_overrides(config, set()) == {}
+    assert (
+        pipeline_module._recovery_trace_timeout_overrides(
+            config, {"not-a-recovery-job"}
+        )
+        == {}
+    )
+    assert (
+        pipeline_module._recovery_trace_timeout_overrides(
+            config, {"lm-eval-large-models-8xh200", "not-a-recovery-job"}
+        )
+        == {}
+    )
 
 
 def test_mirror_branch_snapshot_has_loud_canary_identity(fake_global_config):
