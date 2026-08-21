@@ -591,6 +591,7 @@ def test_published_graph_overlay_renders_one_pinned_cpu_postmerge_step(
     assert "--expected-base-healthy-count 82" in command
     assert "--expected-base-missing-count 7" in command
     assert "--expected-base-unhealthy-count 32" in command
+    assert command.count("--max-snapshot-age-days 7") == 2
     subprocess.run(
         ["bash", "-n"],
         input=command.replace("$$", "$"),

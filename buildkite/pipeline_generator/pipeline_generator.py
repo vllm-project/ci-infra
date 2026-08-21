@@ -838,7 +838,7 @@ def create_published_graph_overlay_group_step(
             f"--bucket {PUBLISHED_GRAPH_OVERLAY_BUCKET} "
             f"--prefix {PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX} "
             f'--repo "$$PWD" --base {RECOVERY_IMAGE_COMMIT} '
-            '--output "$$D/readback.sqlite" --max-snapshot-age-days 1 | '
+            '--output "$$D/readback.sqlite" --max-snapshot-age-days 7 | '
             'tee "$$D/results/readback.json"'
         ),
         (
