@@ -74,6 +74,16 @@ RestartSec=5
 # Prevent OOM killer from targeting buildkitd
 OOMScoreAdjust=-500
 
+# Yield CPU to the buildkite-agent under contention so its heartbeat is never
+# starved. Compressing the image on export (zstd) can saturate every vCPU for
+# minutes; if that starves the agent, Buildkite declares the job dead (~20 min)
+# while the export is still running. Weight-based, not a hard quota: costs
+# nothing on an idle box, and only gives the agent priority when buildkitd would
+# otherwise monopolize all cores. Agent runs in its own cgroup slice at the
+# default weight (100), so CPUWeight=25 gives it ~4:1 priority under contention.
+Nice=10
+CPUWeight=25
+
 # No timeout for long-running builds
 TimeoutStartSec=0
 TimeoutStopSec=300
