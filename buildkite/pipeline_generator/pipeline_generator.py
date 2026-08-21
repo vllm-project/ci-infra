@@ -270,6 +270,34 @@ PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256 = (
 PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256 = (
     "7a48d66419b246e2847cb95c8e226070c675cb19e8787cd47be2ef9729018a15"
 )
+PUBLISHED_GRAPH_PROMOTION_SOURCE_PREFIX = "test-selection/vllm/canary/b2-overlay-100"
+PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_KEY = (
+    f"{PUBLISHED_GRAPH_PROMOTION_SOURCE_PREFIX}/snapshots/"
+    f"{RECOVERY_IMAGE_COMMIT}/manifest.json"
+)
+PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_SHA256 = (
+    "d4d223e5304aa2c5ce29419a539e0e4ddd5d09ca8d1918d32f07af71dff9691a"
+)
+PUBLISHED_GRAPH_PROMOTION_SOURCE_GRAPH_SHA256 = (
+    "30bddb697b23d4c6071c951e5f63b4b6db0965e34df75460b8bfab0e76974deb"
+)
+PUBLISHED_GRAPH_PROMOTION_REPLACEMENTS = (
+    "basic-correctness",
+    "distributed-tests-2xb200",
+    "distributed-tests-4xa100",
+    "kernels-b200",
+    "kernels-deepgemm-test-h100",
+    "kernels-fusedmoe-layer-test-2-b200s",
+    "language-models-tests-hybrid",
+    "multi-modal-processor",
+    "pytorch-compilation-unit-tests",
+    "pytorch-fullgraph-test",
+    "spec-decode-draft-model-nightly-b200",
+    "spec-decode-eagle-nightly-b200",
+    "spec-decode-speculators-mtp-nightly-b200",
+    "speculators-correctness",
+    "v1-sample-logits",
+)
 PUBLISHED_GRAPH_PRODUCTION_PREFIX = "test-selection/vllm"
 RECOVERY_TRACE_TIMEOUTS = {
     "batch-invariance-b200": 120,
@@ -1030,7 +1058,7 @@ def _published_graph_promotion_revision(global_config: dict) -> str:
         "trace_canary_branch": RECOVERY_IMAGE_BRANCH,
         "trace_canary_commit": RECOVERY_IMAGE_COMMIT,
         "trace_s3_bucket": PUBLISHED_GRAPH_OVERLAY_BUCKET,
-        "trace_s3_prefix": PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX,
+        "trace_s3_prefix": PUBLISHED_GRAPH_PROMOTION_SOURCE_PREFIX,
         "registries": RECOVERY_IMAGE_REGISTRY,
     }
     for field, expected in required.items():
@@ -1070,23 +1098,22 @@ def create_published_graph_promotion_group_step(
         "healthy=set(metadata['healthy_jobs']); "
         "missing=set(metadata['missing_jobs']); "
         "unhealthy=set(metadata['unhealthy_jobs']); "
-        f"assert result['source_prefix']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX!r}; "
+        f"assert result['source_prefix']=={PUBLISHED_GRAPH_PROMOTION_SOURCE_PREFIX!r}; "
         f"assert result['destination_prefix']=={PUBLISHED_GRAPH_PRODUCTION_PREFIX!r}; "
-        f"assert result['manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256!r}; "
-        f"assert result['graph_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256!r}; "
-        f"assert result['source']['manifest_key']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_KEY!r}; "
-        f"assert result['source']['manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256!r}; "
+        f"assert result['manifest_sha256']=={PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_SHA256!r}; "
+        f"assert result['graph_sha256']=={PUBLISHED_GRAPH_PROMOTION_SOURCE_GRAPH_SHA256!r}; "
+        f"assert result['source']['manifest_key']=={PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_KEY!r}; "
+        f"assert result['source']['manifest_sha256']=={PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_SHA256!r}; "
         f"assert result['source']['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}; "
-        f"assert result['snapshot']['manifest_key']=={(PUBLISHED_GRAPH_PRODUCTION_PREFIX + '/snapshots/' + RECOVERY_IMAGE_COMMIT + '/m-' + PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256 + '/manifest.json')!r}; "
+        f"assert result['snapshot']['manifest_key']=={(PUBLISHED_GRAPH_PRODUCTION_PREFIX + '/snapshots/' + RECOVERY_IMAGE_COMMIT + '/m-' + PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_SHA256 + '/manifest.json')!r}; "
         "assert result['snapshot']==result['readback']; "
-        f"assert result['snapshot']['manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256!r}; "
+        f"assert result['snapshot']['manifest_sha256']=={PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_SHA256!r}; "
         f"assert result['snapshot']['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}; "
         f"assert metadata['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}; "
-        "assert len(healthy)==85; assert len(missing)==4; assert len(unhealthy)==32; "
+        "assert len(healthy)==100; assert len(missing)==4; assert len(unhealthy)==17; "
         "assert not (healthy&missing or healthy&unhealthy or missing&unhealthy); "
         "assert healthy|missing|unhealthy==set(metadata['expected_jobs']); "
-        f"assert set({PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS!r})<=healthy; "
-        f"assert set({PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING!r})<=missing"
+        f"assert set({PUBLISHED_GRAPH_PROMOTION_REPLACEMENTS!r})<=healthy"
     )
     command = [
         "set -euo pipefail",
@@ -1094,7 +1121,7 @@ def create_published_graph_promotion_group_step(
             "echo "
             + shlex.quote(
                 "+++ :warning: PRODUCTION snapshot promotion authorized from "
-                f"{PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX}"
+                f"{PUBLISHED_GRAPH_PROMOTION_SOURCE_PREFIX}"
             )
         ),
         f'test "$$BUILDKITE_BRANCH" = {shlex.quote(RECOVERY_IMAGE_BRANCH)}',
@@ -1111,10 +1138,10 @@ def create_published_graph_promotion_group_step(
         (
             '"$$D/venv/bin/vllm-test-selection" promote-snapshot '
             f"--bucket {PUBLISHED_GRAPH_OVERLAY_BUCKET} "
-            f"--source-prefix {PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX} "
+            f"--source-prefix {PUBLISHED_GRAPH_PROMOTION_SOURCE_PREFIX} "
             f'--repo "$$PWD" --repository-sha {RECOVERY_IMAGE_COMMIT} '
-            f"--manifest-sha256 {PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256} "
-            f"--graph-sha256 {PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256} "
+            f"--manifest-sha256 {PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_SHA256} "
+            f"--graph-sha256 {PUBLISHED_GRAPH_PROMOTION_SOURCE_GRAPH_SHA256} "
             '--max-snapshot-age-days 7 > "$$D/results/promotion.json"'
         ),
         '"$$D/venv/bin/python" -m json.tool "$$D/results/promotion.json" >/dev/null',
@@ -1130,7 +1157,7 @@ def create_published_graph_promotion_group_step(
                 agents={"queue": AgentQueue.CPU_POSTMERGE_US_EAST_1.value},
                 commands=["\n".join(command)],
                 key="test-selection-promote-published-overlay",
-                label=":warning: Promote verified 85-job snapshot to production",
+                label=":warning: Promote verified 100-job snapshot to production",
                 priority=0,
                 retry={"automatic": [{"exit_status": -1, "limit": 1}]},
                 timeout_in_minutes=60,

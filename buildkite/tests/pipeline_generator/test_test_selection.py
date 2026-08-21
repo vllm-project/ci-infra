@@ -681,6 +681,7 @@ def test_published_graph_promotion_renders_one_pinned_production_step(
     fake_global_config, monkeypatch, tmp_path
 ):
     config = _published_overlay_config(fake_global_config)
+    config["trace_s3_prefix"] = pipeline_module.PUBLISHED_GRAPH_PROMOTION_SOURCE_PREFIX
     monkeypatch.setenv(PUBLISHED_GRAPH_PROMOTE_ENV, "1")
     monkeypatch.setenv("VLLM_CI_BRANCH", "f" * 40)
     monkeypatch.setenv("VLLM_CI_REVISION", "f" * 40)
@@ -708,20 +709,23 @@ def test_published_graph_promotion_renders_one_pinned_production_step(
     assert "publish-snapshot" not in command
     assert "publish-graph" not in command
     assert "artifact download" not in command
-    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX in command
+    assert pipeline_module.PUBLISHED_GRAPH_PROMOTION_SOURCE_PREFIX in command
     assert pipeline_module.PUBLISHED_GRAPH_PRODUCTION_PREFIX in command
-    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256 in command
-    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256 in command
+    assert pipeline_module.PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_SHA256 in command
+    assert pipeline_module.PUBLISHED_GRAPH_PROMOTION_SOURCE_GRAPH_SHA256 in command
+    assert pipeline_module.PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_KEY in command
     expected_manifest_key = (
         f"{pipeline_module.PUBLISHED_GRAPH_PRODUCTION_PREFIX}/snapshots/"
         f"{pipeline_module.RECOVERY_IMAGE_COMMIT}/m-"
-        f"{pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256}/"
+        f"{pipeline_module.PUBLISHED_GRAPH_PROMOTION_SOURCE_MANIFEST_SHA256}/"
         "manifest.json"
     )
     assert expected_manifest_key in unquoted_command
-    assert "len(healthy)==85" in unquoted_command
+    assert "len(healthy)==100" in unquoted_command
     assert "len(missing)==4" in unquoted_command
-    assert "len(unhealthy)==32" in unquoted_command
+    assert "len(unhealthy)==17" in unquoted_command
+    for job_key in pipeline_module.PUBLISHED_GRAPH_PROMOTION_REPLACEMENTS:
+        assert job_key in unquoted_command
     subprocess.run(
         ["bash", "-n"],
         input=command.replace("$$", "$"),
@@ -734,6 +738,7 @@ def test_published_graph_promotion_rejects_drift_and_combined_modes(
     fake_global_config, monkeypatch
 ):
     config = _published_overlay_config(fake_global_config)
+    config["trace_s3_prefix"] = pipeline_module.PUBLISHED_GRAPH_PROMOTION_SOURCE_PREFIX
     monkeypatch.setenv(PUBLISHED_GRAPH_PROMOTE_ENV, "1")
     monkeypatch.setenv("VLLM_CI_BRANCH", "f" * 40)
     monkeypatch.setenv("VLLM_CI_REVISION", "f" * 40)
