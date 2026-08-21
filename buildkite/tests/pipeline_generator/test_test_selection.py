@@ -12,6 +12,9 @@ from constants import DeviceType
 import pipeline_generator as pipeline_module
 from pipeline_generator import (
     PipelineGenerator,
+    PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV,
+    PUBLISHED_GRAPH_OVERLAY_ENV,
+    PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_ENV,
     RECOVERY_IMAGE_AMD64_DIGEST,
     RECOVERY_IMAGE_ARM64_DIGEST,
     RECOVERY_IMAGE_BRANCH,
@@ -22,6 +25,7 @@ from pipeline_generator import (
     REPUBLISH_SOURCE_BUILD_ID_ENV,
     REPUBLISH_TRIALS_ENV,
     configure_test_tracing,
+    create_published_graph_overlay_group_step,
     create_recovery_image_copy_group_step,
     create_snapshot_republish_group_step,
     create_snapshot_group_step,
@@ -30,7 +34,6 @@ from pipeline_generator import (
     should_trace_nightly,
 )
 from step import Step, group_steps
-
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
@@ -57,6 +60,84 @@ def _recovery_config(fake_global_config):
         "trace_canary_branch": RECOVERY_IMAGE_BRANCH,
         "trace_canary_commit": RECOVERY_IMAGE_COMMIT,
     }
+
+
+def _published_overlay_config(fake_global_config):
+    return {
+        **_recovery_config(fake_global_config),
+        "registries": pipeline_module.RECOVERY_IMAGE_REGISTRY,
+        "trace_s3_bucket": pipeline_module.PUBLISHED_GRAPH_OVERLAY_BUCKET,
+        "trace_s3_prefix": pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX,
+    }
+
+
+def _set_published_overlay_env(monkeypatch):
+    base_jobs = [
+        {"expected_shards": 1, "key": f"base-job-{index}", "mode": "python-only"}
+        for index in range(117)
+    ]
+    retry_keys = list(pipeline_module.PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS) + list(
+        pipeline_module.PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING
+    )
+    base_jobs.extend(
+        {"expected_shards": 1, "key": key, "mode": "python-only"} for key in retry_keys
+    )
+    base = {
+        "always_run": [],
+        "ci_infra_revision": "3c43f17714e9f59748992a7d76d64430f2c93779",
+        "collector_sha256": (
+            "ffe147610119438dcd36d624c8137f16014470f1ff590a70f23990c6e93f45e4"
+        ),
+        "jobs": base_jobs,
+        "repository_sha": pipeline_module.RECOVERY_IMAGE_COMMIT,
+        "schema_version": 1,
+        "wait_results": {row["key"]: {"status": "terminal"} for row in base_jobs},
+    }
+    retry = {
+        "always_run": [],
+        "ci_infra_revision": "ec4a54df07f82f0d1e62aaf199d80c7d90f97d10",
+        "collector_sha256": (
+            "00323b97a2fee832cf72c71b7ab4a84df4ca366eed44e7b47e7a1cb86eb29abe"
+        ),
+        "jobs": [row for row in base_jobs if row["key"] in retry_keys],
+        "repository_sha": pipeline_module.RECOVERY_IMAGE_COMMIT,
+        "schema_version": 1,
+        "wait_results": {
+            key: {
+                "status": (
+                    "poll_timeout"
+                    if key in pipeline_module.PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING
+                    else "terminal"
+                )
+            }
+            for key in retry_keys
+        },
+    }
+    base_raw = (json.dumps(base, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    retry_raw = (
+        json.dumps(retry, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    monkeypatch.setattr(
+        pipeline_module,
+        "PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_SHA256",
+        __import__("hashlib").sha256(base_raw).hexdigest(),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_SHA256",
+        __import__("hashlib").sha256(retry_raw).hexdigest(),
+    )
+    monkeypatch.setenv(PUBLISHED_GRAPH_OVERLAY_ENV, "1")
+    monkeypatch.setenv(
+        PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV,
+        base64.b64encode(base_raw).decode(),
+    )
+    monkeypatch.setenv(
+        PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_ENV,
+        base64.b64encode(retry_raw).decode(),
+    )
+    monkeypatch.setenv("VLLM_CI_BRANCH", "f" * 40)
+    return base_raw, retry_raw
 
 
 def _set_republish_env(monkeypatch):
@@ -475,6 +556,69 @@ def test_republish_rejects_incomplete_wait_accounting(fake_global_config, monkey
 
     with pytest.raises(ValueError, match="wait results are incomplete"):
         create_snapshot_republish_group_step(config)
+
+
+def test_published_graph_overlay_renders_one_pinned_cpu_postmerge_step(
+    fake_global_config, monkeypatch, tmp_path
+):
+    config = _published_overlay_config(fake_global_config)
+    base_raw, retry_raw = _set_published_overlay_env(monkeypatch)
+    monkeypatch.setattr(pipeline_module, "_ci_infra_revision", lambda: "f" * 40)
+    monkeypatch.setattr(pipeline_module, "get_global_config", lambda: config)
+    output = tmp_path / "pipeline.yaml"
+    generator = PipelineGenerator.__new__(PipelineGenerator)
+    generator.output_file_path = str(output)
+
+    generator.generate()
+
+    document = yaml.safe_load(output.read_text())
+    assert len(document["steps"]) == 1
+    group = document["steps"][0]
+    assert group["group"] == ":warning: Published graph overlay recovery"
+    assert len(group["steps"]) == 1
+    step = group["steps"][0]
+    assert step["agents"] == {"queue": "cpu_queue_postmerge_us_east_1"}
+    assert step["timeout_in_minutes"] == 180
+    assert "retry" not in step
+    command = step["commands"][0]
+    assert "publish-snapshot" not in command
+    assert "publish-graph" in command
+    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_BASE_PREFIX in command
+    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX in command
+    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_RETRY_BUILD_ID in command
+    assert base64.b64encode(base_raw).decode() in command
+    assert base64.b64encode(retry_raw).decode() in command
+    assert "--expected-base-healthy-count 82" in command
+    assert "--expected-base-missing-count 7" in command
+    assert "--expected-base-unhealthy-count 32" in command
+    subprocess.run(
+        ["bash", "-n"],
+        input=command.replace("$$", "$"),
+        check=True,
+        text=True,
+    )
+
+
+def test_published_graph_overlay_fails_closed_on_identity_drift(
+    fake_global_config, monkeypatch
+):
+    config = _published_overlay_config(fake_global_config)
+    _set_published_overlay_env(monkeypatch)
+    monkeypatch.setattr(pipeline_module, "_ci_infra_revision", lambda: "f" * 40)
+
+    with pytest.raises(ValueError, match="trace_s3_prefix"):
+        create_published_graph_overlay_group_step(
+            {**config, "trace_s3_prefix": "test-selection/vllm"}
+        )
+
+    monkeypatch.setenv(PUBLISHED_GRAPH_OVERLAY_ENV, "0")
+    with pytest.raises(ValueError, match="must equal 1"):
+        create_published_graph_overlay_group_step(config)
+
+    monkeypatch.setenv(PUBLISHED_GRAPH_OVERLAY_ENV, "1")
+    monkeypatch.setenv(PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV, "not-base64")
+    with pytest.raises(ValueError, match="is invalid"):
+        create_published_graph_overlay_group_step(config)
 
 
 def test_test_area_pytest_jobs_are_enrolled_without_yaml_trace_policy():

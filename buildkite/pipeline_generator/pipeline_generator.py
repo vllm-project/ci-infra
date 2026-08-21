@@ -42,6 +42,17 @@ class PipelineGenerator:
     def generate(self):
         global_config = get_global_config()
 
+        if _published_graph_overlay_requested():
+            overlay_step = create_published_graph_overlay_group_step(global_config)
+            with open(self.output_file_path, "w") as output:
+                yaml.dump(
+                    {"steps": [overlay_step.dict(exclude_none=True)]},
+                    output,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+            return
+
         if _recovery_image_copy_requested():
             copy_step = create_recovery_image_copy_group_step(global_config)
             with open(self.output_file_path, "w") as output:
@@ -174,6 +185,13 @@ REPUBLISH_INVENTORY_ENV = "VLLM_CI_REPUBLISH_INVENTORY_B64"
 REPUBLISH_SOURCE_BUILD_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD"
 REPUBLISH_SOURCE_BUILD_ID_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD_ID"
 REPUBLISH_TRIALS_ENV = "VLLM_CI_REPUBLISH_TRIALS_JSON"
+PUBLISHED_GRAPH_OVERLAY_ENV = "VLLM_CI_PUBLISHED_GRAPH_OVERLAY"
+PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV = (
+    "VLLM_CI_PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_B64"
+)
+PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_ENV = (
+    "VLLM_CI_PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_B64"
+)
 RECOVERY_IMAGE_COPY_ENV = "VLLM_CI_RECOVERY_IMAGE_COPY"
 RECOVERY_IMAGE_BRANCH = "ci-tsel-main-mirror-eac636a7"
 RECOVERY_IMAGE_COMMIT = "eac636a7fa476983cdae34b45a984e9852aad375"
@@ -190,6 +208,32 @@ RECOVERY_BUILDX_VERSION = "v0.15.1"
 RECOVERY_BUILDX_SHA256 = (
     "8d486f0088b7407a90ad675525ba4a17d0a537741b9b33fe3391a88cafa2dd0b"
 )
+PUBLISHED_GRAPH_OVERLAY_BUCKET = "vllm-ci-test-selection-traces-936637512419-us-east-1"
+PUBLISHED_GRAPH_OVERLAY_BASE_PREFIX = "test-selection/vllm/canary/node-export-3c43f17"
+PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX = (
+    "test-selection/vllm/canary/node-export-merged-84881"
+)
+PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_KEY = (
+    "test-selection/vllm/canary/node-export-3c43f17/snapshots/"
+    f"{RECOVERY_IMAGE_COMMIT}/manifest.json"
+)
+PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_SHA256 = (
+    "ca59aa071c4f31df0a3e01056c2d04753e3768ab57c0246390ad11a401d752f7"
+)
+PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_SHA256 = (
+    "ec9d0204b1c088cf12107603df3113cbac8e2f99ed6ada3c1a4f6e05fa047a7d"
+)
+PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_SHA256 = (
+    "863a64b84649424338a6545fa5640f7258d70c48b95eb0acd6a2c440ce2c9364"
+)
+PUBLISHED_GRAPH_OVERLAY_BASE_BUILD_ID = "01a01ca3-7564-451f-9291-e08217fdcdd5"
+PUBLISHED_GRAPH_OVERLAY_RETRY_BUILD_ID = "01a020d0-48cb-45b3-adbd-b61fdfb02781"
+PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS = (
+    "distributed-compile-unit-tests-2xh100",
+    "lm-eval-humming-act-a100",
+    "rayexecutorv2-4-gpus",
+)
+PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING = ("lm-eval-large-models-8xh200",)
 RECOVERY_TRACE_TIMEOUTS = {
     "batch-invariance-b200": 120,
     "distributed-compile-unit-tests-2xh100": 120,
@@ -529,8 +573,300 @@ def _snapshot_republish_requested() -> bool:
     )
 
 
+def _published_graph_overlay_requested() -> bool:
+    return any(
+        os.getenv(name) is not None
+        for name in (
+            PUBLISHED_GRAPH_OVERLAY_ENV,
+            PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV,
+            PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_ENV,
+        )
+    )
+
+
 def _recovery_image_copy_requested() -> bool:
     return os.getenv(RECOVERY_IMAGE_COPY_ENV) is not None
+
+
+def _decode_published_graph_overlay_inventory(
+    environment_variable: str, expected_sha256: str
+) -> tuple[str, dict]:
+    encoded = os.getenv(environment_variable)
+    if not encoded:
+        raise ValueError(f"{environment_variable} must be set")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        document = json.loads(raw)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{environment_variable} is invalid") from error
+    if not isinstance(document, dict):
+        raise ValueError(f"{environment_variable} must contain a JSON object")
+    canonical = (
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    if raw != canonical:
+        raise ValueError(f"{environment_variable} must be canonical JSON")
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise ValueError(f"{environment_variable} checksum mismatch")
+    return encoded, document
+
+
+def _published_graph_overlay_inputs(global_config: dict) -> dict:
+    if os.getenv(PUBLISHED_GRAPH_OVERLAY_ENV) != "1":
+        raise ValueError(f"{PUBLISHED_GRAPH_OVERLAY_ENV} must equal 1")
+    if (
+        _recovery_image_copy_requested()
+        or _snapshot_republish_requested()
+        or global_config.get("only_step_keys") is not None
+    ):
+        raise ValueError(
+            "published graph overlay cannot be combined with another recovery mode"
+        )
+    required = {
+        "name": "vllm_ci",
+        "github_repo_name": "vllm-project/vllm",
+        "branch": RECOVERY_IMAGE_BRANCH,
+        "commit": RECOVERY_IMAGE_COMMIT,
+        "pull_request": "false",
+        "nightly": "1",
+        "trace_canary_branch": RECOVERY_IMAGE_BRANCH,
+        "trace_canary_commit": RECOVERY_IMAGE_COMMIT,
+        "trace_s3_bucket": PUBLISHED_GRAPH_OVERLAY_BUCKET,
+        "trace_s3_prefix": PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX,
+        "registries": RECOVERY_IMAGE_REGISTRY,
+    }
+    for field, expected in required.items():
+        if global_config.get(field) != expected:
+            raise ValueError(f"published graph overlay requires {field}={expected!r}")
+    repositories = global_config.get("repositories") or {}
+    if (
+        repositories.get("main") != RECOVERY_IMAGE_SOURCE_REPO
+        or repositories.get("premerge") != RECOVERY_IMAGE_DESTINATION_REPO
+    ):
+        raise ValueError("published graph overlay repository mapping is not trusted")
+    requested_revision = os.getenv("VLLM_CI_BRANCH", "")
+    revision = _ci_infra_revision()
+    if not re.fullmatch(r"[0-9a-f]{40}", requested_revision):
+        raise ValueError(
+            "published graph overlay requires VLLM_CI_BRANCH as an exact SHA"
+        )
+    if requested_revision != revision:
+        raise ValueError("published graph overlay generator revision does not match")
+
+    base_encoded, base_inventory = _decode_published_graph_overlay_inventory(
+        PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV,
+        PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_SHA256,
+    )
+    retry_encoded, retry_inventory = _decode_published_graph_overlay_inventory(
+        PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_ENV,
+        PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_SHA256,
+    )
+    if base_inventory.get("repository_sha") != RECOVERY_IMAGE_COMMIT:
+        raise ValueError("published graph overlay base repository SHA mismatch")
+    if retry_inventory.get("repository_sha") != RECOVERY_IMAGE_COMMIT:
+        raise ValueError("published graph overlay retry repository SHA mismatch")
+    if base_inventory.get("ci_infra_revision") != (
+        "3c43f17714e9f59748992a7d76d64430f2c93779"
+    ):
+        raise ValueError("published graph overlay base ci-infra revision mismatch")
+    if retry_inventory.get("ci_infra_revision") != (
+        "ec4a54df07f82f0d1e62aaf199d80c7d90f97d10"
+    ):
+        raise ValueError("published graph overlay retry ci-infra revision mismatch")
+    if base_inventory.get("collector_sha256") != (
+        "ffe147610119438dcd36d624c8137f16014470f1ff590a70f23990c6e93f45e4"
+    ):
+        raise ValueError("published graph overlay base collector mismatch")
+    if retry_inventory.get("collector_sha256") != (
+        "00323b97a2fee832cf72c71b7ab4a84df4ca366eed44e7b47e7a1cb86eb29abe"
+    ):
+        raise ValueError("published graph overlay retry collector mismatch")
+    base_jobs = {str(row.get("key")): row for row in base_inventory.get("jobs", [])}
+    retry_jobs = {str(row.get("key")): row for row in retry_inventory.get("jobs", [])}
+    expected_retry_jobs = set(PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS) | set(
+        PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING
+    )
+    if len(base_jobs) != 121 or set(retry_jobs) != expected_retry_jobs:
+        raise ValueError("published graph overlay inventory job set mismatch")
+    if any(base_jobs.get(key) != row for key, row in retry_jobs.items()):
+        raise ValueError("published graph overlay retry changes a base job policy")
+    retry_wait = retry_inventory.get("wait_results", {})
+    if any(
+        retry_wait.get(key, {}).get("status") != "terminal"
+        for key in PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS
+    ) or any(
+        retry_wait.get(key, {}).get("status") != "poll_timeout"
+        for key in PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING
+    ):
+        raise ValueError("published graph overlay retry wait result mismatch")
+    return {
+        "base_inventory_base64": base_encoded,
+        "retry_inventory_base64": retry_encoded,
+        "revision": revision,
+    }
+
+
+def create_published_graph_overlay_group_step(
+    global_config: dict,
+) -> BuildkiteGroupStep:
+    """Render the exact one-time published-base recovery and verifier."""
+
+    inputs = _published_graph_overlay_inputs(global_config)
+    revision = inputs["revision"]
+    base_fetch_validation = shlex.quote(
+        "import json,sys; d=json.load(open(sys.argv[1])); "
+        f"assert d['manifest_key']=={PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_KEY!r}; "
+        f"assert d['manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_SHA256!r}; "
+        f"assert d['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}"
+    )
+    final_validation = shlex.quote(
+        "import json,sys; "
+        "from pathlib import Path; "
+        "from test_selection.graph import graph_metadata,sha256_file; "
+        "overlay=json.load(open(sys.argv[1])); "
+        "provenance=json.load(open(sys.argv[2])); "
+        "publish=json.load(open(sys.argv[3])); "
+        "readback=json.load(open(sys.argv[4])); "
+        "merged=Path(sys.argv[5]); fetched=Path(sys.argv[6]); "
+        "metadata=graph_metadata(fetched); "
+        "assert sha256_file(merged)==sha256_file(fetched); "
+        "assert metadata==overlay['metadata']; "
+        "assert len(metadata['healthy_jobs'])==85; "
+        "assert len(metadata['missing_jobs'])==6; "
+        "assert len(metadata['unhealthy_jobs'])==30; "
+        f"assert set({PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS!r})<=set(metadata['healthy_jobs']); "
+        f"assert set({PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING!r})<=set(metadata['missing_jobs']); "
+        f"assert provenance['replacement_jobs']==sorted({PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS!r}); "
+        f"assert provenance['base_manifest_key']=={PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_KEY!r}; "
+        f"assert provenance['base_manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_SHA256!r}; "
+        f"assert provenance['merge_revision']=={revision!r}; "
+        "assert provenance['merged_graph_sha256']==sha256_file(merged); "
+        f"assert publish['snapshot']['manifest_key']=={(PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX + '/snapshots/' + RECOVERY_IMAGE_COMMIT + '/manifest.json')!r}; "
+        "assert readback['manifest_key']==publish['snapshot']['manifest_key']; "
+        "assert readback['manifest_sha256']==publish['snapshot']['manifest_sha256']; "
+        f"assert readback['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}"
+    )
+    replacement_arguments = " ".join(
+        f"--expected-replacement-job {shlex.quote(key)}"
+        for key in PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS
+    )
+    missing_arguments = " ".join(
+        f"--expected-retry-missing-job {shlex.quote(key)}"
+        for key in PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING
+    )
+    command = [
+        "set -euo pipefail",
+        (
+            "echo "
+            + shlex.quote(
+                "+++ :warning: PUBLISHED GRAPH OVERLAY recovery authorized for "
+                f"{RECOVERY_IMAGE_BRANCH}@{RECOVERY_IMAGE_COMMIT}"
+            )
+        ),
+        f'test "$$BUILDKITE_BRANCH" = {shlex.quote(RECOVERY_IMAGE_BRANCH)}',
+        f'test "$$BUILDKITE_COMMIT" = {shlex.quote(RECOVERY_IMAGE_COMMIT)}',
+        'D="$$(mktemp -d)"',
+        "trap 'rm -rf \"$$D\"' EXIT",
+        'mkdir -p "$$D/retry" "$$D/results"',
+        (
+            f"printf '%s' {shlex.quote(inputs['base_inventory_base64'])} | "
+            'base64 -d > "$$D/base-inventory.json"'
+        ),
+        (
+            f"printf '%s' {shlex.quote(inputs['retry_inventory_base64'])} | "
+            'base64 -d > "$$D/retry-inventory.json"'
+        ),
+        (
+            'test "$$(sha256sum "$$D/base-inventory.json" | awk '
+            "'{print $$1}')\" = "
+            f"{PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_SHA256}"
+        ),
+        (
+            'test "$$(sha256sum "$$D/retry-inventory.json" | awk '
+            "'{print $$1}')\" = "
+            f"{PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_SHA256}"
+        ),
+        'python3 -m venv "$$D/venv"',
+        (
+            '"$$D/venv/bin/pip" install --quiet '
+            '"git+https://github.com/vllm-project/ci-infra.git@'
+            f'{revision}#subdirectory=buildkite/pipeline_generator"'
+        ),
+        (
+            '"$$D/venv/bin/vllm-test-selection" fetch-snapshot '
+            f"--bucket {PUBLISHED_GRAPH_OVERLAY_BUCKET} "
+            f"--prefix {PUBLISHED_GRAPH_OVERLAY_BASE_PREFIX} "
+            f'--repo "$$PWD" --base {RECOVERY_IMAGE_COMMIT} '
+            '--output "$$D/base.sqlite" --max-snapshot-age-days 7 | '
+            'tee "$$D/results/base-fetch.json"'
+        ),
+        (
+            f'"$$D/venv/bin/python" -c {base_fetch_validation} '
+            '"$$D/results/base-fetch.json"'
+        ),
+        (
+            'buildkite-agent artifact download "trace-output/**/*" '
+            f'"$$D/retry" --build {PUBLISHED_GRAPH_OVERLAY_RETRY_BUILD_ID}'
+        ),
+        (
+            '"$$D/venv/bin/python" -m test_selection.published_overlay '
+            '--base-graph "$$D/base.sqlite" '
+            '--base-inventory "$$D/base-inventory.json" '
+            '--retry-input "$$D/retry" '
+            '--retry-inventory "$$D/retry-inventory.json" '
+            '--output "$$D/merged.sqlite" '
+            '--provenance-output "$$D/results/provenance.json" '
+            f"--base-source-build-id {PUBLISHED_GRAPH_OVERLAY_BASE_BUILD_ID} "
+            f"--retry-source-build-id {PUBLISHED_GRAPH_OVERLAY_RETRY_BUILD_ID} "
+            f"--merge-revision {revision} "
+            f"--base-manifest-key {PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_KEY} "
+            f"--base-manifest-sha256 {PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_SHA256} "
+            "--expected-base-healthy-count 82 "
+            "--expected-base-missing-count 7 "
+            "--expected-base-unhealthy-count 32 "
+            f"{replacement_arguments} {missing_arguments} | "
+            'tee "$$D/results/overlay.json"'
+        ),
+        (
+            '"$$D/venv/bin/vllm-test-selection" publish-graph '
+            f"--bucket {PUBLISHED_GRAPH_OVERLAY_BUCKET} "
+            f"--prefix {PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX} "
+            '--graph "$$D/merged.sqlite" | tee "$$D/results/publish.json"'
+        ),
+        (
+            '"$$D/venv/bin/vllm-test-selection" fetch-snapshot '
+            f"--bucket {PUBLISHED_GRAPH_OVERLAY_BUCKET} "
+            f"--prefix {PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX} "
+            f'--repo "$$PWD" --base {RECOVERY_IMAGE_COMMIT} '
+            '--output "$$D/readback.sqlite" --max-snapshot-age-days 1 | '
+            'tee "$$D/results/readback.json"'
+        ),
+        (
+            f'"$$D/venv/bin/python" -c {final_validation} '
+            '"$$D/results/overlay.json" "$$D/results/provenance.json" '
+            '"$$D/results/publish.json" "$$D/results/readback.json" '
+            '"$$D/merged.sqlite" "$$D/readback.sqlite"'
+        ),
+        'sha256sum "$$D/merged.sqlite" > "$$D/results/merged.sqlite.sha256"',
+        'sha256sum "$$D/readback.sqlite" > "$$D/results/readback.sqlite.sha256"',
+        'cp "$$D/base-inventory.json" "$$D/results/"',
+        'cp "$$D/retry-inventory.json" "$$D/results/"',
+        f"printf '%s\n' {revision} > \"$$D/results/runner-revision.txt\"",
+        'buildkite-agent artifact upload "$$D/results/*"',
+    ]
+    return BuildkiteGroupStep(
+        group=":warning: Published graph overlay recovery",
+        steps=[
+            BuildkiteCommandStep(
+                agents={"queue": AgentQueue.CPU_POSTMERGE_US_EAST_1.value},
+                commands=["\n".join(command)],
+                key="test-selection-published-graph-overlay",
+                label=":warning: Merge #84714 graph + #84881 raw",
+                priority=-100,
+                timeout_in_minutes=180,
+            )
+        ],
+    )
 
 
 def _validate_recovery_image_copy(global_config: dict) -> str:
@@ -538,6 +874,7 @@ def _validate_recovery_image_copy(global_config: dict) -> str:
         raise ValueError(f"{RECOVERY_IMAGE_COPY_ENV} must equal 1")
     if (
         _snapshot_republish_requested()
+        or _published_graph_overlay_requested()
         or global_config.get("only_step_keys") is not None
     ):
         raise ValueError(
