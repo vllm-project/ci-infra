@@ -3,18 +3,17 @@ import json
 import re
 import subprocess
 
+import buildkite_step
+import pipeline_generator as pipeline_module
 import pytest
 import yaml
-
-import buildkite_step
 from buildkite_step import convert_group_step_to_buildkite_step
 from constants import DeviceType
-import pipeline_generator as pipeline_module
 from pipeline_generator import (
-    PipelineGenerator,
     PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV,
     PUBLISHED_GRAPH_OVERLAY_ENV,
     PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_ENV,
+    PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV,
     RECOVERY_IMAGE_AMD64_DIGEST,
     RECOVERY_IMAGE_ARM64_DIGEST,
     RECOVERY_IMAGE_BRANCH,
@@ -24,11 +23,13 @@ from pipeline_generator import (
     REPUBLISH_SOURCE_BUILD_ENV,
     REPUBLISH_SOURCE_BUILD_ID_ENV,
     REPUBLISH_TRIALS_ENV,
+    PipelineGenerator,
     configure_test_tracing,
     create_published_graph_overlay_group_step,
+    create_published_graph_overlay_verification_group_step,
     create_recovery_image_copy_group_step,
-    create_snapshot_republish_group_step,
     create_snapshot_group_step,
+    create_snapshot_republish_group_step,
     finalize_trace_inventory,
     select_steps_and_dependencies,
     should_trace_nightly,
@@ -602,6 +603,8 @@ def test_published_graph_overlay_renders_one_pinned_cpu_postmerge_step(
     assert command.count("--expected-policy-downgrade-job ") == 15
     assert command.count("buildkite-agent artifact download") == 15
     assert command.count("--max-snapshot-age-days 7") == 2
+    assert "| tee" not in command
+    assert command.count("-m json.tool") == 4
     subprocess.run(
         ["bash", "-n"],
         input=command.replace("$$", "$"),
@@ -630,6 +633,62 @@ def test_published_graph_overlay_fails_closed_on_identity_drift(
     monkeypatch.setenv(PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV, "not-base64")
     with pytest.raises(ValueError, match="is invalid"):
         create_published_graph_overlay_group_step(config)
+
+
+def test_published_graph_overlay_verifier_is_read_only_and_pinned(
+    fake_global_config, monkeypatch, tmp_path
+):
+    config = _published_overlay_config(fake_global_config)
+    monkeypatch.setenv(PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV, "1")
+    monkeypatch.setenv("VLLM_CI_BRANCH", "f" * 40)
+    monkeypatch.setattr(pipeline_module, "_ci_infra_revision", lambda: "f" * 40)
+    monkeypatch.setattr(pipeline_module, "get_global_config", lambda: config)
+    output = tmp_path / "pipeline.yaml"
+    generator = PipelineGenerator.__new__(PipelineGenerator)
+    generator.output_file_path = str(output)
+
+    generator.generate()
+
+    document = yaml.safe_load(output.read_text())
+    assert len(document["steps"]) == 1
+    group = document["steps"][0]
+    assert group["group"] == ":mag: Published B2 overlay read-only verification"
+    assert len(group["steps"]) == 1
+    step = group["steps"][0]
+    assert step["agents"] == {"queue": "cpu_queue_postmerge_us_east_1"}
+    assert step["timeout_in_minutes"] == 60
+    assert "retry" not in step
+    command = step["commands"][0]
+    unquoted_command = command.replace("'\"'\"'", "'")
+    assert "fetch-snapshot" in command
+    assert "inspect-graph" in command
+    assert "publish-graph" not in command
+    assert "artifact download" not in command
+    assert PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV not in command
+    assert PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_ENV not in command
+    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_KEY in command
+    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256 in command
+    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256 in command
+    assert "len(metadata['healthy_jobs'])==100" in unquoted_command
+    assert "len(metadata['missing_jobs'])==4" in unquoted_command
+    assert "len(metadata['unhealthy_jobs'])==17" in unquoted_command
+    assert command.count("-m json.tool") == 2
+    assert "| tee" not in command
+    subprocess.run(
+        ["bash", "-n"],
+        input=command.replace("$$", "$"),
+        check=True,
+        text=True,
+    )
+
+    monkeypatch.setenv(PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV, "0")
+    with pytest.raises(ValueError, match="must equal 1"):
+        create_published_graph_overlay_verification_group_step(config)
+
+    monkeypatch.setenv(PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV, "1")
+    monkeypatch.setenv(PUBLISHED_GRAPH_OVERLAY_ENV, "1")
+    with pytest.raises(ValueError, match="cannot be combined"):
+        create_published_graph_overlay_verification_group_step(config)
 
 
 def test_test_area_pytest_jobs_are_enrolled_without_yaml_trace_policy():
