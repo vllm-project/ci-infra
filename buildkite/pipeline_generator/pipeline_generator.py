@@ -42,6 +42,19 @@ class PipelineGenerator:
     def generate(self):
         global_config = get_global_config()
 
+        if _published_graph_overlay_verification_requested():
+            verification_step = create_published_graph_overlay_verification_group_step(
+                global_config
+            )
+            with open(self.output_file_path, "w") as output:
+                yaml.dump(
+                    {"steps": [verification_step.dict(exclude_none=True)]},
+                    output,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+            return
+
         if _published_graph_overlay_requested():
             overlay_step = create_published_graph_overlay_group_step(global_config)
             with open(self.output_file_path, "w") as output:
@@ -186,6 +199,7 @@ REPUBLISH_SOURCE_BUILD_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD"
 REPUBLISH_SOURCE_BUILD_ID_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD_ID"
 REPUBLISH_TRIALS_ENV = "VLLM_CI_REPUBLISH_TRIALS_JSON"
 PUBLISHED_GRAPH_OVERLAY_ENV = "VLLM_CI_PUBLISHED_GRAPH_OVERLAY"
+PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV = "VLLM_CI_PUBLISHED_GRAPH_OVERLAY_VERIFY_ONLY"
 PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV = (
     "VLLM_CI_PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_B64"
 )
@@ -234,6 +248,16 @@ PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS = (
     "rayexecutorv2-4-gpus",
 )
 PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING = ("lm-eval-large-models-8xh200",)
+PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_KEY = (
+    f"{PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX}/snapshots/"
+    f"{RECOVERY_IMAGE_COMMIT}/manifest.json"
+)
+PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256 = (
+    "3851159f1437e33aef228d845156f7cf79db58b61104f8f611d1fcf5c2059e2b"
+)
+PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256 = (
+    "7a48d66419b246e2847cb95c8e226070c675cb19e8787cd47be2ef9729018a15"
+)
 RECOVERY_TRACE_TIMEOUTS = {
     "batch-invariance-b200": 120,
     "distributed-compile-unit-tests-2xh100": 120,
@@ -578,10 +602,15 @@ def _published_graph_overlay_requested() -> bool:
         os.getenv(name) is not None
         for name in (
             PUBLISHED_GRAPH_OVERLAY_ENV,
+            PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV,
             PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV,
             PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_ENV,
         )
     )
+
+
+def _published_graph_overlay_verification_requested() -> bool:
+    return os.getenv(PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV) is not None
 
 
 def _recovery_image_copy_requested() -> bool:
@@ -732,8 +761,8 @@ def create_published_graph_overlay_group_step(
         "assert sha256_file(merged)==sha256_file(fetched); "
         "assert metadata==overlay['metadata']; "
         "assert len(metadata['healthy_jobs'])==85; "
-        "assert len(metadata['missing_jobs'])==6; "
-        "assert len(metadata['unhealthy_jobs'])==30; "
+        "assert len(metadata['missing_jobs'])==4; "
+        "assert len(metadata['unhealthy_jobs'])==32; "
         f"assert set({PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS!r})<=set(metadata['healthy_jobs']); "
         f"assert set({PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING!r})<=set(metadata['missing_jobs']); "
         f"assert provenance['replacement_jobs']==sorted({PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS!r}); "
@@ -797,9 +826,11 @@ def create_published_graph_overlay_group_step(
             f"--bucket {PUBLISHED_GRAPH_OVERLAY_BUCKET} "
             f"--prefix {PUBLISHED_GRAPH_OVERLAY_BASE_PREFIX} "
             f'--repo "$$PWD" --base {RECOVERY_IMAGE_COMMIT} '
-            '--output "$$D/base.sqlite" --max-snapshot-age-days 7 | '
-            'tee "$$D/results/base-fetch.json"'
+            '--output "$$D/base.sqlite" --max-snapshot-age-days 7 '
+            '> "$$D/results/base-fetch.json"'
         ),
+        '"$$D/venv/bin/python" -m json.tool "$$D/results/base-fetch.json" >/dev/null',
+        'cat "$$D/results/base-fetch.json"',
         (
             f'"$$D/venv/bin/python" -c {base_fetch_validation} '
             '"$$D/results/base-fetch.json"'
@@ -824,23 +855,29 @@ def create_published_graph_overlay_group_step(
             "--expected-base-healthy-count 82 "
             "--expected-base-missing-count 7 "
             "--expected-base-unhealthy-count 32 "
-            f"{replacement_arguments} {missing_arguments} | "
-            'tee "$$D/results/overlay.json"'
+            f"{replacement_arguments} {missing_arguments} "
+            '> "$$D/results/overlay.json"'
         ),
+        '"$$D/venv/bin/python" -m json.tool "$$D/results/overlay.json" >/dev/null',
+        'cat "$$D/results/overlay.json"',
         (
             '"$$D/venv/bin/vllm-test-selection" publish-graph '
             f"--bucket {PUBLISHED_GRAPH_OVERLAY_BUCKET} "
             f"--prefix {PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX} "
-            '--graph "$$D/merged.sqlite" | tee "$$D/results/publish.json"'
+            '--graph "$$D/merged.sqlite" > "$$D/results/publish.json"'
         ),
+        '"$$D/venv/bin/python" -m json.tool "$$D/results/publish.json" >/dev/null',
+        'cat "$$D/results/publish.json"',
         (
             '"$$D/venv/bin/vllm-test-selection" fetch-snapshot '
             f"--bucket {PUBLISHED_GRAPH_OVERLAY_BUCKET} "
             f"--prefix {PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX} "
             f'--repo "$$PWD" --base {RECOVERY_IMAGE_COMMIT} '
-            '--output "$$D/readback.sqlite" --max-snapshot-age-days 7 | '
-            'tee "$$D/results/readback.json"'
+            '--output "$$D/readback.sqlite" --max-snapshot-age-days 7 '
+            '> "$$D/results/readback.json"'
         ),
+        '"$$D/venv/bin/python" -m json.tool "$$D/results/readback.json" >/dev/null',
+        'cat "$$D/results/readback.json"',
         (
             f'"$$D/venv/bin/python" -c {final_validation} '
             '"$$D/results/overlay.json" "$$D/results/provenance.json" '
@@ -864,6 +901,91 @@ def create_published_graph_overlay_group_step(
                 label=":warning: Merge #84714 graph + #84881 raw",
                 priority=0,
                 timeout_in_minutes=180,
+            )
+        ],
+    )
+
+
+def create_published_graph_overlay_verification_group_step(
+    global_config: dict,
+) -> BuildkiteGroupStep:
+    """Render the one-time read-only verifier for the published overlay."""
+
+    if os.getenv(PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV) != "1":
+        raise ValueError(f"{PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV} must equal 1")
+    inputs = _published_graph_overlay_inputs(global_config)
+    revision = inputs["revision"]
+    verification = shlex.quote(
+        "import json,sys; "
+        "metadata=json.load(open(sys.argv[1])); "
+        "readback=json.load(open(sys.argv[2])); "
+        f"assert readback['manifest_key']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_KEY!r}; "
+        f"assert readback['manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256!r}; "
+        f"assert readback['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}; "
+        "assert len(metadata['healthy_jobs'])==85; "
+        "assert len(metadata['missing_jobs'])==4; "
+        "assert len(metadata['unhealthy_jobs'])==32; "
+        f"assert set({PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS!r})<=set(metadata['healthy_jobs']); "
+        f"assert set({PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING!r})<=set(metadata['missing_jobs'])"
+    )
+    command = [
+        "set -euo pipefail",
+        (
+            "echo "
+            + shlex.quote(
+                "+++ :mag: READ-ONLY published graph overlay verification for "
+                f"{RECOVERY_IMAGE_BRANCH}@{RECOVERY_IMAGE_COMMIT}"
+            )
+        ),
+        f'test "$$BUILDKITE_BRANCH" = {shlex.quote(RECOVERY_IMAGE_BRANCH)}',
+        f'test "$$BUILDKITE_COMMIT" = {shlex.quote(RECOVERY_IMAGE_COMMIT)}',
+        'D="$$(mktemp -d)"',
+        "trap 'rm -rf \"$$D\"' EXIT",
+        'mkdir -p "$$D/results"',
+        'python3 -m venv "$$D/venv"',
+        (
+            '"$$D/venv/bin/pip" install --quiet '
+            '"git+https://github.com/vllm-project/ci-infra.git@'
+            f'{revision}#subdirectory=buildkite/pipeline_generator"'
+        ),
+        (
+            '"$$D/venv/bin/vllm-test-selection" fetch-snapshot '
+            f"--bucket {PUBLISHED_GRAPH_OVERLAY_BUCKET} "
+            f"--prefix {PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX} "
+            f'--repo "$$PWD" --base {RECOVERY_IMAGE_COMMIT} '
+            '--output "$$D/readback.sqlite" --max-snapshot-age-days 7 '
+            '> "$$D/results/readback.json"'
+        ),
+        '"$$D/venv/bin/python" -m json.tool "$$D/results/readback.json" >/dev/null',
+        'cat "$$D/results/readback.json"',
+        (
+            '"$$D/venv/bin/vllm-test-selection" inspect-graph '
+            '--graph "$$D/readback.sqlite" --metadata '
+            '> "$$D/results/metadata.json"'
+        ),
+        '"$$D/venv/bin/python" -m json.tool "$$D/results/metadata.json" >/dev/null',
+        'cat "$$D/results/metadata.json"',
+        ('sha256sum "$$D/readback.sqlite" > "$$D/results/readback.sqlite.sha256"'),
+        (
+            'test "$$(awk \'{print $$1}\' "$$D/results/readback.sqlite.sha256")" = '
+            f"{PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256}"
+        ),
+        (
+            f'"$$D/venv/bin/python" -c {verification} '
+            '"$$D/results/metadata.json" "$$D/results/readback.json"'
+        ),
+        f"printf '%s\n' {revision} > \"$$D/results/runner-revision.txt\"",
+        'buildkite-agent artifact upload "$$D/results/*"',
+    ]
+    return BuildkiteGroupStep(
+        group=":mag: Published graph overlay read-only verification",
+        steps=[
+            BuildkiteCommandStep(
+                agents={"queue": AgentQueue.CPU_POSTMERGE_US_EAST_1.value},
+                commands=["\n".join(command)],
+                key="test-selection-published-overlay-readback",
+                label=":mag: Verify published graph overlay",
+                timeout_in_minutes=60,
             )
         ],
     )
