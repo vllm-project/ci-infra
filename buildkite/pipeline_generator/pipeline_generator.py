@@ -209,31 +209,53 @@ RECOVERY_BUILDX_SHA256 = (
     "8d486f0088b7407a90ad675525ba4a17d0a537741b9b33fe3391a88cafa2dd0b"
 )
 PUBLISHED_GRAPH_OVERLAY_BUCKET = "vllm-ci-test-selection-traces-936637512419-us-east-1"
-PUBLISHED_GRAPH_OVERLAY_BASE_PREFIX = "test-selection/vllm/canary/node-export-3c43f17"
-PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX = (
-    "test-selection/vllm/canary/node-export-merged-84881"
-)
+PUBLISHED_GRAPH_OVERLAY_BASE_PREFIX = "test-selection/vllm"
+PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX = "test-selection/vllm/canary/b2-overlay-100"
 PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_KEY = (
-    "test-selection/vllm/canary/node-export-3c43f17/snapshots/"
-    f"{RECOVERY_IMAGE_COMMIT}/manifest.json"
+    f"test-selection/vllm/snapshots/{RECOVERY_IMAGE_COMMIT}/"
+    "m-3851159f1437e33aef228d845156f7cf79db58b61104f8f611d1fcf5c2059e2b/"
+    "manifest.json"
 )
 PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_SHA256 = (
-    "ca59aa071c4f31df0a3e01056c2d04753e3768ab57c0246390ad11a401d752f7"
+    "3851159f1437e33aef228d845156f7cf79db58b61104f8f611d1fcf5c2059e2b"
+)
+PUBLISHED_GRAPH_OVERLAY_BASE_GRAPH_SHA256 = (
+    "7a48d66419b246e2847cb95c8e226070c675cb19e8787cd47be2ef9729018a15"
 )
 PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_SHA256 = (
-    "ec9d0204b1c088cf12107603df3113cbac8e2f99ed6ada3c1a4f6e05fa047a7d"
+    "2fa67d96289055e37dccee94afdaa83f0705bf947788d38b8531c47101b1cf02"
 )
 PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_SHA256 = (
-    "863a64b84649424338a6545fa5640f7258d70c48b95eb0acd6a2c440ce2c9364"
+    "4731e952c6e8896925092cb3fd288bb6568d3c870b3e6f843e1241539a488cd7"
 )
-PUBLISHED_GRAPH_OVERLAY_BASE_BUILD_ID = "01a01ca3-7564-451f-9291-e08217fdcdd5"
-PUBLISHED_GRAPH_OVERLAY_RETRY_BUILD_ID = "01a020d0-48cb-45b3-adbd-b61fdfb02781"
+PUBLISHED_GRAPH_OVERLAY_BASE_BUILD_ID = "01a0237f-19e2-4e30-8836-78165e8e76db"
 PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS = (
-    "distributed-compile-unit-tests-2xh100",
-    "lm-eval-humming-act-a100",
-    "rayexecutorv2-4-gpus",
+    "basic-correctness",
+    "distributed-tests-2xb200",
+    "distributed-tests-4xa100",
+    "kernels-b200",
+    "kernels-deepgemm-test-h100",
+    "kernels-fusedmoe-layer-test-2-b200s",
+    "language-models-tests-hybrid",
+    "multi-modal-processor",
+    "pytorch-compilation-unit-tests",
+    "pytorch-fullgraph-test",
+    "spec-decode-draft-model-nightly-b200",
+    "spec-decode-eagle-nightly-b200",
+    "spec-decode-speculators-mtp-nightly-b200",
+    "speculators-correctness",
+    "v1-sample-logits",
 )
-PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING = ("lm-eval-large-models-8xh200",)
+PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING = ()
+PUBLISHED_GRAPH_OVERLAY_POLICY_DOWNGRADES = PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS
+PUBLISHED_GRAPH_OVERLAY_RETRY_SOURCES = {
+    "01a02308-d7bc-41a0-863a-4235a69219d2": tuple(
+        key
+        for key in PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS
+        if key != "kernels-fusedmoe-layer-test-2-b200s"
+    ),
+    "01a023ff-58a2-4e21-8887-3b3637276b73": ("kernels-fusedmoe-layer-test-2-b200s",),
+}
 RECOVERY_TRACE_TIMEOUTS = {
     "batch-invariance-b200": 120,
     "distributed-compile-unit-tests-2xh100": 120,
@@ -670,11 +692,16 @@ def _published_graph_overlay_inputs(global_config: dict) -> dict:
     ):
         raise ValueError("published graph overlay base ci-infra revision mismatch")
     if retry_inventory.get("ci_infra_revision") != (
-        "ec4a54df07f82f0d1e62aaf199d80c7d90f97d10"
+        "9b579b876cfd6d9ea2c81746a50b0ae13ad1c46a"
     ):
         raise ValueError("published graph overlay retry ci-infra revision mismatch")
-    if base_inventory.get("collector_sha256") != (
-        "ffe147610119438dcd36d624c8137f16014470f1ff590a70f23990c6e93f45e4"
+    expected_base_collectors = [
+        "00323b97a2fee832cf72c71b7ab4a84df4ca366eed44e7b47e7a1cb86eb29abe",
+        "ffe147610119438dcd36d624c8137f16014470f1ff590a70f23990c6e93f45e4",
+    ]
+    if (
+        base_inventory.get("collector_sha256") is not None
+        or base_inventory.get("collector_sha256s") != expected_base_collectors
     ):
         raise ValueError("published graph overlay base collector mismatch")
     if retry_inventory.get("collector_sha256") != (
@@ -688,8 +715,20 @@ def _published_graph_overlay_inputs(global_config: dict) -> dict:
     )
     if len(base_jobs) != 121 or set(retry_jobs) != expected_retry_jobs:
         raise ValueError("published graph overlay inventory job set mismatch")
-    if any(base_jobs.get(key) != row for key, row in retry_jobs.items()):
-        raise ValueError("published graph overlay retry changes a base job policy")
+    changed_policies = {
+        key for key, row in retry_jobs.items() if base_jobs.get(key) != row
+    }
+    if changed_policies != set(PUBLISHED_GRAPH_OVERLAY_POLICY_DOWNGRADES):
+        raise ValueError("published graph overlay policy downgrade set mismatch")
+    for key in changed_policies:
+        base_policy = dict(base_jobs[key])
+        retry_policy = dict(retry_jobs[key])
+        if (
+            base_policy.pop("mode", None) != "kernel-set"
+            or retry_policy.pop("mode", None) != "python-only"
+            or base_policy != retry_policy
+        ):
+            raise ValueError("published graph overlay policy downgrade is not trusted")
     retry_wait = retry_inventory.get("wait_results", {})
     if any(
         retry_wait.get(key, {}).get("status") != "terminal"
@@ -699,6 +738,18 @@ def _published_graph_overlay_inputs(global_config: dict) -> dict:
         for key in PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING
     ):
         raise ValueError("published graph overlay retry wait result mismatch")
+    source_jobs: set[str] = set()
+    for build_id, keys in PUBLISHED_GRAPH_OVERLAY_RETRY_SOURCES.items():
+        if not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            build_id,
+        ):
+            raise ValueError("published graph overlay retry build ID is invalid")
+        if source_jobs & set(keys):
+            raise ValueError("published graph overlay retry sources overlap")
+        source_jobs.update(keys)
+    if source_jobs != expected_retry_jobs:
+        raise ValueError("published graph overlay retry sources are incomplete")
     return {
         "base_inventory_base64": base_encoded,
         "retry_inventory_base64": retry_encoded,
@@ -731,14 +782,17 @@ def create_published_graph_overlay_group_step(
         "metadata=graph_metadata(fetched); "
         "assert sha256_file(merged)==sha256_file(fetched); "
         "assert metadata==overlay['metadata']; "
-        "assert len(metadata['healthy_jobs'])==85; "
-        "assert len(metadata['missing_jobs'])==6; "
-        "assert len(metadata['unhealthy_jobs'])==30; "
+        "assert len(metadata['healthy_jobs'])==100; "
+        "assert len(metadata['missing_jobs'])==4; "
+        "assert len(metadata['unhealthy_jobs'])==17; "
         f"assert set({PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS!r})<=set(metadata['healthy_jobs']); "
         f"assert set({PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING!r})<=set(metadata['missing_jobs']); "
         f"assert provenance['replacement_jobs']==sorted({PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS!r}); "
+        f"assert provenance['policy_downgrade_jobs']==sorted({PUBLISHED_GRAPH_OVERLAY_POLICY_DOWNGRADES!r}); "
+        f"assert provenance['retry_source_builds']=={dict(sorted((key, build_id) for build_id, keys in PUBLISHED_GRAPH_OVERLAY_RETRY_SOURCES.items() for key in keys))!r}; "
         f"assert provenance['base_manifest_key']=={PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_KEY!r}; "
         f"assert provenance['base_manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_SHA256!r}; "
+        f"assert provenance['base_graph_sha256']=={PUBLISHED_GRAPH_OVERLAY_BASE_GRAPH_SHA256!r}; "
         f"assert provenance['merge_revision']=={revision!r}; "
         "assert provenance['merged_graph_sha256']==sha256_file(merged); "
         f"assert publish['snapshot']['manifest_key']=={(PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX + '/snapshots/' + RECOVERY_IMAGE_COMMIT + '/manifest.json')!r}; "
@@ -753,6 +807,29 @@ def create_published_graph_overlay_group_step(
     missing_arguments = " ".join(
         f"--expected-retry-missing-job {shlex.quote(key)}"
         for key in PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING
+    )
+    policy_downgrade_arguments = " ".join(
+        f"--expected-policy-downgrade-job {shlex.quote(key)}"
+        for key in PUBLISHED_GRAPH_OVERLAY_POLICY_DOWNGRADES
+    )
+    retry_source_arguments = " ".join(
+        f"--retry-source-build {shlex.quote(key + '=' + build_id)}"
+        for build_id, keys in PUBLISHED_GRAPH_OVERLAY_RETRY_SOURCES.items()
+        for key in keys
+    )
+    retry_downloads = [
+        (
+            "buildkite-agent artifact download "
+            f"{shlex.quote('trace-output/' + key + '/**/*')} "
+            f'"$$D/retry" --build {build_id}'
+        )
+        for build_id, keys in PUBLISHED_GRAPH_OVERLAY_RETRY_SOURCES.items()
+        for key in keys
+    ]
+    retry_key_validation = shlex.quote(
+        "import sys; from pathlib import Path; "
+        "root=Path(sys.argv[1])/'trace-output'; "
+        f"assert {{p.name for p in root.iterdir() if p.is_dir()}}==set({PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS!r})"
     )
     command = [
         "set -euo pipefail",
@@ -805,9 +882,12 @@ def create_published_graph_overlay_group_step(
             '"$$D/results/base-fetch.json"'
         ),
         (
-            'buildkite-agent artifact download "trace-output/**/*" '
-            f'"$$D/retry" --build {PUBLISHED_GRAPH_OVERLAY_RETRY_BUILD_ID}'
+            'test "$$(sha256sum "$$D/base.sqlite" | awk '
+            "'{print $$1}')\" = "
+            f"{PUBLISHED_GRAPH_OVERLAY_BASE_GRAPH_SHA256}"
         ),
+        *retry_downloads,
+        f'"$$D/venv/bin/python" -c {retry_key_validation} "$$D/retry"',
         (
             '"$$D/venv/bin/python" -m test_selection.published_overlay '
             '--base-graph "$$D/base.sqlite" '
@@ -817,14 +897,15 @@ def create_published_graph_overlay_group_step(
             '--output "$$D/merged.sqlite" '
             '--provenance-output "$$D/results/provenance.json" '
             f"--base-source-build-id {PUBLISHED_GRAPH_OVERLAY_BASE_BUILD_ID} "
-            f"--retry-source-build-id {PUBLISHED_GRAPH_OVERLAY_RETRY_BUILD_ID} "
+            f"{retry_source_arguments} "
             f"--merge-revision {revision} "
             f"--base-manifest-key {PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_KEY} "
             f"--base-manifest-sha256 {PUBLISHED_GRAPH_OVERLAY_BASE_MANIFEST_SHA256} "
-            "--expected-base-healthy-count 82 "
-            "--expected-base-missing-count 7 "
+            "--expected-base-healthy-count 85 "
+            "--expected-base-missing-count 4 "
             "--expected-base-unhealthy-count 32 "
-            f"{replacement_arguments} {missing_arguments} | "
+            f"{replacement_arguments} {missing_arguments} "
+            f"{policy_downgrade_arguments} | "
             'tee "$$D/results/overlay.json"'
         ),
         (
@@ -861,7 +942,7 @@ def create_published_graph_overlay_group_step(
                 agents={"queue": AgentQueue.CPU_POSTMERGE_US_EAST_1.value},
                 commands=["\n".join(command)],
                 key="test-selection-published-graph-overlay",
-                label=":warning: Merge #84714 graph + #84881 raw",
+                label=":warning: Overlay promoted graph + B2 evidence",
                 priority=-100,
                 timeout_in_minutes=180,
             )

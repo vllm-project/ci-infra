@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from test_selection.graph import (
     build_fleet_graph,
     graph_metadata,
     paths_to_jobs,
+    write_checksum,
 )
 
 SHA = "a" * 40
@@ -16,6 +18,8 @@ BASE_COLLECTOR = "b" * 64
 RETRY_COLLECTOR = "e" * 64
 BASE_BUILD = "11111111-1111-4111-8111-111111111111"
 RETRY_BUILD = "22222222-2222-4222-8222-222222222222"
+SECOND_RETRY_BUILD = "33333333-3333-4333-8333-333333333333"
+SECOND_BASE_COLLECTOR = "d" * 64
 
 
 def _write(path: Path, value) -> None:
@@ -220,3 +224,119 @@ def test_overlay_rejects_retry_attempt_to_replace_healthy_base(tmp_path: Path):
 def test_overlay_fails_closed_on_base_accounting_mismatch(tmp_path: Path):
     with pytest.raises(GraphError, match="accounting mismatch"):
         _overlay(tmp_path, expected_base_healthy_count=2)
+
+
+def test_overlay_accepts_exact_mixed_collector_base(tmp_path: Path):
+    base_graph, base_inventory, retry, retry_inventory = _fixture(tmp_path)
+    inventory = json.loads(base_inventory.read_text(encoding="utf-8"))
+    inventory["collector_sha256"] = None
+    inventory["collector_sha256s"] = [BASE_COLLECTOR, SECOND_BASE_COLLECTOR]
+    _write(base_inventory, inventory)
+    with sqlite3.connect(base_graph) as connection:
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='collector_sha256'",
+            (json.dumps(None),),
+        )
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='collector_sha256s'",
+            (json.dumps([BASE_COLLECTOR, SECOND_BASE_COLLECTOR]),),
+        )
+    write_checksum(base_graph)
+
+    result = MODULE.overlay_published_graph(
+        base_graph,
+        base_inventory,
+        retry,
+        retry_inventory,
+        tmp_path / "merged.sqlite",
+        tmp_path / "provenance.json",
+        base_source_build_id=BASE_BUILD,
+        retry_source_build_id=RETRY_BUILD,
+        merge_revision="d" * 40,
+        base_manifest_key="production/snapshots/a/m-f/manifest.json",
+        base_manifest_sha256="f" * 64,
+        expected_base_healthy_count=1,
+        expected_base_missing_count=1,
+        expected_base_unhealthy_count=1,
+        expected_replacements=["fixed"],
+        expected_retry_missing=["deferred"],
+    )
+
+    assert result["provenance"]["base_collector_sha256"] is None
+    assert result["provenance"]["base_collector_sha256s"] == [
+        BASE_COLLECTOR,
+        SECOND_BASE_COLLECTOR,
+    ]
+    assert result["metadata"]["collector_sha256s"] == [
+        BASE_COLLECTOR,
+        SECOND_BASE_COLLECTOR,
+        RETRY_COLLECTOR,
+    ]
+
+
+def test_overlay_records_exact_policy_downgrade_and_source_map(tmp_path: Path):
+    base_graph, base_inventory, retry, retry_inventory = _fixture(tmp_path)
+    inventory = json.loads(base_inventory.read_text(encoding="utf-8"))
+    next(row for row in inventory["jobs"] if row["key"] == "fixed")["mode"] = (
+        "kernel-set"
+    )
+    _write(base_inventory, inventory)
+
+    result = MODULE.overlay_published_graph(
+        base_graph,
+        base_inventory,
+        retry,
+        retry_inventory,
+        tmp_path / "merged.sqlite",
+        tmp_path / "provenance.json",
+        base_source_build_id=BASE_BUILD,
+        retry_source_builds={
+            "fixed": RETRY_BUILD,
+            "deferred": SECOND_RETRY_BUILD,
+        },
+        merge_revision="d" * 40,
+        base_manifest_key="production/snapshots/a/m-f/manifest.json",
+        base_manifest_sha256="f" * 64,
+        expected_base_healthy_count=1,
+        expected_base_missing_count=1,
+        expected_base_unhealthy_count=1,
+        expected_replacements=["fixed"],
+        expected_retry_missing=["deferred"],
+        expected_policy_downgrades=["fixed"],
+    )
+
+    assert result["provenance"]["policy_downgrade_jobs"] == ["fixed"]
+    assert result["provenance"]["retry_source_build_id"] is None
+    assert result["provenance"]["retry_source_builds"] == {
+        "deferred": SECOND_RETRY_BUILD,
+        "fixed": RETRY_BUILD,
+    }
+
+
+def test_overlay_rejects_unapproved_policy_change(tmp_path: Path):
+    base_graph, base_inventory, retry, retry_inventory = _fixture(tmp_path)
+    inventory = json.loads(base_inventory.read_text(encoding="utf-8"))
+    next(row for row in inventory["jobs"] if row["key"] == "fixed")["mode"] = (
+        "kernel-set"
+    )
+    _write(base_inventory, inventory)
+
+    with pytest.raises(GraphError, match="policy changes are not exact"):
+        MODULE.overlay_published_graph(
+            base_graph,
+            base_inventory,
+            retry,
+            retry_inventory,
+            tmp_path / "merged.sqlite",
+            tmp_path / "provenance.json",
+            base_source_build_id=BASE_BUILD,
+            retry_source_build_id=RETRY_BUILD,
+            merge_revision="d" * 40,
+            base_manifest_key="production/snapshots/a/m-f/manifest.json",
+            base_manifest_sha256="f" * 64,
+            expected_base_healthy_count=1,
+            expected_base_missing_count=1,
+            expected_base_unhealthy_count=1,
+            expected_replacements=["fixed"],
+            expected_retry_missing=["deferred"],
+        )

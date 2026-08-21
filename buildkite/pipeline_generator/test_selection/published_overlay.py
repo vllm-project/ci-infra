@@ -48,6 +48,33 @@ def _partition(metadata: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
     return healthy, missing, unhealthy
 
 
+def _collector_identity(
+    inventory: dict[str, Any], label: str
+) -> tuple[str | None, list[str]]:
+    raw_primary = inventory.get("collector_sha256")
+    primary = (
+        None
+        if raw_primary is None
+        else _sha256(raw_primary, f"{label} collector SHA-256")
+    )
+    raw_collectors = inventory.get("collector_sha256s")
+    if raw_collectors is None:
+        if primary is None:
+            raise GraphError(f"{label} collector identity is missing")
+        collectors = [primary]
+    else:
+        if not isinstance(raw_collectors, list) or not raw_collectors:
+            raise GraphError(f"{label} collector SHA-256 set is invalid")
+        collectors = sorted(
+            {_sha256(value, f"{label} collector SHA-256") for value in raw_collectors}
+        )
+        if collectors != raw_collectors:
+            raise GraphError(f"{label} collector SHA-256 set is not canonical")
+        if primary is not None and collectors != [primary]:
+            raise GraphError(f"{label} collector identity is inconsistent")
+    return primary, collectors
+
+
 def _validate_base_graph(
     graph: Path,
     inventory: dict[str, Any],
@@ -60,7 +87,7 @@ def _validate_base_graph(
     metadata = graph_metadata(graph)
     policies = {str(row.get("key")): row for row in inventory.get("jobs", [])}
     repository_sha = _sha(inventory.get("repository_sha"))
-    collector_sha = _sha256(inventory.get("collector_sha256"), "base collector SHA-256")
+    collector_sha, collector_sha256s = _collector_identity(inventory, "base")
     if metadata.get("repository_sha") != repository_sha:
         raise GraphError("published base graph repository SHA mismatch")
     if metadata.get("ci_infra_revision") != inventory.get("ci_infra_revision"):
@@ -71,10 +98,10 @@ def _validate_base_graph(
         raise GraphError("published base graph wait results mismatch")
     if set(map(str, metadata.get("expected_jobs", []))) != set(policies):
         raise GraphError("published base graph expected-job inventory mismatch")
-    collector_sha256s = metadata.get("collector_sha256s", [collector_sha])
-    if metadata.get("collector_sha256") != collector_sha or collector_sha256s != [
-        collector_sha
-    ]:
+    if (
+        metadata.get("collector_sha256") != collector_sha
+        or metadata.get("collector_sha256s") != collector_sha256s
+    ):
         raise GraphError("published base graph collector identity mismatch")
 
     healthy, missing, unhealthy = _partition(metadata)
@@ -133,7 +160,7 @@ def _replace_metadata(
     retry_metadata: dict[str, Any],
     retry_inventory: dict[str, Any],
     replacements: set[str],
-    base_collector_sha: str,
+    base_collector_shas: Iterable[str],
     retry_collector_sha: str,
 ) -> dict[str, Any]:
     merged = json.loads(json.dumps(base_metadata))
@@ -155,7 +182,7 @@ def _replace_metadata(
         if key not in replacements
     }
     merged["collector_sha256"] = None
-    merged["collector_sha256s"] = sorted({base_collector_sha, retry_collector_sha})
+    merged["collector_sha256s"] = sorted({*base_collector_shas, retry_collector_sha})
     wait_results = dict(base_metadata.get("wait_results", {}))
     for key in replacements:
         wait_result = retry_inventory.get("wait_results", {}).get(key)
@@ -182,7 +209,8 @@ def overlay_published_graph(
     provenance_output: Path,
     *,
     base_source_build_id: str,
-    retry_source_build_id: str,
+    retry_source_build_id: str | None = None,
+    retry_source_builds: dict[str, str] | None = None,
     merge_revision: str,
     base_manifest_key: str,
     base_manifest_sha256: str,
@@ -191,13 +219,11 @@ def overlay_published_graph(
     expected_base_unhealthy_count: int,
     expected_replacements: Iterable[str],
     expected_retry_missing: Iterable[str],
+    expected_policy_downgrades: Iterable[str] = (),
 ) -> dict[str, Any]:
     base_source_build_id = _uuid(base_source_build_id, "base source build ID")
-    retry_source_build_id = _uuid(retry_source_build_id, "retry source build ID")
     merge_revision = _sha(merge_revision)
     base_manifest_sha256 = _sha256(base_manifest_sha256, "base manifest SHA-256")
-    if base_source_build_id == retry_source_build_id:
-        raise GraphError("base and retry source build IDs must differ")
     if not base_manifest_key or base_manifest_key.startswith("/"):
         raise GraphError("base manifest key must be a nonempty relative S3 key")
 
@@ -215,20 +241,35 @@ def overlay_published_graph(
     retry_inventory = _json(retry_inventory_path)
     if base_inventory.get("repository_sha") != retry_inventory.get("repository_sha"):
         raise GraphError("base and retry inventories disagree on repository SHA")
-    base_collector_sha = _sha256(
-        base_inventory.get("collector_sha256"), "base collector SHA-256"
+    base_collector_sha, base_collector_shas = _collector_identity(
+        base_inventory, "base"
     )
-    retry_collector_sha = _sha256(
-        retry_inventory.get("collector_sha256"), "retry collector SHA-256"
+    retry_collector_sha, retry_collector_shas = _collector_identity(
+        retry_inventory, "retry"
     )
+    if retry_collector_sha is None or retry_collector_shas != [retry_collector_sha]:
+        raise GraphError("retry inventory must have one primary collector")
     base_policies = {str(row.get("key")): row for row in base_inventory.get("jobs", [])}
     retry_policies = {
         str(row.get("key")): row for row in retry_inventory.get("jobs", [])
     }
     if not retry_policies or not set(retry_policies) <= set(base_policies):
         raise GraphError("retry inventory jobs must be a nonempty base subset")
-    if any(retry_policies[key] != base_policies[key] for key in retry_policies):
-        raise GraphError("retry inventory changes a base job policy")
+    policy_downgrades = set(expected_policy_downgrades)
+    actual_policy_changes = {
+        key for key in retry_policies if retry_policies[key] != base_policies[key]
+    }
+    if actual_policy_changes != policy_downgrades:
+        raise GraphError("retry inventory policy changes are not exact")
+    for key in actual_policy_changes:
+        base_policy = dict(base_policies[key])
+        retry_policy = dict(retry_policies[key])
+        if (
+            base_policy.pop("mode", None) != "kernel-set"
+            or retry_policy.pop("mode", None) != "python-only"
+            or base_policy != retry_policy
+        ):
+            raise GraphError("retry inventory policy downgrade is not trusted")
 
     base_metadata = _validate_base_graph(
         base_graph,
@@ -245,6 +286,27 @@ def overlay_published_graph(
         raise GraphError("expected retry healthy and missing sets overlap")
     if expected_replacement_set | expected_retry_missing_set != set(retry_policies):
         raise GraphError("expected retry accounting does not cover retry inventory")
+    if not policy_downgrades <= expected_replacement_set:
+        raise GraphError("policy downgrades must be healthy replacements")
+    if (retry_source_build_id is None) == (retry_source_builds is None):
+        raise GraphError("exactly one retry source-build mode is required")
+    if retry_source_build_id is not None:
+        source_build_id = _uuid(retry_source_build_id, "retry source build ID")
+        normalized_retry_sources = {
+            key: source_build_id for key in sorted(retry_policies)
+        }
+        normalized_retry_source_build_id = source_build_id
+    else:
+        assert retry_source_builds is not None
+        if set(retry_source_builds) != set(retry_policies):
+            raise GraphError("retry source-build map does not cover retry inventory")
+        normalized_retry_sources = {
+            key: _uuid(retry_source_builds[key], f"retry source build ID for {key}")
+            for key in sorted(retry_source_builds)
+        }
+        normalized_retry_source_build_id = None
+    if base_source_build_id in set(normalized_retry_sources.values()):
+        raise GraphError("base and retry source build IDs must differ")
 
     try:
         with tempfile.TemporaryDirectory(
@@ -315,7 +377,7 @@ def overlay_published_graph(
                     retry_metadata,
                     retry_inventory,
                     replacements,
-                    base_collector_sha,
+                    base_collector_shas,
                     retry_collector_sha,
                 )
                 connection.commit()
@@ -342,6 +404,7 @@ def overlay_published_graph(
 
             provenance = {
                 "base_collector_sha256": base_collector_sha,
+                "base_collector_sha256s": base_collector_shas,
                 "base_graph_sha256": sha256_file(base_graph),
                 "base_healthy_evidence_sha256": base_healthy_digests,
                 "base_healthy_row_counts": base_healthy_counts,
@@ -351,13 +414,23 @@ def overlay_published_graph(
                 "base_metadata": base_metadata,
                 "base_metadata_sha256": _canonical_sha256(base_metadata),
                 "base_source_build_id": base_source_build_id,
-                "collector_sha256s": sorted({base_collector_sha, retry_collector_sha}),
+                "collector_sha256s": sorted(
+                    {*base_collector_shas, retry_collector_sha}
+                ),
                 "kind": "vllm-test-selection-published-base-evidence-overlay",
                 "merge_revision": merge_revision,
                 "merged_graph_sha256": sha256_file(output),
                 "merged_metadata": merged_metadata,
                 "merged_metadata_sha256": _canonical_sha256(merged_metadata),
                 "overlay_script_sha256": sha256_file(Path(__file__).resolve()),
+                "policy_downgrade_jobs": sorted(policy_downgrades),
+                "policy_downgrades": {
+                    key: {
+                        "base": base_policies[key],
+                        "retry": retry_policies[key],
+                    }
+                    for key in sorted(policy_downgrades)
+                },
                 "replacement_evidence_sha256": retry_digests,
                 "replacement_jobs": sorted(replacements),
                 "replacement_row_counts": retry_counts,
@@ -366,8 +439,9 @@ def overlay_published_graph(
                 "retry_inventory_sha256": sha256_file(retry_inventory_path),
                 "retry_metadata": retry_metadata,
                 "retry_metadata_sha256": _canonical_sha256(retry_metadata),
-                "retry_source_build_id": retry_source_build_id,
-                "schema_version": 1,
+                "retry_source_build_id": normalized_retry_source_build_id,
+                "retry_source_builds": normalized_retry_sources,
+                "schema_version": 2,
             }
             provenance_output.parent.mkdir(parents=True, exist_ok=True)
             provenance_temporary = provenance_output.with_suffix(
@@ -389,6 +463,16 @@ def overlay_published_graph(
     return {"metadata": merged_metadata, "provenance": provenance}
 
 
+def _parse_retry_source_builds(values: Iterable[str]) -> dict[str, str] | None:
+    result: dict[str, str] = {}
+    for value in values:
+        key, separator, build_id = value.partition("=")
+        if not separator or not key or not build_id or key in result:
+            raise GraphError("retry source build must be unique JOB_KEY=BUILD_UUID")
+        result[key] = build_id
+    return result or None
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-graph", type=Path, required=True)
@@ -398,7 +482,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--provenance-output", type=Path, required=True)
     parser.add_argument("--base-source-build-id", required=True)
-    parser.add_argument("--retry-source-build-id", required=True)
+    parser.add_argument("--retry-source-build-id")
+    parser.add_argument("--retry-source-build", action="append", default=[])
     parser.add_argument("--merge-revision", required=True)
     parser.add_argument("--base-manifest-key", required=True)
     parser.add_argument("--base-manifest-sha256", required=True)
@@ -407,12 +492,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-base-unhealthy-count", type=int, required=True)
     parser.add_argument("--expected-replacement-job", action="append", default=[])
     parser.add_argument("--expected-retry-missing-job", action="append", default=[])
+    parser.add_argument("--expected-policy-downgrade-job", action="append", default=[])
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
     try:
+        retry_source_builds = _parse_retry_source_builds(args.retry_source_build)
         result = overlay_published_graph(
             args.base_graph,
             args.base_inventory,
@@ -422,6 +509,7 @@ def main() -> int:
             args.provenance_output,
             base_source_build_id=args.base_source_build_id,
             retry_source_build_id=args.retry_source_build_id,
+            retry_source_builds=retry_source_builds,
             merge_revision=args.merge_revision,
             base_manifest_key=args.base_manifest_key,
             base_manifest_sha256=args.base_manifest_sha256,
@@ -430,6 +518,7 @@ def main() -> int:
             expected_base_unhealthy_count=args.expected_base_unhealthy_count,
             expected_replacements=args.expected_replacement_job,
             expected_retry_missing=args.expected_retry_missing_job,
+            expected_policy_downgrades=args.expected_policy_downgrade_job,
         )
         print(json.dumps(result, sort_keys=True, indent=2))
     except Exception as error:  # noqa: BLE001 - CLI must fail closed on every defect.

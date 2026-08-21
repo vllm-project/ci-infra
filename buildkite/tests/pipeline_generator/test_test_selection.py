@@ -72,22 +72,24 @@ def _published_overlay_config(fake_global_config):
 
 
 def _set_published_overlay_env(monkeypatch):
-    base_jobs = [
-        {"expected_shards": 1, "key": f"base-job-{index}", "mode": "python-only"}
-        for index in range(117)
-    ]
     retry_keys = list(pipeline_module.PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS) + list(
         pipeline_module.PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING
     )
+    base_jobs = [
+        {"expected_shards": 1, "key": f"base-job-{index}", "mode": "python-only"}
+        for index in range(121 - len(retry_keys))
+    ]
     base_jobs.extend(
-        {"expected_shards": 1, "key": key, "mode": "python-only"} for key in retry_keys
+        {"expected_shards": 1, "key": key, "mode": "kernel-set"} for key in retry_keys
     )
     base = {
         "always_run": [],
         "ci_infra_revision": "3c43f17714e9f59748992a7d76d64430f2c93779",
-        "collector_sha256": (
-            "ffe147610119438dcd36d624c8137f16014470f1ff590a70f23990c6e93f45e4"
-        ),
+        "collector_sha256": None,
+        "collector_sha256s": [
+            "00323b97a2fee832cf72c71b7ab4a84df4ca366eed44e7b47e7a1cb86eb29abe",
+            "ffe147610119438dcd36d624c8137f16014470f1ff590a70f23990c6e93f45e4",
+        ],
         "jobs": base_jobs,
         "repository_sha": pipeline_module.RECOVERY_IMAGE_COMMIT,
         "schema_version": 1,
@@ -95,11 +97,15 @@ def _set_published_overlay_env(monkeypatch):
     }
     retry = {
         "always_run": [],
-        "ci_infra_revision": "ec4a54df07f82f0d1e62aaf199d80c7d90f97d10",
+        "ci_infra_revision": "9b579b876cfd6d9ea2c81746a50b0ae13ad1c46a",
         "collector_sha256": (
             "00323b97a2fee832cf72c71b7ab4a84df4ca366eed44e7b47e7a1cb86eb29abe"
         ),
-        "jobs": [row for row in base_jobs if row["key"] in retry_keys],
+        "jobs": [
+            {**row, "mode": "python-only"}
+            for row in base_jobs
+            if row["key"] in retry_keys
+        ],
         "repository_sha": pipeline_module.RECOVERY_IMAGE_COMMIT,
         "schema_version": 1,
         "wait_results": {
@@ -585,12 +591,16 @@ def test_published_graph_overlay_renders_one_pinned_cpu_postmerge_step(
     assert "publish-graph" in command
     assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_BASE_PREFIX in command
     assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX in command
-    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_RETRY_BUILD_ID in command
+    for build_id in pipeline_module.PUBLISHED_GRAPH_OVERLAY_RETRY_SOURCES:
+        assert build_id in command
     assert base64.b64encode(base_raw).decode() in command
     assert base64.b64encode(retry_raw).decode() in command
-    assert "--expected-base-healthy-count 82" in command
-    assert "--expected-base-missing-count 7" in command
+    assert "--expected-base-healthy-count 85" in command
+    assert "--expected-base-missing-count 4" in command
     assert "--expected-base-unhealthy-count 32" in command
+    assert command.count("--retry-source-build ") == 15
+    assert command.count("--expected-policy-downgrade-job ") == 15
+    assert command.count("buildkite-agent artifact download") == 15
     assert command.count("--max-snapshot-age-days 7") == 2
     subprocess.run(
         ["bash", "-n"],
