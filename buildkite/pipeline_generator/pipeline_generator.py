@@ -862,7 +862,7 @@ def create_published_graph_overlay_group_step(
                 commands=["\n".join(command)],
                 key="test-selection-published-graph-overlay",
                 label=":warning: Merge #84714 graph + #84881 raw",
-                priority=-100,
+                priority=0,
                 timeout_in_minutes=180,
             )
         ],
