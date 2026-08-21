@@ -1,14 +1,14 @@
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union, Literal
-from copy import deepcopy
 import base64
+from copy import deepcopy
 from functools import lru_cache
 import gzip
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 import re
 import tarfile
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
@@ -24,16 +24,18 @@ from amd import (
     get_rocm_base_refresh_timeout,
     is_amd_gpu_device,
 )
+from constants import AgentQueue, DeviceType
+from global_config import get_global_config
+from plugin.docker_plugin import get_docker_plugin
+from plugin.k8s_plugin import get_k8s_plugin
+from pydantic import BaseModel
 from step import Step
+from test_selection.collector_bundle import download_prelude
 from utils_lib.docker_utils import (
-    get_image,
     get_ecr_cache_registry,
+    get_image,
     get_torch_nightly_image,
 )
-from global_config import get_global_config
-from plugin.k8s_plugin import get_k8s_plugin
-from plugin.docker_plugin import get_docker_plugin
-from constants import DeviceType, AgentQueue
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -434,12 +436,179 @@ def _prepare_commands(
     if trace_commands:
         commands.append(_otel_setup_command())
 
-    continue_on_failure = os.getenv("CONTINUE_ON_FAILURE") == "1"
+    continue_on_failure = (
+        os.getenv("CONTINUE_ON_FAILURE") == "1" and not step.trace_represented_job_key
+    )
 
     if continue_on_failure:
         commands.append("CI_OVERALL_STATUS=0")
 
-    if step.commands:
+    if step.trace_represented_job_key:
+        encoded_commands = []
+        for command in step.commands or []:
+            for variable, value in variables_to_inject.items():
+                if value:
+                    command = re.sub(re.escape(variable) + r"\b", value, command)
+            # The source YAML doubles dollars to survive pipeline upload. The
+            # payload is opaque base64 at upload time, so normalize it here for
+            # the shell that will eventually execute the decoded command.
+            encoded_commands.append(command.replace("$$", "$"))
+        # Run the original command list as one shell script so setup exports,
+        # virtualenv activation, and working-directory changes keep their
+        # existing semantics. Pytest auto-loads the collector when reached.
+        payload = base64.b64encode(
+            json.dumps(
+                ["set -e\n" + "\n".join(encoded_commands)],
+                separators=(",", ":"),
+            ).encode()
+        ).decode()
+        fallback_script = base64.b64encode(
+            b"""import base64,json,subprocess,sys
+commands=json.loads(base64.b64decode(sys.argv[2]))
+for command in commands:
+    result=subprocess.run([\"bash\",\"-lc\",command],check=False)
+    if result.returncode:
+        raise SystemExit(result.returncode)
+"""
+        ).decode()
+        fallback_command = (
+            'python3 -c "import base64,sys;exec(base64.b64decode(sys.argv[1]))" '
+            f"{fallback_script} {payload}"
+        )
+        in_place = step.key == step.trace_represented_job_key
+        trace_root = f"trace-output/{step.trace_represented_job_key}"
+        output_dir = (
+            f"{trace_root}/$$BUILDKITE_PARALLEL_JOB" if step.parallelism else trace_root
+        )
+        gpu_option = "--capture-gpu" if step.trace_gpu else "--python-only"
+        fallback_marker_script = """import base64,json,os,pathlib,sys
+path=pathlib.Path(sys.argv[1])
+path.parent.mkdir(parents=True,exist_ok=True)
+document={
+    "capture_mode":sys.argv[2],
+    "collector_sha256":sys.argv[3],
+    "collector_version":"unavailable",
+    "failure_reason":sys.argv[4],
+    "healthy":False,
+    "job_key":base64.b64decode(sys.argv[5]).decode(),
+    "parallel_job":int(os.environ.get("BUILDKITE_PARALLEL_JOB","0")),
+    "parallel_job_count":int(os.environ.get("BUILDKITE_PARALLEL_JOB_COUNT","1")),
+    "repository_sha":os.environ.get("BUILDKITE_COMMIT",""),
+    "represented_job_key":base64.b64decode(sys.argv[6]).decode(),
+}
+path.write_text(json.dumps(document,sort_keys=True,separators=(",",":"))+"\\n",encoding="utf-8")
+"""
+
+        def fallback_marker(failure_reason: str) -> str:
+            marker_script_payload = base64.b64encode(
+                fallback_marker_script.encode()
+            ).decode()
+            job_key_payload = base64.b64encode((step.key or "").encode()).decode()
+            represented_key_payload = base64.b64encode(
+                (step.trace_represented_job_key or "").encode()
+            ).decode()
+            marker_command = " ".join(
+                [
+                    "python3",
+                    "-c",
+                    '"import base64,sys;payload=sys.argv.pop(1);'
+                    'exec(base64.b64decode(payload))"',
+                    marker_script_payload,
+                    f'"{output_dir}/trace-job.json"',
+                    "gpu" if step.trace_gpu else "python-only",
+                    step.trace_collector_sha256 or "",
+                    failure_reason,
+                    job_key_payload,
+                    represented_key_payload,
+                ]
+            )
+            return (
+                f"if ! {marker_command}; then "
+                'echo "Trace fallback marker creation failed" >&2; fi; '
+                "if command -v buildkite-agent >/dev/null 2>&1; then "
+                f'if ! buildkite-agent artifact upload "{trace_root}/**/*"; then '
+                'echo "Trace fallback marker upload failed; preserving the production '
+                'command status" >&2; fi; fi; '
+            )
+
+        if in_place:
+            poll_timeout = (
+                'echo "Trace collector bundle poll exhausted after 12 attempts with a '
+                '5-second interval; running the production commands uninstrumented" '
+                ">&2; "
+                + fallback_marker("collector_bundle_poll_timeout")
+                + f"{fallback_command}; exit $$?;"
+            )
+            invalid_bundle = (
+                'echo "Trace collector bundle failed checksum or extraction; running '
+                'the production commands uninstrumented" >&2; '
+                + fallback_marker("collector_bundle_invalid")
+                + f"{fallback_command}; exit $$?;"
+            )
+            missing_collector = (
+                'if [ "$$TRACE_COLLECTOR_READY" = "1" ]; then '
+                f"{invalid_bundle} else {poll_timeout} fi;"
+            )
+        else:
+            missing_collector = (
+                'echo "Trace collector bundle is unavailable" >&2; exit 2;'
+            )
+        collector_probe = (
+            'python3 -c "import ci_test_selection.run_job_trace as runner, sys; '
+            'print(sys.executable, runner.__file__)"'
+            if in_place
+            else (
+                'python3 -c "import ci_test_selection, coverage, '
+                "pytest_cov, sys; print(sys.executable, "
+                'ci_test_selection.__file__)"'
+            )
+        )
+        runner = (
+            "python3 -m ci_test_selection.run_job_trace "
+            f"--output-dir {output_dir} --job-key {step.key} "
+            f"--represented-job-key {step.trace_represented_job_key} "
+            f"{gpu_option} --commands-base64 {payload}"
+        )
+        if in_place:
+            runner += " --preserve-command-exit-code"
+            runner = (
+                f"if {runner}; then TRACE_COMMAND_STATUS=0; "
+                "else TRACE_COMMAND_STATUS=$$?; fi; "
+                "if command -v buildkite-agent >/dev/null 2>&1; then "
+                f'if ! buildkite-agent artifact upload "{trace_root}/**/*"; then '
+                'echo "Trace artifact upload failed; preserving the production '
+                'command status" >&2; fi; '
+                'else echo "Buildkite agent unavailable; skipping trace artifact '
+                'upload" >&2; fi; exit $$TRACE_COMMAND_STATUS'
+            )
+        trace_command = (
+            'TRACE_COLLECTOR_DIR="$$(mktemp -d)"; '
+            + download_prelude("$$TRACE_COLLECTOR_DIR")
+            + 'if [ "$$TRACE_COLLECTOR_READY" = "1" ] && '
+            f'echo "{step.trace_collector_sha256}  '
+            '$$TRACE_COLLECTOR_DIR/test-selection-collector.zip" | sha256sum -c - && '
+            "python3 -m zipfile -e "
+            '"$$TRACE_COLLECTOR_DIR/test-selection-collector.zip" '
+            '"$$TRACE_COLLECTOR_DIR/src"; then :; '
+            f"else {missing_collector} fi; "
+            "export PYTHONDONTWRITEBYTECODE=1 "
+            'VLLM_CI_TEST_SELECTION_COLLECTOR_SHA256="'
+            f'{step.trace_collector_sha256}" '
+            'PYTHONPATH="$$TRACE_COLLECTOR_DIR/src:/vllm-workspace'
+            '$${PYTHONPATH:+:$${PYTHONPATH}}"; '
+            + (
+                f"if {collector_probe}; then {runner}; "
+                f'else echo "Trace collector import failed; running the '
+                f'production commands uninstrumented" >&2; '
+                + fallback_marker("collector_import_failed")
+                + f"{fallback_command}; fi"
+                if in_place
+                else f"{collector_probe} && {runner}"
+            )
+        )
+        _validate_trace_wrapper_dollars(trace_command)
+        commands.append(trace_command)
+    elif step.commands:
         for i, cmd in enumerate(step.commands):
             # Sanitize command preview for use in echo (remove quotes and special chars)
             preview = cmd[:80].replace("'", "").replace('"', "").replace("$", "")
@@ -465,9 +634,7 @@ def _prepare_commands(
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
-                commands.append(
-                    f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1"
-                )
+                commands.append(f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1")
             else:
                 commands.append(prepared_command)
 
@@ -493,6 +660,16 @@ def _prepare_commands(
         final_commands.insert(0, f"cd {step.working_dir}")
 
     return final_commands
+
+
+def _validate_trace_wrapper_dollars(command: str) -> None:
+    """Reject shell dollar expansion that Buildkite would interpolate first."""
+    for match in re.finditer(r"\$+", command):
+        if len(match.group()) % 2:
+            raise ValueError(
+                "trace wrapper contains an undoubled dollar expansion at "
+                f"offset {match.start()}"
+            )
 
 
 def _create_block_step(
@@ -712,6 +889,9 @@ def convert_group_step_to_buildkite_step(
                             "commands": custom_commands,
                             "working_dir": amd.get("working_dir", step.working_dir),
                             "no_plugin": amd_no_plugin,
+                            "trace_gpu": False,
+                            "trace_collector_sha256": None,
+                            "trace_represented_job_key": None,
                         }
                     )
                     amd_commands_str = " && ".join(
@@ -723,7 +903,12 @@ def convert_group_step_to_buildkite_step(
                     )
                 else:
                     amd_command_step = step.model_copy(
-                        update={"no_plugin": amd_no_plugin}
+                        update={
+                            "no_plugin": amd_no_plugin,
+                            "trace_gpu": False,
+                            "trace_collector_sha256": None,
+                            "trace_represented_job_key": None,
+                        }
                     )
                     amd_commands_str = " && ".join(
                         _prepare_commands(
