@@ -39,6 +39,20 @@ test-selection/vllm/snapshots/<main-sha>/
 test-selection/vllm/index.json
 ```
 
+Trusted recovery may opt into a content-addressed generation when distinct
+snapshots share the same repository SHA:
+
+```text
+test-selection/vllm/snapshots/<main-sha>/m-<full-manifest-sha256>/
+  graph.sqlite.gz
+  graph.sqlite.sha256
+  manifest.json
+```
+
+The index points to exactly one generation for a repository SHA. Readers accept
+the legacy key above or the full-hash generation key derived from the index
+entry; every other key shape fails closed.
+
 The manifest accounts for every discovered pytest job as healthy, missing, or
 unhealthy. It binds both the deterministic gzip object and the logical SQLite
 bytes; readers verify the compressed object before bounded decompression, then
@@ -60,6 +74,15 @@ This path is intended only for trusted operators recovering immutable evidence,
 not for normal nightly or pull-request execution.
 Do not set any republish variable on a normal nightly: its presence deliberately
 replaces the full generated fleet with the single recovery step.
+
+Any vehicle that fetches the production `test-selection/vllm` prefix must pin a
+ci-infra revision containing content-addressed reader support (introduced by
+`3b34c57ab7ada06b99f2cf6dea606bd2508da9ef`) or a reviewed descendant. Before
+changing the production index, the operator must confirm that no active
+production-fetch vehicle is pinned to an older revision. An older reader fails
+closed into the caller's normal broad/run-all fallback; preserved legacy
+objects are rollback material and are not discoverable after the index points
+to a newer generation.
 
 Snapshot manifests are produced by this trusted publisher. Readers enforce the
 publisher-declared decompression bound and both compressed and logical hashes;

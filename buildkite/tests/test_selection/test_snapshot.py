@@ -182,6 +182,148 @@ def test_snapshot_manifest_records_mixed_collector_identity(tmp_path: Path):
     assert manifest["collector_sha256s"] == collectors
 
 
+def test_content_addressed_generation_round_trip(tmp_path: Path):
+    repo, repository_sha = _repo(tmp_path)
+    graph = _graph(tmp_path / "graph.sqlite", repository_sha)
+    manifest = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest)
+    store = MemoryStore()
+
+    entry = publish_snapshot(
+        store,
+        "test-selection/vllm",
+        graph,
+        manifest,
+        content_addressed=True,
+    )
+    manifest_sha256 = snapshot.sha256_file(manifest)
+    root = f"test-selection/vllm/snapshots/{repository_sha}/m-{manifest_sha256}"
+    assert entry["manifest_key"] == f"{root}/manifest.json"
+    assert f"{root}/graph.sqlite.gz" in store.objects
+
+    output = tmp_path / "downloaded.sqlite"
+    assert (
+        fetch_snapshot(
+            store,
+            "test-selection/vllm",
+            repo,
+            repository_sha,
+            output,
+            max_age_days=1,
+        )
+        == entry
+    )
+    assert output.read_bytes() == graph.read_bytes()
+
+
+def test_content_addressed_generation_supersedes_same_sha_legacy_snapshot(
+    tmp_path: Path,
+):
+    repo, repository_sha = _repo(tmp_path)
+    legacy_graph = _graph(tmp_path / "legacy.sqlite", repository_sha)
+    legacy_manifest = tmp_path / "legacy-manifest.json"
+    build_snapshot_manifest(legacy_graph, legacy_manifest)
+    store = MemoryStore()
+    legacy_entry = publish_snapshot(
+        store, "test-selection/vllm", legacy_graph, legacy_manifest
+    )
+    legacy_objects = {
+        key: item["data"]
+        for key, item in store.objects.items()
+        if key != "test-selection/vllm/index.json"
+    }
+
+    replacement_graph = _graph(tmp_path / "replacement.sqlite", repository_sha)
+    connection = sqlite3.connect(replacement_graph)
+    connection.execute(
+        "UPDATE metadata SET value=? WHERE key='healthy_jobs'",
+        (json.dumps(["replacement-tests", "unit-tests"]),),
+    )
+    connection.execute(
+        "UPDATE metadata SET value=? WHERE key='expected_jobs'",
+        (json.dumps(["replacement-tests", "unit-tests"]),),
+    )
+    connection.execute("INSERT INTO jobs VALUES ('replacement-tests', 'healthy', NULL)")
+    connection.commit()
+    connection.close()
+    write_checksum(replacement_graph)
+    replacement_manifest = tmp_path / "replacement-manifest.json"
+    build_snapshot_manifest(replacement_graph, replacement_manifest)
+
+    replacement_entry = publish_snapshot(
+        store,
+        "test-selection/vllm",
+        replacement_graph,
+        replacement_manifest,
+        content_addressed=True,
+    )
+
+    assert replacement_entry["repository_sha"] == legacy_entry["repository_sha"]
+    assert replacement_entry["manifest_key"] != legacy_entry["manifest_key"]
+    assert all(
+        store.objects[key]["data"] == data for key, data in legacy_objects.items()
+    )
+    output = tmp_path / "replacement-readback.sqlite"
+    assert (
+        fetch_snapshot(
+            store,
+            "test-selection/vllm",
+            repo,
+            repository_sha,
+            output,
+            max_age_days=1,
+        )
+        == replacement_entry
+    )
+    assert output.read_bytes() == replacement_graph.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "manifest_key",
+    [
+        "test-selection/vllm/snapshots/a/manifest.json",
+        f"test-selection/vllm/snapshots/{SHA}/m-{'0' * 63}/manifest.json",
+        f"test-selection/vllm/snapshots/{SHA}/m-{'0' * 64}/../manifest.json",
+    ],
+)
+def test_fetch_rejects_noncanonical_content_addressed_manifest_key(
+    tmp_path: Path, manifest_key: str
+):
+    repo, repository_sha = _repo(tmp_path)
+    graph = _graph(tmp_path / "graph.sqlite", repository_sha)
+    manifest = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest)
+    store = MemoryStore()
+    publish_snapshot(
+        store,
+        "test-selection/vllm",
+        graph,
+        manifest,
+        content_addressed=True,
+    )
+    index_object = store.objects["test-selection/vllm/index.json"]
+    index = json.loads(index_object["data"])
+    index["snapshots"][0]["manifest_key"] = manifest_key
+    data = (json.dumps(index, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    index_object.update(
+        {
+            "data": data,
+            "etag": hashlib.md5(data).hexdigest(),  # nosec: fake S3 ETag
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    )
+
+    with pytest.raises(GraphError, match="snapshot index manifest key is invalid"):
+        fetch_snapshot(
+            store,
+            "test-selection/vllm",
+            repo,
+            repository_sha,
+            tmp_path / "out.sqlite",
+            max_age_days=1,
+        )
+
+
 def test_compressed_graph_is_byte_deterministic(tmp_path: Path):
     graph = _graph(tmp_path / "graph.sqlite")
     first_manifest = tmp_path / "first-manifest.json"

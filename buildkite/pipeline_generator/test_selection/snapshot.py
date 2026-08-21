@@ -377,6 +377,8 @@ def publish_snapshot(
     prefix: str,
     graph: Path,
     manifest_path: Path,
+    *,
+    content_addressed: bool = False,
 ) -> dict[str, Any]:
     prefix = _prefix(prefix)
     verify_checksum(graph)
@@ -405,7 +407,10 @@ def publish_snapshot(
     files = manifest.get("files")
     if not isinstance(files, dict):
         raise GraphError("snapshot manifest files are invalid")
+    manifest_sha256 = sha256_file(manifest_path)
     root = f"{prefix}/snapshots/{repository_sha}"
+    if content_addressed:
+        root = f"{root}/m-{manifest_sha256}"
     _validate_file_record(files.get("graph.sqlite.sha256"), sidecar, "checksum sidecar")
     if manifest["schema_version"] == 1:
         _validate_file_record(files.get("graph.sqlite"), graph, "graph")
@@ -443,7 +448,7 @@ def publish_snapshot(
             "data_through": manifest["data_through"],
             "manifest_bytes": manifest_path.stat().st_size,
             "manifest_key": f"{root}/manifest.json",
-            "manifest_sha256": sha256_file(manifest_path),
+            "manifest_sha256": manifest_sha256,
             "repository_sha": repository_sha,
         }
         index_path = directory / "index.json"
@@ -569,10 +574,20 @@ def fetch_snapshot(
         if not index["snapshots"]:
             raise GraphError("snapshot index does not exist")
         entry = select_snapshot(index, repo, base, max_age_days=max_age_days)
-        expected_manifest_key = (
+        manifest_sha256 = str(entry.get("manifest_sha256", ""))
+        if not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256):
+            raise GraphError("snapshot index manifest checksum is invalid")
+        legacy_manifest_key = (
             f"{prefix}/snapshots/{entry['repository_sha']}/manifest.json"
         )
-        if entry.get("manifest_key") != expected_manifest_key:
+        content_addressed_manifest_key = (
+            f"{prefix}/snapshots/{entry['repository_sha']}"
+            f"/m-{manifest_sha256}/manifest.json"
+        )
+        if entry.get("manifest_key") not in {
+            legacy_manifest_key,
+            content_addressed_manifest_key,
+        }:
             raise GraphError("snapshot index manifest key is invalid")
         manifest_path = directory / "manifest.json"
         manifest_head = store.head(entry["manifest_key"])
