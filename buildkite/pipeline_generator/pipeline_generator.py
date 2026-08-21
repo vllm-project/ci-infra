@@ -1077,7 +1077,7 @@ def create_published_graph_promotion_group_step(
         f"assert result['source']['manifest_key']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_KEY!r}; "
         f"assert result['source']['manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256!r}; "
         f"assert result['source']['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}; "
-        f"assert result['snapshot']['manifest_key']=={(PUBLISHED_GRAPH_PRODUCTION_PREFIX + '/snapshots/' + RECOVERY_IMAGE_COMMIT + '/manifest.json')!r}; "
+        f"assert result['snapshot']['manifest_key']=={(PUBLISHED_GRAPH_PRODUCTION_PREFIX + '/snapshots/' + RECOVERY_IMAGE_COMMIT + '/m-' + PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256 + '/manifest.json')!r}; "
         "assert result['snapshot']==result['readback']; "
         f"assert result['snapshot']['manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256!r}; "
         f"assert result['snapshot']['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}; "

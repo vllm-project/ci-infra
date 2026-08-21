@@ -712,6 +712,13 @@ def test_published_graph_promotion_renders_one_pinned_production_step(
     assert pipeline_module.PUBLISHED_GRAPH_PRODUCTION_PREFIX in command
     assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256 in command
     assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256 in command
+    expected_manifest_key = (
+        f"{pipeline_module.PUBLISHED_GRAPH_PRODUCTION_PREFIX}/snapshots/"
+        f"{pipeline_module.RECOVERY_IMAGE_COMMIT}/m-"
+        f"{pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256}/"
+        "manifest.json"
+    )
+    assert expected_manifest_key in unquoted_command
     assert "len(healthy)==85" in unquoted_command
     assert "len(missing)==4" in unquoted_command
     assert "len(unhealthy)==32" in unquoted_command
