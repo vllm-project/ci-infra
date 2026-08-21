@@ -112,7 +112,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                   - name: devshm
                     emptyDir:
                       medium: Memory
-                      sizeLimit: 16Gi
+                      sizeLimit: 32Gi
                   - name: vllm-workspace
                     emptyDir: {}
 {%- endmacro %}
@@ -173,11 +173,32 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           TERM: "xterm-256color"
           VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+          {% if rocm_stable_image_promotion == "1" %}
+          IMAGE_TAG: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
+          VLLM_CI_SMOKE_IMAGE: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
+          {% else %}
           IMAGE_TAG: "{{ amd_ci_image() | safe }}"
+          {% endif %}
           REMOTE_VLLM: "0"
 {{ amd_infra_retry('        ', true) }}
         agents:
           queue: amd-cpu
+
+      {% if rocm_stable_image_promotion == "1" %}
+      - label: "AMD: :docker: promote stable ROCm images"
+        depends_on: "image-build-amd"
+        soft_fail: false
+        commands:
+          - bash .buildkite/scripts/rocm/promote-stable-images.sh
+        key: "promote-stable-rocm-images-amd"
+        if: build.branch == pipeline.default_branch && build.pull_request.id == null
+        concurrency: 1
+        concurrency_group: "vllm/rocm/stable-image-promotion"
+        timeout_in_minutes: 30
+{{ amd_infra_retry('        ', true) }}
+        agents:
+          queue: amd-cpu
+      {% endif %}
 
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
@@ -269,11 +290,17 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           HF_HUB_ETAG_TIMEOUT: "60"
           PYTORCH_ROCM_ARCH: ""
           {% else %}
-          # DinD: hook warm-up uses stable ci_base; docker run uses fallback image if needed.
+          # DinD: use the build-scoped handoff only when the checkout promotes it.
           DOCKER_BUILDKIT: "1"
+          {% if rocm_stable_image_promotion == "1" %}
+          DOCKER_IMAGE_NAME: "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
+          VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID"
+          VLLM_CI_FALLBACK_IMAGE: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
+          {% else %}
           DOCKER_IMAGE_NAME: "rocm/vllm-dev:ci_base"
           VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
           VLLM_CI_FALLBACK_IMAGE: "{{ amd_ci_image() | safe }}"
+          {% endif %}
           {% endif %}
           VLLM_CI_USE_ARTIFACTS: "1"
           VLLM_CI_ARTIFACT_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
