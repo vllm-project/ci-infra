@@ -12,6 +12,7 @@ from test_selection.graph import GraphError, SCHEMA, write_checksum
 from test_selection.snapshot import (
     build_snapshot_manifest,
     fetch_snapshot,
+    promote_snapshot,
     publish_built_graph,
     publish_snapshot,
     select_snapshot,
@@ -25,6 +26,7 @@ NOW = datetime.now(timezone.utc)
 class MemoryStore:
     def __init__(self):
         self.objects = {}
+        self.upload_calls = []
 
     def head(self, key):
         item = self.objects.get(key)
@@ -41,6 +43,13 @@ class MemoryStore:
         destination.write_bytes(self.objects[key]["data"])
 
     def upload(self, key, source, *, sha256, if_match=None, if_none_match=False):
+        self.upload_calls.append(
+            {
+                "if_match": if_match,
+                "if_none_match": if_none_match,
+                "key": key,
+            }
+        )
         existing = self.objects.get(key)
         if if_none_match and existing is not None:
             raise GraphError("precondition failed")
@@ -141,6 +150,103 @@ def test_publish_built_graph_constructs_and_publishes_manifest(tmp_path: Path):
     assert manifest["collector_sha256"] == "c" * 64
     assert manifest["collector_sha256s"] == ["c" * 64]
     assert "test-selection/vllm/canary/index.json" in store.objects
+
+
+def test_promote_snapshot_pins_source_and_cas_updates_production(tmp_path: Path):
+    repo, repository_sha = _repo(tmp_path)
+    graph = _graph(tmp_path / "graph.sqlite", repository_sha)
+    store = MemoryStore()
+    source_prefix = "test-selection/vllm/canary/verified"
+    source = publish_built_graph(graph, store, source_prefix)
+
+    old_graph = _graph(tmp_path / "old.sqlite", "d" * 40)
+    old_manifest = tmp_path / "old-manifest.json"
+    build_snapshot_manifest(old_graph, old_manifest)
+    publish_snapshot(store, "test-selection/vllm", old_graph, old_manifest)
+
+    result = promote_snapshot(
+        store,
+        source_prefix,
+        repo,
+        repository_sha,
+        source["snapshot"]["manifest_sha256"],
+        snapshot.sha256_file(graph),
+    )
+
+    assert result["source"] == source["snapshot"]
+    assert result["snapshot"] == result["readback"]
+    assert result["destination_prefix"] == "test-selection/vllm"
+    assert result["graph_sha256"] == snapshot.sha256_file(graph)
+    destination_root = f"test-selection/vllm/snapshots/{repository_sha}"
+    assert (
+        store.objects[f"{destination_root}/graph.sqlite.gz"]["data"]
+        == (
+            store.objects[
+                f"{source_prefix}/snapshots/{repository_sha}/graph.sqlite.gz"
+            ]["data"]
+        )
+    )
+    production_index_uploads = [
+        call
+        for call in store.upload_calls
+        if call["key"] == "test-selection/vllm/index.json"
+    ]
+    assert production_index_uploads[-1]["if_match"]
+    assert production_index_uploads[-1]["if_none_match"] is False
+
+
+@pytest.mark.parametrize(
+    ("source_prefix", "manifest_sha256", "graph_sha256", "error"),
+    [
+        (
+            "test-selection/vllm/staging/verified",
+            None,
+            None,
+            "canary source",
+        ),
+        (
+            "test-selection/vllm/canary/verified",
+            "0" * 64,
+            None,
+            "source manifest checksum",
+        ),
+        (
+            "test-selection/vllm/canary/verified",
+            None,
+            "0" * 64,
+            "source graph checksum",
+        ),
+    ],
+)
+def test_promote_snapshot_fails_before_production_write(
+    tmp_path: Path,
+    source_prefix: str,
+    manifest_sha256: str | None,
+    graph_sha256: str | None,
+    error: str,
+):
+    repo, repository_sha = _repo(tmp_path)
+    graph = _graph(tmp_path / "graph.sqlite", repository_sha)
+    store = MemoryStore()
+    canonical_source = "test-selection/vllm/canary/verified"
+    source = publish_built_graph(graph, store, canonical_source)
+    before = set(store.objects)
+
+    with pytest.raises(GraphError, match=error):
+        promote_snapshot(
+            store,
+            source_prefix,
+            repo,
+            repository_sha,
+            manifest_sha256 or source["snapshot"]["manifest_sha256"],
+            graph_sha256 or snapshot.sha256_file(graph),
+        )
+
+    assert set(store.objects) == before
+    assert not any(
+        call["key"].startswith("test-selection/vllm/snapshots/")
+        for call in store.upload_calls
+    )
 
 
 @pytest.mark.parametrize(

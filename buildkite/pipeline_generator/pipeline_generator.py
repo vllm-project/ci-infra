@@ -42,6 +42,17 @@ class PipelineGenerator:
     def generate(self):
         global_config = get_global_config()
 
+        if _published_graph_promotion_requested():
+            promotion_step = create_published_graph_promotion_group_step(global_config)
+            with open(self.output_file_path, "w") as output:
+                yaml.dump(
+                    {"steps": [promotion_step.dict(exclude_none=True)]},
+                    output,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+            return
+
         if _published_graph_overlay_verification_requested():
             verification_step = create_published_graph_overlay_verification_group_step(
                 global_config
@@ -200,6 +211,7 @@ REPUBLISH_SOURCE_BUILD_ID_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD_ID"
 REPUBLISH_TRIALS_ENV = "VLLM_CI_REPUBLISH_TRIALS_JSON"
 PUBLISHED_GRAPH_OVERLAY_ENV = "VLLM_CI_PUBLISHED_GRAPH_OVERLAY"
 PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV = "VLLM_CI_PUBLISHED_GRAPH_OVERLAY_VERIFY_ONLY"
+PUBLISHED_GRAPH_PROMOTE_ENV = "VLLM_CI_PUBLISHED_GRAPH_PROMOTE"
 PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_ENV = (
     "VLLM_CI_PUBLISHED_GRAPH_OVERLAY_BASE_INVENTORY_B64"
 )
@@ -258,6 +270,7 @@ PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256 = (
 PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256 = (
     "7a48d66419b246e2847cb95c8e226070c675cb19e8787cd47be2ef9729018a15"
 )
+PUBLISHED_GRAPH_PRODUCTION_PREFIX = "test-selection/vllm"
 RECOVERY_TRACE_TIMEOUTS = {
     "batch-invariance-b200": 120,
     "distributed-compile-unit-tests-2xh100": 120,
@@ -611,6 +624,10 @@ def _published_graph_overlay_requested() -> bool:
 
 def _published_graph_overlay_verification_requested() -> bool:
     return os.getenv(PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV) is not None
+
+
+def _published_graph_promotion_requested() -> bool:
+    return os.getenv(PUBLISHED_GRAPH_PROMOTE_ENV) is not None
 
 
 def _recovery_image_copy_requested() -> bool:
@@ -985,6 +1002,137 @@ def create_published_graph_overlay_verification_group_step(
                 commands=["\n".join(command)],
                 key="test-selection-published-overlay-readback",
                 label=":mag: Verify published graph overlay",
+                timeout_in_minutes=60,
+            )
+        ],
+    )
+
+
+def _published_graph_promotion_revision(global_config: dict) -> str:
+    if os.getenv(PUBLISHED_GRAPH_PROMOTE_ENV) != "1":
+        raise ValueError(f"{PUBLISHED_GRAPH_PROMOTE_ENV} must equal 1")
+    if (
+        _published_graph_overlay_requested()
+        or _recovery_image_copy_requested()
+        or _snapshot_republish_requested()
+        or global_config.get("only_step_keys") is not None
+    ):
+        raise ValueError(
+            "published graph promotion cannot be combined with another recovery mode"
+        )
+    required = {
+        "name": "vllm_ci",
+        "github_repo_name": "vllm-project/vllm",
+        "branch": RECOVERY_IMAGE_BRANCH,
+        "commit": RECOVERY_IMAGE_COMMIT,
+        "pull_request": "false",
+        "nightly": "1",
+        "trace_canary_branch": RECOVERY_IMAGE_BRANCH,
+        "trace_canary_commit": RECOVERY_IMAGE_COMMIT,
+        "trace_s3_bucket": PUBLISHED_GRAPH_OVERLAY_BUCKET,
+        "trace_s3_prefix": PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX,
+        "registries": RECOVERY_IMAGE_REGISTRY,
+    }
+    for field, expected in required.items():
+        if global_config.get(field) != expected:
+            raise ValueError(f"published graph promotion requires {field}={expected!r}")
+    repositories = global_config.get("repositories") or {}
+    if (
+        repositories.get("main") != RECOVERY_IMAGE_SOURCE_REPO
+        or repositories.get("premerge") != RECOVERY_IMAGE_DESTINATION_REPO
+    ):
+        raise ValueError("published graph promotion repository mapping is not trusted")
+    requested_branch = os.getenv("VLLM_CI_BRANCH", "")
+    requested_revision = os.getenv("VLLM_CI_REVISION", "")
+    revision = _ci_infra_revision()
+    if not re.fullmatch(r"[0-9a-f]{40}", requested_branch) or not re.fullmatch(
+        r"[0-9a-f]{40}", requested_revision
+    ):
+        raise ValueError(
+            "published graph promotion requires exact VLLM_CI_BRANCH and "
+            "VLLM_CI_REVISION SHAs"
+        )
+    if requested_branch != requested_revision or requested_revision != revision:
+        raise ValueError("published graph promotion generator revision does not match")
+    return revision
+
+
+def create_published_graph_promotion_group_step(
+    global_config: dict,
+) -> BuildkiteGroupStep:
+    """Render the one-time exact canary-to-production snapshot promotion."""
+
+    revision = _published_graph_promotion_revision(global_config)
+    validation = shlex.quote(
+        "import json,sys; "
+        "result=json.load(open(sys.argv[1])); "
+        "metadata=result['metadata']; "
+        "healthy=set(metadata['healthy_jobs']); "
+        "missing=set(metadata['missing_jobs']); "
+        "unhealthy=set(metadata['unhealthy_jobs']); "
+        f"assert result['source_prefix']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX!r}; "
+        f"assert result['destination_prefix']=={PUBLISHED_GRAPH_PRODUCTION_PREFIX!r}; "
+        f"assert result['manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256!r}; "
+        f"assert result['graph_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256!r}; "
+        f"assert result['source']['manifest_key']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_KEY!r}; "
+        f"assert result['source']['manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256!r}; "
+        f"assert result['source']['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}; "
+        f"assert result['snapshot']['manifest_key']=={(PUBLISHED_GRAPH_PRODUCTION_PREFIX + '/snapshots/' + RECOVERY_IMAGE_COMMIT + '/manifest.json')!r}; "
+        "assert result['snapshot']==result['readback']; "
+        f"assert result['snapshot']['manifest_sha256']=={PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256!r}; "
+        f"assert result['snapshot']['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}; "
+        f"assert metadata['repository_sha']=={RECOVERY_IMAGE_COMMIT!r}; "
+        "assert len(healthy)==85; assert len(missing)==4; assert len(unhealthy)==32; "
+        "assert not (healthy&missing or healthy&unhealthy or missing&unhealthy); "
+        "assert healthy|missing|unhealthy==set(metadata['expected_jobs']); "
+        f"assert set({PUBLISHED_GRAPH_OVERLAY_REPLACEMENTS!r})<=healthy; "
+        f"assert set({PUBLISHED_GRAPH_OVERLAY_RETRY_MISSING!r})<=missing"
+    )
+    command = [
+        "set -euo pipefail",
+        (
+            "echo "
+            + shlex.quote(
+                "+++ :warning: PRODUCTION snapshot promotion authorized from "
+                f"{PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX}"
+            )
+        ),
+        f'test "$$BUILDKITE_BRANCH" = {shlex.quote(RECOVERY_IMAGE_BRANCH)}',
+        f'test "$$BUILDKITE_COMMIT" = {shlex.quote(RECOVERY_IMAGE_COMMIT)}',
+        'D="$$(mktemp -d)"',
+        "trap 'rm -rf \"$$D\"' EXIT",
+        'mkdir -p "$$D/results"',
+        'python3 -m venv "$$D/venv"',
+        (
+            '"$$D/venv/bin/pip" install --quiet '
+            '"git+https://github.com/vllm-project/ci-infra.git@'
+            f'{revision}#subdirectory=buildkite/pipeline_generator"'
+        ),
+        (
+            '"$$D/venv/bin/vllm-test-selection" promote-snapshot '
+            f"--bucket {PUBLISHED_GRAPH_OVERLAY_BUCKET} "
+            f"--source-prefix {PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX} "
+            f'--repo "$$PWD" --repository-sha {RECOVERY_IMAGE_COMMIT} '
+            f"--manifest-sha256 {PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256} "
+            f"--graph-sha256 {PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256} "
+            '--max-snapshot-age-days 7 > "$$D/results/promotion.json"'
+        ),
+        '"$$D/venv/bin/python" -m json.tool "$$D/results/promotion.json" >/dev/null',
+        'cat "$$D/results/promotion.json"',
+        (f'"$$D/venv/bin/python" -c {validation} "$$D/results/promotion.json"'),
+        f"printf '%s\n' {revision} > \"$$D/results/runner-revision.txt\"",
+        'buildkite-agent artifact upload "$$D/results/*"',
+    ]
+    return BuildkiteGroupStep(
+        group=":warning: PRODUCTION test-selection snapshot promotion",
+        steps=[
+            BuildkiteCommandStep(
+                agents={"queue": AgentQueue.CPU_POSTMERGE_US_EAST_1.value},
+                commands=["\n".join(command)],
+                key="test-selection-promote-published-overlay",
+                label=":warning: Promote verified 85-job snapshot to production",
+                priority=0,
+                retry={"automatic": [{"exit_status": -1, "limit": 1}]},
                 timeout_in_minutes=60,
             )
         ],

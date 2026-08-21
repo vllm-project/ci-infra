@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from test_selection.graph import (
 
 S3_SINGLE_PUT_MAX_BYTES = 5 * 1024**3
 SNAPSHOT_MANIFEST_SCHEMA_VERSION = 2
+PRODUCTION_SNAPSHOT_PREFIX = "test-selection/vllm"
 
 
 class ObjectStore(Protocol):
@@ -494,7 +496,8 @@ def publish_snapshot(
             len(published_index["snapshots"]),
             entry["manifest_key"],
             entry["manifest_sha256"],
-        )
+        ),
+        file=sys.stderr,
     )
     return entry
 
@@ -556,6 +559,7 @@ def fetch_snapshot(
     output: Path,
     *,
     max_age_days: int = 11,
+    expected_repository_sha: Optional[str] = None,
 ) -> dict[str, Any]:
     prefix = _prefix(prefix)
     output = output.resolve()
@@ -568,7 +572,28 @@ def fetch_snapshot(
         index, _etag = _read_index(store, index_key, directory)
         if not index["snapshots"]:
             raise GraphError("snapshot index does not exist")
-        entry = select_snapshot(index, repo, base, max_age_days=max_age_days)
+        if expected_repository_sha is None:
+            entry = select_snapshot(index, repo, base, max_age_days=max_age_days)
+        else:
+            if not re.fullmatch(r"[0-9a-f]{40}", expected_repository_sha):
+                raise GraphError("expected snapshot repository SHA is invalid")
+            matches = [
+                row
+                for row in index["snapshots"]
+                if isinstance(row, dict)
+                and row.get("repository_sha") == expected_repository_sha
+            ]
+            if len(matches) != 1:
+                raise GraphError("exact test-selection snapshot is not available")
+            entry = matches[0]
+            data_through = _timestamp(entry.get("data_through"))
+            now = datetime.now(timezone.utc)
+            if data_through > now + timedelta(minutes=5):
+                raise GraphError("exact snapshot evidence watermark is in the future")
+            if max_age_days < 1:
+                raise GraphError("snapshot maximum age must be at least one day")
+            if now - data_through > timedelta(days=max_age_days):
+                raise GraphError("exact test-selection snapshot is stale")
         expected_manifest_key = (
             f"{prefix}/snapshots/{entry['repository_sha']}/manifest.json"
         )
@@ -704,3 +729,105 @@ def publish_built_graph(
         build_snapshot_manifest(graph, manifest_path)
         entry = publish_snapshot(store, prefix, graph, manifest_path)
     return {"metadata": metadata, "snapshot": entry}
+
+
+def promote_snapshot(
+    store: ObjectStore,
+    source_prefix: str,
+    repo: Path,
+    repository_sha: str,
+    expected_manifest_sha256: str,
+    expected_graph_sha256: str,
+    *,
+    max_age_days: int = 7,
+) -> dict[str, Any]:
+    """Promote one exact canary snapshot into the production index.
+
+    The destination is deliberately not caller-configurable. All source bytes
+    and their deterministic manifest are verified before the first production
+    write; :func:`publish_snapshot` then provides immutable-object guards and
+    compare-and-swap index promotion.
+    """
+
+    source_prefix = _prefix(source_prefix)
+    if not source_prefix.startswith(f"{PRODUCTION_SNAPSHOT_PREFIX}/canary/"):
+        raise GraphError(
+            "snapshot promotion requires an isolated production canary source"
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", repository_sha):
+        raise GraphError("snapshot promotion repository SHA is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha256):
+        raise GraphError("snapshot promotion manifest checksum is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_graph_sha256):
+        raise GraphError("snapshot promotion graph checksum is invalid")
+
+    with tempfile.TemporaryDirectory(prefix="snapshot-promote-") as directory_name:
+        directory = Path(directory_name)
+        source_graph = directory / "source.sqlite"
+        source_entry = fetch_snapshot(
+            store,
+            source_prefix,
+            repo,
+            repository_sha,
+            source_graph,
+            max_age_days=max_age_days,
+            expected_repository_sha=repository_sha,
+        )
+        expected_source_manifest_key = (
+            f"{source_prefix}/snapshots/{repository_sha}/manifest.json"
+        )
+        if source_entry.get("manifest_key") != expected_source_manifest_key:
+            raise GraphError("snapshot promotion source manifest key mismatch")
+        if source_entry.get("manifest_sha256") != expected_manifest_sha256:
+            raise GraphError("snapshot promotion source manifest checksum mismatch")
+        if sha256_file(source_graph) != expected_graph_sha256:
+            raise GraphError("snapshot promotion source graph checksum mismatch")
+
+        manifest_path = directory / "manifest.json"
+        metadata = graph_metadata(source_graph)
+        build_snapshot_manifest(source_graph, manifest_path)
+        if sha256_file(manifest_path) != expected_manifest_sha256:
+            raise GraphError(
+                "snapshot promotion deterministic manifest checksum mismatch"
+            )
+
+        published = publish_snapshot(
+            store,
+            PRODUCTION_SNAPSHOT_PREFIX,
+            source_graph,
+            manifest_path,
+        )
+        readback_graph = directory / "readback.sqlite"
+        readback = fetch_snapshot(
+            store,
+            PRODUCTION_SNAPSHOT_PREFIX,
+            repo,
+            repository_sha,
+            readback_graph,
+            max_age_days=max_age_days,
+            expected_repository_sha=repository_sha,
+        )
+        expected_destination_manifest_key = (
+            f"{PRODUCTION_SNAPSHOT_PREFIX}/snapshots/{repository_sha}/manifest.json"
+        )
+        if published != readback:
+            raise GraphError("promoted snapshot index read-back mismatch")
+        if readback.get("manifest_key") != expected_destination_manifest_key:
+            raise GraphError("promoted snapshot manifest key mismatch")
+        if readback.get("manifest_sha256") != expected_manifest_sha256:
+            raise GraphError("promoted snapshot manifest checksum mismatch")
+        if sha256_file(readback_graph) != expected_graph_sha256:
+            raise GraphError("promoted snapshot graph checksum mismatch")
+        if readback_graph.read_bytes() != source_graph.read_bytes():
+            raise GraphError("promoted snapshot graph read-back differs from source")
+
+    return {
+        "destination_prefix": PRODUCTION_SNAPSHOT_PREFIX,
+        "graph_sha256": expected_graph_sha256,
+        "manifest_sha256": expected_manifest_sha256,
+        "metadata": metadata,
+        "readback": readback,
+        "snapshot": published,
+        "source": source_entry,
+        "source_prefix": source_prefix,
+    }

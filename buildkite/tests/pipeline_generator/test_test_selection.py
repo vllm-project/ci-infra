@@ -16,6 +16,7 @@ from pipeline_generator import (
     PUBLISHED_GRAPH_OVERLAY_ENV,
     PUBLISHED_GRAPH_OVERLAY_RETRY_INVENTORY_ENV,
     PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV,
+    PUBLISHED_GRAPH_PROMOTE_ENV,
     RECOVERY_IMAGE_AMD64_DIGEST,
     RECOVERY_IMAGE_ARM64_DIGEST,
     RECOVERY_IMAGE_BRANCH,
@@ -28,6 +29,7 @@ from pipeline_generator import (
     configure_test_tracing,
     create_published_graph_overlay_group_step,
     create_published_graph_overlay_verification_group_step,
+    create_published_graph_promotion_group_step,
     create_recovery_image_copy_group_step,
     create_snapshot_republish_group_step,
     create_snapshot_group_step,
@@ -673,6 +675,95 @@ def test_published_graph_overlay_verifier_is_read_only_and_pinned(
     monkeypatch.setenv(PUBLISHED_GRAPH_OVERLAY_VERIFY_ENV, "0")
     with pytest.raises(ValueError, match="must equal 1"):
         create_published_graph_overlay_verification_group_step(config)
+
+
+def test_published_graph_promotion_renders_one_pinned_production_step(
+    fake_global_config, monkeypatch, tmp_path
+):
+    config = _published_overlay_config(fake_global_config)
+    monkeypatch.setenv(PUBLISHED_GRAPH_PROMOTE_ENV, "1")
+    monkeypatch.setenv("VLLM_CI_BRANCH", "f" * 40)
+    monkeypatch.setenv("VLLM_CI_REVISION", "f" * 40)
+    monkeypatch.setattr(pipeline_module, "_ci_infra_revision", lambda: "f" * 40)
+    monkeypatch.setattr(pipeline_module, "get_global_config", lambda: config)
+    output = tmp_path / "pipeline.yaml"
+    generator = PipelineGenerator.__new__(PipelineGenerator)
+    generator.output_file_path = str(output)
+
+    generator.generate()
+
+    document = yaml.safe_load(output.read_text())
+    assert len(document["steps"]) == 1
+    group = document["steps"][0]
+    assert group["group"] == ":warning: PRODUCTION test-selection snapshot promotion"
+    assert len(group["steps"]) == 1
+    step = group["steps"][0]
+    assert step["key"] == "test-selection-promote-published-overlay"
+    assert step["agents"] == {"queue": "cpu_queue_postmerge_us_east_1"}
+    assert step["timeout_in_minutes"] == 60
+    assert step["retry"] == {"automatic": [{"exit_status": -1, "limit": 1}]}
+    command = step["commands"][0]
+    unquoted_command = command.replace("'\"'\"'", "'")
+    assert "promote-snapshot" in command
+    assert "publish-snapshot" not in command
+    assert "publish-graph" not in command
+    assert "artifact download" not in command
+    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_PREFIX in command
+    assert pipeline_module.PUBLISHED_GRAPH_PRODUCTION_PREFIX in command
+    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_MANIFEST_SHA256 in command
+    assert pipeline_module.PUBLISHED_GRAPH_OVERLAY_OUTPUT_GRAPH_SHA256 in command
+    assert "len(healthy)==85" in unquoted_command
+    assert "len(missing)==4" in unquoted_command
+    assert "len(unhealthy)==32" in unquoted_command
+    subprocess.run(
+        ["bash", "-n"],
+        input=command.replace("$$", "$"),
+        check=True,
+        text=True,
+    )
+
+
+def test_published_graph_promotion_rejects_drift_and_combined_modes(
+    fake_global_config, monkeypatch
+):
+    config = _published_overlay_config(fake_global_config)
+    monkeypatch.setenv(PUBLISHED_GRAPH_PROMOTE_ENV, "1")
+    monkeypatch.setenv("VLLM_CI_BRANCH", "f" * 40)
+    monkeypatch.setenv("VLLM_CI_REVISION", "f" * 40)
+    monkeypatch.setattr(pipeline_module, "_ci_infra_revision", lambda: "f" * 40)
+
+    for field, value in (
+        ("branch", "main"),
+        ("commit", "a" * 40),
+        ("pull_request", "123"),
+        ("nightly", "0"),
+        ("trace_canary_branch", None),
+        ("trace_canary_commit", None),
+        ("trace_s3_bucket", "wrong-bucket"),
+        ("trace_s3_prefix", "test-selection/vllm"),
+        ("registries", "example.invalid"),
+    ):
+        with pytest.raises(ValueError, match="published graph promotion requires"):
+            create_published_graph_promotion_group_step({**config, field: value})
+
+    monkeypatch.setenv(PUBLISHED_GRAPH_PROMOTE_ENV, "yes")
+    with pytest.raises(ValueError, match="must equal 1"):
+        create_published_graph_promotion_group_step(config)
+    monkeypatch.setenv(PUBLISHED_GRAPH_PROMOTE_ENV, "1")
+
+    monkeypatch.setenv("VLLM_CI_REVISION", "e" * 40)
+    with pytest.raises(ValueError, match="generator revision does not match"):
+        create_published_graph_promotion_group_step(config)
+    monkeypatch.setenv("VLLM_CI_REVISION", "f" * 40)
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        create_published_graph_promotion_group_step(
+            {**config, "only_step_keys": frozenset({"image-build"})}
+        )
+
+    monkeypatch.setenv(RECOVERY_IMAGE_COPY_ENV, "1")
+    with pytest.raises(ValueError, match="cannot be combined"):
+        create_published_graph_promotion_group_step(config)
 
 
 def test_test_area_pytest_jobs_are_enrolled_without_yaml_trace_policy():
