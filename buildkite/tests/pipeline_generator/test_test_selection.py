@@ -764,6 +764,71 @@ def test_automatic_nightly_preserves_evidence_based_fleet_carve_outs():
     assert steps[1].trace_represented_job_key is None
 
 
+def test_fork_cuda_policy_preserves_python_evidence_for_exact_rows():
+    keys = [
+        "basic-correctness",
+        "distributed-tests-2xb200",
+        "distributed-tests-4xa100",
+        "kernels-b200",
+        "kernels-deepgemm-test-h100",
+        "kernels-fusedmoe-layer-test-2-b200s",
+        "language-models-tests-hybrid",
+        "multi-modal-processor",
+        "pytorch-compilation-unit-tests",
+        "pytorch-fullgraph-test",
+        "spec-decode-draft-model-nightly-b200",
+        "spec-decode-eagle-nightly-b200",
+        "spec-decode-speculators-mtp-nightly-b200",
+        "speculators-correctness",
+        "v1-sample-logits",
+    ]
+    steps = [
+        Step(
+            label=key,
+            key=key,
+            commands=["pytest tests/unit"],
+            device=DeviceType.H200,
+            parallelism=2 if key == "language-models-tests-hybrid" else None,
+            timeout_in_minutes=(
+                None
+                if key in {"distributed-tests-2xb200", "distributed-tests-4xa100"}
+                else 60
+            ),
+        )
+        for key in keys
+    ]
+    steps.append(
+        Step(
+            label="Unqualified NVIDIA job",
+            key="gpu-tests",
+            commands=["pytest tests/kernels"],
+            device=DeviceType.H200,
+            timeout_in_minutes=60,
+        )
+    )
+
+    _steps, inventory = configure_test_tracing(
+        steps,
+        {step.key for step in steps},
+        "a" * 40,
+        "b" * 40,
+        "c" * 64,
+    )
+
+    assert inventory["always_run"] == []
+    rows = {row["key"]: row for row in inventory["jobs"]}
+    assert set(rows) == {*keys, "gpu-tests"}
+    assert all(rows[key]["mode"] == "python-only" for key in keys)
+    assert rows["language-models-tests-hybrid"]["expected_shards"] == 2
+    assert rows["gpu-tests"]["mode"] == "kernel-set"
+    by_key = {step.key: step for step in steps}
+    assert by_key["distributed-tests-2xb200"].timeout_in_minutes == 42
+    assert by_key["distributed-tests-4xa100"].timeout_in_minutes == 24
+    assert by_key["basic-correctness"].timeout_in_minutes == 90
+    assert all(not by_key[key].trace_gpu for key in keys)
+    assert by_key["gpu-tests"].trace_gpu is True
+
+
 def test_trace_wrapper_preserves_the_original_command_list_as_one_script(
     fake_global_config,
 ):

@@ -280,6 +280,31 @@ _FLEET_CPU_OVERHEAD_ALWAYS_RUN = frozenset(
     }
 )
 
+# Full-fleet canary #84585 found these jobs fail only when the NVIDIA
+# kernel-set collector initializes CUDA/CUPTI before their forked workers.
+# Build #84375 completed every exact key in python-only mode. Preserve each
+# current job's command/shard shape and Python line evidence while deliberately
+# foregoing kernel evidence until subprocess-safe kernel collection is proven.
+# The two explicit budgets cover jobs without a source timeout; all other rows
+# keep the normal evidence-based timeout expansion below.
+_FLEET_PYTHON_ONLY_TRACE_POLICY: dict[str, Optional[int]] = {
+    "basic-correctness": None,
+    "distributed-tests-2xb200": 42,
+    "distributed-tests-4xa100": 24,
+    "kernels-b200": None,
+    "kernels-deepgemm-test-h100": None,
+    "kernels-fusedmoe-layer-test-2-b200s": None,
+    "language-models-tests-hybrid": None,
+    "multi-modal-processor": None,
+    "pytorch-compilation-unit-tests": None,
+    "pytorch-fullgraph-test": None,
+    "spec-decode-draft-model-nightly-b200": None,
+    "spec-decode-eagle-nightly-b200": None,
+    "spec-decode-speculators-mtp-nightly-b200": None,
+    "speculators-correctness": None,
+    "v1-sample-logits": None,
+}
+
 # Full-fleet canaries #84375 and #84580 proved these exact jobs incompatible
 # with per-test Python dynamic contexts. The latter found the exact forked-CUDA
 # root in every listed newly enrolled job's trace-wrapped log; subprocess/server
@@ -460,14 +485,18 @@ def configure_test_tracing(
         if rejection:
             rejected[step_key] = rejection
             continue
+        force_python_only = step_key in _FLEET_PYTHON_ONLY_TRACE_POLICY
         timeout = step.timeout_in_minutes
         if timeout_overrides and step_key in timeout_overrides:
             timeout = timeout_overrides[step_key]
         elif timeout is not None:
             timeout = max(timeout + 15, ceil(timeout * 1.5))
+        elif force_python_only:
+            timeout = _FLEET_PYTHON_ONLY_TRACE_POLICY[step_key]
         mode = (
             "kernel-set"
-            if step.device in _NVIDIA_TRACE_DEVICES
+            if not force_python_only
+            and step.device in _NVIDIA_TRACE_DEVICES
             and not is_amd_gpu_device(step.device)
             else "python-only"
         )
