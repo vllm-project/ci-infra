@@ -12,6 +12,22 @@ set -eu -o pipefail
 echo "=== Installing BuildKit as standalone systemd service ==="
 
 # -----------------------------------------------------------------------------
+# Install network diagnostic tools
+# ethtool exposes the ENA driver's allowance counters
+# (bw_in/out, pps, conntrack, linklocal *_allowance_exceeded) that are otherwise
+# invisible. Their absence blocked root-causing a CI image-build network
+# incident, so bake them into the AMI. conntrack-tools and sysstat round out
+# on-box network/resource diagnosis.
+# -----------------------------------------------------------------------------
+echo "=== Installing network diagnostic tools (ethtool, conntrack-tools, sysstat) ==="
+if command -v dnf >/dev/null 2>&1; then
+  sudo dnf install -y ethtool conntrack-tools sysstat
+else
+  sudo yum install -y ethtool conntrack-tools sysstat
+fi
+ethtool --version
+
+# -----------------------------------------------------------------------------
 # Install BuildKit binary
 # Extract buildkitd from the official moby/buildkit image
 # -----------------------------------------------------------------------------
