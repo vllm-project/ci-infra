@@ -213,14 +213,16 @@ locals {
       BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "gpu_4_queue"
       InstanceTypes                        = "g6.12xlarge" # 4 Nvidia L4 GPUs, 192GB memory
+      MinSize                              = 1
       MaxSize                              = 64
+      ScaleInIdlePeriod                    = 1200
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       ImageId                              = "ami-040f1b73b7a7c7453" # Custom AMI with Nvidia driver 570.133.20
       BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/bootstrap.sh"
-      # Recycle each GPU instance after a single job completes.
-      BuildkiteTerminateInstanceAfterJob   = true
+      # Keep agents between jobs; recycle only after 20 minutes idle.
+      BuildkiteTerminateInstanceAfterJob   = false
     }
   }
 
