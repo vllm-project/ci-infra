@@ -46,6 +46,18 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
     "startup-script" = <<-STARTUP_SCRIPT
       #!/bin/bash
 
+      # Keep the agent offline until provisioning finishes (unmasked at the
+      # end). This script re-runs on every boot and the unit is enabled from
+      # the previous run, so systemd starts the agent seconds into boot. A
+      # `stop` is not enough: it waits for an in-flight job rather than
+      # preventing it, and the agent's postinst restarts the unit on upgrade.
+      # Masking blocks both.
+      systemctl mask buildkite-agent 2>/dev/null || true
+      # Any job picked up since boot is running against a half-provisioned host.
+      timeout 30 systemctl stop buildkite-agent 2>/dev/null \
+        || systemctl kill -s SIGKILL buildkite-agent 2>/dev/null \
+        || true
+
       apt-get update
       apt-get install -y curl build-essential jq git python3 python3-pip
 
@@ -58,9 +70,6 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
       apt-get update
       apt-get install -y buildkite-agent
-     
-      # Force stop the buildkite-agent and start at the end to avoid race condition
-      sudo systemctl stop buildkite-agent
 
       # ==========================================
       # Setup In-Memory GitHub App Authentication
@@ -158,6 +167,11 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
 
       # Add to /etc/fstab using UUID
       disk_uuid=$(blkid -s UUID -o value /dev/nvme0n2)
+      # An empty UUID= produces an fstab line that can never mount.
+      if [ -z "$disk_uuid" ]; then
+        echo "FATAL: no UUID on /dev/nvme0n2; leaving the agent masked." >&2
+        exit 1
+      fi
       if ! grep -q "/mnt/disks/persist" /etc/fstab; then
        echo "UUID=$disk_uuid /mnt/disks/persist ext4 defaults,discard 0 2" | sudo tee -a /etc/fstab
       fi
@@ -166,6 +180,22 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       if ! mountpoint -q /mnt/disks/persist; then
         sudo mount /mnt/disks/persist
       fi
+
+      # CI jobs bind-mount /mnt/disks/persist unconditionally, so without it
+      # this host would just drain the queue into failures. Bail, agent masked.
+      if ! mountpoint -q /mnt/disks/persist; then
+        echo "FATAL: /mnt/disks/persist is not mounted; leaving the agent masked." >&2
+        exit 1
+      fi
+
+      # Backstop for the mask: hold the agent until the disk is mounted,
+      # however it comes to be started.
+      sudo mkdir -p /etc/systemd/system/buildkite-agent.service.d
+      cat <<'DROPIN' | sudo tee /etc/systemd/system/buildkite-agent.service.d/10-persist-disk.conf > /dev/null
+      [Unit]
+      RequiresMountsFor=/mnt/disks/persist
+      DROPIN
+      sudo systemctl daemon-reload
 
       jq ". + {\"data-root\": \"/mnt/disks/persist\"}" /etc/docker/daemon.json > /tmp/daemon.json.tmp && mv /tmp/daemon.json.tmp /etc/docker/daemon.json
       systemctl stop docker
@@ -207,6 +237,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       # Force rotate once
       sudo logrotate -f /etc/logrotate.conf
 
+      systemctl unmask buildkite-agent
       systemctl enable buildkite-agent
       systemctl start buildkite-agent
     STARTUP_SCRIPT
