@@ -110,6 +110,8 @@ def _subprocess_health(
         return "subprocess_combine_failed"
     if checkout_state and not checkout_state.get("ok"):
         return "checkout_" + str(checkout_state.get("reason"))
+    if "status_after_error" in checkout_state:
+        return "checkout_status_failed_after"
     if checkout_state.get("dirty_after"):
         return "checkout_dirty_after"
     if not serve_markers:
@@ -669,9 +671,11 @@ def main() -> int:
                     text=True,
                     check=False,
                 )
-                checkout_state["dirty_after"] = (
-                    after.stdout.splitlines() if after.returncode == 0 else None
-                )
+                if after.returncode == 0:
+                    checkout_state["dirty_after"] = after.stdout.splitlines()
+                else:
+                    checkout_state["dirty_after"] = None
+                    checkout_state["status_after_error"] = after.stderr.strip()
             invocations_at_finish = (
                 _pytest_invocations_started(node_file) if args.command_base64 else 1
             )
@@ -699,8 +703,9 @@ def main() -> int:
         if state_path.is_file():
             subprocess_hook_state = json.loads(state_path.read_text("utf-8"))
         # Merge per-process parallel data files (serve workers) into the
-        # shard data file the pytest client appends to.
-        if coverage_file.exists() or list(output_dir.glob(".coverage.*")):
+        # shard data file the pytest client appends to. With no parallel
+        # files there is nothing to combine (and combine would exit 1).
+        if list(output_dir.glob(".coverage.*")):
             combine = subprocess.run(
                 [sys.executable, "-m", "coverage", "combine"],
                 cwd=output_dir,

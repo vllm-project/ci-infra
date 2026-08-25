@@ -119,6 +119,12 @@ def init_global_config(pipeline_config_path: str):
                 "trust tuple; refusing a mutable-tag build to claim pinned "
                 "evidence"
             )
+    if trace_canary_branch and not trace_image_digest:
+        raise ValueError(
+            f"canary tracing requires {TRACE_IMAGE_DIGEST_ENV_VAR} "
+            "(sha256:<64 lowercase hex>) so traced evidence provably pins "
+            "the image bytes; a mutable tag cannot carry that claim"
+        )
     config = GlobalConfig(
         name=pipeline_config["name"],
         github_repo_name=pipeline_config["github_repo_name"],

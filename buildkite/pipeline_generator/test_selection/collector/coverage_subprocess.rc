@@ -1,0 +1,15 @@
+# coverage.py configuration for CI test-selection subprocess capture.
+# Installed per traced command by ci_test_selection.subprocess_coverage.
+[run]
+# Per-process unique data file suffixes (hostname.pid.random); combined later.
+parallel = true
+# Flush on SIGTERM so harness teardown (pkill -TERM "vllm serve") does not
+# discard server-side evidence. SIGKILL can never flush.
+sigterm = true
+concurrency = thread,multiprocessing
+# Serve-side rows carry this static context; pytest client rows stack as
+# harness-subprocess|<nodeid>|<phase> when pytest-cov piggybacks on the
+# already-active coverage instance.
+context = harness-subprocess
+source =
+    vllm

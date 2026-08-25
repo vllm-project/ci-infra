@@ -494,9 +494,29 @@ for command in commands:
         # Buildkite retains artifacts from every automatic retry. Keep each
         # attempt in a distinct directory so a later download cannot mix an
         # old failed attempt with the final passing attempt.
+        if step.trace_subprocess_coverage:
+            # Subprocess mode proves the checkout stays pristine, so the
+            # collector output lives outside the repository it measures, in
+            # the per-step temporary collector directory. The upload runs
+            # from that directory so artifact paths stay layout-identical.
+            output_base = "$$TRACE_COLLECTOR_DIR/output"
+        else:
+            output_base = "trace-output"
         trace_root = (
-            f"trace-output/{step.trace_represented_job_key}/"
+            f"{output_base}/{step.trace_represented_job_key}/"
             "attempt-$${BUILDKITE_RETRY_COUNT:-0}"
+        )
+        attempt_relative = (
+            f"{step.trace_represented_job_key}/"
+            "attempt-$${BUILDKITE_RETRY_COUNT:-0}"
+        )
+        if step.parallelism:
+            attempt_relative += "/$$BUILDKITE_PARALLEL_JOB"
+        upload_command = (
+            '(cd "$$TRACE_COLLECTOR_DIR/output" && '
+            f'buildkite-agent artifact upload "{attempt_relative}/**/*")'
+            if step.trace_subprocess_coverage
+            else f'buildkite-agent artifact upload "{trace_root}/**/*"'
         )
         output_dir = (
             f"{trace_root}/$$BUILDKITE_PARALLEL_JOB" if step.parallelism else trace_root
@@ -548,7 +568,7 @@ path.write_text(json.dumps(document,sort_keys=True,separators=(",",":"))+"\\n",e
                 f"if ! {marker_command}; then "
                 'echo "Trace fallback marker creation failed" >&2; fi; '
                 "if command -v buildkite-agent >/dev/null 2>&1; then "
-                f'if ! buildkite-agent artifact upload "{trace_root}/**/*"; then '
+                f'if ! {upload_command}; then '
                 'echo "Trace fallback marker upload failed; preserving the production '
                 'command status" >&2; fi; fi; '
             )
@@ -599,7 +619,7 @@ path.write_text(json.dumps(document,sort_keys=True,separators=(",",":"))+"\\n",e
                 f"if {runner}; then TRACE_COMMAND_STATUS=0; "
                 "else TRACE_COMMAND_STATUS=$$?; fi; "
                 "if command -v buildkite-agent >/dev/null 2>&1; then "
-                f'if ! buildkite-agent artifact upload "{trace_root}/**/*"; then '
+                f'if ! {upload_command}; then '
                 'echo "Trace artifact upload failed; preserving the production '
                 'command status" >&2; fi; '
                 'else echo "Buildkite agent unavailable; skipping trace artifact '

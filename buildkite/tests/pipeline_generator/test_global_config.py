@@ -235,6 +235,7 @@ def test_exact_mirror_branch_canary_requires_isolated_prefix(
         TRACE_CANARY_COMMIT_ENV_VAR: "a" * 40,
         TRACE_S3_BUCKET_ENV_VAR: "vllm-ci-test-selection",
         TRACE_S3_PREFIX_ENV_VAR: "test-selection/vllm/canary/retry",
+        "VLLM_CI_TRACE_IMAGE_DIGEST": "sha256:" + "b" * 64,
     }
     with patch.dict(os.environ, variables, clear=True):
         init_global_config("dummy_path")
@@ -376,4 +377,24 @@ def test_trace_image_digest_accepted_with_canary_trust(*_mocks):
     with patch.dict(os.environ, variables, clear=True):
         init_global_config("dummy_path")
         assert global_config.config["trace_image_digest"] == digest
+    global_config.config = None
+
+
+@_with_config_patches
+def test_canary_tracing_requires_image_digest(*_mocks):
+    import buildkite.pipeline_generator.global_config as global_config
+
+    variables = {
+        "BUILDKITE_BRANCH": "ci-tsel-main-mirror",
+        "BUILDKITE_COMMIT": "a" * 40,
+        "BUILDKITE_PULL_REQUEST": "false",
+        "NIGHTLY": "1",
+        TRACE_CANARY_BRANCH_ENV_VAR: "ci-tsel-main-mirror",
+        TRACE_CANARY_COMMIT_ENV_VAR: "a" * 40,
+        TRACE_S3_BUCKET_ENV_VAR: "vllm-ci-test-selection",
+        TRACE_S3_PREFIX_ENV_VAR: "test-selection/vllm/canary/retry",
+    }
+    with patch.dict(os.environ, variables, clear=True):
+        with pytest.raises(ValueError, match="requires VLLM_CI_TRACE_IMAGE_DIGEST"):
+            init_global_config("dummy_path")
     global_config.config = None

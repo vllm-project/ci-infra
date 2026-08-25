@@ -238,9 +238,15 @@ def _git(repo: Path, *args: str) -> None:
 def _make_repo(tmp_path: Path) -> tuple[Path, str]:
     repo = tmp_path / "repo"
     repo.mkdir()
+    (repo / "vllm").mkdir()
+    (repo / "vllm" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "vllm" / "engine.py").write_text(
+        "one = 1\ntwo = 2\nthree = 3\n", encoding="utf-8"
+    )
     _git(repo, "init", "-q")
+    _git(repo, "add", ".")
     _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit",
-         "--allow-empty", "-q", "-m", "init")
+         "-q", "-m", "init")
     import subprocess
 
     sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
@@ -303,3 +309,87 @@ def test_pin_image_digest_rejects_variants_and_malformed():
         pin_image_digest("reg.example/repo:tag", "not-a-digest")
     with _pytest.raises(ValueError):
         pin_image_digest("reg.example/repo:tag", "sha256:" + "A" * 64)
+
+
+def test_subprocess_health_after_status_error_fails_closed():
+    kwargs = {
+        **_OK_KWARGS,
+        "checkout_state": {"ok": True, "status_after_error": "fatal: not a repo"},
+    }
+    assert _subprocess_health(**kwargs) == "checkout_status_failed_after"
+
+
+# --- end-to-end through run_trace.main: command cwd inside a real repo,
+# --- collector output outside it (blocker 1's integration shape) ---
+
+import base64 as _base64
+import subprocess as _subprocess
+
+from test_selection.collector import run_trace
+
+
+def _run_main(tmp_path: Path, command: str, monkeypatch) -> dict:
+    repo, sha = _make_repo(tmp_path)
+    out = tmp_path / "outside" / "trace"
+    monkeypatch.setenv("BUILDKITE_COMMIT", sha)
+    monkeypatch.setenv("BUILDKITE_BUILD_CHECKOUT_PATH", str(repo))
+    # The traced wrapper sets this before any collector import (the
+    # h200-ci-2-28 incident); mirror that contract or the preflight's vllm
+    # import writes __pycache__ into the checkout and trips the dirty guard.
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    # The preflight subprocess needs the collector importable, as the real
+    # wrapper provides via PYTHONPATH=$TRACE_COLLECTOR_DIR/src.
+    collector_root = str(Path(run_trace.__file__).resolve().parents[3])
+    monkeypatch.setenv("PYTHONPATH", collector_root)
+    # Never let the hook install into this environment's real site-packages.
+    hook_site = tmp_path / "hook-site"
+    hook_site.mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        subprocess_coverage, "_site_packages", lambda: [hook_site]
+    )
+    argv = [
+        "run_trace",
+        "--output-dir", str(out),
+        "--job-key", "k",
+        "--represented-job-key", "k",
+        "--repo-root", str(repo),
+        "--command-cwd", str(repo),
+        "--command-base64",
+        _base64.b64encode(command.encode()).decode(),
+        "--subprocess-coverage",
+    ]
+    monkeypatch.setattr("sys.argv", argv)
+    exit_code = run_trace.main()
+    return json.loads((out / "job.json").read_text()), exit_code
+
+
+def test_main_subprocess_missing_hook_evidence_fails_closed(tmp_path, monkeypatch):
+    # The command runs clean but no hook/marker/serve evidence exists.
+    job, exit_code = _run_main(tmp_path, "true", monkeypatch)
+    assert exit_code == 0  # command itself succeeded
+    assert job["healthy"] is False
+    assert job["failure_reason"] in (
+        "subprocess_hook_not_installed",
+        "subprocess_no_serve_interpreter",
+    )
+
+
+def test_main_subprocess_complete_evidence_is_healthy(tmp_path, monkeypatch):
+    out = tmp_path / "outside" / "trace"
+    out.mkdir(parents=True)
+    # Simulate what the .pth hook produces: an installed-hook sentinel, a
+    # serve-argv marker, and a coverage shard with a bare-context row.
+    (out / "subprocess-hook.json").write_text(
+        json.dumps({"installed": True, "path": "/x"}) + "\n"
+    )
+    _write_marker(out, 4242, ["/opt/venv/bin/vllm", "serve", "m"])
+    _write_contexts(out / ".coverage", {"harness-subprocess": {1}})
+
+    job, exit_code = _run_main(tmp_path, "true", monkeypatch)
+    assert exit_code == 0
+    assert job["healthy"] is True, job["failure_reason"]
+    assert job["subprocess_hook"]["installed"] is True
+    assert job["subprocess_serve_markers"][0]["pid"] == 4242
+    assert job["checkout_state"]["ok"] is True
+    rows = (out / "python-trace.jsonl").read_text().strip().splitlines()
+    assert json.loads(rows[0])["test_id"] == "job::k"
