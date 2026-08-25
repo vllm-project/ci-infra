@@ -178,13 +178,7 @@ def _load_worktree_baseline(
         return None, "worktree_baseline_missing"
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
-        payload = gzip.decompress(base64.b64decode(document["payload_b64gz"]))
-        if hashlib.sha256(payload).hexdigest() != document["raw_sha256"]:
-            return None, "worktree_baseline_corrupt"
-        if int(document["entry_count"]) != len(
-            [entry for entry in payload.split(b"\0") if entry]
-        ):
-            return None, "worktree_baseline_corrupt"
+        entries = _subprocess_coverage.validate_baseline_document(document)
     except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
         return None, f"worktree_baseline_corrupt:{type(error).__name__}"
     if document.get("image_digest") != digest:
@@ -193,9 +187,7 @@ def _load_worktree_baseline(
         return None, "worktree_baseline_sha_mismatch"
     if document.get("untracked_mode") != "normal":
         return None, "worktree_baseline_corrupt:untracked_mode"
-    document["_entries"] = sorted(
-        entry.decode("utf-8", "replace") for entry in payload.split(b"\0") if entry
-    )
+    document["_entries"] = entries
     return document, None
 
 

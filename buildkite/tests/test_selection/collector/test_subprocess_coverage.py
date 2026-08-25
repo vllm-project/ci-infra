@@ -400,7 +400,7 @@ def test_baseline_binding_failures_are_distinct(tmp_path: Path):
     bad["raw_sha256"] = "0" * 64
     _write_baseline(directory, bad, digest=_DIGEST)
     doc, err = _load_worktree_baseline(sha, _image_ref(), directory)
-    assert doc is None and err == "worktree_baseline_corrupt"
+    assert doc is None and err.startswith("worktree_baseline_corrupt")
 
 
 def test_bundled_baseline_loads_and_binds():

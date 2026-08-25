@@ -25,7 +25,10 @@ from buildkite_step import (
 from constants import AgentQueue, DeviceType
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
-from test_selection.collector.subprocess_coverage import baseline_file_name
+from test_selection.collector.subprocess_coverage import (
+    baseline_file_name,
+    validate_baseline_document,
+)
 from test_selection.collector_bundle import (
     bundle_bytes,
     bundle_sha256,
@@ -105,6 +108,10 @@ class PipelineGenerator:
             global_config["commit"],
             _ci_infra_revision() if publish_trace_snapshot else None,
             collector_sha256,
+            # Harness-key subprocess coverage exists only under a
+            # digest-pinned canary; main nightly keeps those jobs honestly
+            # always-run with their own accounting reason.
+            allow_subprocess_harness=bool(global_config.get("trace_image_digest")),
         )
         grouped_steps = group_steps(steps)
 
@@ -325,11 +332,16 @@ def _is_traceable_pytest_step(step: Step) -> bool:
     )
 
 
-def _trace_rejection(step: Step) -> Optional[str]:
+def _trace_rejection(step: Step, allow_subprocess_harness: bool = False) -> Optional[str]:
     if not step.key:
         return "missing_step_key"
     if step.key in _FLEET_SUBPROCESS_HARNESS_KEYS:
-        return None
+        # Shell-harness jobs enroll only under a pinned-digest canary; on
+        # main nightly (no digest) they stay honestly always-run rather
+        # than enrolling as weak python-only traces or crashing the render.
+        if allow_subprocess_harness:
+            return None
+        return "subprocess_coverage_requires_pinned_digest"
     if not _is_traceable_pytest_step(step):
         return "not_plain_pytest_commands"
     return None
@@ -341,6 +353,7 @@ def configure_test_tracing(
     repository_sha: Optional[str] = None,
     ci_infra_revision: Optional[str] = None,
     collector_sha256: Optional[str] = None,
+    allow_subprocess_harness: bool = False,
 ) -> Tuple[List[Step], dict]:
     """Instrument selected existing jobs with the exact ci-infra collector."""
 
@@ -363,7 +376,7 @@ def configure_test_tracing(
         if step_key in _FLEET_CPU_OVERHEAD_ALWAYS_RUN:
             rejected[step_key] = "cpu_overhead_policy"
             continue
-        rejection = _trace_rejection(step)
+        rejection = _trace_rejection(step, allow_subprocess_harness)
         if rejection:
             rejected[step_key] = rejection
             continue
@@ -495,6 +508,10 @@ def create_bundle_verify_group_step(
             f"collector bundle lacks the pinned baseline {baseline_file_name(image_digest)}"
         )
     baseline_document = json.loads(archive.read(baseline_member))
+    # Content validation happens at render, from the shipped bytes — the
+    # embedded expectations below are then derived from a VALIDATED document,
+    # not a merely-present one.
+    validate_baseline_document(baseline_document)
     if (
         baseline_document.get("image_digest") != image_digest
         or baseline_document.get("repository_sha") != repository_sha

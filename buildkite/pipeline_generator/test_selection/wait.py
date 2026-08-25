@@ -25,7 +25,7 @@ STEP_OUTCOMES = {
     "hard_failed",
     "errored",
 }
-TERMINAL_STEP_STATES = {"finished", "ignored", "canceled"}
+TERMINAL_STEP_STATES = {"finished", "ignored", "canceled", "broken"}
 
 
 class StepLookupError(RuntimeError):

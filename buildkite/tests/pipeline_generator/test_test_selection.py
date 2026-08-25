@@ -404,6 +404,7 @@ def test_subprocess_harness_keys_enroll_python_only_with_hook():
         "a" * 40,
         "b" * 40,
         "c" * 64,
+        allow_subprocess_harness=True,
     )
 
     assert [(row["key"], row["mode"]) for row in inventory["jobs"]] == [
@@ -434,6 +435,7 @@ def test_subprocess_harness_runner_flag_in_rendered_command(fake_global_config):
         "a" * 40,
         "b" * 40,
         "c" * 64,
+        allow_subprocess_harness=True,
     )
     groups = convert_group_step_to_buildkite_step({"Disaggregated": steps})
     rendered = "\n".join(
@@ -459,6 +461,7 @@ def test_subprocess_harness_output_lives_outside_checkout(fake_global_config):
         "a" * 40,
         "b" * 40,
         "c" * 64,
+        allow_subprocess_harness=True,
     )
     groups = convert_group_step_to_buildkite_step({"Disaggregated": steps})
     rendered = "\n".join(
@@ -502,7 +505,12 @@ def test_snapshot_download_namespace_matches_subprocess_upload(fake_global_confi
         commands=["bash v1/kv_connector/nixl_integration/run_edge_case_test.sh"],
     )
     steps, _inventory = configure_test_tracing(
-        [step], {"nixlconnector-pd-edge-cases-2-gpus"}, "a" * 40, "b" * 40, "c" * 64
+        [step],
+        {"nixlconnector-pd-edge-cases-2-gpus"},
+        "a" * 40,
+        "b" * 40,
+        "c" * 64,
+        allow_subprocess_harness=True,
     )
     groups = convert_group_step_to_buildkite_step({"Disaggregated": steps})
     producer = "\n".join(
@@ -521,3 +529,27 @@ def test_snapshot_download_namespace_matches_subprocess_upload(fake_global_confi
     # the external collector dir); the publisher downloads trace-output/**.
     assert 'artifact upload "trace-output/' in producer
     assert 'artifact download "trace-output/**/*"' in consumer
+
+
+def test_harness_keys_stay_always_run_without_pinned_digest():
+    # Main nightly (no canary digest): harness keys must NOT enroll — not
+    # as weak python-only traces, and not under a misleading reason.
+    step = Step(
+        label="PD edge cases",
+        key="nixlconnector-pd-edge-cases-2-gpus",
+        commands=["bash v1/kv_connector/nixl_integration/run_edge_case_test.sh"],
+    )
+    _steps, inventory = configure_test_tracing(
+        [step],
+        {"nixlconnector-pd-edge-cases-2-gpus"},
+        "a" * 40,
+        "b" * 40,
+        "c" * 64,
+    )
+    assert inventory["jobs"] == []
+    assert inventory["always_run"] == [
+        {
+            "key": "nixlconnector-pd-edge-cases-2-gpus",
+            "reason": "subprocess_coverage_requires_pinned_digest",
+        }
+    ]

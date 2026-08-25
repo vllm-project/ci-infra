@@ -26,6 +26,9 @@ Only enroll jobs on ephemeral runtimes (elastic EC2 / Kubernetes pod): the
 
 from __future__ import annotations
 
+import base64
+import gzip
+import hashlib
 import json
 import re
 import site
@@ -94,6 +97,36 @@ def write_rc(directory: Path) -> Path:
     target = directory / RC_NAME
     target.write_text(RC_TEXT, encoding="utf-8")
     return target
+
+
+def validate_baseline_document(document: dict) -> list[str]:
+    """Decode + verify a bundled baseline document; returns its entries.
+
+    Raises ValueError with a field-specific message on any corruption —
+    render-time producer validation and runtime loading share this, so a
+    corrupt baseline can never pass render and fail only in the GPU job.
+    """
+
+    payload = gzip.decompress(base64.b64decode(document["payload_b64gz"]))
+    raw_sha = hashlib.sha256(payload).hexdigest()
+    if raw_sha != document.get("raw_sha256"):
+        raise ValueError(
+            f"baseline raw_sha256 mismatch: {raw_sha} != "
+            f"{document.get('raw_sha256')}"
+        )
+    entries = sorted(entry for entry in payload.split(b"\0") if entry)
+    if len(entries) != int(document.get("entry_count", -1)):
+        raise ValueError(
+            f"baseline entry_count mismatch: {len(entries)} != "
+            f"{document.get('entry_count')}"
+        )
+    if document.get("untracked_mode") != "normal":
+        raise ValueError("baseline untracked_mode must be normal")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(document.get("image_digest"))):
+        raise ValueError("baseline image_digest is invalid")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(document.get("repository_sha"))):
+        raise ValueError("baseline repository_sha is invalid")
+    return [entry.decode("utf-8", "replace") for entry in entries]
 
 
 def baseline_file_name(image_digest: str) -> str:
