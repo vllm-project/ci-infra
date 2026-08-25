@@ -35,4 +35,4 @@ include = [".", "otel_helpers", "plugin", "test_selection*", "utils_lib"]
 
 [tool.setuptools.package-data]
 otel_helpers = ["*.sh"]
-"test_selection.collector" = ["*.sh"]
+"test_selection.collector" = ["*.sh", "worktree-baseline-*.json"]

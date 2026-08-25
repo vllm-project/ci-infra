@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 TRACE_COLLECTOR_DOWNLOAD_ATTEMPTS = 12
@@ -35,17 +36,36 @@ def download_prelude(directory: str) -> str:
     )
 
 
-def bundle_bytes() -> bytes:
-    source = Path(__file__).with_name("collector")
+def bundle_bytes(
+    image_digest: Optional[str] = None, source: Optional[Path] = None
+) -> bytes:
+    source = source or Path(__file__).with_name("collector")
     files = sorted(
         path
         for path in source.iterdir()
-        if path.suffix == ".py"
-        or path.name.endswith(".sh")
-        or path.name.startswith("worktree-baseline-")
+        if path.suffix == ".py" or path.name.endswith(".sh")
     )
     if not files:
         raise RuntimeError("test-selection collector package is empty")
+
+    # Worktree baselines ship only when the render pins an image digest, and
+    # then EXACTLY the digest-qualified one: unrelated baselines are excluded
+    # from the output (not a package fault), and a missing target raises —
+    # the producer must never emit a silently incomplete bundle.
+    baselines = sorted(source.glob("worktree-baseline-*.json"))
+    if image_digest:
+        from test_selection.collector.subprocess_coverage import (
+            baseline_file_name,
+        )
+
+        target = baseline_file_name(image_digest)
+        matched = [path for path in baselines if path.name == target]
+        if len(matched) != 1:
+            raise RuntimeError(
+                f"collector bundle lacks the pinned baseline {target} "
+                f"(found {[path.name for path in baselines]})"
+            )
+        files.extend(matched)
 
     output = BytesIO()
     with ZipFile(output, "w") as archive:

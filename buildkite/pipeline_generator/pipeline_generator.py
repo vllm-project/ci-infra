@@ -7,7 +7,9 @@ import os
 import re
 import shlex
 import subprocess
+from io import BytesIO
 from math import ceil
+from zipfile import ZipFile
 from pathlib import Path
 from typing import FrozenSet, List, Optional, Set, Tuple
 
@@ -23,6 +25,7 @@ from buildkite_step import (
 from constants import AgentQueue, DeviceType
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
+from test_selection.collector.subprocess_coverage import baseline_file_name
 from test_selection.collector_bundle import (
     bundle_bytes,
     bundle_sha256,
@@ -83,7 +86,11 @@ class PipelineGenerator:
             if Path(job_dir).as_posix().rstrip("/").endswith(".buildkite/test_areas"):
                 test_area_keys.update(step.key for step in job_steps if step.key)
         publish_trace_snapshot = should_trace_nightly(global_config)
-        collector = bundle_bytes() if publish_trace_snapshot else b""
+        collector = (
+            bundle_bytes(global_config.get("trace_image_digest"))
+            if publish_trace_snapshot
+            else b""
+        )
         collector_sha256 = bundle_sha256(collector) if collector else None
         steps, selected_step_keys = select_steps_and_dependencies(
             steps, global_config["only_step_keys"]
@@ -111,6 +118,21 @@ class PipelineGenerator:
         if trace_inventory["jobs"]:
             buildkite_group_steps.insert(
                 0, create_collector_group_step(collector, collector_sha256 or "")
+            )
+        if trace_inventory["jobs"] and any(
+            getattr(step, "trace_subprocess_coverage", False) for step in steps
+        ):
+            # Subprocess-coverage jobs depend on the uploaded bundle carrying
+            # the digest-pinned baseline; block them until the literal
+            # uploaded artifact proves it.
+            buildkite_group_steps.insert(
+                1,
+                create_bundle_verify_group_step(
+                    collector,
+                    collector_sha256 or "",
+                    global_config.get("trace_image_digest") or "",
+                    global_config["commit"],
+                ),
             )
 
         # Run pre-commit as a dedicated step in parallel with the image build.
@@ -366,9 +388,16 @@ def configure_test_tracing(
         step.trace_represented_job_key = step_key
         step.trace_gpu = mode == "kernel-set"
         step.trace_subprocess_coverage = step_key in _FLEET_SUBPROCESS_HARNESS_KEYS
-        if step.trace_subprocess_coverage and mode != "python-only":
-            raise ValueError(
-                f"subprocess-harness key {step_key} must trace python-only"
+        if step.trace_subprocess_coverage:
+            if mode != "python-only":
+                raise ValueError(
+                    f"subprocess-harness key {step_key} must trace python-only"
+                )
+            # Subprocess coverage reads the bundle's digest-pinned baseline;
+            # the verify step blocks the GPU job until the uploaded bundle
+            # is proven exact.
+            step.depends_on = sorted(
+                set(step.depends_on or []) | {VERIFY_BUNDLE_STEP_KEY}
             )
         traced.append(
             {
@@ -436,6 +465,119 @@ def finalize_trace_inventory(
     inventory["always_run"] = [
         {"key": key, "reason": reason} for key, reason in sorted(always_run.items())
     ]
+
+
+VERIFY_BUNDLE_STEP_KEY = "verify-collector-bundle"
+
+
+def create_bundle_verify_group_step(
+    collector: bytes,
+    collector_sha256: str,
+    image_digest: str,
+    repository_sha: str,
+) -> BuildkiteGroupStep:
+    """Block GPU trace jobs until the UPLOADED collector bundle proves exact.
+
+    Render-time expectations are embedded from the same bundle bytes that pin
+    collector_sha256; the runtime step observes the literal uploaded artifact
+    (no proxy). Hard-fail: no soft_fail, no allow_dependency_failure.
+    """
+
+    if not re.fullmatch(r"[0-9a-f]{64}", collector_sha256):
+        raise ValueError("bundle verification requires an exact collector sha")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest):
+        raise ValueError("bundle verification requires a pinned image digest")
+    baseline_member = f"ci_test_selection/{baseline_file_name(image_digest)}"
+    archive = ZipFile(BytesIO(collector))
+    members = sorted(archive.namelist())
+    if baseline_member not in members:
+        raise ValueError(
+            f"collector bundle lacks the pinned baseline {baseline_file_name(image_digest)}"
+        )
+    baseline_document = json.loads(archive.read(baseline_member))
+    if (
+        baseline_document.get("image_digest") != image_digest
+        or baseline_document.get("repository_sha") != repository_sha
+        or baseline_document.get("untracked_mode") != "normal"
+    ):
+        raise ValueError("bundled baseline does not bind to this generation")
+
+    verifier = '''
+import base64
+import json
+import sys
+import zipfile
+
+archive_path, members_b64, expect_b64 = sys.argv[1], sys.argv[2], sys.argv[3]
+expected_members = json.loads(base64.b64decode(members_b64))
+expect = json.loads(base64.b64decode(expect_b64))
+archive = zipfile.ZipFile(archive_path)
+actual = sorted(archive.namelist())
+if actual != expected_members:
+    raise SystemExit(
+        "collector bundle member mismatch: "
+        f"missing={sorted(set(expected_members) - set(actual))} "
+        f"extra={sorted(set(actual) - set(expected_members))}"
+    )
+document = json.loads(archive.read(expect["baseline_member"]))
+for field in ("entry_count", "raw_sha256", "untracked_mode", "image_digest", "repository_sha"):
+    if document.get(field) != expect[field]:
+        raise SystemExit(
+            f"baseline {field} mismatch: {document.get(field)!r} != {expect[field]!r}"
+        )
+print("collector bundle verified:", expect["baseline_member"])
+'''
+    command = "\n".join(
+        [
+            "set -euo pipefail",
+            'VERIFY_DIR="$$(mktemp -d)"',
+            "trap 'rm -rf \"$$VERIFY_DIR\"' EXIT",
+            'buildkite-agent artifact download "test-selection-collector.zip" '
+            '"$$VERIFY_DIR"',
+            f'echo "{collector_sha256}  '
+            '$$VERIFY_DIR/test-selection-collector.zip" | sha256sum -c -',
+            "python3 -c "
+            + shlex.quote(
+                "import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))"
+            )
+            + " "
+            + shlex.quote(base64.b64encode(verifier.encode()).decode())
+            + ' "$$VERIFY_DIR/test-selection-collector.zip"'
+            + " "
+            + shlex.quote(
+                base64.b64encode(json.dumps(members).encode()).decode()
+            )
+            + " "
+            + shlex.quote(
+                base64.b64encode(
+                    json.dumps(
+                        {
+                            "baseline_member": baseline_member,
+                            "entry_count": baseline_document["entry_count"],
+                            "image_digest": image_digest,
+                            "raw_sha256": baseline_document["raw_sha256"],
+                            "repository_sha": repository_sha,
+                            "untracked_mode": "normal",
+                        }
+                    ).encode()
+                ).decode()
+            ),
+        ]
+    )
+    return BuildkiteGroupStep(
+        group="Test selection collector",
+        steps=[
+            BuildkiteCommandStep(
+                agents={"queue": AgentQueue.SMALL_CPU_PREMERGE.value},
+                commands=[command],
+                depends_on=[TRACE_COLLECTOR_STEP_KEY],
+                key=VERIFY_BUNDLE_STEP_KEY,
+                label=":mag: Verify test-selection collector bundle",
+                retry={"automatic": [{"exit_status": -1, "limit": 1}]},
+                timeout_in_minutes=10,
+            )
+        ],
+    )
 
 
 def create_collector_group_step(

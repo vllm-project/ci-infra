@@ -27,6 +27,7 @@ Only enroll jobs on ephemeral runtimes (elastic EC2 / Kubernetes pod): the
 from __future__ import annotations
 
 import json
+import re
 import site
 import sys
 import sysconfig
@@ -93,6 +94,14 @@ def write_rc(directory: Path) -> Path:
     target = directory / RC_NAME
     target.write_text(RC_TEXT, encoding="utf-8")
     return target
+
+
+def baseline_file_name(image_digest: str) -> str:
+    """The bundled worktree-shape baseline for an image digest."""
+
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest or ""):
+        raise ValueError(f"invalid image digest reference: {image_digest!r}")
+    return f"worktree-baseline-{image_digest.split(':', 1)[1][:12]}.json"
 
 
 def _write_state(output_dir: Path, document: dict) -> None:
