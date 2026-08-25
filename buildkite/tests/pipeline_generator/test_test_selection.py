@@ -467,9 +467,57 @@ def test_subprocess_harness_output_lives_outside_checkout(fake_global_config):
         for buildkite_step in group.steps
         for command in getattr(buildkite_step, "commands", [])
     )
-    # Collector output is external so the pristine-checkout proof can hold;
-    # upload preserves the attempt-relative artifact layout from there.
-    assert '$$TRACE_COLLECTOR_DIR/output' in rendered
-    assert "trace-output/" not in rendered
+    # Collector output is external so the pristine-checkout proof can hold,
+    # with the trace-output/ prefix preserved inside the external root so the
+    # snapshot fan-in's download glob matches byte-identically.
+    assert '$$TRACE_COLLECTOR_DIR/output/trace-output' in rendered
     assert '(cd "$$TRACE_COLLECTOR_DIR/output"' in rendered
-    assert 'artifact upload "nixlconnector-pd-edge-cases-2-gpus/attempt-' in rendered
+    assert (
+        'artifact upload "trace-output/nixlconnector-pd-edge-cases-2-gpus/attempt-'
+        in rendered
+    )
+
+
+def test_snapshot_download_namespace_matches_subprocess_upload(fake_global_config):
+    from pipeline_generator import create_snapshot_group_step
+
+    inventory = {
+        "always_run": [],
+        "ci_infra_revision": "b" * 40,
+        "collector_sha256": "c" * 64,
+        "jobs": [
+            {
+                "expected_shards": 1,
+                "key": "nixlconnector-pd-edge-cases-2-gpus",
+                "mode": "python-only",
+            }
+        ],
+        "repository_sha": "a" * 40,
+        "schema_version": 1,
+        "wait_results": {},
+    }
+    step = Step(
+        label="PD edge cases",
+        key="nixlconnector-pd-edge-cases-2-gpus",
+        commands=["bash v1/kv_connector/nixl_integration/run_edge_case_test.sh"],
+    )
+    steps, _inventory = configure_test_tracing(
+        [step], {"nixlconnector-pd-edge-cases-2-gpus"}, "a" * 40, "b" * 40, "c" * 64
+    )
+    groups = convert_group_step_to_buildkite_step({"Disaggregated": steps})
+    producer = "\n".join(
+        command
+        for group in groups
+        for buildkite_step in group.steps
+        for command in getattr(buildkite_step, "commands", [])
+    )
+    snapshot = create_snapshot_group_step(
+        _inventory, {"trace_s3_bucket": "bucket", "trace_s3_prefix": "p"}
+    )
+    consumer = "\n".join(
+        command for s in snapshot.steps for command in getattr(s, "commands", [])
+    )
+    # The two-sided contract: producer uploads under trace-output/ (inside
+    # the external collector dir); the publisher downloads trace-output/**.
+    assert 'artifact upload "trace-output/' in producer
+    assert 'artifact download "trace-output/**/*"' in consumer

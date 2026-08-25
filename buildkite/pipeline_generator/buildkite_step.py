@@ -497,9 +497,11 @@ for command in commands:
         if step.trace_subprocess_coverage:
             # Subprocess mode proves the checkout stays pristine, so the
             # collector output lives outside the repository it measures, in
-            # the per-step temporary collector directory. The upload runs
-            # from that directory so artifact paths stay layout-identical.
-            output_base = "$$TRACE_COLLECTOR_DIR/output"
+            # the per-step temporary collector directory. The trace-output/
+            # prefix is preserved inside it so the snapshot fan-in's
+            # `trace-output/**/*` download contract is byte-identical; the
+            # upload runs from the external root.
+            output_base = "$$TRACE_COLLECTOR_DIR/output/trace-output"
         else:
             output_base = "trace-output"
         trace_root = (
@@ -514,7 +516,7 @@ for command in commands:
             attempt_relative += "/$$BUILDKITE_PARALLEL_JOB"
         upload_command = (
             '(cd "$$TRACE_COLLECTOR_DIR/output" && '
-            f'buildkite-agent artifact upload "{attempt_relative}/**/*")'
+            f'buildkite-agent artifact upload "trace-output/{attempt_relative}/**/*")'
             if step.trace_subprocess_coverage
             else f'buildkite-agent artifact upload "{trace_root}/**/*"'
         )
