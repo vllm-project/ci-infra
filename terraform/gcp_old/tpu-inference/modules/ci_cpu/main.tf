@@ -7,14 +7,28 @@ data "google_client_config" "gcp_client" {
   provider = google-beta
 }
 
+locals {
+  # The zone comes from the provider, not the caller, so a fleet cannot be
+  # mislabelled by passing the wrong suffix.
+  zone = data.google_client_config.gcp_client.zone
+
+  # One name for the VM, its disk, its address, and the Buildkite agent, so a
+  # queue entry in the Buildkite UI maps straight onto a GCE instance.
+  # An empty purpose keeps the original names, so the tpu-commons fleet is not
+  # renamed and therefore not recreated.
+  node_names = [for i in range(var.instance_count) :
+    var.purpose == "" ? "vllm-ci-cpu-${i}" : "vllm-ci-cpu-${var.purpose}-${local.zone}-${i}"
+  ]
+}
+
 resource "google_compute_instance" "buildkite-agent-instance" {
   provider = google-beta
   count    = var.instance_count
-  name     = "vllm-ci-cpu-${count.index}"
+  name     = local.node_names[count.index]
 
   boot_disk {
     auto_delete = true
-    device_name = "vllm-ci-cpu-${count.index}"
+    device_name = local.node_names[count.index]
 
     initialize_params {
       image = "projects/ubuntu-os-cloud/global/images/ubuntu-2404-noble-amd64-v20251021"
@@ -65,7 +79,12 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
       apt-get update
       apt-get install -y bk buildkite-agent
-           
+      # No `set -e` in this script, so a failed install would otherwise sail on
+      # and the config writes below would create a cfg for a binary that isn't
+      # there, leaving a VM in the fleet running nothing while the startup
+      # script reports success.
+      dpkg -s buildkite-agent >/dev/null 2>&1 || { echo "FATAL: buildkite-agent not installed" >&2; exit 1; }
+
       # Force stop the buildkite-agent and start at the end to avoid race condition
       sudo systemctl stop buildkite-agent
 
@@ -132,22 +151,31 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
       sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
-      sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
-      sudo sed -i 's/name="%hostname-%spawn"/name="vllm-cpu-vm-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
+      # This script re-runs on every boot, so match the whole line rather than
+      # the pristine package default, which is gone after the first boot. The
+      # name below needs no such treatment: it is the instance name, which is
+      # ForceNew, so a rename recreates the VM and this sed always runs against
+      # a freshly installed cfg.
+      sudo sed -i -E 's|^token=.*|token="${var.buildkite_token_value}"|' /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i 's/name="%hostname-%spawn"/name="${local.node_names[count.index]}"/' /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i '/^tags=/d' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=cpu"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i '/^HF_TOKEN=/d' /etc/environment
       echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
+
+      ${file("${path.module}/../shared/keep-agent-connected.sh")}
 
       systemctl stop docker
       systemctl start docker
 
       systemctl enable buildkite-agent
-      systemctl start buildkite-agent
+      systemctl restart buildkite-agent
     STARTUP_SCRIPT
   }
 }
 
 resource "google_compute_address" "static" {
   provider = google-beta
-  name     = "vllm-ci-cpu-${count.index}-ip"
+  name     = "${local.node_names[count.index]}-ip"
   count    = var.instance_count
 }

@@ -5,10 +5,19 @@ data "google_client_config" "config" {
   provider = google-beta
 }
 
+locals {
+  # The one place this name is spelled out. The TPU VM, its label, its disk, and
+  # the Buildkite agent inside it all derive from here, so an agent in the
+  # Buildkite UI always maps onto a `gcloud compute tpus` entry.
+  node_names = [for i in range(var.instance_count) :
+    "${var.accelerator_type}-ci-${i}-${var.project_short_name}-${data.google_client_config.config.zone}"
+  ]
+}
+
 resource "google_compute_disk" "tpu_disk" {
   provider = google-beta
   count    = var.instance_count
-  name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}-disk"
+  name     = "${local.node_names[count.index]}-disk"
   size     = var.disk_size
   type     = "hyperdisk-balanced"
 }
@@ -16,13 +25,13 @@ resource "google_compute_disk" "tpu_disk" {
 resource "google_tpu_v2_vm" "tpu_v6_ci" {
   provider = google-beta
   count    = var.instance_count
-  name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+  name     = local.node_names[count.index]
 
   runtime_version  = "v2-alpha-tpuv6e"
   accelerator_type = var.accelerator_type
 
   labels = {
-    vm_name = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+    vm_name = local.node_names[count.index]
   }
 
   dynamic "scheduling_config" {
@@ -134,9 +143,11 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
       sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
-      sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
+      # This script re-runs on every boot, so match the whole line rather than
+      # the pristine "xxx" placeholder, which is gone after the first boot.
+      sudo sed -i -E 's|^token=.*|token="${var.buildkite_token_value}"|' /etc/buildkite-agent/buildkite-agent.cfg
       
-      HOST_NAME_VAL="${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+      HOST_NAME_VAL="${local.node_names[count.index]}"
       # Set the system-wide environment variable, avoid using the default HOSTNAME because it's too vague to be useful. For example, t1v-n-01667781-w-0
       echo "HOST_NAME=$HOST_NAME_VAL" | sudo tee -a /etc/environment
       sudo sed -i "s/name=\"%hostname-%spawn\"/name=\"$HOST_NAME_VAL\"/" /etc/buildkite-agent/buildkite-agent.cfg
@@ -236,6 +247,8 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       
       # Force rotate once
       sudo logrotate -f /etc/logrotate.conf
+
+      ${file("${path.module}/../shared/keep-agent-connected.sh")}
 
       systemctl unmask buildkite-agent
       systemctl enable buildkite-agent
