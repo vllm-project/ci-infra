@@ -83,10 +83,14 @@ def _site_packages() -> list[Path]:
     return unique
 
 
-def rc_path() -> Path:
-    """Write the rc next to this module (bundle dir) and return its path."""
+def write_rc(directory: Path) -> Path:
+    """Materialize the rc into the command's output dir and return its path.
 
-    target = Path(__file__).resolve().with_name(RC_NAME)
+    Never write next to this module: in a source checkout that pollutes the
+    tree (and the pristine-checkout proof). The caller owns the location.
+    """
+
+    target = directory / RC_NAME
     target.write_text(RC_TEXT, encoding="utf-8")
     return target
 

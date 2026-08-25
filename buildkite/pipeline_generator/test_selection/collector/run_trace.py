@@ -641,7 +641,7 @@ def main() -> int:
             from . import subprocess_coverage
 
             environment["COVERAGE_PROCESS_START"] = str(
-                subprocess_coverage.rc_path()
+                subprocess_coverage.write_rc(output_dir)
             )
             environment["VLLM_CI_TEST_SELECTION_HOOK_DIR"] = str(output_dir)
             subprocess_coverage.enable(output_dir)
