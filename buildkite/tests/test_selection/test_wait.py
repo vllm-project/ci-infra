@@ -188,4 +188,5 @@ def test_terminal_states_are_reachable_through_the_lookup():
     # as handling. (An import-time assert would silently strip under -O.)
     from test_selection.wait import STEP_STATES, TERMINAL_STEP_STATES
 
-    assert TERMINAL_STEP_STATES <= STEP_STATES
+    # Difference form names the offending states in the failure output.
+    assert TERMINAL_STEP_STATES - STEP_STATES == set()

@@ -426,3 +426,103 @@ def test_finished_command_is_not_rerun_after_collector_failure(
     assert summary["command_results"][0]["collector_exit_code"] == 13
     assert summary["command_results"][0]["command_exit_code"] == 0
     assert summary["command_results"][0]["fallback_uninstrumented"] is False
+
+
+def _trace_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    package = repo / "vllm"
+    tests = repo / "tests"
+    package.mkdir(parents=True)
+    tests.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "sample.py").write_text(
+        "def answer():\n    return 42\n", encoding="utf-8"
+    )
+    for name in ("first", "second"):
+        (tests / f"test_{name}.py").write_text(
+            "from vllm.sample import answer\n\n"
+            f"def test_{name}():\n"
+            "    assert answer() == 42\n",
+            encoding="utf-8",
+        )
+    return repo
+
+
+def _run_traced(tmp_path: Path, repo: Path, command: str) -> dict:
+    output = tmp_path / "trace"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "BUILDKITE_COMMIT": "a" * 40,
+            "PATH": f"{Path(sys.executable).parent}:{environment['PATH']}",
+            "PYTHONPATH": str(_module_root()),
+        }
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "test_selection.collector.run_job_trace",
+            "--output-dir",
+            str(output),
+            "--job-key",
+            "unit",
+            "--represented-job-key",
+            "unit",
+            "--commands-base64",
+            _payload([command]),
+            "--repo-root",
+            str(repo),
+            "--python-only",
+        ],
+        cwd=repo,
+        env=environment,
+        check=False,
+    )
+    assert result.returncode == 0
+    return json.loads((output / "commands" / "000" / "job.json").read_text())
+
+
+def test_python_m_pytest_allocates_invocation_ids(tmp_path: Path):
+    """Harnesses calling `python -m pytest` bypass the PATH launcher shim;
+    the plugin itself must allocate so exports never land unsuffixed."""
+
+    repo = _trace_repo(tmp_path)
+    manifest = _run_traced(
+        tmp_path,
+        repo,
+        "python3 -m pytest -q tests/test_first.py && "
+        "python3 -m pytest -q tests/test_second.py",
+    )
+    assert manifest["healthy"] is True
+    assert manifest["pytest_invocations_started"] == 2
+    assert manifest["pytest_invocations_exported"] == 2
+    assert manifest["pytest_node_exports_complete"] is True
+    shard = tmp_path / "trace" / "commands" / "000"
+    assert (shard / "pytest-nodes.000.json").is_file()
+    assert (shard / "pytest-nodes.001.json").is_file()
+    assert set(manifest["node_ids"]) == {
+        "tests/test_first.py::test_first",
+        "tests/test_second.py::test_second",
+    }
+
+
+def test_python_m_pytest_single_invocation_accounts(tmp_path: Path):
+    repo = _trace_repo(tmp_path)
+    manifest = _run_traced(tmp_path, repo, "python3 -m pytest -q tests/test_first.py")
+    assert manifest["pytest_invocations_started"] == 1
+    assert manifest["pytest_invocations_exported"] == 1
+    assert manifest["pytest_node_exports_complete"] is True
+
+
+def test_mixed_launcher_and_module_invocations_never_collide(tmp_path: Path):
+    repo = _trace_repo(tmp_path)
+    manifest = _run_traced(
+        tmp_path,
+        repo,
+        "pytest -q tests/test_first.py && python3 -m pytest -q tests/test_second.py",
+    )
+    assert manifest["healthy"] is True
+    assert manifest["pytest_invocations_started"] == 2
+    assert manifest["pytest_invocations_exported"] == 2
+    assert manifest["pytest_node_exports_complete"] is True
