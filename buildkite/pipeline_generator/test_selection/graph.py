@@ -192,6 +192,23 @@ def _insert_gpu(
     return count
 
 
+def _identity_values(
+    document: dict[str, Any], singular_field: str, plural_field: str
+) -> set[str]:
+    """The identity values a summary claims; singular/plural must agree."""
+
+    singular = document.get(singular_field)
+    plural = document.get(plural_field) or []
+    values = {str(value) for value in plural}
+    if singular:
+        if plural and str(singular) not in {str(value) for value in plural}:
+            raise GraphError(
+                f"summary {singular_field}/{plural_field} fields disagree"
+            )
+        values.add(str(singular))
+    return values
+
+
 def _collect_summaries(
     input_dir: Path,
     policies: dict[str, Any],
@@ -229,6 +246,25 @@ def _collect_summaries(
             and document.get("collector_sha256") == collector_sha
             and document.get("parallel_job_count") == expected
         )
+        # A summary claiming several image digests or baselines is mixed
+        # provenance; the compact writer already fails those, defense here.
+        try:
+            mixed_identity = (
+                len(_identity_values(document, "image_digest", "image_digests")) > 1
+                or len(
+                    _identity_values(
+                        document,
+                        "worktree_baseline_sha256",
+                        "worktree_baseline_sha256s",
+                    )
+                )
+                > 1
+            )
+        except GraphError:
+            # singular/plural disagreement within one summary
+            mixed_identity = True
+        if mixed_identity:
+            identity_valid = False
         candidates[key].setdefault(shard, {}).setdefault(retry_count, []).append(
             (path, document, identity_valid)
         )
@@ -372,6 +408,32 @@ def _materialize(
 
         if not healthy:
             raise GraphError("trace generation contains no healthy jobs")
+        # One generation = one image + one worktree baseline. Jobs that predate
+        # the receipts carry nothing and are ungated; every carrier must agree.
+        generation_image_digests = sorted(
+            {
+                value
+                for _path, document in (
+                    summary for job in summaries.values() for summary in job.values()
+                )
+                for value in _identity_values(document, "image_digest", "image_digests")
+            }
+        )
+        generation_baselines = sorted(
+            {
+                value
+                for _path, document in (
+                    summary for job in summaries.values() for summary in job.values()
+                )
+                for value in _identity_values(
+                    document, "worktree_baseline_sha256", "worktree_baseline_sha256s"
+                )
+            }
+        )
+        if len(generation_image_digests) > 1:
+            raise GraphError("image digest disagreement across generation")
+        if len(generation_baselines) > 1:
+            raise GraphError("worktree baseline disagreement across generation")
         data_through = min(evidence_times).isoformat()
         collector_sha256s = sorted(
             {collector_sha}
@@ -391,6 +453,12 @@ def _materialize(
             "data_through": data_through,
             "expected_jobs": sorted(policies),
             "healthy_jobs": sorted(healthy),
+            "image_digest": (
+                generation_image_digests[0]
+                if len(generation_image_digests) == 1
+                else None
+            ),
+            "image_digests": generation_image_digests,
             "missing_jobs": sorted(missing),
             "missing_reasons": {key: reasons[key] for key in sorted(missing)},
             "repository_sha": repository_sha,
@@ -398,6 +466,10 @@ def _materialize(
             "unhealthy_jobs": sorted(unhealthy),
             "unhealthy_reasons": {key: reasons[key] for key in sorted(unhealthy)},
             "wait_results": wait_results,
+            "worktree_baseline_sha256": (
+                generation_baselines[0] if len(generation_baselines) == 1 else None
+            ),
+            "worktree_baseline_sha256s": generation_baselines,
         }
         for key, value in sorted(metadata.items()):
             connection.execute(

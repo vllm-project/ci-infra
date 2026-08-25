@@ -248,6 +248,8 @@ def build_snapshot_manifest(graph: Path, output: Path) -> dict[str, Any]:
         "created_at": metadata["data_through"],
         "data_through": metadata["data_through"],
         "expected_jobs": metadata["expected_jobs"],
+        "image_digest": metadata.get("image_digest"),
+        "image_digests": metadata.get("image_digests", []),
         "files": {
             "graph.sqlite.gz": {
                 "bytes": compressed_graph.stat().st_size,
@@ -270,6 +272,10 @@ def build_snapshot_manifest(graph: Path, output: Path) -> dict[str, Any]:
         "unhealthy_jobs": metadata.get("unhealthy_jobs", []),
         "unhealthy_reasons": metadata.get("unhealthy_reasons", {}),
         "wait_results": metadata.get("wait_results", {}),
+        "worktree_baseline_sha256": metadata.get("worktree_baseline_sha256"),
+        "worktree_baseline_sha256s": metadata.get(
+            "worktree_baseline_sha256s", []
+        ),
     }
     _atomic_json(output, document)
     return document

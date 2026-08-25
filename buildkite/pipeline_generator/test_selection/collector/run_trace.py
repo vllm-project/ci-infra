@@ -170,7 +170,10 @@ def _load_worktree_baseline(
         return None, "worktree_baseline_unpinned_image"
     digest = "sha256:" + image_ref.rsplit("@sha256:", 1)[1]
     directory = directory or Path(__file__).resolve().parent
-    path = directory / _baseline_file_name(digest)
+    try:
+        path = directory / _baseline_file_name(digest)
+    except ValueError:
+        return None, "worktree_baseline_corrupt:digest"
     if not path.is_file():
         return None, "worktree_baseline_missing"
     try:
@@ -913,6 +916,13 @@ def main() -> int:
             "command_executed": command_executed,
             "created_at": datetime.now(UTC).isoformat(),
             "failure_reason": failure_reason,
+            "image_digest": (
+                image_tag.rsplit("@", 1)[1]
+                if (image_tag := os.environ.get("IMAGE_TAG"))
+                and "@sha256:" in image_tag
+                else None
+            ),
+            "worktree_baseline_sha256": checkout_state.get("baseline_sha256"),
             "healthy": healthy,
             "image_tag": os.environ.get("IMAGE_TAG"),
             "import_preflight_exit_code": preflight_status,

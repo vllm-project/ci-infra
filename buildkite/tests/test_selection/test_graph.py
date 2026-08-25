@@ -433,3 +433,139 @@ def test_reads_current_jobs_from_rendered_pipeline(tmp_path: Path):
         encoding="utf-8",
     )
     assert current_jobs_from_pipeline(pipeline) == ["unit-tests"]
+
+
+def _job_with_identity(root: Path, key: str, digest: str, baseline: str) -> None:
+    directory = root / key / "0"
+    trace = directory / "commands/000/python-trace.jsonl"
+    rows = [
+        {
+            "file": "vllm/model.py",
+            "job_key": key,
+            "line": 7,
+            "repository_sha": SHA,
+            "test_id": "tests/test_model.py::test_forward",
+        }
+    ]
+    _write(trace, rows)
+    _write(
+        directory / "commands/000/job.json",
+        {
+            "created_at": CREATED,
+            "failure_reason": None,
+            "healthy": True,
+            "image_digest": digest,
+            "node_ids": ["tests/test_model.py::test_forward"],
+            "pytest_invocations_exported": 1,
+            "pytest_invocations_started": 1,
+            "pytest_node_exports_complete": True,
+            "python_trace": trace.name,
+            "python_trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(),
+            "repository_sha": SHA,
+            "represented_job_key": key,
+            "retry_count": 0,
+            "worktree_baseline_sha256": baseline,
+        },
+    )
+    _write(
+        directory / "trace-job.json",
+        {
+            "capture_mode": "python-only",
+            "collector_sha256": COLLECTOR,
+            "created_at": CREATED,
+            "failure_reason": None,
+            "healthy": True,
+            "image_digest": digest,
+            "image_digests": [digest],
+            "parallel_job": 0,
+            "parallel_job_count": 1,
+            "repository_sha": SHA,
+            "represented_job_key": key,
+            "retry_count": 0,
+            "worktree_baseline_sha256": baseline,
+            "worktree_baseline_sha256s": [baseline],
+        },
+    )
+
+
+def test_generation_image_identity_flows_to_metadata(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    for key in ("job-a", "job-b"):
+        _job_with_identity(evidence, key, "sha256:" + "d" * 64, "b" * 64)
+    graph = tmp_path / "graph.sqlite"
+    build_fleet_graph(
+        evidence, _inventory(tmp_path / "inventory.json", "job-a", "job-b"), graph
+    )
+    metadata = graph_metadata(graph)
+    assert metadata["image_digest"] == "sha256:" + "d" * 64
+    assert metadata["image_digests"] == ["sha256:" + "d" * 64]
+    assert metadata["worktree_baseline_sha256"] == "b" * 64
+    assert metadata["worktree_baseline_sha256s"] == ["b" * 64]
+
+
+def test_mixed_image_digest_generation_fails_closed(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    _job_with_identity(evidence, "job-a", "sha256:" + "d" * 64, "b" * 64)
+    _job_with_identity(evidence, "job-b", "sha256:" + "e" * 64, "b" * 64)
+    with pytest.raises(GraphError, match="image digest disagreement"):
+        build_fleet_graph(
+            evidence,
+            _inventory(tmp_path / "inventory.json", "job-a", "job-b"),
+            tmp_path / "graph.sqlite",
+        )
+
+
+def test_mixed_baseline_generation_fails_closed(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    _job_with_identity(evidence, "job-a", "sha256:" + "d" * 64, "b" * 64)
+    _job_with_identity(evidence, "job-b", "sha256:" + "d" * 64, "c" * 64)
+    with pytest.raises(GraphError, match="worktree baseline disagreement"):
+        build_fleet_graph(
+            evidence,
+            _inventory(tmp_path / "inventory.json", "job-a", "job-b"),
+            tmp_path / "graph.sqlite",
+        )
+
+
+def test_summary_singular_plural_disagreement_is_invalid(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    _job(evidence, "healthy")
+    _job_with_identity(evidence, "bad", "sha256:" + "d" * 64, "b" * 64)
+    bad_summary = evidence / "bad" / "0" / "trace-job.json"
+    document = json.loads(bad_summary.read_text())
+    document["image_digests"] = ["sha256:" + "f" * 64]  # disagrees with singular
+    bad_summary.write_text(json.dumps(document))
+    metadata = build_fleet_graph(
+        evidence,
+        _inventory(tmp_path / "inventory.json", "healthy", "bad"),
+        tmp_path / "graph.sqlite",
+    )
+    assert metadata["healthy_jobs"] == ["healthy"]
+    assert metadata["unhealthy_reasons"] == {"bad": "invalid_summary"}
+
+
+def test_snapshot_manifest_carries_image_and_baseline_identity(tmp_path: Path):
+    from test_selection.snapshot import build_snapshot_manifest
+
+    evidence = tmp_path / "evidence"
+    _job_with_identity(evidence, "job-a", "sha256:" + "d" * 64, "b" * 64)
+    graph = tmp_path / "graph.sqlite"
+    build_fleet_graph(
+        evidence, _inventory(tmp_path / "inventory.json", "job-a"), graph
+    )
+    manifest = build_snapshot_manifest(graph, tmp_path / "manifest.json")
+    assert manifest["image_digest"] == "sha256:" + "d" * 64
+    assert manifest["image_digests"] == ["sha256:" + "d" * 64]
+    assert manifest["worktree_baseline_sha256"] == "b" * 64
+    assert manifest["worktree_baseline_sha256s"] == ["b" * 64]
+
+
+def test_manifest_identity_fields_default_empty_for_legacy_jobs(tmp_path: Path):
+    from test_selection.snapshot import build_snapshot_manifest
+
+    graph = _graph(tmp_path, "unit-tests")
+    manifest = build_snapshot_manifest(graph, tmp_path / "manifest.json")
+    assert manifest["image_digest"] is None
+    assert manifest["image_digests"] == []
+    assert manifest["worktree_baseline_sha256"] is None
+    assert manifest["worktree_baseline_sha256s"] == []

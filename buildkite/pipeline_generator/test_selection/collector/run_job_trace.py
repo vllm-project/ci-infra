@@ -233,16 +233,38 @@ def main() -> int:
                     and shard_job
                     and shard_job.get("healthy") is True
                 ),
+                "image_digest": shard_job.get("image_digest") if shard_job else None,
+                "worktree_baseline_sha256": (
+                    shard_job.get("worktree_baseline_sha256") if shard_job else None
+                ),
             }
         )
         if effective_exit_code != 0:
             return_code = effective_exit_code
             break
 
+    image_digests = sorted(
+        {
+            str(result["image_digest"])
+            for result in command_results
+            if result.get("image_digest")
+        }
+    )
+    baseline_shas = sorted(
+        {
+            str(result["worktree_baseline_sha256"])
+            for result in command_results
+            if result.get("worktree_baseline_sha256")
+        }
+    )
     healthy = len(command_results) == len(commands) and all(
         result["command_exit_code"] == 0 and result["healthy"]
         for result in command_results
     )
+    # A job whose commands ran under different images/baselines produces
+    # mixed provenance; fail the compact summary rather than publish it.
+    if len(image_digests) > 1 or len(baseline_shas) > 1:
+        healthy = False
     failure_reasons = sorted(
         {
             result["failure_reason"]
@@ -253,7 +275,17 @@ def main() -> int:
     failure_reason = None
     if not healthy:
         failure_reason = (
-            failure_reasons[0] if len(failure_reasons) == 1 else "collector_unhealthy"
+            "mixed_image_identity"
+            if len(image_digests) > 1
+            else (
+                "mixed_worktree_baseline"
+                if len(baseline_shas) > 1
+                else (
+                    failure_reasons[0]
+                    if len(failure_reasons) == 1
+                    else "collector_unhealthy"
+                )
+            )
         )
     summary_path = output_dir / "trace-job.json"
     try:
@@ -272,6 +304,14 @@ def main() -> int:
                 "created_at": datetime.now(UTC).isoformat(),
                 "failure_reason": failure_reason,
                 "healthy": healthy,
+                "image_digest": (
+                    image_digests[0] if len(image_digests) == 1 else None
+                ),
+                "image_digests": image_digests,
+                "worktree_baseline_sha256": (
+                    baseline_shas[0] if len(baseline_shas) == 1 else None
+                ),
+                "worktree_baseline_sha256s": baseline_shas,
                 "job_key": args.job_key,
                 "parallel_job": parallel_job,
                 "parallel_job_count": parallel_job_count,
