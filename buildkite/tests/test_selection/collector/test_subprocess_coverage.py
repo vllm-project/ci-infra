@@ -194,11 +194,11 @@ def test_subprocess_health_combine_failure_is_unhealthy():
     assert _subprocess_health(**kwargs) == "subprocess_combine_failed"
 
 
-def test_subprocess_health_checkout_drift_is_unhealthy():
+def test_subprocess_health_worktree_drift_is_unhealthy():
     kwargs = {**_OK_KWARGS, "checkout_state": {"ok": False, "reason": "repository_sha_mismatch"}}
-    assert _subprocess_health(**kwargs) == "checkout_repository_sha_mismatch"
-    kwargs = {**_OK_KWARGS, "checkout_state": {"ok": True, "dirty_after": ["M x"]}}
-    assert _subprocess_health(**kwargs) == "checkout_dirty_after"
+    assert _subprocess_health(**kwargs) == "repository_sha_mismatch"
+    kwargs = {**_OK_KWARGS, "checkout_state": {"ok": True, "after_mismatch": True}}
+    assert _subprocess_health(**kwargs) == "worktree_shape_mismatch_after"
 
 
 def test_subprocess_health_no_serve_interpreter_is_unhealthy():
@@ -219,11 +219,6 @@ def test_serve_markers_identify_serve_argv(tmp_path: Path):
     serve = _serve_markers(tmp_path)
     assert len(serve) == 1
     assert serve[0]["pid"] == 1
-
-
-# --- pristine checkout proof (blocker 3) ---
-
-from test_selection.collector.run_trace import _verify_pristine_checkout
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -251,69 +246,176 @@ def _make_repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, sha
 
 
-def test_pristine_checkout_ok(tmp_path: Path):
-    repo, sha = _make_repo(tmp_path)
-    state = _verify_pristine_checkout(repo, sha)
+# --- worktree-shape baseline proof (blocker 3, revised after the 85480
+# --- clean negative: CI images deliberately move vllm/ to src/vllm) ---
+
+import gzip as _gzip
+from test_selection.collector.run_trace import (
+    _baseline_file_name,
+    _load_worktree_baseline,
+    _verify_worktree_shape,
+    _worktree_shape,
+)
+
+_DIGEST = "sha256:" + "530a18df" + "0" * 56
+_REPO_SHA = "e" * 40
+
+
+def _baseline_doc(entries: list[str], digest: str = _DIGEST,
+                  repo_sha: str = _REPO_SHA) -> dict:
+    payload = (chr(0).join(sorted(entries)) + chr(0)).encode()
+    return {
+        "image_digest": digest,
+        "repository_sha": repo_sha,
+        "untracked_mode": "normal",
+        "raw_sha256": __import__("hashlib").sha256(payload).hexdigest(),
+        "entry_count": len(entries),
+        "payload_b64gz": _base64.b64encode(_gzip.compress(payload)).decode(),
+        "_entries": sorted(entries),
+    }
+
+
+def _write_baseline(directory: Path, doc: dict, digest: str = _DIGEST) -> None:
+    (directory / _baseline_file_name(digest)).write_text(
+        json.dumps({k: v for k, v in doc.items() if not k.startswith("_")})
+    )
+
+
+def _image_ref(digest: str = _DIGEST) -> str:
+    return f"registry/repo@{digest}"
+
+
+def _image_shaped_repo(tmp_path: Path) -> tuple[Path, str, list[str]]:
+    """A repo in the CI image's deliberate shape: tracked vllm/ moved to
+    untracked src/, plus an untracked build leftover."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "vllm").mkdir()
+    (repo / "vllm" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "vllm" / "engine.py").write_text("one = 1\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", ".")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit",
+         "-q", "-m", "init")
+    sha = _subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                          capture_output=True, text=True, check=True
+                          ).stdout.strip()
+    # The image build's deliberate `mv vllm src/vllm` + COPY'd leftover.
+    (repo / "src").mkdir()
+    (repo / "vllm").rename(repo / "src" / "vllm")
+    (repo / "torch_lib_versions.txt").write_text("torch=2.0\n")
+    entries = _worktree_shape(repo)["entries"]
+    return repo, sha, entries
+
+
+def test_worktree_shape_matches_image_baseline(tmp_path: Path):
+    repo, sha, entries = _image_shaped_repo(tmp_path)
+    doc = _baseline_doc(entries, repo_sha=sha)
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    _write_baseline(directory, doc)
+
+    state = _verify_worktree_shape_with(directory, repo, sha)
     assert state["ok"] is True
-    assert state["head"] == sha
+    assert state["baseline_count"] == len(entries)
 
 
-def test_pristine_checkout_rejects_sha_mismatch(tmp_path: Path):
-    repo, _sha = _make_repo(tmp_path)
-    state = _verify_pristine_checkout(repo, "0" * 40)
+def _verify_worktree_shape_with(directory, repo, sha):
+    from unittest import mock
+
+    with mock.patch(
+        "test_selection.collector.run_trace._load_worktree_baseline",
+        lambda repository_sha, image_ref: _load_worktree_baseline(
+            repository_sha, image_ref, directory=directory
+        ),
+    ):
+        return _verify_worktree_shape(repo, sha, _image_ref())
+
+
+def test_worktree_shape_rejects_tracked_edit(tmp_path: Path):
+    repo, sha, entries = _image_shaped_repo(tmp_path)
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    _write_baseline(directory, _baseline_doc(entries, repo_sha=sha))
+    # A tracked test file changes under the shape-stable image layout.
+    (repo / "src" / "vllm" / "__init__.py").write_text("")  # untracked area
+    (repo / "new_test.py").write_text("x = 1\n")  # untracked addition
+    state = _verify_worktree_shape_with(directory, repo, sha)
+    assert state["ok"] is False
+    assert state["reason"] == "worktree_shape_mismatch"
+    assert state["added_total"] == 1
+    assert "?? new_test.py" in state["added_sample"]
+
+
+def test_worktree_shape_blindness_documented(tmp_path: Path):
+    # Edits INSIDE the untracked src/ tree are invisible to git status:
+    # this invariant is shape, not bytes. Executable-code provenance rests
+    # on the pinned image digest + import preflight, not this check.
+    repo, sha, entries = _image_shaped_repo(tmp_path)
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    _write_baseline(directory, _baseline_doc(entries, repo_sha=sha))
+    (repo / "src" / "vllm" / "engine.py").write_text("tampered = 1\n")
+    state = _verify_worktree_shape_with(directory, repo, sha)
+    assert state["ok"] is True  # shape unchanged; documented blindness
+
+
+def test_worktree_shape_rejects_head_mismatch(tmp_path: Path):
+    repo, sha, entries = _image_shaped_repo(tmp_path)
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    _write_baseline(directory, _baseline_doc(entries, repo_sha=sha))
+    state = _verify_worktree_shape(repo, "0" * 40, _image_ref())
     assert state["ok"] is False
     assert state["reason"] == "repository_sha_mismatch"
 
 
-def test_pristine_checkout_rejects_dirty_tree(tmp_path: Path):
-    repo, sha = _make_repo(tmp_path)
-    (repo / "stray.txt").write_text("x")
-    state = _verify_pristine_checkout(repo, sha)
-    assert state["ok"] is False
-    assert state["reason"] == "checkout_dirty_before"
+def test_baseline_binding_failures_are_distinct(tmp_path: Path):
+    repo, sha, entries = _image_shaped_repo(tmp_path)
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    _write_baseline(directory, _baseline_doc(entries, repo_sha=sha))
+
+    # No baseline for a different digest -> missing
+    other = "sha256:" + "f" * 64
+    doc, err = _load_worktree_baseline(sha, _image_ref(other), directory)
+    assert doc is None and err == "worktree_baseline_missing"
+    # Unpinned image reference
+    doc, err = _load_worktree_baseline(sha, "registry/repo:tag", directory)
+    assert doc is None and err == "worktree_baseline_unpinned_image"
+    # Baseline bound to a different image
+    doc2 = _baseline_doc(entries, digest="sha256:" + "b" * 64, repo_sha=sha)
+    _write_baseline(directory, doc2, digest=_DIGEST)  # file name says _DIGEST
+    doc, err = _load_worktree_baseline(sha, _image_ref(), directory)
+    assert doc is None and err == "worktree_baseline_image_mismatch"
+    # Baseline bound to a different repository SHA
+    _write_baseline(
+        directory, _baseline_doc(entries, repo_sha="0" * 40), digest=_DIGEST
+    )
+    doc, err = _load_worktree_baseline(sha, _image_ref(), directory)
+    assert doc is None and err == "worktree_baseline_sha_mismatch"
+    # Corrupt payload
+    bad = _baseline_doc(entries, repo_sha=sha)
+    bad["raw_sha256"] = "0" * 64
+    _write_baseline(directory, bad, digest=_DIGEST)
+    doc, err = _load_worktree_baseline(sha, _image_ref(), directory)
+    assert doc is None and err == "worktree_baseline_corrupt"
 
 
-def test_pristine_checkout_rejects_non_repo(tmp_path: Path):
-    state = _verify_pristine_checkout(tmp_path, "0" * 40)
-    assert state["ok"] is False
-    assert state["reason"] == "git_rev_parse_failed"
-
-
-# --- immutable image pinning (blocker 2) ---
-
-from utils_lib.docker_utils import pin_image_digest
-
-GOOD_DIGEST = "sha256:" + "a" * 64
-
-
-def test_pin_image_digest_converts_tag():
-    assert (
-        pin_image_digest("reg.example/repo:$BUILDKITE_COMMIT", GOOD_DIGEST)
-        == f"reg.example/repo@{GOOD_DIGEST}"
+def test_bundled_baseline_loads_and_binds():
+    # The real bundled baseline for the eac636a7 pilot image.
+    doc, err = _load_worktree_baseline(
+        "eac636a7fa476983cdae34b45a984e9852aad375",
+        "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo@sha256:530a18dfb04c66cdb4ebb939b111d84c47b902abf21b3e7d3fded2deac8b556a",
+    )
+    assert err is None
+    assert doc["entry_count"] == 2868
+    assert len(doc["_entries"]) == 2868
+    assert doc["raw_sha256"] == (
+        "4baa54f37a7498939362267b1d88b89212b0b9d9f2830dd9d01516cb9fcd87b1"
     )
 
-
-def test_pin_image_digest_rejects_variants_and_malformed():
-    import pytest as _pytest
-
-    with _pytest.raises(ValueError):
-        pin_image_digest("reg.example/repo:tag-cpu", GOOD_DIGEST)
-    with _pytest.raises(ValueError):
-        pin_image_digest("reg.example/repo:tag-torch-nightly", GOOD_DIGEST)
-    with _pytest.raises(ValueError):
-        pin_image_digest("reg.example/repo", GOOD_DIGEST)
-    with _pytest.raises(ValueError):
-        pin_image_digest("reg.example/repo:tag", "not-a-digest")
-    with _pytest.raises(ValueError):
-        pin_image_digest("reg.example/repo:tag", "sha256:" + "A" * 64)
-
-
-def test_subprocess_health_after_status_error_fails_closed():
-    kwargs = {
-        **_OK_KWARGS,
-        "checkout_state": {"ok": True, "status_after_error": "fatal: not a repo"},
-    }
-    assert _subprocess_health(**kwargs) == "checkout_status_failed_after"
 
 
 # --- end-to-end through run_trace.main: command cwd inside a real repo,
@@ -344,6 +446,14 @@ def _run_main(tmp_path: Path, command: str, monkeypatch) -> dict:
     monkeypatch.setattr(
         subprocess_coverage, "_site_packages", lambda: [hook_site]
     )
+    # Baseline binding: clean-tree baseline for this repo, image-pinned.
+    image_ref = "registry/repo@" + _DIGEST
+    monkeypatch.setenv("IMAGE_TAG", image_ref)
+    baseline = _baseline_doc(_worktree_shape(repo)["entries"], repo_sha=sha)
+    monkeypatch.setattr(
+        run_trace, "_load_worktree_baseline",
+        lambda repository_sha, ref: (baseline, None),
+    )
     argv = [
         "run_trace",
         "--output-dir", str(out),
@@ -361,14 +471,12 @@ def _run_main(tmp_path: Path, command: str, monkeypatch) -> dict:
 
 
 def test_main_subprocess_missing_hook_evidence_fails_closed(tmp_path, monkeypatch):
-    # The command runs clean but no hook/marker/serve evidence exists.
+    # The hook installs (into the patched test site dir) and the command runs
+    # clean, but nothing proves a serve interpreter ran or produced rows.
     job, exit_code = _run_main(tmp_path, "true", monkeypatch)
     assert exit_code == 0  # command itself succeeded
     assert job["healthy"] is False
-    assert job["failure_reason"] in (
-        "subprocess_hook_not_installed",
-        "subprocess_no_serve_interpreter",
-    )
+    assert job["failure_reason"] == "subprocess_no_serve_interpreter"
 
 
 def test_main_subprocess_complete_evidence_is_healthy(tmp_path, monkeypatch):

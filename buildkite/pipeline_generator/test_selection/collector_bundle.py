@@ -40,7 +40,9 @@ def bundle_bytes() -> bytes:
     files = sorted(
         path
         for path in source.iterdir()
-        if path.suffix == ".py" or path.name.endswith(".sh")
+        if path.suffix == ".py"
+        or path.name.endswith(".sh")
+        or path.name.startswith("worktree-baseline-")
     )
     if not files:
         raise RuntimeError("test-selection collector package is empty")

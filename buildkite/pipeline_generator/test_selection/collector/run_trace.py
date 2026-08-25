@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -109,11 +111,11 @@ def _subprocess_health(
     if not combine_ok:
         return "subprocess_combine_failed"
     if checkout_state and not checkout_state.get("ok"):
-        return "checkout_" + str(checkout_state.get("reason"))
+        return str(checkout_state.get("reason"))
     if "status_after_error" in checkout_state:
-        return "checkout_status_failed_after"
-    if checkout_state.get("dirty_after"):
-        return "checkout_dirty_after"
+        return "git_status_failed_after"
+    if checkout_state.get("after_mismatch"):
+        return "worktree_shape_mismatch_after"
     if not serve_markers:
         return "subprocess_no_serve_interpreter"
     if not has_serve_rows:
@@ -121,41 +123,132 @@ def _subprocess_health(
     return None
 
 
-def _verify_pristine_checkout(repo_root: Path, expected_sha: str) -> dict[str, Any]:
-    """Prove the checkout under trace is exactly the claimed commit, clean.
+_WORKTREE_STATUS_ARGS = ("status", "--porcelain=v1", "--untracked-files=normal", "-z")
 
-    BUILDKITE_COMMIT is only an environment claim; the evidence rows carry it
-    as repository_sha, so subprocess mode (which exists to merge into a graph
-    pinned at that SHA) verifies the real tree. Fail closed on any drift.
+
+def _worktree_shape(repo_root: Path) -> dict[str, Any]:
+    """Canonical worktree-shape snapshot: sorted NUL-safe status records."""
+
+    result = subprocess.run(
+        ["git", *_WORKTREE_STATUS_ARGS],
+        cwd=repo_root,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {"error": "git_status_failed", "detail": result.stderr.decode(
+            "utf-8", "replace").strip()[:500]}
+    records = sorted(
+        entry for entry in result.stdout.split(b"\0") if entry
+    )
+    canonical = b"\0".join(records) + (b"\0" if records else b"")
+    return {
+        "count": len(records),
+        "entries": [record.decode("utf-8", "replace") for record in records],
+        "sha256": hashlib.sha256(canonical).hexdigest(),
+    }
+
+
+def _baseline_file_name(image_digest: str) -> str:
+    """The bundled baseline for an image digest is named by its hex."""
+
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest or ""):
+        raise ValueError(f"invalid image digest reference: {image_digest!r}")
+    return f"worktree-baseline-{image_digest.split(':', 1)[1][:12]}.json"
+
+
+def _load_worktree_baseline(
+    repository_sha: str, image_ref: str | None, directory: Path | None = None
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Load and bind-check the bundled worktree-shape baseline.
+
+    Returns (baseline, None) or (None, reason). The baseline is valid ONLY
+    for the exact image digest and repository SHA it was captured from.
     """
 
-    def _git(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", *args],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+    if not image_ref or "@sha256:" not in image_ref:
+        return None, "worktree_baseline_unpinned_image"
+    digest = "sha256:" + image_ref.rsplit("@sha256:", 1)[1]
+    directory = directory or Path(__file__).resolve().parent
+    path = directory / _baseline_file_name(digest)
+    if not path.is_file():
+        return None, "worktree_baseline_missing"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        payload = gzip.decompress(base64.b64decode(document["payload_b64gz"]))
+        if hashlib.sha256(payload).hexdigest() != document["raw_sha256"]:
+            return None, "worktree_baseline_corrupt"
+        if int(document["entry_count"]) != len(
+            [entry for entry in payload.split(b"\0") if entry]
+        ):
+            return None, "worktree_baseline_corrupt"
+    except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
+        return None, f"worktree_baseline_corrupt:{type(error).__name__}"
+    if document.get("image_digest") != digest:
+        return None, "worktree_baseline_image_mismatch"
+    if document.get("repository_sha") != repository_sha:
+        return None, "worktree_baseline_sha_mismatch"
+    if document.get("untracked_mode") != "normal":
+        return None, "worktree_baseline_corrupt:untracked_mode"
+    document["_entries"] = sorted(
+        entry.decode("utf-8", "replace") for entry in payload.split(b"\0") if entry
+    )
+    return document, None
 
-    head = _git("rev-parse", "HEAD")
-    status = _git("status", "--porcelain")
-    state: dict[str, Any] = {
-        "head": head.stdout.strip() if head.returncode == 0 else None,
-        "dirty": status.stdout.splitlines() if status.returncode == 0 else None,
-        "expected": expected_sha,
-        "ok": False,
-    }
+
+def _verify_worktree_shape(
+    repo_root: Path, expected_sha: str, image_ref: str | None
+) -> dict[str, Any]:
+    """Verify HEAD equality + worktree shape == the image's baseline.
+
+    The CI test image deliberately moves `vllm/` to `src/vllm` (the package
+    under test is pip-installed), so "pristine checkout" can never hold. The
+    invariant is shape equality with the baseline captured from the pinned
+    image — shape, not bytes: edits inside the untracked `src/` tree are
+    invisible to `git status`, and executable-code provenance rests on the
+    pinned image digest plus the import preflight, not on this check.
+    """
+
+    state: dict[str, Any] = {"expected": expected_sha, "ok": False}
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if head.returncode != 0:
         state["reason"] = "git_rev_parse_failed"
-    elif status.returncode != 0:
-        state["reason"] = "git_status_failed"
-    elif state["head"] != expected_sha:
+        return state
+    state["head"] = head.stdout.strip()
+    if state["head"] != expected_sha:
         state["reason"] = "repository_sha_mismatch"
-    elif state["dirty"]:
-        state["reason"] = "checkout_dirty_before"
-    else:
-        state["ok"] = True
+        return state
+    baseline, error = _load_worktree_baseline(expected_sha, image_ref)
+    if error:
+        state["reason"] = error
+        return state
+    shape = _worktree_shape(repo_root)
+    if "error" in shape:
+        state["reason"] = shape["error"]
+        return state
+    state["baseline_sha256"] = baseline["raw_sha256"]
+    state["baseline_count"] = baseline["entry_count"]
+    state["shape_sha256"] = shape["sha256"]
+    state["shape_count"] = shape["count"]
+    state["_baseline_entries"] = baseline["_entries"]
+    if shape["entries"] != baseline["_entries"]:
+        baseline_set = set(baseline["_entries"])
+        shape_set = set(shape["entries"])
+        added = sorted(shape_set - baseline_set)
+        removed = sorted(baseline_set - shape_set)
+        state["reason"] = "worktree_shape_mismatch"
+        state["added_total"] = len(added)
+        state["removed_total"] = len(removed)
+        state["added_sample"] = added[:20]
+        state["removed_sample"] = removed[:20]
+        return state
+    state["ok"] = True
     return state
 
 
@@ -629,9 +722,12 @@ def main() -> int:
         )
         checkout_state: dict[str, Any] = {}
         if args.subprocess_coverage:
-            # The evidence claims the checkout's repository SHA; prove the
-            # tree is actually that commit and pristine before and after.
-            checkout_state = _verify_pristine_checkout(command_cwd, repository_sha)
+            # The evidence claims the checkout's repository SHA and the image
+            # it runs in: prove HEAD equality and that the worktree shape is
+            # exactly the pinned image's baseline — before and after.
+            checkout_state = _verify_worktree_shape(
+                args.repo_root, repository_sha, os.environ.get("IMAGE_TAG")
+            )
             if not checkout_state["ok"] and preflight_status == 0:
                 preflight_status = 70
         if preflight_status == 0 and args.subprocess_coverage:
@@ -664,18 +760,24 @@ def main() -> int:
             command_exit_code = _shell_exit_code(result.returncode)
             command_finished_at = datetime.now(UTC).isoformat()
             if args.subprocess_coverage:
-                after = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=command_cwd,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if after.returncode == 0:
-                    checkout_state["dirty_after"] = after.stdout.splitlines()
+                after = _worktree_shape(args.repo_root)
+                if "error" in after:
+                    checkout_state["status_after_error"] = after["error"]
                 else:
-                    checkout_state["dirty_after"] = None
-                    checkout_state["status_after_error"] = after.stderr.strip()
+                    checkout_state["after_sha256"] = after["sha256"]
+                    checkout_state["after_count"] = after["count"]
+                    if after["entries"] != checkout_state.get(
+                        "_baseline_entries"
+                    ):
+                        baseline_set = set(checkout_state.get("_baseline_entries", []))
+                        after_set = set(after["entries"])
+                        added = sorted(after_set - baseline_set)
+                        removed = sorted(baseline_set - after_set)
+                        checkout_state["after_mismatch"] = True
+                        checkout_state["added_total"] = len(added)
+                        checkout_state["removed_total"] = len(removed)
+                        checkout_state["added_sample"] = added[:20]
+                        checkout_state["removed_sample"] = removed[:20]
             invocations_at_finish = (
                 _pytest_invocations_started(node_file) if args.command_base64 else 1
             )
@@ -787,7 +889,7 @@ def main() -> int:
     failure_reason = None
     if preflight_status != 0:
         failure_reason = (
-            "checkout_" + str(checkout_state.get("reason"))
+            str(checkout_state.get("reason"))
             if checkout_state and not checkout_state.get("ok")
             else "collector_import_failed"
         )
@@ -828,7 +930,10 @@ def main() -> int:
             "represented_job_key": args.represented_job_key,
             "subprocess_hook": subprocess_hook_state,
             "subprocess_serve_markers": serve_markers,
-            "checkout_state": checkout_state or None,
+            "checkout_state": (
+                {k: v for k, v in checkout_state.items() if not k.startswith("_")}
+                or None
+            ),
         },
     )
     coverage_file.unlink(missing_ok=True)
