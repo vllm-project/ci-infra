@@ -421,7 +421,11 @@ def _fnrec_checkout_path(step: Step) -> str:
     value is correct there.
     """
     if _uses_k8s_plugin(step) or is_amd_gpu_device(step.device):
-        return "$$BUILDKITE_BUILD_CHECKOUT_PATH"
+        # Defaulted, because legacy AMD dind forwards no BUILDKITE_* into its
+        # inner container. Without the fallback the empty variable makes
+        # FNREC_BASE "/.fnrec" and the setup runs `rm -rf` on it. Harmless in a
+        # throwaway container and not something to leave in a 370-job sweep.
+        return "$${BUILDKITE_BUILD_CHECKOUT_PATH:-/tmp/fnrec-no-checkout}"
     return DOCKER_CHECKOUT_MOUNT_PATH
 
 

@@ -137,7 +137,7 @@ def test_reaches_kubernetes_routed_steps(monkeypatch):
     )
     assert any(c.startswith("export FNREC_OUT=") for c in commands)
     base = next(c for c in commands if c.startswith("export FNREC_BASE="))
-    assert "$BUILDKITE_BUILD_CHECKOUT_PATH/.fnrec" in base
+    assert "${BUILDKITE_BUILD_CHECKOUT_PATH:-/tmp/fnrec-no-checkout}/.fnrec" in base
 
 
 @pytest.mark.parametrize(
@@ -405,10 +405,10 @@ def test_the_checkout_choice_tracks_the_plugin_router(monkeypatch, device):
     step = _step(device=device, num_devices=1)
     path = buildkite_step._fnrec_checkout_path(step)
     if is_amd_gpu_device(device):
-        assert path == "$$BUILDKITE_BUILD_CHECKOUT_PATH"
+        assert path.startswith("$${BUILDKITE_BUILD_CHECKOUT_PATH:-")
         return
     routed_to_k8s = "kubernetes" in buildkite_step._get_step_plugin(step)
-    assert (path == "$$BUILDKITE_BUILD_CHECKOUT_PATH") is routed_to_k8s
+    assert path.startswith("$${BUILDKITE_BUILD_CHECKOUT_PATH:-") is routed_to_k8s
 
 
 def test_amd_keeps_its_diagnostics_glob_when_fnrec_is_on(monkeypatch):
