@@ -498,3 +498,79 @@ def test_main_subprocess_complete_evidence_is_healthy(tmp_path, monkeypatch):
     assert job["checkout_state"]["ok"] is True
     rows = (out / "python-trace.jsonl").read_text().strip().splitlines()
     assert json.loads(rows[0])["test_id"] == "job::k"
+
+
+# --- compact-writer identity propagation (run_job_trace assembly) ---
+
+from test_selection.collector import run_job_trace
+
+
+def _run_writer(tmp_path: Path, monkeypatch, shard_docs: list[dict]) -> dict:
+    """Run run_job_trace.main with fabricated per-command shard receipts."""
+
+    commands = ["true"] * len(shard_docs)
+
+    def fake_run(command, *, command_index, output_dir, **_kwargs):
+        shard_dir = output_dir / "commands" / f"{command_index:03d}"
+        shard_dir.mkdir(parents=True, exist_ok=True)
+        doc = dict(shard_docs[command_index])
+        doc.setdefault("command_executed", True)
+        doc.setdefault("pytest_exit_code", 0)
+        (shard_dir / "job.json").write_text(json.dumps(doc))
+        (shard_dir / "python-trace.jsonl").write_text("")
+        return _subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr(run_job_trace, "_run_command", fake_run)
+    monkeypatch.setenv("BUILDKITE_COMMIT", "a" * 40)
+    out = tmp_path / "out"
+    argv = [
+        "run_job_trace",
+        "--output-dir", str(out),
+        "--job-key", "k",
+        "--represented-job-key", "k",
+        "--commands-base64",
+        _base64.b64encode(json.dumps(commands).encode()).decode(),
+        "--python-only",
+    ]
+    monkeypatch.setattr("sys.argv", argv)
+    run_job_trace.main()
+    return json.loads((out / "trace-job.json").read_text())
+
+
+_PAIR = {"image_digest": "sha256:" + "d" * 64, "worktree_baseline_sha256": "b" * 64}
+
+
+def test_writer_propagates_uniform_pair(tmp_path, monkeypatch):
+    doc = dict(_PAIR, healthy=True)
+    summary = _run_writer(tmp_path, monkeypatch, [doc, dict(doc)])
+    assert summary["healthy"] is True
+    assert summary["image_digest"] == _PAIR["image_digest"]
+    assert summary["image_digests"] == [_PAIR["image_digest"]]
+    assert summary["worktree_baseline_sha256"] == _PAIR["worktree_baseline_sha256"]
+    assert summary["worktree_baseline_sha256s"] == [_PAIR["worktree_baseline_sha256"]]
+
+
+def test_writer_rejects_mixed_digests(tmp_path, monkeypatch):
+    a = dict(_PAIR, healthy=True)
+    b = dict(_PAIR, healthy=True, image_digest="sha256:" + "e" * 64)
+    summary = _run_writer(tmp_path, monkeypatch, [a, b])
+    assert summary["healthy"] is False
+    assert summary["failure_reason"] == "mixed_image_identity"
+    assert summary["image_digest"] is None
+    assert len(summary["image_digests"]) == 2
+
+
+def test_writer_rejects_partial_pair(tmp_path, monkeypatch):
+    paired = dict(_PAIR, healthy=True)
+    legacy = {"healthy": True}  # carries nothing
+    summary = _run_writer(tmp_path, monkeypatch, [paired, legacy])
+    assert summary["healthy"] is False
+    assert summary["failure_reason"] == "partial_image_baseline_pair"
+
+
+def test_writer_rejects_malformed_pair(tmp_path, monkeypatch):
+    bad = {"healthy": True, "image_digest": "not-a-digest",
+           "worktree_baseline_sha256": "b" * 64}
+    summary = _run_writer(tmp_path, monkeypatch, [bad])
+    assert summary["healthy"] is False
+    assert summary["failure_reason"] == "invalid_image_identity"

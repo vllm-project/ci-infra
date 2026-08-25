@@ -353,3 +353,31 @@ def test_select_snapshot_requires_fresh_ancestor(tmp_path: Path):
     assert select_snapshot({"snapshots": [stale, fresh]}, repo, repository_sha) == fresh
     with pytest.raises(GraphError, match="no fresh ancestral"):
         select_snapshot({"snapshots": [stale]}, repo, repository_sha)
+
+
+def test_publish_rejects_manifest_with_tampered_image_baseline_pair(tmp_path: Path):
+    graph = _graph(tmp_path / "graph.sqlite")
+    manifest_path = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    # Legacy graph has no pair; inject a valid-looking but graph-absent one.
+    manifest["image_digest"] = "sha256:" + "d" * 64
+    manifest["image_digests"] = ["sha256:" + "d" * 64]
+    manifest["worktree_baseline_sha256"] = "b" * 64
+    manifest["worktree_baseline_sha256s"] = ["b" * 64]
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(GraphError, match="image/baseline"):
+        publish_snapshot(MemoryStore(), "test-selection/vllm", graph, manifest_path)
+
+
+def test_publish_rejects_partial_image_baseline_pair(tmp_path: Path):
+    graph = _graph(tmp_path / "graph.sqlite")
+    manifest_path = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["image_digest"] = "sha256:" + "d" * 64  # digest without baseline
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(GraphError, match="incomplete"):
+        publish_snapshot(MemoryStore(), "test-selection/vllm", graph, manifest_path)

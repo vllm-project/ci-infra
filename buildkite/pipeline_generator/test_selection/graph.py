@@ -192,21 +192,68 @@ def _insert_gpu(
     return count
 
 
-def _identity_values(
-    document: dict[str, Any], singular_field: str, plural_field: str
-) -> set[str]:
-    """The identity values a summary claims; singular/plural must agree."""
+_IMAGE_DIGEST_PATTERN = r"sha256:[0-9a-f]{64}"
+_BASELINE_PATTERN = r"[0-9a-f]{64}"
+
+
+def _strict_singleton(
+    document: dict[str, Any],
+    singular_field: str,
+    plural_field: str,
+    pattern: str,
+    label: str,
+) -> str | None:
+    """A strictly validated optional identity value (canonical set form)."""
 
     singular = document.get(singular_field)
-    plural = document.get(plural_field) or []
-    values = {str(value) for value in plural}
-    if singular:
-        if plural and str(singular) not in {str(value) for value in plural}:
+    plural = document.get(plural_field)
+    if plural == []:
+        # Writers emit an empty list for absent identity; that is legacy.
+        plural = None
+    if plural is not None:
+        if (
+            not isinstance(plural, list)
+            or len(plural) != 1
+            or plural != sorted(plural)
+            or not re.fullmatch(pattern, str(plural[0]))
+        ):
+            raise GraphError(f"{label} {plural_field} is invalid")
+        if singular is not None and str(singular) != str(plural[0]):
             raise GraphError(
-                f"summary {singular_field}/{plural_field} fields disagree"
+                f"{label} {singular_field}/{plural_field} fields disagree"
             )
-        values.add(str(singular))
-    return values
+        singular = plural[0]
+    if singular is None:
+        return None
+    if not re.fullmatch(pattern, str(singular)):
+        raise GraphError(f"{label} {singular_field} is invalid")
+    return str(singular)
+
+
+def image_baseline_identity(
+    document: dict[str, Any], label: str
+) -> tuple[str, str] | None:
+    """The strictly validated (image digest, baseline) pair, or None.
+
+    Both halves are required together: a partial pair can synthesize
+    provenance no single shard carried. Anything malformed raises.
+    """
+
+    digest = _strict_singleton(
+        document, "image_digest", "image_digests", _IMAGE_DIGEST_PATTERN, label
+    )
+    baseline = _strict_singleton(
+        document,
+        "worktree_baseline_sha256",
+        "worktree_baseline_sha256s",
+        _BASELINE_PATTERN,
+        label,
+    )
+    if (digest is None) != (baseline is None):
+        raise GraphError(f"{label} image/baseline identity is incomplete")
+    if digest is None:
+        return None
+    return digest, baseline
 
 
 def _collect_summaries(
@@ -246,24 +293,11 @@ def _collect_summaries(
             and document.get("collector_sha256") == collector_sha
             and document.get("parallel_job_count") == expected
         )
-        # A summary claiming several image digests or baselines is mixed
-        # provenance; the compact writer already fails those, defense here.
+        # Provenance identity must be strictly well-formed and complete
+        # (both halves or neither) to count as evidence at all.
         try:
-            mixed_identity = (
-                len(_identity_values(document, "image_digest", "image_digests")) > 1
-                or len(
-                    _identity_values(
-                        document,
-                        "worktree_baseline_sha256",
-                        "worktree_baseline_sha256s",
-                    )
-                )
-                > 1
-            )
+            image_baseline_identity(document, "summary")
         except GraphError:
-            # singular/plural disagreement within one summary
-            mixed_identity = True
-        if mixed_identity:
             identity_valid = False
         candidates[key].setdefault(shard, {}).setdefault(retry_count, []).append(
             (path, document, identity_valid)
@@ -408,32 +442,32 @@ def _materialize(
 
         if not healthy:
             raise GraphError("trace generation contains no healthy jobs")
-        # One generation = one image + one worktree baseline. Jobs that predate
-        # the receipts carry nothing and are ungated; every carrier must agree.
-        generation_image_digests = sorted(
-            {
-                value
-                for _path, document in (
-                    summary for job in summaries.values() for summary in job.values()
+        # One generation = one image + one worktree baseline. The pair is
+        # all-or-nothing across the healthy set: a carrier mix would let the
+        # manifest claim provenance no single shard attested, and a partial
+        # pair synthesizes a pair nobody carried.
+        healthy_pairs = set()
+        for key in healthy:
+            for _path, document in summaries[key].values():
+                healthy_pairs.add(
+                    image_baseline_identity(document, f"healthy summary {key}")
                 )
-                for value in _identity_values(document, "image_digest", "image_digests")
-            }
-        )
-        generation_baselines = sorted(
-            {
-                value
-                for _path, document in (
-                    summary for job in summaries.values() for summary in job.values()
+        healthy_pairs.discard(None)
+        carrier_keys = set()
+        for key in healthy:
+            for _path, document in summaries[key].values():
+                if image_baseline_identity(document, f"healthy summary {key}"):
+                    carrier_keys.add(key)
+        if healthy_pairs:
+            if len(healthy_pairs) > 1:
+                raise GraphError(
+                    "image/baseline identity disagreement across generation"
                 )
-                for value in _identity_values(
-                    document, "worktree_baseline_sha256", "worktree_baseline_sha256s"
+            if len(carrier_keys) != len(healthy):
+                raise GraphError(
+                    "generation mixes image-pinned and legacy evidence"
                 )
-            }
-        )
-        if len(generation_image_digests) > 1:
-            raise GraphError("image digest disagreement across generation")
-        if len(generation_baselines) > 1:
-            raise GraphError("worktree baseline disagreement across generation")
+        generation_pair = next(iter(healthy_pairs), None)
         data_through = min(evidence_times).isoformat()
         collector_sha256s = sorted(
             {collector_sha}
@@ -453,12 +487,10 @@ def _materialize(
             "data_through": data_through,
             "expected_jobs": sorted(policies),
             "healthy_jobs": sorted(healthy),
-            "image_digest": (
-                generation_image_digests[0]
-                if len(generation_image_digests) == 1
-                else None
+            "image_digest": generation_pair[0] if generation_pair else None,
+            "image_digests": (
+                [generation_pair[0]] if generation_pair else []
             ),
-            "image_digests": generation_image_digests,
             "missing_jobs": sorted(missing),
             "missing_reasons": {key: reasons[key] for key in sorted(missing)},
             "repository_sha": repository_sha,
@@ -467,9 +499,11 @@ def _materialize(
             "unhealthy_reasons": {key: reasons[key] for key in sorted(unhealthy)},
             "wait_results": wait_results,
             "worktree_baseline_sha256": (
-                generation_baselines[0] if len(generation_baselines) == 1 else None
+                generation_pair[1] if generation_pair else None
             ),
-            "worktree_baseline_sha256s": generation_baselines,
+            "worktree_baseline_sha256s": (
+                [generation_pair[1]] if generation_pair else []
+            ),
         }
         for key, value in sorted(metadata.items()):
             connection.execute(

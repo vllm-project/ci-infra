@@ -20,6 +20,7 @@ from test_selection.graph import (
     GraphError,
     build_fleet_graph,
     graph_metadata,
+    image_baseline_identity,
     sha256_file,
     verify_checksum,
 )
@@ -407,6 +408,15 @@ def publish_snapshot(
         != _collector_identity(metadata, "graph metadata")
     ):
         raise GraphError("snapshot graph and manifest collector identities disagree")
+    # The image/baseline provenance pair gets the same treatment: strictly
+    # validated and cross-checked between manifest and graph metadata, so an
+    # injected or drifted pair can never publish as if evidence carried it.
+    manifest_pair = image_baseline_identity(manifest, "snapshot manifest")
+    graph_pair = image_baseline_identity(metadata, "graph metadata")
+    if manifest_pair != graph_pair:
+        raise GraphError(
+            "snapshot graph and manifest image/baseline identities disagree"
+        )
     sidecar = graph.with_suffix(graph.suffix + ".sha256")
     files = manifest.get("files")
     if not isinstance(files, dict):

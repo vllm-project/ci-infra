@@ -914,9 +914,14 @@ def convert_group_step_to_buildkite_step(
 
             if step.trace_represented_job_key:
                 # Evidence records the exact image the traced job pulls.
-                trace_env = dict(buildkite_step.env or {})
-                trace_env["IMAGE_TAG"] = _step_image(step, pin_trace_digest=True)
-                buildkite_step.env = trace_env
+                # Only subprocess-coverage jobs carry the image/baseline
+                # provenance pair; a digest without its baseline is a
+                # partial pair and must not appear (the compact writer and
+                # the generation gate reject partial pairs).
+                if step.trace_subprocess_coverage:
+                    trace_env = dict(buildkite_step.env or {})
+                    trace_env["IMAGE_TAG"] = _step_image(step, pin_trace_digest=True)
+                    buildkite_step.env = trace_env
 
             group_steps_list.append(buildkite_step)
 

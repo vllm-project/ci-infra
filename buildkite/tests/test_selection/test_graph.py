@@ -507,7 +507,7 @@ def test_mixed_image_digest_generation_fails_closed(tmp_path: Path):
     evidence = tmp_path / "evidence"
     _job_with_identity(evidence, "job-a", "sha256:" + "d" * 64, "b" * 64)
     _job_with_identity(evidence, "job-b", "sha256:" + "e" * 64, "b" * 64)
-    with pytest.raises(GraphError, match="image digest disagreement"):
+    with pytest.raises(GraphError, match="image/baseline identity disagreement"):
         build_fleet_graph(
             evidence,
             _inventory(tmp_path / "inventory.json", "job-a", "job-b"),
@@ -519,7 +519,7 @@ def test_mixed_baseline_generation_fails_closed(tmp_path: Path):
     evidence = tmp_path / "evidence"
     _job_with_identity(evidence, "job-a", "sha256:" + "d" * 64, "b" * 64)
     _job_with_identity(evidence, "job-b", "sha256:" + "d" * 64, "c" * 64)
-    with pytest.raises(GraphError, match="worktree baseline disagreement"):
+    with pytest.raises(GraphError, match="image/baseline identity disagreement"):
         build_fleet_graph(
             evidence,
             _inventory(tmp_path / "inventory.json", "job-a", "job-b"),

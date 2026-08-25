@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -263,7 +264,38 @@ def main() -> int:
     )
     # A job whose commands ran under different images/baselines produces
     # mixed provenance; fail the compact summary rather than publish it.
-    if len(image_digests) > 1 or len(baseline_shas) > 1:
+    # And if any command carries the identity pair, every command must
+    # carry the same complete, strictly formatted pair — a partial pair
+    # would synthesize provenance no command attested.
+    identity_failure = None
+    if len(image_digests) > 1:
+        identity_failure = "mixed_image_identity"
+    elif len(baseline_shas) > 1:
+        identity_failure = "mixed_worktree_baseline"
+    else:
+        carriers = [
+            bool(result.get("image_digest"))
+            or bool(result.get("worktree_baseline_sha256"))
+            for result in command_results
+        ]
+        complete = [
+            bool(result.get("image_digest"))
+            and bool(result.get("worktree_baseline_sha256"))
+            for result in command_results
+        ]
+        if any(carriers):
+            if not all(complete):
+                identity_failure = "partial_image_baseline_pair"
+            else:
+                for result in command_results:
+                    if not re.fullmatch(
+                        r"sha256:[0-9a-f]{64}", str(result["image_digest"])
+                    ) or not re.fullmatch(
+                        r"[0-9a-f]{64}", str(result["worktree_baseline_sha256"])
+                    ):
+                        identity_failure = "invalid_image_identity"
+                        break
+    if identity_failure:
         healthy = False
     failure_reasons = sorted(
         {
@@ -274,18 +306,12 @@ def main() -> int:
     )
     failure_reason = None
     if not healthy:
+        # A shard's specific reason (e.g. worktree_shape_mismatch) is more
+        # diagnostic than the pair-level failure it may have caused.
         failure_reason = (
-            "mixed_image_identity"
-            if len(image_digests) > 1
-            else (
-                "mixed_worktree_baseline"
-                if len(baseline_shas) > 1
-                else (
-                    failure_reasons[0]
-                    if len(failure_reasons) == 1
-                    else "collector_unhealthy"
-                )
-            )
+            failure_reasons[0]
+            if len(failure_reasons) == 1
+            else identity_failure or "collector_unhealthy"
         )
     summary_path = output_dir / "trace-job.json"
     try:
