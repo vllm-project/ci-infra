@@ -35,6 +35,7 @@ from utils_lib.docker_utils import (
     get_ecr_cache_registry,
     get_image,
     get_torch_nightly_image,
+    pin_image_digest,
 )
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
@@ -255,22 +256,36 @@ class BuildkiteGroupStep(BaseModel):
     steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
 
 
-def _get_step_plugin(step: Step):
-    # Use K8s plugin
+def _step_image(step: Step, pin_trace_digest: bool = False) -> str:
+    """The exact image reference a step's plugin will pull."""
+
     use_cpu = step.device in (
         DeviceType.CPU,
         DeviceType.CPU_SMALL,
         DeviceType.CPU_MEDIUM,
     )
     use_arm64 = step.device == DeviceType.DGX_SPARK
+    image = get_image(use_cpu, use_arm64)
+    if pin_trace_digest:
+        digest = get_global_config().get("trace_image_digest")
+        if digest:
+            image = pin_image_digest(image, digest)
+    return image
+
+
+def _get_step_plugin(step: Step):
+    # Traced jobs pin the exact image digest when the canary digest override
+    # is active, so evidence provably describes the same image bytes.
+    pin = bool(step.trace_represented_job_key)
+    image = _step_image(step, pin_trace_digest=pin)
     if step.device in [
         DeviceType.H100.value,
         DeviceType.A100.value,
         DeviceType.B200_K8S.value,
     ]:
-        return get_k8s_plugin(step, get_image(use_cpu))
+        return get_k8s_plugin(step, image)
     else:
-        return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
+        return {"docker#v5.2.0": get_docker_plugin(step, image)}
 
 
 def get_agent_queue(step: Step):
@@ -874,6 +889,12 @@ def convert_group_step_to_buildkite_step(
                 or (step.num_nodes and step.num_nodes >= 2)
             ):
                 buildkite_step.plugins = [_get_step_plugin(step)]
+
+            if step.trace_represented_job_key:
+                # Evidence records the exact image the traced job pulls.
+                trace_env = dict(buildkite_step.env or {})
+                trace_env["IMAGE_TAG"] = _step_image(step, pin_trace_digest=True)
+                buildkite_step.env = trace_env
 
             group_steps_list.append(buildkite_step)
 

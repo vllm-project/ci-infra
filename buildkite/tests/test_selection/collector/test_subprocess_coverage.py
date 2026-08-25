@@ -153,3 +153,153 @@ def test_boot_starts_coverage_when_env_set(monkeypatch, tmp_path):
         current = coverage.Coverage.current()
         if current is not None:
             current.stop()
+
+
+# --- fail-closed health gate (blocker 1) ---
+
+from test_selection.collector.run_trace import _serve_markers, _subprocess_health
+
+
+def _write_marker(directory: Path, pid: int, argv: list[str]) -> None:
+    (directory / f"subprocess-hook-ran.{pid}.json").write_text(
+        json.dumps(
+            {"argv": argv, "executable": "/opt/venv/bin/python3", "pid": pid,
+             "prefix": "/opt/venv", "time": 0.0}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+_SERVE_MARKER = {"argv": ["/opt/venv/bin/vllm", "serve", "m"], "pid": 1}
+_OK_KWARGS = dict(
+    hook_state={"installed": True},
+    combine_ok=True,
+    checkout_state={"ok": True},
+    serve_markers=[_SERVE_MARKER],
+    has_serve_rows=True,
+)
+
+
+def test_subprocess_health_ok():
+    assert _subprocess_health(**_OK_KWARGS) is None
+
+
+def test_subprocess_health_hook_skipped_is_unhealthy():
+    kwargs = {**_OK_KWARGS, "hook_state": {"installed": False}}
+    assert _subprocess_health(**kwargs) == "subprocess_hook_not_installed"
+    kwargs = {**_OK_KWARGS, "hook_state": None}
+    assert _subprocess_health(**kwargs) == "subprocess_hook_not_installed"
+
+
+def test_subprocess_health_combine_failure_is_unhealthy():
+    kwargs = {**_OK_KWARGS, "combine_ok": False}
+    assert _subprocess_health(**kwargs) == "subprocess_combine_failed"
+
+
+def test_subprocess_health_checkout_drift_is_unhealthy():
+    kwargs = {**_OK_KWARGS, "checkout_state": {"ok": False, "reason": "repository_sha_mismatch"}}
+    assert _subprocess_health(**kwargs) == "checkout_repository_sha_mismatch"
+    kwargs = {**_OK_KWARGS, "checkout_state": {"ok": True, "dirty_after": ["M x"]}}
+    assert _subprocess_health(**kwargs) == "checkout_dirty_after"
+
+
+def test_subprocess_health_no_serve_interpreter_is_unhealthy():
+    kwargs = {**_OK_KWARGS, "serve_markers": []}
+    assert _subprocess_health(**kwargs) == "subprocess_no_serve_interpreter"
+
+
+def test_subprocess_health_no_serve_rows_is_unhealthy():
+    kwargs = {**_OK_KWARGS, "has_serve_rows": False}
+    assert _subprocess_health(**kwargs) == "subprocess_no_serve_evidence"
+
+
+def test_serve_markers_identify_serve_argv(tmp_path: Path):
+    _write_marker(tmp_path, 1, ["/opt/venv/bin/vllm", "serve", "model"])
+    _write_marker(tmp_path, 2, ["python3", "-m", "pytest", "tests/"])
+    _write_marker(tmp_path, 3, ["python3", "-c", "import vllm"])  # helper, not serve
+    (tmp_path / "subprocess-hook-ran.4.json").write_text("not json")
+    serve = _serve_markers(tmp_path)
+    assert len(serve) == 1
+    assert serve[0]["pid"] == 1
+
+
+# --- pristine checkout proof (blocker 3) ---
+
+from test_selection.collector.run_trace import _verify_pristine_checkout
+
+
+def _git(repo: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def _make_repo(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit",
+         "--allow-empty", "-q", "-m", "init")
+    import subprocess
+
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    return repo, sha
+
+
+def test_pristine_checkout_ok(tmp_path: Path):
+    repo, sha = _make_repo(tmp_path)
+    state = _verify_pristine_checkout(repo, sha)
+    assert state["ok"] is True
+    assert state["head"] == sha
+
+
+def test_pristine_checkout_rejects_sha_mismatch(tmp_path: Path):
+    repo, _sha = _make_repo(tmp_path)
+    state = _verify_pristine_checkout(repo, "0" * 40)
+    assert state["ok"] is False
+    assert state["reason"] == "repository_sha_mismatch"
+
+
+def test_pristine_checkout_rejects_dirty_tree(tmp_path: Path):
+    repo, sha = _make_repo(tmp_path)
+    (repo / "stray.txt").write_text("x")
+    state = _verify_pristine_checkout(repo, sha)
+    assert state["ok"] is False
+    assert state["reason"] == "checkout_dirty_before"
+
+
+def test_pristine_checkout_rejects_non_repo(tmp_path: Path):
+    state = _verify_pristine_checkout(tmp_path, "0" * 40)
+    assert state["ok"] is False
+    assert state["reason"] == "git_rev_parse_failed"
+
+
+# --- immutable image pinning (blocker 2) ---
+
+from utils_lib.docker_utils import pin_image_digest
+
+GOOD_DIGEST = "sha256:" + "a" * 64
+
+
+def test_pin_image_digest_converts_tag():
+    assert (
+        pin_image_digest("reg.example/repo:$BUILDKITE_COMMIT", GOOD_DIGEST)
+        == f"reg.example/repo@{GOOD_DIGEST}"
+    )
+
+
+def test_pin_image_digest_rejects_variants_and_malformed():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        pin_image_digest("reg.example/repo:tag-cpu", GOOD_DIGEST)
+    with _pytest.raises(ValueError):
+        pin_image_digest("reg.example/repo:tag-torch-nightly", GOOD_DIGEST)
+    with _pytest.raises(ValueError):
+        pin_image_digest("reg.example/repo", GOOD_DIGEST)
+    with _pytest.raises(ValueError):
+        pin_image_digest("reg.example/repo:tag", "not-a-digest")
+    with _pytest.raises(ValueError):
+        pin_image_digest("reg.example/repo:tag", "sha256:" + "A" * 64)

@@ -153,12 +153,36 @@ def disable() -> bool:
 
 
 def boot() -> None:
-    """`.pth` entry point: start coverage when the job env requests it."""
+    """`.pth` entry point: start coverage when the job env requests it.
+
+    Also writes a per-process receipt (`subprocess-hook-ran.<pid>.json`)
+    identifying the interpreter that actually started, so the collector can
+    prove a `vllm serve` runtime was hooked — and read `sys.executable` /
+    `sys.prefix` directly instead of inferring site-packages mismatches.
+    """
 
     import os
 
     if not os.environ.get("COVERAGE_PROCESS_START"):
         return
+    marker_dir = os.environ.get("VLLM_CI_TEST_SELECTION_HOOK_DIR")
+    if marker_dir:
+        try:
+            import time
+
+            document = {
+                "argv": sys.argv,
+                "executable": sys.executable,
+                "pid": os.getpid(),
+                "prefix": sys.prefix,
+                "time": time.time(),
+            }
+            path = Path(marker_dir) / f"subprocess-hook-ran.{os.getpid()}.json"
+            path.write_text(
+                json.dumps(document, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        except Exception:
+            pass
     try:
         import coverage
 

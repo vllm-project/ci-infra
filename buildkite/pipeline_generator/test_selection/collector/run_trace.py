@@ -71,6 +71,92 @@ def _git_sha(repo_root: Path) -> str:
     return result.stdout.strip()
 
 
+def _serve_markers(output_dir: Path) -> list[dict[str, Any]]:
+    """Per-process hook receipts that identify a `vllm serve` interpreter."""
+
+    markers = []
+    for marker_path in sorted(output_dir.glob("subprocess-hook-ran.*.json")):
+        try:
+            markers.append(json.loads(marker_path.read_text("utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return [
+        marker
+        for marker in markers
+        if len(marker.get("argv", [])) >= 2
+        and "vllm" in marker["argv"][0]
+        and marker["argv"][1] == "serve"
+    ]
+
+
+def _subprocess_health(
+    *,
+    hook_state: dict[str, Any] | None,
+    combine_ok: bool,
+    checkout_state: dict[str, Any],
+    serve_markers: list[dict[str, Any]],
+    has_serve_rows: bool,
+) -> str | None:
+    """Fail-closed reason for subprocess coverage, or None when healthy.
+
+    Hook skipped, combine failure, a drifted/dirty checkout, no hooked serve
+    interpreter, and no serve-side rows each get a distinct reason so a green
+    pytest client can never mask missing server evidence.
+    """
+
+    if not (hook_state or {}).get("installed"):
+        return "subprocess_hook_not_installed"
+    if not combine_ok:
+        return "subprocess_combine_failed"
+    if checkout_state and not checkout_state.get("ok"):
+        return "checkout_" + str(checkout_state.get("reason"))
+    if checkout_state.get("dirty_after"):
+        return "checkout_dirty_after"
+    if not serve_markers:
+        return "subprocess_no_serve_interpreter"
+    if not has_serve_rows:
+        return "subprocess_no_serve_evidence"
+    return None
+
+
+def _verify_pristine_checkout(repo_root: Path, expected_sha: str) -> dict[str, Any]:
+    """Prove the checkout under trace is exactly the claimed commit, clean.
+
+    BUILDKITE_COMMIT is only an environment claim; the evidence rows carry it
+    as repository_sha, so subprocess mode (which exists to merge into a graph
+    pinned at that SHA) verifies the real tree. Fail closed on any drift.
+    """
+
+    def _git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    head = _git("rev-parse", "HEAD")
+    status = _git("status", "--porcelain")
+    state: dict[str, Any] = {
+        "head": head.stdout.strip() if head.returncode == 0 else None,
+        "dirty": status.stdout.splitlines() if status.returncode == 0 else None,
+        "expected": expected_sha,
+        "ok": False,
+    }
+    if head.returncode != 0:
+        state["reason"] = "git_rev_parse_failed"
+    elif status.returncode != 0:
+        state["reason"] = "git_status_failed"
+    elif state["head"] != expected_sha:
+        state["reason"] = "repository_sha_mismatch"
+    elif state["dirty"]:
+        state["reason"] = "checkout_dirty_before"
+    else:
+        state["ok"] = True
+    return state
+
+
 def normalize_repository_path(filename: str, repo_root: Path) -> str | None:
     """Map source/install paths to a repository-relative ``vllm/...`` path."""
 
@@ -539,7 +625,13 @@ def main() -> int:
             output_path=output_dir / "import-environment.json",
             repo_root=args.repo_root,
         )
-        subprocess_hook = False
+        checkout_state: dict[str, Any] = {}
+        if args.subprocess_coverage:
+            # The evidence claims the checkout's repository SHA; prove the
+            # tree is actually that commit and pristine before and after.
+            checkout_state = _verify_pristine_checkout(command_cwd, repository_sha)
+            if not checkout_state["ok"] and preflight_status == 0:
+                preflight_status = 70
         if preflight_status == 0 and args.subprocess_coverage:
             # Installed after the preflight so preflight output cannot land in
             # the real shard. The job env (COVERAGE_PROCESS_START) is only set
@@ -549,7 +641,8 @@ def main() -> int:
             environment["COVERAGE_PROCESS_START"] = str(
                 subprocess_coverage.rc_path()
             )
-            subprocess_hook = subprocess_coverage.enable(output_dir)
+            environment["VLLM_CI_TEST_SELECTION_HOOK_DIR"] = str(output_dir)
+            subprocess_coverage.enable(output_dir)
         if preflight_status == 0:
             _atomic_json(
                 command_status_file,
@@ -568,6 +661,17 @@ def main() -> int:
             )
             command_exit_code = _shell_exit_code(result.returncode)
             command_finished_at = datetime.now(UTC).isoformat()
+            if args.subprocess_coverage:
+                after = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=command_cwd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                checkout_state["dirty_after"] = (
+                    after.stdout.splitlines() if after.returncode == 0 else None
+                )
             invocations_at_finish = (
                 _pytest_invocations_started(node_file) if args.command_base64 else 1
             )
@@ -587,6 +691,7 @@ def main() -> int:
     command_executed = preflight_status == 0
 
     subprocess_hook_state: dict[str, Any] | None = None
+    combine_ok = True
     if args.subprocess_coverage:
         from . import subprocess_coverage
 
@@ -604,7 +709,8 @@ def main() -> int:
                 text=True,
                 check=False,
             )
-            if combine.returncode != 0:
+            combine_ok = combine.returncode == 0
+            if not combine_ok:
                 print(
                     "test-selection: coverage combine failed: "
                     + combine.stderr.strip(),
@@ -652,17 +758,38 @@ def main() -> int:
                 "pytest_node_exports_complete": node_exports_complete,
             },
         )
+    subprocess_reason = None
+    serve_markers: list[dict[str, Any]] = []
+    if args.subprocess_coverage:
+        serve_markers = _serve_markers(output_dir)
+        subprocess_reason = _subprocess_health(
+            hook_state=subprocess_hook_state,
+            combine_ok=combine_ok,
+            checkout_state=checkout_state,
+            serve_markers=serve_markers,
+            has_serve_rows=any(
+                row["test_id"] == f"job::{args.represented_job_key}" for row in rows
+            ),
+        )
+    subprocess_ok = subprocess_reason is None
     healthy = (
         command_exit_code == 0
         and bool(node_document["collected"])
         and coverage_file.exists()
         and node_exports_complete
+        and subprocess_ok
     )
     failure_reason = None
     if preflight_status != 0:
-        failure_reason = "collector_import_failed"
+        failure_reason = (
+            "checkout_" + str(checkout_state.get("reason"))
+            if checkout_state and not checkout_state.get("ok")
+            else "collector_import_failed"
+        )
     elif not node_exports_complete:
         failure_reason = "pytest_node_export_incomplete"
+    elif subprocess_reason:
+        failure_reason = subprocess_reason
     elif not healthy:
         failure_reason = "collector_unhealthy"
     _atomic_json(
@@ -695,6 +822,8 @@ def main() -> int:
             "repository_sha": repository_sha,
             "represented_job_key": args.represented_job_key,
             "subprocess_hook": subprocess_hook_state,
+            "subprocess_serve_markers": serve_markers,
+            "checkout_state": checkout_state or None,
         },
     )
     coverage_file.unlink(missing_ok=True)

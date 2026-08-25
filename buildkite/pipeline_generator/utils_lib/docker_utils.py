@@ -5,6 +5,28 @@ from typing import Tuple
 from global_config import get_global_config
 
 
+def pin_image_digest(image: str, digest: str) -> str:
+    """Convert a ``registry/repo:tag`` reference to ``registry/repo@digest``.
+
+    Canary-traced runs pin the exact image bytes so the evidence provably
+    describes the same image the graph was built from, immune to tag
+    repoints/eviction. Only the default CUDA amd64 tag is expressible as a
+    digest here; other variants fail closed rather than silently mix.
+    """
+
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError(f"trace image digest must be sha256:<64 hex>: {digest}")
+    if image.endswith(("-cpu", "-arm64")) or "-torch-nightly" in image:
+        raise ValueError(
+            "trace image digest pinning only supports the default CUDA "
+            f"amd64 image variant, not {image}"
+        )
+    repository, separator, _tag = image.partition(":")
+    if not separator:
+        raise ValueError(f"cannot pin an untagged image reference: {image}")
+    return f"{repository}@{digest}"
+
+
 def get_image(cpu: bool = False, arm64: bool = False) -> str:
     global_config = get_global_config()
     commit = "$BUILDKITE_COMMIT"

@@ -287,3 +287,93 @@ def test_validate_pipeline_config_invalid_repo_traversal():
     with patch("os.path.exists", return_value=True):
         with pytest.raises(ValueError, match="Invalid github_repo_name"):
             _validate_pipeline_config(config)
+
+
+_CONFIG_PATCHES = (
+    patch(
+        "buildkite.pipeline_generator.global_config.get_merge_base_commit",
+        return_value="sha",
+    ),
+    patch(
+        "buildkite.pipeline_generator.global_config.get_list_file_diff",
+        return_value=[],
+    ),
+    patch("buildkite.pipeline_generator.global_config.get_pr_labels", return_value=[]),
+    patch(
+        "builtins.open",
+        new_callable=mock_open,
+        read_data=(
+            "name: test\njob_dirs: [/tmp]\nregistries: reg\n"
+            "repositories: {main: repo}\ngithub_repo_name: vllm-project/vllm"
+        ),
+    ),
+    patch("os.path.exists", return_value=True),
+)
+
+
+def _with_config_patches(fn):
+    for decorator in reversed(_CONFIG_PATCHES):
+        fn = decorator(fn)
+    return fn
+
+
+@_with_config_patches
+def test_trace_image_digest_requires_canary_trust(*_mocks):
+    import buildkite.pipeline_generator.global_config as global_config
+
+    variables = {
+        "BUILDKITE_BRANCH": "ci-tsel-main-mirror",
+        "BUILDKITE_COMMIT": "a" * 40,
+        "BUILDKITE_PULL_REQUEST": "false",
+        "NIGHTLY": "1",
+        TRACE_S3_BUCKET_ENV_VAR: "vllm-ci-test-selection",
+        TRACE_S3_PREFIX_ENV_VAR: "test-selection/vllm/canary/retry",
+        "VLLM_CI_TRACE_IMAGE_DIGEST": "sha256:" + "d" * 64,
+    }
+    with patch.dict(os.environ, variables, clear=True):
+        with pytest.raises(ValueError, match="requires the trace canary"):
+            init_global_config("dummy_path")
+    global_config.config = None
+
+
+@_with_config_patches
+def test_trace_image_digest_must_be_strict_sha256(*_mocks):
+    import buildkite.pipeline_generator.global_config as global_config
+
+    variables = {
+        "BUILDKITE_BRANCH": "ci-tsel-main-mirror",
+        "BUILDKITE_COMMIT": "a" * 40,
+        "BUILDKITE_PULL_REQUEST": "false",
+        "NIGHTLY": "1",
+        TRACE_CANARY_BRANCH_ENV_VAR: "ci-tsel-main-mirror",
+        TRACE_CANARY_COMMIT_ENV_VAR: "a" * 40,
+        TRACE_S3_BUCKET_ENV_VAR: "vllm-ci-test-selection",
+        TRACE_S3_PREFIX_ENV_VAR: "test-selection/vllm/canary/retry",
+        "VLLM_CI_TRACE_IMAGE_DIGEST": "sha256:xyz",
+    }
+    with patch.dict(os.environ, variables, clear=True):
+        with pytest.raises(ValueError, match="sha256"):
+            init_global_config("dummy_path")
+    global_config.config = None
+
+
+@_with_config_patches
+def test_trace_image_digest_accepted_with_canary_trust(*_mocks):
+    import buildkite.pipeline_generator.global_config as global_config
+
+    digest = "sha256:" + "d" * 64
+    variables = {
+        "BUILDKITE_BRANCH": "ci-tsel-main-mirror",
+        "BUILDKITE_COMMIT": "a" * 40,
+        "BUILDKITE_PULL_REQUEST": "false",
+        "NIGHTLY": "1",
+        TRACE_CANARY_BRANCH_ENV_VAR: "ci-tsel-main-mirror",
+        TRACE_CANARY_COMMIT_ENV_VAR: "a" * 40,
+        TRACE_S3_BUCKET_ENV_VAR: "vllm-ci-test-selection",
+        TRACE_S3_PREFIX_ENV_VAR: "test-selection/vllm/canary/retry",
+        "VLLM_CI_TRACE_IMAGE_DIGEST": digest,
+    }
+    with patch.dict(os.environ, variables, clear=True):
+        init_global_config("dummy_path")
+        assert global_config.config["trace_image_digest"] == digest
+    global_config.config = None

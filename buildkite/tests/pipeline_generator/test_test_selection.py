@@ -445,3 +445,4 @@ def test_subprocess_harness_runner_flag_in_rendered_command(fake_global_config):
     assert "run_job_trace" in rendered
     assert "--subprocess-coverage" in rendered
     assert "--capture-gpu" not in rendered
+

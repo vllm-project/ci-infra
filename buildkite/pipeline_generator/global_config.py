@@ -11,6 +11,7 @@ TRACE_CANARY_BRANCH_ENV_VAR = "VLLM_CI_TRACE_CANARY_BRANCH"
 TRACE_CANARY_COMMIT_ENV_VAR = "VLLM_CI_TRACE_CANARY_COMMIT"
 TRACE_S3_BUCKET_ENV_VAR = "VLLM_CI_TRACE_S3_BUCKET"
 TRACE_S3_PREFIX_ENV_VAR = "VLLM_CI_TRACE_S3_PREFIX"
+TRACE_IMAGE_DIGEST_ENV_VAR = "VLLM_CI_TRACE_IMAGE_DIGEST"
 DEFAULT_VLLM_TRACE_BUCKET = "vllm-ci-test-selection-traces-936637512419-us-east-1"
 STEP_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
@@ -37,6 +38,7 @@ class GlobalConfig(TypedDict):
     trace_canary_commit: Optional[str] = None
     trace_s3_bucket: Optional[str] = None
     trace_s3_prefix: str = "test-selection/vllm"
+    trace_image_digest: Optional[str] = None
 
 
 config = None
@@ -105,6 +107,18 @@ def init_global_config(pipeline_config_path: str):
             )
         if trace_s3_prefix == "test-selection/vllm":
             raise ValueError("trace canary override requires an isolated S3 prefix")
+    trace_image_digest = os.getenv(TRACE_IMAGE_DIGEST_ENV_VAR)
+    if trace_image_digest:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", trace_image_digest):
+            raise ValueError(
+                f"{TRACE_IMAGE_DIGEST_ENV_VAR} must be sha256:<64 lowercase hex>"
+            )
+        if trace_canary_branch is None:
+            raise ValueError(
+                f"{TRACE_IMAGE_DIGEST_ENV_VAR} requires the trace canary "
+                "trust tuple; refusing a mutable-tag build to claim pinned "
+                "evidence"
+            )
     config = GlobalConfig(
         name=pipeline_config["name"],
         github_repo_name=pipeline_config["github_repo_name"],
@@ -133,6 +147,7 @@ def init_global_config(pipeline_config_path: str):
         trace_canary_commit=trace_canary_commit,
         trace_s3_bucket=trace_s3_bucket,
         trace_s3_prefix=trace_s3_prefix,
+        trace_image_digest=trace_image_digest,
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
