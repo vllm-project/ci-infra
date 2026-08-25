@@ -236,6 +236,9 @@ def build_snapshot_manifest(graph: Path, output: Path) -> dict[str, Any]:
     if collector_identity is None:
         raise GraphError("graph metadata has no collector identity")
     collector_sha256, collector_sha256s = collector_identity
+    # The provenance pair is validated (and all-or-nothing) before the
+    # manifest can carry it; a partial graph pair fails here.
+    image_baseline_identity(metadata, "graph metadata")
     checksum = sha256_file(graph)
     compressed_graph = _compressed_graph_path(graph)
     _compress_graph(graph, compressed_graph)
@@ -677,6 +680,14 @@ def fetch_snapshot(
         ):
             raise GraphError(
                 "downloaded graph and manifest collector identities disagree"
+            )
+        manifest_pair = image_baseline_identity(manifest, "snapshot manifest")
+        graph_pair = image_baseline_identity(
+            metadata, "downloaded graph metadata"
+        )
+        if manifest_pair != graph_pair:
+            raise GraphError(
+                "downloaded graph and manifest image/baseline identities disagree"
             )
         if metadata["data_through"] != manifest.get("data_through"):
             raise GraphError("downloaded graph evidence watermark mismatch")

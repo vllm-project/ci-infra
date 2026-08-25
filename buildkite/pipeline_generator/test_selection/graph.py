@@ -218,7 +218,11 @@ def _strict_singleton(
             or not re.fullmatch(pattern, str(plural[0]))
         ):
             raise GraphError(f"{label} {plural_field} is invalid")
-        if singular is not None and str(singular) != str(plural[0]):
+        # The plural form never synthesizes a missing singular — it only
+        # confirms one already present (the _collector_identity contract).
+        if singular is None:
+            raise GraphError(f"{label} {singular_field} is missing")
+        if str(singular) != str(plural[0]):
             raise GraphError(
                 f"{label} {singular_field}/{plural_field} fields disagree"
             )
@@ -446,24 +450,29 @@ def _materialize(
         # all-or-nothing across the healthy set: a carrier mix would let the
         # manifest claim provenance no single shard attested, and a partial
         # pair synthesizes a pair nobody carried.
-        healthy_pairs = set()
-        for key in healthy:
-            for _path, document in summaries[key].values():
-                healthy_pairs.add(
-                    image_baseline_identity(document, f"healthy summary {key}")
-                )
+        healthy_documents = [
+            document
+            for key in healthy
+            for _path, document in summaries[key].values()
+        ]
+        # Per DOCUMENT, not per key: a paired shard and a legacy shard of the
+        # same job must not average out. If any healthy summary carries the
+        # pair, every healthy summary must carry the same complete pair.
+        healthy_pairs = {
+            image_baseline_identity(document, "healthy summary")
+            for document in healthy_documents
+        }
         healthy_pairs.discard(None)
-        carrier_keys = set()
-        for key in healthy:
-            for _path, document in summaries[key].values():
-                if image_baseline_identity(document, f"healthy summary {key}"):
-                    carrier_keys.add(key)
         if healthy_pairs:
             if len(healthy_pairs) > 1:
                 raise GraphError(
                     "image/baseline identity disagreement across generation"
                 )
-            if len(carrier_keys) != len(healthy):
+            if len(healthy_documents) != sum(
+                1
+                for document in healthy_documents
+                if image_baseline_identity(document, "healthy summary")
+            ):
                 raise GraphError(
                     "generation mixes image-pinned and legacy evidence"
                 )

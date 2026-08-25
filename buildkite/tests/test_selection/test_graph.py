@@ -569,3 +569,56 @@ def test_manifest_identity_fields_default_empty_for_legacy_jobs(tmp_path: Path):
     assert manifest["image_digests"] == []
     assert manifest["worktree_baseline_sha256"] is None
     assert manifest["worktree_baseline_sha256s"] == []
+
+
+def _inventory_two_shard(path: Path, key: str) -> Path:
+    _write(
+        path,
+        {
+            "always_run": [],
+            "ci_infra_revision": "c" * 64,
+            "collector_sha256": COLLECTOR,
+            "jobs": [{"expected_shards": 2, "key": key, "mode": "python-only"}],
+            "repository_sha": SHA,
+            "wait_results": {},
+        },
+    )
+    return path
+
+
+def test_generation_gate_is_per_shard_not_per_key(tmp_path: Path):
+    # One job, two shards: shard 0 carries the pair, shard 1 is legacy.
+    evidence = tmp_path / "evidence"
+    _job_with_identity(evidence, "job-a", "sha256:" + "d" * 64, "b" * 64)
+    _job(evidence, "job-a", shard=1)
+    # Both shard summaries must claim the two-shard shape to be accepted.
+    for shard_doc in (evidence / "job-a").rglob("trace-job.json"):
+        document = json.loads(shard_doc.read_text())
+        document["parallel_job_count"] = 2
+        shard_doc.write_text(json.dumps(document))
+    with pytest.raises(GraphError, match="mixes image-pinned and legacy"):
+        build_fleet_graph(
+            evidence,
+            _inventory_two_shard(tmp_path / "inventory.json", "job-a"),
+            tmp_path / "graph.sqlite",
+        )
+
+
+def test_plural_only_identity_is_rejected_not_synthesized():
+    from test_selection.graph import image_baseline_identity
+
+    with pytest.raises(GraphError, match="image_digest is missing"):
+        image_baseline_identity(
+            {
+                "image_digests": ["sha256:" + "d" * 64],
+                "worktree_baseline_sha256": "b" * 64,
+                "worktree_baseline_sha256s": ["b" * 64],
+            },
+            "test",
+        )
+    # Singular-only remains the allowed compatibility form.
+    pair = image_baseline_identity(
+        {"image_digest": "sha256:" + "d" * 64, "worktree_baseline_sha256": "b" * 64},
+        "test",
+    )
+    assert pair == ("sha256:" + "d" * 64, "b" * 64)
