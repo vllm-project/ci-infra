@@ -376,3 +376,72 @@ def test_trace_wrapper_preserves_the_original_command_list_as_one_script(
     assert commands == [
         'set -e\nexport FOO=bar\ntest "$FOO" = bar && pytest tests/unit'
     ]
+
+
+def test_subprocess_harness_keys_enroll_python_only_with_hook():
+    harness_commands = [
+        "bash .buildkite/scripts/install-kv-connectors.sh",
+        "bash v1/kv_connector/nixl_integration/run_edge_case_test.sh",
+    ]
+    steps = [
+        Step(
+            label="PD edge cases",
+            key="nixlconnector-pd-edge-cases-2-gpus",
+            commands=harness_commands,
+        ),
+        Step(
+            label="Mooncake",
+            key="distributed-mooncakeconnector-pd-accuracy-4-gpus",
+            commands=["bash config_sweep_accuracy_test.sh"],
+            device=DeviceType.B200_K8S,
+        ),
+        Step(label="Script", key="script", commands=["bash smoke.sh"]),
+    ]
+
+    _steps, inventory = configure_test_tracing(
+        steps,
+        {step.key for step in steps},
+        "a" * 40,
+        "b" * 40,
+        "c" * 64,
+    )
+
+    assert [(row["key"], row["mode"]) for row in inventory["jobs"]] == [
+        ("distributed-mooncakeconnector-pd-accuracy-4-gpus", "python-only"),
+        ("nixlconnector-pd-edge-cases-2-gpus", "python-only"),
+    ]
+    # The B200_K8S harness job must NOT enroll kernel-set: nsys on serve
+    # storms is the quarantined perturbation class.
+    assert steps[0].trace_subprocess_coverage is True
+    assert steps[0].trace_gpu is False
+    assert steps[1].trace_subprocess_coverage is True
+    assert steps[1].trace_gpu is False
+    # A non-allowlisted script step is still rejected as before.
+    assert inventory["always_run"] == [
+        {"key": "script", "reason": "not_plain_pytest_commands"}
+    ]
+
+
+def test_subprocess_harness_runner_flag_in_rendered_command(fake_global_config):
+    step = Step(
+        label="PD edge cases",
+        key="nixlconnector-pd-edge-cases-2-gpus",
+        commands=["bash v1/kv_connector/nixl_integration/run_edge_case_test.sh"],
+    )
+    steps, _inventory = configure_test_tracing(
+        [step],
+        {"nixlconnector-pd-edge-cases-2-gpus"},
+        "a" * 40,
+        "b" * 40,
+        "c" * 64,
+    )
+    groups = convert_group_step_to_buildkite_step({"Disaggregated": steps})
+    rendered = "\n".join(
+        command
+        for group in groups
+        for buildkite_step in group.steps
+        for command in getattr(buildkite_step, "commands", [])
+    )
+    assert "run_job_trace" in rendered
+    assert "--subprocess-coverage" in rendered
+    assert "--capture-gpu" not in rendered

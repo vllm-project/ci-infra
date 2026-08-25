@@ -576,6 +576,8 @@ path.write_text(json.dumps(document,sort_keys=True,separators=(",",":"))+"\\n",e
             f"--represented-job-key {step.trace_represented_job_key} "
             f"{gpu_option} --commands-base64 {payload}"
         )
+        if step.trace_subprocess_coverage:
+            runner += " --subprocess-coverage"
         if in_place:
             runner += " --preserve-command-exit-code"
             runner = (

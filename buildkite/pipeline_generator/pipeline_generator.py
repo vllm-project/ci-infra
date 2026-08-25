@@ -138,6 +138,21 @@ class PipelineGenerator:
 
 
 _PYTEST_COMMAND = re.compile(r"(?:^|[\s;&|])(?:python3?\s+-m\s+)?pytest(?:\s|$)")
+
+# Shell-harness jobs whose code under test runs in `vllm serve` subprocesses.
+# These enroll with subprocess coverage (the .pth hook) instead of requiring
+# plain top-level pytest commands. Ephemeral runtimes only (elastic EC2 /
+# k8s pod): the hook writes into site-packages and must not leak onto
+# persistent CI hosts.
+_FLEET_SUBPROCESS_HARNESS_KEYS = frozenset(
+    {
+        "distributed-mooncakeconnector-pd-accuracy-4-gpus",
+        "hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus",
+        "multiconnector-nixl-offloading-pd-accuracy-2-gpus",
+        "multiconnector-nixl-offloading-pd-edge-cases-2-gpus",
+        "nixlconnector-pd-edge-cases-2-gpus",
+    }
+)
 _NVIDIA_TRACE_DEVICES = {
     DeviceType.A100,
     DeviceType.B200,
@@ -291,6 +306,8 @@ def _is_traceable_pytest_step(step: Step) -> bool:
 def _trace_rejection(step: Step) -> Optional[str]:
     if not step.key:
         return "missing_step_key"
+    if step.key in _FLEET_SUBPROCESS_HARNESS_KEYS:
+        return None
     if not _is_traceable_pytest_step(step):
         return "not_plain_pytest_commands"
     return None
@@ -332,10 +349,14 @@ def configure_test_tracing(
         if timeout is not None:
             timeout = max(timeout + 15, ceil(timeout * 1.5))
         mode = (
-            "kernel-set"
-            if step.device in _NVIDIA_TRACE_DEVICES
-            and not is_amd_gpu_device(step.device)
-            else "python-only"
+            "python-only"
+            if step_key in _FLEET_SUBPROCESS_HARNESS_KEYS
+            else (
+                "kernel-set"
+                if step.device in _NVIDIA_TRACE_DEVICES
+                and not is_amd_gpu_device(step.device)
+                else "python-only"
+            )
         )
         step.timeout_in_minutes = timeout
         step.mount_buildkite_agent = bool(
@@ -344,6 +365,11 @@ def configure_test_tracing(
         step.trace_collector_sha256 = collector_sha256
         step.trace_represented_job_key = step_key
         step.trace_gpu = mode == "kernel-set"
+        step.trace_subprocess_coverage = step_key in _FLEET_SUBPROCESS_HARNESS_KEYS
+        if step.trace_subprocess_coverage and mode != "python-only":
+            raise ValueError(
+                f"subprocess-harness key {step_key} must trace python-only"
+            )
         traced.append(
             {
                 "expected_shards": step.parallelism or 1,

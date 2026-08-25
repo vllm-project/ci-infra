@@ -22,6 +22,9 @@ from typing import Any
 from coverage import CoverageData
 
 from . import COLLECTOR_VERSION
+from . import subprocess_coverage as _subprocess_coverage
+
+_SUBPROCESS_CONTEXT_LABEL = _subprocess_coverage.CONTEXT_LABEL
 
 
 def _atomic_json(path: Path, document: Any) -> None:
@@ -97,12 +100,32 @@ def _node_id(context: str) -> str | None:
     return None
 
 
+def _subprocess_test_id(context: str, job_key: str) -> str | None:
+    """Map subprocess-hook coverage contexts to evidence test ids.
+
+    Serve-side rows carry the bare static label and become job-level
+    evidence. Pytest client rows stack as ``<label>|<nodeid>|<phase>`` when
+    pytest-cov piggybacks on the already-active coverage instance; the label
+    prefix is stripped so the node id parses as usual.
+    """
+
+    from . import subprocess_coverage
+
+    label = subprocess_coverage.CONTEXT_LABEL
+    if context == label:
+        return f"job::{job_key}"
+    if context.startswith(f"{label}|"):
+        return _node_id(context[len(label) + 1 :])
+    return None
+
+
 def coverage_rows(
     coverage_file: Path,
     repo_root: Path,
     *,
     repository_sha: str,
     job_key: str,
+    subprocess_contexts: bool = False,
 ) -> list[dict[str, Any]]:
     data = CoverageData(basename=str(coverage_file))
     data.read()
@@ -113,7 +136,15 @@ def coverage_rows(
             continue
         for line, contexts in data.contexts_by_lineno(filename).items():
             for context in contexts:
-                node_id = _node_id(context)
+                if subprocess_contexts and (
+                    context == _SUBPROCESS_CONTEXT_LABEL
+                    or context.startswith(_SUBPROCESS_CONTEXT_LABEL + "|")
+                ):
+                    # Subprocess-hook contexts: never fall through to the
+                    # plain parser, which would keep the label prefix.
+                    node_id = _subprocess_test_id(context, job_key)
+                else:
+                    node_id = _node_id(context)
                 if node_id:
                     rows.add((node_id, repository_path, int(line)))
 
@@ -138,6 +169,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--command-base64")
     parser.add_argument("--command-cwd", type=Path)
+    parser.add_argument(
+        "--subprocess-coverage",
+        action="store_true",
+        help="Record coverage in every Python subprocess of the command "
+        "(site-packages .pth hook + COVERAGE_PROCESS_START), for "
+        "shell-harness jobs whose code under test runs in serve processes.",
+    )
     parser.add_argument("tests", nargs=argparse.REMAINDER)
     return parser
 
@@ -501,6 +539,17 @@ def main() -> int:
             output_path=output_dir / "import-environment.json",
             repo_root=args.repo_root,
         )
+        subprocess_hook = False
+        if preflight_status == 0 and args.subprocess_coverage:
+            # Installed after the preflight so preflight output cannot land in
+            # the real shard. The job env (COVERAGE_PROCESS_START) is only set
+            # for the command itself, never for the preflight.
+            from . import subprocess_coverage
+
+            environment["COVERAGE_PROCESS_START"] = str(
+                subprocess_coverage.rc_path()
+            )
+            subprocess_hook = subprocess_coverage.enable(output_dir)
         if preflight_status == 0:
             _atomic_json(
                 command_status_file,
@@ -537,18 +586,52 @@ def main() -> int:
             command_exit_code = preflight_status
     command_executed = preflight_status == 0
 
+    subprocess_hook_state: dict[str, Any] | None = None
+    if args.subprocess_coverage:
+        from . import subprocess_coverage
+
+        state_path = output_dir / subprocess_coverage.HOOK_STATE_NAME
+        if state_path.is_file():
+            subprocess_hook_state = json.loads(state_path.read_text("utf-8"))
+        # Merge per-process parallel data files (serve workers) into the
+        # shard data file the pytest client appends to.
+        if coverage_file.exists() or list(output_dir.glob(".coverage.*")):
+            combine = subprocess.run(
+                [sys.executable, "-m", "coverage", "combine"],
+                cwd=output_dir,
+                env={**os.environ, "COVERAGE_FILE": str(coverage_file)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if combine.returncode != 0:
+                print(
+                    "test-selection: coverage combine failed: "
+                    + combine.stderr.strip(),
+                    file=sys.stderr,
+                )
+
     rows = (
         coverage_rows(
             coverage_file,
             args.repo_root,
             repository_sha=repository_sha,
             job_key=args.represented_job_key,
+            subprocess_contexts=args.subprocess_coverage,
         )
         if coverage_file.exists()
         else []
     )
     _atomic_jsonl(trace_file, rows)
     node_document, exported_invocations = _merge_node_documents(output_dir, node_file)
+    if args.subprocess_coverage and any(
+        row["test_id"] == f"job::{args.represented_job_key}" for row in rows
+    ):
+        node_document["collected"] = sorted(
+            set(node_document["collected"])
+            | {f"job::{args.represented_job_key}"}
+        )
+        _atomic_json(node_file, node_document)
     if args.command_base64:
         started_invocations = _pytest_invocations_started(node_file)
         expected_invocations = {f"{index:03d}" for index in range(started_invocations)}
@@ -611,6 +694,7 @@ def main() -> int:
             "retry_count": int(os.environ.get("BUILDKITE_RETRY_COUNT", "0")),
             "repository_sha": repository_sha,
             "represented_job_key": args.represented_job_key,
+            "subprocess_hook": subprocess_hook_state,
         },
     )
     coverage_file.unlink(missing_ok=True)
