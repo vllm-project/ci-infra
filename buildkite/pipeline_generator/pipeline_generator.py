@@ -126,8 +126,15 @@ class PipelineGenerator:
             buildkite_group_steps.insert(
                 0, create_collector_group_step(collector, collector_sha256 or "")
             )
-        if trace_inventory["jobs"] and any(
-            getattr(step, "trace_subprocess_coverage", False) for step in steps
+        # Belt and braces: the verify step is only ever constructed when the
+        # pinned digest exists, even if a future edit sets the step flag
+        # without enrolling (one continue currently separates those).
+        if (
+            trace_inventory["jobs"]
+            and global_config.get("trace_image_digest")
+            and any(
+                getattr(step, "trace_subprocess_coverage", False) for step in steps
+            )
         ):
             # Subprocess-coverage jobs depend on the uploaded bundle carrying
             # the digest-pinned baseline; block them until the literal
