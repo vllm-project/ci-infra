@@ -61,14 +61,11 @@ def test_disable_is_idempotent(tmp_path, monkeypatch):
     assert subprocess_coverage.disable() is False
 
 
-def test_rc_path_writes_required_settings():
-    rc = subprocess_coverage.rc_path()
-    try:
-        text = rc.read_text(encoding="utf-8")
-    finally:
-        rc.unlink(missing_ok=True)
-    assert "parallel = true" in text
-    assert "sigterm = true" in text
+def test_rc_text_has_required_settings():
+    # RC_TEXT is the source of truth; rc_path() materializes it at runtime.
+    assert "parallel = true" in subprocess_coverage.RC_TEXT
+    assert "sigterm = true" in subprocess_coverage.RC_TEXT
+    assert "context = harness-subprocess" in subprocess_coverage.RC_TEXT
 
 
 def _write_contexts(coverage_file: Path, contexts: dict[str, set[int]]) -> None:
