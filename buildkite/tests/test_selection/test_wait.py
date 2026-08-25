@@ -181,3 +181,11 @@ def test_query_step_rejects_non_neutral_canceled_outcome(monkeypatch):
 
     with pytest.raises(StepLookupError, match="invalid canceled outcome.*'errored'"):
         query_step("unit")
+
+
+def test_terminal_states_are_reachable_through_the_lookup():
+    # A terminal state that query_step rejects is dead coverage that reads
+    # as handling. (An import-time assert would silently strip under -O.)
+    from test_selection.wait import STEP_STATES, TERMINAL_STEP_STATES
+
+    assert TERMINAL_STEP_STATES <= STEP_STATES

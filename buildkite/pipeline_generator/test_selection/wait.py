@@ -27,10 +27,6 @@ STEP_OUTCOMES = {
 }
 TERMINAL_STEP_STATES = {"finished", "ignored", "canceled"}
 
-# A terminal state the step lookup rejects is strictly worse than an absent
-# one — it appears to handle a case it can never reach.
-assert TERMINAL_STEP_STATES <= STEP_STATES
-
 
 class StepLookupError(RuntimeError):
     """Raised when the Buildkite Agent API cannot return a valid step."""
