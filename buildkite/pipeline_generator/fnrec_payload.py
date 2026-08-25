@@ -51,30 +51,77 @@ print(pathlib.Path(spec.origin).parent if spec is not None and spec.origin else 
 '''
 
 # Runs from an EXIT trap, so it must never fail the step or alter its exit status.
-UPLOAD_SH = """#!/usr/bin/env bash
+# Everything fnrec produces lands under this directory, relative to the Buildkite
+# checkout, so the agent's artifact phase -- which runs on the host after the
+# container is gone -- can see it.
+FNREC_CHECKOUT_DIR = ".fnrec"
+
+# The globs that deliver a job's recording. The agent evaluates these, so nothing
+# inside the container can pre-empt them and `docker run --rm` cannot eat them.
+FNREC_ARTIFACT_PATHS = (
+    # The packed common case: one artifact per job.
+    f"{FNREC_CHECKOUT_DIR}/*.tar.gz",
+    # The raw per-process records, for when packing never ran: a step killed
+    # mid-run, or an abort before the last command. Not `*.txt`, because
+    # install.err is the only witness separating a failed install from a job that
+    # genuinely ran no vLLM code.
+    f"{FNREC_CHECKOUT_DIR}/*/*",
+)
+
+# Marker `fnrec_artifact_paths` greps for. Keyed off the emitted commands rather
+# than re-deriving the enablement predicate, which lives in four places.
+FNREC_OUT_MARKER = "export FNREC_OUT="
+
+PACK_SH = """#!/usr/bin/env bash
+# Pack this job's recording into one tarball, in place. Nothing else.
+#
+# Delivery is the step's `artifact_paths`, evaluated by the agent on the host
+# after the container exits, so this uploads nothing and its failure costs only
+# the packing: the raw files stay where the second glob also looks. It runs as
+# an ordinary command, so it must never fail the step -- but it must say what it
+# did on every path. Four silent `exit 0`s are how a total delivery failure
+# looked exactly like success for a whole rollout.
 set -u
 
-[ -n "${FNREC_OUT:-}" ] || exit 0
-[ -d "${FNREC_OUT}" ] || exit 0
+_fnrec_say() { echo "fnrec: $*" || :; }
 
-# The docker plugin bind-mounts the agent onto PATH; agent-stack-k8s copies it
-# into the command container at /workspace instead.
-if command -v buildkite-agent >/dev/null 2>&1; then
-    AGENT=buildkite-agent
-elif [ -x /workspace/buildkite-agent ]; then
-    AGENT=/workspace/buildkite-agent
-else
-    echo "fnrec: no buildkite-agent found, leaving ${FNREC_OUT} on disk"
+if [ -z "${FNREC_OUT:-}" ]; then
+    _fnrec_say "FNREC_OUT is unset; setup never ran or the environment was reset. Nothing packed."
     exit 0
 fi
 
-# One tarball, one upload. A job forks a worker per test and each child writes
-# its own file, so uploading them individually is hundreds of HTTP PUTs on the
-# critical path of every instrumented step.
-cd "$(dirname "${FNREC_OUT}")" || exit 0
+if [ ! -d "${FNREC_OUT}" ]; then
+    _fnrec_say "no recording directory at ${FNREC_OUT}. Nothing packed."
+    exit 0
+fi
+
+BASE="$(dirname "${FNREC_OUT}")"
 JOB="$(basename "${FNREC_OUT}")"
-tar -czf "${JOB}.tar.gz" "${JOB}" 2>/dev/null || exit 0
-"${AGENT}" artifact upload "${JOB}.tar.gz" || true
+COUNT="$(find "${FNREC_OUT}" -type f 2>/dev/null | wc -l | tr -d ' ')"
+
+# Build under a name no artifact glob matches, then rename. A step killed
+# mid-tar would otherwise publish a truncated tarball that reads downstream as a
+# complete, nearly empty recording -- a wrong answer, not a missing one.
+if ! tar -czf "${BASE}/${JOB}.tar.gz.part" -C "${BASE}" "${JOB}"; then
+    _fnrec_say "tar failed for ${FNREC_OUT} (${COUNT} files); leaving the raw files for artifact_paths."
+    rm -f "${BASE}/${JOB}.tar.gz.part" || :
+    exit 0
+fi
+
+if ! mv "${BASE}/${JOB}.tar.gz.part" "${BASE}/${JOB}.tar.gz"; then
+    _fnrec_say "could not move the tarball into place; leaving the raw files for artifact_paths."
+    rm -f "${BASE}/${JOB}.tar.gz.part" || :
+    exit 0
+fi
+
+# The agent user has to be able to unlink this during the next job's git clean.
+chmod 0666 "${BASE}/${JOB}.tar.gz" || :
+
+if rm -rf "${FNREC_OUT}"; then
+    _fnrec_say "packed ${COUNT} files into ${BASE}/${JOB}.tar.gz"
+else
+    _fnrec_say "packed ${COUNT} files into ${BASE}/${JOB}.tar.gz but could not remove ${FNREC_OUT}; both will upload."
+fi
 exit 0
 """
 
@@ -466,5 +513,18 @@ def install_blob():
     return _blob(f"FNREC_SOURCE = {FNREC_PY!r}\n{INSTALL_PY}")
 
 
-def upload_blob():
-    return _blob(UPLOAD_SH)
+def pack_blob():
+    return _blob(PACK_SH)
+
+
+def fnrec_artifact_paths(commands):
+    """The globs that deliver whatever fnrec injected into `commands`.
+
+    Read off the emitted commands rather than re-deriving the enablement
+    predicate. That predicate lives in several places, and a second copy is a
+    copy that drifts; drift here means a step that records into a directory
+    nothing uploads, which is precisely the bug this delivery path replaced.
+    """
+    if not any(FNREC_OUT_MARKER in command for command in commands):
+        return []
+    return list(FNREC_ARTIFACT_PATHS)

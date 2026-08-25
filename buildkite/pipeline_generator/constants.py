@@ -83,3 +83,9 @@ class AgentQueue(str, Enum):
     DGX_SPARK = "dgx-spark"
     REDHAT_H100_FRANKFURT = "RedHat-H100-Frankfurt"
     AMD_ZEN5_CPU = "amd-zen5-cpu"
+
+# Where docker-buildkite-plugin bind-mounts the Buildkite checkout inside the
+# container. This is also the plugin's default, but fnrec's artifact delivery now
+# depends on the value, so docker_plugin.py states it explicitly rather than
+# inheriting it from a plugin version bump.
+DOCKER_CHECKOUT_MOUNT_PATH = "/workdir"

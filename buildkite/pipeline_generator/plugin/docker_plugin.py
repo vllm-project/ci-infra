@@ -1,5 +1,5 @@
 from step import Step
-from constants import DeviceType
+from constants import DOCKER_CHECKOUT_MOUNT_PATH, DeviceType
 from fnrec_payload import fnrec_enabled
 import copy
 
@@ -142,14 +142,22 @@ def get_docker_plugin(step: Step, image: str):
     if step.device in (DeviceType.H200_18GB, DeviceType.H200_35GB):
         image = image.replace("public.ecr.aws", "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache")
         plugin["image"] = image
-    # Both fnrec and otel upload from inside the container, so both need the
-    # agent binary. k8s needs no equivalent; agent-stack-k8s already copies it
-    # into the pod.
+    # Stated, not inherited, but only where something depends on it. These are
+    # already the plugin's defaults; fnrec writes its recording at this path and
+    # delivery is the step's `artifact_paths`, so a plugin bump that moved the
+    # mount would silently relocate every recording. Gated so the generated YAML
+    # stays byte-identical while fnrec is off.
+    if fnrec_enabled():
+        plugin["mount-checkout"] = True
+        plugin["workdir"] = DOCKER_CHECKOUT_MOUNT_PATH
+    # OTel uploads from inside the container, so it needs the agent binary.
+    # fnrec no longer does: the agent collects its output from the checkout after
+    # the container exits. k8s needs no equivalent; agent-stack-k8s already
+    # copies the binary into the pod.
     if (
         step.label == "Benchmarks"
         or step.mount_buildkite_agent
         or step.otel_tracing_enabled()
-        or fnrec_enabled()
     ):
         plugin["mount_buildkite_agent"] = True
     if step.device in (DeviceType.CPU, DeviceType.CPU_SMALL, DeviceType.CPU_MEDIUM) and plugin.get("gpus"):
