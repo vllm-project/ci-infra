@@ -403,12 +403,33 @@ def test_the_checkout_choice_tracks_the_plugin_router(monkeypatch, device):
     pinned against the router rather than restated as a list."""
     monkeypatch.setenv("FNREC", "1")
     step = _step(device=device, num_devices=1)
-    path = buildkite_step._fnrec_checkout_path(step)
+    path = buildkite_step._fnrec_checkout_path(step, "nvidia")
     if is_amd_gpu_device(device):
         assert path.startswith("$${BUILDKITE_BUILD_CHECKOUT_PATH:-")
         return
     routed_to_k8s = "kubernetes" in buildkite_step._get_step_plugin(step)
     assert path.startswith("$${BUILDKITE_BUILD_CHECKOUT_PATH:-") is routed_to_k8s
+
+
+@pytest.mark.parametrize("device", ["h200_18gb", "h200_35gb", "h100", "b200"])
+def test_an_amd_mirror_never_uses_the_docker_checkout_path(monkeypatch, device):
+    """An AMD mirror keeps its NVIDIA parent's device, so the device cannot pick
+    the root.
+
+    `step.model_copy(...)` in the mirror branch changes `no_plugin` and nothing
+    else, so a mirror of an h200 step still reports device=h200 while running in
+    a ROCm pod that has no /workdir. Build 85562 lost 85 of 91 AMD recordings to
+    exactly this, and the six that survived were the ones whose parent happened
+    to be k8s-routed. Parametrised across both parent families so the accident
+    that hid it cannot hide it again.
+    """
+    monkeypatch.setenv("FNREC", "1")
+    commands = buildkite_step._prepare_commands(
+        _step(device=device, num_devices=1), variables_to_inject={}, setup_profile="amd"
+    )
+    base = next(c for c in commands if c.startswith("export FNREC_BASE="))
+    assert constants.DOCKER_CHECKOUT_MOUNT_PATH not in base, base
+    assert "BUILDKITE_BUILD_CHECKOUT_PATH" in base
 
 
 def test_amd_keeps_its_diagnostics_glob_when_fnrec_is_on(monkeypatch):

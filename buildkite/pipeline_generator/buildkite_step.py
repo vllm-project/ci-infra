@@ -409,8 +409,15 @@ def _is_multi_gpu_step(step: Step) -> bool:
     return bool(step.num_devices and step.num_devices >= 2)
 
 
-def _fnrec_checkout_path(step: Step) -> str:
+def _fnrec_checkout_path(step: Step, setup_profile: SetupProfile) -> str:
     """Where this step's execution mode can see the Buildkite checkout.
+
+    Keyed on `setup_profile`, NOT on `step.device`. An AMD mirror is prepared
+    from `step.model_copy(...)`, which keeps the NVIDIA parent's device, so a
+    mirror of an h200 step still reports an NVIDIA device and would be handed
+    `/workdir` -- a path that does not exist in a ROCm pod. That cost 85 of 91
+    AMD recordings in build 85562, and only the mirrors whose parent happened to
+    be k8s-routed survived.
 
     Decided here, never sniffed at runtime. The docker plugin does not forward
     BUILDKITE_BUILD_CHECKOUT_PATH, and where it is forwarded it names a host
@@ -420,7 +427,9 @@ def _fnrec_checkout_path(step: Step) -> str:
     checkout, command and artifact phases share one volume, so the agent's own
     value is correct there.
     """
-    if _uses_k8s_plugin(step) or is_amd_gpu_device(step.device):
+    if setup_profile == "amd" or _uses_k8s_plugin(step) or is_amd_gpu_device(
+        step.device
+    ):
         # Defaulted, because legacy AMD dind forwards no BUILDKITE_* into its
         # inner container. Without the fallback the empty variable makes
         # FNREC_BASE "/.fnrec" and the setup runs `rm -rf` on it. Harmless in a
@@ -429,7 +438,7 @@ def _fnrec_checkout_path(step: Step) -> str:
     return DOCKER_CHECKOUT_MOUNT_PATH
 
 
-def _get_fnrec_setup_commands(step: Step) -> List[str]:
+def _get_fnrec_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
     """Install the function recorder and put its output where the agent looks.
 
     Delivery is the step's `artifact_paths`, which the agent evaluates on the
@@ -449,7 +458,7 @@ def _get_fnrec_setup_commands(step: Step) -> List[str]:
     if not fnrec_enabled() or (step.num_nodes and step.num_nodes >= 2):
         return []
 
-    checkout = _fnrec_checkout_path(step)
+    checkout = _fnrec_checkout_path(step, setup_profile)
     return [
         "echo '--- :dna: fnrec setup'",
         f"echo {install_blob()} | base64 -d | gunzip > /tmp/fnrec_install.py",
@@ -489,7 +498,7 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
     if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
         return []
 
-    fnrec_commands = _get_fnrec_setup_commands(step)
+    fnrec_commands = _get_fnrec_setup_commands(step, setup_profile)
 
     if setup_profile == "nvidia":
         commands = fnrec_commands + [
