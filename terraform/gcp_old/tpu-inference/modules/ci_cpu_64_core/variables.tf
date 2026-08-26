@@ -45,7 +45,23 @@ variable "huggingface_token_value" {
 }
 
 variable "resource_suffix" {
-  description = "Suffix to append to resource names to avoid collisions across zones"
+  description = <<-DESC
+    Legacy: suffixes only the regional static address. Kept so the original
+    us-central1-c fleet holds its address names. Prefer purpose.
+  DESC
+  type        = string
+  default     = ""
+}
+
+variable "purpose" {
+  description = <<-DESC
+    What this fleet is for, e.g. "vllm" for the fleet registered against the
+    vllm Buildkite org. When set, every name this module creates -- the VM, its
+    boot disk, the static address, and the Buildkite agent -- becomes
+    vllm-ci-cpu-64-core-<purpose>-<zone>-<index>, and resource_suffix is
+    ignored. The zone is read from the provider, so it is never passed in.
+    Empty keeps the original unsuffixed names.
+  DESC
   type        = string
   default     = ""
 }

@@ -3,6 +3,11 @@ data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
   version = "latest"
 }
 
+data "google_secret_manager_secret_version" "buildkite_agent_token_vllm" {
+  secret  = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
+  version = "latest"
+}
+
 data "google_secret_manager_secret_version" "buildkite_analytics_token_ci_cluster" {
   secret  = "projects/${var.secret_project_id}/secrets/tpu_commons_buildkite_analytics_token"
   version = "latest"
@@ -104,15 +109,16 @@ module "ci_v7x_16" {
   # disk_size defaults to 0, disable attached disk
 }
 
-module "ci_cpu_64_core" {
+# The whole tpu-commons 64-core fleet.
+module "ci_cpu_64_core_zone_c" {
   source = "../modules/ci_cpu_64_core"
   providers = {
-    google-beta = google-beta.us-central1-b
+    google-beta = google-beta.us-central1-c
   }
-
+  resource_suffix      = "-zone-c"
   project_id           = var.project_id
-  instance_count       = 4
-  machine_type         = "n2-standard-64"
+  instance_count       = 8
+  machine_type         = "n2d-standard-64"
   disk_size            = 250
   disk_type            = "pd-balanced"
   buildkite_queue_name = "cpu_64_core"
@@ -121,20 +127,54 @@ module "ci_cpu_64_core" {
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
-module "ci_cpu_64_core_zone_c" {
+# CPU fleets registered against the vllm org's TPU cluster. Additive: the
+# tpu-commons fleet above (and module.ci_cpu in cloud-tpu-inference-test) keeps
+# running until traffic is cut over. purpose = "vllm" switches these onto the
+# self-describing naming scheme: vllm-ci-<kind>-vllm-<zone>-<index>, shared by
+# the VM, its disk, its address, and the Buildkite agent.
+module "ci_cpu_vllm_zone_b" {
+  source = "../modules/ci_cpu"
+  providers = {
+    google-beta = google-beta.us-central1-b
+  }
+  purpose                 = "vllm"
+  project_id              = var.project_id
+  instance_count          = 8
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
+  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+}
+
+module "ci_cpu_64_core_vllm_zone_b" {
   source = "../modules/ci_cpu_64_core"
   providers = {
-    google-beta = google-beta.us-central1-c
+    google-beta = google-beta.us-central1-b
   }
-  resource_suffix      = "-zone-c"
+  purpose              = "vllm"
   project_id           = var.project_id
   instance_count       = 4
-  machine_type         = "n2-standard-64"
+  machine_type         = "n2d-standard-64"
   disk_size            = 250
   disk_type            = "pd-balanced"
   buildkite_queue_name = "cpu_64_core"
 
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
+  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+}
+
+module "ci_cpu_64_core_vllm_zone_f" {
+  source = "../modules/ci_cpu_64_core"
+  providers = {
+    google-beta = google-beta.us-central1-f
+  }
+  purpose              = "vllm"
+  project_id           = var.project_id
+  instance_count       = 4
+  machine_type         = "n2d-standard-64"
+  disk_size            = 250
+  disk_type            = "pd-balanced"
+  buildkite_queue_name = "cpu_64_core"
+
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 

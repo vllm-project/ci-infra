@@ -2,14 +2,34 @@ data "google_client_config" "gcp_client" {
   provider = google-beta
 }
 
+locals {
+  # The zone comes from the provider, not the caller, so a fleet cannot be
+  # mislabelled by passing the wrong suffix.
+  zone = data.google_client_config.gcp_client.zone
+
+  # One name for the VM, its disk, its address, and the Buildkite agent, so a
+  # queue entry in the Buildkite UI maps straight onto a GCE instance.
+  # An empty purpose keeps the original names, so the tpu-commons fleet is not
+  # renamed and therefore not recreated.
+  node_names = [for i in range(var.instance_count) :
+    var.purpose == "" ? "vllm-ci-cpu-64-core-${i}" : "vllm-ci-cpu-64-core-${var.purpose}-${local.zone}-${i}"
+  ]
+
+  # Addresses are regional, so under the legacy naming they had to carry a zone
+  # suffix of their own. purpose puts the zone in the name, so it needs none.
+  address_names = [for i in range(var.instance_count) :
+    var.purpose == "" ? "vllm-ci-cpu-64-core${var.resource_suffix}-${i}-ip" : "${local.node_names[i]}-ip"
+  ]
+}
+
 resource "google_compute_instance" "buildkite-agent-instance" {
   provider = google-beta
   count    = var.instance_count
-  name     = "vllm-ci-cpu-64-core-${count.index}"
+  name     = local.node_names[count.index]
 
   boot_disk {
     auto_delete = true
-    device_name = "vllm-ci-cpu-64-core-${count.index}"
+    device_name = local.node_names[count.index]
 
     initialize_params {
       image = "projects/ubuntu-os-cloud/global/images/ubuntu-2404-noble-amd64-v20251021"
@@ -28,6 +48,11 @@ resource "google_compute_instance" "buildkite-agent-instance" {
   deletion_protection = false
   enable_display      = false
   machine_type        = var.machine_type
+
+  # Resizing a running instance is refused unless this is set. These are
+  # disposable CI agents, and a stop/start re-runs the startup script, which is
+  # now idempotent, so the agent comes back configured rather than duplicated.
+  allow_stopping_for_update = true
 
   network_interface {
     access_config {
@@ -61,7 +86,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
       apt-get update
       apt-get install -y bk buildkite-agent
-           
+
       # Force stop the buildkite-agent and start at the end to avoid race condition
       sudo systemctl stop buildkite-agent
 
@@ -128,22 +153,31 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
       sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
-      sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
-      sudo sed -i 's/name="%hostname-%spawn"/name="vllm-cpu-64-core-vm-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
-      grep -q 'tags="queue=${var.buildkite_queue_name}"' /etc/buildkite-agent/buildkite-agent.cfg || echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
-      grep -q "HF_TOKEN=" /etc/environment || echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
+      # This script re-runs on every boot, so match the whole line rather than
+      # the pristine package default, which is gone after the first boot. The
+      # name below needs no such treatment: it is the instance name, which is
+      # ForceNew, so a rename recreates the VM and this sed always runs against
+      # a freshly installed cfg.
+      sudo sed -i -E 's|^token=.*|token="${var.buildkite_token_value}"|' /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i 's/name="%hostname-%spawn"/name="${local.node_names[count.index]}"/' /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i '/^tags=/d' /etc/buildkite-agent/buildkite-agent.cfg
+      echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i '/^HF_TOKEN=/d' /etc/environment
+      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
+
+      ${file("${path.module}/../shared/keep-agent-connected.sh")}
 
       systemctl stop docker
       systemctl start docker
 
       systemctl enable buildkite-agent
-      systemctl start buildkite-agent
+      systemctl restart buildkite-agent
     STARTUP_SCRIPT
   }
 }
 
 resource "google_compute_address" "static" {
   provider = google-beta
-  name     = "vllm-ci-cpu-64-core${var.resource_suffix}-${count.index}-ip"
+  name     = local.address_names[count.index]
   count    = var.instance_count
 }
