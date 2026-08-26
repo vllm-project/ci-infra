@@ -553,3 +553,63 @@ def test_harness_keys_stay_always_run_without_pinned_digest():
             "reason": "subprocess_coverage_requires_pinned_digest",
         }
     ]
+
+
+def _optional_spark_step(**overrides) -> Step:
+    fields = {
+        "label": "Spark kernels",
+        "key": "spark-kernels",
+        "commands": ["pytest tests/kernels"],
+        "device": "dgx-spark",
+        "optional": True,
+    }
+    fields.update(overrides)
+    return Step(**fields)
+
+
+def test_optional_unsupported_variant_degrades_under_pinned_digest():
+    step = _optional_spark_step()
+    _steps, inventory = configure_test_tracing(
+        [step],
+        {"spark-kernels"},
+        "a" * 40,
+        "b" * 40,
+        "c" * 64,
+        allow_subprocess_harness=True,
+    )
+    assert inventory["jobs"] == []
+    assert inventory["always_run"] == [
+        {"key": "spark-kernels", "reason": "pinned_digest_unsupported_image_variant"}
+    ]
+
+
+def test_unsupported_variant_traces_normally_without_digest():
+    step = _optional_spark_step()
+    _steps, inventory = configure_test_tracing(
+        [step],
+        {"spark-kernels"},
+        "a" * 40,
+        "b" * 40,
+        "c" * 64,
+    )
+    assert [job["key"] for job in inventory["jobs"]] == ["spark-kernels"]
+    assert inventory["always_run"] == []
+
+
+def test_non_optional_unsupported_variant_degrades_loudly_under_pinned_digest():
+    # Non-optional keys degrade too, but LOUDLY: they run untraced and are
+    # enumerated in always_run under the distinct reason (kimi-no-na-wa's
+    # accepted relaxation — the guard is against SILENT degradation).
+    step = _optional_spark_step(optional=False)
+    _steps, inventory = configure_test_tracing(
+        [step],
+        {"spark-kernels"},
+        "a" * 40,
+        "b" * 40,
+        "c" * 64,
+        allow_subprocess_harness=True,
+    )
+    assert inventory["jobs"] == []
+    assert inventory["always_run"] == [
+        {"key": "spark-kernels", "reason": "pinned_digest_unsupported_image_variant"}
+    ]

@@ -222,6 +222,20 @@ _SUBPROCESS_COVERAGE_KEYS = (
     | _FLEET_SERVE_JOB_LEVEL_KEYS
     | _FLEET_SERVERLESS_JOB_LEVEL_KEYS
 )
+
+# The pinned-digest canary binds evidence to one image, and pin_image_digest
+# only expresses the default CUDA amd64 tag. Traced steps on other variants
+# (CPU images, DGX Spark arm64) cannot carry that binding; under a
+# digest-pinned canary they stay honestly always-run instead of crashing the
+# render or silently mixing evidence across images.
+_PINNED_DIGEST_UNSUPPORTED_DEVICES = frozenset(
+    {
+        DeviceType.CPU,
+        DeviceType.CPU_MEDIUM,
+        DeviceType.CPU_SMALL,
+        DeviceType.DGX_SPARK,
+    }
+)
 _NVIDIA_TRACE_DEVICES = {
     DeviceType.A100,
     DeviceType.B200,
@@ -385,6 +399,14 @@ def _trace_rejection(step: Step, allow_subprocess_harness: bool = False) -> Opti
         return "subprocess_coverage_requires_pinned_digest"
     if not _is_traceable_pytest_step(step):
         return "not_plain_pytest_commands"
+    if (
+        allow_subprocess_harness
+        and step.device in _PINNED_DIGEST_UNSUPPORTED_DEVICES
+    ):
+        # Degradation is LOUD, not silent: the key runs untraced and lands in
+        # always_run under this distinct reason, enumerated in the generation's
+        # inventory accounting. (Reviewed: kimi-no-na-wa, 2026-08-26.)
+        return "pinned_digest_unsupported_image_variant"
     return None
 
 
