@@ -331,6 +331,26 @@ def test_otel_setup_sources_repo_helpers(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_otel_setup_stays_fail_open_without_git_checkout(tmp_path):
+    # When CI_INFRA_OTEL_DIR is unset and the working directory is not a git
+    # checkout (no .git baked into the image), the setup command must still
+    # succeed under `sh -e` so the job runs untraced instead of failing.
+    command = buildkite_step._otel_setup_command().replace("$$", "$")
+    env = {key: value for key, value in os.environ.items() if key != "CI_INFRA_OTEL_DIR"}
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", command + "\necho setup-survived"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "setup-survived" in result.stdout
+    assert "tracing setup skipped" in result.stderr
+
+
 def test_otel_setup_failure_is_soft_and_direct_command_runs(
     fake_global_config, tmp_path
 ):

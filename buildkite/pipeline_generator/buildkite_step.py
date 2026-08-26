@@ -57,7 +57,9 @@ def _otel_setup_command() -> str:
     return (
         "ci_otel_start() { :; }; ci_otel_finish() { :; }; "
         'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
-        "$$(git rev-parse --show-toplevel 2>/dev/null)/"
+        # `|| :` keeps the assignment itself successful under `sh -e` when the
+        # checkout has no .git; the missing-helper path below stays fail-open.
+        "$$(git rev-parse --show-toplevel 2>/dev/null || :)/"
         '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
         'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
