@@ -187,6 +187,18 @@ _FLEET_SUBPROCESS_HARNESS_KEYS = frozenset(
         "multiconnector-nixl-offloading-pd-accuracy-2-gpus",
         "multiconnector-nixl-offloading-pd-edge-cases-2-gpus",
         "nixlconnector-pd-edge-cases-2-gpus",
+        # Serve/script jobs with no pytest session: evidence is job-level
+        # (harness-subprocess context rows), per the 2026-08-26 directive.
+        "attention-benchmarks-smoke-test-b200",
+        "deepseek-v2-lite-prefetch-offload-accuracy-h100",
+        "deepseek-v2-lite-sync-eplb-accuracy-4xh100",
+        "distributed-tests-8xh100",
+        "distributed-torchrun-examples-4-gpus",
+        "examples",
+        "model-runner-v2-examples",
+        "qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-2xb200",
+        "qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-4xh100",
+        "qwen3-30b-a3b-fp8-dp4-async-eplb-accuracy",
     }
 )
 _NVIDIA_TRACE_DEVICES = {
