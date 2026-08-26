@@ -147,7 +147,7 @@ def _insert_python(
     # never on node shape alone, so a pytest-expected job that silently lost
     # its plugin still fails closed.
     serve_job_level = (
-        capture_class == "serve"
+        capture_class in ("serve", "serverless")
         and bool(node_ids)
         and all(str(node_id).startswith("job::") for node_id in node_ids)
         and type(started) is int

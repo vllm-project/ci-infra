@@ -211,6 +211,28 @@ def test_subprocess_health_no_serve_rows_is_unhealthy():
     assert _subprocess_health(**kwargs) == "subprocess_no_serve_evidence"
 
 
+def test_subprocess_health_serverless_needs_no_marker():
+    kwargs = {**_OK_KWARGS, "serve_markers": [], "capture_class": "serverless"}
+    assert _subprocess_health(**kwargs) is None
+
+
+def test_subprocess_health_serverless_requires_rows():
+    kwargs = {**_OK_KWARGS, "serve_markers": [], "has_serve_rows": False,
+              "capture_class": "serverless"}
+    assert _subprocess_health(**kwargs) == "subprocess_no_coverage_rows"
+
+
+def test_subprocess_health_serverless_still_requires_hook():
+    kwargs = {**_OK_KWARGS, "hook_state": {"installed": False},
+              "capture_class": "serverless"}
+    assert _subprocess_health(**kwargs) == "subprocess_hook_not_installed"
+
+
+def test_subprocess_health_declared_serve_still_requires_marker():
+    kwargs = {**_OK_KWARGS, "serve_markers": [], "capture_class": "serve"}
+    assert _subprocess_health(**kwargs) == "subprocess_no_serve_interpreter"
+
+
 def test_serve_markers_identify_serve_argv(tmp_path: Path):
     _write_marker(tmp_path, 1, ["/opt/venv/bin/vllm", "serve", "model"])
     _write_marker(tmp_path, 2, ["python3", "-m", "pytest", "tests/"])

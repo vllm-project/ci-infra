@@ -405,12 +405,15 @@ def _rewrite_manifest_and_trace(evidence: Path, key: str, **manifest_updates) ->
     _write(manifest_path, manifest)
 
 
-def _inventory_with_serve(path: Path, *keys: str, serve: tuple = ()) -> Path:
+def _inventory_with_serve(path: Path, *keys: str, serve: tuple = (),
+                          serverless: tuple = ()) -> Path:
     inventory = _inventory(path, *keys)
     document = json.loads(inventory.read_text(encoding="utf-8"))
     for job in document["jobs"]:
         if job["key"] in serve:
             job["capture_class"] = "serve"
+        elif job["key"] in serverless:
+            job["capture_class"] = "serverless"
     _write(inventory, document)
     return inventory
 
@@ -471,6 +474,22 @@ def test_materializer_rejects_serve_class_without_hook(tmp_path: Path):
 
     assert metadata["healthy_jobs"] == ["healthy-control"]
     assert metadata["unhealthy_reasons"] == {"serve-job": "GraphError"}
+
+
+def test_materializer_accepts_declared_serverless_job_level_evidence(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    _job(evidence, "examples")
+    _rewrite_manifest_and_trace(evidence, "examples")
+
+    metadata = build_fleet_graph(
+        evidence,
+        _inventory_with_serve(
+            tmp_path / "inventory.json", "examples", serverless=("examples",)
+        ),
+        tmp_path / "graph.sqlite",
+    )
+
+    assert metadata["healthy_jobs"] == ["examples"]
 
 
 def test_bad_checksum_fails_closed(tmp_path: Path):

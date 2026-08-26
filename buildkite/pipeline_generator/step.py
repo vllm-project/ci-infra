@@ -37,6 +37,7 @@ class Step(BaseModel):
     trace_gpu: bool = False
     trace_collector_sha256: Optional[str] = None
     trace_subprocess_coverage: bool = False
+    trace_capture_class: str | None = None
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()

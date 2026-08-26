@@ -62,6 +62,15 @@ def _parser() -> argparse.ArgumentParser:
         help="Record coverage in every Python subprocess of each command.",
     )
     parser.add_argument(
+        "--capture-class",
+        choices=["serve", "serverless"],
+        default=None,
+        help=(
+            "Declared job-level capture class: 'serve' requires a hooked "
+            "vllm-serve interpreter; 'serverless' requires only coverage rows."
+        ),
+    )
+    parser.add_argument(
         "--preserve-command-exit-code",
         action="store_true",
         help=(
@@ -88,6 +97,7 @@ def _run_command(
     represented_job_key: str,
     capture_gpu: bool,
     subprocess_coverage: bool = False,
+    capture_class: str | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     shard_dir = output_dir / "commands" / f"{command_index:03d}"
     shard_dir.mkdir(parents=True, exist_ok=True)
@@ -111,6 +121,8 @@ def _run_command(
     ]
     if subprocess_coverage:
         runner.append("--subprocess-coverage")
+    if capture_class:
+        runner.extend(["--capture-class", capture_class])
     environment = dict(os.environ)
     environment["VLLM_CI_TEST_SELECTION_NVTX"] = "1" if capture_gpu else "0"
     if capture_gpu:
@@ -171,6 +183,7 @@ def main() -> int:
                 represented_job_key=args.represented_job_key,
                 capture_gpu=args.capture_gpu,
                 subprocess_coverage=args.subprocess_coverage,
+                capture_class=args.capture_class,
             )
         except Exception as error:
             collector_error = f"{type(error).__name__}: {error}"

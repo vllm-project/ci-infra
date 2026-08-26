@@ -98,12 +98,17 @@ def _subprocess_health(
     checkout_state: dict[str, Any],
     serve_markers: list[dict[str, Any]],
     has_serve_rows: bool,
+    capture_class: str | None = None,
 ) -> str | None:
     """Fail-closed reason for subprocess coverage, or None when healthy.
 
     Hook skipped, combine failure, a drifted/dirty checkout, no hooked serve
     interpreter, and no serve-side rows each get a distinct reason so a green
     pytest client can never mask missing server evidence.
+
+    Declared "serverless" jobs (examples, torchrun, benchmarks) spawn no
+    `vllm serve` interpreter BY DESIGN; for them the serve-marker requirement
+    is replaced by the presence of any hooked coverage rows.
     """
 
     if not (hook_state or {}).get("installed"):
@@ -116,6 +121,10 @@ def _subprocess_health(
         return "git_status_failed_after"
     if checkout_state.get("after_mismatch"):
         return "worktree_shape_mismatch_after"
+    if capture_class == "serverless":
+        if not has_serve_rows:
+            return "subprocess_no_coverage_rows"
+        return None
     if not serve_markers:
         return "subprocess_no_serve_interpreter"
     if not has_serve_rows:
@@ -351,6 +360,17 @@ def _parser() -> argparse.ArgumentParser:
         help="Record coverage in every Python subprocess of the command "
         "(site-packages .pth hook + COVERAGE_PROCESS_START), for "
         "shell-harness jobs whose code under test runs in serve processes.",
+    )
+    parser.add_argument(
+        "--capture-class",
+        choices=["serve", "serverless"],
+        default=None,
+        help=(
+            "Declared job-level capture class. 'serve' requires a hooked "
+            "vllm-serve interpreter; 'serverless' (examples, torchrun, "
+            "benchmarks) requires only that hooked subprocesses recorded "
+            "coverage rows."
+        ),
     )
     parser.add_argument("tests", nargs=argparse.REMAINDER)
     return parser
@@ -872,6 +892,7 @@ def main() -> int:
             has_serve_rows=any(
                 row["test_id"] == f"job::{args.represented_job_key}" for row in rows
             ),
+            capture_class=args.capture_class,
         )
     subprocess_ok = subprocess_reason is None
     healthy = (

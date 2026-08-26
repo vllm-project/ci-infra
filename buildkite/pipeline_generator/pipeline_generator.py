@@ -196,19 +196,32 @@ _FLEET_SUBPROCESS_HARNESS_KEYS = frozenset(
 # job that silently lost its plugin must still fail closed.
 _FLEET_SERVE_JOB_LEVEL_KEYS = frozenset(
     {
-        "attention-benchmarks-smoke-test-b200",
         "deepseek-v2-lite-prefetch-offload-accuracy-h100",
         "deepseek-v2-lite-sync-eplb-accuracy-4xh100",
-        "distributed-tests-8xh100",
+        # Its rlhf_http_* example scripts self-start `vllm serve`
+        # (examples/rl/rlhf_http_nccl.py) — the serve marker fires.
         "distributed-torchrun-examples-4-gpus",
-        "examples",
-        "model-runner-v2-examples",
         "qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-2xb200",
         "qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-4xh100",
         "qwen3-30b-a3b-fp8-dp4-async-eplb-accuracy",
     }
 )
-_SUBPROCESS_COVERAGE_KEYS = _FLEET_SUBPROCESS_HARNESS_KEYS | _FLEET_SERVE_JOB_LEVEL_KEYS
+# Serverless script jobs: python workloads (examples, torchrun, benchmarks)
+# that never spawn a `vllm serve` interpreter. Same job-level evidence class;
+# the collector health gate must not require a serve marker for these.
+_FLEET_SERVERLESS_JOB_LEVEL_KEYS = frozenset(
+    {
+        "attention-benchmarks-smoke-test-b200",
+        "distributed-tests-8xh100",
+        "examples",
+        "model-runner-v2-examples",
+    }
+)
+_SUBPROCESS_COVERAGE_KEYS = (
+    _FLEET_SUBPROCESS_HARNESS_KEYS
+    | _FLEET_SERVE_JOB_LEVEL_KEYS
+    | _FLEET_SERVERLESS_JOB_LEVEL_KEYS
+)
 _NVIDIA_TRACE_DEVICES = {
     DeviceType.A100,
     DeviceType.B200,
@@ -429,6 +442,15 @@ def configure_test_tracing(
         step.trace_represented_job_key = step_key
         step.trace_gpu = mode == "kernel-set"
         step.trace_subprocess_coverage = step_key in _SUBPROCESS_COVERAGE_KEYS
+        step.trace_capture_class = (
+            "serve"
+            if step_key in _FLEET_SERVE_JOB_LEVEL_KEYS
+            else (
+                "serverless"
+                if step_key in _FLEET_SERVERLESS_JOB_LEVEL_KEYS
+                else None
+            )
+        )
         if step.trace_subprocess_coverage:
             if mode != "python-only":
                 raise ValueError(
@@ -448,7 +470,11 @@ def configure_test_tracing(
                 **(
                     {"capture_class": "serve"}
                     if step_key in _FLEET_SERVE_JOB_LEVEL_KEYS
-                    else {}
+                    else (
+                        {"capture_class": "serverless"}
+                        if step_key in _FLEET_SERVERLESS_JOB_LEVEL_KEYS
+                        else {}
+                    )
                 ),
             }
         )

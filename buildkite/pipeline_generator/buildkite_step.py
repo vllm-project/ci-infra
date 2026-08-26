@@ -615,6 +615,8 @@ path.write_text(json.dumps(document,sort_keys=True,separators=(",",":"))+"\\n",e
         )
         if step.trace_subprocess_coverage:
             runner += " --subprocess-coverage"
+        if step.trace_capture_class:
+            runner += f" --capture-class {step.trace_capture_class}"
         if in_place:
             runner += " --preserve-command-exit-code"
             runner = (
