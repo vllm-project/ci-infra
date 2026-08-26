@@ -44,7 +44,7 @@ To prevent race conditions where worker clusters compete to claim the same Build
 The Buildkite queue deliberately carries no TPU information. A step names its shape with `--profile`, and the controller stays shape-agnostic, so adding a TPU profile is a regenerated ConfigMap rather than another Helm release. The controller's own pod is CPU-only and carries no Kueue queue label, so Kueue never queues or evicts it - only the workload it submits.
 
 ### B. MultiKueue Dispatch over Connect Gateway
-Kueue on the manager cluster inspects submitted jobs, matches cluster queues (`v6e-1-1x1`, `v6e-8-2x4`), and dispatches the workload object to the corresponding worker cluster (`southamerica-west1-a`) via GKE Connect Gateway using Workload Identity (`roles/gkehub.gatewayEditor`).
+Kueue on the manager cluster inspects submitted jobs, matches cluster queues (`v6e-1-1x1`, `v6e-8-2x4`), and dispatches the workload object to the corresponding worker cluster (`southamerica-west1-a`) via GKE Connect Gateway using Workload Identity (`roles/gkehub.gatewayAdmin`).
 
 ### C. Native Cross-Project Image Pulling (No K8s Secrets Required)
 Container images for testing (such as `us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu`) are hosted in the manager project. 
@@ -69,6 +69,17 @@ A pool with `hosts > 1` is a multi-host TPU slice pool: GKE creates it with a `C
 
 ### G. Physical shapes constrain borrowing
 Node pools are single-shape, so with an 18-chip reservation one 8-chip node and ten 1-chip nodes leave nothing for a 16-chip slice. Quota borrowing across shapes is therefore not free: reclaiming chips means draining and deleting nodes of one shape before nodes of the other can be created. Measured on this cluster, that costs roughly 300s on top of the ~110s node scale-up. Worth knowing before tuning quotas - the cost is physical, not a Kueue setting.
+
+### H. The workload launcher
+Every TPU step runs `/opt/launcher/launch`, a CPU-only pod that submits the real workload and owns its lifecycle. It exists because agent-stack-k8s can only create a `batch/v1` Job; routing single-pod work through it as well keeps one code path and, more importantly, keeps the Buildkite agent *outside* the Kueue workload. That is what lets a preempted run pause and resume instead of failing, and stops the Buildkite job sitting reserved through a node scale-up.
+
+Cluster-side it is a ServiceAccount, a Role, two ConfigMaps and a PodTemplate, all in `06-launcher.yaml`, plus a ClusterRole per worker (`07-launcher-rbac.yaml`) letting it read pod logs over Connect Gateway.
+
+The split of responsibility: the **profile registry** is generated here from the same tfvars that builds the node pools, so chip count, topology, node labels and queue names cannot drift from the queues they target. The **workload manifest** lives in the repo under test, so the shape of a job is a PR rather than an infrastructure change. A pipeline names a profile; it cannot invent placement.
+
+Two behaviours worth knowing when reading the launcher:
+- Pod logs are **polled**, not followed. Connect Gateway resets the long-lived HTTP/2 stream `kubectl logs -f` needs (`stream error ... INTERNAL_ERROR`), while short requests through it are reliable.
+- Logs are filed **per owning Job**, not per pod, and uploaded as Buildkite artifacts. A pod does not survive preemption; the Job does, so keying on it gives one continuous log across a preempt-and-resume cycle.
 
 ---
 
@@ -116,7 +127,7 @@ Manifests are rendered into per-cluster directories, numbered in the order
 generated/manager/            01-base 02-multikueue-fleet 03-cohorts
                               04-resource-flavors 05-queues [06-launcher]
 generated/worker-<location>/  01-base 02-resource-flavors 03-queues
-                              [04-launcher-rbac]
+                              [07-launcher-rbac]
 ```
 
 Only `01-base` ordering is load-bearing - it carries the Namespace everything

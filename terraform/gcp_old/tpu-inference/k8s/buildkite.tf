@@ -57,7 +57,10 @@ resource "helm_release" "buildkite_agent_stack" {
         # Applies to the launcher pod only; the workload carries its own
         # activeDeadlineSeconds. Sized to outlast queue wait plus the run,
         # because the launcher waits for both.
-        job-active-deadline-seconds = var.tpu_job_max_runtime_seconds
+        # Outlives the whole budget by a margin, so a step that overruns is
+        # reported by its own Buildkite timeout rather than by the agent pod
+        # vanishing underneath it.
+        job-active-deadline-seconds = var.tpu_total_max_seconds + 900
         pod-pending-timeout         = "180m"
       }
     })

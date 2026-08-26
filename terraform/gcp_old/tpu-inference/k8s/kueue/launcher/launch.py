@@ -1,0 +1,990 @@
+#!/usr/bin/env python3
+"""Submit a TPU workload on behalf of a Buildkite job, then own its lifecycle.
+
+Runs as the command container of an agent-stack-k8s Job in the manager
+cluster. Every TPU step goes through here, single pod or not, so there is one
+code path and one place where policy lives.
+
+    launch --profile v6e-8-2x4 -- pytest tests/e2e
+    launch --profile v6e-8-2x4 --manifest .buildkite/kubernetes/manifests/jobset-multihost.yaml -- bash bench.sh
+
+Why a launcher rather than running the test in this pod: agent-stack-k8s can
+only create a batch/v1 Job, and a Job cannot span hosts, so multi-host slices
+and prefill/decode disagg need something to create a JobSet. Routing the
+single-pod case through the same path costs one cheap CPU pod and buys two
+properties that only hold when the agent is *outside* the Kueue workload:
+
+  * The agent acquires its Buildkite job in seconds instead of after TPU
+    admission and node pool scale-up, so the job is never held reserved long
+    enough for Buildkite's reservation to lapse and be claimed twice.
+  * Kueue preemption evicts the workload without killing the agent, so a
+    preempted run is a pause in the step log rather than a failed build
+    needing `retry: automatic` in every pipeline.
+
+The manifest comes from the repo being tested, so the shape of a job lives
+where the people writing tests do, and submitting a hand-written Job or JobSet
+needs no infrastructure change. What stays cluster-side is the profile
+registry: chips, topology, node labels and queue names are facts about the
+hardware, not about the test, and a pipeline substitutes them by name rather
+than restating them.
+
+That split means the manifest is untrusted, so it is validated before
+submission. Most of the dangerous surface is already covered - the workload
+namespace enforces PodSecurity `baseline` in every cluster, which rejects
+privileged containers, hostPath volumes and host networking outright. What is
+left here is what admission cannot know: that the queue is a real profile's
+queue (so quota cannot be side-stepped), that the image is from an allowed
+registry, and that the workload does not run as the launcher's own identity.
+"""
+
+import argparse
+import json
+import os
+import re
+import signal
+import string
+import shutil
+import subprocess
+import sys
+import time
+
+NAMESPACE = os.environ.get("LAUNCHER_NAMESPACE", "buildkite")
+PROFILES_PATH = os.environ.get("LAUNCHER_PROFILES", "/opt/launcher/profiles/profiles.yaml")
+
+# Relative to the checkout, which agent-stack-k8s clones into the workspace the
+# launcher runs in.
+
+# Per-Job logs are written here, then uploaded as Buildkite artifacts.
+LOG_DIR = os.environ.get("LAUNCHER_LOG_DIR", "/tmp/workload-logs")
+# kubectl --timestamps prefixes each entry with RFC3339. Anything else on a
+# line is a fragment of the entry above it, not a new one.
+TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$")
+
+# The container a manifest must name for its test. Already assumed by env
+# forwarding, which only injects into this one.
+WORKLOAD_CONTAINER = "workload"
+
+POLL_SECONDS = 5
+
+# Worker credentials are kept out of the default kubeconfig; see worker_env().
+WORKER_KUBECONFIG = "/tmp/worker.kubeconfig"
+
+def admission_timeout(registry, profile):
+    """How long to wait for chips: the whole budget, less one full-length run.
+
+    Derived rather than configured. There are only two numbers worth choosing -
+    how long a test may run and how long a step may take in total - and every
+    other deadline follows from them. Waiting longer than this would leave no
+    room to actually run; waiting less would fail steps that were merely
+    queueing, which is what a fixed 30-minute default did to 11 of 23 steps in
+    one build.
+    """
+    total = int(registry.get("total_max_seconds", 28800))
+    test = int(profile.get("max_runtime_seconds", 10800))
+    return max(total - test, 300)
+
+
+# Kinds the launcher will submit. Anything else in a template is a mistake, and
+# catching it here is cheaper than a confusing RBAC denial.
+SUPPORTED_KINDS = {"Job": "job", "JobSet": "jobset"}
+
+
+def log(msg):
+    print(f"~~~ launcher: {msg}", flush=True)
+
+
+def _load_yaml():
+    """Import PyYAML without putting PyPI in the path of every TPU job.
+
+    Tried in order:
+
+      1. An already-importable yaml. Costs nothing.
+      2. The copy gcloud vendors under its SDK root. The launcher image ships
+         gcloud regardless, so this needs no network, no install, and nothing
+         pinned - and the SDK root is discovered rather than hardcoded, since
+         it differs between the Cloud CLI image variants.
+      3. pip, as a last resort, with a warning.
+
+    Step 3 works, but it is a poor steady state: it makes PyPI reachability a
+    dependency of every build, and it pulls an unpinned package into a pod
+    whose service account can create JobSets and reach the worker clusters.
+    If it ever fires, the fix is a launcher_image that ships python3-yaml.
+    """
+    try:
+        import yaml
+        return yaml
+    except ImportError:
+        pass
+
+    candidates = [os.environ.get("CLOUDSDK_ROOT_DIR"),
+                  "/usr/lib/google-cloud-sdk", "/google-cloud-sdk"]
+    try:
+        found = subprocess.run(
+            ["gcloud", "info", "--format=value(installation.sdk_root)"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        if found.returncode == 0:
+            candidates.append(found.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    for root in filter(None, candidates):
+        vendored = os.path.join(root, "lib", "third_party")
+        if not os.path.isdir(vendored):
+            continue
+        sys.path.append(vendored)
+        try:
+            import yaml
+            log(f"using the PyYAML vendored by gcloud ({vendored})")
+            return yaml
+        except ImportError:
+            sys.path.remove(vendored)
+
+    log("PyYAML not found in this image; installing from PyPI. This adds a "
+        "network dependency to every job - prefer a launcher_image that "
+        "ships python3-yaml.")
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "--quiet",
+         "--break-system-packages", "pyyaml"]
+    )
+    import yaml
+    return yaml
+
+
+yaml = _load_yaml()
+
+
+def kubectl(*args, check=True):
+    return subprocess.run(
+        ["kubectl", "-n", NAMESPACE, *args], check=check, capture_output=True, text=True
+    )
+
+
+def delete_workload(kind, name):
+    """Delete the workload and say whether it worked.
+
+    Cancellation is the one path where the launcher is about to exit, so a
+    failed delete leaves a workload behind with nobody watching. Logging the
+    intent and not the outcome makes that indistinguishable from success -
+    which is exactly what made cancellation cleanup untestable without cluster
+    access.
+    """
+    proc = kubectl("delete", kind, name, "--wait=false", check=False)
+    if proc.returncode == 0:
+        log(f"deleted {kind}/{name}")
+    elif "NotFound" in proc.stderr:
+        log(f"{kind}/{name} already gone")
+    else:
+        log(f"WARNING: could not delete {kind}/{name}: {proc.stderr.strip()[:200]}")
+    return proc.returncode == 0
+
+
+def kubectl_json(*args):
+    proc = kubectl(*args, "-o", "json", check=False)
+    return json.loads(proc.stdout) if proc.returncode == 0 else None
+
+
+def load_registry():
+    with open(PROFILES_PATH) as fh:
+        return yaml.safe_load(fh) or {}
+
+def load_profile(registry, name):
+    profiles = registry.get("profiles", {})
+    if name not in profiles:
+        raise SystemExit(
+            f"unknown profile {name!r}. Available: {', '.join(sorted(profiles))}"
+        )
+    return profiles[name]
+
+def resolve_image(registry):
+    """The workload image, checked against the cluster-side allowlist.
+
+    The image is deliberately the pipeline's choice - CI images are built per
+    commit, so the cluster cannot know it. That makes it repo-controlled, and
+    in a public repo repo-controlled means PR-controlled, so the registry it
+    comes from is checked here rather than trusted.
+    """
+    image = os.environ.get("WORKLOAD_IMAGE", "").strip()
+    if not image:
+        raise SystemExit(
+            "no workload image. Set WORKLOAD_IMAGE in the pipeline env, e.g.\n"
+            "  env:\n"
+            "    WORKLOAD_IMAGE: \"$${REGISTRY}/vllm:$${BUILDKITE_COMMIT}\""
+        )
+    allowed = registry.get("allowed_image_repos") or []
+    if not allowed:
+        log("warning: no allowed_image_repos configured; any image is accepted")
+    elif not any(image.startswith(prefix) for prefix in allowed):
+        raise SystemExit(
+            f"image {image!r} is not from an allowed registry. Allowed prefixes: "
+            + ", ".join(allowed)
+        )
+    return image
+
+
+def workload_name():
+    """DNS-safe name from the Buildkite job UUID.
+
+    JobSet appends -<replicatedJob>-<jobIndex>-<podIndex> to build child names,
+    so the parent has to leave room inside the 63 character limit. Bare UUID
+    hex is 32 chars, leaving ~25 for the suffix.
+    """
+    uuid = os.environ.get("BUILDKITE_JOB_ID", "")
+    slug = re.sub(r"[^a-z0-9]", "", uuid.lower())
+    if not slug:
+        raise SystemExit("BUILDKITE_JOB_ID is not set; refusing to guess a name")
+    return f"bk-{slug}"
+
+
+def owner_reference():
+    """Own the workload from this pod, so GC removes it when the pod goes.
+
+    The launcher pod, not its Job: agent-stack sets backoffLimit=0, so an
+    evicted pod leaves a Failed Job sitting around until job-ttl expires -
+    minutes of TPUs running with nobody watching. Owning from the pod fires
+    immediately, and still covers Job deletion, because deleting a Job deletes
+    its pods. The reverse is not true, which is why this is not symmetric.
+
+    Exactly one owner: Kubernetes only collects a dependent once *all* its
+    owners are gone, so listing both pod and Job would be weaker than either.
+    """
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "name": os.environ["LAUNCHER_POD_NAME"],
+        "uid": os.environ["LAUNCHER_POD_UID"],
+        "blockOwnerDeletion": False,
+    }
+
+
+def correlation_labels():
+    """Labels tying the workload back to its Buildkite job.
+
+    Also stamped on pod templates: that is the selector the log stream follows
+    in the worker cluster, and what an orphan sweep there would match on.
+    """
+    pairs = {
+        "buildkite.com/job-id": os.environ.get("BUILDKITE_JOB_ID", ""),
+        "buildkite.com/build-number": os.environ.get("BUILDKITE_BUILD_NUMBER", ""),
+        "buildkite.com/pipeline": os.environ.get("BUILDKITE_PIPELINE_SLUG", ""),
+    }
+    return {k: v for k, v in pairs.items() if v}
+
+
+def pod_specs(doc):
+    """Every PodSpec in the document, whatever the kind."""
+    if doc["kind"] == "Job":
+        return [doc["spec"]["template"]["spec"]]
+    return [
+        rj["template"]["spec"]["template"]["spec"]
+        for rj in doc["spec"].get("replicatedJobs", [])
+    ]
+
+
+def pod_metadatas(doc):
+    if doc["kind"] == "Job":
+        return [doc["spec"]["template"].setdefault("metadata", {})]
+    return [
+        rj["template"]["spec"]["template"].setdefault("metadata", {})
+        for rj in doc["spec"].get("replicatedJobs", [])
+    ]
+
+
+def forward_env(doc, names):
+    """Copy named step variables onto the workload container.
+
+    Named explicitly rather than forwarding wholesale: the launcher's own
+    environment holds the Buildkite agent token and anything else the agent was
+    given, and none of that belongs in a workload pod. A name that is unset in
+    the step is skipped rather than injected empty, so a test can tell "not
+    configured" from "configured to nothing".
+    """
+    # Empty counts as unset. A step that resolves a secret into a variable and
+    # comes back with nothing should fall through to whatever the manifest
+    # declares, not overwrite a secretKeyRef with "".
+    values = [(n, os.environ[n]) for n in names if os.environ.get(n, "") != ""]
+    if not values:
+        return []
+    for spec in pod_specs(doc):
+        for container in spec.get("containers", []):
+            if container.get("name") != "workload":
+                continue
+            env = container.setdefault("env", [])
+            # --env wins over the manifest: the manifest holds the default -
+            # often a secretKeyRef - and the step is the more specific
+            # instruction, so a step can override a cluster secret with a value
+            # it fetched itself.
+            named = {n for n, _ in values}
+            env[:] = [e for e in env if e["name"] not in named]
+            env.extend({"name": n, "value": v} for n, v in values)
+    return [n for n, _ in values]
+
+
+# Placement is not the manifest's to decide, and unlike the names below, a
+# manifest that simply never mentions these fails silently. It still requests
+# TPU chips, so Kueue admits it against the profile's quota and the pod takes
+# any pool with room - a different topology than the profile promised, or the
+# right topology by luck. Nothing rejects that, and the run looks normal.
+PLACEMENT = ("ACCELERATOR_LABEL", "TOPOLOGY", "CHIPS")
+
+
+def render(path, profile, image, command, name, labels, owner):
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"manifest {path!r} not found in the checkout. Point --manifest at "
+            f"a Job or JobSet in the calling repo."
+        )
+
+    # Required: the registry supplies every one of these on every render, so a
+    # ${NAME} the manifest still holds after they are applied is a name nothing
+    # defines - a typo, or a variable that was removed - and substitute()
+    # raises instead of rendering it as literal text.
+    required = {
+        "WORKLOAD_NAME": name,
+        "NUM_HOSTS": str(profile.get("hosts", 1)),
+        "KUEUE_QUEUE": profile["queue"],
+        "CHIPS": str(profile["chips"]),
+        "TOPOLOGY": profile["topology"],
+        "ACCELERATOR_LABEL": profile["accelerator_label"],
+        "MAX_RUNTIME": str(profile.get("max_runtime_seconds", 10800)),
+        # How large the gcsfuse file cache volume may grow here. Set per
+        # machine type by the registry, because host memory ranges from 176 GB
+        # to 1440 GB across the shapes we run and a single figure is either
+        # unsafe on the smallest or wastes most of the largest. The fallback is
+        # small enough to be safe on any shape: too low only costs read
+        # speed, too high risks an OOM.
+        "FUSE_CACHE_SIZE": str(profile.get("fuse_cache_size", "20Gi")),
+        "IMAGE": image,
+    }
+    # Optional: whatever the step happens to export, so a manifest can pin
+    # ${BUILDKITE_COMMIT} or, as testing/gang.yaml does, ${GANG_SIZE}. The
+    # launcher cannot know which of these a manifest wants, so absence is not
+    # an error here - safe_substitute leaves an unset one in place and the
+    # required pass below decides what to do about it.
+    optional = {k: v for k, v in os.environ.items() if k not in required}
+
+    raw = open(path).read()
+
+    absent = [n for n in PLACEMENT if "${%s}" % n not in raw]
+    if absent:
+        raise SystemExit(
+            f"{path}: does not reference "
+            + ", ".join("${%s}" % n for n in absent)
+            + ".\nWhere a workload runs and how many chips it takes come from "
+            "the profile, so a manifest has to ask for them by name."
+        )
+
+    try:
+        doc = yaml.safe_load(
+            string.Template(
+                string.Template(raw).safe_substitute(optional)
+            ).substitute(required)
+        )
+    except KeyError as e:
+        raise SystemExit(
+            f"{path}: nothing provides ${{{e.args[0]}}}.\n"
+            f"The profile supplies {', '.join(sorted(required))}; every other "
+            "name has to come from the step's environment."
+        )
+    except ValueError as e:
+        # A lone `$` that is not a placeholder. Write `$$` for a literal one.
+        raise SystemExit(f"{path}: {e}")
+
+    if doc.get("kind") not in SUPPORTED_KINDS:
+        raise SystemExit(
+            f"{path}: kind {doc.get('kind')!r} is not one of {sorted(SUPPORTED_KINDS)}"
+        )
+
+    coerce_ints(doc)
+
+    meta = doc.setdefault("metadata", {})
+    meta["name"] = name
+    meta["namespace"] = NAMESPACE
+    # The queue label must be on the top-level object; Kueue reads it there for
+    # both Job and JobSet, never off the inner pods.
+    meta.setdefault("labels", {})["kueue.x-k8s.io/queue-name"] = profile["queue"]
+    meta["labels"].update(labels)
+    if owner:
+        meta["ownerReferences"] = [owner]
+
+    for pod_meta in pod_metadatas(doc):
+        pod_meta.setdefault("labels", {}).update(labels)
+
+    # Set the command as a list element rather than interpolating it into YAML,
+    # so a command containing quotes or newlines cannot corrupt the manifest.
+    placed = False
+    for spec in pod_specs(doc):
+        for container in spec.get("containers", []):
+            if container.get("name") == "workload":
+                container["args"] = [command]
+                placed = True
+    if not placed:
+        raise SystemExit(f"{path}: no container named 'workload' to run the command in")
+
+    return doc
+
+
+# Fields the Kubernetes API declares as integers. A manifest is text with
+# ${...} substituted into it, so whether a value survives as an int depends on
+# quoting - and `activeDeadlineSeconds: "${MAX_RUNTIME}"` is an easy thing to
+# write. The API rejects it with a type error a long way from the cause, so
+# coerce instead of relying on every author getting the quoting right.
+INT_FIELDS = frozenset({
+    "activeDeadlineSeconds",
+    "backoffLimit",
+    "completions",
+    "parallelism",
+    "replicas",
+    "startupPolicyOrder",
+    "terminationGracePeriodSeconds",
+    "ttlSecondsAfterFinished",
+})
+
+
+def coerce_ints(node):
+    """Recursively turn numeric strings into ints for known integer fields."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in INT_FIELDS and isinstance(value, str) and value.strip().lstrip("-").isdigit():
+                node[key] = int(value)
+            else:
+                coerce_ints(value)
+    elif isinstance(node, list):
+        for item in node:
+            coerce_ints(item)
+    return node
+
+
+def validate(doc, profile, registry):
+    """Reject a manifest the cluster should not run.
+
+    Deliberately narrow. The workload namespace enforces PodSecurity
+    `baseline`, so privileged containers, hostPath volumes and host networking
+    are already rejected at admission and are not re-checked here. These are
+    the things admission cannot judge.
+    """
+    queues = {p["queue"] for p in registry.get("profiles", {}).values()}
+    declared = doc.get("metadata", {}).get("labels", {}).get("kueue.x-k8s.io/queue-name")
+    if declared is not None and declared != profile["queue"]:
+        # Not just a mismatch: naming another queue would draw on quota the
+        # profile was not admitted against.
+        raise SystemExit(
+            f"manifest targets queue {declared!r} but --profile resolves to "
+            f"{profile['queue']!r}. Remove the label and let --profile set it."
+        )
+    if declared is not None and declared not in queues:
+        raise SystemExit(f"queue {declared!r} is not a known profile queue")
+
+    # Which identities a workload may run as, published by the cluster rather
+    # than chosen by the manifest. The launcher's own account can create
+    # JobSets, so a workload running as it could submit further work outside
+    # any quota - that is what this exists to stop, and why the list is not
+    # something a repo can extend.
+    allowed = set(registry.get("workload_service_accounts") or ["default"])
+    for spec in pod_specs(doc):
+        sa = spec.get("serviceAccountName")
+        if sa and sa not in allowed:
+            raise SystemExit(
+                f"serviceAccountName {sa!r} is not allowed on a workload pod; "
+                f"the cluster permits {', '.join(sorted(allowed))}"
+            )
+    return doc
+
+
+def find_workload(uid):
+    workloads = kubectl_json("get", "workloads")
+    for item in (workloads or {}).get("items", []):
+        for owner in item.get("metadata", {}).get("ownerReferences", []):
+            if owner.get("uid") == uid:
+                return item
+    return None
+
+
+def condition(obj, cond_type):
+    for cond in (obj or {}).get("status", {}).get("conditions", []):
+        if cond.get("type") == cond_type:
+            return cond
+    return None
+
+
+def startup_note(env, job_id):
+    """Where a pod is between admission and running, in a few words.
+
+    Admission means Kueue reserved the chips; the pod still has to be
+    scheduled, the node may have to be created, the image pulled and the cache
+    volume cloned and attached. That gap was 13 minutes for one step in build
+    153 and the launcher said nothing for all of it, so the time could be seen
+    but not attributed. Reported rather than enforced - a slow node pool is not
+    a failure, it is just worth knowing about.
+    """
+    proc = subprocess.run(
+        ["kubectl", "-n", NAMESPACE, "get", "pods",
+         "-l", f"buildkite.com/job-id={job_id}", "-o", "json"],
+        env=env, capture_output=True, text=True, check=False, timeout=60,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        items = json.loads(proc.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return None
+    if not items:
+        return "waiting for a pod to be created"
+    pod = items[0]
+    status = pod.get("status", {})
+    phase = status.get("phase")
+    if phase in ("Running", "Succeeded", "Failed"):
+        return None
+    for cond in status.get("conditions", []) or []:
+        if cond.get("type") == "PodScheduled" and cond.get("status") != "True":
+            return f"pod not scheduled yet: {cond.get('reason') or ''}".strip()
+    for cs in status.get("containerStatuses", []) or []:
+        waiting = (cs.get("state") or {}).get("waiting") or {}
+        if waiting.get("reason"):
+            return f"container waiting: {waiting['reason']}"
+
+    # Still initialising means the sidecars have not finished, and for these
+    # pods that is almost always the gcsfuse mount. Its error never reaches the
+    # workload log, because the collector reads only the workload container -
+    # so a bucket the pod cannot authenticate to looks exactly like a slow
+    # node, for as long as the deadline allows. That has cost three separate
+    # investigations; say what the sidecar says.
+    init = [cs for cs in (status.get("initContainerStatuses") or [])
+            if not (cs.get("state") or {}).get("terminated")]
+    for cs in init:
+        name = cs.get("name") or ""
+        if "gcsfuse" not in name:
+            continue
+        log = subprocess.run(
+            ["kubectl", "-n", NAMESPACE, "logs", pod["metadata"]["name"],
+             "-c", name, "--tail=3"],
+            env=env, capture_output=True, text=True, check=False, timeout=60,
+        )
+        tail = " / ".join(l.strip() for l in log.stdout.splitlines() if l.strip())
+        if tail:
+            return f"{name} still starting: {tail[:300]}"
+    return "pod scheduled, container starting"
+
+
+def termination_reasons(env, job_id):
+    """Why the containers ended, from the pod rather than from the output.
+
+    A process killed by the kernel prints no traceback, so an OOM and a test
+    that returned 1 look identical in the log - which is how two failures went
+    three runs each without anyone being able to say which they were. The pod
+    records it, and reading pods is access the launcher already has.
+    """
+    proc = subprocess.run(
+        ["kubectl", "-n", NAMESPACE, "get", "pods",
+         "-l", f"buildkite.com/job-id={job_id}", "-o", "json"],
+        env=env, capture_output=True, text=True, check=False, timeout=60,
+    )
+    if proc.returncode != 0:
+        return []
+    try:
+        items = json.loads(proc.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return []
+    out = []
+    for pod in items:
+        for cs in pod.get("status", {}).get("containerStatuses", []) or []:
+            term = (cs.get("state") or {}).get("terminated") or {}
+            if not term:
+                term = (cs.get("lastState") or {}).get("terminated") or {}
+            if term and term.get("reason") not in (None, "Completed"):
+                out.append(f"{pod['metadata']['name']}/{cs.get('name')}: "
+                           f"{term.get('reason')} (exit {term.get('exitCode')})")
+    return out
+
+
+def describe_admission(workload):
+    if workload is None:
+        return "waiting for Kueue to create the workload"
+    status = workload.get("status", {})
+    # Eviction first. A workload keeps status.clusterName once it has been
+    # admitted, so testing that first answers "admitted to worker cluster X"
+    # for the rest of the run and a preemption after admission never reaches
+    # the log - which is the one thing the caller polls this for. Build 229's
+    # part2 took a SIGTERM in the pod with no eviction note, and this ordering
+    # is why that told us nothing either way.
+    evicted = condition(workload, "Evicted")
+    if evicted and evicted.get("status") == "True":
+        return f"evicted ({evicted.get('reason')}), waiting for re-admission"
+    if status.get("clusterName"):
+        return f"admitted to worker cluster {status['clusterName']}"
+    if status.get("nominatedClusterNames"):
+        return f"dispatching to {', '.join(status['nominatedClusterNames'])}"
+    quota = condition(workload, "QuotaReserved")
+    if quota and quota.get("status") != "True":
+        return f"waiting for quota: {quota.get('message', quota.get('reason', ''))}"
+    return "waiting for admission"
+
+
+def worker_env(cluster_name, registry):
+    """Connect Gateway credentials for a worker, in an isolated kubeconfig.
+
+    Isolated deliberately: gcloud rewrites the current context, and the
+    launcher's own calls to the manager rely on the in-cluster service account
+    with no kubeconfig at all. Sharing one would repoint them at the worker.
+    """
+    worker = (registry.get("workers") or {}).get(cluster_name)
+    if worker is None:
+        log(f"no gateway mapping for worker {cluster_name!r}; logs unavailable")
+        return None
+    env = {**os.environ, "KUBECONFIG": WORKER_KUBECONFIG}
+    proc = subprocess.run(
+        [
+            "gcloud", "container", "fleet", "memberships", "get-credentials",
+            worker["membership"], "--project", worker["project"],
+        ],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        log(f"gateway credentials failed for {cluster_name}: {proc.stderr.strip()[:300]}")
+        return None
+    return env
+
+
+def worker_pods(env, job_id):
+    """Workload pods on the worker, each tagged with the Job that owns it.
+
+    Grouped by owning Job rather than pod, because a pod does not survive
+    preemption: Kueue suspends the Job, its pods are deleted, and re-admission
+    creates new ones. The Job name is stable across that, so keying on it keeps
+    one continuous log per unit of work instead of a new file per attempt.
+    """
+    proc = subprocess.run(
+        ["kubectl", "-n", NAMESPACE, "get", "pods",
+         "-l", f"buildkite.com/job-id={job_id}", "-o", "json"],
+        env=env, capture_output=True, text=True, check=False, timeout=60,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        items = json.loads(proc.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return None
+    pods = []
+    for pod in items:
+        meta = pod.get("metadata", {})
+        labels = meta.get("labels", {})
+        group = labels.get("batch.kubernetes.io/job-name") or meta.get("name", "pod")
+        index = labels.get("batch.kubernetes.io/job-completion-index")
+        if index is not None:
+            group = f"{group}-{index}"
+        pods.append({
+            "name": meta.get("name", ""),
+            "group": group,
+            "phase": pod.get("status", {}).get("phase", "Unknown"),
+        })
+    return pods
+
+
+class LogCollector:
+    """Polls pod logs and files them per owning Job.
+
+    Polled rather than followed because Connect Gateway resets the long-lived
+    HTTP/2 stream `kubectl logs -f` needs, with "stream error ... INTERNAL".
+    Short requests through the same gateway are reliable, so this asks
+    repeatedly for whatever is new instead of holding a stream open.
+    """
+
+    def __init__(self, env, job_id, outdir):
+        self.env = env
+        self.job_id = job_id
+        self.outdir = outdir
+        self.cursor = {}       # pod name -> last log timestamp seen
+        self.groups = {}       # group -> path on disk
+        self.last_group = None # whose output the log is currently under
+        os.makedirs(outdir, exist_ok=True)
+
+    def _path(self, group):
+        if group not in self.groups:
+            self.groups[group] = os.path.join(self.outdir, f"{group}.log")
+        return self.groups[group]
+
+    def _fetch(self, pod):
+        # The workload container only. --all-containers interleaves containers
+        # whose timestamps advance independently, and one cursor per pod cannot
+        # represent that: a chatty sidecar drags the cursor forward and the
+        # workload's lines are discarded as already seen. A pod with a GCS FUSE
+        # sidecar produced 81 lines of mounter chatter and none of the test.
+        #
+        # Sidecar output is not lost, just not streamed - it is still in
+        # `kubectl logs` for anyone debugging a mount, and it is noise in a
+        # test log either way.
+        cmd = ["kubectl", "-n", NAMESPACE, "logs", pod["name"],
+               "--container", WORKLOAD_CONTAINER, "--timestamps=true"]
+        since = self.cursor.get(pod["name"])
+        if since:
+            cmd += ["--since-time", since]
+        proc = subprocess.run(cmd, env=self.env, capture_output=True,
+                              text=True, check=False, timeout=120)
+        # A pod that is Pending, or already deleted, is normal - not an error.
+        return proc.stdout if proc.returncode == 0 else ""
+
+    def poll(self):
+        """Emit whatever is new. Returns the number of lines emitted."""
+        pods = worker_pods(self.env, self.job_id)
+        if not pods:
+            return 0
+        emitted = 0
+        for pod in sorted(pods, key=lambda p: p["group"]):
+            out = self._fetch(pod)
+            if not out:
+                continue
+            fresh = []
+            keeping = False
+            for line in out.splitlines():
+                stamp, _, text = line.partition(" ")
+                if not TIMESTAMP.match(stamp):
+                    # A continuation. kubectl stamps a log entry, but
+                    # splitlines() also breaks on the carriage returns inside
+                    # one, so a progress bar yields fragments with no timestamp
+                    # of their own. Treating a fragment as timestamped is how
+                    # the cursor ended up holding "safetensors:", after which
+                    # every real line compared lower and was dropped - a pod
+                    # going silent from its first progress bar onward.
+                    if keeping:
+                        fresh.append(line)
+                    continue
+                # --since-time is inclusive to the second, so the cursor has to
+                # drop what was already shown rather than trust the server.
+                keeping = self.cursor.get(pod["name"], "") < stamp
+                if not keeping:
+                    continue
+                self.cursor[pod["name"]] = stamp
+                fresh.append(text)
+            if not fresh:
+                continue
+            with open(self._path(pod["group"]), "a") as fh:
+                fh.write("\n".join(fresh) + "\n")
+            # Name the pod in a section header rather than on every line. One
+            # pod is the normal case, so that is one header instead of a
+            # 36-character prefix repeated thousands of times; a JobSet with
+            # several pods gets a new header each time the output switches.
+            if pod["group"] != self.last_group:
+                print(f"--- {pod['group']}", flush=True)
+                self.last_group = pod["group"]
+            for text in fresh:
+                print(text, flush=True)
+            emitted += len(fresh)
+        return emitted
+
+    def upload(self):
+        """Hand the per-Job logs to Buildkite as artifacts."""
+        if not self.groups:
+            return
+        agent = shutil.which("buildkite-agent")
+        if agent is None:
+            log("buildkite-agent not on PATH; per-job logs not uploaded")
+            return
+        proc = subprocess.run(
+            [agent, "artifact", "upload", "*.log"],
+            cwd=self.outdir, capture_output=True, text=True, check=False,
+        )
+        if proc.returncode == 0:
+            log(f"uploaded {len(self.groups)} per-job log artifact(s): "
+                + ", ".join(sorted(os.path.basename(p) for p in self.groups.values())))
+        else:
+            log(f"artifact upload failed: {proc.stderr.strip()[:200]}")
+
+
+def main():
+    # The launcher image has changed underneath this twice already; recording
+    # the interpreter makes the next change visible instead of inferred.
+    log(f"python {sys.version.split()[0]} at {sys.executable}")
+
+    parser = argparse.ArgumentParser(prog="launch")
+    parser.add_argument("--profile", required=True, help="TPU profile, e.g. v6e-8-2x4")
+    parser.add_argument(
+        "--env", action="append", default=[], metavar="NAME",
+        help="forward this environment variable from the step into the "
+             "workload container; repeatable. Names only - the value is read "
+             "here, so nothing secret has to appear in the pipeline.",
+    )
+    parser.add_argument(
+        "--manifest", required=True,
+        help="Job or JobSet to submit, relative to the checkout. Required: the "
+             "shape of a workload is the calling repo's business, and a default "
+             "here would be the launcher guessing at another repo's layout.",
+    )
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+
+    command = args.command
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise SystemExit("no command given; use: launch --profile P -- <command>")
+
+    registry = load_registry()
+    profile = load_profile(registry, args.profile)
+    image = resolve_image(registry)
+    name = workload_name()
+    labels = correlation_labels()
+    doc = render(args.manifest, profile, image, " ".join(command), name, labels, owner_reference())
+    forwarded = forward_env(doc, args.env)
+    if forwarded:
+        log(f"forwarding step env: {', '.join(forwarded)}")
+    validate(doc, profile, registry)
+    kind = SUPPORTED_KINDS[doc["kind"]]
+
+    deleted = False
+    collector = None
+
+    def cleanup(signum, _frame):
+        # agent-stack deletes the pod on Buildkite cancellation, so SIGTERM is
+        # how the launcher learns the build is gone. The ownerReference covers
+        # the cases that never deliver one.
+        nonlocal deleted
+        if not deleted:
+            deleted = True
+            log(f"signal {signum}, deleting {kind}/{name}")
+            if collector:
+                collector.poll()
+                collector.upload()
+            delete_workload(kind, name)
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, cleanup)
+    signal.signal(signal.SIGINT, cleanup)
+
+    log(f"submitting {doc['kind']} {name} (profile {args.profile}, manifest {args.manifest})")
+    subprocess.run(
+        ["kubectl", "-n", NAMESPACE, "apply", "-f", "-"],
+        input=json.dumps(doc), text=True, check=True,
+    )
+
+    uid = kubectl_json("get", kind, name)["metadata"]["uid"]
+    admission_limit = admission_timeout(registry, profile)
+    started = time.monotonic()
+    admitted = False
+    running = False
+    last_startup = None
+    last_note = None
+    genv = None
+    job_id = labels.get("buildkite.com/job-id")
+
+    while True:
+        obj = kubectl_json("get", kind, name)
+        if obj is None:
+            log(f"{kind}/{name} disappeared")
+            return 1
+
+        # Watch the Workload for the whole run, not just until admission.
+        # Preemption happens after admission, and reporting it only as pods
+        # disappearing leaves a step silent for minutes while it waits to be
+        # re-admitted - which reads as a hang and invites cancelling a run that
+        # was about to resume.
+        workload = find_workload(uid)
+        note = describe_admission(workload)
+        cluster = (workload or {}).get("status", {}).get("clusterName")
+
+        # Fetch gateway credentials on any poll where the cluster is known and
+        # we do not have them, not only on the first admission.
+        #
+        # Tying the single attempt to the first admission means anything that
+        # perturbs that one moment costs the whole run's logs: the workload
+        # completes normally and the launcher reports it as having no Connect
+        # Gateway access, which blames the wrong thing - it never retried.
+        #
+        # Four steps of thirteen in build 215, three of which passed. What
+        # perturbed it is not established. That build was the first after the
+        # Workload Identity and IAM changes were applied, which fits
+        # propagation lag; it is not preemption, since build 216 saw preemption
+        # and lost nothing. Retrying is worth it regardless of which - a
+        # one-shot fetch of a network credential has no reason to be one-shot.
+        if cluster and genv is None:
+            genv = worker_env(cluster, registry)
+            if genv:
+                collector = LogCollector(genv, job_id, LOG_DIR)
+        if cluster and not admitted:
+            admitted = True
+        if not admitted and time.monotonic() - started > admission_limit:
+            log(f"not admitted within {admission_limit}s - capacity, not the test")
+            delete_workload(kind, name)
+            return 1
+        if note != last_note:
+            log(note)
+            last_note = note
+
+        # Until the first pod is up, say where it is stuck. After that the pod's
+        # own output is the better signal and this goes quiet.
+        if admitted and genv and not running:
+            s = startup_note(genv, job_id)
+            if s is None:
+                running = True
+            elif s != last_startup:
+                log(s)
+                last_startup = s
+
+        if collector:
+            collector.poll()
+
+        # Under MultiKueue the local object is a shadow - the pods ran on a
+        # worker - so its own status may never be filled in. The Workload's
+        # Finished condition is authoritative, so take it as a fallback.
+        finished = condition(workload, "Finished")
+        wl_done = bool(finished and finished.get("status") == "True")
+        wl_failed = bool(wl_done and "Failed" in finished.get("reason", ""))
+        wl_succeeded = wl_done and not wl_failed
+
+        if doc["kind"] == "Job":
+            status = obj.get("status", {})
+            done = status.get("succeeded", 0) >= 1 or wl_succeeded
+            failed_cond = condition(obj, "Failed")
+            failed = ((failed_cond and failed_cond.get("status") == "True")
+                      or status.get("failed", 0) >= 1 or wl_failed)
+        else:
+            completed = condition(obj, "Completed")
+            done = bool(completed and completed.get("status") == "True") or wl_succeeded
+            failed_cond = condition(obj, "Failed")
+            failed = bool(failed_cond and failed_cond.get("status") == "True") or wl_failed
+
+        if done or failed:
+            if collector:
+                collector.poll()      # last sweep before the pods are removed
+                collector.upload()
+                if not collector.groups:
+                    log("no workload logs captured: the pods were removed "
+                        "before anything could be read from them.")
+            elif genv is None:
+                log("no workload logs captured: the workload never reported "
+                    "a cluster to fetch gateway credentials for, so none were "
+                    "requested. Not a Connect Gateway permission problem.")
+            # A process killed by the kernel prints no traceback, so an OOM
+            # and a test returning 1 look identical in the log. The pod knows.
+            if failed and genv:
+                for why in termination_reasons(genv, job_id):
+                    log(f"container terminated: {why}")
+
+            # Say what the Workload thought, while it still exists. Kueue
+            # garbage-collects it soon after the run, and once it is gone a
+            # preemption and a test returning 1 are indistinguishable from the
+            # step log - which is exactly how build 229's part2 ended up
+            # undiagnosable. termination_reasons() covers the pod that exited;
+            # this covers the pod that was taken away.
+            if failed:
+                for c in (workload or {}).get("status", {}).get("conditions", []):
+                    if c.get("status") != "True":
+                        continue
+                    detail = " ".join(x for x in (c.get("reason"),
+                                                  c.get("message")) if x)
+                    log(f"workload {c.get('type')}: {detail}"[:300])
+
+            if failed:
+                # Expand the last section. The pod's output is collapsed while
+                # things go well, which is what makes a green build readable -
+                # but on a failure it is the only thing anyone wants to see.
+                print("^^^ +++", flush=True)
+                log(f"{kind}/{name} failed")
+                return 1
+            log(f"{kind}/{name} completed")
+            return 0
+
+        time.sleep(POLL_SECONDS)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
