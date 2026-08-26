@@ -187,8 +187,15 @@ _FLEET_SUBPROCESS_HARNESS_KEYS = frozenset(
         "multiconnector-nixl-offloading-pd-accuracy-2-gpus",
         "multiconnector-nixl-offloading-pd-edge-cases-2-gpus",
         "nixlconnector-pd-edge-cases-2-gpus",
-        # Serve/script jobs with no pytest session: evidence is job-level
-        # (harness-subprocess context rows), per the 2026-08-26 directive.
+    }
+)
+# Serve/script jobs with no pytest session (2026-08-26 directive): enrolled
+# under the same pinned-digest canary path as the harness keys, but their
+# evidence is job-level (job::<key> rows) only. The graph consumer accepts
+# zero-invocation manifests ONLY for keys this set declares — a harness-pytest
+# job that silently lost its plugin must still fail closed.
+_FLEET_SERVE_JOB_LEVEL_KEYS = frozenset(
+    {
         "attention-benchmarks-smoke-test-b200",
         "deepseek-v2-lite-prefetch-offload-accuracy-h100",
         "deepseek-v2-lite-sync-eplb-accuracy-4xh100",
@@ -201,6 +208,7 @@ _FLEET_SUBPROCESS_HARNESS_KEYS = frozenset(
         "qwen3-30b-a3b-fp8-dp4-async-eplb-accuracy",
     }
 )
+_SUBPROCESS_COVERAGE_KEYS = _FLEET_SUBPROCESS_HARNESS_KEYS | _FLEET_SERVE_JOB_LEVEL_KEYS
 _NVIDIA_TRACE_DEVICES = {
     DeviceType.A100,
     DeviceType.B200,
@@ -354,8 +362,9 @@ def _is_traceable_pytest_step(step: Step) -> bool:
 def _trace_rejection(step: Step, allow_subprocess_harness: bool = False) -> Optional[str]:
     if not step.key:
         return "missing_step_key"
-    if step.key in _FLEET_SUBPROCESS_HARNESS_KEYS:
-        # Shell-harness jobs enroll only under a pinned-digest canary; on
+    if step.key in _SUBPROCESS_COVERAGE_KEYS:
+        # Shell-harness and serve/script jobs enroll only under a pinned-digest
+        # canary; on
         # main nightly (no digest) they stay honestly always-run rather
         # than enrolling as weak python-only traces or crashing the render.
         if allow_subprocess_harness:
@@ -404,7 +413,7 @@ def configure_test_tracing(
             timeout = max(timeout + 15, ceil(timeout * 1.5))
         mode = (
             "python-only"
-            if step_key in _FLEET_SUBPROCESS_HARNESS_KEYS
+            if step_key in _SUBPROCESS_COVERAGE_KEYS
             else (
                 "kernel-set"
                 if step.device in _NVIDIA_TRACE_DEVICES
@@ -419,7 +428,7 @@ def configure_test_tracing(
         step.trace_collector_sha256 = collector_sha256
         step.trace_represented_job_key = step_key
         step.trace_gpu = mode == "kernel-set"
-        step.trace_subprocess_coverage = step_key in _FLEET_SUBPROCESS_HARNESS_KEYS
+        step.trace_subprocess_coverage = step_key in _SUBPROCESS_COVERAGE_KEYS
         if step.trace_subprocess_coverage:
             if mode != "python-only":
                 raise ValueError(
@@ -436,6 +445,11 @@ def configure_test_tracing(
                 "expected_shards": step.parallelism or 1,
                 "key": step_key,
                 "mode": mode,
+                **(
+                    {"capture_class": "serve"}
+                    if step_key in _FLEET_SERVE_JOB_LEVEL_KEYS
+                    else {}
+                ),
             }
         )
 

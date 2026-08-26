@@ -370,6 +370,109 @@ def test_materializer_rejects_incomplete_pytest_node_exports(tmp_path: Path):
     assert metadata["unhealthy_reasons"] == {"unit-tests": "GraphError"}
 
 
+def _rewrite_manifest_and_trace(evidence: Path, key: str, **manifest_updates) -> None:
+    """Reshape an evidence job as a serve job: job::-only nodes, zero pytest
+    invocations, subprocess hook installed, trace rows carrying the job-level
+    test id."""
+    command_dir = evidence / key / "0/commands/000"
+    node_id = f"job::{key}"
+    trace = command_dir / "python-trace.jsonl"
+    _write(
+        trace,
+        [
+            {
+                "file": "vllm/model.py",
+                "job_key": key,
+                "line": 7,
+                "repository_sha": SHA,
+                "test_id": node_id,
+            }
+        ],
+    )
+    manifest_path = command_dir / "job.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        {
+            "node_ids": [node_id],
+            "pytest_invocations_exported": 0,
+            "pytest_invocations_started": 0,
+            "pytest_node_exports_complete": True,
+            "python_trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(),
+            "subprocess_hook": {"installed": True},
+        }
+    )
+    manifest.update(manifest_updates)
+    _write(manifest_path, manifest)
+
+
+def _inventory_with_serve(path: Path, *keys: str, serve: tuple = ()) -> Path:
+    inventory = _inventory(path, *keys)
+    document = json.loads(inventory.read_text(encoding="utf-8"))
+    for job in document["jobs"]:
+        if job["key"] in serve:
+            job["capture_class"] = "serve"
+    _write(inventory, document)
+    return inventory
+
+
+def test_materializer_accepts_declared_serve_job_level_evidence(tmp_path: Path):
+    evidence = tmp_path / "evidence"
+    _job(evidence, "serve-job")
+    _rewrite_manifest_and_trace(evidence, "serve-job")
+
+    metadata = build_fleet_graph(
+        evidence,
+        _inventory_with_serve(
+            tmp_path / "inventory.json", "serve-job", serve=("serve-job",)
+        ),
+        tmp_path / "graph.sqlite",
+    )
+
+    assert metadata["healthy_jobs"] == ["serve-job"]
+
+
+def test_materializer_rejects_undeclared_zero_invocation_manifest(tmp_path: Path):
+    """Same manifest shape, but the inventory does NOT declare the serve
+    class: a pytest-expected job that silently lost its plugin must still
+    fail closed."""
+    evidence = tmp_path / "evidence"
+    _job(evidence, "unit-tests")
+    _job(evidence, "healthy-control")
+    _rewrite_manifest_and_trace(evidence, "unit-tests")
+
+    metadata = build_fleet_graph(
+        evidence,
+        _inventory(tmp_path / "inventory.json", "unit-tests", "healthy-control"),
+        tmp_path / "graph.sqlite",
+    )
+
+    assert metadata["healthy_jobs"] == ["healthy-control"]
+    assert metadata["unhealthy_reasons"] == {"unit-tests": "GraphError"}
+
+
+def test_materializer_rejects_serve_class_without_hook(tmp_path: Path):
+    """Declared serve class but the subprocess hook never installed: the
+    manifest does not carry the declaration's runtime proof."""
+    evidence = tmp_path / "evidence"
+    _job(evidence, "serve-job")
+    _job(evidence, "healthy-control")
+    _rewrite_manifest_and_trace(evidence, "serve-job", subprocess_hook={"installed": False})
+
+    metadata = build_fleet_graph(
+        evidence,
+        _inventory_with_serve(
+            tmp_path / "inventory.json",
+            "serve-job",
+            "healthy-control",
+            serve=("serve-job",),
+        ),
+        tmp_path / "graph.sqlite",
+    )
+
+    assert metadata["healthy_jobs"] == ["healthy-control"]
+    assert metadata["unhealthy_reasons"] == {"serve-job": "GraphError"}
+
+
 def test_bad_checksum_fails_closed(tmp_path: Path):
     graph = _graph(tmp_path, "unit-tests")
     graph.write_bytes(graph.read_bytes() + b"corrupt")

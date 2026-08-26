@@ -129,6 +129,7 @@ def _insert_python(
     repository_sha: str,
     job_key: str,
     retry_count: int,
+    capture_class: str | None = None,
 ) -> None:
     manifest = _json(manifest_path)
     if manifest.get("repository_sha") != repository_sha:
@@ -139,13 +140,30 @@ def _insert_python(
         raise GraphError(f"{manifest_path} is not healthy evidence for {job_key}")
     started = manifest.get("pytest_invocations_started")
     exported = manifest.get("pytest_invocations_exported")
-    if (
+    node_ids = manifest.get("node_ids") or []
+    # Serve/script jobs run no pytest session by design: their evidence is the
+    # job-level job::<key> node. Zero invocations are accepted ONLY for the
+    # render-declared serve class — keyed on the inventory's capture_class,
+    # never on node shape alone, so a pytest-expected job that silently lost
+    # its plugin still fails closed.
+    serve_job_level = (
+        capture_class == "serve"
+        and bool(node_ids)
+        and all(str(node_id).startswith("job::") for node_id in node_ids)
+        and type(started) is int
+        and started == 0
+        and type(exported) is int
+        and exported == 0
+        and bool((manifest.get("subprocess_hook") or {}).get("installed"))
+    )
+    if not serve_job_level and (
         type(started) is not int
         or started < 1
         or type(exported) is not int
         or exported != started
-        or manifest.get("pytest_node_exports_complete") is not True
     ):
+        raise GraphError(f"{manifest_path} has incomplete pytest node exports")
+    if manifest.get("pytest_node_exports_complete") is not True:
         raise GraphError(f"{manifest_path} has incomplete pytest node exports")
     trace = manifest_path.parent / str(manifest.get("python_trace", ""))
     if not trace.is_file() or sha256_file(trace) != manifest.get("python_trace_sha256"):
@@ -420,6 +438,7 @@ def _materialize(
                                 repository_sha,
                                 key,
                                 document.get("retry_count", 0),
+                                policy.get("capture_class"),
                             )
                         if policy.get("mode") == "kernel-set" and not _insert_gpu(
                             connection, summary_path.parent, repository_sha, key
