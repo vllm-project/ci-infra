@@ -381,3 +381,76 @@ def test_publish_rejects_partial_image_baseline_pair(tmp_path: Path):
 
     with pytest.raises(GraphError, match="incomplete"):
         publish_snapshot(MemoryStore(), "test-selection/vllm", graph, manifest_path)
+
+
+# --- canary -> production promotion (the 85975 generation path) ---
+
+from test_selection.snapshot import promote_snapshot
+
+
+def test_promote_snapshot_appends_generation_and_readback_matches(tmp_path: Path):
+    repo, repository_sha = _repo(tmp_path)
+    graph = _graph(tmp_path / "graph.sqlite", repository_sha)
+    manifest_path = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest_path)
+    store = MemoryStore()
+    canary_prefix = "test-selection/vllm/canary/test-pilot"
+    publish_snapshot(store, canary_prefix, graph, manifest_path)
+
+    manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    graph_sha = hashlib.sha256(graph.read_bytes()).hexdigest()
+    result = promote_snapshot(
+        store, canary_prefix, repo, repository_sha, manifest_sha, graph_sha
+    )
+
+    assert result["snapshot"] == result["readback"]
+    assert result["source_prefix"] == canary_prefix
+    assert result["destination_prefix"] == "test-selection/vllm"
+    # Production holds the generation content-addressed; the canary source
+    # stays byte-present (promotion copies, never moves).
+    dest_key = (
+        f"test-selection/vllm/snapshots/{repository_sha}"
+        f"/m-{manifest_sha}/manifest.json"
+    )
+    assert dest_key in store.objects
+    assert result["snapshot"]["manifest_key"] == dest_key
+    assert f"{canary_prefix}/snapshots/{repository_sha}/manifest.json" in store.objects
+
+
+def test_promote_snapshot_rejects_non_canary_source(tmp_path: Path):
+    repo, repository_sha = _repo(tmp_path)
+    with pytest.raises(GraphError, match="isolated production canary"):
+        promote_snapshot(
+            MemoryStore(),
+            "test-selection/vllm",
+            repo,
+            repository_sha,
+            "a" * 64,
+            "b" * 64,
+        )
+
+
+def test_promote_snapshot_rejects_tampered_expected_sha(tmp_path: Path):
+    repo, repository_sha = _repo(tmp_path)
+    graph = _graph(tmp_path / "graph.sqlite", repository_sha)
+    manifest_path = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest_path)
+    store = MemoryStore()
+    canary_prefix = "test-selection/vllm/canary/test-pilot"
+    publish_snapshot(store, canary_prefix, graph, manifest_path)
+
+    with pytest.raises(GraphError, match="checksum mismatch"):
+        promote_snapshot(
+            store,
+            canary_prefix,
+            repo,
+            repository_sha,
+            "d" * 64,  # wrong manifest sha
+            hashlib.sha256(graph.read_bytes()).hexdigest(),
+        )
+    # Nothing reached production.
+    assert not any(
+        key.startswith("test-selection/vllm/snapshots/")
+        and "/canary/" not in key
+        for key in store.objects
+    )

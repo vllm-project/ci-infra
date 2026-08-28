@@ -21,6 +21,7 @@ from test_selection.snapshot import (
     Boto3ObjectStore,
     build_and_publish,
     fetch_snapshot,
+    promote_snapshot,
     publish_built_graph,
 )
 from test_selection.wait import wait_for_steps
@@ -84,6 +85,15 @@ def _parser() -> argparse.ArgumentParser:
     publish_graph.add_argument("--graph", type=Path, required=True)
     publish_graph.add_argument("--bucket", required=True)
     publish_graph.add_argument("--prefix", required=True)
+
+    promote = commands.add_parser("promote-snapshot")
+    promote.add_argument("--bucket", required=True)
+    promote.add_argument("--source-prefix", required=True)
+    promote.add_argument("--repo", type=Path, required=True)
+    promote.add_argument("--repository-sha", required=True)
+    promote.add_argument("--manifest-sha256", required=True)
+    promote.add_argument("--graph-sha256", required=True)
+    promote.add_argument("--max-snapshot-age-days", type=int, default=7)
 
     wait = commands.add_parser("wait-for-steps")
     wait.add_argument("--inventory", type=Path, required=True)
@@ -169,6 +179,18 @@ def main() -> int:
                     args.graph,
                     Boto3ObjectStore(args.bucket),
                     args.prefix,
+                )
+            )
+        elif args.command == "promote-snapshot":
+            _print(
+                promote_snapshot(
+                    Boto3ObjectStore(args.bucket),
+                    args.source_prefix,
+                    args.repo,
+                    args.repository_sha,
+                    args.manifest_sha256,
+                    args.graph_sha256,
+                    max_age_days=args.max_snapshot_age_days,
                 )
             )
         elif args.command == "wait-for-steps":

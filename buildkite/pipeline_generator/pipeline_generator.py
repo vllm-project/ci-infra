@@ -48,6 +48,17 @@ class PipelineGenerator:
     def generate(self):
         global_config = get_global_config()
 
+        if _snapshot_promotion_requested():
+            promotion_step = create_snapshot_promotion_group_step(global_config)
+            with open(self.output_file_path, "w") as output:
+                yaml.dump(
+                    {"steps": [promotion_step.dict(exclude_none=True)]},
+                    output,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+            return
+
         if _snapshot_republish_requested():
             republish_step = create_snapshot_republish_group_step(global_config)
             with open(self.output_file_path, "w") as output:
@@ -257,6 +268,12 @@ REPUBLISH_INVENTORY_ENV = "VLLM_CI_REPUBLISH_INVENTORY_B64"
 REPUBLISH_SOURCE_BUILD_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD"
 REPUBLISH_SOURCE_BUILD_ID_ENV = "VLLM_CI_REPUBLISH_SOURCE_BUILD_ID"
 REPUBLISH_TRIALS_ENV = "VLLM_CI_REPUBLISH_TRIALS_JSON"
+
+PROMOTE_SNAPSHOT_ENV = "VLLM_CI_PROMOTE_SNAPSHOT"
+PROMOTE_SOURCE_PREFIX_ENV = "VLLM_CI_PROMOTE_SOURCE_PREFIX"
+PROMOTE_REPOSITORY_SHA_ENV = "VLLM_CI_PROMOTE_REPOSITORY_SHA"
+PROMOTE_MANIFEST_SHA256_ENV = "VLLM_CI_PROMOTE_MANIFEST_SHA256"
+PROMOTE_GRAPH_SHA256_ENV = "VLLM_CI_PROMOTE_GRAPH_SHA256"
 
 # Full-fleet canary #84324 measured prohibitive Python-coverage overhead for
 # these exact jobs. Keep the evidence-based keys visible in the inventory but
@@ -712,6 +729,122 @@ def create_collector_group_step(
                 retry={"automatic": [{"exit_status": -1, "limit": 1}]},
                 soft_fail=True,
                 timeout_in_minutes=10,
+            )
+        ],
+    )
+
+
+def _snapshot_promotion_requested() -> bool:
+    return any(
+        os.getenv(name) is not None
+        for name in (
+            PROMOTE_SNAPSHOT_ENV,
+            PROMOTE_SOURCE_PREFIX_ENV,
+            PROMOTE_REPOSITORY_SHA_ENV,
+            PROMOTE_MANIFEST_SHA256_ENV,
+            PROMOTE_GRAPH_SHA256_ENV,
+        )
+    )
+
+
+def _snapshot_promotion_inputs(global_config: dict) -> dict:
+    if os.getenv(PROMOTE_SNAPSHOT_ENV) != "1":
+        raise ValueError(f"{PROMOTE_SNAPSHOT_ENV} must equal 1")
+    if _snapshot_republish_requested():
+        raise ValueError("snapshot promotion cannot combine with republish")
+    if not should_trace_nightly(global_config):
+        raise ValueError(
+            "snapshot promotion requires a trusted vLLM nightly or exact "
+            "mirror-branch canary"
+        )
+    source_prefix = os.getenv(PROMOTE_SOURCE_PREFIX_ENV)
+    repository_sha = os.getenv(PROMOTE_REPOSITORY_SHA_ENV)
+    manifest_sha256 = os.getenv(PROMOTE_MANIFEST_SHA256_ENV)
+    graph_sha256 = os.getenv(PROMOTE_GRAPH_SHA256_ENV)
+    if not all([source_prefix, repository_sha, manifest_sha256, graph_sha256]):
+        raise ValueError(
+            f"{PROMOTE_SOURCE_PREFIX_ENV}, {PROMOTE_REPOSITORY_SHA_ENV}, "
+            f"{PROMOTE_MANIFEST_SHA256_ENV}, and {PROMOTE_GRAPH_SHA256_ENV} "
+            "must all be set"
+        )
+    if not str(source_prefix).startswith("test-selection/vllm/canary/"):
+        raise ValueError("promotion source must be a production canary prefix")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(repository_sha)):
+        raise ValueError(f"{PROMOTE_REPOSITORY_SHA_ENV} must be a 40-char SHA")
+    for name, value in (
+        (PROMOTE_MANIFEST_SHA256_ENV, manifest_sha256),
+        (PROMOTE_GRAPH_SHA256_ENV, graph_sha256),
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value)):
+            raise ValueError(f"{name} must be a 64-char sha256")
+    if repository_sha != global_config["commit"]:
+        raise ValueError("promotion repository SHA must match the build commit")
+    return {
+        "source_prefix": source_prefix,
+        "repository_sha": repository_sha,
+        "manifest_sha256": manifest_sha256,
+        "graph_sha256": graph_sha256,
+    }
+
+
+def create_snapshot_promotion_group_step(global_config: dict) -> BuildkiteGroupStep:
+    """Render one fail-closed canary-to-production snapshot promotion."""
+
+    inputs = _snapshot_promotion_inputs(global_config)
+    revision = _ci_infra_revision()
+    bucket = shlex.quote(str(global_config["trace_s3_bucket"]))
+    repository_sha = inputs["repository_sha"]
+    canary_branch = global_config.get("trace_canary_branch")
+    canary_commit = global_config.get("trace_canary_commit")
+    if canary_branch:
+        canary_identity = f"{canary_branch}@{canary_commit}"
+        group = f":warning: SNAPSHOT PROMOTION CANARY {canary_identity}"
+        label = f":warning: Promote CANARY snapshot ({canary_identity})"
+        banner = "echo " + shlex.quote(
+            "+++ :warning: SNAPSHOT PROMOTION CANARY authorized for "
+            + canary_identity
+        )
+    else:
+        group = "Test selection snapshot promotion"
+        label = ":database: Promote test-selection snapshot"
+        banner = None
+    command = [
+        "set -euo pipefail",
+        *([banner] if banner else []),
+        f'test "$$BUILDKITE_COMMIT" = {shlex.quote(repository_sha)}',
+        'D="$$(mktemp -d)"',
+        "trap 'rm -rf \"$$D\"' EXIT",
+        'mkdir -p "$$D/results"',
+        'python3 -m venv "$$D/venv"',
+        (
+            '"$$D/venv/bin/pip" install --quiet '
+            '"git+https://github.com/vllm-project/ci-infra.git@'
+            f'{revision}#subdirectory=buildkite/pipeline_generator"'
+        ),
+        (
+            '"$$D/venv/bin/vllm-test-selection" promote-snapshot '
+            f"--bucket {bucket} "
+            f"--source-prefix {shlex.quote(inputs['source_prefix'])} "
+            f'--repo "$$PWD" --repository-sha {shlex.quote(repository_sha)} '
+            f"--manifest-sha256 {inputs['manifest_sha256']} "
+            f"--graph-sha256 {inputs['graph_sha256']} "
+            '> "$$D/results/promotion.json"'
+        ),
+        '"$$D/venv/bin/python" -m json.tool "$$D/results/promotion.json" >/dev/null',
+        'cat "$$D/results/promotion.json"',
+        f"printf '%s\n' {revision} > \"$$D/results/runner-revision.txt\"",
+        'buildkite-agent artifact upload "$$D/results/*"',
+    ]
+    return BuildkiteGroupStep(
+        group=group,
+        steps=[
+            BuildkiteCommandStep(
+                agents={"queue": AgentQueue.CPU_POSTMERGE_US_EAST_1.value},
+                commands=["\n".join(command)],
+                key="test-selection-snapshot-promotion",
+                label=label,
+                retry={"automatic": [{"exit_status": -1, "limit": 1}]},
+                timeout_in_minutes=60,
             )
         ],
     )
