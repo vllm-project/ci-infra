@@ -1,0 +1,38 @@
+# The demo workload. Submit to the MANAGER only - MultiKueue creates the copy
+# on whichever worker admits it, which is the whole point of the exercise.
+#
+#   kubectl --context=$MANAGER apply -f mkexec-demo-job.yaml
+#   ./mkexec.sh mkexec-demo -- sh -c 'cat /etc/hostname'
+#
+# The sleep is what makes it attachable: a job that exits immediately leaves no
+# Running pod to exec into. Thirty minutes is long enough to demonstrate and
+# short enough that a forgotten one clears itself.
+#
+# Note this is the same shape as a "claim a TPU and develop against it" job. On
+# a real TPU queue that pattern holds quota for as long as it runs, and the v6e
+# lanes in prod.auto.tfvars are sized nominal == max with no slack, so a claim
+# job takes chips directly from CI. Give such a job its own borrow-only queue
+# and an execution-time cap before pointing this pattern at v6e.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mkexec-demo
+  namespace: buildkite
+  labels:
+    kueue.x-k8s.io/queue-name: demo-cpu
+spec:
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: main
+        image: alpine:3.20
+        command: ["sh", "-c", "echo started on $(hostname); sleep 1800"]
+        resources:
+          requests:
+            cpu: "200m"
+            memory: 256Mi
