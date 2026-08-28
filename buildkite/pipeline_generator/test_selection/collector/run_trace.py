@@ -915,6 +915,31 @@ def main() -> int:
         failure_reason = subprocess_reason
     elif not healthy:
         failure_reason = "collector_unhealthy"
+    # Identity pair: both halves or neither. Under a pinned-digest canary the
+    # baseline half binds BY DIGEST (the bundled baseline is valid only for
+    # the pinned image, and the worktree shape is image-determined); the
+    # per-job shape verification stays subprocess-only. A pinned job whose
+    # bundle lacks the baseline fails closed, never ships a partial pair.
+    image_tag = os.environ.get("IMAGE_TAG")
+    image_digest = (
+        image_tag.rsplit("@", 1)[1]
+        if image_tag and "@sha256:" in image_tag
+        else None
+    )
+    baseline_sha256 = checkout_state.get("baseline_sha256")
+    baseline_binding = "verified" if baseline_sha256 else None
+    if image_digest and not baseline_sha256:
+        baseline_document, baseline_error = _load_worktree_baseline(
+            repository_sha, image_tag
+        )
+        if baseline_document is None:
+            healthy = False
+            # The identity failure is more diagnostic than the generic
+            # collector_unhealthy it would otherwise collapse into.
+            failure_reason = baseline_error
+        else:
+            baseline_sha256 = baseline_document.get("raw_sha256")
+            baseline_binding = "image-pinned"
     _atomic_json(
         job_file,
         {
@@ -929,15 +954,11 @@ def main() -> int:
             "command_executed": command_executed,
             "created_at": datetime.now(UTC).isoformat(),
             "failure_reason": failure_reason,
-            "image_digest": (
-                image_tag.rsplit("@", 1)[1]
-                if (image_tag := os.environ.get("IMAGE_TAG"))
-                and "@sha256:" in image_tag
-                else None
-            ),
-            "worktree_baseline_sha256": checkout_state.get("baseline_sha256"),
+            "image_digest": image_digest,
+            "worktree_baseline_sha256": baseline_sha256,
+            "baseline_binding": baseline_binding,
             "healthy": healthy,
-            "image_tag": os.environ.get("IMAGE_TAG"),
+            "image_tag": image_tag,
             "import_preflight_exit_code": preflight_status,
             "job_key": args.job_key,
             "node_ids": node_document["collected"],

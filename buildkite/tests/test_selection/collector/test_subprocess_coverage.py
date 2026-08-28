@@ -449,7 +449,8 @@ import subprocess as _subprocess
 from test_selection.collector import run_trace
 
 
-def _run_main(tmp_path: Path, command: str, monkeypatch) -> dict:
+def _run_main(tmp_path: Path, command: str, monkeypatch,
+              subprocess_mode: bool = True) -> dict:
     repo, sha = _make_repo(tmp_path)
     out = tmp_path / "outside" / "trace"
     monkeypatch.setenv("BUILDKITE_COMMIT", sha)
@@ -485,8 +486,9 @@ def _run_main(tmp_path: Path, command: str, monkeypatch) -> dict:
         "--command-cwd", str(repo),
         "--command-base64",
         _base64.b64encode(command.encode()).decode(),
-        "--subprocess-coverage",
     ]
+    if subprocess_mode:
+        argv.append("--subprocess-coverage")
     monkeypatch.setattr("sys.argv", argv)
     exit_code = run_trace.main()
     return json.loads((out / "job.json").read_text()), exit_code
@@ -520,6 +522,100 @@ def test_main_subprocess_complete_evidence_is_healthy(tmp_path, monkeypatch):
     assert job["checkout_state"]["ok"] is True
     rows = (out / "python-trace.jsonl").read_text().strip().splitlines()
     assert json.loads(rows[0])["test_id"] == "job::k"
+
+
+# --- identity pair: both halves or neither (the #85959 mixed-generation
+# --- refusal); pinned regular jobs bind the baseline by digest ---
+
+def test_main_regular_pinned_job_binds_baseline_by_digest(tmp_path, monkeypatch):
+    job, exit_code = _run_main(tmp_path, "true", monkeypatch,
+                               subprocess_mode=False)
+    assert exit_code == 0
+    assert job["image_digest"] == _DIGEST
+    assert job["worktree_baseline_sha256"] is not None
+    assert job["baseline_binding"] == "image-pinned"
+    # The failure, if any, is the no-pytest-session shape of "true" — never
+    # an identity/pairing reason.
+    assert not (job["failure_reason"] or "").startswith("worktree_baseline")
+
+
+def test_main_regular_pinned_job_fails_closed_when_baseline_missing(
+    tmp_path, monkeypatch
+):
+    job, _ = _run_main(tmp_path, "true", monkeypatch, subprocess_mode=False)
+    assert job["baseline_binding"] == "image-pinned"
+    # Now the loader finds no baseline: partial pairs must not ship.
+    (tmp_path / "second").mkdir()
+    repo, sha = _make_repo(tmp_path / "second")
+    out = tmp_path / "second-out"
+    monkeypatch.setenv("BUILDKITE_COMMIT", sha)
+    monkeypatch.setenv("BUILDKITE_BUILD_CHECKOUT_PATH", str(repo))
+    monkeypatch.setattr(
+        run_trace, "_load_worktree_baseline",
+        lambda repository_sha, ref: (None, "worktree_baseline_missing"),
+    )
+    argv = [
+        "run_trace",
+        "--output-dir", str(out),
+        "--job-key", "k",
+        "--represented-job-key", "k",
+        "--repo-root", str(repo),
+        "--command-cwd", str(repo),
+        "--command-base64",
+        _base64.b64encode(b"true").decode(),
+    ]
+    monkeypatch.setattr("sys.argv", argv)
+    run_trace.main()
+    job = json.loads((out / "job.json").read_text())
+    assert job["healthy"] is False
+    assert job["failure_reason"] == "worktree_baseline_missing"
+    assert job["image_digest"] == _DIGEST
+    assert job["worktree_baseline_sha256"] is None
+    assert job["baseline_binding"] is None
+
+
+def test_main_unpinned_job_records_no_identity(tmp_path, monkeypatch):
+    job, exit_code = _run_main(tmp_path, "true", monkeypatch,
+                               subprocess_mode=False)
+    assert exit_code == 0
+    assert job["image_digest"] is not None  # _run_main pins IMAGE_TAG
+    # Legacy shape: tag-form IMAGE_TAG -> no identity at all.
+    (tmp_path / "third").mkdir()
+    repo, sha = _make_repo(tmp_path / "third")
+    out = tmp_path / "third-out"
+    monkeypatch.setenv("BUILDKITE_COMMIT", sha)
+    monkeypatch.setenv("BUILDKITE_BUILD_CHECKOUT_PATH", str(repo))
+    monkeypatch.setenv("IMAGE_TAG", "registry/repo:some-tag")
+    argv = [
+        "run_trace",
+        "--output-dir", str(out),
+        "--job-key", "k",
+        "--represented-job-key", "k",
+        "--repo-root", str(repo),
+        "--command-cwd", str(repo),
+        "--command-base64",
+        _base64.b64encode(b"true").decode(),
+    ]
+    monkeypatch.setattr("sys.argv", argv)
+    run_trace.main()
+    job = json.loads((out / "job.json").read_text())
+    assert job["image_digest"] is None
+    assert job["worktree_baseline_sha256"] is None
+    assert job["baseline_binding"] is None
+
+
+def test_main_subprocess_binding_is_verified(tmp_path, monkeypatch):
+    out = tmp_path / "outside" / "trace"
+    out.mkdir(parents=True)
+    (out / "subprocess-hook.json").write_text(
+        json.dumps({"installed": True, "path": "/x"}) + "\n"
+    )
+    _write_marker(out, 4242, ["/opt/venv/bin/vllm", "serve", "m"])
+    _write_contexts(out / ".coverage", {"harness-subprocess": {1}})
+
+    job, _ = _run_main(tmp_path, "true", monkeypatch)
+    assert job["healthy"] is True, job["failure_reason"]
+    assert job["baseline_binding"] == "verified"
 
 
 # --- compact-writer identity propagation (run_job_trace assembly) ---

@@ -915,15 +915,17 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.plugins = [_get_step_plugin(step)]
 
             if step.trace_represented_job_key:
-                # Evidence records the exact image the traced job pulls.
-                # Only subprocess-coverage jobs carry the image/baseline
-                # provenance pair; a digest without its baseline is a
-                # partial pair and must not appear (the compact writer and
-                # the generation gate reject partial pairs).
-                if step.trace_subprocess_coverage:
-                    trace_env = dict(buildkite_step.env or {})
-                    trace_env["IMAGE_TAG"] = _step_image(step, pin_trace_digest=True)
-                    buildkite_step.env = trace_env
+                # Evidence records the exact image the traced job pulls. Under
+                # a pinned-digest canary EVERY traced step carries the pinned
+                # reference so its manifest can bind the complete
+                # (digest, baseline) pair — the collector records the bundled
+                # baseline's sha by digest for non-subprocess jobs (the shape
+                # check itself stays subprocess-only). A digest without its
+                # baseline is a partial pair and must not appear (the compact
+                # writer and the generation gate reject partial pairs).
+                trace_env = dict(buildkite_step.env or {})
+                trace_env["IMAGE_TAG"] = _step_image(step, pin_trace_digest=True)
+                buildkite_step.env = trace_env
 
             group_steps_list.append(buildkite_step)
 
