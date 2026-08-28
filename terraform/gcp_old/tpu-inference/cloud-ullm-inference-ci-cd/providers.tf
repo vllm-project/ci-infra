@@ -19,6 +19,13 @@ provider "google-beta" {
   alias   = "us-central1-f"
 }
 
+provider "google-beta" {
+  project = var.project_id
+  region  = "us-east5"
+  zone    = "us-east5-a"
+  alias   = "us-east5-a"
+}
+
 terraform {
   backend "gcs" {
     bucket = "tpu_commons_ci-infra_tf"
