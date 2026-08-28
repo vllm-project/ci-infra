@@ -454,3 +454,13 @@ def test_promote_snapshot_rejects_tampered_expected_sha(tmp_path: Path):
         and "/canary/" not in key
         for key in store.objects
     )
+
+
+def test_publish_snapshot_writes_nothing_to_stdout(tmp_path: Path, capsys):
+    # The promote step redirects the CLI's stdout into the receipt file;
+    # a progress print on stdout pollutes it (the #86038 receipt failure).
+    graph = _graph(tmp_path / "graph.sqlite")
+    manifest_path = tmp_path / "manifest.json"
+    build_snapshot_manifest(graph, manifest_path)
+    publish_snapshot(MemoryStore(), "test-selection/vllm", graph, manifest_path)
+    assert capsys.readouterr().out == ""

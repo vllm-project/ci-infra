@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -519,7 +520,8 @@ def publish_snapshot(
             len(published_index["snapshots"]),
             entry["manifest_key"],
             entry["manifest_sha256"],
-        )
+        ),
+        file=sys.stderr,
     )
     return entry
 
