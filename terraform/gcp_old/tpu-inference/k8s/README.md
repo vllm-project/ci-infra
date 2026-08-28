@@ -166,6 +166,102 @@ Expect LocalQueues matching the profile names, the JobSet CRD, and exactly one
 agent-stack pod - more than one means an older per-profile controller survived
 and will compete for jobs.
 
+### Attaching to a running workload
+
+MultiKueue decides which worker a job lands on, so the person who submitted it
+does not know where its pods are - and a worker's pods are invisible from the
+manager, since MultiKueue skips pod creation there. `scripts/mkexec.sh` closes
+that gap by asking the manager, which is the component that made the decision:
+
+```
+job name ──► Workload            (ownerReferences)
+         ──► worker cluster      (Workload .status.clusterName)
+         ──► ClusterProfile      (MultiKueueCluster .spec.clusterSource)
+         ──► Connect Gateway URL (ClusterProfile .status.accessProviders)
+```
+
+```bash
+scripts/mkexec.sh <job-name>                      # interactive shell
+scripts/mkexec.sh <job-name> -- cat /etc/hostname # one-shot command
+scripts/mkexec.sh <job-name> -i 2 -c main         # third pod of a JobSet
+```
+
+The caller names a job and the manager context; the worker is never typed. It
+is an ordinary CLI, so a workstation or a plain VM with `gcloud` configured
+works the same way - nothing about it needs to run inside a cluster. A
+throwaway kubeconfig is synthesized per invocation and the caller's own
+credentials are used, so no shared worker kubeconfig is distributed and the
+user's real kubeconfig is left untouched.
+
+`scripts/mkexec-demo-queues.yaml` and `scripts/mkexec-demo-job.yaml` exercise
+the whole path on a CPU-only queue that rides the same MultiKueue admission
+check, so the resolver can be demonstrated without spending TPU.
+
+#### Access required
+
+**The terraform in this directory does not provision human access to the
+workers.** It grants Connect Gateway only to the Kueue controller
+(`gatewayEditor`) and the launcher (`gatewayReader`). An operator needs both of
+the following before `mkexec.sh` can reach a pod, or it stops at a 403:
+
+1. **GCP IAM.** `exec` is a `create` on `pods/exec`, a write verb, so
+   `gatewayReader` is not sufficient:
+
+   | role | project |
+   |---|---|
+   | `roles/gkehub.gatewayEditor` | each worker project |
+   | `roles/gkehub.viewer` | the manager project, to resolve Fleet memberships |
+
+2. **Kubernetes RBAC on each worker.** Over Connect Gateway the subject is the
+   caller's identity, not a ServiceAccount, so bind a group rather than
+   maintaining a list of emails:
+
+   ```yaml
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: ClusterRole
+   metadata:
+     name: tpu-workload-debugger
+   rules:
+     - apiGroups: [""]
+       resources: ["pods", "pods/log"]
+       verbs: ["get", "list", "watch"]
+     - apiGroups: [""]
+       resources: ["pods/exec"]
+       verbs: ["create"]
+   ---
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: ClusterRoleBinding
+   metadata:
+     name: tpu-workload-debugger
+   roleRef:
+     apiGroup: rbac.authorization.k8s.io
+     kind: ClusterRole
+     name: tpu-workload-debugger
+   subjects:
+     - kind: Group
+       name: tpu-ci-debuggers@your-domain.example
+       apiGroup: rbac.authorization.k8s.io
+   ```
+
+   This is deliberately not generated into `generated/`: who may exec into a
+   shared CI cluster is an access-control decision, not a topology one, and it
+   should not follow the same "regenerate and apply" path as the queues.
+
+On the manager the caller additionally needs read on `workloads`,
+`multikueueclusters` and `clusterprofiles` - the four lookups above.
+
+#### Holding a TPU for development
+
+A long-running job is a workable way to claim a chip and develop against it,
+but note that the v6e lanes in `prod.auto.tfvars` are sized `nominal == max`
+and sum to the whole 18-chip reservation. There is no slack, so a claim job on
+those queues takes chips straight out of CI. Before pointing this at v6e, give
+it a ClusterQueue in the same cohort with `nominalQuota: 0` - it can then only
+borrow what is idle, and `reclaimWithinCohort: Any` hands the chips back when
+CI needs them - and set `maximumExecutionTimeSeconds` so a session forgotten on
+a Friday releases itself. Preemption kills the pod and therefore the shell;
+that is the tradeoff for not reserving capacity.
+
 ---
 
 ## 4. Best Practices & Troubleshooting

@@ -1,0 +1,61 @@
+# A CPU-only queue for exercising the mkexec.sh resolver path, with no TPU
+# required. It rides the SAME MultiKueue admission check as the v6e queues, so
+# a job submitted to the manager is dispatched to a worker exactly as a real
+# TPU job would be - which is the part being demonstrated.
+#
+# Applies to both clusters, with one difference: workers run plain Kueue and
+# must not carry the admission check, or the mirrored workload would try to
+# dispatch onward from the worker.
+#
+#   MANAGER=gke_cloud-ullm-inference-ci-cd_us-central1_tpu-ci-manager
+#   WORKER=connectgateway_cloud-ullm-inference-ci-cd_global_tpu-ci-southamerica-west1-a
+#
+#   kubectl --context=$MANAGER apply -f mkexec-demo-queues.yaml
+#   sed '/admissionChecksStrategy:/,+2d' mkexec-demo-queues.yaml \
+#     | kubectl --context=$WORKER apply -f -
+#
+# Then submit the job (manager only) and attach - see mkexec-demo-job.yaml.
+#
+# Teardown, after deleting the job on the manager so MultiKueue garbage-collects
+# the worker copy:
+#
+#   kubectl --context=$MANAGER delete -f mkexec-demo-queues.yaml
+#   sed '/admissionChecksStrategy:/,+2d' mkexec-demo-queues.yaml \
+#     | kubectl --context=$WORKER delete -f -
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: demo-cpu
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: demo-cpu
+spec:
+  # Manager only. The sed above strips these three lines for the worker copy.
+  admissionChecksStrategy:
+    admissionChecks:
+    - name: v6e-multikueue-dispatch
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+  - coveredResources: ["cpu", "memory"]
+    flavors:
+    - name: demo-cpu
+      resources:
+      - name: cpu
+        nominalQuota: "4"
+      - name: memory
+        nominalQuota: 8Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: demo-cpu
+  namespace: buildkite
+spec:
+  clusterQueue: demo-cpu
+  stopPolicy: None
