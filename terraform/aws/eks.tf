@@ -27,9 +27,9 @@ locals {
 
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  # Pinned to the last version compatible with the locked aws provider (5.56.1);
-  # 20.17+ requires aws >= 5.61. Bump provider and module together, deliberately.
-  version = "20.16.0"
+  # AL2023_x86_64_NVIDIA support (nodeadm user-data) requires module >= 20.23;
+  # 20.37.2 is the last 20.x and needs aws provider >= 5.95 (lock is at 5.100.0).
+  version = "20.37.2"
 
   cluster_name    = local.eks_cluster_name
   cluster_version = "1.32"
