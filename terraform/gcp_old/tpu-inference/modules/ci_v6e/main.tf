@@ -8,9 +8,13 @@ data "google_client_config" "config" {
 locals {
   # The one place this name is spelled out. The TPU VM, its label, its disk, and
   # the Buildkite agent inside it all derive from here, so an agent in the
-  # Buildkite UI always maps onto a `gcloud compute tpus` entry.
+  # Buildkite UI always maps onto a `gcloud compute tpus` entry. An empty
+  # purpose reproduces the original name, so adding this knob does not rename
+  # -- and so does not recreate -- an existing fleet.
   node_names = [for i in range(var.instance_count) :
-    "${var.accelerator_type}-ci-${i}-${var.project_short_name}-${data.google_client_config.config.zone}"
+    var.purpose == "" ?
+    "${var.accelerator_type}-ci-${i}-${var.project_short_name}-${data.google_client_config.config.zone}" :
+    "${var.accelerator_type}-ci-${var.purpose}-${i}-${var.project_short_name}-${data.google_client_config.config.zone}"
   ]
 }
 
