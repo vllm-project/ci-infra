@@ -179,6 +179,19 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         agents:
           queue: amd-cpu
 
+      {# Native pods pull ci_base-build-$BUILDKITE_BUILD_ID. Fail before those
+         jobs schedule if that tag is not on Docker Hub. DinD jobs do not wait. #}
+      - label: "AMD: :docker: verify native ci_base"
+        depends_on: "ensure-ci-base-amd"
+        soft_fail: false
+        commands:
+          - docker manifest inspect "{{ amd_native_base_image() | safe }}"
+        key: "verify-native-ci-base-amd"
+        timeout_in_minutes: 10
+{{ amd_infra_retry('        ', true) }}
+        agents:
+          queue: amd-cpu
+
     {% for step in steps %}
     {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
 
@@ -212,14 +225,19 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         {% set ns.blocked = 0 %}
       {% endif %}
 
-      {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+      {% set step_gated = (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+      {% if step_gated %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
         depends_on: image-build-amd
         key: block-{{ step_slug }}
       {% endif %}
 
       - label: "{{ step.agent_pool }}: {{ step.label }}"
-      {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+        {% if step.dind == false %}
+        depends_on:
+          - {{ "block-" ~ step_slug if step_gated else "image-build-amd" }}
+          - verify-native-ci-base-amd
+        {% elif step_gated %}
         depends_on: block-{{ step_slug }}
         {% else %}
         depends_on: image-build-amd
