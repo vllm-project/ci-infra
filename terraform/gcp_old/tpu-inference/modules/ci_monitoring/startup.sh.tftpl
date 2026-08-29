@@ -1,0 +1,64 @@
+#!/bin/bash
+set -euo pipefail
+
+# Step 1: Stop any exporter already running, so the binary is not busy when we
+# replace it. This runs on every boot, not just the first.
+for unit in /etc/systemd/system/bk-metrics*.service; do
+  [ -e "$unit" ] || continue
+  systemctl stop "$(basename "$unit")" || true
+done
+
+# Retire the single-org unit from before per-org exporters
+if [ -f /etc/systemd/system/bk-metrics.service ]; then
+  systemctl disable bk-metrics.service || true
+  rm -f /etc/systemd/system/bk-metrics.service
+fi
+
+# Step 2: Download the official buildkite-agent-metrics binary. Stage it and
+# rename into place: writing the destination directly fails with ETXTBSY if
+# anything still holds the old binary open.
+wget -q https://github.com/buildkite/buildkite-agent-metrics/releases/download/v5.5.0/buildkite-agent-metrics-linux-amd64 -O /tmp/buildkite-agent-metrics
+chmod +x /tmp/buildkite-agent-metrics
+mv -f /tmp/buildkite-agent-metrics /usr/local/bin/buildkite-agent-metrics
+
+install -d -m 0700 /etc/bk-metrics
+umask 077
+
+# Step 3: One exporter per Buildkite org. The token selects the org, and
+# buildkite-agent-metrics namespaces its Stackdriver metrics under the org slug,
+# so the two never collide. The token reaches systemd via EnvironmentFile so it
+# stays out of both instance metadata and the unit file.
+%{ for org, secret in token_secret_ids ~}
+# --secret takes a bare name and resolves it against --project; handing it a
+# full resource path yields a 404. Assert the result too, since a failure
+# inside a command substitution would otherwise slip past set -e.
+BK_TOKEN="$(gcloud secrets versions access latest --project='${split("/", secret)[1]}' --secret='${split("/", secret)[3]}')"
+[ -n "$BK_TOKEN" ] || { echo "empty token for org ${org}" >&2; exit 1; }
+printf 'BK_TOKEN=%s\n' "$BK_TOKEN" > /etc/bk-metrics/${org}.env
+
+cat << 'SERVICE_EOF' > /etc/systemd/system/bk-metrics-${org}.service
+[Unit]
+Description=Buildkite Agent Metrics Exporter (${org})
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/bk-metrics/${org}.env
+ExecStart=/usr/local/bin/buildkite-agent-metrics \
+  -backend stackdriver \
+  -stackdriver-projectid ${project_id} \
+  -token $${BK_TOKEN} \
+  -interval 15s
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+%{ endfor ~}
+
+# Step 4: Enable and start the per-org services
+systemctl daemon-reload
+%{ for org, secret in token_secret_ids ~}
+systemctl enable --now bk-metrics-${org}
+%{ endfor ~}
