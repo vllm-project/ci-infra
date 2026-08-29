@@ -37,6 +37,23 @@ module "eks" {
   cluster_endpoint_public_access           = true
   enable_cluster_creator_admin_permissions = true
 
+  # Console/kubectl access for humans. The cluster creator (the vllm-ci IAM user
+  # running terraform) is admin via the flag above; everyone else needs an
+  # explicit access entry or the EKS console shows "Unauthorized" on the
+  # Nodes/Resources tabs. Add SSO/federated role ARNs in terraform.tfvars, e.g.
+  #   eks_admin_principal_arns = ["arn:aws:iam::936637512419:role/aws-reserved/sso.amazonaws.com/..."]
+  access_entries = {
+    for i, arn in var.eks_admin_principal_arns : "admin_${i}" => {
+      principal_arn = arn
+      policy_associations = {
+        admin = {
+          policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
+      }
+    }
+  }
+
   # The CI VPC has public subnets only (same ones the ASGs and FSx ENIs use).
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.public_subnets
