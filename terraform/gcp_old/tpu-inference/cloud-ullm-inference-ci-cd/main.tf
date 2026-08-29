@@ -228,8 +228,8 @@ module "ci_monitoring" {
     google-beta = google-beta.us-central1-b
   }
 
-  project_id              = var.project_id
-  bq_puller_pipeline_slug = "tpu-inference-ci"
+  project_id               = var.project_id
+  bq_puller_pipeline_slugs = ["tpu-inference-ci", "vllm-torchtpu-ci"]
 
   # Both orgs are exported while the migration is in flight. Drop the
   # tpu-commons entry once its agents are gone.

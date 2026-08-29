@@ -183,13 +183,14 @@ resource "google_cloudfunctions2_function" "webhook_receiver" {
   service_config {
     max_instance_count = 3
     available_memory   = "256M"
-    # One Buildkite round trip per org, done sequentially.
-    timeout_seconds       = 120
+    # One Buildkite round trip per org/pipeline pair, done sequentially, each
+    # capped at 30s client-side. Stays under the scheduler's 320s deadline.
+    timeout_seconds       = 240
     service_account_email = google_service_account.function_sa.email
 
     environment_variables = {
-      BQ_TABLE_ID   = "${var.project_id}.${google_bigquery_dataset.ci_analytics.dataset_id}.${google_bigquery_table.step_logs.table_id}"
-      PIPELINE_SLUG = var.bq_puller_pipeline_slug
+      BQ_TABLE_ID    = "${var.project_id}.${google_bigquery_dataset.ci_analytics.dataset_id}.${google_bigquery_table.step_logs.table_id}"
+      PIPELINE_SLUGS = jsonencode(var.bq_puller_pipeline_slugs)
 
       # Which orgs to poll, and the env var holding each one's token.
       ORGS_JSON = jsonencode([

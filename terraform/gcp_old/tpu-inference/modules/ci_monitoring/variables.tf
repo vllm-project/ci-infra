@@ -8,9 +8,9 @@ variable "buildkite_token_secret_ids" {
   description = "Buildkite org slug => Secret Manager resource name of that org's Agent Registration Token (projects/.../secrets/...). One metrics exporter runs per entry."
 }
 
-variable "bq_puller_pipeline_slug" {
-  type        = string
-  description = "Buildkite pipeline slug the BigQuery puller reads. The same slug is used in every org in bq_puller_orgs."
+variable "bq_puller_pipeline_slugs" {
+  type        = list(string)
+  description = "Buildkite pipeline slugs the BigQuery puller reads. Every slug is polled in every org in bq_puller_orgs; a slug missing from an org is reported and skipped rather than failing the run."
 }
 
 variable "bq_puller_orgs" {

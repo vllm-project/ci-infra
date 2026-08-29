@@ -10,7 +10,10 @@ from google.cloud import bigquery
 # Global clients
 client = bigquery.Client()
 TABLE_ID = os.environ.get("BQ_TABLE_ID")
-PIPELINE_SLUG = os.environ.get("PIPELINE_SLUG")
+
+# Every pipeline is polled in every org. A pipeline that does not exist in a
+# given org just 404s and is skipped.
+PIPELINE_SLUGS = json.loads(os.environ.get("PIPELINE_SLUGS", "[]"))
 
 # One entry per Buildkite org to poll: {"org": ..., "token_env": ...}. A
 # Buildkite API token is scoped to a single org, so each org names the env var
@@ -20,14 +23,15 @@ ORGS = json.loads(os.environ.get("ORGS_JSON", "[]"))
 @functions_framework.http
 def handle_webhook(request):
     """
-    Triggered by Cloud Scheduler to poll a SPECIFIC Buildkite pipeline in every
-    configured org.
+    Triggered by Cloud Scheduler to poll every configured Buildkite pipeline in
+    every configured org.
     """
     # Define time window: look back 15 mins to ensure no gaps with 10-min cron
     now = datetime.datetime.now(datetime.timezone.utc)
     finished_from = (now - datetime.timedelta(minutes=15)).isoformat()
 
-    rows_to_insert = []
+    # (row_id, row) pairs; the id is what BigQuery dedups on.
+    pairs = []
     failures = []
 
     for entry in ORGS:
@@ -36,36 +40,37 @@ def handle_webhook(request):
         if not token:
             failures.append(f"{org}: {entry['token_env']} is unset")
             continue
-        try:
-            rows_to_insert.extend(fetch_org_rows(org, token, finished_from))
-        except requests.RequestException as e:
-            # Keep going: one org being down should not stop the others from
-            # landing, and the 15-min lookback re-covers this window next run.
-            failures.append(f"{org}: {e}")
+
+        for pipeline in PIPELINE_SLUGS:
+            try:
+                pairs.extend(fetch_rows(org, token, pipeline, finished_from))
+            except requests.RequestException as e:
+                # Keep going: one org or pipeline being unreachable should not
+                # stop the others from landing, and the 15-min lookback
+                # re-covers this window on the next run.
+                failures.append(f"{org}/{pipeline}: {e}")
+
+    rows_to_insert = [row for _, row in pairs]
 
     if rows_to_insert:
-        # Generate Deterministic Row IDs for Idempotency
-        # Format: {build_uuid}_{step_name_hash}. build_id is a UUID, so it is
-        # already unique across orgs.
-        row_ids = [f"{row['build_id']}_{row['step_name']}" for row in rows_to_insert]
-
         # Stream to BigQuery with deduplication
+        row_ids = [row_id for row_id, _ in pairs]
         errors = client.insert_rows_json(TABLE_ID, rows_to_insert, row_ids=row_ids)
         if errors:
             print(f"BigQuery Errors: {errors}")
             return "Partial Success", 500
 
     if failures:
-        print(f"Failed orgs: {'; '.join(failures)}")
-        return f"Processed {len(rows_to_insert)} items, {len(failures)} org(s) failed", 500
+        print(f"Failed: {'; '.join(failures)}")
+        return f"Processed {len(rows_to_insert)} items, {len(failures)} target(s) failed", 500
 
-    return f"Processed {len(rows_to_insert)} items for pipeline {PIPELINE_SLUG}", 200
+    targets = len(ORGS) * len(PIPELINE_SLUGS)
+    return f"Processed {len(rows_to_insert)} items across {targets} org/pipeline pair(s)", 200
 
-def fetch_org_rows(org, token, finished_from):
+def fetch_rows(org, token, pipeline, finished_from):
     headers = {"Authorization": f"Bearer {token}"}
 
-    # Filtered by single pipeline
-    url = f"https://api.buildkite.com/v2/organizations/{org}/pipelines/{PIPELINE_SLUG}/builds"
+    url = f"https://api.buildkite.com/v2/organizations/{org}/pipelines/{pipeline}/builds"
     params = {
         "finished_from": finished_from,
         "state": "finished"
@@ -74,15 +79,25 @@ def fetch_org_rows(org, token, finished_from):
     response = requests.get(url, headers=headers, params=params, timeout=30)
     response.raise_for_status()
 
+    # Deterministic row IDs for idempotency, since the 15-min lookback re-sends
+    # builds the previous run already inserted. Keyed on the job UUID, not the
+    # step name: a step with parallelism emits several jobs sharing one name,
+    # and a name-keyed ID makes BigQuery dedup all but one of them away.
     rows = []
     for build in response.json():
         # 1. Capture E2E Summary
-        rows.append(construct_bq_row(org, build, "E2E_SUMMARY", build))
+        rows.append((
+            f"{build['id']}_E2E_SUMMARY",
+            construct_bq_row(org, build, "E2E_SUMMARY", build),
+        ))
 
         # 2. Capture Individual Steps
         for job in build.get("jobs", []):
             if job.get("type") == "script" and job.get("finished_at"):
-                rows.append(construct_bq_row(org, build, job.get("name"), job))
+                rows.append((
+                    f"{build['id']}_{job['id']}",
+                    construct_bq_row(org, build, job.get("name"), job),
+                ))
 
     return rows
 
