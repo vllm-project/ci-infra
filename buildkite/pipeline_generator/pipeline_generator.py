@@ -5,6 +5,7 @@ from typing import FrozenSet, List, Optional, Tuple
 import yaml
 
 from buildkite_step import (
+    _generate_step_key,
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
     create_precommit_group_step,
@@ -93,8 +94,11 @@ def select_steps_and_dependencies(
 
     steps_by_key = {}
     for step in steps:
+        # Steps without an explicit key are uploaded with a label-derived key
+        # (see convert_group_step_to_buildkite_step), so retry builds reference
+        # them by that generated key.
         if not step.key:
-            continue
+            step.key = _generate_step_key(step.label)
         if step.key in steps_by_key:
             raise ValueError(f"Duplicate CI step key: {step.key}")
         steps_by_key[step.key] = step
