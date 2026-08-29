@@ -11,7 +11,7 @@
 # cannot select among the four per-AZ filesystems by node AZ.
 
 locals {
-  eks_cluster_name = "gpu-ci-eks"
+  eks_cluster_name = "l4-ci"
 
   # From the Phase 0 audit (aws fsx describe-file-systems, us-west-2).
   # us-west-2a is the odd one out: 500 MB/s/TiB (others 1000) and missing the
