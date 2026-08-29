@@ -21,8 +21,8 @@ resource "google_project_iam_member" "metrics_sa_roles" {
   member  = "serviceAccount:${google_service_account.metrics_sa.email}"
 }
 
-# Read access to each org's agent token. The tokens live in a different project
-# from the VM, so the grant is made against the secret's own project.
+# The agent tokens live in a different project from the VM, so each grant is
+# made against the secret's own project.
 resource "google_secret_manager_secret_iam_member" "metrics_token_access" {
   for_each = var.buildkite_token_secret_ids
 
@@ -38,8 +38,8 @@ resource "google_compute_instance" "monitoring_instance" {
   name         = "vllm-ci-monitoring-cpu-0"
   machine_type = "e2-micro"
 
-  # Changing the service account, and re-running the startup script for a new
-  # set of exporters, both require a stop/start.
+  # Startup-script metadata is only re-read on boot, so exporter changes need
+  # a stop/start to take effect.
   allow_stopping_for_update = true
 
   service_account {
@@ -183,8 +183,8 @@ resource "google_cloudfunctions2_function" "webhook_receiver" {
   service_config {
     max_instance_count = 3
     available_memory   = "256M"
-    # One Buildkite round trip per org/pipeline pair, done sequentially, each
-    # capped at 30s client-side. Stays under the scheduler's 320s deadline.
+    # One request per org/pipeline pair, sequential, 30s each. Under the
+    # scheduler's 320s deadline.
     timeout_seconds       = 240
     service_account_email = google_service_account.function_sa.email
 
