@@ -4,15 +4,53 @@
 # buildkite-agent-metrics binary to export queue/agent metrics.
 # =====================================================================
 # Provision the e2-micro compute instance for monitoring
+resource "google_service_account" "metrics_sa" {
+  account_id   = "ci-metrics-exporter-sa"
+  project      = var.project_id
+  display_name = "SA for the Buildkite agent-metrics exporter VM"
+}
+
+resource "google_project_iam_member" "metrics_sa_roles" {
+  for_each = toset([
+    "roles/monitoring.metricWriter",
+    "roles/logging.logWriter",
+  ])
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.metrics_sa.email}"
+}
+
+# Read access to each org's agent token. The tokens live in a different project
+# from the VM, so the grant is made against the secret's own project.
+resource "google_secret_manager_secret_iam_member" "metrics_token_access" {
+  for_each = var.buildkite_token_secret_ids
+
+  project   = split("/", each.value)[1]
+  secret_id = split("/", each.value)[3]
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.metrics_sa.email}"
+}
+
 resource "google_compute_instance" "monitoring_instance" {
   provider     = google-beta
   project      = var.project_id
   name         = "vllm-ci-monitoring-cpu-0"
   machine_type = "e2-micro"
 
+  # Changing the service account, and re-running the startup script for a new
+  # set of exporters, both require a stop/start.
+  allow_stopping_for_update = true
+
   service_account {
+    email  = google_service_account.metrics_sa.email
     scopes = ["cloud-platform"]
   }
+
+  depends_on = [
+    google_secret_manager_secret_iam_member.metrics_token_access,
+    google_project_iam_member.metrics_sa_roles,
+  ]
 
   boot_disk {
     auto_delete = true
@@ -29,41 +67,11 @@ resource "google_compute_instance" "monitoring_instance" {
   }
 
   metadata = {
-    enable-oslogin   = "true"
-    "startup-script" = <<-EOF
-      #!/bin/bash
-      
-      # Step 1: Download the official buildkite-agent-metrics binary
-      wget -q https://github.com/buildkite/buildkite-agent-metrics/releases/download/v5.5.0/buildkite-agent-metrics-linux-amd64 -O /usr/local/bin/buildkite-agent-metrics
-      chmod +x /usr/local/bin/buildkite-agent-metrics
-
-      BK_TOKEN=$(gcloud secrets versions access latest --secret="${var.buildkite_token_secret_id}")
-
-      # Step 2: Configure Systemd background service
-      cat << 'SERVICE_EOF' > /etc/systemd/system/bk-metrics.service
-      [Unit]
-      Description=Buildkite Agent Metrics Exporter
-      After=network.target
-
-      [Service]
-      Type=simple
-      ExecStart=/usr/local/bin/buildkite-agent-metrics \
-        -backend stackdriver \
-        -stackdriver-projectid ${var.project_id} \
-        -token $${BK_TOKEN} \
-        -interval 15s
-      Restart=always
-      RestartSec=10
-
-      [Install]
-      WantedBy=multi-user.target
-      SERVICE_EOF
-
-      # Step 3: Enable and start the systemd service
-      systemctl daemon-reload
-      systemctl enable bk-metrics
-      systemctl start bk-metrics
-    EOF
+    enable-oslogin = "true"
+    "startup-script" = templatefile("${path.module}/startup.sh.tftpl", {
+      project_id       = var.project_id
+      token_secret_ids = var.buildkite_token_secret_ids
+    })
   }
 }
 

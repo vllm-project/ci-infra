@@ -228,10 +228,16 @@ module "ci_monitoring" {
     google-beta = google-beta.us-central1-b
   }
 
-  project_id                = var.project_id
-  pipeline_slug             = "tpu-inference-ci"
-  org_slug                  = "tpu-commons"
-  buildkite_token_secret_id = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret
+  project_id    = var.project_id
+  pipeline_slug = "tpu-inference-ci"
+  org_slug      = "tpu-commons"
+
+  # Both orgs are exported while the migration is in flight. Drop the
+  # tpu-commons entry once its agents are gone.
+  buildkite_token_secret_ids = {
+    "tpu-commons" = "projects/${var.secret_project_id}/secrets/tpu_commons_buildkite_agent_token"
+    "vllm"        = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
+  }
 }
 
 module "ci_cache_storage" {
