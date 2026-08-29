@@ -11,13 +11,11 @@ from google.cloud import bigquery
 client = bigquery.Client()
 TABLE_ID = os.environ.get("BQ_TABLE_ID")
 
-# Every pipeline is polled in every org. A pipeline that does not exist in a
-# given org just 404s and is skipped.
+# Every pipeline is polled in every org; a pipeline absent from an org 404s.
 PIPELINE_SLUGS = json.loads(os.environ.get("PIPELINE_SLUGS", "[]"))
 
-# One entry per Buildkite org to poll: {"org": ..., "token_env": ...}. A
-# Buildkite API token is scoped to a single org, so each org names the env var
-# holding its own token, injected from Secret Manager by Terraform.
+# [{"org": ..., "token_env": ...}]. A Buildkite token is scoped to one org, so
+# each names the env var holding its own, injected by Terraform.
 ORGS = json.loads(os.environ.get("ORGS_JSON", "[]"))
 
 @functions_framework.http
@@ -45,9 +43,8 @@ def handle_webhook(request):
             try:
                 pairs.extend(fetch_rows(org, token, pipeline, finished_from))
             except requests.RequestException as e:
-                # Keep going: one org or pipeline being unreachable should not
-                # stop the others from landing, and the 15-min lookback
-                # re-covers this window on the next run.
+                # Keep going so one bad target cannot drop the others; the
+                # lookback re-covers this window next run.
                 failures.append(f"{org}/{pipeline}: {e}")
 
     rows_to_insert = [row for _, row in pairs]
@@ -79,10 +76,8 @@ def fetch_rows(org, token, pipeline, finished_from):
     response = requests.get(url, headers=headers, params=params, timeout=30)
     response.raise_for_status()
 
-    # Deterministic row IDs for idempotency, since the 15-min lookback re-sends
-    # builds the previous run already inserted. Keyed on the job UUID, not the
-    # step name: a step with parallelism emits several jobs sharing one name,
-    # and a name-keyed ID makes BigQuery dedup all but one of them away.
+    # Row IDs dedup the builds the lookback re-sends. Key on the job UUID, not
+    # the step name: parallel jobs share a name and would collapse into one.
     rows = []
     for build in response.json():
         # 1. Capture E2E Summary

@@ -10,10 +10,10 @@ variable "buildkite_token_secret_ids" {
 
 variable "bq_puller_pipeline_slugs" {
   type        = list(string)
-  description = "Buildkite pipeline slugs the BigQuery puller reads. Every slug is polled in every org in bq_puller_orgs; a slug missing from an org is reported and skipped rather than failing the run."
+  description = "Buildkite pipeline slugs the BigQuery puller reads. Every slug is polled in every org in bq_puller_orgs; a slug missing from an org is skipped."
 }
 
 variable "bq_puller_orgs" {
   type        = map(string)
-  description = "Buildkite org slug => name of a Secret Manager secret in project_id holding a REST API token for that org. A token is scoped to one org, so each entry needs its own. The puller polls every entry and stamps each BigQuery row with its org."
+  description = "Buildkite org slug => name of a Secret Manager secret in project_id holding a REST API token for that org. A token is scoped to one org, so each entry needs its own. Rows are stamped with org_slug."
 }
