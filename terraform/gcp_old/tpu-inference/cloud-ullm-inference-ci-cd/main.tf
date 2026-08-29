@@ -228,15 +228,22 @@ module "ci_monitoring" {
     google-beta = google-beta.us-central1-b
   }
 
-  project_id    = var.project_id
-  pipeline_slug = "tpu-inference-ci"
-  org_slug      = "tpu-commons"
+  project_id              = var.project_id
+  bq_puller_pipeline_slug = "tpu-inference-ci"
 
   # Both orgs are exported while the migration is in flight. Drop the
   # tpu-commons entry once its agents are gone.
   buildkite_token_secret_ids = {
     "tpu-commons" = "projects/${var.secret_project_id}/secrets/tpu_commons_buildkite_agent_token"
     "vllm"        = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
+  }
+
+  # A Buildkite API token belongs to a single org, so the puller needs one per
+  # org. vllm_buildkite_rest_api_token predates the migration and 404s on the
+  # vllm org despite its name.
+  bq_puller_orgs = {
+    "tpu-commons" = "vllm_buildkite_rest_api_token"
+    "vllm"        = "vllm_org_buildkite_rest_api_token"
   }
 }
 

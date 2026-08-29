@@ -102,7 +102,8 @@ resource "google_bigquery_table" "step_logs" {
   {"name": "state", "type": "STRING", "mode": "NULLABLE"},
   {"name": "wait_duration_sec", "type": "FLOAT", "mode": "NULLABLE"},
   {"name": "run_duration_sec", "type": "FLOAT", "mode": "NULLABLE"},
-  {"name": "created_at", "type": "TIMESTAMP", "mode": "NULLABLE"}
+  {"name": "created_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+  {"name": "org_slug", "type": "STRING", "mode": "NULLABLE"}
 ]
 EOF
 }
@@ -135,12 +136,6 @@ resource "google_storage_bucket_object" "source_object" {
 # PART 4: SECURITY & PERMISSIONS (IAM)
 # =====================================================================
 
-data "google_secret_manager_secret_version" "webhook_secret_val" {
-  project = var.project_id
-  secret  = "vllm_buildkite_rest_api_token"
-  version = "latest"
-}
-
 resource "google_service_account" "function_sa" {
   account_id   = "ci-webhook-receiver-sa"
   project      = var.project_id
@@ -154,8 +149,10 @@ resource "google_project_iam_member" "bq_editor" {
 }
 
 resource "google_secret_manager_secret_iam_member" "secret_access" {
+  for_each = var.bq_puller_orgs
+
   project   = var.project_id
-  secret_id = data.google_secret_manager_secret_version.webhook_secret_val.secret
+  secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.function_sa.email}"
 }
@@ -170,6 +167,8 @@ resource "google_cloudfunctions2_function" "webhook_receiver" {
   location    = "us-central1"
   description = "Polls Buildkite API and stores events into BigQuery"
 
+  depends_on = [google_secret_manager_secret_iam_member.secret_access]
+
   build_config {
     runtime     = "python310"
     entry_point = "handle_webhook"
@@ -182,22 +181,35 @@ resource "google_cloudfunctions2_function" "webhook_receiver" {
   }
 
   service_config {
-    max_instance_count    = 3
-    available_memory      = "256M"
-    timeout_seconds       = 60
+    max_instance_count = 3
+    available_memory   = "256M"
+    # One Buildkite round trip per org, done sequentially.
+    timeout_seconds       = 120
     service_account_email = google_service_account.function_sa.email
 
     environment_variables = {
       BQ_TABLE_ID   = "${var.project_id}.${google_bigquery_dataset.ci_analytics.dataset_id}.${google_bigquery_table.step_logs.table_id}"
-      PIPELINE_SLUG = var.pipeline_slug
-      ORG_SLUG      = var.org_slug
+      PIPELINE_SLUG = var.bq_puller_pipeline_slug
+
+      # Which orgs to poll, and the env var holding each one's token.
+      ORGS_JSON = jsonencode([
+        for org, secret in var.bq_puller_orgs : {
+          org       = org
+          token_env = "BK_TOKEN_${upper(replace(org, "-", "_"))}"
+        }
+      ])
     }
 
-    secret_environment_variables {
-      key        = "WEBHOOK_SECRET"
-      project_id = var.project_id
-      secret     = data.google_secret_manager_secret_version.webhook_secret_val.secret
-      version    = "latest"
+    dynamic "secret_environment_variables" {
+      for_each = var.bq_puller_orgs
+      iterator = org
+
+      content {
+        key        = "BK_TOKEN_${upper(replace(org.key, "-", "_"))}"
+        project_id = var.project_id
+        secret     = org.value
+        version    = "latest"
+      }
     }
   }
 }
