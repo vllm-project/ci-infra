@@ -9,6 +9,14 @@
 # s3://vllm-ci/bootstrap.sh on the ASGs) and pods consume it through a hostPath
 # volume. The FSx CSI driver / static PV design was dropped because a static PV
 # cannot select among the four per-AZ filesystems by node AZ.
+#
+# OUT-OF-BAND CONFIG WARNING: the cluster runs kube-scheduler
+# nodeResourcesFit.scoringStrategy=MostAllocated (weights nvidia.com/gpu:10,
+# cpu:1, memory:1), applied 2026-08-29 via `aws eks update-cluster-config
+# --kube-scheduler-config` (EKS advanced control plane configuration).
+# terraform aws provider support for kube_scheduler_config did not exist at
+# that time ("planned" per AWS), so this is NOT in code: fold it in when the
+# provider lands, and re-apply after any cluster recreate.
 
 locals {
   eks_cluster_name = "l4-ci"
