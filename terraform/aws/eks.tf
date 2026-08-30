@@ -17,6 +17,13 @@
 # terraform aws provider support for kube_scheduler_config did not exist at
 # that time ("planned" per AWS), so this is NOT in code: fold it in when the
 # provider lands, and re-apply after any cluster recreate.
+#
+# OUT-OF-BAND CONFIG WARNING 2 (2026-08-30): the l4x4 node group's ASG was set
+# to AvailabilityZoneDistribution=balanced-only via update-auto-scaling-group.
+# EKS managed node groups default to balanced-best-effort, which terminates
+# instances for AZ rebalancing WITHOUT draining pods (kills CI jobs mid-run;
+# safe-to-evict only governs cluster-autoscaler, not the ASG). Re-apply after
+# node group recreation.
 
 locals {
   eks_cluster_name = "l4-ci"
