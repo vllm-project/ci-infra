@@ -32,12 +32,17 @@ kubectl -n buildkite create serviceaccount buildkite-gpu-jobs \
 # which would masquerade as an autoscaling failure; 0 = unlimited (node group max
 # is the real cap). Do NOT set config.job-ttl: it hard-kills jobs at the TTL and
 # distributed L4 tests legitimately run 20-40min (learned the hard way, ci#86133).
+# pod-pending-timeout defaults to 10m, which fails jobs when AWS has no
+# g6.12xlarge capacity (pods pend on scale-up); 2h makes capacity shortages
+# queue like they do on the ASGs (ci#86253). The rollout-status deploy name is
+# the release name (agent-stack-k8s-l4), not -controller.
 helm upgrade --install agent-stack-k8s-l4 \
   oci://ghcr.io/buildkite/helm/agent-stack-k8s \
   --version "${CHART_VERSION}" \
   --namespace buildkite \
   --set agentToken="$BUILDKITE_AGENT_TOKEN" \
   --set-json 'config.tags=["queue=l4-k8s"]' \
-  --set config.max-in-flight=0
+  --set config.max-in-flight=0 \
+  --set config.pod-pending-timeout=2h
 
-kubectl -n buildkite rollout status deployment/agent-stack-k8s-l4-controller --timeout=120s
+kubectl -n buildkite rollout status deployment/agent-stack-k8s-l4 --timeout=120s
