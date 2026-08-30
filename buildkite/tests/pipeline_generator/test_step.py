@@ -1,6 +1,6 @@
-import base64
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -242,10 +242,10 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
     assert "ci_otel_finish" in commands[2]
     assert "ci_otel_start 2 " in commands[4]
     assert 'test "$VALUE" = ready' in commands[4]
-    match = re.search(r"ci_otel_start 2 (\S+)", commands[4])
+    match = re.search(r'ci_otel_start 2 ("[^"]*"|\S+)', commands[4])
     assert match is not None
-    (encoded_label,) = match.groups()
-    assert base64.b64decode(encoded_label).decode() == "test VALUE = ready"
+    (quoted_label,) = match.groups()
+    assert shlex.split(quoted_label)[0] == "test VALUE = ready"
     assert "'" not in commands[4]
 
 

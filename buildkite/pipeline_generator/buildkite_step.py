@@ -1,9 +1,9 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
-import base64
 import os
 import re
+import shlex
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
@@ -454,12 +454,12 @@ def _prepare_commands(
             )
             prepared_command = cmd
             if trace_commands:
-                encoded_preview = base64.b64encode(preview.encode()).decode()
+                quoted_preview = shlex.quote(preview)
                 if _is_simple_command(cmd):
-                    prepared_command = f"ci_otel_run {i + 1} {encoded_preview} {cmd}"
+                    prepared_command = f"ci_otel_run {i + 1} {quoted_preview} {cmd}"
                 else:
                     prepared_command = (
-                        f"ci_otel_start {i + 1} {encoded_preview} || :\n"
+                        f"ci_otel_start {i + 1} {quoted_preview} || :\n"
                         f"{cmd}\n"
                         "_CI_INFRA_OTEL_COMMAND_STATUS=$$?\n"
                         "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :\n"
