@@ -50,6 +50,52 @@ spec = importlib.util.find_spec("vllm")
 print(pathlib.Path(spec.origin).parent if spec is not None and spec.origin else target / "vllm")
 '''
 
+HOST_INSTALL_PY = '''import importlib.util
+import os
+import pathlib
+
+
+# A plugin-less step runs on the agent host, so the container install cannot be
+# reused: it writes fnrec.py AND fnrec.pth into the shared interpreter's
+# site-packages, and a .pth executes at every interpreter start on that host
+# forever, for every later job. That is the reason multi-node steps are excluded
+# from recording at all. Here the same effect is had per job: a directory under
+# FNREC_OUT, on PYTHONPATH, gone when the checkout is cleaned.
+#
+# sitecustomize rather than a .pth because only real site directories process
+# .pth files, and a PYTHONPATH entry is not one. Both are imported at
+# interpreter start, so engine and worker subprocesses are covered either way.
+target = pathlib.Path(os.environ["FNREC_LIB"])
+target.mkdir(parents=True, exist_ok=True)
+(target / "fnrec.py").write_text(FNREC_SOURCE)
+
+# Ours must not be the last sitecustomize the host ever sees. Python imports the
+# first one on sys.path, so shadowing an agent's own would silently disable
+# whatever it does. Delegate to it first, then load the recorder.
+(target / "sitecustomize.py").write_text(
+    "import os, sys\\n"
+    "_here = os.path.dirname(os.path.abspath(__file__))\\n"
+    "_saved = sys.path[:]\\n"
+    "try:\\n"
+    "    sys.path[:] = [p for p in sys.path if os.path.abspath(p) != _here]\\n"
+    "    sys.modules.pop('sitecustomize', None)\\n"
+    "    try:\\n"
+    "        import sitecustomize  # the host's own, if it has one\\n"
+    "    except Exception:\\n"
+    "        pass\\n"
+    "finally:\\n"
+    "    sys.path[:] = _saved\\n"
+    "try:\\n"
+    "    import fnrec\\n"
+    "except Exception:\\n"
+    "    pass\\n"
+)
+
+# Same contract as the container installer: print where vllm's code actually is.
+spec = importlib.util.find_spec("vllm")
+print(pathlib.Path(spec.origin).parent if spec is not None and spec.origin else target / "vllm")
+'''
+
 # Runs from an EXIT trap, so it must never fail the step or alter its exit status.
 # Everything fnrec produces lands under this directory, relative to the Buildkite
 # checkout, so the agent's artifact phase -- which runs on the host after the
@@ -511,6 +557,15 @@ def install_blob():
     # the recorder happens to contain no triple-quote and not to end in a
     # backslash, and breaking either would emit a SyntaxError inside a container.
     return _blob(f"FNREC_SOURCE = {FNREC_PY!r}\n{INSTALL_PY}")
+
+
+def host_install_blob():
+    """Installer for a step that runs on the agent host, not in a container.
+
+    Same recorder, isolated loader. `install_blob` mutates the shared
+    interpreter and is only safe where the filesystem is thrown away.
+    """
+    return _blob(f"FNREC_SOURCE = {FNREC_PY!r}\n{HOST_INSTALL_PY}")
 
 
 def pack_blob():

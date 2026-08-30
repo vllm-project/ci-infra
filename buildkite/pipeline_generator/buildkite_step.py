@@ -29,6 +29,7 @@ from fnrec_payload import (
     FNREC_OUT_MARKER,
     fnrec_artifact_paths,
     fnrec_enabled,
+    host_install_blob,
     install_blob,
     pack_blob,
 )
@@ -427,8 +428,11 @@ def _fnrec_checkout_path(step: Step, setup_profile: SetupProfile) -> str:
     checkout, command and artifact phases share one volume, so the agent's own
     value is correct there.
     """
-    if setup_profile == "amd" or _uses_k8s_plugin(step) or is_amd_gpu_device(
-        step.device
+    if (
+        setup_profile == "amd"
+        or step.no_plugin
+        or _uses_k8s_plugin(step)
+        or is_amd_gpu_device(step.device)
     ):
         # Defaulted, because legacy AMD dind forwards no BUILDKITE_* into its
         # inner container. Without the fallback the empty variable makes
@@ -459,9 +463,21 @@ def _get_fnrec_setup_commands(step: Step, setup_profile: SetupProfile) -> List[s
         return []
 
     checkout = _fnrec_checkout_path(step, setup_profile)
+    # A plugin-less step's commands run on the agent host, so the container
+    # installer is not safe here: it writes a .pth into the shared interpreter's
+    # site-packages, which then executes for every later job on that agent, with
+    # no uninstall. The host installer puts the same recorder in a per-job
+    # directory on PYTHONPATH instead, and the checkout takes it away.
+    installer = host_install_blob() if step.no_plugin else install_blob()
+    lib = ['export FNREC_LIB="$$FNREC_OUT/lib"'] if step.no_plugin else []
+    path = (
+        ['export PYTHONPATH="$$FNREC_LIB$${PYTHONPATH:+:$$PYTHONPATH}"']
+        if step.no_plugin
+        else []
+    )
     return [
         "echo '--- :dna: fnrec setup'",
-        f"echo {install_blob()} | base64 -d | gunzip > /tmp/fnrec_install.py",
+        f"echo {installer} | base64 -d | gunzip > /tmp/fnrec_install.py",
         f"echo {pack_blob()} | base64 -d | gunzip > /tmp/fnrec_pack.sh",
         "chmod +x /tmp/fnrec_pack.sh",
         f'export FNREC_BASE="{checkout}/{FNREC_CHECKOUT_DIR}"',
@@ -479,26 +495,40 @@ def _get_fnrec_setup_commands(step: Step, setup_profile: SetupProfile) -> List[s
         # that is Buildkite's default rather than ours to depend on.
         'rm -rf "$$FNREC_BASE"',
         'mkdir -p "$$FNREC_OUT" || echo "fnrec: cannot create $$FNREC_OUT" >&2',
-        # The container is root and the agent is not, so these files land
-        # root-owned in an agent-owned checkout. Unlinking a file needs write
+        # In the container case root writes into an agent-owned checkout, so
+        # these files land root-owned. A plugin-less step is already the agent
+        # and needs none of this, but a no-op chmod is cheaper than a branch.
+        # Unlinking a file needs write
         # and execute on its directory, not on the file, so 0777 here is exactly
         # what lets the next job's `git clean` succeed. Getting this wrong wedges
         # the agent on checkout, which is worse than losing a recording.
         'chmod 0777 "$$FNREC_BASE" "$$FNREC_OUT" 2>/dev/null || :',
+        *lib,
         # The installer prints where vllm's code is; assembling it from the
         # install target is wrong under an editable install. Its stderr is the
         # only thing separating a failed install from a job that genuinely runs
         # no vLLM code, since both leave an empty recording. Keep `export`: it
         # masks the substitution's status, so a crash cannot fail the step.
         "export FNREC_ROOT=$$(python3 /tmp/fnrec_install.py 2>$$FNREC_OUT/install.err)",
+        # After the install, so a failed install cannot leave a PYTHONPATH
+        # pointing at a directory with no recorder in it.
+        *path,
     ]
 
 
 def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
-    if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
+    if step.label.startswith(":docker:") or setup_profile == "none":
         return []
 
     fnrec_commands = _get_fnrec_setup_commands(step, setup_profile)
+
+    # A plugin-less step runs on the agent host with no container, so none of
+    # the GPU or AMD setup below applies to it. It still records: the recorder
+    # is the only part that is about the interpreter rather than the machine,
+    # and delivery follows on its own because `artifact_paths` keys off the
+    # emitted commands rather than re-deriving who is instrumented.
+    if step.no_plugin:
+        return fnrec_commands
 
     if setup_profile == "nvidia":
         commands = fnrec_commands + [

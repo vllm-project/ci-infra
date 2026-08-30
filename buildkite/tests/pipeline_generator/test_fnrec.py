@@ -141,18 +141,75 @@ def test_reaches_kubernetes_routed_steps(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "step_kwargs",
+    "step_kwargs,setup_profile",
     [
-        {"label": ":docker: Build image", "key": "image-build"},
-        {"no_plugin": True, "key": "rust-frontend-cargo-tests"},
+        # An image build runs no pytest, so there is nothing to record.
+        ({"label": ":docker: Build image", "key": "image-build"}, "nvidia"),
+        # "none" is never passed in production, only here. Kept so the branch
+        # cannot rot into something that silently instruments.
+        ({"key": "extract-hidden-states-integration"}, "none"),
     ],
 )
-def test_skipped_where_the_profile_is_skipped(monkeypatch, step_kwargs):
+def test_skipped_where_the_profile_is_skipped(monkeypatch, step_kwargs, setup_profile):
     monkeypatch.setenv("FNREC", "1")
     commands = buildkite_step._prepare_commands(
-        _step(**step_kwargs), variables_to_inject={}
+        _step(**step_kwargs), variables_to_inject={}, setup_profile=setup_profile
     )
     assert not any("fnrec" in c.lower() for c in commands)
+
+
+def test_reaches_a_plugin_less_step(monkeypatch):
+    """`no_plugin` used to skip recording along with image builds, which is what
+    cost every CPU, Arm and XPU suite its coverage. It runs pytest like any other
+    step; it just runs on the agent host instead of in a container."""
+    monkeypatch.setenv("FNREC", "1")
+    commands = buildkite_step._prepare_commands(
+        _step(no_plugin=True, key="cpu-kernel-tests"), variables_to_inject={}
+    )
+    assert any("--- :dna: fnrec setup" in c for c in commands)
+    base = next(c for c in commands if c.startswith("export FNREC_BASE="))
+    # The agent's own checkout, never the docker mount: there is no container.
+    assert "${BUILDKITE_BUILD_CHECKOUT_PATH:-/tmp/fnrec-no-checkout}/.fnrec" in base
+    # Delivery follows from the commands, so it needs no separate predicate.
+    assert fnrec_payload.fnrec_artifact_paths(commands)
+
+
+def test_a_plugin_less_step_does_not_touch_the_shared_interpreter(monkeypatch):
+    """The property the whole host path rests on.
+
+    The container installer writes a .pth into site-packages, which then executes
+    at every interpreter start on that agent, for every later job, with no
+    uninstall. That is why multi-node steps are excluded from recording, and
+    plugin-less steps run on the same shared hosts. So they get an installer that
+    writes only inside the job's own directory and reaches subprocesses through
+    PYTHONPATH instead.
+    """
+    monkeypatch.setenv("FNREC", "1")
+    commands = buildkite_step._prepare_commands(
+        _step(no_plugin=True, key="cpu-kernel-tests"), variables_to_inject={}
+    )
+    installer = next(c for c in commands if "fnrec_install.py" in c)
+    source = gzip.decompress(
+        base64.b64decode(installer.split()[1])
+    ).decode()
+    # Assert on what it WRITES, not on what it mentions: the host installer's
+    # comments discuss the .pth precisely because it must not create one.
+    assert '"fnrec.pth"' not in source
+    assert "site.getsitepackages()" not in source
+    assert 'os.environ["FNREC_LIB"]' in source
+    assert any(c.startswith('export FNREC_LIB="$$FNREC_OUT/lib"') for c in commands)
+    assert any("PYTHONPATH" in c for c in commands)
+
+    # A container step must keep the .pth: it is the only thing that reaches the
+    # engine and worker subprocesses, and the container is thrown away.
+    contained = buildkite_step._prepare_commands(_step(), variables_to_inject={})
+    src = gzip.decompress(
+        base64.b64decode(
+            next(c for c in contained if "fnrec_install.py" in c).split()[1]
+        )
+    ).decode()
+    assert '"fnrec.pth"' in src
+    assert "site.getsitepackages()" in src
 
 
 def test_reaches_the_amd_profile(monkeypatch):
