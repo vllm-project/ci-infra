@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
 import base64
@@ -225,10 +225,26 @@ class BuildkiteCommandStep(BaseModel):
     env: Optional[Dict[str, str]] = None
     artifact_paths: Optional[List[str]] = None
     parallelism: Optional[int] = None
-    concurrency: Optional[int] = None
-    concurrency_group: Optional[str] = None
+    concurrency: Optional[int] = Field(default=None, gt=0, strict=True)
+    concurrency_group: Optional[str] = Field(default=None, min_length=1)
+    if_condition: Optional[str] = Field(default=None, serialization_alias="if")
     timeout_in_minutes: Optional[int] = None
     priority: Optional[int] = None
+
+    @field_validator("concurrency_group")
+    @classmethod
+    def validate_concurrency_group(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("'concurrency_group' must be a nonempty string.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_concurrency_pair(self):
+        if (self.concurrency is None) != (self.concurrency_group is None):
+            raise ValueError(
+                "'concurrency' and 'concurrency_group' must be defined together."
+            )
+        return self
 
     def to_yaml(self):
         return {
@@ -246,6 +262,7 @@ class BuildkiteCommandStep(BaseModel):
             "parallelism": self.parallelism,
             "concurrency": self.concurrency,
             "concurrency_group": self.concurrency_group,
+            "if": self.if_condition,
             "timeout_in_minutes": self.timeout_in_minutes,
             "priority": self.priority,
         }
@@ -623,6 +640,7 @@ def convert_group_step_to_buildkite_step(
                     parallelism=step.parallelism,
                     concurrency=step.concurrency,
                     concurrency_group=step.concurrency_group,
+                    if_condition=step.if_condition,
                     timeout_in_minutes=step.timeout_in_minutes,
                     agent_tags=step.agent_tags,
                 )
@@ -650,6 +668,7 @@ def convert_group_step_to_buildkite_step(
                 priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
                 concurrency=step.concurrency,
                 concurrency_group=step.concurrency_group,
+                if_condition=step.if_condition,
             )
 
             if step.env:
@@ -772,6 +791,7 @@ def convert_group_step_to_buildkite_step(
                     concurrency_group=amd.get(
                         "concurrency_group", step.concurrency_group
                     ),
+                    if_condition=step.if_condition,
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
                     display_label=amd.get("label"),
@@ -912,6 +932,7 @@ def _create_amd_step(
     parallelism: Optional[int],
     concurrency: Optional[int],
     concurrency_group: Optional[str],
+    if_condition: Optional[str],
     key: str,
     timeout_in_minutes: Optional[int] = None,
     agent_tags: Optional[Dict[str, str]] = None,
@@ -940,6 +961,7 @@ def _create_amd_step(
         parallelism=parallelism,
         concurrency=concurrency,
         concurrency_group=concurrency_group,
+        if_condition=if_condition,
         timeout_in_minutes=_get_timeout_in_minutes(
             get_amd_timeout_in_minutes(timeout_in_minutes)
         ),
