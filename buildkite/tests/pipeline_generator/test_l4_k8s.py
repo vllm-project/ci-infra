@@ -1,59 +1,10 @@
-import sys
-from pathlib import Path
-
 import pytest
 
-PIPELINE_GENERATOR_DIR = Path(__file__).resolve().parents[2] / "pipeline_generator"
-sys.path.insert(0, str(PIPELINE_GENERATOR_DIR))
-
 import buildkite_step
-import step as step_module
 from constants import AgentQueue
 from step import Step
 
-
-@pytest.fixture(autouse=True)
-def fake_global_config(monkeypatch):
-    config = {
-        "name": "vllm_ci",
-        "github_repo_name": "vllm-project/vllm",
-        "job_dirs": [],
-        "registries": "example.com/vllm",
-        "repositories": {
-            "main": "vllm-ci-postmerge-repo",
-            "premerge": "vllm-ci-test-repo",
-        },
-        "branch": "test-branch",
-        "commit": "abc123",
-        "pull_request": "false",
-        "docs_only_disable": "1",
-        "nightly": "0",
-        "torch_nightly": "0",
-        "run_all": False,
-        "list_file_diff": [],
-        "fail_fast": False,
-    }
-    monkeypatch.setattr(step_module, "get_global_config", lambda: config)
-    monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
-    monkeypatch.setattr(
-        buildkite_step,
-        "get_ecr_cache_registry",
-        lambda: ("cache-from", "cache-to"),
-    )
-    monkeypatch.setattr(
-        buildkite_step,
-        "get_image",
-        lambda cpu=False, arm64=False: "test-image",
-    )
-    monkeypatch.setattr(
-        buildkite_step,
-        "get_torch_nightly_image",
-        lambda: "torch-nightly-image",
-    )
-    # Make sure the EKS gates never leak in from the ambient environment.
-    monkeypatch.delenv("GPU_1_K8S", raising=False)
-    monkeypatch.delenv("GPU_4_K8S", raising=False)
-    return config
+pytestmark = pytest.mark.usefixtures("fake_global_config")
 
 
 def _render_command_step(step):
@@ -78,8 +29,7 @@ def _make_l4_step(num_devices, **kwargs):
     )
 
 
-def test_gated_4gpu_l4_step_uses_k8s_plugin(monkeypatch):
-    monkeypatch.setenv("GPU_4_K8S", "1")
+def test_4gpu_l4_step_uses_k8s_plugin():
     command_step = _render_command_step(_make_l4_step(num_devices=4))
 
     assert command_step.agents == {"queue": AgentQueue.L4_K8S}
@@ -131,8 +81,7 @@ def test_gated_4gpu_l4_step_uses_k8s_plugin(monkeypatch):
     }
 
 
-def test_gated_1gpu_l4_step_uses_k8s_plugin(monkeypatch):
-    monkeypatch.setenv("GPU_1_K8S", "1")
+def test_1gpu_l4_step_uses_k8s_plugin():
     command_step = _render_command_step(_make_l4_step(num_devices=1))
 
     assert command_step.agents == {"queue": AgentQueue.L4_K8S}
@@ -151,46 +100,63 @@ def test_gated_1gpu_l4_step_uses_k8s_plugin(monkeypatch):
     assert volumes["devshm"]["emptyDir"]["sizeLimit"] == "24Gi"
 
 
-def test_gpu_1_gate_does_not_route_4gpu_step(monkeypatch):
-    monkeypatch.setenv("GPU_1_K8S", "1")
-    command_step = _render_command_step(_make_l4_step(num_devices=4))
+def test_l4_step_without_num_devices_defaults_to_one_gpu():
+    command_step = _render_command_step(_make_l4_step(num_devices=None))
 
-    assert command_step.agents == {"queue": AgentQueue.GPU_4}
-    assert "docker#v5.2.0" in command_step.plugins[0]
-    assert command_step.retry is None
-
-
-def test_gpu_4_gate_does_not_route_1gpu_step(monkeypatch):
-    monkeypatch.setenv("GPU_4_K8S", "1")
-    command_step = _render_command_step(_make_l4_step(num_devices=1))
-
-    assert command_step.agents == {"queue": AgentQueue.GPU_1}
-    assert "docker#v5.2.0" in command_step.plugins[0]
-    assert command_step.retry is None
+    assert command_step.agents == {"queue": AgentQueue.L4_K8S}
+    container = command_step.plugins[0]["kubernetes"]["podSpec"]["containers"][0]
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == 1
+    assert container["resources"]["requests"]["cpu"] == "10"
 
 
-def test_ungated_l4_steps_keep_existing_ec2_routing():
-    command_step_4gpu = _render_command_step(_make_l4_step(num_devices=4))
-    assert command_step_4gpu.agents == {"queue": AgentQueue.GPU_4}
-    assert "docker#v5.2.0" in command_step_4gpu.plugins[0]
-    assert command_step_4gpu.retry is None
-
-    command_step_1gpu = _render_command_step(_make_l4_step(num_devices=1))
-    assert command_step_1gpu.agents == {"queue": AgentQueue.GPU_1}
-    assert "docker#v5.2.0" in command_step_1gpu.plugins[0]
-    assert command_step_1gpu.retry is None
-
-
-def test_gated_l4_step_keeps_explicit_retry(monkeypatch):
-    monkeypatch.setenv("GPU_4_K8S", "1")
+def test_l4_step_keeps_explicit_retry():
     explicit_retry = {"automatic": [{"exit_status": 5, "limit": 3}]}
     command_step = _render_command_step(
         _make_l4_step(num_devices=4, retry=explicit_retry)
     )
 
     assert command_step.agents == {"queue": AgentQueue.L4_K8S}
-    assert command_step.retry == explicit_retry
+    # K8S_RETRY is not applied; the explicit retry only gets the repo-wide
+    # exit-status -1 retry that main adds to every step.
+    assert command_step.retry == buildkite_step.ensure_exit_status_negative_one_retry(
+        explicit_retry
+    )
+
+
+@pytest.mark.parametrize(
+    ("device", "num_devices", "queue"),
+    [
+        (None, None, AgentQueue.GPU_1),
+        (None, 2, AgentQueue.GPU_4),
+        (None, 4, AgentQueue.GPU_4),
+        ("h100", None, AgentQueue.MITHRIL_H100),
+        ("a100", None, AgentQueue.A100),
+    ],
+)
+def test_non_l4_steps_keep_existing_routing(device, num_devices, queue):
+    """Steps not marked device: l4 render exactly as before the migration."""
+    step = Step(
+        label="Regular GPU test",
+        group="GPU tests",
+        device=device,
+        num_devices=num_devices,
+        commands=["pytest tests/foo.py"],
+    )
+
+    command_step = _render_command_step(step)
+
+    assert command_step.agents == {"queue": queue}
+    # Every step gets the repo-wide exit-status -1 retry; non-l4 steps get
+    # nothing beyond it (in particular not K8S_RETRY).
+    assert command_step.retry == {
+        "automatic": [buildkite_step.EXIT_STATUS_NEGATIVE_ONE_RETRY]
+    }
+    if device in ("h100", "a100"):
+        # H100/A100 were already on the k8s plugin before this change.
+        assert "kubernetes" in command_step.plugins[0]
+    else:
+        assert set(command_step.plugins[0].keys()) == {"docker#v5.2.0"}
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main(["-v", __file__]))
+    raise SystemExit(pytest.main(["-v", __file__]))
