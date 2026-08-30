@@ -264,6 +264,47 @@ def test_otel_trace_allows_exact_api_treatment_branch(fake_global_config, monkey
     assert any("ci_otel_start" in command for command in commands)
 
 
+def test_otel_trace_uses_ci_otel_run_for_simple_commands(fake_global_config):
+    fake_global_config["branch"] = "main"
+    step = Step(
+        label="Traced",
+        group="Tracing",
+        commands=["pytest tests", "export VALUE=ready", "python script.py"],
+    )
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    # Simple commands use ci_otel_run
+    assert "ci_otel_run 1 " in commands[2]
+    assert "pytest tests" in commands[2]
+    # Shell builtins use the explicit start/finish pair
+    assert "ci_otel_start 2 " in commands[4]
+    assert "export VALUE=ready" in commands[4]
+    assert "ci_otel_finish" in commands[4]
+    # Simple commands use ci_otel_run
+    assert "ci_otel_run 3 " in commands[6]
+    assert "python script.py" in commands[6]
+
+
+def test_is_simple_command():
+    assert buildkite_step._is_simple_command("pytest tests")
+    assert buildkite_step._is_simple_command("python script.py")
+    assert buildkite_step._is_simple_command("docker build .")
+    assert not buildkite_step._is_simple_command("export FOO=bar")
+    assert not buildkite_step._is_simple_command("cd /tmp")
+    assert not buildkite_step._is_simple_command("source env.sh")
+    assert not buildkite_step._is_simple_command(". env.sh")
+    assert not buildkite_step._is_simple_command("pytest tests | grep pass")
+    assert not buildkite_step._is_simple_command("pytest tests > out.txt")
+    assert not buildkite_step._is_simple_command("pytest tests && echo done")
+    assert not buildkite_step._is_simple_command("echo $HOME")
+    assert not buildkite_step._is_simple_command("echo `date`")
+
+
 def test_otel_trace_rejects_non_api_treatment_branch(fake_global_config, monkeypatch):
     fake_global_config["branch"] = "khluu/otel"
     monkeypatch.setenv("BUILDKITE_SOURCE", "webhook")
@@ -336,7 +377,9 @@ def test_otel_setup_stays_fail_open_without_git_checkout(tmp_path):
     # checkout (no .git baked into the image), the setup command must still
     # succeed under `sh -e` so the job runs untraced instead of failing.
     command = buildkite_step._otel_setup_command().replace("$$", "$")
-    env = {key: value for key, value in os.environ.items() if key != "CI_INFRA_OTEL_DIR"}
+    env = {
+        key: value for key, value in os.environ.items() if key != "CI_INFRA_OTEL_DIR"
+    }
     result = subprocess.run(
         ["/bin/sh", "-e", "-c", command + "\necho setup-survived"],
         check=False,

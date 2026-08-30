@@ -51,11 +51,33 @@ K8S_RETRY = {
     ],
 }
 
+# Shell builtins and metacharacters that require the explicit start/finish pair
+# because ci_otel_run uses "$@" which cannot invoke them.
+_SHELL_STATE_BUILTINS = frozenset(
+    {"export", "cd", "source", ".", "set", "unset", "alias", "umask", "eval", "exec"}
+)
+_SHELL_METACHARS = frozenset("|&;<>`(){}[]$\\")
+
+
+def _is_simple_command(cmd: str) -> bool:
+    """Return True if cmd is safe to wrap with ci_otel_run.
+
+    ci_otel_run uses "$@" which works for external commands but not for shell
+    builtins that modify state (export, cd, etc.) or commands with shell
+    metacharacters (pipes, redirects, etc.).
+    """
+    first_word = cmd.split(None, 1)[0] if cmd.strip() else ""
+    if first_word in _SHELL_STATE_BUILTINS:
+        return False
+    return not any(char in _SHELL_METACHARS for char in cmd)
+
+
 def _otel_setup_command() -> str:
     """Best-effort activation of the tracing helpers in the vLLM checkout."""
     # No-ops keep every generated wrapper safe when setup is unavailable.
     return (
         "ci_otel_start() { :; }; ci_otel_finish() { :; }; "
+        'ci_otel_run() { shift 2; "$@"; return $$?; }; '
         'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
         # `|| :` keeps the assignment itself successful under `sh -e` when the
         # checkout has no .git; the missing-helper path below stays fail-open.
@@ -433,13 +455,16 @@ def _prepare_commands(
             prepared_command = cmd
             if trace_commands:
                 encoded_preview = base64.b64encode(preview.encode()).decode()
-                prepared_command = (
-                    f"ci_otel_start {i + 1} {encoded_preview} || :\n"
-                    f"{cmd}\n"
-                    "_CI_INFRA_OTEL_COMMAND_STATUS=$$?\n"
-                    "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :\n"
-                    "(exit $$_CI_INFRA_OTEL_COMMAND_STATUS)"
-                )
+                if _is_simple_command(cmd):
+                    prepared_command = f"ci_otel_run {i + 1} {encoded_preview} {cmd}"
+                else:
+                    prepared_command = (
+                        f"ci_otel_start {i + 1} {encoded_preview} || :\n"
+                        f"{cmd}\n"
+                        "_CI_INFRA_OTEL_COMMAND_STATUS=$$?\n"
+                        "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :\n"
+                        "(exit $$_CI_INFRA_OTEL_COMMAND_STATUS)"
+                    )
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
