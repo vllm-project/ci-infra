@@ -228,10 +228,20 @@ module "ci_monitoring" {
     google-beta = google-beta.us-central1-b
   }
 
-  project_id                = var.project_id
-  pipeline_slug             = "tpu-inference-ci"
-  org_slug                  = "tpu-commons"
-  buildkite_token_secret_id = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret
+  project_id               = var.project_id
+  bq_puller_pipeline_slugs = ["tpu-inference-ci", "vllm-torchtpu-ci"]
+
+  # Drop the tpu-commons entries once its agents are gone.
+  buildkite_token_secret_ids = {
+    "tpu-commons" = "projects/${var.secret_project_id}/secrets/tpu_commons_buildkite_agent_token"
+    "vllm"        = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
+  }
+
+  # vllm_buildkite_rest_api_token is the tpu-commons token despite its name.
+  bq_puller_orgs = {
+    "tpu-commons" = "vllm_buildkite_rest_api_token"
+    "vllm"        = "vllm_org_buildkite_rest_api_token"
+  }
 }
 
 module "ci_cache_storage" {

@@ -44,6 +44,18 @@ PRECOMMIT_WAIT_INTERVAL = 60
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 
+# Pod-level failures on EKS surface as agent stops / lost pods rather than
+# clean non-zero exits, which exit-code-only retries would miss.
+K8S_RETRY = {
+    "automatic": [
+        EXIT_STATUS_NEGATIVE_ONE_RETRY,
+        {"exit_status": 1, "limit": 1},
+        {"exit_status": 128, "limit": 1},
+        {"signal_reason": "agent_stop", "limit": 1},
+        {"signal_reason": "agent_refused", "limit": 1},
+    ],
+}
+
 OTEL_HELPERS_DIR = Path(__file__).resolve().parent / "otel_helpers"
 OTEL_HELPER_FILES = (
     "ci_otel.py",
@@ -265,6 +277,7 @@ def _get_step_plugin(step: Step):
         DeviceType.H100.value,
         DeviceType.A100.value,
         DeviceType.B200_K8S.value,
+        DeviceType.L4.value,
     ]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
@@ -291,6 +304,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.MEDIUM_CPU_PREMERGE
     elif step.device == DeviceType.CPU:
         return AgentQueue.CPU_PREMERGE_US_EAST_1
+    elif step.device == DeviceType.L4:
+        return AgentQueue.L4_K8S
     elif step.device == DeviceType.A100:
         return AgentQueue.A100
     elif step.device == DeviceType.H100:
@@ -688,6 +703,10 @@ def convert_group_step_to_buildkite_step(
                 or (step.num_nodes and step.num_nodes >= 2)
             ):
                 buildkite_step.plugins = [_get_step_plugin(step)]
+                # L4-on-EKS steps get a retry policy that also covers pod-level
+                # failures (agent stops), unless the step opted out explicitly.
+                if step.device == DeviceType.L4 and not step.retry:
+                    buildkite_step.retry = K8S_RETRY
 
             group_steps_list.append(buildkite_step)
 

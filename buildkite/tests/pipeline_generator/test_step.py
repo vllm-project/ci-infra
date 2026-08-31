@@ -107,6 +107,41 @@ def test_selected_steps_reject_unknown_key():
         )
 
 
+def test_selected_steps_support_label_generated_keys():
+    # Steps without an explicit key are uploaded with a label-derived key, so
+    # retry builds reference them by that generated key.
+    steps = [
+        Step(label="Image", key="image-build", commands=["build"]),
+        Step(
+            label=":nvidia: (H200) Rust Frontend OpenAI Coverage",
+            depends_on=["image-build"],
+            commands=["test"],
+        ),
+    ]
+
+    selected, selected_keys = select_steps_and_dependencies(
+        steps, frozenset({"-nvidia--h200-rust-frontend-openai-coverage"})
+    )
+
+    assert [step.key for step in selected] == [
+        "image-build",
+        "-nvidia--h200-rust-frontend-openai-coverage",
+    ]
+    assert selected_keys == frozenset(
+        {"image-build", "-nvidia--h200-rust-frontend-openai-coverage"}
+    )
+
+
+def test_selected_steps_reject_duplicate_generated_key():
+    steps = [
+        Step(label="Test", key="test", commands=["a"]),
+        Step(label="test", commands=["b"]),
+    ]
+
+    with pytest.raises(ValueError, match="Duplicate CI step key: test"):
+        select_steps_and_dependencies(steps, frozenset({"test"}))
+
+
 def test_selected_steps_reject_unknown_dependency():
     step = Step(
         label="Test",
