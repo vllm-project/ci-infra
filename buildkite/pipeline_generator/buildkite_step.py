@@ -62,9 +62,10 @@ _SHELL_METACHARS = frozenset("|&;<>`(){}[]$\\")
 def _is_simple_command(cmd: str) -> bool:
     """Return True if cmd is safe to wrap with ci_otel_run.
 
-    ci_otel_run uses "$@" which works for external commands but not for shell
-    builtins that modify state (export, cd, etc.) or commands with shell
-    metacharacters (pipes, redirects, etc.).
+    ci_otel_run uses "env $@" which works for external commands and
+    assignment-prefixed commands (VAR=value cmd) but not for shell builtins
+    that modify state (export, cd, etc.) or commands with shell metacharacters
+    (pipes, redirects, etc.).
     """
     first_word = cmd.split(None, 1)[0] if cmd.strip() else ""
     if first_word in _SHELL_STATE_BUILTINS:

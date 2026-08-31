@@ -294,6 +294,7 @@ def test_is_simple_command():
     assert buildkite_step._is_simple_command("pytest tests")
     assert buildkite_step._is_simple_command("python script.py")
     assert buildkite_step._is_simple_command("docker build .")
+    assert buildkite_step._is_simple_command("PYTHONPATH=/vllm-workspace pytest tests")
     assert not buildkite_step._is_simple_command("export FOO=bar")
     assert not buildkite_step._is_simple_command("cd /tmp")
     assert not buildkite_step._is_simple_command("source env.sh")
