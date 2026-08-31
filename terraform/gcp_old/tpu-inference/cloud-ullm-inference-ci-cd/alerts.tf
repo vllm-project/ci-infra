@@ -4,7 +4,7 @@ variable "notification_channel_ids" {
   default     = []
 }
 
-# 1. Disk & Resource Utilization Alerts (v6, v7, and CPU)
+# Disk & Resource Utilization Alerts (v6, v7, and CPU)
 
 resource "google_monitoring_alert_policy" "high_disk_utilization" {
   display_name = "CI Agent High Disk Utilization (>90%)"
@@ -28,7 +28,7 @@ resource "google_monitoring_alert_policy" "high_disk_utilization" {
   }
 }
 
-# 2. Job-Type Success Rate Tracking & Degradation
+# Job-Type Success Rate Tracking & Degradation
 
 resource "google_monitoring_alert_policy" "pipeline_degradation" {
   display_name = "Buildkite Pipeline Success Rate Degradation"
@@ -38,7 +38,7 @@ resource "google_monitoring_alert_policy" "pipeline_degradation" {
   conditions {
     display_name = "Success Rate < 80% over 2 hours"
     condition_threshold {
-      # The numerator: only passed jobs
+      # The numerator only passed jobs
       filter          = "metric.type=\"custom.googleapis.com/buildkite/job_status\" AND metric.labels.status=\"passed\""
       comparison      = "COMPARISON_LT"
       threshold_value = 0.8 # 80%
@@ -48,7 +48,7 @@ resource "google_monitoring_alert_policy" "pipeline_degradation" {
         per_series_aligner   = "ALIGN_RATE"
         cross_series_reducer = "REDUCE_SUM"
       }
-      # The denominator: all jobs
+      # The denominator all jobs
       denominator_filter = "metric.type=\"custom.googleapis.com/buildkite/job_status\""
       denominator_aggregations {
         alignment_period     = "7200s"
@@ -59,7 +59,7 @@ resource "google_monitoring_alert_policy" "pipeline_degradation" {
   }
 }
 
-# 3. Agent / VM Health & Flapping (Multi-Host Focus)
+# Agent / VM Health & Flapping (Multi-Host Focus)
 
 resource "google_monitoring_alert_policy" "agent_flapping" {
   display_name = "Buildkite Agent Flapping (High Failure Rate)"
@@ -83,7 +83,7 @@ resource "google_monitoring_alert_policy" "agent_flapping" {
   }
 }
 
-# 4. Pipeline Timeout Surge Alerting
+# Pipeline Timeout Surge Alerting
 
 resource "google_monitoring_alert_policy" "timeout_spike" {
   display_name = "Spike in Buildkite Job Timeouts"
@@ -106,13 +106,13 @@ resource "google_monitoring_alert_policy" "timeout_spike" {
   }
 }
 
-# 5. Cloud Monitoring Dashboard (Disk & Resource Utilization)
+# Cloud Monitoring Dashboard (Disk & Resource Utilization)
 
 resource "google_monitoring_dashboard" "ci_observability_dashboard" {
   dashboard_json = jsonencode({
     displayName = "CI/CD Observability & Resource Utilization"
     gridLayout = {
-      columns = 2   # <--- Fixed! Now an integer
+      columns = 2   
       widgets = [
         {
           title = "Disk Utilization (TPU v6, v7, CPU)"
