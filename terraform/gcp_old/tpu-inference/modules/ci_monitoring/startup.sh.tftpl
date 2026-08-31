@@ -1,0 +1,58 @@
+#!/bin/bash
+set -euo pipefail
+
+# Runs on every boot, so stop the exporters before touching their binary.
+for unit in /etc/systemd/system/bk-metrics*.service; do
+  [ -e "$unit" ] || continue
+  systemctl stop "$(basename "$unit")" || true
+done
+
+# Retire the single-org unit that predates the per-org exporters.
+if [ -f /etc/systemd/system/bk-metrics.service ]; then
+  systemctl disable bk-metrics.service || true
+  rm -f /etc/systemd/system/bk-metrics.service
+fi
+
+# Stage and rename; writing the destination directly fails with ETXTBSY.
+wget -q https://github.com/buildkite/buildkite-agent-metrics/releases/download/v5.5.0/buildkite-agent-metrics-linux-amd64 -O /tmp/buildkite-agent-metrics
+chmod +x /tmp/buildkite-agent-metrics
+mv -f /tmp/buildkite-agent-metrics /usr/local/bin/buildkite-agent-metrics
+
+install -d -m 0700 /etc/bk-metrics
+umask 077
+
+# One exporter per org. The token selects the org and metrics are namespaced
+# under the org slug, so the exporters never collide. EnvironmentFile keeps the
+# token out of instance metadata and out of the unit file.
+%{ for org, secret in token_secret_ids ~}
+# --secret takes a bare name, resolved against --project. Assert non-empty:
+# set -e does not catch a failure inside $( ).
+BK_TOKEN="$(gcloud secrets versions access latest --project='${split("/", secret)[1]}' --secret='${split("/", secret)[3]}')"
+[ -n "$BK_TOKEN" ] || { echo "empty token for org ${org}" >&2; exit 1; }
+printf 'BK_TOKEN=%s\n' "$BK_TOKEN" > /etc/bk-metrics/${org}.env
+
+cat << 'SERVICE_EOF' > /etc/systemd/system/bk-metrics-${org}.service
+[Unit]
+Description=Buildkite Agent Metrics Exporter (${org})
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/bk-metrics/${org}.env
+ExecStart=/usr/local/bin/buildkite-agent-metrics \
+  -backend stackdriver \
+  -stackdriver-projectid ${project_id} \
+  -token $${BK_TOKEN} \
+  -interval 15s
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+%{ endfor ~}
+
+systemctl daemon-reload
+%{ for org, secret in token_secret_ids ~}
+systemctl enable --now bk-metrics-${org}
+%{ endfor ~}

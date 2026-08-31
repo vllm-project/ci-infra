@@ -4,15 +4,53 @@
 # buildkite-agent-metrics binary to export queue/agent metrics.
 # =====================================================================
 # Provision the e2-micro compute instance for monitoring
+resource "google_service_account" "metrics_sa" {
+  account_id   = "ci-metrics-exporter-sa"
+  project      = var.project_id
+  display_name = "SA for the Buildkite agent-metrics exporter VM"
+}
+
+resource "google_project_iam_member" "metrics_sa_roles" {
+  for_each = toset([
+    "roles/monitoring.metricWriter",
+    "roles/logging.logWriter",
+  ])
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.metrics_sa.email}"
+}
+
+# The agent tokens live in a different project from the VM, so each grant is
+# made against the secret's own project.
+resource "google_secret_manager_secret_iam_member" "metrics_token_access" {
+  for_each = var.buildkite_token_secret_ids
+
+  project   = split("/", each.value)[1]
+  secret_id = split("/", each.value)[3]
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.metrics_sa.email}"
+}
+
 resource "google_compute_instance" "monitoring_instance" {
   provider     = google-beta
   project      = var.project_id
   name         = "vllm-ci-monitoring-cpu-0"
   machine_type = "e2-micro"
 
+  # Startup-script metadata is only re-read on boot, so exporter changes need
+  # a stop/start to take effect.
+  allow_stopping_for_update = true
+
   service_account {
+    email  = google_service_account.metrics_sa.email
     scopes = ["cloud-platform"]
   }
+
+  depends_on = [
+    google_secret_manager_secret_iam_member.metrics_token_access,
+    google_project_iam_member.metrics_sa_roles,
+  ]
 
   boot_disk {
     auto_delete = true
@@ -29,41 +67,11 @@ resource "google_compute_instance" "monitoring_instance" {
   }
 
   metadata = {
-    enable-oslogin   = "true"
-    "startup-script" = <<-EOF
-      #!/bin/bash
-      
-      # Step 1: Download the official buildkite-agent-metrics binary
-      wget -q https://github.com/buildkite/buildkite-agent-metrics/releases/download/v5.5.0/buildkite-agent-metrics-linux-amd64 -O /usr/local/bin/buildkite-agent-metrics
-      chmod +x /usr/local/bin/buildkite-agent-metrics
-
-      BK_TOKEN=$(gcloud secrets versions access latest --secret="${var.buildkite_token_secret_id}")
-
-      # Step 2: Configure Systemd background service
-      cat << 'SERVICE_EOF' > /etc/systemd/system/bk-metrics.service
-      [Unit]
-      Description=Buildkite Agent Metrics Exporter
-      After=network.target
-
-      [Service]
-      Type=simple
-      ExecStart=/usr/local/bin/buildkite-agent-metrics \
-        -backend stackdriver \
-        -stackdriver-projectid ${var.project_id} \
-        -token $${BK_TOKEN} \
-        -interval 15s
-      Restart=always
-      RestartSec=10
-
-      [Install]
-      WantedBy=multi-user.target
-      SERVICE_EOF
-
-      # Step 3: Enable and start the systemd service
-      systemctl daemon-reload
-      systemctl enable bk-metrics
-      systemctl start bk-metrics
-    EOF
+    enable-oslogin = "true"
+    "startup-script" = templatefile("${path.module}/startup.sh.tftpl", {
+      project_id       = var.project_id
+      token_secret_ids = var.buildkite_token_secret_ids
+    })
   }
 }
 
@@ -94,7 +102,8 @@ resource "google_bigquery_table" "step_logs" {
   {"name": "state", "type": "STRING", "mode": "NULLABLE"},
   {"name": "wait_duration_sec", "type": "FLOAT", "mode": "NULLABLE"},
   {"name": "run_duration_sec", "type": "FLOAT", "mode": "NULLABLE"},
-  {"name": "created_at", "type": "TIMESTAMP", "mode": "NULLABLE"}
+  {"name": "created_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+  {"name": "org_slug", "type": "STRING", "mode": "NULLABLE"}
 ]
 EOF
 }
@@ -127,12 +136,6 @@ resource "google_storage_bucket_object" "source_object" {
 # PART 4: SECURITY & PERMISSIONS (IAM)
 # =====================================================================
 
-data "google_secret_manager_secret_version" "webhook_secret_val" {
-  project = var.project_id
-  secret  = "vllm_buildkite_rest_api_token"
-  version = "latest"
-}
-
 resource "google_service_account" "function_sa" {
   account_id   = "ci-webhook-receiver-sa"
   project      = var.project_id
@@ -146,8 +149,10 @@ resource "google_project_iam_member" "bq_editor" {
 }
 
 resource "google_secret_manager_secret_iam_member" "secret_access" {
+  for_each = var.bq_puller_orgs
+
   project   = var.project_id
-  secret_id = data.google_secret_manager_secret_version.webhook_secret_val.secret
+  secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.function_sa.email}"
 }
@@ -162,6 +167,8 @@ resource "google_cloudfunctions2_function" "webhook_receiver" {
   location    = "us-central1"
   description = "Polls Buildkite API and stores events into BigQuery"
 
+  depends_on = [google_secret_manager_secret_iam_member.secret_access]
+
   build_config {
     runtime     = "python310"
     entry_point = "handle_webhook"
@@ -174,22 +181,36 @@ resource "google_cloudfunctions2_function" "webhook_receiver" {
   }
 
   service_config {
-    max_instance_count    = 3
-    available_memory      = "256M"
-    timeout_seconds       = 60
+    max_instance_count = 3
+    available_memory   = "256M"
+    # One request per org/pipeline pair, sequential, 30s each. Under the
+    # scheduler's 320s deadline.
+    timeout_seconds       = 240
     service_account_email = google_service_account.function_sa.email
 
     environment_variables = {
-      BQ_TABLE_ID   = "${var.project_id}.${google_bigquery_dataset.ci_analytics.dataset_id}.${google_bigquery_table.step_logs.table_id}"
-      PIPELINE_SLUG = var.pipeline_slug
-      ORG_SLUG      = var.org_slug
+      BQ_TABLE_ID    = "${var.project_id}.${google_bigquery_dataset.ci_analytics.dataset_id}.${google_bigquery_table.step_logs.table_id}"
+      PIPELINE_SLUGS = jsonencode(var.bq_puller_pipeline_slugs)
+
+      # Which orgs to poll, and the env var holding each one's token.
+      ORGS_JSON = jsonencode([
+        for org, secret in var.bq_puller_orgs : {
+          org       = org
+          token_env = "BK_TOKEN_${upper(replace(org, "-", "_"))}"
+        }
+      ])
     }
 
-    secret_environment_variables {
-      key        = "WEBHOOK_SECRET"
-      project_id = var.project_id
-      secret     = data.google_secret_manager_secret_version.webhook_secret_val.secret
-      version    = "latest"
+    dynamic "secret_environment_variables" {
+      for_each = var.bq_puller_orgs
+      iterator = org
+
+      content {
+        key        = "BK_TOKEN_${upper(replace(org.key, "-", "_"))}"
+        project_id = var.project_id
+        secret     = org.value
+        version    = "latest"
+      }
     }
   }
 }
