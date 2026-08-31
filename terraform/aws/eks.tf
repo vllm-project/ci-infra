@@ -93,12 +93,13 @@ module "eks" {
       ami_type       = "AL2023_x86_64_NVIDIA"
       instance_types = ["g6.12xlarge"]
       capacity_type  = "ON_DEMAND"
-      # 5 warm nodes at all times (fast job pickup, warm FSx clients), CA scales
-      # to 30 under load. Note: 5x g6.12xlarge on-demand 24/7 is a real standing
-      # cost (~$9.7k/mo) — revisit min_size once Phase 5 has wait-time data.
-      min_size     = 5
+      # 15 warm nodes at all times (fast job pickup, warm FSx clients, and holds
+      # g6.12xlarge capacity against frequent AWS InsufficientInstanceCapacity
+      # in us-west-2), CA scales to 30 under load. Note: 15x g6.12xlarge
+      # on-demand 24/7 is ~$29k/mo — revisit with utilization data.
+      min_size     = 15
       max_size     = 30
-      desired_size = 5
+      desired_size = 15
 
       labels = {
         "vllm.ci/gpu-pool"              = "l4x4"
