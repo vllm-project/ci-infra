@@ -1,4 +1,3 @@
-import base64
 import os
 import re
 import shlex
@@ -23,18 +22,6 @@ def _render_single_step(step):
             step.group: [step],
         }
     )[0]
-
-
-def _make_pytest_bin(tmp_path: Path) -> Path:
-    bin_dir = tmp_path / "pytest-bin"
-    bin_dir.mkdir()
-    pytest_executable = bin_dir / "pytest"
-    pytest_executable.write_text(
-        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m pytest "$@"\n',
-        encoding="utf-8",
-    )
-    pytest_executable.chmod(0o755)
-    return bin_dir
 
 
 def test_read_steps_from_job_dir():
@@ -246,24 +233,23 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
         setup_profile="none",
     )
 
-    assert "CI_INFRA_OTEL_DIR=$$(mktemp -d 2>/dev/null)" in commands[0]
-    assert commands[0].endswith("fi; :")
+    assert ".buildkite/scripts/ci-otel" in commands[0]
+    assert "base64 --decode" not in commands[0]
+    assert len(commands[0]) < 500
     assert '. "$$CI_INFRA_OTEL_DIR/ci_otel.sh"' in commands[0]
     assert "ci_otel_start 1 " in commands[2]
     assert "export VALUE=ready" in commands[2]
     assert "ci_otel_finish" in commands[2]
     assert "ci_otel_start 2 " in commands[4]
     assert 'test "$VALUE" = ready' in commands[4]
-    match = re.search(r"ci_otel_start 2 (\S+)", commands[4])
+    match = re.search(r'ci_otel_start 2 ("[^"]*"|\S+)', commands[4])
     assert match is not None
-    (encoded_label,) = match.groups()
-    assert base64.b64decode(encoded_label).decode() == "test VALUE = ready"
+    (quoted_label,) = match.groups()
+    assert shlex.split(quoted_label)[0] == "test VALUE = ready"
     assert "'" not in commands[4]
 
 
-def test_otel_trace_allows_exact_api_treatment_branch(
-    fake_global_config, monkeypatch
-):
+def test_otel_trace_allows_exact_api_treatment_branch(fake_global_config, monkeypatch):
     fake_global_config["branch"] = "khluu/otel"
     monkeypatch.setenv("BUILDKITE_SOURCE", "api")
     monkeypatch.setenv("CI_INFRA_OTEL_TREATMENT_BRANCH", "khluu/otel")
@@ -278,9 +264,82 @@ def test_otel_trace_allows_exact_api_treatment_branch(
     assert any("ci_otel_start" in command for command in commands)
 
 
-def test_otel_trace_rejects_non_api_treatment_branch(
-    fake_global_config, monkeypatch
-):
+def test_otel_trace_uses_ci_otel_run_for_simple_commands(fake_global_config):
+    fake_global_config["branch"] = "main"
+    step = Step(
+        label="Traced",
+        group="Tracing",
+        commands=["pytest tests", "export VALUE=ready", "python script.py"],
+    )
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    # Simple commands use ci_otel_run
+    assert "ci_otel_run 1 " in commands[2]
+    assert "pytest tests" in commands[2]
+    # Shell builtins use the explicit start/finish pair
+    assert "ci_otel_start 2 " in commands[4]
+    assert "export VALUE=ready" in commands[4]
+    assert "ci_otel_finish" in commands[4]
+    # Simple commands use ci_otel_run
+    assert "ci_otel_run 3 " in commands[6]
+    assert "python script.py" in commands[6]
+
+
+def test_otel_trace_keeps_assignment_prefixed_commands_in_shell(fake_global_config):
+    # Leading POSIX assignment words must run in the shell so the variables
+    # apply as the job author wrote them; env would scope them to the child.
+    fake_global_config["branch"] = "main"
+    step = Step(
+        label="Traced",
+        group="Tracing",
+        commands=[
+            "TP_SIZE=1 pytest tests/entrypoints",
+            "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed",
+        ],
+    )
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    for index, command_index in ((1, 2), (2, 4)):
+        command = commands[command_index]
+        assert f"ci_otel_start {index} " in command
+        assert "ci_otel_finish" in command
+        assert "ci_otel_run" not in command
+    assert "TP_SIZE=1 pytest tests/entrypoints" in commands[2]
+    assert "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed" in commands[4]
+
+
+def test_is_simple_command():
+    assert buildkite_step._is_simple_command("pytest tests")
+    assert buildkite_step._is_simple_command("python script.py")
+    assert buildkite_step._is_simple_command("docker build .")
+    assert not buildkite_step._is_simple_command("export FOO=bar")
+    assert not buildkite_step._is_simple_command("cd /tmp")
+    assert not buildkite_step._is_simple_command("source env.sh")
+    assert not buildkite_step._is_simple_command(". env.sh")
+    assert not buildkite_step._is_simple_command("pytest tests | grep pass")
+    assert not buildkite_step._is_simple_command("pytest tests > out.txt")
+    assert not buildkite_step._is_simple_command("pytest tests && echo done")
+    assert not buildkite_step._is_simple_command("echo $HOME")
+    assert not buildkite_step._is_simple_command("echo `date`")
+    # Leading POSIX assignment words (single and multiple) stay in the shell
+    assert not buildkite_step._is_simple_command("FOO=bar pytest tests")
+    assert not buildkite_step._is_simple_command("FOO=bar BAZ=qux pytest tests")
+    assert not buildkite_step._is_simple_command("FOO=bar")
+    # Assignments after the program name are plain arguments, not assignments
+    assert buildkite_step._is_simple_command("pytest tests FOO=bar")
+
+
+def test_otel_trace_rejects_non_api_treatment_branch(fake_global_config, monkeypatch):
     fake_global_config["branch"] = "khluu/otel"
     monkeypatch.setenv("BUILDKITE_SOURCE", "webhook")
     monkeypatch.setenv("CI_INFRA_OTEL_TREATMENT_BRANCH", "khluu/otel")
@@ -316,27 +375,38 @@ def test_otel_trace_preserves_generator_variable_injection(fake_global_config):
     assert "build registry.example.com vllm-ci $$BUILDKITE_COMMIT" in commands[2]
 
 
-def test_otel_helper_bundle_installs_and_sources():
+def test_otel_setup_has_no_unescaped_dollar_for_pipeline_interpolation():
+    # Buildkite interpolates $VAR / ${VAR} when uploading pipeline.yaml; a bare
+    # $@ or $? is a hard parse error that fails the whole pipeline upload.
+    # Every literal $ in the generated setup must be escaped as $$.
+    setup = buildkite_step._otel_setup_command()
+    stripped = setup.replace("$$", "")
+    assert not re.search(r"\$(?![A-Za-z_{])", stripped)
+
+
+def test_otel_setup_sources_repo_helpers(tmp_path):
+    helper = tmp_path / "ci_otel.sh"
+    helper.write_text(
+        "ci_otel_start() { return 11; }; ci_otel_finish() { return 12; }; :\n",
+        encoding="utf-8",
+    )
     command = buildkite_step._otel_setup_command().replace("$$", "$")
     result = subprocess.run(
         [
             "bash",
             "-c",
             command
-            + ' && test -f "$CI_INFRA_OTEL_DIR/ci_otel.py"'
-            + ' && test -f "$CI_INFRA_OTEL_DIR/ci_pytest.sh"'
-            + ' && test -f "$CI_INFRA_OTEL_DIR/ci_pytest_otel.py"'
-            + ' && test "$CI_INFRA_OTEL_READY" = 1'
             + ' && test "$PYTHONPATH" = original-pythonpath'
             + ' && test "$PYTEST_ADDOPTS" = original-pytest-options'
-            + " && type ci_otel_start"
-            + " && type ci_otel_finish",
+            + " && ci_otel_start; test $? = 11"
+            + " && ci_otel_finish; test $? = 12",
         ],
         check=False,
         capture_output=True,
         text=True,
         env={
             **os.environ,
+            "CI_INFRA_OTEL_DIR": str(tmp_path),
             "PYTHONPATH": "original-pythonpath",
             "PYTEST_ADDOPTS": "original-pytest-options",
         },
@@ -345,81 +415,45 @@ def test_otel_helper_bundle_installs_and_sources():
     assert result.returncode == 0, result.stderr
 
 
-def test_pytest_shim_traces_with_command_level_pythonpath_override(
-    fake_global_config, tmp_path
-):
-    fake_global_config["branch"] = "main"
-    test_file = tmp_path / "test_sample.py"
-    test_file.write_text("def test_sample():\n    assert True\n", encoding="utf-8")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    pytest_bin = _make_pytest_bin(tmp_path)
-    step = Step(
-        label="PYTHONPATH override",
-        group="Tracing",
-        commands=[
-            f"PYTHONPATH={shlex.quote(str(workspace))} "
-            f"pytest -q {shlex.quote(str(test_file))}"
-        ],
-    )
-    commands = buildkite_step._prepare_commands(
-        step,
-        variables_to_inject={},
-        setup_profile="none",
+def test_otel_setup_stays_fail_open_without_git_checkout(tmp_path):
+    # When CI_INFRA_OTEL_DIR is unset and the working directory is not a git
+    # checkout (no .git baked into the image), the setup command must still
+    # succeed under `sh -e` so the job runs untraced instead of failing.
+    command = buildkite_step._otel_setup_command().replace("$$", "$")
+    env = {
+        key: value for key, value in os.environ.items() if key != "CI_INFRA_OTEL_DIR"
+    }
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", command + "\necho setup-survived"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=env,
     )
 
-    script = (
-        "\n".join(commands).replace("$$", "$")
-        + '\ngrep -q \'"name":"pytest.test"\' '
-        + '"$CI_INFRA_OTEL_SPOOL_DIR"/spans-*.jsonl'
-    )
+    assert result.returncode == 0, result.stderr
+    assert "setup-survived" in result.stdout
+    assert "tracing setup skipped" in result.stderr
+
+
+def test_noop_ci_otel_run_handles_assignment_prefixed_commands(tmp_path):
+    # With the helper directory missing, the generated setup leaves the no-op
+    # ci_otel_run in place. It must route through env so assignment-prefixed
+    # commands (FOO=bar cmd) do not try to execute the assignment as a program.
+    command = buildkite_step._otel_setup_command().replace("$$", "$")
+    script = command + "\nci_otel_run 1 label FOO=bar env"
     result = subprocess.run(
         ["/bin/sh", "-e", "-c", script],
         check=False,
         capture_output=True,
         text=True,
-        env={
-            **os.environ,
-            "PATH": f"{pytest_bin}:{os.environ['PATH']}",
-            "PYTEST_ADDOPTS": "",
-        },
+        env={**os.environ, "CI_INFRA_OTEL_DIR": str(tmp_path / "missing")},
     )
 
     assert result.returncode == 0, result.stderr
-    assert "1 passed" in result.stdout
-    assert "No module named 'ci_pytest_otel'" not in result.stderr
-
-
-def test_pytest_shim_falls_back_when_plugin_disappears(tmp_path):
-    test_file = tmp_path / "test_sample.py"
-    test_file.write_text("def test_sample():\n    assert True\n", encoding="utf-8")
-    pytest_bin = _make_pytest_bin(tmp_path)
-    missing_helpers = tmp_path / "missing-helpers"
-    missing_helpers.mkdir()
-    command = buildkite_step._otel_setup_command().replace("$$", "$")
-    shell = (
-        command
-        + "\nci_otel_start 1 dGVzdA=="
-        + f"\nCI_INFRA_OTEL_DIR={shlex.quote(str(missing_helpers))}"
-        + "\nexport CI_INFRA_OTEL_DIR"
-        + f"\npytest -q {shlex.quote(str(test_file))}"
-    )
-
-    result = subprocess.run(
-        ["/bin/sh", "-e", "-c", shell],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={
-            **os.environ,
-            "PATH": f"{pytest_bin}:{os.environ['PATH']}",
-            "PYTEST_ADDOPTS": "",
-        },
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert "1 passed" in result.stdout
-    assert "pytest tracing skipped; running pytest normally" in result.stderr
+    assert "FOO=bar" in result.stdout.splitlines()
+    assert "tracing setup skipped" in result.stderr
 
 
 def test_otel_setup_failure_is_soft_and_direct_command_runs(
@@ -437,47 +471,7 @@ def test_otel_setup_failure_is_soft_and_direct_command_runs(
         variables_to_inject={},
         setup_profile="none",
     )
-    script = "mktemp() { return 1; };\n" + "\n".join(commands).replace("$$", "$")
-
-    result = subprocess.run(
-        ["/bin/sh", "-e", "-c", script],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "OUTPUT_FILE": str(output)},
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8") == "ran"
-    assert "tracing setup skipped" in result.stderr
-
-
-def test_otel_import_failure_leaves_test_environment_untouched(
-    fake_global_config, tmp_path
-):
-    fake_global_config["branch"] = "main"
-    output = tmp_path / "command-ran"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_python = fake_bin / "python3"
-    fake_python.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-    fake_python.chmod(0o755)
-    step = Step(
-        label="Traced",
-        group="Tracing",
-        commands=['printf ran > "$OUTPUT_FILE"'],
-    )
-    commands = buildkite_step._prepare_commands(
-        step,
-        variables_to_inject={},
-        setup_profile="none",
-    )
-    script = (
-        "\n".join(commands).replace("$$", "$")
-        + '\ntest "$CI_INFRA_OTEL_READY" = 0'
-        + '\ntest "$PYTHONPATH" = original-pythonpath'
-        + '\ntest "$PYTEST_ADDOPTS" = original-pytest-options'
-    )
+    script = "\n".join(commands).replace("$$", "$")
 
     result = subprocess.run(
         ["/bin/sh", "-e", "-c", script],
@@ -486,16 +480,14 @@ def test_otel_import_failure_leaves_test_environment_untouched(
         text=True,
         env={
             **os.environ,
+            "CI_INFRA_OTEL_DIR": str(tmp_path / "missing"),
             "OUTPUT_FILE": str(output),
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "PYTHONPATH": "original-pythonpath",
-            "PYTEST_ADDOPTS": "original-pytest-options",
         },
     )
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8") == "ran"
-    assert "tracing disabled" in result.stderr
+    assert "tracing setup skipped" in result.stderr
 
 
 def test_otel_does_not_change_errexit_behavior(fake_global_config, tmp_path):
@@ -518,30 +510,15 @@ def test_otel_does_not_change_errexit_behavior(fake_global_config, tmp_path):
         check=False,
         capture_output=True,
         text=True,
-        env={**os.environ, "OUTPUT_FILE": str(output)},
+        env={
+            **os.environ,
+            "CI_INFRA_OTEL_DIR": str(tmp_path / "missing"),
+            "OUTPUT_FILE": str(output),
+        },
     )
 
     assert result.returncode == 1
     assert not output.exists()
-
-
-def test_otel_helper_bundle_runs_under_posix_shell():
-    command = buildkite_step._otel_setup_command().replace("$$", "$")
-    result = subprocess.run(
-        [
-            "/bin/sh",
-            "-c",
-            command
-            + " && ci_otel_start 1 dHJ1ZQ=="
-            + " && true && ci_otel_finish 0"
-            + ' && test -n "$(find "$CI_INFRA_OTEL_SPOOL_DIR" -name spans-\\*.jsonl -size +0c -print -quit)"',
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
 
 
 def test_otel_trace_is_disabled_for_amd_mirror(fake_global_config):
