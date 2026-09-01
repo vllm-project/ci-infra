@@ -290,11 +290,38 @@ def test_otel_trace_uses_ci_otel_run_for_simple_commands(fake_global_config):
     assert "python script.py" in commands[6]
 
 
+def test_otel_trace_keeps_assignment_prefixed_commands_in_shell(fake_global_config):
+    # Leading POSIX assignment words must run in the shell so the variables
+    # apply as the job author wrote them; env would scope them to the child.
+    fake_global_config["branch"] = "main"
+    step = Step(
+        label="Traced",
+        group="Tracing",
+        commands=[
+            "TP_SIZE=1 pytest tests/entrypoints",
+            "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed",
+        ],
+    )
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    for index, command_index in ((1, 2), (2, 4)):
+        command = commands[command_index]
+        assert f"ci_otel_start {index} " in command
+        assert "ci_otel_finish" in command
+        assert "ci_otel_run" not in command
+    assert "TP_SIZE=1 pytest tests/entrypoints" in commands[2]
+    assert "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed" in commands[4]
+
+
 def test_is_simple_command():
     assert buildkite_step._is_simple_command("pytest tests")
     assert buildkite_step._is_simple_command("python script.py")
     assert buildkite_step._is_simple_command("docker build .")
-    assert buildkite_step._is_simple_command("PYTHONPATH=/vllm-workspace pytest tests")
     assert not buildkite_step._is_simple_command("export FOO=bar")
     assert not buildkite_step._is_simple_command("cd /tmp")
     assert not buildkite_step._is_simple_command("source env.sh")
@@ -304,6 +331,12 @@ def test_is_simple_command():
     assert not buildkite_step._is_simple_command("pytest tests && echo done")
     assert not buildkite_step._is_simple_command("echo $HOME")
     assert not buildkite_step._is_simple_command("echo `date`")
+    # Leading POSIX assignment words (single and multiple) stay in the shell
+    assert not buildkite_step._is_simple_command("FOO=bar pytest tests")
+    assert not buildkite_step._is_simple_command("FOO=bar BAZ=qux pytest tests")
+    assert not buildkite_step._is_simple_command("FOO=bar")
+    # Assignments after the program name are plain arguments, not assignments
+    assert buildkite_step._is_simple_command("pytest tests FOO=bar")
 
 
 def test_otel_trace_rejects_non_api_treatment_branch(fake_global_config, monkeypatch):

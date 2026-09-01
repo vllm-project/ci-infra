@@ -57,18 +57,25 @@ _SHELL_STATE_BUILTINS = frozenset(
     {"export", "cd", "source", ".", "set", "unset", "alias", "umask", "eval", "exec"}
 )
 _SHELL_METACHARS = frozenset("|&;<>`(){}[]$\\")
+_POSIX_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def _is_simple_command(cmd: str) -> bool:
     """Return True if cmd is safe to wrap with ci_otel_run.
 
-    ci_otel_run uses "env $@" which works for external commands and
-    assignment-prefixed commands (VAR=value cmd) but not for shell builtins
-    that modify state (export, cd, etc.) or commands with shell metacharacters
-    (pipes, redirects, etc.).
+    ci_otel_run execs its arguments via env, which works for plain external
+    commands but not for shell builtins that modify state (export, cd, etc.),
+    commands with shell metacharacters (pipes, redirects, etc.), or commands
+    with leading POSIX assignment words (VAR=value cmd) — env would apply the
+    assignments only to its own child instead of the invoking shell, and a
+    bare assignment like `FOO=bar` would silently become a no-op.
     """
-    first_word = cmd.split(None, 1)[0] if cmd.strip() else ""
-    if first_word in _SHELL_STATE_BUILTINS:
+    words = cmd.split()
+    if not words:
+        return False
+    if any(_POSIX_ASSIGNMENT.match(word) for word in words[:1]):
+        return False
+    if words[0] in _SHELL_STATE_BUILTINS:
         return False
     return not any(char in _SHELL_METACHARS for char in cmd)
 
