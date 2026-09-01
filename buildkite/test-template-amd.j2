@@ -315,7 +315,6 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           {% endif %}
         {% endif %}
         priority: 100
-        soft_fail: true
         {% if step.parallelism %}
         parallelism: {{ step.parallelism }}
         {% endif %}
