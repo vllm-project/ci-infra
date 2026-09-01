@@ -85,7 +85,7 @@ def _otel_setup_command() -> str:
     # No-ops keep every generated wrapper safe when setup is unavailable.
     return (
         "ci_otel_start() { :; }; ci_otel_finish() { :; }; "
-        'ci_otel_run() { shift 2; env "$@"; return $$?; }; '
+        'ci_otel_run() { shift 2; env "$$@"; return $$?; }; '
         'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
         # `|| :` keeps the assignment itself successful under `sh -e` when the
         # checkout has no .git; the missing-helper path below stays fail-open.

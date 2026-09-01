@@ -375,6 +375,15 @@ def test_otel_trace_preserves_generator_variable_injection(fake_global_config):
     assert "build registry.example.com vllm-ci $$BUILDKITE_COMMIT" in commands[2]
 
 
+def test_otel_setup_has_no_unescaped_dollar_for_pipeline_interpolation():
+    # Buildkite interpolates $VAR / ${VAR} when uploading pipeline.yaml; a bare
+    # $@ or $? is a hard parse error that fails the whole pipeline upload.
+    # Every literal $ in the generated setup must be escaped as $$.
+    setup = buildkite_step._otel_setup_command()
+    stripped = setup.replace("$$", "")
+    assert not re.search(r"\$(?![A-Za-z_{])", stripped)
+
+
 def test_otel_setup_sources_repo_helpers(tmp_path):
     helper = tmp_path / "ci_otel.sh"
     helper.write_text(
