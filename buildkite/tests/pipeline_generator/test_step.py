@@ -395,6 +395,25 @@ def test_otel_setup_stays_fail_open_without_git_checkout(tmp_path):
     assert "tracing setup skipped" in result.stderr
 
 
+def test_noop_ci_otel_run_handles_assignment_prefixed_commands(tmp_path):
+    # With the helper directory missing, the generated setup leaves the no-op
+    # ci_otel_run in place. It must route through env so assignment-prefixed
+    # commands (FOO=bar cmd) do not try to execute the assignment as a program.
+    command = buildkite_step._otel_setup_command().replace("$$", "$")
+    script = command + "\nci_otel_run 1 label FOO=bar env"
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CI_INFRA_OTEL_DIR": str(tmp_path / "missing")},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "FOO=bar" in result.stdout.splitlines()
+    assert "tracing setup skipped" in result.stderr
+
+
 def test_otel_setup_failure_is_soft_and_direct_command_runs(
     fake_global_config, tmp_path
 ):
