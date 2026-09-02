@@ -199,7 +199,7 @@ def _get_step_agents(step: Step) -> Dict[str, str]:
         agents.update(
             {key: value for key, value in step.agent_tags.items() if key != "queue"}
         )
-    elif step.device is DeviceType.INTEL_CPU and not step.agent_tags:
+    elif step.device == DeviceType.INTEL_CPU and not step.agent_tags:
         agents.update({"label": "functional"})
     return agents
 
