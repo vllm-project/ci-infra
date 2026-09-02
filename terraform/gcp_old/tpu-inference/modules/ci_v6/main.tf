@@ -121,8 +121,11 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="vllm-tpu-${count.index}"/' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=tpu_v6e_queue"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
-      echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
+      # tee echoes to stdout, which the startup script sends to the serial
+      # console, where anyone with compute.instances.getSerialPortOutput can
+      # read it. Secrets go to the file only.
+      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment > /dev/null
+      echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment > /dev/null
 
       sudo mkdir -p /mnt/disks/persist
 

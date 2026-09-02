@@ -161,7 +161,10 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       sudo sed -i '/^tags=/d' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=cpu"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i '/^HF_TOKEN=/d' /etc/environment
-      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
+      # tee echoes to stdout, which the startup script sends to the serial
+      # console, where anyone with compute.instances.getSerialPortOutput can
+      # read it. Secrets go to the file only.
+      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment > /dev/null
 
       ${file("${path.module}/../shared/keep-agent-connected.sh")}
 

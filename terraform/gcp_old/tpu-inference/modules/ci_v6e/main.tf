@@ -156,8 +156,11 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo "HOST_NAME=$HOST_NAME_VAL" | sudo tee -a /etc/environment
       sudo sed -i "s/name=\"%hostname-%spawn\"/name=\"$HOST_NAME_VAL\"/" /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
-      echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
+      # tee echoes to stdout, which the startup script sends to the serial
+      # console, where anyone with compute.instances.getSerialPortOutput can
+      # read it. Secrets go to the file only.
+      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment > /dev/null
+      echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment > /dev/null
       echo 'TPU_VERSION=tpu6e' | sudo tee -a /etc/environment
 
       # Also provide HF_TOKEN and BUILDKITE_ANALYTICS_TOKEN through the agent's
