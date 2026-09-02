@@ -143,6 +143,12 @@ These files guide an agent but do not install timers or send scheduled alerts:
   daily CI runs.
 - [`pytorch-bump-triage.md`](pytorch-bump-triage.md): distinguish PyTorch or
   Triton bump regressions from failures already present on main.
+- [`../terraform/gcp_old/tpu-inference/skills/agent-health/`](../terraform/gcp_old/tpu-inference/skills/agent-health/):
+  find degraded agents in the `tpu-commons` cluster (disk full, silently
+  wedged) and recreate their VMs. It lives next to the Terraform it acts on
+  rather than here, so `terraform state pull` and `rolling_restart.py` resolve
+  relative to it. Driven by `/loop`, not a timer; see its
+  [`references/loop-prompt.md`](../terraform/gcp_old/tpu-inference/skills/agent-health/references/loop-prompt.md).
 
 ## Validate changes
 

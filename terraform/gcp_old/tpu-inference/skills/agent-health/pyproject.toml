@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tpu-inference-agent-health"
+version = "0.1.0"
+description = "Detect degraded Buildkite agents in the tpu-commons cluster and recreate their VMs"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+agent-health = "agent_health:main"
+
+[dependency-groups]
+dev = [
+  "pytest==9.0.2",
+  "ruff==0.15.8",
+]
+
+[tool.setuptools]
+py-modules = ["agent_health"]
+package-dir = {"" = "scripts"}
+
+[tool.pytest.ini_options]
+pythonpath = ["scripts"]
+testpaths = ["scripts"]
