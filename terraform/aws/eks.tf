@@ -95,10 +95,10 @@ module "eks" {
       capacity_type  = "ON_DEMAND"
       # 20 warm nodes at all times (fast job pickup, warm FSx clients, and holds
       # g6.12xlarge capacity against frequent AWS InsufficientInstanceCapacity
-      # in us-west-2), CA scales to 30 under load. Note: 20x g6.12xlarge
+      # in us-west-2), CA scales to 50 under load. Note: 20x g6.12xlarge
       # on-demand 24/7 is ~$39k/mo — revisit with utilization data.
       min_size     = 20
-      max_size     = 30
+      max_size     = 50
       desired_size = 20
 
       labels = {
