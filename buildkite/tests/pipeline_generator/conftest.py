@@ -7,6 +7,10 @@ import step as step_module
 @pytest.fixture
 def fake_global_config(monkeypatch):
     monkeypatch.delenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, raising=False)
+    # AMD GPU tests are disabled by default; existing tests exercise the AMD
+    # step generation path, so opt back in. Tests for the kill switch itself
+    # override this.
+    monkeypatch.setenv(buildkite_step.ENABLE_AMD_TESTS_ENV_VAR, "1")
     config = {
         "name": "vllm_ci",
         "github_repo_name": "vllm-project/vllm",

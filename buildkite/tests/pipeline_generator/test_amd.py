@@ -603,3 +603,78 @@ def test_amd_mirror_label_override(fake_global_config, amd_label, expected_amd_l
     # never affected either way.
     assert amd_command_step.label == expected_amd_label
     assert default_command_step.label == "Mirrored label test"
+
+
+def _amd_disabled_test_steps():
+    direct_step = Step(
+        label="AMD direct test",
+        group="Direct AMD",
+        key="amd-direct-disabled",
+        depends_on=["image-build"],
+        device="mi300_4",
+        optional=True,
+        commands=["pytest tests/foo.py"],
+    )
+    mirrored_step = Step(
+        label="Mirrored test",
+        group="Mirrors",
+        key="mirrored-disabled",
+        depends_on=["image-build"],
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        mirror={
+            "amd": {
+                "device": "mi325_1",
+                "depends_on": ["image-build-amd"],
+            }
+        },
+    )
+    return direct_step, mirrored_step
+
+
+def test_amd_tests_disabled_by_default(monkeypatch, fake_global_config):
+    monkeypatch.delenv(buildkite_step.ENABLE_AMD_TESTS_ENV_VAR, raising=False)
+    fake_global_config["list_file_diff"] = ["vllm/foo.py"]
+    direct_step, mirrored_step = _amd_disabled_test_steps()
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            direct_step.group: [direct_step],
+            mirrored_step.group: [mirrored_step],
+        }
+    )
+
+    # The AMD direct step and the AMD mirror are dropped entirely, while the
+    # non-AMD mirrored step still renders.
+    assert all(group.group != "Hardware-AMD Tests" for group in group_steps)
+    command_steps = [
+        command_step
+        for group_step in group_steps
+        for command_step in group_step.steps
+        if isinstance(command_step, buildkite_step.BuildkiteCommandStep)
+    ]
+    assert [step.label for step in command_steps] == ["Mirrored test"]
+
+
+def test_enable_amd_tests_env_var_restores_amd_steps(monkeypatch, fake_global_config):
+    monkeypatch.setenv(buildkite_step.ENABLE_AMD_TESTS_ENV_VAR, "1")
+    fake_global_config["list_file_diff"] = ["vllm/foo.py"]
+    direct_step, mirrored_step = _amd_disabled_test_steps()
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            direct_step.group: [direct_step],
+            mirrored_step.group: [mirrored_step],
+        }
+    )
+
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+    amd_command_steps = [
+        step
+        for step in amd_group.steps
+        if isinstance(step, buildkite_step.BuildkiteCommandStep)
+    ]
+    assert len(amd_command_steps) == 2
