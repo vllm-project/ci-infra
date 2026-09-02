@@ -195,10 +195,12 @@ def add_precommit_dependency(
 
 def _get_step_agents(step: Step) -> Dict[str, str]:
     agents = {"queue": get_agent_queue(step)}
-    if step.device == DeviceType.INTEL_GPU and step.agent_tags:
+    if step.device in [DeviceType.INTEL_GPU, DeviceType.INTEL_CPU] and step.agent_tags:
         agents.update(
             {key: value for key, value in step.agent_tags.items() if key != "queue"}
         )
+    elif step.device is DeviceType.INTEL_CPU and not step.agent_tags:
+        agents.update({"label": "functional"})
     return agents
 
 
