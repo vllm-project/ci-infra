@@ -15,8 +15,13 @@ locals {
   is_multi_host  = local.tpu_core_size > 8
 
   has_attached_disk = var.disk_size > 0
-  # Use "ci-bk" for multi-host to avoid naming conflicts with existing v7x TPU resources
-  ci_tmp = local.is_multi_host ? "ci-bk" : "ci"
+
+  # The one place this name is spelled out. The TPU VM, its label, its disk, and
+  # the Buildkite agent inside it all derive from here, so an agent in the
+  # Buildkite UI always maps onto a `gcloud compute tpus` entry.
+  node_names = [for i in range(var.instance_count) :
+    "${var.accelerator_type}-ci-${i}-${var.project_short_name}-${data.google_client_config.config.zone}"
+  ]
 }
 
 # Generate a SSH key pair for internal multi-host communication
@@ -29,7 +34,7 @@ resource "tls_private_key" "internal_ssh_key" {
 resource "google_compute_disk" "tpu_disk" {
   provider = google-beta
   count    = local.has_attached_disk ? var.instance_count : 0
-  name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}-disk"
+  name     = "${local.node_names[count.index]}-disk"
   size     = var.disk_size
   type     = "hyperdisk-balanced"
 }
@@ -38,12 +43,12 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
   provider = google-beta
   count    = var.instance_count
 
-  name             = "${var.accelerator_type}-${local.ci_tmp}-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+  name             = local.node_names[count.index]
   runtime_version  = "v2-alpha-tpu7-ubuntu2404"
   accelerator_type = var.accelerator_type
 
   labels = {
-    vm_name = "${var.accelerator_type}-${local.ci_tmp}-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+    vm_name = local.node_names[count.index]
   }
 
   dynamic "scheduling_config" {
@@ -74,14 +79,12 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       buildkite_queue_name            = var.buildkite_queue_name
       github_app_secret_name          = var.github_app_secret_name
       is_multi_host                   = local.is_multi_host
-      accelerator_type                = var.accelerator_type
-      project_short_name              = var.project_short_name
-      instance_index                  = count.index
-      zone                            = data.google_client_config.config.zone
+      host_name                       = local.node_names[count.index]
       private_key_pem                 = local.is_multi_host ? tls_private_key.internal_ssh_key[count.index].private_key_pem : ""
       public_key_openssh              = local.is_multi_host ? tls_private_key.internal_ssh_key[count.index].public_key_openssh : ""
       has_attached_disk               = local.has_attached_disk
       disk_size_bytes                 = var.disk_size * 1073741824
+      keep_agent_connected            = file("${path.module}/../shared/keep-agent-connected.sh")
     })
   }
 }

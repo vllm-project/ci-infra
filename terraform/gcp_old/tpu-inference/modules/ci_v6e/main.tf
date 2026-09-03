@@ -5,10 +5,23 @@ data "google_client_config" "config" {
   provider = google-beta
 }
 
+locals {
+  # The one place this name is spelled out. The TPU VM, its label, its disk, and
+  # the Buildkite agent inside it all derive from here, so an agent in the
+  # Buildkite UI always maps onto a `gcloud compute tpus` entry. An empty
+  # purpose reproduces the original name, so adding this knob does not rename
+  # -- and so does not recreate -- an existing fleet.
+  node_names = [for i in range(var.instance_count) :
+    var.purpose == "" ?
+    "${var.accelerator_type}-ci-${i}-${var.project_short_name}-${data.google_client_config.config.zone}" :
+    "${var.accelerator_type}-ci-${var.purpose}-${i}-${var.project_short_name}-${data.google_client_config.config.zone}"
+  ]
+}
+
 resource "google_compute_disk" "tpu_disk" {
   provider = google-beta
   count    = var.instance_count
-  name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}-disk"
+  name     = "${local.node_names[count.index]}-disk"
   size     = var.disk_size
   type     = "hyperdisk-balanced"
 }
@@ -16,13 +29,13 @@ resource "google_compute_disk" "tpu_disk" {
 resource "google_tpu_v2_vm" "tpu_v6_ci" {
   provider = google-beta
   count    = var.instance_count
-  name     = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+  name     = local.node_names[count.index]
 
   runtime_version  = "v2-alpha-tpuv6e"
   accelerator_type = var.accelerator_type
 
   labels = {
-    vm_name = "${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+    vm_name = local.node_names[count.index]
   }
 
   dynamic "scheduling_config" {
@@ -46,6 +59,18 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
     "startup-script" = <<-STARTUP_SCRIPT
       #!/bin/bash
 
+      # Keep the agent offline until provisioning finishes (unmasked at the
+      # end). This script re-runs on every boot and the unit is enabled from
+      # the previous run, so systemd starts the agent seconds into boot. A
+      # `stop` is not enough: it waits for an in-flight job rather than
+      # preventing it, and the agent's postinst restarts the unit on upgrade.
+      # Masking blocks both.
+      systemctl mask buildkite-agent 2>/dev/null || true
+      # Any job picked up since boot is running against a half-provisioned host.
+      timeout 30 systemctl stop buildkite-agent 2>/dev/null \
+        || systemctl kill -s SIGKILL buildkite-agent 2>/dev/null \
+        || true
+
       apt-get update
       apt-get install -y curl build-essential jq git python3 python3-pip
 
@@ -58,9 +83,6 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
       apt-get update
       apt-get install -y buildkite-agent
-     
-      # Force stop the buildkite-agent and start at the end to avoid race condition
-      sudo systemctl stop buildkite-agent
 
       # ==========================================
       # Setup In-Memory GitHub App Authentication
@@ -125,9 +147,11 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
       sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
-      sudo sed -i "s/xxx/${var.buildkite_token_value}/g" /etc/buildkite-agent/buildkite-agent.cfg
+      # This script re-runs on every boot, so match the whole line rather than
+      # the pristine "xxx" placeholder, which is gone after the first boot.
+      sudo sed -i -E 's|^token=.*|token="${var.buildkite_token_value}"|' /etc/buildkite-agent/buildkite-agent.cfg
       
-      HOST_NAME_VAL="${var.accelerator_type}-ci-${count.index}-${var.project_short_name}-${data.google_client_config.config.zone}"
+      HOST_NAME_VAL="${local.node_names[count.index]}"
       # Set the system-wide environment variable, avoid using the default HOSTNAME because it's too vague to be useful. For example, t1v-n-01667781-w-0
       echo "HOST_NAME=$HOST_NAME_VAL" | sudo tee -a /etc/environment
       sudo sed -i "s/name=\"%hostname-%spawn\"/name=\"$HOST_NAME_VAL\"/" /etc/buildkite-agent/buildkite-agent.cfg
@@ -158,6 +182,11 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
 
       # Add to /etc/fstab using UUID
       disk_uuid=$(blkid -s UUID -o value /dev/nvme0n2)
+      # An empty UUID= produces an fstab line that can never mount.
+      if [ -z "$disk_uuid" ]; then
+        echo "FATAL: no UUID on /dev/nvme0n2; leaving the agent masked." >&2
+        exit 1
+      fi
       if ! grep -q "/mnt/disks/persist" /etc/fstab; then
        echo "UUID=$disk_uuid /mnt/disks/persist ext4 defaults,discard 0 2" | sudo tee -a /etc/fstab
       fi
@@ -166,6 +195,22 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       if ! mountpoint -q /mnt/disks/persist; then
         sudo mount /mnt/disks/persist
       fi
+
+      # CI jobs bind-mount /mnt/disks/persist unconditionally, so without it
+      # this host would just drain the queue into failures. Bail, agent masked.
+      if ! mountpoint -q /mnt/disks/persist; then
+        echo "FATAL: /mnt/disks/persist is not mounted; leaving the agent masked." >&2
+        exit 1
+      fi
+
+      # Backstop for the mask: hold the agent until the disk is mounted,
+      # however it comes to be started.
+      sudo mkdir -p /etc/systemd/system/buildkite-agent.service.d
+      cat <<'DROPIN' | sudo tee /etc/systemd/system/buildkite-agent.service.d/10-persist-disk.conf > /dev/null
+      [Unit]
+      RequiresMountsFor=/mnt/disks/persist
+      DROPIN
+      sudo systemctl daemon-reload
 
       jq ". + {\"data-root\": \"/mnt/disks/persist\"}" /etc/docker/daemon.json > /tmp/daemon.json.tmp && mv /tmp/daemon.json.tmp /etc/docker/daemon.json
       systemctl stop docker
@@ -207,6 +252,9 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       # Force rotate once
       sudo logrotate -f /etc/logrotate.conf
 
+      ${file("${path.module}/../shared/keep-agent-connected.sh")}
+
+      systemctl unmask buildkite-agent
       systemctl enable buildkite-agent
       systemctl start buildkite-agent
     STARTUP_SCRIPT

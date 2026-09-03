@@ -18,48 +18,6 @@ data "google_secret_manager_secret_version" "huggingface_token" {
   version = "latest"
 }
 
-data "google_secret_manager_secret_version" "buildkite_analytics_token_ci_cluster" {
-  secret  = "projects/${var.project_id}/secrets/tpu_commons_buildkite_analytics_token"
-  version = "latest"
-}
-
-
-module "ci_v6e_1" {
-  source = "../modules/ci_v6e"
-  providers = {
-    google-beta = google-beta.us-east5-a
-  }
-
-  accelerator_type                = "v6e-1"
-  reserved                        = true
-  instance_count                  = 30
-  disk_size                       = 1024
-  buildkite_queue_name            = "tpu_v6e_queue"
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
-}
-
-module "ci_v6e_8" {
-  source = "../modules/ci_v6e"
-  providers = {
-    google-beta = google-beta.southamerica-west1-a
-  }
-
-  accelerator_type                = "v6e-8"
-  reserved                        = true
-  instance_count                  = 9
-  disk_size                       = 4096
-  buildkite_queue_name            = "tpu_v6e_8_queue"
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
-}
-
 module "ci_cpu" {
   source = "../modules/ci_cpu"
   providers = {

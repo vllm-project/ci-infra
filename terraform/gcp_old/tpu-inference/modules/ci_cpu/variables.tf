@@ -16,6 +16,19 @@ variable "huggingface_token_value" {
   type        = string
   description = "Hugging Face token for vLLM model serving usage."
 }
+
+variable "purpose" {
+  type        = string
+  description = <<-DESC
+    What this fleet is for, e.g. "vllm" for the fleet registered against the
+    vllm Buildkite org. When set, every name this module creates -- the VM, its
+    boot disk, the static address, and the Buildkite agent -- becomes
+    vllm-ci-cpu-<purpose>-<zone>-<index>. The zone is read from the provider, so
+    it is never passed in. Empty keeps the original unsuffixed names.
+  DESC
+  default     = ""
+}
+
 variable "github_app_secret_name" {
   type        = string
   description = "The Buildkite secret name for the GitHub App PEM key."

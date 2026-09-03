@@ -1,6 +1,7 @@
 # modules/ci_monitoring/src/main.py
 
 import os
+import json
 import datetime
 import requests
 import functions_framework
@@ -9,59 +10,93 @@ from google.cloud import bigquery
 # Global clients
 client = bigquery.Client()
 TABLE_ID = os.environ.get("BQ_TABLE_ID")
-BK_API_TOKEN = os.environ.get("WEBHOOK_SECRET") 
-ORG_SLUG = os.environ.get("ORG_SLUG")
-PIPELINE_SLUG = os.environ.get("PIPELINE_SLUG")
+
+# Every pipeline is polled in every org; a pipeline absent from an org 404s.
+PIPELINE_SLUGS = json.loads(os.environ.get("PIPELINE_SLUGS", "[]"))
+
+# [{"org": ..., "token_env": ...}]. A Buildkite token is scoped to one org, so
+# each names the env var holding its own, injected by Terraform.
+ORGS = json.loads(os.environ.get("ORGS_JSON", "[]"))
 
 @functions_framework.http
 def handle_webhook(request):
     """
-    Triggered by Cloud Scheduler to poll a SPECIFIC Buildkite pipeline.
+    Triggered by Cloud Scheduler to poll every configured Buildkite pipeline in
+    every configured org.
     """
     # Define time window: look back 15 mins to ensure no gaps with 10-min cron
     now = datetime.datetime.now(datetime.timezone.utc)
     finished_from = (now - datetime.timedelta(minutes=15)).isoformat()
 
-    headers = {"Authorization": f"Bearer {BK_API_TOKEN}"}
-    
-    # Updated URL to filter by single pipeline
-    url = f"https://api.buildkite.com/v2/organizations/{ORG_SLUG}/pipelines/{PIPELINE_SLUG}/builds"
-    params = {
-        "finished_from": finished_from,
-        "state": "finished"
-    }
+    # (row_id, row) pairs; the id is what BigQuery dedups on.
+    pairs = []
+    failures = []
 
-    response = requests.get(url, headers=headers, params=params)
-    if response.status_code != 200:
-        print(f"Failed to fetch from Buildkite: {response.text}")
-        return "Error", 500
+    for entry in ORGS:
+        org = entry["org"]
+        token = os.environ.get(entry["token_env"])
+        if not token:
+            failures.append(f"{org}: {entry['token_env']} is unset")
+            continue
 
-    builds = response.json()
-    rows_to_insert = []
+        for pipeline in PIPELINE_SLUGS:
+            try:
+                pairs.extend(fetch_rows(org, token, pipeline, finished_from))
+            except requests.RequestException as e:
+                # Keep going so one bad target cannot drop the others; the
+                # lookback re-covers this window next run.
+                failures.append(f"{org}/{pipeline}: {e}")
 
-    for build in builds:
-        # 1. Capture E2E Summary
-        rows_to_insert.append(construct_bq_row(build, "E2E_SUMMARY", build))
-        
-        # 2. Capture Individual Steps
-        for job in build.get("jobs", []):
-            if job.get("type") == "script" and job.get("finished_at"):
-                rows_to_insert.append(construct_bq_row(build, job.get("name"), job))
+    rows_to_insert = [row for _, row in pairs]
 
     if rows_to_insert:
-        # Generate Deterministic Row IDs for Idempotency
-        # Format: {build_uuid}_{step_name_hash}
-        row_ids = [f"{row['build_id']}_{row['step_name']}" for row in rows_to_insert]
-        
         # Stream to BigQuery with deduplication
+        row_ids = [row_id for row_id, _ in pairs]
         errors = client.insert_rows_json(TABLE_ID, rows_to_insert, row_ids=row_ids)
         if errors:
             print(f"BigQuery Errors: {errors}")
             return "Partial Success", 500
 
-    return f"Processed {len(rows_to_insert)} items for pipeline {PIPELINE_SLUG}", 200
+    if failures:
+        print(f"Failed: {'; '.join(failures)}")
+        return f"Processed {len(rows_to_insert)} items, {len(failures)} target(s) failed", 500
 
-def construct_bq_row(build, step_name, timing_source):
+    targets = len(ORGS) * len(PIPELINE_SLUGS)
+    return f"Processed {len(rows_to_insert)} items across {targets} org/pipeline pair(s)", 200
+
+def fetch_rows(org, token, pipeline, finished_from):
+    headers = {"Authorization": f"Bearer {token}"}
+
+    url = f"https://api.buildkite.com/v2/organizations/{org}/pipelines/{pipeline}/builds"
+    params = {
+        "finished_from": finished_from,
+        "state": "finished"
+    }
+
+    response = requests.get(url, headers=headers, params=params, timeout=30)
+    response.raise_for_status()
+
+    # Row IDs dedup the builds the lookback re-sends. Key on the job UUID, not
+    # the step name: parallel jobs share a name and would collapse into one.
+    rows = []
+    for build in response.json():
+        # 1. Capture E2E Summary
+        rows.append((
+            f"{build['id']}_E2E_SUMMARY",
+            construct_bq_row(org, build, "E2E_SUMMARY", build),
+        ))
+
+        # 2. Capture Individual Steps
+        for job in build.get("jobs", []):
+            if job.get("type") == "script" and job.get("finished_at"):
+                rows.append((
+                    f"{build['id']}_{job['id']}",
+                    construct_bq_row(org, build, job.get("name"), job),
+                ))
+
+    return rows
+
+def construct_bq_row(org, build, step_name, timing_source):
     runnable_at = parse_ts(timing_source.get("runnable_at"))
     started_at = parse_ts(timing_source.get("started_at"))
     finished_at = parse_ts(timing_source.get("finished_at"))
@@ -80,6 +115,7 @@ def construct_bq_row(build, step_name, timing_source):
 
     return {
         "build_id": build.get("id"),
+        "org_slug": org,
         "commit_hash": build.get("commit"),
         "step_name": step_name,
         "pipeline_slug": build.get("pipeline", {}).get("slug"),
