@@ -13,9 +13,8 @@ locals {
   zone = data.google_client_config.gcp_client.zone
 
   # One name for the VM, its disk, its address, and the Buildkite agent, so a
-  # queue entry in the Buildkite UI maps straight onto a GCE instance.
-  # An empty purpose keeps the original names, so the tpu-commons fleet is not
-  # renamed and therefore not recreated.
+  # queue entry in the Buildkite UI maps straight onto a GCE instance. An empty
+  # purpose keeps the legacy flat name; renaming a live fleet recreates it.
   node_names = [for i in range(var.instance_count) :
     var.purpose == "" ? "vllm-ci-cpu-${i}" : "vllm-ci-cpu-${var.purpose}-${local.zone}-${i}"
   ]

@@ -153,7 +153,6 @@ module "ci_v7x_16" {
   # disk_size defaults to 0, disable attached disk
 }
 
-# The whole tpu-commons 64-core fleet.
 module "ci_cpu_64_core_zone_c" {
   source = "../modules/ci_cpu_64_core"
   providers = {
@@ -171,11 +170,9 @@ module "ci_cpu_64_core_zone_c" {
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
-# CPU fleets registered against the vllm org's TPU cluster. Additive: the
-# tpu-commons fleet above (and module.ci_cpu in cloud-tpu-inference-test) keeps
-# running until traffic is cut over. purpose = "vllm" switches these onto the
-# self-describing naming scheme: vllm-ci-<kind>-vllm-<zone>-<index>, shared by
-# the VM, its disk, its address, and the Buildkite agent.
+# purpose puts these on the self-describing naming scheme,
+# vllm-ci-<kind>-<purpose>-<zone>-<index>, shared by the VM, its disk, its
+# address, and the Buildkite agent.
 module "ci_cpu_vllm_zone_b" {
   source = "../modules/ci_cpu"
   providers = {
