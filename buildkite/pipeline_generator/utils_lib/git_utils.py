@@ -9,6 +9,12 @@ def get_merge_base_commit() -> Optional[str]:
     merge_base = os.getenv("MERGE_BASE_COMMIT")
     if merge_base:
         return merge_base
+    # Fetch latest main to ensure origin/main is up-to-date on agent workspaces
+    subprocess.run(
+        ["git", "fetch", "origin", "main", "--no-tags"],
+        capture_output=True,
+        check=False,
+    )
     # Compute merge base if not provided
     try:
         result = subprocess.run(
