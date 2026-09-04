@@ -10,6 +10,8 @@ locals {
   # Detect multi-host based on accelerator_type suffix
   # Expected format: tpu7x-N where N is the number of cores.
   # For v7x, usually 8 cores/ 4 chips per host. (there're 2 core per chip for v7x)
+  # So tpu7x-16 is 2 hosts and tpu7x-32 is 4 hosts; the startup script starts
+  # the Buildkite agent on worker 0 only and the other hosts are reached over ssh.
   tpu_size_parts = split("-", var.accelerator_type)
   tpu_core_size  = length(local.tpu_size_parts) > 1 ? tonumber(local.tpu_size_parts[1]) : 0
   is_multi_host  = local.tpu_core_size > 8
