@@ -55,9 +55,8 @@ variable "resource_suffix" {
 
 variable "purpose" {
   description = <<-DESC
-    What this fleet is for, e.g. "vllm" for the fleet registered against the
-    vllm Buildkite org. When set, every name this module creates -- the VM, its
-    boot disk, the static address, and the Buildkite agent -- becomes
+    What this fleet is for. When set, every name this module creates -- the VM,
+    its boot disk, the static address, and the Buildkite agent -- becomes
     vllm-ci-cpu-64-core-<purpose>-<zone>-<index>, and resource_suffix is
     ignored. The zone is read from the provider, so it is never passed in.
     Empty keeps the original unsuffixed names.
