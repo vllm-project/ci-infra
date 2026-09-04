@@ -128,6 +128,12 @@ nvidia-smi
 docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
 ```
 
+Dedicated GPU Buildkite hosts should use the native CDI selector and agent
+pre-start refresh in [`buildkite-gpu-cdi/`](buildkite-gpu-cdi/README.md). Its
+guarded installer requires the agents to be paused and the Buildkite API,
+Docker, and GPU-process gates to be empty before it reloads systemd. Do not run
+that deployment while the host is accepting or executing jobs.
+
 For H200 MIG setup, see [`setup_mig_h200.sh`](setup_mig_h200.sh) and [`teardown_mig_h200.sh`](teardown_mig_h200.sh).
 
 ## 6. Configure and Start the Buildkite Agent
