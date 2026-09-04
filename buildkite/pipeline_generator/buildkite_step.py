@@ -594,6 +594,10 @@ def convert_group_step_to_buildkite_step(
         group_steps_list = []
         for step in steps:
             step_key = step.key or _generate_step_key(step.label)
+            # In a retry build a step may be present only because its AMD
+            # mirror was requested; then emit the mirror but not the step.
+            only_step_keys = global_config["only_step_keys"]
+            include_step = only_step_keys is None or step_key in only_step_keys
             if is_amd_gpu_device(step.device):
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
@@ -683,7 +687,7 @@ def convert_group_step_to_buildkite_step(
                     step.timeout_in_minutes
                 )
 
-            if not _step_should_run(step, list_file_diff):
+            if include_step and not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(
                     block=f"Run {step.label}",
                     key=f"block-{step_key}",
@@ -704,13 +708,14 @@ def convert_group_step_to_buildkite_step(
                 if step.device == DeviceType.L4 and not step.retry:
                     buildkite_step.retry = K8S_RETRY
 
-            group_steps_list.append(buildkite_step)
+            if include_step:
+                group_steps_list.append(buildkite_step)
 
             # Create AMD mirror step and its block step if specified/applicable
             if (
                 step.mirror
                 and step.mirror.get("amd")
-                and global_config["only_step_keys"] is None
+                and (only_step_keys is None or f"amd-{step_key}" in only_step_keys)
             ):
                 amd = step.mirror["amd"]
                 amd_no_plugin = amd.get("no_plugin", False)
@@ -849,7 +854,7 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
 
     return step.model_copy(
         update={
-            "key": None,
+            "key": f"amd-{step.key or _generate_step_key(step.label)}",
             "device": amd["device"],
             "dind": amd.get("dind", True),
             "optional": amd.get("optional", step.optional),
