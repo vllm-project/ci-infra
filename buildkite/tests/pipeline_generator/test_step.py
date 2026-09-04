@@ -119,6 +119,45 @@ def test_selected_steps_support_label_generated_keys():
     )
 
 
+def test_selected_steps_support_amd_mirror_keys(fake_global_config):
+    steps = [
+        Step(label="AMD image", key="image-build-amd", commands=["build"]),
+        Step(
+            label="Multimodal Processor",
+            group="Models - Multimodal",
+            key="multi-modal-processor",
+            commands=["test"],
+            mirror={
+                "amd": {
+                    "device": "mi355_1",
+                    "dind": False,
+                    "depends_on": ["image-build-amd"],
+                }
+            },
+        ),
+        Step(label="Other", key="other", commands=["other"]),
+    ]
+
+    selected, selected_keys = select_steps_and_dependencies(
+        steps, frozenset({"amd-multi-modal-processor"})
+    )
+    fake_global_config["only_step_keys"] = selected_keys
+    groups = buildkite_step.convert_group_step_to_buildkite_step(
+        group_steps(selected)
+    )
+    generated_keys = [job.key for group in groups for job in group.steps]
+
+    assert [step.key for step in selected] == [
+        "image-build-amd",
+        "multi-modal-processor",
+    ]
+    assert selected_keys == frozenset(
+        {"image-build-amd", "amd-multi-modal-processor"}
+    )
+    # The NVIDIA parent is neither emitted nor blocked; the mirror runs unblocked.
+    assert generated_keys == ["image-build-amd", "amd-multi-modal-processor"]
+
+
 def test_selected_steps_reject_duplicate_generated_key():
     steps = [
         Step(label="Test", key="test", commands=["a"]),
