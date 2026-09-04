@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import buildkite_step
+from main import GENERATOR_ERROR_ANNOTATION_CONTEXT, annotate_generation_failure
 from pipeline_generator import select_steps_and_dependencies
 from step import Step, group_steps, read_steps_from_job_dir
 
@@ -86,11 +87,11 @@ def test_selected_steps_include_transitive_dependencies():
     assert selected_keys == frozenset({"image-build", "prepare", "test"})
 
 
-def test_selected_steps_reject_unknown_key():
-    with pytest.raises(ValueError, match="Unknown CI step key.*missing"):
+def test_selected_steps_reject_unknown_keys():
+    with pytest.raises(ValueError, match="Unknown CI step key\\(s\\): missing"):
         select_steps_and_dependencies(
             [Step(label="Test", key="test", commands=["test"])],
-            frozenset({"missing"}),
+            frozenset({"test", "missing"}),
         )
 
 
@@ -117,6 +118,78 @@ def test_selected_steps_support_label_generated_keys():
     assert selected_keys == frozenset(
         {"image-build", "-nvidia--h200-rust-frontend-openai-coverage"}
     )
+
+
+def test_selected_steps_support_amd_mirror_keys(fake_global_config):
+    steps = [
+        Step(label="AMD image", key="image-build-amd", commands=["build"]),
+        Step(
+            label="Multimodal Processor",
+            group="Models - Multimodal",
+            key="multi-modal-processor",
+            commands=["test"],
+            mirror={
+                "amd": {
+                    "device": "mi355_1",
+                    "dind": False,
+                    "depends_on": ["image-build-amd"],
+                }
+            },
+        ),
+        Step(label="Other", key="other", commands=["other"]),
+    ]
+
+    selected, selected_keys = select_steps_and_dependencies(
+        steps, frozenset({"amd-multi-modal-processor"})
+    )
+    fake_global_config["only_step_keys"] = selected_keys
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(selected))
+    generated_keys = [job.key for group in groups for job in group.steps]
+
+    assert [step.key for step in selected] == [
+        "image-build-amd",
+        "multi-modal-processor",
+    ]
+    assert selected_keys == frozenset({"image-build-amd", "amd-multi-modal-processor"})
+    assert generated_keys == ["image-build-amd", "amd-multi-modal-processor"]
+
+
+def test_generator_failure_is_annotated(monkeypatch):
+    calls = []
+    monkeypatch.setenv("BUILDKITE", "true")
+    monkeypatch.setattr(
+        "main.subprocess.run",
+        lambda command, check: calls.append((command, check)),
+    )
+
+    annotate_generation_failure(
+        "Pipeline generation failed: Unknown CI step key(s): removed-test"
+    )
+
+    assert calls[0] == (
+        [
+            "buildkite-agent",
+            "annotate",
+            "Pipeline generation failed: Unknown CI step key(s): removed-test",
+            "--style",
+            "error",
+            "--context",
+            GENERATOR_ERROR_ANNOTATION_CONTEXT,
+        ],
+        False,
+    )
+
+
+def test_generator_failure_is_not_annotated_outside_buildkite(monkeypatch):
+    calls = []
+    monkeypatch.delenv("BUILDKITE", raising=False)
+    monkeypatch.setattr(
+        "main.subprocess.run", lambda *args, **kwargs: calls.append(args)
+    )
+
+    annotate_generation_failure("Pipeline generation failed: boom")
+
+    assert calls == []
 
 
 def test_selected_steps_reject_duplicate_generated_key():

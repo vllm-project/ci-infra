@@ -594,7 +594,11 @@ def convert_group_step_to_buildkite_step(
         group_steps_list = []
         for step in steps:
             step_key = step.key or _generate_step_key(step.label)
+            only_step_keys = global_config["only_step_keys"]
+            include_step = only_step_keys is None or step_key in only_step_keys
             if is_amd_gpu_device(step.device):
+                if not include_step:
+                    continue
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
                     _prepare_commands(
@@ -683,7 +687,7 @@ def convert_group_step_to_buildkite_step(
                     step.timeout_in_minutes
                 )
 
-            if not _step_should_run(step, list_file_diff):
+            if include_step and not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(
                     block=f"Run {step.label}",
                     key=f"block-{step_key}",
@@ -704,13 +708,15 @@ def convert_group_step_to_buildkite_step(
                 if step.device == DeviceType.L4 and not step.retry:
                     buildkite_step.retry = K8S_RETRY
 
-            group_steps_list.append(buildkite_step)
+            if include_step:
+                group_steps_list.append(buildkite_step)
 
             # Create AMD mirror step and its block step if specified/applicable
+            amd_mirror_key = f"amd-{step_key}"
             if (
                 step.mirror
                 and step.mirror.get("amd")
-                and global_config["only_step_keys"] is None
+                and (only_step_keys is None or amd_mirror_key in only_step_keys)
             ):
                 amd = step.mirror["amd"]
                 amd_no_plugin = amd.get("no_plugin", False)
@@ -752,7 +758,7 @@ def convert_group_step_to_buildkite_step(
                 extra_env.update(amd.get("env", {}))
                 amd_step = _create_amd_step(
                     label=step.label,
-                    key=f"amd-{step_key}",
+                    key=amd_mirror_key,
                     device=amd["device"],
                     num_devices=amd_num_devices,
                     commands_str=amd_commands_str,
@@ -772,7 +778,10 @@ def convert_group_step_to_buildkite_step(
                     agent_tags=amd.get("agent_tags"),
                     display_label=amd.get("label"),
                 )
-                if not _amd_mirror_should_run(
+                mirror_is_selected = (
+                    only_step_keys is not None and amd_mirror_key in only_step_keys
+                )
+                if not mirror_is_selected and not _amd_mirror_should_run(
                     _step_should_run(
                         _get_amd_mirror_effective_step(step, amd),
                         list_file_diff,

@@ -4,6 +4,7 @@ from typing import FrozenSet, List, Optional, Tuple
 
 import yaml
 
+from amd import normalize_amd_depends_on
 from buildkite_step import (
     _generate_step_key,
     add_precommit_dependency,
@@ -93,6 +94,7 @@ def select_steps_and_dependencies(
         return steps, None
 
     steps_by_key = {}
+    dependencies_by_key = {}
     for step in steps:
         # Steps without an explicit key are uploaded with a label-derived key
         # (see convert_group_step_to_buildkite_step), so retry builds reference
@@ -102,6 +104,21 @@ def select_steps_and_dependencies(
         if step.key in steps_by_key:
             raise ValueError(f"Duplicate CI step key: {step.key}")
         steps_by_key[step.key] = step
+        dependencies_by_key[step.key] = step.depends_on or []
+
+        # AMD mirrors are minted later, in convert_group_step_to_buildkite_step,
+        # so their derived keys are registered here. Without this a retry that
+        # references a mirror cannot resolve it, because steps_by_key would only
+        # ever hold top-level YAML steps.
+        amd_mirror = (step.mirror or {}).get("amd")
+        if amd_mirror:
+            mirror_key = f"amd-{step.key}"
+            if mirror_key in steps_by_key:
+                raise ValueError(f"Duplicate CI step key: {mirror_key}")
+            steps_by_key[mirror_key] = step
+            dependencies_by_key[mirror_key] = normalize_amd_depends_on(
+                amd_mirror.get("depends_on")
+            )
 
     missing = requested_step_keys - steps_by_key.keys()
     if missing:
@@ -111,7 +128,7 @@ def select_steps_and_dependencies(
     pending = list(requested_step_keys)
     while pending:
         step_key = pending.pop()
-        for dependency in steps_by_key[step_key].depends_on or []:
+        for dependency in dependencies_by_key[step_key]:
             if dependency not in steps_by_key:
                 raise ValueError(
                     f"CI step {step_key} depends on unknown step {dependency}."
@@ -120,7 +137,10 @@ def select_steps_and_dependencies(
                 selected_step_keys.add(dependency)
                 pending.append(dependency)
 
-    selected = [step for step in steps if step.key in selected_step_keys]
+    # A mirror key and its parent key resolve to the same Step, so select by
+    # object identity rather than by key.
+    selected_step_ids = {id(steps_by_key[key]) for key in selected_step_keys}
+    selected = [step for step in steps if id(step) in selected_step_ids]
     return selected, frozenset(selected_step_keys)
 
 

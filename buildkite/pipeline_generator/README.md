@@ -80,7 +80,14 @@ The generator relies on several environment variables, typically provided by Bui
 *   `VLLM_USE_PRECOMPILED`: Set to "1" to force use of precompiled wheels.
 *   `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
     set, the generator emits those steps and their transitive dependencies,
-    ignoring normal source-file selection. Unknown keys fail generation.
+    ignoring normal source-file selection. Derived AMD mirror keys such as
+    `amd-multi-modal-processor` are supported and select only the mirror plus
+    its AMD dependencies. Unknown keys fail generation.
+
+When generation fails for any reason on a Buildkite agent, the error is
+recorded as an `error` annotation under the `pipeline-generator-error` context.
+The vLLM CI command bot reads that annotation so `/ci retry` can report the
+cause on the pull request.
 
 Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
 `buildkite-analytics-token-secret` Secret's `token` key when it is available.
