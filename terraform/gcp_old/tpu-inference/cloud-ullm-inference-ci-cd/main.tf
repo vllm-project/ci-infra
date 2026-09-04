@@ -112,8 +112,8 @@ module "ci_v7x_2" {
   disk_size                       = 2048
   project_id                      = var.project_id
   project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
+  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
+  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
@@ -130,8 +130,8 @@ module "ci_v7x_8" {
   disk_size                       = 4096
   project_id                      = var.project_id
   project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
+  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
+  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
@@ -147,8 +147,8 @@ module "ci_v7x_16" {
   buildkite_queue_name            = "tpu_v7x_16_queue"
   project_id                      = var.project_id
   project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
+  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
+  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
   # disk_size defaults to 0, disable attached disk
 }
