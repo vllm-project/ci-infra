@@ -122,6 +122,14 @@ build {
     script = "scripts/install-build-tools.sh"
   }
 
+  # Use a blobless checkout for the vLLM image build without changing checkout
+  # behavior for other jobs on the shared CPU queues.
+  provisioner "shell" {
+    inline = [
+      "sudo install -D -o buildkite-agent -g buildkite-agent -m 0755 /tmp/scripts/pre-checkout /etc/buildkite-agent/hooks/pre-checkout"
+    ]
+  }
+
   # Warm the cache by building vLLM image (runs as buildkite-agent)
   provisioner "shell" {
     environment_vars = [
