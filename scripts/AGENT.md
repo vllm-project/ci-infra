@@ -172,6 +172,41 @@ sudo systemctl status buildkite-agent
 
 The agent should appear in your Buildkite dashboard under Agents within a few seconds. Verify it shows the correct tags/queue.
 
+## 7. Install the GPU Reporter (GPU Machines Only)
+
+Every GPU machine must run the reporter so the dashboard's `/gpu` page (and infra
+alerting) can see it. An unmonitored machine can die or fill a disk unnoticed.
+
+The reporter sources live in the **vllm-dashboard** repo under
+`scripts/gpu-reporter/` (it owns the ingestion contract the reporters post to):
+
+```bash
+# From a checkout of the vllm-dashboard repo:
+sudo mkdir -p /opt/gpu-reporter
+sudo install -m 0755 scripts/gpu-reporter/gpu-reporter.py /opt/gpu-reporter/
+
+# Credentials: copy the example and fill in the real secret (mode 0600!)
+sudo install -m 0600 scripts/gpu-reporter/gpu-reporter.env.example /etc/gpu-reporter.env
+sudoedit /etc/gpu-reporter.env   # set GPU_REPORT_SECRET (and GPU_HOSTNAME if needed)
+
+sudo install -m 0644 scripts/gpu-reporter/gpu-reporter.service /etc/systemd/system/
+sudo install -m 0644 scripts/gpu-reporter/gpu-reporter.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now gpu-reporter.timer
+```
+
+Verify:
+
+```bash
+systemctl list-timers gpu-reporter.timer
+sudo systemctl start gpu-reporter.service && journalctl -u gpu-reporter.service -n 5
+# Then confirm the host appears on the dashboard /gpu page within a minute.
+```
+
+Kubernetes worker nodes are covered by the control-plane scraper instead —
+see `scripts/gpu-reporter/gpu-reporter-k8s-rbac.yaml` in vllm-dashboard;
+do not install the per-host reporter there.
+
 ## Quick Checklist
 
 - [ ] Docker installed and running
@@ -180,5 +215,6 @@ The agent should appear in your Buildkite dashboard under Agents within a few se
 - [ ] `buildkite-agent` user is in the `docker` group
 - [ ] Docker/containerd data roots moved if needed (step 4)
 - [ ] NVIDIA driver + container toolkit installed (GPU machines only)
+- [ ] GPU reporter installed and timer enabled (GPU machines only, step 7)
 - [ ] Agent configured with correct token and queue tags (step 6)
 - [ ] Agent started and visible in Buildkite dashboard
