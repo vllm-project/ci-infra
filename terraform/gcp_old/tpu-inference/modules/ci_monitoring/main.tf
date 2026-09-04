@@ -103,7 +103,8 @@ resource "google_bigquery_table" "step_logs" {
   {"name": "wait_duration_sec", "type": "FLOAT", "mode": "NULLABLE"},
   {"name": "run_duration_sec", "type": "FLOAT", "mode": "NULLABLE"},
   {"name": "created_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
-  {"name": "org_slug", "type": "STRING", "mode": "NULLABLE"}
+  {"name": "org_slug", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "row_key", "type": "STRING", "mode": "NULLABLE"}
 ]
 EOF
 }
@@ -145,6 +146,13 @@ resource "google_service_account" "function_sa" {
 resource "google_project_iam_member" "bq_editor" {
   project = var.project_id
   role    = "roles/bigquery.dataEditor"
+  member  = "serviceAccount:${google_service_account.function_sa.email}"
+}
+
+# The puller's MERGE needs job-creation rights; streaming inserts did not.
+resource "google_project_iam_member" "bq_job_user" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
   member  = "serviceAccount:${google_service_account.function_sa.email}"
 }
 

@@ -7,16 +7,20 @@ for unit in /etc/systemd/system/bk-metrics*.service; do
   systemctl stop "$(basename "$unit")" || true
 done
 
-# Retire the single-org unit that predates the per-org exporters.
-if [ -f /etc/systemd/system/bk-metrics.service ]; then
-  systemctl disable bk-metrics.service || true
-  rm -f /etc/systemd/system/bk-metrics.service
-fi
-
 # Stage and rename; writing the destination directly fails with ETXTBSY.
 wget -q https://github.com/buildkite/buildkite-agent-metrics/releases/download/v5.5.0/buildkite-agent-metrics-linux-amd64 -O /tmp/buildkite-agent-metrics
 chmod +x /tmp/buildkite-agent-metrics
 mv -f /tmp/buildkite-agent-metrics /usr/local/bin/buildkite-agent-metrics
+
+# Discard every unit and token, then rebuild only what is configured below.
+# Stopping a unit leaves it enabled, so a retired org would otherwise come back
+# on the next boot; rebuilding from scratch also drops its token from disk.
+for unit in /etc/systemd/system/bk-metrics*.service; do
+  [ -e "$unit" ] || continue
+  systemctl disable "$(basename "$unit")" || true
+  rm -f "$unit"
+done
+rm -rf /etc/bk-metrics
 
 install -d -m 0700 /etc/bk-metrics
 umask 077
