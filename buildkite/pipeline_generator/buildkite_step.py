@@ -37,6 +37,9 @@ PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
+# Ascend NPU tests are disabled by default. Set to "1" at pipeline generation
+# time to re-enable Ascend NPU test steps.
+ENABLE_ASCEND_TESTS_ENV_VAR = "ENABLE_ASCEND_TESTS"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 
 # Pod-level failures on EKS surface as agent stops / lost pods rather than
@@ -590,10 +593,21 @@ def convert_group_step_to_buildkite_step(
 
     amd_hardware_steps = []
 
+    # Ascend NPU tests are disabled by default. Set ENABLE_ASCEND_TESTS=1 at
+    # pipeline generation time to re-enable them without reverting this change.
+    ascend_tests_disabled = os.getenv(ENABLE_ASCEND_TESTS_ENV_VAR) != "1"
+    if ascend_tests_disabled:
+        print(
+            "Ascend NPU test steps are disabled by default; set "
+            f"{ENABLE_ASCEND_TESTS_ENV_VAR}=1 to re-enable."
+        )
+
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
             step_key = step.key or _generate_step_key(step.label)
+            if ascend_tests_disabled and step.device == DeviceType.ASCEND:
+                continue
             if is_amd_gpu_device(step.device):
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(

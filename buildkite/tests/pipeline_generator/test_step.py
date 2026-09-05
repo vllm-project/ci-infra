@@ -822,5 +822,52 @@ def test_step_explicitly_listing_excluded_subtree_still_matches():
     )
 
 
+def _ascend_test_step():
+    return Step(
+        label="Ascend NPU Test",
+        group="Hardware",
+        key="ascend-npu-test",
+        device="ascend_npu",
+        no_plugin=True,
+        commands=["bash .buildkite/scripts/hardware_ci/run-npu-test.sh"],
+    )
+
+
+def test_ascend_tests_disabled_by_default(monkeypatch):
+    monkeypatch.delenv(buildkite_step.ENABLE_ASCEND_TESTS_ENV_VAR, raising=False)
+    step = _ascend_test_step()
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {step.group: [step]}
+    )
+
+    command_steps = [
+        command_step
+        for group_step in group_steps
+        for command_step in group_step.steps
+        if isinstance(command_step, buildkite_step.BuildkiteCommandStep)
+    ]
+    assert command_steps == []
+
+
+def test_enable_ascend_tests_env_var_restores_ascend_steps(monkeypatch):
+    monkeypatch.setenv(buildkite_step.ENABLE_ASCEND_TESTS_ENV_VAR, "1")
+    step = _ascend_test_step()
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {step.group: [step]}
+    )
+
+    command_steps = [
+        command_step
+        for group_step in group_steps
+        for command_step in group_step.steps
+        if isinstance(command_step, buildkite_step.BuildkiteCommandStep)
+    ]
+    assert [command_step.label for command_step in command_steps] == [
+        "Ascend NPU Test"
+    ]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
