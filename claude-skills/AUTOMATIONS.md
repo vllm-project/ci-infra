@@ -143,6 +143,8 @@ These files guide an agent but do not install timers or send scheduled alerts:
   daily CI runs.
 - [`pytorch-bump-triage.md`](pytorch-bump-triage.md): distinguish PyTorch or
   Triton bump regressions from failures already present on main.
+- [`release-branch-cut.md`](release-branch-cut.md): cut a vLLM release branch,
+  tag RCs, cherry-pick milestone PRs, and launch all validation builds.
 
 ## Validate changes
 
