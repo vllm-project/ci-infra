@@ -130,9 +130,64 @@ docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
 
 For H200 MIG setup, see [`setup_mig_h200.sh`](setup_mig_h200.sh) and [`teardown_mig_h200.sh`](teardown_mig_h200.sh).
 
-## 6. Configure and Start the Buildkite Agent
+## 6. Point HF_HOME at Large Storage
+
+Model weights downloaded during CI jobs go to Hugging Face's cache. By default that is `~/.cache/huggingface` on the root disk, which fills up fast on GPU machines. Point `HF_HOME` at a big disk instead:
+
+- If the machine has a mounted shared filesystem with **4+ TB** of space (FSx, NFS, a large NVMe array), use that — a shared cache stays warm across jobs.
+- Otherwise use the **largest local filesystem** (e.g. a RAID or NVMe mount).
+
+This snippet picks the target automatically and prints what it chose:
+
+```bash
+# Prefer a mounted share with >= 4TB, else the largest non-root filesystem.
+HF_TARGET=$(
+  df -B1G --output=target,size,avail | tail -n +2 | \
+  awk '
+    $1 != "/" && $1 !~ "^/boot" {
+      if ($2 >= 4096) { big[++n] = $1; sz[n] = $2 }
+      if ($2 > max) { max = $2; largest = $1 }
+    }
+    END {
+      if (n > 0) {
+        # among >= 4TB mounts, pick the largest
+        best = 0
+        for (i = 1; i <= n; i++) if (sz[i] > best) { best = sz[i]; pick = i }
+        print big[pick]
+      } else {
+        print largest
+      }
+    }'
+)
+echo "HF cache target: $HF_TARGET"
+sudo mkdir -p "$HF_TARGET/hf_cache"
+```
+
+Then set `HF_HOME` for the buildkite-agent user via the agent's environment hook so every job inherits it (the pipeline's docker plugin passes `HF_HOME` through into containers):
+
+```bash
+sudo tee -a /etc/buildkite-agent/hooks/environment > /dev/null <<EOF
+export HF_HOME="$HF_TARGET/hf_cache"
+EOF
+sudo chown buildkite-agent:buildkite-agent /etc/buildkite-agent/hooks/environment
+```
+
+Make sure the directory is writable by the agent:
+
+```bash
+sudo chown -R buildkite-agent:buildkite-agent "$HF_TARGET/hf_cache"
+```
+
+> If your pipeline mounts a specific path into containers (e.g. `/fsx/hf_cache` or `/raid`), set `HF_HOME` to that same path so the container and host agree on the cache location.
+
+## 7. Configure and Start the Buildkite Agent
 
 Now that the machine is fully prepared, configure the agent and bring it online.
+
+> **H200 MIG machines:** ready-made config + hook templates (including MIG
+> slice pinning, ECR login, and secrets) live in
+> [`buildkite-agent/`](buildkite-agent/README.md). Copy those instead of writing
+> the config from scratch.
 
 ### Determine your token and queue
 
@@ -180,5 +235,6 @@ The agent should appear in your Buildkite dashboard under Agents within a few se
 - [ ] `buildkite-agent` user is in the `docker` group
 - [ ] Docker/containerd data roots moved if needed (step 4)
 - [ ] NVIDIA driver + container toolkit installed (GPU machines only)
-- [ ] Agent configured with correct token and queue tags (step 6)
+- [ ] `HF_HOME` pointed at large storage (step 6)
+- [ ] Agent configured with correct token and queue tags (step 7)
 - [ ] Agent started and visible in Buildkite dashboard
