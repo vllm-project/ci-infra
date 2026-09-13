@@ -50,6 +50,7 @@ import string
 import subprocess
 import sys
 import time
+import urllib.request
 
 # Comes from the launcher image, which exists to add it: the Cloud CLI image it
 # is built on ships no YAML importable from Python 3. Installed there rather
@@ -115,6 +116,29 @@ SUPPORTED_KINDS = {"Job": "job", "JobSet": "jobset"}
 # a failed test, while one that waits two minutes only delays a poll that runs
 # every few seconds anyway.
 CLI_TIMEOUT_SECONDS = 120
+
+# Two HTTP requests, one to the node's metadata server and one to the registry,
+# and neither has a control plane behind it to be slow the way a kubectl call
+# can. They answer in under a second together, so the generous figure above
+# would only mean a registry that has stopped responding holds up every pod in
+# the workload for two minutes before the caller gives up and uses the tag.
+REGISTRY_TIMEOUT_SECONDS = 20
+
+# What a manifest may be, so the registry returns the manifest itself rather
+# than converting it to the schema a client that named none is assumed to want.
+# All four, because the digest to pin is the one the pull will ask for: for a
+# multi-architecture image that is the index, not the single manifest inside it.
+REGISTRY_MANIFEST_ACCEPT = ", ".join([
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+])
+
+METADATA_TOKEN_URL = (
+    "http://metadata.google.internal/computeMetadata/v1/instance/"
+    "service-accounts/default/token"
+)
 
 
 def log(msg):
@@ -379,6 +403,22 @@ def resolve_image(registry):
     return pin_digest(image)
 
 
+def access_token():
+    """A token for the launcher's own identity, from the node's metadata server.
+
+    The same source the Cloud CLI and the kubelet read, so it carries the
+    workload identity this pod already runs as and there is nothing to mount or
+    refresh.
+    """
+    request = urllib.request.Request(
+        METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"}
+    )
+    with urllib.request.urlopen(
+        request, timeout=REGISTRY_TIMEOUT_SECONDS
+    ) as response:
+        return json.load(response)["access_token"]
+
+
 def pin_digest(image):
     """Resolve a tag to the digest it points at right now.
 
@@ -388,25 +428,45 @@ def pin_digest(image):
     image. Resolving once, here, is what makes every pod in a workload the same
     bytes.
 
+    Asked of the registry over its own HTTP API rather than through the Cloud
+    CLI, which reads Container Analysis occurrences on the way to the same
+    field: that is a second permission to hold for something no pull needs, and
+    the CLI spends longer starting up than this spends answering. A HEAD on the
+    manifest asks for exactly the read the pull will ask for.
+
     Best effort: a tag that cannot be resolved is passed through, because the
     registry being briefly unreachable is a worse reason to fail a step than an
     unpinned pull is to run one.
     """
     if "@" in image:
         return image
-    proc = subprocess.run(
-        ["gcloud", "artifacts", "docker", "images", "describe", image,
-         "--format=value(image_summary.digest)"],
-        capture_output=True, text=True, timeout=CLI_TIMEOUT_SECONDS,
-    )
-    digest = proc.stdout.strip()
-    if proc.returncode != 0 or not digest:
-        log(f"warning: could not resolve {image} to a digest; using the tag")
+    # Split the last path segment off first: a colon earlier in the string is a
+    # registry port, not a tag separator.
+    repo, sep, tail = image.rpartition("/")
+    name, _, tag = tail.partition(":")
+    host, _, path = repo.partition("/")
+    try:
+        if not path:
+            raise ValueError("names no repository under a registry host")
+        request = urllib.request.Request(
+            f"https://{host}/v2/{path}/{name}/manifests/{tag or 'latest'}",
+            method="HEAD",
+            headers={
+                "Authorization": f"Bearer {access_token()}",
+                "Accept": REGISTRY_MANIFEST_ACCEPT,
+            },
+        )
+        with urllib.request.urlopen(
+            request, timeout=REGISTRY_TIMEOUT_SECONDS
+        ) as response:
+            digest = response.headers.get("Docker-Content-Digest", "").strip()
+    except (OSError, ValueError, KeyError) as err:
+        log(f"warning: could not resolve {image} to a digest ({err}); using the tag")
         return image
-    # Strip the tag off the last path segment only: a colon earlier in the
-    # string is a registry port, not a tag separator.
-    head, sep, tail = image.rpartition("/")
-    pinned = f"{head}{sep}{tail.split(':', 1)[0]}@{digest}"
+    if not digest:
+        log(f"warning: {image} resolved to no digest header; using the tag")
+        return image
+    pinned = f"{repo}{sep}{name}@{digest}"
     log(f"image {image} -> {pinned}")
     return pinned
 
