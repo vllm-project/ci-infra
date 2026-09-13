@@ -227,10 +227,32 @@ def fuse_min_cache_gib() -> int:
     copy of a number that moves.
     """
     text = (TEMPLATES / "cache_volumes.yaml.tpl").read_text()
-    caps = re.findall(r'fileCacheCapacity:\s*"(\d+)Gi"', text)
+    # Comment lines dropped first: the comments around these fields quote the
+    # figures they explain, and a quoted one would be counted twice.
+    body = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    # Matched loosely and checked strictly, so that a figure this cannot read is
+    # an error rather than a mount silently left out of the sum. Out of the sum
+    # is the direction that hurts: the floor comes back too low, a shape that
+    # should have been refused is generated, and the kubelet evicts the pod when
+    # the cache fills. gcsfuse's own "-1" is the case worth naming - it is legal,
+    # it means fill the volume, and no total bounds it.
+    caps = re.findall(r"fileCacheCapacity:\s*(\S+)", body)
     if not caps:
         raise ValueError("cache_volumes.yaml.tpl declares no fileCacheCapacity")
-    return sum(int(cap) for cap in caps)
+    total = 0
+    for cap in caps:
+        match = re.fullmatch(r'"(\d+)Gi"', cap)
+        if not match:
+            raise ValueError(
+                f"cache_volumes.yaml.tpl states fileCacheCapacity: {cap}, which "
+                "is not a quoted whole number of Gi. The gcsfuse cache floor is "
+                "the sum of these, and a figure this cannot add is a floor too "
+                "low rather than a missing one."
+            )
+        total += int(match.group(1))
+    return total
 
 
 def fuse_cache_size(machine_type: str) -> str:

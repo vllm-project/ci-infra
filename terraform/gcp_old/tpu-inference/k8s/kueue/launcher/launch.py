@@ -262,6 +262,26 @@ def load_profile(registry, machine_type, topology):
     )
 
 
+def pod_chips(spec):
+    """The chip counts one pod's containers ask for, as distinct values.
+
+    Requests as well as limits. The API accepts an extended resource stated
+    under either and leaves the other unset, so reading one field would let a
+    pod that wrote only requests pass for a role that holds no chips - and the
+    two questions asked of this set, which shape to run and whether the pod is
+    on a TPU host at all, would answer differently for the same pod.
+    """
+    return {
+        str(field[TPU_RESOURCE])
+        for c in spec.get("containers", [])
+        for field in (
+            (c.get("resources") or {}).get("limits") or {},
+            (c.get("resources") or {}).get("requests") or {},
+        )
+        if field.get(TPU_RESOURCE) is not None
+    }
+
+
 def pod_shape(spec):
     """The hardware one pod asks for: what it selects, and how many chips.
 
@@ -271,11 +291,7 @@ def pod_shape(spec):
     and the quota.
     """
     selector = spec.get("nodeSelector") or {}
-    chips = {
-        str((c.get("resources") or {}).get("limits", {}).get(TPU_RESOURCE))
-        for c in spec.get("containers", [])
-        if (c.get("resources") or {}).get("limits", {}).get(TPU_RESOURCE) is not None
-    }
+    chips = pod_chips(spec)
     return (
         selector.get(ACCELERATOR_KEY),
         selector.get(TOPOLOGY_KEY),
@@ -665,11 +681,15 @@ def size_fuse_cache(doc, profile):
     Chip-holding roles only. The figure is a fraction of a TPU host's memory,
     and a role that holds no chips is not on one - it is on a worker-cpu node
     sized to its own requests, where a tmpfs the size of a TPU host's cache is
-    an eviction as soon as it fills. Such a role has to state its own sizeLimit
-    to mount the caches at all.
+    a number the node cannot honour. validate() makes such a role state its own
+    sizeLimit before it may mount the caches.
+
+    Tested on the chips alone, not on the shape: the shape is also None for a
+    pod that names an accelerator and misstates its count, and that pod is on a
+    TPU host and does want sizing. resolve_shape rejects it on its own terms.
     """
     for spec in pod_specs(doc):
-        if pod_shape(spec) == (None, None, None):
+        if not pod_chips(spec):
             continue
         for volume in spec.get("volumes", []):
             if volume.get("name") == FUSE_CACHE_VOLUME and "emptyDir" in volume:
@@ -736,6 +756,28 @@ def validate(doc, registry, where):
                 f"serviceAccountName {sa!r} is not allowed on a workload pod; "
                 f"the cluster permits {', '.join(sorted(allowed))}"
             )
+
+    # The one case size_fuse_cache cannot size. Left unbounded, a memory-backed
+    # emptyDir is as large as the node, while gcsfuse fills toward a
+    # fileCacheCapacity set on the PersistentVolume that this pod never sees -
+    # so the node reaches memory pressure before the volume reaches a limit,
+    # and the kubelet picks a victim by its own reckoning rather than evicting
+    # the pod that overran.
+    for spec in pod_specs(doc):
+        if pod_chips(spec):
+            continue
+        for volume in spec.get("volumes", []):
+            if volume.get("name") != FUSE_CACHE_VOLUME:
+                continue
+            empty_dir = volume.get("emptyDir")
+            if empty_dir is not None and "sizeLimit" not in empty_dir:
+                raise SystemExit(
+                    f"{where}: {FUSE_CACHE_VOLUME} has no sizeLimit on a pod "
+                    "that asks for no chips. The launcher sizes that volume "
+                    "from the TPU host's memory and this pod is not on one, so "
+                    "the manifest has to name a figure the node it did ask for "
+                    "can hold."
+                )
     return doc
 
 

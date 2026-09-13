@@ -110,9 +110,10 @@ launcher sizes that from the TPU host's memory, which this node does not have.
 A manifest must contain a container named `workload`: that is the one whose
 output is streamed back and which step environment is forwarded to. More than
 one may carry the name, and in a JobSet whose roles all want the log and the
-step's secrets, they all should. Everything that follows from the shape is the
-launcher's and is rejected in a manifest — the queue label, the gcsfuse cache
-size.
+step's secrets, they all should. The queue label is the launcher's alone and is
+rejected in a manifest: a queue named here is either the shape said twice or a
+disagreement with it. The gcsfuse cache size is filled in only where the
+manifest leaves it open, so a pod that needs the memory for itself can say so.
 
 How long the workload runs is not one of those. It defaults to
 `tpu_test_max_seconds`, which is right for a test, and a manifest that knows

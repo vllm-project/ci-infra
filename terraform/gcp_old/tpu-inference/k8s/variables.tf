@@ -277,8 +277,9 @@ variable "worker_clusters" {
     master_ipv4_cidr_block = string
 
     # Sized for the cluster's own components and nothing else: the CSI drivers,
-    # the metrics agent, and the per-cluster half of Kueue and JobSet. Four
-    # cores holds that stack with room to spare on every worker we run.
+    # the metrics agent, and the per-cluster half of Kueue and JobSet. That
+    # stack asks for 2.3 of the four cores with everything scheduled, and
+    # us-east5 has run it on this size throughout.
     #
     # A workload role that holds no chips is not what this pool is for, however
     # much it looks like the only place such a role could go. It asks for the
