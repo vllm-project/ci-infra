@@ -144,11 +144,6 @@ worker_clusters = [
     subnetwork             = "projects/cloud-ullm-inference-ci-cd/regions/us-central1/subnetworks/default"
     master_ipv4_cidr_block = "172.16.0.64/28"
 
-    # Larger than the e2-standard-4 default, because a workload role that holds
-    # no chips lands here rather than on a TPU node - a benchmark client driving
-    # the engines over HTTP wants real cores to keep hundreds of streams fed.
-    system_machine_type = "e2-standard-16"
-
     # Three shapes over the same eight chips of the v7x reservation, which is
     # every shape the tests ask for. The quota is not split between them: eight
     # chips will not divide three ways and still leave each a whole slice, so
