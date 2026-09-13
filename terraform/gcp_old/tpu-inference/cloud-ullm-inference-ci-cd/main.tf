@@ -79,7 +79,7 @@ module "ci_v7x_8" {
 
   accelerator_type                = "tpu7x-8"
   reserved                        = true
-  instance_count                  = 18
+  instance_count                  = 14
   buildkite_queue_name            = "tpu_v7x_8_queue"
   disk_size                       = 4096
   project_id                      = var.project_id
@@ -112,9 +112,8 @@ module "ci_v7x_16" {
 # READ_WRITE disk cannot be shared by four hosts, and the multi-host jobs
 # stream weights from GCS instead. Replaces the hand-built ranlihao-v7x-32 slice.
 #
-# instance_count is 0 because the project's tpu7x reservation is fully used
-# and a tpu7x-32 needs 16 chips. The hand-built slice still holds them. Raise
-# to 1 after that slice is deleted (or 4 tpu7x-8 nodes are released).
+# Its 16 chips come from the same full tpu7x reservation as ci_v7x_8, so the
+# two counts share one budget: one tpu7x-32 costs four tpu7x-8.
 module "ci_v7x_32" {
   source = "../modules/ci_v7x"
   providers = {
@@ -123,7 +122,7 @@ module "ci_v7x_32" {
 
   accelerator_type                = "tpu7x-32"
   reserved                        = true
-  instance_count                  = 0
+  instance_count                  = 1
   buildkite_queue_name            = "tpu_v7x_32_queue"
   project_id                      = var.project_id
   project_short_name              = var.project_short_name
