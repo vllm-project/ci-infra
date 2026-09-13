@@ -1195,11 +1195,23 @@ def main():
     shape = {}
     manifest = args.manifest or (PREWARM_JOB if args.prewarm else DEFAULT_JOB)
     if args.prewarm:
-        # The flags name a shape here only to reach the queue that dispatches to
-        # its region; the pod asks for none of it. So no host count to check -
-        # a multi-host profile is a fine way to say "the cluster those nodes are
-        # on", and the prewarm is still one pod holding nothing.
+        # The flags name a shape here only to reach the cluster it runs on; the
+        # pod asks for none of it. So no host count to check - a multi-host
+        # profile is a fine way to say "the cluster those nodes are on", and the
+        # prewarm is still one pod holding nothing.
         profile = load_profile(registry, args.machine_type, args.topology)
+        # Not the shape's queue: that one puts google.com/tpu alone under quota,
+        # and a workload assigned no flavor is assigned no AdmissionCheck
+        # either, so it would be admitted on the manager and dispatched nowhere.
+        # See worker_cpu_queue.yaml.tpl.
+        queue = profile.get("prewarm_queue")
+        if not queue:
+            raise SystemExit(
+                f"{args.machine_type} at {args.topology} has no prewarm queue: "
+                "the shape runs in more than one region, so there is no single "
+                "cluster to warm. Prewarm a shape that runs in one."
+            )
+        profile = {**profile, "queue": queue}
     elif not args.manifest:
         profile = load_profile(registry, args.machine_type, args.topology)
         if profile["hosts"] > 1:
