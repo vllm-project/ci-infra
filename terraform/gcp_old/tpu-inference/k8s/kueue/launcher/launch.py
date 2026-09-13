@@ -73,6 +73,13 @@ PROFILES_PATH = os.environ.get(
 # write them - and a repo that copied it would be copying those.
 DEFAULT_JOB = os.environ.get("LAUNCHER_DEFAULT_JOB", "/opt/launcher/manifests/job.yaml")
 
+# The Job --prewarm submits: the same image on a node that holds no chips, so
+# the per-digest image conversion is done before a test waits on it. Deployed
+# beside the program for the same reason as the one above.
+PREWARM_JOB = os.environ.get(
+    "LAUNCHER_PREWARM_JOB", "/opt/launcher/manifests/prewarm.yaml"
+)
+
 # Where a pod says what hardware it wants. Read back to find the profile, so
 # these are the launcher's names for them too.
 ACCELERATOR_KEY = "cloud.google.com/gke-tpu-accelerator"
@@ -1132,6 +1139,13 @@ def main():
              "own commands, so it takes the place of --machine-type, "
              "--topology and the command rather than adding to them.",
     )
+    parser.add_argument(
+        "--prewarm", action="store_true",
+        help="start this build's image on a chip-less node in the region "
+             "--machine-type and --topology name, and exit. Pays the "
+             "per-digest image conversion beside the tests instead of inside "
+             "the first one to schedule. Runs no command and holds no chips.",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -1149,7 +1163,16 @@ def main():
             f"command to pass here. Put {shlex.join(command)!r} in the "
             f"{WORKLOAD_CONTAINER!r} container of {args.manifest}."
         )
-    if not args.manifest and not command:
+    # A prewarm runs the image and nothing else, so both of the things a normal
+    # invocation must supply are errors here: a command would not be run, and a
+    # manifest describes a workload this is not.
+    if args.prewarm and (command or args.manifest):
+        raise SystemExit(
+            "--prewarm starts this build's image and exits, so it takes "
+            "neither a command nor --manifest. Name the region with "
+            "--machine-type and --topology."
+        )
+    if not args.manifest and not command and not args.prewarm:
         raise SystemExit(
             "no command given; use: launch --machine-type M --topology T "
             "-- <command>"
@@ -1170,8 +1193,14 @@ def main():
     # The built-in Job is one pod, and only the flags can select a shape that
     # is more than one - a manifest saying so has already written the pods.
     shape = {}
-    manifest = args.manifest or DEFAULT_JOB
-    if not args.manifest:
+    manifest = args.manifest or (PREWARM_JOB if args.prewarm else DEFAULT_JOB)
+    if args.prewarm:
+        # The flags name a shape here only to reach the queue that dispatches to
+        # its region; the pod asks for none of it. So no host count to check -
+        # a multi-host profile is a fine way to say "the cluster those nodes are
+        # on", and the prewarm is still one pod holding nothing.
+        profile = load_profile(registry, args.machine_type, args.topology)
+    elif not args.manifest:
         profile = load_profile(registry, args.machine_type, args.topology)
         if profile["hosts"] > 1:
             raise SystemExit(
@@ -1190,8 +1219,11 @@ def main():
     labels = correlation_labels()
     doc = render(manifest, image, name, shape)
     # Read back even when the flags chose it, so there is one answer to what
-    # shape a workload is: the pods'.
-    profile = resolve_shape(doc, registry, manifest)
+    # shape a workload is: the pods'. Except for a prewarm, whose pods hold no
+    # chips by design and so describe no shape to read - there the flags are the
+    # only statement of where it goes, and they already chose the profile.
+    if not args.prewarm:
+        profile = resolve_shape(doc, registry, manifest)
     validate(doc, registry, manifest)
     forwarded = forward_env(doc, args.env, registry)
     if forwarded:
@@ -1225,7 +1257,10 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
 
     log(f"submitting {doc['kind']} {name} to {profile['queue']} "
-        f"({profile['hosts']} x {profile['chips']} chips, from {manifest})")
+        + ("(prewarm: no chips, from "
+           if args.prewarm else
+           f"({profile['hosts']} x {profile['chips']} chips, from ")
+        + f"{manifest})")
     subprocess.run(
         ["kubectl", "-n", NAMESPACE, "apply", "-f", "-"],
         input=json.dumps(doc), text=True, check=True,

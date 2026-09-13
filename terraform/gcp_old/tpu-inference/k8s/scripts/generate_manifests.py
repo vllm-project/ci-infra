@@ -108,6 +108,11 @@ LAUNCHER_DEFAULT_JOB = ROOT / "kueue" / "launcher" / "job.yaml"
 LAUNCHER_MANIFEST_CONFIGMAP = "tpu-launcher-manifests"
 LAUNCHER_DEFAULT_JOB_KEY = "job.yaml"
 
+# The Job --prewarm submits, in the same ConfigMap: both are manifests the
+# launcher owns rather than the repo under test.
+LAUNCHER_PREWARM_JOB = ROOT / "kueue" / "launcher" / "prewarm.yaml"
+LAUNCHER_PREWARM_JOB_KEY = "prewarm.yaml"
+
 # The node label GKE puts on a TPU node, by machine family. Not derivable from
 # the machine type - a ct6e-standard-8t is `tpu-v6e-slice`, a tpu7x-standard-4t
 # is plain `tpu7x` - so these are read off live nodes.

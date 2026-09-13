@@ -238,7 +238,8 @@ template:
       - name: launcher-profiles
         configMap:
           name: tpu-launcher-profiles
-      # The Job a step gets when it names hardware and nothing else.
+      # The Jobs the launcher supplies itself: the one a step gets when it names
+      # hardware and nothing else, and the chip-less one --prewarm submits.
       - name: launcher-manifests
         configMap:
           name: tpu-launcher-manifests
