@@ -94,6 +94,20 @@ QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 # the host, and the manifest does not know which host it landed on.
 FUSE_CACHE_VOLUME = "gke-gcsfuse-cache"
 
+# The pod's /dev/shm, which for the same reason is ours to size. vLLM's engine
+# processes and torch_tpu's tier-2 compilation cache both live in it, and a
+# ceiling too low does not present as a full filesystem - it presents as a
+# worker that stops answering, then as the slice failing around it.
+SHM_VOLUME = "dshm"
+
+# Memory-backed emptyDirs the launcher sizes from the host, and the profile key
+# holding each ceiling. setdefault, so a manifest that states its own figure
+# keeps it: the launcher knows the host, the manifest knows the workload.
+HOST_SIZED_VOLUMES = {
+    FUSE_CACHE_VOLUME: "fuse_cache_size",
+    SHM_VOLUME: "shm_size",
+}
+
 # kubectl --timestamps prefixes each entry with RFC3339. Anything else on a
 # line is a fragment of the entry above it, not a new one.
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$")
@@ -710,7 +724,7 @@ def finalise(doc, profile, registry, name, labels, owner, command, where):
             container["args"] = [command]
 
     cap_runtime(doc, profile, registry)
-    size_fuse_cache(doc, profile)
+    size_host_volumes(doc, profile)
     return doc
 
 
@@ -737,19 +751,19 @@ def cap_runtime(doc, profile, registry):
         )
 
 
-def size_fuse_cache(doc, profile):
-    """How large the gcsfuse file cache may grow on this host.
+def size_host_volumes(doc, profile):
+    """How large this host lets the memory-backed volumes grow.
 
     Per machine type, since host memory runs from 176 GB to 1440 GB across the
     shapes we run and one figure is either unsafe on the smallest or wasteful on
     the largest. Set only where the manifest left it open, so a pod that needs
     the memory for itself can say so.
 
-    Chip-holding roles only. The figure is a fraction of a TPU host's memory,
+    Chip-holding roles only. The figures are fractions of a TPU host's memory,
     and a role that holds no chips is not on one - it is on a worker-cpu node
     sized to its own requests, where a tmpfs the size of a TPU host's cache is
     a number the node cannot honour. validate() makes such a role state its own
-    sizeLimit before it may mount the caches.
+    sizeLimit before it may mount them.
 
     Tested on the chips alone, not on the shape: the shape is also None for a
     pod that names an accelerator and misstates its count, and that pod is on a
@@ -759,10 +773,24 @@ def size_fuse_cache(doc, profile):
         if not pod_chips(spec):
             continue
         for volume in spec.get("volumes", []):
-            if volume.get("name") == FUSE_CACHE_VOLUME and "emptyDir" in volume:
-                volume["emptyDir"].setdefault(
-                    "sizeLimit", profile["fuse_cache_size"]
+            name = volume.get("name")
+            key = HOST_SIZED_VOLUMES.get(name)
+            if key is None or "emptyDir" not in volume:
+                continue
+            size = profile.get(key)
+            if size is None:
+                # A deploy applies this program and the shape registry as two
+                # ConfigMaps in turn, so a launcher that starts between the two
+                # can read a registry older than itself. Said here rather than
+                # left as a KeyError because the answer is to redeploy or wait,
+                # and neither is what a traceback suggests.
+                raise SystemExit(
+                    f"the shape registry has no {key} for "
+                    f"{profile.get('queue', 'this shape')}, so {name} would be "
+                    "created with no ceiling. Regenerate and redeploy the "
+                    "manifests; if a deploy is in flight, retry the step."
                 )
+            volume["emptyDir"].setdefault("sizeLimit", size)
 
 
 # Fields the Kubernetes API declares as integers. A manifest is text with
@@ -824,26 +852,27 @@ def validate(doc, registry, where):
                 f"the cluster permits {', '.join(sorted(allowed))}"
             )
 
-    # The one case size_fuse_cache cannot size. Left unbounded, a memory-backed
-    # emptyDir is as large as the node, while gcsfuse fills toward a
-    # fileCacheCapacity set on the PersistentVolume that this pod never sees -
-    # so the node reaches memory pressure before the volume reaches a limit,
-    # and the kubelet picks a victim by its own reckoning rather than evicting
-    # the pod that overran.
+    # The one case size_host_volumes cannot size. Left unbounded, a
+    # memory-backed emptyDir is as large as the node, while what fills it -
+    # gcsfuse toward a fileCacheCapacity set on a PersistentVolume this pod
+    # never sees, or a process writing to /dev/shm - has no ceiling of its own
+    # to stop at. The node then reaches memory pressure before the volume
+    # reaches a limit, and the kubelet picks a victim by its own reckoning
+    # rather than evicting the pod that overran.
     for spec in pod_specs(doc):
         if pod_chips(spec):
             continue
         for volume in spec.get("volumes", []):
-            if volume.get("name") != FUSE_CACHE_VOLUME:
+            name = volume.get("name")
+            if name not in HOST_SIZED_VOLUMES:
                 continue
             empty_dir = volume.get("emptyDir")
             if empty_dir is not None and "sizeLimit" not in empty_dir:
                 raise SystemExit(
-                    f"{where}: {FUSE_CACHE_VOLUME} has no sizeLimit on a pod "
-                    "that asks for no chips. The launcher sizes that volume "
-                    "from the TPU host's memory and this pod is not on one, so "
-                    "the manifest has to name a figure the node it did ask for "
-                    "can hold."
+                    f"{where}: {name} has no sizeLimit on a pod that asks for "
+                    "no chips. The launcher sizes that volume from the TPU "
+                    "host's memory and this pod is not on one, so the manifest "
+                    "has to name a figure the node it did ask for can hold."
                 )
     return doc
 

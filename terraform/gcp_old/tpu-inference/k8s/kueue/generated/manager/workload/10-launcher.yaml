@@ -101,6 +101,7 @@ data:
         topology: 1x1
         accelerator_label: tpu-v6e-slice
         fuse_cache_size: 81Gi
+        shm_size: 24Gi
         max_runtime_seconds: 10800
         prewarm_queue: worker-cpu-tpu-ci-us-east5
       ct6e-standard-8t-2x4:
@@ -111,6 +112,7 @@ data:
         topology: 2x4
         accelerator_label: tpu-v6e-slice
         fuse_cache_size: 670Gi
+        shm_size: 201Gi
         max_runtime_seconds: 10800
         prewarm_queue: worker-cpu-tpu-ci-us-east5
       tpu7x-standard-1t-1x1x1:
@@ -121,6 +123,7 @@ data:
         topology: 1x1x1
         accelerator_label: tpu7x
         fuse_cache_size: 111Gi
+        shm_size: 33Gi
         max_runtime_seconds: 10800
         prewarm_queue: worker-cpu-tpu-ci-us-central1
       tpu7x-standard-4t-2x2x1:
@@ -131,6 +134,7 @@ data:
         topology: 2x2x1
         accelerator_label: tpu7x
         fuse_cache_size: 447Gi
+        shm_size: 134Gi
         max_runtime_seconds: 10800
         prewarm_queue: worker-cpu-tpu-ci-us-central1
       tpu7x-standard-4t-2x2x2:
@@ -141,6 +145,7 @@ data:
         topology: 2x2x2
         accelerator_label: tpu7x
         fuse_cache_size: 447Gi
+        shm_size: 134Gi
         max_runtime_seconds: 10800
         prewarm_queue: worker-cpu-tpu-ci-us-central1
 ---

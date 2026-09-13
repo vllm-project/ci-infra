@@ -125,11 +125,12 @@ spec:
           emptyDir:
             medium: Memory
         # JAX and vLLM use shared memory heavily; the 64MB default is far too
-        # small and fails in ways that look like unrelated crashes.
+        # small and fails in ways that look like unrelated crashes. Sized by
+        # the launcher from the host, like the cache above and for the same
+        # reason - what needs the room is one engine per chip.
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 16Gi
         # Both caches are claims, not mounts: the bucket is regional, so its
         # name differs per cluster, and only a claim resolves at mount time in
         # whichever cluster MultiKueue placed this Job in. An inline volume

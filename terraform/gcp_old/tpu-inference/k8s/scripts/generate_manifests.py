@@ -152,6 +152,24 @@ MACHINE_MEMORY_GB = {
 # is sized for the smallest shape.
 FUSE_VOLUME_RATIO = 0.50
 
+# How much of the host the pod's /dev/shm may take, on the same terms and for
+# the same reason: a tmpfs, so a fraction of memory rather than of disk.
+#
+# Sized rather than fixed because what lands in it scales with the host. vLLM
+# gives every data-parallel engine its own shared-memory broadcast buffers and
+# torch_tpu spills its tier-2 compilation cache beside them, so a machine type
+# with four times the chips runs four times the engines against the same
+# ceiling. The bare-metal lane hands its container a flat 64 GiB, which this
+# clears on every machine type that holds more than one chip; the small shapes
+# it does not clear run one engine.
+#
+# With FUSE_VOLUME_RATIO this is the whole tmpfs ceiling on a TPU host. The two
+# together come to 65% of the memory the machine family documents, which is
+# around 68% of what the kubelet leaves allocatable - so the workload keeps
+# roughly the remaining third. They are caps on what may be written rather than
+# reservations, but a cap the node cannot honour is not a cap.
+SHM_VOLUME_RATIO = 0.15
+
 
 # hcl2 defaults to output you can write back out as HCL, which is not what we
 # want to read: a string keeps the quotes it was written with, so
@@ -266,8 +284,8 @@ def fuse_min_cache_gib() -> int:
     return total
 
 
-def fuse_cache_size(machine_type: str) -> str:
-    """The workload's gcsfuse file cache on this machine type, as a GiB string.
+def host_share_gib(machine_type: str, ratio: float) -> int:
+    """That fraction of this machine type's memory, in whole GiB.
 
     GB to GiB as well as the ratio: the machine family documentation quotes
     memory in decimal gigabytes and a Kubernetes quantity written Gi is binary,
@@ -276,17 +294,29 @@ def fuse_cache_size(machine_type: str) -> str:
 
     An unlisted machine type is an error rather than a conservative guess, for
     the reason on fuse_min_cache_gib: a number too small is not slower, it is a
-    pod the kubelet evicts once the cache fills.
+    pod the kubelet evicts once the volume fills.
     """
     gb = MACHINE_MEMORY_GB.get(machine_type)
     if gb is None:
         raise KeyError(
             f"no host memory known for machine type {machine_type!r}. Read it "
             "off the accelerator-optimized machine family documentation and "
-            "add it to MACHINE_MEMORY_GB; the gcsfuse file cache is sized from "
-            "it, and a wrong number is an eviction rather than a slow mount."
+            "add it to MACHINE_MEMORY_GB; the pod's memory-backed volumes are "
+            "sized from it, and a wrong number is an eviction rather than a "
+            "slow mount."
         )
-    gib = int(gb * FUSE_VOLUME_RATIO * 1000**3 / 1024**3)
+    return int(gb * ratio * 1000**3 / 1024**3)
+
+
+def shm_size(machine_type: str) -> str:
+    """The pod's /dev/shm on this machine type, as a GiB string."""
+    return f"{host_share_gib(machine_type, SHM_VOLUME_RATIO)}Gi"
+
+
+def fuse_cache_size(machine_type: str) -> str:
+    """The workload's gcsfuse file cache on this machine type, as a GiB string."""
+    gib = host_share_gib(machine_type, FUSE_VOLUME_RATIO)
+    gb = MACHINE_MEMORY_GB[machine_type]
     floor = fuse_min_cache_gib()
     if gib < floor:
         raise ValueError(
@@ -363,6 +393,7 @@ def shapes(worker: dict) -> dict[str, dict]:
             "topology": topology,
             "accelerator_label": ACCELERATOR_LABELS[family],
             "fuse_cache_size": fuse_cache_size(machine_type),
+            "shm_size": shm_size(machine_type),
             # The one number here that is a policy rather than a fact, and the
             # only one Kueue reads: this shape's share of the reservation.
             "quota": int(pool["nominal_nodes"]) * chips,
