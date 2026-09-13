@@ -1205,6 +1205,34 @@
         "reference_url": "https://github.com/vllm-project/vllm/pull/56677",
         "notes": "PR #56157 both added the PCP4+DCP4 config without a DCP backend flag and added validation requiring ag_rs, while its exact optional B200 evaluation stayed blocked in PR CI. Draft PR #56677 supplies the single missing --dcp-comm-backend ag_rs argument."
       }
+    },
+    {
+      "id": "pr-56305-main-88651-h200-model-executor",
+      "job_name": "H200 MIG 35GB Model Executor",
+      "job_key": "model-executor",
+      "culprit_pr": {
+        "number": 56305,
+        "url": "https://github.com/vllm-project/vllm/pull/56305",
+        "merge_commit": "82a85dc1d2d5b3ad4453eaa1bd7596de888a66b3"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 88637,
+        "job_id": "01a09ac6-876e-4f2f-99d6-1c2d20c39f3d",
+        "url": "https://buildkite.com/vllm/ci/builds/88637#01a09ac6-876e-4f2f-99d6-1c2d20c39f3d"
+      },
+      "main_failure": {
+        "build_number": 88651,
+        "job_id": "01a09b47-c668-4e25-a3cd-342c156b6511",
+        "url": "https://buildkite.com/vllm/ci/builds/88651#01a09b47-c668-4e25-a3cd-342c156b6511",
+        "signature": "all 12 applicable fused-shared-expert model-construction cases failed because the fixture model_config lacked the new rswa_window field"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/56710",
+        "notes": "PR #56305 added an unconditional model_config.rswa_window read in get_attn_backend, but its exact build and immediate post-main build both left H200 Model Executor blocked. The next selected main lane deterministically failed the fixture; draft PR #56710 adds the non-R-SWA default to its SimpleNamespace contract."
+      }
     }
   ]
 }
