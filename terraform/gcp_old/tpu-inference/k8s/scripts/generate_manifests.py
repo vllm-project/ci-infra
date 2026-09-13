@@ -140,12 +140,6 @@ MACHINE_MEMORY_GB = {
 # fileCacheCapacity in cache_volumes.yaml.tpl is one object per cluster and so
 # is sized for the smallest shape.
 FUSE_VOLUME_RATIO = 0.50
-# The largest fileCacheCapacity in cache_volumes.yaml.tpl. gcsfuse fills its
-# file cache up to that figure whatever the volume behind it holds, and
-# overrunning a memory-backed emptyDir's sizeLimit gets the pod evicted mid-run
-# - so a shape whose share of host memory does not clear this cannot mount the
-# caches safely, and there is no smaller number that degrades gracefully.
-FUSE_MIN_CACHE_GIB = 65
 
 
 # hcl2 defaults to output you can write back out as HCL, which is not what we
@@ -219,6 +213,26 @@ def cohort(queue: str) -> str:
     return queue.split("-")[0]
 
 
+def fuse_min_cache_gib() -> int:
+    """The smallest gke-gcsfuse-cache volume a pod can mount the caches with.
+
+    The sum of the fileCacheCapacity figures rather than the largest of them:
+    every gcsfuse mount in a pod shares one gke-gcsfuse-cache volume, so what
+    has to fit is all of them at once. gcsfuse fills to those figures whatever
+    the volume behind them holds, and overrunning a memory-backed emptyDir's
+    sizeLimit is the kubelet evicting the pod mid-run, so no smaller number
+    degrades gracefully.
+
+    Read out of the template instead of restated here, which would be a second
+    copy of a number that moves.
+    """
+    text = (TEMPLATES / "cache_volumes.yaml.tpl").read_text()
+    caps = re.findall(r'fileCacheCapacity:\s*"(\d+)Gi"', text)
+    if not caps:
+        raise ValueError("cache_volumes.yaml.tpl declares no fileCacheCapacity")
+    return sum(int(cap) for cap in caps)
+
+
 def fuse_cache_size(machine_type: str) -> str:
     """The workload's gcsfuse file cache on this machine type, as a GiB string.
 
@@ -228,7 +242,7 @@ def fuse_cache_size(machine_type: str) -> str:
     than intended.
 
     An unlisted machine type is an error rather than a conservative guess, for
-    the reason on FUSE_MIN_CACHE_GIB: a number too small is not slower, it is a
+    the reason on fuse_min_cache_gib: a number too small is not slower, it is a
     pod the kubelet evicts once the cache fills.
     """
     gb = MACHINE_MEMORY_GB.get(machine_type)
@@ -240,12 +254,14 @@ def fuse_cache_size(machine_type: str) -> str:
             "it, and a wrong number is an eviction rather than a slow mount."
         )
     gib = int(gb * FUSE_VOLUME_RATIO * 1000**3 / 1024**3)
-    if gib < FUSE_MIN_CACHE_GIB:
+    floor = fuse_min_cache_gib()
+    if gib < floor:
         raise ValueError(
             f"{machine_type} has {gb} GB of host memory, so {FUSE_VOLUME_RATIO:.0%} "
-            f"of it is {gib}Gi - under the {FUSE_MIN_CACHE_GIB}Gi "
-            "fileCacheCapacity in cache_volumes.yaml.tpl. gcsfuse would fill "
-            "past the emptyDir's sizeLimit and the kubelet would evict the pod."
+            f"of it is {gib}Gi - under the {floor}Gi of fileCacheCapacity that "
+            "cache_volumes.yaml.tpl asks for across the mounts sharing one "
+            "gke-gcsfuse-cache volume. gcsfuse would fill past the emptyDir's "
+            "sizeLimit and the kubelet would evict the pod."
         )
     return f"{gib}Gi"
 
