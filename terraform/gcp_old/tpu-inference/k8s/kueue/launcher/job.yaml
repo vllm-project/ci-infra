@@ -112,7 +112,7 @@ spec:
               mountPath: /cache/hf/hub
       volumes:
         # Backing store for the gcsfuse file cache, in RAM. The launcher sets
-        # sizeLimit to half the machine type's memory - 80Gi on
+        # sizeLimit to half the machine type's memory - 81Gi on
         # ct6e-standard-1t, 670Gi on ct6e-standard-8t - since one fixed number
         # would be unsafe on the smallest shape or waste most of the largest.
         # A sizeLimit, not a reservation: tmpfs holds only what is written.

@@ -103,7 +103,9 @@ at all is the exception and rides along — a benchmark client driving the serve
 over HTTP, say — because the queues put `google.com/tpu` alone under quota. Give
 such a role `nodeSelector: cloud.google.com/compute-class: worker-cpu` and real
 CPU requests; otherwise it lands on the worker's small shared system pool, or on
-a TPU node where it would sit on four chips to run a Python process.
+a TPU node where it would sit on four chips to run a Python process. If it also
+mounts the caches it must state its own `gke-gcsfuse-cache` `sizeLimit` — the
+launcher sizes that from the TPU host's memory, which this node does not have.
 
 A manifest must contain a container named `workload`: that is the one whose
 output is streamed back and which step environment is forwarded to. More than

@@ -661,8 +661,16 @@ def size_fuse_cache(doc, profile):
     shapes we run and one figure is either unsafe on the smallest or wasteful on
     the largest. Set only where the manifest left it open, so a pod that needs
     the memory for itself can say so.
+
+    Chip-holding roles only. The figure is a fraction of a TPU host's memory,
+    and a role that holds no chips is not on one - it is on a worker-cpu node
+    sized to its own requests, where a tmpfs the size of a TPU host's cache is
+    an eviction as soon as it fills. Such a role has to state its own sizeLimit
+    to mount the caches at all.
     """
     for spec in pod_specs(doc):
+        if pod_shape(spec) == (None, None, None):
+            continue
         for volume in spec.get("volumes", []):
             if volume.get("name") == FUSE_CACHE_VOLUME and "emptyDir" in volume:
                 volume["emptyDir"].setdefault(
