@@ -7,8 +7,7 @@ network     = "projects/cloud-ullm-inference-ci-cd/global/networks/default"
 namespace = "buildkite"
 
 # The token the bare-metal agents already register with, so the kube fleet joins
-# the same Buildkite org as the queues it is replacing. Terraform grants read on
-# it and never owns its value.
+# the same Buildkite org as the queues it is replacing.
 agent_token_secret_id = "vllm_buildkite_agent_token"
 
 # Credentials any pipeline may ask for by name, keyed by the environment
@@ -67,29 +66,20 @@ buildkite_queue = "kube"
 auth_plugin_image       = "gcr.io/google.com/cloudsdktool/google-cloud-cli:584.0.0"
 auth_plugin_source_path = "/usr/lib/google-cloud-sdk/bin/gke-gcloud-auth-plugin"
 
-# Built by kueue/launcher/cloudbuild.yaml from the Cloud CLI image the auth
-# plugin is copied out of, at the same version. Still a variable of its own:
-# there that image is a source of one static binary for a distroless container,
-# here it is the whole runtime a pod boots into, and the two move for different
-# reasons.
-#
-# The suffix after the CLI version is the Dockerfile revision, bumped when the
-# Dockerfile changes and the base image does not, so a tag names one set of
-# bytes.
+# Built by kueue/launcher/cloudbuild.yaml from the same Cloud CLI image the
+# auth plugin is copied out of. The suffix after the CLI version is the
+# Dockerfile revision, bumped when the Dockerfile changes and the base image
+# does not, so a tag names one set of bytes.
 launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/launcher:584.0.0-1"
 
-# A test gets three hours with the chips unless its manifest says otherwise,
-# matching the bare-metal budget so a step moving between the two lanes gets the
-# same allowance.
+# Three hours with the chips unless a manifest says otherwise, matching the
+# bare-metal budget so a step moving between the lanes gets the same allowance.
 #
-# A day in total, which is the ceiling on both the queueing and on what a
-# manifest may ask for. Set by the queue rather than by the work: the fleet has
-# eight v7x chips, so a build that fans out over several shapes puts most of its
-# steps behind the rest of itself, and one long benchmark holds every chip for
-# as long as it serves. A step that has been waiting since the previous evening
-# is waiting on hardware that is busy, not on anything wrong with it, and
-# failing it for that loses its place in line as well as its result - the retry
-# goes to the back of a queue it had already reached the front of.
+# A day in total, set by the queue rather than by the work: the fleet has eight
+# v7x chips, so a build fanning out over several shapes puts most of its steps
+# behind the rest of itself. A step that has been waiting since the previous
+# evening is waiting on busy hardware, and failing it for that loses its place
+# in line as well as its result.
 tpu_test_max_seconds  = 10800
 tpu_total_max_seconds = 86400
 
@@ -102,8 +92,8 @@ allowed_image_repos = [
 ]
 
 # A cluster is its project and its region; everything it is called is derived
-# from those two. The cluster pins no zones; the reservation's zone (us-east5-a)
-# belongs to the TPU pools that draw on it.
+# from those two. A cluster pins no zones - the reservation's zone belongs to
+# the TPU pools that draw on it.
 worker_clusters = [
   {
     project                = "cloud-ullm-inference-ci-cd"
@@ -191,8 +181,8 @@ worker_clusters = [
         max_nodes     = 2
       },
       {
-        # Eight chips as one slice across two VMs, so this is the multi-host
-        # shape and GKE places it from a COMPACT policy. It takes the whole
+        # Eight chips as one slice across two VMs: the multi-host shape, placed
+        # from the named workload policy in workers.tf. It takes the whole
         # cohort, which means it waits for every other v7x workload to finish.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x2"

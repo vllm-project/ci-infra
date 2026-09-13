@@ -5,18 +5,27 @@ on long-lived agent VMs. A Buildkite step on queue `kube` becomes a Kueue
 workload, which is admitted against fleet quota on a manager cluster and
 dispatched to whichever worker cluster has the chips.
 
-Two clusters, and the split is the whole design:
+One manager and one worker per reservation, and that split is the whole design:
 
 - **Manager** — `tpu-ci-manager`, Standard, `us-central1`. No TPUs. Runs the
   agent-stack-k8s controller, the Buildkite agent pods, and the Kueue that owns
   fleet-wide quota. This is where a step's agent lives and where its log goes.
   It declares no node pools: nodes are auto-provisioned per pending pod, from
   the machine families the `manager-system` ComputeClass lists in order.
-- **Worker** — `tpu-ci-us-east5`, Standard, `us-east5`. The chips. Reports to
-  the manager over Connect Gateway; runs no agent of its own.
+- **Worker** — `tpu-ci-us-east5`, Standard, `us-east5`. v6e, 26 chips free of a
+  128-chip reservation, as `ct6e-standard-1t` (1x1) and `ct6e-standard-8t` (2x4).
+- **Worker** — `tpu-ci-us-central1`, Standard, `us-central1`. v7x, 8 chips, as
+  `tpu7x-standard-1t` (1x1x1), `tpu7x-standard-4t` (2x2x1) and `tpu7x-standard-4t`
+  (2x2x2, multi-host across two VMs). Every v7x step in the fleet runs here.
 
-MultiKueue joins them: the manager admits, the worker executes. An operator
+A worker reports to the manager over Connect Gateway and runs no agent of its
+own. MultiKueue joins them: the manager admits, the worker executes. An operator
 talks to the manager for almost everything.
+
+Each worker also carries a `worker-cpu` ComputeClass for roles that hold no
+chips, and the fleet's secrets, put there by GKE SecretSync — a workload pod
+runs on the worker, so a `secretKeyRef` has to resolve there rather than on the
+manager where the launcher built the podspec.
 
 ## Layout
 
@@ -91,7 +100,10 @@ every restart pull the same bytes even if the tag is republished mid-run.
 Every role that holds chips must ask for the same shape: a workload is admitted
 against one queue and a queue is one shape. A role that asks for no accelerator
 at all is the exception and rides along — a benchmark client driving the servers
-over HTTP, say — because the queues put `google.com/tpu` alone under quota.
+over HTTP, say — because the queues put `google.com/tpu` alone under quota. Give
+such a role `nodeSelector: cloud.google.com/compute-class: worker-cpu` and real
+CPU requests; otherwise it lands on the worker's small shared system pool, or on
+a TPU node where it would sit on four chips to run a Python process.
 
 A manifest must contain a container named `workload`: that is the one whose
 output is streamed back and which step environment is forwarded to. More than
@@ -151,6 +163,13 @@ A machine type and a topology together identify a shape, and both are needed: a
 2x4 slice of v6e is eight chips either as one `ct6e-standard-8t` or as two
 `ct6e-standard-4t`, and which it is decides the host, the pod count and the
 quota.
+
+All three counts are in **nodes**, not chips — the generator multiplies
+`nominal_nodes` by the machine type's chips per VM to get the ClusterQueue's
+`nominalQuota`. Summed across a cluster, `nominal_nodes` should come to the chips
+the reservation actually has free; `max_nodes` deliberately oversubscribes so a
+shape can borrow, and `min_nodes` is the only one that really partitions the
+reservation, since those chips stay with one shape once booted.
 
 ### Rotate the Buildkite agent token
 
@@ -228,6 +247,33 @@ faster before the first line arrives, which covers the built-in Job. The step
 still passes or fails correctly and says when output is missing; the container
 output is in Cloud Logging either way.
 
+**Two of the three v7x shapes have no quota of their own.** All eight chips are
+the nominal quota of `tpu7x-standard-4t-2x2x1`; `tpu7x-standard-1t-1x1x1` and
+`tpu7x-standard-4t-2x2x2` have zero and run entirely on what that queue is not
+using. Eight chips will not divide three ways and still leave each shape a whole
+slice, so this is deliberate — but it means a single-chip step can wait behind a
+four-chip one indefinitely, and `reclaimWithinCohort: Never` will not preempt to
+free it. If a shape is starving, the lever is the split in `prod.auto.tfvars`,
+not the node pools.
+
+**A cold pool's first image pull is slow, and that is not streaming failing.**
+Image streaming is on for every TPU pool, but GKE serves an image it has
+converted and it converts each digest once. CI pushes a new digest every build,
+so the first node to want it waits out the conversion — measured at 87s for a
+2.7 GB image — and every node after it mounts the same digest in about two
+seconds. Caching layers on the node cannot help; the digest is new every build.
+
+**A step may legitimately queue for hours.** `tpu_total_max_seconds` is a day,
+and it is a budget for queueing and running together. With eight v7x chips, a
+build that fans out over several shapes puts most of its steps behind the rest of
+itself. The launcher annotates what it is waiting for; read that before assuming
+a fault.
+
+**us-central1 holds both the manager and a worker.** They are separate clusters
+with separate control-plane CIDRs, but they share the region's Cloud Router and
+Cloud NAT, and both pull from the same Artifact Registry. Do not declare a second
+NAT gateway for the worker.
+
 **Not every controller setting is in our values.** The effective config is:
 
 ```bash
@@ -251,12 +297,14 @@ otherwise.
 kubectl get workloads -n buildkite
 kubectl describe workload -n buildkite <name>
 
-# Is there quota for the shape it asked for?
+# Is there quota for the shape it asked for? Check borrowing too: a shape with
+# nominalQuota 0 is admitted only out of its cohort's idle chips.
 kubectl get clusterqueue
 
-# Admitted but nothing running: it is on the worker.
-gcloud container clusters get-credentials tpu-ci-us-east5 \
-  --region us-east5 --project cloud-ullm-inference-ci-cd
+# Admitted but nothing running: it is on the worker that owns that shape -
+# tpu-ci-us-east5 for ct6e, tpu-ci-us-central1 for tpu7x.
+gcloud container clusters get-credentials <cluster> \
+  --region <region> --project cloud-ullm-inference-ci-cd
 kubectl get pods -n buildkite
 ```
 

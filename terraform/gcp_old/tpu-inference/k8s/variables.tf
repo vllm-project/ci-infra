@@ -267,11 +267,8 @@ variable "tpu_total_max_seconds" {
 
 variable "worker_clusters" {
   type = list(object({
-    # What identifies a worker cluster. Every name it gets is derived from this
-    # pair and nothing else, so there is no label to invent and none to keep in
-    # step: locals.tf builds the project-scoped names from location alone, and
-    # the fleet-wide ones - the Terraform address, the generated directory, the
-    # MultiKueueCluster on the manager - from both.
+    # Identifies the cluster: every name it gets is derived from this pair, so
+    # there is no label to invent and none to keep in step. See locals.workers.
     project  = string
     location = string
 
@@ -283,16 +280,15 @@ variable "worker_clusters" {
     system_min_nodes    = optional(number, 1)
     system_max_nodes    = optional(number, 3)
 
-    # One per TPU shape this cluster can run. A list rather than a map, because
-    # the node pool's name is its shape - <machine type>-<topology>, e.g.
-    # ct6e-standard-8t-2x4 - and locals.tf builds it from the two fields below
-    # rather than taking it from here, so it cannot name hardware the pool does
-    # not have. generate_manifests.py names the shape's Kueue queue the same way.
+    # One per TPU shape this cluster can run. The node pool's name is its shape
+    # - <machine type>-<topology>, e.g. ct6e-standard-8t-2x4 - and locals.tf
+    # derives it from the two fields below rather than taking it from here, so
+    # it cannot name hardware the pool does not have. generate_manifests.py
+    # names the shape's Kueue queue the same way.
     tpu_node_pools = optional(list(object({
-      # The machine type is the VM, the topology the slice asked of it. Both are
-      # needed because a topology does not imply a machine type: 2x4 is eight
-      # chips either as one ct6e-standard-8t or as two ct6e-standard-4t, and
-      # those differ in pod count, chips per pod and JobSet parallelism.
+      # A topology does not imply a machine type: 2x4 is eight chips either as
+      # one ct6e-standard-8t or as two ct6e-standard-4t, and those differ in pod
+      # count, chips per pod and JobSet parallelism.
       machine_type = string
       topology     = string
 
@@ -308,13 +304,12 @@ variable "worker_clusters" {
       # free chips; the reservation running out is what stops a scale-up.
       max_nodes = number
 
-      # This shape's share of the reservation, and the only one of the three
-      # counts that no resource here reads: generate_manifests.py turns it into
-      # the nominalQuota of the shape's ClusterQueue. Chips a shape can always
-      # get, so the shapes cannot starve each other, while the queues sit in
-      # one cohort and lend out whatever is idle. Summed across a cluster's
-      # pools it should be the chips the reservation actually has free, which
-      # is what max_nodes deliberately oversubscribes.
+      # This shape's share of the reservation, in nodes. The only one of the
+      # three counts no resource here reads: generate_manifests.py multiplies it
+      # by chips per VM to get the nominalQuota of the shape's ClusterQueue -
+      # chips the shape can always have, while the queues sit in one cohort and
+      # lend out whatever is idle. Summed across a cluster it should be the
+      # chips the reservation actually has free, which max_nodes oversubscribes.
       nominal_nodes = number
     })), [])
   }))
