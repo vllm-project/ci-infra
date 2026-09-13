@@ -24,14 +24,12 @@ resource "google_storage_bucket" "workload" {
   uniform_bucket_level_access = true
   storage_class               = "STANDARD"
 
-  # Real folders, and fixed at creation - changing it means replacing the
-  # bucket. It matters because of how gcsfuse writes: every write goes to a
-  # temporary object and is then renamed, which on a flat bucket is a copy plus
-  # a delete. HNS makes it an atomic folder operation with up to 8x the initial
-  # QPS limit. Requires uniform bucket-level access, set above.
-  #
-  # It rules out object versioning, retention and bucket lock, cross-bucket
-  # replication and object-level ACLs. A rebuildable cache uses none of those.
+  # Real folders, fixed at creation - changing it means replacing the bucket.
+  # It matters because of how gcsfuse writes: every write goes to a temporary
+  # object and is then renamed, which on a flat bucket is a copy plus a delete.
+  # HNS makes it an atomic folder operation with up to 8x the initial QPS
+  # limit. Requires uniform bucket-level access, set above, and rules out
+  # versioning, retention, bucket lock, replication and object ACLs.
   hierarchical_namespace {
     enabled = true
   }
@@ -45,14 +43,11 @@ resource "google_storage_bucket" "workload" {
     retention_duration_seconds = 0
   }
 
-  # Nothing here is public and nothing should become public by accident. These
-  # hold model weights and compilation output for a CI fleet.
   public_access_prevention = "enforced"
 
-  # The caches are rebuildable by definition - a lost entry costs a recompile,
-  # not data - but rebuilding all of it costs about 2.7x a suite's chips, so do
-  # not let a terraform mistake take it. Emptying them is a deliberate step in
-  # the runbook, not something a destroy does on the way past.
+  # A cache is rebuildable, but rebuilding one costs about 2.7x a suite's
+  # chips. Emptying it is a deliberate step in the runbook, not something a
+  # destroy does on the way past.
   force_destroy = false
 
   lifecycle_rule {
@@ -76,18 +71,12 @@ resource "google_storage_bucket" "workload" {
     }
   }
 
-  # No label for the cluster: a bucket already sits in the worker's project, and
-  # that with the region below is the pair that identifies one.
   labels = merge(local.common_labels, {
     purpose = "tpu-ci-${each.value.purpose}"
     region  = each.value.location
   })
 }
 
-# Bucket-scoped and additive on purpose. _member manages exactly one (bucket,
-# role, member) tuple; _binding would own the whole role and _policy the whole
-# bucket, either of which fights anything else managing IAM here.
-#
 # Granted to tpu-workload rather than the namespace's default account, since
 # default is what a pod gets when it names none - and the launcher will run
 # images named by a pull request.

@@ -25,13 +25,12 @@ resource "google_container_cluster" "manager" {
   remove_default_node_pool = true
   initial_node_count       = 1
 
-  # Only ever the pool that `remove_default_node_pool` deletes again, and it is
-  # named because the default is `e2-medium` in every zone of the region at
-  # once: four nodes created to be thrown away, and a shortage in any one of
-  # them fails the whole cluster create. us-central1 runs out of e2 regularly.
+  # Only ever the pool that remove_default_node_pool deletes again, and it is
+  # named because the default is e2-medium in every zone of the region at once:
+  # four nodes created to be thrown away, and a shortage in any one of them
+  # fails the whole cluster create. us-central1 runs out of e2 regularly.
   #
-  # It is read at create and never again - see the lifecycle block, without
-  # which every later apply tries to update a pool that is not there.
+  # Read at create and never again - see the lifecycle block below.
   node_config {
     machine_type = var.manager_bootstrap_machine_type
   }
@@ -61,9 +60,6 @@ resource "google_container_cluster" "manager" {
   # workers.
   ip_allocation_policy {}
 
-  # How a pod here gets a Google identity without a key: the secret sync reads
-  # the agent token, and the launcher reads the Test Engine and Hugging Face
-  # tokens. Implicit under Autopilot, explicit here.
   workload_identity_config {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
@@ -99,13 +95,9 @@ resource "google_container_cluster" "manager" {
   # There are no fixed node pools here. Every node this cluster runs is created
   # by GKE for a pod that is already pending, from whichever machine family and
   # zone has capacity at that moment - see the ComputeClass in
-  # kueue/templates/compute_class.yaml.tpl for the order it tries them in.
-  #
-  # A pool pinned to one machine type in one region is a stockout away from the
-  # fleet having no control plane, and it is not a hypothetical: the first
-  # attempt at this cluster failed to create at all because us-central1 was out
-  # of e2. Nothing here holds accelerators or state, so there is nothing to lose
-  # by letting the shape of a node be decided at scale-up.
+  # kueue/templates/compute_class.yaml.tpl for the order it tries them in. A
+  # pool pinned to one machine type in one region is a stockout away from the
+  # fleet having no control plane, and nothing here holds accelerators or state.
   #
   # The limits are the fleet's ceiling, not a pool's: a launcher pod waiting on
   # quota occupies a node without holding a chip, so what has to fit is the
@@ -149,10 +141,8 @@ resource "google_container_cluster" "manager" {
   lifecycle {
     ignore_changes = [
       # The default pool this describes is deleted seconds after it is created,
-      # so an apply that tried to reconcile it would fail on a pool that is not
-      # there - which is exactly what happened: "Node pool default-pool not
-      # found on update". Nothing runs on it, and every node that does run here
-      # comes from auto-provisioning, so there is nothing here worth tracking.
+      # so an apply that tried to reconcile it fails with "Node pool
+      # default-pool not found on update".
       node_config,
 
       # GKE turns these on by itself and reports them back, so they diff on

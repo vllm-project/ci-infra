@@ -140,9 +140,6 @@ MACHINE_MEMORY_GB = {
 # fileCacheCapacity in cache_volumes.yaml.tpl is one object per cluster and so
 # is sized for the smallest shape.
 FUSE_VOLUME_RATIO = 0.50
-# Small enough to be safe on any host, for a machine type not listed above. Too
-# low only costs read speed.
-FUSE_FALLBACK = "20Gi"
 
 
 # hcl2 defaults to output you can write back out as HCL, which is not what we
@@ -216,6 +213,48 @@ def cohort(queue: str) -> str:
     return queue.split("-")[0]
 
 
+def fuse_min_cache_gib() -> int:
+    """The smallest gke-gcsfuse-cache volume a pod can mount the caches with.
+
+    The sum of the fileCacheCapacity figures rather than the largest of them:
+    every gcsfuse mount in a pod shares one gke-gcsfuse-cache volume, so what
+    has to fit is all of them at once. gcsfuse fills to those figures whatever
+    the volume behind them holds, and overrunning a memory-backed emptyDir's
+    sizeLimit is the kubelet evicting the pod mid-run, so no smaller number
+    degrades gracefully.
+
+    Read out of the template instead of restated here, which would be a second
+    copy of a number that moves.
+    """
+    text = (TEMPLATES / "cache_volumes.yaml.tpl").read_text()
+    # Comment lines dropped first: the comments around these fields quote the
+    # figures they explain, and a quoted one would be counted twice.
+    body = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    # Matched loosely and checked strictly, so that a figure this cannot read is
+    # an error rather than a mount silently left out of the sum. Out of the sum
+    # is the direction that hurts: the floor comes back too low, a shape that
+    # should have been refused is generated, and the kubelet evicts the pod when
+    # the cache fills. gcsfuse's own "-1" is the case worth naming - it is legal,
+    # it means fill the volume, and no total bounds it.
+    caps = re.findall(r"fileCacheCapacity:\s*(\S+)", body)
+    if not caps:
+        raise ValueError("cache_volumes.yaml.tpl declares no fileCacheCapacity")
+    total = 0
+    for cap in caps:
+        match = re.fullmatch(r'"(\d+)Gi"', cap)
+        if not match:
+            raise ValueError(
+                f"cache_volumes.yaml.tpl states fileCacheCapacity: {cap}, which "
+                "is not a quoted whole number of Gi. The gcsfuse cache floor is "
+                "the sum of these, and a figure this cannot add is a floor too "
+                "low rather than a missing one."
+            )
+        total += int(match.group(1))
+    return total
+
+
 def fuse_cache_size(machine_type: str) -> str:
     """The workload's gcsfuse file cache on this machine type, as a GiB string.
 
@@ -223,11 +262,30 @@ def fuse_cache_size(machine_type: str) -> str:
     memory in decimal gigabytes and a Kubernetes quantity written Gi is binary,
     so taking the number across unconverted would ask for 7% more of the host
     than intended.
+
+    An unlisted machine type is an error rather than a conservative guess, for
+    the reason on fuse_min_cache_gib: a number too small is not slower, it is a
+    pod the kubelet evicts once the cache fills.
     """
     gb = MACHINE_MEMORY_GB.get(machine_type)
     if gb is None:
-        return FUSE_FALLBACK
-    return f"{int(gb * FUSE_VOLUME_RATIO * 1000**3 / 1024**3)}Gi"
+        raise KeyError(
+            f"no host memory known for machine type {machine_type!r}. Read it "
+            "off the accelerator-optimized machine family documentation and "
+            "add it to MACHINE_MEMORY_GB; the gcsfuse file cache is sized from "
+            "it, and a wrong number is an eviction rather than a slow mount."
+        )
+    gib = int(gb * FUSE_VOLUME_RATIO * 1000**3 / 1024**3)
+    floor = fuse_min_cache_gib()
+    if gib < floor:
+        raise ValueError(
+            f"{machine_type} has {gb} GB of host memory, so {FUSE_VOLUME_RATIO:.0%} "
+            f"of it is {gib}Gi - under the {floor}Gi of fileCacheCapacity that "
+            "cache_volumes.yaml.tpl asks for across the mounts sharing one "
+            "gke-gcsfuse-cache volume. gcsfuse would fill past the emptyDir's "
+            "sizeLimit and the kubelet would evict the pod."
+        )
+    return f"{gib}Gi"
 
 
 def shapes(worker: dict) -> dict[str, dict]:
@@ -272,15 +330,15 @@ def shapes(worker: dict) -> dict[str, dict]:
             )
 
         # A multi-host slice is admitted and built whole, so quota that is not
-        # a multiple of hosts is quota this shape can never use and a ceiling
-        # that is not one is a node pool GKE cannot build. Fail here rather
-        # than as a workload that queues forever.
-        for field in ("nominal_nodes", "max_nodes"):
+        # a multiple of hosts is quota this shape can never use, and a floor or
+        # ceiling that is not one is a node pool GKE cannot build. Fail here
+        # rather than as a workload that queues forever.
+        for field in ("min_nodes", "nominal_nodes", "max_nodes"):
             if hosts > 1 and int(pool[field]) % hosts:
                 raise ValueError(
                     f"{name}: {field}={pool[field]} is not a multiple of the "
-                    f"{hosts} hosts in a {topology} slice; a multi-host shape's "
-                    "quota has to be whole slices"
+                    f"{hosts} hosts in a {topology} slice; every count for a "
+                    "multi-host shape has to be whole slices"
                 )
 
         out[name] = {

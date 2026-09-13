@@ -155,10 +155,13 @@ spec:
       # under the largest checkpoint refetches it on every load and evicts the
       # small models that would have fit.
       #
-      # The pod must back this with a gke-gcsfuse-cache volume at least this
-      # large, or the sidecar falls back to 5GiB of ephemeral storage and the
-      # capacity is nominal. The launcher sizes that volume at half the machine
-      # type's memory, and every shape this fleet runs clears 65Gi.
+      # The pod backs this with a gke-gcsfuse-cache volume, and shares that one
+      # volume with every other gcsfuse mount - so it has to hold this plus the
+      # jax cache's 8Gi, not just this. Too small is not a slower mount: the
+      # sidecar falls back to 5GiB of ephemeral storage, or the kubelet evicts
+      # the pod when the tmpfs fills. The launcher sizes the volume at half the
+      # machine type's memory, and generate_manifests.py refuses a shape whose
+      # half does not clear the total.
       fileCacheCapacity: "65Gi"
       # safetensors are memory-mapped, which is nothing but random reads. With
       # this false a 2.88 GiB checkpoint page-faulted over the network until the

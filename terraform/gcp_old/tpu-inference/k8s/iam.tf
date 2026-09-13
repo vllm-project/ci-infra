@@ -6,14 +6,13 @@ resource "google_service_account" "manager_nodes" {
   display_name = "Manager GKE Node SA"
 }
 
-# container.defaultNodeServiceAccount is GKE's maintained definition of what a
-# node needs to boot, log and report metrics, and a node gets nothing beyond it.
-# Every pod scheduled to a node can reach that node's identity, so anything a
-# workload needs belongs on the workload's own service account through Workload
-# Identity instead.
+# Every pod scheduled to a node can reach that node's identity, so a node gets
+# nothing beyond container.defaultNodeServiceAccount - GKE's maintained
+# definition of what it takes to boot, log and report metrics. Anything a
+# workload needs goes on the workload's own account through Workload Identity.
 #
 # It does not cover pulling private images; that is granted per repository
-# below, from var.image_repositories, to both node accounts.
+# below, to both node accounts.
 resource "google_project_iam_member" "manager_nodes" {
   project = var.project_id
   role    = "roles/container.defaultNodeServiceAccount"
