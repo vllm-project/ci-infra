@@ -287,9 +287,18 @@ variable "worker_clusters" {
     # requests and removes it afterwards. Growing this pool to fit one instead
     # buys a node that is idle between runs and still too small for the next
     # role that wants more.
+    #
+    # e2 despite the worker-cpu class ordering it last for supply, because that
+    # ordering is about eight-core nodes built on demand at burst and this is
+    # one four-core node that already exists. On the shape this pool asks for,
+    # e2 is the family us-east5 actually has: n2-standard-4 is exhausted in
+    # us-east5-b, which is where a surge upgrade of this pool has to land.
     system_machine_type = optional(string, "e2-standard-4")
     system_min_nodes    = optional(number, 1)
-    system_max_nodes    = optional(number, 3)
+    # A ceiling, not a plan: both workers have run on one node since they were
+    # built. Left above the floor because an unreached ceiling costs nothing and
+    # a system pod that cannot schedule is an outage.
+    system_max_nodes = optional(number, 3)
 
     # One per TPU shape this cluster can run. The node pool's name is its shape
     # - <machine type>-<topology>, e.g. ct6e-standard-8t-2x4 - and locals.tf
