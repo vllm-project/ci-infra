@@ -1016,6 +1016,37 @@ def termination_reasons(items):
     return out
 
 
+def workload_exit_code(items):
+    """The status the workload's own command returned, or None.
+
+    The launcher's contract is that a step's result is the workload's result,
+    and a step that retries on a particular code needs that code rather than a
+    flat 1: the disagg harness answers 75 for "the TPU runtime would not open a
+    session", which is the difference between an infrastructure retry and a
+    reported test failure.
+
+    Only when every terminated workload container agrees. Disagreement means
+    several roles failed for different reasons and no single number describes
+    the run; the caller's 1 is the honest answer there.
+    """
+    codes = set()
+    for pod in items:
+        for cs in pod.get("status", {}).get("containerStatuses", []) or []:
+            if cs.get("name") != "workload":
+                continue
+            term = (cs.get("state") or {}).get("terminated") or {}
+            if not term:
+                term = (cs.get("lastState") or {}).get("terminated") or {}
+            code = term.get("exitCode")
+            if code:
+                codes.add(code)
+    if len(codes) != 1:
+        return None
+    code = codes.pop()
+    # Beyond a byte the shell truncates, and 0 would report a failure as a pass.
+    return code if 0 < code < 256 else None
+
+
 def describe_admission(workload):
     if workload is None:
         return "waiting for Kueue to create the workload"
@@ -1508,9 +1539,9 @@ def main():
                     log("no workload logs captured: the workload never reported "
                         "a cluster to fetch gateway credentials for, so none were "
                         "requested. Not a Connect Gateway permission problem.")
-                if failed and genv:
-                    for why in termination_reasons(worker_pods(genv, job_id) or []):
-                        log(f"container terminated: {why}")
+                pods = worker_pods(genv, job_id) or [] if (failed and genv) else []
+                for why in termination_reasons(pods):
+                    log(f"container terminated: {why}")
 
                 # What the Workload thought, while it still exists - Kueue
                 # collects it soon after the run, and once it is gone a preemption
@@ -1528,7 +1559,7 @@ def main():
                     # build readable, but on a failure it is what anyone wants.
                     print("^^^ +++", flush=True)
                     log(f"{kind}/{name} failed")
-                    return 1
+                    return workload_exit_code(pods) or 1
                 log(f"{kind}/{name} completed")
                 return 0
 
