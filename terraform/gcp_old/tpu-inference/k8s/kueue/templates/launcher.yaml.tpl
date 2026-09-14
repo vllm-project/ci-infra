@@ -168,8 +168,8 @@ template:
       - name: launcher-profiles
         configMap:
           name: tpu-launcher-profiles
-      # The Jobs the launcher supplies itself: the one a step gets when it names
-      # hardware and nothing else, and the chip-less one --prewarm submits.
+      # The Job the launcher supplies itself, for a step that names hardware
+      # and nothing else.
       - name: launcher-manifests
         configMap:
           name: tpu-launcher-manifests

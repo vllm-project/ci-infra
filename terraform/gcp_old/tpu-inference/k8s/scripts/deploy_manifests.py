@@ -33,8 +33,6 @@ from generate_manifests import (
     LAUNCHER_DEFAULT_JOB,
     LAUNCHER_DEFAULT_JOB_KEY,
     LAUNCHER_MANIFEST_CONFIGMAP,
-    LAUNCHER_PREWARM_JOB,
-    LAUNCHER_PREWARM_JOB_KEY,
     LAUNCHER_SCRIPT,
     LAUNCHER_SCRIPT_CONFIGMAP,
     LAUNCHER_SCRIPT_KEY,
@@ -319,7 +317,6 @@ def plan(cluster: dict, index: dict) -> list[Step]:
             name=LAUNCHER_MANIFEST_CONFIGMAP,
             files=(
                 (LAUNCHER_DEFAULT_JOB_KEY, LAUNCHER_DEFAULT_JOB),
-                (LAUNCHER_PREWARM_JOB_KEY, LAUNCHER_PREWARM_JOB),
             ),
             namespace=index["namespace"],
         ))
