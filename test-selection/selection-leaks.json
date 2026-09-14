@@ -1289,6 +1289,34 @@
         "reference_url": "https://github.com/vllm-project/vllm/pull/56819",
         "notes": "PR #55176 removed VLLM_ENABLE_SCALE_OUT_ENDPOINTS in favor of --enable-scale-out, but did not migrate the exact L4 EC E2E launcher. Its PR build selected 13 other jobs and omitted this exact lane; main and its automatic retry failed identically. The failure later recurred on main #88913 in both the original job and its automatic retry, then again on daily-main #88920, each time after all three services became healthy and the encode request returned the same HTTP 404. PR #56819 passes the new CLI flag to both affected serve processes; its isolated exact L4 lane passed in #88826."
       }
+    },
+    {
+      "id": "pr-51167-main-88920-h200-multimodal-extended-generation-1",
+      "job_name": "H200 MIG 35GB Multimodal Models (Extended Generation 1)",
+      "job_key": "multi-modal-models-extended-generation-1",
+      "culprit_pr": {
+        "number": 51167,
+        "url": "https://github.com/vllm-project/vllm/pull/51167",
+        "merge_commit": "995e8581f462a13e32f30cfba946c63d48cf31d7"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 88857,
+        "job_id": "01a0a07b-c776-4a75-a453-dbe2937abd32",
+        "url": "https://buildkite.com/vllm/ci/builds/88857#01a0a07b-c776-4a75-a453-dbe2937abd32"
+      },
+      "main_failure": {
+        "build_number": 88920,
+        "job_id": "01a0a1bb-3ab4-4e43-9dcd-58dbf6068458",
+        "url": "https://buildkite.com/vllm/ci/builds/88920#01a0a1bb-3ab4-4e43-9dcd-58dbf6068458",
+        "signature": "the new Voxtral FULL_DECODE_ONLY cudagraph test failed full-graph Dynamo tracing because the GPU sync debug Tensor.to wrapper called ContextVar.get before checking torch.compiler.is_compiling"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/56904",
+        "notes": "PR #51167 added the compiled Voxtral path and its parametrized regression test, but the exact optional H200 lane stayed blocked in PR build #88857 and post-merge main #88899. Daily #88920 first exercised it and failed deterministically at ContextVar.get; subsequent failures were leaked-engine-memory fallout. Draft PR #56904 checks compile state before reading either ContextVar and adds a full-graph regression test around the patched Tensor.to path."
+      }
     }
   ]
 }
