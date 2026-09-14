@@ -73,6 +73,13 @@ PROFILES_PATH = os.environ.get(
 # write them - and a repo that copied it would be copying those.
 DEFAULT_JOB = os.environ.get("LAUNCHER_DEFAULT_JOB", "/opt/launcher/manifests/job.yaml")
 
+# The Job --prewarm submits: the same image on a node that holds no chips, so
+# the per-digest image conversion is done before a test waits on it. Deployed
+# beside the program for the same reason as the one above.
+PREWARM_JOB = os.environ.get(
+    "LAUNCHER_PREWARM_JOB", "/opt/launcher/manifests/prewarm.yaml"
+)
+
 # Where a pod says what hardware it wants. Read back to find the profile, so
 # these are the launcher's names for them too.
 ACCELERATOR_KEY = "cloud.google.com/gke-tpu-accelerator"
@@ -86,6 +93,20 @@ QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 # and uses it as the file cache. Sized here because the ceiling is a fact about
 # the host, and the manifest does not know which host it landed on.
 FUSE_CACHE_VOLUME = "gke-gcsfuse-cache"
+
+# The pod's /dev/shm, which for the same reason is ours to size. vLLM's engine
+# processes and torch_tpu's tier-2 compilation cache both live in it, and a
+# ceiling too low does not present as a full filesystem - it presents as a
+# worker that stops answering, then as the slice failing around it.
+SHM_VOLUME = "dshm"
+
+# Memory-backed emptyDirs the launcher sizes from the host, and the profile key
+# holding each ceiling. setdefault, so a manifest that states its own figure
+# keeps it: the launcher knows the host, the manifest knows the workload.
+HOST_SIZED_VOLUMES = {
+    FUSE_CACHE_VOLUME: "fuse_cache_size",
+    SHM_VOLUME: "shm_size",
+}
 
 # kubectl --timestamps prefixes each entry with RFC3339. Anything else on a
 # line is a fragment of the entry above it, not a new one.
@@ -703,7 +724,7 @@ def finalise(doc, profile, registry, name, labels, owner, command, where):
             container["args"] = [command]
 
     cap_runtime(doc, profile, registry)
-    size_fuse_cache(doc, profile)
+    size_host_volumes(doc, profile)
     return doc
 
 
@@ -730,19 +751,19 @@ def cap_runtime(doc, profile, registry):
         )
 
 
-def size_fuse_cache(doc, profile):
-    """How large the gcsfuse file cache may grow on this host.
+def size_host_volumes(doc, profile):
+    """How large this host lets the memory-backed volumes grow.
 
     Per machine type, since host memory runs from 176 GB to 1440 GB across the
     shapes we run and one figure is either unsafe on the smallest or wasteful on
     the largest. Set only where the manifest left it open, so a pod that needs
     the memory for itself can say so.
 
-    Chip-holding roles only. The figure is a fraction of a TPU host's memory,
+    Chip-holding roles only. The figures are fractions of a TPU host's memory,
     and a role that holds no chips is not on one - it is on a worker-cpu node
     sized to its own requests, where a tmpfs the size of a TPU host's cache is
     a number the node cannot honour. validate() makes such a role state its own
-    sizeLimit before it may mount the caches.
+    sizeLimit before it may mount them.
 
     Tested on the chips alone, not on the shape: the shape is also None for a
     pod that names an accelerator and misstates its count, and that pod is on a
@@ -752,10 +773,24 @@ def size_fuse_cache(doc, profile):
         if not pod_chips(spec):
             continue
         for volume in spec.get("volumes", []):
-            if volume.get("name") == FUSE_CACHE_VOLUME and "emptyDir" in volume:
-                volume["emptyDir"].setdefault(
-                    "sizeLimit", profile["fuse_cache_size"]
+            name = volume.get("name")
+            key = HOST_SIZED_VOLUMES.get(name)
+            if key is None or "emptyDir" not in volume:
+                continue
+            size = profile.get(key)
+            if size is None:
+                # A deploy applies this program and the shape registry as two
+                # ConfigMaps in turn, so a launcher that starts between the two
+                # can read a registry older than itself. Said here rather than
+                # left as a KeyError because the answer is to redeploy or wait,
+                # and neither is what a traceback suggests.
+                raise SystemExit(
+                    f"the shape registry has no {key} for "
+                    f"{profile.get('queue', 'this shape')}, so {name} would be "
+                    "created with no ceiling. Regenerate and redeploy the "
+                    "manifests; if a deploy is in flight, retry the step."
                 )
+            volume["emptyDir"].setdefault("sizeLimit", size)
 
 
 # Fields the Kubernetes API declares as integers. A manifest is text with
@@ -817,26 +852,27 @@ def validate(doc, registry, where):
                 f"the cluster permits {', '.join(sorted(allowed))}"
             )
 
-    # The one case size_fuse_cache cannot size. Left unbounded, a memory-backed
-    # emptyDir is as large as the node, while gcsfuse fills toward a
-    # fileCacheCapacity set on the PersistentVolume that this pod never sees -
-    # so the node reaches memory pressure before the volume reaches a limit,
-    # and the kubelet picks a victim by its own reckoning rather than evicting
-    # the pod that overran.
+    # The one case size_host_volumes cannot size. Left unbounded, a
+    # memory-backed emptyDir is as large as the node, while what fills it -
+    # gcsfuse toward a fileCacheCapacity set on a PersistentVolume this pod
+    # never sees, or a process writing to /dev/shm - has no ceiling of its own
+    # to stop at. The node then reaches memory pressure before the volume
+    # reaches a limit, and the kubelet picks a victim by its own reckoning
+    # rather than evicting the pod that overran.
     for spec in pod_specs(doc):
         if pod_chips(spec):
             continue
         for volume in spec.get("volumes", []):
-            if volume.get("name") != FUSE_CACHE_VOLUME:
+            name = volume.get("name")
+            if name not in HOST_SIZED_VOLUMES:
                 continue
             empty_dir = volume.get("emptyDir")
             if empty_dir is not None and "sizeLimit" not in empty_dir:
                 raise SystemExit(
-                    f"{where}: {FUSE_CACHE_VOLUME} has no sizeLimit on a pod "
-                    "that asks for no chips. The launcher sizes that volume "
-                    "from the TPU host's memory and this pod is not on one, so "
-                    "the manifest has to name a figure the node it did ask for "
-                    "can hold."
+                    f"{where}: {name} has no sizeLimit on a pod that asks for "
+                    "no chips. The launcher sizes that volume from the TPU "
+                    "host's memory and this pod is not on one, so the manifest "
+                    "has to name a figure the node it did ask for can hold."
                 )
     return doc
 
@@ -1132,6 +1168,13 @@ def main():
              "own commands, so it takes the place of --machine-type, "
              "--topology and the command rather than adding to them.",
     )
+    parser.add_argument(
+        "--prewarm", action="store_true",
+        help="start this build's image on a chip-less node in the region "
+             "--machine-type and --topology name, and exit. Pays the "
+             "per-digest image conversion beside the tests instead of inside "
+             "the first one to schedule. Runs no command and holds no chips.",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -1149,7 +1192,16 @@ def main():
             f"command to pass here. Put {shlex.join(command)!r} in the "
             f"{WORKLOAD_CONTAINER!r} container of {args.manifest}."
         )
-    if not args.manifest and not command:
+    # A prewarm runs the image and nothing else, so both of the things a normal
+    # invocation must supply are errors here: a command would not be run, and a
+    # manifest describes a workload this is not.
+    if args.prewarm and (command or args.manifest):
+        raise SystemExit(
+            "--prewarm starts this build's image and exits, so it takes "
+            "neither a command nor --manifest. Name the region with "
+            "--machine-type and --topology."
+        )
+    if not args.manifest and not command and not args.prewarm:
         raise SystemExit(
             "no command given; use: launch --machine-type M --topology T "
             "-- <command>"
@@ -1170,8 +1222,26 @@ def main():
     # The built-in Job is one pod, and only the flags can select a shape that
     # is more than one - a manifest saying so has already written the pods.
     shape = {}
-    manifest = args.manifest or DEFAULT_JOB
-    if not args.manifest:
+    manifest = args.manifest or (PREWARM_JOB if args.prewarm else DEFAULT_JOB)
+    if args.prewarm:
+        # The flags name a shape here only to reach the cluster it runs on; the
+        # pod asks for none of it. So no host count to check - a multi-host
+        # profile is a fine way to say "the cluster those nodes are on", and the
+        # prewarm is still one pod holding nothing.
+        profile = load_profile(registry, args.machine_type, args.topology)
+        # Not the shape's queue: that one puts google.com/tpu alone under quota,
+        # and a workload assigned no flavor is assigned no AdmissionCheck
+        # either, so it would be admitted on the manager and dispatched nowhere.
+        # See worker_cpu_queue.yaml.tpl.
+        queue = profile.get("prewarm_queue")
+        if not queue:
+            raise SystemExit(
+                f"{args.machine_type} at {args.topology} has no prewarm queue: "
+                "the shape runs in more than one region, so there is no single "
+                "cluster to warm. Prewarm a shape that runs in one."
+            )
+        profile = {**profile, "queue": queue}
+    elif not args.manifest:
         profile = load_profile(registry, args.machine_type, args.topology)
         if profile["hosts"] > 1:
             raise SystemExit(
@@ -1190,8 +1260,11 @@ def main():
     labels = correlation_labels()
     doc = render(manifest, image, name, shape)
     # Read back even when the flags chose it, so there is one answer to what
-    # shape a workload is: the pods'.
-    profile = resolve_shape(doc, registry, manifest)
+    # shape a workload is: the pods'. Except for a prewarm, whose pods hold no
+    # chips by design and so describe no shape to read - there the flags are the
+    # only statement of where it goes, and they already chose the profile.
+    if not args.prewarm:
+        profile = resolve_shape(doc, registry, manifest)
     validate(doc, registry, manifest)
     forwarded = forward_env(doc, args.env, registry)
     if forwarded:
@@ -1225,7 +1298,10 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
 
     log(f"submitting {doc['kind']} {name} to {profile['queue']} "
-        f"({profile['hosts']} x {profile['chips']} chips, from {manifest})")
+        + ("(prewarm: no chips, from "
+           if args.prewarm else
+           f"({profile['hosts']} x {profile['chips']} chips, from ")
+        + f"{manifest})")
     subprocess.run(
         ["kubectl", "-n", NAMESPACE, "apply", "-f", "-"],
         input=json.dumps(doc), text=True, check=True,

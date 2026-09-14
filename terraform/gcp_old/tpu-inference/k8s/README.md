@@ -104,16 +104,17 @@ over HTTP, say — because the queues put `google.com/tpu` alone under quota. Gi
 such a role `nodeSelector: cloud.google.com/compute-class: worker-cpu` and real
 CPU requests; otherwise it lands on the worker's small shared system pool, or on
 a TPU node where it would sit on four chips to run a Python process. If it also
-mounts the caches it must state its own `gke-gcsfuse-cache` `sizeLimit` — the
-launcher sizes that from the TPU host's memory, which this node does not have.
+mounts `gke-gcsfuse-cache` or `dshm` it must state their `sizeLimit` itself —
+the launcher sizes both from the TPU host's memory, which this node is not on.
 
 A manifest must contain a container named `workload`: that is the one whose
 output is streamed back and which step environment is forwarded to. More than
 one may carry the name, and in a JobSet whose roles all want the log and the
 step's secrets, they all should. The queue label is the launcher's alone and is
 rejected in a manifest: a queue named here is either the shape said twice or a
-disagreement with it. The gcsfuse cache size is filled in only where the
-manifest leaves it open, so a pod that needs the memory for itself can say so.
+disagreement with it. The gcsfuse cache and `/dev/shm` sizes are filled in only
+where the manifest leaves them open, so a pod that needs the memory for itself
+can say so.
 
 How long the workload runs is not one of those. It defaults to
 `tpu_test_max_seconds`, which is right for a test, and a manifest that knows

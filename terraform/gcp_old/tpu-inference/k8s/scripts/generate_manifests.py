@@ -93,6 +93,12 @@ MANAGER_COMPUTE_CLASS = "manager-system"
 # No namespace default goes with it, unlike the manager's: see the template.
 WORKER_COMPUTE_CLASS = "worker-cpu"
 
+# Cores a worker will admit chip-less work up to. Not a reservation and not
+# sized from any node pool: the class auto-creates the nodes. It is here only so
+# that the number a queue publishes is a decision this file made rather than one
+# a template happened to contain.
+WORKER_CPU_QUOTA_CORES = 64
+
 # The launcher's program, and the ConfigMap deploy_manifests.py builds out of
 # it. Not rendered into the generated tree: a program indented into YAML is not
 # a diff anyone reads. Named here because launcher.yaml.tpl mounts it.
@@ -107,6 +113,11 @@ LAUNCHER_SCRIPT_KEY = "launch"
 LAUNCHER_DEFAULT_JOB = ROOT / "kueue" / "launcher" / "job.yaml"
 LAUNCHER_MANIFEST_CONFIGMAP = "tpu-launcher-manifests"
 LAUNCHER_DEFAULT_JOB_KEY = "job.yaml"
+
+# The Job --prewarm submits, in the same ConfigMap: both are manifests the
+# launcher owns rather than the repo under test.
+LAUNCHER_PREWARM_JOB = ROOT / "kueue" / "launcher" / "prewarm.yaml"
+LAUNCHER_PREWARM_JOB_KEY = "prewarm.yaml"
 
 # The node label GKE puts on a TPU node, by machine family. Not derivable from
 # the machine type - a ct6e-standard-8t is `tpu-v6e-slice`, a tpu7x-standard-4t
@@ -140,6 +151,24 @@ MACHINE_MEMORY_GB = {
 # fileCacheCapacity in cache_volumes.yaml.tpl is one object per cluster and so
 # is sized for the smallest shape.
 FUSE_VOLUME_RATIO = 0.50
+
+# How much of the host the pod's /dev/shm may take, on the same terms and for
+# the same reason: a tmpfs, so a fraction of memory rather than of disk.
+#
+# Sized rather than fixed because what lands in it scales with the host. vLLM
+# gives every data-parallel engine its own shared-memory broadcast buffers and
+# torch_tpu spills its tier-2 compilation cache beside them, so a machine type
+# with four times the chips runs four times the engines against the same
+# ceiling. The bare-metal lane hands its container a flat 64 GiB, which this
+# clears on every machine type that holds more than one chip; the small shapes
+# it does not clear run one engine.
+#
+# With FUSE_VOLUME_RATIO this is the whole tmpfs ceiling on a TPU host. The two
+# together come to 65% of the memory the machine family documents, which is
+# around 68% of what the kubelet leaves allocatable - so the workload keeps
+# roughly the remaining third. They are caps on what may be written rather than
+# reservations, but a cap the node cannot honour is not a cap.
+SHM_VOLUME_RATIO = 0.15
 
 
 # hcl2 defaults to output you can write back out as HCL, which is not what we
@@ -255,8 +284,8 @@ def fuse_min_cache_gib() -> int:
     return total
 
 
-def fuse_cache_size(machine_type: str) -> str:
-    """The workload's gcsfuse file cache on this machine type, as a GiB string.
+def host_share_gib(machine_type: str, ratio: float) -> int:
+    """That fraction of this machine type's memory, in whole GiB.
 
     GB to GiB as well as the ratio: the machine family documentation quotes
     memory in decimal gigabytes and a Kubernetes quantity written Gi is binary,
@@ -265,17 +294,29 @@ def fuse_cache_size(machine_type: str) -> str:
 
     An unlisted machine type is an error rather than a conservative guess, for
     the reason on fuse_min_cache_gib: a number too small is not slower, it is a
-    pod the kubelet evicts once the cache fills.
+    pod the kubelet evicts once the volume fills.
     """
     gb = MACHINE_MEMORY_GB.get(machine_type)
     if gb is None:
         raise KeyError(
             f"no host memory known for machine type {machine_type!r}. Read it "
             "off the accelerator-optimized machine family documentation and "
-            "add it to MACHINE_MEMORY_GB; the gcsfuse file cache is sized from "
-            "it, and a wrong number is an eviction rather than a slow mount."
+            "add it to MACHINE_MEMORY_GB; the pod's memory-backed volumes are "
+            "sized from it, and a wrong number is an eviction rather than a "
+            "slow mount."
         )
-    gib = int(gb * FUSE_VOLUME_RATIO * 1000**3 / 1024**3)
+    return int(gb * ratio * 1000**3 / 1024**3)
+
+
+def shm_size(machine_type: str) -> str:
+    """The pod's /dev/shm on this machine type, as a GiB string."""
+    return f"{host_share_gib(machine_type, SHM_VOLUME_RATIO)}Gi"
+
+
+def fuse_cache_size(machine_type: str) -> str:
+    """The workload's gcsfuse file cache on this machine type, as a GiB string."""
+    gib = host_share_gib(machine_type, FUSE_VOLUME_RATIO)
+    gb = MACHINE_MEMORY_GB[machine_type]
     floor = fuse_min_cache_gib()
     if gib < floor:
         raise ValueError(
@@ -352,6 +393,7 @@ def shapes(worker: dict) -> dict[str, dict]:
             "topology": topology,
             "accelerator_label": ACCELERATOR_LABELS[family],
             "fuse_cache_size": fuse_cache_size(machine_type),
+            "shm_size": shm_size(machine_type),
             # The one number here that is a policy rather than a fact, and the
             # only one Kueue reads: this shape's share of the reservation.
             "quota": int(pool["nominal_nodes"]) * chips,
@@ -359,13 +401,29 @@ def shapes(worker: dict) -> dict[str, dict]:
     return out
 
 
-def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
-    """A flavor per machine family, then a queue per shape sharing it.
+def dispatch_check(queue: str, checks: bool) -> str:
+    """The admissionChecksStrategy block a ClusterQueue carries, or nothing.
 
-    checks is what separates the manager from a worker: on the manager every
-    queue carries a MultiKueue AdmissionCheck, so passing quota there means the
+    This is what separates the manager from a worker: on the manager a queue
+    carries a MultiKueue AdmissionCheck, so passing quota there means the
     workload is dispatched rather than run.
     """
+    if not checks:
+        return ""
+    return (
+        "\n  admissionChecksStrategy:\n"
+        "    admissionChecks:\n"
+        f"      - name: {queue}-multikueue-dispatch"
+    )
+
+
+def worker_cpu_queue(cluster_name: str) -> str:
+    """The queue a worker's chip-less work is admitted through."""
+    return f"{WORKER_COMPUTE_CLASS}-{cluster_name}"
+
+
+def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
+    """A flavor per machine family, then a queue per shape sharing it."""
     out = [
         render("resource_flavor", ACCELERATOR=family)
         for family in sorted({cohort(name) for name in shapes})
@@ -378,13 +436,30 @@ def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
                 ACCELERATOR=cohort(name),
                 NAMESPACE=namespace,
                 NOMINAL_QUOTA=chips,
-                ADMISSION_CHECKS=(
-                    "\n  admissionChecksStrategy:\n"
-                    "    admissionChecks:\n"
-                    f"      - name: {name}-multikueue-dispatch"
-                    if checks
-                    else ""
-                ),
+                ADMISSION_CHECKS=dispatch_check(name, checks),
+            )
+        )
+    return "".join(out)
+
+
+def cpu_queues(cluster_names: list[str], namespace: str, checks: bool) -> str:
+    """The chip-less queue for each of these workers, and the flavor they share.
+
+    One flavor for the fleet, since it describes a kind of node rather than a
+    cluster; one queue per worker, since a workload here is asking for that
+    worker specifically. See worker_cpu_queue.yaml.tpl.
+    """
+    out = [render("worker_cpu_flavor", NAME=WORKER_COMPUTE_CLASS)]
+    for cluster_name in sorted(cluster_names):
+        queue = worker_cpu_queue(cluster_name)
+        out.append(
+            render(
+                "worker_cpu_queue",
+                QUEUE_NAME=queue,
+                FLAVOR=WORKER_COMPUTE_CLASS,
+                NAMESPACE=namespace,
+                NOMINAL_QUOTA=WORKER_CPU_QUOTA_CORES,
+                ADMISSION_CHECKS=dispatch_check(queue, checks),
             )
         )
     return "".join(out)
@@ -497,6 +572,16 @@ def launcher_profiles(fleet: dict, workers: list[str], tfvars: dict) -> str:
                         if key != "quota"
                     },
                     "max_runtime_seconds": int(tfvars["tpu_test_max_seconds"]),
+                    # Where a prewarm for this shape goes. Absent, rather than
+                    # wrong, when the shape runs in more than one region: the
+                    # chip-less queues name one cluster each, and warming a
+                    # cluster the workload will not land on is worse than not
+                    # warming one. The launcher says so when a step asks.
+                    **(
+                        {"prewarm_queue": worker_cpu_queue(entry["workers"][0])}
+                        if len(set(entry["workers"])) == 1
+                        else {}
+                    ),
                 }
                 for name, entry in sorted(fleet.items())
             },
@@ -602,7 +687,11 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 {name: shape["quota"] for name, shape in local.items()},
                 namespace,
                 checks=False,
-            ),
+            )
+            # Its own and no other worker's: a queue exists here to admit what
+            # the manager dispatched to this cluster, and chip-less work is
+            # dispatched to one named cluster.
+            + cpu_queues([cluster_name], namespace, checks=False),
         )
         write(
             base / "queues" / "20-multikueue-rbac.yaml",
@@ -645,6 +734,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             base / "workload" / "20-launcher-rbac.yaml",
             render("launcher_rbac_worker", NAMESPACE=namespace, PROJECT_ID=project),
         )
+
+    worker_names = sorted(c["name"] for c in clusters if c["role"] == "worker")
 
     base = out_dir / manager_dir
     write(base / "system" / "10-kueue-config.yaml", kueue_config("manager"))
@@ -728,7 +819,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             {name: entry["quota"] for name, entry in fleet.items()},
             namespace,
             checks=True,
-        ),
+        )
+        + cpu_queues(worker_names, namespace, checks=True),
     )
     write(
         base / "queues" / "20-multikueue.yaml",
@@ -752,6 +844,17 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 ),
             )
             for queue, entry in sorted(fleet.items())
+        )
+        # The chip-less queues dispatch the same way, each to the one worker it
+        # is named for.
+        + "".join(
+            render("admission_check", QUEUE_NAME=worker_cpu_queue(name))
+            + render(
+                "multikueue_config",
+                QUEUE_NAME=worker_cpu_queue(name),
+                WORKER_LIST=f"    - {name}",
+            )
+            for name in worker_names
         ),
     )
 
