@@ -97,6 +97,51 @@ resource "google_container_cluster" "worker" {
   # sit.
   cluster_autoscaling {
     autoscaling_profile = "OPTIMIZE_UTILIZATION"
+
+    # Describes a node created for a pending pod, not one of the pools declared
+    # below: a ComputeClass with nodePoolAutoCreation makes those, and what it
+    # does not state for itself it takes from here. Set even though cluster-wide
+    # autoprovisioning is off - leave the block out and GKE fills the same
+    # fields with its own answers, which is how the existing worker-cpu nodes
+    # came up with secure boot disabled.
+    #
+    # Enabling autoprovisioning to get this would cost more than it gives: the
+    # resource_limits that then become mandatory count every node in the
+    # cluster, including the TPU pools below, so a ceiling sized for a benchmark
+    # client is a ceiling on v6e and v7x scale-up.
+    auto_provisioning_defaults {
+      # Anything but the Compute Engine default account, which is what GKE
+      # supplies unasked. On this project that one carries tpu.admin,
+      # storage.admin, compute.instanceAdmin.v1, iam.serviceAccountUser and
+      # project-wide secretmanager.secretAccessor, because the bare-metal agent
+      # VMs run as it. Workload Identity is on for these nodes too, so what this
+      # closes is the kubelet's own reach rather than any pod's.
+      service_account = google_service_account.worker_nodes[each.key].email
+      # Wider than the six GKE would pick, deliberately: a scope only ever
+      # subtracts from what IAM already allows, and the account above holds
+      # nothing worth a second bound. Narrow scopes on a broad account would be
+      # the combination worth having, and it is not the one on offer.
+      oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+
+      # Every family worker-cpu will pick takes pd-balanced. A class offering
+      # one of the families that requires Hyperdisk would need to state its own
+      # boot disk rather than inherit this.
+      disk_type  = "pd-balanced"
+      disk_size  = 100
+      image_type = "COS_CONTAINERD"
+
+      management {
+        auto_repair  = true
+        auto_upgrade = true
+      }
+
+      # No ComputeClass field corresponds to these, so this block is the only
+      # place in the fleet that can ask for them on an auto-created node.
+      shielded_instance_config {
+        enable_integrity_monitoring = true
+        enable_secure_boot          = true
+      }
+    }
   }
 
   resource_labels = merge(local.common_labels, {
