@@ -1261,6 +1261,34 @@
         "reference_url": "https://github.com/vllm-project/vllm/pull/56808",
         "notes": "PR #51700 added the ubatch_runner constructor dependency and an unconditional read in capture(), but its exact H200 CUDAGraph job remained blocked. The next nightly exact job deterministically failed the existing __new__-based test; draft PR #56808 initializes that test double to the non-DBO default."
       }
+    },
+    {
+      "id": "pr-55176-main-88790-scale-out-ec-e2e",
+      "job_name": "L4 Scale-out EC Connector E2E",
+      "job_key": "scale-out-ec-e2e-2-gpus",
+      "culprit_pr": {
+        "number": 55176,
+        "url": "https://github.com/vllm-project/vllm/pull/55176",
+        "merge_commit": "934b1fcbcbbac6e68da7a4246928ac797fe54690"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "not_selected",
+        "build_number": 88768,
+        "job_id": null,
+        "url": "https://buildkite.com/vllm/ci/builds/88768"
+      },
+      "main_failure": {
+        "build_number": 88790,
+        "job_id": "01a09f5f-7c79-4f41-9f88-845c324b85d0",
+        "url": "https://buildkite.com/vllm/ci/builds/88790#01a09f5f-7c79-4f41-9f88-845c324b85d0",
+        "signature": "both scale-out vllm serve processes kept the removed environment opt-in, so the encode request reached a healthy server without the /inference/v1/generate route and returned HTTP 404"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/56819",
+        "notes": "PR #55176 removed VLLM_ENABLE_SCALE_OUT_ENDPOINTS in favor of --enable-scale-out, but did not migrate the exact L4 EC E2E launcher. Its PR build selected 13 other jobs and omitted this exact lane; main and its automatic retry failed identically. Draft PR #56819 passes the new CLI flag to both affected serve processes."
+      }
     }
   ]
 }
