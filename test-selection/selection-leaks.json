@@ -1233,6 +1233,34 @@
         "reference_url": "https://github.com/vllm-project/vllm/pull/56710",
         "notes": "PR #56305 added an unconditional model_config.rswa_window read in get_attn_backend, but its exact build and immediate post-main build both left H200 Model Executor blocked. The next selected main lane deterministically failed the fixture; draft PR #56710 adds the non-R-SWA default to its SimpleNamespace contract."
       }
+    },
+    {
+      "id": "pr-51700-main-88743-cudagraph",
+      "job_name": "H200 MIG 35GB CUDAGraph",
+      "job_key": "cudagraph",
+      "culprit_pr": {
+        "number": 51700,
+        "url": "https://github.com/vllm-project/vllm/pull/51700",
+        "merge_commit": "73d2a8cf86c46e21af723ffd34ce0d56668fdd14"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 88703,
+        "job_id": "01a09db2-6192-4ad4-af3a-f21a1d95db8e",
+        "url": "https://buildkite.com/vllm/ci/builds/88703#01a09db2-6192-4ad4-af3a-f21a1d95db8e"
+      },
+      "main_failure": {
+        "build_number": 88743,
+        "job_id": "01a09f3f-e24f-4da4-9c78-2268343936d6",
+        "url": "https://buildkite.com/vllm/ci/builds/88743#01a09f3f-e24f-4da4-9c78-2268343936d6",
+        "signature": "the breakable-cudagraph unit test constructed CudaGraphManager without the new ubatch_runner attribute, so capture failed immediately with AttributeError"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/56808",
+        "notes": "PR #51700 added the ubatch_runner constructor dependency and an unconditional read in capture(), but its exact H200 CUDAGraph job remained blocked. The next nightly exact job deterministically failed the existing __new__-based test; draft PR #56808 initializes that test double to the non-DBO default."
+      }
     }
   ]
 }
