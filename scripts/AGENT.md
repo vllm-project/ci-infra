@@ -184,9 +184,10 @@ sudo chown -R buildkite-agent:buildkite-agent "$HF_TARGET/hf_cache"
 
 Now that the machine is fully prepared, configure the agent and bring it online.
 
-> **H200 MIG machines:** ready-made config + hook templates (including MIG
-> slice pinning, ECR login, and secrets) live in
-> [`buildkite-agent/`](buildkite-agent/README.md). Copy those instead of writing
+> **GPU machines (whole-GPU or MIG):** follow the step-by-step
+> [`buildkite-agent/RUNBOOK.md`](buildkite-agent/RUNBOOK.md) — device setup,
+> Buildkite, and GPU monitoring. The ready-made config + hook templates live in
+> [`buildkite-agent/`](buildkite-agent/README.md) — copy those instead of writing
 > the config from scratch.
 
 ### Determine your token and queue
