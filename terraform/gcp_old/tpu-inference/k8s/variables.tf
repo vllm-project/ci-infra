@@ -132,25 +132,25 @@ variable "agent_token_secret_id" {
   EOT
 }
 
-variable "analytics_token_secret_project" {
-  type        = string
-  description = "Project holding the Buildkite Test Engine token. Not this one: it belongs to the suite, which predates this fleet and is shared with the bare-metal lane."
-}
-
-variable "hf_token_secret_project" {
-  type        = string
-  description = "Project holding the Hugging Face token. Not this one: it belongs to the bare-metal agents, and a gated model should be fetched under the same identity in both lanes."
-}
-
-variable "hf_token_secret_id" {
-  type        = string
+variable "env_secrets" {
+  type = map(object({
+    project = string
+    secret  = string
+  }))
   description = <<-EOT
-    Secret Manager secret holding the Hugging Face token.
+    Credentials the fleet supplies to a workload that forwards the name, keyed
+    by the environment variable it is read from.
 
-    Read by the launcher pod and forwarded into the workload, since the pod
-    that downloads the weights is the only one that needs it.
+    Read by both Terraform and scripts/generate_manifests.py, and the one place
+    the set is written down: Terraform grants the sync read on each, the
+    generator turns each into a SecretSync on every worker, and the launcher's
+    registry decides from the same map whether a --env name may be supplied at
+    all. A secret listed here is one every pipeline on the fleet can ask for,
+    so the list is short on purpose.
 
-    Named rather than defaulted because the grant is scoped to this one secret.
+    Each names its own project, because none of these belong to this fleet.
+    Scoping the grant to the secret rather than its project matters more than
+    usual for that reason - those projects hold other people's secrets.
   EOT
 }
 
@@ -164,18 +164,6 @@ variable "git_ssh_key_secret_id" {
     every agent pod; a public repository ignores it. Its algorithm is part of
     the contract - see GIT_SSH_KEY_ENV in scripts/generate_manifests.py - so
     replacing it with a key of another type is a change in two places.
-  EOT
-}
-
-variable "analytics_token_secret_id" {
-  type        = string
-  description = <<-EOT
-    Secret Manager secret holding the Buildkite Test Engine token.
-
-    Read by the launcher pod and forwarded into the workload, since a TPU pod
-    is the only thing that can see its own test output.
-
-    Named rather than defaulted because the grant is scoped to this one secret.
   EOT
 }
 
@@ -261,7 +249,7 @@ variable "allowed_image_repos" {
 
 variable "tpu_test_max_seconds" {
   type        = number
-  description = "How long a TPU workload runs for when it says nothing. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out. A manifest that knows better states its own, bounded by tpu_total_max_seconds."
+  description = "How long a TPU workload runs for when it says nothing. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out. A manifest that knows better states its own, and a single step overrides both with TPU_MAX_RUNTIME_SECONDS in its env; either way bounded by tpu_total_max_seconds."
 }
 
 variable "tpu_total_max_seconds" {
@@ -279,11 +267,8 @@ variable "tpu_total_max_seconds" {
 
 variable "worker_clusters" {
   type = list(object({
-    # What identifies a worker cluster. Every name it gets is derived from this
-    # pair and nothing else, so there is no label to invent and none to keep in
-    # step: locals.tf builds the project-scoped names from location alone, and
-    # the fleet-wide ones - the Terraform address, the generated directory, the
-    # MultiKueueCluster on the manager - from both.
+    # Identifies the cluster: every name it gets is derived from this pair, so
+    # there is no label to invent and none to keep in step. See locals.workers.
     project  = string
     location = string
 
@@ -291,20 +276,39 @@ variable "worker_clusters" {
     subnetwork             = string
     master_ipv4_cidr_block = string
 
+    # Sized for the cluster's own components and nothing else: the CSI drivers,
+    # the metrics agent, and the per-cluster half of Kueue and JobSet. That
+    # stack asks for 2.3 of the four cores with everything scheduled, and
+    # us-east5 has run it on this size throughout.
+    #
+    # A workload role that holds no chips is not what this pool is for, however
+    # much it looks like the only place such a role could go. It asks for the
+    # worker-cpu compute class, which builds a node against that pod's own
+    # requests and removes it afterwards. Growing this pool to fit one instead
+    # buys a node that is idle between runs and still too small for the next
+    # role that wants more.
+    #
+    # e2 despite the worker-cpu class ordering it last for supply, because that
+    # ordering is about eight-core nodes built on demand at burst and this is
+    # one four-core node that already exists. On the shape this pool asks for,
+    # e2 is the family us-east5 actually has: n2-standard-4 is exhausted in
+    # us-east5-b, which is where a surge upgrade of this pool has to land.
     system_machine_type = optional(string, "e2-standard-4")
     system_min_nodes    = optional(number, 1)
-    system_max_nodes    = optional(number, 3)
+    # A ceiling, not a plan: both workers have run on one node since they were
+    # built. Left above the floor because an unreached ceiling costs nothing and
+    # a system pod that cannot schedule is an outage.
+    system_max_nodes = optional(number, 3)
 
-    # One per TPU shape this cluster can run. A list rather than a map, because
-    # the node pool's name is its shape - <machine type>-<topology>, e.g.
-    # ct6e-standard-8t-2x4 - and locals.tf builds it from the two fields below
-    # rather than taking it from here, so it cannot name hardware the pool does
-    # not have. generate_manifests.py names the shape's Kueue queue the same way.
+    # One per TPU shape this cluster can run. The node pool's name is its shape
+    # - <machine type>-<topology>, e.g. ct6e-standard-8t-2x4 - and locals.tf
+    # derives it from the two fields below rather than taking it from here, so
+    # it cannot name hardware the pool does not have. generate_manifests.py
+    # names the shape's Kueue queue the same way.
     tpu_node_pools = optional(list(object({
-      # The machine type is the VM, the topology the slice asked of it. Both are
-      # needed because a topology does not imply a machine type: 2x4 is eight
-      # chips either as one ct6e-standard-8t or as two ct6e-standard-4t, and
-      # those differ in pod count, chips per pod and JobSet parallelism.
+      # A topology does not imply a machine type: 2x4 is eight chips either as
+      # one ct6e-standard-8t or as two ct6e-standard-4t, and those differ in pod
+      # count, chips per pod and JobSet parallelism.
       machine_type = string
       topology     = string
 
@@ -320,13 +324,12 @@ variable "worker_clusters" {
       # free chips; the reservation running out is what stops a scale-up.
       max_nodes = number
 
-      # This shape's share of the reservation, and the only one of the three
-      # counts that no resource here reads: generate_manifests.py turns it into
-      # the nominalQuota of the shape's ClusterQueue. Chips a shape can always
-      # get, so the shapes cannot starve each other, while the queues sit in
-      # one cohort and lend out whatever is idle. Summed across a cluster's
-      # pools it should be the chips the reservation actually has free, which
-      # is what max_nodes deliberately oversubscribes.
+      # This shape's share of the reservation, in nodes. The only one of the
+      # three counts no resource here reads: generate_manifests.py multiplies it
+      # by chips per VM to get the nominalQuota of the shape's ClusterQueue -
+      # chips the shape can always have, while the queues sit in one cohort and
+      # lend out whatever is idle. Summed across a cluster it should be the
+      # chips the reservation actually has free, which max_nodes oversubscribes.
       nominal_nodes = number
     })), [])
   }))

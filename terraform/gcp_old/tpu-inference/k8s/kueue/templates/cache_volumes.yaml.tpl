@@ -109,15 +109,28 @@ spec:
     name: hf-cache
   mountOptions:
     - implicit-dirs
-    - metadata-cache:ttl-secs:-1
+    # A minute, where the compilation cache pins its metadata forever. This
+    # mount is not read-only: a model nothing has fetched yet is downloaded by
+    # the first workload that wants it, through this mount, and the same
+    # process then lists the directory it just filled. Pinned metadata makes
+    # that listing the one taken before the download - vLLM reports "Cannot
+    # find any model weights" for a snapshot whose safetensors are sitting in
+    # the bucket - and a handle opened across the change comes back as
+    # OSError: [Errno 116] Stale file handle.
+    #
+    # The size caps stay unbounded. What has to expire is an entry's age, not
+    # how many of them are kept, and a checkpoint directory is a few dozen
+    # names.
+    - metadata-cache:ttl-secs:60
     - metadata-cache:stat-cache-max-size-mb:-1
     - metadata-cache:type-cache-max-size-mb:-1
-    - file-system:kernel-list-cache-ttl-secs:-1
-    # An hour, against the compilation cache's minute. Hugging Face probes
-    # several optional files per model - adapter_config.json and friends - that
-    # legitimately do not exist, and a model that is absent stays absent until
-    # something downloads it, which writes through this same mount.
-    - metadata-cache:negative-ttl-secs:3600
+    - file-system:kernel-list-cache-ttl-secs:60
+    # Hugging Face probes several optional files per model -
+    # adapter_config.json and friends - that legitimately do not exist, so a
+    # negative entry is worth keeping. The same minute as above, and for the
+    # same reason: what does not exist at the start of a download does by the
+    # end of it.
+    - metadata-cache:negative-ttl-secs:60
     # 128MiB, GKE's own serving-profile value. Large sequential reads want each
     # round trip to carry as much as possible.
     - read_ahead_kb=131072
@@ -137,10 +150,13 @@ spec:
       # under the largest checkpoint refetches it on every load and evicts the
       # small models that would have fit.
       #
-      # The pod must back this with a gke-gcsfuse-cache volume at least this
-      # large, or the sidecar falls back to 5GiB of ephemeral storage and the
-      # capacity is nominal. The launcher sizes that volume at half the machine
-      # type's memory, and every shape this fleet runs clears 65Gi.
+      # The pod backs this with a gke-gcsfuse-cache volume, and shares that one
+      # volume with every other gcsfuse mount - so it has to hold this plus the
+      # jax cache's 8Gi, not just this. Too small is not a slower mount: the
+      # sidecar falls back to 5GiB of ephemeral storage, or the kubelet evicts
+      # the pod when the tmpfs fills. The launcher sizes the volume at half the
+      # machine type's memory, and generate_manifests.py refuses a shape whose
+      # half does not clear the total.
       fileCacheCapacity: "65Gi"
       # safetensors are memory-mapped, which is nothing but random reads. With
       # this false a 2.88 GiB checkpoint page-faulted over the network until the

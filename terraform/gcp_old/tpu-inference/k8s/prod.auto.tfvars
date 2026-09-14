@@ -7,21 +7,28 @@ network     = "projects/cloud-ullm-inference-ci-cd/global/networks/default"
 namespace = "buildkite"
 
 # The token the bare-metal agents already register with, so the kube fleet joins
-# the same Buildkite org as the queues it is replacing. Terraform grants read on
-# it and never owns its value.
+# the same Buildkite org as the queues it is replacing.
 agent_token_secret_id = "vllm_buildkite_agent_token"
 
-# The Test Engine token, in the suite's own project rather than this one. Also
-# not created here: the bare-metal agents read the same secret, and the results
-# of a kube run and a bare-metal run should land in one suite.
-analytics_token_secret_project = "cloud-tpu-inference-test"
-analytics_token_secret_id      = "tpu_commons_buildkite_analytics_token"
-
-# The Hugging Face token, likewise the bare-metal agents' rather than one of
-# this fleet's: a gated model is gated per account, and the two lanes pull the
-# same weights into the same caches.
-hf_token_secret_project = "cloud-tpu-inference-test"
-hf_token_secret_id      = "bm-agent-hf-token"
+# Credentials any pipeline may ask for by name, keyed by the environment
+# variable a workload reads them from. None is created here: each belongs to
+# another project, and is shared with the bare-metal lane so that the two lanes
+# fetch a gated model under one account and report into one suite.
+env_secrets = {
+  # A gated model cannot be fetched without it, and the fleet's model cache is
+  # shared, so the first step to want one pays for every later one.
+  HF_TOKEN = {
+    project = "cloud-tpu-inference-test"
+    secret  = "bm-agent-hf-token"
+  }
+  # Test Engine. The collector runs inside the workload rather than in the
+  # agent, so the token has to reach the pod; without it a suite still passes
+  # and reports nothing, which is the failure mode worth designing against.
+  BUILDKITE_ANALYTICS_TOKEN = {
+    project = "cloud-tpu-inference-test"
+    secret  = "tpu_commons_buildkite_analytics_token"
+  }
+}
 
 # The GitHub deploy key an agent pod clones a private repository with, which is
 # vllm-torchtpu; tpu-inference is public and needs none.
@@ -59,24 +66,22 @@ buildkite_queue = "kube"
 auth_plugin_image       = "gcr.io/google.com/cloudsdktool/google-cloud-cli:584.0.0"
 auth_plugin_source_path = "/usr/lib/google-cloud-sdk/bin/gke-gcloud-auth-plugin"
 
-# Built by kueue/launcher/cloudbuild.yaml from the Cloud CLI image the auth
-# plugin is copied out of, at the same version. Still a variable of its own:
-# there that image is a source of one static binary for a distroless container,
-# here it is the whole runtime a pod boots into, and the two move for different
-# reasons.
-#
-# The suffix after the CLI version is the Dockerfile revision, bumped when the
-# Dockerfile changes and the base image does not, so a tag names one set of
-# bytes.
+# Built by kueue/launcher/cloudbuild.yaml from the same Cloud CLI image the
+# auth plugin is copied out of. The suffix after the CLI version is the
+# Dockerfile revision, bumped when the Dockerfile changes and the base image
+# does not, so a tag names one set of bytes.
 launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/launcher:584.0.0-1"
 
-# A test gets three hours with the chips unless its manifest says otherwise,
-# matching the bare-metal budget so a step moving between the two lanes gets the
-# same allowance. Eleven in total is the ceiling on both the queueing and on
-# what a manifest may ask for, set by the longest workload the fleet runs: the
-# nightly P/D disaggregation benchmark, which serves for ten.
+# Three hours with the chips unless a manifest says otherwise, matching the
+# bare-metal budget so a step moving between the lanes gets the same allowance.
+#
+# A day in total, set by the queue rather than by the work: the fleet has eight
+# v7x chips, so a build fanning out over several shapes puts most of its steps
+# behind the rest of itself. A step that has been waiting since the previous
+# evening is waiting on busy hardware, and failing it for that loses its place
+# in line as well as its result.
 tpu_test_max_seconds  = 10800
-tpu_total_max_seconds = 39600
+tpu_total_max_seconds = 86400
 
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
@@ -87,8 +92,8 @@ allowed_image_repos = [
 ]
 
 # A cluster is its project and its region; everything it is called is derived
-# from those two. The cluster pins no zones; the reservation's zone (us-east5-a)
-# belongs to the TPU pools that draw on it.
+# from those two. A cluster pins no zones - the reservation's zone belongs to
+# the TPU pools that draw on it.
 worker_clusters = [
   {
     project                = "cloud-ullm-inference-ci-cd"
@@ -139,11 +144,6 @@ worker_clusters = [
     subnetwork             = "projects/cloud-ullm-inference-ci-cd/regions/us-central1/subnetworks/default"
     master_ipv4_cidr_block = "172.16.0.64/28"
 
-    # Larger than the e2-standard-4 default, because a workload role that holds
-    # no chips lands here rather than on a TPU node - a benchmark client driving
-    # the engines over HTTP wants real cores to keep hundreds of streams fed.
-    system_machine_type = "e2-standard-16"
-
     # Three shapes over the same eight chips of the v7x reservation, which is
     # every shape the tests ask for. The quota is not split between them: eight
     # chips will not divide three ways and still leave each a whole slice, so
@@ -176,8 +176,8 @@ worker_clusters = [
         max_nodes     = 2
       },
       {
-        # Eight chips as one slice across two VMs, so this is the multi-host
-        # shape and GKE places it from a COMPACT policy. It takes the whole
+        # Eight chips as one slice across two VMs: the multi-host shape, placed
+        # from the named workload policy in workers.tf. It takes the whole
         # cohort, which means it waits for every other v7x workload to finish.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x2"

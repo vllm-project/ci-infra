@@ -22,6 +22,17 @@ config:
   # cluster's and not the organization's.
   queue: ${BUILDKITE_QUEUE}
 
+  # How long a container may sit unable to start before the controller gives
+  # up on the step. The chart's thirty seconds assumes a warm node and a small
+  # image; a fleet node is often brand new, and the pull is a CI image built
+  # per commit, so nothing about it is cached anywhere. Steps were failing with
+  # exit -1, no agent and an empty log - the controller had failed them before
+  # a pod ever ran, which reads as a Buildkite fault rather than a slow pull.
+  #
+  # Five minutes, not longer: this is also what catches an image that does not
+  # exist, and that should not cost a step its whole timeout.
+  image-pull-backoff-grace-period: 5m
+
   # The git SSH key, on every agent pod's checkout container. Controller-wide
   # rather than per-pipeline `gitEnvFrom`, because which repositories are
   # private is not something a pipeline should have to know: a public one

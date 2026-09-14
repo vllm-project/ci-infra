@@ -130,8 +130,16 @@ template:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.uid
-        # Not as small as it looks - the launcher polls kubectl and gcloud, both
-        # Python, and holds a poll's worth of log lines in memory.
+        # Memory is what the launcher actually uses - kubectl and gcloud are
+        # both Python, and a poll's worth of log lines is held in memory - so
+        # that is what it reserves.
+        #
+        # CPU is a packing number here rather than a need. A queued step is a
+        # launcher pod polling on an interval, and the queue is allowed to be a
+        # day deep, so the manager is sized by how many steps are waiting rather
+        # than by how many are running. The request is what decides how many of
+        # those fit on a node; with no cpu limit, a launcher that briefly needs
+        # more than it reserved still gets it.
         #
         # A memory limit and no cpu limit. The launcher shares its nodes with
         # the controllers that run the fleet, so a step whose workload floods
@@ -140,7 +148,7 @@ template:
         # to notice its workload finished.
         resources:
           requests:
-            cpu: "500m"
+            cpu: "100m"
             memory: 1Gi
           limits:
             memory: 2Gi
@@ -160,7 +168,8 @@ template:
       - name: launcher-profiles
         configMap:
           name: tpu-launcher-profiles
-      # The Job a step gets when it names hardware and nothing else.
+      # The Job the launcher supplies itself, for a step that names hardware
+      # and nothing else.
       - name: launcher-manifests
         configMap:
           name: tpu-launcher-manifests

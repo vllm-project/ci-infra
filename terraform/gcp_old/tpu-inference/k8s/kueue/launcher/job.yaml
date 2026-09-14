@@ -17,7 +17,21 @@ spec:
   # a pod the infrastructure took away (node lost, autoscaler) is replaced for
   # as long as activeDeadlineSeconds allows: DisruptionTarget is ignored, and
   # only the workload container's own exit code fails the Job.
-  backoffLimit: 0
+  #
+  # The limit is what carries the second half of that, not the rules. A test
+  # that fails is failed by the FailJob rule below, which ends the Job on the
+  # spot no matter how many retries remain, so this number never lets a red
+  # test run twice. What it covers is the case neither rule names: a TPU node
+  # repaired underneath a running pod rejects it at kubelet admission -
+  # `no healthy devices present; cannot allocate unhealthy devices
+  # google.com/tpu` - and that pod has no DisruptionTarget condition and no
+  # container exit code, because the container never started. At zero, the
+  # step's result is whatever the hardware did.
+  #
+  # Three, rather than a number that spends the whole deadline: a node repair
+  # is a single event and one replacement clears it, while a pool that cannot
+  # produce a healthy node should say so in the time a person is waiting.
+  backoffLimit: 3
   podFailurePolicy:
     rules:
       - action: Ignore
@@ -80,13 +94,6 @@ spec:
             # than in blocks when a pipe flushes.
             - name: PYTHONUNBUFFERED
               value: "1"
-            # Both names for the same reason run_in_docker.sh sets both: the
-            # first stops vLLM's CompilationManager substituting its default,
-            # the second catches tests that never go through it.
-            - name: VLLM_XLA_CACHE_PATH
-              value: /cache/jax
-            - name: JAX_COMPILATION_CACHE_DIR
-              value: /cache/jax
           resources:
             limits:
               google.com/tpu: "${CHIPS}"
@@ -95,13 +102,17 @@ spec:
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
+            # Mounted for every workload, but pointed at by none: a compilation
+            # cache has to be keyed on the toolchain that filled it, so only the
+            # step knows a safe path under here, and a step that sets no cache
+            # variables gets no persistent cache rather than a shared one.
             - name: jax-cache
               mountPath: /cache/jax
             - name: hf-cache
               mountPath: /cache/hf/hub
       volumes:
         # Backing store for the gcsfuse file cache, in RAM. The launcher sets
-        # sizeLimit to half the machine type's memory - 80Gi on
+        # sizeLimit to half the machine type's memory - 81Gi on
         # ct6e-standard-1t, 670Gi on ct6e-standard-8t - since one fixed number
         # would be unsafe on the smallest shape or waste most of the largest.
         # A sizeLimit, not a reservation: tmpfs holds only what is written.
@@ -114,11 +125,12 @@ spec:
           emptyDir:
             medium: Memory
         # JAX and vLLM use shared memory heavily; the 64MB default is far too
-        # small and fails in ways that look like unrelated crashes.
+        # small and fails in ways that look like unrelated crashes. Sized by
+        # the launcher from the host, like the cache above and for the same
+        # reason - what needs the room is one engine per chip.
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 16Gi
         # Both caches are claims, not mounts: the bucket is regional, so its
         # name differs per cluster, and only a claim resolves at mount time in
         # whichever cluster MultiKueue placed this Job in. An inline volume

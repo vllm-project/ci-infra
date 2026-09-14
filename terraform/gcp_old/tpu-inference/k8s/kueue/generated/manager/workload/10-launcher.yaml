@@ -78,13 +78,13 @@ data:
     - default
     - tpu-workload
     env_secrets:
-      HF_TOKEN:
-        project: cloud-tpu-inference-test
-        secret: bm-agent-hf-token
       BUILDKITE_ANALYTICS_TOKEN:
-        project: cloud-tpu-inference-test
-        secret: tpu_commons_buildkite_analytics_token
-    total_max_seconds: 39600
+        secret: fleet-buildkite-analytics-token
+        key: BUILDKITE_ANALYTICS_TOKEN
+      HF_TOKEN:
+        secret: fleet-hf-token
+        key: HF_TOKEN
+    total_max_seconds: 86400
     workers:
       tpu-ci-us-central1:
         membership: tpu-ci-us-central1
@@ -101,6 +101,7 @@ data:
         topology: 1x1
         accelerator_label: tpu-v6e-slice
         fuse_cache_size: 81Gi
+        shm_size: 24Gi
         max_runtime_seconds: 10800
       ct6e-standard-8t-2x4:
         queue: ct6e-standard-8t-2x4
@@ -110,6 +111,7 @@ data:
         topology: 2x4
         accelerator_label: tpu-v6e-slice
         fuse_cache_size: 670Gi
+        shm_size: 201Gi
         max_runtime_seconds: 10800
       tpu7x-standard-1t-1x1x1:
         queue: tpu7x-standard-1t-1x1x1
@@ -119,6 +121,7 @@ data:
         topology: 1x1x1
         accelerator_label: tpu7x
         fuse_cache_size: 111Gi
+        shm_size: 33Gi
         max_runtime_seconds: 10800
       tpu7x-standard-4t-2x2x1:
         queue: tpu7x-standard-4t-2x2x1
@@ -128,6 +131,7 @@ data:
         topology: 2x2x1
         accelerator_label: tpu7x
         fuse_cache_size: 447Gi
+        shm_size: 134Gi
         max_runtime_seconds: 10800
       tpu7x-standard-4t-2x2x2:
         queue: tpu7x-standard-4t-2x2x2
@@ -137,6 +141,7 @@ data:
         topology: 2x2x2
         accelerator_label: tpu7x
         fuse_cache_size: 447Gi
+        shm_size: 134Gi
         max_runtime_seconds: 10800
 ---
 # Referenced from a pipeline step as:
@@ -200,8 +205,16 @@ template:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.uid
-        # Not as small as it looks - the launcher polls kubectl and gcloud, both
-        # Python, and holds a poll's worth of log lines in memory.
+        # Memory is what the launcher actually uses - kubectl and gcloud are
+        # both Python, and a poll's worth of log lines is held in memory - so
+        # that is what it reserves.
+        #
+        # CPU is a packing number here rather than a need. A queued step is a
+        # launcher pod polling on an interval, and the queue is allowed to be a
+        # day deep, so the manager is sized by how many steps are waiting rather
+        # than by how many are running. The request is what decides how many of
+        # those fit on a node; with no cpu limit, a launcher that briefly needs
+        # more than it reserved still gets it.
         #
         # A memory limit and no cpu limit. The launcher shares its nodes with
         # the controllers that run the fleet, so a step whose workload floods
@@ -210,7 +223,7 @@ template:
         # to notice its workload finished.
         resources:
           requests:
-            cpu: "500m"
+            cpu: "100m"
             memory: 1Gi
           limits:
             memory: 2Gi
@@ -230,7 +243,8 @@ template:
       - name: launcher-profiles
         configMap:
           name: tpu-launcher-profiles
-      # The Job a step gets when it names hardware and nothing else.
+      # The Job the launcher supplies itself, for a step that names hardware
+      # and nothing else.
       - name: launcher-manifests
         configMap:
           name: tpu-launcher-manifests

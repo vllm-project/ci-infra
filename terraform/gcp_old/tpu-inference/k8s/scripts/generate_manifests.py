@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import math
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -55,12 +56,42 @@ GIT_CREDENTIALS_SECRET_NAME = "git-ssh-credentials"
 # key's algorithm - see git_credentials.yaml.tpl. Change it with the key.
 GIT_SSH_KEY_ENV = "SSH_PRIVATE_ED25519_KEY"
 
+
+def fleet_secret_name(env_name: str) -> str:
+    """What a fleet credential is called once it is a Kubernetes Secret.
+
+    Derived from the variable rather than configured, because this is the join
+    between two generated things - the SecretSync on a worker writes it, the
+    launcher's registry tells the launcher to point a secretKeyRef at it - and
+    a join nobody can misspell is better than one more name to keep in step.
+    """
+    name = "fleet-" + env_name.lower().replace("_", "-")
+    # Checked here rather than left to kubectl, which would reject it partway
+    # through a deploy with some clusters already updated. Underscores fold to
+    # dashes, so two names can also arrive at one Secret; the caller checks
+    # that, since only it can see the whole set.
+    if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", name):
+        raise SystemExit(
+            f"env_secrets key {env_name!r} does not make a Kubernetes name: "
+            f"got {name!r}, which must be lowercase alphanumerics and dashes"
+        )
+    return name
+
+
 # The ComputeClass the manager's nodes are created from, and the name the
 # manager's namespace points at to make it the default for everything in it.
 # Here rather than in either template because it is the join between them: a
 # namespace whose default names a class that does not exist leaves every pod in
-# it pending. Worker clusters have fixed TPU pools and get neither.
+# it pending.
 MANAGER_COMPUTE_CLASS = "manager-system"
+
+# The ComputeClass a worker's chip-less workload roles select. Named here rather
+# than only in the template because a manifest in the tpu-inference repo names
+# it too, in the nodeSelector of any role that holds no chips - so the string is
+# fleet-wide API, not an implementation detail of this file.
+#
+# No namespace default goes with it, unlike the manager's: see the template.
+WORKER_COMPUTE_CLASS = "worker-cpu"
 
 # The launcher's program, and the ConfigMap deploy_manifests.py builds out of
 # it. Not rendered into the generated tree: a program indented into YAML is not
@@ -109,9 +140,24 @@ MACHINE_MEMORY_GB = {
 # fileCacheCapacity in cache_volumes.yaml.tpl is one object per cluster and so
 # is sized for the smallest shape.
 FUSE_VOLUME_RATIO = 0.50
-# Small enough to be safe on any host, for a machine type not listed above. Too
-# low only costs read speed.
-FUSE_FALLBACK = "20Gi"
+
+# How much of the host the pod's /dev/shm may take, on the same terms and for
+# the same reason: a tmpfs, so a fraction of memory rather than of disk.
+#
+# Sized rather than fixed because what lands in it scales with the host. vLLM
+# gives every data-parallel engine its own shared-memory broadcast buffers and
+# torch_tpu spills its tier-2 compilation cache beside them, so a machine type
+# with four times the chips runs four times the engines against the same
+# ceiling. The bare-metal lane hands its container a flat 64 GiB, which this
+# clears on every machine type that holds more than one chip; the small shapes
+# it does not clear run one engine.
+#
+# With FUSE_VOLUME_RATIO this is the whole tmpfs ceiling on a TPU host. The two
+# together come to 65% of the memory the machine family documents, which is
+# around 68% of what the kubelet leaves allocatable - so the workload keeps
+# roughly the remaining third. They are caps on what may be written rather than
+# reservations, but a cap the node cannot honour is not a cap.
+SHM_VOLUME_RATIO = 0.15
 
 
 # hcl2 defaults to output you can write back out as HCL, which is not what we
@@ -147,6 +193,21 @@ def bucket_name(prefix: str, project: str, location: str, purpose: str) -> str:
     return f"{prefix}-{purpose}-{digest}"
 
 
+def worker_node_service_account(prefix: str, project: str, location: str) -> str:
+    """The identity a worker's nodes run as, derived rather than configured.
+
+    iam.tf builds the same string and creates the account; a ComputeClass names
+    it so that the nodes GKE auto-creates run as it too, rather than falling
+    through to the Compute Engine default account. Two derivations of one name
+    can drift, and getting it wrong is not loud: GKE accepts an account that
+    does not exist and the node pool fails to register, or - worse, if the name
+    happens to resolve - the nodes come up with more authority than intended.
+    The suffix is the location because that is a worker's short name; see
+    locals.tf.
+    """
+    return f"{prefix}-wkr-{location}@{project}.iam.gserviceaccount.com"
+
+
 def render(name: str, **values) -> str:
     text = (TEMPLATES / f"{name}.yaml.tpl").read_text()
     for key, value in values.items():
@@ -170,18 +231,91 @@ def cohort(queue: str) -> str:
     return queue.split("-")[0]
 
 
-def fuse_cache_size(machine_type: str) -> str:
-    """The workload's gcsfuse file cache on this machine type, as a GiB string.
+def fuse_min_cache_gib() -> int:
+    """The smallest gke-gcsfuse-cache volume a pod can mount the caches with.
+
+    The sum of the fileCacheCapacity figures rather than the largest of them:
+    every gcsfuse mount in a pod shares one gke-gcsfuse-cache volume, so what
+    has to fit is all of them at once. gcsfuse fills to those figures whatever
+    the volume behind them holds, and overrunning a memory-backed emptyDir's
+    sizeLimit is the kubelet evicting the pod mid-run, so no smaller number
+    degrades gracefully.
+
+    Read out of the template instead of restated here, which would be a second
+    copy of a number that moves.
+    """
+    text = (TEMPLATES / "cache_volumes.yaml.tpl").read_text()
+    # Comment lines dropped first: the comments around these fields quote the
+    # figures they explain, and a quoted one would be counted twice.
+    body = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    # Matched loosely and checked strictly, so that a figure this cannot read is
+    # an error rather than a mount silently left out of the sum. Out of the sum
+    # is the direction that hurts: the floor comes back too low, a shape that
+    # should have been refused is generated, and the kubelet evicts the pod when
+    # the cache fills. gcsfuse's own "-1" is the case worth naming - it is legal,
+    # it means fill the volume, and no total bounds it.
+    caps = re.findall(r"fileCacheCapacity:\s*(\S+)", body)
+    if not caps:
+        raise ValueError("cache_volumes.yaml.tpl declares no fileCacheCapacity")
+    total = 0
+    for cap in caps:
+        match = re.fullmatch(r'"(\d+)Gi"', cap)
+        if not match:
+            raise ValueError(
+                f"cache_volumes.yaml.tpl states fileCacheCapacity: {cap}, which "
+                "is not a quoted whole number of Gi. The gcsfuse cache floor is "
+                "the sum of these, and a figure this cannot add is a floor too "
+                "low rather than a missing one."
+            )
+        total += int(match.group(1))
+    return total
+
+
+def host_share_gib(machine_type: str, ratio: float) -> int:
+    """That fraction of this machine type's memory, in whole GiB.
 
     GB to GiB as well as the ratio: the machine family documentation quotes
     memory in decimal gigabytes and a Kubernetes quantity written Gi is binary,
     so taking the number across unconverted would ask for 7% more of the host
     than intended.
+
+    An unlisted machine type is an error rather than a conservative guess, for
+    the reason on fuse_min_cache_gib: a number too small is not slower, it is a
+    pod the kubelet evicts once the volume fills.
     """
     gb = MACHINE_MEMORY_GB.get(machine_type)
     if gb is None:
-        return FUSE_FALLBACK
-    return f"{int(gb * FUSE_VOLUME_RATIO * 1000**3 / 1024**3)}Gi"
+        raise KeyError(
+            f"no host memory known for machine type {machine_type!r}. Read it "
+            "off the accelerator-optimized machine family documentation and "
+            "add it to MACHINE_MEMORY_GB; the pod's memory-backed volumes are "
+            "sized from it, and a wrong number is an eviction rather than a "
+            "slow mount."
+        )
+    return int(gb * ratio * 1000**3 / 1024**3)
+
+
+def shm_size(machine_type: str) -> str:
+    """The pod's /dev/shm on this machine type, as a GiB string."""
+    return f"{host_share_gib(machine_type, SHM_VOLUME_RATIO)}Gi"
+
+
+def fuse_cache_size(machine_type: str) -> str:
+    """The workload's gcsfuse file cache on this machine type, as a GiB string."""
+    gib = host_share_gib(machine_type, FUSE_VOLUME_RATIO)
+    gb = MACHINE_MEMORY_GB[machine_type]
+    floor = fuse_min_cache_gib()
+    if gib < floor:
+        raise ValueError(
+            f"{machine_type} has {gb} GB of host memory, so {FUSE_VOLUME_RATIO:.0%} "
+            f"of it is {gib}Gi - under the {floor}Gi of fileCacheCapacity that "
+            "cache_volumes.yaml.tpl asks for across the mounts sharing one "
+            "gke-gcsfuse-cache volume. gcsfuse would fill past the emptyDir's "
+            "sizeLimit and the kubelet would evict the pod."
+        )
+    return f"{gib}Gi"
 
 
 def shapes(worker: dict) -> dict[str, dict]:
@@ -226,15 +360,15 @@ def shapes(worker: dict) -> dict[str, dict]:
             )
 
         # A multi-host slice is admitted and built whole, so quota that is not
-        # a multiple of hosts is quota this shape can never use and a ceiling
-        # that is not one is a node pool GKE cannot build. Fail here rather
-        # than as a workload that queues forever.
-        for field in ("nominal_nodes", "max_nodes"):
+        # a multiple of hosts is quota this shape can never use, and a floor or
+        # ceiling that is not one is a node pool GKE cannot build. Fail here
+        # rather than as a workload that queues forever.
+        for field in ("min_nodes", "nominal_nodes", "max_nodes"):
             if hosts > 1 and int(pool[field]) % hosts:
                 raise ValueError(
                     f"{name}: {field}={pool[field]} is not a multiple of the "
-                    f"{hosts} hosts in a {topology} slice; a multi-host shape's "
-                    "quota has to be whole slices"
+                    f"{hosts} hosts in a {topology} slice; every count for a "
+                    "multi-host shape has to be whole slices"
                 )
 
         out[name] = {
@@ -248,6 +382,7 @@ def shapes(worker: dict) -> dict[str, dict]:
             "topology": topology,
             "accelerator_label": ACCELERATOR_LABELS[family],
             "fuse_cache_size": fuse_cache_size(machine_type),
+            "shm_size": shm_size(machine_type),
             # The one number here that is a policy rather than a fact, and the
             # only one Kueue reads: this shape's share of the reservation.
             "quota": int(pool["nominal_nodes"]) * chips,
@@ -255,13 +390,24 @@ def shapes(worker: dict) -> dict[str, dict]:
     return out
 
 
-def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
-    """A flavor per machine family, then a queue per shape sharing it.
+def dispatch_check(queue: str, checks: bool) -> str:
+    """The admissionChecksStrategy block a ClusterQueue carries, or nothing.
 
-    checks is what separates the manager from a worker: on the manager every
-    queue carries a MultiKueue AdmissionCheck, so passing quota there means the
+    This is what separates the manager from a worker: on the manager a queue
+    carries a MultiKueue AdmissionCheck, so passing quota there means the
     workload is dispatched rather than run.
     """
+    if not checks:
+        return ""
+    return (
+        "\n  admissionChecksStrategy:\n"
+        "    admissionChecks:\n"
+        f"      - name: {queue}-multikueue-dispatch"
+    )
+
+
+def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
+    """A flavor per machine family, then a queue per shape sharing it."""
     out = [
         render("resource_flavor", ACCELERATOR=family)
         for family in sorted({cohort(name) for name in shapes})
@@ -274,16 +420,62 @@ def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
                 ACCELERATOR=cohort(name),
                 NAMESPACE=namespace,
                 NOMINAL_QUOTA=chips,
-                ADMISSION_CHECKS=(
-                    "\n  admissionChecksStrategy:\n"
-                    "    admissionChecks:\n"
-                    f"      - name: {name}-multikueue-dispatch"
-                    if checks
-                    else ""
-                ),
+                ADMISSION_CHECKS=dispatch_check(name, checks),
             )
         )
     return "".join(out)
+
+
+def fleet_secret_docs(tfvars: dict, namespace: str) -> str:
+    """A SecretProviderClass and a SecretSync per fleet credential.
+
+    `path` is internal - it names the value for the SecretSync below, and is
+    never a file anywhere, since nothing mounts these as a CSI volume.
+
+    `versions/latest` so a rotation is picked up without a deploy. A container
+    resolves a secretKeyRef once, when it is created, so a running workload
+    keeps the version it started with - but a workload is one job long, and the
+    next job gets whatever the sync last wrote.
+    """
+    docs = []
+    seen = {}
+    for env_name, spec in sorted(tfvars["env_secrets"].items()):
+        name = fleet_secret_name(env_name)
+        if name in seen:
+            raise SystemExit(
+                f"env_secrets keys {seen[name]!r} and {env_name!r} both name "
+                f"the Secret {name!r}; one of them would silently win"
+            )
+        seen[name] = env_name
+        docs.append(
+            f"""---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  provider: gke
+  parameters:
+    secrets: |
+      - resourceName: "projects/{spec['project']}/secrets/{spec['secret']}/versions/latest"
+        path: "value"
+---
+apiVersion: secret-sync.gke.io/v1
+kind: SecretSync
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  serviceAccountName: secret-sync
+  secretProviderClassName: {name}
+  secretObject:
+    type: Opaque
+    data:
+      - sourcePath: value
+        targetKey: {env_name}"""
+        )
+    return "\n".join(docs)
 
 
 def launcher_profiles(fleet: dict, workers: list[str], tfvars: dict) -> str:
@@ -311,22 +503,16 @@ def launcher_profiles(fleet: dict, workers: list[str], tfvars: dict) -> str:
             # own account, which is the point.
             "workload_service_accounts": ["default", "tpu-workload"],
             # Names the launcher can supply itself when a step forwards one it
-            # does not have. Fleet-wide credentials, held by the launcher's
-            # account so a pipeline needs no grant of its own - and still only
-            # reaching a workload that asked by name.
+            # does not have. Fleet-wide credentials, and still only reaching a
+            # workload that asked by name.
+            #
+            # Where the sync put it on the worker, not where it came from in
+            # Secret Manager: the launcher points a secretKeyRef at it and
+            # never reads the value. Same tfvars list the syncs are generated
+            # from, so a name here is a Secret that exists.
             "env_secrets": {
-                "HF_TOKEN": {
-                    "project": tfvars["hf_token_secret_project"],
-                    "secret": tfvars["hf_token_secret_id"],
-                },
-                # Test Engine. The collector runs inside the workload, not in
-                # the agent, so the token has to reach the pod; without it a
-                # suite still passes and reports nothing, which is the failure
-                # mode worth designing against.
-                "BUILDKITE_ANALYTICS_TOKEN": {
-                    "project": tfvars["analytics_token_secret_project"],
-                    "secret": tfvars["analytics_token_secret_id"],
-                },
+                name: {"secret": fleet_secret_name(name), "key": name}
+                for name in sorted(tfvars["env_secrets"])
             },
             "total_max_seconds": int(tfvars["tpu_total_max_seconds"]),
             # How the launcher gets from an admitted workload to the pod logs.
@@ -428,6 +614,20 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
 
         base = out_dir / worker_dir
         write(base / "system" / "10-kueue-config.yaml", kueue_config("worker"))
+        # Under system/, alongside the rest of what a worker has to hold before
+        # it can run anything. Nothing in this repo names the class; the roles
+        # that do arrive later, as workloads MultiKueue dispatches here, and a
+        # pod naming a class the cluster does not have stays pending.
+        write(
+            base / "system" / "00-compute-class.yaml",
+            render(
+                "compute_class_worker",
+                NAME=WORKER_COMPUTE_CLASS,
+                NODE_SERVICE_ACCOUNT=worker_node_service_account(
+                    prefix, worker["project"], worker["location"]
+                ),
+            ),
+        )
         write(
             base / "queues" / "00-namespace.yaml",
             render("namespace", NAMESPACE=namespace, EXTRA_LABELS=""),
@@ -453,6 +653,14 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             render("workload_sa", NAMESPACE=namespace, PROJECT_ID=worker["project"]),
         )
         write(
+            base / "workload" / "05-fleet-secrets.yaml",
+            render(
+                "fleet_secrets",
+                NAMESPACE=namespace,
+                SECRET_DOCS=fleet_secret_docs(tfvars, namespace),
+            ),
+        )
+        write(
             base / "workload" / "10-cache-volumes.yaml",
             render(
                 "cache_volumes",
@@ -473,6 +681,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             base / "workload" / "20-launcher-rbac.yaml",
             render("launcher_rbac_worker", NAMESPACE=namespace, PROJECT_ID=project),
         )
+
+    worker_names = sorted(c["name"] for c in clusters if c["role"] == "worker")
 
     base = out_dir / manager_dir
     write(base / "system" / "10-kueue-config.yaml", kueue_config("manager"))
