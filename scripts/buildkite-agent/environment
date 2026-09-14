@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Buildkite agent environment hook for an H200 MIG machine.
+#
+# Install at: /etc/buildkite-agent/hooks/environment
+# Owner: root, mode 0755. Sourced by every job before it runs.
+#
+# What it does:
+#   1. Exports secrets (HF_TOKEN, AWS creds, analytics token) — fill these in.
+#   2. Logs Docker into ECR (public + the pull-through cache).
+#   3. Maps this agent's spawn number to a specific MIG slice UUID and pins the
+#      job to it via BUILDKITE_PLUGIN_DOCKER_GPUS.
+#   4. Serializes the first docker pull of the job image across the many agents
+#      on the host (flock), so 56 agents don't all pull at once.
+#
+# This template assumes the H200 MIG layout from scripts/setup_mig_h200.sh,
+# with agents spawned with names ending in -<N> (N = 1..num_slices).
+#
+# MIG profiles (8-GPU H200):
+#   - 1g.18gb: 7 slices/GPU -> 56 agents (queue=h200_18gb), SLICES_PER_GPU=7
+#   - 1g.35gb: 4 slices/GPU -> 32 agents (queue=h200_35gb), SLICES_PER_GPU=4
+# Set SLICES_PER_GPU to match the MIG profile and the agent cfg `spawn` value.
+
+set -e
+
+# Number of MIG slices per GPU (7 for 1g.18gb, 4 for 1g.35gb).
+SLICES_PER_GPU=7
+
+# ── Secrets (FILL THESE IN) ───────────────────────────────────────────────────
+export HF_TOKEN="<hf-token>"
+export AWS_ACCESS_KEY_ID="<aws-access-key-id>"
+export AWS_SECRET_ACCESS_KEY="<aws-secret-access-key>"
+export BUILDKITE_ANALYTICS_TOKEN="<analytics-token>"   # optional
+
+# ── Hugging Face cache ────────────────────────────────────────────────────────
+# Point at large shared/local storage. The h200_18gb docker plugin mounts
+# /mnt/vllm-ci into containers, so keep HF_HOME on that path.
+export HF_HOME=/mnt/vllm-ci
+
+# ── ECR login ─────────────────────────────────────────────────────────────────
+aws ecr-public get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin public.ecr.aws
+aws ecr get-login-password --region us-west-2 \
+  | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-west-2.amazonaws.com
+
+# ── Pin this agent to one MIG slice ───────────────────────────────────────────
+# Agent names look like "<host>-<N>"; N selects the MIG device.
+AGENT_NUMBER="${BUILDKITE_AGENT_NAME##*-}"
+if [[ -z "$AGENT_NUMBER" ]]; then
+  echo "ERROR: Could not extract agent number from BUILDKITE_AGENT_NAME=$BUILDKITE_AGENT_NAME"
+  exit 1
+fi
+
+mapfile -t UUIDS < <(nvidia-smi -L | grep -oP 'UUID: \KMIG-[^\)]+')
+if (( AGENT_NUMBER < 1 || AGENT_NUMBER > ${#UUIDS[@]} )); then
+  echo "ERROR: Agent number $AGENT_NUMBER exceeds available MIG devices (${#UUIDS[@]})"
+  exit 1
+fi
+
+IDX=$(( AGENT_NUMBER - 1 ))
+UUID="${UUIDS[$IDX]}"
+GPU=$(( IDX / SLICES_PER_GPU ))
+SLOT=$(( IDX % SLICES_PER_GPU ))
+echo "Agent $BUILDKITE_AGENT_NAME (#$AGENT_NUMBER) → GPU $GPU slot $SLOT → $UUID"
+export BUILDKITE_PLUGIN_DOCKER_GPUS="device=${UUID}"
+
+# ── Serialize the first image pull across agents on this host ─────────────────
+if [[ -n "${BUILDKITE_PLUGIN_DOCKER_IMAGE:-}" ]]; then
+  IMAGE="$BUILDKITE_PLUGIN_DOCKER_IMAGE"
+elif [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
+  if [[ "${BUILDKITE_BRANCH:-}" == "main" ]]; then
+    IMAGE="<main-image>"        # e.g. the postmerge CI image
+  else
+    IMAGE="<branch-image>"      # e.g. the premerge CI image
+  fi
+else
+  IMAGE=""
+fi
+
+if [[ -n "$IMAGE" ]]; then
+  LOCK_DIR="/tmp/docker-pull-locks"
+  mkdir -p "$LOCK_DIR"
+  LOCK_FILE="${LOCK_DIR}/$(echo "$IMAGE" | tr '/:' '__').lock"
+  DONE_FILE="${LOCK_FILE}.done"
+  if [[ -f "$DONE_FILE" ]]; then
+    echo "Image $IMAGE already pulled (done marker exists), skipping pull."
+  else
+    exec 9>"$LOCK_FILE"
+    if flock -n 9; then
+      echo "Pulling image $IMAGE (this agent won the lock)..."
+      docker pull "$IMAGE"
+      touch "$DONE_FILE"
+      echo "Image pull complete."
+    else
+      echo "Waiting for another agent to finish pulling $IMAGE..."
+      flock 9
+      echo "Image $IMAGE is now available."
+    fi
+    exec 9>&-
+  fi
+fi
+
+# ── CDI device injection + shallow git clones ─────────────────────────────────
+source /usr/local/libexec/buildkite-gpu-cdi-env.sh
+export BUILDKITE_GIT_CLONE_FLAGS="-v --depth=1 --filter=blob:none"
+export BUILDKITE_GIT_FETCH_FLAGS="-v --prune --depth=1"
