@@ -123,9 +123,17 @@ can say so.
 How long the workload runs is not one of those. It defaults to
 `tpu_test_max_seconds`, which is right for a test, and a manifest that knows
 better states its own `activeDeadlineSeconds` — a serving benchmark runs for as
-long as its client sweeps, which no shape implies. The ceiling is
-`tpu_total_max_seconds`: past that the workload would outlive the launcher
-watching it, and the chips would be held by nothing.
+long as its client sweeps, which no shape implies. A single step can override
+both by setting `TPU_MAX_RUNTIME_SECONDS` in its `env:`, which is how one step
+asks for longer without every step sharing the manifest getting it too. The
+ceiling is `tpu_total_max_seconds`: past that the workload would outlive the
+launcher watching it, and the chips would be held by nothing.
+
+Whatever the source, keep it under the step's own `timeout_in_minutes` by more
+than the startup envelope. The two clocks do not start together — the step's
+runs from the agent pod, the workload's from admission — so a workload given
+the step's whole budget is killed by Buildkite before its own deadline can fire
+or its artifacts can upload.
 
 `kueue/launcher/launch.py` is the program. It is a file rather than YAML so it
 can be linted and run; `deploy_manifests.py` builds the ConfigMap from it.

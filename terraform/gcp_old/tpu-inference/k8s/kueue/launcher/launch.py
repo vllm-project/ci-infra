@@ -779,6 +779,30 @@ def finalise(doc, profile, registry, name, labels, owner, command, where):
     return doc
 
 
+def requested_runtime():
+    """What the step asked to run for, if it asked.
+
+    A step that shares a manifest with others has nowhere to put a deadline of
+    its own, and the steps that need one are exactly the ones that cannot be
+    told apart by shape: the same four chips serve a smoke test and an eval
+    suite that runs for most of a day.
+    """
+    raw = os.environ.get("TPU_MAX_RUNTIME_SECONDS", "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"TPU_MAX_RUNTIME_SECONDS={raw!r} is not a whole number of seconds"
+        )
+    if seconds <= 0:
+        raise SystemExit(
+            f"TPU_MAX_RUNTIME_SECONDS={raw!r} must be greater than zero"
+        )
+    return seconds
+
+
 def cap_runtime(doc, profile, registry):
     """Bound how long the workload may hold its chips.
 
@@ -787,7 +811,9 @@ def cap_runtime(doc, profile, registry):
     One that does have an opinion states activeDeadlineSeconds and is believed:
     how long a workload runs is a property of the work, not of the hardware,
     and a benchmark that serves for ten hours has no shape-derived number that
-    could know that.
+    could know that. TPU_MAX_RUNTIME_SECONDS is that same opinion held by a
+    single step rather than by every step sharing the manifest, so it is the
+    narrower of the two and wins.
 
     The ceiling is the step's whole budget, which is the part that is always
     true - a workload must not outlast the step watching it, or it is holding a
@@ -795,11 +821,34 @@ def cap_runtime(doc, profile, registry):
     """
     default = int(profile["max_runtime_seconds"])
     ceiling = int(registry["total_max_seconds"])
-    for spec in job_specs(doc):
-        current = spec.get("activeDeadlineSeconds")
-        spec["activeDeadlineSeconds"] = (
-            min(int(current), ceiling) if current else default
+    asked = requested_runtime()
+    if asked is not None:
+        # Name what the step overrode. A manifest and a step disagreeing about
+        # the deadline is the kind of thing that is obvious in the log and
+        # baffling anywhere else.
+        stated = sorted(
+            {
+                int(spec["activeDeadlineSeconds"])
+                for spec in job_specs(doc)
+                if spec.get("activeDeadlineSeconds") is not None
+            }
         )
+        over = f", over the manifest's {', '.join(f'{s}s' for s in stated)}"
+        log(
+            f"runtime {min(asked, ceiling)}s, from TPU_MAX_RUNTIME_SECONDS"
+            f"{over if stated else ''}"
+        )
+    for spec in job_specs(doc):
+        # `is None` rather than falsy: a manifest that states 0 is making a
+        # claim about the work, and a job that fails on it the moment it starts
+        # is a better answer than one that silently runs for the default three
+        # hours instead.
+        current = spec.get("activeDeadlineSeconds")
+        if asked is not None:
+            current = asked
+        elif current is None:
+            current = default
+        spec["activeDeadlineSeconds"] = min(int(current), ceiling)
 
 
 def size_host_volumes(doc, profile):

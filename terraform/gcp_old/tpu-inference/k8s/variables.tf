@@ -249,7 +249,7 @@ variable "allowed_image_repos" {
 
 variable "tpu_test_max_seconds" {
   type        = number
-  description = "How long a TPU workload runs for when it says nothing. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out. A manifest that knows better states its own, bounded by tpu_total_max_seconds."
+  description = "How long a TPU workload runs for when it says nothing. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out. A manifest that knows better states its own, and a single step overrides both with TPU_MAX_RUNTIME_SECONDS in its env; either way bounded by tpu_total_max_seconds."
 }
 
 variable "tpu_total_max_seconds" {
