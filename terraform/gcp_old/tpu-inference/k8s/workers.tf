@@ -172,9 +172,22 @@ resource "google_container_node_pool" "worker_system" {
   # total_, not the per-zone min_node_count/max_node_count: in a regional
   # cluster those are multiplied by the number of zones, so a floor of 1 would
   # quietly become one node per zone.
+  #
+  # ANY rather than the default, for the opposite reason to the TPU pools below:
+  # not because a balanced spread breaks the shape, but because this is the one
+  # pool on a worker with no second choice of machine type. A node pool takes
+  # one, and the pods here are GKE's own addons, which carry no compute class
+  # selector and so cannot be given the worker-cpu family ordering. All the
+  # fallback available to it is the other zones in the region, and BALANCED
+  # spends that on an even spread it has no use for at one node.
+  #
+  # It buys a zone for scale-up only. Replacing the machine type surges into the
+  # zone the outgoing node already sits in, so a family this region is short of
+  # fails that upgrade no matter what is set here.
   autoscaling {
     total_min_node_count = each.value.system_min_nodes
     total_max_node_count = each.value.system_max_nodes
+    location_policy      = "ANY"
   }
 
   management {
