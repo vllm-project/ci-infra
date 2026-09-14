@@ -47,7 +47,11 @@ variable in between.
 `kueue/generated/` is committed so that reviewing a quota change means reading
 the YAML that will be applied rather than inferring it from a template.
 `deploy_manifests.py` refuses to run if the committed tree differs from a fresh
-render, so it doubles as a drift detector.
+render, so it doubles as a drift detector - but only between the templates and
+the committed tree. It applies, never prunes, so **deleting an object from the
+tree does not delete it from the clusters**: a change that removes a queue, a
+flavor or an admission check needs the matching `kubectl delete` by hand, on the
+manager and on every worker that carried it.
 
 ## Deploying a change
 
