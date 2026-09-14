@@ -1,5 +1,9 @@
 # Buildkite Agent Templates (H200 MIG)
 
+> **New here?** Start with the step-by-step [MIG_RUNBOOK.md](MIG_RUNBOOK.md) —
+> it walks through MIG setup, hooking into Buildkite, and GPU monitoring
+> end to end. This README is the reference for the template files.
+
 Reusable, working copies of the Buildkite agent config and hooks from live
 H200 MIG agents (`h200_18gb` and `h200_35gb`). Use these when onboarding a new
 H200 MIG machine so you don't have to reverse-engineer a running agent each time.
