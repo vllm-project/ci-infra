@@ -165,6 +165,23 @@ def test_selected_steps_support_amd_mirror_keys(
     assert generated_keys == ["image-build-amd", f"amd-{generated_key}"]
 
 
+def test_a100_steps_are_not_emitted_but_amd_mirrors_are():
+    step = Step(
+        label="A100 test",
+        group="GPU",
+        key="a100-test",
+        device="a100",
+        commands=["test"],
+        mirror={"amd": {"device": "mi300_2"}},
+    )
+
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps([step]))
+    generated_keys = [job.key for group in groups for job in group.steps]
+
+    assert "a100-test" not in generated_keys
+    assert "amd-a100-test" in generated_keys
+
+
 def test_selected_steps_reject_duplicate_generated_key():
     steps = [
         Step(label="Test", key="test", commands=["a"]),
