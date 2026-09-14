@@ -823,11 +823,26 @@ def cap_runtime(doc, profile, registry):
     ceiling = int(registry["total_max_seconds"])
     asked = requested_runtime()
     if asked is not None:
-        log(f"runtime {min(asked, ceiling)}s, from TPU_MAX_RUNTIME_SECONDS")
+        # Name what the step overrode. A manifest and a step disagreeing about
+        # the deadline is the kind of thing that is obvious in the log and
+        # baffling anywhere else.
+        stated = sorted(
+            {
+                int(spec["activeDeadlineSeconds"])
+                for spec in job_specs(doc)
+                if spec.get("activeDeadlineSeconds") is not None
+            }
+        )
+        over = f", over the manifest's {', '.join(f'{s}s' for s in stated)}"
+        log(
+            f"runtime {min(asked, ceiling)}s, from TPU_MAX_RUNTIME_SECONDS"
+            f"{over if stated else ''}"
+        )
     for spec in job_specs(doc):
         # `is None` rather than falsy: a manifest that states 0 is making a
-        # claim about the work, and the API rejecting it is the better answer
-        # than silently running for the default three hours instead.
+        # claim about the work, and a job that fails on it the moment it starts
+        # is a better answer than one that silently runs for the default three
+        # hours instead.
         current = spec.get("activeDeadlineSeconds")
         if asked is not None:
             current = asked
