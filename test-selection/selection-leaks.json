@@ -1287,7 +1287,7 @@
       "causal_confirmation": {
         "kind": "fix",
         "reference_url": "https://github.com/vllm-project/vllm/pull/56819",
-        "notes": "PR #55176 removed VLLM_ENABLE_SCALE_OUT_ENDPOINTS in favor of --enable-scale-out, but did not migrate the exact L4 EC E2E launcher. Its PR build selected 13 other jobs and omitted this exact lane; main and its automatic retry failed identically. Draft PR #56819 passes the new CLI flag to both affected serve processes."
+        "notes": "PR #55176 removed VLLM_ENABLE_SCALE_OUT_ENDPOINTS in favor of --enable-scale-out, but did not migrate the exact L4 EC E2E launcher. Its PR build selected 13 other jobs and omitted this exact lane; main and its automatic retry failed identically. The failure later recurred on main #88913 in both the original job and its automatic retry, then again on daily-main #88920, each time after all three services became healthy and the encode request returned the same HTTP 404. PR #56819 passes the new CLI flag to both affected serve processes; its isolated exact L4 lane passed in #88826."
       }
     }
   ]
