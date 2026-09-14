@@ -138,6 +138,24 @@ SUPPORTED_KINDS = {"Job": "job", "JobSet": "jobset"}
 # every few seconds anyway.
 CLI_TIMEOUT_SECONDS = 120
 
+# How long the launcher will go without an answer from the manager's API server
+# before it stops waiting on the workload. A GKE control plane stops answering
+# for a few seconds whenever it is upgraded or repaired, which is routine and
+# is not a reason to end a test that has been compiling for an hour; the
+# workload is on a worker cluster and keeps running throughout. Bounded rather
+# than endless because past this the launcher can no longer say what it is
+# watching, and a step that reports nothing for the rest of its timeout is
+# worse than one that ends and says why.
+API_GRACE_SECONDS = 600
+
+# The deadline for the delete the signal handler makes, which is racing the
+# pod's termination grace period rather than the step's timeout. Kubernetes
+# sends SIGKILL 30s after SIGTERM unless a pod asks for longer, so a delete
+# still waiting on an unresponsive API server at that point is a delete that
+# never happened - and the workload it was for keeps its chips until the
+# ownerReference collects it. Short enough to fail and say so in time.
+CLEANUP_TIMEOUT_SECONDS = 15
+
 # Two HTTP requests, one to the node's metadata server and one to the registry,
 # and neither has a control plane behind it to be slow the way a kubectl call
 # can. They answer in under a second together, so the generous figure above
@@ -238,10 +256,10 @@ def kubectl(*args, check=True, timeout=CLI_TIMEOUT_SECONDS):
     for as long as it runs, and a call that never returns holds the chips with
     it - past the step timeout, since the step is waiting on this process.
 
-    A timeout reads as a failed call rather than an exception for the callers
-    that already tolerate one: a poll that cannot reach the API server has the
-    same nothing to report as a poll that was refused, and the loop's next
-    attempt is a better answer than a traceback.
+    A timeout reads as a failed call rather than an exception, so that it
+    reaches kubectl_json's classification with every other failed call and is
+    retried on the same terms rather than arriving as a traceback. The string
+    it reports is chosen not to look like any answer the API server gives.
     """
     try:
         return subprocess.run(
@@ -254,19 +272,59 @@ def kubectl(*args, check=True, timeout=CLI_TIMEOUT_SECONDS):
         return subprocess.CompletedProcess(args, 1, "", f"timed out after {timeout}s")
 
 
+# Failures that are the API server's considered answer rather than a failure to
+# reach it. Retrying these waits out the whole grace period to arrive at the
+# same refusal, while the workload holds its chips throughout.
+FATAL_API_ERRORS = ("(Forbidden)", "(Unauthorized)")
+
+
+class ApiUnreachable(Exception):
+    """A kubectl call that failed without telling us anything about the object.
+
+    Kept apart from a NotFound because the two call for opposite responses. An
+    object the API server says is gone will not come back and the step is over;
+    an API server that could not be reached has said nothing about the workload,
+    which is on a worker cluster and carries on regardless. A launcher that
+    reads the second as the first ends every in-flight step on the fleet each
+    time a control plane is upgraded.
+    """
+
+
 def kubectl_json(*args):
-    proc = kubectl(*args, "-o", "json", check=False)
-    return json.loads(proc.stdout) if proc.returncode == 0 else None
+    """The object, or None if the API server says there is no such object.
+
+    Raises ApiUnreachable for every other failure, so that a caller treating
+    absence as terminal cannot silently treat an unanswered call the same way.
+
+    --ignore-not-found rather than reading kubectl's message, because absence is
+    the one answer the launcher must not get wrong and the message is a poor
+    witness to it: a control plane that is still registering its CRDs says
+    "the server could not find the requested resource", which is about a URL
+    path and not about our object at all. With the flag a missing object exits
+    0 with nothing on stdout, so a non-zero exit needs no interpretation.
+    """
+    proc = kubectl(*args, "--ignore-not-found", "-o", "json", check=False)
+    if proc.returncode == 0:
+        return json.loads(proc.stdout) if proc.stdout.strip() else None
+    detail = proc.stderr.strip()[:300]
+    if any(marker in proc.stderr for marker in FATAL_API_ERRORS):
+        raise SystemExit(f"kubectl {' '.join(args)}: {detail}")
+    raise ApiUnreachable(detail or f"kubectl {' '.join(args)} exited {proc.returncode}")
 
 
-def delete_workload(kind, name):
+def delete_workload(kind, name, timeout=CLI_TIMEOUT_SECONDS):
     """Delete the workload and say whether it worked.
 
     On cancellation the launcher is about to exit, so a failed delete leaves
     chips running with nobody watching; logging the intent alone would make
     that indistinguishable from success.
+
+    The caller chooses the deadline because the two callers have different ones
+    to meet. The signal handler is racing the pod's termination grace period and
+    a delete still waiting when that expires is a delete that never happened.
     """
-    proc = kubectl("delete", kind, name, "--wait=false", check=False)
+    proc = kubectl("delete", kind, name, "--wait=false", check=False,
+                   timeout=timeout)
     if proc.returncode == 0:
         log(f"deleted {kind}/{name}")
     elif "NotFound" in proc.stderr:
@@ -878,6 +936,14 @@ def validate(doc, registry, where):
 
 
 def find_workload(uid):
+    """Kueue's Workload for our object, or None if it has not made one yet.
+
+    None only ever means that. A list read of a kind the cluster knows does not
+    come back empty-handed for any other reason, and kubectl_json raises rather
+    than returning None when it could not ask - which is what keeps "Kueue has
+    not got to it" apart from "the manager did not answer", two states that read
+    identically from here and call for opposite responses.
+    """
     workloads = kubectl_json("get", "workloads")
     for item in (workloads or {}).get("items", []):
         for owner in item.get("metadata", {}).get("ownerReferences", []):
@@ -1291,7 +1357,7 @@ def main():
             log(f"signal {signum}, deleting {kind}/{name}")
             if collector:
                 collector.sweep()
-            delete_workload(kind, name)
+            delete_workload(kind, name, timeout=CLEANUP_TIMEOUT_SECONDS)
         sys.exit(128 + signum)
 
     signal.signal(signal.SIGTERM, cleanup)
@@ -1330,8 +1396,61 @@ def main():
             announced = False
             withdraw_waiting(waiting)
 
+    # Every read of the manager below goes through this; the worker-side reads
+    # that stream the pods' logs have their own failure handling. The manager's
+    # API server is the launcher's only view of the workload, and it stops
+    # answering for a few seconds whenever GKE upgrades or repairs the control
+    # plane - while the workload itself, which runs on a worker cluster, carries
+    # on. Retried in one place rather than at each call site so no reader has to
+    # remember the difference between an object that is gone and a question that
+    # went unanswered.
+    blind_since = None
+    # Kept across spells, because the grace period is per contiguous outage - a
+    # manager answering one poll in twenty resets it and the launcher waits on -
+    # and what the admission timeout wants to report is the total.
+    blind_total = 0.0
+
+    # While blind the step's log is otherwise silent, and ten silent minutes
+    # look the same as a hang. Often enough to show progress, rare enough not to
+    # bury the run's own output.
+    blind_notice_seconds = 60
+
+    def with_grace(fn, *fn_args):
+        nonlocal blind_since, blind_total
+        announced_at = None
+        while True:
+            try:
+                value = fn(*fn_args)
+            except ApiUnreachable as err:
+                now = time.monotonic()
+                if blind_since is None:
+                    blind_since = now
+                if announced_at is None or now - announced_at >= blind_notice_seconds:
+                    announced_at = now
+                    blind = now - blind_since
+                    log(f"manager API unreachable for {blind:.0f}s of "
+                        f"{API_GRACE_SECONDS}s, still waiting on {kind}/{name}: "
+                        f"{err}")
+                if now - blind_since > API_GRACE_SECONDS:
+                    raise
+                time.sleep(POLL_SECONDS)
+                continue
+            if blind_since is not None:
+                waited = time.monotonic() - blind_since
+                blind_total += waited
+                log(f"manager API answering again after {waited:.0f}s")
+                blind_since = None
+            return value
+
     try:
-        uid = kubectl_json("get", kind, name)["metadata"]["uid"]
+        created = with_grace(kubectl_json, "get", kind, name)
+        if created is None:
+            # The apply above succeeded, so this is not a workload that was
+            # never created; something removed it in the seconds since.
+            log(f"{kind}/{name} was removed immediately after being created")
+            stop_announcing()
+            return 1
+        uid = created["metadata"]["uid"]
         admission_limit = admission_timeout(registry, doc)
         started = time.monotonic()
         admitted = False
@@ -1342,7 +1461,7 @@ def main():
         job_id = labels.get("buildkite.com/job-id")
 
         while True:
-            obj = kubectl_json("get", kind, name)
+            obj = with_grace(kubectl_json, "get", kind, name)
             if obj is None:
                 log(f"{kind}/{name} disappeared")
                 stop_announcing()
@@ -1351,7 +1470,7 @@ def main():
             # Watched for the whole run, not just until admission: preemption
             # happens after it, and a step that goes silent for minutes waiting to
             # be re-admitted reads as a hang.
-            workload = find_workload(uid)
+            workload = with_grace(find_workload, uid)
             note = describe_admission(workload)
             cluster = (workload or {}).get("status", {}).get("clusterName")
 
@@ -1367,7 +1486,14 @@ def main():
                 admitted = True
                 stop_announcing()
             if not admitted and time.monotonic() - started > admission_limit:
-                log(f"not admitted within {admission_limit}s - capacity, not the test")
+                # Time spent unable to reach the manager counts against this on
+                # purpose - the budget is carved so the run still fits inside
+                # the step's own deadline, and a blind spell does not move that.
+                # Named so the difference between no capacity and no answer is
+                # not left to be inferred.
+                blind = f", {blind_total:.0f}s of it blind" if blind_total else ""
+                log(f"not admitted within {admission_limit}s{blind} "
+                    "- capacity, not the test")
                 stop_announcing()
                 delete_workload(kind, name)
                 return 1
@@ -1457,6 +1583,23 @@ def main():
                 time.sleep(FIRST_LOG_POLL_SECONDS)
             else:
                 time.sleep(POLL_SECONDS)
+    except ApiUnreachable as err:
+        # Handled apart from the traceback below because this is the one exit
+        # where the launcher knows exactly what happened and the delete it is
+        # about to attempt goes to the same API server that just stopped
+        # answering. Saying so is the difference between a human reclaiming the
+        # chips now and finding them held an hour later.
+        stop_announcing()
+        log(f"no answer from the manager's API server for {API_GRACE_SECONDS}s: "
+            f"{err}")
+        if not deleted:
+            deleted = True
+            if not delete_workload(kind, name):
+                log(f"WARNING: {kind}/{name} could not be deleted either, so it "
+                    "may still be running on its worker cluster and holding its "
+                    "chips. It is collected when this pod's object is removed.")
+        print("^^^ +++", flush=True)
+        return 1
     except BaseException:
         stop_announcing()
         if not deleted:
