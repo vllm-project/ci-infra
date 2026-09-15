@@ -28,10 +28,19 @@ spec:
   # container exit code, because the container never started. At zero, the
   # step's result is whatever the hardware did.
   #
-  # Three, rather than a number that spends the whole deadline: a node repair
-  # is a single event and one replacement clears it, while a pool that cannot
-  # produce a healthy node should say so in the time a person is waiting.
-  backoffLimit: 3
+  # Six, because what this has to outlast is the repair rather than the pod. A
+  # replacement is admitted against the same node, so it is rejected again for
+  # as long as the chips are unhealthy, and the Job's backoff is what decides
+  # how long that can go on: ten seconds, then twenty, forty, eighty, a hundred
+  # and sixty, three hundred and twenty. Three of those is seventy seconds,
+  # which a repair outlives comfortably - it cost two consecutive nightlies the
+  # same step. Six is a little over ten minutes.
+  #
+  # Spending that is safe because it is not a test's budget. A test that fails
+  # is failed by the FailJob rule below on the spot, so a larger number here
+  # never runs a red test twice; it is only reached by a pod that never got far
+  # enough to have an exit code.
+  backoffLimit: 6
   podFailurePolicy:
     rules:
       - action: Ignore
