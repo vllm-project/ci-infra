@@ -99,14 +99,18 @@ tpu_test_max_seconds      = 10800
 tpu_runtime_max_seconds   = 43200
 tpu_queue_max_seconds     = 43200
 #
-# Half an hour to get from a reservation to a pod, which is the one wait that
-# is nobody's turn: queueing means another workload has the chips, but a
-# reservation that has not dispatched means Kueue is holding them for a pod
-# that does not exist. Measured dispatch on a passing v7x step is nine seconds,
-# and a node coming up cold is ten minutes or so, so this is wide enough not to
-# fire on a slow start and narrow enough that idle reserved chips come back the
-# same hour.
-tpu_admission_max_seconds = 1800
+# An hour between a reservation and a pod. Dispatch on a warm path measures
+# nine seconds, so almost all of this is for the case where the chips Kueue
+# counted are not yet in the shape the workload needs: quota is chips, but a
+# slice is a topology. Eight free chips sitting as two 2x2x1 nodes do not admit
+# a 2x2x2 without those nodes draining and a two-host slice being built against
+# the reservation in their place - node deletion, TPU provisioning and a cold
+# image pull, none of which is a fault.
+#
+# So this is not a broken-detector. It is the bound on a wait that has no
+# queue behind it: while it runs, the chips are reserved and nothing is using
+# them, which is the one state no other budget here can see.
+tpu_admission_max_seconds = 3600
 
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather

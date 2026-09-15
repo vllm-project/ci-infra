@@ -290,10 +290,16 @@ variable "tpu_admission_max_seconds" {
     MultiKueue admission check Pending, reconciled once and never again,
     surviving a controller restart.
 
-    Wider than the seconds dispatch actually takes, because a node coming up
-    cold sits between reservation and pod for ten minutes or so and a short
-    family for longer - but not wide enough to leave reserved chips idle for an
-    hour, which is what they are for as long as this is running.
+    Much wider than the seconds dispatch takes on a warm path, because quota is
+    chips and a slice is a topology. Eight chips free as two 2x2x1 nodes do not
+    admit a 2x2x2: those nodes drain and a two-host slice is built against the
+    reservation in their place, which is node deletion, TPU provisioning and a
+    cold image pull. None of that is a fault, and the multi-host step is the
+    one that pays it.
+
+    What it bounds is therefore not brokenness but a wait with no queue behind
+    it - chips reserved, nothing running, no other workload benefiting - which
+    is the one state none of the other budgets can distinguish.
   EOT
 }
 
