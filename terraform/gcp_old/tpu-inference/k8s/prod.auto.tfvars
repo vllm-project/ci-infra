@@ -102,6 +102,10 @@ worker_clusters = [
     subnetwork             = "projects/cloud-ullm-inference-ci-cd/regions/us-east5/subnetworks/default"
     master_ipv4_cidr_block = "172.16.0.32/28"
 
+    # The zone both v6e pools sit in, so the caches serve the nodes that read
+    # them. A cache in any other us-east5 zone would be billed and never hit.
+    rapid_cache_zones = ["us-east5-a"]
+
     # Reservation cloudtpu-20260828173000-731402396 in us-east5-a: 128 v6e
     # chips, 102 in use, 26 free. nominal_nodes splits those 26 between the
     # shapes so neither starves the other; max_nodes sums to more, so a shape
@@ -143,6 +147,9 @@ worker_clusters = [
     network                = "projects/cloud-ullm-inference-ci-cd/global/networks/default"
     subnetwork             = "projects/cloud-ullm-inference-ci-cd/regions/us-central1/subnetworks/default"
     master_ipv4_cidr_block = "172.16.0.64/28"
+
+    # The zone all three v7x pools sit in.
+    rapid_cache_zones = ["us-central1-c"]
 
     # Three shapes over the same eight chips of the v7x reservation, which is
     # every shape the tests ask for. The quota is not split between them: eight

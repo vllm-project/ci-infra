@@ -304,6 +304,22 @@ variable "worker_clusters" {
     # reports `max node group size reached` into pod events nobody is reading.
     system_max_nodes = optional(number, 64)
 
+    # Zones to put a Rapid Cache in, for both of this worker's buckets. Empty
+    # disables it, which is the default: a cache is billed on what it holds,
+    # and holding a copy of a bucket nothing reads from that zone is spending
+    # for nothing.
+    #
+    # Where, not just whether, because the cache is zonal and only serves reads
+    # from its own zone - so the zones worth naming are the ones the TPU pools
+    # below sit in. Deriving it from them was tempting and is wrong: a shape
+    # can exist in a zone the fleet has not run in for months, and that is
+    # exactly the cache nobody wants to pay for.
+    #
+    # It reads through: no mount changes, no staged copy, nothing to repopulate
+    # when a model is added. Measured on the 480B checkpoint against
+    # us-central1-c, warm, from 483s to 304s.
+    rapid_cache_zones = optional(list(string), [])
+
     # One per TPU shape this cluster can run. The node pool's name is its shape
     # - <machine type>-<topology>, e.g. ct6e-standard-8t-2x4 - and locals.tf
     # derives it from the two fields below rather than taking it from here, so
