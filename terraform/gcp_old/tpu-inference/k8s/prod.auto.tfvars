@@ -76,16 +76,27 @@ launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/l
 # bare-metal budget so a step moving between the lanes gets the same allowance.
 # Twelve to ask for at the outside, which is where the disagg manifests sit.
 #
-# Half a day in line, set by the fleet rather than by the work: eight v7x chips
-# means a build fanning out over several shapes puts most of its steps behind
-# the rest of itself, and waits of that length are observed rather than
-# hypothetical.
+# Two hours in line, which is less than the fleet makes a step wait and is not
+# the number this would be on its own. Something ends a kube step at 5h59m48s:
+# every job that has ever reached it died there as exit_status -1 with an empty
+# log, across perf-kube and tests-kube alike, with timeout_in_minutes already
+# set to a day. It is not any deadline in this configuration and it is not
+# readable from the Buildkite API.
 #
-# Twenty-four hours is therefore the worst case a step can reach, which is what
-# every Buildkite step timeout on a kube lane is set to.
+# So the budget that matters is not the one written here, and a launcher
+# allowed to wait longer than the ceiling cannot report: the step dies first,
+# unattributed. Two hours plus a three-hour run leaves an hour under it, which
+# buys a step that fails saying it never got chips instead of one that fails
+# saying nothing.
+#
+# Waiting in line for a v7x slot is genuinely longer than this. That wait
+# belongs in Buildkite, where a step held by a concurrency group is `limited`
+# with a null started_at and burns no clock at all - not in the launcher, where
+# every second is inside the step. Raise this to 43200 once the ceiling is
+# found and lifted.
 tpu_test_max_seconds      = 10800
 tpu_runtime_max_seconds   = 43200
-tpu_queue_max_seconds     = 43200
+tpu_queue_max_seconds     = 7200
 tpu_admission_max_seconds = 3600
 
 # Every CI image this fleet runs is built into the manager project's Artifact

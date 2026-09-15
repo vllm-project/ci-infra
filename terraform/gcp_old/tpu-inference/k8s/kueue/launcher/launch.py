@@ -1536,8 +1536,17 @@ def main():
             # the chips and dispatch is the only thing left - seconds, normally.
             # One that has not dispatched within the shorter cap is not queued,
             # it is stuck, and it is holding a quota reservation while it is.
-            if reserved is None and quota_reserved(workload):
-                reserved = time.monotonic()
+            #
+            # Cleared as well as set, because a reservation is not permanent:
+            # preemption and a lost worker both send an admitted workload back
+            # to the queue with QuotaReserved false. Latched, the dispatch cap
+            # would keep running against a workload that is once again waiting
+            # its turn, and kill it for being queued.
+            if quota_reserved(workload):
+                if reserved is None:
+                    reserved = time.monotonic()
+            else:
+                reserved = None
             if reserved is not None:
                 limit, since, what = dispatch_limit, reserved, "dispatched"
             else:
