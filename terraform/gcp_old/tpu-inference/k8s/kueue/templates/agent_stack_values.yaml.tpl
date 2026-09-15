@@ -1,0 +1,51 @@
+# Values for the agent-stack-k8s chart. deploy_manifests.py renders the chart
+# with these and applies the result; helm is a renderer here, so there is no
+# release and no in-cluster Helm state.
+#
+# Deliberately short. The chart pastes this block under three keys of its own -
+# agent-token-secret, namespace and id - and the controller parses the result
+# with a decoder that rejects a duplicated key, so anything the chart derives
+# must be left out.
+
+# The chart takes a Secret name, not a value; workload/'s SecretSync writes it.
+# It becomes envFrom on the controller, so every key in that Secret is an
+# environment variable on it. Ours holds exactly one.
+agentStackSecret: ${AGENT_TOKEN_SECRET_NAME}
+
+config:
+  # One queue for the whole fleet. A queue does not encode a TPU shape: every
+  # TPU step goes through the launcher, so adding a shape is a regenerated
+  # profile registry rather than another queue.
+  #
+  # The organization is not named here. The controller takes the org and the
+  # cluster from the agent token, which is why that token has to be a
+  # cluster's and not the organization's.
+  queue: ${BUILDKITE_QUEUE}
+
+  # How long a container may sit unable to start before the controller gives
+  # up on the step. The chart's thirty seconds assumes a warm node and a small
+  # image; a fleet node is often brand new, and the pull is a CI image built
+  # per commit, so nothing about it is cached anywhere. Steps were failing with
+  # exit -1, no agent and an empty log - the controller had failed them before
+  # a pod ever ran, which reads as a Buildkite fault rather than a slow pull.
+  #
+  # Five minutes, not longer: this is also what catches an image that does not
+  # exist, and that should not cost a step its whole timeout.
+  image-pull-backoff-grace-period: 5m
+
+  # The git SSH key, on every agent pod's checkout container. Controller-wide
+  # rather than per-pipeline `gitEnvFrom`, because which repositories are
+  # private is not something a pipeline should have to know: a public one
+  # ignores the key, so the cost of it being everywhere is nothing, and the
+  # alternative is a plugin stanza that only fails once a repository turns
+  # private.
+  #
+  # Only the checkout container. The command container runs the step, which on
+  # this fleet is a workload image named by a pull request, and a deploy key
+  # reaching that is a key a pull request can read.
+  pod-spec-patch:
+    containers:
+      - name: checkout
+        envFrom:
+          - secretRef:
+              name: ${GIT_CREDENTIALS_SECRET_NAME}

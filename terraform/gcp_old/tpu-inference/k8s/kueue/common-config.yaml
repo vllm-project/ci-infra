@@ -1,0 +1,36 @@
+# Kueue controller configuration, on the manager and on every worker.
+#
+# A workload is admitted twice - once by the manager against fleet quota, again
+# by the worker against local quota - so both sides have to agree on what a
+# workload is and how it is admitted, which is everything in this file.
+# manager-config.yaml adds the keys only the dispatching side needs.
+apiVersion: config.kueue.x-k8s.io/v1beta2
+kind: Configuration
+manageJobsWithoutQueueName: false
+health:
+  healthProbeBindAddress: :8081
+metrics:
+  bindAddress: :8443
+webhook:
+  port: 9443
+leaderElection:
+  leaderElect: true
+  resourceName: c1f6bfd2.kueue.x-k8s.io
+resources:
+  # Check only the resources a ClusterQueue declares. A TPU pod also requests
+  # cpu, memory and ephemeral-storage - its own and its gcsfuse sidecar's - and
+  # under the default BlockUndeclared any of those makes the workload
+  # inadmissible against a queue covering google.com/tpu alone. The kube
+  # scheduler enforces them against node capacity, which is where they belong.
+  quotaCheckStrategy: IgnoreUndeclared
+integrations:
+  frameworks:
+    - batch/job
+    # Multi-pod workloads: multi-host TPU slices and prefill/decode disagg.
+    # A batch/v1 Job cannot span hosts.
+    - jobset.x-k8s.io/jobset
+waitForPodsReady:
+  # Inert without `enable: true`. Turning it on adds readiness-timeout eviction
+  # and requeue accounting, which changes how preemption behaves.
+  blockAdmission: false
+  timeout: 10800s

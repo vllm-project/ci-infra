@@ -14,6 +14,18 @@ variable "instance_count" {
   description = "Number of TPU instance"
 }
 
+variable "purpose" {
+  type        = string
+  description = <<-DESC
+    What this fleet is for. When set, every name this module creates -- the TPU
+    VM, its label, its disk, and the Buildkite agent -- becomes
+    <accelerator_type>-ci-<purpose>-<index>-<project_short_name>-<zone>. The
+    zone is read from the provider, so it is never passed in. Empty keeps the
+    original unsuffixed names.
+  DESC
+  default     = ""
+}
+
 variable "disk_size" {
   type        = number
   description = "The mount disk size"

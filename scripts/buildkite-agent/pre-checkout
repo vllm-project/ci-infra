@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Injects a GitHub read-only PAT as an HTTP extraHeader for git fetches on the
+# two canonical repos (vllm and perf-eval). The PAT comes from the Buildkite
+# agent secret store, never from disk.
+#
+# Install at: /etc/buildkite-agent/hooks/pre-checkout
+# Pair with post-checkout, which unsets the injected config after the fetch.
+
+set -e
+
+# Authenticate only the two canonical repositories.
+case "${BUILDKITE_PIPELINE_ID:-}:${BUILDKITE_REPO:-}" in
+    018cdabc-d930-49f6-9085-634c4cb582ed:https://github.com/vllm-project/vllm.git|\
+    019dd151-0969-469a-a03e-43dfc10f204f:https://github.com/vllm-project/perf-eval.git)
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+github_pat=$(/usr/bin/buildkite-agent secret get GITHUB_READONLY_PAT)
+github_basic=$(printf 'x-access-token:%s' "$github_pat" | base64 -w0)
+
+# The secret command redacts the raw PAT. Register the derived Basic payload and
+# complete header before exporting them so hook environment-diff logs are safe.
+printf '%s' "$github_basic" | /usr/bin/buildkite-agent redactor add
+printf '%s' "AUTHORIZATION: basic ${github_basic}" | /usr/bin/buildkite-agent redactor add
+
+git_config_index=${GIT_CONFIG_COUNT:-0}
+case "$git_config_index" in
+    ''|*[!0-9]*)
+        echo "Invalid GIT_CONFIG_COUNT: expected a non-negative integer" >&2
+        exit 1
+        ;;
+esac
+
+export BUILDKITE_GITHUB_AUTH_PREVIOUS_CONFIG_COUNT=$git_config_index
+export BUILDKITE_GITHUB_AUTH_CONFIG_INDEX=$git_config_index
+export "GIT_CONFIG_KEY_${git_config_index}=http.https://github.com/.extraHeader"
+export "GIT_CONFIG_VALUE_${git_config_index}=AUTHORIZATION: basic ${github_basic}"
+export GIT_CONFIG_COUNT=$((git_config_index + 1))
+
+unset github_pat github_basic git_config_index

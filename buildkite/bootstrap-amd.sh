@@ -163,12 +163,6 @@ upload_pipeline() {
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     FAIL_FAST=$(fail_fast)
-    ROCM_BUILD_SCOPED_IMAGES=0
-    if grep -q 'CI_BASE_IMAGE_TAG_BUILD_REF' \
-        .buildkite/scripts/ci-bake-rocm.sh 2>/dev/null; then
-        ROCM_BUILD_SCOPED_IMAGES=1
-    fi
-
     cd .buildkite
     (
         set -x
@@ -187,7 +181,6 @@ upload_pipeline() {
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
             -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
             -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
-            -D rocm_build_scoped_images="$ROCM_BUILD_SCOPED_IMAGES" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
