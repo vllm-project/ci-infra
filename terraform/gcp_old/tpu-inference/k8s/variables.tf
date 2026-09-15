@@ -249,40 +249,71 @@ variable "allowed_image_repos" {
 
 variable "tpu_test_max_seconds" {
   type        = number
-  description = "How long a TPU workload runs for when it says nothing. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out. A manifest that knows better states its own, and a single step overrides both with TPU_MAX_RUNTIME_SECONDS in its env; either way bounded by tpu_total_max_seconds."
+  description = "How long a TPU workload runs for when it says nothing. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out. A manifest that knows better states its own, and a single step overrides both with TPU_MAX_RUNTIME_SECONDS in its env; either way bounded by tpu_runtime_max_seconds."
+}
+
+variable "tpu_queue_max_seconds" {
+  type        = number
+  description = <<-EOT
+    How long the launcher waits for chips before giving up.
+
+    Generous on purpose: waiting is capacity, not a fault in the step, and a
+    step that has been in line since the previous evening is waiting on busy
+    hardware. Failing it there loses its place in the queue as well as its
+    result.
+
+    Stated rather than derived. This used to be whatever a total budget left
+    once the run was allowed for, which meant a manifest asking to serve for
+    longer silently shortened how long it could queue - two unrelated things
+    moving together. The pair a step actually has is how long it may wait and
+    how long it may run, so those are the two numbers.
+  EOT
 }
 
 variable "tpu_admission_max_seconds" {
   type        = number
   description = <<-EOT
-    How long the launcher waits for Kueue to admit a workload before giving up.
+    How long the launcher waits for a workload with reserved quota to reach a
+    worker before giving up. Not the wait for chips - that is capacity, and it
+    gets tpu_queue_max_seconds.
 
-    A ceiling on the wait derived from tpu_total_max_seconds, which on its own
-    produces a number no step can reach: a day's budget less a three-hour run
-    is twenty-one hours, and Buildkite ends the step at about six. So the
-    derived timeout never fires, and a workload that is never going to be
-    admitted reads as exit_status -1 with no message - indistinguishable from
-    the step ceiling, and holding its quota reservation the whole time.
+    The distinction is the point. A workload without quota is in line behind
+    other work and may legitimately wait hours; one with quota has had chips
+    committed to it and only dispatch is left, which takes seconds. A
+    reservation that has not become a pod is not queued, it is stuck, and it is
+    holding chips nobody can use while it waits.
 
-    An hour is far longer than admission takes when the fleet is working. The
-    concurrency group means only as many steps are runnable as there are chips,
-    so the wait is a node coming up rather than a queue: about ten minutes cold,
-    more if the family is short and the autoscaler has to try another. What it
-    is long enough to rule out is anything transient, and short enough that a
-    stuck admission check costs one step rather than a build.
+    Left unbounded it never reports on its own: the queue budget is half a day,
+    so a stuck reservation is indistinguishable from a long line until the
+    Buildkite step gives up and the job ends as exit_status -1 with no message.
+    That is what a perf-kube step did for three hours with its MultiKueue
+    admission check Pending, reconciled once and never again, surviving a
+    controller restart.
+
+    An hour, rather than the minutes dispatch actually takes, because a node
+    coming up cold can sit between reservation and pod for ten and a short
+    family for longer.
   EOT
 }
 
-variable "tpu_total_max_seconds" {
+variable "tpu_runtime_max_seconds" {
   type        = number
   description = <<-EOT
-    How long a TPU step may take in total, queueing included.
+    The most runtime a workload may ask for, whatever its manifest says.
 
-    Also the ceiling on any deadline a manifest asks for, since the one thing
-    that must hold is that a workload does not outlast the launcher watching
-    it. The launcher waits for admission for whatever this leaves once the
-    workload's own run is allowed for, so this and tpu_test_max_seconds are the
-    only deadlines worth choosing and every other one follows from them.
+    tpu_test_max_seconds is what a step gets when it has no opinion; this is
+    what it gets when its opinion is too large. The thing that must hold is
+    that a workload does not outlast the launcher watching it, or it holds a
+    reservation nothing will clean up.
+
+    Set above tpu_test_max_seconds, not equal to it: the disagg manifests state
+    their own deadlines in hours because a serving benchmark's length is a
+    property of the benchmark. Setting the two equal would make three hours a
+    hard cap rather than a default and clamp them.
+
+    With tpu_queue_max_seconds this is the whole budget - a step's worst case
+    is the two added together, which is what the Buildkite step timeout has to
+    clear.
   EOT
 }
 

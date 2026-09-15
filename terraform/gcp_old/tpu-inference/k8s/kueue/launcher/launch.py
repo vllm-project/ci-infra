@@ -438,23 +438,27 @@ def resolve_shape(doc, registry, where):
     )
 
 
-def admission_timeout(registry, doc):
-    """How long to wait for chips: the whole budget, less this run, capped.
+def quota_reserved(workload):
+    """Whether Kueue has committed chips to this workload."""
+    quota = condition(workload, "QuotaReserved")
+    return bool(quota) and quota.get("status") == "True"
 
-    The subtraction is what keeps a workload that asked to serve for ten hours
-    from also being given eight to queue in - read off the deadline cap_runtime
-    settled on rather than the shape's default.
 
-    The cap is what makes it reachable. A day's budget less a three-hour run is
-    twenty-one hours and Buildkite ends the step at about six, so on its own
-    this timeout never fires: a workload that is never admitted takes the step
-    down as exit_status -1 with no message, looking exactly like the ceiling and
-    holding its quota reservation until it does. Admission that has not happened
-    within the hour is not going to.
+def admission_timeout(registry):
+    """How long to wait in line for chips.
+
+    Queueing is capacity rather than a fault in the step, so this is generous
+    and flat. It used to be a total budget less whatever this workload asked to
+    run for, which coupled two unrelated things: a benchmark declaring a longer
+    deadline quietly got less time to queue in, on a fleet where queueing is
+    the part that varies.
+
+    What is bounded tightly is the step after this one: see admission_max_seconds,
+    which starts when quota is reserved rather than when the workload is
+    submitted. A queue is someone else using the chips; a reservation that has
+    not turned into a pod is nobody using them.
     """
-    runtime = max(int(spec["activeDeadlineSeconds"]) for spec in job_specs(doc))
-    budget = int(registry["total_max_seconds"]) - runtime
-    return max(min(budget, int(registry["admission_max_seconds"])), 300)
+    return int(registry["queue_max_seconds"])
 
 
 def resolve_image(registry):
@@ -821,12 +825,12 @@ def cap_runtime(doc, profile, registry):
     single step rather than by every step sharing the manifest, so it is the
     narrower of the two and wins.
 
-    The ceiling is the step's whole budget, which is the part that is always
-    true - a workload must not outlast the step watching it, or it is holding a
+    The ceiling is the part that is always true whatever the opinion - a
+    workload must not outlast the step watching it, or it is holding a
     reservation nothing will clean up.
     """
     default = int(profile["max_runtime_seconds"])
-    ceiling = int(registry["total_max_seconds"])
+    ceiling = int(registry["runtime_max_seconds"])
     asked = requested_runtime()
     if asked is not None:
         # Name what the step overrode. A manifest and a step disagreeing about
@@ -1490,8 +1494,10 @@ def main():
             stop_announcing()
             return 1
         uid = created["metadata"]["uid"]
-        admission_limit = admission_timeout(registry, doc)
+        admission_limit = admission_timeout(registry)
+        dispatch_limit = int(registry["admission_max_seconds"])
         started = time.monotonic()
+        reserved = None
         admitted = False
         running = False
         last_startup = None
@@ -1524,15 +1530,26 @@ def main():
             if cluster and not admitted:
                 admitted = True
                 stop_announcing()
-            if not admitted and time.monotonic() - started > admission_limit:
+            # Two different waits wearing the same name. Before quota is
+            # reserved the workload is in line behind other work, which is
+            # capacity and gets the whole budget. After it, Kueue has committed
+            # the chips and dispatch is the only thing left - seconds, normally.
+            # One that has not dispatched within the shorter cap is not queued,
+            # it is stuck, and it is holding a quota reservation while it is.
+            if reserved is None and quota_reserved(workload):
+                reserved = time.monotonic()
+            if reserved is not None:
+                limit, since, what = dispatch_limit, reserved, "dispatched"
+            else:
+                limit, since, what = admission_limit, started, "admitted"
+            if not admitted and time.monotonic() - since > limit:
                 # Time spent unable to reach the manager counts against this on
                 # purpose - the budget is carved so the run still fits inside
                 # the step's own deadline, and a blind spell does not move that.
                 # Named so the difference between no capacity and no answer is
                 # not left to be inferred.
                 blind = f", {blind_total:.0f}s of it blind" if blind_total else ""
-                log(f"not admitted within {admission_limit}s{blind} "
-                    "- capacity, not the test")
+                log(f"not {what} within {limit}s{blind} - capacity, not the test")
                 stop_announcing()
                 delete_workload(kind, name)
                 return 1

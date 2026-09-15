@@ -74,14 +74,18 @@ launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/l
 
 # Three hours with the chips unless a manifest says otherwise, matching the
 # bare-metal budget so a step moving between the lanes gets the same allowance.
+# Twelve to ask for at the outside, which is where the disagg manifests sit.
 #
-# A day in total, set by the queue rather than by the work: the fleet has eight
-# v7x chips, so a build fanning out over several shapes puts most of its steps
-# behind the rest of itself. A step that has been waiting since the previous
-# evening is waiting on busy hardware, and failing it for that loses its place
-# in line as well as its result.
+# Half a day in line, set by the fleet rather than by the work: eight v7x chips
+# means a build fanning out over several shapes puts most of its steps behind
+# the rest of itself, and waits of that length are observed rather than
+# hypothetical.
+#
+# Twenty-four hours is therefore the worst case a step can reach, which is what
+# every Buildkite step timeout on a kube lane is set to.
 tpu_test_max_seconds      = 10800
-tpu_total_max_seconds     = 86400
+tpu_runtime_max_seconds   = 43200
+tpu_queue_max_seconds     = 43200
 tpu_admission_max_seconds = 3600
 
 # Every CI image this fleet runs is built into the manager project's Artifact

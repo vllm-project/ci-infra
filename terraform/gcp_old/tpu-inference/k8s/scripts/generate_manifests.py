@@ -514,7 +514,8 @@ def launcher_profiles(fleet: dict, workers: list[str], tfvars: dict) -> str:
                 name: {"secret": fleet_secret_name(name), "key": name}
                 for name in sorted(tfvars["env_secrets"])
             },
-            "total_max_seconds": int(tfvars["tpu_total_max_seconds"]),
+            "queue_max_seconds": int(tfvars["tpu_queue_max_seconds"]),
+            "runtime_max_seconds": int(tfvars["tpu_runtime_max_seconds"]),
             "admission_max_seconds": int(tfvars["tpu_admission_max_seconds"]),
             # How the launcher gets from an admitted workload to the pod logs.
             # Kueue reports the cluster it dispatched to by MultiKueueCluster
