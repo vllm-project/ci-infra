@@ -101,18 +101,16 @@ sudo ./scripts/move-docker-containerd.sh /path/to/target
 ```
 
 The script will:
-- Set Docker's `data-root` in `/etc/docker/daemon.json`
-- Set containerd's `root` in `/etc/containerd/config.toml`
+- Set Docker's `data-root` in `/etc/docker/daemon.json` (creating the file if it's missing)
+- Set containerd's `root` in `/etc/containerd/config.toml` (same)
+- Move the Buildkite agent's `build-path` to the same volume, if buildkite-agent is already installed
 - Install systemd drop-ins so the target directories are recreated on boot
 - Restart both services and run a smoke test
 
-The script expects `/etc/docker/daemon.json` to exist and needs `jq`. On a
-fresh machine, create a stub first:
-
-```bash
-echo '{}' | sudo tee /etc/docker/daemon.json
-sudo apt-get install -y jq
-```
+It works on a fresh machine — no prerequisites beyond Docker/containerd
+themselves (it uses `jq` if present, otherwise falls back to `python3`).
+Existing images are not migrated; the new roots start empty and images re-pull
+on demand.
 
 See [`move-docker-containerd.sh`](move-docker-containerd.sh) for details.
 

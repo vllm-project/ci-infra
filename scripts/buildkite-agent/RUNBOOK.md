@@ -104,28 +104,26 @@ dies at initialization with `no space left on device` (writing
 `/tmp/job-env-*`), so the queue looks stuck for no obvious reason.
 
 Move three things off the root disk onto the big volume (e.g. `/mnt/local`,
-`/raid0`):
+`/raid0`). The script handles all three:
 
 ```bash
-# Docker + containerd data roots
 sudo ../move-docker-containerd.sh /mnt/local
-
-# Buildkite build directory
-sudo mkdir -p /mnt/local/buildkite-agent/builds
-sudo chown -R buildkite-agent:buildkite-agent /mnt/local/buildkite-agent
-# then set: build-path="/mnt/local/buildkite-agent/builds" in buildkite-agent.cfg (Step 4)
 ```
 
-> **Note:** `move-docker-containerd.sh` expects `/etc/docker/daemon.json` to
-> already exist and needs `jq` installed. On a fresh machine, create a stub
-> first: `echo '{}' | sudo tee /etc/docker/daemon.json` and
-> `sudo apt-get install -y jq`.
->
+It moves Docker's `data-root`, containerd's `root`, and — if buildkite-agent is
+already installed — the agent's `build-path` too, then restarts the services.
+It works on a fresh machine (creates `/etc/docker/daemon.json` if missing, uses
+`jq` or `python3`, whichever is present).
+
 > If the disk is **already** full: stop the agent (`sudo systemctl stop
 > buildkite-agent`), `sudo docker image prune -a -f` to reclaim space, clear
 > stale pull-lock markers (`sudo rm -rf /tmp/docker-pull-locks` — otherwise the
 > environment hook will skip re-pulling images you just deleted), then do the
 > move and restart.
+>
+> The script does **not** migrate existing images — the new roots start empty
+> and images re-pull on demand. If the agent was running, restart it after:
+> `sudo systemctl restart buildkite-agent`.
 
 ## Step 4 — Install the Buildkite agent config and hooks
 
