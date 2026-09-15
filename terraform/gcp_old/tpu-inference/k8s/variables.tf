@@ -285,14 +285,15 @@ variable "tpu_admission_max_seconds" {
 
     Left unbounded it never reports on its own: the queue budget is half a day,
     so a stuck reservation is indistinguishable from a long line until the
-    Buildkite step gives up and the job ends as exit_status -1 with no message.
-    That is what a perf-kube step did for three hours with its MultiKueue
-    admission check Pending, reconciled once and never again, surviving a
-    controller restart.
+    agent Job's own deadline kills the pods and the step ends as exit_status -1
+    with no message. That is what a perf-kube step did for three hours with its
+    MultiKueue admission check Pending, reconciled once and never again,
+    surviving a controller restart.
 
-    An hour, rather than the minutes dispatch actually takes, because a node
-    coming up cold can sit between reservation and pod for ten and a short
-    family for longer.
+    Wider than the seconds dispatch actually takes, because a node coming up
+    cold sits between reservation and pod for ten minutes or so and a short
+    family for longer - but not wide enough to leave reserved chips idle for an
+    hour, which is what they are for as long as this is running.
   EOT
 }
 

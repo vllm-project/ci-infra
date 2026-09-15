@@ -805,6 +805,16 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             AGENT_TOKEN_SECRET_NAME=AGENT_TOKEN_SECRET_NAME,
             GIT_CREDENTIALS_SECRET_NAME=GIT_CREDENTIALS_SECRET_NAME,
             BUILDKITE_QUEUE=tfvars["buildkite_queue"],
+            # A backstop above the two budgets that do the reporting, rather
+            # than a number to tune. Two hours covers what sits inside the
+            # agent Job but outside either budget: scheduling the pod, pulling
+            # the launcher image, the checkout, and the sweep after the
+            # workload has gone.
+            AGENT_JOB_DEADLINE_SECONDS=(
+                int(tfvars["tpu_queue_max_seconds"])
+                + int(tfvars["tpu_runtime_max_seconds"])
+                + 7200
+            ),
         ),
     )
 

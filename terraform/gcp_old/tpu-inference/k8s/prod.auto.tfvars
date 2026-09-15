@@ -76,28 +76,37 @@ launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/l
 # bare-metal budget so a step moving between the lanes gets the same allowance.
 # Twelve to ask for at the outside, which is where the disagg manifests sit.
 #
-# Two hours in line, which is less than the fleet makes a step wait and is not
-# the number this would be on its own. Something ends a kube step at 5h59m48s:
-# every job that has ever reached it died there as exit_status -1 with an empty
-# log, across perf-kube and tests-kube alike, with timeout_in_minutes already
-# set to a day. It is not any deadline in this configuration and it is not
-# readable from the Buildkite API.
+# Half a day in line, which is longer than anything can currently use. Something
+# ends a kube step at 5h59m48s: every job that has ever reached that mark died
+# there as exit_status -1 with an empty log, across perf-kube and tests-kube
+# alike, on builds whose timeout_in_minutes was already a day. It is not any
+# deadline set here and it is not readable from the Buildkite API.
 #
-# So the budget that matters is not the one written here, and a launcher
-# allowed to wait longer than the ceiling cannot report: the step dies first,
-# unattributed. Two hours plus a three-hour run leaves an hour under it, which
-# buys a step that fails saying it never got chips instead of one that fails
-# saying nothing.
+# Deliberately left above it anyway. Lowering this to fit under the ceiling
+# would buy a message in the last few minutes before a step dies mute, and
+# would cost every step whose wait is legitimately longer than the lowered
+# number - which is the multi-host glm step, whose slice is the whole cohort,
+# so its pod starts on a free concurrency slot and then waits out both of the
+# steps holding the chips. Killing a step that was going to get its chips is a
+# worse trade than an unattributed death for one that was not.
 #
-# Waiting in line for a v7x slot is genuinely longer than this. That wait
-# belongs in Buildkite, where a step held by a concurrency group is `limited`
-# with a null started_at and burns no clock at all - not in the launcher, where
-# every second is inside the step. Raise this to 43200 once the ceiling is
-# found and lifted.
+# What keeps this from mattering in the ordinary case is that the queueing does
+# not happen here. A step held by a concurrency group is `limited`, has a null
+# started_at, and burns no clock; by the time its agent pod starts, a slot and
+# its quota are both free. Measured in-pod wait on a passing v7x step: nine
+# seconds.
 tpu_test_max_seconds      = 10800
 tpu_runtime_max_seconds   = 43200
-tpu_queue_max_seconds     = 7200
-tpu_admission_max_seconds = 3600
+tpu_queue_max_seconds     = 43200
+#
+# Half an hour to get from a reservation to a pod, which is the one wait that
+# is nobody's turn: queueing means another workload has the chips, but a
+# reservation that has not dispatched means Kueue is holding them for a pod
+# that does not exist. Measured dispatch on a passing v7x step is nine seconds,
+# and a node coming up cold is ten minutes or so, so this is wide enough not to
+# fire on a slow start and narrow enough that idle reserved chips come back the
+# same hour.
+tpu_admission_max_seconds = 1800
 
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather

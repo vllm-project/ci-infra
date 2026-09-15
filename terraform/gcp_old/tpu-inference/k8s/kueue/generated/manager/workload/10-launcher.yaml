@@ -84,9 +84,9 @@ data:
       HF_TOKEN:
         secret: fleet-hf-token
         key: HF_TOKEN
-    queue_max_seconds: 7200
+    queue_max_seconds: 43200
     runtime_max_seconds: 43200
-    admission_max_seconds: 3600
+    admission_max_seconds: 1800
     workers:
       tpu-ci-us-central1:
         membership: tpu-ci-us-central1
