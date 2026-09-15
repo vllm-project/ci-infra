@@ -87,6 +87,26 @@ locals {
     }
   ]...)
 
+  # A cache per bucket per named zone. Keyed off the bucket pair above rather
+  # than rebuilding the names, so adding a third purpose gets a cache without
+  # anything here changing; keyed off the worker for the zones, so a worker
+  # that names none gets none.
+  rapid_cache_zones_by_worker = {
+    for worker in var.worker_clusters :
+    "${worker.project}/${worker.location}" => worker.rapid_cache_zones
+  }
+
+  rapid_caches = merge([
+    for key, bucket in local.workload_buckets : {
+      for zone in local.rapid_cache_zones_by_worker["${bucket.project}/${bucket.location}"] :
+      "${key}/${zone}" => {
+        project = bucket.project
+        bucket  = bucket.name
+        zone    = zone
+      }
+    }
+  ]...)
+
   manager_repository_bindings = {
     for repo in var.image_repositories :
     "${repo.location}/${repo.repository}" => repo

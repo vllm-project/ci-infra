@@ -87,3 +87,32 @@ resource "google_storage_bucket_iam_member" "workload" {
   role   = "roles/storage.objectUser"
   member = "serviceAccount:${each.value.project}.svc.id.goog[${var.namespace}/tpu-workload]"
 }
+
+# A zonal read cache in front of a bucket, for the zones a worker names.
+#
+# Reads from that zone are served locally instead of from the bucket, and
+# nothing on the reading side changes: same bucket, same gcsfuse mount, same
+# paths. That is the whole reason it is here rather than a disk. A staged copy
+# reads faster still - Hyperdisk ML did the same checkpoint in 199s against
+# this at 304s and gcsfuse alone at 483s - but it has to be attached to a
+# machine family that supports it, written from a node in its own zone, kept
+# read-only without breaking HuggingFace's lock files, and repopulated whenever
+# a model changes. None of that applies to a cache that fills itself.
+#
+# No admission policy: the field is deprecated and the backend admits on first
+# miss whatever is asked for. Which is what this wants anyway - CI reads the
+# same checkpoints every night, so there is nothing to learn from making the
+# first read miss twice.
+resource "google_storage_anywhere_cache" "workload" {
+  for_each = local.rapid_caches
+
+  bucket = google_storage_bucket.workload[
+    join("/", slice(split("/", each.key), 0, 3))
+  ].name
+  zone = each.value.zone
+
+  # A week, against a default of one day. The lane reads a model once a night,
+  # so a day-long entry can expire in the hour before the run that wanted it -
+  # which costs the full uncached read and looks like the cache doing nothing.
+  ttl = "604800s"
+}
