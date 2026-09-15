@@ -94,7 +94,38 @@ nvidia-ctk cdi list | grep -c "nvidia.com/gpu="
 > Re-run this after recreating MIG instances, or after a reboot that didn't
 > persist them (e.g. following `teardown_mig_h200.sh`).
 
-## Step 3 — Install the Buildkite agent config and hooks
+## Step 3 — Put Docker, containerd, and builds on large storage
+
+**Do not skip this on GPU machines.** Each vLLM CI image is ~34 GB, and a busy
+machine accumulates several of them (plus pull-through-cache duplicates). On a
+typical 200-250 GB root disk that fills the disk completely — and the failure
+mode is nasty: agents stay "connected" and keep accepting jobs, but every job
+dies at initialization with `no space left on device` (writing
+`/tmp/job-env-*`), so the queue looks stuck for no obvious reason.
+
+Move three things off the root disk onto the big volume (e.g. `/mnt/local`,
+`/raid0`). The script handles all three:
+
+```bash
+sudo ../move-docker-containerd.sh /mnt/local
+```
+
+It moves Docker's `data-root`, containerd's `root`, and — if buildkite-agent is
+already installed — the agent's `build-path` too, then restarts the services.
+It works on a fresh machine (creates `/etc/docker/daemon.json` if missing, uses
+`jq` or `python3`, whichever is present).
+
+> If the disk is **already** full: stop the agent (`sudo systemctl stop
+> buildkite-agent`), `sudo docker image prune -a -f` to reclaim space, clear
+> stale pull-lock markers (`sudo rm -rf /tmp/docker-pull-locks` — otherwise the
+> environment hook will skip re-pulling images you just deleted), then do the
+> move and restart.
+>
+> The script does **not** migrate existing images — the new roots start empty
+> and images re-pull on demand. If the agent was running, restart it after:
+> `sudo systemctl restart buildkite-agent`.
+
+## Step 4 — Install the Buildkite agent config and hooks
 
 Ready-made, annotated templates live in this directory (`buildkite-agent/`).
 They encode the device→agent mapping so you don't have to write it yourself.
@@ -144,7 +175,7 @@ uses an `flock` so the first image pull happens once, not N times at once.
 This is why `spawn`, the slice math, and the actual device count must agree —
 if they don't, an agent maps to a nonexistent device or two agents collide.
 
-## Step 4 — Start the agents
+## Step 5 — Start the agents
 
 ```bash
 sudo systemctl enable --now buildkite-agent
@@ -160,7 +191,7 @@ sudo journalctl -u buildkite-agent --no-pager | grep -oP "$(hostname)-\d+" | sor
 You should see N distinct agents, and they should appear in the Buildkite
 dashboard under your queue within a few seconds.
 
-## Step 5 — Report GPU stats to ci.vllm.ai/gpu
+## Step 6 — Report GPU stats to ci.vllm.ai/gpu
 
 The `../gpu-reporter/` directory has a small Python reporter that reads
 `nvidia-smi` and POSTs utilization to the dashboard, plus a systemd
@@ -203,6 +234,8 @@ hostname.
 
 ## Verify end to end
 
+- [ ] Docker/containerd data roots and `build-path` are on large storage, not
+      the root disk (Step 3)
 - [ ] `nvidia-smi` lists the expected GPUs (and MIG slices, if slicing)
 - [ ] `nvidia-ctk cdi list` shows the same devices
 - [ ] `systemctl is-active buildkite-agent` is `active`
@@ -212,6 +245,12 @@ hostname.
 
 ## Troubleshooting
 
+- **Jobs get acquired but never run; agent log shows `failed to initialize job:
+  open /tmp/job-env-...: no space left on device`** — the root disk is full of
+  Docker images. Fix: stop the agent, `docker image prune -a -f`, `rm -rf
+  /tmp/docker-pull-locks`, move the data roots + build-path to big storage
+  (Step 3), restart. Prevention is Step 3 — always move storage before starting
+  the agent on a GPU machine.
 - **Agent error: "Agent number N exceeds available MIG devices"** — `spawn` is
   larger than the actual slice count. Recreate the slices (Step 1) or lower
   `spawn`.

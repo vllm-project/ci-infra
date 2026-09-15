@@ -81,9 +81,16 @@ If you use instance-level AWS credentials (IAM role), the buildkite-agent user i
 
 > **Do not start the agent yet.** Finish all remaining setup steps first (docker/containerd data roots, GPU drivers, etc.) so the agent doesn't pick up jobs on a half-configured machine.
 
-## 4. Move Docker and containerd Data Roots (Optional but Recommended)
+## 4. Move Docker and containerd Data Roots (Required on GPU Machines)
 
 By default Docker stores images/containers under `/var/lib/docker` and containerd under `/var/lib/containerd`. On machines with a small root partition and a large secondary mount (NVMe, tmpfs, etc.), move both to the larger volume.
+
+> **This is effectively required for GPU CI machines.** vLLM CI images are
+> ~34 GB each and a busy machine accumulates several, which fills a typical
+> 200-250 GB root disk. When that happens the agents stay connected and keep
+> accepting jobs, but every job fails at initialization with
+> `no space left on device`. Move the data roots **before** starting the agent,
+> and put the agent's `build-path` on the same large volume.
 
 Use the provided script:
 
@@ -94,10 +101,16 @@ sudo ./scripts/move-docker-containerd.sh /path/to/target
 ```
 
 The script will:
-- Set Docker's `data-root` in `/etc/docker/daemon.json`
-- Set containerd's `root` in `/etc/containerd/config.toml`
+- Set Docker's `data-root` in `/etc/docker/daemon.json` (creating the file if it's missing)
+- Set containerd's `root` in `/etc/containerd/config.toml` (same)
+- Move the Buildkite agent's `build-path` to the same volume, if buildkite-agent is already installed
 - Install systemd drop-ins so the target directories are recreated on boot
 - Restart both services and run a smoke test
+
+It works on a fresh machine — no prerequisites beyond Docker/containerd
+themselves (it uses `jq` if present, otherwise falls back to `python3`).
+Existing images are not migrated; the new roots start empty and images re-pull
+on demand.
 
 See [`move-docker-containerd.sh`](move-docker-containerd.sh) for details.
 
@@ -234,7 +247,7 @@ The agent should appear in your Buildkite dashboard under Agents within a few se
 - [ ] AWS CLI installed and credentials accessible
 - [ ] Buildkite agent package installed
 - [ ] `buildkite-agent` user is in the `docker` group
-- [ ] Docker/containerd data roots moved if needed (step 4)
+- [ ] Docker/containerd data roots moved to large storage (step 4 — required on GPU machines)
 - [ ] NVIDIA driver + container toolkit installed (GPU machines only)
 - [ ] `HF_HOME` pointed at large storage (step 6)
 - [ ] Agent configured with correct token and queue tags (step 7)
