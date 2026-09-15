@@ -514,7 +514,9 @@ def launcher_profiles(fleet: dict, workers: list[str], tfvars: dict) -> str:
                 name: {"secret": fleet_secret_name(name), "key": name}
                 for name in sorted(tfvars["env_secrets"])
             },
-            "total_max_seconds": int(tfvars["tpu_total_max_seconds"]),
+            "queue_max_seconds": int(tfvars["tpu_queue_max_seconds"]),
+            "runtime_max_seconds": int(tfvars["tpu_runtime_max_seconds"]),
+            "admission_max_seconds": int(tfvars["tpu_admission_max_seconds"]),
             # How the launcher gets from an admitted workload to the pod logs.
             # Kueue reports the cluster it dispatched to by MultiKueueCluster
             # name, which is also the Fleet membership ID; memberships live in
@@ -803,6 +805,16 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             AGENT_TOKEN_SECRET_NAME=AGENT_TOKEN_SECRET_NAME,
             GIT_CREDENTIALS_SECRET_NAME=GIT_CREDENTIALS_SECRET_NAME,
             BUILDKITE_QUEUE=tfvars["buildkite_queue"],
+            # A backstop above the two budgets that do the reporting, rather
+            # than a number to tune. Two hours covers what sits inside the
+            # agent Job but outside either budget: scheduling the pod, pulling
+            # the launcher image, the checkout, and the sweep after the
+            # workload has gone.
+            AGENT_JOB_DEADLINE_SECONDS=(
+                int(tfvars["tpu_queue_max_seconds"])
+                + int(tfvars["tpu_runtime_max_seconds"])
+                + 7200
+            ),
         ),
     )
 

@@ -74,14 +74,43 @@ launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/l
 
 # Three hours with the chips unless a manifest says otherwise, matching the
 # bare-metal budget so a step moving between the lanes gets the same allowance.
+# Twelve to ask for at the outside, which is where the disagg manifests sit.
 #
-# A day in total, set by the queue rather than by the work: the fleet has eight
-# v7x chips, so a build fanning out over several shapes puts most of its steps
-# behind the rest of itself. A step that has been waiting since the previous
-# evening is waiting on busy hardware, and failing it for that loses its place
-# in line as well as its result.
-tpu_test_max_seconds  = 10800
-tpu_total_max_seconds = 86400
+# Half a day in line, which is longer than anything can currently use. Something
+# ends a kube step at 5h59m48s: every job that has ever reached that mark died
+# there as exit_status -1 with an empty log, across perf-kube and tests-kube
+# alike, on builds whose timeout_in_minutes was already a day. It is not any
+# deadline set here and it is not readable from the Buildkite API.
+#
+# Deliberately left above it anyway. Lowering this to fit under the ceiling
+# would buy a message in the last few minutes before a step dies mute, and
+# would cost every step whose wait is legitimately longer than the lowered
+# number - which is the multi-host glm step, whose slice is the whole cohort,
+# so its pod starts on a free concurrency slot and then waits out both of the
+# steps holding the chips. Killing a step that was going to get its chips is a
+# worse trade than an unattributed death for one that was not.
+#
+# What keeps this from mattering in the ordinary case is that the queueing does
+# not happen here. A step held by a concurrency group is `limited`, has a null
+# started_at, and burns no clock; by the time its agent pod starts, a slot and
+# its quota are both free. Measured in-pod wait on a passing v7x step: nine
+# seconds.
+tpu_test_max_seconds      = 10800
+tpu_runtime_max_seconds   = 43200
+tpu_queue_max_seconds     = 43200
+#
+# An hour between a reservation and a pod. Dispatch on a warm path measures
+# nine seconds, so almost all of this is for the case where the chips Kueue
+# counted are not yet in the shape the workload needs: quota is chips, but a
+# slice is a topology. Eight free chips sitting as two 2x2x1 nodes do not admit
+# a 2x2x2 without those nodes draining and a two-host slice being built against
+# the reservation in their place - node deletion, TPU provisioning and a cold
+# image pull, none of which is a fault.
+#
+# So this is not a broken-detector. It is the bound on a wait that has no
+# queue behind it: while it runs, the chips are reserved and nothing is using
+# them, which is the one state no other budget here can see.
+tpu_admission_max_seconds = 3600
 
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
