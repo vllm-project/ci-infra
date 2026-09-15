@@ -41,7 +41,7 @@ For MIG on an 8×H200, the two profiles in use are:
 
 - Ubuntu 20.04+ (or Amazon Linux), root/sudo access
 - NVIDIA driver + `nvidia-container-toolkit` installed and working
-  (`nvidia-smi` lists your GPUs). See `../AGENT.md` steps 1-5 for Docker, AWS
+  (`nvidia-smi` lists your GPUs). See `../AGENTS.md` steps 1-5 for Docker, AWS
   CLI, and the container toolkit.
 - A Buildkite agent **registration token** for your cluster
 - Secrets: `HF_TOKEN`, AWS access key + secret (for ECR pulls), and optionally
@@ -162,7 +162,7 @@ Now edit **two** files to match your machine:
 
 > **HF_HOME:** the docker plugin passes `HF_HOME` through to containers and
 > mounts a fixed path. Set `HF_HOME` to a path that's actually mounted into the
-> container, on a big disk (4+ TB preferred). See `../AGENT.md` step 6 for a
+> container, on a big disk (4+ TB preferred). See `../AGENTS.md` step 6 for a
 > snippet that auto-detects the best disk.
 
 ### How device pinning works (the part worth understanding)
@@ -267,7 +267,7 @@ hostname.
 
 ## Related files
 
-- `../AGENT.md` — generic machine → Buildkite agent onboarding (OS, Docker, AWS)
+- `../AGENTS.md` — generic machine → Buildkite agent onboarding (OS, Docker, AWS)
 - `../setup_mig_h200.sh` / `../teardown_mig_h200.sh` — MIG slice create/destroy
 - `./` (`buildkite-agent/`) — agent config + hook templates
 - `../gpu-reporter/` — GPU stats reporter for ci.vllm.ai/gpu
