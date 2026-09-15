@@ -252,6 +252,27 @@ variable "tpu_test_max_seconds" {
   description = "How long a TPU workload runs for when it says nothing. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out. A manifest that knows better states its own, and a single step overrides both with TPU_MAX_RUNTIME_SECONDS in its env; either way bounded by tpu_total_max_seconds."
 }
 
+variable "tpu_admission_max_seconds" {
+  type        = number
+  description = <<-EOT
+    How long the launcher waits for Kueue to admit a workload before giving up.
+
+    A ceiling on the wait derived from tpu_total_max_seconds, which on its own
+    produces a number no step can reach: a day's budget less a three-hour run
+    is twenty-one hours, and Buildkite ends the step at about six. So the
+    derived timeout never fires, and a workload that is never going to be
+    admitted reads as exit_status -1 with no message - indistinguishable from
+    the step ceiling, and holding its quota reservation the whole time.
+
+    An hour is far longer than admission takes when the fleet is working. The
+    concurrency group means only as many steps are runnable as there are chips,
+    so the wait is a node coming up rather than a queue: about ten minutes cold,
+    more if the family is short and the autoscaler has to try another. What it
+    is long enough to rule out is anything transient, and short enough that a
+    stuck admission check costs one step rather than a build.
+  EOT
+}
+
 variable "tpu_total_max_seconds" {
   type        = number
   description = <<-EOT

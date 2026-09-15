@@ -515,6 +515,7 @@ def launcher_profiles(fleet: dict, workers: list[str], tfvars: dict) -> str:
                 for name in sorted(tfvars["env_secrets"])
             },
             "total_max_seconds": int(tfvars["tpu_total_max_seconds"]),
+            "admission_max_seconds": int(tfvars["tpu_admission_max_seconds"]),
             # How the launcher gets from an admitted workload to the pod logs.
             # Kueue reports the cluster it dispatched to by MultiKueueCluster
             # name, which is also the Fleet membership ID; memberships live in

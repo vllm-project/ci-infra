@@ -439,16 +439,22 @@ def resolve_shape(doc, registry, where):
 
 
 def admission_timeout(registry, doc):
-    """How long to wait for chips: the whole budget, less this run.
+    """How long to wait for chips: the whole budget, less this run, capped.
 
-    Derived rather than configured, from the only two numbers worth choosing.
-    Longer leaves no room to run; shorter fails steps that were queueing. Read
-    off the deadline cap_runtime settled on rather than the shape's default, so
-    a workload that asked to serve for ten hours is not also given eight to
-    queue in.
+    The subtraction is what keeps a workload that asked to serve for ten hours
+    from also being given eight to queue in - read off the deadline cap_runtime
+    settled on rather than the shape's default.
+
+    The cap is what makes it reachable. A day's budget less a three-hour run is
+    twenty-one hours and Buildkite ends the step at about six, so on its own
+    this timeout never fires: a workload that is never admitted takes the step
+    down as exit_status -1 with no message, looking exactly like the ceiling and
+    holding its quota reservation until it does. Admission that has not happened
+    within the hour is not going to.
     """
     runtime = max(int(spec["activeDeadlineSeconds"]) for spec in job_specs(doc))
-    return max(int(registry["total_max_seconds"]) - runtime, 300)
+    budget = int(registry["total_max_seconds"]) - runtime
+    return max(min(budget, int(registry["admission_max_seconds"])), 300)
 
 
 def resolve_image(registry):

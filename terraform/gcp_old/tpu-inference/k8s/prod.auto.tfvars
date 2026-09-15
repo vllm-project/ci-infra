@@ -80,8 +80,9 @@ launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/l
 # behind the rest of itself. A step that has been waiting since the previous
 # evening is waiting on busy hardware, and failing it for that loses its place
 # in line as well as its result.
-tpu_test_max_seconds  = 10800
-tpu_total_max_seconds = 86400
+tpu_test_max_seconds      = 10800
+tpu_total_max_seconds     = 86400
+tpu_admission_max_seconds = 3600
 
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
