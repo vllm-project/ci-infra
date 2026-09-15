@@ -82,6 +82,19 @@ metadata:
   name: tpu-launcher
   namespace: ${NAMESPACE}
 template:
+  metadata:
+    annotations:
+      # The same protection the workload pod carries on the worker, for the
+      # same reason and with more of it needed. This pod spends most of its
+      # life waiting - for quota, for a node, for a test that runs for hours -
+      # and it does nothing while it waits, which is exactly the profile a
+      # scale-down picks: a Job-backed pod on a node with nothing else on it.
+      #
+      # Losing it is worse than losing the workload. The workload is a Job and
+      # comes back; this pod is the step's agent, so an eviction is a Buildkite
+      # job whose agent stopped reporting - exit_status -1, no error, and the
+      # workload it was watching left running on the worker.
+      cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
   spec:
     serviceAccountName: tpu-launcher
     # Pod-level: agent-stack-k8s adds the agent and the checkout to this pod and

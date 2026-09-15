@@ -37,14 +37,14 @@ variable "manager_bootstrap_machine_type" {
 
 variable "manager_max_cpu" {
   type        = number
-  description = "Ceiling on vCPUs auto-provisioning may create across the manager. Bounded by the Buildkite controller's in-flight limit rather than by any TPU quota: a launcher pod waiting for chips occupies a node without holding any."
-  default     = 128
+  description = "Ceiling on vCPUs auto-provisioning may create across the manager. Deliberately far above what the fleet can use: a launcher pod holds no chip, so what has to fit is the Buildkite controller's in-flight limit, and a ceiling that can be reached turns a busy night into steps that never start. Chips are what should bound the fleet."
+  default     = 1024
 }
 
 variable "manager_max_memory_gb" {
   type        = number
   description = "Ceiling on memory auto-provisioning may create across the manager. Generous against the CPU ceiling, so that the family fallback is free to land on a memory-heavy shape when the balanced ones are short."
-  default     = 512
+  default     = 4096
 }
 
 variable "labels" {
@@ -296,9 +296,13 @@ variable "worker_clusters" {
     system_machine_type = optional(string, "e2-standard-4")
     system_min_nodes    = optional(number, 1)
     # A ceiling, not a plan: both workers have run on one node since they were
-    # built. Left above the floor because an unreached ceiling costs nothing and
-    # a system pod that cannot schedule is an outage.
-    system_max_nodes = optional(number, 3)
+    # built, and a node that is never asked for is never billed. High because
+    # this pool should not be what limits anything - what bounds the fleet is
+    # chips, and what bounds burst CPU is the worker-cpu class, which states its
+    # own families and sizes. A number here that can be reached turns an
+    # unrelated pod into an outage, and reaching it is silent: the autoscaler
+    # reports `max node group size reached` into pod events nobody is reading.
+    system_max_nodes = optional(number, 64)
 
     # One per TPU shape this cluster can run. The node pool's name is its shape
     # - <machine type>-<topology>, e.g. ct6e-standard-8t-2x4 - and locals.tf
