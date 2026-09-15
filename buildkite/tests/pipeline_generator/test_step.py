@@ -126,9 +126,7 @@ def test_selected_steps_support_label_generated_keys():
         (None, "multimodal-processor"),
     ],
 )
-def test_selected_steps_support_amd_mirror_keys(
-    fake_global_config, key, generated_key
-):
+def test_selected_steps_support_amd_mirror_keys(fake_global_config, key, generated_key):
     steps = [
         Step(label="AMD image", key="image-build-amd", commands=["build"]),
         Step(
@@ -151,9 +149,7 @@ def test_selected_steps_support_amd_mirror_keys(
         steps, frozenset({f"amd-{generated_key}"})
     )
     fake_global_config["only_step_keys"] = selected_keys
-    groups = buildkite_step.convert_group_step_to_buildkite_step(
-        group_steps(selected)
-    )
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(selected))
     generated_keys = [job.key for group in groups for job in group.steps]
 
     assert [step.key for step in selected] == [
@@ -216,6 +212,34 @@ def test_selected_step_runs_without_source_match(fake_global_config):
     )
 
     assert buildkite_step._step_should_run(step, ["changed.py"])
+
+
+def test_autorun_on_main_runs_optional_step_without_source_match(fake_global_config):
+    fake_global_config["branch"] = "main"
+    step = Step.from_yaml(
+        {
+            "label": "Main guard",
+            "commands": ["test"],
+            "optional": True,
+            "autorun_on_main": True,
+            "source_file_dependencies": ["unrelated.py"],
+        }
+    )
+
+    assert step.autorun_on_main
+    assert buildkite_step._step_should_run(step, ["changed.py"])
+
+
+def test_autorun_on_main_stays_gated_off_main(fake_global_config):
+    step = Step(
+        label="Main guard",
+        commands=["test"],
+        optional=True,
+        autorun_on_main=True,
+        source_file_dependencies=["changed.py"],
+    )
+
+    assert not buildkite_step._step_should_run(step, ["changed.py"])
 
 
 def test_every_generated_job_has_a_unique_key():

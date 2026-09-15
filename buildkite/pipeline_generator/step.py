@@ -29,6 +29,7 @@ class Step(BaseModel):
     env: Optional[Dict[str, str]] = None
     retry: Optional[Dict[str, Any]] = None
     optional: Optional[bool] = False
+    autorun_on_main: bool = False
     no_plugin: Optional[bool] = False
     no_gpu: Optional[bool] = False
     dind: bool = True
@@ -96,7 +97,9 @@ def read_steps_from_job_dir(job_dir: str):
                         and global_config["github_repo_name"] == "vllm-project/vllm"
                     ):
                         step.working_dir = "/vllm-workspace/tests"
-                    step.source_file_dependencies = getattr(step, "source_file_dependencies", [])
+                    step.source_file_dependencies = getattr(
+                        step, "source_file_dependencies", []
+                    )
                     if not step.source_file_dependencies:
                         step.source_file_dependencies = []
                     step.source_file_dependencies.append(os.path.relpath(yaml_path))
