@@ -36,6 +36,29 @@ resource "aws_security_group" "ci-model-weights-sg" {
       prefix_list_ids  = []
       security_groups  = ["sg-0c83698515e47eb5b"]
       self             = true
+    },
+    # EKS GPU CI nodes (terraform/aws/eks.tf) mounting the FSx filesystems
+    {
+      cidr_blocks      = []
+      description      = "Lustre LNet from gpu-ci-eks nodes"
+      from_port        = 1018
+      to_port          = 1023
+      protocol         = "tcp"
+      ipv6_cidr_blocks = []
+      prefix_list_ids  = []
+      security_groups  = [module.eks.node_security_group_id]
+      self             = false
+    },
+    {
+      cidr_blocks      = []
+      description      = "Lustre LNet from gpu-ci-eks nodes"
+      from_port        = 988
+      to_port          = 988
+      protocol         = "tcp"
+      ipv6_cidr_blocks = []
+      prefix_list_ids  = []
+      security_groups  = [module.eks.node_security_group_id]
+      self             = false
     }
   ]
 
