@@ -145,7 +145,7 @@ target "test-ci" {
     IMAGE_TAG,
     IMAGE_TAG_LATEST,
   ])
-  output = ["type=registry"]
+  output = ["type=registry,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true"]
 }
 
 target "cache-warm" {
