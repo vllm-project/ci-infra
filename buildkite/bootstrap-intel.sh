@@ -178,6 +178,14 @@ upload_pipeline() {
 
     python -m pip install click pydantic requests pyyaml
 
+    if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
+        echo "Exporting trusted pipeline generator from origin/${VLLM_CI_BRANCH:-main}..."
+        TMP_GEN_DIR=$(mktemp -d /tmp/intel_gen.XXXXXX)
+        trap 'rm -rf "$TMP_GEN_DIR"' EXIT INT TERM
+        git archive "origin/${VLLM_CI_BRANCH:-main}" buildkite/pipeline_generator | tar -x -C "$TMP_GEN_DIR"
+        GENERATOR_MAIN="$TMP_GEN_DIR/buildkite/pipeline_generator/main.py"
+    fi
+
     python "$GENERATOR_MAIN" \
         --pipeline_config_path "$PIPELINE_CONFIG_PATH" \
         --output_file_path "$OUTPUT_PIPELINE_PATH"
