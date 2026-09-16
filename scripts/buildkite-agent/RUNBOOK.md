@@ -206,29 +206,33 @@ dashboard under your queue within a few seconds.
 
 ## Step 6 — Report GPU stats to ci.vllm.ai/gpu
 
-The `../gpu-reporter/` directory has a small Python reporter that reads
-`nvidia-smi` and POSTs utilization to the dashboard, plus a systemd
-service + timer to run it every 30s.
+A small Python reporter reads `nvidia-smi` and `/proc` and POSTs GPU and host
+metrics to the dashboard, with a systemd service + timer to run it every 30s.
+
+> **Install it from the dashboard repository, not from `../gpu-reporter/`.**
+> The reporter is developed alongside the API that receives it, so
+> `scripts/gpu-reporter/` in the dashboard repo is the version that matches
+> what production expects; the copy here is older and reports fewer metrics.
 
 ```bash
-# Install the script
+# from a checkout of the dashboard repo, scripts/gpu-reporter/
 sudo mkdir -p /opt/gpu-reporter
-sudo install -m 0755 ../gpu-reporter/gpu-reporter.py /opt/gpu-reporter/gpu-reporter.py
-
-# Install the service + timer
-sudo install -m 0644 ../gpu-reporter/gpu-reporter.service /etc/systemd/system/gpu-reporter.service
-sudo install -m 0644 ../gpu-reporter/gpu-reporter.timer   /etc/systemd/system/gpu-reporter.timer
+sudo install -m 0755 gpu-reporter.py /opt/gpu-reporter/gpu-reporter.py
+sudo install -m 0644 gpu-reporter.service /etc/systemd/system/gpu-reporter.service
+sudo install -m 0644 gpu-reporter.timer   /etc/systemd/system/gpu-reporter.timer
 ```
 
-Edit `/etc/systemd/system/gpu-reporter.service` and set the real values:
+The secret goes in an environment file, never in the unit — the unit is
+world-readable, so a secret written there leaks to every local user:
 
-```ini
-Environment=GPU_REPORT_URL=https://ci.vllm.ai/api/gpu/report
-Environment=GPU_REPORT_SECRET=<the dashboard's bearer secret>
+```bash
+sudo install -m 0600 -o root -g root gpu-reporter.env.example /etc/gpu-reporter.env
+sudo vim /etc/gpu-reporter.env   # set GPU_REPORT_URL and GPU_REPORT_SECRET
 ```
 
-If you don't have the secret to hand, copy both `Environment=` lines from a
-machine whose `gpu-reporter.timer` is already active.
+The unit already reads it via `EnvironmentFile=/etc/gpu-reporter.env`. If you
+don't have the secret to hand, copy `/etc/gpu-reporter.env` from a machine whose
+`gpu-reporter.timer` is already active.
 
 Then enable it:
 
@@ -245,10 +249,15 @@ Within a minute the host should show up at <https://ci.vllm.ai/gpu> under its
 hostname.
 
 > Note: `nvidia-smi` reports the **physical** GPUs, so the dashboard shows
-> per-GPU rows for the whole box, not per MIG slice. Be aware that on a
-> MIG-enabled machine `utilization.gpu` reads `[N/A]` — the driver only reports
-> utilization per MIG device — so those hosts report memory and counts but no
-> utilization percentage, and the reporter still logs `OK: N GPUs reported`.
+> per-GPU rows for the whole box, not per MIG slice.
+>
+> **Utilization is not real on MIG machines.** `nvidia-smi
+> --query-gpu=utilization.gpu` returns `[N/A]` once MIG is enabled (the driver
+> only tracks utilization per MIG device), and the reporter coerces that to
+> `0`. So a fully busy MIG host publishes `gpu_util = 0` while its memory, CPU,
+> RAM and disk figures are correct, and the reporter still logs `OK: N GPUs
+> reported`. Read memory, not utilization, when judging whether a MIG box is
+> busy; real per-slice utilization would need DCGM or per-instance NVML.
 
 ## Verify end to end
 
@@ -306,4 +315,5 @@ hostname.
 - `../AGENTS.md` — generic machine → Buildkite agent onboarding (OS, Docker, AWS)
 - `../setup_mig_h200.sh` / `../teardown_mig_h200.sh` — MIG slice create/destroy
 - `./` (`buildkite-agent/`) — agent config + hook templates
-- `../gpu-reporter/` — GPU stats reporter for ci.vllm.ai/gpu
+- `../gpu-reporter/` — older copy of the GPU stats reporter; install the
+  dashboard repo's `scripts/gpu-reporter/` instead (see Step 6)

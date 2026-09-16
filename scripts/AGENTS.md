@@ -215,8 +215,9 @@ plugin passes `HF_HOME` straight into the container, so if the host value names
 a path the plugin does not mount, every job starts with a cold cache inside its
 own container layer. The mount lists live in
 `buildkite/pipeline_generator/plugin/docker_plugin.py` — check the template for
-your queue before choosing. For example `h200_18gb` mounts only
-`/mnt/vllm-ci`, while `h200_35gb` also mounts `/mnt/hf-cache-af-south1-a`.
+your queue before choosing — the queues do not all mount the same paths, so a
+value that is right for one queue can be wrong for another on identical
+hardware.
 
 When the host's real cache lives elsewhere, expose it at the path the plugin
 mounts instead of moving it — a bind mount keeps the change local to the
