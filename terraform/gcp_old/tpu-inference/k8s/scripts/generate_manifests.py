@@ -121,43 +121,32 @@ ACCELERATOR_LABELS = {
     "tpu7x": "tpu7x",
 }
 
-# Host memory per TPU machine type, from the accelerator-optimized machine
-# family documentation. Only the shapes we run are listed.
-MACHINE_MEMORY_GB = {
-    "ct6e-standard-1t": 176,
-    "ct6e-standard-4t": 720,
-    "ct6e-standard-8t": 1440,
-    "tpu7x-standard-1t": 240,
-    "tpu7x-standard-4t": 960,
-}
+# What the memory request adds for the workload's own heap, on top of the
+# volumes memory_request() sums.
+#
+# The volumes are the bulk of it: a `medium: Memory` emptyDir is charged to the
+# pod's cgroup, and eviction ranks pods by usage above request, so a pod that
+# can hold more than it asked for is first to be killed. Asking for too much is
+# not free either - a request no node can satisfy stops the autoscaler building
+# one.
+WORKLOAD_MEMORY_RATIO = 0.10
 
-# How much of the host a workload's gcsfuse file cache may take. Memory, not
-# disk: the volume behind it is a `medium: Memory` emptyDir, so a node's
-# ephemeral storage does not bound it and too high shows up as an OOM.
+# The tmpfs behind the gcsfuse file cache. The same on every shape: the only
+# writer is gcsfuse, and fileCacheCapacity in cache_volumes.yaml.tpl caps what
+# it will write at 73Gi whatever the host.
 #
-# Per machine type, since host memory runs from 176 GB to 1440 GB across the
-# shapes we run. Only the pod's volume can vary that way; the per-mount
-# fileCacheCapacity in cache_volumes.yaml.tpl is one object per cluster and so
-# is sized for the smallest shape.
-FUSE_VOLUME_RATIO = 0.50
+# fuse_cache_size() holds it between that cap and what the memory request
+# covers, so it cannot be set below what the caches need or above what the pod
+# asked for.
+FUSE_CACHE_GIB = 80
 
-# How much of the host the pod's /dev/shm may take, on the same terms and for
-# the same reason: a tmpfs, so a fraction of memory rather than of disk.
+# The pod's /dev/shm, per chip: vLLM gives every data-parallel engine its own
+# shared-memory broadcast buffers and torch_tpu spills its tier-2 compilation
+# cache beside them, so what needs the room is one engine per chip.
 #
-# Sized rather than fixed because what lands in it scales with the host. vLLM
-# gives every data-parallel engine its own shared-memory broadcast buffers and
-# torch_tpu spills its tier-2 compilation cache beside them, so a machine type
-# with four times the chips runs four times the engines against the same
-# ceiling. The bare-metal lane hands its container a flat 64 GiB, which this
-# clears on every machine type that holds more than one chip; the small shapes
-# it does not clear run one engine.
-#
-# With FUSE_VOLUME_RATIO this is the whole tmpfs ceiling on a TPU host. The two
-# together come to 65% of the memory the machine family documents, which is
-# around 68% of what the kubelet leaves allocatable - so the workload keeps
-# roughly the remaining third. They are caps on what may be written rather than
-# reservations, but a cap the node cannot honour is not a cap.
-SHM_VOLUME_RATIO = 0.15
+# 32 is the most any known-working configuration gives a chip. Err high: too
+# little /dev/shm surfaces as crashes that look unrelated to shared memory.
+SHM_GIB_PER_CHIP = 32
 
 
 # hcl2 defaults to output you can write back out as HCL, which is not what we
@@ -273,52 +262,63 @@ def fuse_min_cache_gib() -> int:
     return total
 
 
-def host_share_gib(machine_type: str, ratio: float) -> int:
-    """That fraction of this machine type's memory, in whole GiB.
+def host_share_gib(memory_gb: int, ratio: float) -> int:
+    """That fraction of a host's memory, in whole GiB.
 
     GB to GiB as well as the ratio: the machine family documentation quotes
     memory in decimal gigabytes and a Kubernetes quantity written Gi is binary,
     so taking the number across unconverted would ask for 7% more of the host
     than intended.
 
-    An unlisted machine type is an error rather than a conservative guess, for
-    the reason on fuse_min_cache_gib: a number too small is not slower, it is a
-    pod the kubelet evicts once the volume fills.
     """
-    gb = MACHINE_MEMORY_GB.get(machine_type)
-    if gb is None:
-        raise KeyError(
-            f"no host memory known for machine type {machine_type!r}. Read it "
-            "off the accelerator-optimized machine family documentation and "
-            "add it to MACHINE_MEMORY_GB; the pod's memory-backed volumes are "
-            "sized from it, and a wrong number is an eviction rather than a "
-            "slow mount."
-        )
-    return int(gb * ratio * 1000**3 / 1024**3)
+    return int(memory_gb * ratio * 1000**3 / 1024**3)
 
 
-def shm_size(machine_type: str) -> str:
-    """The pod's /dev/shm on this machine type, as a GiB string."""
-    return f"{host_share_gib(machine_type, SHM_VOLUME_RATIO)}Gi"
+def shm_size(chips: int) -> str:
+    """The pod's /dev/shm for a host holding this many chips, as a GiB string."""
+    return f"{SHM_GIB_PER_CHIP * chips}Gi"
 
 
-def fuse_cache_size(machine_type: str) -> str:
-    """The workload's gcsfuse file cache on this machine type, as a GiB string."""
-    gib = host_share_gib(machine_type, FUSE_VOLUME_RATIO)
-    gb = MACHINE_MEMORY_GB[machine_type]
-    floor = fuse_min_cache_gib()
-    if gib < floor:
-        raise ValueError(
-            f"{machine_type} has {gb} GB of host memory, so {FUSE_VOLUME_RATIO:.0%} "
-            f"of it is {gib}Gi - under the {floor}Gi of fileCacheCapacity that "
-            "cache_volumes.yaml.tpl asks for across the mounts sharing one "
-            "gke-gcsfuse-cache volume. gcsfuse would fill past the emptyDir's "
-            "sizeLimit and the kubelet would evict the pod."
-        )
+def memory_request(memory_gb: int, chips: int) -> str:
+    """What the workload container asks for in memory, as a GiB string.
+
+    The /dev/shm tmpfs, the file caches, and a share of the host for the
+    workload itself - all three are memory-backed and so charged to this
+    container's cgroup.
+
+    The caches are the same size on every shape, because they are claims on
+    PersistentVolumes and a PersistentVolume is one object per cluster. Summed
+    from the template that declares them rather than restated, so the request
+    cannot drift from what the mounts will actually fill.
+    """
+    gib = host_share_gib(memory_gb, WORKLOAD_MEMORY_RATIO)
+    gib += int(shm_size(chips).removesuffix("Gi"))
+    gib += fuse_min_cache_gib()
     return f"{gib}Gi"
 
 
-def shapes(worker: dict) -> dict[str, dict]:
+def fuse_cache_size(memory_gb: int, chips: int) -> str:
+    """The workload's gcsfuse file cache volume, as a GiB string."""
+    floor = fuse_min_cache_gib()
+    if FUSE_CACHE_GIB < floor:
+        raise ValueError(
+            f"FUSE_CACHE_GIB is {FUSE_CACHE_GIB}Gi, under the {floor}Gi of "
+            "fileCacheCapacity cache_volumes.yaml.tpl asks for across the "
+            "mounts sharing one gke-gcsfuse-cache volume. gcsfuse would fill "
+            "past the emptyDir's sizeLimit and the kubelet would evict the pod."
+        )
+    ceiling = int(memory_request(memory_gb, chips).removesuffix("Gi"))
+    shm = int(shm_size(chips).removesuffix("Gi"))
+    if FUSE_CACHE_GIB + shm > ceiling:
+        raise ValueError(
+            f"on a {memory_gb} GB host the memory-backed volumes can hold "
+            f"{FUSE_CACHE_GIB}Gi + {shm}Gi = {FUSE_CACHE_GIB + shm}Gi, over the "
+            f"{ceiling}Gi the container requests. Eviction ranks pods by usage "
+            "above request, so a pod that fills them is the first one killed."
+        )
+    return f"{FUSE_CACHE_GIB}Gi"
+
+def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
     """Every TPU shape a worker cluster can run, keyed by queue name.
 
     A queue is named for its node pool - <machine type>-<topology>, e.g.
@@ -371,6 +371,16 @@ def shapes(worker: dict) -> dict[str, dict]:
                     "multi-host shape has to be whole slices"
                 )
 
+        memory_gb = machine_memory_gb.get(machine_type)
+        if memory_gb is None:
+            raise ValueError(
+                f"{name}: prod.auto.tfvars has no machine_memory_gb entry for "
+                f"{machine_type!r}. Read it off the accelerator-optimized "
+                "machine family documentation and add it there; the pod's "
+                "memory-backed volumes are sized from it, and a wrong number "
+                "is an eviction rather than a slow mount."
+            )
+
         out[name] = {
             "queue": name,
             # How a step names this shape when it asks for the built-in Job.
@@ -381,8 +391,9 @@ def shapes(worker: dict) -> dict[str, dict]:
             "hosts": hosts,
             "topology": topology,
             "accelerator_label": ACCELERATOR_LABELS[family],
-            "fuse_cache_size": fuse_cache_size(machine_type),
-            "shm_size": shm_size(machine_type),
+            "fuse_cache_size": fuse_cache_size(memory_gb, chips),
+            "shm_size": shm_size(chips),
+            "memory_request": memory_request(memory_gb, chips),
             # The one number here that is a policy rather than a fact, and the
             # only one Kueue reads: this shape's share of the reservation.
             "quota": int(pool["nominal_nodes"]) * chips,
@@ -478,7 +489,10 @@ spec:
     return "\n".join(docs)
 
 
-def launcher_profiles(fleet: dict, workers: list[str], tfvars: dict) -> str:
+def launcher_profiles(
+    fleet: dict, workers: list[str], tfvars: dict, worker_by_name: dict
+) -> str:
+    prefix = tfvars["name_prefix"]
     """The registry the launcher resolves a workload's hardware against.
 
     One profile per shape, named for the shape, which is also the name of the
@@ -514,13 +528,23 @@ def launcher_profiles(fleet: dict, workers: list[str], tfvars: dict) -> str:
                 name: {"secret": fleet_secret_name(name), "key": name}
                 for name in sorted(tfvars["env_secrets"])
             },
-            "total_max_seconds": int(tfvars["tpu_total_max_seconds"]),
+            "queue_max_seconds": int(tfvars["tpu_queue_max_seconds"]),
+            "runtime_max_seconds": int(tfvars["tpu_runtime_max_seconds"]),
+            "admission_max_seconds": int(tfvars["tpu_admission_max_seconds"]),
             # How the launcher gets from an admitted workload to the pod logs.
             # Kueue reports the cluster it dispatched to by MultiKueueCluster
             # name, which is also the Fleet membership ID; memberships live in
             # the manager's project whatever project the worker runs in.
+            # location as well as membership: `fleet memberships
+            # get-credentials` without one searches every fleet location, and
+            # refuses outright if any of them is unreachable - which takes the
+            # workload's logs with it while the run itself carries on.
             "workers": {
-                name: {"membership": name, "project": tfvars["project_id"]}
+                name: {
+                    "membership": name,
+                    "project": tfvars["project_id"],
+                    "location": worker_by_name[name]["location"],
+                }
                 for name in sorted(workers)
             },
             "profiles": {
@@ -571,6 +595,11 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         key=lambda w: (w["project"], w["location"]),
     )
 
+    # Keyed by the MultiKueueCluster name a fleet entry records, so a shape can
+    # be taken back to the worker it runs on - and from there to that worker's
+    # buckets, which an inline CSI volume has to name at submission.
+    worker_by_name = {f"{prefix}-{w['location']}": w for w in workers}
+
     manager_name = f"{prefix}-manager"
     manager_dir = "manager"
 
@@ -604,7 +633,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             }
         )
 
-        local = shapes(worker)
+        local = shapes(worker, tfvars["machine_memory_gb"])
         for name, shape in local.items():
             # The shape is stored once, not summed: two clusters running it
             # run the same hardware. Only the quota adds up.
@@ -735,6 +764,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                     fleet,
                     [c["name"] for c in clusters if c["role"] == "worker"],
                     tfvars,
+                    worker_by_name,
                 ),
                 4,
             ),
@@ -803,6 +833,16 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             AGENT_TOKEN_SECRET_NAME=AGENT_TOKEN_SECRET_NAME,
             GIT_CREDENTIALS_SECRET_NAME=GIT_CREDENTIALS_SECRET_NAME,
             BUILDKITE_QUEUE=tfvars["buildkite_queue"],
+            # A backstop above the two budgets that do the reporting, rather
+            # than a number to tune. Two hours covers what sits inside the
+            # agent Job but outside either budget: scheduling the pod, pulling
+            # the launcher image, the checkout, and the sweep after the
+            # workload has gone.
+            AGENT_JOB_DEADLINE_SECONDS=(
+                int(tfvars["tpu_queue_max_seconds"])
+                + int(tfvars["tpu_runtime_max_seconds"])
+                + 7200
+            ),
         ),
     )
 

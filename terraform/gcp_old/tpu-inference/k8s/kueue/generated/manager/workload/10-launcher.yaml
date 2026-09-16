@@ -84,14 +84,18 @@ data:
       HF_TOKEN:
         secret: fleet-hf-token
         key: HF_TOKEN
-    total_max_seconds: 86400
+    queue_max_seconds: 43200
+    runtime_max_seconds: 43200
+    admission_max_seconds: 3600
     workers:
       tpu-ci-us-central1:
         membership: tpu-ci-us-central1
         project: cloud-ullm-inference-ci-cd
+        location: us-central1
       tpu-ci-us-east5:
         membership: tpu-ci-us-east5
         project: cloud-ullm-inference-ci-cd
+        location: us-east5
     profiles:
       ct6e-standard-1t-1x1:
         queue: ct6e-standard-1t-1x1
@@ -100,8 +104,9 @@ data:
         hosts: 1
         topology: 1x1
         accelerator_label: tpu-v6e-slice
-        fuse_cache_size: 81Gi
-        shm_size: 24Gi
+        fuse_cache_size: 80Gi
+        shm_size: 32Gi
+        memory_request: 121Gi
         max_runtime_seconds: 10800
       ct6e-standard-8t-2x4:
         queue: ct6e-standard-8t-2x4
@@ -110,8 +115,9 @@ data:
         hosts: 1
         topology: 2x4
         accelerator_label: tpu-v6e-slice
-        fuse_cache_size: 670Gi
-        shm_size: 201Gi
+        fuse_cache_size: 80Gi
+        shm_size: 256Gi
+        memory_request: 463Gi
         max_runtime_seconds: 10800
       tpu7x-standard-1t-1x1x1:
         queue: tpu7x-standard-1t-1x1x1
@@ -120,8 +126,9 @@ data:
         hosts: 1
         topology: 1x1x1
         accelerator_label: tpu7x
-        fuse_cache_size: 111Gi
-        shm_size: 33Gi
+        fuse_cache_size: 80Gi
+        shm_size: 32Gi
+        memory_request: 127Gi
         max_runtime_seconds: 10800
       tpu7x-standard-4t-2x2x1:
         queue: tpu7x-standard-4t-2x2x1
@@ -130,8 +137,9 @@ data:
         hosts: 1
         topology: 2x2x1
         accelerator_label: tpu7x
-        fuse_cache_size: 447Gi
-        shm_size: 134Gi
+        fuse_cache_size: 80Gi
+        shm_size: 128Gi
+        memory_request: 290Gi
         max_runtime_seconds: 10800
       tpu7x-standard-4t-2x2x2:
         queue: tpu7x-standard-4t-2x2x2
@@ -140,8 +148,9 @@ data:
         hosts: 2
         topology: 2x2x2
         accelerator_label: tpu7x
-        fuse_cache_size: 447Gi
-        shm_size: 134Gi
+        fuse_cache_size: 80Gi
+        shm_size: 128Gi
+        memory_request: 290Gi
         max_runtime_seconds: 10800
 ---
 # Referenced from a pipeline step as:

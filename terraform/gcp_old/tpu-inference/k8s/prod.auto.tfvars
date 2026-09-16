@@ -55,6 +55,17 @@ image_repositories = [
   { location = "us-central1", repository = "vllm-on-tpu-docker-container" },
 ]
 
+# Host memory per machine type, in the decimal GB the machine family
+# documentation quotes. Add an entry when a pool below names a new machine
+# type; see variables.tf.
+machine_memory_gb = {
+  "ct6e-standard-1t"  = 176
+  "ct6e-standard-4t"  = 720
+  "ct6e-standard-8t"  = 1440
+  "tpu7x-standard-1t" = 240
+  "tpu7x-standard-4t" = 960
+}
+
 kueue_version       = "0.19.0"
 jobset_version      = "0.12.0"
 agent_stack_version = "0.49.0"
@@ -72,16 +83,26 @@ auth_plugin_source_path = "/usr/lib/google-cloud-sdk/bin/gke-gcloud-auth-plugin"
 # does not, so a tag names one set of bytes.
 launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/launcher:584.0.0-1"
 
-# Three hours with the chips unless a manifest says otherwise, matching the
-# bare-metal budget so a step moving between the lanes gets the same allowance.
-#
-# A day in total, set by the queue rather than by the work: the fleet has eight
-# v7x chips, so a build fanning out over several shapes puts most of its steps
-# behind the rest of itself. A step that has been waiting since the previous
-# evening is waiting on busy hardware, and failing it for that loses its place
-# in line as well as its result.
-tpu_test_max_seconds  = 10800
-tpu_total_max_seconds = 86400
+# How long a workload may hold the chips by default, matching the bare-metal
+# budget so a step moving between the lanes gets the same allowance, and the
+# most a manifest may ask for instead - twelve hours, where the disagg
+# manifests sit. The agent Job's own deadline is derived from these rather than
+# set beside them, so the two cannot drift apart; see agent_stack_values.tpl.
+tpu_test_max_seconds    = 10800
+tpu_runtime_max_seconds = 43200
+
+# Half a day in line for chips, which is longer than anything currently uses.
+# The multi-host glm step needs the whole cohort, so it waits out every other
+# v7x workload before it can start.
+tpu_queue_max_seconds = 43200
+
+# An hour between a reservation and a pod. Not a broken-detector: it bounds the
+# one state no other budget here can see, where the chips are reserved and
+# nothing is using them. Warm dispatch measures nine seconds, and the rest is
+# for a shape change - quota is chips but a slice is a topology, so eight free
+# chips as two 2x2x1 nodes do not admit a 2x2x2 until those drain and a
+# two-host slice is built in their place.
+tpu_admission_max_seconds = 3600
 
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
@@ -151,10 +172,10 @@ worker_clusters = [
     # The zone all three v7x pools sit in.
     rapid_cache_zones = ["us-central1-c"]
 
-    # Three shapes over the same eight chips of the v7x reservation, which is
-    # every shape the tests ask for. The quota is not split between them: eight
-    # chips will not divide three ways and still leave each a whole slice, so
-    # all of it is nominal on 2x2x1 and the other two run on what that one is
+    # Three shapes over the v7x reservation's free chips, which is every shape
+    # the tests ask for. The quota is not split between them: the chips will not
+    # divide three ways and still leave each a whole slice, so all of it is
+    # nominal on 2x2x1 and the other two run on what that one is
     # not using. Every pool's max_nodes is the full eight chips, so the cohort
     # accounting decides how many run at once and the node pools only decide
     # what a chip can be shaped into.
@@ -204,3 +225,4 @@ labels = {
   workload    = "tpu-ci"
   owner       = "tpu-inference"
 }
+

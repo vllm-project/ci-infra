@@ -126,7 +126,7 @@ better states its own `activeDeadlineSeconds` — a serving benchmark runs for a
 long as its client sweeps, which no shape implies. A single step can override
 both by setting `TPU_MAX_RUNTIME_SECONDS` in its `env:`, which is how one step
 asks for longer without every step sharing the manifest getting it too. The
-ceiling is `tpu_total_max_seconds`: past that the workload would outlive the
+ceiling is `tpu_runtime_max_seconds`: past that the workload would outlive the
 launcher watching it, and the chips would be held by nothing.
 
 Whatever the source, keep it under the step's own `timeout_in_minutes` by more
@@ -279,11 +279,16 @@ so the first node to want it waits out the conversion — measured at 87s for a
 2.7 GB image — and every node after it mounts the same digest in about two
 seconds. Caching layers on the node cannot help; the digest is new every build.
 
-**A step may legitimately queue for hours.** `tpu_total_max_seconds` is a day,
-and it is a budget for queueing and running together. With eight v7x chips, a
-build that fans out over several shapes puts most of its steps behind the rest of
-itself. The launcher annotates what it is waiting for; read that before assuming
-a fault.
+**A step may legitimately queue for hours, but not inside the launcher.**
+`tpu_queue_max_seconds` and `tpu_runtime_max_seconds` are separate budgets —
+how long to wait for chips, and how long to hold them — and the first is set
+well under what the fleet actually makes a step wait. Something ends a kube
+step at 5h59m48s as `exit_status -1` with an empty log, whatever
+`timeout_in_minutes` says, so a launcher permitted to wait past that never gets
+to report why. Queueing longer than the budget belongs in Buildkite instead: a
+step held by a `concurrency_group` is `limited`, has a null `started_at`, and
+burns no clock. The launcher annotates what it is waiting for; read that before
+assuming a fault.
 
 **us-central1 holds both the manager and a worker.** They are separate clusters
 with separate control-plane CIDRs, but they share the region's Cloud Router and

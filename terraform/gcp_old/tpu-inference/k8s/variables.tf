@@ -249,19 +249,61 @@ variable "allowed_image_repos" {
 
 variable "tpu_test_max_seconds" {
   type        = number
-  description = "How long a TPU workload runs for when it says nothing. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out. A manifest that knows better states its own, and a single step overrides both with TPU_MAX_RUNTIME_SECONDS in its env; either way bounded by tpu_total_max_seconds."
+  description = "How long a TPU workload runs for when it says nothing. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out. A manifest that knows better states its own, and a single step overrides both with TPU_MAX_RUNTIME_SECONDS in its env; either way bounded by tpu_runtime_max_seconds."
 }
 
-variable "tpu_total_max_seconds" {
+variable "tpu_queue_max_seconds" {
   type        = number
   description = <<-EOT
-    How long a TPU step may take in total, queueing included.
+    How long the launcher waits for chips before giving up.
 
-    Also the ceiling on any deadline a manifest asks for, since the one thing
-    that must hold is that a workload does not outlast the launcher watching
-    it. The launcher waits for admission for whatever this leaves once the
-    workload's own run is allowed for, so this and tpu_test_max_seconds are the
-    only deadlines worth choosing and every other one follows from them.
+    Generous on purpose: waiting is capacity, not a fault in the step, and a
+    step that has been in line since the previous evening is waiting on busy
+    hardware. Failing it there loses its place in the queue as well as its
+    result.
+
+    Stated rather than derived. This used to be whatever a total budget left
+    once the run was allowed for, which meant a manifest asking to serve for
+    longer silently shortened how long it could queue - two unrelated things
+    moving together. The pair a step actually has is how long it may wait and
+    how long it may run, so those are the two numbers.
+  EOT
+}
+
+variable "tpu_admission_max_seconds" {
+  type        = number
+  description = <<-EOT
+    How long the launcher waits for a workload that already has quota to reach
+    a worker. Waiting for chips is capacity and gets tpu_queue_max_seconds;
+    this bounds the state after that, where chips are committed, nothing is
+    running, and no other workload can use them.
+
+    Wide, because quota is chips and a slice is a topology: eight chips free as
+    two 2x2x1 nodes do not admit a 2x2x2 until those drain and a two-host slice
+    is built in their place, which is node deletion, TPU provisioning and a
+    cold image pull. Unbounded it reports nothing - a stuck reservation looks
+    like a long queue until the Job deadline ends the step as exit_status -1.
+  EOT
+}
+
+variable "tpu_runtime_max_seconds" {
+  type        = number
+  description = <<-EOT
+    The most runtime a workload may ask for, whatever its manifest says.
+
+    tpu_test_max_seconds is what a step gets when it has no opinion; this is
+    what it gets when its opinion is too large. The thing that must hold is
+    that a workload does not outlast the launcher watching it, or it holds a
+    reservation nothing will clean up.
+
+    Set above tpu_test_max_seconds, not equal to it: the disagg manifests state
+    their own deadlines in hours because a serving benchmark's length is a
+    property of the benchmark. Setting the two equal would make three hours a
+    hard cap rather than a default and clamp them.
+
+    With tpu_queue_max_seconds this is the whole budget - a step's worst case
+    is the two added together, which is what the Buildkite step timeout has to
+    clear.
   EOT
 }
 
@@ -388,3 +430,20 @@ variable "worker_clusters" {
   }
 }
 
+
+variable "machine_memory_gb" {
+  type = map(number)
+  description = <<-EOT
+    Host memory per TPU machine type, in the decimal GB the accelerator-
+    optimized machine family documentation quotes.
+
+    Every machine_type named by a tpu_node_pools entry needs one here, and a
+    new machine generation or variant is the moment to add it -
+    generate_manifests.py refuses a shape it cannot size rather than guessing.
+
+    Read only by generate_manifests.py, which sizes the pod's memory-backed
+    volumes and its memory request from it. Here rather than in that script so
+    that it sits beside the pools that name these machine types, since the two
+    have to be edited together.
+  EOT
+}
