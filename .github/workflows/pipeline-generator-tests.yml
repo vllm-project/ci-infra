@@ -6,8 +6,10 @@ on:
       - ".github/workflows/pipeline-generator-tests.yml"
       - "buildkite/pipeline_generator/**"
       - "buildkite/tests/**"
+      - "buildkite/pyproject.toml"
+      - "buildkite/uv.lock"
+      - "buildkite/.python-version"
       - "pyproject.toml"
-      - "requirements.txt"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -27,15 +29,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          python-version: "3.12"
+          # Mirrors UV_VERSION in buildkite/bootstrap.sh. No python-version:
+          # it would export UV_PYTHON and override buildkite/.python-version.
+          version: "0.12.15"
 
       - name: Install test dependencies
-        run: |
-          python -m pip install -r requirements.txt
-          python -m pip install pytest ./buildkite/pipeline_generator
+        working-directory: buildkite
+        run: uv sync --locked --all-packages
 
       - name: Run tests
-        run: python -m pytest buildkite/tests
+        run: buildkite/.venv/bin/python -m pytest buildkite/tests
