@@ -1,45 +1,24 @@
 # The Job a step gets when it names hardware and nothing else: one pod on one
-# host, holding every chip on the node.
-#
-# Here rather than in the repo being tested because everything in it is a fact
-# about the cluster - which caches exist, what mounts them, which identity may
-# write them. The step supplies the command and the shape; the launcher fills
-# in the name, the queue, the deadline and the file cache size.
+# host, holding every chip on the node. Everything in it is a fact about the
+# cluster, which is why it lives here and not in the repo being tested; the
+# step supplies the command and the shape, the launcher fills in the name,
+# queue, deadline and cache sizes.
 #
 # A workload this cannot express - roles that talk to each other, hosts of one
-# slice - is a JobSet the calling repo writes and passes as --manifest.
+# slice - is a JobSet the calling repo passes as --manifest.
 apiVersion: batch/v1
 kind: Job
 spec:
   parallelism: 1
   completions: 1
-  # No retry for a test that failed - Buildkite already has its result - but
-  # a pod the infrastructure took away (node lost, autoscaler) is replaced for
-  # as long as activeDeadlineSeconds allows: DisruptionTarget is ignored, and
-  # only the workload container's own exit code fails the Job.
+  # For the case the rules below cannot name: a TPU node repaired underneath a
+  # running pod is rejected at kubelet admission - `no healthy devices present;
+  # cannot allocate unhealthy devices google.com/tpu` - with no
+  # DisruptionTarget condition and no exit code, because nothing started.
   #
-  # The limit is what carries the second half of that, not the rules. A test
-  # that fails is failed by the FailJob rule below, which ends the Job on the
-  # spot no matter how many retries remain, so this number never lets a red
-  # test run twice. What it covers is the case neither rule names: a TPU node
-  # repaired underneath a running pod rejects it at kubelet admission -
-  # `no healthy devices present; cannot allocate unhealthy devices
-  # google.com/tpu` - and that pod has no DisruptionTarget condition and no
-  # container exit code, because the container never started. At zero, the
-  # step's result is whatever the hardware did.
-  #
-  # Six, because what this has to outlast is the repair rather than the pod. A
-  # replacement is admitted against the same node, so it is rejected again for
-  # as long as the chips are unhealthy, and the Job's backoff is what decides
-  # how long that can go on: ten seconds, then twenty, forty, eighty, a hundred
-  # and sixty, three hundred and twenty. Three of those is seventy seconds,
-  # which a repair outlives comfortably - it cost two consecutive nightlies the
-  # same step. Six is a little over ten minutes.
-  #
-  # Spending that is safe because it is not a test's budget. A test that fails
-  # is failed by the FailJob rule below on the spot, so a larger number here
-  # never runs a red test twice; it is only reached by a pod that never got far
-  # enough to have an exit code.
+  # Six is a little over ten minutes of exponential backoff, which outlasts a
+  # repair. It never reruns a red test: FailJob below ends the Job on the first
+  # non-zero exit however many retries remain.
   backoffLimit: 6
   podFailurePolicy:
     rules:
@@ -57,21 +36,17 @@ spec:
         # Without this GKE does not inject the sidecar and the csi volumes
         # below never mount.
         gke-gcsfuse/volumes: "true"
-        # Do not let the autoscaler reclaim this node underneath a running
-        # test. Job pods are evictable by default, so once the rest of a build
-        # drains, the last long step is a lone pod on an otherwise idle node -
-        # exactly what OPTIMIZE_UTILIZATION consolidates away, and it presents
-        # as a job that vanished rather than as an eviction.
+        # Job pods are evictable by default, so the last long step of a build
+        # is a lone pod on an idle node - what OPTIMIZE_UTILIZATION
+        # consolidates away. It presents as a job that vanished.
         cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
         # Headroom for metadata prefetch on both mounts. GKE's guidance is
         # 512Mi or higher; 2Gi because the compilation cache prefix holds tens
         # of thousands of entries and a prefetch that runs out of memory falls
         # back to a lookup per miss.
         gke-gcsfuse/metadata-prefetch-memory-limit: "2Gi"
-        # Unlimited sidecar CPU and memory. Parallel downloads are what make a
-        # multi-gigabyte checkpoint arrive in one pass rather than eight
-        # sequential ones, and they are CPU-bound, so the default limits
-        # throttle them. Permitted on Standard clusters only, which these are.
+        # Unlimited sidecar CPU and memory: parallel downloads are CPU-bound
+        # and the defaults throttle them. Standard clusters only.
         gke-gcsfuse/cpu-limit: "0"
         gke-gcsfuse/memory-limit: "0"
     spec:
@@ -94,13 +69,11 @@ spec:
           # file is not the place to know that.
           command: ["/bin/bash", "-lc"]
           env:
-            # Only what is the same for every test. Everything else arrives
-            # through `--env`, which skips names the step did not set - unlike
-            # template substitution, which cannot express "leave this unset".
+            # Only what is the same for every test; the rest arrives through
+            # `--env`, which can leave a name the step did not set unset.
             - name: HF_HOME
               value: /cache/hf
-            # Unbuffered, so output reaches the log as it happens rather
-            # than in blocks when a pipe flushes.
+            # Unbuffered, so output reaches the log as it happens.
             - name: PYTHONUNBUFFERED
               value: "1"
           resources:
@@ -108,28 +81,33 @@ spec:
               google.com/tpu: "${CHIPS}"
             requests:
               google.com/tpu: "${CHIPS}"
+              # Keeps the pod out of BestEffort, which is evicted first: it
+              # holds a tmpfs /dev/shm and a memory-backed file cache, and
+              # eviction ranks pods by usage above request. Sized from those
+              # volumes by memory_request() in generate_manifests.py.
+              #
+              # No CPU request: it is also a scheduling floor, checked against
+              # a template the autoscaler builds for the shape, and one large
+              # enough to matter can exceed what that template offers - which
+              # stops the pool building nodes at all.
+              memory: "${MEMORY_REQUEST}"
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
-            # Mounted for every workload, but pointed at by none: a compilation
-            # cache has to be keyed on the toolchain that filled it, so only the
-            # step knows a safe path under here, and a step that sets no cache
-            # variables gets no persistent cache rather than a shared one.
+            # Mounted for every workload, pointed at by none: a compilation
+            # cache must be keyed on the toolchain that filled it, so only the
+            # step knows a safe path under here.
             - name: jax-cache
               mountPath: /cache/jax
             - name: hf-cache
               mountPath: /cache/hf/hub
       volumes:
-        # Backing store for the gcsfuse file cache, in RAM. The launcher sets
-        # sizeLimit to half the machine type's memory - 81Gi on
-        # ct6e-standard-1t, 670Gi on ct6e-standard-8t - since one fixed number
-        # would be unsafe on the smallest shape or waste most of the largest.
-        # A sizeLimit, not a reservation: tmpfs holds only what is written.
+        # Backing store for the gcsfuse file cache. Without it the sidecar falls
+        # back to 5GiB of ephemeral storage and fileCacheCapacity becomes a
+        # cheque it cannot cash, refetching checkpoints on every load.
         #
-        # Without it the sidecar falls back to 5GiB of ephemeral storage and
-        # fileCacheCapacity becomes a cheque it cannot cash - checkpoints are
-        # then refetched on every load, which costs more than an order of
-        # magnitude in load time.
+        # The launcher sizes it from the host and may swap it for a PD; see
+        # fuse_cache_medium in variables.tf.
         - name: gke-gcsfuse-cache
           emptyDir:
             medium: Memory
@@ -140,10 +118,10 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-        # Both caches are claims, not mounts: the bucket is regional, so its
-        # name differs per cluster, and only a claim resolves at mount time in
-        # whichever cluster MultiKueue placed this Job in. An inline volume
-        # would be rendered before submission. See cache_volumes.yaml.tpl.
+        # The buckets are regional, so these claims resolve at mount time in
+        # whichever cluster MultiKueue landed the pod. Defined, with their
+        # mount options and cache capacities, in cache_volumes.yaml.tpl - the
+        # JobSets a repo passes as --manifest claim the same names.
         - name: jax-cache
           persistentVolumeClaim:
             claimName: jax-cache
