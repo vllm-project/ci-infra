@@ -56,9 +56,11 @@ Configure credentials as needed for ECR pulls or S3 access (instance profile, en
 ## 3. Install the Buildkite Agent
 
 ```bash
-# Ubuntu / Debian
-sudo sh -c 'echo deb https://apt.buildkite.com/buildkite-agent stable main > /etc/apt/sources.list.d/buildkite-agent.list'
-sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com --recv-keys 32A37959C2FA5C3C99EFBC32A79206696452D198
+# Ubuntu / Debian — `apt-key` is gone on Ubuntu 24.04, so use a signed-by keyring
+curl -fsSL "https://keys.openpgp.org/vks/v1/by-fingerprint/32A37959C2FA5C3C99EFBC32A79206696452D198" \
+  | sudo gpg --dearmor -o /usr/share/keyrings/buildkite-agent-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" \
+  | sudo tee /etc/apt/sources.list.d/buildkite-agent.list > /dev/null
 sudo apt-get update
 sudo apt-get install -y buildkite-agent
 
@@ -66,6 +68,11 @@ sudo apt-get install -y buildkite-agent
 sudo sh -c 'echo -e "[buildkite-agent]\nname = Buildkite Pty Ltd\nbaseurl = https://yum.buildkite.com/buildkite-agent/stable/x86_64/\nenabled=1\ngpgcheck=0\npriority=1" > /etc/yum.repos.d/buildkite-agent.repo'
 sudo yum install -y buildkite-agent
 ```
+
+`stable` currently installs the 4.x agent. Check what the other machines on the
+same queue run (`dpkg -l buildkite-agent`) and match them — pin with
+`apt-get install -y buildkite-agent=<version>` from `apt-cache madison
+buildkite-agent` if they are still on 3.x.
 
 ### Grant buildkite-agent access to Docker and AWS
 
@@ -111,6 +118,12 @@ It works on a fresh machine — no prerequisites beyond Docker/containerd
 themselves (it uses `jq` if present, otherwise falls back to `python3`).
 Existing images are not migrated; the new roots start empty and images re-pull
 on demand.
+
+> The script rewrites `build-path` in the agent config that exists **at the
+> time it runs**. If you install a config from the templates afterwards (step 7
+> / RUNBOOK step 4), that template's `build-path` replaces it — re-apply the
+> large-volume path before starting the agent, and confirm with
+> `grep build-path /etc/buildkite-agent/buildkite-agent.cfg`.
 
 See [`move-docker-containerd.sh`](move-docker-containerd.sh) for details.
 
@@ -188,10 +201,32 @@ sudo chown buildkite-agent:buildkite-agent /etc/buildkite-agent/hooks/environmen
 Make sure the directory is writable by the agent:
 
 ```bash
-sudo chown -R buildkite-agent:buildkite-agent "$HF_TARGET/hf_cache"
+sudo chown buildkite-agent:buildkite-agent "$HF_TARGET/hf_cache"
 ```
 
-> If your pipeline mounts a specific path into containers (e.g. `/fsx/hf_cache` or `/raid`), set `HF_HOME` to that same path so the container and host agree on the cache location.
+> **Don't `chown -R` a shared cache.** If the target is a shared volume (NFS,
+> FSx, virtiofs) that other machines already use, it is usually group- or
+> world-writable and owned correctly already. Check with
+> `stat -c "%A %U:%G" "$HF_TARGET"` first and leave it alone if the agent can
+> already write — a recursive chown there rewrites other hosts' cached data.
+
+**`HF_HOME` must be a path the queue's docker plugin actually mounts.** The
+plugin passes `HF_HOME` straight into the container, so if the host value names
+a path the plugin does not mount, every job starts with a cold cache inside its
+own container layer. The mount lists live in
+`buildkite/pipeline_generator/plugin/docker_plugin.py` — check the template for
+your queue before choosing. For example `h200_18gb` mounts only
+`/mnt/vllm-ci`, while `h200_35gb` also mounts `/mnt/hf-cache-af-south1-a`.
+
+When the host's real cache lives elsewhere, expose it at the path the plugin
+mounts instead of moving it — a bind mount keeps the change local to the
+machine and needs no pipeline change:
+
+```bash
+sudo mkdir -p /mnt/vllm-ci
+echo "$HF_TARGET /mnt/vllm-ci none bind,nofail 0 0" | sudo tee -a /etc/fstab
+sudo mount /mnt/vllm-ci
+```
 
 ## 7. Configure and Start the Buildkite Agent
 

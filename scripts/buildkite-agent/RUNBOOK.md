@@ -153,12 +153,24 @@ Now edit **two** files to match your machine:
 - `tags="queue=<your-queue>"` — the queue for this machine (e.g. `h200_35gb`)
 - `spawn=` — number of agents. Whole-GPU: usually the GPU count. MIG: `num_gpus
   × slices_per_gpu` (32 for 35gb, 56 for 18gb).
+- `build-path=` — the large volume from Step 3. The template ships a path that
+  probably doesn't exist on your machine, and installing it here **overwrites
+  the value `move-docker-containerd.sh` wrote**, so set it again now and create
+  the directory: `sudo install -d -o buildkite-agent -g buildkite-agent
+  <volume>/buildkite-agent/builds`.
+
+Copying an existing machine on the same queue is the fastest way to get the
+secrets right — the values in `environment` (`HF_TOKEN`, the AWS keys) and the
+`token` are identical across machines in one cluster, so only `name`, `tags`,
+`spawn`, `SLICES_PER_GPU`, `build-path` and `HF_HOME` are per-machine.
 
 **`/etc/buildkite-agent/hooks/environment`:**
 - Fill in the secrets: `HF_TOKEN`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
   and optionally `BUILDKITE_ANALYTICS_TOKEN`
 - `HF_HOME=...` — point at large storage (see below)
 - (MIG only) `SLICES_PER_GPU=` — must match the profile (4 for 35gb, 7 for 18gb)
+- `<main-image>` / `<branch-image>` — the postmerge and premerge CI image
+  references used to pre-pull; copy them from a machine already on the queue
 
 > **HF_HOME:** the docker plugin passes `HF_HOME` through to containers and
 > mounts a fixed path. Set `HF_HOME` to a path that's actually mounted into the
@@ -215,6 +227,9 @@ Environment=GPU_REPORT_URL=https://ci.vllm.ai/api/gpu/report
 Environment=GPU_REPORT_SECRET=<the dashboard's bearer secret>
 ```
 
+If you don't have the secret to hand, copy both `Environment=` lines from a
+machine whose `gpu-reporter.timer` is already active.
+
 Then enable it:
 
 ```bash
@@ -230,8 +245,10 @@ Within a minute the host should show up at <https://ci.vllm.ai/gpu> under its
 hostname.
 
 > Note: `nvidia-smi` reports the **physical** GPUs, so the dashboard shows
-> per-GPU utilization for the whole box — it doesn't break stats down per MIG
-> slice. That's usually what you want for capacity monitoring.
+> per-GPU rows for the whole box, not per MIG slice. Be aware that on a
+> MIG-enabled machine `utilization.gpu` reads `[N/A]` — the driver only reports
+> utilization per MIG device — so those hosts report memory and counts but no
+> utilization percentage, and the reporter still logs `OK: N GPUs reported`.
 
 ## Verify end to end
 
@@ -241,7 +258,16 @@ hostname.
 - [ ] `nvidia-ctk cdi list` shows the same devices
 - [ ] `systemctl is-active buildkite-agent` is `active`
 - [ ] N agents visible in the Buildkite dashboard on the right queue
-- [ ] A test job on the queue runs and lands on the right GPU/slice
+- [ ] A test job on the queue runs and lands on the right GPU/slice — with jobs
+      in flight, the running container count and the distinct slice count
+      should be equal (zero collisions):
+
+      ```bash
+      ids=$(sudo docker ps -q)
+      echo "containers: $(echo "$ids" | grep -c .)"
+      echo "slices:     $(sudo docker inspect $ids | grep -oE 'MIG-[0-9a-f-]{36}' | sort -u | wc -l)"
+      ```
+
 - [ ] Host appears at <https://ci.vllm.ai/gpu>
 
 ## Troubleshooting
@@ -252,6 +278,16 @@ hostname.
   /tmp/docker-pull-locks`, move the data roots + build-path to big storage
   (Step 3), restart. Prevention is Step 3 — always move storage before starting
   the agent on a GPU machine.
+- **Right after the first start, every agent says "Starting job" but nothing
+  seems to happen — no containers, idle GPUs, an empty build directory** — this
+  is normal for several minutes on a busy queue. All N agents take a job at
+  once, each runs the ECR logins in the `environment` hook, then one agent per
+  image pulls it (~34 GB) while the rest wait on the hook's `flock`. Confirm
+  progress with `ps -ef | grep "docker pull"` and `df -h <big volume>` rather
+  than `docker ps`. Two things that look like failures here but aren't: `du` on
+  the Docker root disagrees wildly with `df` while layers are unpacking, and
+  `docker system df` can error with `snapshotter.Usage failed ... no such file
+  or directory` during concurrent pulls.
 - **Agent error: "Agent number N exceeds available MIG devices"** — `spawn` is
   larger than the actual slice count. Recreate the slices (Step 1) or lower
   `spawn`.
