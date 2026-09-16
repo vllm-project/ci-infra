@@ -60,9 +60,21 @@ config:
   # Only the checkout container. The command container runs the step, which on
   # this fleet is a workload image named by a pull request, and a deploy key
   # reaching that is a key a pull request can read.
+  # Shallow, blobless checkouts for every step. A pod's checkout is cold every
+  # time - there is no reusable clone on a long-lived VM to fall back on - so
+  # the full history is fetched once per step and used for nothing.
+  #
+  # Controller-wide for the same reason as the key below: no pipeline should
+  # have to know this. A step that needs history or tags overrides it with the
+  # plugin's own `checkout:` block, which wins over this patch.
   pod-spec-patch:
     containers:
       - name: checkout
+        env:
+          - name: BUILDKITE_GIT_CLONE_FLAGS
+            value: "-v --depth 1 --filter=blob:none"
+          - name: BUILDKITE_GIT_FETCH_FLAGS
+            value: "-v --prune --depth 1 --filter=blob:none"
         envFrom:
           - secretRef:
               name: ${GIT_CREDENTIALS_SECRET_NAME}
