@@ -5,16 +5,27 @@ on long-lived agent VMs. A Buildkite step on queue `kube` becomes a Kueue
 workload, which is admitted against fleet quota on a manager cluster and
 dispatched to whichever worker cluster has the chips.
 
-Two clusters, and the split is the whole design:
+One manager and one worker per reservation, and that split is the whole design:
 
-- **Manager** — `tpu-ci-manager`, Autopilot, `us-central1`. No TPUs. Runs the
+- **Manager** — `tpu-ci-manager`, Standard, `us-central1`. No TPUs. Runs the
   agent-stack-k8s controller, the Buildkite agent pods, and the Kueue that owns
   fleet-wide quota. This is where a step's agent lives and where its log goes.
-- **Worker** — `tpu-ci-us-east5`, Standard, `us-east5`. The chips. Reports to
-  the manager over Connect Gateway; runs no agent of its own.
+  It declares no node pools: nodes are auto-provisioned per pending pod, from
+  the machine families the `manager-system` ComputeClass lists in order.
+- **Worker** — `tpu-ci-us-east5`, Standard, `us-east5`. v6e, 26 chips free of a
+  128-chip reservation, as `ct6e-standard-1t` (1x1) and `ct6e-standard-8t` (2x4).
+- **Worker** — `tpu-ci-us-central1`, Standard, `us-central1`. v7x, 8 chips, as
+  `tpu7x-standard-1t` (1x1x1), `tpu7x-standard-4t` (2x2x1) and `tpu7x-standard-4t`
+  (2x2x2, multi-host across two VMs). Every v7x step in the fleet runs here.
 
-MultiKueue joins them: the manager admits, the worker executes. An operator
+A worker reports to the manager over Connect Gateway and runs no agent of its
+own. MultiKueue joins them: the manager admits, the worker executes. An operator
 talks to the manager for almost everything.
+
+Each worker also carries a `worker-cpu` ComputeClass for roles that hold no
+chips, and the fleet's secrets, put there by GKE SecretSync — a workload pod
+runs on the worker, so a `secretKeyRef` has to resolve there rather than on the
+manager where the launcher built the podspec.
 
 ## Layout
 
@@ -27,6 +38,7 @@ talks to the manager for almost everything.
 | `kueue/templates/` | The templates the generator renders. |
 | `kueue/generated/` | The YAML that actually gets applied. Committed on purpose — see below. |
 | `kueue/launcher/` | The program every TPU step runs, its Job, and its image build. |
+| `kueue/launcher/pod_defaults.yaml` | What the fleet gives a workload's pods: caches, gcsfuse settings, eviction and retry policy. One definition, inherited by the built-in Job and by every manifest. |
 
 Terraform stops at the cluster; `deploy_manifests.py` starts there. The
 Kubernetes and Helm providers need a reachable API server at plan time, which
@@ -36,7 +48,11 @@ variable in between.
 `kueue/generated/` is committed so that reviewing a quota change means reading
 the YAML that will be applied rather than inferring it from a template.
 `deploy_manifests.py` refuses to run if the committed tree differs from a fresh
-render, so it doubles as a drift detector.
+render, so it doubles as a drift detector - but only between the templates and
+the committed tree. It applies, never prunes, so **deleting an object from the
+tree does not delete it from the clusters**: a change that removes a queue, a
+flavor or an admission check needs the matching `kubectl delete` by hand, on the
+manager and on every worker that carried it.
 
 ## Deploying a change
 
@@ -76,20 +92,117 @@ states its hardware inside it:
 ```
 
 and passes nothing else. Not the shape, because a JobSet already says where each
-of its pods runs and can put two roles on two different shapes, which no pair of
-flags can express. Not the command either — a JobSet has one per role. A
-manifest passed together with a command is refused rather than one role being
-silently chosen.
+of its pods runs, which no pair of flags can express. Not the command either — a
+JobSet has one per role. A manifest passed together with a command is refused
+rather than one role being silently chosen.
+
+### What a manifest states, and what it inherits
+
+A manifest states the hardware it wants and nothing that follows from it:
+
+```yaml
+metadata:
+  annotations:
+    tpu-ci.google.com/defaults: standard
+```
+
+With that annotation the launcher merges in `pod_defaults.yaml` — the cache
+volumes and their mounts, the gcsfuse sidecar settings, the TPU toleration, the
+service account, `restartPolicy`, the two env names every workload wants, the
+TTL, and the retry rules that let a pod survive its node being repaired. The
+memory request comes from the shape's profile, since it is a fraction of the
+host the pod landed on.
+
+The merge is additive: anything the manifest sets itself is left alone, so a
+role can add a volume or override a default it needs to differ on. Inherited
+mounts are applied first, so a mount nested inside an inherited one lands inside
+it rather than under it.
+
+Only roles that hold chips get the caches and retry rules — they are sized from
+a TPU host's memory and about TPU nodes being repaired, and a chipless role runs
+on neither. Such a role states what it needs itself.
+
+What stays in the manifest is `nodeSelector` and the `google.com/tpu` count:
+together with the chip count they are how the queue is chosen, so there would be
+nothing left to resolve if the fleet supplied them. Its deadline stays too.
+
+Two things a manifest should not set. A **CPU request** is a scheduling floor
+checked against the template the autoscaler builds for a shape; one large enough
+to matter can exceed what that template offers and stop the pool building nodes
+at all. An **ephemeral-storage** request reserves a large share of a node's disk
+to cap a pod that already holds every chip on it.
+
+The image is `WORKLOAD_IMAGE` in the step's environment, checked against
+`allowed_image_repos` — a CI image is built per commit, so which one runs is the
+pipeline's choice, which in a public repo means a PR's. A tag is resolved to the
+digest it points at when the step submits, so every pod in the workload and
+every restart pull the same bytes even if the tag is republished mid-run.
+
+Every role that holds chips must ask for the same shape: a workload is admitted
+against one queue and a queue is one shape. A role that asks for no accelerator
+at all is the exception and rides along — a benchmark client driving the servers
+over HTTP, say — because the queues put `google.com/tpu` alone under quota. Give
+such a role `nodeSelector: cloud.google.com/compute-class: worker-cpu` and real
+CPU requests; otherwise it lands on the worker's small shared system pool, or on
+a TPU node where it would sit on four chips to run a Python process. If it also
+mounts `gke-gcsfuse-cache` or `dshm` it must state their `sizeLimit` itself —
+the launcher sizes both from the TPU host's memory, which this node is not on.
 
 A manifest must contain a container named `workload`: that is the one whose
-output is streamed back and which step environment is forwarded to. Everything
-that follows from the shape is the launcher's and is rejected in a manifest —
-the queue label, the `activeDeadlineSeconds` ceiling, the gcsfuse cache size.
+output is streamed back and which step environment is forwarded to. More than
+one may carry the name, and in a JobSet whose roles all want the log and the
+step's secrets, they all should. The queue label is the launcher's alone and is
+rejected in a manifest: a queue named here is either the shape said twice or a
+disagreement with it. The gcsfuse cache and `/dev/shm` sizes are filled in only
+where the manifest leaves them open, so a pod that needs the memory for itself
+can say so.
+
+How long the workload runs is not one of those. It defaults to
+`tpu_test_max_seconds`, which is right for a test, and a manifest that knows
+better states its own `activeDeadlineSeconds` — a serving benchmark runs for as
+long as its client sweeps, which no shape implies. A single step can override
+both by setting `TPU_MAX_RUNTIME_SECONDS` in its `env:`, which is how one step
+asks for longer without every step sharing the manifest getting it too. The
+ceiling is `tpu_runtime_max_seconds`: past that the workload would outlive the
+launcher watching it, and the chips would be held by nothing.
+
+Whatever the source, keep it under the step's own `timeout_in_minutes` by more
+than the startup envelope. The two clocks do not start together — the step's
+runs from the agent pod, the workload's from admission — so a workload given
+the step's whole budget is killed by Buildkite before its own deadline can fire
+or its artifacts can upload.
 
 `kueue/launcher/launch.py` is the program. It is a file rather than YAML so it
 can be linted and run; `deploy_manifests.py` builds the ConfigMap from it.
 
 ## Runbook
+
+### Before adding a region
+
+Terraform here owns clusters, not networking. A region needs a Cloud Router and
+a Cloud NAT before a private cluster in it can pull from registry.k8s.io, and
+neither is declared in this config: a NAT gateway covers every subnet range in
+its region and network, so it is shared by everything there rather than owned by
+one cluster, and a second gateway over ranges another already claims is refused
+at apply.
+
+They are named for the network and the region they serve — `default-us-central1-router`,
+`default-us-central1-nat` — and not for this fleet, which merely happens to be
+their first tenant.
+
+```bash
+gcloud compute routers create default-<region>-router \
+  --project cloud-ullm-inference-ci-cd --region <region> --network default
+gcloud compute routers nats create default-<region>-nat \
+  --project cloud-ullm-inference-ci-cd --region <region> --router default-<region>-router \
+  --auto-allocate-nat-external-ips --nat-all-subnet-ip-ranges
+```
+
+Check before creating: one may already be there for another tenant.
+
+```bash
+gcloud compute routers list --project cloud-ullm-inference-ci-cd
+```
 
 ### Add a TPU shape
 
@@ -103,6 +216,13 @@ A machine type and a topology together identify a shape, and both are needed: a
 2x4 slice of v6e is eight chips either as one `ct6e-standard-8t` or as two
 `ct6e-standard-4t`, and which it is decides the host, the pod count and the
 quota.
+
+All three counts are in **nodes**, not chips — the generator multiplies
+`nominal_nodes` by the machine type's chips per VM to get the ClusterQueue's
+`nominalQuota`. Summed across a cluster, `nominal_nodes` should come to the chips
+the reservation actually has free; `max_nodes` deliberately oversubscribes so a
+shape can borrow, and `min_nodes` is the only one that really partitions the
+reservation, since those chips stay with one shape once booted.
 
 ### Rotate the Buildkite agent token
 
@@ -166,12 +286,12 @@ do not deploy into the middle of something that cannot tolerate it. JobSet's
 webhooks are also `Fail`, though those are narrowed to pods that already carry a
 JobSet label.
 
-**Autopilot writes a nodeAffinity into any podspec that lacks one** —
-`cloud.google.com/extended-duration-pods`. MultiKueue copies the podspec to the
-worker unchanged, no Standard node carries that label, and the pod is then
-unschedulable with nothing reporting an error: the step simply waits out its
-timeout. The launcher always states an affinity of its own to prevent it. If you
-write a podspec that reaches the worker by some other path, state one too.
+**No cluster in this fleet may be Autopilot.** Autopilot writes a nodeAffinity
+on `cloud.google.com/extended-duration-pods` into any podspec that arrives
+without one. MultiKueue copies the podspec to the worker unchanged, no Standard
+node carries that label, and the pod is then unschedulable with nothing
+reporting an error: the step simply waits out its timeout. The manager is where
+every workload podspec is born, so that is the one it would break.
 
 **A very short workload can lose its output.** MultiKueue deletes the remote Job
 when it completes and the pods go with it, so a workload that lives a few
@@ -179,6 +299,38 @@ seconds can be created and removed between two log polls. The launcher polls
 faster before the first line arrives, which covers the built-in Job. The step
 still passes or fails correctly and says when output is missing; the container
 output is in Cloud Logging either way.
+
+**Two of the three v7x shapes have no quota of their own.** All eight chips are
+the nominal quota of `tpu7x-standard-4t-2x2x1`; `tpu7x-standard-1t-1x1x1` and
+`tpu7x-standard-4t-2x2x2` have zero and run entirely on what that queue is not
+using. Eight chips will not divide three ways and still leave each shape a whole
+slice, so this is deliberate — but it means a single-chip step can wait behind a
+four-chip one indefinitely, and `reclaimWithinCohort: Never` will not preempt to
+free it. If a shape is starving, the lever is the split in `prod.auto.tfvars`,
+not the node pools.
+
+**A cold pool's first image pull is slow, and that is not streaming failing.**
+Image streaming is on for every TPU pool, but GKE serves an image it has
+converted and it converts each digest once. CI pushes a new digest every build,
+so the first node to want it waits out the conversion — measured at 87s for a
+2.7 GB image — and every node after it mounts the same digest in about two
+seconds. Caching layers on the node cannot help; the digest is new every build.
+
+**A step may legitimately queue for hours, but not inside the launcher.**
+`tpu_queue_max_seconds` and `tpu_runtime_max_seconds` are separate budgets —
+how long to wait for chips, and how long to hold them — and the first is set
+well under what the fleet actually makes a step wait. Something ends a kube
+step at 5h59m48s as `exit_status -1` with an empty log, whatever
+`timeout_in_minutes` says, so a launcher permitted to wait past that never gets
+to report why. Queueing longer than the budget belongs in Buildkite instead: a
+step held by a `concurrency_group` is `limited`, has a null `started_at`, and
+burns no clock. The launcher annotates what it is waiting for; read that before
+assuming a fault.
+
+**us-central1 holds both the manager and a worker.** They are separate clusters
+with separate control-plane CIDRs, but they share the region's Cloud Router and
+Cloud NAT, and both pull from the same Artifact Registry. Do not declare a second
+NAT gateway for the worker.
 
 **Not every controller setting is in our values.** The effective config is:
 
@@ -203,12 +355,14 @@ otherwise.
 kubectl get workloads -n buildkite
 kubectl describe workload -n buildkite <name>
 
-# Is there quota for the shape it asked for?
+# Is there quota for the shape it asked for? Check borrowing too: a shape with
+# nominalQuota 0 is admitted only out of its cohort's idle chips.
 kubectl get clusterqueue
 
-# Admitted but nothing running: it is on the worker.
-gcloud container clusters get-credentials tpu-ci-us-east5 \
-  --region us-east5 --project cloud-ullm-inference-ci-cd
+# Admitted but nothing running: it is on the worker that owns that shape -
+# tpu-ci-us-east5 for ct6e, tpu-ci-us-central1 for tpu7x.
+gcloud container clusters get-credentials <cluster> \
+  --region <region> --project cloud-ullm-inference-ci-cd
 kubectl get pods -n buildkite
 ```
 

@@ -29,6 +29,24 @@ variable "manager_master_ipv4_cidr_block" {
   description = "RFC1918 /28 for the manager control plane. Must not overlap any worker cluster's block, because the manager peers with all of them."
 }
 
+variable "manager_bootstrap_machine_type" {
+  type        = string
+  description = "Machine type for the default node pool GKE insists on creating and that remove_default_node_pool then deletes. Nothing is ever scheduled on it; it is named only so that the create does not fail on whichever family is short in the region."
+  default     = "n2-standard-2"
+}
+
+variable "manager_max_cpu" {
+  type        = number
+  description = "Ceiling on vCPUs auto-provisioning may create across the manager. Deliberately far above what the fleet can use: a launcher pod holds no chip, so what has to fit is the Buildkite controller's in-flight limit, and a ceiling that can be reached turns a busy night into steps that never start. Chips are what should bound the fleet."
+  default     = 1024
+}
+
+variable "manager_max_memory_gb" {
+  type        = number
+  description = "Ceiling on memory auto-provisioning may create across the manager. Generous against the CPU ceiling, so that the family fallback is free to land on a memory-heavy shape when the balanced ones are short."
+  default     = 4096
+}
+
 variable "labels" {
   type        = map(string)
   description = "Labels applied to every resource that takes them."
@@ -114,20 +132,38 @@ variable "agent_token_secret_id" {
   EOT
 }
 
-variable "analytics_token_secret_project" {
-  type        = string
-  description = "Project holding the Buildkite Test Engine token. Not this one: it belongs to the suite, which predates this fleet and is shared with the bare-metal lane."
+variable "env_secrets" {
+  type = map(object({
+    project = string
+    secret  = string
+  }))
+  description = <<-EOT
+    Credentials the fleet supplies to a workload that forwards the name, keyed
+    by the environment variable it is read from.
+
+    Read by both Terraform and scripts/generate_manifests.py, and the one place
+    the set is written down: Terraform grants the sync read on each, the
+    generator turns each into a SecretSync on every worker, and the launcher's
+    registry decides from the same map whether a --env name may be supplied at
+    all. A secret listed here is one every pipeline on the fleet can ask for,
+    so the list is short on purpose.
+
+    Each names its own project, because none of these belong to this fleet.
+    Scoping the grant to the secret rather than its project matters more than
+    usual for that reason - those projects hold other people's secrets.
+  EOT
 }
 
-variable "analytics_token_secret_id" {
+variable "git_ssh_key_secret_id" {
   type        = string
   description = <<-EOT
-    Secret Manager secret holding the Buildkite Test Engine token.
+    Secret Manager secret in project_id holding the SSH deploy key for the
+    private repositories this fleet builds.
 
-    Read by the launcher pod and forwarded into the workload, since a TPU pod
-    is the only thing that can see its own test output.
-
-    Named rather than defaulted because the grant is scoped to this one secret.
+    Synced into the manager's namespace and read by the checkout container of
+    every agent pod; a public repository ignores it. Its algorithm is part of
+    the contract - see GIT_SSH_KEY_ENV in scripts/generate_manifests.py - so
+    replacing it with a key of another type is a change in two places.
   EOT
 }
 
@@ -213,27 +249,68 @@ variable "allowed_image_repos" {
 
 variable "tpu_test_max_seconds" {
   type        = number
-  description = "How long a TPU workload may run once it has chips. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out."
+  description = "How long a TPU workload runs for when it says nothing. The launcher puts it on the submitted workload as activeDeadlineSeconds, so a hung test releases the chips rather than holding them until the Buildkite step times out. A manifest that knows better states its own, and a single step overrides both with TPU_MAX_RUNTIME_SECONDS in its env; either way bounded by tpu_runtime_max_seconds."
 }
 
-variable "tpu_total_max_seconds" {
+variable "tpu_queue_max_seconds" {
   type        = number
   description = <<-EOT
-    How long a TPU step may take in total, queueing included.
+    How long the launcher waits for chips before giving up.
 
-    The launcher waits for admission for whatever this leaves once a
-    full-length run is allowed for, so this and tpu_test_max_seconds are the
-    only deadlines worth choosing and every other one follows from them.
+    Generous on purpose: waiting is capacity, not a fault in the step, and a
+    step that has been in line since the previous evening is waiting on busy
+    hardware. Failing it there loses its place in the queue as well as its
+    result.
+
+    Stated rather than derived. This used to be whatever a total budget left
+    once the run was allowed for, which meant a manifest asking to serve for
+    longer silently shortened how long it could queue - two unrelated things
+    moving together. The pair a step actually has is how long it may wait and
+    how long it may run, so those are the two numbers.
+  EOT
+}
+
+variable "tpu_admission_max_seconds" {
+  type        = number
+  description = <<-EOT
+    How long the launcher waits for a workload that already has quota to reach
+    a worker. Waiting for chips is capacity and gets tpu_queue_max_seconds;
+    this bounds the state after that, where chips are committed, nothing is
+    running, and no other workload can use them.
+
+    Wide, because quota is chips and a slice is a topology: eight chips free as
+    two 2x2x1 nodes do not admit a 2x2x2 until those drain and a two-host slice
+    is built in their place, which is node deletion, TPU provisioning and a
+    cold image pull. Unbounded it reports nothing - a stuck reservation looks
+    like a long queue until the Job deadline ends the step as exit_status -1.
+  EOT
+}
+
+variable "tpu_runtime_max_seconds" {
+  type        = number
+  description = <<-EOT
+    The most runtime a workload may ask for, whatever its manifest says.
+
+    tpu_test_max_seconds is what a step gets when it has no opinion; this is
+    what it gets when its opinion is too large. The thing that must hold is
+    that a workload does not outlast the launcher watching it, or it holds a
+    reservation nothing will clean up.
+
+    Set above tpu_test_max_seconds, not equal to it: the disagg manifests state
+    their own deadlines in hours because a serving benchmark's length is a
+    property of the benchmark. Setting the two equal would make three hours a
+    hard cap rather than a default and clamp them.
+
+    With tpu_queue_max_seconds this is the whole budget - a step's worst case
+    is the two added together, which is what the Buildkite step timeout has to
+    clear.
   EOT
 }
 
 variable "worker_clusters" {
   type = list(object({
-    # What identifies a worker cluster. Every name it gets is derived from this
-    # pair and nothing else, so there is no label to invent and none to keep in
-    # step: locals.tf builds the project-scoped names from location alone, and
-    # the fleet-wide ones - the Terraform address, the generated directory, the
-    # MultiKueueCluster on the manager - from both.
+    # Identifies the cluster: every name it gets is derived from this pair, so
+    # there is no label to invent and none to keep in step. See locals.workers.
     project  = string
     location = string
 
@@ -241,20 +318,59 @@ variable "worker_clusters" {
     subnetwork             = string
     master_ipv4_cidr_block = string
 
+    # Sized for the cluster's own components and nothing else: the CSI drivers,
+    # the metrics agent, and the per-cluster half of Kueue and JobSet. That
+    # stack asks for 2.3 of the four cores with everything scheduled, and
+    # us-east5 has run it on this size throughout.
+    #
+    # A workload role that holds no chips is not what this pool is for, however
+    # much it looks like the only place such a role could go. It asks for the
+    # worker-cpu compute class, which builds a node against that pod's own
+    # requests and removes it afterwards. Growing this pool to fit one instead
+    # buys a node that is idle between runs and still too small for the next
+    # role that wants more.
+    #
+    # e2 despite the worker-cpu class ordering it last for supply, because that
+    # ordering is about eight-core nodes built on demand at burst and this is
+    # one four-core node that already exists. On the shape this pool asks for,
+    # e2 is the family us-east5 actually has: n2-standard-4 is exhausted in
+    # us-east5-b, which is where a surge upgrade of this pool has to land.
     system_machine_type = optional(string, "e2-standard-4")
     system_min_nodes    = optional(number, 1)
-    system_max_nodes    = optional(number, 3)
+    # A ceiling, not a plan: both workers have run on one node since they were
+    # built, and a node that is never asked for is never billed. High because
+    # this pool should not be what limits anything - what bounds the fleet is
+    # chips, and what bounds burst CPU is the worker-cpu class, which states its
+    # own families and sizes. A number here that can be reached turns an
+    # unrelated pod into an outage, and reaching it is silent: the autoscaler
+    # reports `max node group size reached` into pod events nobody is reading.
+    system_max_nodes = optional(number, 64)
 
-    # One per TPU shape this cluster can run. A list rather than a map, because
-    # the node pool's name is its shape - <machine type>-<topology>, e.g.
-    # ct6e-standard-8t-2x4 - and locals.tf builds it from the two fields below
-    # rather than taking it from here, so it cannot name hardware the pool does
-    # not have. generate_manifests.py names the shape's Kueue queue the same way.
+    # Zones to put a Rapid Cache in, for both of this worker's buckets. Empty
+    # disables it, which is the default: a cache is billed on what it holds,
+    # and holding a copy of a bucket nothing reads from that zone is spending
+    # for nothing.
+    #
+    # Where, not just whether, because the cache is zonal and only serves reads
+    # from its own zone - so the zones worth naming are the ones the TPU pools
+    # below sit in. Deriving it from them was tempting and is wrong: a shape
+    # can exist in a zone the fleet has not run in for months, and that is
+    # exactly the cache nobody wants to pay for.
+    #
+    # It reads through: no mount changes, no staged copy, nothing to repopulate
+    # when a model is added. Measured on the 480B checkpoint against
+    # us-central1-c, warm, from 483s to 304s.
+    rapid_cache_zones = optional(list(string), [])
+
+    # One per TPU shape this cluster can run. The node pool's name is its shape
+    # - <machine type>-<topology>, e.g. ct6e-standard-8t-2x4 - and locals.tf
+    # derives it from the two fields below rather than taking it from here, so
+    # it cannot name hardware the pool does not have. generate_manifests.py
+    # names the shape's Kueue queue the same way.
     tpu_node_pools = optional(list(object({
-      # The machine type is the VM, the topology the slice asked of it. Both are
-      # needed because a topology does not imply a machine type: 2x4 is eight
-      # chips either as one ct6e-standard-8t or as two ct6e-standard-4t, and
-      # those differ in pod count, chips per pod and JobSet parallelism.
+      # A topology does not imply a machine type: 2x4 is eight chips either as
+      # one ct6e-standard-8t or as two ct6e-standard-4t, and those differ in pod
+      # count, chips per pod and JobSet parallelism.
       machine_type = string
       topology     = string
 
@@ -270,13 +386,12 @@ variable "worker_clusters" {
       # free chips; the reservation running out is what stops a scale-up.
       max_nodes = number
 
-      # This shape's share of the reservation, and the only one of the three
-      # counts that no resource here reads: generate_manifests.py turns it into
-      # the nominalQuota of the shape's ClusterQueue. Chips a shape can always
-      # get, so the shapes cannot starve each other, while the queues sit in
-      # one cohort and lend out whatever is idle. Summed across a cluster's
-      # pools it should be the chips the reservation actually has free, which
-      # is what max_nodes deliberately oversubscribes.
+      # This shape's share of the reservation, in nodes. The only one of the
+      # three counts no resource here reads: generate_manifests.py multiplies it
+      # by chips per VM to get the nominalQuota of the shape's ClusterQueue -
+      # chips the shape can always have, while the queues sit in one cohort and
+      # lend out whatever is idle. Summed across a cluster it should be the
+      # chips the reservation actually has free, which max_nodes oversubscribes.
       nominal_nodes = number
     })), [])
   }))
@@ -315,3 +430,20 @@ variable "worker_clusters" {
   }
 }
 
+
+variable "machine_memory_gb" {
+  type = map(number)
+  description = <<-EOT
+    Host memory per TPU machine type, in the decimal GB the accelerator-
+    optimized machine family documentation quotes.
+
+    Every machine_type named by a tpu_node_pools entry needs one here, and a
+    new machine generation or variant is the moment to add it -
+    generate_manifests.py refuses a shape it cannot size rather than guessing.
+
+    Read only by generate_manifests.py, which sizes the pod's memory-backed
+    volumes and its memory request from it. Here rather than in that script so
+    that it sits beside the pools that name these machine types, since the two
+    have to be edited together.
+  EOT
+}

@@ -51,6 +51,13 @@ repos:
       stages: [commit-msg]
 
     # Keep `suggestion` last
+    - id: validate-selection-leaks
+      name: Validate test-selection leak corpus
+      entry: python3 test-selection/validate_selection_leaks.py
+      language: system
+      files: ^test-selection/(selection-leaks\.json|selection-leaks\.schema\.json|README\.md|validate_selection_leaks\.py)$
+      pass_filenames: false
+
     - id: suggestion
       name: Suggestion
       entry: bash -c 'echo "To bypass all the pre-commit hooks, add --no-verify to git commit. To skip a specific hook, prefix the commit command with SKIP=<hook-id>."'

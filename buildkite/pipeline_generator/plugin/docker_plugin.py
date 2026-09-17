@@ -62,6 +62,7 @@ h200_35gb_plugin_template = {
     "volumes": [
         "/dev/shm:/dev/shm",
         "/mnt/vllm-ci:/mnt/vllm-ci",
+        "/mnt/hf-cache-af-south1-a:/mnt/hf-cache-af-south1-a",
         "/dev/nvidiactl:/dev/nvidiactl",
     ],
 }

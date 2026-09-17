@@ -12,6 +12,20 @@
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: MultiKueueCluster
 metadata:
+  name: tpu-ci-us-central1
+spec:
+  clusterSource:
+    clusterProfileRef:
+      name: tpu-ci-us-central1-us-central1
+---
+# A worker the manager may dispatch to. The credentials come from a
+# ClusterProfile that GKE's fleet writes into kueue-system by itself, because
+# the manager cluster carries the labels fleet-clusterinventory-management-
+# cluster=true and fleet-clusterinventory-namespace=kueue-system. Nothing here
+# holds a token for the worker.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueCluster
+metadata:
   name: tpu-ci-us-east5
 spec:
   clusterSource:
@@ -65,3 +79,75 @@ metadata:
 spec:
   clusters:
     - tpu-ci-us-east5
+---
+# Makes a ClusterQueue on the manager dispatch rather than run. A workload that
+# passes quota is held until MultiKueue has placed it on a worker.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: AdmissionCheck
+metadata:
+  name: tpu7x-standard-1t-1x1x1-multikueue-dispatch
+spec:
+  controllerName: kueue.x-k8s.io/multikueue
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: MultiKueueConfig
+    name: tpu7x-standard-1t-1x1x1-workers
+---
+# The workers that have a node pool of this shape, and so the ones an
+# AdmissionCheck for it may place onto. Kueue picks the first that admits the
+# workload.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueConfig
+metadata:
+  name: tpu7x-standard-1t-1x1x1-workers
+spec:
+  clusters:
+    - tpu-ci-us-central1
+---
+# Makes a ClusterQueue on the manager dispatch rather than run. A workload that
+# passes quota is held until MultiKueue has placed it on a worker.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: AdmissionCheck
+metadata:
+  name: tpu7x-standard-4t-2x2x1-multikueue-dispatch
+spec:
+  controllerName: kueue.x-k8s.io/multikueue
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: MultiKueueConfig
+    name: tpu7x-standard-4t-2x2x1-workers
+---
+# The workers that have a node pool of this shape, and so the ones an
+# AdmissionCheck for it may place onto. Kueue picks the first that admits the
+# workload.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueConfig
+metadata:
+  name: tpu7x-standard-4t-2x2x1-workers
+spec:
+  clusters:
+    - tpu-ci-us-central1
+---
+# Makes a ClusterQueue on the manager dispatch rather than run. A workload that
+# passes quota is held until MultiKueue has placed it on a worker.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: AdmissionCheck
+metadata:
+  name: tpu7x-standard-4t-2x2x2-multikueue-dispatch
+spec:
+  controllerName: kueue.x-k8s.io/multikueue
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: MultiKueueConfig
+    name: tpu7x-standard-4t-2x2x2-workers
+---
+# The workers that have a node pool of this shape, and so the ones an
+# AdmissionCheck for it may place onto. Kueue picks the first that admits the
+# workload.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueConfig
+metadata:
+  name: tpu7x-standard-4t-2x2x2-workers
+spec:
+  clusters:
+    - tpu-ci-us-central1

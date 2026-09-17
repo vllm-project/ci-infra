@@ -7,15 +7,32 @@ network     = "projects/cloud-ullm-inference-ci-cd/global/networks/default"
 namespace = "buildkite"
 
 # The token the bare-metal agents already register with, so the kube fleet joins
-# the same Buildkite org as the queues it is replacing. Terraform grants read on
-# it and never owns its value.
+# the same Buildkite org as the queues it is replacing.
 agent_token_secret_id = "vllm_buildkite_agent_token"
 
-# The Test Engine token, in the suite's own project rather than this one. Also
-# not created here: the bare-metal agents read the same secret, and the results
-# of a kube run and a bare-metal run should land in one suite.
-analytics_token_secret_project = "cloud-tpu-inference-test"
-analytics_token_secret_id      = "tpu_commons_buildkite_analytics_token"
+# Credentials any pipeline may ask for by name, keyed by the environment
+# variable a workload reads them from. None is created here: each belongs to
+# another project, and is shared with the bare-metal lane so that the two lanes
+# fetch a gated model under one account and report into one suite.
+env_secrets = {
+  # A gated model cannot be fetched without it, and the fleet's model cache is
+  # shared, so the first step to want one pays for every later one.
+  HF_TOKEN = {
+    project = "cloud-tpu-inference-test"
+    secret  = "bm-agent-hf-token"
+  }
+  # Test Engine. The collector runs inside the workload rather than in the
+  # agent, so the token has to reach the pod; without it a suite still passes
+  # and reports nothing, which is the failure mode worth designing against.
+  BUILDKITE_ANALYTICS_TOKEN = {
+    project = "cloud-tpu-inference-test"
+    secret  = "tpu_commons_buildkite_analytics_token"
+  }
+}
+
+# The GitHub deploy key an agent pod clones a private repository with, which is
+# vllm-torchtpu; tpu-inference is public and needs none.
+git_ssh_key_secret_id = "vllm_torchtpu_deploy_key"
 
 # us-central1 to sit with the rest of the CI control plane: the monitoring VM,
 # the cache buckets, and the Artifact Registry these nodes pull from. The
@@ -38,6 +55,17 @@ image_repositories = [
   { location = "us-central1", repository = "vllm-on-tpu-docker-container" },
 ]
 
+# Host memory per machine type, in the decimal GB the machine family
+# documentation quotes. Add an entry when a pool below names a new machine
+# type; see variables.tf.
+machine_memory_gb = {
+  "ct6e-standard-1t"  = 176
+  "ct6e-standard-4t"  = 720
+  "ct6e-standard-8t"  = 1440
+  "tpu7x-standard-1t" = 240
+  "tpu7x-standard-4t" = 960
+}
+
 kueue_version       = "0.19.0"
 jobset_version      = "0.12.0"
 agent_stack_version = "0.49.0"
@@ -49,23 +77,32 @@ buildkite_queue = "kube"
 auth_plugin_image       = "gcr.io/google.com/cloudsdktool/google-cloud-cli:584.0.0"
 auth_plugin_source_path = "/usr/lib/google-cloud-sdk/bin/gke-gcloud-auth-plugin"
 
-# Built by kueue/launcher/cloudbuild.yaml from the Cloud CLI image the auth
-# plugin is copied out of, at the same version. Still a variable of its own:
-# there that image is a source of one static binary for a distroless container,
-# here it is the whole runtime a pod boots into, and the two move for different
-# reasons.
-#
-# The suffix after the CLI version is the Dockerfile revision, bumped when the
-# Dockerfile changes and the base image does not, so a tag names one set of
-# bytes.
+# Built by kueue/launcher/cloudbuild.yaml from the same Cloud CLI image the
+# auth plugin is copied out of. The suffix after the CLI version is the
+# Dockerfile revision, bumped when the Dockerfile changes and the base image
+# does not, so a tag names one set of bytes.
 launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/launcher:584.0.0-1"
 
-# A test may hold chips for three hours and a step may take eight in total,
-# queueing included; the launcher waits for admission for the difference. Both
-# match the bare-metal budgets, so a step moving between the two lanes gets the
-# same allowance.
-tpu_test_max_seconds  = 10800
-tpu_total_max_seconds = 28800
+# How long a workload may hold the chips by default, matching the bare-metal
+# budget so a step moving between the lanes gets the same allowance, and the
+# most a manifest may ask for instead - twelve hours, where the disagg
+# manifests sit. The agent Job's own deadline is derived from these rather than
+# set beside them, so the two cannot drift apart; see agent_stack_values.tpl.
+tpu_test_max_seconds    = 10800
+tpu_runtime_max_seconds = 43200
+
+# Half a day in line for chips, which is longer than anything currently uses.
+# The multi-host glm step needs the whole cohort, so it waits out every other
+# v7x workload before it can start.
+tpu_queue_max_seconds = 43200
+
+# An hour between a reservation and a pod. Not a broken-detector: it bounds the
+# one state no other budget here can see, where the chips are reserved and
+# nothing is using them. Warm dispatch measures nine seconds, and the rest is
+# for a shape change - quota is chips but a slice is a topology, so eight free
+# chips as two 2x2x1 nodes do not admit a 2x2x2 until those drain and a
+# two-host slice is built in their place.
+tpu_admission_max_seconds = 3600
 
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
@@ -76,8 +113,8 @@ allowed_image_repos = [
 ]
 
 # A cluster is its project and its region; everything it is called is derived
-# from those two. The cluster pins no zones; the reservation's zone (us-east5-a)
-# belongs to the TPU pools that draw on it.
+# from those two. A cluster pins no zones - the reservation's zone belongs to
+# the TPU pools that draw on it.
 worker_clusters = [
   {
     project                = "cloud-ullm-inference-ci-cd"
@@ -85,6 +122,10 @@ worker_clusters = [
     network                = "projects/cloud-ullm-inference-ci-cd/global/networks/default"
     subnetwork             = "projects/cloud-ullm-inference-ci-cd/regions/us-east5/subnetworks/default"
     master_ipv4_cidr_block = "172.16.0.32/28"
+
+    # The zone both v6e pools sit in, so the caches serve the nodes that read
+    # them. A cache in any other us-east5 zone would be billed and never hit.
+    rapid_cache_zones = ["us-east5-a"]
 
     # Reservation cloudtpu-20260828173000-731402396 in us-east5-a: 128 v6e
     # chips, 102 in use, 26 free. nominal_nodes splits those 26 between the
@@ -112,10 +153,68 @@ worker_clusters = [
         # No floor: eight chips is too much of what is free to leave parked, so
         # this shape boots a node per job.
         min_nodes = 0
-        # One slice, which is what the disagg benchmark takes. Room for two more
-        # by borrowing whatever the single-chip queue is not using.
+        # One slice guaranteed, and room for two more by borrowing whatever the
+        # single-chip queue is not using.
         nominal_nodes = 1
         max_nodes     = 3
+      },
+    ]
+  },
+
+  # The v7x lane, in us-central1 because that is where its reservation is.
+  {
+    project                = "cloud-ullm-inference-ci-cd"
+    location               = "us-central1"
+    network                = "projects/cloud-ullm-inference-ci-cd/global/networks/default"
+    subnetwork             = "projects/cloud-ullm-inference-ci-cd/regions/us-central1/subnetworks/default"
+    master_ipv4_cidr_block = "172.16.0.64/28"
+
+    # The zone all three v7x pools sit in.
+    rapid_cache_zones = ["us-central1-c"]
+
+    # Three shapes over the v7x reservation's free chips, which is every shape
+    # the tests ask for. The quota is not split between them: the chips will not
+    # divide three ways and still leave each a whole slice, so all of it is
+    # nominal on 2x2x1 and the other two run on what that one is
+    # not using. Every pool's max_nodes is the full eight chips, so the cohort
+    # accounting decides how many run at once and the node pools only decide
+    # what a chip can be shaped into.
+    #
+    # min_nodes is 0 throughout: the reservation has no slack, so a floor is
+    # chips held out of it permanently rather than a warm node.
+    tpu_node_pools = [
+      {
+        machine_type     = "tpu7x-standard-1t"
+        topology         = "1x1x1"
+        reservation_name = "cloudtpu-20251114223000-2002888989"
+        zone             = "us-central1-c"
+
+        min_nodes     = 0
+        nominal_nodes = 0
+        max_nodes     = 8
+      },
+      {
+        machine_type     = "tpu7x-standard-4t"
+        topology         = "2x2x1"
+        reservation_name = "cloudtpu-20251114223000-2002888989"
+        zone             = "us-central1-c"
+
+        min_nodes     = 0
+        nominal_nodes = 2
+        max_nodes     = 2
+      },
+      {
+        # Eight chips as one slice across two VMs: the multi-host shape, placed
+        # from the named workload policy in workers.tf. It takes the whole
+        # cohort, which means it waits for every other v7x workload to finish.
+        machine_type     = "tpu7x-standard-4t"
+        topology         = "2x2x2"
+        reservation_name = "cloudtpu-20251114223000-2002888989"
+        zone             = "us-central1-c"
+
+        min_nodes     = 0
+        nominal_nodes = 0
+        max_nodes     = 2
       },
     ]
   },
@@ -126,3 +225,4 @@ labels = {
   workload    = "tpu-ci"
   owner       = "tpu-inference"
 }
+

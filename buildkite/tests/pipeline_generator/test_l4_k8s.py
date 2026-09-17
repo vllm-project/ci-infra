@@ -130,7 +130,6 @@ def test_l4_step_keeps_explicit_retry():
         (None, 2, AgentQueue.GPU_4),
         (None, 4, AgentQueue.GPU_4),
         ("h100", None, AgentQueue.MITHRIL_H100),
-        ("a100", None, AgentQueue.A100),
     ],
 )
 def test_non_l4_steps_keep_existing_routing(device, num_devices, queue):

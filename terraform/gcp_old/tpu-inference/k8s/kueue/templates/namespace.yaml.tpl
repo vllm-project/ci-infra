@@ -10,4 +10,4 @@ metadata:
     # that does not need the exemption still shows up.
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn: restricted${EXTRA_LABELS}

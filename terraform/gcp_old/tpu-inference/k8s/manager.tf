@@ -3,27 +3,17 @@
 # that nothing running here competes with a test for chips. Worker clusters hold
 # the TPUs and attach to this one through Fleet.
 #
-# Autopilot is ForceNew: switching to Standard rebuilds the cluster and every
-# workload on it.
+# Standard, like the workers, because this is where every workload podspec is
+# born. Autopilot admission-mutates a podspec it considers underspecified - it
+# fills in a nodeAffinity on cloud.google.com/extended-duration-pods for any pod
+# that arrives without one - and MultiKueue copies the podspec to a worker
+# verbatim, where no node carries that label and the pod is unschedulable with
+# nothing reporting an error. A launcher that builds podspecs for another
+# cluster cannot share a cluster with something that rewrites them.
 
-# Nodes are private, so egress - image pulls, Buildkite's API, Secret Manager -
-# has to go through Cloud NAT.
-resource "google_compute_router" "manager" {
-  name    = "${var.name_prefix}-mgr-router"
-  project = var.project_id
-  region  = var.manager_region
-  network = var.network
-}
-
-resource "google_compute_router_nat" "manager" {
-  name                               = "${var.name_prefix}-mgr-nat"
-  project                            = var.project_id
-  region                             = var.manager_region
-  router                             = google_compute_router.manager.name
-  nat_ip_allocate_option             = "AUTO_ONLY"
-  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
-}
-
+# Nodes here are private, so egress - image pulls, Buildkite's API, Secret
+# Manager - goes through the Cloud NAT covering this region. It is created
+# outside this config, with the rest of the networking; see workers.tf.
 resource "google_container_cluster" "manager" {
   project  = var.project_id
   name     = "${var.name_prefix}-manager"
@@ -32,7 +22,19 @@ resource "google_container_cluster" "manager" {
   network    = var.network
   subnetwork = var.manager_subnetwork
 
-  enable_autopilot    = true
+  remove_default_node_pool = true
+  initial_node_count       = 1
+
+  # Only ever the pool that remove_default_node_pool deletes again, and it is
+  # named because the default is e2-medium in every zone of the region at once:
+  # four nodes created to be thrown away, and a shortage in any one of them
+  # fails the whole cluster create. us-central1 runs out of e2 regularly.
+  #
+  # Read at create and never again - see the lifecycle block below.
+  node_config {
+    machine_type = var.manager_bootstrap_machine_type
+  }
+
   deletion_protection = var.deletion_protection
 
   release_channel {
@@ -54,18 +56,12 @@ resource "google_container_cluster" "manager" {
     role                                      = "manager"
   })
 
-  # Autopilot has no node pool to hang a service account on, so this is the only
-  # place to keep nodes off the project default compute account - which holds
-  # tpu.admin, storage.admin and project-wide secretmanager.secretAccessor,
-  # because the bare-metal agent VMs share it.
-  #
-  # `enabled` must stay unset: on Autopilot the autoscaler is always on and
-  # setting it is an error. Only auto_provisioning_defaults is honoured.
-  cluster_autoscaling {
-    auto_provisioning_defaults {
-      service_account = google_service_account.manager_nodes.email
-      oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
-    }
+  # Empty: GKE picks and creates the pod and service secondary ranges, as on the
+  # workers.
+  ip_allocation_policy {}
+
+  workload_identity_config {
+    workload_pool = "${var.project_id}.svc.id.goog"
   }
 
   private_cluster_config {
@@ -94,5 +90,64 @@ resource "google_container_cluster" "manager" {
       enabled           = true
       rotation_interval = "300s"
     }
+  }
+
+  # There are no fixed node pools here. Every node this cluster runs is created
+  # by GKE for a pod that is already pending, from whichever machine family and
+  # zone has capacity at that moment - see the ComputeClass in
+  # kueue/templates/compute_class.yaml.tpl for the order it tries them in. A
+  # pool pinned to one machine type in one region is a stockout away from the
+  # fleet having no control plane, and nothing here holds accelerators or state.
+  #
+  # The limits are the fleet's ceiling, not a pool's: a launcher pod waiting on
+  # quota occupies a node without holding a chip, so what has to fit is the
+  # Buildkite controller's in-flight limit rather than any TPU count.
+  cluster_autoscaling {
+    enabled = true
+
+    resource_limits {
+      resource_type = "cpu"
+      maximum       = var.manager_max_cpu
+    }
+
+    resource_limits {
+      resource_type = "memory"
+      maximum       = var.manager_max_memory_gb
+    }
+
+    auto_provisioning_defaults {
+      # Off the project default compute account, which holds tpu.admin,
+      # storage.admin and project-wide secretmanager.secretAccessor because the
+      # bare-metal agent VMs share it.
+      service_account = google_service_account.manager_nodes.email
+      oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+
+      disk_type  = "pd-balanced"
+      disk_size  = 100
+      image_type = "COS_CONTAINERD"
+
+      management {
+        auto_repair  = true
+        auto_upgrade = true
+      }
+
+      shielded_instance_config {
+        enable_integrity_monitoring = true
+        enable_secure_boot          = true
+      }
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [
+      # The default pool this describes is deleted seconds after it is created,
+      # so an apply that tried to reconcile it fails with "Node pool
+      # default-pool not found on update".
+      node_config,
+
+      # GKE turns these on by itself and reports them back, so they diff on
+      # every plan if tracked.
+      monitoring_config,
+    ]
   }
 }

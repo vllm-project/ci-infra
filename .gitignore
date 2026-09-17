@@ -42,6 +42,20 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Packaging artifacts, written by `pip install ./buildkite/pipeline_generator`
+# and by any other source install in this repo
+build/
+dist/
+*.egg-info/
+
+# Tool caches
+.venv/
+.pytest_cache/
+.ruff_cache/
+
 .cache
 *.log
 .claude/
+
+# Buildkite CLI's per-checkout state, written by `bk` on first use.
+.bk.yaml

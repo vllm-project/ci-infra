@@ -597,7 +597,11 @@ def convert_group_step_to_buildkite_step(
             # In a retry build a step may be present only because its AMD
             # mirror was requested; then emit the mirror but not the step.
             only_step_keys = global_config["only_step_keys"]
-            include_step = only_step_keys is None or step_key in only_step_keys
+            # The A100 fleet is retired; retain declarations only for AMD mirrors.
+            include_step = (
+                step.device != DeviceType.A100
+                and (only_step_keys is None or step_key in only_step_keys)
+            )
             if is_amd_gpu_device(step.device):
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
@@ -768,7 +772,7 @@ def convert_group_step_to_buildkite_step(
                     no_gpu=amd_no_gpu,
                     num_nodes=amd.get("num_nodes", step.num_nodes),
                     soft_fail=amd.get("soft_fail", step.soft_fail or False),
-                    parallelism=step.parallelism,
+                    parallelism=amd.get("parallelism", step.parallelism),
                     concurrency=amd.get("concurrency", step.concurrency),
                     concurrency_group=amd.get(
                         "concurrency_group", step.concurrency_group

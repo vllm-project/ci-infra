@@ -33,6 +33,8 @@ from generate_manifests import (
     LAUNCHER_DEFAULT_JOB,
     LAUNCHER_DEFAULT_JOB_KEY,
     LAUNCHER_MANIFEST_CONFIGMAP,
+    LAUNCHER_POD_DEFAULTS,
+    LAUNCHER_POD_DEFAULTS_KEY,
     LAUNCHER_SCRIPT,
     LAUNCHER_SCRIPT_CONFIGMAP,
     LAUNCHER_SCRIPT_KEY,
@@ -206,7 +208,7 @@ class Chart(Step):
 
 @dataclass(frozen=True)
 class ConfigMapFile(Step):
-    """A file on disk, applied as the one key of a ConfigMap.
+    """Files on disk, applied as the keys of a ConfigMap.
 
     kubectl builds the object, so the file goes in verbatim - no template, no
     indentation, and no second copy that can drift from the first. The
@@ -222,8 +224,11 @@ class ConfigMapFile(Step):
 
     what: str
     name: str
-    key: str
-    path: Path
+    # Key to file, as a tuple of pairs rather than a dict: this dataclass is
+    # frozen and a dict is not hashable. One kubectl invocation builds the whole
+    # object, because a ConfigMap is applied whole - a second step naming the
+    # same object would replace it and take the first one's keys with it.
+    files: tuple
     namespace: str
     field_manager: str = FIELD_MANAGER
 
@@ -232,7 +237,7 @@ class ConfigMapFile(Step):
         with tempfile.TemporaryDirectory() as tmp:
             args = ["kubectl", "create", "configmap", self.name,
                     "--namespace", self.namespace,
-                    f"--from-file={self.key}={self.path}",
+                    *(f"--from-file={key}={path}" for key, path in self.files),
                     "--dry-run=client", "-o", "yaml"]
             proc = subprocess.run(args, capture_output=True, text=True)
             if proc.returncode:
@@ -306,15 +311,16 @@ def plan(cluster: dict, index: dict) -> list[Step]:
         steps.append(ConfigMapFile(
             "launcher program",
             name=LAUNCHER_SCRIPT_CONFIGMAP,
-            key=LAUNCHER_SCRIPT_KEY,
-            path=LAUNCHER_SCRIPT,
+            files=((LAUNCHER_SCRIPT_KEY, LAUNCHER_SCRIPT),),
             namespace=index["namespace"],
         ))
         steps.append(ConfigMapFile(
-            "launcher default job",
+            "launcher job manifests",
             name=LAUNCHER_MANIFEST_CONFIGMAP,
-            key=LAUNCHER_DEFAULT_JOB_KEY,
-            path=LAUNCHER_DEFAULT_JOB,
+            files=(
+                (LAUNCHER_DEFAULT_JOB_KEY, LAUNCHER_DEFAULT_JOB),
+                (LAUNCHER_POD_DEFAULTS_KEY, LAUNCHER_POD_DEFAULTS),
+            ),
             namespace=index["namespace"],
         ))
 
@@ -449,9 +455,13 @@ def main() -> int:
 
         index = verify_generated()
         verify_buckets()
-        # In the order the generator listed them: the manager first, so its
-        # queues exist before a worker starts reporting to them.
-        clusters = index["clusters"]
+        # Workers first, manager last. What the manager holds is the launcher's
+        # registry, and everything in it is a promise about a worker - the
+        # queues a shape can be admitted to, the Secret a forwarded credential
+        # resolves against. A manager updated ahead of its workers is one
+        # promising things that are not there yet, and the pod that discovers
+        # it does so holding a TPU reservation.
+        clusters = sorted(index["clusters"], key=lambda c: c["role"] == "manager")
         print(f"Kueue v{index['kueue_version']}, JobSet v{index['jobset_version']}, "
               f"agent-stack-k8s v{index['agent_stack_version']}, "
               f"{len(clusters)} cluster(s).")

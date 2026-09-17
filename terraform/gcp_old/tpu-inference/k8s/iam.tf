@@ -6,14 +6,13 @@ resource "google_service_account" "manager_nodes" {
   display_name = "Manager GKE Node SA"
 }
 
-# container.defaultNodeServiceAccount is GKE's maintained definition of what a
-# node needs to boot, log and report metrics, and a node gets nothing beyond it.
-# Every pod scheduled to a node can reach that node's identity, so anything a
-# workload needs belongs on the workload's own service account through Workload
-# Identity instead.
+# Every pod scheduled to a node can reach that node's identity, so a node gets
+# nothing beyond container.defaultNodeServiceAccount - GKE's maintained
+# definition of what it takes to boot, log and report metrics. Anything a
+# workload needs goes on the workload's own account through Workload Identity.
 #
 # It does not cover pulling private images; that is granted per repository
-# below, from var.image_repositories, to both node accounts.
+# below, to both node accounts.
 resource "google_project_iam_member" "manager_nodes" {
   project = var.project_id
   role    = "roles/container.defaultNodeServiceAccount"
@@ -96,4 +95,18 @@ resource "google_project_iam_member" "launcher_gateway" {
   project = var.project_id
   role    = each.value
   member  = local.launcher_principal
+}
+
+# Read of the registry metadata, not of the layers: the launcher never pulls an
+# image, it asks which digest a tag currently points at so that every pod in a
+# workload is pinned to one set of bytes. The pull itself is the node service
+# accounts' above.
+resource "google_artifact_registry_repository_iam_member" "launcher" {
+  for_each = local.manager_repository_bindings
+
+  project    = var.project_id
+  location   = each.value.location
+  repository = each.value.repository
+  role       = "roles/artifactregistry.reader"
+  member     = local.launcher_principal
 }

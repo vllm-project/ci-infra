@@ -1,46 +1,26 @@
 # Worker clusters: where the TPUs are. Standard, not Autopilot, because a TPU
 # node needs reservation affinity on a named reservation, the google.com/tpu
-# taint and COMPACT placement with an explicit topology - none of which
+# taint and a placement policy carrying an explicit topology - none of which
 # Autopilot lets through.
 #
-# The control plane is regional so that it survives a zone going away, and the
-# cluster sets no node_locations: it has no opinion about zones. The one thing
-# that does is a TPU node, which must land in its reservation's zone, and each
-# TPU pool pins that for itself.
+# The control plane is regional and the cluster sets no node_locations. The one
+# thing with an opinion about zones is a TPU node, which must land in its
+# reservation's zone, and each TPU pool pins that for itself.
 
-# Worker nodes are private too, and Private Google Access is not enough on its
-# own: it resolves Google's endpoints, so Artifact Registry and the GKE system
-# images work without egress, but Kueue and JobSet are published on
-# registry.k8s.io and time out. Per region, because a Cloud Router is regional.
-resource "google_compute_router" "worker" {
-  for_each = local.workers
-
-  name    = "${var.name_prefix}-wkr-${each.value.short_name}-router"
-  project = each.value.project
-  region  = each.value.location
-  network = each.value.network
-}
-
-resource "google_compute_router_nat" "worker" {
-  for_each = local.workers
-
-  name                               = "${var.name_prefix}-wkr-${each.value.short_name}-nat"
-  project                            = each.value.project
-  region                             = each.value.location
-  router                             = google_compute_router.worker[each.key].name
-  nat_ip_allocate_option             = "AUTO_ONLY"
-  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
-}
-
+# Nodes here are private, and Private Google Access only resolves Google's own
+# endpoints: Artifact Registry and the GKE system images work without egress,
+# but Kueue and JobSet are published on registry.k8s.io and time out. So every
+# region a worker runs in needs a Cloud Router and a Cloud NAT, created outside
+# this config because a NAT gateway covers a whole region and network - the
+# manager's already serves us-central1, and a second one declared here for a
+# worker in the same region would be refused. See the README before adding a
+# region.
 resource "google_container_cluster" "worker" {
   for_each = local.workers
 
-  # The region alone, because a cluster name is scoped to its project. It is
-  # also the Fleet membership ID, and every worker joins the manager's fleet
+  # Also the Fleet membership ID, and every worker joins the manager's fleet
   # whatever project it runs in - so two clusters in one region in different
-  # projects would ask for one membership and the second apply would be
-  # refused. An optional short-name field would fix that without renaming
-  # anything that exists.
+  # projects would ask for one membership and the second apply would be refused.
   name     = "${var.name_prefix}-${each.value.short_name}"
   project  = each.value.project
   location = each.value.location
@@ -71,31 +51,97 @@ resource "google_container_cluster" "worker" {
     workload_pool = "${each.value.project}.svc.id.goog"
   }
 
-  # How the cache buckets reach a pod. The driver is off by default and cannot
-  # be installed by applying a manifest; it is a GKE addon, and a
-  # PersistentVolume naming gcsfuse.csi.storage.gke.io just stays Pending
-  # without it. Only on workers, because only the TPU pods mount the caches.
+  # How the cache buckets reach a pod. The driver is a GKE addon, off by
+  # default and not installable by applying a manifest; without it a
+  # PersistentVolume naming gcsfuse.csi.storage.gke.io just stays Pending.
   addons_config {
     gcs_fuse_csi_driver_config {
       enabled = true
     }
   }
 
+  # A pod here is on another cluster from the launcher that submitted it, so a
+  # value the launcher resolved would travel as plaintext in the podspec and be
+  # copied again into the Kueue Workload. A secretKeyRef instead needs the
+  # Secret to exist here, which is what these two addons let the sync do.
+  #
+  # Five minutes to match the manager: a rotation the clusters notice at
+  # different times is a difference nobody would think to look for.
+  secret_manager_config {
+    enabled = true
+    rotation_config {
+      enabled           = true
+      rotation_interval = "300s"
+    }
+  }
+
+  secret_sync_config {
+    enabled = true
+    rotation_config {
+      enabled           = true
+      rotation_interval = "300s"
+    }
+  }
+
   # MultiKueue reaches workers through the Connect Gateway, which resolves a
-  # Fleet membership rather than a kubeconfig. Registering here is enough: GKE
-  # creates the membership itself, in the cluster's region, and ties its
-  # lifecycle to the cluster. A google_gke_hub_membership for the same cluster
-  # collides with that one instead of adopting it.
+  # Fleet membership rather than a kubeconfig. GKE creates the membership itself
+  # from this block and ties its lifecycle to the cluster; a separate
+  # google_gke_hub_membership collides with that one instead of adopting it.
   fleet {
     project = var.project_id
   }
 
-  # OPTIMIZE_UTILIZATION because every TPU shape draws on one reservation of 26
-  # chips. A node that has gone idle is holding chips another shape cannot have
-  # until it is reaped, so reaping promptly is what lets the shapes hand over;
-  # BALANCED would let it sit.
+  # Every TPU shape on a cluster draws on one reservation, so a node that has
+  # gone idle is holding chips another shape cannot have until it is reaped.
+  # Reaping promptly is what lets the shapes hand over; BALANCED would let it
+  # sit.
   cluster_autoscaling {
     autoscaling_profile = "OPTIMIZE_UTILIZATION"
+
+    # Describes a node created for a pending pod, not one of the pools declared
+    # below: a ComputeClass with nodePoolAutoCreation makes those, and what it
+    # does not state for itself it takes from here. Set even though cluster-wide
+    # autoprovisioning is off - leave the block out and GKE fills the same
+    # fields with its own answers, which is how the existing worker-cpu nodes
+    # came up with secure boot disabled.
+    #
+    # Enabling autoprovisioning to get this would cost more than it gives: the
+    # resource_limits that then become mandatory count every node in the
+    # cluster, including the TPU pools below, so a ceiling sized for a benchmark
+    # client is a ceiling on v6e and v7x scale-up.
+    auto_provisioning_defaults {
+      # Anything but the Compute Engine default account, which is what GKE
+      # supplies unasked. On this project that one carries tpu.admin,
+      # storage.admin, compute.instanceAdmin.v1, iam.serviceAccountUser and
+      # project-wide secretmanager.secretAccessor, because the bare-metal agent
+      # VMs run as it. Workload Identity is on for these nodes too, so what this
+      # closes is the kubelet's own reach rather than any pod's.
+      service_account = google_service_account.worker_nodes[each.key].email
+      # Wider than the six GKE would pick, deliberately: a scope only ever
+      # subtracts from what IAM already allows, and the account above holds
+      # nothing worth a second bound. Narrow scopes on a broad account would be
+      # the combination worth having, and it is not the one on offer.
+      oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+
+      # Every family worker-cpu will pick takes pd-balanced. A class offering
+      # one of the families that requires Hyperdisk would need to state its own
+      # boot disk rather than inherit this.
+      disk_type  = "pd-balanced"
+      disk_size  = 100
+      image_type = "COS_CONTAINERD"
+
+      management {
+        auto_repair  = true
+        auto_upgrade = true
+      }
+
+      # No ComputeClass field corresponds to these, so this block is the only
+      # place in the fleet that can ask for them on an auto-created node.
+      shielded_instance_config {
+        enable_integrity_monitoring = true
+        enable_secure_boot          = true
+      }
+    }
   }
 
   resource_labels = merge(local.common_labels, {
@@ -105,10 +151,8 @@ resource "google_container_cluster" "worker" {
 
   lifecycle {
     ignore_changes = [
-      # GKE turns these on by itself and reports them back, so they diff on
-      # every plan if tracked.
-      secret_manager_config,
-      secret_sync_config,
+      # GKE turns this on by itself and reports it back, so it diffs on every
+      # plan if tracked.
       monitoring_config,
     ]
   }
@@ -128,9 +172,22 @@ resource "google_container_node_pool" "worker_system" {
   # total_, not the per-zone min_node_count/max_node_count: in a regional
   # cluster those are multiplied by the number of zones, so a floor of 1 would
   # quietly become one node per zone.
+  #
+  # ANY rather than the default, for the opposite reason to the TPU pools below:
+  # not because a balanced spread breaks the shape, but because this is the one
+  # pool on a worker with no second choice of machine type. A node pool takes
+  # one, and the pods here are GKE's own addons, which carry no compute class
+  # selector and so cannot be given the worker-cpu family ordering. All the
+  # fallback available to it is the other zones in the region, and BALANCED
+  # spends that on an even spread it has no use for at one node.
+  #
+  # It buys a zone for scale-up only. Replacing the machine type surges into the
+  # zone the outgoing node already sits in, so a family this region is short of
+  # fails that upgrade no matter what is set here.
   autoscaling {
     total_min_node_count = each.value.system_min_nodes
     total_max_node_count = each.value.system_max_nodes
+    location_policy      = "ANY"
   }
 
   management {
@@ -164,10 +221,34 @@ resource "google_container_node_pool" "worker_system" {
   }
 }
 
+# How a tpu7x slice is placed. Compute Engine will not build a node pool's
+# managed instance group around a compact placement policy for this machine
+# type and points at a workload policy instead. HIGH_THROUGHPUT is the
+# colocating one; the accelerator topology on it is what makes it a slice
+# rather than a hint, and GKE reads it back out and labels the nodes with it.
+#
+# One policy per pool rather than one per topology, so a pool can be replaced
+# without disturbing another that happens to be the same shape.
+resource "google_compute_resource_policy" "tpu_slice" {
+  for_each = {
+    for key, pool in local.tpu_node_pools : key => pool
+    if pool.is_multi_host && pool.family == "tpu7x"
+  }
+
+  project = local.workers[each.value.worker].project
+  region  = local.workers[each.value.worker].location
+  name    = "${each.value.name}-slice"
+
+  workload_policy {
+    type                 = "HIGH_THROUGHPUT"
+    accelerator_topology = each.value.topology
+  }
+}
+
 # One pool per TPU shape. min_nodes is a scale-down floor, so a shape keeps
-# nodes it has already booted; GKE creates them only for a pending pod, never
-# to reach the floor. max_nodes exceeds this pool's share of the reservation,
-# so the shapes compete for what is free rather than each owning a fixed slice.
+# nodes it has already booted; GKE creates them only for a pending pod, never to
+# reach the floor. max_nodes exceeds this pool's share of the reservation, so
+# the shapes compete for what is free rather than each owning a fixed slice.
 resource "google_container_node_pool" "worker_tpu" {
   for_each = local.tpu_node_pools
 
@@ -180,11 +261,21 @@ resource "google_container_node_pool" "worker_tpu" {
   # region and lands in zones that cannot serve the reservation.
   node_locations = [each.value.zone]
 
-  # total_, not the per-zone pair: one zone makes them equal today, but adding
-  # a second would quietly double a per-zone floor.
+  # The per-zone pair, not total_: node_locations pins the pool to one zone so
+  # the two carry the same number, but only this pair is the field GKE sizes a
+  # TPU slice against. Set as a total, the per-zone field arrives as zero and
+  # the pool is rejected - "Maximum node count 0 is not a valid size of TPU pod
+  # slice with topology 2x2x2" - which surfaces only on shapes spanning more
+  # than one host, since a single-host pool has no slice to divide.
+  #
+  # ANY rather than the default: TPU autoscaling wants the zone with capacity,
+  # and a balanced spread across zones cannot build a slice at all. Moot while
+  # node_locations is one zone, and stated so that adding a second does not
+  # quietly turn it on.
   autoscaling {
-    total_min_node_count = each.value.min_nodes
-    total_max_node_count = each.value.max_nodes
+    min_node_count  = each.value.min_nodes
+    max_node_count  = each.value.max_nodes
+    location_policy = "ANY"
   }
 
   management {
@@ -203,8 +294,25 @@ resource "google_container_node_pool" "worker_tpu" {
 
     # A test image here is tens of gigabytes and a pod reads part of it, so
     # starting before the pull finishes is most of the cold start.
+    #
+    # Streaming serves an image GKE has converted, and it converts each digest
+    # once: the first node to want a freshly pushed image waits out the
+    # conversion and every node after it mounts in seconds. So a slow first pull
+    # is not streaming failing to engage, and caching layers on the node would
+    # not shorten it - the digest is new every build.
     gcfs_config {
       enabled = true
+    }
+
+    # A serving workload maps far more regions than the 65530 default allows -
+    # one per weight shard, per compiled executable and per KV buffer - and dies
+    # partway through model load without this. Set on the node because the
+    # alternative, an init container in every manifest, would need privilege and
+    # so be refused by PodSecurity baseline on the workload namespace.
+    linux_node_config {
+      sysctls = {
+        "vm.max_map_count" = "8388608"
+      }
     }
 
     labels = {
@@ -212,7 +320,6 @@ resource "google_container_node_pool" "worker_tpu" {
       "tpu-ci.google.com/profile" = each.value.name
     }
 
-    # Nothing lands on a TPU node unless it asked for one.
     taint {
       key    = "google.com/tpu"
       value  = "present"
@@ -232,12 +339,18 @@ resource "google_container_node_pool" "worker_tpu" {
     }
   }
 
-  # A slice wider than one VM needs its topology on a placement policy; GKE then
+  # A slice wider than one VM needs a policy that places it as a unit; GKE then
   # creates one node per host and scales the pool atomically.
+  #
+  # Up to v6e, COMPACT asks GKE to derive a compact placement policy from the
+  # topology. tpu7x refuses one and takes the named workload policy above
+  # instead, and GKE stores no type at all in that case - so stating one is a
+  # diff that would replace the pool on every apply.
   dynamic "placement_policy" {
     for_each = each.value.is_multi_host ? [1] : []
     content {
-      type         = "COMPACT"
+      type         = each.value.family == "tpu7x" ? "" : "COMPACT"
+      policy_name  = each.value.family == "tpu7x" ? google_compute_resource_policy.tpu_slice[each.key].name : null
       tpu_topology = each.value.topology
     }
   }

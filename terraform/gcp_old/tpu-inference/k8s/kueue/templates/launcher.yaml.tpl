@@ -82,6 +82,19 @@ metadata:
   name: tpu-launcher
   namespace: ${NAMESPACE}
 template:
+  metadata:
+    annotations:
+      # The same protection the workload pod carries on the worker, for the
+      # same reason and with more of it needed. This pod spends most of its
+      # life waiting - for quota, for a node, for a test that runs for hours -
+      # and it does nothing while it waits, which is exactly the profile a
+      # scale-down picks: a Job-backed pod on a node with nothing else on it.
+      #
+      # Losing it is worse than losing the workload. The workload is a Job and
+      # comes back; this pod is the step's agent, so an eviction is a Buildkite
+      # job whose agent stopped reporting - exit_status -1, no error, and the
+      # workload it was watching left running on the worker.
+      cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
   spec:
     serviceAccountName: tpu-launcher
     # Pod-level: agent-stack-k8s adds the agent and the checkout to this pod and
@@ -130,14 +143,28 @@ template:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.uid
-        # Requests only: Autopilot mirrors them into limits, so a limit above
-        # the request would be a request at the limit's size and a bill to
-        # match. Not as small as it looks - the launcher polls kubectl and
-        # gcloud, both Python, and holds log lines in memory.
+        # Memory is what the launcher actually uses - kubectl and gcloud are
+        # both Python, and a poll's worth of log lines is held in memory - so
+        # that is what it reserves.
+        #
+        # CPU is a packing number here rather than a need. A queued step is a
+        # launcher pod polling on an interval, and the queue is allowed to be a
+        # day deep, so the manager is sized by how many steps are waiting rather
+        # than by how many are running. The request is what decides how many of
+        # those fit on a node; with no cpu limit, a launcher that briefly needs
+        # more than it reserved still gets it.
+        #
+        # A memory limit and no cpu limit. The launcher shares its nodes with
+        # the controllers that run the fleet, so a step whose workload floods
+        # the log must not be able to take the Kueue controller down with it;
+        # cpu is left unbounded because throttling a poller only makes it slower
+        # to notice its workload finished.
         resources:
           requests:
-            cpu: "500m"
+            cpu: "100m"
             memory: 1Gi
+          limits:
+            memory: 2Gi
         volumeMounts:
           - name: launcher-scripts
             mountPath: /opt/launcher
@@ -154,7 +181,8 @@ template:
       - name: launcher-profiles
         configMap:
           name: tpu-launcher-profiles
-      # The Job a step gets when it names hardware and nothing else.
+      # The Job the launcher supplies itself, for a step that names hardware
+      # and nothing else.
       - name: launcher-manifests
         configMap:
           name: tpu-launcher-manifests

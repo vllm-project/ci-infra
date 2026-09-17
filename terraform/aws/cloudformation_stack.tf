@@ -23,6 +23,8 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      elastic_ci_stack_version             = "6.41.5"  # Stack v6.41.5 bakes agent 3.107.0
+      BootstrapScriptUrl                  = "https://vllm-ci.s3.us-west-2.amazonaws.com/instance-bootstrap.sh"
     }
 
     medium-cpu-queue-premerge = {

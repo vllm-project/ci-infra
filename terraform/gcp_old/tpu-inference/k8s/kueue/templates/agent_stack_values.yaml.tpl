@@ -21,3 +21,60 @@ config:
   # cluster from the agent token, which is why that token has to be a
   # cluster's and not the organization's.
   queue: ${BUILDKITE_QUEUE}
+
+  # How long a container may sit unable to start before the controller gives
+  # up on the step. The chart's thirty seconds assumes a warm node and a small
+  # image; a fleet node is often brand new, and the pull is a CI image built
+  # per commit, so nothing about it is cached anywhere. Steps were failing with
+  # exit -1, no agent and an empty log - the controller had failed them before
+  # a pod ever ran, which reads as a Buildkite fault rather than a slow pull.
+  #
+  # Five minutes, not longer: this is also what catches an image that does not
+  # exist, and that should not cost a step its whole timeout.
+  image-pull-backoff-grace-period: 5m
+
+  # An upper bound and nothing else. The chart's default is six hours, and it
+  # is what was ending every long kube step at 5h59m48s - the Job's deadline
+  # kills the pods, so Buildkite sees a vanished agent and records exit_status
+  # -1 against an empty log. A step stopped this way says nothing about why,
+  # which makes it the wrong layer to enforce anything at.
+  #
+  # The two budgets worth failing on are the launcher's, because each names a
+  # cause: a step that cannot get chips within tpu_queue_max_seconds is telling
+  # you about the fleet, and one that holds them past its activeDeadlineSeconds
+  # is telling you about the test. Both report before they stop anything.
+  #
+  # Derived, not chosen, so it cannot drift under the budgets it exists to sit
+  # above: their sum, plus two hours for everything outside them - pod
+  # scheduling, the image pull, the checkout, and the log sweep after the
+  # workload is gone.
+  job-active-deadline-seconds: ${AGENT_JOB_DEADLINE_SECONDS}
+
+  # The git SSH key, on every agent pod's checkout container. Controller-wide
+  # rather than per-pipeline `gitEnvFrom`, because which repositories are
+  # private is not something a pipeline should have to know: a public one
+  # ignores the key, so the cost of it being everywhere is nothing, and the
+  # alternative is a plugin stanza that only fails once a repository turns
+  # private.
+  #
+  # Only the checkout container. The command container runs the step, which on
+  # this fleet is a workload image named by a pull request, and a deploy key
+  # reaching that is a key a pull request can read.
+  # Shallow, blobless checkouts for every step. A pod's checkout is cold every
+  # time - there is no reusable clone on a long-lived VM to fall back on - so
+  # the full history is fetched once per step and used for nothing.
+  #
+  # Controller-wide for the same reason as the key below: no pipeline should
+  # have to know this. A step that needs history or tags overrides it with the
+  # plugin's own `checkout:` block, which wins over this patch.
+  pod-spec-patch:
+    containers:
+      - name: checkout
+        env:
+          - name: BUILDKITE_GIT_CLONE_FLAGS
+            value: "-v --depth 1 --filter=blob:none"
+          - name: BUILDKITE_GIT_FETCH_FLAGS
+            value: "-v --prune --depth 1 --filter=blob:none"
+        envFrom:
+          - secretRef:
+              name: ${GIT_CREDENTIALS_SECRET_NAME}

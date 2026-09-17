@@ -107,6 +107,31 @@ module "ci_v7x_16" {
   # disk_size defaults to 0, disable attached disk
 }
 
+# 4 hosts x 4 chips (2x2x4). Same multi-host shape as tpu7x-16: the agent runs
+# on worker 0 and fans out to the other hosts over ssh. No data disk: a
+# READ_WRITE disk cannot be shared by four hosts, and the multi-host jobs
+# stream weights from GCS instead. Replaces the hand-built ranlihao-v7x-32 slice.
+#
+# instance_count is 0 because the project's tpu7x reservation is fully used
+# and a tpu7x-32 needs 16 chips. The hand-built slice still holds them. Raise
+# to 1 after that slice is deleted (or 4 tpu7x-8 nodes are released).
+module "ci_v7x_32" {
+  source = "../modules/ci_v7x"
+  providers = {
+    google-beta = google-beta.us-central1-c
+  }
+
+  accelerator_type                = "tpu7x-32"
+  reserved                        = true
+  instance_count                  = 0
+  buildkite_queue_name            = "tpu_v7x_32_queue"
+  project_id                      = var.project_id
+  project_short_name              = var.project_short_name
+  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
+  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
+  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+}
+
 # purpose puts these on the self-describing naming scheme,
 # vllm-ci-<kind>-<purpose>-<zone>-<index>, shared by the VM, its disk, its
 # address, and the Buildkite agent.
