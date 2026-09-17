@@ -1,41 +1,26 @@
 #!/usr/bin/env python3
 """Submit a TPU workload on behalf of a Buildkite job, then own its lifecycle.
 
-Runs as the command container of an agent-stack-k8s Job in the manager
-cluster. Every TPU step goes through here, single pod or not, so there is one
-code path and one place where policy lives.
+Runs as the command container of an agent-stack-k8s Job in the manager cluster.
 
     launch --machine-type ct6e-standard-8t --topology 2x4 -- pytest tests/e2e
     launch --manifest .buildkite/kubernetes/manifests/1p1d.yaml
 
-Why a launcher rather than running the test in this pod: agent-stack-k8s can
-only create a batch/v1 Job, and a Job cannot span hosts, so multi-host work
-needs something to create a JobSet. Routing the single-pod case through it too
-costs one cheap CPU pod and buys two properties that only hold when the agent
-is outside the Kueue workload: the agent acquires its Buildkite job in seconds
-rather than after admission and node scale-up, so the reservation cannot lapse
-and be claimed twice; and preemption evicts the workload without killing the
-agent, so a preempted run is a pause in the log rather than a failed build.
+Every TPU step goes through here, single pod or not. agent-stack-k8s can only
+create a batch/v1 Job and a Job cannot span hosts, so multi-host work needs
+something to create a JobSet; keeping the agent outside the Kueue workload also
+means the Buildkite job is acquired before admission and that preemption pauses
+a run rather than failing it.
 
-The two forms above are the same path with different manifests. Most steps run
-one pod on one host, which is the same YAML every time, so the launcher ships
-that Job itself and a step gives only the hardware and the command. A step that
-needs another arrangement - roles that talk to each other, hosts of one slice -
-brings a manifest instead, and that manifest says everything: the hardware,
-because a JobSet can hold roles that want chips beside a client that wants none
-and no flag here could express that, and the commands, because a JobSet has one
-per role and no reading of one command line says which of them it replaces.
+Both forms are the same path with different manifests: the launcher ships the
+single-pod Job, and anything else comes as a manifest from the repo under test,
+which states its own hardware and its own per-role commands. Placement is
+therefore read back out of the manifest, where it can be checked against the
+profile registry rather than queueing forever against quota that does not exist.
 
-So placement is read back out of the manifest rather than taken from a flag.
-That is also the only reading that can be checked: a shape the fleet has no
-node pool for is refused here, where the profile registry says what the pools
-are, instead of queueing forever against quota that does not exist.
-
-A manifest comes from the repo being tested, and so is untrusted. PodSecurity
-`baseline` on the workload namespace already rejects privileged containers,
-hostPath volumes and host networking, so validation here covers only what
-admission cannot know: that the image is from an allowed registry, and that the
-workload does not run as the launcher's own identity.
+A repo manifest is untrusted. PodSecurity `baseline` on the workload namespace
+already rejects privileged containers, hostPath volumes and host networking, so
+validation here covers only what admission cannot know.
 """
 
 import argparse
@@ -52,9 +37,6 @@ import sys
 import time
 import urllib.request
 
-# Comes from the launcher image, which exists to add it: the Cloud CLI image it
-# is built on ships no YAML importable from Python 3. Installed there rather
-# than fetched here, so PyPI is not in the path of every TPU step.
 try:
     import yaml
 except ImportError:
@@ -67,35 +49,32 @@ PROFILES_PATH = os.environ.get(
     "LAUNCHER_PROFILES", "/opt/launcher/profiles/profiles.yaml"
 )
 
-# The Job a step gets when it names hardware and nothing else. Deployed beside
-# this program rather than kept in a repo, because everything in it is a fact
-# about the cluster - which caches exist, what mounts them, which identity may
-# write them - and a repo that copied it would be copying those.
+# The Job a step gets when it names hardware and nothing else. Deployed with
+# the launcher rather than kept in a repo: everything in it (which caches
+# exist, what mounts them, which identity may write them) is cluster state.
 DEFAULT_JOB = os.environ.get("LAUNCHER_DEFAULT_JOB", "/opt/launcher/manifests/job.yaml")
+POD_DEFAULTS = os.environ.get(
+    "LAUNCHER_POD_DEFAULTS", "/opt/launcher/manifests/pod_defaults.yaml")
 
-# Where a pod says what hardware it wants. Read back to find the profile, so
-# these are the launcher's names for them too.
 ACCELERATOR_KEY = "cloud.google.com/gke-tpu-accelerator"
 TOPOLOGY_KEY = "cloud.google.com/gke-tpu-topology"
 TPU_RESOURCE = "google.com/tpu"
 
-# Where Kueue reads the queue, on the top-level object for both Job and JobSet.
+# Kueue reads this on the top-level object for both Job and JobSet, never on
+# the inner pods.
 QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 
 # GKE's name, not ours: the gcsfuse sidecar looks for an emptyDir called this
-# and uses it as the file cache. Sized here because the ceiling is a fact about
-# the host, and the manifest does not know which host it landed on.
+# and uses it as its file cache.
 FUSE_CACHE_VOLUME = "gke-gcsfuse-cache"
 
-# The pod's /dev/shm, which for the same reason is ours to size. vLLM's engine
-# processes and torch_tpu's tier-2 compilation cache both live in it, and a
-# ceiling too low does not present as a full filesystem - it presents as a
-# worker that stops answering, then as the slice failing around it.
+# The pod's /dev/shm. Too small does not present as a full filesystem - it
+# presents as a worker that stops answering, then as the slice failing around
+# it.
 SHM_VOLUME = "dshm"
 
 # Memory-backed emptyDirs the launcher sizes from the host, and the profile key
-# holding each ceiling. setdefault, so a manifest that states its own figure
-# keeps it: the launcher knows the host, the manifest knows the workload.
+# holding each ceiling.
 HOST_SIZED_VOLUMES = {
     FUSE_CACHE_VOLUME: "fuse_cache_size",
     SHM_VOLUME: "shm_size",
@@ -105,61 +84,66 @@ HOST_SIZED_VOLUMES = {
 # line is a fragment of the entry above it, not a new one.
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$")
 
-# The container a manifest must name for its test. Already assumed by env
-# forwarding, which only injects into this one.
 WORKLOAD_CONTAINER = "workload"
 
+# Held back from the BUILDKITE_* sweep in forward_env. BUILDKITE_COMMAND is the
+# step's own command line, which would have the workload re-run the launcher
+# that started it; BUILDKITE_PLUGINS can bloat the pod spec; the rest are the
+# agent's per-job API credentials, which belong to the agent rather than to a
+# workload pod.
+BUILDKITE_DENY = frozenset({
+    "BUILDKITE_COMMAND",
+    "BUILDKITE_PLUGINS",
+    "BUILDKITE_AGENT_JOB_API_SOCKET",
+    "BUILDKITE_AGENT_JOB_API_TOKEN",
+    "BUILDKITE_OIDC_TOKEN_PATH",
+})
+
+# What a manifest sets to be given the fleet's pod setup instead of restating
+# it. See inherit_defaults().
+DEFAULTS_ANNOTATION = "tpu-ci.google.com/defaults"
+DEFAULTS_STANDARD = "standard"
+
+
 POLL_SECONDS = 5
-# From admission until the first line reaches us, and only there. When the
-# workload finishes MultiKueue deletes the remote Job and the pods go with it,
-# so a short step on a warm node can be created, run and removed between two
-# ordinary polls and leave nothing to read at all. Once output is arriving the
-# pod is demonstrably still there and the ordinary interval is enough.
+# Used only until the first log line arrives. MultiKueue deletes the remote Job
+# when the workload finishes and the pods go with it, so a short step on a warm
+# node can be created, run and removed between two ordinary polls, leaving
+# nothing to read.
 FIRST_LOG_POLL_SECONDS = 2
 
 # Worker credentials are kept out of the default kubeconfig; see worker_env().
 WORKER_KUBECONFIG = "/tmp/worker.kubeconfig"
 
-# Kinds the launcher will submit. Anything else in a template is a mistake, and
-# catching it here is cheaper than a confusing RBAC denial.
 SUPPORTED_KINDS = {"Job": "job", "JobSet": "jobset"}
 
-# Every kubectl and gcloud call the launcher makes is a single API request, so
-# this is generous for all of them. Generous on purpose: the cost of being
-# wrong is not symmetric. A call cut off early turns a slow control plane into
-# a failed test, while one that waits two minutes only delays a poll that runs
-# every few seconds anyway.
+# Every kubectl and gcloud call here is a single API request. Generous on
+# purpose: a call cut off early turns a slow control plane into a failed test,
+# while one that waits two minutes only delays a poll.
 CLI_TIMEOUT_SECONDS = 120
 
-# How long the launcher will go without an answer from the manager's API server
-# before it stops waiting on the workload. A GKE control plane stops answering
-# for a few seconds whenever it is upgraded or repaired, which is routine and
-# is not a reason to end a test that has been compiling for an hour; the
-# workload is on a worker cluster and keeps running throughout. Bounded rather
-# than endless because past this the launcher can no longer say what it is
-# watching, and a step that reports nothing for the rest of its timeout is
-# worse than one that ends and says why.
+# How long to go without an answer from the manager's API server before giving
+# up on the workload. A GKE control plane stops answering for a few seconds
+# whenever it is upgraded or repaired, and the workload runs on a worker
+# cluster throughout. Bounded because past this the launcher can no longer say
+# what it is watching.
 API_GRACE_SECONDS = 600
 
-# The deadline for the delete the signal handler makes, which is racing the
-# pod's termination grace period rather than the step's timeout. Kubernetes
-# sends SIGKILL 30s after SIGTERM unless a pod asks for longer, so a delete
-# still waiting on an unresponsive API server at that point is a delete that
-# never happened - and the workload it was for keeps its chips until the
-# ownerReference collects it. Short enough to fail and say so in time.
+# Deadline for the signal handler's delete, which races the pod's termination
+# grace period (SIGKILL 30s after SIGTERM) rather than the step timeout: a
+# delete still in flight then is a delete that never happened, and the workload
+# holds its chips until the ownerReference collects it.
 CLEANUP_TIMEOUT_SECONDS = 15
 
-# Two HTTP requests, one to the node's metadata server and one to the registry,
-# and neither has a control plane behind it to be slow the way a kubectl call
-# can. They answer in under a second together, so the generous figure above
-# would only mean a registry that has stopped responding holds up every pod in
-# the workload for two minutes before the caller gives up and uses the tag.
+# Shorter than CLI_TIMEOUT_SECONDS: these are two plain HTTP requests with no
+# control plane behind them, and a registry that has stopped answering should
+# not hold up every pod in the workload before the caller falls back to the tag.
 REGISTRY_TIMEOUT_SECONDS = 20
 
-# What a manifest may be, so the registry returns the manifest itself rather
-# than converting it to the schema a client that named none is assumed to want.
-# All four, because the digest to pin is the one the pull will ask for: for a
-# multi-architecture image that is the index, not the single manifest inside it.
+# Ask for the manifest itself rather than the schema the registry assumes for a
+# client that named none. All four, because the digest to pin is the one the
+# pull will ask for: for a multi-architecture image that is the index, not the
+# single manifest inside it.
 REGISTRY_MANIFEST_ACCEPT = ", ".join([
     "application/vnd.oci.image.index.v1+json",
     "application/vnd.oci.image.manifest.v1+json",
@@ -177,19 +161,17 @@ def log(msg):
     print(f"~~~ launcher: {msg}", flush=True)
 
 
-# The agent binary, which the controller copies onto the shared workspace
-# volume rather than onto this container's PATH. Looked up anyway, so an
-# invocation that does put it on PATH keeps working.
+# The controller copies the agent binary onto the shared workspace volume
+# rather than onto this container's PATH.
 AGENT_CLI = shutil.which("buildkite-agent") or "/workspace/buildkite-agent"
 
 
 def agent(*args):
     """Run one buildkite-agent subcommand, best effort.
 
-    Everything the launcher uses this for is commentary on a run that is
-    happening either way, so a failure here is worth a line in the log and
-    nothing more. The credentials come from the step's own environment, which
-    is why there is nothing to pass.
+    Everything this is used for is commentary on a run that is happening either
+    way, so a failure is worth a log line and nothing more. Credentials come
+    from the step's own environment.
     """
     try:
         proc = subprocess.run(
@@ -208,10 +190,9 @@ def agent(*args):
 def waiting_context():
     """The annotation context for this step's "waiting for hardware" notice.
 
-    Per job rather than per build: several steps of one build queue at once,
-    each for its own shape, and a shared context would have them overwrite each
-    other. A context is also what lets the notice be withdrawn on admission -
-    an appended line could only ever be added to.
+    Per job rather than per build: several steps of one build queue at once and
+    a shared context would have them overwrite each other. A context is also
+    what lets the notice be withdrawn on admission.
     """
     job_id = os.environ.get("BUILDKITE_JOB_ID")
     return f"kueue-waiting-{job_id}" if job_id else None
@@ -221,14 +202,9 @@ def announce_waiting(context, queue, note):
     """Say on the build page that this step is queued, not running.
 
     Buildkite has no state for "the agent has the job but the hardware does
-    not". The step is `running` from the moment the launcher starts, so a build
-    where every TPU step is waiting on one busy reservation looks exactly like
-    a build where every step is executing. The log says which it is, but only
-    if someone opens the job.
-
-    An annotation is the one surface that is visible from the build page
-    without opening anything, and it is withdrawn on admission, so what is left
-    on screen is the set of steps still waiting.
+    not": the step is `running` from the moment the launcher starts. An
+    annotation is the one surface visible without opening the job, and it is
+    withdrawn on admission.
     """
     label = os.environ.get("BUILDKITE_LABEL", "this step")
     agent("annotate", "--context", context, "--style", "info",
@@ -243,16 +219,12 @@ def withdraw_waiting(context):
 def kubectl(*args, check=True, timeout=CLI_TIMEOUT_SECONDS):
     """Run one kubectl call against the manager.
 
-    Every call here is a single API request, so a deadline costs nothing when
-    the API server is answering and is the difference between a slow poll and
-    a stopped launcher when it is not. The launcher holds an admitted workload
-    for as long as it runs, and a call that never returns holds the chips with
-    it - past the step timeout, since the step is waiting on this process.
+    A call that never returns holds the admitted workload's chips past the step
+    timeout, since the step is waiting on this process.
 
-    A timeout reads as a failed call rather than an exception, so that it
-    reaches kubectl_json's classification with every other failed call and is
-    retried on the same terms rather than arriving as a traceback. The string
-    it reports is chosen not to look like any answer the API server gives.
+    With check=False a timeout is reported as a failed call rather than raised,
+    so it reaches kubectl_json's classification with every other failed call
+    and is retried on the same terms.
     """
     try:
         return subprocess.run(
@@ -265,21 +237,19 @@ def kubectl(*args, check=True, timeout=CLI_TIMEOUT_SECONDS):
         return subprocess.CompletedProcess(args, 1, "", f"timed out after {timeout}s")
 
 
-# Failures that are the API server's considered answer rather than a failure to
-# reach it. Retrying these waits out the whole grace period to arrive at the
-# same refusal, while the workload holds its chips throughout.
+# The API server's considered answer rather than a failure to reach it.
+# Retrying these waits out the whole grace period to arrive at the same
+# refusal, while the workload holds its chips throughout.
 FATAL_API_ERRORS = ("(Forbidden)", "(Unauthorized)")
 
 
 class ApiUnreachable(Exception):
     """A kubectl call that failed without telling us anything about the object.
 
-    Kept apart from a NotFound because the two call for opposite responses. An
-    object the API server says is gone will not come back and the step is over;
-    an API server that could not be reached has said nothing about the workload,
-    which is on a worker cluster and carries on regardless. A launcher that
-    reads the second as the first ends every in-flight step on the fleet each
-    time a control plane is upgraded.
+    Kept apart from NotFound because the two call for opposite responses: an
+    object the API server says is gone will not come back, while an API server
+    that could not be reached has said nothing about a workload that is on a
+    worker cluster and carries on regardless.
     """
 
 
@@ -289,12 +259,10 @@ def kubectl_json(*args):
     Raises ApiUnreachable for every other failure, so that a caller treating
     absence as terminal cannot silently treat an unanswered call the same way.
 
-    --ignore-not-found rather than reading kubectl's message, because absence is
-    the one answer the launcher must not get wrong and the message is a poor
-    witness to it: a control plane that is still registering its CRDs says
-    "the server could not find the requested resource", which is about a URL
-    path and not about our object at all. With the flag a missing object exits
-    0 with nothing on stdout, so a non-zero exit needs no interpretation.
+    --ignore-not-found rather than reading kubectl's message: a control plane
+    still registering its CRDs also says "the server could not find the
+    requested resource", which is about a URL path and not about our object.
+    With the flag a missing object exits 0 with empty stdout.
     """
     proc = kubectl(*args, "--ignore-not-found", "-o", "json", check=False)
     if proc.returncode == 0:
@@ -309,12 +277,8 @@ def delete_workload(kind, name, timeout=CLI_TIMEOUT_SECONDS):
     """Delete the workload and say whether it worked.
 
     On cancellation the launcher is about to exit, so a failed delete leaves
-    chips running with nobody watching; logging the intent alone would make
-    that indistinguishable from success.
-
-    The caller chooses the deadline because the two callers have different ones
-    to meet. The signal handler is racing the pod's termination grace period and
-    a delete still waiting when that expires is a delete that never happened.
+    chips running with nobody watching. The caller chooses the deadline: the
+    signal handler has the pod's termination grace period to meet.
     """
     proc = kubectl("delete", kind, name, "--wait=false", check=False,
                    timeout=timeout)
@@ -340,13 +304,10 @@ def available(registry):
 
 
 def load_profile(registry, machine_type, topology):
-    """The shape a step asked for, by the two names it is already known by.
+    """The shape a step asked for, by machine type and topology.
 
-    A machine type and a topology rather than the profile's own name: those are
-    what a node pool, a reservation and `gcloud` all call a shape, and the
-    profile name is only the two of them joined. Matched on the registry's
-    fields rather than by composing that name, so the convention lives in one
-    place - the generator that writes it.
+    Matched on the registry's fields rather than by composing the profile name
+    from them, so that naming convention stays in the generator that writes it.
     """
     for profile in registry.get("profiles", {}).values():
         if (profile.get("machine_type") == machine_type
@@ -361,11 +322,9 @@ def load_profile(registry, machine_type, topology):
 def pod_chips(spec):
     """The chip counts one pod's containers ask for, as distinct values.
 
-    Requests as well as limits. The API accepts an extended resource stated
+    Requests as well as limits: the API accepts an extended resource stated
     under either and leaves the other unset, so reading one field would let a
-    pod that wrote only requests pass for a role that holds no chips - and the
-    two questions asked of this set, which shape to run and whether the pod is
-    on a TPU host at all, would answer differently for the same pod.
+    pod that wrote only requests pass for a role that holds no chips.
     """
     return {
         str(field[TPU_RESOURCE])
@@ -383,8 +342,7 @@ def pod_shape(spec):
 
     Chips as well as the two labels, because those do not identify a shape on
     their own: a 2x4 slice of v6e is eight chips either as one ct6e-standard-8t
-    or as two ct6e-standard-4t, and which it is decides the host, the pod count
-    and the quota.
+    or as two ct6e-standard-4t, which differ in host, pod count and quota.
     """
     selector = spec.get("nodeSelector") or {}
     chips = pod_chips(spec)
@@ -398,20 +356,15 @@ def pod_shape(spec):
 def resolve_shape(doc, registry, where):
     """The profile the manifest's TPU pods describe.
 
-    Read rather than passed in, so the hardware is written once. What follows
-    from it - the queue, the deadline, the file cache size - is cluster policy,
-    and the manifest states none of it.
-
-    Only the roles holding chips decide it. A disaggregated workload is servers
-    plus a client that drives them over HTTP, and the client wants no
-    accelerator at all; the queues put google.com/tpu alone under quota, so a
-    role asking for none is admitted with the rest and scheduled wherever the
-    worker has room.
+    Only the roles holding chips decide it: a disaggregated workload is servers
+    plus a client that drives them over HTTP and wants no accelerator, and the
+    queues put google.com/tpu alone under quota, so a role asking for none is
+    admitted with the rest and scheduled wherever the worker has room.
     """
     asked = {pod_shape(spec) for spec in pod_specs(doc)}
     # Nothing of the three, rather than "no chips": a role that names an
-    # accelerator but forgets its limit has made a mistake, and falls through to
-    # the message below rather than being read as CPU-only and ignored.
+    # accelerator but forgets its limit has made a mistake, and should reach
+    # the message below rather than be read as CPU-only and ignored.
     asked.discard((None, None, None))
     if len(asked) > 1:
         raise SystemExit(
@@ -438,17 +391,22 @@ def resolve_shape(doc, registry, where):
     )
 
 
-def admission_timeout(registry, doc):
-    """How long to wait for chips: the whole budget, less this run.
+def quota_reserved(workload):
+    """Whether Kueue has committed chips to this workload."""
+    quota = condition(workload, "QuotaReserved")
+    return bool(quota) and quota.get("status") == "True"
 
-    Derived rather than configured, from the only two numbers worth choosing.
-    Longer leaves no room to run; shorter fails steps that were queueing. Read
-    off the deadline cap_runtime settled on rather than the shape's default, so
-    a workload that asked to serve for ten hours is not also given eight to
-    queue in.
+
+def admission_timeout(registry):
+    """How long to wait in line for chips.
+
+    Queueing is capacity rather than a fault in the step, so this is generous
+    and flat - independent of what the workload asked to run for. The tight
+    bound is admission_max_seconds, which starts when quota is reserved: a
+    queue is someone else using the chips, an undispatched reservation is
+    nobody using them.
     """
-    runtime = max(int(spec["activeDeadlineSeconds"]) for spec in job_specs(doc))
-    return max(int(registry["total_max_seconds"]) - runtime, 300)
+    return int(registry["queue_max_seconds"])
 
 
 def resolve_image(registry):
@@ -479,8 +437,7 @@ def access_token():
     """A token for the launcher's own identity, from the node's metadata server.
 
     The same source the Cloud CLI and the kubelet read, so it carries the
-    workload identity this pod already runs as and there is nothing to mount or
-    refresh.
+    workload identity this pod already runs as, with nothing to mount.
     """
     request = urllib.request.Request(
         METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"}
@@ -497,14 +454,7 @@ def pin_digest(image):
     A run is many pulls - a pod per role, and another on every restart - spread
     over hours. A moving tag can be republished between two of them, which puts
     two builds in one benchmark and invalidates a compile cache keyed on the
-    image. Resolving once, here, is what makes every pod in a workload the same
-    bytes.
-
-    Asked of the registry over its own HTTP API rather than through the Cloud
-    CLI, which reads Container Analysis occurrences on the way to the same
-    field: that is a second permission to hold for something no pull needs, and
-    the CLI spends longer starting up than this spends answering. A HEAD on the
-    manifest asks for exactly the read the pull will ask for.
+    image. Resolving once here is what makes every pod the same bytes.
 
     Best effort: a tag that cannot be resolved is passed through, because the
     registry being briefly unreachable is a worse reason to fail a step than an
@@ -513,7 +463,7 @@ def pin_digest(image):
     if "@" in image:
         return image
     # Split the last path segment off first: a colon earlier in the string is a
-    # registry port, not a tag separator.
+    # registry port, not a tag.
     repo, sep, tail = image.rpartition("/")
     name, _, tag = tail.partition(":")
     host, _, path = repo.partition("/")
@@ -563,9 +513,8 @@ def owner_reference():
     The pod, not its Job: agent-stack sets backoffLimit=0, so an evicted pod
     leaves a Failed Job around until job-ttl expires. Owning from the pod fires
     at once and still covers Job deletion, since that deletes the pods too.
-
-    Exactly one owner: a dependent is collected only once every owner is gone,
-    so naming both would be weaker than naming either.
+    Exactly one owner, since a dependent is collected only once every owner is
+    gone.
     """
     return {
         "apiVersion": "v1",
@@ -590,14 +539,19 @@ def correlation_labels():
     return {k: v for k, v in pairs.items() if v}
 
 
-def pod_specs(doc):
-    """Every PodSpec in the document, whatever the kind."""
+def pod_templates(doc):
+    """Every pod template in the document, whatever the kind."""
     if doc["kind"] == "Job":
-        return [doc["spec"]["template"]["spec"]]
+        return [doc["spec"]["template"]]
     return [
-        rj["template"]["spec"]["template"]["spec"]
+        rj["template"]["spec"]["template"]
         for rj in doc["spec"].get("replicatedJobs", [])
     ]
+
+
+def pod_specs(doc):
+    """Every PodSpec in the document, whatever the kind."""
+    return [t["spec"] for t in pod_templates(doc)]
 
 
 def job_specs(doc):
@@ -608,33 +562,28 @@ def job_specs(doc):
 
 
 def pod_metadatas(doc):
-    if doc["kind"] == "Job":
-        return [doc["spec"]["template"].setdefault("metadata", {})]
-    return [
-        rj["template"]["spec"]["template"].setdefault("metadata", {})
-        for rj in doc["spec"].get("replicatedJobs", [])
-    ]
+    return [t.setdefault("metadata", {}) for t in pod_templates(doc)]
 
 
 def forward_env(doc, names, registry):
     """Copy named step variables onto the workload container.
 
-    Named explicitly rather than forwarded wholesale. There is no allowlist -
-    the launcher's environment holds the agent's per-job credentials, and a step
-    that needs its workload to talk back to Buildkite may forward them - but it
-    has to say so, one name at a time, so what crosses into a workload pod is
-    written down in the step rather than inherited by default.
+    Named explicitly, except for BUILDKITE_*: a workload needs the agent that
+    started it to publish an artifact or report a test result, and every step
+    wanted the same set, so the launcher supplies it rather than each pipeline
+    restating it. BUILDKITE_DENY holds back the agent's own job credentials.
+    Everything else a workload wants, including its secrets, the step names.
 
-    Some names are the fleet's rather than any one pipeline's, and the launcher
-    supplies those for a step that asked and does not have one, by pointing at
-    the Secret each worker's sync writes. A reference rather than a value
-    because the pod is on another cluster: a value would be plaintext in the
-    Job, in the Workload Kueue admits it through, in the copies MultiKueue makes
-    of both on the worker, and in the pod - five objects, readable by anything
-    with get on any of them. A secretKeyRef is behind whatever guards the
-    Secret, which is the boundary a credential should have.
+    A name the step asked for but does not have may be a fleet-wide one, and is
+    then supplied as a secretKeyRef into the Secret each worker's sync writes.
+    A reference rather than a value because a value would sit in plaintext in
+    five objects: the Job, the Workload, MultiKueue's copies of both on the
+    worker, and the pod.
     """
     fleet = registry.get("env_secrets") or {}
+    swept = sorted(k for k in os.environ
+                   if k.startswith("BUILDKITE_") and k not in BUILDKITE_DENY)
+    names = list(dict.fromkeys(list(names) + swept))
     entries = []
     for name in names:
         value = os.environ.get(name, "")
@@ -660,18 +609,20 @@ def forward_env(doc, names, registry):
             # --env wins over the manifest, which holds only the default, so a
             # step can override a cluster secret with one it fetched itself.
             env[:] = [e for e in env if e["name"] not in named]
-            # Copies, so a JobSet's roles do not share one dict between them:
-            # anything that later edits a role's env would be editing every
-            # role's, and finding that out means reading two functions that
-            # look independent.
+            # Copies, so a JobSet's roles do not share one dict: editing one
+            # role's env would otherwise edit every role's.
             env.extend(copy.deepcopy(e) for e in entries)
     return [e["name"] for e in entries]
 
 
-# What the built-in Job is rendered with, and the only names a manifest cannot
-# supply for itself. A repo manifest states its hardware instead, so asking for
-# one of these there is a mistake worth naming.
-SHAPE_NAMES = ("CHIPS", "TOPOLOGY", "ACCELERATOR_LABEL")
+# Substituted into the built-in Job only; a repo manifest states its hardware
+# itself, so render() gives these names a specific error there.
+SHAPE_NAMES = (
+    "CHIPS",
+    "TOPOLOGY",
+    "ACCELERATOR_LABEL",
+    "MEMORY_REQUEST",
+)
 
 
 def render(path, image, name, shape):
@@ -682,21 +633,14 @@ def render(path, image, name, shape):
             f"a Job or JobSet in the calling repo."
         )
 
-    # Required: supplied on every render, so a ${NAME} still unresolved once
-    # these are applied is a typo, and substitute() raises rather than leaving
-    # it as literal text.
     required = {"WORKLOAD_NAME": name, "IMAGE": image, **shape}
-    # Optional: whatever the step exports, so a manifest can pin
-    # ${BUILDKITE_COMMIT} or a size its own pipeline sets.
+    # Whatever the step exports, so a manifest can pin ${BUILDKITE_COMMIT} or a
+    # size its own pipeline sets.
     optional = {k: v for k, v in os.environ.items() if k not in required}
 
-    # One pass over the two merged, not a pass each. A manifest's containers are
-    # mostly shell, and shell is full of dollars that are not ours - $HOSTNAME,
-    # $(date), a loop variable. Substituting twice means the escape has to
-    # survive twice too: $$ collapses to $ in the first pass and is read as a
-    # placeholder in the second, so writing a single literal dollar took $$$$.
-    # Merged, the manifest keeps the ordinary convention - $$ is a literal $ -
-    # and the errors below are unchanged, since an unknown name still raises.
+    # One substitution pass over the two merged, not a pass each: with two
+    # passes the escape has to survive both, so a literal dollar in a
+    # container's shell would need $$$$ instead of the usual $$.
     try:
         doc = yaml.safe_load(
             string.Template(open(path).read()).substitute({**optional, **required})
@@ -715,9 +659,6 @@ def render(path, image, name, shape):
         # A lone `$` that is not a placeholder. Write `$$` for a literal one.
         raise SystemExit(f"{path}: {e}")
     except yaml.YAMLError as e:
-        # After substitution, so the line it points at is the rendered text -
-        # which is the one that has to parse, and where a value carrying a
-        # colon or a newline shows up.
         raise SystemExit(f"{path}: not valid YAML once substituted: {e}")
 
     if not isinstance(doc, dict):
@@ -726,8 +667,6 @@ def render(path, image, name, shape):
         raise SystemExit(
             f"{path}: kind {doc.get('kind')!r} is not one of {sorted(SUPPORTED_KINDS)}"
         )
-    # Checked before anything walks it, so a Job with no template or a JobSet
-    # with no replicatedJobs is a sentence rather than a KeyError traceback.
     try:
         specs = pod_specs(doc)
     except (KeyError, TypeError):
@@ -746,8 +685,6 @@ def finalise(doc, profile, registry, name, labels, owner, command, where):
     meta = doc.setdefault("metadata", {})
     meta["name"] = name
     meta["namespace"] = NAMESPACE
-    # The queue label must be on the top-level object; Kueue reads it there for
-    # both Job and JobSet, never off the inner pods.
     meta.setdefault("labels", {})[QUEUE_LABEL] = profile["queue"]
     meta["labels"].update(labels)
     if owner:
@@ -757,8 +694,7 @@ def finalise(doc, profile, registry, name, labels, owner, command, where):
         pod_meta.setdefault("labels", {}).update(labels)
 
     # Required with or without a command of our own: it is also where step
-    # environment is forwarded and whose output is streamed back, so a workload
-    # without one runs unattributed.
+    # environment is forwarded and whose output is streamed back.
     workload = [c for spec in pod_specs(doc)
                 for c in spec.get("containers", [])
                 if c.get("name") == WORKLOAD_CONTAINER]
@@ -775,6 +711,7 @@ def finalise(doc, profile, registry, name, labels, owner, command, where):
             container["args"] = [command]
 
     cap_runtime(doc, profile, registry)
+    inherit_defaults(doc, profile)
     size_host_volumes(doc, profile)
     return doc
 
@@ -782,10 +719,8 @@ def finalise(doc, profile, registry, name, labels, owner, command, where):
 def requested_runtime():
     """What the step asked to run for, if it asked.
 
-    A step that shares a manifest with others has nowhere to put a deadline of
-    its own, and the steps that need one are exactly the ones that cannot be
-    told apart by shape: the same four chips serve a smoke test and an eval
-    suite that runs for most of a day.
+    A step sharing a manifest with others has nowhere else to put a deadline of
+    its own, and the same four chips serve a smoke test and a day-long eval.
     """
     raw = os.environ.get("TPU_MAX_RUNTIME_SECONDS", "").strip()
     if not raw:
@@ -806,26 +741,17 @@ def requested_runtime():
 def cap_runtime(doc, profile, registry):
     """Bound how long the workload may hold its chips.
 
-    A default rather than a setting, because most steps have no opinion and the
-    number would otherwise have to be right in every copy of every manifest.
-    One that does have an opinion states activeDeadlineSeconds and is believed:
-    how long a workload runs is a property of the work, not of the hardware,
-    and a benchmark that serves for ten hours has no shape-derived number that
-    could know that. TPU_MAX_RUNTIME_SECONDS is that same opinion held by a
-    single step rather than by every step sharing the manifest, so it is the
-    narrower of the two and wins.
-
-    The ceiling is the step's whole budget, which is the part that is always
-    true - a workload must not outlast the step watching it, or it is holding a
-    reservation nothing will clean up.
+    Narrowest opinion wins: TPU_MAX_RUNTIME_SECONDS from the step, else the
+    manifest's activeDeadlineSeconds, else the shape's default. The registry
+    ceiling applies to all three - a workload must not outlast the step
+    watching it, or it holds a reservation nothing will clean up.
     """
     default = int(profile["max_runtime_seconds"])
-    ceiling = int(registry["total_max_seconds"])
+    ceiling = int(registry["runtime_max_seconds"])
     asked = requested_runtime()
     if asked is not None:
-        # Name what the step overrode. A manifest and a step disagreeing about
-        # the deadline is the kind of thing that is obvious in the log and
-        # baffling anywhere else.
+        # Name what the step overrode: a manifest and a step disagreeing about
+        # the deadline is baffling anywhere but the log.
         stated = sorted(
             {
                 int(spec["activeDeadlineSeconds"])
@@ -839,10 +765,8 @@ def cap_runtime(doc, profile, registry):
             f"{over if stated else ''}"
         )
     for spec in job_specs(doc):
-        # `is None` rather than falsy: a manifest that states 0 is making a
-        # claim about the work, and a job that fails on it the moment it starts
-        # is a better answer than one that silently runs for the default three
-        # hours instead.
+        # `is None` rather than falsy, so a manifest stating 0 keeps it rather
+        # than silently getting the shape default.
         current = spec.get("activeDeadlineSeconds")
         if asked is not None:
             current = asked
@@ -851,23 +775,116 @@ def cap_runtime(doc, profile, registry):
         spec["activeDeadlineSeconds"] = min(int(current), ceiling)
 
 
+def pod_defaults():
+    """What pod_defaults.yaml gives a workload, split by what it depends on.
+
+    One document rather than a pod to read them off: the set is the fleet's
+    contract with every repo, and a Job that also defined it could not be
+    edited for its own sake without changing every manifest too.
+    """
+    with open(POD_DEFAULTS) as fh:
+        doc = yaml.safe_load(fh) or {}
+    tpu = doc.get("tpuPods") or {}
+    missing = {"volumes", "volumeMounts", "annotations", "spec", "env"} - set(tpu)
+    if missing or not (doc.get("everyPod") or {}).get("annotations"):
+        raise SystemExit(
+            f"{POD_DEFAULTS} is missing tpuPods.{'/'.join(sorted(missing))} or "
+            "everyPod.annotations. A workload inheriting it would come up "
+            "without its caches."
+        )
+    return doc
+
+
+def inherit_defaults(doc, profile):
+    """Give a manifest the fleet's pod setup without it restating it.
+
+    The sidecar annotations come with the caches: without gke-gcsfuse/volumes
+    GKE injects no sidecar and the claims silently never mount.
+
+    Additive throughout. Anything the manifest already sets - a volume, a mount
+    path, an annotation, an env name, a field of the pod or Job spec - is left
+    alone, so a role can add its own or override one it needs to differ on.
+
+    Only the chip-holding parts are held back from a chipless role, because
+    only they depend on the hardware: the caches are sized from a TPU host's
+    memory, and the retry rules are about TPU nodes being repaired.
+    """
+    annotations = (doc.get("metadata") or {}).get("annotations") or {}
+    if annotations.get(DEFAULTS_ANNOTATION) != DEFAULTS_STANDARD:
+        return
+    defaults = pod_defaults()
+    every = defaults["everyPod"]["annotations"]
+    tpu = defaults["tpuPods"]
+
+    for key, value in (defaults.get("workload") or {}).items():
+        doc["spec"].setdefault(key, value)
+
+    for template in pod_templates(doc):
+        on_pod = template.setdefault("metadata", {}).setdefault(
+            "annotations", {})
+        for key, value in every.items():
+            on_pod.setdefault(key, value)
+
+        spec = template["spec"]
+        if not pod_chips(spec):
+            continue
+
+        for key, value in tpu["annotations"].items():
+            on_pod.setdefault(key, value)
+        for key, value in tpu["spec"].items():
+            spec.setdefault(key, copy.deepcopy(value))
+
+        have = {v.get("name") for v in spec.setdefault("volumes", [])}
+        spec["volumes"].extend(
+            copy.deepcopy(v) for v in tpu["volumes"]
+            if v.get("name") not in have
+        )
+
+        for container in spec.get("containers", []):
+            if container.get("name") != WORKLOAD_CONTAINER:
+                continue
+            at = {m.get("mountPath")
+                  for m in container.setdefault("volumeMounts", [])}
+            # Ahead of the manifest's own, so a mount nested inside an
+            # inherited one - the profile cache under the jax cache - is
+            # applied after the mount it sits in rather than under it.
+            container["volumeMounts"][:0] = [
+                copy.deepcopy(m) for m in tpu["volumeMounts"]
+                if m.get("mountPath") not in at
+            ]
+            named = {e.get("name")
+                     for e in container.setdefault("env", [])}
+            container["env"].extend(
+                copy.deepcopy(e) for e in tpu["env"]
+                if e.get("name") not in named
+            )
+            # Sized from the host like the volumes above, and for the same
+            # reason: what the pod needs is a fraction of the machine it
+            # landed on, which the manifest cannot know.
+            requests = (container.setdefault("resources", {})
+                        .setdefault("requests", {}))
+            requests.setdefault("memory", profile["memory_request"])
+
+    for job in job_specs(doc):
+        if not pod_chips(job["template"]["spec"]):
+            continue
+        for key, value in (defaults.get("tpuJobs") or {}).items():
+            job.setdefault(key, copy.deepcopy(value))
+
+
 def size_host_volumes(doc, profile):
     """How large this host lets the memory-backed volumes grow.
 
     Per machine type, since host memory runs from 176 GB to 1440 GB across the
-    shapes we run and one figure is either unsafe on the smallest or wasteful on
-    the largest. Set only where the manifest left it open, so a pod that needs
-    the memory for itself can say so.
+    shapes we run. Set only where the manifest left it open.
 
-    Chip-holding roles only. The figures are fractions of a TPU host's memory,
-    and a role that holds no chips is not on one - it is on a worker-cpu node
-    sized to its own requests, where a tmpfs the size of a TPU host's cache is
-    a number the node cannot honour. validate() makes such a role state its own
-    sizeLimit before it may mount them.
+    Chip-holding roles only: the figures are fractions of a TPU host's memory,
+    and a role holding no chips runs on a worker-cpu node that cannot honour
+    them. validate() makes such a role state its own sizeLimit instead.
 
-    Tested on the chips alone, not on the shape: the shape is also None for a
-    pod that names an accelerator and misstates its count, and that pod is on a
-    TPU host and does want sizing. resolve_shape rejects it on its own terms.
+    Tested on the chips alone, not on the shape, which is also None for a pod
+    that names an accelerator and misstates its count - that pod is on a TPU
+    host and does want sizing; resolve_shape rejects it on its own terms.
     """
     for spec in pod_specs(doc):
         if not pod_chips(spec):
@@ -880,10 +897,8 @@ def size_host_volumes(doc, profile):
             size = profile.get(key)
             if size is None:
                 # A deploy applies this program and the shape registry as two
-                # ConfigMaps in turn, so a launcher that starts between the two
-                # can read a registry older than itself. Said here rather than
-                # left as a KeyError because the answer is to redeploy or wait,
-                # and neither is what a traceback suggests.
+                # ConfigMaps in turn, so a launcher starting between the two can
+                # read a registry older than itself.
                 raise SystemExit(
                     f"the shape registry has no {key} for "
                     f"{profile.get('queue', 'this shape')}, so {name} would be "
@@ -893,9 +908,8 @@ def size_host_volumes(doc, profile):
             volume["emptyDir"].setdefault("sizeLimit", size)
 
 
-# Fields the Kubernetes API declares as integers. A manifest is text with
-# ${...} substituted in, so whether a value survives as an int comes down to
-# quoting, and the API rejects `activeDeadlineSeconds: "10800"` with a type
+# Fields the Kubernetes API declares as integers. Substitution turns them into
+# strings, and the API rejects `activeDeadlineSeconds: "10800"` with a type
 # error a long way from the cause.
 INT_FIELDS = frozenset({
     "activeDeadlineSeconds",
@@ -932,17 +946,15 @@ def validate(doc, registry, where):
     are the things admission cannot judge.
     """
     # Rejected rather than overwritten: the queue follows from the hardware the
-    # pods ask for, so a label here is either the same thing said twice or a
-    # disagreement, and both read as though the manifest chose the queue.
+    # pods ask for, so a label here reads as though the manifest chose it.
     if QUEUE_LABEL in doc.get("metadata", {}).get("labels", {}):
         raise SystemExit(
             f"{where}: sets {QUEUE_LABEL}. Remove it - the launcher sets the "
             "queue from the shape the pods select."
         )
 
-    # Which identities a workload may run as, published by the cluster and not
-    # extensible by a repo: the launcher's own account can create JobSets, so a
-    # workload running as it could submit further work outside any quota.
+    # The launcher's own account can create JobSets, so a workload running as
+    # it could submit further work outside any quota.
     allowed = set(registry.get("workload_service_accounts") or ["default"])
     for spec in pod_specs(doc):
         sa = spec.get("serviceAccountName")
@@ -952,13 +964,10 @@ def validate(doc, registry, where):
                 f"the cluster permits {', '.join(sorted(allowed))}"
             )
 
-    # The one case size_host_volumes cannot size. Left unbounded, a
-    # memory-backed emptyDir is as large as the node, while what fills it -
-    # gcsfuse toward a fileCacheCapacity set on a PersistentVolume this pod
-    # never sees, or a process writing to /dev/shm - has no ceiling of its own
-    # to stop at. The node then reaches memory pressure before the volume
-    # reaches a limit, and the kubelet picks a victim by its own reckoning
-    # rather than evicting the pod that overran.
+    # The one case size_host_volumes cannot size. An unbounded memory-backed
+    # emptyDir is as large as the node, so the node hits memory pressure before
+    # the volume hits a limit and the kubelet evicts a victim of its own
+    # choosing rather than the pod that overran.
     for spec in pod_specs(doc):
         if pod_chips(spec):
             continue
@@ -980,11 +989,9 @@ def validate(doc, registry, where):
 def find_workload(uid):
     """Kueue's Workload for our object, or None if it has not made one yet.
 
-    None only ever means that. A list read of a kind the cluster knows does not
-    come back empty-handed for any other reason, and kubectl_json raises rather
-    than returning None when it could not ask - which is what keeps "Kueue has
-    not got to it" apart from "the manager did not answer", two states that read
-    identically from here and call for opposite responses.
+    None only ever means that: kubectl_json raises rather than returning None
+    when it could not ask, which keeps "Kueue has not got to it" apart from
+    "the manager did not answer".
     """
     workloads = kubectl_json("get", "workloads")
     for item in (workloads or {}).get("items", []):
@@ -1005,11 +1012,9 @@ def startup_note(env, items):
     """Where a pod is between admission and running, in a few words.
 
     Admission only means the chips are reserved: the pod still has to be
-    scheduled, the node possibly created, and the image pulled. That gap runs
-    to tens of minutes, and unreported it is time that can be seen but not
-    attributed. Reported, not enforced - a slow node pool is not a failure.
-
-    None once a pod is up and its own output takes over as the better signal.
+    scheduled, the node possibly created and the image pulled, which runs to
+    tens of minutes. Reported, not enforced. None once a pod is up and its own
+    output takes over.
     """
     if not items:
         return "waiting for a pod to be created"
@@ -1026,10 +1031,9 @@ def startup_note(env, items):
         if waiting.get("reason"):
             return f"container waiting: {waiting['reason']}"
 
-    # Still initialising means a sidecar has not finished, and here that is
-    # almost always the gcsfuse mount. The collector reads only the workload
-    # container, so without this a bucket the pod cannot authenticate to looks
-    # exactly like a slow node for as long as the deadline allows.
+    # The collector reads only the workload container, so without this a bucket
+    # the pod cannot authenticate to looks exactly like a slow node for as long
+    # as the deadline allows.
     init = [cs for cs in (status.get("initContainerStatuses") or [])
             if not (cs.get("state") or {}).get("terminated")]
     for cs in init:
@@ -1068,15 +1072,12 @@ def termination_reasons(items):
 def workload_exit_code(items):
     """The status the workload's own command returned, or None.
 
-    The launcher's contract is that a step's result is the workload's result,
-    and a step that retries on a particular code needs that code rather than a
-    flat 1: the disagg harness answers 75 for "the TPU runtime would not open a
-    session", which is the difference between an infrastructure retry and a
-    reported test failure.
+    A step's result is the workload's result, and a step with a retry rule
+    needs the specific code rather than a flat 1.
 
-    Only when every terminated workload container agrees. Disagreement means
+    Only when every terminated workload container agrees: disagreement means
     several roles failed for different reasons and no single number describes
-    the run; the caller's 1 is the honest answer there.
+    the run, so the caller's 1 is the honest answer.
     """
     codes = set()
     for pod in items:
@@ -1101,7 +1102,7 @@ def describe_admission(workload):
         return "waiting for Kueue to create the workload"
     status = workload.get("status", {})
     # Eviction first: a workload keeps status.clusterName once admitted, so
-    # testing that first would answer "admitted to X" for the rest of the run
+    # testing that first would report "admitted to X" for the rest of the run
     # and a preemption would never reach the log.
     evicted = condition(workload, "Evicted")
     if evicted and evicted.get("status") == "True":
@@ -1127,15 +1128,18 @@ def worker_env(cluster_name, registry):
         log(f"no gateway mapping for worker {cluster_name!r}; logs unavailable")
         return None
     env = {**os.environ, "KUBECONFIG": WORKER_KUBECONFIG}
-    # A timeout is the same answer as a refusal here - no credentials this turn
-    # - and the caller already retries on every poll, so it costs one interval
-    # rather than the run. Without one it costs the run: this is called from
-    # inside the watch loop, with the workload admitted and on the chips.
+    # Called from inside the watch loop with the workload on the chips, and the
+    # caller retries every poll, so a timeout costs one interval while no
+    # timeout costs the run.
     try:
         proc = subprocess.run(
             [
                 "gcloud", "container", "fleet", "memberships", "get-credentials",
                 worker["membership"], "--project", worker["project"],
+                # Without this gcloud searches every fleet location and fails
+                # the lookup when any one of them is unreachable, even though
+                # the location we want answered.
+                "--location", worker["location"],
             ],
             env=env, capture_output=True, text=True, check=False,
             timeout=CLI_TIMEOUT_SECONDS,
@@ -1154,10 +1158,8 @@ def worker_env(cluster_name, registry):
 def worker_pods(env, job_id):
     """This workload's pods on the worker, or None if they could not be read.
 
-    One read per turn of the loop, shared by everything that wants them: what
-    the pods are doing, what they printed, and why they stopped. Fetching per
-    reader would cost three Connect Gateway round trips for one answer, and the
-    polling ahead of the first log line is deliberately quick.
+    One read per turn of the loop, shared by every reader: fetching per reader
+    would cost three Connect Gateway round trips for one answer.
 
     None rather than an empty list, because "no pods yet" and "could not ask"
     read differently in a step log.
@@ -1178,9 +1180,8 @@ def worker_pods(env, job_id):
 def pod_groups(items):
     """The pods tagged with the Job that owns each, for log attribution.
 
-    Grouped by owning Job rather than pod, because a pod does not survive
-    preemption and the Job name does - so one continuous stream per unit of
-    work rather than a fresh one per attempt.
+    Grouped by owning Job rather than by pod, because a pod does not survive
+    preemption and the Job name does.
     """
     pods = []
     for pod in items:
@@ -1214,11 +1215,10 @@ class LogCollector:
         self.last_group = None  # whose output the log is currently under
 
     def _fetch(self, pod):
-        # The workload container only. --all-containers interleaves containers
-        # whose timestamps advance independently, which one cursor per pod
-        # cannot represent: a chatty sidecar drags the cursor forward and the
-        # workload's own lines are then discarded as already seen. Sidecar
-        # output is still in `kubectl logs` for anyone debugging a mount.
+        # The workload container only: --all-containers interleaves containers
+        # whose timestamps advance independently, and one cursor per pod cannot
+        # represent that - a chatty sidecar drags the cursor forward and the
+        # workload's own lines are discarded as already seen.
         cmd = ["kubectl", "-n", NAMESPACE, "logs", pod["name"],
                "--container", WORKLOAD_CONTAINER, "--timestamps=true"]
         since = self.cursor.get(pod["name"])
@@ -1248,11 +1248,10 @@ class LogCollector:
             for line in out.splitlines():
                 stamp, _, text = line.partition(" ")
                 if not TIMESTAMP.match(stamp):
-                    # A continuation: kubectl stamps an entry, but
-                    # splitlines() also breaks on the carriage returns inside
-                    # one, so a progress bar yields untimestamped fragments.
-                    # Taking one as a timestamp would poison the cursor and
-                    # silence the pod from its first progress bar onward.
+                    # A continuation: kubectl stamps an entry, but splitlines()
+                    # also breaks on the carriage returns inside one. Taking a
+                    # fragment's first word as a timestamp would poison the
+                    # cursor and silence the pod from its first progress bar on.
                     if keeping:
                         fresh.append(line)
                     continue
@@ -1265,8 +1264,6 @@ class LogCollector:
                 fresh.append(text)
             if not fresh:
                 continue
-            # A section header rather than a 36-character prefix on every
-            # line; a JobSet gets a new one each time the output switches pod.
             if pod["group"] != self.last_group:
                 print(f"--- {pod['group']}", flush=True)
                 self.last_group = pod["group"]
@@ -1278,7 +1275,6 @@ class LogCollector:
 
 
 def main():
-    # So a change of base image is visible in the log rather than inferred.
     log(f"python {sys.version.split()[0]} at {sys.executable}")
 
     parser = argparse.ArgumentParser(prog="launch")
@@ -1315,9 +1311,6 @@ def main():
         command = command[1:]
 
     registry = load_registry()
-    # A manifest describes the whole workload, command included: a JobSet has a
-    # command per role, and there is no reading of one command line that says
-    # which of them it replaces.
     if args.manifest and command:
         raise SystemExit(
             "--manifest describes what to run as well as where, so there is no "
@@ -1342,8 +1335,6 @@ def main():
             "own. Available: " + "; ".join(available(registry))
         )
 
-    # The built-in Job is one pod, and only the flags can select a shape that
-    # is more than one - a manifest saying so has already written the pods.
     shape = {}
     manifest = args.manifest or DEFAULT_JOB
     if not args.manifest:
@@ -1358,24 +1349,23 @@ def main():
             "CHIPS": str(profile["chips"]),
             "TOPOLOGY": profile["topology"],
             "ACCELERATOR_LABEL": profile["accelerator_label"],
+            "MEMORY_REQUEST": profile["memory_request"],
         }
 
     image = resolve_image(registry)
     name = workload_name()
     labels = correlation_labels()
     doc = render(manifest, image, name, shape)
-    # Read back even when the flags chose it, so there is one answer to what
-    # shape a workload is: the pods'.
+    # Read back even when the flags chose it, so the pods are the one answer to
+    # what shape a workload is.
     profile = resolve_shape(doc, registry, manifest)
     validate(doc, registry, manifest)
     forwarded = forward_env(doc, args.env, registry)
     if forwarded:
         log(f"forwarding step env: {', '.join(forwarded)}")
-    # shlex.join, not " ".join: the step's own shell has already parsed the
-    # command into arguments, and the built-in Job runs the result through a
-    # shell again, so joining plainly loses every quote the step wrote. `python
-    # -c 'import jax; print(jax.devices())'` arrives as three arguments and
-    # would go back out as an unquoted one-liner the second shell breaks on.
+    # shlex.join, not " ".join: argv has already been through the step's shell
+    # and the built-in Job runs the result through another one, so joining
+    # plainly loses every quote the step wrote.
     finalise(doc, profile, registry, name, labels, owner_reference(),
              shlex.join(command) if command else None, manifest)
     kind = SUPPORTED_KINDS[doc["kind"]]
@@ -1385,8 +1375,7 @@ def main():
 
     def cleanup(signum, _frame):
         # agent-stack deletes the pod on Buildkite cancellation, so SIGTERM is
-        # how the launcher learns the build is gone. The ownerReference covers
-        # the cases that never deliver one.
+        # how the launcher learns the build is gone.
         nonlocal deleted
         if not deleted:
             deleted = True
@@ -1407,12 +1396,10 @@ def main():
         timeout=CLI_TIMEOUT_SECONDS,
     )
 
-    # Everything from here holds an admitted workload, so an exception on the
-    # way out is not just a failed step: the slice keeps running with nobody
-    # watching it. The pod ownerReference does collect it, but only once the
-    # launcher's own pod object is removed, and a pod that exited non-zero
-    # stays until something else cleans it up - minutes to hours during which
-    # the chips are unavailable and the queue behind them does not move.
+    # Everything below holds an admitted workload, so the except clauses delete
+    # it: the ownerReference only collects it once the launcher's own pod
+    # object is removed, and a pod that exited non-zero stays for minutes to
+    # hours while the chips sit unavailable.
     #
     # Not a `finally`: on the ordinary paths the workload has already reached a
     # terminal state and the ownerReference is the right thing to remove it,
@@ -1429,23 +1416,16 @@ def main():
             announced = False
             withdraw_waiting(waiting)
 
-    # Every read of the manager below goes through this; the worker-side reads
-    # that stream the pods' logs have their own failure handling. The manager's
-    # API server is the launcher's only view of the workload, and it stops
-    # answering for a few seconds whenever GKE upgrades or repairs the control
-    # plane - while the workload itself, which runs on a worker cluster, carries
-    # on. Retried in one place rather than at each call site so no reader has to
-    # remember the difference between an object that is gone and a question that
-    # went unanswered.
+    # Every read of the manager below goes through with_grace; the worker-side
+    # reads that stream the pods' logs have their own failure handling.
     blind_since = None
     # Kept across spells, because the grace period is per contiguous outage - a
-    # manager answering one poll in twenty resets it and the launcher waits on -
-    # and what the admission timeout wants to report is the total.
+    # manager answering one poll in twenty resets it - while the admission
+    # timeout wants to report the total.
     blind_total = 0.0
 
     # While blind the step's log is otherwise silent, and ten silent minutes
-    # look the same as a hang. Often enough to show progress, rare enough not to
-    # bury the run's own output.
+    # look the same as a hang.
     blind_notice_seconds = 60
 
     def with_grace(fn, *fn_args):
@@ -1478,14 +1458,15 @@ def main():
     try:
         created = with_grace(kubectl_json, "get", kind, name)
         if created is None:
-            # The apply above succeeded, so this is not a workload that was
-            # never created; something removed it in the seconds since.
+            # The apply above succeeded, so something removed it since.
             log(f"{kind}/{name} was removed immediately after being created")
             stop_announcing()
             return 1
         uid = created["metadata"]["uid"]
-        admission_limit = admission_timeout(registry, doc)
+        admission_limit = admission_timeout(registry)
+        dispatch_limit = int(registry["admission_max_seconds"])
         started = time.monotonic()
+        reserved = None
         admitted = False
         running = False
         last_startup = None
@@ -1501,16 +1482,14 @@ def main():
                 return 1
 
             # Watched for the whole run, not just until admission: preemption
-            # happens after it, and a step that goes silent for minutes waiting to
-            # be re-admitted reads as a hang.
+            # happens after it.
             workload = with_grace(find_workload, uid)
             note = describe_admission(workload)
             cluster = (workload or {}).get("status", {}).get("clusterName")
 
-            # On any poll where the cluster is known and we have no credentials,
-            # not only on the first admission: tying the one attempt to that one
-            # moment costs a whole run's logs whenever anything perturbs it, and
-            # reports it as missing gateway access rather than as a failed fetch.
+            # Retried on any poll where the cluster is known and there are no
+            # credentials yet: one attempt at first admission would cost a whole
+            # run's logs whenever it failed.
             if cluster and genv is None:
                 genv = worker_env(cluster, registry)
                 if genv:
@@ -1518,25 +1497,37 @@ def main():
             if cluster and not admitted:
                 admitted = True
                 stop_announcing()
-            if not admitted and time.monotonic() - started > admission_limit:
+            # Two different waits: before quota is reserved the workload is in
+            # line behind other work and gets the whole budget, after it only
+            # dispatch is left and a workload past the shorter cap is stuck
+            # while holding a reservation.
+            #
+            # Cleared as well as set, because preemption and a lost worker both
+            # send an admitted workload back to the queue with QuotaReserved
+            # false; latched, the dispatch cap would kill it for being queued.
+            if quota_reserved(workload):
+                if reserved is None:
+                    reserved = time.monotonic()
+            else:
+                reserved = None
+            if reserved is not None:
+                limit, since, what = dispatch_limit, reserved, "dispatched"
+            else:
+                limit, since, what = admission_limit, started, "admitted"
+            if not admitted and time.monotonic() - since > limit:
                 # Time spent unable to reach the manager counts against this on
-                # purpose - the budget is carved so the run still fits inside
-                # the step's own deadline, and a blind spell does not move that.
-                # Named so the difference between no capacity and no answer is
-                # not left to be inferred.
+                # purpose: the budget is carved so the run still fits inside the
+                # step's own deadline, which a blind spell does not move.
                 blind = f", {blind_total:.0f}s of it blind" if blind_total else ""
-                log(f"not admitted within {admission_limit}s{blind} "
-                    "- capacity, not the test")
+                log(f"not {what} within {limit}s{blind} - capacity, not the test")
                 stop_announcing()
                 delete_workload(kind, name)
                 return 1
             if note != last_note:
                 log(note)
                 last_note = note
-                # Only while it is still true. Kueue's reason changes as the
-                # wait goes on - reserved, then preempted, then reserved again -
-                # and the notice is worth keeping current, but it is withdrawn
-                # the moment the workload lands rather than corrected.
+                # Kept current while the wait goes on, but withdrawn rather
+                # than corrected once the workload lands.
                 if waiting and not admitted:
                     announce_waiting(waiting, profile["queue"], note)
                     announced = True
@@ -1544,9 +1535,7 @@ def main():
             # One read of the workload's pods, for both readers below.
             items = worker_pods(genv, job_id) if genv else None
 
-            # Until the first pod is up, say where it is stuck. After that the pod's
-            # own output is the better signal and this goes quiet. A failed read is
-            # neither: leave it to the next turn rather than calling it started.
+            # A failed read is not a started pod: leave it to the next turn.
             if admitted and items is not None and not running:
                 s = startup_note(genv, items)
                 if s is None:
@@ -1592,10 +1581,9 @@ def main():
                 for why in termination_reasons(pods):
                     log(f"container terminated: {why}")
 
-                # What the Workload thought, while it still exists - Kueue
-                # collects it soon after the run, and once it is gone a preemption
-                # and a test returning 1 read the same. termination_reasons()
-                # covers the pod that exited; this covers the one taken away.
+                # Read while the Workload still exists: Kueue collects it soon
+                # after the run, and once it is gone a preemption and a test
+                # returning 1 read the same.
                 if failed:
                     for c in (workload or {}).get("status", {}).get("conditions", []):
                         if c.get("status") != "True":
@@ -1604,8 +1592,7 @@ def main():
                                                       c.get("message")) if x)
                         log(f"workload {c.get('type')}: {detail}"[:300])
 
-                    # Expand the last section: collapsed output keeps a green
-                    # build readable, but on a failure it is what anyone wants.
+                    # Expand the last section on the build page.
                     print("^^^ +++", flush=True)
                     log(f"{kind}/{name} failed")
                     return workload_exit_code(pods) or 1
@@ -1617,11 +1604,9 @@ def main():
             else:
                 time.sleep(POLL_SECONDS)
     except ApiUnreachable as err:
-        # Handled apart from the traceback below because this is the one exit
-        # where the launcher knows exactly what happened and the delete it is
-        # about to attempt goes to the same API server that just stopped
-        # answering. Saying so is the difference between a human reclaiming the
-        # chips now and finding them held an hour later.
+        # Handled apart from the traceback below because the delete it is about
+        # to attempt goes to the same API server that just stopped answering,
+        # so the chips may need reclaiming by hand.
         stop_announcing()
         log(f"no answer from the manager's API server for {API_GRACE_SECONDS}s: "
             f"{err}")

@@ -224,7 +224,75 @@ bk job retry <job_id> --yes
 
 ---
 
-## Step 8: Cherry-pick PRs from the milestone
+## Step 8: Compare perf with the previous release
+
+Once perf-eval finishes, compare the release candidate against the last
+release's final RC using the CI dashboard compare API.
+
+Find the previous release's perf-eval build (look for the latest
+`v<prev>.Y.ZrcN candidate` message):
+
+```bash
+bk build list --pipeline vllm/perf-eval --branch main --limit 30 --summary --json \
+  | python3 -c "
+import json, sys
+for b in json.load(sys.stdin):
+    print(b['number'], b['state'], b.get('message', ''))"
+```
+
+Pull the release image URIs from that build's env (`VLLM_IMAGE_CUDA` /
+`VLLM_IMAGE_ROCM`), then query the compare API once per platform — the
+`baseline` is the previous release image, `candidate` is the new one:
+
+```bash
+curl -s "https://ci.vllm.ai/api/compare?baseline=<prev_image>&candidate=<new_image>" > compare.json
+```
+
+The JSON contains a `summary` (regression/improvement/noisy/unchanged
+counts), `worstRegressions` (sorted by severity), and `eval.deltas`
+(accuracy scores). Thresholds: perf 2%, eval 2σ (`thresholds` field).
+
+Things to watch for when reading results:
+
+- **Accuracy first:** any `eval.deltas` entry with status `regression` is
+  a release blocker. `noisy` means within 2σ — not actionable.
+- **Single-run noise:** perf numbers come from one run each. Large
+  regressions (>10%) on a workload whose job was retried (e.g. after an
+  infra flake) may be agent-specific — sanity-check against a rerun before
+  filing.
+
+To confirm a regression with a targeted rerun, launch a new perf-eval
+build with `WORKLOADS` (comma-separated workload stems from the
+perf-eval repo's `workloads/` dir, e.g. `deepseek_v4_pro_5_h200`) and
+`BENCH_ONLY=1`, which runs only the vllm bench configs and skips the
+lm_eval/BFCL accuracy tasks — much faster when accuracy data is already
+in hand:
+
+```bash
+bk build create --yes --pipeline vllm/perf-eval --branch main \
+  --commit <perf_eval_sha> --message "vX.Y.ZrcN regression rerun" \
+  --env "BENCH_ONLY=1" \
+  --env "WORKLOADS=<stem1>,<stem2>" \
+  --env "VLLM_COMMIT=<commit_sha>" \
+  --env "VLLM_IMAGE_CUDA=public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-x86_64"
+```
+
+A passed job cannot be retried in place, so a fresh targeted build is the
+way to get a clean-agent data point. Rerun results upload under the same
+image URI and supersede the earlier runs in the compare API.
+- **Workload coverage:** check `summary.missingBaseline` /
+  `missingCandidate` — renamed or newly added workloads won't have a
+  comparison. ROCm comparisons often match few workloads across releases;
+  that's expected, not an error.
+- Share the browser version of the link in the Slack announcement:
+  `https://ci.vllm.ai/compare?baseline=<prev_image>&candidate=<new_image>`
+
+Include significant regressions in the Slack announcement and flag them to
+the release manager as cherry-pick candidates.
+
+---
+
+## Step 9: Cherry-pick PRs from the milestone
 
 When new PRs are added to the milestone for the next RC:
 
@@ -286,11 +354,11 @@ git tag vX.Y.ZrcN
 git push origin vX.Y.ZrcN
 ```
 
-Then repeat steps 4–7 with the new HEAD commit.
+Then repeat steps 4–8 with the new HEAD commit.
 
 ---
 
-## Step 9: Announce in Slack
+## Step 10: Announce in Slack
 
 Post to the appropriate channel with:
 
@@ -301,44 +369,53 @@ Post to the appropriate channel with:
 - **Links to all builds**: full CI, release-v2, perf-eval
 - **List of cherry-picked PRs** since the previous RC
 
+> **Formatting:** write the message in **Slack mrkdwn**, not Markdown.
+> Slack does NOT render `**double asterisks**` or `[text](url)` — they show
+> up as literal characters. Use `*single asterisks*` for bold, single
+> backticks for inline code (branch names, tags, commit SHAs), and
+> `<https://full-url|link text>` for hyperlinks on PR numbers, build
+> numbers, and the milestone title.
+
 Template for initial branch cut:
 
 ```
-**vX.Y.Z branch cut** :scissors:
+*vX.Y.Z branch cut* :scissors:
 
 The `releases/vX.Y.Z` branch has been cut from commit `<sha>` (based on
-[full CI run #NNN](https://buildkite.com/vllm/ci/builds/NNN), the greenest
+<https://buildkite.com/vllm/ci/builds/NNN|full CI run #NNN>, the greenest
 of the last 3 runs).
 
-**Known failing jobs (N):**
+*Known failing jobs (N):*
 • Job 1
 • Job 2
 ...
 
-**Milestone:** [vX.Y.Z cherry picks](https://github.com/vllm-project/vllm/milestone/NN)
+*Milestone:* <https://github.com/vllm-project/vllm/milestone/NN|vX.Y.Z cherry picks>
 — please tag PRs for cherry-picking here.
 
-**Perf-eval:** [Build #NNN](https://buildkite.com/vllm/perf-eval/builds/NNN)
-running all workloads against the release image.
+*Builds:*
+• Full CI: <https://buildkite.com/vllm/ci/builds/NNNNN|#NNNNN> (run_all + nightly)
+• Release: <https://buildkite.com/vllm/release-v2/builds/NNNNN|#NNNNN>
+• Perf-eval: <https://buildkite.com/vllm/perf-eval/builds/NNN|#NNN> (CUDA + ROCm)
 ```
 
 Template for subsequent RCs:
 
 ```
-**vX.Y.ZrcN** :rocket:
+*vX.Y.ZrcN* :rocket:
 
-Release candidate `vX.Y.ZrcN` tagged on `releases/vX.Y.Z` at commit `<sha>`.
+Release candidate `vX.Y.ZrcN` tagged on `releases/vX.Y.Z` at commit `<full_sha>`.
 
-**New cherry-picks since rcN-1 (N):**
-• [#NNNNN](https://github.com/vllm-project/vllm/pull/NNNNN) Title
+*New cherry-picks since rcN-1 (N):*
+• <https://github.com/vllm-project/vllm/pull/NNNNN|#NNNNN> Title
 ...
 
-**Builds:**
-• Full CI: [#NNNNN](https://buildkite.com/vllm/ci/builds/NNNNN) (run_all + nightly)
-• Release: [#NNNNN](https://buildkite.com/vllm/release-v2/builds/NNNNN)
-• Perf-eval: [#NNNNN](https://buildkite.com/vllm/perf-eval/builds/NNNNN) (CUDA + ROCm)
+*Builds:*
+• Full CI: <https://buildkite.com/vllm/ci/builds/NNNNN|#NNNNN> (run_all + nightly)
+• Release: <https://buildkite.com/vllm/release-v2/builds/NNNNN|#NNNNN>
+• Perf-eval: <https://buildkite.com/vllm/perf-eval/builds/NNNNN|#NNNNN> (CUDA + ROCm)
 
-**Milestone:** [vX.Y.Z cherry picks](https://github.com/vllm-project/vllm/milestone/NN)
+*Milestone:* <https://github.com/vllm-project/vllm/milestone/NN|vX.Y.Z cherry picks>
 ```
 
 ---

@@ -38,6 +38,7 @@ manager where the launcher built the podspec.
 | `kueue/templates/` | The templates the generator renders. |
 | `kueue/generated/` | The YAML that actually gets applied. Committed on purpose — see below. |
 | `kueue/launcher/` | The program every TPU step runs, its Job, and its image build. |
+| `kueue/launcher/pod_defaults.yaml` | What the fleet gives a workload's pods: caches, gcsfuse settings, eviction and retry policy. One definition, inherited by the built-in Job and by every manifest. |
 
 Terraform stops at the cluster; `deploy_manifests.py` starts there. The
 Kubernetes and Helm providers need a reachable API server at plan time, which
@@ -95,6 +96,42 @@ of its pods runs, which no pair of flags can express. Not the command either —
 JobSet has one per role. A manifest passed together with a command is refused
 rather than one role being silently chosen.
 
+### What a manifest states, and what it inherits
+
+A manifest states the hardware it wants and nothing that follows from it:
+
+```yaml
+metadata:
+  annotations:
+    tpu-ci.google.com/defaults: standard
+```
+
+With that annotation the launcher merges in `pod_defaults.yaml` — the cache
+volumes and their mounts, the gcsfuse sidecar settings, the TPU toleration, the
+service account, `restartPolicy`, the two env names every workload wants, the
+TTL, and the retry rules that let a pod survive its node being repaired. The
+memory request comes from the shape's profile, since it is a fraction of the
+host the pod landed on.
+
+The merge is additive: anything the manifest sets itself is left alone, so a
+role can add a volume or override a default it needs to differ on. Inherited
+mounts are applied first, so a mount nested inside an inherited one lands inside
+it rather than under it.
+
+Only roles that hold chips get the caches and retry rules — they are sized from
+a TPU host's memory and about TPU nodes being repaired, and a chipless role runs
+on neither. Such a role states what it needs itself.
+
+What stays in the manifest is `nodeSelector` and the `google.com/tpu` count:
+together with the chip count they are how the queue is chosen, so there would be
+nothing left to resolve if the fleet supplied them. Its deadline stays too.
+
+Two things a manifest should not set. A **CPU request** is a scheduling floor
+checked against the template the autoscaler builds for a shape; one large enough
+to matter can exceed what that template offers and stop the pool building nodes
+at all. An **ephemeral-storage** request reserves a large share of a node's disk
+to cap a pod that already holds every chip on it.
+
 The image is `WORKLOAD_IMAGE` in the step's environment, checked against
 `allowed_image_repos` — a CI image is built per commit, so which one runs is the
 pipeline's choice, which in a public repo means a PR's. A tag is resolved to the
@@ -126,7 +163,7 @@ better states its own `activeDeadlineSeconds` — a serving benchmark runs for a
 long as its client sweeps, which no shape implies. A single step can override
 both by setting `TPU_MAX_RUNTIME_SECONDS` in its `env:`, which is how one step
 asks for longer without every step sharing the manifest getting it too. The
-ceiling is `tpu_total_max_seconds`: past that the workload would outlive the
+ceiling is `tpu_runtime_max_seconds`: past that the workload would outlive the
 launcher watching it, and the chips would be held by nothing.
 
 Whatever the source, keep it under the step's own `timeout_in_minutes` by more
@@ -279,11 +316,16 @@ so the first node to want it waits out the conversion — measured at 87s for a
 2.7 GB image — and every node after it mounts the same digest in about two
 seconds. Caching layers on the node cannot help; the digest is new every build.
 
-**A step may legitimately queue for hours.** `tpu_total_max_seconds` is a day,
-and it is a budget for queueing and running together. With eight v7x chips, a
-build that fans out over several shapes puts most of its steps behind the rest of
-itself. The launcher annotates what it is waiting for; read that before assuming
-a fault.
+**A step may legitimately queue for hours, but not inside the launcher.**
+`tpu_queue_max_seconds` and `tpu_runtime_max_seconds` are separate budgets —
+how long to wait for chips, and how long to hold them — and the first is set
+well under what the fleet actually makes a step wait. Something ends a kube
+step at 5h59m48s as `exit_status -1` with an empty log, whatever
+`timeout_in_minutes` says, so a launcher permitted to wait past that never gets
+to report why. Queueing longer than the budget belongs in Buildkite instead: a
+step held by a `concurrency_group` is `limited`, has a null `started_at`, and
+burns no clock. The launcher annotates what it is waiting for; read that before
+assuming a fault.
 
 **us-central1 holds both the manager and a worker.** They are separate clusters
 with separate control-plane CIDRs, but they share the region's Cloud Router and
