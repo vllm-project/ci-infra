@@ -53,6 +53,8 @@ PROFILES_PATH = os.environ.get(
 # the launcher rather than kept in a repo: everything in it (which caches
 # exist, what mounts them, which identity may write them) is cluster state.
 DEFAULT_JOB = os.environ.get("LAUNCHER_DEFAULT_JOB", "/opt/launcher/manifests/job.yaml")
+POD_DEFAULTS = os.environ.get(
+    "LAUNCHER_POD_DEFAULTS", "/opt/launcher/manifests/pod_defaults.yaml")
 
 ACCELERATOR_KEY = "cloud.google.com/gke-tpu-accelerator"
 TOPOLOGY_KEY = "cloud.google.com/gke-tpu-topology"
@@ -84,13 +86,11 @@ TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$")
 
 WORKLOAD_CONTAINER = "workload"
 
-# What a manifest sets to be given the caches job.yaml declares, instead of
-# repeating them. See inherit_volumes().
-VOLUMES_ANNOTATION = "tpu-ci.google.com/volumes"
-VOLUMES_STANDARD = "standard"
+# What a manifest sets to be given the fleet's pod setup instead of restating
+# it. See inherit_defaults().
+DEFAULTS_ANNOTATION = "tpu-ci.google.com/defaults"
+DEFAULTS_STANDARD = "standard"
 
-# The gcsfuse sidecar's knobs, which travel with the cache volumes.
-FUSE_ANNOTATION_PREFIX = "gke-gcsfuse/"
 
 POLL_SECONDS = 5
 # Used only until the first log line arrives. MultiKueue deletes the remote Job
@@ -693,7 +693,7 @@ def finalise(doc, profile, registry, name, labels, owner, command, where):
             container["args"] = [command]
 
     cap_runtime(doc, profile, registry)
-    inherit_volumes(doc)
+    inherit_defaults(doc)
     size_host_volumes(doc, profile)
     return doc
 
@@ -757,57 +757,63 @@ def cap_runtime(doc, profile, registry):
         spec["activeDeadlineSeconds"] = min(int(current), ceiling)
 
 
-def standard_volumes():
-    """The caches job.yaml gives a pod: its volumes, mounts and annotations.
+def pod_defaults():
+    """What pod_defaults.yaml gives a workload, split by what it depends on.
 
-    Read from job.yaml rather than restated here, so a manifest that inherits
-    them and the built-in Job cannot come to describe different caches.
+    One document rather than a pod to read them off: the set is the fleet's
+    contract with every repo, and a Job that also defined it could not be
+    edited for its own sake without changing every manifest too.
     """
-    with open(DEFAULT_JOB) as fh:
-        doc = yaml.safe_load(fh)
-    for template in pod_templates(doc):
-        spec = template["spec"]
-        mounts = [
-            m for c in spec.get("containers", [])
-            if c.get("name") == WORKLOAD_CONTAINER
-            for m in c.get("volumeMounts", [])
-        ]
-        annotations = {
-            k: v
-            for k, v in ((template.get("metadata") or {})
-                         .get("annotations") or {}).items()
-            if k.startswith(FUSE_ANNOTATION_PREFIX)
-        }
-        return spec.get("volumes", []), mounts, annotations
-    raise SystemExit(f"{DEFAULT_JOB} declares no pod to take volumes from")
+    with open(POD_DEFAULTS) as fh:
+        doc = yaml.safe_load(fh) or {}
+    every = (doc.get("everyPod") or {}).get("annotations") or {}
+    tpu = doc.get("tpuPods") or {}
+    missing = {"volumes", "volumeMounts", "annotations"} - set(tpu)
+    if missing or not every:
+        raise SystemExit(
+            f"{POD_DEFAULTS} is missing "
+            f"{'everyPod.annotations' if not every else ''}"
+            f"{' '.join('tpuPods.' + m for m in sorted(missing))}. "
+            "A workload inheriting it would come up without its caches."
+        )
+    return every, tpu
 
 
-def inherit_volumes(doc):
+def inherit_defaults(doc):
     """Give a manifest the fleet's caches without it restating them.
 
-    The sidecar annotations come too: without gke-gcsfuse/volumes GKE injects
-    no sidecar and the claims silently never mount.
+    The sidecar annotations come with them: without gke-gcsfuse/volumes GKE
+    injects no sidecar and the claims silently never mount.
 
     Additive. A volume, mount path or annotation the manifest already sets is
     left alone, so a role can add its own - the disagg manifests shadow a
     subtree of the jax cache this way - or override one it needs to differ on.
 
-    Chip-holding roles only. The sizes are fractions of a TPU host's memory,
-    and a chipless role on a worker-cpu node cannot honour them; validate()
-    makes such a role state its own.
+    Only the caches are held back from chipless roles, because only they depend
+    on the hardware: they are sized from a TPU host's memory, and validate()
+    makes a role that is not on one state its own sizes.
     """
     annotations = (doc.get("metadata") or {}).get("annotations") or {}
-    if annotations.get(VOLUMES_ANNOTATION) != VOLUMES_STANDARD:
+    if annotations.get(DEFAULTS_ANNOTATION) != DEFAULTS_STANDARD:
         return
-    volumes, mounts, fuse = standard_volumes()
+    every, tpu = pod_defaults()
     for template in pod_templates(doc):
+        on_pod = template.setdefault("metadata", {}).setdefault(
+            "annotations", {})
+        for key, value in every.items():
+            on_pod.setdefault(key, value)
+
         spec = template["spec"]
         if not pod_chips(spec):
             continue
 
+        for key, value in tpu["annotations"].items():
+            on_pod.setdefault(key, value)
+
         have = {v.get("name") for v in spec.setdefault("volumes", [])}
         spec["volumes"].extend(
-            copy.deepcopy(v) for v in volumes if v.get("name") not in have
+            copy.deepcopy(v) for v in tpu["volumes"]
+            if v.get("name") not in have
         )
 
         for container in spec.get("containers", []):
@@ -819,13 +825,9 @@ def inherit_volumes(doc):
             # inherited one - the profile cache under the jax cache - is
             # applied after the mount it sits in rather than under it.
             container["volumeMounts"][:0] = [
-                copy.deepcopy(m) for m in mounts if m.get("mountPath") not in at
+                copy.deepcopy(m) for m in tpu["volumeMounts"]
+                if m.get("mountPath") not in at
             ]
-
-        on_pod = template.setdefault("metadata", {}).setdefault(
-            "annotations", {})
-        for key, value in fuse.items():
-            on_pod.setdefault(key, value)
 
 
 def size_host_volumes(doc, profile):
