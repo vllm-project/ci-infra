@@ -1,30 +1,14 @@
-# What this fleet gives a workload's pods: the caches, the gcsfuse settings that
-# make them mount, and the eviction policy that keeps a running one alive.
+# What the fleet gives a workload's pods. A manifest opts in with
+# `tpu-ci.google.com/defaults: standard`; see README.md for the contract.
 #
-# A manifest opts in with `tpu-ci.google.com/defaults: standard` on its
-# top-level metadata and the launcher merges this in; job.yaml opts in the same
-# way. It is additive, so a pod keeps any volume, mount path or annotation it
-# declares itself.
-#
-# Split by what each part depends on: everyPod has no dependency on the
-# hardware; tpuPods and tpuJobs apply only to roles holding chips, because the
-# caches are sized from a TPU host's memory and the retry rules are about TPU
-# nodes being repaired.
-#
-# What a manifest still states for itself is the hardware it wants - nodeSelector
-# and the google.com/tpu count, which together are how the launcher picks the
-# queue - and anything genuinely its own, like its deadline.
-#
-# This is the fleet's contract with every repo, not one Job's configuration:
-# changing it changes every workload in tpu-inference and vllm-torchtpu.
+# This is not one Job's configuration: changing it changes every workload in
+# tpu-inference and vllm-torchtpu.
 
 # Applied to every pod of a workload that opts in, chips or not.
 everyPod:
   annotations:
-    # Job pods are evictable by default, so the last long step of a build is a
-    # lone pod on an idle node - what OPTIMIZE_UTILIZATION consolidates away.
-    # It presents as a job that vanished. A chipless proxy or benchmark client
-    # is no different: consolidate one away and the run ends with it.
+    # Job pods are evictable, so a long step alone on an idle node is what
+    # OPTIMIZE_UTILIZATION consolidates away. It presents as a job that vanished.
     cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
 
 # Applied only to pods that hold chips.
@@ -33,10 +17,9 @@ tpuPods:
     # Without this GKE does not inject the sidecar and the claims below never
     # mount.
     gke-gcsfuse/volumes: "true"
-    # Headroom for metadata prefetch on both mounts. GKE's guidance is 512Mi or
-    # higher; 2Gi because the compilation cache prefix holds tens of thousands of
-    # entries and a prefetch that runs out of memory falls back to a lookup per
-    # miss.
+    # 2Gi, not GKE's suggested 512Mi: the compilation cache holds tens of
+    # thousands of entries, and a prefetch that runs out falls back to a lookup
+    # per miss.
     gke-gcsfuse/metadata-prefetch-memory-limit: "2Gi"
     # Unlimited sidecar CPU and memory: parallel downloads are CPU-bound and the
     # defaults throttle them. Standard clusters only.
@@ -44,23 +27,18 @@ tpuPods:
     gke-gcsfuse/memory-limit: "0"
 
   volumes:
-    # Backing store for the gcsfuse file cache. Without it the sidecar falls back
-    # to 5GiB of ephemeral storage and fileCacheCapacity becomes a cheque it
-    # cannot cash, refetching checkpoints on every load. Sized by the launcher
-    # from the host.
+    # Backing store for the gcsfuse file cache; without it the sidecar falls
+    # back to 5GiB of ephemeral storage and refetches checkpoints every load.
     - name: gke-gcsfuse-cache
       emptyDir:
         medium: Memory
-    # JAX and vLLM use shared memory heavily; the 64MB default is far too small
-    # and fails in ways that look like unrelated crashes. Sized by the launcher
-    # from the host, like the cache above and for the same reason - what needs
-    # the room is one engine per chip.
+    # JAX and vLLM lean on shared memory; the 64MB default fails in ways that
+    # look like unrelated crashes. Both emptyDirs are sized by the launcher.
     - name: dshm
       emptyDir:
         medium: Memory
-    # The buckets are regional, so these claims resolve at mount time in whichever
-    # cluster MultiKueue landed the pod. Defined, with their mount options and
-    # cache capacities, in cache_volumes.yaml.tpl.
+    # Claims, so they resolve in whichever cluster MultiKueue landed the pod.
+    # Defined in cache_volumes.yaml.tpl.
     - name: jax-cache
       persistentVolumeClaim:
         claimName: jax-cache
@@ -74,9 +52,8 @@ tpuPods:
   volumeMounts:
     - name: dshm
       mountPath: /dev/shm
-    # Mounted for every workload, pointed at by none: a compilation cache must be
-    # keyed on the toolchain that filled it, so only the step knows a safe path
-    # under here.
+    # Mounted for every workload, pointed at by none: a compilation cache must
+    # be keyed on the toolchain that filled it, which only the step knows.
     - name: jax-cache
       mountPath: /cache/jax
     - name: hf-cache
@@ -85,9 +62,7 @@ tpuPods:
   # Merged into the pod spec.
   spec:
     restartPolicy: Never
-    # The identity the cache buckets authorise; see workload_sa.yaml.tpl for why
-    # it is not `default`. validate() rejects any name the fleet has not
-    # allowed, so this is the value that name check expects.
+    # The identity the cache buckets authorise; see workload_sa.yaml.tpl.
     serviceAccountName: tpu-workload
     # TPU nodes are tainted. Without this a pod that asks for chips is never
     # scheduled onto the node that has them.
@@ -97,25 +72,20 @@ tpuPods:
         value: "present"
         effect: "NoSchedule"
 
-  # Merged into the container named `workload`. Only what is the same for every
-  # workload on the fleet; anything a test needs arrives through --env.
+  # Merged into the container named `workload`. Only what every workload wants;
+  # anything a test needs arrives through --env.
   env:
     - name: HF_HOME
       value: /cache/hf
-    # Unbuffered, so output reaches the log as it happens.
     - name: PYTHONUNBUFFERED
       value: "1"
 
 # Merged into the Job of each role that holds chips.
 tpuJobs:
-  # A TPU node repaired underneath a running pod is rejected at kubelet
-  # admission - `no healthy devices present; cannot allocate unhealthy devices
-  # google.com/tpu` - with no DisruptionTarget condition and no exit code,
-  # because nothing started. Six is a little over ten minutes of exponential
-  # backoff, which outlasts a repair.
-  #
-  # It never reruns a red test: FailJob below ends the Job on the first non-zero
-  # exit however many retries remain.
+  # A node repaired under a running pod is rejected at kubelet admission with
+  # no DisruptionTarget and no exit code, because nothing started. Six retries
+  # is ten minutes of backoff, which outlasts a repair. FailJob below means
+  # they never rerun a red test.
   backoffLimit: 6
   podFailurePolicy:
     rules:
