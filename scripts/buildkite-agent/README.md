@@ -53,10 +53,11 @@ cluster's secret store.
 ## Quick install
 
 ```bash
-# On the target machine, after scripts/AGENT.md steps 1-5 are done:
+# On the target machine, after scripts/AGENTS.md steps 1-5 are done:
 sudo install -m 0755 environment            /etc/buildkite-agent/hooks/environment
 sudo install -m 0755 pre-checkout           /etc/buildkite-agent/hooks/pre-checkout
 sudo install -m 0755 post-checkout          /etc/buildkite-agent/hooks/post-checkout
+sudo install -d -m 0755 /usr/local/libexec
 sudo install -m 0755 buildkite-gpu-cdi-env.sh /usr/local/libexec/buildkite-gpu-cdi-env.sh
 sudo install -m 0644 buildkite-agent.cfg    /etc/buildkite-agent/buildkite-agent.cfg
 
@@ -73,4 +74,4 @@ sudo systemctl enable --now buildkite-agent
   plugin's volume list.
 - `spawn` must equal `num_gpus × slices_per_gpu` for the MIG-slice mapping to
   line up with the agent names (`<host>-1` … `<host>-N`).
-- See [`../AGENT.md`](../AGENT.md) for the full machine-onboarding runbook.
+- See [`../AGENTS.md`](../AGENTS.md) for the full machine-onboarding runbook.
