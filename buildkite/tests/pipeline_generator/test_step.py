@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import buildkite_step
-from pipeline_generator import select_steps_and_dependencies
+from pipeline_generator import drop_amd_steps, select_steps_and_dependencies
 from step import Step, group_steps, read_steps_from_job_dir
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
@@ -753,6 +753,76 @@ def test_torch_nightly_flag_no_separate_group(fake_global_config):
     ]
     assert "Untagged test" in labels
     assert not any(lbl.startswith("Torch Nightly ") for lbl in labels)
+
+
+def test_drop_amd_steps_removes_amd_build_and_gpu_devices():
+    steps = [
+        Step(label="AMD ensure ci_base", key="ensure-ci-base-amd", device="amd_cpu"),
+        Step(label="AMD image build", key="image-build-amd", device="amd_cpu"),
+        Step(label="AMD native test", key="amd-native", device="mi300_2"),
+        Step(label="CUDA test", key="cuda-test", device="h100"),
+    ]
+
+    filtered = drop_amd_steps(steps)
+
+    assert [step.key for step in filtered] == ["cuda-test"]
+
+
+def test_drop_amd_steps_strips_amd_mirror_but_keeps_primary_step():
+    step = Step(
+        label="Multimodal Processor",
+        group="Models - Multimodal",
+        key="multimodal-processor",
+        device="h100",
+        commands=["test"],
+        mirror={"amd": {"device": "mi355_1"}},
+    )
+
+    (filtered_step,) = drop_amd_steps([step])
+
+    assert filtered_step.key == "multimodal-processor"
+    assert filtered_step.mirror is None
+
+
+def test_drop_amd_steps_preserves_other_mirrors_alongside_amd():
+    step = Step(
+        label="Multimodal Processor",
+        key="multimodal-processor",
+        device="h100",
+        commands=["test"],
+        mirror={"amd": {"device": "mi355_1"}, "other": {"foo": "bar"}},
+    )
+
+    (filtered_step,) = drop_amd_steps([step])
+
+    assert filtered_step.mirror == {"other": {"foo": "bar"}}
+
+
+def test_torch_nightly_run_omits_amd_hardware_group(fake_global_config):
+    fake_global_config["torch_nightly"] = "1"
+    steps = [
+        Step(label="AMD image build", key="image-build-amd", device="amd_cpu"),
+        Step(
+            label="Multimodal Processor",
+            group="Models - Multimodal",
+            key="multimodal-processor",
+            device="h100",
+            commands=["test"],
+            mirror={"amd": {"device": "mi355_1"}},
+        ),
+    ]
+
+    filtered = drop_amd_steps(steps)
+    group_step_map = group_steps(filtered)
+    buildkite_groups = buildkite_step.convert_group_step_to_buildkite_step(
+        group_step_map
+    )
+
+    assert not any(g.group == "Hardware-AMD Tests" for g in buildkite_groups)
+    generated_keys = [job.key for group in buildkite_groups for job in group.steps]
+    assert "image-build-amd" not in generated_keys
+    assert "amd-multimodal-processor" not in generated_keys
+    assert "multimodal-processor" in generated_keys
 
 
 def test_image_tag_matches_get_image_and_latest_suppressed_on_nightly(
