@@ -826,6 +826,16 @@ def inherit_defaults(doc, profile):
             on_pod.setdefault(key, value)
 
         spec = template["spec"]
+        for container in spec.get("containers", []):
+            if container.get("name") != WORKLOAD_CONTAINER:
+                continue
+            named = {e.get("name")
+                     for e in container.setdefault("env", [])}
+            container["env"].extend(
+                copy.deepcopy(e) for e in (defaults["everyPod"].get("env") or [])
+                if e.get("name") not in named
+            )
+
         if not pod_chips(spec):
             continue
 

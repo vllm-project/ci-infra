@@ -6,6 +6,15 @@
 
 # Applied to every pod of a workload that opts in, chips or not.
 everyPod:
+  # Every workload pulls a model or a tokenizer, including the chipless
+  # benchmark clients, so the token is fleet setup rather than something each
+  # step remembers to name. A manifest that sets HF_TOKEN itself still wins.
+  env:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: fleet-hf-token
+        key: HF_TOKEN
   annotations:
     # Job pods are evictable, so a long step alone on an idle node is what
     # OPTIMIZE_UTILIZATION consolidates away. It presents as a job that vanished.
