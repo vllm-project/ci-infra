@@ -34,6 +34,7 @@ import signal
 import string
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.request
 
@@ -613,6 +614,41 @@ def forward_env(doc, names, registry):
             # role's env would otherwise edit every role's.
             env.extend(copy.deepcopy(e) for e in entries)
     return [e["name"] for e in entries]
+
+
+def report_forwarded(asked, forwarded):
+    """Say what crossed into the pod, without the sweep filling the heading.
+
+    log() opens a Buildkite group and the rest of the line is its title, so a
+    list of ninety names becomes a heading the width of the screen. The
+    BUILDKITE_* set is also identical on every step in the fleet, so it is the
+    part least worth reading and the part that was crowding out the rest: it
+    goes in the body, where it stays greppable and collapsed. What varies is the
+    handful the step named, so that is the title.
+
+    A name the step asked for and did not get is worth saying out loud. It is
+    unset on the agent and not a fleet secret, so the launcher carried nothing
+    and the pod runs on whatever default its manifest holds - a step quietly not
+    doing what it says rather than one that fails. Some are deliberate, which is
+    why this reports rather than refuses.
+    """
+    asked = list(asked or ())
+    got = set(forwarded)
+    named = [n for n in asked if n in got]
+    dropped = [n for n in asked if n not in got]
+    swept = [n for n in forwarded if n not in set(asked)]
+
+    log("forwarding step env: " + (", ".join(named) if named
+                                   else "nothing the step named"))
+    if dropped:
+        print("unset on the agent and not a fleet secret, so not forwarded: "
+              + ", ".join(dropped), flush=True)
+    if swept:
+        print(f"plus {len(swept)} BUILDKITE_* swept from the agent:",
+              flush=True)
+        print(textwrap.fill(", ".join(swept), width=100,
+                            initial_indent="  ", subsequent_indent="  "),
+              flush=True)
 
 
 # Substituted into the built-in Job only; a repo manifest states its hardware
@@ -1371,8 +1407,8 @@ def main():
     profile = resolve_shape(doc, registry, manifest)
     validate(doc, registry, manifest)
     forwarded = forward_env(doc, args.env, registry)
-    if forwarded:
-        log(f"forwarding step env: {', '.join(forwarded)}")
+    if forwarded or args.env:
+        report_forwarded(args.env, forwarded)
     # shlex.join, not " ".join: argv has already been through the step's shell
     # and the built-in Job runs the result through another one, so joining
     # plainly loses every quote the step wrote.
