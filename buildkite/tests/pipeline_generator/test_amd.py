@@ -4,8 +4,8 @@ import pytest
 
 import amd
 import buildkite_step
+from amd import drop_amd_steps
 from constants import AgentQueue
-from pipeline_generator import drop_amd_steps
 from step import Step
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")

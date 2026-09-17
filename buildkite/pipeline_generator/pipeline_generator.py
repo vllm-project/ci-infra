@@ -4,7 +4,7 @@ from typing import FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import is_amd_device, normalize_amd_depends_on
+from amd import drop_amd_steps, normalize_amd_depends_on
 from buildkite_step import (
     _generate_step_key,
     add_precommit_dependency,
@@ -54,6 +54,8 @@ class PipelineGenerator:
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
         if global_config["torch_nightly"] == "1":
+            # ROCm has its own pinned torch and gains nothing from validating
+            # against a CUDA torch-nightly build, so skip the AMD lane here.
             steps = drop_amd_steps(steps)
             subprocess.run(
                 [
@@ -102,24 +104,6 @@ class PipelineGenerator:
                 buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
             )
         return
-
-
-def drop_amd_steps(steps: List[Step]) -> List[Step]:
-    """Strip AMD build/test steps and AMD mirrors from a torch-nightly run.
-
-    A full torch-nightly run only validates vLLM against a CUDA nightly
-    PyTorch build; ROCm has its own pinned torch and gains nothing from it,
-    so building/running the AMD lane there just burns AMD CI capacity.
-    """
-    kept = []
-    for step in steps:
-        if is_amd_device(step.device):
-            continue
-        if step.mirror and "amd" in step.mirror:
-            others = {key: value for key, value in step.mirror.items() if key != "amd"}
-            step = step.model_copy(update={"mirror": others or None})
-        kept.append(step)
-    return kept
 
 
 def select_steps_and_dependencies(
