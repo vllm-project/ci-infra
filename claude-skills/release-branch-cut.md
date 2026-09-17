@@ -369,44 +369,53 @@ Post to the appropriate channel with:
 - **Links to all builds**: full CI, release-v2, perf-eval
 - **List of cherry-picked PRs** since the previous RC
 
+> **Formatting:** write the message in **Slack mrkdwn**, not Markdown.
+> Slack does NOT render `**double asterisks**` or `[text](url)` — they show
+> up as literal characters. Use `*single asterisks*` for bold, single
+> backticks for inline code (branch names, tags, commit SHAs), and
+> `<https://full-url|link text>` for hyperlinks on PR numbers, build
+> numbers, and the milestone title.
+
 Template for initial branch cut:
 
 ```
-**vX.Y.Z branch cut** :scissors:
+*vX.Y.Z branch cut* :scissors:
 
 The `releases/vX.Y.Z` branch has been cut from commit `<sha>` (based on
-[full CI run #NNN](https://buildkite.com/vllm/ci/builds/NNN), the greenest
+<https://buildkite.com/vllm/ci/builds/NNN|full CI run #NNN>, the greenest
 of the last 3 runs).
 
-**Known failing jobs (N):**
+*Known failing jobs (N):*
 • Job 1
 • Job 2
 ...
 
-**Milestone:** [vX.Y.Z cherry picks](https://github.com/vllm-project/vllm/milestone/NN)
+*Milestone:* <https://github.com/vllm-project/vllm/milestone/NN|vX.Y.Z cherry picks>
 — please tag PRs for cherry-picking here.
 
-**Perf-eval:** [Build #NNN](https://buildkite.com/vllm/perf-eval/builds/NNN)
-running all workloads against the release image.
+*Builds:*
+• Full CI: <https://buildkite.com/vllm/ci/builds/NNNNN|#NNNNN> (run_all + nightly)
+• Release: <https://buildkite.com/vllm/release-v2/builds/NNNNN|#NNNNN>
+• Perf-eval: <https://buildkite.com/vllm/perf-eval/builds/NNN|#NNN> (CUDA + ROCm)
 ```
 
 Template for subsequent RCs:
 
 ```
-**vX.Y.ZrcN** :rocket:
+*vX.Y.ZrcN* :rocket:
 
-Release candidate `vX.Y.ZrcN` tagged on `releases/vX.Y.Z` at commit `<sha>`.
+Release candidate `vX.Y.ZrcN` tagged on `releases/vX.Y.Z` at commit `<full_sha>`.
 
-**New cherry-picks since rcN-1 (N):**
-• [#NNNNN](https://github.com/vllm-project/vllm/pull/NNNNN) Title
+*New cherry-picks since rcN-1 (N):*
+• <https://github.com/vllm-project/vllm/pull/NNNNN|#NNNNN> Title
 ...
 
-**Builds:**
-• Full CI: [#NNNNN](https://buildkite.com/vllm/ci/builds/NNNNN) (run_all + nightly)
-• Release: [#NNNNN](https://buildkite.com/vllm/release-v2/builds/NNNNN)
-• Perf-eval: [#NNNNN](https://buildkite.com/vllm/perf-eval/builds/NNNNN) (CUDA + ROCm)
+*Builds:*
+• Full CI: <https://buildkite.com/vllm/ci/builds/NNNNN|#NNNNN> (run_all + nightly)
+• Release: <https://buildkite.com/vllm/release-v2/builds/NNNNN|#NNNNN>
+• Perf-eval: <https://buildkite.com/vllm/perf-eval/builds/NNNNN|#NNNNN> (CUDA + ROCm)
 
-**Milestone:** [vX.Y.Z cherry picks](https://github.com/vllm-project/vllm/milestone/NN)
+*Milestone:* <https://github.com/vllm-project/vllm/milestone/NN|vX.Y.Z cherry picks>
 ```
 
 ---
