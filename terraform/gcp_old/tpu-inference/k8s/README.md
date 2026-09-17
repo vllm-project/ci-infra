@@ -38,6 +38,7 @@ manager where the launcher built the podspec.
 | `kueue/templates/` | The templates the generator renders. |
 | `kueue/generated/` | The YAML that actually gets applied. Committed on purpose — see below. |
 | `kueue/launcher/` | The program every TPU step runs, its Job, and its image build. |
+| `kueue/launcher/pod_defaults.yaml` | What the fleet gives a workload's pods: caches, gcsfuse settings, eviction and retry policy. One definition, inherited by the built-in Job and by every manifest. |
 
 Terraform stops at the cluster; `deploy_manifests.py` starts there. The
 Kubernetes and Helm providers need a reachable API server at plan time, which
@@ -94,6 +95,42 @@ and passes nothing else. Not the shape, because a JobSet already says where each
 of its pods runs, which no pair of flags can express. Not the command either — a
 JobSet has one per role. A manifest passed together with a command is refused
 rather than one role being silently chosen.
+
+### What a manifest states, and what it inherits
+
+A manifest states the hardware it wants and nothing that follows from it:
+
+```yaml
+metadata:
+  annotations:
+    tpu-ci.google.com/defaults: standard
+```
+
+With that annotation the launcher merges in `pod_defaults.yaml` — the cache
+volumes and their mounts, the gcsfuse sidecar settings, the TPU toleration, the
+service account, `restartPolicy`, the two env names every workload wants, the
+TTL, and the retry rules that let a pod survive its node being repaired. The
+memory request comes from the shape's profile, since it is a fraction of the
+host the pod landed on.
+
+The merge is additive: anything the manifest sets itself is left alone, so a
+role can add a volume or override a default it needs to differ on. Inherited
+mounts are applied first, so a mount nested inside an inherited one lands inside
+it rather than under it.
+
+Only roles that hold chips get the caches and retry rules — they are sized from
+a TPU host's memory and about TPU nodes being repaired, and a chipless role runs
+on neither. Such a role states what it needs itself.
+
+What stays in the manifest is `nodeSelector` and the `google.com/tpu` count:
+together with the chip count they are how the queue is chosen, so there would be
+nothing left to resolve if the fleet supplied them. Its deadline stays too.
+
+Two things a manifest should not set. A **CPU request** is a scheduling floor
+checked against the template the autoscaler builds for a shape; one large enough
+to matter can exceed what that template offers and stop the pool building nodes
+at all. An **ephemeral-storage** request reserves a large share of a node's disk
+to cap a pod that already holds every chip on it.
 
 The image is `WORKLOAD_IMAGE` in the step's environment, checked against
 `allowed_image_repos` — a CI image is built per commit, so which one runs is the
