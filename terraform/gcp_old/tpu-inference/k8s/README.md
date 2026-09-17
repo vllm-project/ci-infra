@@ -359,6 +359,43 @@ guessing — and note the chart pastes our block under keys of its own, so
 anything it derives must be left out of the template or the controller's decoder
 rejects the duplicate.
 
+## Reading the metrics
+
+Managed Prometheus scrapes Kueue on all three clusters and the Buildkite
+controller on the manager. There is no Grafana and no Prometheus server to point
+a browser at; query Cloud Monitoring's Prometheus-compatible endpoint:
+
+```bash
+curl -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  --data-urlencode 'query=kueue_cluster_queue_resource_usage' \
+  https://monitoring.googleapis.com/v1/projects/cloud-ullm-inference-ci-cd/location/global/prometheus/api/v1/query
+```
+
+Utilisation is `kueue_cluster_queue_resource_usage` over
+`kueue_cluster_queue_nominal_quota`, both labelled by flavor and resource. Queue
+time is `kueue_admission_wait_time_seconds`, which is the number Buildkite
+cannot give you: its `started_at` includes the wait. Whether the fleet is being
+fed at all is `buildkite_monitor_monitor_up` and
+`buildkite_scheduler_job_create_success_total` against `job_create_calls_total`.
+
+Read utilisation on the manager. It is the only cluster holding every
+ClusterQueue, because it admits against fleet quota; a worker reports only its
+own generation, and what a worker's numbers tell you is whether something
+admitted here is also through admission there.
+
+**Collapse `instance` before you sum.** A rolled controller leaves the old pod's
+series inside the five-minute lookback, so both report and a plain
+`sum(kueue_cluster_queue_resource_usage{flavor="tpu7x"})` reads sixteen chips on
+an eight-chip fleet. Aggregate it away first:
+
+```
+sum(max by (cluster_queue,flavor,resource) (kueue_cluster_queue_resource_usage{flavor="tpu7x"}))
+```
+
+A usage-over-quota ratio hides this, because both sides double and the ratio
+comes out right for the wrong reason. Do not take a plausible ratio as evidence
+the query is sound.
+
 ## When a step is stuck
 
 Work down from admission. Everything here is on the manager unless it says
