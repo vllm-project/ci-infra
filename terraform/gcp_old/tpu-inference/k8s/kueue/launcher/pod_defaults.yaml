@@ -1,0 +1,78 @@
+# What this fleet gives a workload's pods: the caches, the gcsfuse settings that
+# make them mount, and the eviction policy that keeps a running one alive.
+#
+# A manifest opts in with `tpu-ci.google.com/defaults: standard` on its
+# top-level metadata and the launcher merges this in; job.yaml opts in the same
+# way. It is additive, so a pod keeps any volume, mount path or annotation it
+# declares itself.
+#
+# Split by what each part depends on: everyPod has no dependency on the
+# hardware, tpuPods holds the caches, which are sized from a TPU host's memory
+# and so cannot go to a role running on a worker-cpu node.
+#
+# This is the fleet's contract with every repo, not one Job's configuration:
+# changing it changes every workload in tpu-inference and vllm-torchtpu.
+
+# Applied to every pod of a workload that opts in, chips or not.
+everyPod:
+  annotations:
+    # Job pods are evictable by default, so the last long step of a build is a
+    # lone pod on an idle node - what OPTIMIZE_UTILIZATION consolidates away.
+    # It presents as a job that vanished. A chipless proxy or benchmark client
+    # is no different: consolidate one away and the run ends with it.
+    cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+
+# Applied only to pods that hold chips.
+tpuPods:
+  annotations:
+    # Without this GKE does not inject the sidecar and the claims below never
+    # mount.
+    gke-gcsfuse/volumes: "true"
+    # Headroom for metadata prefetch on both mounts. GKE's guidance is 512Mi or
+    # higher; 2Gi because the compilation cache prefix holds tens of thousands of
+    # entries and a prefetch that runs out of memory falls back to a lookup per
+    # miss.
+    gke-gcsfuse/metadata-prefetch-memory-limit: "2Gi"
+    # Unlimited sidecar CPU and memory: parallel downloads are CPU-bound and the
+    # defaults throttle them. Standard clusters only.
+    gke-gcsfuse/cpu-limit: "0"
+    gke-gcsfuse/memory-limit: "0"
+
+  volumes:
+    # Backing store for the gcsfuse file cache. Without it the sidecar falls back
+    # to 5GiB of ephemeral storage and fileCacheCapacity becomes a cheque it
+    # cannot cash, refetching checkpoints on every load. Sized by the launcher
+    # from the host.
+    - name: gke-gcsfuse-cache
+      emptyDir:
+        medium: Memory
+    # JAX and vLLM use shared memory heavily; the 64MB default is far too small
+    # and fails in ways that look like unrelated crashes. Sized by the launcher
+    # from the host, like the cache above and for the same reason - what needs
+    # the room is one engine per chip.
+    - name: dshm
+      emptyDir:
+        medium: Memory
+    # The buckets are regional, so these claims resolve at mount time in whichever
+    # cluster MultiKueue landed the pod. Defined, with their mount options and
+    # cache capacities, in cache_volumes.yaml.tpl.
+    - name: jax-cache
+      persistentVolumeClaim:
+        claimName: jax-cache
+    - name: hf-cache
+      persistentVolumeClaim:
+        claimName: hf-cache
+
+  # Merged into the container named `workload`. Applied ahead of a pod's own
+  # mounts, so one nested inside a cache here - vllm-torchtpu's profile cache
+  # under /cache/jax - lands inside the mount it shadows rather than under it.
+  volumeMounts:
+    - name: dshm
+      mountPath: /dev/shm
+    # Mounted for every workload, pointed at by none: a compilation cache must be
+    # keyed on the toolchain that filled it, so only the step knows a safe path
+    # under here.
+    - name: jax-cache
+      mountPath: /cache/jax
+    - name: hf-cache
+      mountPath: /cache/hf/hub

@@ -8,6 +8,12 @@
 # slice - is a JobSet the calling repo passes as --manifest.
 apiVersion: batch/v1
 kind: Job
+metadata:
+  annotations:
+    # The fleet's caches, gcsfuse settings and eviction policy, from
+    # pod_defaults.yaml. This Job takes them the same way a repo's own manifest
+    # does, so there is one definition rather than one here and one there.
+    tpu-ci.google.com/defaults: standard
 spec:
   parallelism: 1
   completions: 1
@@ -31,24 +37,6 @@ spec:
           operator: NotIn
           values: [0]
   template:
-    metadata:
-      annotations:
-        # Without this GKE does not inject the sidecar and the csi volumes
-        # below never mount.
-        gke-gcsfuse/volumes: "true"
-        # Job pods are evictable by default, so the last long step of a build
-        # is a lone pod on an idle node - what OPTIMIZE_UTILIZATION
-        # consolidates away. It presents as a job that vanished.
-        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
-        # Headroom for metadata prefetch on both mounts. GKE's guidance is
-        # 512Mi or higher; 2Gi because the compilation cache prefix holds tens
-        # of thousands of entries and a prefetch that runs out of memory falls
-        # back to a lookup per miss.
-        gke-gcsfuse/metadata-prefetch-memory-limit: "2Gi"
-        # Unlimited sidecar CPU and memory: parallel downloads are CPU-bound
-        # and the defaults throttle them. Standard clusters only.
-        gke-gcsfuse/cpu-limit: "0"
-        gke-gcsfuse/memory-limit: "0"
     spec:
       restartPolicy: Never
       # The identity the cache buckets authorise; see workload_sa.yaml.tpl for
@@ -91,40 +79,3 @@ spec:
               # enough to matter can exceed what that template offers - which
               # stops the pool building nodes at all.
               memory: "${MEMORY_REQUEST}"
-          volumeMounts:
-            - name: dshm
-              mountPath: /dev/shm
-            # Mounted for every workload, pointed at by none: a compilation
-            # cache must be keyed on the toolchain that filled it, so only the
-            # step knows a safe path under here.
-            - name: jax-cache
-              mountPath: /cache/jax
-            - name: hf-cache
-              mountPath: /cache/hf/hub
-      volumes:
-        # Backing store for the gcsfuse file cache. Without it the sidecar falls
-        # back to 5GiB of ephemeral storage and fileCacheCapacity becomes a
-        # cheque it cannot cash, refetching checkpoints on every load.
-        #
-        # The launcher sizes it from the host and may swap it for a PD; see
-        # fuse_cache_medium in variables.tf.
-        - name: gke-gcsfuse-cache
-          emptyDir:
-            medium: Memory
-        # JAX and vLLM use shared memory heavily; the 64MB default is far too
-        # small and fails in ways that look like unrelated crashes. Sized by
-        # the launcher from the host, like the cache above and for the same
-        # reason - what needs the room is one engine per chip.
-        - name: dshm
-          emptyDir:
-            medium: Memory
-        # The buckets are regional, so these claims resolve at mount time in
-        # whichever cluster MultiKueue landed the pod. Defined, with their
-        # mount options and cache capacities, in cache_volumes.yaml.tpl - the
-        # JobSets a repo passes as --manifest claim the same names.
-        - name: jax-cache
-          persistentVolumeClaim:
-            claimName: jax-cache
-        - name: hf-cache
-          persistentVolumeClaim:
-            claimName: hf-cache

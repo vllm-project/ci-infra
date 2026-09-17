@@ -108,6 +108,10 @@ LAUNCHER_DEFAULT_JOB = ROOT / "kueue" / "launcher" / "job.yaml"
 LAUNCHER_MANIFEST_CONFIGMAP = "tpu-launcher-manifests"
 LAUNCHER_DEFAULT_JOB_KEY = "job.yaml"
 
+# The pod setup both that Job and a repo's own manifest inherit.
+LAUNCHER_POD_DEFAULTS = ROOT / "kueue" / "launcher" / "pod_defaults.yaml"
+LAUNCHER_POD_DEFAULTS_KEY = "pod_defaults.yaml"
+
 # The node label GKE puts on a TPU node, by machine family. Not derivable from
 # the machine type - a ct6e-standard-8t is `tpu-v6e-slice`, a tpu7x-standard-4t
 # is plain `tpu7x` - so these are read off live nodes.
