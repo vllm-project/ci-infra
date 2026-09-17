@@ -86,6 +86,19 @@ TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$")
 
 WORKLOAD_CONTAINER = "workload"
 
+# Held back from the BUILDKITE_* sweep in forward_env. BUILDKITE_COMMAND is the
+# step's own command line, which would have the workload re-run the launcher
+# that started it; BUILDKITE_PLUGINS can bloat the pod spec; the rest are the
+# agent's per-job API credentials, which belong to the agent rather than to a
+# workload pod.
+BUILDKITE_DENY = frozenset({
+    "BUILDKITE_COMMAND",
+    "BUILDKITE_PLUGINS",
+    "BUILDKITE_AGENT_JOB_API_SOCKET",
+    "BUILDKITE_AGENT_JOB_API_TOKEN",
+    "BUILDKITE_OIDC_TOKEN_PATH",
+})
+
 # What a manifest sets to be given the fleet's pod setup instead of restating
 # it. See inherit_defaults().
 DEFAULTS_ANNOTATION = "tpu-ci.google.com/defaults"
@@ -555,9 +568,11 @@ def pod_metadatas(doc):
 def forward_env(doc, names, registry):
     """Copy named step variables onto the workload container.
 
-    Named explicitly rather than forwarded wholesale: the launcher's
-    environment holds the agent's per-job credentials, so what crosses into a
-    workload pod has to be written down in the step.
+    Named explicitly, except for BUILDKITE_*: a workload needs the agent that
+    started it to publish an artifact or report a test result, and every step
+    wanted the same set, so the launcher supplies it rather than each pipeline
+    restating it. BUILDKITE_DENY holds back the agent's own job credentials.
+    Everything else a workload wants, including its secrets, the step names.
 
     A name the step asked for but does not have may be a fleet-wide one, and is
     then supplied as a secretKeyRef into the Secret each worker's sync writes.
@@ -566,6 +581,9 @@ def forward_env(doc, names, registry):
     worker, and the pod.
     """
     fleet = registry.get("env_secrets") or {}
+    swept = sorted(k for k in os.environ
+                   if k.startswith("BUILDKITE_") and k not in BUILDKITE_DENY)
+    names = list(dict.fromkeys(list(names) + swept))
     entries = []
     for name in names:
         value = os.environ.get(name, "")
