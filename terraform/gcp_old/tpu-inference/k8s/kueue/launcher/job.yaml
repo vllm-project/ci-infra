@@ -104,10 +104,8 @@ spec:
       volumes:
         # Backing store for the gcsfuse file cache. Without it the sidecar falls
         # back to 5GiB of ephemeral storage and fileCacheCapacity becomes a
-        # cheque it cannot cash, refetching checkpoints on every load.
-        #
-        # The launcher sizes it from the host and may swap it for a PD; see
-        # fuse_cache_medium in variables.tf.
+        # cheque it cannot cash, refetching checkpoints on every load. Sized by
+        # the launcher from the host.
         - name: gke-gcsfuse-cache
           emptyDir:
             medium: Memory
