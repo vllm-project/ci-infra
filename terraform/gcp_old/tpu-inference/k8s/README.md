@@ -69,6 +69,20 @@ terraform init && terraform apply          # if any *.tf or the shape list chang
 its queues exist before a worker reports to them, and it uses its own temporary
 kubeconfig, so it will not touch yours or leave a context selected.
 
+Deploying does not disturb a workload that is already running. Every deploy
+rolls `kueue-controller-manager` whether or not its config changed, which looks
+like it would, and it does not: Kueue gates admission and nothing else, so once
+a workload is running its pods belong to `Job` objects driven by the
+control-plane Job controller and `jobset-controller-manager`, neither of which
+the deploy touches. Measured against a live benchmark - the controller was
+replaced while pod names, start times, restart counts and `Admitted` on both
+manager and worker all stayed as they were.
+
+What the roll does affect is pod creation, for the seconds it takes: see "A
+deploy briefly rejects pod creation, cluster-wide" below. So the case to think
+about before deploying is not a workload that is running, but one that is about
+to start a pod.
+
 Always commit the regenerated `kueue/generated/` alongside whatever produced it.
 A change to a comment in a template counts: the comments are rendered into the
 ConfigMaps.
