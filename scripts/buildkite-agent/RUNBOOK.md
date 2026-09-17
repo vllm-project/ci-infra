@@ -162,7 +162,15 @@ Now edit **two** files to match your machine:
 Copying an existing machine on the same queue is the fastest way to get the
 secrets right — the values in `environment` (`HF_TOKEN`, the AWS keys) and the
 `token` are identical across machines in one cluster, so only `name`, `tags`,
-`spawn`, `SLICES_PER_GPU`, `build-path` and `HF_HOME` are per-machine.
+`spawn`, `SLICES_PER_GPU`, `build-path` and `HF_HOME` are per-machine. Take the
+token from a machine **on the same queue**, so per-queue tokens stay separable.
+
+> If you copy the config with `tar`, mind the ownership: `--no-same-owner`
+> leaves `buildkite-agent.cfg` owned by `root`, and the agent then fails to
+> start with `loading config file: ... permission denied` because the service
+> runs as `buildkite-agent`. Either preserve ownership or set it explicitly —
+> `chown root:buildkite-agent` with mode `0640` lets the agent read the token
+> without being able to rewrite it.
 
 **`/etc/buildkite-agent/hooks/environment`:**
 - Fill in the secrets: `HF_TOKEN`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
@@ -176,6 +184,36 @@ secrets right — the values in `environment` (`HF_TOKEN`, the AWS keys) and the
 > mounts a fixed path. Set `HF_HOME` to a path that's actually mounted into the
 > container, on a big disk (4+ TB preferred). See `../AGENTS.md` step 6 for a
 > snippet that auto-detects the best disk.
+
+### Pre-mount every cache path a pipeline may use, not just `HF_HOME`
+
+**A queue can carry pipelines whose cache paths this repo never mentions.** The
+agent's own `HF_HOME` is only one of them: a pipeline scheduled onto the same
+queue can set its own cache directory, and `/mnt/shared` is used this way by
+pipelines on the whole-GPU GPU queues.
+
+This fails in the worst possible way. A Docker bind mount **creates a missing
+host path instead of failing**, so if `/mnt/shared` is not a mount on the node,
+the directory is silently created on the root disk and model downloads land
+there. One large model is enough to fill a 200-250 GB root disk, after which
+every job on the machine dies at initialization writing `/tmp/job-env-*` while
+the agent stays connected and keeps accepting work.
+
+So on any whole-GPU machine, mount `/mnt/shared` onto the large volume during
+setup, before starting the agent:
+
+```bash
+sudo mkdir -p /mnt/local/shared          # or <big-volume>/shared
+echo "/mnt/local/shared /mnt/shared none bind,nofail 0 0" | sudo tee -a /etc/fstab
+sudo mount /mnt/shared
+```
+
+Verify that no cache path resolves to the root filesystem. `du -x` stays on one
+filesystem, so this must stay small on a machine that has run jobs:
+
+```bash
+du -xsh /mnt        # root-disk usage under /mnt; expect kilobytes, not gigabytes
+```
 
 ### How device pinning works (the part worth understanding)
 
@@ -263,6 +301,8 @@ hostname.
 
 - [ ] Docker/containerd data roots and `build-path` are on large storage, not
       the root disk (Step 3)
+- [ ] Every cache path a pipeline on this queue may use is a real mount —
+      `HF_HOME` and `/mnt/shared` — and `du -xsh /mnt` reads kilobytes
 - [ ] `nvidia-smi` lists the expected GPUs (and MIG slices, if slicing)
 - [ ] `nvidia-ctk cdi list` shows the same devices
 - [ ] `systemctl is-active buildkite-agent` is `active`
@@ -282,11 +322,22 @@ hostname.
 ## Troubleshooting
 
 - **Jobs get acquired but never run; agent log shows `failed to initialize job:
-  open /tmp/job-env-...: no space left on device`** — the root disk is full of
-  Docker images. Fix: stop the agent, `docker image prune -a -f`, `rm -rf
-  /tmp/docker-pull-locks`, move the data roots + build-path to big storage
-  (Step 3), restart. Prevention is Step 3 — always move storage before starting
-  the agent on a GPU machine.
+  open /tmp/job-env-...: no space left on device`** — the root disk is full.
+  Docker images are one cause; an unmounted cache path such as `/mnt/shared` is
+  the other, so check `du -xh -d1 /mnt` as well as the Docker root. Fix: stop
+  the agent (it keeps accepting and failing jobs while broken, so stopping it
+  lets them reschedule elsewhere), reclaim the space, mount the path that
+  should have been a mount, restart. Prevention is Step 3 plus the cache-path
+  mounts above.
+  - With `/` at 100% you cannot even copy a script to `/tmp`, so run the
+    remediation as inline `ssh` commands rather than staging a file.
+  - `du -x` on a full disk can disagree wildly with `df` while layers are
+    unpacking; trust `df`.
+- **`apt` install fails with `Could not get lock /var/lib/apt/lists/lock`** —
+  the periodic `apt.systemd.daily` job can wedge on its HTTP fetch and hold the
+  lock for hours. Check the holder with `sudo fuser /var/lib/apt/lists/lock`
+  and its age with `ps -o etime= -p <pid>` before blaming the repository, then
+  `sudo systemctl stop apt-daily.service apt-daily-upgrade.service`.
 - **Right after the first start, every agent says "Starting job" but nothing
   seems to happen — no containers, idle GPUs, an empty build directory** — this
   is normal for several minutes on a busy queue. All N agents take a job at

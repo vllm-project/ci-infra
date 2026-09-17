@@ -219,6 +219,14 @@ your queue before choosing — the queues do not all mount the same paths, so a
 value that is right for one queue can be wrong for another on identical
 hardware.
 
+**`HF_HOME` is not the only cache path.** Pipelines sharing a queue can set
+their own cache directory — `/mnt/shared` is used this way on the whole-GPU GPU
+queues — and a Docker bind mount creates a missing host path rather than
+failing, so an unmounted cache path silently fills the root disk. Mount every
+such path onto the large volume before starting the agent, and see
+[`buildkite-agent/RUNBOOK.md`](buildkite-agent/RUNBOOK.md) for the exact steps
+and the failure it prevents.
+
 When the host's real cache lives elsewhere, expose it at the path the plugin
 mounts instead of moving it — a bind mount keeps the change local to the
 machine and needs no pipeline change:
