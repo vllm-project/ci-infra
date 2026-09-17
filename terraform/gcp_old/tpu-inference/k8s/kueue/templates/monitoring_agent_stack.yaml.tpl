@@ -1,0 +1,36 @@
+---
+# The Buildkite controller's own health. Kueue can only account for work that
+# reached it, and everything reaches it through this one Deployment: it polls
+# Buildkite for jobs and creates a Job per step. If it stops polling, or polls
+# and fails to create, the fleet goes quiet and every Kueue metric agrees that
+# there is nothing to do.
+#
+# That failure is otherwise invisible. A step that was never turned into a Job
+# sits in Buildkite as a job nobody picked up, which looks the same as a queue
+# that is simply busy.
+#
+# What this is scraped for: buildkite_monitor_monitor_up,
+# buildkite_monitor_job_query_errors_total against job_queries_total, and
+# buildkite_scheduler_job_create_success_total against job_create_calls_total.
+#
+# Manager only - the controller runs here, and the workers only ever see the
+# pods MultiKueue sends them.
+#
+# Namespaced, unlike the Kueue scrape beside it, because the endpoint is plain
+# HTTP on the pod and needs no credential, so nothing forces it out of the
+# namespace it belongs to.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: agent-stack-k8s
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    matchLabels:
+      app: agent-stack-k8s
+  endpoints:
+  - port: metrics
+    # The controller's counters move on its polling loop, which is seconds, but
+    # what is wanted from them is a rate over minutes - whether creates are
+    # still succeeding - so the scrape does not have to be fast to be useful.
+    interval: 30s
