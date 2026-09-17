@@ -7,8 +7,13 @@
 # declares itself.
 #
 # Split by what each part depends on: everyPod has no dependency on the
-# hardware, tpuPods holds the caches, which are sized from a TPU host's memory
-# and so cannot go to a role running on a worker-cpu node.
+# hardware; tpuPods and tpuJobs apply only to roles holding chips, because the
+# caches are sized from a TPU host's memory and the retry rules are about TPU
+# nodes being repaired.
+#
+# What a manifest still states for itself is the hardware it wants - nodeSelector
+# and the google.com/tpu count, which together are how the launcher picks the
+# queue - and anything genuinely its own, like its deadline.
 #
 # This is the fleet's contract with every repo, not one Job's configuration:
 # changing it changes every workload in tpu-inference and vllm-torchtpu.
@@ -76,3 +81,54 @@ tpuPods:
       mountPath: /cache/jax
     - name: hf-cache
       mountPath: /cache/hf/hub
+
+  # Merged into the pod spec.
+  spec:
+    restartPolicy: Never
+    # The identity the cache buckets authorise; see workload_sa.yaml.tpl for why
+    # it is not `default`. validate() rejects any name the fleet has not
+    # allowed, so this is the value that name check expects.
+    serviceAccountName: tpu-workload
+    # TPU nodes are tainted. Without this a pod that asks for chips is never
+    # scheduled onto the node that has them.
+    tolerations:
+      - key: "google.com/tpu"
+        operator: "Equal"
+        value: "present"
+        effect: "NoSchedule"
+
+  # Merged into the container named `workload`. Only what is the same for every
+  # workload on the fleet; anything a test needs arrives through --env.
+  env:
+    - name: HF_HOME
+      value: /cache/hf
+    # Unbuffered, so output reaches the log as it happens.
+    - name: PYTHONUNBUFFERED
+      value: "1"
+
+# Merged into the Job of each role that holds chips.
+tpuJobs:
+  # A TPU node repaired underneath a running pod is rejected at kubelet
+  # admission - `no healthy devices present; cannot allocate unhealthy devices
+  # google.com/tpu` - with no DisruptionTarget condition and no exit code,
+  # because nothing started. Six is a little over ten minutes of exponential
+  # backoff, which outlasts a repair.
+  #
+  # It never reruns a red test: FailJob below ends the Job on the first non-zero
+  # exit however many retries remain.
+  backoffLimit: 6
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+      - action: FailJob
+        onExitCodes:
+          containerName: workload
+          operator: NotIn
+          values: [0]
+
+# Merged into the submitted object itself.
+workload:
+  # Long enough for the launcher's last log poll after the pods exit.
+  ttlSecondsAfterFinished: 300

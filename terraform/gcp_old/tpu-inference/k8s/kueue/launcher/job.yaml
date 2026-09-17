@@ -17,65 +17,21 @@ metadata:
 spec:
   parallelism: 1
   completions: 1
-  # For the case the rules below cannot name: a TPU node repaired underneath a
-  # running pod is rejected at kubelet admission - `no healthy devices present;
-  # cannot allocate unhealthy devices google.com/tpu` - with no
-  # DisruptionTarget condition and no exit code, because nothing started.
-  #
-  # Six is a little over ten minutes of exponential backoff, which outlasts a
-  # repair. It never reruns a red test: FailJob below ends the Job on the first
-  # non-zero exit however many retries remain.
-  backoffLimit: 6
-  podFailurePolicy:
-    rules:
-      - action: Ignore
-        onPodConditions:
-          - type: DisruptionTarget
-      - action: FailJob
-        onExitCodes:
-          containerName: workload
-          operator: NotIn
-          values: [0]
   template:
     spec:
-      restartPolicy: Never
-      # The identity the cache buckets authorise; see workload_sa.yaml.tpl for
-      # why it is not `default`.
-      serviceAccountName: tpu-workload
+      # The hardware this Job wants; the launcher reads these and the chip
+      # count below to pick the queue, so they stay here.
       nodeSelector:
         cloud.google.com/gke-tpu-accelerator: ${ACCELERATOR_LABEL}
         cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
-      tolerations:
-        - key: "google.com/tpu"
-          operator: "Equal"
-          value: "present"
-          effect: "NoSchedule"
       containers:
         - name: workload
           image: ${IMAGE}
           # No workingDir: the image's own is where its tests live, and this
           # file is not the place to know that.
           command: ["/bin/bash", "-lc"]
-          env:
-            # Only what is the same for every test; the rest arrives through
-            # `--env`, which can leave a name the step did not set unset.
-            - name: HF_HOME
-              value: /cache/hf
-            # Unbuffered, so output reaches the log as it happens.
-            - name: PYTHONUNBUFFERED
-              value: "1"
           resources:
             limits:
               google.com/tpu: "${CHIPS}"
             requests:
               google.com/tpu: "${CHIPS}"
-              # Keeps the pod out of BestEffort, which is evicted first: it
-              # holds a tmpfs /dev/shm and a memory-backed file cache, and
-              # eviction ranks pods by usage above request. Sized from those
-              # volumes by memory_request() in generate_manifests.py.
-              #
-              # No CPU request: it is also a scheduling floor, checked against
-              # a template the autoscaler builds for the shape, and one large
-              # enough to matter can exceed what that template offers - which
-              # stops the pool building nodes at all.
-              memory: "${MEMORY_REQUEST}"

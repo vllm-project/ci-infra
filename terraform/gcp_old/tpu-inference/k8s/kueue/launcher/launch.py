@@ -693,7 +693,7 @@ def finalise(doc, profile, registry, name, labels, owner, command, where):
             container["args"] = [command]
 
     cap_runtime(doc, profile, registry)
-    inherit_defaults(doc)
+    inherit_defaults(doc, profile)
     size_host_volumes(doc, profile)
     return doc
 
@@ -766,37 +766,41 @@ def pod_defaults():
     """
     with open(POD_DEFAULTS) as fh:
         doc = yaml.safe_load(fh) or {}
-    every = (doc.get("everyPod") or {}).get("annotations") or {}
     tpu = doc.get("tpuPods") or {}
-    missing = {"volumes", "volumeMounts", "annotations"} - set(tpu)
-    if missing or not every:
+    missing = {"volumes", "volumeMounts", "annotations", "spec", "env"} - set(tpu)
+    if missing or not (doc.get("everyPod") or {}).get("annotations"):
         raise SystemExit(
-            f"{POD_DEFAULTS} is missing "
-            f"{'everyPod.annotations' if not every else ''}"
-            f"{' '.join('tpuPods.' + m for m in sorted(missing))}. "
-            "A workload inheriting it would come up without its caches."
+            f"{POD_DEFAULTS} is missing tpuPods.{'/'.join(sorted(missing))} or "
+            "everyPod.annotations. A workload inheriting it would come up "
+            "without its caches."
         )
-    return every, tpu
+    return doc
 
 
-def inherit_defaults(doc):
-    """Give a manifest the fleet's caches without it restating them.
+def inherit_defaults(doc, profile):
+    """Give a manifest the fleet's pod setup without it restating it.
 
-    The sidecar annotations come with them: without gke-gcsfuse/volumes GKE
-    injects no sidecar and the claims silently never mount.
+    The sidecar annotations come with the caches: without gke-gcsfuse/volumes
+    GKE injects no sidecar and the claims silently never mount.
 
-    Additive. A volume, mount path or annotation the manifest already sets is
-    left alone, so a role can add its own - the disagg manifests shadow a
-    subtree of the jax cache this way - or override one it needs to differ on.
+    Additive throughout. Anything the manifest already sets - a volume, a mount
+    path, an annotation, an env name, a field of the pod or Job spec - is left
+    alone, so a role can add its own or override one it needs to differ on.
 
-    Only the caches are held back from chipless roles, because only they depend
-    on the hardware: they are sized from a TPU host's memory, and validate()
-    makes a role that is not on one state its own sizes.
+    Only the chip-holding parts are held back from a chipless role, because
+    only they depend on the hardware: the caches are sized from a TPU host's
+    memory, and the retry rules are about TPU nodes being repaired.
     """
     annotations = (doc.get("metadata") or {}).get("annotations") or {}
     if annotations.get(DEFAULTS_ANNOTATION) != DEFAULTS_STANDARD:
         return
-    every, tpu = pod_defaults()
+    defaults = pod_defaults()
+    every = defaults["everyPod"]["annotations"]
+    tpu = defaults["tpuPods"]
+
+    for key, value in (defaults.get("workload") or {}).items():
+        doc["spec"].setdefault(key, value)
+
     for template in pod_templates(doc):
         on_pod = template.setdefault("metadata", {}).setdefault(
             "annotations", {})
@@ -809,6 +813,8 @@ def inherit_defaults(doc):
 
         for key, value in tpu["annotations"].items():
             on_pod.setdefault(key, value)
+        for key, value in tpu["spec"].items():
+            spec.setdefault(key, copy.deepcopy(value))
 
         have = {v.get("name") for v in spec.setdefault("volumes", [])}
         spec["volumes"].extend(
@@ -828,6 +834,24 @@ def inherit_defaults(doc):
                 copy.deepcopy(m) for m in tpu["volumeMounts"]
                 if m.get("mountPath") not in at
             ]
+            named = {e.get("name")
+                     for e in container.setdefault("env", [])}
+            container["env"].extend(
+                copy.deepcopy(e) for e in tpu["env"]
+                if e.get("name") not in named
+            )
+            # Sized from the host like the volumes above, and for the same
+            # reason: what the pod needs is a fraction of the machine it
+            # landed on, which the manifest cannot know.
+            requests = (container.setdefault("resources", {})
+                        .setdefault("requests", {}))
+            requests.setdefault("memory", profile["memory_request"])
+
+    for job in job_specs(doc):
+        if not pod_chips(job["template"]["spec"]):
+            continue
+        for key, value in (defaults.get("tpuJobs") or {}).items():
+            job.setdefault(key, copy.deepcopy(value))
 
 
 def size_host_volumes(doc, profile):
