@@ -175,6 +175,13 @@ def is_amd_gpu_device(device: Optional[str]) -> bool:
     return get_amd_device_config(device) is not None
 
 
+def is_amd_device(device: Optional[str]) -> bool:
+    """True for the AMD build lane (amd_cpu) or any native AMD GPU device."""
+    return _device_value(device) == DeviceType.AMD_CPU.value or is_amd_gpu_device(
+        device
+    )
+
+
 def valid_amd_gpu_devices() -> List[str]:
     return list(AMD_DEVICE_CONFIGS)
 

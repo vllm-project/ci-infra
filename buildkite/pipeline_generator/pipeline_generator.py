@@ -4,14 +4,13 @@ from typing import FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import is_amd_gpu_device, normalize_amd_depends_on
+from amd import is_amd_device, normalize_amd_depends_on
 from buildkite_step import (
     _generate_step_key,
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
     create_precommit_group_step,
 )
-from constants import DeviceType
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
 
@@ -56,6 +55,14 @@ class PipelineGenerator:
             steps.extend(read_steps_from_job_dir(job_dir))
         if global_config["torch_nightly"] == "1":
             steps = drop_amd_steps(steps)
+            subprocess.run(
+                [
+                    "buildkite-agent",
+                    "annotate",
+                    "AMD lane excluded: torch-nightly validates CUDA only.",
+                ],
+                check=False,
+            )
         try:
             steps, selected_step_keys = select_steps_and_dependencies(
                 steps, global_config["only_step_keys"]
@@ -104,17 +111,15 @@ def drop_amd_steps(steps: List[Step]) -> List[Step]:
     PyTorch build; ROCm has its own pinned torch and gains nothing from it,
     so building/running the AMD lane there just burns AMD CI capacity.
     """
-    filtered_steps = []
+    kept = []
     for step in steps:
-        if step.device == DeviceType.AMD_CPU.value or is_amd_gpu_device(step.device):
+        if is_amd_device(step.device):
             continue
         if step.mirror and "amd" in step.mirror:
-            remaining_mirror = {
-                key: value for key, value in step.mirror.items() if key != "amd"
-            }
-            step = step.model_copy(update={"mirror": remaining_mirror or None})
-        filtered_steps.append(step)
-    return filtered_steps
+            others = {key: value for key, value in step.mirror.items() if key != "amd"}
+            step = step.model_copy(update={"mirror": others or None})
+        kept.append(step)
+    return kept
 
 
 def select_steps_and_dependencies(
