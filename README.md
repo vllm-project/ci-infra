@@ -179,6 +179,10 @@ A daily Buildkite pipeline (`.buildkite/pipelines/rebuild-cpu-ami.yml`, schedule
 
 The warm-cache AMI is used by the `cpu_queue_*_us_east_1` queues and release queues.
 
+### HF Model Cache (FSx)
+
+Test containers on the L4 GPU queues share a persistent HuggingFace cache via `HF_HOME=/fsx/hf_cache` (see `buildkite/pipeline_generator/plugin/docker_plugin.py`). A nightly Buildkite pipeline (`.buildkite/pipelines/warm-hf-cache.yml`) runs `buildkite/scripts/warm-hf-cache.sh` on `gpu_1_queue` to pre-download the small models and MTEB datasets behind the most download-flaky test groups (bitsandbytes plugins, MTEB pooling), so those steps never depend on hub availability.
+
 ### sccache
 
 C++ compilation outputs are cached in S3 (`vllm-build-sccache` in us-west-2), configured via `docker/ci.hcl`.
