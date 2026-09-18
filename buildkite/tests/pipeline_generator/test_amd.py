@@ -27,6 +27,13 @@ def test_amd_template_uses_build_scoped_images():
     assert "rocm_build_scoped_images" not in template
 
 
+def test_amd_template_uses_shallow_native_checkouts():
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+
+    assert f'cloneFlags: "{amd.AMD_GIT_CLONE_FLAGS}"' in template
+    assert f'fetchFlags: "{amd.AMD_GIT_FETCH_FLAGS}"' in template
+
+
 def test_amd_template_configures_gpu_diagnostics():
     template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
 
@@ -127,7 +134,12 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_gpu_count
     if not dind:
         assert command_step.plugins is not None
-        pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
+        k8s_plugin = command_step.plugins[0]["kubernetes"]
+        assert k8s_plugin["checkout"] == {
+            "cloneFlags": amd.AMD_GIT_CLONE_FLAGS,
+            "fetchFlags": amd.AMD_GIT_FETCH_FLAGS,
+        }
+        pod_patch = k8s_plugin["podSpecPatch"]
         container = pod_patch["containers"][0]
         assert container["image"] == amd.AMD_NATIVE_BASE_IMAGE
         assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
