@@ -592,24 +592,40 @@ def convert_group_step_to_buildkite_step(
     # a CUDA torch-nightly build, so the AMD lane is excluded entirely there.
     include_amd = global_config["torch_nightly"] != "1"
 
+    # When AMD is excluded, a step could still declare depends_on an AMD key
+    # (build lane or native GPU); that key is never emitted, which would
+    # otherwise leave a dangling reference in the uploaded pipeline.
+    excluded_amd_step_keys = set()
+    if not include_amd:
+        for other_steps in group_steps.values():
+            for other_step in other_steps:
+                if is_amd_device(other_step.device):
+                    excluded_amd_step_keys.add(
+                        other_step.key or _generate_step_key(other_step.label)
+                    )
+
     amd_hardware_steps = []
 
     for group, steps in group_steps.items():
         group_steps_list = []
         for step in steps:
             step_key = step.key or _generate_step_key(step.label)
+            if is_amd_gpu_device(step.device) and not include_amd:
+                continue
+
             # In a retry build a step may be present only because its AMD
             # mirror was requested; then emit the mirror but not the step.
             only_step_keys = global_config["only_step_keys"]
             # The A100 fleet is retired; retain declarations only for AMD mirrors.
+            # Any AMD GPU device reaching this point already has include_amd
+            # True (see the continue above), so this clause really only gates
+            # the amd_cpu build lane.
             include_step = (
                 step.device != DeviceType.A100
                 and (include_amd or not is_amd_device(step.device))
                 and (only_step_keys is None or step_key in only_step_keys)
             )
             if is_amd_gpu_device(step.device):
-                if not include_amd:
-                    continue
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
                     _prepare_commands(
@@ -650,12 +666,19 @@ def convert_group_step_to_buildkite_step(
 
             # command step
             step_commands = _prepare_commands(step, variables_to_inject)
+            depends_on = step.depends_on
+            if excluded_amd_step_keys and depends_on:
+                depends_on = [
+                    dependency
+                    for dependency in depends_on
+                    if dependency not in excluded_amd_step_keys
+                ]
 
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
                 key=step_key,
                 commands=step_commands,
-                depends_on=step.depends_on,
+                depends_on=depends_on,
                 soft_fail=step.soft_fail,
                 agents=_get_step_agents(step),
                 priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
