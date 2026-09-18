@@ -1401,6 +1401,62 @@
         "reference_url": "https://buildkite.com/vllm/ci/builds/89444",
         "notes": "Nightly-only lane, absent from the bump PR's CI render (#89315). Deterministic post-bump failure in transformers rope-config validation; same transformers-5.17 config-schema break family."
       }
+    },
+    {
+      "id": "pr-57405-main-89911-kernels-fp8-moe-test-1xh100",
+      "job_name": ":nvidia: (H100) FP8 MoE Kernels",
+      "job_key": "kernels-fp8-moe-test-1xh100",
+      "culprit_pr": {
+        "number": 57405,
+        "url": "https://github.com/vllm-project/vllm/pull/57405",
+        "merge_commit": "ac78445bc9ee3bb615b8b21db22fb7dac6698ece"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 89682,
+        "job_id": "01a0b070-0bb5-435d-bcd9-e1aa1fe557dc",
+        "url": "https://buildkite.com/vllm/ci/builds/89682#01a0b070-0bb5-435d-bcd9-e1aa1fe557dc"
+      },
+      "main_failure": {
+        "build_number": 89911,
+        "job_id": "01a0b656-cc48-4606-9130-949336a903f3",
+        "url": "https://buildkite.com/vllm/ci/builds/89911#01a0b656-cc48-4606-9130-949336a903f3",
+        "signature": "AttributeError 'object' object has no attribute 'fused_experts' in test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed (test mock sentinel broke by the PR's delegation refactor)"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/57641",
+        "notes": "PR refactored process_weights_after_loading to delegate via moe_kernel.fused_experts; the test's bare object() sentinel lacked the attribute. Fix swaps in a MagicMock."
+      }
+    },
+    {
+      "id": "pr-57405-main-89914-kernels-b200",
+      "job_name": ":nvidia: (B200) Kernels Shard %N",
+      "job_key": "kernels-b200",
+      "culprit_pr": {
+        "number": 57405,
+        "url": "https://github.com/vllm-project/vllm/pull/57405",
+        "merge_commit": "ac78445bc9ee3bb615b8b21db22fb7dac6698ece"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 89682,
+        "job_id": "01a0b070-0bae-4c61-b5ca-453ff46f67c1",
+        "url": "https://buildkite.com/vllm/ci/builds/89682#01a0b070-0bae-4c61-b5ca-453ff46f67c1"
+      },
+      "main_failure": {
+        "build_number": 89914,
+        "job_id": "01a0b660-1ec3-4940-83cd-1d73918eb94a",
+        "url": "https://buildkite.com/vllm/ci/builds/89914#01a0b660-1ec3-4940-83cd-1d73918eb94a",
+        "signature": "Same AttributeError 'object' has no attribute 'fused_experts' in test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed (shard 3)"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/57641",
+        "notes": "Same root cause as the H100 lane; both lanes were block-gated on the PR's CI #89682."
+      }
     }
   ]
 }
