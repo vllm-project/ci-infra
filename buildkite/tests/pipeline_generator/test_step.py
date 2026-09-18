@@ -637,7 +637,10 @@ def test_generated_steps_retry_when_the_agent_is_lost():
     command_step = _render_single_step(step).steps[0]
 
     assert command_step.retry == {
-        "automatic": [{"exit_status": -1, "limit": 1}],
+        "automatic": [
+            {"exit_status": -1, "limit": 1},
+            {"signal_reason": "agent_stop", "limit": 1},
+        ],
     }
 
 
@@ -656,6 +659,7 @@ def test_agent_lost_retry_preserves_step_retry_conditions():
     assert command_step.retry == {
         "automatic": [
             {"exit_status": -1, "limit": 1},
+            {"signal_reason": "agent_stop", "limit": 1},
             {"exit_status": 143, "limit": 2},
         ],
     }
