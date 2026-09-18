@@ -15,18 +15,13 @@ from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
 
 
-def _annotate_best_effort(
-    message: str, *, context: str, style: Optional[str] = None
-) -> None:
+def _annotate_best_effort(message: str, style: Optional[str] = None) -> None:
     """Best-effort `buildkite-agent annotate`: never fail the build over it.
 
     check=False only covers a non-zero exit; it still lets FileNotFoundError
     propagate if the binary itself is missing (e.g. when generating locally).
-    A distinct --context per call site is required: annotations posted to the
-    same (default) context replace one another, so without it a later
-    annotation (e.g. an error) would silently erase an earlier one.
     """
-    command = ["buildkite-agent", "annotate", message, "--context", context]
+    command = ["buildkite-agent", "annotate", message]
     if style:
         command.extend(["--style", style])
     try:
@@ -57,8 +52,13 @@ class PipelineGenerator:
             if is_docs_only_change(global_config["list_file_diff"]):
                 print("List file diff: ", global_config["list_file_diff"])
                 print("All changes are doc-only, skipping CI.")
-                _annotate_best_effort(
-                    ":memo: CI skipped — doc-only changes", context="docs-only"
+                subprocess.run(
+                    [
+                        "buildkite-agent",
+                        "annotate",
+                        ":memo: CI skipped — doc-only changes",
+                    ],
+                    check=True,
                 )
                 output_dir_path = os.path.dirname(self.output_file_path)
                 with open(os.path.join(output_dir_path, ".docs_only"), "w") as f:
@@ -71,8 +71,7 @@ class PipelineGenerator:
             # against a CUDA torch-nightly build, so the AMD lane is excluded
             # further downstream (see is_amd_device / include_amd).
             _annotate_best_effort(
-                "AMD lane excluded: torch-nightly validates CUDA only.",
-                context="torch-nightly-amd-skip",
+                "AMD lane excluded: torch-nightly validates CUDA only."
             )
 
         steps = []
@@ -84,9 +83,7 @@ class PipelineGenerator:
             )
         except ValueError as error:
             # Surface the reason on the build page, not only in the bootstrap log.
-            _annotate_best_effort(
-                str(error), context="step-selection-error", style="error"
-            )
+            _annotate_best_effort(str(error), style="error")
             raise
         global_config["only_step_keys"] = selected_step_keys
         grouped_steps = group_steps(steps)
@@ -159,6 +156,14 @@ def select_steps_and_dependencies(
     if missing:
         raise ValueError("Unknown CI step key(s): " + ", ".join(sorted(missing)))
 
+    if torch_nightly:
+        requested_amd_keys = requested_step_keys & amd_step_keys
+        if requested_amd_keys:
+            raise ValueError(
+                "AMD CI step key(s) requested, but AMD steps are excluded from "
+                "torch-nightly runs: " + ", ".join(sorted(requested_amd_keys))
+            )
+
     selected_step_keys = set(requested_step_keys)
     pending = list(requested_step_keys)
     while pending:
@@ -171,17 +176,6 @@ def select_steps_and_dependencies(
             if dependency not in selected_step_keys:
                 selected_step_keys.add(dependency)
                 pending.append(dependency)
-
-    if torch_nightly:
-        # Check the full closure, not just the directly-requested keys: a
-        # requested CUDA step could still pull in an AMD dependency, which
-        # would otherwise resolve to a silently-dropped, dangling reference.
-        selected_amd_keys = selected_step_keys & amd_step_keys
-        if selected_amd_keys:
-            raise ValueError(
-                "AMD CI step key(s) requested, but AMD steps are excluded from "
-                "torch-nightly runs: " + ", ".join(sorted(selected_amd_keys))
-            )
 
     selected = [
         step

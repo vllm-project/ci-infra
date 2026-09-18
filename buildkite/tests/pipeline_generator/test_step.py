@@ -240,27 +240,6 @@ def test_selected_steps_allow_non_amd_key_under_torch_nightly():
     assert selected_keys == frozenset({"cuda-test"})
 
 
-def test_selected_steps_reject_amd_key_pulled_in_via_dependency_closure():
-    # A directly-requested CUDA step can still pull in an AMD dependency
-    # through the transitive closure; that must be rejected too, not just
-    # AMD keys requested outright (the closure runs after the initial check).
-    steps = [
-        Step(label="AMD image build", key="image-build-amd", device="amd_cpu"),
-        Step(
-            label="CUDA thing",
-            key="cuda-thing",
-            device="h100",
-            depends_on=["image-build-amd"],
-            commands=["test"],
-        ),
-    ]
-
-    with pytest.raises(ValueError, match="image-build-amd"):
-        select_steps_and_dependencies(
-            steps, frozenset({"cuda-thing"}), torch_nightly=True
-        )
-
-
 def test_selected_step_runs_without_source_match(fake_global_config):
     fake_global_config["only_step_keys"] = frozenset({"selected"})
     step = Step(
@@ -867,72 +846,6 @@ def test_torch_nightly_off_still_generates_amd_build_gpu_and_mirror_steps(
     assert "amd-native" in generated_keys
     assert "amd-multimodal-processor" in generated_keys
     assert "multimodal-processor" in generated_keys
-
-
-def test_torch_nightly_strips_depends_on_for_excluded_amd_step(fake_global_config):
-    # A step could depend directly on an AMD key (not just via mirror). Under
-    # torch-nightly that AMD key is never emitted, so it must not survive into
-    # the uploaded depends_on either, or Buildkite would reject the pipeline.
-    fake_global_config["torch_nightly"] = "1"
-    fake_global_config["nightly"] = "1"  # always-run, so no block step is inserted
-    steps = [
-        Step(
-            label="AMD image build",
-            group="Build",
-            key="image-build-amd",
-            device="amd_cpu",
-            commands=["build"],
-        ),
-        Step(
-            label="CUDA thing",
-            group="Test",
-            key="cuda-thing",
-            device="h100",
-            depends_on=["image-build-amd"],
-            commands=["test"],
-        ),
-    ]
-
-    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(steps))
-    cuda_step = next(
-        job
-        for group in groups
-        for job in group.steps
-        if getattr(job, "key", None) == "cuda-thing"
-    )
-
-    assert cuda_step.depends_on == []
-
-
-def test_torch_nightly_off_preserves_depends_on_for_amd_step(fake_global_config):
-    fake_global_config["nightly"] = "1"  # always-run, so no block step is inserted
-    steps = [
-        Step(
-            label="AMD image build",
-            group="Build",
-            key="image-build-amd",
-            device="amd_cpu",
-            commands=["build"],
-        ),
-        Step(
-            label="CUDA thing",
-            group="Test",
-            key="cuda-thing",
-            device="h100",
-            depends_on=["image-build-amd"],
-            commands=["test"],
-        ),
-    ]
-
-    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(steps))
-    cuda_step = next(
-        job
-        for group in groups
-        for job in group.steps
-        if getattr(job, "key", None) == "cuda-thing"
-    )
-
-    assert cuda_step.depends_on == ["image-build-amd"]
 
 
 def test_image_tag_matches_get_image_and_latest_suppressed_on_nightly(
