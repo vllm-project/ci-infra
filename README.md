@@ -87,7 +87,7 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 
 #### Jinja2 Template (AMD CI)
 
-`buildkite/test-template-amd.j2` renders vLLM's [`test-pipeline.yaml`](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-pipeline.yaml) into Buildkite YAML using [minijinja-cli](https://github.com/mitsuhiko/minijinja).
+`buildkite/test-template-amd.j2` renders vLLM's [`.buildkite/test-amd.yaml`](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-amd.yaml) into Buildkite YAML using [minijinja-cli](https://github.com/mitsuhiko/minijinja).
 
 ### Bootstrap Scripts
 
