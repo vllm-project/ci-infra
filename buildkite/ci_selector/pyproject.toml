@@ -18,7 +18,7 @@ ci-fetch-kernel-record = "ci_selector.scripts.fetch_kernels:main"
 dev = ["pytest>=8.0"]
 
 [tool.uv.sources]
-pipeline-generator = { path = "../pipeline_generator", editable = true }
+pipeline-generator = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
