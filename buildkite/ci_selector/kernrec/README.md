@@ -96,6 +96,26 @@ after the recorder is in nightly, a change to
 steps whose recorded set contains `fusedQKNormRopeKernel`, roughly a dozen
 instead of 225.
 
+## Spike result (Buildkite build 89825, 2026-09-18)
+
+Six steps recorded from ci-infra branch `kernrec-spike` against vLLM main
+`3263658`. Every job recorded, zero dropped records, and the target kernel
+appeared exactly where it should and nowhere else:
+
+| step | procs | kernels | fusedQKNormRope | Triton fused_moe | deep_gemm |
+|---|---|---|---|---|---|
+| fusion-e2e-tp2-quick-h100 | 27 | 426 | 3 | 1 | 0 |
+| kernels-core-operation-test (3 shards) | 9 | 390 | 4 | 0 | 0 |
+| pytorch-compilation-passes-unit-tests | 1 | 221 | 4 | 0 | 0 |
+| kernels-deepgemm-test-h100 | 4 | 330 | 0 | 1 | 161 |
+| kernels-moe-test (5 shards) | 9 | 838 | 0 | 2 | 6 |
+
+The 27 processes in the TP2 step are the engine cores and tensor-parallel
+workers across the tests, all recorded through the inherited environment
+variable with no wrapper. Job durations were within noise of the previous
+main build (−6% to +10%, single samples). Reproduce the scoring with
+`analyze_build.py 89825` and the expectations listed in its docstring.
+
 ## Not here yet
 
 The build-side symbol map (`cuobjdump -symbols` over the `.cu.o` files plus
