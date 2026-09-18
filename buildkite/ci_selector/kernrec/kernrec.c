@@ -94,6 +94,16 @@ static int set_insert(const char *name) {
 
 /* ---- output ------------------------------------------------------------ */
 
+/* Directories are made world-writable on purpose. Under CI's docker plugin
+ * this process is root and the output lands in a bind-mounted checkout owned
+ * by the agent user; a root:root 0755 directory there is one the agent can
+ * never delete, and every later job on that machine fails at checkout. The
+ * umask would turn 0777 into 0755, so chmod after mkdir. */
+static int mkdir_open(const char *dir) {
+  if (mkdir(dir, 0777) == 0) return chmod(dir, 0777);
+  return errno == EEXIST ? 0 : -1;
+}
+
 static int mkdir_p(const char *path) {
   char tmp[4096];
   size_t n = strlen(path);
@@ -102,11 +112,10 @@ static int mkdir_p(const char *path) {
   for (char *p = tmp + 1; *p; ++p) {
     if (*p != '/') continue;
     *p = 0;
-    if (mkdir(tmp, 0777) && errno != EEXIST) return -1;
+    if (mkdir_open(tmp)) return -1;
     *p = '/';
   }
-  if (mkdir(tmp, 0777) && errno != EEXIST) return -1;
-  return 0;
+  return mkdir_open(tmp);
 }
 
 /* Lazily opened on the first record, keyed by pid, so a process that forks
