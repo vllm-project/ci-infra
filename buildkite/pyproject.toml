@@ -14,4 +14,4 @@ dev = ["pytest==9.1.1"]
 package = false
 
 [tool.uv.workspace]
-members = ["pipeline_generator"]
+members = ["pipeline_generator", "ci_selector"]
