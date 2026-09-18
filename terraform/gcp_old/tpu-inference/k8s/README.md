@@ -422,6 +422,30 @@ the node possibly created from zero, and the image pulled — tens of minutes on
 cold pool. The launcher reports where it is in that gap; a step sitting quietly
 at "waiting for a node" is usually the autoscaler, not a fault.
 
+**What a Buildkite job is actually asking for.** The agent page will not tell
+you. Its `k8s:node=` tag is the manager node the *agent* pod landed on — a CPU
+machine — and nothing there names a TPU. The request lives in the Kueue
+workload, which you can reach because the agent pod is `buildkite-<job-uuid>-…`
+and its workload is `job-bk-<uuid with the dashes removed>-…`:
+
+```bash
+kubectl get workloads -n buildkite -o json | python3 -c '
+import json, sys
+for w in json.load(sys.stdin)["items"]:
+    uid = w["metadata"]["name"].split("-")[2]
+    pod = w["spec"]["podSets"][0]
+    chips = (pod["template"]["spec"]["containers"][0]
+             .get("resources", {}).get("limits", {}).get("google.com/tpu", "?"))
+    cond = {c["type"]: c["status"] for c in w["status"].get("conditions", [])}
+    print(uid, w["spec"]["queueName"], chips, "x", pod.get("count", 1),
+          "ADMITTED" if cond.get("Admitted") == "True" else "waiting")'
+```
+
+Read it as a histogram rather than a list. Fifteen rows waiting on
+`tpu7x-standard-4t-2x2x1` is not fifteen problems; it is one nightly whose
+multichip steps all became runnable at once, against a queue that holds two of
+them.
+
 A shape with no node pool is an error at submission that lists the shapes the
 fleet does have, rather than a workload queued forever against quota that does
 not exist.
