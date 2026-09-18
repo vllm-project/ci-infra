@@ -1,0 +1,63 @@
+name: ci_selector tests
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ci-selector-tests.yml"
+      - "buildkite/ci_selector/**"
+      - "buildkite/pipeline_generator/**"
+  workflow_dispatch:
+    inputs:
+      vllm_remote:
+        description: "vLLM repository to test against. Defaults to upstream."
+      vllm_ref:
+        description: "Commit or branch. Defaults to the commit in VLLM_PIN."
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.12"
+
+      # Full history, not --depth 1: the suite builds git worktrees and asks for
+      # merge bases, so it needs real history. --filter=blob:none keeps that
+      # while skipping file contents until something reads them.
+      - name: Check out the vLLM to test against
+        env:
+          VLLM_REMOTE: ${{ inputs.vllm_remote }}
+          VLLM_REF: ${{ inputs.vllm_ref }}
+          VLLM_CHECKOUT: ${{ runner.temp }}/vllm
+        run: |
+          remote="${VLLM_REMOTE:-https://github.com/vllm-project/vllm}"
+          ref="${VLLM_REF:-$(cat buildkite/ci_selector/VLLM_PIN)}"
+          rm -rf "$VLLM_CHECKOUT"
+          git clone --filter=blob:none -- "$remote" "$VLLM_CHECKOUT"
+          git -C "$VLLM_CHECKOUT" checkout "$ref"
+          echo "Testing against $remote at $(git -C "$VLLM_CHECKOUT" rev-parse HEAD)"
+
+      - name: Install dependencies
+        working-directory: buildkite/ci_selector
+        run: uv sync --locked
+
+      - name: Run tests
+        working-directory: buildkite/ci_selector
+        env:
+          VLLM_REPO: ${{ runner.temp }}/vllm
+        run: uv run pytest tests -q
