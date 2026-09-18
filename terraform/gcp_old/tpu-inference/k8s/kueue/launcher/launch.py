@@ -855,6 +855,12 @@ def inherit_defaults(doc, profile):
     for key, value in (defaults.get("workload") or {}).items():
         doc["spec"].setdefault(key, value)
 
+    # A Job has no failurePolicy field, and an unknown key is rejected rather
+    # than ignored, so this cannot go in the block above.
+    if doc["kind"] == "JobSet":
+        for key, value in (defaults.get("jobSets") or {}).items():
+            doc["spec"].setdefault(key, copy.deepcopy(value))
+
     for template in pod_templates(doc):
         on_pod = template.setdefault("metadata", {}).setdefault(
             "annotations", {})
