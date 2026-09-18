@@ -38,6 +38,15 @@ kernrec_setup() {
   [ -n "$root" ] || root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
   export KERNREC_DIR="$root/.fnrec/${BUILDKITE_JOB_ID:-local}"
 
+  # Under the docker plugin this shell is root and the checkout is a bind
+  # mount owned by the agent user. Anything root creates with default modes
+  # cannot be removed by the agent's `git clean` and breaks every later job
+  # on that machine. Create the directories world-writable up front, and
+  # open up whatever the recorder wrote when the step ends, even on failure.
+  mkdir -p "$KERNREC_DIR" && chmod 0777 "$root/.fnrec" "$KERNREC_DIR"
+  # shellcheck disable=SC2064
+  trap "chmod -R a+rwX '$root/.fnrec' 2>/dev/null || true" EXIT
+
   # libkernrec needs libcupti.so.<major>. torch ships it in a pip wheel that is
   # not on the loader path until torch itself has loaded it.
   local cupti
