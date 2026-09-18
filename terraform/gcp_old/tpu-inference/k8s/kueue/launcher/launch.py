@@ -1651,8 +1651,13 @@ def main():
                 status = obj.get("status", {})
                 done = status.get("succeeded", 0) >= 1 or wl_succeeded
                 failed_cond = condition(obj, "Failed")
+                # The condition, not status.failed: that counts failed pods, so
+                # it reaches 1 on the first one and the Job is allowed six.
+                # Kubernetes sets Failed once the Job is done retrying, which is
+                # the question here. The JobSet branch below already reads only
+                # its condition.
                 failed = ((failed_cond and failed_cond.get("status") == "True")
-                          or status.get("failed", 0) >= 1 or wl_failed)
+                          or wl_failed)
             else:
                 completed = condition(obj, "Completed")
                 done = bool(completed and completed.get("status") == "True") or wl_succeeded
@@ -1677,6 +1682,18 @@ def main():
                 # after the run, and once it is gone a preemption and a test
                 # returning 1 read the same.
                 if failed:
+                    # Which budget ran out: the fleet churning through every
+                    # retry and one pod's exit code tripping a rule call for
+                    # opposite fixes. The reasons gathered above come from a
+                    # live pod query, so they are empty exactly when a node took
+                    # the pods away.
+                    if failed_cond:
+                        detail = " ".join(x for x in (failed_cond.get("reason"),
+                                                      failed_cond.get("message"))
+                                          if x)
+                        if detail:
+                            log(f"{kind} Failed: {detail}"[:300])
+
                     for c in (workload or {}).get("status", {}).get("conditions", []):
                         if c.get("status") != "True":
                             continue
