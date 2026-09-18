@@ -38,6 +38,11 @@ PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
+# Agents on EC2 queues are terminated after each job and can also be stopped
+# mid-job by ASG scale-in; the AMD policy (amd.py AMD_RETRY) already retries
+# this infra class, so every generated step gets it too.
+AGENT_STOP_RETRY = {"signal_reason": "agent_stop", "limit": 1}
+AGENT_LOSS_RETRIES = (EXIT_STATUS_NEGATIVE_ONE_RETRY, AGENT_STOP_RETRY)
 
 # Pod-level failures on EKS surface as agent stops / lost pods rather than
 # clean non-zero exits, which exit-code-only retries would miss.
@@ -549,7 +554,13 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
 def ensure_exit_status_negative_one_retry(
     retry: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Add a one-time retry for jobs that lose their agent."""
+    """Add one-time retries for jobs that lose their agent.
+
+    Covers both agent-loss signatures: exit status -1 (agent disappeared
+    mid-job) and signal_reason agent_stop (agent stopped by the ASG /
+    TerminateInstanceAfterJob racing a running job). Steps whose policy
+    already covers a signature keep their own condition.
+    """
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -559,23 +570,32 @@ def ensure_exit_status_negative_one_retry(
     if automatic is None or automatic is False:
         automatic_conditions = []
     elif isinstance(automatic, dict):
-        if automatic.get("exit_status") == -1:
-            return retry_policy
         automatic_conditions = [automatic]
     elif isinstance(automatic, list):
         automatic_conditions = automatic
-        if any(
-            isinstance(condition, dict) and condition.get("exit_status") == -1
-            for condition in automatic_conditions
-        ):
-            return retry_policy
     else:
         raise ValueError("retry.automatic must be a boolean, mapping, or list.")
 
-    retry_policy["automatic"] = [
-        dict(EXIT_STATUS_NEGATIVE_ONE_RETRY),
-        *automatic_conditions,
-    ]
+    missing_conditions = []
+    for default_condition in AGENT_LOSS_RETRIES:
+        if "exit_status" in default_condition:
+            covered = any(
+                isinstance(condition, dict)
+                and condition.get("exit_status")
+                == default_condition["exit_status"]
+                for condition in automatic_conditions
+            )
+        else:
+            covered = any(
+                isinstance(condition, dict)
+                and condition.get("signal_reason")
+                == default_condition["signal_reason"]
+                for condition in automatic_conditions
+            )
+        if not covered:
+            missing_conditions.append(dict(default_condition))
+
+    retry_policy["automatic"] = [*missing_conditions, *automatic_conditions]
     return retry_policy
 
 
