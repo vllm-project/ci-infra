@@ -8,9 +8,13 @@ data "google_client_config" "config" {
 locals {
   # The one place this name is spelled out. The TPU VM, its label, its disk, and
   # the Buildkite agent inside it all derive from here, so an agent in the
-  # Buildkite UI always maps onto a `gcloud compute tpus` entry.
+  # Buildkite UI always maps onto a `gcloud compute tpus` entry. An empty
+  # purpose reproduces the original name, so adding this knob does not rename
+  # -- and so does not recreate -- an existing fleet.
   node_names = [for i in range(var.instance_count) :
-    "${var.accelerator_type}-ci-${i}-${var.project_short_name}-${data.google_client_config.config.zone}"
+    var.purpose == "" ?
+    "${var.accelerator_type}-ci-${i}-${var.project_short_name}-${data.google_client_config.config.zone}" :
+    "${var.accelerator_type}-ci-${var.purpose}-${i}-${var.project_short_name}-${data.google_client_config.config.zone}"
   ]
 }
 
@@ -152,8 +156,11 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo "HOST_NAME=$HOST_NAME_VAL" | sudo tee -a /etc/environment
       sudo sed -i "s/name=\"%hostname-%spawn\"/name=\"$HOST_NAME_VAL\"/" /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
-      echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment
+      # tee echoes to stdout, which the startup script sends to the serial
+      # console, where anyone with compute.instances.getSerialPortOutput can
+      # read it. Secrets go to the file only.
+      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment > /dev/null
+      echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment > /dev/null
       echo 'TPU_VERSION=tpu6e' | sudo tee -a /etc/environment
 
       # Also provide HF_TOKEN and BUILDKITE_ANALYTICS_TOKEN through the agent's

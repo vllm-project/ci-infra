@@ -1,14 +1,9 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
-import base64
-from functools import lru_cache
-import gzip
-from io import BytesIO
 import os
-from pathlib import Path
 import re
-import tarfile
+import shlex
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
@@ -44,46 +39,62 @@ PRECOMMIT_WAIT_INTERVAL = 60
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 
-OTEL_HELPERS_DIR = Path(__file__).resolve().parent / "otel_helpers"
-OTEL_HELPER_FILES = (
-    "ci_otel.py",
-    "ci_otel.sh",
-    "ci_pytest.sh",
-    "ci_pytest_otel.py",
+# Pod-level failures on EKS surface as agent stops / lost pods rather than
+# clean non-zero exits, which exit-code-only retries would miss.
+K8S_RETRY = {
+    "automatic": [
+        EXIT_STATUS_NEGATIVE_ONE_RETRY,
+        {"exit_status": 1, "limit": 1},
+        {"exit_status": 128, "limit": 1},
+        {"signal_reason": "agent_stop", "limit": 1},
+        {"signal_reason": "agent_refused", "limit": 1},
+    ],
+}
+
+# Shell builtins and metacharacters that require the explicit start/finish pair
+# because ci_otel_run uses "$@" which cannot invoke them.
+_SHELL_STATE_BUILTINS = frozenset(
+    {"export", "cd", "source", ".", "set", "unset", "alias", "umask", "eval", "exec"}
 )
+_SHELL_METACHARS = frozenset("|&;<>`(){}[]$\\")
+_POSIX_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
-@lru_cache(maxsize=1)
-def _otel_helpers_bundle() -> str:
-    """Return a deterministic compressed bundle for injection into CI jobs."""
-    archive = BytesIO()
-    with gzip.GzipFile(
-        fileobj=archive, mode="wb", compresslevel=9, mtime=0
-    ) as compressed:
-        with tarfile.open(fileobj=compressed, mode="w") as bundle:
-            for name in OTEL_HELPER_FILES:
-                contents = (OTEL_HELPERS_DIR / name).read_bytes()
-                info = tarfile.TarInfo(name=name)
-                info.size = len(contents)
-                info.mode = 0o755 if name.endswith(".sh") else 0o644
-                info.mtime = 0
-                bundle.addfile(info, BytesIO(contents))
-    return base64.b64encode(archive.getvalue()).decode()
+def _is_simple_command(cmd: str) -> bool:
+    """Return True if cmd is safe to wrap with ci_otel_run.
+
+    ci_otel_run execs its arguments via env, which works for plain external
+    commands but not for shell builtins that modify state (export, cd, etc.),
+    commands with shell metacharacters (pipes, redirects, etc.), or commands
+    with leading POSIX assignment words (VAR=value cmd) — env would apply the
+    assignments only to its own child instead of the invoking shell, and a
+    bare assignment like `FOO=bar` would silently become a no-op.
+    """
+    words = cmd.split()
+    if not words:
+        return False
+    if any(_POSIX_ASSIGNMENT.match(word) for word in words[:1]):
+        return False
+    if words[0] in _SHELL_STATE_BUILTINS:
+        return False
+    return not any(char in _SHELL_METACHARS for char in cmd)
 
 
 def _otel_setup_command() -> str:
-    """Best-effort install of ci-infra-owned tracing helpers."""
-    bundle = _otel_helpers_bundle()
+    """Best-effort activation of the tracing helpers in the vLLM checkout."""
+    # No-ops keep every generated wrapper safe when setup is unavailable.
     return (
-        "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; "
-        "if CI_INFRA_OTEL_DIR=$$(mktemp -d 2>/dev/null) && "
-        "export CI_INFRA_OTEL_DIR && "
-        f'printf "%s" "{bundle}" | base64 --decode | '
-        'tar -xz -C "$$CI_INFRA_OTEL_DIR" && '
+        "ci_otel_start() { :; }; ci_otel_finish() { :; }; "
+        'ci_otel_run() { shift 2; env "$$@"; return $$?; }; '
+        'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
+        # `|| :` keeps the assignment itself successful under `sh -e` when the
+        # checkout has no .git; the missing-helper path below stays fail-open.
+        "$$(git rev-parse --show-toplevel 2>/dev/null || :)/"
+        '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
+        'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
         '. "$$CI_INFRA_OTEL_DIR/ci_otel.sh"; then :; else '
-        'echo "vLLM CI OTel: tracing setup skipped" >&2 || :; '
-        "CI_INFRA_OTEL_READY=0; export CI_INFRA_OTEL_READY; fi; :"
+        'echo "vLLM CI OTel: tracing setup skipped" >&2 || :; fi'
     )
 
 
@@ -181,10 +192,12 @@ def add_precommit_dependency(
 
 def _get_step_agents(step: Step) -> Dict[str, str]:
     agents = {"queue": get_agent_queue(step)}
-    if step.device == DeviceType.INTEL_GPU and step.agent_tags:
+    if step.device in [DeviceType.INTEL_GPU, DeviceType.INTEL_CPU] and step.agent_tags:
         agents.update(
             {key: value for key, value in step.agent_tags.items() if key != "queue"}
         )
+    elif step.device == DeviceType.INTEL_CPU and not step.agent_tags:
+        agents.update({"label": "functional"})
     return agents
 
 
@@ -265,6 +278,7 @@ def _get_step_plugin(step: Step):
         DeviceType.H100.value,
         DeviceType.A100.value,
         DeviceType.B200_K8S.value,
+        DeviceType.L4.value,
     ]:
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
@@ -291,6 +305,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.MEDIUM_CPU_PREMERGE
     elif step.device == DeviceType.CPU:
         return AgentQueue.CPU_PREMERGE_US_EAST_1
+    elif step.device == DeviceType.L4:
+        return AgentQueue.L4_K8S
     elif step.device == DeviceType.A100:
         return AgentQueue.A100
     elif step.device == DeviceType.H100:
@@ -448,26 +464,21 @@ def _prepare_commands(
             )
             prepared_command = cmd
             if trace_commands:
-                # Run the original command directly. Tracing only brackets it
-                # with best-effort start/finish calls, so OTel never owns command
-                # execution and cannot change shell state or failure semantics.
-                encoded_preview = base64.b64encode(preview.encode()).decode()
-                prepared_command = (
-                    'if [ "$${CI_INFRA_OTEL_READY:-0}" = "1" ] && '
-                    "command -v ci_otel_start >/dev/null 2>&1; then "
-                    f"ci_otel_start {i + 1} {encoded_preview} || :; fi\n"
-                    f"{cmd}\n"
-                    "_CI_INFRA_OTEL_COMMAND_STATUS=$$?\n"
-                    "if command -v ci_otel_finish >/dev/null 2>&1; then "
-                    "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :; fi\n"
-                    "(exit $$_CI_INFRA_OTEL_COMMAND_STATUS)"
-                )
+                quoted_preview = shlex.quote(preview)
+                if _is_simple_command(cmd):
+                    prepared_command = f"ci_otel_run {i + 1} {quoted_preview} {cmd}"
+                else:
+                    prepared_command = (
+                        f"ci_otel_start {i + 1} {quoted_preview} || :\n"
+                        f"{cmd}\n"
+                        "_CI_INFRA_OTEL_COMMAND_STATUS=$$?\n"
+                        "ci_otel_finish $$_CI_INFRA_OTEL_COMMAND_STATUS || :\n"
+                        "(exit $$_CI_INFRA_OTEL_COMMAND_STATUS)"
+                    )
             if continue_on_failure:
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
-                commands.append(
-                    f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1"
-                )
+                commands.append(f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1")
             else:
                 commands.append(prepared_command)
 
@@ -583,6 +594,14 @@ def convert_group_step_to_buildkite_step(
         group_steps_list = []
         for step in steps:
             step_key = step.key or _generate_step_key(step.label)
+            # In a retry build a step may be present only because its AMD
+            # mirror was requested; then emit the mirror but not the step.
+            only_step_keys = global_config["only_step_keys"]
+            # The A100 fleet is retired; retain declarations only for AMD mirrors.
+            include_step = (
+                step.device != DeviceType.A100
+                and (only_step_keys is None or step_key in only_step_keys)
+            )
             if is_amd_gpu_device(step.device):
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
@@ -672,7 +691,7 @@ def convert_group_step_to_buildkite_step(
                     step.timeout_in_minutes
                 )
 
-            if not _step_should_run(step, list_file_diff):
+            if include_step and not _step_should_run(step, list_file_diff):
                 block_step = _create_block_step(
                     block=f"Run {step.label}",
                     key=f"block-{step_key}",
@@ -688,14 +707,19 @@ def convert_group_step_to_buildkite_step(
                 or (step.num_nodes and step.num_nodes >= 2)
             ):
                 buildkite_step.plugins = [_get_step_plugin(step)]
+                # L4-on-EKS steps get a retry policy that also covers pod-level
+                # failures (agent stops), unless the step opted out explicitly.
+                if step.device == DeviceType.L4 and not step.retry:
+                    buildkite_step.retry = K8S_RETRY
 
-            group_steps_list.append(buildkite_step)
+            if include_step:
+                group_steps_list.append(buildkite_step)
 
             # Create AMD mirror step and its block step if specified/applicable
             if (
                 step.mirror
                 and step.mirror.get("amd")
-                and global_config["only_step_keys"] is None
+                and (only_step_keys is None or f"amd-{step_key}" in only_step_keys)
             ):
                 amd = step.mirror["amd"]
                 amd_no_plugin = amd.get("no_plugin", False)
@@ -748,7 +772,7 @@ def convert_group_step_to_buildkite_step(
                     no_gpu=amd_no_gpu,
                     num_nodes=amd.get("num_nodes", step.num_nodes),
                     soft_fail=amd.get("soft_fail", step.soft_fail or False),
-                    parallelism=step.parallelism,
+                    parallelism=amd.get("parallelism", step.parallelism),
                     concurrency=amd.get("concurrency", step.concurrency),
                     concurrency_group=amd.get(
                         "concurrency_group", step.concurrency_group
@@ -834,7 +858,7 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
 
     return step.model_copy(
         update={
-            "key": None,
+            "key": f"amd-{step.key or _generate_step_key(step.label)}",
             "device": amd["device"],
             "dind": amd.get("dind", True),
             "optional": amd.get("optional", step.optional),

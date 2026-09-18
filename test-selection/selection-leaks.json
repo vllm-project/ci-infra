@@ -1,0 +1,678 @@
+{
+  "$schema": "./selection-leaks.schema.json",
+  "schema_version": 1,
+  "records": [
+    {
+      "id": "pr-52131-main-84585-distributed-dp-tests-2-gpus",
+      "job_name": "L4 Distributed DP Tests (2 GPUs)",
+      "job_key": "distributed-dp-tests-2-gpus",
+      "culprit_pr": {
+        "number": 52131,
+        "url": "https://github.com/vllm-project/vllm/pull/52131",
+        "merge_commit": "eac636a7fa476983cdae34b45a984e9852aad375"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 84571,
+        "job_id": "01a01924-4d9a-43e7-8b8f-5942754ea911",
+        "url": "https://buildkite.com/vllm/ci/builds/84571#01a01924-4d9a-43e7-8b8f-5942754ea911"
+      },
+      "main_failure": {
+        "build_number": 84585,
+        "job_id": "01a0199c-2a3a-402c-a6e2-d9b9473af880",
+        "url": "https://buildkite.com/vllm/ci/builds/84585#01a0199c-2a3a-402c-a6e2-d9b9473af880",
+        "signature": "pytest exit 4: moved test_multi_api_servers.py path did not exist"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/52939",
+        "notes": "The fix updated the stale NVIDIA and AMD distributed test paths left by PR #52131."
+      }
+    },
+    {
+      "id": "pr-52131-main-84585-amd-distributed-dp-tests-2-gpus",
+      "job_name": "MI300 Distributed DP Tests (2 GPUs)",
+      "job_key": "amd-distributed-dp-tests-2-gpus",
+      "culprit_pr": {
+        "number": 52131,
+        "url": "https://github.com/vllm-project/vllm/pull/52131",
+        "merge_commit": "eac636a7fa476983cdae34b45a984e9852aad375"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 84571,
+        "job_id": "01a01924-4df6-496d-8412-3723bee439f9",
+        "url": "https://buildkite.com/vllm/ci/builds/84571#01a01924-4df6-496d-8412-3723bee439f9"
+      },
+      "main_failure": {
+        "build_number": 84585,
+        "job_id": "01a0199c-2a85-4548-bb98-a886e8630dad",
+        "url": "https://buildkite.com/vllm/ci/builds/84585#01a0199c-2a85-4548-bb98-a886e8630dad",
+        "signature": "pytest exit 4: moved test_multi_api_servers.py path did not exist"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/52939",
+        "notes": "The fix updated the stale NVIDIA and AMD distributed test paths left by PR #52131."
+      }
+    },
+    {
+      "id": "pr-51665-main-84882-quantized-models-test",
+      "job_name": "H200 Quantized Models",
+      "job_key": "quantized-models-test",
+      "culprit_pr": {
+        "number": 51665,
+        "url": "https://github.com/vllm-project/vllm/pull/51665",
+        "merge_commit": "f0c14b4f776bb976e654b430442067539fbdb2ea"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 84786,
+        "job_id": "01a01e6e-a5f8-40a5-bda0-be9160791f94",
+        "url": "https://buildkite.com/vllm/ci/builds/84786#01a01e6e-a5f8-40a5-bda0-be9160791f94"
+      },
+      "main_failure": {
+        "build_number": 84882,
+        "job_id": "01a02120-8ed5-41ee-bbe4-a10f5bf5e7e1",
+        "url": "https://buildkite.com/vllm/ci/builds/84882#01a02120-8ed5-41ee-bbe4-a10f5bf5e7e1",
+        "signature": "Gemma tied lm_head checkpoint weight was not recognized as an alias"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/53170",
+        "notes": "The fix restored loading for a physical lm_head key when the model exposes only tied embeddings."
+      }
+    },
+    {
+      "id": "pr-53106-main-84887-bitsandbytes-plugin",
+      "job_name": "H200 BitsAndBytes Plugin",
+      "job_key": "bitsandbytes-plugin",
+      "culprit_pr": {
+        "number": 53106,
+        "url": "https://github.com/vllm-project/vllm/pull/53106",
+        "merge_commit": "1fe3a1571ac67581478a11743e55a306de1d136f"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 84841,
+        "job_id": "01a01f90-6493-43bb-90d1-40135f82de53",
+        "url": "https://buildkite.com/vllm/ci/builds/84841#01a01f90-6493-43bb-90d1-40135f82de53"
+      },
+      "main_failure": {
+        "build_number": 84887,
+        "job_id": "01a020fa-8367-4346-8c8a-aa763ebaf8fa",
+        "url": "https://buildkite.com/vllm/ci/builds/84887#01a020fa-8367-4346-8c8a-aa763ebaf8fa",
+        "signature": "BitsAndBytes plugin called removed WeightsMapper.get_unstacked_mapper"
+      },
+      "causal_confirmation": {
+        "kind": "reproduction",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/53224",
+        "notes": "The proposed compatibility patch directly restored the method removed by PR #53106; the same exception repeated in later exact jobs."
+      }
+    },
+    {
+      "id": "pr-53106-main-84887-bitsandbytes-plugin-2-gpus",
+      "job_name": "L4 BitsAndBytes Plugin (2 GPUs)",
+      "job_key": "bitsandbytes-plugin-2-gpus",
+      "culprit_pr": {
+        "number": 53106,
+        "url": "https://github.com/vllm-project/vllm/pull/53106",
+        "merge_commit": "1fe3a1571ac67581478a11743e55a306de1d136f"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 84841,
+        "job_id": "01a01f90-6494-4f47-ad8d-68515555725f",
+        "url": "https://buildkite.com/vllm/ci/builds/84841#01a01f90-6494-4f47-ad8d-68515555725f"
+      },
+      "main_failure": {
+        "build_number": 84887,
+        "job_id": "01a020fa-8367-49cf-985a-0f229f663b1d",
+        "url": "https://buildkite.com/vllm/ci/builds/84887#01a020fa-8367-49cf-985a-0f229f663b1d",
+        "signature": "BitsAndBytes plugin called removed WeightsMapper.get_unstacked_mapper"
+      },
+      "causal_confirmation": {
+        "kind": "reproduction",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/53224",
+        "notes": "The proposed compatibility patch directly restored the method removed by PR #53106; the same exception repeated in later exact jobs."
+      }
+    },
+    {
+      "id": "pr-53093-main-85112-lm-eval-humming-f16-a100",
+      "job_name": "A100 LM Eval Humming F16 (Shard 2)",
+      "job_key": "lm-eval-humming-f16-a100",
+      "culprit_pr": {
+        "number": 53093,
+        "url": "https://github.com/vllm-project/vllm/pull/53093",
+        "merge_commit": "b00f475f09b7d54e811efc006cab2562d3b23893"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 84868,
+        "job_id": "01a02067-2edd-4ddd-9ba0-904042a9f1ff",
+        "url": "https://buildkite.com/vllm/ci/builds/84868#01a02067-2edd-4ddd-9ba0-904042a9f1ff"
+      },
+      "main_failure": {
+        "build_number": 85112,
+        "job_id": "01a02620-d87f-465d-a61c-bf18dc01cf53",
+        "url": "https://buildkite.com/vllm/ci/builds/85112#01a02620-d87f-465d-a61c-bf18dc01cf53",
+        "signature": "Qwen3-VL dummy processor inputs were truncated and no longer matched multimodal placeholders"
+      },
+      "causal_confirmation": {
+        "kind": "code_analysis",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/53093",
+        "notes": "The culprit diff removed the processor-input truncation override reached by all three exact Humming jobs."
+      }
+    },
+    {
+      "id": "pr-53093-main-85112-lm-eval-humming-f16-b200",
+      "job_name": "B200 LM Eval Humming F16",
+      "job_key": "lm-eval-humming-f16-b200",
+      "culprit_pr": {
+        "number": 53093,
+        "url": "https://github.com/vllm-project/vllm/pull/53093",
+        "merge_commit": "b00f475f09b7d54e811efc006cab2562d3b23893"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 84868,
+        "job_id": "01a02067-2ede-4178-b48b-ca9cdad022d7",
+        "url": "https://buildkite.com/vllm/ci/builds/84868#01a02067-2ede-4178-b48b-ca9cdad022d7"
+      },
+      "main_failure": {
+        "build_number": 85112,
+        "job_id": "01a02620-d880-45cd-acb5-b0d50c9c2ccd",
+        "url": "https://buildkite.com/vllm/ci/builds/85112#01a02620-d880-45cd-acb5-b0d50c9c2ccd",
+        "signature": "Qwen3-VL dummy processor inputs were truncated and no longer matched multimodal placeholders"
+      },
+      "causal_confirmation": {
+        "kind": "code_analysis",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/53093",
+        "notes": "The culprit diff removed the processor-input truncation override reached by all three exact Humming jobs."
+      }
+    },
+    {
+      "id": "pr-53093-main-85112-lm-eval-humming-f16-h100",
+      "job_name": "H100 LM Eval Humming F16 (Shard 2)",
+      "job_key": "lm-eval-humming-f16-h100",
+      "culprit_pr": {
+        "number": 53093,
+        "url": "https://github.com/vllm-project/vllm/pull/53093",
+        "merge_commit": "b00f475f09b7d54e811efc006cab2562d3b23893"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 84868,
+        "job_id": "01a02067-2ee4-45f9-8f59-55a527a553e5",
+        "url": "https://buildkite.com/vllm/ci/builds/84868#01a02067-2ee4-45f9-8f59-55a527a553e5"
+      },
+      "main_failure": {
+        "build_number": 85112,
+        "job_id": "01a02620-d884-4e7b-9c9b-a2aafe130807",
+        "url": "https://buildkite.com/vllm/ci/builds/85112#01a02620-d884-4e7b-9c9b-a2aafe130807",
+        "signature": "Qwen3-VL dummy processor inputs were truncated and no longer matched multimodal placeholders"
+      },
+      "causal_confirmation": {
+        "kind": "code_analysis",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/53093",
+        "notes": "The culprit diff removed the processor-input truncation override reached by all three exact Humming jobs."
+      }
+    },
+    {
+      "id": "pr-53306-main-85298-basic-models-tests-extra-initialization",
+      "job_name": "H200 Basic Models - Extra Initialization (Shard 1)",
+      "job_key": "basic-models-tests-extra-initialization",
+      "culprit_pr": {
+        "number": 53306,
+        "url": "https://github.com/vllm-project/vllm/pull/53306",
+        "merge_commit": "a4d70bef3724edb068c8206804154065acaa4cd4"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 85254,
+        "job_id": "01a030bf-20d5-47cb-a33f-326ab6a8bcc0",
+        "url": "https://buildkite.com/vllm/ci/builds/85254#01a030bf-20d5-47cb-a33f-326ab6a8bcc0"
+      },
+      "main_failure": {
+        "build_number": 85298,
+        "job_id": "01a03290-1976-4ce2-ad50-22e62ba39776",
+        "url": "https://buildkite.com/vllm/ci/builds/85298#01a03290-1976-4ce2-ad50-22e62ba39776",
+        "signature": "Kimi-K3 model-runner-v2 startup raised KeyError for missing CUDA-graph profiling metadata"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/53581",
+        "notes": "The fix restored the missing profiling metadata and the exact post-fix job passed."
+      }
+    },
+    {
+      "id": "pr-53306-main-85388-moe-refactor-integration-test-b200-temporary",
+      "job_name": "B200 MoE Refactor Integration (Shard 1)",
+      "job_key": "moe-refactor-integration-test-b200-temporary",
+      "culprit_pr": {
+        "number": 53306,
+        "url": "https://github.com/vllm-project/vllm/pull/53306",
+        "merge_commit": "a4d70bef3724edb068c8206804154065acaa4cd4"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 85254,
+        "job_id": "01a030bf-20be-4fe4-b7dc-6a4e9d7ec9dc",
+        "url": "https://buildkite.com/vllm/ci/builds/85254#01a030bf-20be-4fe4-b7dc-6a4e9d7ec9dc"
+      },
+      "main_failure": {
+        "build_number": 85388,
+        "job_id": "01a035af-ab0f-49af-ae58-841411521cad",
+        "url": "https://buildkite.com/vllm/ci/builds/85388#01a035af-ab0f-49af-ae58-841411521cad",
+        "signature": "CachingHostAllocator use_count remained positive during CUDA-graph recapture"
+      },
+      "causal_confirmation": {
+        "kind": "revert",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/53644",
+        "notes": "The diagnostic revert passed all four exact B200 MoE shards and isolated the profiling-capture change."
+      }
+    },
+    {
+      "id": "pr-52388-main-85541-basic-models-tests-extra-initialization",
+      "job_name": "H200 Basic Models - Extra Initialization (Shard 1)",
+      "job_key": "basic-models-tests-extra-initialization",
+      "culprit_pr": {
+        "number": 52388,
+        "url": "https://github.com/vllm-project/vllm/pull/52388",
+        "merge_commit": "41729fc53b02cb09beda2a1ced690d021443be43"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 85384,
+        "job_id": "01a03555-17a3-474d-b71c-62aa2320559b",
+        "url": "https://buildkite.com/vllm/ci/builds/85384#01a03555-17a3-474d-b71c-62aa2320559b"
+      },
+      "main_failure": {
+        "build_number": 85541,
+        "job_id": "01a03a23-80cf-4c73-8040-7336c53622df",
+        "url": "https://buildkite.com/vllm/ci/builds/85541#01a03a23-80cf-4c73-8040-7336c53622df",
+        "signature": "Kimi-K3 CUDA illegal memory access from stale raw block-table pointers"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/53773",
+        "notes": "The fix stopped caching raw block-table pointers across graph-capture lifetimes; the exact post-merge job passed."
+      }
+    },
+    {
+      "id": "pr-51332-main-85561-lm-eval-humming-act-h100",
+      "job_name": "H100 LM Eval Humming Act",
+      "job_key": "lm-eval-humming-act-h100",
+      "culprit_pr": {
+        "number": 51332,
+        "url": "https://github.com/vllm-project/vllm/pull/51332",
+        "merge_commit": "ca29cd48ba05ac9ae1c9fa29271e9f899bc4ce56"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 85460,
+        "job_id": "01a037c6-7f27-4717-bd9b-e54ecda7fae6",
+        "url": "https://buildkite.com/vllm/ci/builds/85460#01a037c6-7f27-4717-bd9b-e54ecda7fae6"
+      },
+      "main_failure": {
+        "build_number": 85561,
+        "job_id": "01a03aba-6c3e-4b98-a0f5-40d420e14882",
+        "url": "https://buildkite.com/vllm/ci/builds/85561#01a03aba-6c3e-4b98-a0f5-40d420e14882",
+        "signature": "H100 Humming MXFP4 correctness score was zero with 99.4 percent invalid outputs"
+      },
+      "causal_confirmation": {
+        "kind": "revert",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/53805",
+        "notes": "The H100-only failure began at the block-FP8/MXFP4 change while the B200 control passed; the narrow revert targets that change."
+      }
+    },
+    {
+      "id": "pr-50611-main-86170-lm-eval-spec-decode-4xb200",
+      "job_name": "B200 LM Eval Spec Decode (4xB200)",
+      "job_key": "lm-eval-spec-decode-4xb200",
+      "culprit_pr": {
+        "number": 50611,
+        "url": "https://github.com/vllm-project/vllm/pull/50611",
+        "merge_commit": "7f4793eaa335a3667927a0191868d01f36b170af"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 86145,
+        "job_id": "01a04ddc-3e0d-465c-b35f-e9ece2858957",
+        "url": "https://buildkite.com/vllm/ci/builds/86145#01a04ddc-3e0d-465c-b35f-e9ece2858957"
+      },
+      "main_failure": {
+        "build_number": 86170,
+        "job_id": "01a04f53-ac9e-4549-92a2-859958908fbf",
+        "url": "https://buildkite.com/vllm/ci/builds/86170#01a04f53-ac9e-4549-92a2-859958908fbf",
+        "signature": "lazy interleave property called get_current_vllm_config outside the configuration context"
+      },
+      "causal_confirmation": {
+        "kind": "code_analysis",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/50611",
+        "notes": "The culprit diff replaced a constructor-cached value with the failing lazy property; the same assertion appeared in four exact jobs."
+      }
+    },
+    {
+      "id": "pr-50611-main-86170-moe-refactor-integration-test-b200-temporary",
+      "job_name": "B200 MoE Refactor Integration (Shard 1)",
+      "job_key": "moe-refactor-integration-test-b200-temporary",
+      "culprit_pr": {
+        "number": 50611,
+        "url": "https://github.com/vllm-project/vllm/pull/50611",
+        "merge_commit": "7f4793eaa335a3667927a0191868d01f36b170af"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 86145,
+        "job_id": "01a04ddc-3e0e-4a4f-978b-511fc41fa502",
+        "url": "https://buildkite.com/vllm/ci/builds/86145#01a04ddc-3e0e-4a4f-978b-511fc41fa502"
+      },
+      "main_failure": {
+        "build_number": 86170,
+        "job_id": "01a04f53-ac9e-41d2-b97b-a2ce9b155b63",
+        "url": "https://buildkite.com/vllm/ci/builds/86170#01a04f53-ac9e-41d2-b97b-a2ce9b155b63",
+        "signature": "lazy interleave property called get_current_vllm_config outside the configuration context"
+      },
+      "causal_confirmation": {
+        "kind": "code_analysis",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/50611",
+        "notes": "The culprit diff replaced a constructor-cached value with the failing lazy property; the same assertion appeared in four exact jobs."
+      }
+    },
+    {
+      "id": "pr-50611-main-86170-kv-offload-large",
+      "job_name": "H100 KV Offload Large",
+      "job_key": "kv-offload-large",
+      "culprit_pr": {
+        "number": 50611,
+        "url": "https://github.com/vllm-project/vllm/pull/50611",
+        "merge_commit": "7f4793eaa335a3667927a0191868d01f36b170af"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 86145,
+        "job_id": "01a04ddc-3e12-4e05-bae6-114ff35a21e2",
+        "url": "https://buildkite.com/vllm/ci/builds/86145#01a04ddc-3e12-4e05-bae6-114ff35a21e2"
+      },
+      "main_failure": {
+        "build_number": 86170,
+        "job_id": "01a04f53-aca0-412c-aaf6-5c15639e7607",
+        "url": "https://buildkite.com/vllm/ci/builds/86170#01a04f53-aca0-412c-aaf6-5c15639e7607",
+        "signature": "lazy interleave property called get_current_vllm_config outside the configuration context"
+      },
+      "causal_confirmation": {
+        "kind": "code_analysis",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/50611",
+        "notes": "The culprit diff replaced a constructor-cached value with the failing lazy property; the same assertion appeared in four exact jobs."
+      }
+    },
+    {
+      "id": "pr-50611-main-86170-dsv4-flash-disaggregated",
+      "job_name": "H200 DeepSeek-V4 Flash Disaggregated",
+      "job_key": "dsv4-flash-disaggregated",
+      "culprit_pr": {
+        "number": 50611,
+        "url": "https://github.com/vllm-project/vllm/pull/50611",
+        "merge_commit": "7f4793eaa335a3667927a0191868d01f36b170af"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 86145,
+        "job_id": "01a04ddc-3d89-47ef-8dea-2f9a4f5d12d3",
+        "url": "https://buildkite.com/vllm/ci/builds/86145#01a04ddc-3d89-47ef-8dea-2f9a4f5d12d3"
+      },
+      "main_failure": {
+        "build_number": 86170,
+        "job_id": "01a04f53-ac2a-45bf-b593-b9abc1e42323",
+        "url": "https://buildkite.com/vllm/ci/builds/86170#01a04f53-ac2a-45bf-b593-b9abc1e42323",
+        "signature": "lazy interleave property called get_current_vllm_config outside the configuration context"
+      },
+      "causal_confirmation": {
+        "kind": "code_analysis",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/50611",
+        "notes": "The culprit diff replaced a constructor-cached value with the failing lazy property; the same assertion appeared in four exact jobs."
+      }
+    },
+    {
+      "id": "pr-55377-main-87778-lm-eval-pcp-4xb200",
+      "job_name": "B200 LM Eval PCP",
+      "job_key": "lm-eval-pcp-4xb200",
+      "culprit_pr": {
+        "number": 55377,
+        "url": "https://github.com/vllm-project/vllm/pull/55377",
+        "merge_commit": "7fa2c637968e2f7f7f815f3acc9ceb847a8a462d"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 87615,
+        "job_id": "01a07ee9-c300-4239-8a6f-8bf1db94bd57",
+        "url": "https://buildkite.com/vllm/ci/builds/87615#01a07ee9-c300-4239-8a6f-8bf1db94bd57"
+      },
+      "main_failure": {
+        "build_number": 87778,
+        "job_id": "01a082e3-5e32-44a0-ae49-19940319ea5a",
+        "url": "https://buildkite.com/vllm/ci/builds/87778#01a082e3-5e32-44a0-ae49-19940319ea5a",
+        "signature": "FlashInfer 32768-token autotune warmup exhausted B200 memory with a 12.22 GiB allocation"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/55879",
+        "notes": "PR #55377 added the repeated full-model autotune warmup that triggered the OOM; the narrow memory-headroom fix passed the exact PCP evaluation in combined build #87893."
+      }
+    },
+    {
+      "id": "pr-54917-main-87778-spec-decode-speculators-mtp-nightly-b200",
+      "job_name": "B200 Spec Decode Speculators + MTP Nightly",
+      "job_key": "spec-decode-speculators-mtp-nightly-b200",
+      "culprit_pr": {
+        "number": 54917,
+        "url": "https://github.com/vllm-project/vllm/pull/54917",
+        "merge_commit": "f2d45f26bd6a2c841ffbd0030ebaefe87c274e58"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 87543,
+        "job_id": "01a07be1-82c2-41e0-b0c6-51c974b086e1",
+        "url": "https://buildkite.com/vllm/ci/builds/87543#01a07be1-82c2-41e0-b0c6-51c974b086e1"
+      },
+      "main_failure": {
+        "build_number": 87778,
+        "job_id": "01a082d3-624a-458b-90ee-ea78a2083257",
+        "url": "https://buildkite.com/vllm/ci/builds/87778#01a082d3-624a-458b-90ee-ea78a2083257",
+        "signature": "FlashInfer sliced omitted Gemma4 key and value tensors and raised TypeError on None"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/55864",
+        "notes": "The fix made FlashInfer accept the omitted K/V tensors introduced by PR #54917 and preserved its intended KV-sharing optimization."
+      }
+    },
+    {
+      "id": "pr-53491-main-87842-lm-eval-pcp-4xb200",
+      "job_name": "B200 LM Eval PCP",
+      "job_key": "lm-eval-pcp-4xb200",
+      "culprit_pr": {
+        "number": 53491,
+        "url": "https://github.com/vllm-project/vllm/pull/53491",
+        "merge_commit": "4aadb0f14d4c0d6397cfba271f11906e980b18c1"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 87756,
+        "job_id": "01a0825e-835c-4ecc-847b-74c5dca67738",
+        "url": "https://buildkite.com/vllm/ci/builds/87756#01a0825e-835c-4ecc-847b-74c5dca67738"
+      },
+      "main_failure": {
+        "build_number": 87842,
+        "job_id": "01a084c1-e2fe-4c48-ad52-d632faaa1c74",
+        "url": "https://buildkite.com/vllm/ci/builds/87842#01a084c1-e2fe-4c48-ad52-d632faaa1c74",
+        "signature": "strict sync checking rejected a nonblocking H2D copy from an unpinned sparse MLA context-length buffer"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/56138",
+        "notes": "The fix allocated sparse MLA context lengths in pinned CPU memory; the exact PCP evaluation passed in combined build #87893."
+      }
+    },
+    {
+      "id": "pr-53491-main-87842-qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-2xb200",
+      "job_name": "B200 Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy",
+      "job_key": "qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-2xb200",
+      "culprit_pr": {
+        "number": 53491,
+        "url": "https://github.com/vllm-project/vllm/pull/53491",
+        "merge_commit": "4aadb0f14d4c0d6397cfba271f11906e980b18c1"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 87756,
+        "job_id": "01a0825e-82ef-4a61-be8c-db5c6016fdf1",
+        "url": "https://buildkite.com/vllm/ci/builds/87756#01a0825e-82ef-4a61-be8c-db5c6016fdf1"
+      },
+      "main_failure": {
+        "build_number": 87842,
+        "job_id": "01a084c1-e276-4461-8840-72950bfd187a",
+        "url": "https://buildkite.com/vllm/ci/builds/87842#01a084c1-e276-4461-8840-72950bfd187a",
+        "signature": "strict sync checking rejected a nonblocking H2D copy from the unpinned EPLB receive buffer"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/56138",
+        "notes": "The fix pinned the Gloo EPLB receive staging buffer; the exact B200 accuracy job passed in build #87891."
+      }
+    },
+    {
+      "id": "pr-53491-main-87842-qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-4xh100",
+      "job_name": "H100 Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy",
+      "job_key": "qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-4xh100",
+      "culprit_pr": {
+        "number": 53491,
+        "url": "https://github.com/vllm-project/vllm/pull/53491",
+        "merge_commit": "4aadb0f14d4c0d6397cfba271f11906e980b18c1"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 87756,
+        "job_id": "01a0825e-82f1-4af3-b9c7-00019bb6e213",
+        "url": "https://buildkite.com/vllm/ci/builds/87756#01a0825e-82f1-4af3-b9c7-00019bb6e213"
+      },
+      "main_failure": {
+        "build_number": 87842,
+        "job_id": "01a084c1-e279-4220-bfb8-9a21d3883e58",
+        "url": "https://buildkite.com/vllm/ci/builds/87842#01a084c1-e279-4220-bfb8-9a21d3883e58",
+        "signature": "strict sync checking rejected a nonblocking H2D copy from the unpinned EPLB receive buffer"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/56138",
+        "notes": "The fix pinned the Gloo EPLB receive staging buffer; the exact H100 accuracy job passed in build #87891."
+      }
+    },
+    {
+      "id": "pr-53491-main-87842-kimi-linear-disaggregated",
+      "job_name": "H200 Kimi-Linear-48B-A3B Disaggregated DP EP",
+      "job_key": "kimi-linear-disaggregated",
+      "culprit_pr": {
+        "number": 53491,
+        "url": "https://github.com/vllm-project/vllm/pull/53491",
+        "merge_commit": "4aadb0f14d4c0d6397cfba271f11906e980b18c1"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 87756,
+        "job_id": "01a0825e-82da-4744-9b5f-53d11c9c02c9",
+        "url": "https://buildkite.com/vllm/ci/builds/87756#01a0825e-82da-4744-9b5f-53d11c9c02c9"
+      },
+      "main_failure": {
+        "build_number": 87842,
+        "job_id": "01a084c1-e264-4287-86fd-13bcc839f278",
+        "url": "https://buildkite.com/vllm/ci/builds/87842#01a084c1-e264-4287-86fd-13bcc839f278",
+        "signature": "strict sync checking rejected prepare_chunk_indices copying an unpinned CPU tensor to H200"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/51540",
+        "notes": "The fix derives KDA chunk indices from existing host-side sequence lengths and transfers a pinned result."
+      }
+    },
+    {
+      "id": "pr-53491-main-87842-lm-eval-large-models-8xh200",
+      "job_name": "H200 LM Eval Large Models",
+      "job_key": "lm-eval-large-models-8xh200",
+      "culprit_pr": {
+        "number": 53491,
+        "url": "https://github.com/vllm-project/vllm/pull/53491",
+        "merge_commit": "4aadb0f14d4c0d6397cfba271f11906e980b18c1"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 87756,
+        "job_id": "01a0825e-8364-4a5b-90ec-e68e17c2696b",
+        "url": "https://buildkite.com/vllm/ci/builds/87756#01a0825e-8364-4a5b-90ec-e68e17c2696b"
+      },
+      "main_failure": {
+        "build_number": 87842,
+        "job_id": "01a084c1-e305-4b78-9f46-26d84eb7ec20",
+        "url": "https://buildkite.com/vllm/ci/builds/87842#01a084c1-e305-4b78-9f46-26d84eb7ec20",
+        "signature": "strict sync checking rejected a nonblocking H2D copy from an unpinned sparse MLA context-length buffer"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/56138",
+        "notes": "The fix allocated sparse MLA context lengths in pinned CPU memory; both failing DeepSeek-V3.2 configurations exercise that path."
+      }
+    },
+    {
+      "id": "pr-55499-main-88213-distributed-model-tests-2-gpus",
+      "job_name": "L4 Distributed Models Shard 3",
+      "job_key": "distributed-model-tests-2-gpus",
+      "culprit_pr": {
+        "number": 55499,
+        "url": "https://github.com/vllm-project/vllm/pull/55499",
+        "merge_commit": "8c87c333b84c85908b1d11f0044457692277c6f3"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "not_selected",
+        "build_number": 87983,
+        "job_id": null,
+        "url": "https://buildkite.com/vllm/ci/builds/87983"
+      },
+      "main_failure": {
+        "build_number": 88213,
+        "job_id": "01a08da5-ef81-445c-a56f-2150f673aeeb",
+        "url": "https://buildkite.com/vllm/ci/builds/88213#01a08da5-ef81-445c-a56f-2150f673aeeb",
+        "signature": "Maverick tensor-parallel workers could not re-initialize CUDA in forked subprocesses"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/56423",
+        "notes": "The FlashInfer post-release bump introduced module-scope CUDA initialization before the fork-based test; spawning isolated tests passed all three exact L4 shards in build #88281."
+      }
+    }
+  ]
+}

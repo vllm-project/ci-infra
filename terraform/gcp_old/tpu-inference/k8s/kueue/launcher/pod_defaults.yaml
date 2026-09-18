@@ -1,0 +1,113 @@
+# What the fleet gives a workload's pods. A manifest opts in with
+# `tpu-ci.google.com/defaults: standard`; see README.md for the contract.
+#
+# This is not one Job's configuration: changing it changes every workload in
+# tpu-inference and vllm-torchtpu.
+
+# Applied to every pod of a workload that opts in, chips or not.
+everyPod:
+  # Every workload pulls a model or a tokenizer, including the chipless
+  # benchmark clients, so the token is fleet setup rather than something each
+  # step remembers to name. A manifest that sets HF_TOKEN itself still wins.
+  env:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: fleet-hf-token
+        key: HF_TOKEN
+  annotations:
+    # Job pods are evictable, so a long step alone on an idle node is what
+    # OPTIMIZE_UTILIZATION consolidates away. It presents as a job that vanished.
+    cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+
+# Applied only to pods that hold chips.
+tpuPods:
+  annotations:
+    # Without this GKE does not inject the sidecar and the claims below never
+    # mount.
+    gke-gcsfuse/volumes: "true"
+    # 2Gi, not GKE's suggested 512Mi: the compilation cache holds tens of
+    # thousands of entries, and a prefetch that runs out falls back to a lookup
+    # per miss.
+    gke-gcsfuse/metadata-prefetch-memory-limit: "2Gi"
+    # Unlimited sidecar CPU and memory: parallel downloads are CPU-bound and the
+    # defaults throttle them. Standard clusters only.
+    gke-gcsfuse/cpu-limit: "0"
+    gke-gcsfuse/memory-limit: "0"
+
+  volumes:
+    # Backing store for the gcsfuse file cache; without it the sidecar falls
+    # back to 5GiB of ephemeral storage and refetches checkpoints every load.
+    - name: gke-gcsfuse-cache
+      emptyDir:
+        medium: Memory
+    # JAX and vLLM lean on shared memory; the 64MB default fails in ways that
+    # look like unrelated crashes. Both emptyDirs are sized by the launcher.
+    - name: dshm
+      emptyDir:
+        medium: Memory
+    # Claims, so they resolve in whichever cluster MultiKueue landed the pod.
+    # Defined in cache_volumes.yaml.tpl.
+    - name: jax-cache
+      persistentVolumeClaim:
+        claimName: jax-cache
+    - name: hf-cache
+      persistentVolumeClaim:
+        claimName: hf-cache
+
+  # Merged into the container named `workload`. Applied ahead of a pod's own
+  # mounts, so one nested inside a cache here - vllm-torchtpu's profile cache
+  # under /cache/jax - lands inside the mount it shadows rather than under it.
+  volumeMounts:
+    - name: dshm
+      mountPath: /dev/shm
+    # Mounted for every workload, pointed at by none: a compilation cache must
+    # be keyed on the toolchain that filled it, which only the step knows.
+    - name: jax-cache
+      mountPath: /cache/jax
+    - name: hf-cache
+      mountPath: /cache/hf/hub
+
+  # Merged into the pod spec.
+  spec:
+    restartPolicy: Never
+    # The identity the cache buckets authorise; see workload_sa.yaml.tpl.
+    serviceAccountName: tpu-workload
+    # TPU nodes are tainted. Without this a pod that asks for chips is never
+    # scheduled onto the node that has them.
+    tolerations:
+      - key: "google.com/tpu"
+        operator: "Equal"
+        value: "present"
+        effect: "NoSchedule"
+
+  # Merged into the container named `workload`. Only what every workload wants;
+  # anything a test needs arrives through --env.
+  env:
+    - name: HF_HOME
+      value: /cache/hf
+    - name: PYTHONUNBUFFERED
+      value: "1"
+
+# Merged into the Job of each role that holds chips.
+tpuJobs:
+  # A node repaired under a running pod is rejected at kubelet admission with
+  # no DisruptionTarget and no exit code, because nothing started. Six retries
+  # is ten minutes of backoff, which outlasts a repair. FailJob below means
+  # they never rerun a red test.
+  backoffLimit: 6
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+      - action: FailJob
+        onExitCodes:
+          containerName: workload
+          operator: NotIn
+          values: [0]
+
+# Merged into the submitted object itself.
+workload:
+  # Long enough for the launcher's last log poll after the pods exit.
+  ttlSecondsAfterFinished: 300

@@ -1,0 +1,4 @@
+# The repo root ignores *.tfvars as likely to hold secrets. This one holds
+# project ids, regions and CIDR blocks, and needs to be reviewed alongside the
+# code that reads it. Left ignored, every edit needs `git add -f` to commit.
+!prod.auto.tfvars

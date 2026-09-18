@@ -8,9 +8,8 @@ locals {
   zone = data.google_client_config.gcp_client.zone
 
   # One name for the VM, its disk, its address, and the Buildkite agent, so a
-  # queue entry in the Buildkite UI maps straight onto a GCE instance.
-  # An empty purpose keeps the original names, so the tpu-commons fleet is not
-  # renamed and therefore not recreated.
+  # queue entry in the Buildkite UI maps straight onto a GCE instance. An empty
+  # purpose keeps the legacy flat name; renaming a live fleet recreates it.
   node_names = [for i in range(var.instance_count) :
     var.purpose == "" ? "vllm-ci-cpu-64-core-${i}" : "vllm-ci-cpu-64-core-${var.purpose}-${local.zone}-${i}"
   ]
@@ -163,7 +162,10 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       sudo sed -i '/^tags=/d' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="queue=${var.buildkite_queue_name}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i '/^HF_TOKEN=/d' /etc/environment
-      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment
+      # tee echoes to stdout, which the startup script sends to the serial
+      # console, where anyone with compute.instances.getSerialPortOutput can
+      # read it. Secrets go to the file only.
+      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment > /dev/null
 
       ${file("${path.module}/../shared/keep-agent-connected.sh")}
 
