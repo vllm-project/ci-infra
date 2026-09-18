@@ -26,10 +26,16 @@ kernrec_setup() {
       || { echo "kernrec: download failed: $base/libkernrec.so"; return 1; }
   fi
 
-  # Steps often `cd tests` first; the recording must land at the checkout
-  # root where artifact_paths looks for it.
-  local root
-  root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  # The recording must land in the agent's checkout, where artifact_paths
+  # looks for it. Tests run from /vllm-workspace, the image's own copy of the
+  # repo, so the working directory is the wrong place. In the k8s stack the
+  # agent runs inside the pod and BUILDKITE_BUILD_CHECKOUT_PATH is a real
+  # directory; the docker plugin mounts the checkout at /workdir.
+  local root="" cand
+  for cand in "${BUILDKITE_BUILD_CHECKOUT_PATH:-}" /workdir; do
+    if [ -n "$cand" ] && [ -d "$cand" ]; then root="$cand"; break; fi
+  done
+  [ -n "$root" ] || root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
   export KERNREC_DIR="$root/.fnrec/${BUILDKITE_JOB_ID:-local}"
 
   # libkernrec needs libcupti.so.<major>. torch ships it in a pip wheel that is
