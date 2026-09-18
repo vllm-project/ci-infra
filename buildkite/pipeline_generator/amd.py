@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 from constants import AgentQueue, DeviceType
-from step import Step
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
@@ -181,25 +180,6 @@ def is_amd_device(device: Optional[str]) -> bool:
     return _device_value(device) == DeviceType.AMD_CPU.value or is_amd_gpu_device(
         device
     )
-
-
-def drop_amd_steps(steps: List[Step]) -> List[Step]:
-    """Remove AMD build/test steps and strip "amd" mirrors from a step list.
-
-    Steps on an AMD device (build lane or native GPU) are dropped outright;
-    steps with a `mirror.amd` companion keep running on their own device,
-    just without the AMD mirror. Not specific to any one run type — callers
-    decide when a run has no reason to exercise the AMD/ROCm lane.
-    """
-    kept = []
-    for step in steps:
-        if is_amd_device(step.device):
-            continue
-        if step.mirror and "amd" in step.mirror:
-            others = {key: value for key, value in step.mirror.items() if key != "amd"}
-            step = step.model_copy(update={"mirror": others or None})
-        kept.append(step)
-    return kept
 
 
 def valid_amd_gpu_devices() -> List[str]:

@@ -206,6 +206,40 @@ def test_selected_steps_reject_unknown_dependency():
         select_steps_and_dependencies([step], frozenset({"test"}))
 
 
+def test_selected_steps_reject_amd_gpu_key_under_torch_nightly():
+    step = Step(label="AMD GPU test", key="amd-gpu-test", device="mi300_2")
+
+    with pytest.raises(ValueError, match="amd-gpu-test"):
+        select_steps_and_dependencies(
+            [step], frozenset({"amd-gpu-test"}), torch_nightly=True
+        )
+
+
+def test_selected_steps_reject_amd_mirror_key_under_torch_nightly():
+    step = Step(
+        label="Multimodal Processor",
+        key="multimodal-processor",
+        commands=["test"],
+        mirror={"amd": {"device": "mi355_1"}},
+    )
+
+    with pytest.raises(ValueError, match="amd-multimodal-processor"):
+        select_steps_and_dependencies(
+            [step], frozenset({"amd-multimodal-processor"}), torch_nightly=True
+        )
+
+
+def test_selected_steps_allow_non_amd_key_under_torch_nightly():
+    step = Step(label="CUDA test", key="cuda-test", commands=["test"])
+
+    selected, selected_keys = select_steps_and_dependencies(
+        [step], frozenset({"cuda-test"}), torch_nightly=True
+    )
+
+    assert [s.key for s in selected] == ["cuda-test"]
+    assert selected_keys == frozenset({"cuda-test"})
+
+
 def test_selected_step_runs_without_source_match(fake_global_config):
     fake_global_config["only_step_keys"] = frozenset({"selected"})
     step = Step(
@@ -753,6 +787,65 @@ def test_torch_nightly_flag_no_separate_group(fake_global_config):
     ]
     assert "Untagged test" in labels
     assert not any(lbl.startswith("Torch Nightly ") for lbl in labels)
+
+
+def _amd_and_cuda_steps():
+    return [
+        Step(
+            label="AMD image build",
+            group="Build",
+            key="image-build-amd",
+            device="amd_cpu",
+            commands=["build"],
+        ),
+        Step(
+            label="AMD native test",
+            group="GPU",
+            key="amd-native",
+            device="mi300_2",
+            depends_on=["image-build-amd"],
+            commands=["test"],
+        ),
+        Step(
+            label="Multimodal Processor",
+            group="Models",
+            key="multimodal-processor",
+            device="h100",
+            commands=["test"],
+            mirror={"amd": {"device": "mi355_1", "depends_on": ["image-build-amd"]}},
+        ),
+    ]
+
+
+def test_torch_nightly_run_omits_amd_build_gpu_and_mirror_steps(fake_global_config):
+    fake_global_config["torch_nightly"] = "1"
+
+    groups = buildkite_step.convert_group_step_to_buildkite_step(
+        group_steps(_amd_and_cuda_steps())
+    )
+    generated_keys = [job.key for group in groups for job in group.steps]
+
+    assert "image-build-amd" not in generated_keys
+    assert "amd-native" not in generated_keys
+    assert "amd-multimodal-processor" not in generated_keys
+    assert not any(g.group == "Hardware-AMD Tests" for g in groups)
+    assert "multimodal-processor" in generated_keys
+
+
+def test_torch_nightly_off_still_generates_amd_build_gpu_and_mirror_steps(
+    fake_global_config,
+):
+    fake_global_config["torch_nightly"] = "0"
+
+    groups = buildkite_step.convert_group_step_to_buildkite_step(
+        group_steps(_amd_and_cuda_steps())
+    )
+    generated_keys = [job.key for group in groups for job in group.steps]
+
+    assert "image-build-amd" in generated_keys
+    assert "amd-native" in generated_keys
+    assert "amd-multimodal-processor" in generated_keys
+    assert "multimodal-processor" in generated_keys
 
 
 def test_image_tag_matches_get_image_and_latest_suppressed_on_nightly(

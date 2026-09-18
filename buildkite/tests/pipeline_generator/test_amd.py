@@ -4,7 +4,7 @@ import pytest
 
 import amd
 import buildkite_step
-from amd import drop_amd_steps
+from amd import is_amd_device
 from constants import AgentQueue
 from step import Step
 
@@ -666,38 +666,15 @@ def test_amd_mirror_parallelism_override(
     assert "--num-shards" not in amd_step.env["VLLM_TEST_COMMANDS"]
 
 
-def test_drop_amd_steps_removes_amd_build_and_gpu_devices():
-    steps = [
-        Step(label="AMD image build", key="image-build-amd", device="amd_cpu"),
-        Step(label="AMD native test", key="amd-native", device="mi300_2"),
-        Step(label="CUDA test", key="cuda-test", device="h100"),
-    ]
-
-    filtered = drop_amd_steps(steps)
-
-    assert [step.key for step in filtered] == ["cuda-test"]
-
-
 @pytest.mark.parametrize(
-    ("mirror", "expected_mirror"),
+    ("device", "expected"),
     [
-        ({"amd": {"device": "mi355_1"}}, None),
-        (
-            {"amd": {"device": "mi355_1"}, "other": {"foo": "bar"}},
-            {"other": {"foo": "bar"}},
-        ),
+        ("amd_cpu", True),
+        ("mi300_2", True),
+        ("mi355_8", True),
+        ("h100", False),
+        (None, False),
     ],
 )
-def test_drop_amd_steps_strips_amd_mirror_key_only(mirror, expected_mirror):
-    step = Step(
-        label="Multimodal Processor",
-        key="multimodal-processor",
-        device="h100",
-        commands=["test"],
-        mirror=mirror,
-    )
-
-    (filtered_step,) = drop_amd_steps([step])
-
-    assert filtered_step.key == "multimodal-processor"
-    assert filtered_step.mirror == expected_mirror
+def test_is_amd_device(device, expected):
+    assert is_amd_device(device) is expected
