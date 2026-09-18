@@ -59,7 +59,11 @@ def demangle(names: list[str]) -> dict[str, str]:
     if not filt or not names:
         return {n: n for n in names}
     out = subprocess.run(
-        [filt], input="\n".join(names) + "\n", capture_output=True, text=True
+        [filt],
+        input="\n".join(names) + "\n",
+        capture_output=True,
+        text=True,
+        check=False,
     ).stdout.splitlines()
     return dict(zip(names, out)) if len(out) == len(names) else {n: n for n in names}
 

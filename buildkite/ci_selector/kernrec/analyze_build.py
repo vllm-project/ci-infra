@@ -130,7 +130,7 @@ def main() -> int:
             ]
             for e in expects.get(step_key, []):
                 cmd += ["--expect", e]
-            rc = subprocess.run(cmd).returncode
+            rc = subprocess.run(cmd, check=False).returncode
             failures += rc != 0
     print(
         f"\n{'all expectations held' if not failures else f'{failures} step(s) failed expectations'}; files under {out}"
