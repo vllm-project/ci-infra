@@ -28,6 +28,15 @@ nothing. Recording is meant for nightly or post-merge full runs only.
 Names are appended the first time they are seen, so a test killed by a
 timeout still leaves everything it launched up to that point.
 
+Under the docker plugin the step runs as root and the checkout is a bind
+mount owned by the agent user, so anything left there with default modes
+is something the agent's `git clean` can never remove, and every later job
+on that machine fails at checkout (this happened once, build 89825). Both
+layers guard against it: `ci_setup.sh` creates `.fnrec/` and the job
+directory `0777` and opens up everything on `EXIT`, and the recorder itself
+chmods any directory it has to create. `test_checkout_perms.sh` reproduces
+the conditions in Docker and checks both, including a SIGKILLed step.
+
 ## Output
 
 ```
