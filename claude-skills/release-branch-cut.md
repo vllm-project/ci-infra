@@ -260,6 +260,19 @@ Things to watch for when reading results:
   regressions (>10%) on a workload whose job was retried (e.g. after an
   infra flake) may be agent-specific — sanity-check against a rerun before
   filing.
+- **Check the baseline before bisecting code:** a flagged regression can be
+  a *lucky baseline* rather than a slow candidate. Before digging through
+  commits, compare recent nightly builds (`bk build list --pipeline
+  vllm/perf-eval --branch main`, message "Nightly run ...") against the same
+  baseline image — the per-day candidate values form a free bisection and
+  reveal the metric's steady-state band. If the baseline sits outside that
+  band, the regression is an artifact. Definitive check: rerun the workload
+  with `VLLM_IMAGE_CUDA` pointing at the *baseline* image and see if it
+  reproduces the baseline number.
+- **Agent identity matters:** record which Buildkite agent each compared
+  run executed on (job detail API). Only same-host comparisons are
+  trustworthy; some perf hosts are intermittently slow, so a bad run on an
+  unverified host is noise until reproduced on a known-good one.
 
 To confirm a regression with a targeted rerun, launch a new perf-eval
 build with `WORKLOADS` (comma-separated workload stems from the
