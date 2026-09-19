@@ -126,9 +126,7 @@ def test_selected_steps_support_label_generated_keys():
         (None, "multimodal-processor"),
     ],
 )
-def test_selected_steps_support_amd_mirror_keys(
-    fake_global_config, key, generated_key
-):
+def test_selected_steps_support_amd_mirror_keys(fake_global_config, key, generated_key):
     steps = [
         Step(label="AMD image", key="image-build-amd", commands=["build"]),
         Step(
@@ -151,9 +149,7 @@ def test_selected_steps_support_amd_mirror_keys(
         steps, frozenset({f"amd-{generated_key}"})
     )
     fake_global_config["only_step_keys"] = selected_keys
-    groups = buildkite_step.convert_group_step_to_buildkite_step(
-        group_steps(selected)
-    )
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(selected))
     generated_keys = [job.key for group in groups for job in group.steps]
 
     assert [step.key for step in selected] == [
@@ -795,6 +791,66 @@ def test_timeout_in_minutes_propagates_to_command_step():
     assert command_step.timeout_in_minutes == 42
 
 
+def test_concurrency_fields_propagate_from_yaml_to_command_step():
+    step = Step.from_yaml(
+        {
+            "label": "Serialized promotion",
+            "group": "Image promotion",
+            "key": "serialized-promotion",
+            "commands": ["promote-image"],
+            "device": "amd_cpu",
+            "concurrency": 1,
+            "concurrency_group": "rocm-stable-image-promotion",
+            "if_condition": (
+                "build.branch == pipeline.default_branch "
+                "&& build.pull_request.id == null"
+            ),
+        }
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        rendered_step
+        for rendered_step in group_step.steps
+        if isinstance(rendered_step, buildkite_step.BuildkiteCommandStep)
+    )
+    rendered_group = group_step.model_dump(exclude_none=True, by_alias=True)
+    rendered = next(
+        rendered_step
+        for rendered_step in rendered_group["steps"]
+        if rendered_step.get("key") == command_step.key
+    )
+
+    assert rendered["concurrency"] == 1
+    assert rendered["concurrency_group"] == "rocm-stable-image-promotion"
+    assert rendered["if"] == (
+        "build.branch == pipeline.default_branch && build.pull_request.id == null"
+    )
+
+
+@pytest.mark.parametrize(
+    "yaml_fields",
+    [
+        {"concurrency": 0},
+        {"concurrency": -1},
+        {"concurrency": True},
+        {"concurrency": 1},
+        {"concurrency_group": ""},
+        {"concurrency_group": "   "},
+        {"concurrency_group": "missing-limit"},
+    ],
+)
+def test_step_rejects_invalid_concurrency_fields(yaml_fields):
+    with pytest.raises(ValueError):
+        Step.from_yaml(
+            {
+                "label": "Invalid serialization",
+                "commands": ["true"],
+                **yaml_fields,
+            }
+        )
+
+
 def test_skip_timeout_omits_timeout_from_command_step(monkeypatch):
     monkeypatch.setenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, "1")
     step = Step(
@@ -813,7 +869,10 @@ def test_skip_timeout_omits_timeout_from_command_step(monkeypatch):
     )
 
     assert command_step.timeout_in_minutes is None
-    assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
+    rendered = command_step.model_dump(exclude_none=True)
+    assert "timeout_in_minutes" not in rendered
+    assert "concurrency" not in rendered
+    assert "concurrency_group" not in rendered
 
 
 def test_missing_timeout_in_minutes_is_omitted_from_pipeline():
