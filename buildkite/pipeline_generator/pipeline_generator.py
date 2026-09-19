@@ -4,7 +4,7 @@ from typing import FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import normalize_amd_depends_on
+from amd import is_amd_device, normalize_amd_depends_on
 from buildkite_step import (
     _generate_step_key,
     add_precommit_dependency,
@@ -13,6 +13,21 @@ from buildkite_step import (
 )
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
+
+
+def _annotate_best_effort(message: str, style: Optional[str] = None) -> None:
+    """Best-effort `buildkite-agent annotate`: never fail the build over it.
+
+    check=False only covers a non-zero exit; it still lets FileNotFoundError
+    propagate if the binary itself is missing (e.g. when generating locally).
+    """
+    command = ["buildkite-agent", "annotate", message]
+    if style:
+        command.extend(["--style", style])
+    try:
+        subprocess.run(command, check=False)
+    except OSError:
+        pass
 
 
 class PipelineGenerator:
@@ -50,19 +65,25 @@ class PipelineGenerator:
                     f.write("true")
                 return
 
+        torch_nightly = global_config["torch_nightly"] == "1"
+        if torch_nightly:
+            # ROCm has its own pinned torch and gains nothing from validating
+            # against a CUDA torch-nightly build, so the AMD lane is excluded
+            # further downstream (see is_amd_device / include_amd).
+            _annotate_best_effort(
+                "AMD lane excluded: torch-nightly validates CUDA only."
+            )
+
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
         try:
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"]
+                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
             )
         except ValueError as error:
             # Surface the reason on the build page, not only in the bootstrap log.
-            subprocess.run(
-                ["buildkite-agent", "annotate", str(error), "--style", "error"],
-                check=False,
-            )
+            _annotate_best_effort(str(error), style="error")
             raise
         global_config["only_step_keys"] = selected_step_keys
         grouped_steps = group_steps(steps)
@@ -97,12 +118,14 @@ class PipelineGenerator:
 def select_steps_and_dependencies(
     steps: List[Step],
     requested_step_keys: Optional[FrozenSet[str]],
+    torch_nightly: bool = False,
 ) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
     if requested_step_keys is None:
         return steps, None
 
     steps_by_key = {}
     dependencies_by_key = {}
+    amd_step_keys = set()
     for step in steps:
         # Steps without an explicit key are uploaded with a label-derived key
         # (see convert_group_step_to_buildkite_step), so retry builds reference
@@ -113,6 +136,8 @@ def select_steps_and_dependencies(
             raise ValueError(f"Duplicate CI step key: {step.key}")
         steps_by_key[step.key] = step
         dependencies_by_key[step.key] = step.depends_on or []
+        if is_amd_device(step.device):
+            amd_step_keys.add(step.key)
 
         # AMD mirrors are uploaded as generated `amd-<key>` steps, so retry
         # builds reference them by that key too.
@@ -125,10 +150,19 @@ def select_steps_and_dependencies(
             dependencies_by_key[mirror_key] = normalize_amd_depends_on(
                 amd_mirror.get("depends_on")
             )
+            amd_step_keys.add(mirror_key)
 
     missing = requested_step_keys - steps_by_key.keys()
     if missing:
         raise ValueError("Unknown CI step key(s): " + ", ".join(sorted(missing)))
+
+    if torch_nightly:
+        requested_amd_keys = requested_step_keys & amd_step_keys
+        if requested_amd_keys:
+            raise ValueError(
+                "AMD CI step key(s) requested, but AMD steps are excluded from "
+                "torch-nightly runs: " + ", ".join(sorted(requested_amd_keys))
+            )
 
     selected_step_keys = set(requested_step_keys)
     pending = list(requested_step_keys)

@@ -4,6 +4,7 @@ import pytest
 
 import amd
 import buildkite_step
+from amd import is_amd_device
 from constants import AgentQueue
 from step import Step
 
@@ -663,3 +664,17 @@ def test_amd_mirror_parallelism_override(
     # custom AMD command remains the unsharded original
     assert "pytest tests/pooling.py" in amd_step.env["VLLM_TEST_COMMANDS"]
     assert "--num-shards" not in amd_step.env["VLLM_TEST_COMMANDS"]
+
+
+@pytest.mark.parametrize(
+    ("device", "expected"),
+    [
+        ("amd_cpu", True),
+        ("mi300_2", True),
+        ("mi355_8", True),
+        ("h100", False),
+        (None, False),
+    ],
+)
+def test_is_amd_device(device, expected):
+    assert is_amd_device(device) is expected
