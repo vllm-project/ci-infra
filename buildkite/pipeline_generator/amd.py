@@ -21,6 +21,8 @@ AMD_HF_HOME = "/home/buildkite-agent/huggingface"
 AMD_NATIVE_WORKSPACE = "/vllm-workspace"
 AMD_NATIVE_WORKSPACE_VOLUME = "vllm-workspace"
 AMD_NATIVE_SHM_SIZE = "16Gi"
+AMD_GIT_CLONE_FLAGS = "-v --depth=1 --filter=blob:none"
+AMD_GIT_FETCH_FLAGS = "-v --prune --depth=1"
 AMD_NATIVE_POD_IDENTITY_ENV = {
     "VLLM_CI_K8S_POD_NAME": "metadata.name",
     "VLLM_CI_K8S_NAMESPACE": "metadata.namespace",
@@ -351,6 +353,10 @@ def get_amd_k8s_plugin(
     gpu_resource = str(gpu_count)
     return {
         "kubernetes": {
+            "checkout": {
+                "cloneFlags": AMD_GIT_CLONE_FLAGS,
+                "fetchFlags": AMD_GIT_FETCH_FLAGS,
+            },
             "podSpecPatch": {
                 "automountServiceAccountToken": False,
                 "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
@@ -404,7 +410,7 @@ def get_amd_k8s_plugin(
                     },
                     {"name": workspace_volume_name, "emptyDir": {}},
                 ],
-            }
+            },
         }
     }
 
