@@ -1,0 +1,17 @@
+# Workspace root for the tools bootstrap installs.
+#
+# No [tool.pytest.ini_options] or [tool.ruff] here: both take config from the
+# nearest file walking up, so a table here silently re-roots all of buildkite/.
+[project]
+name = "vllm-ci-buildkite"
+version = "0.0.0"
+requires-python = ">=3.12"
+
+[dependency-groups]
+dev = ["pytest==9.1.1"]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["pipeline_generator", "ci_selector"]

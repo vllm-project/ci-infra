@@ -24,8 +24,10 @@ Needs a local vLLM checkout to analyze against.
 
 ```bash
 uv sync
-source .venv/bin/activate
+source ../.venv/bin/activate
 ```
+
+This is a member of the `buildkite/` uv workspace, so the environment is the shared one at `buildkite/.venv` and the generator beside us resolves to the same dependency versions we do. `uv run` from here finds it without activating.
 
 For the coverage half, put a table at `coverage-data/table.json.gz`, which is gitignored because it is a build artifact. Override the location with `--table` or `$CI_SELECTOR_TABLE`. Without one, the selector runs on the code map alone and says so on stderr.
 
