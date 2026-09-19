@@ -1,0 +1,4 @@
+interface:
+  display_name: "vLLM Main CI Triage"
+  short_description: "Diagnose hard vLLM main-CI failures"
+  default_prompt: "Use $vllm-main-ci-triage to inspect hard main-CI failures, identify the cause, and record confirmed selection leaks."

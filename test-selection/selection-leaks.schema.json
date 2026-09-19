@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vllm-project/ci-infra/test-selection/selection-leaks.schema.json",
+  "title": "vLLM CI test-selection leaks",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "records"],
+  "properties": {
+    "$schema": {"const": "./selection-leaks.schema.json"},
+    "schema_version": {"const": 1},
+    "records": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/record"}
+    }
+  },
+  "$defs": {
+    "positiveInteger": {"type": "integer", "minimum": 1},
+    "jobId": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      ]
+    },
+    "buildkiteUrl": {
+      "type": "string",
+      "pattern": "^https://buildkite\\.com/vllm/ci/builds/[1-9][0-9]*(#[0-9a-f-]+)?$"
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "job_name",
+        "job_key",
+        "culprit_pr",
+        "pr_ci",
+        "main_failure",
+        "causal_confirmation"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$"},
+        "job_name": {"type": "string", "minLength": 1},
+        "job_key": {"type": "string", "minLength": 1},
+        "culprit_pr": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["number", "url", "merge_commit"],
+          "properties": {
+            "number": {"$ref": "#/$defs/positiveInteger"},
+            "url": {
+              "type": "string",
+              "pattern": "^https://github\\.com/vllm-project/vllm/pull/[1-9][0-9]*$"
+            },
+            "merge_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+          }
+        },
+        "pr_ci": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ran", "state", "build_number", "job_id", "url"],
+          "properties": {
+            "ran": {"const": false},
+            "state": {
+              "enum": ["blocked", "not_selected", "skipped", "canceled"]
+            },
+            "build_number": {"$ref": "#/$defs/positiveInteger"},
+            "job_id": {"$ref": "#/$defs/jobId"},
+            "url": {"$ref": "#/$defs/buildkiteUrl"}
+          }
+        },
+        "main_failure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["build_number", "job_id", "url", "signature"],
+          "properties": {
+            "build_number": {"$ref": "#/$defs/positiveInteger"},
+            "job_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "url": {"$ref": "#/$defs/buildkiteUrl"},
+            "signature": {"type": "string", "minLength": 1}
+          }
+        },
+        "causal_confirmation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reference_url", "notes"],
+          "properties": {
+            "kind": {
+              "enum": ["fix", "revert", "reproduction", "code_analysis"]
+            },
+            "reference_url": {"type": "string", "pattern": "^https://"},
+            "notes": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    }
+  }
+}

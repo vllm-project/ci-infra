@@ -1,0 +1,32 @@
+# Builds the launcher image. Run by hand, not on a trigger: it changes only
+# when the Cloud CLI version in prod.auto.tfvars does.
+#
+#   gcloud builds submit --project cloud-ullm-inference-ci-cd --region us-central1 \
+#     --config cloudbuild.yaml \
+#     --gcs-source-staging-dir gs://cloud-ullm-inference-ci-cd-tf-state/cloudbuild-source \
+#     --substitutions _CLOUD_SDK_VERSION=584.0.0,_REVISION=1 .
+#
+# The staging directory has to be named: the default is a multi-region `us`
+# bucket, which constraints/gcp.resourceLocations refuses in this org.
+substitutions:
+  _CLOUD_SDK_VERSION: "584.0.0"
+  # Bumped when this Dockerfile changes without the base image changing, so a
+  # tag always names one set of bytes.
+  _REVISION: "1"
+  # The fleet's own repository, not tpu-inference-ci, which holds the CI images
+  # a test runs.
+  _IMAGE: us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/launcher
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg=CLOUD_SDK_VERSION=${_CLOUD_SDK_VERSION}
+      - --tag=${_IMAGE}:${_CLOUD_SDK_VERSION}-${_REVISION}
+      - .
+
+images:
+  - ${_IMAGE}:${_CLOUD_SDK_VERSION}-${_REVISION}
+
+options:
+  logging: CLOUD_LOGGING_ONLY

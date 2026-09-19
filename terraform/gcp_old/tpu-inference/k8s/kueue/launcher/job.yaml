@@ -1,0 +1,37 @@
+# The Job a step gets when it names hardware and nothing else: one pod on one
+# host, holding every chip on the node. Everything in it is a fact about the
+# cluster, which is why it lives here and not in the repo being tested; the
+# step supplies the command and the shape, the launcher fills in the name,
+# queue, deadline and cache sizes.
+#
+# A workload this cannot express - roles that talk to each other, hosts of one
+# slice - is a JobSet the calling repo passes as --manifest.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    # The fleet's caches, gcsfuse settings and eviction policy, from
+    # pod_defaults.yaml. This Job takes them the same way a repo's own manifest
+    # does, so there is one definition rather than one here and one there.
+    tpu-ci.google.com/defaults: standard
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    spec:
+      # The hardware this Job wants; the launcher reads these and the chip
+      # count below to pick the queue, so they stay here.
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: ${ACCELERATOR_LABEL}
+        cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
+      containers:
+        - name: workload
+          image: ${IMAGE}
+          # No workingDir: the image's own is where its tests live, and this
+          # file is not the place to know that.
+          command: ["/bin/bash", "-lc"]
+          resources:
+            limits:
+              google.com/tpu: "${CHIPS}"
+            requests:
+              google.com/tpu: "${CHIPS}"

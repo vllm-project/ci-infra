@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Removes the git extraHeader config injected by pre-checkout, restoring the
+# previous GIT_CONFIG_COUNT so later steps don't carry the credential.
+#
+# Install at: /etc/buildkite-agent/hooks/post-checkout
+
+set -e
+
+config_index=${BUILDKITE_GITHUB_AUTH_CONFIG_INDEX:-}
+previous_count=${BUILDKITE_GITHUB_AUTH_PREVIOUS_CONFIG_COUNT:-}
+
+if [ -z "$config_index" ] || [ -z "$previous_count" ]; then
+    exit 0
+fi
+
+unset "GIT_CONFIG_KEY_${config_index}"
+unset "GIT_CONFIG_VALUE_${config_index}"
+
+if [ "$previous_count" -eq 0 ]; then
+    unset GIT_CONFIG_COUNT
+else
+    export GIT_CONFIG_COUNT=$previous_count
+fi
+
+unset BUILDKITE_GITHUB_AUTH_CONFIG_INDEX
+unset BUILDKITE_GITHUB_AUTH_PREVIOUS_CONFIG_COUNT
+unset config_index previous_count

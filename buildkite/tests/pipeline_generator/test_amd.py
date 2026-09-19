@@ -650,3 +650,114 @@ def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
     # An AMD mirror without its own timeout does not inherit the shorter main
     # timeout (AMD runs slower); it receives the standard AMD timeout.
     assert amd_command_step.timeout_in_minutes == 180
+
+
+@pytest.mark.parametrize(
+    "amd_label,expected_amd_label",
+    [
+        (None, "AMD: Mirrored label test (mi300_1)"),
+        (
+            ":amd: MI300 Attention Kernels",
+            ":amd: MI300 Attention Kernels",
+        ),
+    ],
+)
+def test_amd_mirror_label_override(fake_global_config, amd_label, expected_amd_label):
+    fake_global_config["list_file_diff"] = ["vllm/foo.py"]
+    amd_mirror = {
+        "device": "mi300_1",
+        "depends_on": ["image-build-amd"],
+    }
+    if amd_label is not None:
+        amd_mirror["label"] = amd_label
+    step = Step(
+        label="Mirrored label test",
+        group="Mirrors",
+        key="mirrored-label",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/mirror.py"],
+        source_file_dependencies=["vllm/"],
+        device="h200_18gb",
+        mirror={"amd": amd_mirror},
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+    amd_command_step = next(
+        s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+    default_group = next(group for group in group_steps if group.group == "Mirrors")
+    default_command_step = next(
+        s
+        for s in default_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    # A mirror-level label is used verbatim; without one the derived
+    # "AMD: <label> (<device>)" form is unchanged. The NVIDIA label is
+    # never affected either way.
+    assert amd_command_step.label == expected_amd_label
+    assert default_command_step.label == "Mirrored label test"
+
+
+@pytest.mark.parametrize(
+    ("amd_parallelism", "expected"),
+    [
+        (None, 4),  # unset -> inherit parent parallelism (existing behavior)
+        (1, 1),  # explicit override -> AMD stays a single copy
+        (2, 2),  # explicit override -> independent AMD shard count
+    ],
+)
+def test_amd_mirror_parallelism_override(fake_global_config, amd_parallelism, expected):
+    """NVIDIA sharding must not multiply AMD mirrors: mirror.amd.parallelism
+    overrides the inherited parent parallelism when set."""
+    amd_config = {
+        "device": "mi325_1",
+        "depends_on": ["image-build-amd"],
+        # pooling-shaped mirror: custom unsharded AMD command preserved
+        "commands": ["pytest tests/pooling.py"],
+    }
+    if amd_parallelism is not None:
+        amd_config["parallelism"] = amd_parallelism
+    step = Step(
+        label="Pooling test",
+        group="Models",
+        key="pooling-test",
+        depends_on=["image-build"],
+        working_dir="/vllm-workspace/tests",
+        commands=[
+            "pytest tests/pooling.py --shard-id=$$BUILDKITE_PARALLEL_JOB"
+            " --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT"
+        ],
+        parallelism=4,
+        source_file_dependencies=["vllm/"],
+        mirror={"amd": amd_config},
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {step.group: [step]}
+    )
+    nvidia_group = next(g for g in group_steps if g.group == "Models")
+    nvidia_step = next(
+        s
+        for s in nvidia_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+    amd_group = next(g for g in group_steps if g.group == "Hardware-AMD Tests")
+    amd_step = next(
+        s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+
+    # parent sharding always preserved
+    assert nvidia_step.parallelism == 4
+    assert amd_step.parallelism == expected
+    # custom AMD command remains the unsharded original
+    assert "pytest tests/pooling.py" in amd_step.env["VLLM_TEST_COMMANDS"]
+    assert "--num-shards" not in amd_step.env["VLLM_TEST_COMMANDS"]

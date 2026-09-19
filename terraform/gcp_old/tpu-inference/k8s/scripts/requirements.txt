@@ -1,0 +1,8 @@
+# For generate_manifests.py, which reads prod.auto.tfvars so that the queues
+# and the node pools cannot describe different reservations.
+python-hcl2==8.1.2
+
+# The launcher's profile registry is written as YAML rather than templated,
+# because it is a data structure and not a manifest: quoting a chip count or an
+# accelerator label by hand is the kind of mistake that reaches a pod.
+PyYAML==6.0.3
