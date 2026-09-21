@@ -184,6 +184,41 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
 
 
+def test_native_no_gpu_omits_amd_gpu_resource():
+    step = Step(
+        label="AMD CPU test",
+        group="Direct AMD",
+        key="amd-cpu-no-gpu",
+        depends_on=["image-build"],
+        device="mi250_1",
+        dind=False,
+        no_gpu=True,
+        optional=True,
+        working_dir="/vllm-workspace/tests",
+        commands=["pytest tests/cpu.py"],
+    )
+
+    group_step = _render_single_step(step)
+    command_step = next(
+        s
+        for s in group_step.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+    container = command_step.plugins[0]["kubernetes"]["podSpecPatch"]["containers"][0]
+
+    assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == "0"
+    assert "resources" not in container
+    assert "amd.com/gpu" not in str(container)
+
+
+def test_amd_template_omits_gpu_resource_for_no_gpu_steps():
+    template = (Path(__file__).parents[2] / "test-template-amd.j2").read_text()
+
+    assert '{% if "dpx" not in step.agent_pool and not step.no_gpu %}' in template
+    assert 'amd.com/gpu: "0"' not in template
+    assert 'amd.com/gpu: "{{ step.num_gpus or 1 }}"' in template
+
+
 @pytest.mark.parametrize("device,gpu_count", [("mi300_4", 4), ("mi355_dpx", 1)])
 def test_amd_device_rejects_conflicting_gpu_count(device, gpu_count):
     step = Step(
@@ -382,13 +417,8 @@ def test_native_amd_no_gpu_preserves_allocation_contract(device):
     container = command_step.plugins[0]["kubernetes"]["podSpecPatch"]["containers"][0]
     container_env = {entry["name"]: entry for entry in container["env"]}
     assert container_env["VLLM_CI_EXPECTED_GPU_COUNT"]["value"] == "0"
-    if device == "mi355_dpx":
-        assert "resources" not in container
-    else:
-        assert container["resources"] == {
-            "limits": {"amd.com/gpu": "0"},
-            "requests": {"amd.com/gpu": "0"},
-        }
+    assert "resources" not in container
+    assert "amd.com/gpu" not in str(container)
 
 
 def test_untagged_mirror_defaults_to_dind(
