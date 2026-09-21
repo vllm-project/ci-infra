@@ -103,6 +103,14 @@ data:
         project: cloud-ullm-inference-ci-cd
         location: us-east5
     profiles:
+      cpu:
+        queue: cpu
+        chips: 0
+        hosts: 1
+        cpu_cores: '6'
+        cpu_memory: 16Gi
+        cpu_disk: 20Gi
+        max_runtime_seconds: 21600
       ct6e-standard-1t-1x1:
         queue: ct6e-standard-1t-1x1
         machine_type: ct6e-standard-1t

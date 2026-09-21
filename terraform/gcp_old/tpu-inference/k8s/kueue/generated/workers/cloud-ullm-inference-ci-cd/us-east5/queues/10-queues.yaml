@@ -58,7 +58,61 @@ description: "Work that yields to everything: nightlies, autotuning"
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
+  name: cpu
+---
+# One flavor per TPU generation, and deliberately no nodeLabels.
+#
+# The flavor, not the queue, is Kueue's quota partition, and Kueue skips a
+# flavor whose nodeLabels conflict with what a podSet asks for. A flavor per
+# shape would therefore stop a 1-chip job borrowing idle 8-chip capacity,
+# whatever the numbers said. Placement is the workload's anyway: it carries the
+# TPU nodeSelectors itself.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
   name: ct6e
+---
+# One queue per TPU shape, all of a generation's queues in one cohort, so that
+# nominalQuota is chips this shape can always have and no other shape can hold
+# the reservation against it, while whatever it is not using is lent out.
+#
+# Both preemption policies stay Never: eviction returns the accounting at once
+# but not the hardware, since eight chips freed across eight single-chip nodes
+# still have to scale down before an 8-chip node can boot, and the jobs killed
+# to get there have to run again. Priority decides who goes next, not who stops.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: cpu
+spec:
+  cohortName: cpu
+  preemption:
+    reclaimWithinCohort: Never
+    withinClusterQueue: Never
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  resourceGroups:
+    # google.com/tpu is the only resource under quota; everything else a pod
+    # requests is left to the kube scheduler. See quotaCheckStrategy in
+    # common-config.yaml.
+    - coveredResources:
+        - google.com/tpu
+      flavors:
+        - name: cpu
+          resources:
+            - name: google.com/tpu
+              # Chips, not nodes. This is a ceiling on what Kueue will admit at
+              # once, not a promise that a slice of the right shape is free.
+              nominalQuota: 0
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: cpu
+  namespace: buildkite
+spec:
+  clusterQueue: cpu
 ---
 # One queue per TPU shape, all of a generation's queues in one cohort, so that
 # nominalQuota is chips this shape can always have and no other shape can hold

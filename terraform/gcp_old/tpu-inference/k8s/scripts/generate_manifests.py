@@ -105,6 +105,24 @@ WORKLOAD_PRIORITIES = {
     "low": (-100, "Work that yields to everything: nightlies, autotuning"),
 }
 
+# The cpu queue: what a CPU-only workload is admitted against. It needs one because
+# admission is what MultiKueue dispatches on, and a workload with no queue stays
+# on the manager, which has neither the fleet secrets nor the class above.
+#
+# No quota to keep: it covers google.com/tpu at nominalQuota 0 like the rest, a
+# CPU-only workload asks for none, and what it does consume is left to the kube
+# scheduler by quotaCheckStrategy: IgnoreUndeclared. One word, so cohort() gives
+# it a cohort of its own rather than one it could borrow chips from.
+CPU_QUEUE = "cpu"
+
+# Sized to a unit suite, so several fit a node. Requests equal limits because a
+# worker-cpu node is shared where a TPU host is not.
+CPU_JOB_SIZE = {
+    "cpu_cores": "6",
+    "cpu_memory": "16Gi",
+    "cpu_disk": "20Gi",
+}
+
 # The identity Managed Prometheus scrapes Kueue as, and where its token lives.
 # The namespace is not a choice: it is the only one the Managed Prometheus
 # operator holds a Role to read Secrets in, and a scrape of Kueue needs a token.
@@ -126,6 +144,10 @@ LAUNCHER_SCRIPT_KEY = "launch"
 LAUNCHER_DEFAULT_JOB = ROOT / "kueue" / "launcher" / "job.yaml"
 LAUNCHER_MANIFEST_CONFIGMAP = "tpu-launcher-manifests"
 LAUNCHER_DEFAULT_JOB_KEY = "job.yaml"
+
+# And the one a step gets when it wants the image and no chips.
+LAUNCHER_DEFAULT_CPU_JOB = ROOT / "kueue" / "launcher" / "job_cpu.yaml"
+LAUNCHER_DEFAULT_CPU_JOB_KEY = "job_cpu.yaml"
 
 # The pod setup both that Job and a repo's own manifest inherit.
 LAUNCHER_POD_DEFAULTS = ROOT / "kueue" / "launcher" / "pod_defaults.yaml"
@@ -677,6 +699,18 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         )
 
         local = shapes(worker, tfvars["machine_memory_gb"])
+        # Not read from a node pool - there is no hardware to describe. In the
+        # same map as the shapes so the queue, the AdmissionCheck, the
+        # MultiKueueConfig and the profile all come from the existing code.
+        local[CPU_QUEUE] = {
+            "queue": CPU_QUEUE,
+            "chips": 0,
+            "hosts": 1,
+            "quota": 0,
+            # What the compute class builds a node against. One size for the
+            # lane; a step wanting another states its own manifest.
+            **CPU_JOB_SIZE,
+        }
         for name, shape in local.items():
             # The shape is stored once, not summed: two clusters running it
             # run the same hardware. Only the quota adds up.
