@@ -433,6 +433,62 @@ Release candidate `vX.Y.ZrcN` tagged on `releases/vX.Y.Z` at commit `<full_sha>`
 
 ---
 
+## Step 11: Smoke test the release artifacts (final release only)
+
+For the **final** release (not RCs), once the release-v2 build has produced
+wheels and images, smoke test what users will actually install before the
+announcement goes out. Keep it shallow: install/boot + one request, not
+benchmarks.
+
+**What to test:**
+
+- **Wheel:** once `vllm==X.Y.Z` appears on PyPI (`upload-release-wheels`
+  job; poll `https://pypi.org/pypi/vllm/json`): on a clean linux x86_64
+  machine, `python3.12 -m venv /tmp/vllm-smoke && pip install vllm==X.Y.Z`,
+  then `python -c "import vllm; print(vllm.__version__)"` and
+  `from vllm import LLM, SamplingParams` import check. A short offline
+  generation with a tiny cached model is a good bonus but optional.
+- **Image:** the release-repo ECR images are the exact content that the
+  publish steps later push to DockerHub:
+  `public.ecr.aws/q9t5s3a7/vllm-release-repo:<full_sha>-x86_64` (and
+  `-aarch64` for Grace/ARM). `docker run` the image, `vllm serve` a model,
+  wait for `/health`, hit `/v1/models`, send one chat completion
+  ("What is 2+2?", max_tokens 64), then tear down.
+
+**Model × hardware matrix:** cover the currently popular models on each GPU
+generation (e.g. GLM-5.3-Flash, MiniMax-M3, Qwen3.8-Flash-Next,
+DeepSeek-V4.x-Flash across H200 / B200 / GB200). Use the exact serve command
+from the model's recipe — `https://recipes.vllm.ai/models.json` is
+machine-readable; each recipe has per-hardware `command`/`env` blocks.
+Prefer each model's recipe-recommended hardware.
+
+**Machines available for smoke testing:**
+
+- H200: `ssh h200-ci-1` (8×H200; HF cache at `/mnt/vllm-ci`, set
+  `HF_HOME=/mnt/vllm-ci` and mount it into the container)
+- GB200: `gcloud compute ssh gb200-rack1-07 --zone us-central1-b
+  --ssh-key-file ~/.ssh/id_ed25519` (also `gb200-rack1-08`; 4×GB200 each;
+  model cache on Lustre at `/mnt/lustre/hf-models`)
+- B200: `ssh dgxb200-15` / `ssh dgxb200-16` (8×B200)
+
+**Practical notes:**
+
+- These are shared CI machines — wait for a CI-free window before starting
+  (no containers in `docker ps`, no processes in
+  `nvidia-smi --query-compute-apps=pid`). Never run a TP8 server alongside
+  a CI job; you'd poison both.
+- The release image's entrypoint is `vllm` — for anything other than
+  `serve`/`bench`, pass `--entrypoint` (e.g. `--entrypoint python3`).
+- Use `--network host --ipc=host`, and mount the HF cache dir with
+  `-e HF_HOME=<path> -v <path>:<path>`.
+- Big models take 5–60 min to load even from cache; wait on `/health` up to
+  90 min (GB200 + Lustre can be slow) and bail early if the container exits.
+- Docker needs `sudo` on the mithril/GB200 hosts.
+- If a release-pipeline step fails on infra (e.g. triton-cpu cmake flake in
+  `build-cpu-release-image-x86`), retry it once; report if it repeats.
+
+---
+
 ## Gotchas
 
 - **Branch filters on CI pipeline:** The `ci` pipeline only builds `main` and
