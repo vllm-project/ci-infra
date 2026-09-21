@@ -1360,6 +1360,12 @@ class LogCollector:
         # them rather than being shuffled by role name.
         entries.sort(key=lambda e: e[0])
 
+        # Every launcher line is its own `~~~` group, so without a header here
+        # the workload's output is filed under whichever progress note came
+        # last - normally "container waiting: PodInitializing".
+        if not self.emitted:
+            print("+++ workload", flush=True)
+
         emitted = 0
         for _, role, lines in entries:
             for text in lines:

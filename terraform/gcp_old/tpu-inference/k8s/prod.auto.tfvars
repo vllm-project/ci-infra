@@ -83,12 +83,14 @@ auth_plugin_source_path = "/usr/lib/google-cloud-sdk/bin/gke-gcloud-auth-plugin"
 # does not, so a tag names one set of bytes.
 launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/launcher:584.0.0-1"
 
-# How long a workload may hold the chips by default, matching the bare-metal
-# budget so a step moving between the lanes gets the same allowance, and the
-# most a manifest may ask for instead - twelve hours, where the disagg
-# manifests sit. The agent Job's own deadline is derived from these rather than
-# set beside them, so the two cannot drift apart; see agent_stack_values.tpl.
-tpu_test_max_seconds    = 10800
+# How long a workload may hold the chips by default, and the most a manifest may
+# ask for instead - twelve hours, where the disagg manifests sit. The agent Job's
+# own deadline is derived from these rather than set beside them, so the two
+# cannot drift apart; see agent_stack_values.tpl.
+#
+# The default is a ceiling on a hung test rather than a target, so it sits above
+# the longest honest run; Buildkite's own cap on a step bounds the wait anyway.
+tpu_test_max_seconds    = 21600
 tpu_runtime_max_seconds = 43200
 
 # Half a day in line for chips, which is longer than anything currently uses.

@@ -125,7 +125,7 @@ jobSets:
     # workload. A test returning non-zero fails as PodFailurePolicy, matches
     # nothing here, and stays red on the first attempt.
     rules:
-      - name: fleet-took-the-pods
+      - name: fleet_took_the_pods
         action: RestartJobSet
         onJobFailureReasons:
           - BackoffLimitExceeded
