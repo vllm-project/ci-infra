@@ -123,6 +123,35 @@ def test_unknown_field_force_selected():
     assert step.step_id in pf.force_select
 
 
+@pytest.mark.parametrize(
+    "condition", ["true", "false", "build.branch == pipeline.default_branch"]
+)
+def test_buildkite_condition_does_not_force_selection(tmp_path, condition):
+    from ci_selector.codemap.pipeline.buildkite import load_steps
+
+    (tmp_path / "jobs").mkdir()
+    (tmp_path / "jobs" / "test.yaml").write_text(
+        "steps:\n"
+        "  - label: Conditional test\n"
+        "    key: conditional-test\n"
+        "    commands: [pytest tests/x]\n"
+        f"    if_condition: '{condition}'\n"
+    )
+    config = PipelineConfig("p", ".buildkite/x.yaml", ["jobs"], [], [])
+    report = LoadReport()
+    steps = load_steps(tmp_path, config, report)
+    (step,) = steps
+    pf = run_preflight(
+        tmp_path,
+        [_pipe(steps, _covered_targets(step))],
+        _healthy_full(),
+        report,
+    )
+
+    assert report.unknown_fields == {}
+    assert step.step_id not in pf.force_select
+
+
 def test_duplicate_id_force_selected():
     a, b = _step("dup"), _step("dup")
     report = LoadReport()

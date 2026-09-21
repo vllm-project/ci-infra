@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import regex as re
+from amd import AMD_STABLE_IMAGE_PROMOTION_STEP_KEY, supports_stable_image_promotion
 from ci_selector.codemap.pipeline.buildkite import (
     _expand_mirror,
     load_pipeline_configs,
@@ -121,8 +122,36 @@ def test_a_mirror_publishes_the_hardware_as_a_prefix(loaded):
     assert plain.buildkite_key == "lora"
 
 
+def _assert_amd_auto_run_semantics(rocm, promotion_supported):
+    # Only the promotion step is optional across companion vLLM checkouts.
+    # Existing keys still have to exist, and a capable checkout must include
+    # promotion. Whenever promotion is present, verify its always-run shortcut.
+    for key in AMD_ALWAYS_RUN_STEP_KEYS:
+        if (
+            key == AMD_STABLE_IMAGE_PROMOTION_STEP_KEY
+            and key not in rocm
+            and not promotion_supported
+        ):
+            continue
+        assert key in rocm, drift_message(
+            f"AMD_ALWAYS_RUN_STEP_KEYS names a step that no longer exists: {key}",
+            "These steps declare no dependencies, so always_runs is the only "
+            "thing that ever selects them. A renamed key means we stop naming "
+            "the step and CI stops running it.",
+            "we re-export this list from the generator's amd.py, so there is "
+            "nothing to edit here: fix the key in amd.py, or in vLLM's rocm "
+            "yaml if that is where it was renamed",
+        )
+        assert rocm[key].always_runs, drift_message(
+            f"{key} is in AMD_ALWAYS_RUN_STEP_KEYS but does not read as always-run.",
+            "It would only be selected if some rule happened to pick it, and "
+            "these steps have no dependencies for a rule to match on.",
+            "check Step.always_runs against ci-infra's _step_should_run",
+        )
+
+
 @pytest.mark.drift
-def test_auto_run_semantics(loaded):
+def test_auto_run_semantics(loaded, vllm_repo, monkeypatch):
     """always_runs is the generator's key shortcut (image-build*/AMD list),
     NOT "has no deps": a no-deps step without the shortcut never auto-runs."""
     _, steps, _ = loaded
@@ -153,27 +182,12 @@ def test_auto_run_semantics(loaded):
     assert by_key["cpu-arm64-image-build"].source_file_dependencies is None, prefix
     assert not by_key["cpu-arm64-image-build"].always_runs, prefix
     assert not by_key["arm64-image-build"].always_runs, prefix
-    # Membership asserted: these steps declare no deps, so always_runs
-    # is the only thing that ever selects them, and this is the
-    # only guard tying the generator's list to vLLM's yaml. Under `if key in
-    # rocm` a step vanishing from the yaml would skip the check in silence.
+    # Read capability from the vLLM checkout, not the ci-infra working directory.
     rocm = {s.key: s for s in steps["vllm_rocm_ci"] if s.key}
-    for key in AMD_ALWAYS_RUN_STEP_KEYS:
-        assert key in rocm, drift_message(
-            f"AMD_ALWAYS_RUN_STEP_KEYS names a step that no longer exists: {key}",
-            "These steps declare no dependencies, so always_runs is the only "
-            "thing that ever selects them. A renamed key means we stop naming "
-            "the step and CI stops running it.",
-            "we re-export this list from the generator's amd.py, so there is "
-            "nothing to edit here: fix the key in amd.py, or in vLLM's rocm "
-            "yaml if that is where it was renamed",
-        )
-        assert rocm[key].always_runs, drift_message(
-            f"{key} is in AMD_ALWAYS_RUN_STEP_KEYS but does not read as always-run.",
-            "It would only be selected if some rule happened to pick it, and "
-            "these steps have no dependencies for a rule to match on.",
-            "check Step.always_runs against ci-infra's _step_should_run",
-        )
+    with monkeypatch.context() as checkout:
+        checkout.chdir(vllm_repo)
+        promotion_supported = supports_stable_image_promotion()
+    _assert_amd_auto_run_semantics(rocm, promotion_supported)
     no_deps_no_shortcut = [
         s
         for s in steps["vllm_ci"]
@@ -365,6 +379,51 @@ def _parent_step(**kw):
         source_file_dependencies=None,
     )
     return Step(**{**base, **kw})
+
+
+def _amd_always_run_steps():
+    return {key: _parent_step(key=key) for key in AMD_ALWAYS_RUN_STEP_KEYS}
+
+
+@pytest.mark.parametrize("promotion_supported", [False, True])
+@pytest.mark.parametrize("promotion_present", [False, True])
+def test_amd_promotion_membership_tracks_checkout_capability(
+    promotion_supported, promotion_present
+):
+    rocm = _amd_always_run_steps()
+    if not promotion_present:
+        del rocm[AMD_STABLE_IMAGE_PROMOTION_STEP_KEY]
+    if promotion_supported and not promotion_present:
+        with pytest.raises(AssertionError, match=AMD_STABLE_IMAGE_PROMOTION_STEP_KEY):
+            _assert_amd_auto_run_semantics(rocm, promotion_supported)
+    else:
+        _assert_amd_auto_run_semantics(rocm, promotion_supported)
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    sorted(AMD_ALWAYS_RUN_STEP_KEYS - {AMD_STABLE_IMAGE_PROMOTION_STEP_KEY}),
+)
+def test_old_checkout_still_requires_existing_amd_steps(missing_key):
+    rocm = _amd_always_run_steps()
+    del rocm[AMD_STABLE_IMAGE_PROMOTION_STEP_KEY]
+    del rocm[missing_key]
+    with pytest.raises(AssertionError, match=missing_key):
+        _assert_amd_auto_run_semantics(rocm, promotion_supported=False)
+
+
+@pytest.mark.parametrize("promotion_supported", [False, True])
+def test_present_amd_promotion_must_read_as_always_run(
+    monkeypatch, promotion_supported
+):
+    rocm = _amd_always_run_steps()
+    monkeypatch.setattr(
+        Step,
+        "always_runs",
+        property(lambda step: step.key != AMD_STABLE_IMAGE_PROMOTION_STEP_KEY),
+    )
+    with pytest.raises(AssertionError, match="does not read as always-run"):
+        _assert_amd_auto_run_semantics(rocm, promotion_supported)
 
 
 def test_a_stray_mirror_key_is_recorded_against_the_mirror_not_the_parent():
