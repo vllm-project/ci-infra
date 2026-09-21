@@ -17,6 +17,7 @@ from amd import (
     get_amd_timeout_in_minutes,
     get_rocm_base_refresh_env,
     get_rocm_base_refresh_timeout,
+    is_amd_device,
     is_amd_gpu_device,
 )
 from step import Step
@@ -630,6 +631,9 @@ def convert_group_step_to_buildkite_step(
     print(variables_to_inject)
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
+    # ROCm has its own pinned torch and gains nothing from validating against
+    # a CUDA torch-nightly build, so the AMD lane is excluded entirely there.
+    include_amd = global_config["torch_nightly"] != "1"
 
     amd_hardware_steps = []
 
@@ -641,10 +645,14 @@ def convert_group_step_to_buildkite_step(
             # mirror was requested; then emit the mirror but not the step.
             only_step_keys = global_config["only_step_keys"]
             # The A100 fleet is retired; retain declarations only for AMD mirrors.
-            include_step = step.device != DeviceType.A100 and (
-                only_step_keys is None or step_key in only_step_keys
+            include_step = (
+                step.device != DeviceType.A100
+                and (include_amd or not is_amd_device(step.device))
+                and (only_step_keys is None or step_key in only_step_keys)
             )
             if is_amd_gpu_device(step.device):
+                if not include_amd:
+                    continue
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
                     _prepare_commands(
@@ -711,10 +719,7 @@ def convert_group_step_to_buildkite_step(
             )
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
-            if (
-                step.device == DeviceType.AMD_CPU
-                or step.device == DeviceType.AMD_CPU.value
-            ):
+            if is_amd_device(step.device):
                 buildkite_step.retry = ensure_amd_stack_error_retry(
                     buildkite_step.retry
                 )
@@ -725,10 +730,7 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
                     get_rocm_base_refresh_timeout()
                 )
-            elif (
-                step.device == DeviceType.AMD_CPU
-                or step.device == DeviceType.AMD_CPU.value
-            ):
+            elif is_amd_device(step.device):
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
                     get_amd_timeout_in_minutes(step.timeout_in_minutes)
                 )
@@ -763,7 +765,8 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step and its block step if specified/applicable
             if (
-                step.mirror
+                include_amd
+                and step.mirror
                 and step.mirror.get("amd")
                 and (only_step_keys is None or f"amd-{step_key}" in only_step_keys)
             ):
