@@ -477,15 +477,30 @@ Prefer each model's recipe-recommended hardware.
   (no containers in `docker ps`, no processes in
   `nvidia-smi --query-compute-apps=pid`). Never run a TP8 server alongside
   a CI job; you'd poison both.
-- The release image's entrypoint is `vllm` — for anything other than
-  `serve`/`bench`, pass `--entrypoint` (e.g. `--entrypoint python3`).
-- Use `--network host --ipc=host`, and mount the HF cache dir with
+- The release image's entrypoint is `["vllm", "serve"]` — so
+  `docker run <img> <model> <serve args...>` works directly (do NOT add
+  `serve` yourself; `docker run <img> serve <model>` becomes
+  `vllm serve serve <model>` and fails with
+  `unrecognized arguments: <model>`). For `bench` or anything else, override
+  the entrypoint: `--entrypoint vllm` (bench) or `--entrypoint python3`.
+- Always pass `--ipc=host` — DP/TP servers need >64 MiB of /dev/shm
+  (docker's default) and die with
+  `Insufficient space in /dev/shm: ... required, 64 MiB free`.
+- Pulling release-repo images from a fresh host: anonymous ECR Public pulls
+  hit "Data limit exceeded" quickly at 30 GB/image. Log in first:
+  `aws ecr-public get-login-password --region us-east-1 | ssh <host> 'sudo docker login --username AWS --password-stdin public.ecr.aws'`.
+- With `VLLM_USE_RUST_FRONTEND=1`, the frontend gives up after 600s if the
+  engine is still downloading/loading a model — set
+  `VLLM_ENGINE_READY_TIMEOUT_S=3600` for first-time (uncached) models.
+- Use `--network host`, and mount the HF cache dir with
   `-e HF_HOME=<path> -v <path>:<path>`.
 - Big models take 5–60 min to load even from cache; wait on `/health` up to
   90 min (GB200 + Lustre can be slow) and bail early if the container exits.
 - Docker needs `sudo` on the mithril/GB200 hosts.
-- If a release-pipeline step fails on infra (e.g. triton-cpu cmake flake in
-  `build-cpu-release-image-x86`), retry it once; report if it repeats.
+- If a release-pipeline step fails on infra (e.g. the triton-cpu sleef
+  submodule flake in `build-cpu-release-image-x86`), retry it once; if it
+  repeats, it's the known `--shallow-submodules --filter=blob:none` issue —
+  see vllm#57871.
 
 ---
 
