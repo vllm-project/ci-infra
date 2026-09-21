@@ -84,6 +84,11 @@ data:
       HF_TOKEN:
         secret: fleet-hf-token
         key: HF_TOKEN
+    priorities:
+    - integration
+    - low
+    - post-merge
+    - pre-merge
     queue_max_seconds: 43200
     runtime_max_seconds: 43200
     admission_max_seconds: 3600

@@ -4,6 +4,50 @@
 # here is never applied: deploy_manifests.py re-renders and refuses to deploy a
 # tree that does not match.
 ---
+# What a workload's place in the queue is worth, mirroring the rungs
+# bootstrap.sh applies on bare metal. A workload naming no class scores 0.
+#
+# Ordering only - nothing running is ever taken away; see queue_group.yaml.tpl.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
+  name: post-merge
+value: 100
+description: "Tests of what is already on main"
+---
+# What a workload's place in the queue is worth, mirroring the rungs
+# bootstrap.sh applies on bare metal. A workload naming no class scores 0.
+#
+# Ordering only - nothing running is ever taken away; see queue_group.yaml.tpl.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
+  name: pre-merge
+value: 50
+description: "Tests gating a pull request"
+---
+# What a workload's place in the queue is worth, mirroring the rungs
+# bootstrap.sh applies on bare metal. A workload naming no class scores 0.
+#
+# Ordering only - nothing running is ever taken away; see queue_group.yaml.tpl.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
+  name: integration
+value: 30
+description: "The integration suite"
+---
+# What a workload's place in the queue is worth, mirroring the rungs
+# bootstrap.sh applies on bare metal. A workload naming no class scores 0.
+#
+# Ordering only - nothing running is ever taken away; see queue_group.yaml.tpl.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
+  name: low
+value: -100
+description: "Work that yields to everything: nightlies, autotuning"
+---
 # One flavor per TPU generation, and deliberately no nodeLabels.
 #
 # The flavor, not the queue, is Kueue's quota partition, and Kueue skips a
@@ -20,11 +64,10 @@ metadata:
 # nominalQuota is chips this shape can always have and no other shape can hold
 # the reservation against it, while whatever it is not using is lent out.
 #
-# reclaimWithinCohort stays Never: a lender waits for the borrower's workloads
-# to finish rather than evicting them. Eviction returns the accounting at once
+# Both preemption policies stay Never: eviction returns the accounting at once
 # but not the hardware, since eight chips freed across eight single-chip nodes
 # still have to scale down before an 8-chip node can boot, and the jobs killed
-# to get there have to run again.
+# to get there have to run again. Priority decides who goes next, not who stops.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
@@ -33,7 +76,7 @@ spec:
   cohortName: tpu7x
   preemption:
     reclaimWithinCohort: Never
-    withinClusterQueue: LowerPriority
+    withinClusterQueue: Never
   namespaceSelector:
     matchLabels:
       kubernetes.io/metadata.name: buildkite
@@ -63,11 +106,10 @@ spec:
 # nominalQuota is chips this shape can always have and no other shape can hold
 # the reservation against it, while whatever it is not using is lent out.
 #
-# reclaimWithinCohort stays Never: a lender waits for the borrower's workloads
-# to finish rather than evicting them. Eviction returns the accounting at once
+# Both preemption policies stay Never: eviction returns the accounting at once
 # but not the hardware, since eight chips freed across eight single-chip nodes
 # still have to scale down before an 8-chip node can boot, and the jobs killed
-# to get there have to run again.
+# to get there have to run again. Priority decides who goes next, not who stops.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
@@ -76,7 +118,7 @@ spec:
   cohortName: tpu7x
   preemption:
     reclaimWithinCohort: Never
-    withinClusterQueue: LowerPriority
+    withinClusterQueue: Never
   namespaceSelector:
     matchLabels:
       kubernetes.io/metadata.name: buildkite
@@ -106,11 +148,10 @@ spec:
 # nominalQuota is chips this shape can always have and no other shape can hold
 # the reservation against it, while whatever it is not using is lent out.
 #
-# reclaimWithinCohort stays Never: a lender waits for the borrower's workloads
-# to finish rather than evicting them. Eviction returns the accounting at once
+# Both preemption policies stay Never: eviction returns the accounting at once
 # but not the hardware, since eight chips freed across eight single-chip nodes
 # still have to scale down before an 8-chip node can boot, and the jobs killed
-# to get there have to run again.
+# to get there have to run again. Priority decides who goes next, not who stops.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
@@ -119,7 +160,7 @@ spec:
   cohortName: tpu7x
   preemption:
     reclaimWithinCohort: Never
-    withinClusterQueue: LowerPriority
+    withinClusterQueue: Never
   namespaceSelector:
     matchLabels:
       kubernetes.io/metadata.name: buildkite
