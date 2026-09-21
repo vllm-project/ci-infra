@@ -107,7 +107,7 @@ data:
         fuse_cache_size: 80Gi
         shm_size: 32Gi
         memory_request: 121Gi
-        max_runtime_seconds: 10800
+        max_runtime_seconds: 21600
       ct6e-standard-8t-2x4:
         queue: ct6e-standard-8t-2x4
         machine_type: ct6e-standard-8t
@@ -118,7 +118,7 @@ data:
         fuse_cache_size: 80Gi
         shm_size: 256Gi
         memory_request: 463Gi
-        max_runtime_seconds: 10800
+        max_runtime_seconds: 21600
       tpu7x-standard-1t-1x1x1:
         queue: tpu7x-standard-1t-1x1x1
         machine_type: tpu7x-standard-1t
@@ -129,7 +129,7 @@ data:
         fuse_cache_size: 80Gi
         shm_size: 32Gi
         memory_request: 127Gi
-        max_runtime_seconds: 10800
+        max_runtime_seconds: 21600
       tpu7x-standard-4t-2x2x1:
         queue: tpu7x-standard-4t-2x2x1
         machine_type: tpu7x-standard-4t
@@ -140,7 +140,7 @@ data:
         fuse_cache_size: 80Gi
         shm_size: 128Gi
         memory_request: 290Gi
-        max_runtime_seconds: 10800
+        max_runtime_seconds: 21600
       tpu7x-standard-4t-2x2x2:
         queue: tpu7x-standard-4t-2x2x2
         machine_type: tpu7x-standard-4t
@@ -151,7 +151,7 @@ data:
         fuse_cache_size: 80Gi
         shm_size: 128Gi
         memory_request: 290Gi
-        max_runtime_seconds: 10800
+        max_runtime_seconds: 21600
 ---
 # Referenced from a pipeline step as:
 #
