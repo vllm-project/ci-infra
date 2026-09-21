@@ -27,6 +27,23 @@ config:
   # cluster's and not the organization's.
   queue: kube
 
+  # How many steps the controller will hold at once. The chart's default is 25,
+  # and a single nightly reaches it: the JAX suite fans out into far more
+  # four-chip steps than eight chips can admit, so the cap binds while most of
+  # those pods are doing nothing but waiting for hardware.
+  #
+  # Waiting in a pod is not the wasteful half of that. Kueue is the queue, and a
+  # step that cannot get chips inside tpu_queue_max_seconds says so and names the
+  # fleet as the cause, with job-active-deadline-seconds derived to sit above it
+  # so the deadline never fires first. What the cap costs is the opposite: work
+  # the controller has not picked up is invisible, so a fleet that is saturated
+  # and one that is merely capped read the same from Buildkite.
+  #
+  # Set above what the chips can admit rather than equal to it. The ClusterQueues
+  # ration hardware; this only rations how much of the backlog is visible, and
+  # the fleet is expected to grow.
+  max-in-flight: 50
+
   # How long a container may sit unable to start before the controller gives
   # up on the step. The chart's thirty seconds assumes a warm node and a small
   # image; a fleet node is often brand new, and the pull is a CI image built

@@ -6,6 +6,15 @@
 
 # Applied to every pod of a workload that opts in, chips or not.
 everyPod:
+  # Every workload pulls a model or a tokenizer, including the chipless
+  # benchmark clients, so the token is fleet setup rather than something each
+  # step remembers to name. A manifest that sets HF_TOKEN itself still wins.
+  env:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: fleet-hf-token
+        key: HF_TOKEN
   annotations:
     # Job pods are evictable, so a long step alone on an idle node is what
     # OPTIMIZE_UTILIZATION consolidates away. It presents as a job that vanished.
@@ -102,3 +111,27 @@ tpuJobs:
 workload:
   # Long enough for the launcher's last log poll after the pods exit.
   ttlSecondsAfterFinished: 300
+
+# Merged into a JobSet's spec, and only a JobSet: a Job has no failurePolicy
+# field and the API server rejects the unknown key.
+#
+# The retries above are per pod, which a slice cannot use - the peers of a dead
+# pod wait on a rank that never rejoins, so the set restarts or nothing does.
+jobSets:
+  failurePolicy:
+    # Only the failure that means the fleet. A child Job reports
+    # BackoffLimitExceeded once it has spent every pod retry, which the
+    # podFailurePolicy above lets it do only on pods that never ran the
+    # workload. A test returning non-zero fails as PodFailurePolicy, matches
+    # nothing here, and stays red on the first attempt.
+    rules:
+      - name: fleet_took_the_pods
+        action: RestartJobSet
+        onJobFailureReasons:
+          - BackoffLimitExceeded
+    # A restart repeats the whole run, so one: twice over is the fleet being
+    # unusable, which should surface.
+    maxRestarts: 1
+    # Chips are exclusive. Under the default the replacement is created against
+    # nodes whose TPUs are still held by terminating pods, and waits.
+    restartStrategy: BlockingRecreate

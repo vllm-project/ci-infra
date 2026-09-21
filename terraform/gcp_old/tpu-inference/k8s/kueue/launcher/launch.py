@@ -34,6 +34,7 @@ import signal
 import string
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.request
 
@@ -615,6 +616,41 @@ def forward_env(doc, names, registry):
     return [e["name"] for e in entries]
 
 
+def report_forwarded(asked, forwarded):
+    """Say what crossed into the pod, without the sweep filling the heading.
+
+    log() opens a Buildkite group and the rest of the line is its title, so a
+    list of ninety names becomes a heading the width of the screen. The
+    BUILDKITE_* set is also identical on every step in the fleet, so it is the
+    part least worth reading and the part that was crowding out the rest: it
+    goes in the body, where it stays greppable and collapsed. What varies is the
+    handful the step named, so that is the title.
+
+    A name the step asked for and did not get is worth saying out loud. It is
+    unset on the agent and not a fleet secret, so the launcher carried nothing
+    and the pod runs on whatever default its manifest holds - a step quietly not
+    doing what it says rather than one that fails. Some are deliberate, which is
+    why this reports rather than refuses.
+    """
+    asked = list(asked or ())
+    got = set(forwarded)
+    named = [n for n in asked if n in got]
+    dropped = [n for n in asked if n not in got]
+    swept = [n for n in forwarded if n not in set(asked)]
+
+    log("forwarding step env: " + (", ".join(named) if named
+                                   else "nothing the step named"))
+    if dropped:
+        print("unset on the agent and not a fleet secret, so not forwarded: "
+              + ", ".join(dropped), flush=True)
+    if swept:
+        print(f"plus {len(swept)} BUILDKITE_* swept from the agent:",
+              flush=True)
+        print(textwrap.fill(", ".join(swept), width=100,
+                            initial_indent="  ", subsequent_indent="  "),
+              flush=True)
+
+
 # Substituted into the built-in Job only; a repo manifest states its hardware
 # itself, so render() gives these names a specific error there.
 SHAPE_NAMES = (
@@ -819,6 +855,12 @@ def inherit_defaults(doc, profile):
     for key, value in (defaults.get("workload") or {}).items():
         doc["spec"].setdefault(key, value)
 
+    # A Job has no failurePolicy field, and an unknown key is rejected rather
+    # than ignored, so this cannot go in the block above.
+    if doc["kind"] == "JobSet":
+        for key, value in (defaults.get("jobSets") or {}).items():
+            doc["spec"].setdefault(key, copy.deepcopy(value))
+
     for template in pod_templates(doc):
         on_pod = template.setdefault("metadata", {}).setdefault(
             "annotations", {})
@@ -826,6 +868,16 @@ def inherit_defaults(doc, profile):
             on_pod.setdefault(key, value)
 
         spec = template["spec"]
+        for container in spec.get("containers", []):
+            if container.get("name") != WORKLOAD_CONTAINER:
+                continue
+            named = {e.get("name")
+                     for e in container.setdefault("env", [])}
+            container["env"].extend(
+                copy.deepcopy(e) for e in (defaults["everyPod"].get("env") or [])
+                if e.get("name") not in named
+            )
+
         if not pod_chips(spec):
             continue
 
@@ -1199,6 +1251,22 @@ def pod_groups(items):
     return pods
 
 
+def role_prefix(groups):
+    """How much of a Job name every role shares, so the gutter can drop it.
+
+    The shared head is the workload's own name, repeated on every line and
+    carrying nothing. Cut on a field boundary rather than mid-token, and keep
+    backing off while what is left is only an index: a slice whose roles differ
+    solely by completion number would otherwise be labelled `0` and `1`, which
+    says less than `slice-0` and `slice-1`.
+    """
+    head = os.path.commonprefix(groups)
+    cut = head.rfind("-") + 1
+    while cut and all(g[cut:].split("-")[0].isdigit() for g in groups):
+        cut = head.rfind("-", 0, cut - 1) + 1
+    return cut
+
+
 class LogCollector:
     """Streams the workload pods' output into this step's log.
 
@@ -1212,7 +1280,7 @@ class LogCollector:
         self.job_id = job_id
         self.cursor = {}        # pod name -> last log timestamp seen
         self.emitted = 0        # lines printed, over every pod
-        self.last_group = None  # whose output the log is currently under
+        self.width = 0          # widest role label seen, to keep the gutter straight
 
     def _fetch(self, pod):
         # The workload container only: --all-containers interleaves containers
@@ -1234,16 +1302,38 @@ class LogCollector:
         return self.poll(worker_pods(self.env, self.job_id))
 
     def poll(self, items):
-        """Emit whatever is new in the pods it is handed."""
+        """Emit whatever is new in the pods it is handed, in time order.
+
+        One stream, not one section per pod. The obvious shape - print each
+        pod's new lines under a heading - reads fine for a single pod and falls
+        apart for a slice: polling alternates between pods, so a heading per
+        switch means a multi-host run arrives as dozens of fragments, and
+        `---` is Buildkite's own section marker, so each one collapses. Worse,
+        the fragments do not line up in time with each other, which is the one
+        thing you want when a step hangs and you are asking which host stopped
+        first.
+
+        So the roles are merged on kubectl's own timestamps and attributed in a
+        gutter instead. Ordering is only as good as the pods' clocks agree, but
+        they are nodes in one cluster and the alternative orders by whichever
+        pod this poll happened to read first.
+        """
         pods = pod_groups(items or [])
         if not pods:
             return 0
-        emitted = 0
-        for pod in sorted(pods, key=lambda p: p["group"]):
+
+        # Role rather than Job name. Every group shares the workload's name and
+        # differs only in the tail, so the shared head is noise repeated on
+        # every line - and the tail is what a reader is actually distinguishing.
+        groups = sorted({p["group"] for p in pods})
+        head = role_prefix(groups) if len(groups) > 1 else 0
+
+        entries = []  # (stamp, role, [lines]) - a stamped line and its continuations
+        for pod in pods:
             out = self._fetch(pod)
             if not out:
                 continue
-            fresh = []
+            role = pod["group"][head:] or pod["group"]
             keeping = False
             for line in out.splitlines():
                 stamp, _, text = line.partition(" ")
@@ -1252,8 +1342,8 @@ class LogCollector:
                     # also breaks on the carriage returns inside one. Taking a
                     # fragment's first word as a timestamp would poison the
                     # cursor and silence the pod from its first progress bar on.
-                    if keeping:
-                        fresh.append(line)
+                    if keeping and entries:
+                        entries[-1][2].append(line)
                     continue
                 # --since-time is inclusive to the second, so the cursor has to
                 # drop what was already shown rather than trust the server.
@@ -1261,15 +1351,29 @@ class LogCollector:
                 if not keeping:
                     continue
                 self.cursor[pod["name"]] = stamp
-                fresh.append(text)
-            if not fresh:
-                continue
-            if pod["group"] != self.last_group:
-                print(f"--- {pod['group']}", flush=True)
-                self.last_group = pod["group"]
-            for text in fresh:
-                print(text, flush=True)
-            emitted += len(fresh)
+                entries.append((stamp, role, [text]))
+                self.width = max(self.width, len(role))
+
+        if not entries:
+            return 0
+        # Stable, so two entries sharing a timestamp keep the order kubectl gave
+        # them rather than being shuffled by role name.
+        entries.sort(key=lambda e: e[0])
+
+        # Every launcher line is its own `~~~` group, so without a header here
+        # the workload's output is filed under whichever progress note came
+        # last - normally "container waiting: PodInitializing".
+        if not self.emitted:
+            print("+++ workload", flush=True)
+
+        emitted = 0
+        for _, role, lines in entries:
+            for text in lines:
+                # A single pod is its own attribution; a gutter there would be
+                # the same token on every line of the common case.
+                print(f"{role:<{self.width}} | {text}" if len(groups) > 1 else text,
+                      flush=True)
+                emitted += 1
         self.emitted += emitted
         return emitted
 
@@ -1361,8 +1465,8 @@ def main():
     profile = resolve_shape(doc, registry, manifest)
     validate(doc, registry, manifest)
     forwarded = forward_env(doc, args.env, registry)
-    if forwarded:
-        log(f"forwarding step env: {', '.join(forwarded)}")
+    if forwarded or args.env:
+        report_forwarded(args.env, forwarded)
     # shlex.join, not " ".join: argv has already been through the step's shell
     # and the built-in Job runs the result through another one, so joining
     # plainly loses every quote the step wrote.
@@ -1559,8 +1663,13 @@ def main():
                 status = obj.get("status", {})
                 done = status.get("succeeded", 0) >= 1 or wl_succeeded
                 failed_cond = condition(obj, "Failed")
+                # The condition, not status.failed: that counts failed pods, so
+                # it reaches 1 on the first one and the Job is allowed six.
+                # Kubernetes sets Failed once the Job is done retrying, which is
+                # the question here. The JobSet branch below already reads only
+                # its condition.
                 failed = ((failed_cond and failed_cond.get("status") == "True")
-                          or status.get("failed", 0) >= 1 or wl_failed)
+                          or wl_failed)
             else:
                 completed = condition(obj, "Completed")
                 done = bool(completed and completed.get("status") == "True") or wl_succeeded
@@ -1585,6 +1694,18 @@ def main():
                 # after the run, and once it is gone a preemption and a test
                 # returning 1 read the same.
                 if failed:
+                    # Which budget ran out: the fleet churning through every
+                    # retry and one pod's exit code tripping a rule call for
+                    # opposite fixes. The reasons gathered above come from a
+                    # live pod query, so they are empty exactly when a node took
+                    # the pods away.
+                    if failed_cond:
+                        detail = " ".join(x for x in (failed_cond.get("reason"),
+                                                      failed_cond.get("message"))
+                                          if x)
+                        if detail:
+                            log(f"{kind} Failed: {detail}"[:300])
+
                     for c in (workload or {}).get("status", {}).get("conditions", []):
                         if c.get("status") != "True":
                             continue

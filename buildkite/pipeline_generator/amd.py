@@ -127,6 +127,7 @@ def get_rocm_base_refresh_env() -> Dict[str, str]:
 class AmdDeviceConfig:
     queue: AgentQueue
     default_gpu_count: int
+    uses_dra: bool = False
 
 
 AMD_DEVICE_CONFIGS = {
@@ -142,6 +143,9 @@ AMD_DEVICE_CONFIGS = {
     DeviceType.AMD_MI325_2.value: AmdDeviceConfig(AgentQueue.AMD_MI325_2, 2),
     DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4),
     DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8),
+    DeviceType.AMD_MI355_DPX.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI355_DPX, 1, uses_dra=True
+    ),
     DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1),
     DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2),
     DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4),
@@ -350,13 +354,10 @@ def get_amd_k8s_plugin(
     workspace_volume_name: str,
     shm_size: str,
     container_env: Mapping[str, str],
+    uses_dra: bool = False,
 ) -> Dict[str, Any]:
     """Build the Kubernetes pod patch for native AMD test execution."""
-    # The Buildkite controller decodes podSpecPatch into a typed PodSpec before
-    # merging it. An explicit zero therefore overrides the controller's GPU
-    # default; omitting the key would preserve the inherited request.
-    gpu_resource = str(gpu_count)
-    return {
+    plugin = {
         "kubernetes": {
             "podSpecPatch": {
                 "automountServiceAccountToken": False,
@@ -370,10 +371,6 @@ def get_amd_k8s_plugin(
                         "securityContext": {
                             "allowPrivilegeEscalation": False,
                             "capabilities": {"add": ["IPC_LOCK"]},
-                        },
-                        "resources": {
-                            "limits": {"amd.com/gpu": gpu_resource},
-                            "requests": {"amd.com/gpu": gpu_resource},
                         },
                         "volumeMounts": [
                             {"name": "devshm", "mountPath": "/dev/shm"},
@@ -414,6 +411,17 @@ def get_amd_k8s_plugin(
             }
         }
     }
+    # DPX controllers allocate partitions through DRA resourceClaims. Adding
+    # amd.com/gpu would request a second allocation alongside that partition.
+    if not uses_dra:
+        # An explicit zero overrides the typed controller PodSpec's inherited
+        # GPU request for no_gpu jobs; omitting it would retain that request.
+        gpu_resource = str(gpu_count)
+        plugin["kubernetes"]["podSpecPatch"]["containers"][0]["resources"] = {
+            "limits": {"amd.com/gpu": gpu_resource},
+            "requests": {"amd.com/gpu": gpu_resource},
+        }
+    return plugin
 
 
 def build_amd_step_options(
@@ -465,6 +473,7 @@ def build_amd_step_options(
                 workspace_volume_name=AMD_NATIVE_WORKSPACE_VOLUME,
                 shm_size=AMD_NATIVE_SHM_SIZE,
                 container_env=container_env,
+                uses_dra=config.uses_dra,
             )
         ]
 
