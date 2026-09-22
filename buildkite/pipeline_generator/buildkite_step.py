@@ -39,6 +39,10 @@ PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
+# The self-hosted GPU agent hooks exit 255 on provider/infrastructure failures
+# (ECR login, secret-store fetch, docker pull). The agent preserves a hook's
+# exit code as the job's exit status, so retry 255 like agent-lost.
+EXIT_STATUS_255_RETRY = {"exit_status": 255, "limit": 1}
 
 # Pod-level failures on EKS surface as agent stops / lost pods rather than
 # clean non-zero exits, which exit-code-only retries would miss.
@@ -643,10 +647,10 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
     return diff_file == normalized or diff_file.startswith(f"{normalized}/")
 
 
-def ensure_exit_status_negative_one_retry(
+def ensure_infra_failure_retry(
     retry: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Add a one-time retry for jobs that lose their agent."""
+    """Add one-time retries for agent-lost (-1) and provider hook (255) failures."""
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -656,23 +660,27 @@ def ensure_exit_status_negative_one_retry(
     if automatic is None or automatic is False:
         automatic_conditions = []
     elif isinstance(automatic, dict):
-        if automatic.get("exit_status") == -1:
-            return retry_policy
         automatic_conditions = [automatic]
     elif isinstance(automatic, list):
         automatic_conditions = automatic
-        if any(
-            isinstance(condition, dict) and condition.get("exit_status") == -1
-            for condition in automatic_conditions
-        ):
-            return retry_policy
     else:
         raise ValueError("retry.automatic must be a boolean, mapping, or list.")
 
-    retry_policy["automatic"] = [
-        dict(EXIT_STATUS_NEGATIVE_ONE_RETRY),
-        *automatic_conditions,
+    existing_statuses = set()
+    for condition in automatic_conditions:
+        if not isinstance(condition, dict):
+            continue
+        exit_status = condition.get("exit_status")
+        if isinstance(exit_status, list):
+            existing_statuses.update(exit_status)
+        else:
+            existing_statuses.add(exit_status)
+    infra_conditions = [
+        dict(condition)
+        for condition in (EXIT_STATUS_NEGATIVE_ONE_RETRY, EXIT_STATUS_255_RETRY)
+        if condition["exit_status"] not in existing_statuses
     ]
+    retry_policy["automatic"] = [*infra_conditions, *automatic_conditions]
     return retry_policy
 
 
@@ -767,7 +775,7 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.artifact_paths = [KERNREC_ARTIFACT_PATH]
             if step.retry:
                 buildkite_step.retry = step.retry
-            buildkite_step.retry = ensure_exit_status_negative_one_retry(
+            buildkite_step.retry = ensure_infra_failure_retry(
                 buildkite_step.retry
             )
             if step.parallelism:

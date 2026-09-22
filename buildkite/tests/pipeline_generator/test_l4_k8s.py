@@ -117,8 +117,8 @@ def test_l4_step_keeps_explicit_retry():
 
     assert command_step.agents == {"queue": AgentQueue.L4_K8S}
     # K8S_RETRY is not applied; the explicit retry only gets the repo-wide
-    # exit-status -1 retry that main adds to every step.
-    assert command_step.retry == buildkite_step.ensure_exit_status_negative_one_retry(
+    # exit-status -1/255 retry that main adds to every step.
+    assert command_step.retry == buildkite_step.ensure_infra_failure_retry(
         explicit_retry
     )
 
@@ -145,10 +145,13 @@ def test_non_l4_steps_keep_existing_routing(device, num_devices, queue):
     command_step = _render_command_step(step)
 
     assert command_step.agents == {"queue": queue}
-    # Every step gets the repo-wide exit-status -1 retry; non-l4 steps get
+    # Every step gets the repo-wide exit-status -1/255 retry; non-l4 steps get
     # nothing beyond it (in particular not K8S_RETRY).
     assert command_step.retry == {
-        "automatic": [buildkite_step.EXIT_STATUS_NEGATIVE_ONE_RETRY]
+        "automatic": [
+            buildkite_step.EXIT_STATUS_NEGATIVE_ONE_RETRY,
+            buildkite_step.EXIT_STATUS_255_RETRY,
+        ]
     }
     if device in ("h100", "a100"):
         # H100/A100 were already on the k8s plugin before this change.

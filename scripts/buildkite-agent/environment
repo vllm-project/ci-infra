@@ -19,8 +19,24 @@
 #   - 1g.18gb: 7 slices/GPU -> 56 agents (queue=h200_18gb), SLICES_PER_GPU=7
 #   - 1g.35gb: 4 slices/GPU -> 32 agents (queue=h200_35gb), SLICES_PER_GPU=4
 # Set SLICES_PER_GPU to match the MIG profile and the agent cfg `spawn` value.
+#
+# Exit-code convention:
+#   - exit 1   = genuine misconfiguration (wrong spawn count, stale CDI spec).
+#                The job fails immediately.
+#   - exit 255 = provider/infrastructure failure (AWS CLI / ECR, registry,
+#                docker pull, nvidia-smi driver hiccup). The agent preserves a
+#                hook's exit code as the job's exit status, and the generated
+#                pipeline steps auto-retry exit_status 255 (like agent-lost
+#                -1) — so one network blip doesn't kill the whole build.
 
 set -e
+
+# retry_exit: fail the job with 255 so the generated steps' automatic
+# exit_status 255 retry re-runs it. Use only for provider/infra failures.
+retry_exit() {
+  echo "ERROR: $1 (provider/infrastructure failure — exiting 255 to trigger the infra retry)" >&2
+  exit 255
+}
 
 # Number of MIG slices per GPU (7 for 1g.18gb, 4 for 1g.35gb).
 SLICES_PER_GPU=7
@@ -38,9 +54,11 @@ export HF_HOME=/mnt/vllm-ci
 
 # ── ECR login ─────────────────────────────────────────────────────────────────
 aws ecr-public get-login-password --region us-east-1 \
-  | docker login --username AWS --password-stdin public.ecr.aws
+  | docker login --username AWS --password-stdin public.ecr.aws \
+  || retry_exit "ECR public login failed"
 aws ecr get-login-password --region us-west-2 \
-  | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-west-2.amazonaws.com
+  | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-west-2.amazonaws.com \
+  || retry_exit "ECR pull-through-cache login failed"
 
 # ── Pin this agent to one MIG slice ───────────────────────────────────────────
 # Agent names look like "<host>-<N>"; N selects the MIG device.
@@ -50,7 +68,9 @@ if [[ -z "$AGENT_NUMBER" ]]; then
   exit 1
 fi
 
-mapfile -t UUIDS < <(nvidia-smi -L | grep -oP 'UUID: \KMIG-[^\)]+')
+nvidia_smi_list=$(nvidia-smi -L) \
+  || retry_exit "nvidia-smi -L failed (driver/GPU hiccup)"
+mapfile -t UUIDS < <(grep -oP 'UUID: \KMIG-[^\)]+' <<< "$nvidia_smi_list")
 if (( AGENT_NUMBER < 1 || AGENT_NUMBER > ${#UUIDS[@]} )); then
   echo "ERROR: Agent number $AGENT_NUMBER exceeds available MIG devices (${#UUIDS[@]})"
   exit 1
@@ -87,7 +107,7 @@ if [[ -n "$IMAGE" ]]; then
     exec 9>"$LOCK_FILE"
     if flock -n 9; then
       echo "Pulling image $IMAGE (this agent won the lock)..."
-      docker pull "$IMAGE"
+      docker pull "$IMAGE" || retry_exit "docker pull $IMAGE failed"
       touch "$DONE_FILE"
       echo "Image pull complete."
     else
