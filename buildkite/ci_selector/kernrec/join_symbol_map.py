@@ -57,13 +57,18 @@ def load_map(path: Path):
     file_to_syms: dict[str, set[str]] = defaultdict(
         set
     )  # source or header -> symbols reachable
+    unknown: set[str] = set()  # files an unreadable object touched
     for e in d["objects"]:
+        if e.get("error"):
+            unknown.add(e["source"])
+            unknown.update(e["deps"])
+            continue
         for s in e["symbols"]:
             sym_to_files[s].add(e["source"])
             file_to_syms[e["source"]].add(s)
             for dep in e["deps"]:
                 file_to_syms[dep].add(s)
-    return d, sym_to_files, file_to_syms
+    return d, sym_to_files, file_to_syms, unknown
 
 
 def load_recordings(root: Path) -> dict[str, set[str]]:
@@ -98,7 +103,7 @@ def main() -> int:
     )
     a = ap.parse_args()
 
-    d, sym_to_files, file_to_syms = load_map(a.map)
+    d, sym_to_files, file_to_syms, unknown = load_map(a.map)
     steps = load_recordings(a.recordings)
     st = d.get("stats", {})
     print(
@@ -125,7 +130,16 @@ def main() -> int:
             for n in sorted(names - hit)[: a.show_unattributed]:
                 print(f"      ? {n[:120]}")
 
+    if d.get("incomplete"):
+        print(
+            f"\nnote: map incomplete; {len(unknown)} files are unknown and fall back to the static rule"
+        )
     for path in a.file or DEFAULT_FILES:
+        if path in unknown:
+            print(
+                f"\n--- change to {path}: UNKNOWN (unreadable object touched it) -> static rule"
+            )
+            continue
         syms = file_to_syms.get(path, set())
         print(
             f"\n--- change to {path}: {len(syms)} symbols reachable (compiled from it or including it)"

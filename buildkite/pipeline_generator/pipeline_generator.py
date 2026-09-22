@@ -9,6 +9,8 @@ from buildkite_step import (
     _generate_step_key,
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
+    kernrec_collect_group,
+    kernrec_enabled,
     create_precommit_group_step,
 )
 from global_config import get_global_config, init_global_config
@@ -90,6 +92,11 @@ class PipelineGenerator:
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
+
+        # A recording build ends by folding every job's kernel recordings into
+        # the per-step table and publishing it (see kernrec/collect.sh).
+        if kernrec_enabled():
+            buildkite_group_steps.append(kernrec_collect_group(buildkite_group_steps))
 
         # Run pre-commit as a dedicated step in parallel with the image build.
         # Steps that depend on the image build also wait for pre-commit to pass.

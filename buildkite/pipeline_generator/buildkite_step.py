@@ -231,6 +231,7 @@ class BuildkiteCommandStep(BaseModel):
     concurrency_group: Optional[str] = None
     timeout_in_minutes: Optional[int] = None
     priority: Optional[int] = None
+    allow_dependency_failure: Optional[bool] = None
 
     def to_yaml(self):
         return {
@@ -250,6 +251,7 @@ class BuildkiteCommandStep(BaseModel):
             "concurrency_group": self.concurrency_group,
             "timeout_in_minutes": self.timeout_in_minutes,
             "priority": self.priority,
+            "allow_dependency_failure": self.allow_dependency_failure,
         }
 
 
@@ -446,6 +448,57 @@ def _kernrec_setup_command() -> str:
         ". /tmp/kernrec/ci_setup.sh || "
         'echo "kernrec: setup skipped"'
     )
+
+
+KERNREC_COLLECT_KEY = "kernrec-collect"
+KERNREC_COLLECT_GROUP = "Coverage"
+
+
+def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupStep":
+    """The recording build's last step: fold every job's kernel recordings
+    into the per-step kernel table and publish it with the symbol map.
+
+    Depends on every command step that will actually run. Steps behind a
+    block step are left out, because a dependency that never starts would
+    hold this step forever. Runs whether they passed or failed: a failed
+    job's recording is still evidence, and the row carries the exit status.
+    """
+    blocked = {
+        s.key[len("block-") :]
+        for g in groups
+        for s in g.steps
+        if isinstance(s, BuildkiteBlockStep)
+    }
+    depends_on = [
+        s.key
+        for g in groups
+        for s in g.steps
+        if isinstance(s, BuildkiteCommandStep) and s.key not in blocked
+    ]
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        f"{branch}/buildkite/ci_selector/kernrec/collect.sh"
+    )
+    queue = (
+        AgentQueue.SMALL_CPU_POSTMERGE
+        if get_global_config()["branch"] == "main"
+        else AgentQueue.SMALL_CPU_PREMERGE
+    )
+    step = BuildkiteCommandStep(
+        label=":satellite: Collect kernel coverage",
+        key=KERNREC_COLLECT_KEY,
+        agents={"queue": queue.value},
+        commands=[
+            f'curl -sSfL --retry 3 --max-time 60 -o /tmp/kernrec-collect.sh "{url}"'
+            + " && bash /tmp/kernrec-collect.sh"
+        ],
+        depends_on=depends_on,
+        allow_dependency_failure=True,
+        soft_fail=True,
+        timeout_in_minutes=30,
+    )
+    return BuildkiteGroupStep(group=KERNREC_COLLECT_GROUP, steps=[step])
 
 
 def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:

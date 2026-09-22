@@ -146,7 +146,40 @@ selected fusion-e2e-quick, fusion-e2e-tp2-quick, core-operation-kernels and
 compilation-passes and dropped moe and deepgemm; `csrc/cuda_compat.h`
 selected all six, as a header included everywhere should.
 
+## Collecting and publishing
+
+When a build records, the pipeline generator appends one last step,
+`kernrec-collect`, that depends on every command step (blocked ones
+excluded, so it can never wait on a step that will not start) and runs
+whether they passed or failed. It executes `collect.sh`:
+
+1. `buildkite-agent artifact download ".fnrec/**/*"` pulls every job's
+   recordings and the `kernrec.json` sidecar `ci_setup.sh` writes on exit
+   (step key, shard, exit status), so no Buildkite API token is needed.
+2. `kernel_table.py build --fnrec .fnrec` folds them into one row per step:
+   kernels launched, jobs, all-passed, processes, dropped records.
+3. The table and the build's `kernel_symbol_map.json.gz` are uploaded as
+   artifacts of the collect job. Then, only if both validate (rows in the
+   table, objects and no failure reason in the map) and the agent has AWS
+   identity, to
+
+   ```
+   s3://vllm-ci-selector/<pipeline>/<commit>/kernel_table.json.gz
+   s3://vllm-ci-selector/<pipeline>/<commit>/kernel_symbol_map.json.gz
+   s3://vllm-ci-selector/<pipeline>/latest.json
+   ```
+
+   The commit prefix is written as a unit and `latest.json` last, so a
+   consumer following the pointer always finds a complete, validated pair.
+   Several builds can collect the same commit (daily and nightly often
+   share one); a later run whose map is broken publishes nothing and leaves
+   the earlier pair in place. The bucket is public-read
+   (`terraform/aws/s3.tf`), so the selector's bootstrap can fetch over plain
+   HTTPS; the postmerge agents that run the collect step hold the write
+   policy (`terraform/aws/iam.tf`). The step is `soft_fail`: a publishing
+   problem is reported, never a red build.
+
 ## Not here yet
 
-The table type in `ci_selector/coverage` that stores per-step kernel sets
-plus the map per commit, and the csrc decision rule in `decide.py`.
+The bootstrap fetch into `coverage-data/`, and the csrc decision rule in
+`decide.py`: record row decides, image-copy only as the fallback.
