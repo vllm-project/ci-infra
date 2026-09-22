@@ -350,6 +350,14 @@ def crosscheck_pr(
         "them_jobs": them_jobs,
         "codemap_jobs": codemap_jobs,
         "final_jobs": final_jobs,
+        # Per step, how many jobs it expands to, for every step any side named,
+        # so a reader can re-total the comparison over a subset of steps
+        # (say, without AMD mirrors or image builds) without another replay.
+        "step_jobs": {
+            s: (vllm_steps[s].parallelism or 1)
+            for s in sorted(a_ids | t_ids | f_ids)
+            if s in vllm_steps
+        },
         # Positive means we eliminated jobs; negative means we ran more.
         "win": them_jobs - final_jobs,
         # Job slugs no step of ours explains. They are missing from
