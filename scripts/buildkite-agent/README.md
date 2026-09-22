@@ -68,6 +68,19 @@ sudo systemctl enable --now buildkite-agent
 
 ## Notes
 
+- **Exit-code convention in the hooks.** Exit 1 means a genuine
+  misconfiguration (wrong `spawn` count, stale CDI spec, invalid git config
+  state) and fails the job immediately. Exit 255 means a provider /
+  infrastructure failure — AWS CLI or ECR unreachable, registry or secret-store
+  blip, `docker pull` failure, `nvidia-smi` hiccup. The agent preserves a
+  hook's exit code as the job's exit status, and the generated pipeline steps
+  automatically retry `exit_status: 255` (alongside `exit_status: -1`,
+  agent-lost), so one network blip can't kill a whole build. Keep every
+  provider call behind an explicit `exit 255` guard;
+  never let it fall through to the default exit 1.
+  Hooks are re-read at every job start, but merging a template change here does
+  not update running hosts — re-install the hook on each affected agent with
+  the Quick install commands above.
 - `HF_HOME=/mnt/vllm-ci` matches the `h200_18gb` / `h200_35gb` docker plugins,
   which mount `/mnt/vllm-ci` into containers. Keep them in sync: if the host's
   HF cache lives elsewhere, either mount it at `/mnt/vllm-ci` or update the

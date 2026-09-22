@@ -41,3 +41,17 @@ check head-commit owner:feature HEAD false unset ''
 check short-sha owner:feature 002c42b false unset ''
 check missing-commit owner:feature '' false unset ''
 check invalid-sha owner:feature zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz false unset ''
+
+# When the agent secret store is unreachable, the hook must exit 255 so the
+# generated steps' automatic exit_status 255 retry fires instead of failing
+# the build.
+(
+    function /usr/bin/buildkite-agent() { return 1; }
+    export BUILDKITE_PIPELINE_ID=018cdabc-d930-49f6-9085-634c4cb582ed
+    export BUILDKITE_REPO=https://github.com/vllm-project/vllm.git
+    export BUILDKITE_BRANCH=feature BUILDKITE_COMMIT="$sha"
+    unset BUILDKITE_PULL_REQUEST BUILDKITE_REFSPEC GIT_CONFIG_COUNT
+    source "$hook" 2>/dev/null
+) || status=$?
+[[ "${status:-0}" -eq 255 ]] || { echo "FAIL secret-store-down: expected 255, got ${status:-0}"; exit 1; }
+printf 'PASS %s\n' secret-store-down
