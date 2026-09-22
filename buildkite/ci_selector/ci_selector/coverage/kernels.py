@@ -348,11 +348,15 @@ def read_pr(
         if not why and path in stale:
             why = "its source changed between the map's commit and this base"
         if why:
-            reading.files[path] = f"{len(voting[path])} kernel symbols; may only select: {why}"
+            reading.files[path] = (
+                f"{len(voting[path])} kernel symbols; may only select: {why}"
+            )
             reading.reasons["file-may-only-select"] += 1
         else:
             clearable.add(path)
-            reading.files[path] = f"{len(voting[path])} kernel symbols; may select and drop"
+            reading.files[path] = (
+                f"{len(voting[path])} kernel symbols; may select and drop"
+            )
             reading.reasons["file-may-drop"] += 1
 
     def launched(row: KernelRow) -> bool:
