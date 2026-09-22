@@ -511,7 +511,12 @@ Prefer each model's recipe-recommended hardware.
   creating CI builds on `releases/*` branches.
 - **Release version input step:** Do NOT unblock the "Provide Release version
   here" input step for release candidates. It's only for the final release
-  and sets metadata used by PyPI/DockerHub publishing steps.
+  and sets metadata used by PyPI/DockerHub publishing steps. When you DO
+  unblock it (final release), the value must include the leading `v`
+  (e.g. `v0.30.0`, not `0.30.0`): `upload-release-wheels-pypi.sh` compares
+  it literally against `git describe --tags` output and hard-fails on
+  mismatch. A wrong value cannot be fixed by retry — you must create a new
+  release build at the same commit and unblock the input correctly.
 - **Buildkite API token:** Some operations (e.g. unblocking jobs with input
   fields) require the REST API rather than the `bk` CLI. Set
   `BUILDKITE_API_TOKEN` as an env var or retrieve it from your `bk` CLI
