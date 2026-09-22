@@ -699,6 +699,48 @@ def test_agent_lost_retry_preserves_step_retry_conditions():
     }
 
 
+def test_infra_retry_tolerates_exit_status_arrays():
+    # exit_status also accepts an array of codes; the dedup must not crash on it.
+    step = Step(
+        label="Agent retry with array policy",
+        group="Failure handling",
+        key="image-build-agent-retry-with-array-policy",
+        device="h100",
+        commands=["pytest tests/basic.py"],
+        retry={"automatic": [{"exit_status": [1, 2], "limit": 1}]},
+    )
+
+    command_step = _render_single_step(step).steps[0]
+
+    assert command_step.retry == {
+        "automatic": [
+            {"exit_status": -1, "limit": 1},
+            {"exit_status": 255, "limit": 1},
+            {"exit_status": [1, 2], "limit": 1},
+        ],
+    }
+
+
+def test_infra_retry_dedupes_statuses_inside_arrays():
+    step = Step(
+        label="Agent retry with overlapping array policy",
+        group="Failure handling",
+        key="image-build-agent-retry-with-overlapping-array-policy",
+        device="h100",
+        commands=["pytest tests/basic.py"],
+        retry={"automatic": [{"exit_status": [2, 255], "limit": 1}]},
+    )
+
+    command_step = _render_single_step(step).steps[0]
+
+    assert command_step.retry == {
+        "automatic": [
+            {"exit_status": -1, "limit": 1},
+            {"exit_status": [2, 255], "limit": 1},
+        ],
+    }
+
+
 def test_multi_gpu_step_dumps_nvidia_topology():
     step = Step(
         label="Distributed Comm Ops Test",

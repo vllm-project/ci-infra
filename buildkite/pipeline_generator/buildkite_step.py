@@ -613,11 +613,15 @@ def ensure_infra_failure_retry(
     else:
         raise ValueError("retry.automatic must be a boolean, mapping, or list.")
 
-    existing_statuses = {
-        condition.get("exit_status")
-        for condition in automatic_conditions
-        if isinstance(condition, dict)
-    }
+    existing_statuses = set()
+    for condition in automatic_conditions:
+        if not isinstance(condition, dict):
+            continue
+        exit_status = condition.get("exit_status")
+        if isinstance(exit_status, list):
+            existing_statuses.update(exit_status)
+        else:
+            existing_statuses.add(exit_status)
     infra_conditions = [
         dict(condition)
         for condition in (EXIT_STATUS_NEGATIVE_ONE_RETRY, EXIT_STATUS_255_RETRY)
