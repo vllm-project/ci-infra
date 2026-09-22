@@ -65,6 +65,11 @@ TPU_RESOURCE = "google.com/tpu"
 # the inner pods.
 QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 
+# Where a workload sits in the pending queue. From the step, not the shape: what
+# a run is worth depends on why it was started, not what hardware it asked for.
+PRIORITY_LABEL = "kueue.x-k8s.io/priority-class"
+PRIORITY_ENV = "WORKLOAD_PRIORITY"
+
 # GKE's name, not ours: the gcsfuse sidecar looks for an emptyDir called this
 # and uses it as its file cache.
 FUSE_CACHE_VOLUME = "gke-gcsfuse-cache"
@@ -716,12 +721,35 @@ def render(path, image, name, shape):
     return coerce_ints(doc)
 
 
+def resolve_priority(registry):
+    """Which WorkloadPriorityClass this run is worth, or None for the default.
+
+    Unlabelled scores 0, which the ladder leaves empty, so a step that says
+    nothing needs no class. A name no class answers to is not a demotion but a
+    refusal - Kueue will not create the Workload - so it is checked here, where
+    the valid names are known, rather than failing inside admission.
+    """
+    known = registry.get("priorities") or []
+    asked = os.environ.get(PRIORITY_ENV, "").strip()
+    if not asked:
+        return None
+    if asked not in known:
+        raise SystemExit(
+            f"{PRIORITY_ENV}={asked!r} is not a priority the fleet defines. "
+            "Use one of: " + ", ".join(known)
+        )
+    return asked
+
+
 def finalise(doc, profile, registry, name, labels, owner, command, where):
     """Everything the launcher decides rather than the manifest."""
     meta = doc.setdefault("metadata", {})
     meta["name"] = name
     meta["namespace"] = NAMESPACE
     meta.setdefault("labels", {})[QUEUE_LABEL] = profile["queue"]
+    priority = resolve_priority(registry)
+    if priority:
+        meta["labels"][PRIORITY_LABEL] = priority
     meta["labels"].update(labels)
     if owner:
         meta["ownerReferences"] = [owner]
@@ -1003,6 +1031,13 @@ def validate(doc, registry, where):
         raise SystemExit(
             f"{where}: sets {QUEUE_LABEL}. Remove it - the launcher sets the "
             "queue from the shape the pods select."
+        )
+    # Same again: one in a manifest would fix the queue position of every step
+    # that uses it.
+    if PRIORITY_LABEL in doc.get("metadata", {}).get("labels", {}):
+        raise SystemExit(
+            f"{where}: sets {PRIORITY_LABEL}. Remove it - a step says what a "
+            f"run is worth in {PRIORITY_ENV}."
         )
 
     # The launcher's own account can create JobSets, so a workload running as

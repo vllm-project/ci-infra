@@ -93,6 +93,18 @@ MANAGER_COMPUTE_CLASS = "manager-system"
 # No namespace default goes with it, unlike the manager's: see the template.
 WORKER_COMPUTE_CLASS = "worker-cpu"
 
+# What a workload's place in the queue is worth: the rungs both repos'
+# pipeline_config.sh already rank work by, so a step keeps its standing when it
+# moves between bare metal and here. A workload naming no class scores 0, so
+# "default" is the gap rather than a class; `low` covers nightlies and
+# autotuning. Only the order of the numbers matters to Kueue.
+WORKLOAD_PRIORITIES = {
+    "post-merge": (100, "Tests of what is already on main"),
+    "pre-merge": (50, "Tests gating a pull request"),
+    "integration": (30, "The integration suite"),
+    "low": (-100, "Work that yields to everything: nightlies, autotuning"),
+}
+
 # The identity Managed Prometheus scrapes Kueue as, and where its token lives.
 # The namespace is not a choice: it is the only one the Managed Prometheus
 # operator holds a Role to read Secrets in, and a scrape of Kueue needs a token.
@@ -428,9 +440,26 @@ def dispatch_check(queue: str, checks: bool) -> str:
     )
 
 
+def priority_classes() -> str:
+    """The ladder, rendered on the workers too: MultiKueue copies the workload
+    across, and a class the worker does not have is a workload it cannot sort.
+    """
+    return "".join(
+        render(
+            "workload_priority",
+            PRIORITY_NAME=name,
+            PRIORITY_VALUE=value,
+            PRIORITY_DESCRIPTION=description,
+        )
+        for name, (value, description) in sorted(
+            WORKLOAD_PRIORITIES.items(), key=lambda kv: -kv[1][0]
+        )
+    )
+
+
 def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
     """A flavor per machine family, then a queue per shape sharing it."""
-    out = [
+    out = [priority_classes()] + [
         render("resource_flavor", ACCELERATOR=family)
         for family in sorted({cohort(name) for name in shapes})
     ]
@@ -539,6 +568,9 @@ def launcher_profiles(
                 name: {"secret": fleet_secret_name(name), "key": name}
                 for name in sorted(tfvars["env_secrets"])
             },
+            # Checked in the launcher, where the valid names are known: Kueue
+            # refuses to create a Workload naming a class it cannot find.
+            "priorities": sorted(WORKLOAD_PRIORITIES),
             "queue_max_seconds": int(tfvars["tpu_queue_max_seconds"]),
             "runtime_max_seconds": int(tfvars["tpu_runtime_max_seconds"]),
             "admission_max_seconds": int(tfvars["tpu_admission_max_seconds"]),
