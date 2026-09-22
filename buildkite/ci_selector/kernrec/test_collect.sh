@@ -3,11 +3,14 @@
 # stand-ins on PATH. Checks the publishing rules that matter:
 #
 #   1. happy path: table + usable map -> both under <commit>/, latest.json written
-#   2. table built, no map        -> table under <commit>/, latest.json NOT written, exit 1
+#   2. table built, no map        -> artifacts only, nothing to S3, exit 1
 #   3. kernel_table.py download fails -> nothing published, exit 1
 #   4. table with no rows          -> artifacts only, nothing to S3, exit 1
 #      (a build with no recordings at all is not a failure: exit 0, nothing to fold)
 #   5. no AWS identity             -> artifacts only, exit 0
+#   6. rerun of a commit already published, this time with a corrupt map
+#      -> exit 1 and every byte already under S3 (pair + latest.json) untouched
+#      (Codex P2 on #620: the commit prefix is written as a unit)
 #
 # Real python3 is used for kernel_table.py; only the network/cloud commands
 # are faked. Run from anywhere; needs bash and python3.
@@ -15,8 +18,10 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 fail=0
 
-run_case() { # name expect_exit expect_latest(yes|no) expect_commit_upload(yes|no) mode
-  local name=$1 want_rc=$2 want_latest=$3 want_commit=$4 mode=$5
+s3_digest() { (cd "$1" && find . -type f | sort | xargs cksum 2>/dev/null); }
+
+run_case() { # name expect_exit expect_latest(yes|no) expect_commit_upload(yes|no) mode [s3_untouched(yes|no)]
+  local name=$1 want_rc=$2 want_latest=$3 want_commit=$4 mode=$5 want_untouched=${6:-no}
   local T; T=$(mktemp -d)
   mkdir -p "$T/bin" "$T/s3" "$T/artifacts" "$T/build/.fnrec/job-a"
   # a recording + sidecar for one non-parallel step
@@ -31,6 +36,16 @@ import gzip, json, sys
 json.dump({"version": 1, "commit": "abc", "objects": [{"source": "csrc/a.cu", "target": "_C", "object": "o", "device": True, "symbols": ["kernA"], "deps": ["csrc/a.cu"]}], "stats": {}}, gzip.open(sys.argv[1], "wt"))
 PY
   fi
+  # rerun: an earlier build already published a valid pair for this commit and
+  # latest.json points at it; this build's map is garbage
+  if [[ "$mode" == "corrupt-map-rerun" ]]; then
+    mkdir -p "$T/s3/bkt/ci/abc"
+    cp "$T/build/kernel_symbol_map.json.gz" "$T/s3/bkt/ci/abc/"
+    printf 'table from build 41' | gzip > "$T/s3/bkt/ci/abc/kernel_table.json.gz"
+    echo '{"commit":"abc","build":41}' > "$T/s3/bkt/ci/latest.json"
+    printf 'this is not gzip' > "$T/build/kernel_symbol_map.json.gz"
+  fi
+  local s3_before; s3_before=$(s3_digest "$T/s3")
 
   # --- stubs ---------------------------------------------------------------
   cat > "$T/bin/buildkite-agent" <<EOF
@@ -65,19 +80,22 @@ EOF
 
   ( cd "$T" && PATH="$T/bin:$PATH" BUILDKITE_COMMIT=abc BUILDKITE_BUILD_NUMBER=42 BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt \
       bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
-  local latest=no commit=no
+  local latest=no commit=no untouched=no
   [[ -f "$T/s3/bkt/ci/latest.json" ]] && latest=yes
   [[ -f "$T/s3/bkt/ci/abc/kernel_table.json.gz" ]] && commit=yes
+  [[ "$(s3_digest "$T/s3")" == "$s3_before" ]] && untouched=yes
   local verdict=OK
   [[ "$rc" == "$want_rc" && "$latest" == "$want_latest" && "$commit" == "$want_commit" ]] || { verdict=FAIL; fail=1; }
-  printf '%-4s %-12s exit=%s (want %s)  latest=%s (want %s)  commit_upload=%s (want %s)\n' "$verdict" "$name" "$rc" "$want_rc" "$latest" "$want_latest" "$commit" "$want_commit"
+  [[ "$want_untouched" == "no" || "$untouched" == "yes" ]] || { verdict=FAIL; fail=1; }
+  printf '%-4s %-18s exit=%s (want %s)  latest=%s (want %s)  commit_upload=%s (want %s)  s3_untouched=%s\n' "$verdict" "$name" "$rc" "$want_rc" "$latest" "$want_latest" "$commit" "$want_commit" "$untouched"
   [[ "$verdict" == FAIL ]] && sed 's/^/      /' "$T/log" | tail -12
   rm -rf "$T"
 }
 
-run_case happy       0 yes yes normal
-run_case no-map      1 no  yes no-map
-run_case no-builder  1 no  no  no-builder
-run_case no-rows     1 no  no  no-rows
-run_case no-identity 0 no  no  no-identity
+run_case happy             0 yes yes normal
+run_case no-map            1 no  no  no-map
+run_case no-builder        1 no  no  no-builder
+run_case no-rows           1 no  no  no-rows
+run_case no-identity       0 no  no  no-identity
+run_case corrupt-map-rerun 1 yes yes corrupt-map-rerun yes
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" || { echo "collect.sh publishing rules: FAIL"; exit 1; }

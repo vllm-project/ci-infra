@@ -159,7 +159,9 @@ whether they passed or failed. It executes `collect.sh`:
 2. `kernel_table.py build --fnrec .fnrec` folds them into one row per step:
    kernels launched, jobs, all-passed, processes, dropped records.
 3. The table and the build's `kernel_symbol_map.json.gz` are uploaded as
-   artifacts of the collect job, and, when the agent has AWS identity, to
+   artifacts of the collect job. Then, only if both validate (rows in the
+   table, objects and no failure reason in the map) and the agent has AWS
+   identity, to
 
    ```
    s3://vllm-ci-selector/<pipeline>/<commit>/kernel_table.json.gz
@@ -167,10 +169,15 @@ whether they passed or failed. It executes `collect.sh`:
    s3://vllm-ci-selector/<pipeline>/latest.json
    ```
 
-   The bucket is public-read (`terraform/aws/s3.tf`), so the selector's
-   bootstrap can fetch over plain HTTPS; the postmerge agents that run the
-   collect step hold the write policy (`terraform/aws/iam.tf`). The step is
-   `soft_fail`: a publishing problem is reported, never a red build.
+   The commit prefix is written as a unit and `latest.json` last, so a
+   consumer following the pointer always finds a complete, validated pair.
+   Several builds can collect the same commit (daily and nightly often
+   share one); a later run whose map is broken publishes nothing and leaves
+   the earlier pair in place. The bucket is public-read
+   (`terraform/aws/s3.tf`), so the selector's bootstrap can fetch over plain
+   HTTPS; the postmerge agents that run the collect step hold the write
+   policy (`terraform/aws/iam.tf`). The step is `soft_fail`: a publishing
+   problem is reported, never a red build.
 
 ## Not here yet
 

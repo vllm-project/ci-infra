@@ -10,11 +10,18 @@
 # exit status.
 #
 # Publishes to two places. Always: the table and the map as artifacts of this
-# job. When the agent has AWS credentials and the bucket exists:
+# job, whatever state they are in, for debugging. Only when both validate
+# (table has rows, map has objects and no failure reason) and the agent has
+# AWS credentials:
 #
 #   s3://$CI_SELECTOR_BUCKET/<pipeline>/<commit>/kernel_table.json.gz
 #   s3://$CI_SELECTOR_BUCKET/<pipeline>/<commit>/kernel_symbol_map.json.gz
 #   s3://$CI_SELECTOR_BUCKET/<pipeline>/latest.json        -> {commit, build, ...}
+#
+# Nothing reaches S3 unless the pair is complete. Several builds can collect
+# the same commit (daily and nightly often share one), and a later run with
+# a bad map must not overwrite the good one that latest.json already points
+# at.
 #
 # Never fails the build for a publishing problem; the step is soft_fail and
 # says on stderr what it could not do.
@@ -79,8 +86,15 @@ echo "table usable: ${table_ok}; symbol map usable: ${map_ok}"
 echo "--- :arrow_up: Uploading as build artifacts"
 (cd out && buildkite-agent artifact upload "*")
 
+# Both gates come before anything touches S3. The commit prefix is written
+# as a unit: a rerun of this commit with a broken half must leave the good
+# pair (and latest.json, which may already point here) exactly as it was.
 if [[ "${table_ok}" != "yes" ]]; then
   echo "table has no rows; not publishing" >&2
+  exit 1
+fi
+if [[ "${map_ok}" != "yes" ]]; then
+  echo "no usable symbol map in this build; not publishing (${COMMIT}/ keeps whatever an earlier build put there)" >&2
   exit 1
 fi
 
@@ -95,12 +109,6 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
 fi
 if ! aws s3 cp out/ "s3://${BUCKET}/${PIPELINE}/${COMMIT}/" --recursive --only-show-errors; then
   echo "S3 upload failed (bucket or write permission not in place?); artifacts are on this job" >&2
-  exit 1
-fi
-# latest.json only ever points at a complete pair: a consumer following it
-# must find both files, and a map with no objects is no map.
-if [[ "${map_ok}" != "yes" ]]; then
-  echo "no usable symbol map in this build; ${COMMIT}/ has the table but latest.json is unchanged" >&2
   exit 1
 fi
 files=$(find out -maxdepth 1 -type f -exec basename {} \; | python3 -c 'import json,sys; print(json.dumps(sorted(sys.stdin.read().split())))')
