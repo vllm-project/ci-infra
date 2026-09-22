@@ -673,6 +673,34 @@
         "reference_url": "https://github.com/vllm-project/vllm/pull/56423",
         "notes": "The FlashInfer post-release bump introduced module-scope CUDA initialization before the fork-based test; spawning isolated tests passed all three exact L4 shards in build #88281."
       }
+    },
+    {
+      "id": "pr-57312-main-90376-kernels-fp8-moe-test-1xh100",
+      "job_name": ":nvidia: (H100) FP8 MoE Kernels",
+      "job_key": "kernels-fp8-moe-test-1xh100",
+      "culprit_pr": {
+        "number": 57312,
+        "url": "https://github.com/vllm-project/vllm/pull/57312",
+        "merge_commit": "c723a831a81cb4ff89ea6d61b2d15109306ed1bc"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "not_selected",
+        "build_number": 90327,
+        "job_id": null,
+        "url": "https://buildkite.com/vllm/ci/builds/90327"
+      },
+      "main_failure": {
+        "build_number": 90376,
+        "job_id": "01a0c7bb-10d8-47ed-a327-51e4aed59cd1",
+        "url": "https://buildkite.com/vllm/ci/builds/90376#01a0c7bb-10d8-47ed-a327-51e4aed59cd1",
+        "signature": "TypeError: IpcModelLoader._apply_entries() takes 4 positional arguments but 5 were given (test caller not updated for the new WeightCacheState signature)"
+      },
+      "causal_confirmation": {
+        "kind": "fix",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/58107",
+        "notes": "Test caller updated to WeightCacheState in #58107. Lane absent from the PR's CI render (#90327)."
+      }
     }
   ]
 }
