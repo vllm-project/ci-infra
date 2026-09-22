@@ -18,7 +18,10 @@ Two files, produced together by a recording build (`kernrec/README.md`):
   kernel_symbol_map.json.gz  per compiled object: its source file, the
                              headers it included, and the kernel entry
                              symbols it defines, read off the objects the
-                             image build produced
+                             image build produced. One symbol per compiled
+                             instantiation: a kernel template over dtype,
+                             head size and layout is dozens of symbols, and
+                             the recorder reports the one that launched.
 
 Joined, they say for a changed file F which steps launched a kernel compiled
 from F or from something that includes F. Per changed file F and step S:
@@ -345,11 +348,11 @@ def read_pr(
         if not why and path in stale:
             why = "its source changed between the map's commit and this base"
         if why:
-            reading.files[path] = f"{len(voting[path])} kernels; may only select: {why}"
+            reading.files[path] = f"{len(voting[path])} kernel symbols; may only select: {why}"
             reading.reasons["file-may-only-select"] += 1
         else:
             clearable.add(path)
-            reading.files[path] = f"{len(voting[path])} kernels; may select and drop"
+            reading.files[path] = f"{len(voting[path])} kernel symbols; may select and drop"
             reading.reasons["file-may-drop"] += 1
 
     def launched(row: KernelRow) -> bool:

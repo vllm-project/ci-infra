@@ -316,7 +316,7 @@ def test_three_lines_and_every_gate(tmp_path):
     assert r.added == ["vllm_ci:missed"], (
         "a row launching kA selects a step the map missed"
     )
-    assert r.files == {"csrc/a.cu": "1 kernels; may select and drop"}
+    assert r.files == {"csrc/a.cu": "1 kernel symbols; may select and drop"}
     assert r.reasons["row-launched-a-kernel-from-a-changed-file"] == 1
     assert r.reasons["row-not-usable"] == 1
     assert r.reasons["selected-by-a-file-outside-the-map"] == 1
@@ -497,7 +497,7 @@ def test_decide_applies_the_kernel_record(tmp_path, csrc_diff, monkeypatch):
         "a step naming the file in source_file_dependencies is the floor"
     )
     assert "abc" in d.kernel_pair and "DIFFERENT" not in d.kernel_pair
-    assert d.kernel_files == {"csrc/a.cu": "1 kernels; may select and drop"}
+    assert d.kernel_files == {"csrc/a.cu": "1 kernel symbols; may select and drop"}
 
 
 def test_decide_unmatched_pair_drops_only_on_opt_in(tmp_path, csrc_diff, monkeypatch):
