@@ -125,9 +125,28 @@ variable with no wrapper. Job durations were within noise of the previous
 main build (−6% to +10%, single samples). Reproduce the scoring with
 `analyze_build.py 89825` and the expectations listed in its docstring.
 
+## The other half: kernel symbol → source file
+
+Recordings say which kernels a step launched. The kernel symbol map says
+which source file each kernel came from, read from the objects the image
+build actually compiled. It is produced on the vLLM side
+(`tools/ci/kernel_symbol_map.py`, run in the `csrc-build` Dockerfile stage
+when the build arg `VLLM_KERNEL_SYMBOL_MAP=1`) and exported by the
+`kernel-symbol-map` bake target in `docker/ci.hcl`, which `image_build.sh`
+uploads as the artifact `kernel_symbol_map.json.gz` on the image-build job.
+Per object: source, CMake target, kernel entry symbols from
+`cuobjdump -symbols`, and the headers from `ninja -t deps`, so a header
+change reaches every kernel compiled with it.
+
+`join_symbol_map.py <map> <recordings-dir> --file csrc/x.cu` joins the two
+and prints the steps a change to that file would select. First real run
+(Buildkite build 90006 against the 89825 recordings): 569 objects, 10,447
+kernel symbols, 62 s inside the cached build. For the #55755 file it
+selected fusion-e2e-quick, fusion-e2e-tp2-quick, core-operation-kernels and
+compilation-passes and dropped moe and deepgemm; `csrc/cuda_compat.h`
+selected all six, as a header included everywhere should.
+
 ## Not here yet
 
-The build-side symbol map (`cuobjdump -symbols` over the `.cu.o` files plus
-`ninja -t deps` for headers, produced in the Dockerfile build stage), the
-table type in `ci_selector/coverage`, and the csrc decision rule in
-`decide.py`. See the plan in the PR that adds this directory.
+The table type in `ci_selector/coverage` that stores per-step kernel sets
+plus the map per commit, and the csrc decision rule in `decide.py`.
