@@ -38,6 +38,7 @@ manager where the launcher built the podspec.
 | `kueue/templates/` | The templates the generator renders. |
 | `kueue/generated/` | The YAML that actually gets applied. Committed on purpose — see below. |
 | `kueue/launcher/` | The program every TPU step runs, its Job, and its image build. |
+| `kueue/launcher/pod_defaults.yaml` | What the fleet gives a workload's pods: caches, gcsfuse settings, eviction and retry policy. One definition, inherited by the built-in Job and by every manifest. |
 
 Terraform stops at the cluster; `deploy_manifests.py` starts there. The
 Kubernetes and Helm providers need a reachable API server at plan time, which
@@ -68,6 +69,20 @@ terraform init && terraform apply          # if any *.tf or the shape list chang
 its queues exist before a worker reports to them, and it uses its own temporary
 kubeconfig, so it will not touch yours or leave a context selected.
 
+Deploying does not disturb a workload that is already running. Every deploy
+rolls `kueue-controller-manager` whether or not its config changed, which looks
+like it would, and it does not: Kueue gates admission and nothing else, so once
+a workload is running its pods belong to `Job` objects driven by the
+control-plane Job controller and `jobset-controller-manager`, neither of which
+the deploy touches. Measured against a live benchmark - the controller was
+replaced while pod names, start times, restart counts and `Admitted` on both
+manager and worker all stayed as they were.
+
+What the roll does affect is pod creation, for the seconds it takes: see "A
+deploy briefly rejects pod creation, cluster-wide" below. So the case to think
+about before deploying is not a workload that is running, but one that is about
+to start a pod.
+
 Always commit the regenerated `kueue/generated/` alongside whatever produced it.
 A change to a comment in a template counts: the comments are rendered into the
 ConfigMaps.
@@ -94,6 +109,42 @@ and passes nothing else. Not the shape, because a JobSet already says where each
 of its pods runs, which no pair of flags can express. Not the command either — a
 JobSet has one per role. A manifest passed together with a command is refused
 rather than one role being silently chosen.
+
+### What a manifest states, and what it inherits
+
+A manifest states the hardware it wants and nothing that follows from it:
+
+```yaml
+metadata:
+  annotations:
+    tpu-ci.google.com/defaults: standard
+```
+
+With that annotation the launcher merges in `pod_defaults.yaml` — the cache
+volumes and their mounts, the gcsfuse sidecar settings, the TPU toleration, the
+service account, `restartPolicy`, the two env names every workload wants, the
+TTL, and the retry rules that let a pod survive its node being repaired. The
+memory request comes from the shape's profile, since it is a fraction of the
+host the pod landed on.
+
+The merge is additive: anything the manifest sets itself is left alone, so a
+role can add a volume or override a default it needs to differ on. Inherited
+mounts are applied first, so a mount nested inside an inherited one lands inside
+it rather than under it.
+
+Only roles that hold chips get the caches and retry rules — they are sized from
+a TPU host's memory and about TPU nodes being repaired, and a chipless role runs
+on neither. Such a role states what it needs itself.
+
+What stays in the manifest is `nodeSelector` and the `google.com/tpu` count:
+together with the chip count they are how the queue is chosen, so there would be
+nothing left to resolve if the fleet supplied them. Its deadline stays too.
+
+Two things a manifest should not set. A **CPU request** is a scheduling floor
+checked against the template the autoscaler builds for a shape; one large enough
+to matter can exceed what that template offers and stop the pool building nodes
+at all. An **ephemeral-storage** request reserves a large share of a node's disk
+to cap a pod that already holds every chip on it.
 
 The image is `WORKLOAD_IMAGE` in the step's environment, checked against
 `allowed_image_repos` — a CI image is built per commit, so which one runs is the
@@ -308,6 +359,43 @@ guessing — and note the chart pastes our block under keys of its own, so
 anything it derives must be left out of the template or the controller's decoder
 rejects the duplicate.
 
+## Reading the metrics
+
+Managed Prometheus scrapes Kueue on all three clusters and the Buildkite
+controller on the manager. There is no Grafana and no Prometheus server to point
+a browser at; query Cloud Monitoring's Prometheus-compatible endpoint:
+
+```bash
+curl -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  --data-urlencode 'query=kueue_cluster_queue_resource_usage' \
+  https://monitoring.googleapis.com/v1/projects/cloud-ullm-inference-ci-cd/location/global/prometheus/api/v1/query
+```
+
+Utilisation is `kueue_cluster_queue_resource_usage` over
+`kueue_cluster_queue_nominal_quota`, both labelled by flavor and resource. Queue
+time is `kueue_admission_wait_time_seconds`, which is the number Buildkite
+cannot give you: its `started_at` includes the wait. Whether the fleet is being
+fed at all is `buildkite_monitor_monitor_up` and
+`buildkite_scheduler_job_create_success_total` against `job_create_calls_total`.
+
+Read utilisation on the manager. It is the only cluster holding every
+ClusterQueue, because it admits against fleet quota; a worker reports only its
+own generation, and what a worker's numbers tell you is whether something
+admitted here is also through admission there.
+
+**Collapse `instance` before you sum.** A rolled controller leaves the old pod's
+series inside the five-minute lookback, so both report and a plain
+`sum(kueue_cluster_queue_resource_usage{flavor="tpu7x"})` reads sixteen chips on
+an eight-chip fleet. Aggregate it away first:
+
+```
+sum(max by (cluster_queue,flavor,resource) (kueue_cluster_queue_resource_usage{flavor="tpu7x"}))
+```
+
+A usage-over-quota ratio hides this, because both sides double and the ratio
+comes out right for the wrong reason. Do not take a plausible ratio as evidence
+the query is sound.
+
 ## When a step is stuck
 
 Work down from admission. Everything here is on the manager unless it says
@@ -333,6 +421,30 @@ Admission only means the chips are reserved. The pod still has to be scheduled,
 the node possibly created from zero, and the image pulled — tens of minutes on a
 cold pool. The launcher reports where it is in that gap; a step sitting quietly
 at "waiting for a node" is usually the autoscaler, not a fault.
+
+**What a Buildkite job is actually asking for.** The agent page will not tell
+you. Its `k8s:node=` tag is the manager node the *agent* pod landed on — a CPU
+machine — and nothing there names a TPU. The request lives in the Kueue
+workload, which you can reach because the agent pod is `buildkite-<job-uuid>-…`
+and its workload is `job-bk-<uuid with the dashes removed>-…`:
+
+```bash
+kubectl get workloads -n buildkite -o json | python3 -c '
+import json, sys
+for w in json.load(sys.stdin)["items"]:
+    uid = w["metadata"]["name"].split("-")[2]
+    pod = w["spec"]["podSets"][0]
+    chips = (pod["template"]["spec"]["containers"][0]
+             .get("resources", {}).get("limits", {}).get("google.com/tpu", "?"))
+    cond = {c["type"]: c["status"] for c in w["status"].get("conditions", [])}
+    print(uid, w["spec"]["queueName"], chips, "x", pod.get("count", 1),
+          "ADMITTED" if cond.get("Admitted") == "True" else "waiting")'
+```
+
+Read it as a histogram rather than a list. Fifteen rows waiting on
+`tpu7x-standard-4t-2x2x1` is not fifteen problems; it is one nightly whose
+multichip steps all became runnable at once, against a queue that holds two of
+them.
 
 A shape with no node pool is an error at submission that lists the shapes the
 fleet does have, rather than a workload queued forever against quota that does

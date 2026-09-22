@@ -682,6 +682,41 @@
         "number": 57312,
         "url": "https://github.com/vllm-project/vllm/pull/57312",
         "merge_commit": "c723a831a81cb4ff89ea6d61b2d15109306ed1bc"
+      "id": "pr-57270-main-89713-qwen3-30b-sync-eplb-4xh100",
+      "job_name": ":nvidia: (H100) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy",
+      "job_key": "qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-4xh100",
+      "culprit_pr": {
+        "number": 57270,
+        "url": "https://github.com/vllm-project/vllm/pull/57270",
+        "merge_commit": "861a299adc72bbbb1b60853b6173075465a6b425"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 89506,
+        "job_id": "01a0ad1e-32e3-42bf-be99-68fe829bd5b2",
+        "url": "https://buildkite.com/vllm/ci/builds/89506#01a0ad1e-32e3-42bf-be99-68fe829bd5b2"
+      },
+      "main_failure": {
+        "build_number": 89713,
+        "job_id": "01a0b130-2d98-4e59-8357-576dde0d357a",
+        "url": "https://buildkite.com/vllm/ci/builds/89713#01a0b130-2d98-4e59-8357-576dde0d357a",
+        "signature": "DeepEP CPU recv timeout during flashinfer-autotune warmup at engine startup; lane fails every daily/nightly since the merge"
+      },
+      "causal_confirmation": {
+        "kind": "code_analysis",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/57270",
+        "notes": "Lane block-gated on the PR's CI (#89506). Persistent deterministic failure post-merge; dummy-token MoE profiling routing is causal per cross-analysis. Analysis cross-confirmed by Sherlock."
+      }
+    },
+    {
+      "id": "pr-55960-main-90039-spec-decode-al-dflash-nightly",
+      "job_name": ":nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Nightly",
+      "job_key": "spec-decode-al-dflash-nightly",
+      "culprit_pr": {
+        "number": 55960,
+        "url": "https://github.com/vllm-project/vllm/pull/55960",
+        "merge_commit": "db7a24c230a4db6ae3a568ed01b01f3f7172069d"
       },
       "pr_ci": {
         "ran": false,
@@ -700,6 +735,20 @@
         "kind": "fix",
         "reference_url": "https://github.com/vllm-project/vllm/pull/58107",
         "notes": "Test caller updated to WeightCacheState in #58107. Lane absent from the PR's CI render (#90327)."
+        "build_number": 89703,
+        "job_id": null,
+        "url": "https://buildkite.com/vllm/ci/builds/89703"
+      },
+      "main_failure": {
+        "build_number": 90039,
+        "job_id": "01a0b31f-b1bb-4bbb-95fb-14a9e60698c2",
+        "url": "https://buildkite.com/vllm/ci/builds/90039#01a0b31f-b1bb-4bbb-95fb-14a9e60698c2",
+        "signature": "DFlash acceptance_len 3.060 below expected 3.195 (laguna-nvfp4-mrv2); fused DFlash2 grouped convolution dropped acceptance below threshold"
+      },
+      "causal_confirmation": {
+        "kind": "code_analysis",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/55960",
+        "notes": "Nightly-only lane absent from the PR CI render (#89703). Acceptance-length regression appeared the first nightly after merge and persists. Analysis cross-confirmed by Sherlock."
       }
     }
   ]

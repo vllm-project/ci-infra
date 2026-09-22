@@ -224,7 +224,88 @@ bk job retry <job_id> --yes
 
 ---
 
-## Step 8: Cherry-pick PRs from the milestone
+## Step 8: Compare perf with the previous release
+
+Once perf-eval finishes, compare the release candidate against the last
+release's final RC using the CI dashboard compare API.
+
+Find the previous release's perf-eval build (look for the latest
+`v<prev>.Y.ZrcN candidate` message):
+
+```bash
+bk build list --pipeline vllm/perf-eval --branch main --limit 30 --summary --json \
+  | python3 -c "
+import json, sys
+for b in json.load(sys.stdin):
+    print(b['number'], b['state'], b.get('message', ''))"
+```
+
+Pull the release image URIs from that build's env (`VLLM_IMAGE_CUDA` /
+`VLLM_IMAGE_ROCM`), then query the compare API once per platform — the
+`baseline` is the previous release image, `candidate` is the new one:
+
+```bash
+curl -s "https://ci.vllm.ai/api/compare?baseline=<prev_image>&candidate=<new_image>" > compare.json
+```
+
+The JSON contains a `summary` (regression/improvement/noisy/unchanged
+counts), `worstRegressions` (sorted by severity), and `eval.deltas`
+(accuracy scores). Thresholds: perf 2%, eval 2σ (`thresholds` field).
+
+Things to watch for when reading results:
+
+- **Accuracy first:** any `eval.deltas` entry with status `regression` is
+  a release blocker. `noisy` means within 2σ — not actionable.
+- **Single-run noise:** perf numbers come from one run each. Large
+  regressions (>10%) on a workload whose job was retried (e.g. after an
+  infra flake) may be agent-specific — sanity-check against a rerun before
+  filing.
+- **Check the baseline before bisecting code:** a flagged regression can be
+  a *lucky baseline* rather than a slow candidate. Before digging through
+  commits, compare recent nightly builds (`bk build list --pipeline
+  vllm/perf-eval --branch main`, message "Nightly run ...") against the same
+  baseline image — the per-day candidate values form a free bisection and
+  reveal the metric's steady-state band. If the baseline sits outside that
+  band, the regression is an artifact. Definitive check: rerun the workload
+  with `VLLM_IMAGE_CUDA` pointing at the *baseline* image and see if it
+  reproduces the baseline number.
+- **Agent identity matters:** record which Buildkite agent each compared
+  run executed on (job detail API). Only same-host comparisons are
+  trustworthy; some perf hosts are intermittently slow, so a bad run on an
+  unverified host is noise until reproduced on a known-good one.
+
+To confirm a regression with a targeted rerun, launch a new perf-eval
+build with `WORKLOADS` (comma-separated workload stems from the
+perf-eval repo's `workloads/` dir, e.g. `deepseek_v4_pro_5_h200`) and
+`BENCH_ONLY=1`, which runs only the vllm bench configs and skips the
+lm_eval/BFCL accuracy tasks — much faster when accuracy data is already
+in hand:
+
+```bash
+bk build create --yes --pipeline vllm/perf-eval --branch main \
+  --commit <perf_eval_sha> --message "vX.Y.ZrcN regression rerun" \
+  --env "BENCH_ONLY=1" \
+  --env "WORKLOADS=<stem1>,<stem2>" \
+  --env "VLLM_COMMIT=<commit_sha>" \
+  --env "VLLM_IMAGE_CUDA=public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-x86_64"
+```
+
+A passed job cannot be retried in place, so a fresh targeted build is the
+way to get a clean-agent data point. Rerun results upload under the same
+image URI and supersede the earlier runs in the compare API.
+- **Workload coverage:** check `summary.missingBaseline` /
+  `missingCandidate` — renamed or newly added workloads won't have a
+  comparison. ROCm comparisons often match few workloads across releases;
+  that's expected, not an error.
+- Share the browser version of the link in the Slack announcement:
+  `https://ci.vllm.ai/compare?baseline=<prev_image>&candidate=<new_image>`
+
+Include significant regressions in the Slack announcement and flag them to
+the release manager as cherry-pick candidates.
+
+---
+
+## Step 9: Cherry-pick PRs from the milestone
 
 When new PRs are added to the milestone for the next RC:
 
@@ -286,11 +367,11 @@ git tag vX.Y.ZrcN
 git push origin vX.Y.ZrcN
 ```
 
-Then repeat steps 4–7 with the new HEAD commit.
+Then repeat steps 4–8 with the new HEAD commit.
 
 ---
 
-## Step 9: Announce in Slack
+## Step 10: Announce in Slack
 
 Post to the appropriate channel with:
 
@@ -301,45 +382,125 @@ Post to the appropriate channel with:
 - **Links to all builds**: full CI, release-v2, perf-eval
 - **List of cherry-picked PRs** since the previous RC
 
+> **Formatting:** write the message in **Slack mrkdwn**, not Markdown.
+> Slack does NOT render `**double asterisks**` or `[text](url)` — they show
+> up as literal characters. Use `*single asterisks*` for bold, single
+> backticks for inline code (branch names, tags, commit SHAs), and
+> `<https://full-url|link text>` for hyperlinks on PR numbers, build
+> numbers, and the milestone title.
+
 Template for initial branch cut:
 
 ```
-**vX.Y.Z branch cut** :scissors:
+*vX.Y.Z branch cut* :scissors:
 
 The `releases/vX.Y.Z` branch has been cut from commit `<sha>` (based on
-[full CI run #NNN](https://buildkite.com/vllm/ci/builds/NNN), the greenest
+<https://buildkite.com/vllm/ci/builds/NNN|full CI run #NNN>, the greenest
 of the last 3 runs).
 
-**Known failing jobs (N):**
+*Known failing jobs (N):*
 • Job 1
 • Job 2
 ...
 
-**Milestone:** [vX.Y.Z cherry picks](https://github.com/vllm-project/vllm/milestone/NN)
+*Milestone:* <https://github.com/vllm-project/vllm/milestone/NN|vX.Y.Z cherry picks>
 — please tag PRs for cherry-picking here.
 
-**Perf-eval:** [Build #NNN](https://buildkite.com/vllm/perf-eval/builds/NNN)
-running all workloads against the release image.
+*Builds:*
+• Full CI: <https://buildkite.com/vllm/ci/builds/NNNNN|#NNNNN> (run_all + nightly)
+• Release: <https://buildkite.com/vllm/release-v2/builds/NNNNN|#NNNNN>
+• Perf-eval: <https://buildkite.com/vllm/perf-eval/builds/NNN|#NNN> (CUDA + ROCm)
 ```
 
 Template for subsequent RCs:
 
 ```
-**vX.Y.ZrcN** :rocket:
+*vX.Y.ZrcN* :rocket:
 
-Release candidate `vX.Y.ZrcN` tagged on `releases/vX.Y.Z` at commit `<sha>`.
+Release candidate `vX.Y.ZrcN` tagged on `releases/vX.Y.Z` at commit `<full_sha>`.
 
-**New cherry-picks since rcN-1 (N):**
-• [#NNNNN](https://github.com/vllm-project/vllm/pull/NNNNN) Title
+*New cherry-picks since rcN-1 (N):*
+• <https://github.com/vllm-project/vllm/pull/NNNNN|#NNNNN> Title
 ...
 
-**Builds:**
-• Full CI: [#NNNNN](https://buildkite.com/vllm/ci/builds/NNNNN) (run_all + nightly)
-• Release: [#NNNNN](https://buildkite.com/vllm/release-v2/builds/NNNNN)
-• Perf-eval: [#NNNNN](https://buildkite.com/vllm/perf-eval/builds/NNNNN) (CUDA + ROCm)
+*Builds:*
+• Full CI: <https://buildkite.com/vllm/ci/builds/NNNNN|#NNNNN> (run_all + nightly)
+• Release: <https://buildkite.com/vllm/release-v2/builds/NNNNN|#NNNNN>
+• Perf-eval: <https://buildkite.com/vllm/perf-eval/builds/NNNNN|#NNNNN> (CUDA + ROCm)
 
-**Milestone:** [vX.Y.Z cherry picks](https://github.com/vllm-project/vllm/milestone/NN)
+*Milestone:* <https://github.com/vllm-project/vllm/milestone/NN|vX.Y.Z cherry picks>
 ```
+
+---
+
+## Step 11: Smoke test the release artifacts (final release only)
+
+For the **final** release (not RCs), once the release-v2 build has produced
+wheels and images, smoke test what users will actually install before the
+announcement goes out. Keep it shallow: install/boot + one request, not
+benchmarks.
+
+**What to test:**
+
+- **Wheel:** once `vllm==X.Y.Z` appears on PyPI (`upload-release-wheels`
+  job; poll `https://pypi.org/pypi/vllm/json`): on a clean linux x86_64
+  machine, `python3.12 -m venv /tmp/vllm-smoke && pip install vllm==X.Y.Z`,
+  then `python -c "import vllm; print(vllm.__version__)"` and
+  `from vllm import LLM, SamplingParams` import check. A short offline
+  generation with a tiny cached model is a good bonus but optional.
+- **Image:** the release-repo ECR images are the exact content that the
+  publish steps later push to DockerHub:
+  `public.ecr.aws/q9t5s3a7/vllm-release-repo:<full_sha>-x86_64` (and
+  `-aarch64` for Grace/ARM). `docker run` the image, `vllm serve` a model,
+  wait for `/health`, hit `/v1/models`, send one chat completion
+  ("What is 2+2?", max_tokens 64), then tear down.
+
+**Model × hardware matrix:** cover the currently popular models on each GPU
+generation (e.g. GLM-5.3-Flash, MiniMax-M3, Qwen3.8-Flash-Next,
+DeepSeek-V4.x-Flash across H200 / B200 / GB200). Use the exact serve command
+from the model's recipe — `https://recipes.vllm.ai/models.json` is
+machine-readable; each recipe has per-hardware `command`/`env` blocks.
+Prefer each model's recipe-recommended hardware.
+
+**Machines available for smoke testing:**
+
+- H200: `ssh h200-ci-1` (8×H200; HF cache at `/mnt/vllm-ci`, set
+  `HF_HOME=/mnt/vllm-ci` and mount it into the container)
+- GB200: `gcloud compute ssh gb200-rack1-07 --zone us-central1-b
+  --ssh-key-file ~/.ssh/id_ed25519` (also `gb200-rack1-08`; 4×GB200 each;
+  model cache on Lustre at `/mnt/lustre/hf-models`)
+- B200: `ssh dgxb200-15` / `ssh dgxb200-16` (8×B200)
+
+**Practical notes:**
+
+- These are shared CI machines — wait for a CI-free window before starting
+  (no containers in `docker ps`, no processes in
+  `nvidia-smi --query-compute-apps=pid`). Never run a TP8 server alongside
+  a CI job; you'd poison both.
+- The release image's entrypoint is `["vllm", "serve"]` — so
+  `docker run <img> <model> <serve args...>` works directly (do NOT add
+  `serve` yourself; `docker run <img> serve <model>` becomes
+  `vllm serve serve <model>` and fails with
+  `unrecognized arguments: <model>`). For `bench` or anything else, override
+  the entrypoint: `--entrypoint vllm` (bench) or `--entrypoint python3`.
+- Always pass `--ipc=host` — DP/TP servers need >64 MiB of /dev/shm
+  (docker's default) and die with
+  `Insufficient space in /dev/shm: ... required, 64 MiB free`.
+- Pulling release-repo images from a fresh host: anonymous ECR Public pulls
+  hit "Data limit exceeded" quickly at 30 GB/image. Log in first:
+  `aws ecr-public get-login-password --region us-east-1 | ssh <host> 'sudo docker login --username AWS --password-stdin public.ecr.aws'`.
+- With `VLLM_USE_RUST_FRONTEND=1`, the frontend gives up after 600s if the
+  engine is still downloading/loading a model — set
+  `VLLM_ENGINE_READY_TIMEOUT_S=3600` for first-time (uncached) models.
+- Use `--network host`, and mount the HF cache dir with
+  `-e HF_HOME=<path> -v <path>:<path>`.
+- Big models take 5–60 min to load even from cache; wait on `/health` up to
+  90 min (GB200 + Lustre can be slow) and bail early if the container exits.
+- Docker needs `sudo` on the mithril/GB200 hosts.
+- If a release-pipeline step fails on infra (e.g. the triton-cpu sleef
+  submodule flake in `build-cpu-release-image-x86`), retry it once; if it
+  repeats, it's the known `--shallow-submodules --filter=blob:none` issue —
+  see vllm#57871.
 
 ---
 
@@ -350,7 +511,12 @@ Release candidate `vX.Y.ZrcN` tagged on `releases/vX.Y.Z` at commit `<sha>`.
   creating CI builds on `releases/*` branches.
 - **Release version input step:** Do NOT unblock the "Provide Release version
   here" input step for release candidates. It's only for the final release
-  and sets metadata used by PyPI/DockerHub publishing steps.
+  and sets metadata used by PyPI/DockerHub publishing steps. When you DO
+  unblock it (final release), the value must include the leading `v`
+  (e.g. `v0.30.0`, not `0.30.0`): `upload-release-wheels-pypi.sh` compares
+  it literally against `git describe --tags` output and hard-fails on
+  mismatch. A wrong value cannot be fixed by retry — you must create a new
+  release build at the same commit and unblock the input correctly.
 - **Buildkite API token:** Some operations (e.g. unblocking jobs with input
   fields) require the REST API rather than the `bk` CLI. Set
   `BUILDKITE_API_TOKEN` as an env var or retrieve it from your `bk` CLI

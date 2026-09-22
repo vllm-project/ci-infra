@@ -32,6 +32,12 @@ data:
       healthProbeBindAddress: :8081
     metrics:
       bindAddress: :8443
+      # Off by default, and the reason to scrape Kueue at all: without it the
+      # controller reports how many workloads were admitted but not what they were
+      # admitted against, so there is no denominator and no way to say a chip was
+      # busy. This is what adds kueue_cluster_queue_resource_usage and the nominal
+      # quota beside it, per flavor and per resource.
+      enableClusterQueueResources: true
     webhook:
       port: 9443
     leaderElection:

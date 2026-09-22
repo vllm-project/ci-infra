@@ -1,0 +1,32 @@
+[project]
+name = "ci-selector"
+version = "0.1.0"
+description = "Derived CI job selection for vLLM: diff -> Buildkite job set"
+requires-python = ">=3.12"
+dependencies = ["pyyaml>=6.0", "regex>=2024.0.0", "pipeline-generator"]
+
+[project.scripts]
+ci-select = "ci_selector.cli:main"
+ci-validate = "ci_selector.validate.__main__:main"
+ci-fetch-build = "ci_selector.scripts.fetch:main"
+ci-build-table = "ci_selector.scripts.build:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.uv.sources]
+pipeline-generator = { path = "../pipeline_generator", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ci_selector"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "drift: fails when vLLM moved under us, or the generator beside us did, not when our code is wrong. The fix is usually editing handwritten.py or teaching a parser; for a value we re-export, it is editing the generator's own amd.py.",
+    "quiet_preflight: a rule that asserts its file selects nothing beyond the always-run steps, so any preflight-forced step fails it for a reason it is not about. Fails with the forced steps and why, instead of a set diff.",
+]

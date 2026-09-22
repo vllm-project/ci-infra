@@ -17,6 +17,7 @@ from amd import (
     get_amd_timeout_in_minutes,
     get_rocm_base_refresh_env,
     get_rocm_base_refresh_timeout,
+    is_amd_device,
     is_amd_gpu_device,
 )
 from step import Step
@@ -406,6 +407,47 @@ def _is_multi_gpu_step(step: Step) -> bool:
     return bool(step.num_devices and step.num_devices >= 2)
 
 
+# Kernel-launch recorder (buildkite/ci_selector/kernrec). Opt-in per build so
+# PR jobs never pay for it; nightly and post-merge builds set it to feed the
+# selector's kernel coverage table. The setup script and the library come from
+# the ci-infra branch that generated this pipeline.
+KERNREC_ENV_VAR = "VLLM_CI_KERNREC"
+KERNREC_ARTIFACT_PATH = ".fnrec/**/*"
+
+
+def kernrec_enabled() -> bool:
+    return os.getenv(KERNREC_ENV_VAR, "") == "1"
+
+
+def _kernrec_applies(step: Step) -> bool:
+    """The steps _get_setup_commands arms with the nvidia profile."""
+    return (
+        kernrec_enabled()
+        and not step.no_plugin
+        and not step.label.startswith(":docker:")
+    )
+
+
+def _kernrec_setup_command() -> str:
+    """Source the recorder's setup script at the start of the step.
+
+    Double quotes only: _prepare_commands rewrites single quotes. The chain
+    ends in an echo so a download failure never fails the step.
+    """
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        f"{branch}/buildkite/ci_selector/kernrec/ci_setup.sh"
+    )
+    return (
+        'echo "--- :satellite: Kernel launch recorder"; '
+        "mkdir -p /tmp/kernrec && "
+        f'curl -sSfL --retry 3 --max-time 60 -o /tmp/kernrec/ci_setup.sh "{url}" && '
+        ". /tmp/kernrec/ci_setup.sh || "
+        'echo "kernrec: setup skipped"'
+    )
+
+
 def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
     if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
         return []
@@ -428,6 +470,8 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
             "echo '--- :gear: CUDA Coredump Setup'",
             "export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'",
         ]
+        if kernrec_enabled():
+            commands.append(_kernrec_setup_command())
         return commands
 
     if setup_profile == "amd":
@@ -587,6 +631,9 @@ def convert_group_step_to_buildkite_step(
     print(variables_to_inject)
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
+    # ROCm has its own pinned torch and gains nothing from validating against
+    # a CUDA torch-nightly build, so the AMD lane is excluded entirely there.
+    include_amd = global_config["torch_nightly"] != "1"
 
     amd_hardware_steps = []
 
@@ -600,9 +647,12 @@ def convert_group_step_to_buildkite_step(
             # The A100 fleet is retired; retain declarations only for AMD mirrors.
             include_step = (
                 step.device != DeviceType.A100
+                and (include_amd or not is_amd_device(step.device))
                 and (only_step_keys is None or step_key in only_step_keys)
             )
             if is_amd_gpu_device(step.device):
+                if not include_amd:
+                    continue
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
                     _prepare_commands(
@@ -658,6 +708,10 @@ def convert_group_step_to_buildkite_step(
 
             if step.env:
                 buildkite_step.env = step.env
+            if _kernrec_applies(step):
+                # The recorder writes under <checkout>/.fnrec/<job-id>; the
+                # agent collects it from the checkout, in docker and k8s alike.
+                buildkite_step.artifact_paths = [KERNREC_ARTIFACT_PATH]
             if step.retry:
                 buildkite_step.retry = step.retry
             buildkite_step.retry = ensure_exit_status_negative_one_retry(
@@ -665,10 +719,7 @@ def convert_group_step_to_buildkite_step(
             )
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
-            if (
-                step.device == DeviceType.AMD_CPU
-                or step.device == DeviceType.AMD_CPU.value
-            ):
+            if is_amd_device(step.device):
                 buildkite_step.retry = ensure_amd_stack_error_retry(
                     buildkite_step.retry
                 )
@@ -679,10 +730,7 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
                     get_rocm_base_refresh_timeout()
                 )
-            elif (
-                step.device == DeviceType.AMD_CPU
-                or step.device == DeviceType.AMD_CPU.value
-            ):
+            elif is_amd_device(step.device):
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
                     get_amd_timeout_in_minutes(step.timeout_in_minutes)
                 )
@@ -717,7 +765,8 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step and its block step if specified/applicable
             if (
-                step.mirror
+                include_amd
+                and step.mirror
                 and step.mirror.get("amd")
                 and (only_step_keys is None or f"amd-{step_key}" in only_step_keys)
             ):

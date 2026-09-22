@@ -93,6 +93,13 @@ MANAGER_COMPUTE_CLASS = "manager-system"
 # No namespace default goes with it, unlike the manager's: see the template.
 WORKER_COMPUTE_CLASS = "worker-cpu"
 
+# The identity Managed Prometheus scrapes Kueue as, and where its token lives.
+# The namespace is not a choice: it is the only one the Managed Prometheus
+# operator holds a Role to read Secrets in, and a scrape of Kueue needs a token.
+# See monitoring_kueue.yaml.tpl.
+METRICS_SCRAPER_NAME = "kueue-metrics-scraper"
+METRICS_SCRAPER_NAMESPACE = "gmp-public"
+
 # The launcher's program, and the ConfigMap deploy_manifests.py builds out of
 # it. Not rendered into the generated tree: a program indented into YAML is not
 # a diff anyone reads. Named here because launcher.yaml.tpl mounts it.
@@ -107,6 +114,10 @@ LAUNCHER_SCRIPT_KEY = "launch"
 LAUNCHER_DEFAULT_JOB = ROOT / "kueue" / "launcher" / "job.yaml"
 LAUNCHER_MANIFEST_CONFIGMAP = "tpu-launcher-manifests"
 LAUNCHER_DEFAULT_JOB_KEY = "job.yaml"
+
+# The pod setup both that Job and a repo's own manifest inherit.
+LAUNCHER_POD_DEFAULTS = ROOT / "kueue" / "launcher" / "pod_defaults.yaml"
+LAUNCHER_POD_DEFAULTS_KEY = "pod_defaults.yaml"
 
 # The node label GKE puts on a TPU node, by machine family. Not derivable from
 # the machine type - a ct6e-standard-8t is `tpu-v6e-slice`, a tpu7x-standard-4t
@@ -657,6 +668,10 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 ),
             ),
         )
+        # Both sides of a MultiKueue admission keep their own quota and their own
+        # pending count, so a worker is scraped for the same reasons the manager
+        # is - a workload the manager admitted can still be waiting here.
+        write(base / "system" / "30-monitoring.yaml", monitoring_kueue())
         write(
             base / "queues" / "00-namespace.yaml",
             render("namespace", NAMESPACE=namespace, EXTRA_LABELS=""),
@@ -777,6 +792,15 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         base / "system" / "00-compute-class.yaml",
         render("compute_class", NAME=MANAGER_COMPUTE_CLASS),
     )
+    write(base / "system" / "30-monitoring.yaml", monitoring_kueue())
+    # Under workload/ rather than beside the Kueue scrape in system/, only
+    # because it names the workload namespace and system/ is applied before the
+    # namespace exists. It selects the controller Deployment the chart installs
+    # afterwards; a PodMonitoring whose selector matches nothing yet is inert.
+    write(
+        base / "workload" / "30-monitoring.yaml",
+        render("monitoring_agent_stack", NAMESPACE=namespace),
+    )
     # Everything the fleet runs on the manager lives in this namespace, so
     # setting the class here covers the launcher pods and the agent pods without
     # either of their templates having to name a node. The controllers in
@@ -864,6 +888,15 @@ def top_level_keys(text: str) -> set[str]:
         for line in text.splitlines()
         if ":" in line and line[:1].isalpha()
     }
+
+
+def monitoring_kueue() -> str:
+    """The Kueue scrape, which is the same on every cluster that runs Kueue."""
+    return render(
+        "monitoring_kueue",
+        SCRAPER_NAME=METRICS_SCRAPER_NAME,
+        SCRAPER_NAMESPACE=METRICS_SCRAPER_NAMESPACE,
+    )
 
 
 def kueue_config(role: str) -> str:

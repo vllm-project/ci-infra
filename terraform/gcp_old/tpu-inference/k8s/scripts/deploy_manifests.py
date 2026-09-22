@@ -24,15 +24,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
 from generate_manifests import (
     DEFAULT_OUT,
     LAUNCHER_DEFAULT_JOB,
     LAUNCHER_DEFAULT_JOB_KEY,
     LAUNCHER_MANIFEST_CONFIGMAP,
+    LAUNCHER_POD_DEFAULTS,
+    LAUNCHER_POD_DEFAULTS_KEY,
     LAUNCHER_SCRIPT,
     LAUNCHER_SCRIPT_CONFIGMAP,
     LAUNCHER_SCRIPT_KEY,
@@ -76,11 +80,14 @@ def ssa_flags(field_manager: str) -> list[str]:
     CRDs are each over a megabyte, and a client-side apply stores the whole
     object in the last-applied-configuration annotation, capped at 256 KB.
 
-    --force-conflicts is how our ConfigMap override survives. Applying an
-    upstream release hands ownership of every field it sets back to upstream;
+    --force-conflicts is how our overlay of an upstream object survives.
+    Applying a release hands ownership of every field it sets back to upstream;
     taking it back is the point of applying ours afterwards. Field ownership is
     per list item, so the auth plugin's container, volume and mount collide with
     nothing.
+
+    Not the controller's own ConfigMap, which we replace whole rather than
+    overlay; it is dropped from the release instead - see Apply.without.
     """
     return ["--server-side", "--force-conflicts", f"--field-manager={field_manager}"]
 
@@ -134,6 +141,39 @@ class Step:
         return True
 
 
+def release_without(url: str, drop: tuple[tuple[str, str], ...]) -> str:
+    """An upstream release with named objects left out.
+
+    Split and rejoined as text rather than round-tripped through a YAML dumper:
+    the CRDs run to a megabyte of schema each, and re-emitting them would make a
+    deploy depend on the serializer rather than on what upstream published.
+
+    A name matching nothing is an error, so an upstream rename stops the deploy
+    instead of quietly reinstating an object a later step is meant to own.
+    """
+    with urllib.request.urlopen(url) as response:
+        manifest = response.read().decode()
+
+    seen, kept = set(), []
+    for doc in manifest.split("\n---\n"):
+        obj = yaml.safe_load(doc)
+        if not obj:
+            continue
+        ident = (obj.get("kind"), (obj.get("metadata") or {}).get("name"))
+        if ident in drop:
+            seen.add(ident)
+            continue
+        kept.append(doc)
+
+    if missing := set(drop) - seen:
+        raise SystemExit(
+            f"{url} no longer contains {sorted(missing)}. It was being dropped "
+            "because a later step replaces it; check what upstream renamed it "
+            "to before deploying."
+        )
+    return "\n---\n".join(kept)
+
+
 @dataclass(frozen=True)
 class Apply(Step):
     """A committed manifest, or an upstream release fetched by URL."""
@@ -141,14 +181,24 @@ class Apply(Step):
     what: str
     source: str | Path
     field_manager: str = FIELD_MANAGER
+    # (kind, name) to leave out, for objects a later step replaces in full.
+    # Applying upstream's version first only to overwrite it buries the preview
+    # in a change that never lasts, and an interrupted deploy leaves the wrong
+    # one behind.
+    without: tuple[tuple[str, str], ...] = ()
 
     @contextmanager
     def _target(self):
         # An upstream release is one file; ours are directories.
         if isinstance(self.source, Path):
             yield ["-R", "-f", str(self.source)]
-        else:
+        elif not self.without:
             yield ["-f", self.source]
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "release.yaml"
+                out.write_text(release_without(self.source, self.without))
+                yield ["-f", str(out)]
 
 
 @dataclass(frozen=True)
@@ -287,7 +337,9 @@ def plan(cluster: dict, index: dict) -> list[Step]:
         # exists when the controller starts, and the rollout below is what makes
         # that true on a fresh cluster.
         Apply("JobSet release", upstream("jobset", index), UPSTREAM_FIELD_MANAGER),
-        Apply("Kueue release", upstream("kueue", index), UPSTREAM_FIELD_MANAGER),
+        Apply("Kueue release", upstream("kueue", index), UPSTREAM_FIELD_MANAGER,
+              # "fleet configuration" below sets every field of this one.
+              without=(("ConfigMap", "kueue-manager-config"),)),
 
         # Immediately after, so the window in which the controller could come up
         # on upstream's default configuration - no MultiKueue, quota checks
@@ -317,6 +369,7 @@ def plan(cluster: dict, index: dict) -> list[Step]:
             name=LAUNCHER_MANIFEST_CONFIGMAP,
             files=(
                 (LAUNCHER_DEFAULT_JOB_KEY, LAUNCHER_DEFAULT_JOB),
+                (LAUNCHER_POD_DEFAULTS_KEY, LAUNCHER_POD_DEFAULTS),
             ),
             namespace=index["namespace"],
         ))

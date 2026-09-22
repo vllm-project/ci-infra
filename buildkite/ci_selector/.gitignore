@@ -1,0 +1,15 @@
+coverage-data/*
+!coverage-data/README.md
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+.coverage
+.coverage.*
+
+build/
+dist/
+*.egg-info/

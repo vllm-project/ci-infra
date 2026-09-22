@@ -64,6 +64,13 @@ variable "VLLM_USE_PRECOMPILED" {
   default = "0"
 }
 
+# Kernel symbol map for the CI test selector: "1" makes the csrc-build stage
+# record which source file produced each GPU kernel symbol, and adds the
+# kernel-symbol-map export target below. Off for PR builds.
+variable "VLLM_KERNEL_SYMBOL_MAP" {
+  default = "0"
+}
+
 variable "VLLM_MERGE_BASE_COMMIT" {
   default = ""
 }
@@ -133,6 +140,7 @@ target "_ci" {
     SCCACHE_S3_NO_CREDENTIALS = SCCACHE_S3_NO_CREDENTIALS
     VLLM_USE_PRECOMPILED      = VLLM_USE_PRECOMPILED
     VLLM_MERGE_BASE_COMMIT    = VLLM_MERGE_BASE_COMMIT
+    VLLM_KERNEL_SYMBOL_MAP    = VLLM_KERNEL_SYMBOL_MAP
   }
 }
 
@@ -146,6 +154,16 @@ target "test-ci" {
     IMAGE_TAG_LATEST,
   ])
   output = ["type=registry"]
+}
+
+# Writes the kernel symbol map produced during the test-ci build to a local
+# directory (image_build.sh uploads it as a build artifact). Same args as
+# test-ci, so every layer is a cache hit and only the scratch stage runs.
+target "kernel-symbol-map" {
+  inherits   = ["_common", "_ci"]
+  target     = "kernel-symbol-map"
+  cache-from = get_cache_from()
+  output     = ["type=local,dest=./kernel-symbol-map"]
 }
 
 target "cache-warm" {
