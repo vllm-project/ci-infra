@@ -673,6 +673,34 @@
         "reference_url": "https://github.com/vllm-project/vllm/pull/56423",
         "notes": "The FlashInfer post-release bump introduced module-scope CUDA initialization before the fork-based test; spawning isolated tests passed all three exact L4 shards in build #88281."
       }
+    },
+    {
+      "id": "pr-51360-main-90376-initialized-snapshot-e2e",
+      "job_name": ":nvidia: (H200) Initialized Snapshot E2E",
+      "job_key": "initialized-snapshot-e2e",
+      "culprit_pr": {
+        "number": 51360,
+        "url": "https://github.com/vllm-project/vllm/pull/51360",
+        "merge_commit": "13058faa49f5e4a4d50e1ca562ba0c2fdd73c7bc"
+      },
+      "pr_ci": {
+        "ran": false,
+        "state": "blocked",
+        "build_number": 90301,
+        "job_id": "01a0c5da-f721-4e0c-b0df-b10a6e2bc1dc",
+        "url": "https://buildkite.com/vllm/ci/builds/90301#01a0c5da-f721-4e0c-b0df-b10a6e2bc1dc"
+      },
+      "main_failure": {
+        "build_number": 90376,
+        "job_id": "01a0c8bf-2692-48b5-add4-98531e8e6b03",
+        "url": "https://buildkite.com/vllm/ci/builds/90376#01a0c8bf-2692-48b5-add4-98531e8e6b03",
+        "signature": "Dies ~1.6s in: host precondition 'kernel.io_uring_disabled must already equal 2' unmet on mithril-h200-7-1 \u2014 new lane's host requirement never exercised pre-merge"
+      },
+      "causal_confirmation": {
+        "kind": "code_analysis",
+        "reference_url": "https://github.com/vllm-project/vllm/pull/51360",
+        "notes": "Lane was block-gated on the PR's CI (#90301); fails deterministically on main at the host precondition. Fix = host sysctl or job-level skip/self-configure."
+      }
     }
   ]
 }
