@@ -120,7 +120,7 @@ def build(a) -> int:
             "pipeline": a.pipeline,
             "build": a.build,
             "commit": a.commit,
-            "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(
+            "recorded_at": dt.datetime.now(dt.UTC).isoformat(
                 timespec="seconds"
             ),
         },
@@ -146,25 +146,42 @@ def load_table(path: Path) -> dict:
         return json.load(f)
 
 
-def load_map(path: Path) -> dict[str, set[str]]:
-    """file (source or header) -> symbols reachable from it."""
+def load_map(path: Path) -> tuple[dict[str, set[str]], set[str], dict]:
+    """(file -> symbols reachable from it, files that are unknown, header).
+
+    A file is unknown when an object compiled from it or including it failed
+    symbol extraction: the map cannot say the file is kernel-free, so a change
+    to it must not drop anything. Same for every file when the map is empty.
+    """
     with gzip.open(path, "rt", encoding="utf-8") as f:
         d = json.load(f)
     reach: dict[str, set[str]] = defaultdict(set)
+    unknown: set[str] = set()
     for e in d["objects"]:
+        if e.get("error"):
+            unknown.add(e["source"])
+            unknown.update(e["deps"])
+            continue
         for s in e["symbols"]:
             reach[e["source"]].add(s)
             for dep in e["deps"]:
                 reach[dep].add(s)
-    reach["__commit__"] = {d.get("commit", "")}
-    return reach
+    return reach, unknown, d
 
 
 def query(a) -> int:
     t = load_table(a.table)
-    reach = load_map(a.map)
-    map_commit = next(iter(reach.pop("__commit__")))
+    reach, unknown, m = load_map(a.map)
+    map_commit = m.get("commit", "")
     names = t["names"]
+    if m.get("reason"):
+        print(f"map is empty ({m['reason']}): every file falls back to the static rule")
+        return 0
+    if m.get("incomplete"):
+        print(
+            f"note: map incomplete, {len(m.get('errors', []))} objects unreadable; "
+            f"{len(unknown)} files fall back to the static rule"
+        )
     if map_commit and t["source"]["commit"] and map_commit != t["source"]["commit"]:
         print(
             f"note: map is for {map_commit[:12]}, table for {t['source']['commit'][:12]}; "
@@ -174,6 +191,12 @@ def query(a) -> int:
     for path in a.file:
         syms = reach.get(path, set())
         print(f"\n--- {path}: {len(syms)} symbols reachable")
+        if path in unknown:
+            print(
+                "    UNKNOWN: an object compiled from or including this file failed "
+                "extraction -> static rule, nothing dropped"
+            )
+            continue
         if not syms:
             print(
                 "    not in the map: nothing compiled from it or included it -> static rule"
