@@ -68,10 +68,11 @@ RULES = frozenset(
     }
 )
 
-# Emitted alongside selected steps, never as a Claim.rule. "coverage" is written
-# by the CLI for steps the record added, which skip `_record`.
+# Emitted alongside selected steps, never as a Claim.rule. "coverage" and
+# "kernels" are written by the CLI for steps a record added, which skip
+# `_record`.
 SYNTHETIC_RULES = frozenset(
-    {"preflight", "run-all", "always-run", "coverage", "image-copy"}
+    {"preflight", "run-all", "always-run", "coverage", "kernels", "image-copy"}
 )
 
 OUTPUT_RULES = RULES | SYNTHETIC_RULES

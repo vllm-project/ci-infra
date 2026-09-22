@@ -24,6 +24,13 @@ Selecting takes one observation and carries no gate. Dropping needs the
 recording to still describe the step it came from, so it carries the freshness
 gate and every health check in `table.look_up`.
 
+A second record answers for csrc, where no Python frame exists: the kernel
+record (`coverage/kernels.py`), a table of the GPU kernels each step launched
+joined to the file each kernel was compiled from. Same three lines, same
+authority: it selects on one observation and drops only behind every gate,
+and it runs after the Python record, never overruling a step that record kept
+on an observed call.
+
 WHEN ANYTHING GOES WRONG, THE MAP'S SELECTION STANDS UNCHANGED -- and note the
 shape of that. It is NOT "carry on with an empty stale set": an empty stale set
 means nothing is disqualified, so every step stays droppable, and the failure
@@ -39,12 +46,20 @@ from pathlib import Path
 
 from .coverage import freshness
 from .coverage.phase import DEFAULT_MODE, PhaseMode, mode_from_env
+from .coverage.kernels import KernelEvidence
 from .coverage.rules import RowKeys, newest_commit, read_pr, unknown_names
-from .coverage.source import fetch_table
+from .coverage.source import fetch_kernel_evidence, fetch_table
 from .coverage.table import Table
 
-#: Set to re-enable the freshness gate, which is off by default.
+#: Set to re-enable the freshness gate, which is off by default. Governs both
+#: records: for the kernel record it means a csrc file whose source moved
+#: between the map's commit and the PR's base may select but not drop.
 FRESHNESS_ENV = "CI_SELECTOR_FRESHNESS"
+#: Set to let the kernel record DROP when its table and map were recorded at
+#: different commits. Off, such a pair only selects: a kernel renamed between
+#: the two reads as never launched. The collect step publishes matched pairs,
+#: so this is for measuring against older data.
+KERNEL_UNMATCHED_ENV = "CI_SELECTOR_KERNEL_UNMATCHED_DROPS"
 
 
 @dataclass
@@ -64,10 +79,26 @@ class Decision:
     unreadable_rows: int = 0
     rows: int = 0
     reasons: dict = field(default_factory=dict)
+    # Steps the Python record kept on positive evidence. The kernel record
+    # may not drop these.
+    executes_by_coverage: set[str] = field(default_factory=set)
+    # The kernel record's contribution, kept apart the same way.
+    added_by_kernels: set[str] = field(default_factory=set)
+    dropped_by_kernels: set[str] = field(default_factory=set)
+    kernel_note: str = ""
+    # Which table and map answered, and whether they match.
+    kernel_pair: str = ""
+    kernel_reasons: dict = field(default_factory=dict)
+    # changed csrc file -> what the kernel record could do with it
+    kernel_files: dict = field(default_factory=dict)
 
     @property
     def used_coverage(self) -> bool:
         return not self.coverage_note
+
+    @property
+    def used_kernels(self) -> bool:
+        return not self.kernel_note
 
 
 def decide(
@@ -79,11 +110,12 @@ def decide(
     *,
     table: Table | None = None,
     mode: PhaseMode | None = None,
+    kernels: KernelEvidence | None = None,
 ) -> Decision:
-    """Apply the record to the map's selection.
+    """Apply both records to the map's selection.
 
-    When coverage cannot be used, for any reason at all, the map's selection
-    comes back unchanged with the reason in `coverage_note`.
+    When a record cannot be used, for any reason at all, it changes nothing
+    and the reason lands in `coverage_note` or `kernel_note`.
     """
     # Resolved above the try on purpose. A bad env value has to kill the run:
     # below, the broad handler would swallow it, every PR would come back
@@ -94,23 +126,38 @@ def decide(
     table = table if table is not None else fetch_table()
     if not table.available:
         out.coverage_note = table.unavailable
-        return out
+    else:
+        out.rows = len(table)
+        # Only askable with a built state. Every live caller has one; the tests
+        # that pass None are exercising the rules rather than the tally.
+        if getattr(state, "pipelines", None):
+            out.unreadable_rows = _unreadable_rows(state, table)
+        try:
+            _apply_record(out, table, selection, repo, base, head, mode)
+        except Exception as exc:  # noqa: BLE001 - see the module docstring
+            # Broad on purpose. A narrower handler would have to decide what
+            # to do with a half-built reading, and the only safe answer is
+            # nothing.
+            out.steps = set(out.from_map)
+            out.added_by_coverage.clear()
+            out.dropped_by_coverage.clear()
+            out.executes_by_coverage.clear()
+            out.coverage_note = f"coverage unusable ({type(exc).__name__}: {exc})"
 
-    out.rows = len(table)
-    # Only askable with a built state. Every live caller has one; the tests that
-    # pass None are exercising the rules rather than the tally.
-    if getattr(state, "pipelines", None):
-        out.unreadable_rows = _unreadable_rows(state, table)
-
-    try:
-        _apply_record(out, table, selection, repo, base, head, mode)
-    except Exception as exc:  # noqa: BLE001 - see the module docstring
-        # Broad on purpose. A narrower handler would have to decide what to do
-        # with a half-built reading, and the only safe answer is nothing.
-        out.steps = set(out.from_map)
-        out.added_by_coverage.clear()
-        out.dropped_by_coverage.clear()
-        out.coverage_note = f"coverage unusable ({type(exc).__name__}: {exc})"
+    kernels = kernels if kernels is not None else fetch_kernel_evidence()
+    if kernels.unavailable:
+        out.kernel_note = kernels.unavailable
+    else:
+        out.kernel_pair = kernels.describe()
+        try:
+            _apply_kernel_record(out, kernels, selection, state, repo, base, head)
+        except Exception as exc:  # noqa: BLE001 - same reasoning as above
+            out.steps = (
+                set(out.from_map) | out.added_by_coverage
+            ) - out.dropped_by_coverage
+            out.added_by_kernels.clear()
+            out.dropped_by_kernels.clear()
+            out.kernel_note = f"kernel record unusable ({type(exc).__name__}: {exc})"
     return out
 
 
@@ -212,6 +259,7 @@ def _apply_record(
     out.reasons = dict(reading.reasons)
     out.added_by_coverage = set(reading.added)
     out.dropped_by_coverage = set(reading.dropped)
+    out.executes_by_coverage = set(reading.executes)
     out.steps |= out.added_by_coverage
     out.steps -= out.dropped_by_coverage
 
@@ -258,3 +306,73 @@ def _append_op_proxies(query, repo: Path, base: str, union_names, table) -> None
                 ),
             )
         )
+
+
+def _apply_kernel_record(
+    out: Decision,
+    kernels: KernelEvidence,
+    selection,
+    state,
+    repo: Path,
+    base: str,
+    head: str | None,
+) -> None:
+    """The kernel record over the map's selection, after the Python record.
+
+    Keys resolve at the PR's base from the state `decide` was handed, since
+    the table's rows carry the generator's step keys and the emitter names
+    steps from the base. Raises rather than guessing when there is no state
+    to spell them with; `decide` turns that into a note.
+    """
+    from .codemap.classify import csrc_held_steps
+    from .coverage import kernels as kernel_rules
+    from .gitdiff import changed_paths, diff_files
+
+    if not getattr(state, "pipelines", None):
+        raise RuntimeError("no pipeline state to resolve step keys against")
+    keys = RowKeys.resolve_from_state(set(kernels.table._rows), state)
+    changed = changed_paths(diff_files(repo, base, head))
+
+    stale: frozenset[str] = frozenset()
+    if os.environ.get(FRESHNESS_ENV):
+        stale = _csrc_moved_since(repo, kernels.symbol_map.commit, base, changed)
+
+    allow_drops = kernels.matched or bool(os.environ.get(KERNEL_UNMATCHED_ENV))
+    reading = kernel_rules.read_pr(
+        kernels,
+        selection,
+        changed,
+        keys,
+        held=lambda path: csrc_held_steps(state, path),
+        stale=stale,
+        allow_drops=allow_drops,
+        protected=frozenset(out.executes_by_coverage),
+    )
+    out.kernel_reasons = dict(reading.reasons)
+    out.kernel_files = dict(reading.files)
+    out.added_by_kernels = set(reading.added)
+    out.dropped_by_kernels = set(reading.dropped)
+    out.steps |= out.added_by_kernels
+    out.steps -= out.dropped_by_kernels
+
+
+def _csrc_moved_since(
+    repo: Path, map_commit: str, base: str, changed
+) -> frozenset[str]:
+    """Changed files whose source differs between the map's commit and the
+    base, so the map may describe kernels that are no longer there, or miss
+    ones that are. A commit the repo does not have makes every changed file
+    stale: unknown freshness is not freshness."""
+    import subprocess
+
+    if not map_commit:
+        return frozenset(changed)
+    out = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--name-only", map_commit, base, "--", "csrc"],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        return frozenset(changed)
+    moved = set(out.stdout.split())
+    return frozenset(p for p in changed if p in moved)
