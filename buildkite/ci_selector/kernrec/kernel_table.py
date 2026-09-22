@@ -32,7 +32,9 @@ and whether any recorder reported dropped records.
       "names": ["_Z21fusedQKNormRopeKernel...", "fused_moe_kernel", ...],
       "rows": {
         "fusion-e2e-quick-h100": {
-          "jobs": 1, "passed": true, "processes": 4, "dropped": 0,
+          "jobs": 1, "passed": true, "complete": true,
+          "shards": {"expected": 3, "seen": 3},   # null expected: not parallel
+          "processes": 4, "dropped": 0,
           "kernels": [0, 17, 42, ...]        # indexes into names
         },
         ...
@@ -42,8 +44,8 @@ and whether any recorder reported dropped records.
 A query joins it with a kernel symbol map for the same commit: a changed
 file -> the symbols compiled from it or from objects that included it ->
 every row whose kernel set meets them. A row that is usable (all jobs
-passed, nothing dropped) and meets none of them is a step the change
-cannot reach through any kernel. A step with no row is a step the record
+passed, every shard present, nothing dropped) and meets none of them is a
+step the change cannot reach through any kernel. A step with no row is a step the record
 knows nothing about, and stays with the static map.
 """
 
@@ -57,7 +59,7 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-TABLE_VERSION = 1
+TABLE_VERSION = 2
 
 
 def read_recording(path: Path) -> tuple[set[str], int, bool]:
@@ -83,28 +85,47 @@ def read_recording(path: Path) -> tuple[set[str], int, bool]:
 
 
 def _jobs_from_step_layout(root: Path, job_state: dict[str, str]):
-    """(step_key, job_id, files, passed) per job under <step>/<job>/kern.*.txt."""
+    """Jobs under <step>/<job>/kern.*.txt (the analyze_build.py layout).
+
+    Shard coverage is unknown here, so rows are complete when every job the
+    API reported as passed is present; the API states are the evidence.
+    """
     for step_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         for job_dir in sorted(p for p in step_dir.iterdir() if p.is_dir()):
             files = sorted(job_dir.glob("kern.*.txt"))
             if not files:
                 continue
             state = job_state.get(job_dir.name)
-            yield step_dir.name, job_dir.name, files, (state in (None, "passed"))
+            yield {
+                "step_key": step_dir.name,
+                "job_id": job_dir.name,
+                "files": files,
+                "passed": state in (None, "passed"),
+                "shard": None,
+                "shard_count": None,
+            }
+
+
+def _int_or_none(v):
+    try:
+        return int(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _jobs_from_fnrec_layout(root: Path, job_state: dict[str, str]):
-    """(step_key, job_id, files, passed) per job under <job>/kern.*.txt.
+    """Jobs under <job>/kern.*.txt + kernrec.json (the artifact download layout).
 
-    The step key comes from the kernrec.json sidecar, or from --jobs when the
-    API states were supplied. A job with recordings but no sidecar exited
-    without running its trap, so it is not passed; with no step key at all it
-    is reported as (None, ...) and the caller counts it.
+    Every job directory is read, whether or not it holds recordings: a shard
+    that failed before launching a kernel still has its sidecar, and its
+    exit status must count against the row. ci_setup.sh writes the sidecar
+    at setup with `exit_status: null` and rewrites it on exit, so a job
+    killed before its trap ran keeps its step key and is simply not passed.
+    A job with recordings but no sidecar at all cannot be filed and is
+    reported with step_key None.
     """
     for job_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         files = sorted(job_dir.glob("kern.*.txt"))
-        if not files:
-            continue
         meta: dict = {}
         side = job_dir / "kernrec.json"
         if side.exists():
@@ -112,6 +133,8 @@ def _jobs_from_fnrec_layout(root: Path, job_state: dict[str, str]):
                 meta = json.loads(side.read_text())
             except ValueError:
                 meta = {}
+        if not files and not meta:
+            continue
         step_key = (
             meta.get("step_key") or job_state.get(f"{job_dir.name}:step_key") or None
         )
@@ -119,8 +142,28 @@ def _jobs_from_fnrec_layout(root: Path, job_state: dict[str, str]):
         if state:
             passed = state == "passed"
         else:
-            passed = bool(meta) and meta.get("exit_status") == 0
-        yield step_key, job_dir.name, files, passed
+            passed = meta.get("exit_status") == 0
+        yield {
+            "step_key": step_key,
+            "job_id": job_dir.name,
+            "files": files,
+            "passed": passed,
+            "shard": _int_or_none(meta.get("parallel_job")),
+            "shard_count": _int_or_none(meta.get("parallel_job_count")),
+        }
+
+
+def usable(row: dict) -> bool:
+    """A row the selector may drop a step on.
+
+    Every job passed, every shard is accounted for, and no recorder dropped
+    records. Anything less is evidence for selecting, never for dropping.
+    """
+    return (
+        bool(row.get("passed"))
+        and bool(row.get("complete", True))
+        and not row.get("dropped")
+    )
 
 
 def build(a) -> int:
@@ -140,17 +183,31 @@ def build(a) -> int:
     names: list[str] = []
     rows: dict[str, dict] = {}
     unfiled = 0
-    for step_key, _job_id, files, passed in job_iter:
-        if not step_key:
+    for job in job_iter:
+        if not job["step_key"]:
             unfiled += 1
             continue
         row = rows.setdefault(
-            step_key,
-            {"jobs": 0, "passed": True, "processes": 0, "dropped": 0, "kernels": set()},
+            job["step_key"],
+            {
+                "jobs": 0,
+                "passed": True,
+                "complete": True,
+                "processes": 0,
+                "dropped": 0,
+                "shards": {"expected": None, "seen": set()},
+                "kernels": set(),
+            },
         )
         row["jobs"] += 1
-        row["passed"] = row["passed"] and passed
-        for f in files:
+        row["passed"] = row["passed"] and job["passed"]
+        if job["shard_count"] is not None:
+            row["shards"]["expected"] = max(
+                row["shards"]["expected"] or 0, job["shard_count"]
+            )
+        if job["shard"] is not None:
+            row["shards"]["seen"].add(job["shard"])
+        for f in job["files"]:
             row["processes"] += 1
             got, d, _clean = read_recording(f)
             row["dropped"] += d
@@ -162,6 +219,12 @@ def build(a) -> int:
                 row["kernels"].add(i)
     for row in rows.values():
         row["kernels"] = sorted(row["kernels"])
+        expected, seen = row["shards"]["expected"], row["shards"]["seen"]
+        # A parallel step is complete only when every shard reported in.
+        # Non-parallel steps have no shard fields and stay complete.
+        if expected is not None and len(seen) < expected:
+            row["complete"] = False
+        row["shards"] = {"expected": expected, "seen": len(seen)}
     if unfiled:
         print(f"warning: {unfiled} job(s) with recordings but no step key; skipped")
 
@@ -180,7 +243,8 @@ def build(a) -> int:
             "steps": len(rows),
             "unique_kernels": len(names),
             "processes": sum(r["processes"] for r in rows.values()),
-            "rows_passed": sum(1 for r in rows.values() if r["passed"]),
+            "rows_usable": sum(1 for r in rows.values() if usable(r)),
+            "rows_incomplete": sum(1 for r in rows.values() if not r["complete"]),
             "rows_with_drops": sum(1 for r in rows.values() if r["dropped"]),
         },
     }
@@ -256,7 +320,7 @@ def query(a) -> int:
         for k, r in t["rows"].items():
             if row_sets[k] & syms:
                 select.append(k)
-            elif r["passed"] and not r["dropped"]:
+            elif usable(r):
                 drop.append(k)
             else:
                 unusable.append(k)
@@ -293,7 +357,7 @@ def show(a) -> int:
         : a.top
     ]:
         print(
-            f"{k[:48]:48} {r['jobs']:>4} {r['processes']:>5} {len(r['kernels']):>7} {'yes' if r['passed'] and not r['dropped'] else 'NO':>3}"
+            f"{k[:48]:48} {r['jobs']:>4} {r['processes']:>5} {len(r['kernels']):>7} {'yes' if usable(r) else 'NO':>3}"
         )
     return 0
 

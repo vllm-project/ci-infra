@@ -88,6 +88,7 @@ def test_fnrec_layout_folds_jobs_into_step_rows(tmp_path):
     row = t["rows"]["step-x"]
     assert row["jobs"] == 2 and row["processes"] == 2
     assert row["passed"] is False, "one job exited 1"
+    assert row["complete"] is True, "no shard fields: a non-parallel step"
     assert row["dropped"] == 2
     assert sorted(t["names"][i] for i in row["kernels"]) == ["kernA", "kernB", "kernC"]
     assert "kernZ" not in t["names"], "an unfiled job must not leak into any row"
@@ -202,3 +203,97 @@ def test_query_falls_back_for_every_file_when_the_map_is_empty(tmp_path, capsys)
     _run(["query", str(out), str(m), "--file", "csrc/a.cu"])
     text = capsys.readouterr().out
     assert "map is empty" in text and "SELECT" not in text
+
+
+def _sidecar(job_dir: Path, step="step-x", exit_status=0, shard=None, count=None):
+    d = {"step_key": step, "exit_status": exit_status}
+    if shard is not None:
+        d["parallel_job"] = str(shard)
+        d["parallel_job_count"] = str(count)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "kernrec.json").write_text(json.dumps(d))
+
+
+def _build_fnrec(tmp_path, fn):
+    out = tmp_path / "t.json.gz"
+    _run(
+        [
+            "build",
+            "--fnrec",
+            str(fn),
+            "--build",
+            "1",
+            "--commit",
+            "abc",
+            "--out",
+            str(out),
+        ]
+    )
+    return _read(out), out
+
+
+def test_failed_shard_without_recordings_still_counts(tmp_path):
+    """Codex P1: a shard that died before launching anything has a sidecar
+    but no kern files; it must fail the row, not vanish."""
+    fn = tmp_path / ".fnrec"
+    _recording((fn / "j0").mkdir(parents=True) or fn / "j0" / "kern.1.txt", ["kA"])
+    _sidecar(fn / "j0", exit_status=0, shard=0, count=2)
+    _sidecar(fn / "j1", exit_status=1, shard=1, count=2)  # no recordings
+    t, _ = _build_fnrec(tmp_path, fn)
+    row = t["rows"]["step-x"]
+    assert row["jobs"] == 2
+    assert row["passed"] is False
+    assert row["complete"] is True, "both shards reported in"
+    assert kernel_table.usable(row) is False
+
+
+def test_missing_shard_makes_the_row_incomplete(tmp_path):
+    """One of two shards never produced anything (agent lost, never ran)."""
+    fn = tmp_path / ".fnrec"
+    (fn / "j0").mkdir(parents=True)
+    _recording(fn / "j0" / "kern.1.txt", ["kA"])
+    _sidecar(fn / "j0", exit_status=0, shard=0, count=2)
+    t, _ = _build_fnrec(tmp_path, fn)
+    row = t["rows"]["step-x"]
+    assert row["passed"] is True and row["complete"] is False
+    assert row["shards"] == {"expected": 2, "seen": 1}
+    assert kernel_table.usable(row) is False
+
+
+def test_killed_shard_with_setup_sidecar_is_not_passed(tmp_path):
+    """ci_setup.sh writes the sidecar at setup with exit_status null; a job
+    SIGKILLed later keeps its step key and must read as not passed."""
+    fn = tmp_path / ".fnrec"
+    (fn / "j0").mkdir(parents=True)
+    _recording(fn / "j0" / "kern.1.txt", ["kA"], end=False)
+    _sidecar(fn / "j0", exit_status=None)
+    t, _ = _build_fnrec(tmp_path, fn)
+    row = t["rows"]["step-x"]
+    assert row["jobs"] == 1 and row["passed"] is False
+    assert kernel_table.usable(row) is False
+
+
+def test_query_keeps_incomplete_rows_instead_of_dropping(tmp_path, capsys):
+    fn = tmp_path / ".fnrec"
+    (fn / "j0").mkdir(parents=True)
+    _recording(fn / "j0" / "kern.1.txt", ["kOther"])
+    _sidecar(fn / "j0", exit_status=0, shard=0, count=2)  # shard 1 missing
+    _, table = _build_fnrec(tmp_path, fn)
+    m = tmp_path / "map.json.gz"
+    _symbol_map(
+        m,
+        [
+            {
+                "source": "csrc/a.cu",
+                "target": "_C",
+                "object": "o",
+                "device": True,
+                "symbols": ["kA"],
+                "deps": ["csrc/a.cu"],
+            }
+        ],
+    )
+    _run(["query", str(table), str(m), "--file", "csrc/a.cu"])
+    text = capsys.readouterr().out
+    assert "drop     (0)" in text
+    assert "keep, row not usable (1): step-x" in text

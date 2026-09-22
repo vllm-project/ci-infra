@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# collect.sh under mocked externals: buildkite-agent, curl, aws, python3
+# stand-ins on PATH. Checks the publishing rules that matter:
+#
+#   1. happy path: table + usable map -> both under <commit>/, latest.json written
+#   2. table built, no map        -> table under <commit>/, latest.json NOT written, exit 1
+#   3. kernel_table.py download fails -> nothing published, exit 1
+#   4. table with no rows          -> artifacts only, nothing to S3, exit 1
+#      (a build with no recordings at all is not a failure: exit 0, nothing to fold)
+#   5. no AWS identity             -> artifacts only, exit 0
+#
+# Real python3 is used for kernel_table.py; only the network/cloud commands
+# are faked. Run from anywhere; needs bash and python3.
+set -uo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+fail=0
+
+run_case() { # name expect_exit expect_latest(yes|no) expect_commit_upload(yes|no) mode
+  local name=$1 want_rc=$2 want_latest=$3 want_commit=$4 mode=$5
+  local T; T=$(mktemp -d)
+  mkdir -p "$T/bin" "$T/s3" "$T/artifacts" "$T/build/.fnrec/job-a"
+  # a recording + sidecar for one non-parallel step
+  printf '# kernrec v1 pid=1 ppid=0 exe=python\nkernA\n# end records=1 unique=1 dropped=0\n' > "$T/build/.fnrec/job-a/kern.1.txt"
+  echo '{"step_key":"step-x","exit_status":0,"parallel_job":"","parallel_job_count":""}' > "$T/build/.fnrec/job-a/kernrec.json"
+  # no-rows: a recording that cannot be filed (blank step key) -> a table with no rows
+  [[ "$mode" == "no-rows" ]] && echo '{"step_key":"","exit_status":0}' > "$T/build/.fnrec/job-a/kernrec.json"
+  # a usable symbol map unless the case says otherwise
+  if [[ "$mode" != "no-map" ]]; then
+    python3 - "$T/build/kernel_symbol_map.json.gz" <<'PY'
+import gzip, json, sys
+json.dump({"version": 1, "commit": "abc", "objects": [{"source": "csrc/a.cu", "target": "_C", "object": "o", "device": True, "symbols": ["kernA"], "deps": ["csrc/a.cu"]}], "stats": {}}, gzip.open(sys.argv[1], "wt"))
+PY
+  fi
+
+  # --- stubs ---------------------------------------------------------------
+  cat > "$T/bin/buildkite-agent" <<EOF
+#!/usr/bin/env bash
+# artifact download PATTERN DEST | artifact upload GLOB
+case "\$1 \$2" in
+  "artifact download")
+    if [[ "\$3" == *fnrec* ]]; then cp -R "$T/build/.fnrec" "\$4/" 2>/dev/null; fi
+    if [[ "\$3" == *kernel_symbol_map* ]]; then cp "$T/build/kernel_symbol_map.json.gz" "\$4/" 2>/dev/null || exit 1; fi
+    ;;
+  "artifact upload") for f in \$3; do cp "\$f" "$T/artifacts/"; done ;;
+esac
+EOF
+  cat > "$T/bin/curl" <<EOF
+#!/usr/bin/env bash
+# only the kernel_table.py fetch goes through curl; -o is the output
+out=""; while [[ \$# -gt 0 ]]; do [[ "\$1" == "-o" ]] && out="\$2"; shift; done
+if [[ "$mode" == "no-builder" ]]; then echo "curl: (22) 404" >&2; exit 22; fi
+cp "$HERE/kernel_table.py" "\$out"
+EOF
+  cat > "$T/bin/aws" <<EOF
+#!/usr/bin/env bash
+if [[ "$mode" == "no-identity" && "\$1" == "sts" ]]; then exit 255; fi
+case "\$1 \$2" in
+  "sts get-caller-identity") echo '{"Account":"1"}' ;;
+  "s3 cp")
+    src="\$3"; dst="\$4"; dst="\${dst#s3://}"
+    if [[ "\$*" == *--recursive* ]]; then mkdir -p "$T/s3/\$dst" && cp -R "\$src"/. "$T/s3/\$dst/"; else mkdir -p "$T/s3/\$(dirname "\$dst")" && cp "\$src" "$T/s3/\$dst"; fi ;;
+esac
+EOF
+  chmod +x "$T/bin"/*
+
+  ( cd "$T" && PATH="$T/bin:$PATH" BUILDKITE_COMMIT=abc BUILDKITE_BUILD_NUMBER=42 BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt \
+      bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
+  local latest=no commit=no
+  [[ -f "$T/s3/bkt/ci/latest.json" ]] && latest=yes
+  [[ -f "$T/s3/bkt/ci/abc/kernel_table.json.gz" ]] && commit=yes
+  local verdict=OK
+  [[ "$rc" == "$want_rc" && "$latest" == "$want_latest" && "$commit" == "$want_commit" ]] || { verdict=FAIL; fail=1; }
+  printf '%-4s %-12s exit=%s (want %s)  latest=%s (want %s)  commit_upload=%s (want %s)\n' "$verdict" "$name" "$rc" "$want_rc" "$latest" "$want_latest" "$commit" "$want_commit"
+  [[ "$verdict" == FAIL ]] && sed 's/^/      /' "$T/log" | tail -12
+  rm -rf "$T"
+}
+
+run_case happy       0 yes yes normal
+run_case no-map      1 no  yes no-map
+run_case no-builder  1 no  no  no-builder
+run_case no-rows     1 no  no  no-rows
+run_case no-identity 0 no  no  no-identity
+echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" || { echo "collect.sh publishing rules: FAIL"; exit 1; }
