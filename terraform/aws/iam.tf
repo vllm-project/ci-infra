@@ -538,3 +538,35 @@ resource "aws_iam_role_policy_attachment" "vllm_wheels_bucket_read_write_access_
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.vllm_wheels_bucket_read_write_access.arn
 }
+
+# The recording build's collect step (small CPU postmerge agents) publishes
+# the selector's coverage tables here. Reads need no identity: the bucket is
+# public-read (see s3.tf).
+resource "aws_iam_policy" "vllm_ci_selector_bucket_write_access" {
+  name = "write-access-to-vllm-ci-selector-bucket"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Action = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket"
+      ],
+      Effect = "Allow",
+      Resource = [
+        "arn:aws:s3:::vllm-ci-selector",
+        "arn:aws:s3:::vllm-ci-selector/*"
+      ]
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "vllm_ci_selector_bucket_write_access" {
+  for_each = merge(
+    { for k, v in aws_cloudformation_stack.bk_queue_postmerge : k => v },
+    { for k, v in aws_cloudformation_stack.bk_queue_postmerge_us_east_1 : k => v },
+  )
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.vllm_ci_selector_bucket_write_access.arn
+}

@@ -105,3 +105,65 @@ def test_on_leaves_no_plugin_steps_alone(monkeypatch):
     rendered = _render(_gpu_step(no_plugin=True))
     assert not any("kernrec" in c for c in _commands(rendered))
     assert not _artifact_paths(rendered)
+
+
+def _rendered_groups(*steps):
+    groups = {}
+    for s in steps:
+        groups.setdefault(s.group, []).append(s)
+    return buildkite_step.convert_group_step_to_buildkite_step(groups)
+
+
+def test_collect_group_depends_on_every_runnable_command_step(
+    monkeypatch, fake_global_config
+):
+    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv("VLLM_CI_BRANCH", "my-branch")
+    fake_global_config["nightly"] = "1"  # every step runs, none is blocked
+    groups = _rendered_groups(
+        _gpu_step(key="kernels", group="kernels"),
+        _gpu_step(key="fusion", group="compile", label=":nvidia: (H100) Fusion"),
+    )
+    collect = buildkite_step.kernrec_collect_group(groups)
+    assert collect.group == buildkite_step.KERNREC_COLLECT_GROUP
+    (step,) = collect.steps
+    assert step.key == buildkite_step.KERNREC_COLLECT_KEY
+    assert set(step.depends_on) == {"kernels", "fusion"}
+    assert step.allow_dependency_failure is True, (
+        "a failed job's recording is still evidence"
+    )
+    assert step.soft_fail is True, "publishing must not turn the build red"
+    assert (
+        "ci-infra/my-branch/buildkite/ci_selector/kernrec/collect.sh"
+        in step.commands[0]
+    )
+    assert step.agents["queue"] == buildkite_step.AgentQueue.SMALL_CPU_PREMERGE.value
+
+
+def test_collect_group_skips_steps_behind_a_block(monkeypatch, fake_global_config):
+    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    # Not a nightly and no matching file diff: the generator gates the step
+    # behind a block step, so the collect step must not depend on it.
+    groups = _rendered_groups(_gpu_step(key="kernels", group="kernels"))
+    assert any(
+        isinstance(s, buildkite_step.BuildkiteBlockStep) for s in groups[0].steps
+    )
+    (step,) = buildkite_step.kernrec_collect_group(groups).steps
+    assert step.depends_on == [], (
+        "a dependency that never starts would hold the step forever"
+    )
+
+
+def test_collect_group_uses_postmerge_queue_on_main(monkeypatch, fake_global_config):
+    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    fake_global_config["branch"] = "main"
+    fake_global_config["nightly"] = "1"
+    (step,) = buildkite_step.kernrec_collect_group(_rendered_groups(_gpu_step())).steps
+    assert step.agents["queue"] == buildkite_step.AgentQueue.SMALL_CPU_POSTMERGE.value
+
+
+def test_collect_step_serializes_allow_dependency_failure(monkeypatch):
+    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    (step,) = buildkite_step.kernrec_collect_group(_rendered_groups(_gpu_step())).steps
+    assert step.to_yaml()["allow_dependency_failure"] is True
+    assert step.dict(exclude_none=True)["allow_dependency_failure"] is True

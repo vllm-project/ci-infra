@@ -14,6 +14,38 @@
 #   LD_LIBRARY_PATH        gains torch's bundled CUPTI so the library resolves
 #                          even in a process that initializes CUDA before
 #                          torch has preloaded libcupti
+#
+# On exit, writes $KERNREC_DIR/kernrec.json (step key, shard, exit status) so
+# the collect step can file the recordings without asking the Buildkite API.
+
+# Escape a string for a JSON literal (backslashes and double quotes).
+kernrec_json() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# Runs when the step's shell exits (not after a SIGKILL). Writes the sidecar
+# the table builder needs to file this job under its step and judge the row:
+# step key, parallel shard, exit status. Then opens permissions so the agent
+# can clean the checkout, whatever the step did.
+kernrec_finish() {
+  rc="${1:-0}"
+  if [ -n "${KERNREC_DIR:-}" ] && [ -d "$KERNREC_DIR" ]; then
+    printf '{"step_key":"%s","label":"%s","job_id":"%s","build":"%s","commit":"%s","parallel_job":"%s","parallel_job_count":"%s","exit_status":%s,"host":"%s"}\n' \
+      "$(kernrec_json "${BUILDKITE_STEP_KEY:-}")" \
+      "$(kernrec_json "${BUILDKITE_LABEL:-}")" \
+      "${BUILDKITE_JOB_ID:-local}" \
+      "${BUILDKITE_BUILD_NUMBER:-}" \
+      "${BUILDKITE_COMMIT:-}" \
+      "${BUILDKITE_PARALLEL_JOB:-}" \
+      "${BUILDKITE_PARALLEL_JOB_COUNT:-}" \
+      "${rc:-0}" \
+      "$(kernrec_json "$(hostname 2>/dev/null || echo '?')")" \
+      > "$KERNREC_DIR/kernrec.json" 2>/dev/null || true
+  fi
+  if [ -n "${KERNREC_ROOT:-}" ]; then
+    chmod -R a+rwX "$KERNREC_ROOT/.fnrec" 2>/dev/null || true
+  fi
+}
 
 kernrec_setup() {
   local branch="${VLLM_CI_BRANCH:-main}"
@@ -44,8 +76,9 @@ kernrec_setup() {
   # on that machine. Create the directories world-writable up front, and
   # open up whatever the recorder wrote when the step ends, even on failure.
   mkdir -p "$KERNREC_DIR" && chmod 0777 "$root/.fnrec" "$KERNREC_DIR"
-  # shellcheck disable=SC2064
-  trap "chmod -R a+rwX '$root/.fnrec' 2>/dev/null || true" EXIT
+  KERNREC_ROOT="$root"
+  export KERNREC_ROOT
+  trap 'kernrec_finish $?' EXIT
 
   # libkernrec needs libcupti.so.<major>. torch ships it in a pip wheel that is
   # not on the loader path until torch itself has loaded it.

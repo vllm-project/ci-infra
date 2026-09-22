@@ -5,7 +5,19 @@
     kernel_table.py query <kernel_table.json.gz> <kernel_symbol_map.json.gz> --file csrc/x.cu [...]
     kernel_table.py show  <kernel_table.json.gz>
 
-<recordings-dir> is what analyze_build.py writes: <step_key>/<job-id>/kern.*.txt.
+Two input layouts:
+
+    <recordings-dir>/<step_key>/<job-id>/kern.*.txt   what analyze_build.py writes
+    --fnrec <dir>: <dir>/<job-id>/kern.*.txt + kernrec.json
+                                                      what `buildkite-agent artifact
+                                                      download ".fnrec/**/*"` yields
+                                                      inside the build; the sidecar
+                                                      (written by ci_setup.sh on exit)
+                                                      carries step key and exit status
+
+A job without a sidecar died before its shell could exit (timeout, OOM kill)
+and is filed under its step as not passed; if its step is unknown it is
+counted and skipped.
 
 One row per step key, the same unit the pipeline generator selects. Parallel
 shards and every process of every job fold into the row, because a change
@@ -38,10 +50,10 @@ knows nothing about, and stays with the static map.
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import gzip
 import json
 import sys
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -70,48 +82,88 @@ def read_recording(path: Path) -> tuple[set[str], int, bool]:
     return names, dropped, clean
 
 
-def build(a) -> int:
-    root: Path = a.recordings
-    job_state: dict[str, str] = {}
-    if a.jobs:
-        for j in json.loads(Path(a.jobs).read_text()):
-            job_state[j["id"]] = j.get("state", "")
-
-    names_index: dict[str, int] = {}
-    names: list[str] = []
-    rows: dict[str, dict] = {}
+def _jobs_from_step_layout(root: Path, job_state: dict[str, str]):
+    """(step_key, job_id, files, passed) per job under <step>/<job>/kern.*.txt."""
     for step_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        kernels: set[int] = set()
-        jobs = 0
-        procs = 0
-        dropped = 0
-        passed = True
         for job_dir in sorted(p for p in step_dir.iterdir() if p.is_dir()):
             files = sorted(job_dir.glob("kern.*.txt"))
             if not files:
                 continue
-            jobs += 1
             state = job_state.get(job_dir.name)
-            if state and state != "passed":
-                passed = False
-            for f in files:
-                procs += 1
-                got, d, _clean = read_recording(f)
-                dropped += d
-                for n in got:
-                    i = names_index.get(n)
-                    if i is None:
-                        i = names_index[n] = len(names)
-                        names.append(n)
-                    kernels.add(i)
-        if jobs:
-            rows[step_dir.name] = {
-                "jobs": jobs,
-                "passed": passed,
-                "processes": procs,
-                "dropped": dropped,
-                "kernels": sorted(kernels),
-            }
+            yield step_dir.name, job_dir.name, files, (state in (None, "passed"))
+
+
+def _jobs_from_fnrec_layout(root: Path, job_state: dict[str, str]):
+    """(step_key, job_id, files, passed) per job under <job>/kern.*.txt.
+
+    The step key comes from the kernrec.json sidecar, or from --jobs when the
+    API states were supplied. A job with recordings but no sidecar exited
+    without running its trap, so it is not passed; with no step key at all it
+    is reported as (None, ...) and the caller counts it.
+    """
+    for job_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        files = sorted(job_dir.glob("kern.*.txt"))
+        if not files:
+            continue
+        meta: dict = {}
+        side = job_dir / "kernrec.json"
+        if side.exists():
+            try:
+                meta = json.loads(side.read_text())
+            except ValueError:
+                meta = {}
+        step_key = (
+            meta.get("step_key") or job_state.get(f"{job_dir.name}:step_key") or None
+        )
+        state = job_state.get(job_dir.name)
+        if state:
+            passed = state == "passed"
+        else:
+            passed = bool(meta) and meta.get("exit_status") == 0
+        yield step_key, job_dir.name, files, passed
+
+
+def build(a) -> int:
+    job_state: dict[str, str] = {}
+    if a.jobs:
+        for j in json.loads(Path(a.jobs).read_text()):
+            job_state[j["id"]] = j.get("state", "")
+            if j.get("step_key"):
+                job_state[f"{j['id']}:step_key"] = j["step_key"]
+
+    if a.fnrec:
+        job_iter = _jobs_from_fnrec_layout(a.fnrec, job_state)
+    else:
+        job_iter = _jobs_from_step_layout(a.recordings, job_state)
+
+    names_index: dict[str, int] = {}
+    names: list[str] = []
+    rows: dict[str, dict] = {}
+    unfiled = 0
+    for step_key, _job_id, files, passed in job_iter:
+        if not step_key:
+            unfiled += 1
+            continue
+        row = rows.setdefault(
+            step_key,
+            {"jobs": 0, "passed": True, "processes": 0, "dropped": 0, "kernels": set()},
+        )
+        row["jobs"] += 1
+        row["passed"] = row["passed"] and passed
+        for f in files:
+            row["processes"] += 1
+            got, d, _clean = read_recording(f)
+            row["dropped"] += d
+            for n in got:
+                i = names_index.get(n)
+                if i is None:
+                    i = names_index[n] = len(names)
+                    names.append(n)
+                row["kernels"].add(i)
+    for row in rows.values():
+        row["kernels"] = sorted(row["kernels"])
+    if unfiled:
+        print(f"warning: {unfiled} job(s) with recordings but no step key; skipped")
 
     table = {
         "version": TABLE_VERSION,
@@ -120,9 +172,7 @@ def build(a) -> int:
             "pipeline": a.pipeline,
             "build": a.build,
             "commit": a.commit,
-            "recorded_at": dt.datetime.now(dt.UTC).isoformat(
-                timespec="seconds"
-            ),
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },
         "names": names,
         "rows": rows,
@@ -252,7 +302,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build")
-    b.add_argument("recordings", type=Path)
+    b.add_argument("recordings", type=Path, nargs="?", default=None)
+    b.add_argument(
+        "--fnrec",
+        type=Path,
+        default=None,
+        help="<job-id>/kern.*.txt + kernrec.json layout (artifact download)",
+    )
     b.add_argument("--build", type=int, required=True)
     b.add_argument("--commit", default="")
     b.add_argument("--org", default="vllm")
@@ -274,6 +330,8 @@ def main() -> int:
     s.add_argument("--top", type=int, default=15)
     s.set_defaults(fn=show)
     a = ap.parse_args()
+    if a.cmd == "build" and not (a.fnrec or a.recordings):
+        ap.error("build needs a <recordings-dir> or --fnrec <dir>")
     return a.fn(a)
 
 
