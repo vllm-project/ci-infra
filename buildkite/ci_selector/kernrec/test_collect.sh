@@ -8,6 +8,10 @@
 #   4. table with no rows          -> artifacts only, nothing to S3, exit 1
 #      (a build with no recordings at all is not a failure: exit 0, nothing to fold)
 #   5. no AWS identity             -> artifacts only, exit 0
+#   7. a build not on main (a fork branch under test) -> artifacts only, exit 0,
+#      S3 untouched: only main's recordings describe what PRs are compared to
+#   8. folding another build (KERNREC_SOURCE_BUILD_ID/_NUMBER/_JOBS): both
+#      downloads name it, recordings come per job, the table carries its number
 #   6. rerun of a commit already published, this time with a corrupt map
 #      -> exit 1 and every byte already under S3 (pair + latest.json) untouched
 #      (Codex P2 on #620: the commit prefix is written as a unit)
@@ -51,6 +55,7 @@ PY
   cat > "$T/bin/buildkite-agent" <<EOF
 #!/usr/bin/env bash
 # artifact download PATTERN DEST | artifact upload GLOB
+echo "\$*" >> "$T/agent.log"
 case "\$1 \$2" in
   "artifact download")
     if [[ "\$3" == *fnrec* ]]; then cp -R "$T/build/.fnrec" "\$4/" 2>/dev/null; fi
@@ -78,8 +83,12 @@ esac
 EOF
   chmod +x "$T/bin"/*
 
-  ( cd "$T" && PATH="$T/bin:$PATH" BUILDKITE_COMMIT=abc BUILDKITE_BUILD_NUMBER=42 BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt \
-      bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
+  local branch=main
+  [[ "$mode" == "fork-branch" ]] && branch="khluu:some-branch"
+  local extra=()
+  [[ "$mode" == "other-build" ]] && extra=(KERNREC_SOURCE_BUILD_ID=src-uuid KERNREC_SOURCE_BUILD_NUMBER=41 KERNREC_SOURCE_JOBS=job-a)
+  ( cd "$T" && PATH="$T/bin:$PATH" BUILDKITE_COMMIT=abc BUILDKITE_BUILD_NUMBER=42 BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
+      env ${extra[@]+"${extra[@]}"} bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
   local latest=no commit=no untouched=no
   [[ -f "$T/s3/bkt/ci/latest.json" ]] && latest=yes
   [[ -f "$T/s3/bkt/ci/abc/kernel_table.json.gz" ]] && commit=yes
@@ -87,6 +96,13 @@ EOF
   local verdict=OK
   [[ "$rc" == "$want_rc" && "$latest" == "$want_latest" && "$commit" == "$want_commit" ]] || { verdict=FAIL; fail=1; }
   [[ "$want_untouched" == "no" || "$untouched" == "yes" ]] || { verdict=FAIL; fail=1; }
+  if [[ "$mode" == "other-build" ]]; then
+    # both downloads went to the source build, per job, and the table is stamped with it
+    [[ "$(grep -c -- '--build src-uuid' "$T/agent.log")" == 2 ]] || { verdict=FAIL; fail=1; echo "      agent calls: $(cat "$T/agent.log")"; }
+    grep -q '^artifact download .fnrec/job-a/\* ' "$T/agent.log" || { verdict=FAIL; fail=1; echo "      no per-job download"; }
+    python3 -c 'import gzip,json,sys; t=json.load(gzip.open(sys.argv[1],"rt")); sys.exit(0 if t["source"]["build"] == 41 else 1)' "$T/artifacts/kernel_table.json.gz" \
+      || { verdict=FAIL; fail=1; echo "      table not stamped with build 41"; }
+  fi
   printf '%-4s %-18s exit=%s (want %s)  latest=%s (want %s)  commit_upload=%s (want %s)  s3_untouched=%s\n' "$verdict" "$name" "$rc" "$want_rc" "$latest" "$want_latest" "$commit" "$want_commit" "$untouched"
   [[ "$verdict" == FAIL ]] && sed 's/^/      /' "$T/log" | tail -12
   rm -rf "$T"
@@ -98,4 +114,6 @@ run_case no-builder        1 no  no  no-builder
 run_case no-rows           1 no  no  no-rows
 run_case no-identity       0 no  no  no-identity
 run_case corrupt-map-rerun 1 yes yes corrupt-map-rerun yes
+run_case fork-branch       0 no  no  fork-branch yes
+run_case other-build       0 yes yes other-build
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" || { echo "collect.sh publishing rules: FAIL"; exit 1; }
