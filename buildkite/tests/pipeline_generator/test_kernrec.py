@@ -204,3 +204,24 @@ def test_finish_stays_off_with_the_recorder(monkeypatch):
     monkeypatch.delenv(buildkite_step.KERNREC_ENV_VAR, raising=False)
     monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
     assert not any("kernrec_finish" in c for c in _commands(_render(_gpu_step())))
+
+
+def _timeout(rendered):
+    return (
+        rendered.get("timeout_in_minutes")
+        if isinstance(rendered, dict)
+        else rendered.timeout_in_minutes
+    )
+
+
+def test_recording_gives_steps_a_timeout_margin(monkeypatch):
+    """A recording run timed out steps whose tests all passed, because they
+    finish within a minute of their limit even without a recorder."""
+    step = _gpu_step(timeout_in_minutes=40)
+    monkeypatch.delenv(buildkite_step.KERNREC_ENV_VAR, raising=False)
+    assert _timeout(_render(step)) == 40
+    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    assert _timeout(_render(step)) == 50
+    assert _timeout(_render(_gpu_step(timeout_in_minutes=40, no_plugin=True))) == 40, (
+        "no recorder on the step, no margin"
+    )

@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
+import math
 import os
 import re
 import shlex
@@ -434,6 +435,20 @@ def _kernrec_applies(step: Step) -> bool:
     )
 
 
+# Recording costs time on some steps, and several already finish within a
+# minute of their limit on main: a recording run (vllm/ci #90641) timed out
+# entrypoints-unit-tests, examples and pipeline-context-parallelism-4-gpus
+# while every test passed. The margin applies only where a recorder is armed,
+# so ordinary builds keep their limits.
+RECORDING_TIMEOUT_FACTOR = 1.25
+
+
+def _recording_timeout(step: Step, minutes: int) -> int:
+    if _kernrec_applies(step):
+        return math.ceil(minutes * RECORDING_TIMEOUT_FACTOR)
+    return minutes
+
+
 def _kernrec_setup_command() -> str:
     """Source the recorder's setup script at the start of the step.
 
@@ -821,7 +836,7 @@ def convert_group_step_to_buildkite_step(
                 )
             elif step.timeout_in_minutes:
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
-                    step.timeout_in_minutes
+                    _recording_timeout(step, step.timeout_in_minutes)
                 )
 
             if include_step and not _step_should_run(step, list_file_diff):
