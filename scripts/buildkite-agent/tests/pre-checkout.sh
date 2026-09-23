@@ -45,6 +45,7 @@ check invalid-sha owner:feature zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz false u
 # When the agent secret store is unreachable, the hook must exit 255 so the
 # generated steps' automatic exit_status 255 retry fires instead of failing
 # the build.
+export BUILDKITE_SECRET_FETCH_DELAY=0
 (
     function /usr/bin/buildkite-agent() { return 1; }
     export BUILDKITE_PIPELINE_ID=018cdabc-d930-49f6-9085-634c4cb582ed
@@ -55,3 +56,32 @@ check invalid-sha owner:feature zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz false u
 ) || status=$?
 [[ "${status:-0}" -eq 255 ]] || { echo "FAIL secret-store-down: expected 255, got ${status:-0}"; exit 1; }
 printf 'PASS %s\n' secret-store-down
+
+# A transient secret-store failure (e.g. a host DNS blip) is retried in-hook.
+(
+    failures=$(mktemp)
+    trap 'rm -f "$failures"' EXIT
+    echo 2 >"$failures"
+    function /usr/bin/buildkite-agent() {
+        case "$1 $2" in
+            'secret get')
+                local remaining
+                remaining=$(<"$failures")
+                if ((remaining > 0)); then
+                    echo $((remaining - 1)) >"$failures"
+                    return 1
+                fi
+                printf 'test-only-placeholder'
+                ;;
+            'redactor add') cat >/dev/null ;;
+            *) return 1 ;;
+        esac
+    }
+    export BUILDKITE_PIPELINE_ID=018cdabc-d930-49f6-9085-634c4cb582ed
+    export BUILDKITE_REPO=https://github.com/vllm-project/vllm.git
+    export BUILDKITE_BRANCH=feature BUILDKITE_COMMIT="$sha"
+    unset BUILDKITE_PULL_REQUEST BUILDKITE_REFSPEC GIT_CONFIG_COUNT
+    source "$hook" 2>/dev/null
+    [[ "$GIT_CONFIG_COUNT" == 1 && "$(<"$failures")" == 0 ]]
+) || { echo "FAIL secret-store-transient"; exit 1; }
+printf 'PASS %s\n' secret-store-transient

@@ -33,14 +33,30 @@ BUCKET="${CI_SELECTOR_BUCKET:-vllm-ci-selector}"
 PIPELINE="${BUILDKITE_PIPELINE_SLUG:-ci}"
 COMMIT="${BUILDKITE_COMMIT:?}"
 BUILD="${BUILDKITE_BUILD_NUMBER:?}"
+# Fold another build of the same pipeline instead of this one, for when a
+# recording build's own collect step is stuck behind a job that never gets a
+# machine. The source must be at this build's commit.
+FROM=()
+if [[ -n "${KERNREC_SOURCE_BUILD_ID:-}" ]]; then
+  FROM=(--build "${KERNREC_SOURCE_BUILD_ID}")
+  BUILD="${KERNREC_SOURCE_BUILD_NUMBER:?set with KERNREC_SOURCE_BUILD_ID}"
+  echo "folding build ${BUILD} (${KERNREC_SOURCE_BUILD_ID}) from build ${BUILDKITE_BUILD_NUMBER}"
+fi
 
 WORK="$(mktemp -d)"
 cd "${WORK}" || exit 1
 trap 'rm -rf -- "${WORK}"' EXIT
 
 echo "--- :satellite: Collecting kernel recordings of build ${BUILD}"
-buildkite-agent artifact download ".fnrec/**/*" . || echo "no kernel recordings in this build"
-buildkite-agent artifact download "kernel_symbol_map.json.gz" . || echo "no kernel symbol map in this build"
+if [[ -n "${KERNREC_SOURCE_JOBS:-}" ]]; then
+  # One search per job: a build with the Python recorder on holds tens of
+  # thousands of artifacts, and one search over all of them times out.
+  printf '%s\n' ${KERNREC_SOURCE_JOBS} | xargs -P 8 -I{} sh -c \
+    'buildkite-agent artifact download ".fnrec/{}/*" . "$@" >/dev/null 2>&1 || echo "no recordings for job {}"' _ ${FROM[@]+"${FROM[@]}"}
+else
+  buildkite-agent artifact download ".fnrec/**/*" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel recordings in this build"
+fi
+buildkite-agent artifact download "kernel_symbol_map.json.gz" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel symbol map in this build"
 n_files=$(find .fnrec -name 'kern.*.txt' 2>/dev/null | wc -l | tr -d ' ')
 n_jobs=$(find .fnrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
 echo "${n_files} recording files from ${n_jobs} jobs"
@@ -96,6 +112,14 @@ fi
 if [[ "${map_ok}" != "yes" ]]; then
   echo "no usable symbol map in this build; not publishing (${COMMIT}/ keeps whatever an earlier build put there)" >&2
   exit 1
+fi
+
+# Only main's recordings describe the tree PRs are selected against, and only
+# postmerge agents can write the bucket anyway. A branch under test stops here,
+# green, with everything on this job's artifacts.
+if [[ "${BUILDKITE_BRANCH:-main}" != "main" ]]; then
+  echo "branch ${BUILDKITE_BRANCH} is not main; not publishing (the artifacts above are the result)"
+  exit 0
 fi
 
 echo "--- :s3: Publishing to s3://${BUCKET}/${PIPELINE}/${COMMIT}/"

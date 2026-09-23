@@ -81,6 +81,11 @@ sudo systemctl enable --now buildkite-agent
   Hooks are re-read at every job start, but merging a template change here does
   not update running hosts — re-install the hook on each affected agent with
   the Quick install commands above.
+- **DNS on mithril H200 VMs.** DHCP hands out a single resolver (the
+  provider's CoreDNS, `10.96.0.10`), so a CoreDNS blip fails every lookup on
+  the host (`lookup ... on 127.0.0.53:53: server misbehaving`). Add public
+  resolvers so systemd-resolved can answer from either:
+  `printf '[Resolve]\nDNS=1.1.1.1 8.8.8.8\n' | sudo tee /etc/systemd/resolved.conf.d/10-public-dns.conf && sudo systemctl restart systemd-resolved`
 - `HF_HOME=/mnt/vllm-ci` matches the `h200_18gb` / `h200_35gb` docker plugins,
   which mount `/mnt/vllm-ci` into containers. Keep them in sync: if the host's
   HF cache lives elsewhere, either mount it at `/mnt/vllm-ci` or update the

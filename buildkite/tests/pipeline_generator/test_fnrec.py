@@ -97,3 +97,15 @@ def test_on_leaves_docker_and_no_plugin_steps_alone(monkeypatch, overrides):
 
 def _fnrec_or_setup(step):
     return buildkite_step._fnrec_applies(step)
+
+
+def test_the_python_recorder_alone_gets_the_timeout_margin(monkeypatch):
+    monkeypatch.delenv(buildkite_step.KERNREC_ENV_VAR, raising=False)
+    monkeypatch.setenv(buildkite_step.FNREC_ENV_VAR, "1")
+    rendered = _render(_gpu_step(timeout_in_minutes=40))
+    timeout = (
+        rendered.get("timeout_in_minutes")
+        if isinstance(rendered, dict)
+        else rendered.timeout_in_minutes
+    )
+    assert timeout == 50

@@ -36,10 +36,24 @@ if [[ "${BUILDKITE_BRANCH:-}" == *:* &&
     export BUILDKITE_REFSPEC="$BUILDKITE_COMMIT"
 fi
 
-if ! github_pat=$(/usr/bin/buildkite-agent secret get GITHUB_READONLY_PAT); then
-    echo "ERROR: could not fetch GITHUB_READONLY_PAT from the agent secret store (provider/infrastructure failure — exiting 255 to trigger the infra retry)" >&2
-    exit 255
-fi
+# Retry in-hook first: transient host DNS failures ("lookup agent-edge.buildkite.com
+# on 127.0.0.53:53: server misbehaving") usually clear within seconds, which is
+# much cheaper than a job-level retry that re-queues and re-runs the env hook.
+secret_attempts=${BUILDKITE_SECRET_FETCH_ATTEMPTS:-5}
+secret_delay=${BUILDKITE_SECRET_FETCH_DELAY:-2}
+for ((attempt = 1; ; attempt++)); do
+    if github_pat=$(/usr/bin/buildkite-agent secret get GITHUB_READONLY_PAT); then
+        break
+    fi
+    if ((attempt >= secret_attempts)); then
+        echo "ERROR: could not fetch GITHUB_READONLY_PAT from the agent secret store after ${attempt} attempts (provider/infrastructure failure — exiting 255 to trigger the infra retry)" >&2
+        exit 255
+    fi
+    echo "WARNING: GITHUB_READONLY_PAT fetch failed (attempt ${attempt}/${secret_attempts}); retrying in ${secret_delay}s" >&2
+    sleep "$secret_delay"
+    secret_delay=$((secret_delay * 2))
+done
+unset attempt secret_attempts secret_delay
 github_basic=$(printf 'x-access-token:%s' "$github_pat" | base64 -w0)
 
 # The secret command redacts the raw PAT. Register the derived Basic payload and

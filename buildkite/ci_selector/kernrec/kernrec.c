@@ -8,7 +8,20 @@
  * Output: $KERNREC_DIR/kern.<pid>.txt (default .fnrec/$BUILDKITE_JOB_ID, next
  * to the Python recorder's fn.*.txt). One mangled kernel name per line,
  * appended the first time the name is seen, so a SIGKILL loses nothing that
- * was recorded before it. Lines starting with '#' are metadata.
+ * was written before it. Lines starting with '#' are metadata.
+ *
+ * Written, not just recorded: CUPTI hands records over only when a buffer
+ * fills or someone flushes, and one 8 MiB buffer holds more kernel records
+ * than most processes ever launch. Flushing only at exit meant every process
+ * that never reaches atexit (engine cores and Ray workers SIGKILLed at
+ * teardown, os._exit after fork) left nothing at all, about fifteen CUDA
+ * steps per nightly. So a thread flushes on a timer (KERNREC_FLUSH_MS,
+ * default 1000; 0 turns it off): a plain flush every tick, which returns
+ * buffers whose records are all complete, and a forced one every
+ * KERNREC_FORCE_EVERY ticks (default 5), which also returns the buffer a
+ * busy process always has a kernel in flight in. A kill loses at most the
+ * last few seconds of new names. The file is opened at cuInit, so a process
+ * that initialised CUDA and was killed before any flush still says so.
  *
  * Why the Activity API and not the Callback API: kernels replayed from a
  * CUDA graph never pass through cuLaunchKernel, but CUPTI still reports one
@@ -23,12 +36,14 @@
 #include <cupti.h>
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Kernel activity records are versioned structs (CUpti_ActivityKernel9 in
@@ -50,6 +65,16 @@ static char **g_keys = NULL; /* open-addressing set of strdup'd names */
 static size_t g_cap = 0, g_count = 0;
 static unsigned long g_records = 0, g_dropped = 0;
 static int g_initialized = 0;
+
+/* Flush thread; see the header comment. g_flush_pid guards the join: a forked
+ * child inherits the atexit handler but not the thread. */
+static pthread_mutex_t g_flush_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_flush_cond = PTHREAD_COND_INITIALIZER;
+static pthread_t g_flush_thread;
+static pid_t g_flush_pid = 0;
+static int g_flush_stop = 0;
+static long g_flush_ms = 1000;
+static long g_force_every = 5;
 
 /* ---- string set -------------------------------------------------------- */
 
@@ -118,9 +143,9 @@ static int mkdir_p(const char *path) {
   return mkdir_open(tmp);
 }
 
-/* Lazily opened on the first record, keyed by pid, so a process that forks
- * after CUDA init (unsupported by CUDA, but it happens) does not write into
- * its parent's file. Caller holds g_lock. */
+/* Opened at cuInit and keyed by pid, so a process that forks after CUDA init
+ * (unsupported by CUDA, but it happens) opens its own file on its first
+ * record instead of writing into its parent's. Caller holds g_lock. */
 static FILE *output(void) {
   pid_t pid = getpid();
   if (g_out && g_out_pid == pid) return g_out;
@@ -205,7 +230,71 @@ static void CUPTIAPI buffer_completed(CUcontext ctx, uint32_t stream_id,
   free(buffer);
 }
 
+static long env_long(const char *name, long dflt, long lo, long hi) {
+  const char *v = getenv(name);
+  if (!v || !*v) return dflt;
+  char *end = NULL;
+  long n = strtol(v, &end, 10);
+  if (*end || n < lo || n > hi) return dflt;
+  return n;
+}
+
+static void *flush_loop(void *arg) {
+  (void)arg;
+  long tick = 0;
+  pthread_mutex_lock(&g_flush_lock);
+  while (!g_flush_stop) {
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += g_flush_ms / 1000;
+    until.tv_nsec += (g_flush_ms % 1000) * 1000000L;
+    if (until.tv_nsec >= 1000000000L) {
+      until.tv_sec += 1;
+      until.tv_nsec -= 1000000000L;
+    }
+    int rc = 0;
+    while (!g_flush_stop && rc != ETIMEDOUT)
+      rc = pthread_cond_timedwait(&g_flush_cond, &g_flush_lock, &until);
+    if (g_flush_stop) break;
+    pthread_mutex_unlock(&g_flush_lock);
+    /* Outside g_flush_lock: the flush calls buffer_completed, which takes
+     * g_lock, and at_exit takes g_flush_lock to stop us. */
+    tick++;
+    int forced = g_force_every > 0 && tick % g_force_every == 0;
+    cuptiActivityFlushAll(forced ? CUPTI_ACTIVITY_FLAG_FLUSH_FORCED : 0);
+    pthread_mutex_lock(&g_flush_lock);
+  }
+  pthread_mutex_unlock(&g_flush_lock);
+  return NULL;
+}
+
+static void start_flush_thread(void) {
+  g_flush_ms = env_long("KERNREC_FLUSH_MS", 1000, 0, 3600000);
+  g_force_every = env_long("KERNREC_FORCE_EVERY", 5, 0, 1000000);
+  if (g_flush_ms == 0) return;
+  /* Keep this thread out of the application's signal handling. */
+  sigset_t all, old;
+  sigfillset(&all);
+  pthread_sigmask(SIG_SETMASK, &all, &old);
+  if (pthread_create(&g_flush_thread, NULL, flush_loop, NULL) == 0)
+    g_flush_pid = getpid();
+  else
+    fprintf(stderr, "kernrec: no flush thread; recording until exit only\n");
+  pthread_sigmask(SIG_SETMASK, &old, NULL);
+}
+
+static void stop_flush_thread(void) {
+  if (g_flush_pid != getpid()) return;
+  pthread_mutex_lock(&g_flush_lock);
+  g_flush_stop = 1;
+  pthread_cond_signal(&g_flush_cond);
+  pthread_mutex_unlock(&g_flush_lock);
+  pthread_join(g_flush_thread, NULL);
+  g_flush_pid = 0;
+}
+
 static void at_exit(void) {
+  stop_flush_thread();
   /* Drain records still sitting in device buffers. */
   cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
   pthread_mutex_lock(&g_lock);
@@ -247,6 +336,12 @@ int InitializeInjection(void) {
             cupti_err(st));
     return 1;
   }
+  /* Open the file now, not at the first record, so a process killed before
+   * its first flush still leaves a header saying it initialised CUDA. */
+  pthread_mutex_lock(&g_lock);
+  output();
+  pthread_mutex_unlock(&g_lock);
   atexit(at_exit);
+  start_flush_thread();
   return 1;
 }
