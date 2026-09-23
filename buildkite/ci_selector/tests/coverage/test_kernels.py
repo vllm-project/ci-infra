@@ -579,7 +579,7 @@ def test_decide_attributes_per_kernel_by_default(tmp_path, tmp_repo, monkeypatch
     d = decide(state, sel, root, base, head, table=no_table, kernels=ev)
     assert d.dropped_by_kernels == set(), "both steps launched a kernel of the file"
 
-    monkeypatch.setenv(KERNEL_ATTRIBUTION_ENV, "kernal")
+    monkeypatch.setenv(KERNEL_ATTRIBUTION_ENV, "per-line")
     with pytest.raises(ValueError):
         decide(state, sel, root, base, head, table=no_table, kernels=ev)
 
