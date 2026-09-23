@@ -6,7 +6,7 @@ Works out which vLLM CI jobs a diff needs to run. It derives the answer from the
 
 **The code map** reads the repo and the CI config (import graph, registries, step targets, container-build DAG) and works out which steps a diff could affect. When it cannot work something out it selects more, never less.
 
-**The coverage record** is a table of what each step actually ran on real CI builds, one row per step, produced by an instrumented build.
+**The coverage record** is a table of what each step actually ran on real CI builds, one row per step, produced by an instrumented build. The recorder that produces it is `fnrec/` (a `sys.monitoring` hook loaded into every Python process of a step when the build has `VLLM_CI_FNREC=1`); `scripts/` turns a build's recordings into the table.
 
 Neither is a stage of the other. `decide.py` reads both, per changed file:
 

@@ -82,6 +82,11 @@ The generator relies on several environment variables, typically provided by Bui
     (`buildkite/ci_selector/kernrec`) into every CUDA process of every GPU step
     and upload its `.fnrec/**` output as job artifacts. Off by default; meant
     for nightly and post-merge builds that feed the test selector.
+*   `VLLM_CI_FNREC`: Set to "1" to load the Python function recorder
+    (`buildkite/ci_selector/fnrec`) into every Python process of every GPU
+    step, via a `.pth` in the container's site-packages, writing next to the
+    kernel recorder under `.fnrec/<job-id>/`. Same artifact upload, same
+    audience: the nightly and post-merge builds that feed the test selector.
 *   `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
     set, the generator emits those steps and their transitive dependencies,
     ignoring normal source-file selection. Generated AMD mirror keys such as

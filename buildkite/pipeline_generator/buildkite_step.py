@@ -434,6 +434,41 @@ def _kernrec_applies(step: Step) -> bool:
     )
 
 
+# Python function recorder (buildkite/ci_selector/fnrec). Same opt-in shape
+# as the kernel recorder and the same output directory, so one artifact glob
+# and one collect step cover both. Independent switch: the two records have
+# different producers and can be turned on separately.
+FNREC_ENV_VAR = "VLLM_CI_FNREC"
+
+
+def fnrec_enabled() -> bool:
+    return os.getenv(FNREC_ENV_VAR, "") == "1"
+
+
+def _fnrec_applies(step: Step) -> bool:
+    """The steps _get_setup_commands arms with the nvidia profile."""
+    return (
+        fnrec_enabled() and not step.no_plugin and not step.label.startswith(":docker:")
+    )
+
+
+def _fnrec_setup_command() -> str:
+    """Source the Python recorder's setup script at the start of the step.
+    Double quotes only, and never fails the step, like the kernel one."""
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        f"{branch}/buildkite/ci_selector/fnrec/ci_setup.sh"
+    )
+    return (
+        'echo "--- :snake: Python function recorder"; '
+        "mkdir -p /tmp/fnrec && "
+        f'curl -sSfL --retry 3 --max-time 60 -o /tmp/fnrec/ci_setup.sh "{url}" && '
+        ". /tmp/fnrec/ci_setup.sh || "
+        'echo "fnrec: setup skipped"'
+    )
+
+
 def _kernrec_setup_command() -> str:
     """Source the recorder's setup script at the start of the step.
 
@@ -550,6 +585,8 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
         ]
         if kernrec_enabled():
             commands.append(_kernrec_setup_command())
+        if fnrec_enabled():
+            commands.append(_fnrec_setup_command())
         return commands
 
     if setup_profile == "amd":
@@ -795,7 +832,7 @@ def convert_group_step_to_buildkite_step(
 
             if step.env:
                 buildkite_step.env = step.env
-            if _kernrec_applies(step):
+            if _kernrec_applies(step) or _fnrec_applies(step):
                 # The recorder writes under <checkout>/.fnrec/<job-id>; the
                 # agent collects it from the checkout, in docker and k8s alike.
                 buildkite_step.artifact_paths = [KERNREC_ARTIFACT_PATH]

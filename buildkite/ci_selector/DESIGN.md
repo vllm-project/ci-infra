@@ -74,7 +74,7 @@ All of it is parsed, with tests. A file that fits no mechanism runs everything.
 
 One row per step, holding the function names that step was observed to enter, keyed by file and identified by full qualified name so that fifty different `forward` methods do not collapse into one.
 
-It is collected by instrumenting full CI runs. The recorder subscribes to CPython's `sys.monitoring` function-start event and returns `DISABLE` from the callback, so each function costs one event ever. Across the 222 jobs that both an instrumented sweep and a plain scheduled run passed, total wall clock was 83.2 hours against 83.3.
+It is collected by instrumenting full CI runs. The recorder (`fnrec/fnrec.py`, armed by `VLLM_CI_FNREC=1`) subscribes to CPython's `sys.monitoring` function-start event and returns `DISABLE` from the callback, so each function costs one event ever. A `.pth` file loads it into every Python process of the step, so engine cores and workers record alongside pytest. Across the 222 jobs that both an instrumented sweep and a plain scheduled run passed, total wall clock was 83.2 hours against 83.3.
 
 Every row carries a trust stamp: which builds and jobs fed it, whether they passed, whether tests executed, whether every parallel slice reported. A row whose stamp shows any weakness can add jobs but never remove one.
 
