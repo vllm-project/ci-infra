@@ -410,6 +410,9 @@ KNOWN_STEP_FIELDS = {
     "agent_pool",
     "concurrency",
     "concurrency_group",
+    # Emitted as Buildkite's `if`: evaluated on upload, after step selection.
+    # It can only restrict execution, so it does not force-select a step.
+    "if_condition",
     # Buildkite built-in, absent from the generator's Step model, so it is
     # dropped before reaching a command. Governs ordering after a failure.
     "allow_dependency_failure",

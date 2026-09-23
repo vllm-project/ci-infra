@@ -136,7 +136,16 @@ get_diff_main() {
 # upload_pipeline: render and upload the Buildkite pipeline YAML
 # ---------------------------------------------------------------------------
 upload_pipeline() {
+    local rocm_stable_image_promotion=0
+
+    if [[ -f ".buildkite/scripts/rocm/promote-stable-images.sh" ]] \
+        && grep -q 'CI_BASE_IMAGE_TAG_BUILD_REF' \
+            .buildkite/scripts/ci-bake-rocm.sh 2>/dev/null; then
+        rocm_stable_image_promotion=1
+    fi
+
     echo "Uploading pipeline..."
+    echo "ROCm stable image promotion: ${rocm_stable_image_promotion}"
     # Install minijinja
     ls .buildkite || buildkite-agent annotate --style error 'Please merge upstream main branch for buildkite CI'
     curl -sSfL https://github.com/mitsuhiko/minijinja/releases/download/2.3.1/minijinja-cli-installer.sh | sh
@@ -181,6 +190,7 @@ upload_pipeline() {
             -D vllm_ci_branch="$VLLM_CI_BRANCH" \
             -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
             -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
+            -D rocm_stable_image_promotion="${rocm_stable_image_promotion}" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
