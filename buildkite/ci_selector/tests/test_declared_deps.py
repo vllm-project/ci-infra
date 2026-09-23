@@ -81,7 +81,9 @@ def test_raw_reads_are_whitelisted_in_both_directions():
     # step_refs: the gate's own call. classify: requirements twice, the
     # release-ci and lint-only guards, the csrc hold (which can only keep a
     # step), and the inert veto (which can only keep run-all: a declared file
-    # must never be silenced to the floor).
+    # must never be silenced to the floor). The kernel record's floor,
+    # `step_refs.steps_naming_file`, reads the attribute inside the gate module
+    # and can likewise only keep a step.
     assert raw_calls == {
         "codemap/step_refs.py": 1,
         "codemap/classify.py": 6,

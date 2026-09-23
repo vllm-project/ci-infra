@@ -78,6 +78,8 @@ It is collected by instrumenting full CI runs. The recorder subscribes to CPytho
 
 Every row carries a trust stamp: which builds and jobs fed it, whether they passed, whether tests executed, whether every parallel slice reported. A row whose stamp shows any weakness can add jobs but never remove one.
 
+A second record covers what no Python frame can: **the kernel record**. A CUPTI injection library on the nightly and daily runs writes the set of GPU kernel names each step launched (`kernrec/`), and the image build emits a map from every compiled csrc object to its source file, the headers it included, and the kernel symbols it defines. Joined, they say which steps ran code compiled from a changed `.cu` or header. The rows carry the same kind of health (every job passed, every shard reported, no dropped records), and a row with any weakness can select but never drop.
+
 ### 3.3 Why both
 
 The map is complete but imprecise. It can answer for the whole repository, including files never observed, but it reasons about reach rather than risk. The record is precise but partial, and only knows what it has watched.
@@ -94,7 +96,7 @@ Three changed files, one of each kind.
 
 **`tests/entrypoints/openai/chat_completion/test_chat.py`**, a test file. The map asks which steps run this path, parsed from their shell commands rather than inferred from their labels. That answer is exact, so the record adds nothing.
 
-**`csrc/libtorch_stable/attention/merge_attn_states.cu`**, a kernel. No Python frame exists for it, so the record cannot speak about it directly. The map scopes it to the device families CMake says compile it, then translates the change into the ops that file registers and joins those to the `torch.ops.*` call sites in `vllm/`. That produces Python wrapper names, which the record can answer.
+**`csrc/libtorch_stable/attention/merge_attn_states.cu`**, a kernel. No Python frame exists for it, so the Python record cannot speak about it directly. The map scopes it to the device families CMake says compile it and, since the tree is copied into the CUDA image, to every step running that image. The kernel record then reads the symbol map for the kernels compiled from that file and keeps the steps whose rows launched one of them; a step with a healthy row that launched none, selected for nothing else, is dropped. PR 55755, a one-file `.cu` change, goes from 311 jobs on the map to 158.
 
 The three answers are unioned, so a step needed for any one file runs. Had any file said "run everything", the whole pipeline runs and no drop applies anywhere in that diff.
 
@@ -136,7 +138,7 @@ None of it routes through imports, so each surface has its own derived mechanism
 
 | surface | routing | droppable on evidence |
 | --- | --- | --- |
-| `csrc/`, `.cu`, `.cpp`, headers | CMake device families, plus the op-to-wrapper bridge | yes, through the wrapper names |
+| `csrc/`, `.cu`, `.cpp`, headers | CMake device families, plus the op-to-wrapper bridge | yes: the kernel record, per file, for a file compiled only into kernels; the wrapper names otherwise |
 | `cmake/` | the same build map, inheriting the context it is included from | no |
 | `rust/` | which shipped artifact the crate feeds, not which image copies it | no |
 | Dockerfiles, `requirements/` | the image build graph | no |
@@ -147,7 +149,9 @@ Measured on 25 C++/cmake/requirements pull requests: 4,284 jobs against CI's own
 
 Two of these rules answer narrower than "run everything", which is the only place the tool volunteers less under uncertainty. Scoping a build file to its compiling families is a reading of what CMake declares rather than a guess. And a file no mechanism reaches, that no image copies and no step names, runs only the always-on builds, because nothing claiming it is itself evidence.
 
-`CMakeLists.txt` and `pyproject.toml` still run everything, since they compile into every wheel. Outside the op bridge there is no execution evidence for a non-Python file, so those surfaces narrow by reasoning about the build and never by observation.
+`CMakeLists.txt` and `pyproject.toml` still run everything, since they compile into every wheel. Outside csrc there is no execution evidence for a non-Python file, so those surfaces narrow by reasoning about the build and never by observation.
+
+Inside csrc the kernel record decides per kernel where it can and per file where it cannot. A changed `.cu` is read on both sides of the diff and each changed line is placed: inside a `__global__` body it names that kernel; inside a `__device__` helper, the kernels in the file whose bodies reach it; inside a host function, the kernels it launches, through dispatch helpers and macros in the same file; a namespace-scope constant or macro goes through the functions that mention it. The names join back to the map's symbols by the `<len>name` component of the mangling, so one name covers every template instantiation. A line that cannot be placed, such as a `#if` at namespace scope, sends the whole file to the file-level reading, which is where every csrc change was before. On a one-kernel fix inside `cache_kernels.cu` this is the difference between 147 steps and 5. The gate that matters at file level is what else depends on the file. A `.cu` compiled into one object with kernels is clearable: a step whose healthy row launched none of them ran nothing from it. A header that a host-only object such as `torch_bindings.cpp` also includes is not: it can change what every step does at import, and a kernel silence cannot speak to that, so it selects steps whose rows launched its kernels and never drops one. Files outside the CUDA build (`csrc/cpu/`, `csrc/rocm/`) are not in the map and stay with the map's routing. Steps naming a file outright in `source_file_dependencies` are never dropped; a directory declaration such as `csrc/` is the blanket the record replaces.
 
 ## 7. Integration
 
@@ -194,6 +198,7 @@ ci-select --repo /path/to/vllm --diff origin/main...HEAD             # both inpu
 ci-select codemap --repo /path/to/vllm --diff origin/main...HEAD     # the map alone, for comparison
 ci-select --repo /path/to/vllm --diff origin/main...HEAD --emit-keys # the same run, as the key list CI would consume
 ci-validate crosscheck --repo /path/to/vllm --prs 50219              # replay a real PR against real Buildkite outcomes
+ci-fetch-kernel-record                                                 # pull the latest kernel table + symbol map into coverage-data/
 ```
 
 The range must be two-ended. A one-ended range compares against the working tree, which skips the base checkout, so added-file routing never fires.

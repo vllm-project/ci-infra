@@ -8,15 +8,19 @@ Works out which vLLM CI jobs a diff needs to run. It derives the answer from the
 
 **The coverage record** is a table of what each step actually ran on real CI builds, one row per step, produced by an instrumented build.
 
-Neither is a stage of the other. `decide.py` reads both, per changed file:
+**The kernel record** is the same idea for `csrc/`, where no Python frame exists: a table of the GPU kernels each step launched (CUPTI, recorded on the nightly and daily runs) joined to a map of which csrc file each kernel was compiled from (read off the image build's objects). Both are produced by `buildkite/ci_selector/kernrec/`.
+
+Neither is a stage of the other. `decide.py` reads all of them, per changed file:
 
 | for file F and step S | decides |
 | --- | --- |
-| S has a row, and it shows S ran F | **select**, and the map gets no vote |
+| S has a row, and it shows S ran F (a function, or a kernel compiled from F) | **select**, and the map gets no vote |
 | S has a row, and it shows S ran none of F | **drop**, if every gate agrees |
-| S has no row, or F is outside the recorder's root | **the map decides** |
+| S has no row, or F is outside what the record can see | **the map decides** |
 
-Selecting takes one observation and carries no gate. Dropping carries all of them.
+A changed `.cu` votes with the kernels its diff touched, not the whole file: `coverage/changed_kernels.py` reads both sides of the file, finds the definition each changed line falls in (a `__global__`, a `__device__` helper and the kernels reaching it, a host launcher and the kernels it launches, a constant and the functions using it) and joins the names back to the map's symbols. Anything it cannot name falls back to the whole file. `CI_SELECTOR_KERNEL_ATTRIBUTION=file` restores the whole-file reading for measurement.
+
+Selecting takes one observation and carries no gate. Dropping carries all of them. For the kernel record the gates are: the row is healthy (every job passed, every shard reported, no dropped records), the file is clearable (compiled into kernels and into no host-only object, so a header `torch_bindings.cpp` includes may select but never drop), the step was selected for nothing but files the record can clear, no step declares the file by name, and the table and map come from the same commit.
 
 ## Setup
 
@@ -28,6 +32,14 @@ source .venv/bin/activate
 ```
 
 For the coverage half, put a table at `coverage-data/table.json.gz`, which is gitignored because it is a build artifact. Override the location with `--table` or `$CI_SELECTOR_TABLE`. Without one, the selector runs on the code map alone and says so on stderr.
+
+For the kernel record, which answers for `csrc/`, fetch the latest published pair into the same directory:
+
+```bash
+ci-fetch-kernel-record
+```
+
+That downloads `kernel_table.json.gz` and `kernel_symbol_map.json.gz` for the commit `latest.json` names in the public `vllm-ci-selector` bucket, validates both, and only then replaces what is on disk. Override with `--kernel-table` / `--kernel-symbol-map` or `$CI_SELECTOR_KERNEL_TABLE` / `$CI_SELECTOR_KERNEL_SYMBOL_MAP`. Without them, csrc files route on the code map alone, which today means every step on the CUDA image.
 
 ## Commands
 
@@ -56,6 +68,8 @@ Replays real PRs and compares our selection against what CI actually ran, and wh
 ```bash
 ci-validate crosscheck --repo /path/to/vllm --prs 50378 47189
 ```
+
+Each line reads CI ran / code map alone / records + code map, and `kern +a/-d` is the kernel record's share. `--kernel-table` and `--kernel-symbol-map` point it at a specific pair; `CI_SELECTOR_KERNEL_UNMATCHED_DROPS=1` lets a table and map from different commits drop steps, which is for measuring against older data and never for production.
 
 Run it after any change to selection. It exits 1 on a problem, and also when it finds nothing at all, because a detector that has stopped detecting looks like a clean result from the outside. Anything checkable from a plain checkout is a drift-marked test instead, see Tests below.
 
