@@ -106,12 +106,14 @@ tpu_queue_max_seconds = 43200
 # two-host slice is built in their place.
 tpu_admission_max_seconds = 3600
 
-# Every CI image this fleet runs is built into the manager project's Artifact
-# Registry, and a step names its own tag, so the project is the boundary rather
-# than the repository. Trailing slash required: without it the prefix would also
-# match a longer repository name.
+# A step names its own image tag, so this is the boundary on what can run. The
+# manager project's registry is trusted whole; vllm-torchtpu's CI image moved to
+# inferact-vllm-tpu in vllm-torchtpu#1205, and only that repository is trusted
+# there. Trailing slash required: without it a prefix would also match a longer
+# repository name.
 allowed_image_repos = [
   "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/",
+  "us-central1-docker.pkg.dev/inferact-vllm-tpu/vllm-tpu-ci/",
 ]
 
 # A cluster is its project and its region; everything it is called is derived
