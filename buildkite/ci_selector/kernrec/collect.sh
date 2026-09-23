@@ -50,7 +50,14 @@ cd "${WORK}" || exit 1
 trap 'rm -rf -- "${WORK}"' EXIT
 
 echo "--- :satellite: Collecting kernel recordings of build ${BUILD}"
-buildkite-agent artifact download ".fnrec/**/*" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel recordings in this build"
+if [[ -n "${KERNREC_SOURCE_JOBS:-}" ]]; then
+  # One search per job: a build with the Python recorder on holds tens of
+  # thousands of artifacts, and one search over all of them times out.
+  printf '%s\n' ${KERNREC_SOURCE_JOBS} | xargs -P 8 -I{} sh -c \
+    'buildkite-agent artifact download ".fnrec/{}/*" . "$@" >/dev/null 2>&1 || echo "no recordings for job {}"' _ ${FROM[@]+"${FROM[@]}"}
+else
+  buildkite-agent artifact download ".fnrec/**/*" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel recordings in this build"
+fi
 buildkite-agent artifact download "kernel_symbol_map.json.gz" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel symbol map in this build"
 n_files=$(find .fnrec -name 'kern.*.txt' 2>/dev/null | wc -l | tr -d ' ')
 n_jobs=$(find .fnrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')

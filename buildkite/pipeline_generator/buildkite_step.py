@@ -550,7 +550,7 @@ def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroup
         depends_on=depends_on,
         allow_dependency_failure=True,
         soft_fail=True,
-        timeout_in_minutes=30,
+        timeout_in_minutes=90,  # tens of thousands of artifacts with the Python recorder on
     )
     return BuildkiteGroupStep(group=KERNREC_COLLECT_GROUP, steps=[step])
 
