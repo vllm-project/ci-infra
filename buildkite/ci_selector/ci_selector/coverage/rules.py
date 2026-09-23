@@ -225,6 +225,12 @@ class Reading:
     # the kernel record: a silence about kernels cannot overrule an observed
     # call on another changed file.
     executes: list[str] = field(default_factory=list)
+    # The subset of `executes` whose only evidence is an op-wrapper stand-in
+    # for a changed csrc file. That is the same file the kernel record answers
+    # for, not another one, and a coarser answer: the stand-in covers every op
+    # the file binds, and one of them, a torch.compile pass that names dozens
+    # of ops, runs in every compiling step (61 steps held on vllm#55755).
+    executes_by_proxy: list[str] = field(default_factory=list)
 
 
 def unknown_names(
@@ -305,11 +311,26 @@ def read_pr(
         # `look_up` re-makes this exact match further down, so both read the
         # same predicate or neither moves.
         row = table.row(key)
-        if row is not None and any(
-            row_shows_use(row, f, name, mode) for f in query.files for name in f.names
-        ):
+        if row is not None:
+            direct = any(
+                row_shows_use(row, f, name, mode)
+                for f in query.files
+                if not f.proxy
+                for name in f.names
+            )
+            via_proxy = not direct and any(
+                row_shows_use(row, f, name, mode)
+                for f in query.files
+                if f.proxy
+                for name in f.names
+            )
+        else:
+            direct = via_proxy = False
+        if direct or via_proxy:
             reading.kept.append(step_id)
             reading.executes.append(step_id)
+            if via_proxy:
+                reading.executes_by_proxy.append(step_id)
             reading.reasons["row-executes-a-changed-function"] += 1
             continue
 
