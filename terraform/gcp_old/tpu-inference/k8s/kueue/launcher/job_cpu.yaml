@@ -30,6 +30,12 @@ spec:
     spec:
       # No TPU nodeSelector and no toleration: a TPU node is tainted against
       # exactly this pod. The class builds a node against the requests below.
+      # Stated here because the fleet merges these two only into pods that
+      # hold chips (tpuPods.spec in pod_defaults.yaml). A Job's pod has to say
+      # Never or OnFailure, and without the account the pod runs as `default`
+      # and has none of the fleet's Workload Identity grants.
+      restartPolicy: Never
+      serviceAccountName: tpu-workload
       nodeSelector:
         cloud.google.com/compute-class: worker-cpu
       containers:
