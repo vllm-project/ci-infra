@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
+import math
 import os
 import re
 import shlex
@@ -425,12 +426,27 @@ def kernrec_enabled() -> bool:
     return os.getenv(KERNREC_ENV_VAR, "") == "1"
 
 
+# Steps the kernel recorder stays off, and why. A CUPTI client changes what
+# some tests see, and a recording run must not turn a green step red. With no
+# recording the step has no row, so the selector keeps it: only savings lost.
+KERNREC_SKIP_STEPS = {
+    # quantization/test_per_token_kv_cache.py::test_reshape_and_cache_per_token_head
+    # [int4-*] fails its tolerance on shards 1 and 3 in every recording run
+    # (daily 90513, nightly 90589, vllm/ci #90641) and in no recorder-free main
+    # build (90574, 90608, 90617, 90628, the last at 90641's commit). Likely a
+    # latent read of uninitialised memory or a race that CUPTI's allocations or
+    # timing expose; back on once a kernel owner has looked.
+    "quantization": "int4 per-token KV cache test fails under CUPTI",
+}
+
+
 def _kernrec_applies(step: Step) -> bool:
     """The steps _get_setup_commands arms with the nvidia profile."""
     return (
         kernrec_enabled()
         and not step.no_plugin
         and not step.label.startswith(":docker:")
+        and step.key not in KERNREC_SKIP_STEPS
     )
 
 
@@ -467,6 +483,20 @@ def _fnrec_setup_command() -> str:
         ". /tmp/fnrec/ci_setup.sh || "
         'echo "fnrec: setup skipped"'
     )
+
+
+# Recording costs time on some steps, and several already finish within a
+# minute of their limit on main: a recording run (vllm/ci #90641) timed out
+# entrypoints-unit-tests, examples and pipeline-context-parallelism-4-gpus
+# while every test passed. The margin applies only where a recorder is armed,
+# kernel or Python, so ordinary builds keep their limits.
+RECORDING_TIMEOUT_FACTOR = 1.25
+
+
+def _recording_timeout(step: Step, minutes: int) -> int:
+    if _kernrec_applies(step) or _fnrec_applies(step):
+        return math.ceil(minutes * RECORDING_TIMEOUT_FACTOR)
+    return minutes
 
 
 def _kernrec_setup_command() -> str:
@@ -535,7 +565,7 @@ def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroup
         depends_on=depends_on,
         allow_dependency_failure=True,
         soft_fail=True,
-        timeout_in_minutes=30,
+        timeout_in_minutes=90,  # tens of thousands of artifacts with the Python recorder on
     )
     return BuildkiteGroupStep(group=KERNREC_COLLECT_GROUP, steps=[step])
 
@@ -583,9 +613,9 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
             "echo '--- :gear: CUDA Coredump Setup'",
             "export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'",
         ]
-        if kernrec_enabled():
+        if _kernrec_applies(step):
             commands.append(_kernrec_setup_command())
-        if fnrec_enabled():
+        if _fnrec_applies(step):
             commands.append(_fnrec_setup_command())
         return commands
 
@@ -858,7 +888,7 @@ def convert_group_step_to_buildkite_step(
                 )
             elif step.timeout_in_minutes:
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
-                    step.timeout_in_minutes
+                    _recording_timeout(step, step.timeout_in_minutes)
                 )
 
             if include_step and not _step_should_run(step, list_file_diff):

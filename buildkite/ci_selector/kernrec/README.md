@@ -28,6 +28,17 @@ nothing. Recording is meant for nightly or post-merge full runs only.
 Names are appended the first time they are seen, so a test killed by a
 timeout still leaves everything it launched up to that point.
 
+"Up to that point" depends on flushing. CUPTI hands records over only when a
+buffer fills or someone flushes, and most processes never fill one, so a
+recorder that flushed only at exit lost every process that never got there:
+engine cores and Ray workers SIGKILLed at teardown, children leaving through
+`os._exit`. A thread now flushes on a timer, a plain flush every
+`KERNREC_FLUSH_MS` (default 1000, 0 turns it off) and a forced one every
+`KERNREC_FORCE_EVERY` ticks (default 5) for the buffer a busy process always
+has a kernel in flight in. A kill loses at most the last few seconds of new
+names. The file is opened at `cuInit`, so a process that initialised CUDA and
+died before its first flush still leaves a header.
+
 Under the docker plugin the step runs as root and the checkout is a bind
 mount owned by the agent user, so anything left there with default modes
 is something the agent's `git clean` can never remove, and every later job
