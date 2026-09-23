@@ -15,6 +15,7 @@ resolves toward keeping.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -23,6 +24,10 @@ from pathlib import Path
 from .changed_funcs import Query
 from .phase import DEFAULT_MODE, PhaseMode, row_shows_use
 from .table import Table
+
+# Lets a row add an optional step it shows executing the change; see
+# RowKeys.candidates.
+RECORD_OPTIONAL_ENV = "CI_SELECTOR_RECORD_OPTIONAL"
 
 
 def row_key_for(step_id: str) -> str | None:
@@ -134,12 +139,18 @@ class RowKeys:
         The subtractive direction needs no such filter, its population being
         the map's selection, which holds no manual-only step.
         """
+        # CI_SELECTOR_RECORD_OPTIONAL=1 lifts the filter, an experiment and not
+        # a default: most confirmed selection leaks are optional evals that ran
+        # the changed code on main and never on the PR, and only a row can say
+        # so. The emitter would have to name them for them to run.
+        optional_ok = os.environ.get(RECORD_OPTIONAL_ENV) == "1"
         return [
             sid
             for sid, step in self.steps.items()
             # Defaults to manual_only=True: this filter is a safety gate, so an
             # object that cannot answer the question is not addable.
-            if self.key_for(sid) is not None and not getattr(step, "manual_only", True)
+            if self.key_for(sid) is not None
+            and (optional_ok or not getattr(step, "manual_only", True))
         ]
 
     def restrict_to(
