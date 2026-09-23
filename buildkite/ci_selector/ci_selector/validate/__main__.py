@@ -4,6 +4,7 @@
 
 Subcommands:
   crosscheck       replay real PRs, compare our selection vs actual CI outcomes
+  leaks            replay the confirmed selection leaks: would we have run the job that broke main?
 
 Everything checkable from a plain checkout is a drift-marked test instead:
 `VLLM_REPO=/path/to/vllm pytest tests -m drift`.
@@ -13,9 +14,9 @@ from __future__ import annotations
 
 import argparse
 
-from . import crosscheck
+from . import crosscheck, leaks
 
-_COMMANDS = {"crosscheck": crosscheck}
+_COMMANDS = {"crosscheck": crosscheck, "leaks": leaks}
 
 
 def main(argv: list[str] | None = None) -> int:
