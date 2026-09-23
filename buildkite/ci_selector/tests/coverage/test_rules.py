@@ -257,6 +257,24 @@ class TestTheAdditiveHalf:
         )
         assert reading.added == []
 
+    def test_the_optional_experiment_lets_a_row_add_a_manual_only_step(
+        self, monkeypatch
+    ):
+        """CI_SELECTOR_RECORD_OPTIONAL=1 lifts the filter above and nothing
+        else: the step still needs a row, so a key the table cannot spell
+        stays out."""
+        from ci_selector.coverage.rules import RECORD_OPTIONAL_ENV
+
+        owner = RowKeys(
+            {"vllm_ci"},
+            {"vllm_ci": 1.0},
+            steps={"vllm_ci:elsewhere": FakeStep(manual_only=True)},
+        )
+        monkeypatch.setenv(RECORD_OPTIONAL_ENV, "1")
+        assert owner.candidates() == ["vllm_ci:elsewhere"]
+        monkeypatch.setenv(RECORD_OPTIONAL_ENV, "0")
+        assert owner.candidates() == []
+
     def test_a_step_absent_at_base_is_never_added(self, table):
         """The two-clock bug. These ids were resolved at the TABLE's commit and
         the emitter names steps from the base, so a label rename on main leaves

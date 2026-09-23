@@ -39,7 +39,7 @@ from pathlib import Path
 
 from ..codemap.classify import select
 from ..codemap.worktree import git_out, state_for
-from ..coverage.source import fetch_table
+from ..coverage.source import fetch_kernel_evidence, fetch_table
 from ..decide import decide
 from ..gitdiff import changed_paths, diff_files
 from .crosscheck import base_in_window
@@ -54,7 +54,7 @@ def _spellings(state) -> dict[str, str]:
     return {s.step_id: s.buildkite_key for p in state.pipelines for s in p.steps}
 
 
-def replay(repo: Path, merge: str, rows: list[dict], table=None) -> dict:
+def replay(repo: Path, merge: str, rows: list[dict], table=None, kernels=None) -> dict:
     """One culprit PR: select at merge^..merge and score each leaked job."""
     base = git_out(repo, "rev-parse", f"{merge}^")
     head = merge
@@ -63,7 +63,7 @@ def replay(repo: Path, merge: str, rows: list[dict], table=None) -> dict:
     paths = changed_paths(diff_files(repo, base, head))
     state = state_for(repo, base)
     sel = select(state, paths, base=base, head=head)
-    decision = decide(state, sel, repo, base, head, table=table)
+    decision = decide(state, sel, repo, base, head, table=table, kernels=kernels)
     key_of = _spellings(state)
     by_key: dict[str, str] = {}
     for sid, key in key_of.items():
@@ -71,6 +71,8 @@ def replay(repo: Path, merge: str, rows: list[dict], table=None) -> dict:
     auto = {key_of[s] for s in sel.selected if s in key_of}
     manual = {key_of[s] for s in sel.manual_hits if s in key_of}
     final = {key_of[s] for s in decision.steps if s in key_of}
+    by_python = {key_of[s] for s in decision.added_by_coverage if s in key_of}
+    by_kernels = {key_of[s] for s in decision.added_by_kernels if s in key_of}
     out_rows = []
     for r in rows:
         k = r["job_key"]
@@ -95,6 +97,12 @@ def replay(repo: Path, merge: str, rows: list[dict], table=None) -> dict:
                 "pr_ci_state": r["pr_ci"]["state"],
                 "verdict": verdict,
                 "codemap": k in auto or k in manual,
+                # Which record put it in the final selection, if one did.
+                "added_by": "python record"
+                if k in by_python
+                else "kernel record"
+                if k in by_kernels
+                else None,
                 "rules": rules,
                 "signature": r["main_failure"]["signature"],
             }
@@ -108,6 +116,9 @@ def replay(repo: Path, merge: str, rows: list[dict], table=None) -> dict:
         "final_steps": len(decision.steps),
         "run_all": bool(sel.run_all),
         "coverage_note": decision.coverage_note,
+        "kernel_note": decision.kernel_note,
+        "added_by_python": len(decision.added_by_coverage),
+        "dropped_by_python": len(decision.dropped_by_coverage),
         "rows": out_rows,
     }
 
@@ -118,6 +129,14 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json-out", type=Path)
     parser.add_argument(
         "--table", type=Path, help="coverage table (default: the configured one)"
+    )
+    parser.add_argument(
+        "--kernel-table", type=Path, help="kernel table (default: the configured one)"
+    )
+    parser.add_argument(
+        "--kernel-symbol-map",
+        type=Path,
+        help="kernel symbol map (default: the configured one)",
     )
 
 
@@ -130,6 +149,9 @@ def run(args) -> int:
     table = fetch_table(args.table)
     if not table.available:
         print(f"NOTE: {table.unavailable}")
+    kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
+    if kernels.unavailable:
+        print(f"NOTE: {kernels.unavailable}")
     by_pr: OrderedDict[int, dict] = OrderedDict()
     for r in records:
         pr = r["culprit_pr"]["number"]
@@ -146,7 +168,7 @@ def run(args) -> int:
     print(f"{len(records)} leaked jobs across {len(by_pr)} pull requests\n")
     for pr, d in by_pr.items():
         try:
-            res = replay(repo, d["merge"], d["rows"], table=table)
+            res = replay(repo, d["merge"], d["rows"], table=table, kernels=kernels)
         except subprocess.CalledProcessError as e:
             res = {
                 "merge": d["merge"],
@@ -164,6 +186,8 @@ def run(args) -> int:
         for row in res["rows"]:
             tally[row["verdict"]] += 1
             rules = f" via {','.join(row['rules'])}" if row["rules"] else ""
+            if row.get("added_by"):
+                rules += f" (added by the {row['added_by']})"
             print(
                 f"    {row['verdict']:<20} {row['job_key']}  [pr ci: {row['pr_ci_state']}]{rules}",
                 flush=True,
