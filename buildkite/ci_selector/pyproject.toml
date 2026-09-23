@@ -10,6 +10,7 @@ ci-select = "ci_selector.cli:main"
 ci-validate = "ci_selector.validate.__main__:main"
 ci-fetch-build = "ci_selector.scripts.fetch:main"
 ci-build-table = "ci_selector.scripts.build:main"
+ci-sweep-from-artifacts = "ci_selector.scripts.artifacts:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

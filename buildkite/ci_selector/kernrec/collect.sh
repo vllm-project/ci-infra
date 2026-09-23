@@ -16,6 +16,8 @@
 #
 #   s3://$CI_SELECTOR_BUCKET/<pipeline>/<commit>/kernel_table.json.gz
 #   s3://$CI_SELECTOR_BUCKET/<pipeline>/<commit>/kernel_symbol_map.json.gz
+#   s3://$CI_SELECTOR_BUCKET/<pipeline>/<commit>/table.json.gz   (Python record,
+#                                        when the build recorded one and it built)
 #   s3://$CI_SELECTOR_BUCKET/<pipeline>/latest.json        -> {commit, build, ...}
 #
 # Nothing reaches S3 unless the pair is complete. Several builds can collect
@@ -57,6 +59,43 @@ mkdir -p out
 python3 kernel_table.py build --fnrec .fnrec --build "${BUILD}" --commit "${COMMIT}" \
   --pipeline "${PIPELINE}" --out out/kernel_table.json.gz || { echo "table build failed" >&2; exit 1; }
 python3 kernel_table.py show out/kernel_table.json.gz --top 10 || true
+
+echo "--- :snake: Building the Python coverage table"
+# Optional: the kernel pair publishes with or without it. Needs the
+# ci_selector package (uv, Python 3.12, the recorders' minor) and this build's
+# vLLM checkout, which the agent made for this step. Everything else comes off
+# the artifacts: job identity and exit status from each kernrec.json, test
+# counts from the pytest plugin (ci_selector/scripts/artifacts.py says how).
+py_ok=no
+n_fn=$(find .fnrec -name 'fn.*.txt' 2>/dev/null | wc -l | tr -d ' ')
+CHECKOUT="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+if [[ "${n_fn}" == "0" ]]; then
+  echo "no Python recordings in this build (VLLM_CI_FNREC unset?)"
+elif [[ -z "${CHECKOUT}" ]] || ! git -C "${CHECKOUT}" cat-file -e "${COMMIT}^{commit}" 2>/dev/null; then
+  echo "no vLLM checkout holding ${COMMIT}; skipping the Python table" >&2
+else
+  if ! command -v uv >/dev/null 2>&1; then
+    curl -LsSf --retry 3 https://astral.sh/uv/install.sh \
+      | env UV_INSTALL_DIR="${WORK}/bin" UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1
+    export PATH="${WORK}/bin:${PATH}"
+  fi
+  if command -v uv >/dev/null 2>&1 \
+     && git clone -q --depth 1 --branch "${BRANCH}" https://github.com/vllm-project/ci-infra "${WORK}/ci-infra"; then
+    SEL="${WORK}/ci-infra/buildkite/ci_selector"
+    run_sel() { uv run -q --no-dev --python 3.12 --project "${SEL}" "$@"; }
+    if run_sel ci-sweep-from-artifacts .fnrec --out "sweep/${PIPELINE}-${BUILD}" \
+         --build "${BUILD}" --commit "${COMMIT}" --pipeline "${PIPELINE}" \
+       && run_sel ci-build-table "${CHECKOUT}" "sweep/${PIPELINE}-${BUILD}" -o out/table.json.gz; then
+      py_ok=yes
+    else
+      echo "Python table build failed; the kernel record publishes without it" >&2
+      rm -f out/table.json.gz
+    fi
+  else
+    echo "no uv or no ci-infra checkout of ${BRANCH}; skipping the Python table" >&2
+  fi
+fi
+echo "${n_fn} Python recording files; Python table built: ${py_ok}"
 
 # Validate the pair before anything leaves this job.
 table_ok=$(python3 - <<'PY'
