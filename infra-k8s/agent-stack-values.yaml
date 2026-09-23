@@ -1,0 +1,15 @@
+annotations:
+  prometheus.io/path: /metrics
+  prometheus.io/port: "9216"
+  prometheus.io/scrape: "true"
+
+config:
+  enable-completion-watcher: true
+  pod-pending-timeout: 15m
+  prometheus-port: 9216
+  reservation-expiry-seconds: 900
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 100Mi
