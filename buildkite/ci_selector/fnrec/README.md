@@ -36,7 +36,9 @@ VLLM_CI_ONLY_STEP_KEYS=["basic-correctness","kernels-core-operation-test"]
 ```
 
 Only functions under the vLLM package directory are written; the rest are
-counted in `other`. `#end` is the clean-exit marker a killed engine core
+counted in `other`. The file is created on the process's first vLLM function, so
+the compile workers and helpers that never enter vLLM, 90% of a step's
+Python processes, leave nothing. `#end` is the clean-exit marker a killed engine core
 never writes; the table's stamp counts how many processes did.
 
 ## Test outcomes

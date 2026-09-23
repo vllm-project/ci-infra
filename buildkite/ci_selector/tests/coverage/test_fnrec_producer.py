@@ -135,6 +135,21 @@ def test_forked_child_writes_its_own_file(tmp_path, fake_vllm):
     )
 
 
+def test_a_process_that_never_enters_vllm_writes_nothing(tmp_path, fake_vllm):
+    """Most Python processes in a step are compile workers and helpers that
+    never enter vLLM; one empty file each made ~44k artifacts on a full build
+    and timed out the agent's artifact search."""
+    out, _ = _run(
+        tmp_path,
+        fake_vllm,
+        """
+        import json, os
+        json.dumps({"a": 1}); os.getcwd()
+        """,
+    )
+    assert not list(out.glob("fn.*.txt"))
+
+
 def test_off_without_fnrec_dir(tmp_path, fake_vllm):
     out, proc = _run(
         tmp_path,
