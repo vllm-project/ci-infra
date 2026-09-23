@@ -13,6 +13,7 @@ pip install git+https://github.com/vllm-project/ci-infra.git#subdirectory=buildk
 ## Usage
 
 The main entry point is `pipeline-generator`. It requires 2 args:
+
 1. Path to your CI configuration file an output path.
 2. Path to the output Buildkite-formatted yaml file.
 
@@ -68,21 +69,19 @@ repositories:
 
 The generator relies on several environment variables, typically provided by Buildkite or set by user:
 
-*   `BUILDKITE_BRANCH`: Current branch name.
-*   `BUILDKITE_COMMIT`: Current commit hash.
-*   `BUILDKITE_PULL_REQUEST`: Pull request number (or "false").
-*   `BUILDKITE_PULL_REQUEST_BASE_BRANCH`: Base branch for PRs.
-*   `NIGHTLY`: Set to "1" to auto-run the curated torch-nightly steps (those tagged `mirror.torch_nightly`).
-*   `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build. AMD build/test steps and AMD mirrors are dropped entirely for this run, since ROCm uses its own pinned torch and gains no signal from validating against a CUDA torch-nightly build.
-*   `RUN_ALL`: Set to "1" to force run all steps.
-*   `SKIP_TIMEOUT`: Set to "1" at pipeline generation time to omit all configured step timeouts.
-*   `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.
-*   `VLLM_USE_PRECOMPILED`: Set to "1" to force use of precompiled wheels.
-*   `VLLM_CI_KERNREC`: Set to "1" to load the kernel-launch recorder
-    (`buildkite/ci_selector/recorders/kernrec`) into every CUDA process of every GPU step
-    and upload its `.fnrec/**` output as job artifacts. Off by default; meant
-    for nightly and post-merge builds that feed the test selector.
-*   `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
+* `BUILDKITE_BRANCH`: Current branch name.
+* `BUILDKITE_COMMIT`: Current commit hash.
+* `BUILDKITE_PULL_REQUEST`: Pull request number (or "false").
+* `BUILDKITE_PULL_REQUEST_BASE_BRANCH`: Base branch for PRs.
+* `NIGHTLY`: Set to "1" to auto-run the curated torch-nightly steps (those tagged `mirror.torch_nightly`).
+* `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build. AMD build/test steps and AMD mirrors are dropped entirely for this run, since ROCm uses its own pinned torch and gains no signal from validating against a CUDA torch-nightly build.
+* `RUN_ALL`: Set to "1" to force run all steps.
+* `SKIP_TIMEOUT`: Set to "1" at pipeline generation time to omit all configured step timeouts.
+* `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.
+* `VLLM_USE_PRECOMPILED`: Set to "1" to force use of precompiled wheels.
+* `VLLM_CI_KERNREC`: Set to "1" to load the kernel-launch recorder (`buildkite/ci_selector/recorders/kernrec`) into every CUDA process of every GPU step and upload its `.kernrec/**` output as job artifacts. Off by default; meant for nightly and post-merge builds that feed the test selector.
+* `VLLM_CI_FNREC`: Set to "1" to load the Python function recorder (`buildkite/ci_selector/recorders/fnrec`) into every Python process of every step, writing to its own `.fnrec/<job-id>`. Off by default; independent of `VLLM_CI_KERNREC`, same audience.
+* `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
     set, the generator emits those steps and their transitive dependencies,
     ignoring normal source-file selection. Generated AMD mirror keys such as
     `amd-multi-modal-processor` are accepted and select only the mirror plus

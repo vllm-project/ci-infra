@@ -52,13 +52,13 @@ if [[ -n "${KERNREC_SOURCE_JOBS:-}" ]]; then
   # One search per job: a build with the Python recorder on holds tens of
   # thousands of artifacts, and one search over all of them times out.
   printf '%s\n' ${KERNREC_SOURCE_JOBS} | xargs -P 8 -I{} sh -c \
-    'buildkite-agent artifact download ".fnrec/{}/*" . "$@" >/dev/null 2>&1 || echo "no recordings for job {}"' _ ${FROM[@]+"${FROM[@]}"}
+    'buildkite-agent artifact download ".kernrec/{}/*" . "$@" >/dev/null 2>&1 || echo "no recordings for job {}"' _ ${FROM[@]+"${FROM[@]}"}
 else
-  buildkite-agent artifact download ".fnrec/**/*" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel recordings in this build"
+  buildkite-agent artifact download ".kernrec/**/*" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel recordings in this build"
 fi
 buildkite-agent artifact download "kernel_symbol_map.json.gz" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel symbol map in this build"
-n_files=$(find .fnrec -name 'kern.*.txt' 2>/dev/null | wc -l | tr -d ' ')
-n_jobs=$(find .fnrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+n_files=$(find .kernrec -name 'kern.*.txt' 2>/dev/null | wc -l | tr -d ' ')
+n_jobs=$(find .kernrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
 echo "${n_files} recording files from ${n_jobs} jobs"
 if [[ "${n_files}" == "0" ]]; then
   echo "nothing to fold; done"
@@ -70,7 +70,7 @@ echo "--- :table_tennis_paddle_and_ball: Building the kernel table"
 # a half-built result must never be published as if it were complete.
 curl -sSfL --retry 3 -o kernel_table.py "${RAW}/kernel_table.py" || { echo "cannot fetch kernel_table.py" >&2; exit 1; }
 mkdir -p out
-python3 kernel_table.py build --fnrec .fnrec --build "${BUILD}" --commit "${COMMIT}" \
+python3 kernel_table.py build --kernrec .kernrec --build "${BUILD}" --commit "${COMMIT}" \
   --pipeline "${PIPELINE}" --out out/kernel_table.json.gz || { echo "table build failed" >&2; exit 1; }
 python3 kernel_table.py show out/kernel_table.json.gz --top 10 || true
 

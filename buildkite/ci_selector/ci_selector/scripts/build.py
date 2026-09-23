@@ -49,7 +49,7 @@ WORLD_ENV = (
     "TORCH_NIGHTLY",
     "RUN_ALL",
     "CONTINUE_ON_FAILURE",
-    "FNREC",
+    "VLLM_CI_FNREC",
     "VLLM_CI_BRANCH",
 )
 JOB_STATE_PASSED = "passed"

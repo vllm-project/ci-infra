@@ -8,9 +8,9 @@
 Two input layouts:
 
     <recordings-dir>/<step_key>/<job-id>/kern.*.txt   what analyze_build.py writes
-    --fnrec <dir>: <dir>/<job-id>/kern.*.txt + kernrec.json
+    --kernrec <dir>: <dir>/<job-id>/kern.*.txt + kernrec.json
                                                       what `buildkite-agent artifact
-                                                      download ".fnrec/**/*"` yields
+                                                      download ".kernrec/**/*"` yields
                                                       inside the build; the sidecar
                                                       (written by ci_setup.sh on exit)
                                                       carries step key and exit status
@@ -113,7 +113,7 @@ def _int_or_none(v):
         return None
 
 
-def _jobs_from_fnrec_layout(root: Path, job_state: dict[str, str]):
+def _jobs_from_kernrec_layout(root: Path, job_state: dict[str, str]):
     """Jobs under <job>/kern.*.txt + kernrec.json (the artifact download layout).
 
     Every job directory is read, whether or not it holds recordings: a shard
@@ -174,8 +174,8 @@ def build(a) -> int:
             if j.get("step_key"):
                 job_state[f"{j['id']}:step_key"] = j["step_key"]
 
-    if a.fnrec:
-        job_iter = _jobs_from_fnrec_layout(a.fnrec, job_state)
+    if a.kernrec:
+        job_iter = _jobs_from_kernrec_layout(a.kernrec, job_state)
     else:
         job_iter = _jobs_from_step_layout(a.recordings, job_state)
 
@@ -368,7 +368,7 @@ def main() -> int:
     b = sub.add_parser("build")
     b.add_argument("recordings", type=Path, nargs="?", default=None)
     b.add_argument(
-        "--fnrec",
+        "--kernrec",
         type=Path,
         default=None,
         help="<job-id>/kern.*.txt + kernrec.json layout (artifact download)",
@@ -394,8 +394,8 @@ def main() -> int:
     s.add_argument("--top", type=int, default=15)
     s.set_defaults(fn=show)
     a = ap.parse_args()
-    if a.cmd == "build" and not (a.fnrec or a.recordings):
-        ap.error("build needs a <recordings-dir> or --fnrec <dir>")
+    if a.cmd == "build" and not (a.kernrec or a.recordings):
+        ap.error("build needs a <recordings-dir> or --kernrec <dir>")
     return a.fn(a)
 
 

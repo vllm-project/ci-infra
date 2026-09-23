@@ -29,8 +29,9 @@ from utils_lib.docker_utils import (
 )
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
-from plugin.docker_plugin import get_docker_plugin
-from constants import DeviceType, AgentQueue
+from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
+from constants import AgentQueue, DeviceType
+from recorder_switches import fnrec_enabled, kernrec_enabled
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -274,6 +275,21 @@ class BuildkiteGroupStep(BaseModel):
     steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
 
 
+# Devices routed to agent-stack-k8s. Shared with the fnrec checkout decision
+# below so the two cannot disagree: the wrong root writes the recording where
+# the agent never looks, and nothing reports it.
+K8S_PLUGIN_DEVICES = (
+    DeviceType.H100.value,
+    DeviceType.A100.value,
+    DeviceType.B200_K8S.value,
+    DeviceType.L4.value,
+)
+
+
+def _uses_k8s_plugin(step: Step) -> bool:
+    return step.device in K8S_PLUGIN_DEVICES
+
+
 def _get_step_plugin(step: Step):
     # Use K8s plugin
     use_cpu = step.device in (
@@ -282,12 +298,7 @@ def _get_step_plugin(step: Step):
         DeviceType.CPU_MEDIUM,
     )
     use_arm64 = step.device == DeviceType.DGX_SPARK
-    if step.device in [
-        DeviceType.H100.value,
-        DeviceType.A100.value,
-        DeviceType.B200_K8S.value,
-        DeviceType.L4.value,
-    ]:
+    if _uses_k8s_plugin(step):
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
@@ -414,16 +425,10 @@ def _is_multi_gpu_step(step: Step) -> bool:
     return bool(step.num_devices and step.num_devices >= 2)
 
 
-# Kernel-launch recorder (buildkite/ci_selector/recorders/kernrec). Opt-in per build so
-# PR jobs never pay for it; nightly and post-merge builds set it to feed the
-# selector's kernel coverage table. The setup script and the library come from
-# the ci-infra branch that generated this pipeline.
-KERNREC_ENV_VAR = "VLLM_CI_KERNREC"
-KERNREC_ARTIFACT_PATH = ".fnrec/**/*"
-
-
-def kernrec_enabled() -> bool:
-    return os.getenv(KERNREC_ENV_VAR, "") == "1"
+# Kernel-launch recorder (buildkite/ci_selector/recorders/kernrec). Its setup
+# script and library come from the ci-infra branch that generated this
+# pipeline. The switch is in recorder_switches, beside fnrec's.
+KERNREC_ARTIFACT_PATH = ".kernrec/**/*"
 
 
 # Steps the kernel recorder stays off, and why. A CUPTI client changes what
@@ -482,6 +487,117 @@ def _kernrec_setup_command() -> str:
         ". /tmp/kernrec/ci_setup.sh || "
         'echo "kernrec: setup skipped"'
     )
+
+
+# Python function recorder (buildkite/ci_selector/recorders/fnrec). Writes to
+# its own `.fnrec/<job-id>`, beside the kernel recorder's `.kernrec/`, so
+# neither can touch the other's files and their order does not matter.
+#
+# Two globs: the tarball is the common case, the raw files are what a step
+# killed mid-run leaves. Raw is `*/*` rather than `*.txt` so install.err comes
+# too -- it is the only thing separating a failed install from a job that ran
+# no vLLM code.
+FNREC_ARTIFACT_PATHS = (".fnrec/*.tar.gz", ".fnrec/*/*")
+
+# Where the step keeps the fetched payload; the recording itself goes to the
+# checkout. Job-scoped because a plugin-less step runs on the agent host, where
+# concurrent jobs would otherwise overwrite each other's download mid-read.
+FNREC_TMP_DIR = "/tmp/fnrec.$${BUILDKITE_JOB_ID:-local}"
+
+
+def _fnrec_checkout_path(step: Step, setup_profile: SetupProfile) -> str:
+    """Where this step can see the Buildkite checkout.
+
+    Keyed on `setup_profile`, not `step.device`: an AMD mirror is copied from
+    its NVIDIA parent and keeps that device, so going by device would send it
+    to `/workdir`, which a ROCm pod does not have.
+
+    Decided here, never read at runtime. The docker plugin does not forward
+    BUILDKITE_BUILD_CHECKOUT_PATH, and where it is forwarded it names a host
+    directory the container cannot reach, so a step that trusted it would
+    record into a path nothing collects and still pass. Under k8s and ROCm
+    pods the checkout, command and artifact phases share one volume, so the
+    agent's own value is right there.
+    """
+    if (
+        setup_profile == "amd"
+        or step.no_plugin
+        or _uses_k8s_plugin(step)
+        or is_amd_gpu_device(step.device)
+    ):
+        # Defaulted because legacy AMD dind forwards no BUILDKITE_* inward.
+        # An empty value would make FNREC_BASE "/.fnrec" and setup would
+        # `rm -rf` that.
+        return "$${BUILDKITE_BUILD_CHECKOUT_PATH:-/tmp/fnrec-no-checkout}"
+    return DOCKER_CHECKOUT_MOUNT_PATH
+
+
+def _fnrec_applies(step: Step, setup_profile: SetupProfile) -> bool:
+    """Every step whose Python the recorder can reach.
+
+    Unlike the kernel recorder this keeps plugin-less steps: they run on the
+    agent host, so ci_setup.sh installs into a per-job directory instead of
+    site-packages. Multi-node steps stay out, because nothing scopes an
+    install to one job across several hosts.
+    """
+    return (
+        fnrec_enabled()
+        and setup_profile != "none"
+        and not step.label.startswith(":docker:")
+        and not (step.num_nodes and step.num_nodes >= 2)
+    )
+
+
+def _fnrec_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
+    """Fetch and source the recorder's setup script at the start of the step.
+
+    Assumes the step is armed; `_prepare_commands` decides that once for both
+    this and the pack command.
+
+    Double quotes only: _prepare_commands rewrites single quotes, and a `$`
+    must be written `$$` to survive pipeline upload. The checkout path and
+    install mode are exported because the step cannot work them out itself.
+
+    Braced: the AMD path joins commands with `&&`, and the `;` separators
+    inside would otherwise end that chain, so an earlier failure would stop
+    aborting the step.
+    """
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        f"{branch}/buildkite/ci_selector/recorders/fnrec/ci_setup.sh"
+    )
+    checkout = _fnrec_checkout_path(step, setup_profile)
+    mode = "host" if step.no_plugin else "container"
+    return [
+        '{ echo "--- :dna: Python function recorder"; '
+        f'export FNREC_CHECKOUT="{checkout}"; export FNREC_MODE="{mode}"; '
+        f"mkdir -p {FNREC_TMP_DIR} && "
+        f"curl -sSfL --retry 3 --max-time 60 -o {FNREC_TMP_DIR}/ci_setup.sh "
+        f'"{url}" && '
+        f". {FNREC_TMP_DIR}/ci_setup.sh || "
+        'echo "fnrec: setup skipped"; }'
+    ]
+
+
+def _fnrec_artifact_paths(step: Step, setup_profile: SetupProfile) -> List[str]:
+    """The globs that deliver this step's recording, or none if it is not armed."""
+    return list(FNREC_ARTIFACT_PATHS) if _fnrec_applies(step, setup_profile) else []
+
+
+def _fnrec_pack_command() -> str:
+    """Fold this job's records into one tarball, as the last command.
+
+    Packing, not delivery: artifact_paths ships the raw files either way. A
+    final command rather than an EXIT trap, because a shell has one EXIT slot
+    and vLLM's OTel prelude takes it. `|| true` so it cannot change the step's
+    status.
+
+    Braced because the AMD path joins commands with `&&`: a bare trailing
+    `|| true` would bind to the whole chain and report success for a step
+    whose tests failed.
+    """
+    return f"{{ {FNREC_TMP_DIR}/pack.sh || true; }}"
 
 
 KERNREC_COLLECT_KEY = "kernrec-collect"
@@ -594,7 +710,14 @@ def _prepare_commands(
     setup_profile: SetupProfile = "nvidia",
 ) -> List[str]:
     """Prepare step commands with variables injected and default setup commands."""
-    commands = _get_setup_commands(step, setup_profile)
+    # Prepended, not folded into _get_setup_commands: that returns [] early
+    # for plugin-less steps, the very ones the host installer exists for. AMD
+    # needs the order too, since its setup commands are re-run after the wheel
+    # install and the recorder must already be in that interpreter.
+    fnrec_armed = _fnrec_applies(step, setup_profile)
+    commands = (
+        _fnrec_setup_commands(step, setup_profile) if fnrec_armed else []
+    ) + _get_setup_commands(step, setup_profile)
     # AMD mirrors use a separate runtime and do not expose the agent binary
     # needed to mint the short-lived upload credential. Native agent tracing
     # still covers those jobs; command/test spans are injected elsewhere.
@@ -638,6 +761,9 @@ def _prepare_commands(
         # After the step's own commands and before the exit, so the sidecar
         # carries the status the step is about to exit with.
         commands.append(_kernrec_finish_command())
+
+    if fnrec_armed:
+        commands.append(_fnrec_pack_command())
 
     if continue_on_failure:
         commands.append("exit $$CI_OVERALL_STATUS")
@@ -796,6 +922,7 @@ def convert_group_step_to_buildkite_step(
                     concurrency_group=step.concurrency_group,
                     timeout_in_minutes=step.timeout_in_minutes,
                     agent_tags=step.agent_tags,
+                    extra_artifact_paths=_fnrec_artifact_paths(step, "amd"),
                 )
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
@@ -825,10 +952,18 @@ def convert_group_step_to_buildkite_step(
 
             if step.env:
                 buildkite_step.env = step.env
+            # Each recorder writes under its own <checkout>/.<name>/<job-id>,
+            # which the agent collects from the checkout. _prepare_commands
+            # above used its default profile, so this is the nvidia path.
+            recorder_globs: List[str] = []
             if _kernrec_applies(step):
-                # The recorder writes under <checkout>/.fnrec/<job-id>; the
-                # agent collects it from the checkout, in docker and k8s alike.
-                buildkite_step.artifact_paths = [KERNREC_ARTIFACT_PATH]
+                recorder_globs.append(KERNREC_ARTIFACT_PATH)
+            if _fnrec_applies(step, "nvidia"):
+                recorder_globs.extend(FNREC_ARTIFACT_PATHS)
+            if recorder_globs:
+                buildkite_step.artifact_paths = _merge_artifact_paths(
+                    buildkite_step.artifact_paths, recorder_globs
+                )
             if step.retry:
                 buildkite_step.retry = step.retry
             buildkite_step.retry = ensure_infra_failure_retry(buildkite_step.retry)
@@ -944,6 +1079,7 @@ def convert_group_step_to_buildkite_step(
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
                     display_label=amd.get("label"),
+                    extra_artifact_paths=_fnrec_artifact_paths(amd_command_step, "amd"),
                 )
                 if not _amd_mirror_should_run(
                     _step_should_run(
@@ -1065,6 +1201,20 @@ def _generate_step_key(step_label: str) -> str:
     )
 
 
+def _merge_artifact_paths(
+    existing: Optional[List[str]], extra: List[str]
+) -> Optional[List[str]]:
+    """Append without clobbering.
+
+    AMD steps already declare a GPU diagnostics glob, and that is where a ROCm
+    hang investigation starts. Assigning over it trades one data loss for
+    another.
+    """
+    merged = list(existing or [])
+    merged.extend(glob for glob in extra if glob not in merged)
+    return merged or None
+
+
 def _create_amd_step(
     *,
     label: str,
@@ -1085,6 +1235,7 @@ def _create_amd_step(
     timeout_in_minutes: Optional[int] = None,
     agent_tags: Optional[Dict[str, str]] = None,
     display_label: Optional[str] = None,
+    extra_artifact_paths: Optional[List[str]] = None,
 ) -> BuildkiteCommandStep:
     """Create a Buildkite command step that runs through the AMD CI wrapper."""
     options = build_amd_step_options(
@@ -1102,6 +1253,10 @@ def _create_amd_step(
     )
     if display_label:
         options["label"] = display_label
+    if extra_artifact_paths:
+        options["artifact_paths"] = _merge_artifact_paths(
+            options.get("artifact_paths"), extra_artifact_paths
+        )
     return BuildkiteCommandStep(
         **options,
         key=key,

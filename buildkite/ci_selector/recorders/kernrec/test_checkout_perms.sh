@@ -54,9 +54,9 @@ if [ "$2" = kill ]; then
 else
   sh /scripts/inner.sh
 fi
-find /co/.fnrec -exec stat -c "   %A %u:%g %n" {} \;
+find /co/.kernrec -exec stat -c "   %A %u:%g %n" {} \;
 su agent -s /bin/sh -c 'cd /co && git clean -ffdxq' 2>&1 | sed 's/^/   /' | head -4
-[ -e /co/.fnrec ] && echo "RESULT: FAILED (leftover the agent cannot remove)" || echo "RESULT: OK"
+[ -e /co/.kernrec ] && echo "RESULT: FAILED (leftover the agent cannot remove)" || echo "RESULT: OK"
 EOF
 
 fail=0

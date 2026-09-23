@@ -27,12 +27,12 @@ s3_digest() { (cd "$1" && find . -type f | sort | xargs cksum 2>/dev/null); }
 run_case() { # name expect_exit expect_latest(yes|no) expect_commit_upload(yes|no) mode [s3_untouched(yes|no)]
   local name=$1 want_rc=$2 want_latest=$3 want_commit=$4 mode=$5 want_untouched=${6:-no}
   local T; T=$(mktemp -d)
-  mkdir -p "$T/bin" "$T/s3" "$T/artifacts" "$T/build/.fnrec/job-a"
+  mkdir -p "$T/bin" "$T/s3" "$T/artifacts" "$T/build/.kernrec/job-a"
   # a recording + sidecar for one non-parallel step
-  printf '# kernrec v1 pid=1 ppid=0 exe=python\nkernA\n# end records=1 unique=1 dropped=0\n' > "$T/build/.fnrec/job-a/kern.1.txt"
-  echo '{"step_key":"step-x","exit_status":0,"parallel_job":"","parallel_job_count":""}' > "$T/build/.fnrec/job-a/kernrec.json"
+  printf '# kernrec v1 pid=1 ppid=0 exe=python\nkernA\n# end records=1 unique=1 dropped=0\n' > "$T/build/.kernrec/job-a/kern.1.txt"
+  echo '{"step_key":"step-x","exit_status":0,"parallel_job":"","parallel_job_count":""}' > "$T/build/.kernrec/job-a/kernrec.json"
   # no-rows: a recording that cannot be filed (blank step key) -> a table with no rows
-  [[ "$mode" == "no-rows" ]] && echo '{"step_key":"","exit_status":0}' > "$T/build/.fnrec/job-a/kernrec.json"
+  [[ "$mode" == "no-rows" ]] && echo '{"step_key":"","exit_status":0}' > "$T/build/.kernrec/job-a/kernrec.json"
   # a usable symbol map unless the case says otherwise
   if [[ "$mode" != "no-map" ]]; then
     python3 - "$T/build/kernel_symbol_map.json.gz" <<'PY'
@@ -58,7 +58,7 @@ PY
 echo "\$*" >> "$T/agent.log"
 case "\$1 \$2" in
   "artifact download")
-    if [[ "\$3" == *fnrec* ]]; then cp -R "$T/build/.fnrec" "\$4/" 2>/dev/null; fi
+    if [[ "\$3" == *kernrec* ]]; then cp -R "$T/build/.kernrec" "\$4/" 2>/dev/null; fi
     if [[ "\$3" == *kernel_symbol_map* ]]; then cp "$T/build/kernel_symbol_map.json.gz" "\$4/" 2>/dev/null || exit 1; fi
     ;;
   "artifact upload") for f in \$3; do cp "\$f" "$T/artifacts/"; done ;;
@@ -99,7 +99,7 @@ EOF
   if [[ "$mode" == "other-build" ]]; then
     # both downloads went to the source build, per job, and the table is stamped with it
     [[ "$(grep -c -- '--build src-uuid' "$T/agent.log")" == 2 ]] || { verdict=FAIL; fail=1; echo "      agent calls: $(cat "$T/agent.log")"; }
-    grep -q '^artifact download .fnrec/job-a/\* ' "$T/agent.log" || { verdict=FAIL; fail=1; echo "      no per-job download"; }
+    grep -q '^artifact download .kernrec/job-a/\* ' "$T/agent.log" || { verdict=FAIL; fail=1; echo "      no per-job download"; }
     python3 -c 'import gzip,json,sys; t=json.load(gzip.open(sys.argv[1],"rt")); sys.exit(0 if t["source"]["build"] == 41 else 1)' "$T/artifacts/kernel_table.json.gz" \
       || { verdict=FAIL; fail=1; echo "      table not stamped with build 41"; }
   fi
