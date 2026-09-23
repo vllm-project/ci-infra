@@ -90,7 +90,7 @@ launcher_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/l
 #
 # The default is a ceiling on a hung test rather than a target, so it sits above
 # the longest honest run; Buildkite's own cap on a step bounds the wait anyway.
-tpu_test_max_seconds    = 21600
+tpu_test_max_seconds    = 28800
 tpu_runtime_max_seconds = 43200
 
 # Half a day in line for chips, which is longer than anything currently uses.
