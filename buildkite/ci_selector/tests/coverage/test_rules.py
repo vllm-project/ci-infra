@@ -201,6 +201,19 @@ class TestFreshnessGate:
         assert "vllm_ci:elsewhere" in gated.kept
         assert gated.reasons["row-is-stale"] == 1
 
+    def test_evidence_only_through_an_op_wrapper_stand_in_is_marked(self, table):
+        """A stand-in answers for a changed csrc file, which the kernel record
+        answers for too and more precisely, so the kernel record is told which
+        keeps rest on nothing else (decide._protected_from_kernel_drops)."""
+        proxied = read(
+            table, query_for("vllm/mod.py", "plain", proxy=True), "vllm_ci:runs-plain"
+        )
+        assert proxied.executes == ["vllm_ci:runs-plain"]
+        assert proxied.executes_by_proxy == ["vllm_ci:runs-plain"]
+        direct = read(table, query_for("vllm/mod.py", "plain"), "vllm_ci:runs-plain")
+        assert direct.executes == ["vllm_ci:runs-plain"]
+        assert direct.executes_by_proxy == []
+
     def test_staleness_does_not_block_a_positive_match(self, table):
         """Only the DROP direction is gated. A row showing the step ran the
         changed code is still proof it is relevant, stale or not -- and the
