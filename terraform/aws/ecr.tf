@@ -26,6 +26,11 @@ resource "aws_ecr_repository" "vllm_ci_postmerge_cache" {
   provider = aws.us_east_1
 }
 
+resource "aws_ecr_repository" "vllm_release_cache" {
+  name     = "vllm-release-cache"
+  provider = aws.us_east_1
+}
+
 # Lifecycle policies for cache repositories
 resource "aws_ecr_lifecycle_policy" "vllm_ci_test_cache" {
   repository = aws_ecr_repository.vllm_ci_test_cache.name
@@ -35,6 +40,12 @@ resource "aws_ecr_lifecycle_policy" "vllm_ci_test_cache" {
 
 resource "aws_ecr_lifecycle_policy" "vllm_ci_postmerge_cache" {
   repository = aws_ecr_repository.vllm_ci_postmerge_cache.name
+  provider   = aws.us_east_1
+  policy     = local.ecr_cache_lifecycle_policy
+}
+
+resource "aws_ecr_lifecycle_policy" "vllm_release_cache" {
+  repository = aws_ecr_repository.vllm_release_cache.name
   provider   = aws.us_east_1
   policy     = local.ecr_cache_lifecycle_policy
 }
