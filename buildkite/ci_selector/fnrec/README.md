@@ -39,18 +39,45 @@ Only functions under the vLLM package directory are written; the rest are
 counted in `other`. `#end` is the clean-exit marker a killed engine core
 never writes; the table's stamp counts how many processes did.
 
+## Test outcomes
+
+A row built from a job whose tests all skipped holds little more than its
+imports, so the table's stamp carries each job's pytest counts. Offline they
+come off the Buildkite log. The collect step has no log, so `ci_setup.sh`
+also installs `fnrec_pytest.py` as a pytest plugin (a `pytest11` entry point
+in the same site-packages) that writes each run's two log lines the parser
+reads, in pytest's own format, to `pytest.<pid>.txt`:
+
+```
+collected 12 items
+========== 10 passed, 2 skipped in 3.21s ==========
+```
+
+The collection line is written first and on its own, so a run killed before
+its summary reads as unparsed and keeps the row thin. `pytest.installed`
+marks that the plugin was in place; without it the collect step treats the
+job's counts as unknown.
+
 ## Building the table
 
-Offline, as `ci_selector/scripts/README.md` describes: `ci-fetch-build`
-downloads a build's `.fnrec/**` artifacts and job logs (Buildkite API
-token), `ci-build-table` merges them into `coverage-data/table.json.gz`.
-Doing that inside the recording build's collect step, the way the kernel
-table is built, needs either an API token on the postmerge agents or a
-log-free stamp, and is not here yet.
+Two ways, same output:
+
+- In the recording build. The collect step (`kernrec/collect.sh`) runs
+  `ci-sweep-from-artifacts` on the downloaded `.fnrec/`, then
+  `ci-build-table` against the build's own checkout, and ships
+  `table.json.gz` next to the kernel pair. No API token: identity and exit
+  status come from each job's `kernrec.json`, so it needs `VLLM_CI_KERNREC=1`
+  as well.
+- Offline, as `ci_selector/scripts/README.md` describes: `ci-fetch-build`
+  downloads the artifacts and job logs with a Buildkite token, then
+  `ci-build-table`.
 
 ## Tests
 
 `tests/coverage/test_fnrec_producer.py` runs the recorder in a subprocess
 against a fake `vllm` package and reads the result back with the real
 `coverage/model.py` reader: names, DISABLE, fork, outside-root counting,
-the off switch, and a taken tool slot.
+the off switch, and a taken tool slot. `test_fnrec_pytest.py` runs real
+pytest with the plugin and requires its lines and pytest's own terminal
+summary to parse to the same counts. `test_sweep_from_artifacts.py` lays out
+a build's artifacts, converts them and merges the result.
