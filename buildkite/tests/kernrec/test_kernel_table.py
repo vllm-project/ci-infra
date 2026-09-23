@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-KERNREC = Path(__file__).resolve().parents[2] / "ci_selector" / "kernrec"
+KERNREC = Path(__file__).resolve().parents[2] / "ci_selector" / "recorders" / "kernrec"
 
 
 def _load(name):

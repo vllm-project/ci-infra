@@ -28,7 +28,7 @@
 set -uo pipefail
 
 BRANCH="${VLLM_CI_BRANCH:-main}"
-RAW="https://raw.githubusercontent.com/vllm-project/ci-infra/${BRANCH}/buildkite/ci_selector/kernrec"
+RAW="https://raw.githubusercontent.com/vllm-project/ci-infra/${BRANCH}/buildkite/ci_selector/recorders/kernrec"
 BUCKET="${CI_SELECTOR_BUCKET:-vllm-ci-selector}"
 PIPELINE="${BUILDKITE_PIPELINE_SLUG:-ci}"
 COMMIT="${BUILDKITE_COMMIT:?}"

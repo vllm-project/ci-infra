@@ -414,7 +414,7 @@ def _is_multi_gpu_step(step: Step) -> bool:
     return bool(step.num_devices and step.num_devices >= 2)
 
 
-# Kernel-launch recorder (buildkite/ci_selector/kernrec). Opt-in per build so
+# Kernel-launch recorder (buildkite/ci_selector/recorders/kernrec). Opt-in per build so
 # PR jobs never pay for it; nightly and post-merge builds set it to feed the
 # selector's kernel coverage table. The setup script and the library come from
 # the ci-infra branch that generated this pipeline.
@@ -473,7 +473,7 @@ def _kernrec_setup_command() -> str:
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
-        f"{branch}/buildkite/ci_selector/kernrec/ci_setup.sh"
+        f"{branch}/buildkite/ci_selector/recorders/kernrec/ci_setup.sh"
     )
     return (
         'echo "--- :satellite: Kernel launch recorder"; '
@@ -512,7 +512,7 @@ def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroup
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
-        f"{branch}/buildkite/ci_selector/kernrec/collect.sh"
+        f"{branch}/buildkite/ci_selector/recorders/kernrec/collect.sh"
     )
     queue = (
         AgentQueue.SMALL_CPU_POSTMERGE

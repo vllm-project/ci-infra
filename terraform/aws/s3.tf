@@ -9,7 +9,7 @@ resource "aws_s3_bucket" "vllm_wheels_dev" {
 # Coverage tables for the CI test selector (buildkite/ci_selector): per
 # commit, the per-step kernel table and the kernel symbol map, plus a
 # latest.json pointer, written by the recording build's collect step
-# (buildkite/ci_selector/kernrec/collect.sh). Public read: the bootstrap
+# (buildkite/ci_selector/recorders/kernrec/collect.sh). Public read: the bootstrap
 # agents fetch over HTTPS without credentials, and the contents are step keys
 # and kernel symbol names.
 resource "aws_s3_bucket" "vllm_ci_selector" {

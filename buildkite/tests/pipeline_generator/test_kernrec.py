@@ -64,7 +64,10 @@ def test_on_arms_gpu_steps_from_the_generating_branch(monkeypatch):
 
     setup = [c for c in commands if "ci_setup.sh" in c]
     assert len(setup) == 1
-    assert "ci-infra/my-branch/buildkite/ci_selector/kernrec/ci_setup.sh" in setup[0]
+    assert (
+        "ci-infra/my-branch/buildkite/ci_selector/recorders/kernrec/ci_setup.sh"
+        in setup[0]
+    )
     # Setup runs before the step's own commands and after the cd, so the
     # script itself must find the checkout root (it uses git for that).
     assert commands.index(setup[0]) < commands.index(
@@ -83,7 +86,7 @@ def test_on_defaults_to_main_branch(monkeypatch):
     monkeypatch.delenv("VLLM_CI_BRANCH", raising=False)
     rendered = _render(_gpu_step())
     setup = next(c for c in _commands(rendered) if "kernrec" in c)
-    assert "ci-infra/main/buildkite/ci_selector/kernrec/ci_setup.sh" in setup
+    assert "ci-infra/main/buildkite/ci_selector/recorders/kernrec/ci_setup.sh" in setup
 
 
 def test_on_leaves_docker_build_steps_alone(monkeypatch):
@@ -146,7 +149,7 @@ def test_collect_group_depends_on_every_runnable_command_step(
     )
     assert step.soft_fail is True, "publishing must not turn the build red"
     assert (
-        "ci-infra/my-branch/buildkite/ci_selector/kernrec/collect.sh"
+        "ci-infra/my-branch/buildkite/ci_selector/recorders/kernrec/collect.sh"
         in step.commands[0]
     )
     assert step.agents["queue"] == buildkite_step.AgentQueue.SMALL_CPU_PREMERGE.value

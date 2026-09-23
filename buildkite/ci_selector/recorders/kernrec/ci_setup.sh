@@ -60,7 +60,7 @@ kernrec_finish() {
 
 kernrec_setup() {
   local branch="${VLLM_CI_BRANCH:-main}"
-  local base="https://raw.githubusercontent.com/vllm-project/ci-infra/${branch}/buildkite/ci_selector/kernrec"
+  local base="https://raw.githubusercontent.com/vllm-project/ci-infra/${branch}/buildkite/ci_selector/recorders/kernrec"
   local dir=/tmp/kernrec
   mkdir -p "$dir" || { echo "kernrec: cannot create $dir"; return 1; }
 

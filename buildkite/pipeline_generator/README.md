@@ -79,7 +79,7 @@ The generator relies on several environment variables, typically provided by Bui
 *   `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.
 *   `VLLM_USE_PRECOMPILED`: Set to "1" to force use of precompiled wheels.
 *   `VLLM_CI_KERNREC`: Set to "1" to load the kernel-launch recorder
-    (`buildkite/ci_selector/kernrec`) into every CUDA process of every GPU step
+    (`buildkite/ci_selector/recorders/kernrec`) into every CUDA process of every GPU step
     and upload its `.fnrec/**` output as job artifacts. Off by default; meant
     for nightly and post-merge builds that feed the test selector.
 *   `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
