@@ -505,6 +505,27 @@ def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroup
     return BuildkiteGroupStep(group=KERNREC_COLLECT_GROUP, steps=[step])
 
 
+def _kernrec_finish_command() -> str:
+    """Record the step's exit status in the recorder's sidecar, explicitly.
+
+    `ci_setup.sh` installs an EXIT trap for this, but a trap is a single
+    slot: vLLM's OTel prelude (`.buildkite/scripts/ci-otel/ci_otel.sh`)
+    installs its own `trap ... 0` after ours and replaces it, so on every GPU
+    step the sidecar kept `exit_status: null` and the whole nightly read as
+    failed (build 90513: 215 of 225 rows unusable). The generator owns the
+    end of the command list, so it calls the finish itself; the trap stays as
+    a fallback for shells nothing else touches. `set -e` means a failed
+    command in a non-CONTINUE_ON_FAILURE step never reaches this line, which
+    leaves the sidecar null, which the table builder reads as not passed.
+    That is the right answer for a step that died. Double quotes only,
+    like the setup command.
+    """
+    return (
+        "command -v kernrec_finish >/dev/null 2>&1 && "
+        'kernrec_finish "$${CI_OVERALL_STATUS:-0}" || echo "kernrec: finish skipped"'
+    )
+
+
 def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
     if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
         return []
@@ -582,6 +603,11 @@ def _prepare_commands(
                 commands.append(f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1")
             else:
                 commands.append(prepared_command)
+
+    if setup_profile == "nvidia" and _kernrec_applies(step):
+        # After the step's own commands and before the exit, so the sidecar
+        # carries the status the step is about to exit with.
+        commands.append(_kernrec_finish_command())
 
     if continue_on_failure:
         commands.append("exit $$CI_OVERALL_STATUS")
@@ -775,9 +801,7 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.artifact_paths = [KERNREC_ARTIFACT_PATH]
             if step.retry:
                 buildkite_step.retry = step.retry
-            buildkite_step.retry = ensure_infra_failure_retry(
-                buildkite_step.retry
-            )
+            buildkite_step.retry = ensure_infra_failure_retry(buildkite_step.retry)
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
             if is_amd_device(step.device):

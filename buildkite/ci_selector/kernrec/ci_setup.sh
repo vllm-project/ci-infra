@@ -15,8 +15,10 @@
 #                          even in a process that initializes CUDA before
 #                          torch has preloaded libcupti
 #
-# On exit, writes $KERNREC_DIR/kernrec.json (step key, shard, exit status) so
-# the collect step can file the recordings without asking the Buildkite API.
+# Writes $KERNREC_DIR/kernrec.json (step key, shard, exit status) at setup
+# and again when the step's commands finish, so the collect step can file the
+# recordings without asking the Buildkite API. The finish is called by the
+# generator as the step's last command; the EXIT trap here is a fallback.
 
 # Escape a string for a JSON literal (backslashes and double quotes).
 kernrec_json() {
@@ -88,6 +90,10 @@ kernrec_setup() {
   KERNREC_ROOT="$root"
   export KERNREC_ROOT
   kernrec_write_sidecar null
+  # A fallback only. A trap is a single slot and vLLM's OTel prelude installs
+  # its own `trap ... 0` after this one, replacing it; so the pipeline
+  # generator also calls kernrec_finish explicitly as the step's last command
+  # (buildkite_step._kernrec_finish_command). Calling it twice is harmless.
   trap 'kernrec_finish $?' EXIT
 
   # libkernrec needs libcupti.so.<major>. torch ships it in a pip wheel that is

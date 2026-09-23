@@ -62,7 +62,7 @@ def test_on_arms_gpu_steps_from_the_generating_branch(monkeypatch):
     rendered = _render(_gpu_step())
     commands = _commands(rendered)
 
-    setup = [c for c in commands if "kernrec" in c]
+    setup = [c for c in commands if "ci_setup.sh" in c]
     assert len(setup) == 1
     assert "ci-infra/my-branch/buildkite/ci_selector/kernrec/ci_setup.sh" in setup[0]
     # Setup runs before the step's own commands and after the cd, so the
@@ -167,3 +167,40 @@ def test_collect_step_serializes_allow_dependency_failure(monkeypatch):
     (step,) = buildkite_step.kernrec_collect_group(_rendered_groups(_gpu_step())).steps
     assert step.to_yaml()["allow_dependency_failure"] is True
     assert step.dict(exclude_none=True)["allow_dependency_failure"] is True
+
+
+def test_on_finishes_the_sidecar_as_the_last_command(monkeypatch):
+    """The EXIT trap in ci_setup.sh is replaced by vLLM's OTel prelude, so the
+    generator records the exit status itself: after the step's commands,
+    right before the exit."""
+    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
+    commands = _commands(_render(_gpu_step()))
+    finish = [c for c in commands if "kernrec_finish" in c]
+    assert len(finish) == 1
+    assert "'" not in finish[0]
+    assert "CI_OVERALL_STATUS" in finish[0], "records the status the step exits with"
+    test_cmd = next(c for c in commands if "pytest -v -s kernels/core" in c)
+    exit_cmd = next(
+        c for c in commands if c.startswith("exit ") and "CI_OVERALL_STATUS" in c
+    )
+    assert (
+        commands.index(test_cmd)
+        < commands.index(finish[0])
+        == commands.index(exit_cmd) - 1
+    )
+
+
+def test_on_finishes_the_sidecar_without_continue_on_failure(monkeypatch):
+    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.delenv("CONTINUE_ON_FAILURE", raising=False)
+    commands = _commands(_render(_gpu_step()))
+    assert "kernrec_finish" in commands[-1], (
+        "last, since there is no exit line to precede"
+    )
+
+
+def test_finish_stays_off_with_the_recorder(monkeypatch):
+    monkeypatch.delenv(buildkite_step.KERNREC_ENV_VAR, raising=False)
+    monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
+    assert not any("kernrec_finish" in c for c in _commands(_render(_gpu_step())))
