@@ -20,15 +20,16 @@ spec:
     matchLabels:
       kubernetes.io/metadata.name: ${NAMESPACE}${ADMISSION_CHECKS}
   resourceGroups:
-    # google.com/tpu is the only resource under quota; everything else a pod
+    # One resource under quota: google.com/tpu for a TPU shape, cpu for the cpu
+    # queue (see CPU_QUEUE_RESOURCE in generate_manifests.py). Everything else a pod
     # requests is left to the kube scheduler. See quotaCheckStrategy in
     # common-config.yaml.
     - coveredResources:
-        - google.com/tpu
+        - ${COVERED_RESOURCE}
       flavors:
         - name: ${ACCELERATOR}
           resources:
-            - name: google.com/tpu
+            - name: ${COVERED_RESOURCE}
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
               nominalQuota: ${NOMINAL_QUOTA}

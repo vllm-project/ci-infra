@@ -6,7 +6,7 @@
 
 # Applied to every pod of a workload that opts in, chips or not.
 everyPod:
-  # Every workload pulls a model or a tokenizer, including the chipless
+  # Every workload pulls a model or a tokenizer, including the CPU-only
   # benchmark clients, so the token is fleet setup rather than something each
   # step remembers to name. A manifest that sets HF_TOKEN itself still wins.
   env:
