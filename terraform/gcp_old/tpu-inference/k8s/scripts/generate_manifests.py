@@ -105,6 +105,34 @@ WORKLOAD_PRIORITIES = {
     "low": (-100, "Work that yields to everything: nightlies, autotuning"),
 }
 
+# The cpu queue: what a CPU-only workload is admitted against. It needs one because
+# admission is what MultiKueue dispatches on, and a workload with no queue stays
+# on the manager, which has neither the fleet secrets nor the class above.
+#
+# No quota to keep: it covers cpu at a number no build reaches (see below), and
+# the rest of what a pod consumes is left to the kube scheduler by
+# quotaCheckStrategy: IgnoreUndeclared. One word, so cohort() gives it a cohort
+# of its own rather than one it could borrow chips from.
+CPU_QUEUE = "cpu"
+
+# What the cpu queue covers, and a quota for it no one will reach. Covering
+# google.com/tpu alone does not work for this queue: a workload that requests
+# none of a queue's covered resources is assigned no flavor, Kueue attaches
+# admission checks per assigned flavor, and so the MultiKueue dispatch check
+# never applies - the workload is admitted on the manager and never runs.
+# Covering cpu gives it a flavor and so a dispatch. The number rations
+# nothing; the worker-cpu compute class and the kube scheduler bound the rest.
+CPU_QUEUE_RESOURCE = "cpu"
+CPU_QUEUE_CORES = 100000
+
+# Sized to a unit suite, so several fit a node. Requests equal limits because a
+# worker-cpu node is shared where a TPU host is not.
+CPU_JOB_SIZE = {
+    "cpu_cores": "6",
+    "cpu_memory": "16Gi",
+    "cpu_disk": "20Gi",
+}
+
 # The identity Managed Prometheus scrapes Kueue as, and where its token lives.
 # The namespace is not a choice: it is the only one the Managed Prometheus
 # operator holds a Role to read Secrets in, and a scrape of Kueue needs a token.
@@ -126,6 +154,10 @@ LAUNCHER_SCRIPT_KEY = "launch"
 LAUNCHER_DEFAULT_JOB = ROOT / "kueue" / "launcher" / "job.yaml"
 LAUNCHER_MANIFEST_CONFIGMAP = "tpu-launcher-manifests"
 LAUNCHER_DEFAULT_JOB_KEY = "job.yaml"
+
+# And the one a step gets when it wants the image and no chips.
+LAUNCHER_DEFAULT_CPU_JOB = ROOT / "kueue" / "launcher" / "job_cpu.yaml"
+LAUNCHER_DEFAULT_CPU_JOB_KEY = "job_cpu.yaml"
 
 # The pod setup both that Job and a repo's own manifest inherit.
 LAUNCHER_POD_DEFAULTS = ROOT / "kueue" / "launcher" / "pod_defaults.yaml"
@@ -470,7 +502,10 @@ def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
                 QUEUE_NAME=name,
                 ACCELERATOR=cohort(name),
                 NAMESPACE=namespace,
-                NOMINAL_QUOTA=chips,
+                COVERED_RESOURCE=(
+                    CPU_QUEUE_RESOURCE if name == CPU_QUEUE else "google.com/tpu"
+                ),
+                NOMINAL_QUOTA=CPU_QUEUE_CORES if name == CPU_QUEUE else chips,
                 ADMISSION_CHECKS=dispatch_check(name, checks),
             )
         )
@@ -677,6 +712,18 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         )
 
         local = shapes(worker, tfvars["machine_memory_gb"])
+        # Not read from a node pool - there is no hardware to describe. In the
+        # same map as the shapes so the queue, the AdmissionCheck, the
+        # MultiKueueConfig and the profile all come from the existing code.
+        local[CPU_QUEUE] = {
+            "queue": CPU_QUEUE,
+            "chips": 0,
+            "hosts": 1,
+            "quota": 0,
+            # What the compute class builds a node against. One size for the
+            # lane; a step wanting another states its own manifest.
+            **CPU_JOB_SIZE,
+        }
         for name, shape in local.items():
             # The shape is stored once, not summed: two clusters running it
             # run the same hardware. Only the quota adds up.
