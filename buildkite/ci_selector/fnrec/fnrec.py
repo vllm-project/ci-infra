@@ -17,7 +17,9 @@ and otherwise ignored.
 Switched on by `FNREC_DIR`. Unset, importing this module does nothing, so a
 PR build with the `.pth` in place still pays nothing.
 
-Output, `$FNREC_DIR/fn.<pid>.txt`, in the shape `coverage/model.py` reads:
+Output, `$FNREC_DIR/fn.<pid>.txt`, in the shape `coverage/model.py` reads,
+created on the process's first vLLM function (a process that never enters
+vLLM writes nothing):
 
     #start  pid=4242  root=/usr/local/lib/python3.12/dist-packages/vllm/  py=3.12.13  BUILDKITE_JOB_ID=...  BUILDKITE_RETRY_COUNT=0
     #root   /usr/local/lib/python3.12/dist-packages/vllm/  t=<epoch>
@@ -81,30 +83,45 @@ def _find_vllm_root() -> str | None:
 
 
 def _open(directory: str, root: str | None) -> None:
-    """Start a fresh file for this pid. Called at install and after a fork."""
+    """Reset the state for this pid. Called at install and after a fork.
+
+    No file yet: `_file()` makes one on the first record under the root. Most
+    Python processes in a step never enter vLLM (compile workers, helpers,
+    pip): build 90637 wrote 2,905 files and 90% held no vLLM function, and a
+    full build's ~44k artifacts timed out the agent's artifact search. A
+    process that records nothing leaves nothing, which says the same thing.
+    """
     os.makedirs(directory, exist_ok=True)
     try:
         os.chmod(directory, 0o777)
     except OSError:
         pass
-    pid = os.getpid()
-    path = os.path.join(directory, f"fn.{pid}.txt")
-    fh = open(path, "a", buffering=1, encoding="utf-8", errors="replace")  # noqa: SIM115
-    try:
-        os.chmod(path, 0o666)
-    except OSError:
-        pass
     _state.update(
-        pid=pid,
-        fh=fh,
+        pid=os.getpid(),
+        dir=directory,
+        fh=None,
         root=root,
-        root_written=False,
         n_root=0,
         n_other=0,
         errors=0,
         last_error="",
         error_lines=0,
     )
+
+
+def _file():
+    """This process's file, created with its header on first use."""
+    s = _state
+    if s["fh"] is not None:
+        return s["fh"]
+    pid = s["pid"]
+    path = os.path.join(s["dir"], f"fn.{pid}.txt")
+    fh = open(path, "a", buffering=1, encoding="utf-8", errors="replace")  # noqa: SIM115
+    try:
+        os.chmod(path, 0o666)
+    except OSError:
+        pass
+    root = s["root"]
     fh.write(
         "\t".join(
             [
@@ -119,12 +136,9 @@ def _open(directory: str, root: str | None) -> None:
         + "\n"
     )
     if root:
-        _write_root(root)
-
-
-def _write_root(root: str) -> None:
-    _state["fh"].write(f"#root\t{root}\tt={int(time.time())}\n")
-    _state["root_written"] = True
+        fh.write(f"#root\t{root}\tt={int(time.time())}\n")
+    s["fh"] = fh
+    return fh
 
 
 def _counters(tag: str) -> str:
@@ -148,16 +162,14 @@ def _on_start(code, instruction_offset):
         root = s["root"]
         if root is None:
             root = s["root"] = _find_vllm_root()
-            if root is not None:
-                with _lock:
-                    _write_root(root)
         filename = code.co_filename
         with _lock:
             if root is not None and filename.startswith(root):
-                s["fh"].write(f"{filename}\t{code.co_qualname}\t1\n")
+                fh = _file()
+                fh.write(f"{filename}\t{code.co_qualname}\t1\n")
                 s["n_root"] += 1
                 if s["n_root"] % STAT_EVERY == 0:
-                    s["fh"].write(_counters("#stat"))
+                    fh.write(_counters("#stat"))
             else:
                 s["n_other"] += 1
     except Exception as exc:  # noqa: BLE001 - never propagate into the workload
@@ -167,7 +179,7 @@ def _on_start(code, instruction_offset):
                 _state["last_error"] = type(exc).__name__
                 if _state["error_lines"] < MAX_ERROR_LINES:
                     _state["error_lines"] += 1
-                    _state["fh"].write(f"#error\t{type(exc).__name__}: {exc}\n")
+                    _file().write(f"#error\t{type(exc).__name__}: {exc}\n")
         except Exception:  # noqa: BLE001
             pass
     finally:
@@ -201,6 +213,7 @@ def _after_fork_in_child() -> None:
                 s["fh"].close()  # the parent's handle; the parent keeps its own
             except Exception:  # noqa: BLE001
                 pass
+            s["fh"] = None
         _open(directory, s.get("root"))
     except Exception:  # noqa: BLE001
         pass
@@ -222,7 +235,7 @@ def install(directory: str | None = None) -> bool:
     having done nothing, when there is nowhere to write, the interpreter is
     too old, or no monitoring tool slot is free."""
     directory = directory or os.environ.get("FNREC_DIR")
-    if not directory or _state.get("fh"):
+    if not directory or _state.get("tool") is not None:
         return False
     if sys.version_info < (3, 12) or not hasattr(sys, "monitoring"):
         return False
@@ -230,7 +243,6 @@ def install(directory: str | None = None) -> bool:
     if tool is None:
         return False
     try:
-        _state["dir"] = directory
         _open(directory, _find_vllm_root())
     except OSError:
         return False
