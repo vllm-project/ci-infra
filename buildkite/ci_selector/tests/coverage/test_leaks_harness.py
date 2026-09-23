@@ -34,3 +34,25 @@ def test_spellings_use_the_buildkite_key():
     step = SimpleNamespace(step_id="vllm_ci:foo:amd", buildkite_key="amd-foo")
     state = SimpleNamespace(pipelines=[SimpleNamespace(steps=[step])])
     assert leaks._spellings(state) == {"vllm_ci:foo:amd": "amd-foo"}
+
+
+def test_split_by_optional_scores_optional_steps_by_reach():
+    from ci_selector.validate.leaks import split_by_optional
+
+    results = [
+        {
+            "rows": [
+                {"verdict": "selected", "optional": False},
+                {"verdict": "missed", "optional": False},
+                {"verdict": "optional reached", "optional": True},
+                {"verdict": "selected", "optional": True},
+                {"verdict": "missed", "optional": True},
+                {"verdict": "step absent at base", "optional": None},
+            ]
+        },
+        {"skip": "pre-restructure base", "rows": [{"id": "x"}]},
+    ]
+    assert split_by_optional(results) == [
+        "  regular steps: 1/2 would run",
+        "  optional steps: 2/3 selected or reached (1 selected as emitted today)",
+    ]
