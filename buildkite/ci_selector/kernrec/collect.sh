@@ -35,14 +35,23 @@ BUCKET="${CI_SELECTOR_BUCKET:-vllm-ci-selector}"
 PIPELINE="${BUILDKITE_PIPELINE_SLUG:-ci}"
 COMMIT="${BUILDKITE_COMMIT:?}"
 BUILD="${BUILDKITE_BUILD_NUMBER:?}"
+# Fold another build of the same pipeline instead of this one, for when a
+# recording build's own collect step is stuck behind a job that never gets a
+# machine. The source must be at this build's commit (the checkout is used).
+FROM=()
+if [[ -n "${KERNREC_SOURCE_BUILD_ID:-}" ]]; then
+  FROM=(--build "${KERNREC_SOURCE_BUILD_ID}")
+  BUILD="${KERNREC_SOURCE_BUILD_NUMBER:?set with KERNREC_SOURCE_BUILD_ID}"
+  echo "folding build ${BUILD} (${KERNREC_SOURCE_BUILD_ID}) from build ${BUILDKITE_BUILD_NUMBER}"
+fi
 
 WORK="$(mktemp -d)"
 cd "${WORK}" || exit 1
 trap 'rm -rf -- "${WORK}"' EXIT
 
 echo "--- :satellite: Collecting kernel recordings of build ${BUILD}"
-buildkite-agent artifact download ".fnrec/**/*" . || echo "no kernel recordings in this build"
-buildkite-agent artifact download "kernel_symbol_map.json.gz" . || echo "no kernel symbol map in this build"
+buildkite-agent artifact download ".fnrec/**/*" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel recordings in this build"
+buildkite-agent artifact download "kernel_symbol_map.json.gz" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel symbol map in this build"
 n_files=$(find .fnrec -name 'kern.*.txt' 2>/dev/null | wc -l | tr -d ' ')
 n_jobs=$(find .fnrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
 echo "${n_files} recording files from ${n_jobs} jobs"
@@ -84,6 +93,7 @@ else
     SEL="${WORK}/ci-infra/buildkite/ci_selector"
     run_sel() { uv run -q --no-dev --python 3.12 --project "${SEL}" "$@"; }
     if run_sel ci-sweep-from-artifacts .fnrec --out "sweep/${PIPELINE}-${BUILD}" \
+         --build "${BUILD}" --commit "${COMMIT}" --pipeline "${PIPELINE}" \
        && run_sel ci-build-table "${CHECKOUT}" "sweep/${PIPELINE}-${BUILD}" -o out/table.json.gz; then
       py_ok=yes
     else
