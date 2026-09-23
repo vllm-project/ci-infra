@@ -74,6 +74,7 @@ data:
   profiles.yaml: |
     allowed_image_repos:
     - us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/
+    - us-central1-docker.pkg.dev/inferact-vllm-tpu/vllm-tpu-ci/
     workload_service_accounts:
     - default
     - tpu-workload
