@@ -109,11 +109,21 @@ WORKLOAD_PRIORITIES = {
 # admission is what MultiKueue dispatches on, and a workload with no queue stays
 # on the manager, which has neither the fleet secrets nor the class above.
 #
-# No quota to keep: it covers google.com/tpu at nominalQuota 0 like the rest, a
-# CPU-only workload asks for none, and what it does consume is left to the kube
-# scheduler by quotaCheckStrategy: IgnoreUndeclared. One word, so cohort() gives
-# it a cohort of its own rather than one it could borrow chips from.
+# No quota to keep: it covers cpu at a number no build reaches (see below), and
+# the rest of what a pod consumes is left to the kube scheduler by
+# quotaCheckStrategy: IgnoreUndeclared. One word, so cohort() gives it a cohort
+# of its own rather than one it could borrow chips from.
 CPU_QUEUE = "cpu"
+
+# What the cpu queue covers, and a quota for it no one will reach. Covering
+# google.com/tpu alone does not work for this queue: a workload that requests
+# none of a queue's covered resources is assigned no flavor, Kueue attaches
+# admission checks per assigned flavor, and so the MultiKueue dispatch check
+# never applies - the workload is admitted on the manager and never runs.
+# Covering cpu gives it a flavor and so a dispatch. The number rations
+# nothing; the worker-cpu compute class and the kube scheduler bound the rest.
+CPU_QUEUE_RESOURCE = "cpu"
+CPU_QUEUE_CORES = 100000
 
 # Sized to a unit suite, so several fit a node. Requests equal limits because a
 # worker-cpu node is shared where a TPU host is not.
@@ -492,7 +502,10 @@ def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
                 QUEUE_NAME=name,
                 ACCELERATOR=cohort(name),
                 NAMESPACE=namespace,
-                NOMINAL_QUOTA=chips,
+                COVERED_RESOURCE=(
+                    CPU_QUEUE_RESOURCE if name == CPU_QUEUE else "google.com/tpu"
+                ),
+                NOMINAL_QUOTA=CPU_QUEUE_CORES if name == CPU_QUEUE else chips,
                 ADMISSION_CHECKS=dispatch_check(name, checks),
             )
         )
