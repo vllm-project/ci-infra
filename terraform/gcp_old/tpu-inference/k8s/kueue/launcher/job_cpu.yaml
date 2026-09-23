@@ -1,0 +1,55 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The Job a step gets when it wants the image and no chips, deployed with the
+# launcher like job.yaml beside it.
+#
+# `standard` brings the everyPod defaults - the HF token, the safe-to-evict
+# annotation - but not the tpuPods block, which the launcher applies only to a
+# pod holding chips. So no gcsfuse sidecar and no host-sized volumes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    tpu-ci.google.com/defaults: standard
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    spec:
+      # No TPU nodeSelector and no toleration: a TPU node is tainted against
+      # exactly this pod. The class builds a node against the requests below.
+      # Stated here because the fleet merges these two only into pods that
+      # hold chips (tpuPods.spec in pod_defaults.yaml). A Job's pod has to say
+      # Never or OnFailure, and without the account the pod runs as `default`
+      # and has none of the fleet's Workload Identity grants.
+      restartPolicy: Never
+      serviceAccountName: tpu-workload
+      nodeSelector:
+        cloud.google.com/compute-class: worker-cpu
+      containers:
+        - name: workload
+          image: ${IMAGE}
+          command: ["/bin/bash", "-lc"]
+          # Guaranteed: a worker-cpu node is shared, unlike a TPU host, so the
+          # bound is what keeps one step off another's throughput.
+          resources:
+            requests:
+              cpu: "${CPU_CORES}"
+              memory: "${CPU_MEMORY}"
+              ephemeral-storage: "${CPU_DISK}"
+            limits:
+              cpu: "${CPU_CORES}"
+              memory: "${CPU_MEMORY}"
+              ephemeral-storage: "${CPU_DISK}"

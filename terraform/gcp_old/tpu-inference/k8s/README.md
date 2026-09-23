@@ -133,7 +133,7 @@ mounts are applied first, so a mount nested inside an inherited one lands inside
 it rather than under it.
 
 Only roles that hold chips get the caches and retry rules — they are sized from
-a TPU host's memory and about TPU nodes being repaired, and a chipless role runs
+a TPU host's memory and about TPU nodes being repaired, and a CPU-only role runs
 on neither. Such a role states what it needs itself.
 
 What stays in the manifest is `nodeSelector` and the `google.com/tpu` count:
