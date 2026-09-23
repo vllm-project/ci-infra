@@ -717,6 +717,25 @@ def _classify(state: RepoState, path: str, ctx: DiffContext | None) -> Claim:
     return _apply_csrc_droppability(state, path, claim)
 
 
+def csrc_held_steps(state: RepoState, path: str) -> set[str]:
+    """Steps a csrc file keeps whatever the kernel record says about it.
+
+    The floor under kernel evidence: steps that build an image, since the
+    file compiles into it, and steps that declare THIS file by name in
+    `source_file_dependencies`. A named file is a deliberate tie its owner
+    wrote down. A directory declaration such as `csrc/` is a blanket, and the
+    kernel record exists to replace that blanket with an observation, so it
+    holds nothing here. `_apply_csrc_droppability` keeps every declarer
+    because the wrapper-name evidence it works from is indirect; a recorded
+    kernel launch is not.
+    """
+    held: set[str] = set()
+    held |= {s for ss in state.artifacts.producers_of.values() for s in ss}
+    held |= {s for ss in state.artifacts.self_builders.values() for s in ss}
+    held |= step_refs.steps_naming_file(state, path)
+    return held
+
+
 def _apply_csrc_droppability(state: RepoState, path: str, claim: Claim) -> Claim:
     """Let the record drop a csrc file's steps on wrapper evidence.
 

@@ -92,20 +92,31 @@ class RowKeys:
     def resolve(cls, table: Table, repo: Path, ref: str) -> RowKeys:
         from ci_selector.codemap.worktree import state_for
 
-        rows = set(table._rows)
+        return cls.resolve_from_state(set(table._rows), state_for(repo, ref))
+
+    @classmethod
+    def resolve_from_state(cls, rows: set[str], state) -> RowKeys:
+        """`resolve` against a state the caller already holds.
+
+        The kernel record resolves at the PR's base, whose state `decide`
+        was handed, so this costs nothing where `resolve` builds a worktree.
+        `rows` is the table's row keys, whichever table.
+        """
         spellings: dict[str, str] = {}
         match_rate: dict[str, float] = {}
-        for pipeline in state_for(repo, ref).pipelines:
+        for pipeline in state.pipelines:
             idents = set()
             for step in pipeline.steps:
                 ident = step.buildkite_key or step.label
                 spellings[step.step_id] = ident
                 idents.add(ident)
-            match_rate[pipeline.config.name] = len(rows & idents) / len(rows)
+            match_rate[pipeline.config.name] = (
+                len(rows & idents) / len(rows) if rows else 0.0
+            )
         resolved = cls.from_match_rates(match_rate, spellings)
         resolved.steps = {
             step.step_id: step
-            for pipeline in state_for(repo, ref).pipelines
+            for pipeline in state.pipelines
             if pipeline.config.name in resolved.owners
             for step in pipeline.steps
         }
@@ -199,6 +210,10 @@ class Reading:
     # Additions whose CI job actually failed: the recall this half buys, and
     # the mirror of dropped_and_failed.
     added_and_failed: list[str] = field(default_factory=list)
+    # Steps kept because a row shows them running a changed function. Read by
+    # the kernel record: a silence about kernels cannot overrule an observed
+    # call on another changed file.
+    executes: list[str] = field(default_factory=list)
 
 
 def unknown_names(
@@ -283,6 +298,7 @@ def read_pr(
             row_shows_use(row, f, name, mode) for f in query.files for name in f.names
         ):
             reading.kept.append(step_id)
+            reading.executes.append(step_id)
             reading.reasons["row-executes-a-changed-function"] += 1
             continue
 
