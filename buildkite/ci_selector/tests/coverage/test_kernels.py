@@ -34,7 +34,7 @@ from ci_selector.coverage.kernels import (
 )
 from ci_selector.coverage.rules import RowKeys
 from ci_selector.coverage.table import Table
-from ci_selector.decide import KERNEL_UNMATCHED_ENV, decide
+from ci_selector.decide import KERNEL_ATTRIBUTION_ENV, KERNEL_UNMATCHED_ENV, decide
 
 KERNREC = Path(__file__).resolve().parents[2] / "kernrec"
 
@@ -439,6 +439,48 @@ def test_manual_only_steps_are_never_added(tmp_path):
     assert r.added == []
 
 
+def test_attribution_narrows_a_file_to_its_changed_kernels(tmp_path):
+    """Two kernels in one file; only kA changed. The step that launched kB
+    alone is held by the whole-file reading and dropped by the narrowed one."""
+    ev = _evidence(
+        tmp_path,
+        {"runs-a": {"kernels": ["kA"]}, "runs-b": {"kernels": ["kB"]}},
+        [_obj("csrc/a.cu", ["kA", "kB"])],
+    )
+    sel = _selection({"csrc/a.cu": ["runs-a", "runs-b"]})
+    keys = _keys("runs-a", "runs-b")
+    whole = _read(ev, sel, ["csrc/a.cu"], keys)
+    assert whole.dropped == []
+    narrowed = _read(
+        ev,
+        sel,
+        ["csrc/a.cu"],
+        keys,
+        attribute=lambda p, syms: (frozenset({"kA"}), "changed: kA"),
+    )
+    assert narrowed.dropped == ["vllm_ci:runs-b"]
+    assert narrowed.reasons["file-narrowed-to-changed-kernels"] == 1
+    assert narrowed.files["csrc/a.cu"].startswith("1 of 2 kernel symbols (changed: kA)")
+    # names the map has no symbols for (a kernel new in this PR): whole file
+    fresh = _read(
+        ev,
+        sel,
+        ["csrc/a.cu"],
+        keys,
+        attribute=lambda p, syms: (frozenset({"kNew"}), "changed: kNew"),
+    )
+    assert fresh.dropped == [] and "none of them in the map" in fresh.files["csrc/a.cu"]
+    # the attribution declining (whole file) reads like no attribution at all
+    declined = _read(
+        ev,
+        sel,
+        ["csrc/a.cu"],
+        keys,
+        attribute=lambda p, syms: (frozenset(), "line 3 is outside every function"),
+    )
+    assert declined.dropped == [] and "whole file" in declined.files["csrc/a.cu"]
+
+
 # --- decide() wiring --------------------------------------------------------------
 
 
@@ -497,7 +539,49 @@ def test_decide_applies_the_kernel_record(tmp_path, csrc_diff, monkeypatch):
         "a step naming the file in source_file_dependencies is the floor"
     )
     assert "abc" in d.kernel_pair and "DIFFERENT" not in d.kernel_pair
-    assert d.kernel_files == {"csrc/a.cu": "1 kernel symbols; may select and drop"}
+    assert d.kernel_files["csrc/a.cu"].endswith("; may select and drop")
+    assert d.kernel_files["csrc/a.cu"].startswith("1 of 1 kernel symbols (changed: kA)")
+
+
+TWO_KERNELS = """\
+__global__ void kA(float* p) {
+  p[0] = 1.0f;
+}
+
+__global__ void kB(float* p) {
+  p[0] = 2.0f;
+}
+"""
+
+
+def test_decide_attributes_per_kernel_by_default(tmp_path, tmp_repo, monkeypatch):
+    monkeypatch.delenv(KERNEL_UNMATCHED_ENV, raising=False)
+    tmp_repo.write("csrc/two.cu", TWO_KERNELS)
+    base = tmp_repo.commit("two kernels")
+    tmp_repo.write("csrc/two.cu", TWO_KERNELS.replace("p[0] = 1.0f;", "p[0] = 1.5f;"))
+    head = tmp_repo.commit("edit kA")
+    root = Path(tmp_repo.git("rev-parse", "--show-toplevel").strip())
+    ev = _evidence(
+        tmp_path,
+        {"runs-a": {"kernels": ["_Z2kAPf"]}, "runs-b": {"kernels": ["_Z2kBPf"]}},
+        [_obj("csrc/two.cu", ["_Z2kAPf", "_Z2kBPf"])],
+    )
+    sel = _selection({"csrc/two.cu": ["runs-a", "runs-b"]})
+    state = _state(_Step("runs-a"), _Step("runs-b"))
+    no_table = Table(None, unavailable="x")
+
+    monkeypatch.delenv(KERNEL_ATTRIBUTION_ENV, raising=False)
+    d = decide(state, sel, root, base, head, table=no_table, kernels=ev)
+    assert d.dropped_by_kernels == {"vllm_ci:runs-b"}, d.kernel_files
+    assert "1 of 2 kernel symbols" in d.kernel_files["csrc/two.cu"]
+
+    monkeypatch.setenv(KERNEL_ATTRIBUTION_ENV, "file")
+    d = decide(state, sel, root, base, head, table=no_table, kernels=ev)
+    assert d.dropped_by_kernels == set(), "both steps launched a kernel of the file"
+
+    monkeypatch.setenv(KERNEL_ATTRIBUTION_ENV, "kernal")
+    with pytest.raises(ValueError):
+        decide(state, sel, root, base, head, table=no_table, kernels=ev)
 
 
 def test_decide_unmatched_pair_drops_only_on_opt_in(tmp_path, csrc_diff, monkeypatch):

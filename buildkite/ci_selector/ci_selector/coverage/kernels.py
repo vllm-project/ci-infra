@@ -24,7 +24,9 @@ Two files, produced together by a recording build (`kernrec/README.md`):
                              the recorder reports the one that launched.
 
 Joined, they say for a changed file F which steps launched a kernel compiled
-from F or from something that includes F. Per changed file F and step S:
+from F or from something that includes F. `changed_kernels.py` narrows F to
+the kernels its diff touched when it can place every changed line; the whole
+file is the unit otherwise. Per changed file F and step S:
 
     S's row launched a kernel from F              -> select. The map gets no vote.
     S's USABLE row launched none, F is CLEARABLE   -> drop, if F is all the map
@@ -309,6 +311,11 @@ class KernelReading:
     files: dict[str, str] = field(default_factory=dict)
 
 
+#: What `attribute` returns for one changed file: the kernel names the diff
+#: is attributed to (empty when the whole file is the unit) and a note.
+Attribution = tuple[frozenset[str], str]
+
+
 def read_pr(
     evidence: KernelEvidence,
     selection,
@@ -319,6 +326,7 @@ def read_pr(
     stale: frozenset[str] = frozenset(),
     allow_drops: bool = True,
     protected: frozenset[str] = frozenset(),
+    attribute: Callable[[str, frozenset[str]], Attribution] | None = None,
 ) -> KernelReading:
     """The kernel record over one PR's map selection.
 
@@ -328,6 +336,11 @@ def read_pr(
     computes when the freshness gate is on. `protected` is the steps the
     Python record kept on positive evidence about some other changed file;
     a silence about kernels cannot overrule an observed call.
+
+    `attribute(path, symbols)` narrows a file to the kernels its diff
+    touched (`changed_kernels`): the file then votes with those symbols only,
+    so a step that launched other kernels from the same file is not held by
+    them. Empty names mean the whole file, which is the reading without it.
     """
     table, sm = evidence.table, evidence.symbol_map
     reading = KernelReading()
@@ -343,20 +356,31 @@ def read_pr(
                 )
                 reading.reasons["file-not-in-map"] += 1
             continue
-        voting[path] = sm.symbols(path)
+        symbols = sm.symbols(path)
+        scope = f"{len(symbols)} kernel symbols"
+        if attribute is not None and symbols:
+            names, note = attribute(path, symbols)
+            narrowed = _symbols_named(names, symbols) if names else frozenset()
+            if narrowed:
+                symbols = narrowed
+                scope = f"{len(narrowed)} of {len(sm.symbols(path))} kernel symbols ({note})"
+                reading.reasons["file-narrowed-to-changed-kernels"] += 1
+            elif names:
+                # Named kernels the map has no symbols for: new in this PR.
+                # Nothing recorded can speak to them, so the file stays whole.
+                scope += f" (whole file: {note}, none of them in the map)"
+            else:
+                scope += f" (whole file: {note})"
+        voting[path] = symbols
         why = sm.why_not_clearable(path)
         if not why and path in stale:
             why = "its source changed between the map's commit and this base"
         if why:
-            reading.files[path] = (
-                f"{len(voting[path])} kernel symbols; may only select: {why}"
-            )
+            reading.files[path] = f"{scope}; may only select: {why}"
             reading.reasons["file-may-only-select"] += 1
         else:
             clearable.add(path)
-            reading.files[path] = (
-                f"{len(voting[path])} kernel symbols; may select and drop"
-            )
+            reading.files[path] = f"{scope}; may select and drop"
             reading.reasons["file-may-drop"] += 1
 
     def launched(row: KernelRow) -> bool:
@@ -401,6 +425,12 @@ def read_pr(
             reading.dropped.append(step_id)
             reading.reasons["row-launched-none-of-its-kernels"] += 1
     return reading
+
+
+def _symbols_named(names: frozenset[str], symbols: frozenset[str]) -> frozenset[str]:
+    from .changed_kernels import symbols_for
+
+    return symbols_for(names, symbols)
 
 
 def _why_keep(

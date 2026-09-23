@@ -18,6 +18,8 @@ Neither is a stage of the other. `decide.py` reads all of them, per changed file
 | S has a row, and it shows S ran none of F | **drop**, if every gate agrees |
 | S has no row, or F is outside what the record can see | **the map decides** |
 
+A changed `.cu` votes with the kernels its diff touched, not the whole file: `coverage/changed_kernels.py` reads both sides of the file, finds the definition each changed line falls in (a `__global__`, a `__device__` helper and the kernels reaching it, a host launcher and the kernels it launches, a constant and the functions using it) and joins the names back to the map's symbols. Anything it cannot name falls back to the whole file. `CI_SELECTOR_KERNEL_ATTRIBUTION=file` restores the whole-file reading for measurement.
+
 Selecting takes one observation and carries no gate. Dropping carries all of them. For the kernel record the gates are: the row is healthy (every job passed, every shard reported, no dropped records), the file is clearable (compiled into kernels and into no host-only object, so a header `torch_bindings.cpp` includes may select but never drop), the step was selected for nothing but files the record can clear, no step declares the file by name, and the table and map come from the same commit.
 
 ## Setup

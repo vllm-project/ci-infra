@@ -60,6 +60,10 @@ FRESHNESS_ENV = "CI_SELECTOR_FRESHNESS"
 #: the two reads as never launched. The collect step publishes matched pairs,
 #: so this is for measuring against older data.
 KERNEL_UNMATCHED_ENV = "CI_SELECTOR_KERNEL_UNMATCHED_DROPS"
+#: How a changed csrc file votes in the kernel record. "kernel" (the default)
+#: narrows the file to the kernels its diff touched (`coverage/changed_kernels`);
+#: "file" is the whole-file reading, kept as a measurement baseline.
+KERNEL_ATTRIBUTION_ENV = "CI_SELECTOR_KERNEL_ATTRIBUTION"
 
 
 @dataclass
@@ -121,6 +125,7 @@ def decide(
     # below, the broad handler would swallow it, every PR would come back
     # map-only, and that reads as "the mode does nothing".
     mode = mode if mode is not None else mode_from_env()
+    kernel_mode = _attribution_mode()
     out = Decision(steps=set(selection.selected), from_map=set(selection.selected))
 
     table = table if table is not None else fetch_table()
@@ -150,7 +155,9 @@ def decide(
     else:
         out.kernel_pair = kernels.describe()
         try:
-            _apply_kernel_record(out, kernels, selection, state, repo, base, head)
+            _apply_kernel_record(
+                out, kernels, selection, state, repo, base, head, kernel_mode
+            )
         except Exception as exc:  # noqa: BLE001 - same reasoning as above
             out.steps = (
                 set(out.from_map) | out.added_by_coverage
@@ -316,6 +323,7 @@ def _apply_kernel_record(
     repo: Path,
     base: str,
     head: str | None,
+    attribution_mode: str = "kernel",
 ) -> None:
     """The kernel record over the map's selection, after the Python record.
 
@@ -347,6 +355,7 @@ def _apply_kernel_record(
         stale=stale,
         allow_drops=allow_drops,
         protected=frozenset(out.executes_by_coverage),
+        attribute=_kernel_attribution(repo, base, head, attribution_mode),
     )
     out.kernel_reasons = dict(reading.reasons)
     out.kernel_files = dict(reading.files)
@@ -376,3 +385,29 @@ def _csrc_moved_since(
         return frozenset(changed)
     moved = set(out.stdout.split())
     return frozenset(p for p in changed if p in moved)
+
+
+def _attribution_mode() -> str:
+    """How a changed csrc file votes: "kernel" or "file". Resolved above the
+    broad handler in `decide`, like the phase mode, so a typo kills the run
+    instead of quietly reading as the whole-file baseline."""
+    mode = os.environ.get(KERNEL_ATTRIBUTION_ENV) or "kernel"
+    if mode not in ("kernel", "file"):
+        raise ValueError(
+            f"{KERNEL_ATTRIBUTION_ENV}={mode!r}, expected one of: kernel, file"
+        )
+    return mode
+
+
+def _kernel_attribution(repo: Path, base: str, head: str | None, mode: str):
+    """The per-file narrowing `kernels.read_pr` applies, or None for the
+    whole-file reading."""
+    if mode == "file":
+        return None
+    from .coverage.changed_kernels import attribute
+
+    def narrow(path: str, symbols: frozenset[str]):
+        a = attribute(repo, base, head, path, symbols)
+        return (a.kernels if a.narrowed else frozenset()), a.why
+
+    return narrow
