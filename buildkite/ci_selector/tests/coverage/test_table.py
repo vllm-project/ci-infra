@@ -484,3 +484,24 @@ class TestEmptyChangedFunctionSet:
     def test_an_empty_diff_drops_nothing(self, table_path: Path):
         verdict = load(table_path).look_up("runs-other", Query(base="b", head="h"))
         assert verdict.evidence is Evidence.NOTHING_TO_MATCH and verdict.keep
+
+
+def test_the_add_share_cap_can_be_tightened(tmp_path, tmp_repo, monkeypatch):
+    """CI_SELECTOR_ADD_MAX_SHARE lowers the breadth above which a name adds
+    nothing; engine-path code sits in about half the rows."""
+    from ci_selector.coverage.model import ADD_MAX_SHARE_ENV
+
+    from .helpers import make_table
+
+    jobs = {
+        f"s{i}": [("mod.py", "plain")] if i < 10 else [("other.py", "elsewhere")]
+        for i in range(20)
+    }
+    table = make_table(tmp_path, tmp_repo, jobs)
+    monkeypatch.delenv(ADD_MAX_SHARE_ENV, raising=False)
+    assert table.discriminates("vllm/mod.py", "plain")
+    monkeypatch.setenv(ADD_MAX_SHARE_ENV, "0.25")
+    assert not table.discriminates("vllm/mod.py", "plain")
+    monkeypatch.setenv(ADD_MAX_SHARE_ENV, "2")
+    with pytest.raises(ValueError):
+        table.discriminates("vllm/mod.py", "plain")
