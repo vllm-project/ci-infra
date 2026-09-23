@@ -59,6 +59,16 @@ ci-validate crosscheck --repo /path/to/vllm --prs 50378 47189
 
 Run it after any change to selection. It exits 1 on a problem, and also when it finds nothing at all, because a detector that has stopped detecting looks like a clean result from the outside. Anything checkable from a plain checkout is a drift-marked test instead, see Tests below.
 
+### Leak replay
+
+`test-selection/selection-leaks.json` at the repository root is the curated corpus of confirmed selection leaks: jobs that did not run on a pull request and then failed on main because of it. Replaying it asks the recall question crosscheck cannot: would we have reached the job that broke?
+
+```bash
+ci-validate leaks --repo /path/to/vllm
+```
+
+Each leaked job scores as `selected` (in the emitted selection, so it runs), `optional reached` (a rule reached it, but the step is optional and the emitter leaves optional steps out; the generator would run it if named, so this is a policy choice), or `missed`. Today's rules score zero on this corpus by construction. Re-run it after any change to selection; the counts must never fall.
+
 ## Tests
 
 ```bash
