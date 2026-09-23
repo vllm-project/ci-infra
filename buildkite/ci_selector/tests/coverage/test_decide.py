@@ -342,3 +342,19 @@ def test_a_row_no_step_can_address_is_counted_but_not_acted_on(
     blind = decide(None, sel, tmp_repo.root, *diff, table=table)
     assert seen.steps == blind.steps
     assert seen.dropped_by_coverage == blind.dropped_by_coverage
+
+
+def test_stand_in_evidence_does_not_protect_a_step_from_kernel_drops(monkeypatch):
+    from ci_selector.decide import (
+        PROXY_HOLDS_ENV,
+        Decision,
+        _protected_from_kernel_drops,
+    )
+
+    out = Decision(steps=set(), from_map=set())
+    out.executes_by_coverage = {"vllm_ci:called", "vllm_ci:compiles"}
+    out.executes_by_proxy = {"vllm_ci:compiles"}
+    monkeypatch.delenv(PROXY_HOLDS_ENV, raising=False)
+    assert _protected_from_kernel_drops(out) == {"vllm_ci:called"}
+    monkeypatch.setenv(PROXY_HOLDS_ENV, "1")
+    assert _protected_from_kernel_drops(out) == {"vllm_ci:called", "vllm_ci:compiles"}
