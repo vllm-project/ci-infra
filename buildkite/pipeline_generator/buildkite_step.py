@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
+import math
 import os
 import re
 import shlex
@@ -452,6 +453,20 @@ def _fnrec_applies(step: Step) -> bool:
     )
 
 
+# Recording costs time: about 5% at the median over a full run (build 90641
+# against 90628, same commit), more on compile-heavy steps. Several steps
+# already finish within a minute of their limit on main, and a recording run
+# timed them out while every test was passing. The margin applies only when a
+# recorder is armed on the step, so ordinary builds keep their limits.
+RECORDING_TIMEOUT_FACTOR = 1.25
+
+
+def _recording_timeout(step: Step, minutes: int) -> int:
+    if _kernrec_applies(step) or _fnrec_applies(step):
+        return math.ceil(minutes * RECORDING_TIMEOUT_FACTOR)
+    return minutes
+
+
 def _fnrec_setup_command() -> str:
     """Source the Python recorder's setup script at the start of the step.
     Double quotes only, and never fails the step, like the kernel one."""
@@ -858,7 +873,7 @@ def convert_group_step_to_buildkite_step(
                 )
             elif step.timeout_in_minutes:
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
-                    step.timeout_in_minutes
+                    _recording_timeout(step, step.timeout_in_minutes)
                 )
 
             if include_step and not _step_should_run(step, list_file_diff):

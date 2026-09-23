@@ -97,3 +97,25 @@ def test_on_leaves_docker_and_no_plugin_steps_alone(monkeypatch, overrides):
 
 def _fnrec_or_setup(step):
     return buildkite_step._fnrec_applies(step)
+
+
+def test_recording_gives_steps_a_timeout_margin(monkeypatch):
+    """A recording run once timed out steps whose tests all passed, because
+    they finish within a minute of their limit even without a recorder."""
+    step = _gpu_step(timeout_in_minutes=40)
+    monkeypatch.delenv(buildkite_step.FNREC_ENV_VAR, raising=False)
+    monkeypatch.delenv(buildkite_step.KERNREC_ENV_VAR, raising=False)
+    assert _timeout(_render(step)) == 40
+    monkeypatch.setenv(buildkite_step.FNREC_ENV_VAR, "1")
+    assert _timeout(_render(step)) == 50
+    monkeypatch.delenv(buildkite_step.FNREC_ENV_VAR)
+    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    assert _timeout(_render(step)) == 50
+
+
+def _timeout(rendered):
+    return (
+        rendered.get("timeout_in_minutes")
+        if isinstance(rendered, dict)
+        else rendered.timeout_in_minutes
+    )
