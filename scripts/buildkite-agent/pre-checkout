@@ -8,6 +8,14 @@
 
 set -e
 
+# Exit-code convention:
+#   - exit 1   = genuine misconfiguration. The job fails immediately.
+#   - exit 255 = provider/infrastructure failure (the agent secret store is
+#                unreachable). The agent preserves a hook's exit code as the
+#                job's exit status, and the generated pipeline steps auto-retry
+#                exit_status 255 (like agent-lost -1) — so one network blip
+#                doesn't kill the whole build.
+
 # Authenticate only the two canonical repositories.
 case "${BUILDKITE_PIPELINE_ID:-}:${BUILDKITE_REPO:-}" in
     018cdabc-d930-49f6-9085-634c4cb582ed:https://github.com/vllm-project/vllm.git|\
@@ -28,7 +36,10 @@ if [[ "${BUILDKITE_BRANCH:-}" == *:* &&
     export BUILDKITE_REFSPEC="$BUILDKITE_COMMIT"
 fi
 
-github_pat=$(/usr/bin/buildkite-agent secret get GITHUB_READONLY_PAT)
+if ! github_pat=$(/usr/bin/buildkite-agent secret get GITHUB_READONLY_PAT); then
+    echo "ERROR: could not fetch GITHUB_READONLY_PAT from the agent secret store (provider/infrastructure failure — exiting 255 to trigger the infra retry)" >&2
+    exit 255
+fi
 github_basic=$(printf 'x-access-token:%s' "$github_pat" | base64 -w0)
 
 # The secret command redacts the raw PAT. Register the derived Basic payload and

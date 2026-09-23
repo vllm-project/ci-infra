@@ -154,8 +154,11 @@ excluded, so it can never wait on a step that will not start) and runs
 whether they passed or failed. It executes `collect.sh`:
 
 1. `buildkite-agent artifact download ".fnrec/**/*"` pulls every job's
-   recordings and the `kernrec.json` sidecar `ci_setup.sh` writes on exit
-   (step key, shard, exit status), so no Buildkite API token is needed.
+   recordings and the `kernrec.json` sidecar (step key, shard, exit status),
+   so no Buildkite API token is needed. `ci_setup.sh` writes it at setup with
+   a null status and the generator's last command, `kernrec_finish`, rewrites
+   it with the real one. Not an EXIT trap alone: vLLM's OTel prelude installs
+   its own and replaced ours, which read a whole nightly as failed once.
 2. `kernel_table.py build --fnrec .fnrec` folds them into one row per step:
    kernels launched, jobs, all-passed, processes, dropped records.
 3. The table and the build's `kernel_symbol_map.json.gz` are uploaded as

@@ -39,6 +39,10 @@ PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
+# The self-hosted GPU agent hooks exit 255 on provider/infrastructure failures
+# (ECR login, secret-store fetch, docker pull). The agent preserves a hook's
+# exit code as the job's exit status, so retry 255 like agent-lost.
+EXIT_STATUS_255_RETRY = {"exit_status": 255, "limit": 1}
 
 # Pod-level failures on EKS surface as agent stops / lost pods rather than
 # clean non-zero exits, which exit-code-only retries would miss.
@@ -501,6 +505,27 @@ def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroup
     return BuildkiteGroupStep(group=KERNREC_COLLECT_GROUP, steps=[step])
 
 
+def _kernrec_finish_command() -> str:
+    """Record the step's exit status in the recorder's sidecar, explicitly.
+
+    `ci_setup.sh` installs an EXIT trap for this, but a trap is a single
+    slot: vLLM's OTel prelude (`.buildkite/scripts/ci-otel/ci_otel.sh`)
+    installs its own `trap ... 0` after ours and replaces it, so on every GPU
+    step the sidecar kept `exit_status: null` and the whole nightly read as
+    failed (build 90513: 215 of 225 rows unusable). The generator owns the
+    end of the command list, so it calls the finish itself; the trap stays as
+    a fallback for shells nothing else touches. `set -e` means a failed
+    command in a non-CONTINUE_ON_FAILURE step never reaches this line, which
+    leaves the sidecar null, which the table builder reads as not passed.
+    That is the right answer for a step that died. Double quotes only,
+    like the setup command.
+    """
+    return (
+        "command -v kernrec_finish >/dev/null 2>&1 && "
+        'kernrec_finish "$${CI_OVERALL_STATUS:-0}" || echo "kernrec: finish skipped"'
+    )
+
+
 def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
     if step.label.startswith(":docker:") or step.no_plugin or setup_profile == "none":
         return []
@@ -579,6 +604,11 @@ def _prepare_commands(
             else:
                 commands.append(prepared_command)
 
+    if setup_profile == "nvidia" and _kernrec_applies(step):
+        # After the step's own commands and before the exit, so the sidecar
+        # carries the status the step is about to exit with.
+        commands.append(_kernrec_finish_command())
+
     if continue_on_failure:
         commands.append("exit $$CI_OVERALL_STATUS")
 
@@ -643,10 +673,10 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
     return diff_file == normalized or diff_file.startswith(f"{normalized}/")
 
 
-def ensure_exit_status_negative_one_retry(
+def ensure_infra_failure_retry(
     retry: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Add a one-time retry for jobs that lose their agent."""
+    """Add one-time retries for agent-lost (-1) and provider hook (255) failures."""
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -656,23 +686,27 @@ def ensure_exit_status_negative_one_retry(
     if automatic is None or automatic is False:
         automatic_conditions = []
     elif isinstance(automatic, dict):
-        if automatic.get("exit_status") == -1:
-            return retry_policy
         automatic_conditions = [automatic]
     elif isinstance(automatic, list):
         automatic_conditions = automatic
-        if any(
-            isinstance(condition, dict) and condition.get("exit_status") == -1
-            for condition in automatic_conditions
-        ):
-            return retry_policy
     else:
         raise ValueError("retry.automatic must be a boolean, mapping, or list.")
 
-    retry_policy["automatic"] = [
-        dict(EXIT_STATUS_NEGATIVE_ONE_RETRY),
-        *automatic_conditions,
+    existing_statuses = set()
+    for condition in automatic_conditions:
+        if not isinstance(condition, dict):
+            continue
+        exit_status = condition.get("exit_status")
+        if isinstance(exit_status, list):
+            existing_statuses.update(exit_status)
+        else:
+            existing_statuses.add(exit_status)
+    infra_conditions = [
+        dict(condition)
+        for condition in (EXIT_STATUS_NEGATIVE_ONE_RETRY, EXIT_STATUS_255_RETRY)
+        if condition["exit_status"] not in existing_statuses
     ]
+    retry_policy["automatic"] = [*infra_conditions, *automatic_conditions]
     return retry_policy
 
 
@@ -767,9 +801,7 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.artifact_paths = [KERNREC_ARTIFACT_PATH]
             if step.retry:
                 buildkite_step.retry = step.retry
-            buildkite_step.retry = ensure_exit_status_negative_one_retry(
-                buildkite_step.retry
-            )
+            buildkite_step.retry = ensure_infra_failure_retry(buildkite_step.retry)
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
             if is_amd_device(step.device):

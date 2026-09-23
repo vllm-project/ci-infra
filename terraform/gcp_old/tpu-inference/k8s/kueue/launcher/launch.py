@@ -54,6 +54,13 @@ PROFILES_PATH = os.environ.get(
 # the launcher rather than kept in a repo: everything in it (which caches
 # exist, what mounts them, which identity may write them) is cluster state.
 DEFAULT_JOB = os.environ.get("LAUNCHER_DEFAULT_JOB", "/opt/launcher/manifests/job.yaml")
+# The same, for a step that wants the image and no chips. A separate file
+# because what the two share is a container and a command, and nothing else.
+DEFAULT_CPU_JOB = os.environ.get(
+    "LAUNCHER_DEFAULT_CPU_JOB", "/opt/launcher/manifests/job_cpu.yaml")
+# What a CPU-only workload is admitted against; see CPU_QUEUE in
+# generate_manifests.py.
+CPU_PROFILE = "cpu"
 POD_DEFAULTS = os.environ.get(
     "LAUNCHER_POD_DEFAULTS", "/opt/launcher/manifests/pod_defaults.yaml")
 
@@ -64,6 +71,11 @@ TPU_RESOURCE = "google.com/tpu"
 # Kueue reads this on the top-level object for both Job and JobSet, never on
 # the inner pods.
 QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
+
+# Where a workload sits in the pending queue. From the step, not the shape: what
+# a run is worth depends on why it was started, not what hardware it asked for.
+PRIORITY_LABEL = "kueue.x-k8s.io/priority-class"
+PRIORITY_ENV = "WORKLOAD_PRIORITY"
 
 # GKE's name, not ours: the gcsfuse sidecar looks for an emptyDir called this
 # and uses it as its file cache.
@@ -298,9 +310,11 @@ def load_registry():
 
 
 def available(registry):
+    # What --machine-type and --topology can name, which the cpu profile is not.
     return sorted(
-        f"{p.get('machine_type')} {p.get('topology')}"
+        f"{p['machine_type']} {p['topology']}"
         for p in registry.get("profiles", {}).values()
+        if p.get("machine_type")
     )
 
 
@@ -361,12 +375,25 @@ def resolve_shape(doc, registry, where):
     plus a client that drives them over HTTP and wants no accelerator, and the
     queues put google.com/tpu alone under quota, so a role asking for none is
     admitted with the rest and scheduled wherever the worker has room.
+
+    A workload where no role holds chips gets the cpu profile. It still needs
+    one: admission is what MultiKueue dispatches on, and a workload with no
+    queue stays on the manager, which cannot run it.
     """
     asked = {pod_shape(spec) for spec in pod_specs(doc)}
     # Nothing of the three, rather than "no chips": a role that names an
     # accelerator but forgets its limit has made a mistake, and should reach
     # the message below rather than be read as CPU-only and ignored.
     asked.discard((None, None, None))
+    if not asked:
+        profile = registry.get("profiles", {}).get(CPU_PROFILE)
+        if profile is None:
+            raise SystemExit(
+                f"{where}: holds no chips, and the shape registry has no "
+                f"{CPU_PROFILE!r} profile to admit it against. The launcher is "
+                "newer than the registry beside it; redeploy."
+            )
+        return profile
     if len(asked) > 1:
         raise SystemExit(
             f"{where}: names more than one shape "
@@ -382,9 +409,11 @@ def resolve_shape(doc, registry, where):
             f"and a {TPU_RESOURCE} limit on the container holding them."
         )
     for profile in registry.get("profiles", {}).values():
-        if (profile["accelerator_label"] == accelerator
-                and profile["topology"] == topology
-                and str(profile["chips"]) == chips):
+        # .get: the cpu profile carries none of these, and is reached by
+        # holding no chips rather than by matching.
+        if (profile.get("accelerator_label") == accelerator
+                and profile.get("topology") == topology
+                and str(profile.get("chips")) == chips):
             return profile
     raise SystemExit(
         f"{where}: the fleet has no node pool of {accelerator} at {topology} "
@@ -658,6 +687,9 @@ SHAPE_NAMES = (
     "TOPOLOGY",
     "ACCELERATOR_LABEL",
     "MEMORY_REQUEST",
+    "CPU_CORES",
+    "CPU_MEMORY",
+    "CPU_DISK",
 )
 
 
@@ -716,12 +748,35 @@ def render(path, image, name, shape):
     return coerce_ints(doc)
 
 
+def resolve_priority(registry):
+    """Which WorkloadPriorityClass this run is worth, or None for the default.
+
+    Unlabelled scores 0, which the ladder leaves empty, so a step that says
+    nothing needs no class. A name no class answers to is not a demotion but a
+    refusal - Kueue will not create the Workload - so it is checked here, where
+    the valid names are known, rather than failing inside admission.
+    """
+    known = registry.get("priorities") or []
+    asked = os.environ.get(PRIORITY_ENV, "").strip()
+    if not asked:
+        return None
+    if asked not in known:
+        raise SystemExit(
+            f"{PRIORITY_ENV}={asked!r} is not a priority the fleet defines. "
+            "Use one of: " + ", ".join(known)
+        )
+    return asked
+
+
 def finalise(doc, profile, registry, name, labels, owner, command, where):
     """Everything the launcher decides rather than the manifest."""
     meta = doc.setdefault("metadata", {})
     meta["name"] = name
     meta["namespace"] = NAMESPACE
     meta.setdefault("labels", {})[QUEUE_LABEL] = profile["queue"]
+    priority = resolve_priority(registry)
+    if priority:
+        meta["labels"][PRIORITY_LABEL] = priority
     meta["labels"].update(labels)
     if owner:
         meta["ownerReferences"] = [owner]
@@ -841,7 +896,7 @@ def inherit_defaults(doc, profile):
     path, an annotation, an env name, a field of the pod or Job spec - is left
     alone, so a role can add its own or override one it needs to differ on.
 
-    Only the chip-holding parts are held back from a chipless role, because
+    Only the chip-holding parts are held back from a CPU-only role, because
     only they depend on the hardware: the caches are sized from a TPU host's
     memory, and the retry rules are about TPU nodes being repaired.
     """
@@ -1003,6 +1058,13 @@ def validate(doc, registry, where):
         raise SystemExit(
             f"{where}: sets {QUEUE_LABEL}. Remove it - the launcher sets the "
             "queue from the shape the pods select."
+        )
+    # Same again: one in a manifest would fix the queue position of every step
+    # that uses it.
+    if PRIORITY_LABEL in doc.get("metadata", {}).get("labels", {}):
+        raise SystemExit(
+            f"{where}: sets {PRIORITY_LABEL}. Remove it - a step says what a "
+            f"run is worth in {PRIORITY_ENV}."
         )
 
     # The launcher's own account can create JobSets, so a workload running as
@@ -1395,6 +1457,12 @@ def main():
              "and quota for; everything else about placement follows.",
     )
     parser.add_argument(
+        "--cpu", action="store_true",
+        help="run the built-in Job with the workload image and no chips. Still "
+             "admitted and dispatched like any other workload, which is what "
+             "puts it on a worker rather than the manager.",
+    )
+    parser.add_argument(
         "--env", action="append", default=[], metavar="NAME",
         help="forward this environment variable from the step into the "
              "workload container; repeatable. Names only - the value is read "
@@ -1426,22 +1494,42 @@ def main():
             "no command given; use: launch --machine-type M --topology T "
             "-- <command>"
         )
-    if args.manifest and (args.machine_type or args.topology):
+    if args.manifest and (args.machine_type or args.topology or args.cpu):
         raise SystemExit(
-            "--manifest states its own hardware, so --machine-type and "
-            "--topology do not apply to it. Put the accelerator label, the "
-            "topology and the chip count in the pods that need them."
+            "--manifest states its own hardware, so --machine-type, --topology "
+            "and --cpu do not apply to it. Put the accelerator label, the "
+            "topology and the chip count in the pods that need them, or leave "
+            "them out of a pod that holds no chips."
         )
-    if not args.manifest and not (args.machine_type and args.topology):
+    if args.cpu and (args.machine_type or args.topology):
+        raise SystemExit(
+            "--cpu is the built-in Job without chips, so --machine-type and "
+            "--topology have nothing to name."
+        )
+    if not args.manifest and not args.cpu and not (args.machine_type and args.topology):
         raise SystemExit(
             "say what hardware to run on: --machine-type and --topology for "
-            "the built-in Job, or --manifest for a workload that states its "
-            "own. Available: " + "; ".join(available(registry))
+            "the built-in Job, --cpu for the built-in Job without chips, or "
+            "--manifest for a workload that states its own. Available: "
+            + "; ".join(available(registry))
         )
 
     shape = {}
-    manifest = args.manifest or DEFAULT_JOB
-    if not args.manifest:
+    manifest = args.manifest or (DEFAULT_CPU_JOB if args.cpu else DEFAULT_JOB)
+    if args.cpu:
+        profile = registry.get("profiles", {}).get(CPU_PROFILE)
+        if profile is None:
+            raise SystemExit(
+                f"--cpu wants the {CPU_PROFILE!r} profile and the shape "
+                "registry has none. The launcher is newer than the registry "
+                "beside it; redeploy."
+            )
+        shape = {
+            "CPU_CORES": profile["cpu_cores"],
+            "CPU_MEMORY": profile["cpu_memory"],
+            "CPU_DISK": profile["cpu_disk"],
+        }
+    elif not args.manifest:
         profile = load_profile(registry, args.machine_type, args.topology)
         if profile["hosts"] > 1:
             raise SystemExit(
