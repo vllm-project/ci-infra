@@ -204,3 +204,15 @@ def test_finish_stays_off_with_the_recorder(monkeypatch):
     monkeypatch.delenv(buildkite_step.KERNREC_ENV_VAR, raising=False)
     monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
     assert not any("kernrec_finish" in c for c in _commands(_render(_gpu_step())))
+
+
+def test_on_leaves_skipped_steps_alone(monkeypatch):
+    """A step in KERNREC_SKIP_STEPS runs as if the recorder were off: no setup,
+    no artifact paths, so no row, and the selector keeps it."""
+    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    (key,) = [k for k in buildkite_step.KERNREC_SKIP_STEPS if k == "quantization"]
+    rendered = _render(_gpu_step(key=key, label=":nvidia: (H200) Quantization"))
+    assert not any("kernrec" in c for c in _commands(rendered))
+    assert not _artifact_paths(rendered)
+    # and a neighbour still records
+    assert any("kernrec" in c for c in _commands(_render(_gpu_step())))

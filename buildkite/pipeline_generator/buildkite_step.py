@@ -425,12 +425,27 @@ def kernrec_enabled() -> bool:
     return os.getenv(KERNREC_ENV_VAR, "") == "1"
 
 
+# Steps the kernel recorder stays off, and why. A CUPTI client changes what
+# some tests see, and a recording run must not turn a green step red. With no
+# recording the step has no row, so the selector keeps it: only savings lost.
+KERNREC_SKIP_STEPS = {
+    # quantization/test_per_token_kv_cache.py::test_reshape_and_cache_per_token_head
+    # [int4-*] fails its tolerance on shards 1 and 3 in every recording run
+    # (daily 90513, nightly 90589, vllm/ci #90641) and in no recorder-free main
+    # build (90574, 90608, 90617, 90628, the last at 90641's commit). Likely a
+    # latent read of uninitialised memory or a race that CUPTI's allocations or
+    # timing expose; back on once a kernel owner has looked.
+    "quantization": "int4 per-token KV cache test fails under CUPTI",
+}
+
+
 def _kernrec_applies(step: Step) -> bool:
     """The steps _get_setup_commands arms with the nvidia profile."""
     return (
         kernrec_enabled()
         and not step.no_plugin
         and not step.label.startswith(":docker:")
+        and step.key not in KERNREC_SKIP_STEPS
     )
 
 
@@ -548,7 +563,7 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
             "echo '--- :gear: CUDA Coredump Setup'",
             "export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1 && export CUDA_COREDUMP_SHOW_PROGRESS=1 && export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'",
         ]
-        if kernrec_enabled():
+        if _kernrec_applies(step):
             commands.append(_kernrec_setup_command())
         return commands
 
