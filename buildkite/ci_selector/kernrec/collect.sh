@@ -136,6 +136,14 @@ if [[ "${map_ok}" != "yes" ]]; then
   exit 1
 fi
 
+# Only main's recordings describe the tree PRs are selected against, and only
+# postmerge agents can write the bucket anyway. A branch under test stops here,
+# green, with everything on this job's artifacts.
+if [[ "${BUILDKITE_BRANCH:-main}" != "main" ]]; then
+  echo "branch ${BUILDKITE_BRANCH} is not main; not publishing (the artifacts above are the result)"
+  exit 0
+fi
+
 echo "--- :s3: Publishing to s3://${BUCKET}/${PIPELINE}/${COMMIT}/"
 if ! command -v aws >/dev/null 2>&1; then
   echo "aws cli not on this agent; the table and map are artifacts of this job only" >&2

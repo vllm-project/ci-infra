@@ -8,6 +8,8 @@
 #   4. table with no rows          -> artifacts only, nothing to S3, exit 1
 #      (a build with no recordings at all is not a failure: exit 0, nothing to fold)
 #   5. no AWS identity             -> artifacts only, exit 0
+#   7. a build not on main (a fork branch under test) -> artifacts only, exit 0,
+#      S3 untouched: only main's recordings describe what PRs are compared to
 #   6. rerun of a commit already published, this time with a corrupt map
 #      -> exit 1 and every byte already under S3 (pair + latest.json) untouched
 #      (Codex P2 on #620: the commit prefix is written as a unit)
@@ -78,7 +80,9 @@ esac
 EOF
   chmod +x "$T/bin"/*
 
-  ( cd "$T" && PATH="$T/bin:$PATH" BUILDKITE_COMMIT=abc BUILDKITE_BUILD_NUMBER=42 BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt \
+  local branch=main
+  [[ "$mode" == "fork-branch" ]] && branch="khluu:some-branch"
+  ( cd "$T" && PATH="$T/bin:$PATH" BUILDKITE_COMMIT=abc BUILDKITE_BUILD_NUMBER=42 BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
       bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
   local latest=no commit=no untouched=no
   [[ -f "$T/s3/bkt/ci/latest.json" ]] && latest=yes
@@ -98,4 +102,5 @@ run_case no-builder        1 no  no  no-builder
 run_case no-rows           1 no  no  no-rows
 run_case no-identity       0 no  no  no-identity
 run_case corrupt-map-rerun 1 yes yes corrupt-map-rerun yes
+run_case fork-branch       0 no  no  fork-branch yes
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" || { echo "collect.sh publishing rules: FAIL"; exit 1; }
