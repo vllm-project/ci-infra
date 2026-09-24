@@ -64,6 +64,8 @@ KERNEL_UNMATCHED_ENV = "CI_SELECTOR_KERNEL_UNMATCHED_DROPS"
 #: narrows the file to the kernels its diff touched (`coverage/changed_kernels`);
 #: "file" is the whole-file reading, kept as a measurement baseline.
 KERNEL_ATTRIBUTION_ENV = "CI_SELECTOR_KERNEL_ATTRIBUTION"
+# Lets op-wrapper stand-in evidence hold steps against kernel drops, as it did.
+PROXY_HOLDS_ENV = "CI_SELECTOR_PROXY_HOLDS_KERNEL"
 
 
 @dataclass
@@ -86,6 +88,7 @@ class Decision:
     # Steps the Python record kept on positive evidence. The kernel record
     # may not drop these.
     executes_by_coverage: set[str] = field(default_factory=set)
+    executes_by_proxy: set[str] = field(default_factory=set)
     # The kernel record's contribution, kept apart the same way.
     added_by_kernels: set[str] = field(default_factory=set)
     dropped_by_kernels: set[str] = field(default_factory=set)
@@ -147,6 +150,7 @@ def decide(
             out.added_by_coverage.clear()
             out.dropped_by_coverage.clear()
             out.executes_by_coverage.clear()
+            out.executes_by_proxy.clear()
             out.coverage_note = f"coverage unusable ({type(exc).__name__}: {exc})"
 
     kernels = kernels if kernels is not None else fetch_kernel_evidence()
@@ -267,6 +271,7 @@ def _apply_record(
     out.added_by_coverage = set(reading.added)
     out.dropped_by_coverage = set(reading.dropped)
     out.executes_by_coverage = set(reading.executes)
+    out.executes_by_proxy = set(reading.executes_by_proxy)
     out.steps |= out.added_by_coverage
     out.steps -= out.dropped_by_coverage
 
@@ -354,7 +359,7 @@ def _apply_kernel_record(
         held=lambda path: csrc_held_steps(state, path),
         stale=stale,
         allow_drops=allow_drops,
-        protected=frozenset(out.executes_by_coverage),
+        protected=_protected_from_kernel_drops(out),
         attribute=_kernel_attribution(repo, base, head, attribution_mode),
     )
     out.kernel_reasons = dict(reading.reasons)
@@ -363,6 +368,17 @@ def _apply_kernel_record(
     out.dropped_by_kernels = set(reading.dropped)
     out.steps |= out.added_by_kernels
     out.steps -= out.dropped_by_kernels
+
+
+def _protected_from_kernel_drops(out: Decision) -> frozenset[str]:
+    """Steps the Python record saw running a changed function, which the
+    kernel record may not drop. Evidence that came only through an op-wrapper
+    stand-in does not count: the stand-in answers for the changed csrc file
+    itself, which the kernel record answers for per kernel, and more coarsely.
+    CI_SELECTOR_PROXY_HOLDS_KERNEL=1 restores the old reading."""
+    if os.environ.get(PROXY_HOLDS_ENV) == "1":
+        return frozenset(out.executes_by_coverage)
+    return frozenset(out.executes_by_coverage - out.executes_by_proxy)
 
 
 def _csrc_moved_since(

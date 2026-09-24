@@ -22,6 +22,11 @@ that CI leaves blocked on a PR, so there are three answers:
                        8xH200 eval is the question that policy has to answer
     missed             nothing reached it
 
+The summary also splits regular steps from optional ones. Optional steps never
+run on a PR, so they leak whatever is selected; the goal is to retire them and
+let selection decide every step, so they are scored as that world would score
+them: a step selected or reached would run.
+
 Today's rules score zero on this corpus by construction. Re-run after any
 change to selection; the reach must never fall.
 
@@ -39,7 +44,7 @@ from pathlib import Path
 
 from ..codemap.classify import select
 from ..codemap.worktree import git_out, state_for
-from ..coverage.source import fetch_table
+from ..coverage.source import fetch_kernel_evidence, fetch_table
 from ..decide import decide
 from ..gitdiff import changed_paths, diff_files
 from .crosscheck import base_in_window
@@ -54,7 +59,12 @@ def _spellings(state) -> dict[str, str]:
     return {s.step_id: s.buildkite_key for p in state.pipelines for s in p.steps}
 
 
-def replay(repo: Path, merge: str, rows: list[dict], table=None) -> dict:
+def _optional(state) -> dict[str, bool]:
+    """step_id -> whether the step is optional (manual-only) at this checkout."""
+    return {s.step_id: bool(s.manual_only) for p in state.pipelines for s in p.steps}
+
+
+def replay(repo: Path, merge: str, rows: list[dict], table=None, kernels=None) -> dict:
     """One culprit PR: select at merge^..merge and score each leaked job."""
     base = git_out(repo, "rev-parse", f"{merge}^")
     head = merge
@@ -63,14 +73,17 @@ def replay(repo: Path, merge: str, rows: list[dict], table=None) -> dict:
     paths = changed_paths(diff_files(repo, base, head))
     state = state_for(repo, base)
     sel = select(state, paths, base=base, head=head)
-    decision = decide(state, sel, repo, base, head, table=table)
+    decision = decide(state, sel, repo, base, head, table=table, kernels=kernels)
     key_of = _spellings(state)
+    optional = _optional(state)
     by_key: dict[str, str] = {}
     for sid, key in key_of.items():
         by_key.setdefault(key, sid)
     auto = {key_of[s] for s in sel.selected if s in key_of}
     manual = {key_of[s] for s in sel.manual_hits if s in key_of}
     final = {key_of[s] for s in decision.steps if s in key_of}
+    by_python = {key_of[s] for s in decision.added_by_coverage if s in key_of}
+    by_kernels = {key_of[s] for s in decision.added_by_kernels if s in key_of}
     out_rows = []
     for r in rows:
         k = r["job_key"]
@@ -95,6 +108,15 @@ def replay(repo: Path, merge: str, rows: list[dict], table=None) -> dict:
                 "pr_ci_state": r["pr_ci"]["state"],
                 "verdict": verdict,
                 "codemap": k in auto or k in manual,
+                # Optional steps never run on a PR, so they leak by construction.
+                # Scored apart from regular steps: see the module docstring.
+                "optional": optional.get(sid) if sid else None,
+                # Which record put it in the final selection, if one did.
+                "added_by": "python record"
+                if k in by_python
+                else "kernel record"
+                if k in by_kernels
+                else None,
                 "rules": rules,
                 "signature": r["main_failure"]["signature"],
             }
@@ -108,6 +130,9 @@ def replay(repo: Path, merge: str, rows: list[dict], table=None) -> dict:
         "final_steps": len(decision.steps),
         "run_all": bool(sel.run_all),
         "coverage_note": decision.coverage_note,
+        "kernel_note": decision.kernel_note,
+        "added_by_python": len(decision.added_by_coverage),
+        "dropped_by_python": len(decision.dropped_by_coverage),
         "rows": out_rows,
     }
 
@@ -118,6 +143,14 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json-out", type=Path)
     parser.add_argument(
         "--table", type=Path, help="coverage table (default: the configured one)"
+    )
+    parser.add_argument(
+        "--kernel-table", type=Path, help="kernel table (default: the configured one)"
+    )
+    parser.add_argument(
+        "--kernel-symbol-map",
+        type=Path,
+        help="kernel symbol map (default: the configured one)",
     )
 
 
@@ -130,6 +163,9 @@ def run(args) -> int:
     table = fetch_table(args.table)
     if not table.available:
         print(f"NOTE: {table.unavailable}")
+    kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
+    if kernels.unavailable:
+        print(f"NOTE: {kernels.unavailable}")
     by_pr: OrderedDict[int, dict] = OrderedDict()
     for r in records:
         pr = r["culprit_pr"]["number"]
@@ -146,7 +182,7 @@ def run(args) -> int:
     print(f"{len(records)} leaked jobs across {len(by_pr)} pull requests\n")
     for pr, d in by_pr.items():
         try:
-            res = replay(repo, d["merge"], d["rows"], table=table)
+            res = replay(repo, d["merge"], d["rows"], table=table, kernels=kernels)
         except subprocess.CalledProcessError as e:
             res = {
                 "merge": d["merge"],
@@ -164,6 +200,8 @@ def run(args) -> int:
         for row in res["rows"]:
             tally[row["verdict"]] += 1
             rules = f" via {','.join(row['rules'])}" if row["rules"] else ""
+            if row.get("added_by"):
+                rules += f" (added by the {row['added_by']})"
             print(
                 f"    {row['verdict']:<20} {row['job_key']}  [pr ci: {row['pr_ci_state']}]{rules}",
                 flush=True,
@@ -183,4 +221,32 @@ def run(args) -> int:
             f"  would run: {run}/{scored} ({run / scored:.0%}); with optional steps emitted: "
             f"{reach}/{scored} ({reach / scored:.0%}); today's rules by definition: 0/{scored}"
         )
+        for line in split_by_optional(results):
+            print(line)
     return 0 if scored else 1
+
+
+def split_by_optional(results: list[dict]) -> list[str]:
+    """The same tally, regular steps apart from optional ones.
+
+    A regular step's leak is the selector's miss: the step runs on a PR when
+    selected. An optional step's leak is the pipeline's: it never runs on a
+    PR, whatever is selected. So optional ones are scored as if optional were
+    gone and the selector decided them like any other step, where a step its
+    rules reached would run.
+    """
+    rows = [r for res in results for r in res.get("rows", []) if "verdict" in r]
+    regular = [r for r in rows if r.get("optional") is False]
+    opt = [r for r in rows if r.get("optional") is True]
+    lines = []
+    if regular:
+        run = sum(r["verdict"] == "selected" for r in regular)
+        lines.append(f"  regular steps: {run}/{len(regular)} would run")
+    if opt:
+        sel = sum(r["verdict"] == "selected" for r in opt)
+        reach = sel + sum(r["verdict"] == "optional reached" for r in opt)
+        lines.append(
+            f"  optional steps: {reach}/{len(opt)} selected or reached "
+            f"({sel} selected as emitted today)"
+        )
+    return lines
