@@ -56,8 +56,11 @@ jobs:
         working-directory: buildkite/ci_selector
         run: uv sync --locked
 
+      # --durations keeps the runner's cold graph build on record (the setup
+      # row for test_cold_build_within_budget), which COLD_BUILD_BUDGET_S in
+      # tests/test_imports.py is sized against.
       - name: Run tests
         working-directory: buildkite/ci_selector
         env:
           VLLM_REPO: ${{ runner.temp }}/vllm
-        run: uv run pytest tests -q
+        run: uv run pytest tests -q --durations=10
