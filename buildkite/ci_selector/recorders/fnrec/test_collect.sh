@@ -9,6 +9,7 @@
 #   5. no AWS identity              -> artifacts only, exit 0
 #   6. a branch that is not main    -> artifacts only, exit 0, S3 untouched
 #   7. fewer jobs delivered than the generator armed -> exit 1, S3 untouched
+#   8. folding another build, per job -> its recordings, number and count
 #
 # Real python3 and the real fold, so what is under test is what runs in CI.
 # The fold runs through uv exactly as collect.sh runs it in CI, so these cover
@@ -74,6 +75,16 @@ run_case() { # name expect_exit expect_latest expect_commit mode [s3_untouched]
   [[ "$mode" == "fork-branch" ]] && branch="tahsintunan:some-branch"
   local expected=1
   [[ "$mode" == "below-floor" ]] && expected=10
+  # Folding another build: this build's own count is wrong for the source, so
+  # the case passes only if the source's is the one the fold uses. The stand-in
+  # agent serves nothing unless asked for the source build.
+  local source_env=() need_build=""
+  if [[ "$mode" == "another-build" ]]; then
+    expected=99
+    source_env=(FNREC_SOURCE_BUILD_ID=src-uuid FNREC_SOURCE_BUILD_NUMBER=77
+      FNREC_SOURCE_EXPECTED_JOBS=1 FNREC_SOURCE_JOBS=job-a)
+    need_build="--build src-uuid"
+  fi
 
   cat > "$T/bin/buildkite-agent" <<EOF
 #!/usr/bin/env bash
@@ -81,7 +92,9 @@ echo "\$*" >> "$T/agent.log"
 case "\$1 \$2" in
   # Both download calls land here. Merge rather than copy the directory, or
   # the second call nests it and invents a job that never existed.
-  "artifact download") mkdir -p .fnrec && cp -R "$T/build/.fnrec/." .fnrec/ 2>/dev/null ;;
+  "artifact download")
+    [[ -z "$need_build" || "\$*" == *"$need_build"* ]] || exit 1
+    mkdir -p .fnrec && cp -R "$T/build/.fnrec/." .fnrec/ 2>/dev/null ;;
   "artifact upload") for f in \$3; do cp "\$f" "$T/artifacts/" 2>/dev/null; done ;;
 esac
 EOF
@@ -102,7 +115,7 @@ EOF
       BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
       FNREC_CI_INFRA="$REPO" FNREC_VLLM_REPO="$vllm" \
       FNREC_EXPECTED_JOBS="$expected" \
-      bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
+      env ${source_env[@]+"${source_env[@]}"} bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
 
   local latest=no commit_up=no untouched=no
   [[ -f "$T/s3/bkt/ci/fnrec/latest.json" ]] && latest=yes
@@ -113,6 +126,10 @@ EOF
     || { verdict=FAIL; fail=1; }
   [[ "$want_untouched" == "no" || "$untouched" == "yes" ]] || { verdict=FAIL; fail=1; }
   # The artifact goes up before any gate, so a refused build is still readable.
+  if [[ "$mode" == "another-build" ]]; then
+    grep -q '"build":77,' "$T/s3/bkt/ci/fnrec/latest.json" 2>/dev/null \
+      || { verdict=FAIL; fail=1; echo "      latest.json does not name the source build"; }
+  fi
   if [[ "$mode" == "happy" || "$mode" == "fork-branch" ]]; then
     [[ -f "$T/artifacts/table.json.gz" ]] || { verdict=FAIL; fail=1; echo "      no artifact"; }
   fi
@@ -136,5 +153,6 @@ run_case unreadable     1 no  no  unreadable
 run_case no-identity    0 no  no  no-identity
 run_case fork-branch    0 no  no  fork-branch  yes
 run_case below-floor    1 no  no  below-floor  yes
+run_case another-build  0 yes yes another-build
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" \
   || { echo "collect.sh publishing rules: FAIL"; exit 1; }
