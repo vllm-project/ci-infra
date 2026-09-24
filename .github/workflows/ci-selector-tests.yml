@@ -37,8 +37,8 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          # Mirrors UV_VERSION in buildkite/bootstrap.sh. No python-version:
-          # it would export UV_PYTHON and override buildkite/.python-version.
+          # The uv bootstrap.sh pins. No python-version: it sets
+          # UV_PYTHON, which overrides buildkite/.python-version.
           version: "0.12.15"
 
       # Full history, not --depth 1: the suite builds git worktrees and asks for
@@ -68,4 +68,4 @@ jobs:
         working-directory: buildkite/ci_selector
         env:
           VLLM_REPO: ${{ runner.temp }}/vllm
-        run: uv run pytest tests -q --durations=10
+        run: uv run --locked pytest tests -q --durations=10
