@@ -74,11 +74,11 @@ All of it is parsed, with tests. A file that fits no mechanism runs everything.
 
 One row per step, holding the function names that step was observed to enter, keyed by file and identified by full qualified name so that fifty different `forward` methods do not collapse into one.
 
-It is collected by instrumenting full CI runs. The recorder subscribes to CPython's `sys.monitoring` function-start event and returns `DISABLE` from the callback, so each function costs one event ever. Across the 222 jobs that both an instrumented sweep and a plain scheduled run passed, total wall clock was 83.2 hours against 83.3.
+It is collected by instrumenting full CI runs. The recorder (`recorders/fnrec/fnrec.py`, armed by `VLLM_CI_FNREC=1`) subscribes to CPython's `sys.monitoring` function-start event and returns `DISABLE` from the callback, so each function costs one event ever. Across the 222 jobs that both an instrumented sweep and a plain scheduled run passed, total wall clock was 83.2 hours against 83.3.
 
 Every row carries a trust stamp: which builds and jobs fed it, whether they passed, whether tests executed, whether every parallel slice reported. A row whose stamp shows any weakness can add jobs but never remove one.
 
-A second record covers what no Python frame can: **the kernel record**. A CUPTI injection library on the nightly and daily runs writes the set of GPU kernel names each step launched (`kernrec/`), and the image build emits a map from every compiled csrc object to its source file, the headers it included, and the kernel symbols it defines. Joined, they say which steps ran code compiled from a changed `.cu` or header. The rows carry the same kind of health (every job passed, every shard reported, no dropped records), and a row with any weakness can select but never drop.
+A second record covers what no Python frame can: **the kernel record**. A CUPTI injection library on the nightly and daily runs writes the set of GPU kernel names each step launched (`recorders/kernrec/`), and the image build emits a map from every compiled csrc object to its source file, the headers it included, and the kernel symbols it defines. Joined, they say which steps ran code compiled from a changed `.cu` or header. The rows carry the same kind of health (every job passed, every shard reported, no dropped records), and a row with any weakness can select but never drop.
 
 ### 3.3 Why both
 

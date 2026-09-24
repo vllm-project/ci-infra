@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-KERNREC = Path(__file__).resolve().parents[2] / "ci_selector" / "kernrec"
+KERNREC = Path(__file__).resolve().parents[2] / "recorders" / "kernrec"
 
 
 def _load(name):
@@ -49,8 +49,8 @@ def _read(path: Path) -> dict:
         return json.load(f)
 
 
-def test_fnrec_layout_folds_jobs_into_step_rows(tmp_path):
-    fn = tmp_path / ".fnrec"
+def test_kernrec_layout_folds_jobs_into_step_rows(tmp_path):
+    fn = tmp_path / ".kernrec"
     (fn / "job-a").mkdir(parents=True)
     (fn / "job-b").mkdir()
     (fn / "job-c").mkdir()
@@ -70,7 +70,7 @@ def test_fnrec_layout_folds_jobs_into_step_rows(tmp_path):
         _run(
             [
                 "build",
-                "--fnrec",
+                "--kernrec",
                 str(fn),
                 "--build",
                 "7",
@@ -94,8 +94,8 @@ def test_fnrec_layout_folds_jobs_into_step_rows(tmp_path):
     assert "kernZ" not in t["names"], "an unfiled job must not leak into any row"
 
 
-def test_fnrec_layout_without_sidecar_but_with_api_states(tmp_path):
-    fn = tmp_path / ".fnrec"
+def test_kernrec_layout_without_sidecar_but_with_api_states(tmp_path):
+    fn = tmp_path / ".kernrec"
     (fn / "job-a").mkdir(parents=True)
     _recording(fn / "job-a" / "kern.1.txt", ["kernA"])
     jobs = tmp_path / "jobs.json"
@@ -104,7 +104,7 @@ def test_fnrec_layout_without_sidecar_but_with_api_states(tmp_path):
     _run(
         [
             "build",
-            "--fnrec",
+            "--kernrec",
             str(fn),
             "--build",
             "1",
@@ -214,12 +214,12 @@ def _sidecar(job_dir: Path, step="step-x", exit_status=0, shard=None, count=None
     (job_dir / "kernrec.json").write_text(json.dumps(d))
 
 
-def _build_fnrec(tmp_path, fn):
+def _build_kernrec(tmp_path, fn):
     out = tmp_path / "t.json.gz"
     _run(
         [
             "build",
-            "--fnrec",
+            "--kernrec",
             str(fn),
             "--build",
             "1",
@@ -235,11 +235,11 @@ def _build_fnrec(tmp_path, fn):
 def test_failed_shard_without_recordings_still_counts(tmp_path):
     """Codex P1: a shard that died before launching anything has a sidecar
     but no kern files; it must fail the row, not vanish."""
-    fn = tmp_path / ".fnrec"
+    fn = tmp_path / ".kernrec"
     _recording((fn / "j0").mkdir(parents=True) or fn / "j0" / "kern.1.txt", ["kA"])
     _sidecar(fn / "j0", exit_status=0, shard=0, count=2)
     _sidecar(fn / "j1", exit_status=1, shard=1, count=2)  # no recordings
-    t, _ = _build_fnrec(tmp_path, fn)
+    t, _ = _build_kernrec(tmp_path, fn)
     row = t["rows"]["step-x"]
     assert row["jobs"] == 2
     assert row["passed"] is False
@@ -249,11 +249,11 @@ def test_failed_shard_without_recordings_still_counts(tmp_path):
 
 def test_missing_shard_makes_the_row_incomplete(tmp_path):
     """One of two shards never produced anything (agent lost, never ran)."""
-    fn = tmp_path / ".fnrec"
+    fn = tmp_path / ".kernrec"
     (fn / "j0").mkdir(parents=True)
     _recording(fn / "j0" / "kern.1.txt", ["kA"])
     _sidecar(fn / "j0", exit_status=0, shard=0, count=2)
-    t, _ = _build_fnrec(tmp_path, fn)
+    t, _ = _build_kernrec(tmp_path, fn)
     row = t["rows"]["step-x"]
     assert row["passed"] is True and row["complete"] is False
     assert row["shards"] == {"expected": 2, "seen": 1}
@@ -263,22 +263,22 @@ def test_missing_shard_makes_the_row_incomplete(tmp_path):
 def test_killed_shard_with_setup_sidecar_is_not_passed(tmp_path):
     """ci_setup.sh writes the sidecar at setup with exit_status null; a job
     SIGKILLed later keeps its step key and must read as not passed."""
-    fn = tmp_path / ".fnrec"
+    fn = tmp_path / ".kernrec"
     (fn / "j0").mkdir(parents=True)
     _recording(fn / "j0" / "kern.1.txt", ["kA"], end=False)
     _sidecar(fn / "j0", exit_status=None)
-    t, _ = _build_fnrec(tmp_path, fn)
+    t, _ = _build_kernrec(tmp_path, fn)
     row = t["rows"]["step-x"]
     assert row["jobs"] == 1 and row["passed"] is False
     assert kernel_table.usable(row) is False
 
 
 def test_query_keeps_incomplete_rows_instead_of_dropping(tmp_path, capsys):
-    fn = tmp_path / ".fnrec"
+    fn = tmp_path / ".kernrec"
     (fn / "j0").mkdir(parents=True)
     _recording(fn / "j0" / "kern.1.txt", ["kOther"])
     _sidecar(fn / "j0", exit_status=0, shard=0, count=2)  # shard 1 missing
-    _, table = _build_fnrec(tmp_path, fn)
+    _, table = _build_kernrec(tmp_path, fn)
     m = tmp_path / "map.json.gz"
     _symbol_map(
         m,

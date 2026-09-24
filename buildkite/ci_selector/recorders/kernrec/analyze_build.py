@@ -4,7 +4,7 @@
     BUILDKITE_TOKEN=... analyze_build.py <build-number> [--out DIR]
                         [--expect STEP_KEY=SUBSTR ...] [--org vllm] [--pipeline ci]
 
-Downloads each job's `.fnrec/**/kern.*.txt` artifacts into
+Downloads each job's `.kernrec/**/kern.*.txt` artifacts into
 <out>/<step_key>/<job-id>/, then prints one line per step: processes,
 unique kernels, dropped records, and whether each expected name showed up.
 Jobs with no recording are listed too, since silence is the failure mode
@@ -105,11 +105,11 @@ def main() -> int:
             jdir = out / step_key / j["id"]
             arts = api(f"{base}/jobs/{j['id']}/artifacts?per_page=100", token)
             # removeprefix, not lstrip: lstrip takes a character set and would eat
-            # the leading dot of `.fnrec` (the same trap fetch.py documents).
+            # the leading dot of `.kernrec` (the same trap fetch.py documents).
             recs = [
                 x
                 for x in arts
-                if x["path"].removeprefix("./").startswith(".fnrec/")
+                if x["path"].removeprefix("./").startswith(".kernrec/")
                 and "/kern." in x["path"]
             ]
             for x in recs:

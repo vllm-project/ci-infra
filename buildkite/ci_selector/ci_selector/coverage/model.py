@@ -35,6 +35,10 @@ JOB_META_PARALLEL_TOTAL = "parallel_total"
 JOB_META_PARALLEL_INDEX = "parallel_index"
 BUILDKITE_JOB_ID_ENV = "BUILDKITE_JOB_ID"
 BUILDKITE_RETRY_COUNT_ENV = "BUILDKITE_RETRY_COUNT"
+BUILDKITE_STEP_KEY_ENV = "BUILDKITE_STEP_KEY"
+BUILDKITE_LABEL_ENV = "BUILDKITE_LABEL"
+BUILDKITE_PARALLEL_INDEX_ENV = "BUILDKITE_PARALLEL_JOB"
+BUILDKITE_PARALLEL_TOTAL_ENV = "BUILDKITE_PARALLEL_JOB_COUNT"
 
 ENV_ABSENT = "<unset>"
 
@@ -66,12 +70,12 @@ MIN_ROWS_FOR_BREADTH = 20
 # not know, which is the only thing stopping an older table from reading
 # healthier than it was recorded: a missing field takes its default, and every
 # default here is the healthy value.
-TABLE_VERSION = 4
+TABLE_VERSION = 5
 
 # Fingerprint of `Stamp`'s fields, so remembering to bump the version above is a
 # mechanism and not a discipline. A test recomputes it and fails when the two
 # disagree. Change both together, in the same commit that changes the stamp.
-STAMP_SHAPE = "060984df5663c507"
+STAMP_SHAPE = "710849dd809c75ad"
 
 MIRROR_NOTE = (
     "A mirror owns its own row and never inherits its parent's. Keyless mirrors "
@@ -88,6 +92,9 @@ class ProcessRecord:
     job: str | None
     py: str | None
     retry: str | None
+    # The step this process ran under, from the recording header. Used only
+    # when there is no Buildkite API to ask.
+    identity: dict
     functions: dict[str, set[str]]
     data_lines: int
     counter: int | None  # last root=N written, a floor on what was recorded
@@ -116,6 +123,7 @@ def read_process(path: Path) -> ProcessRecord | None:
     clean_exit = False
     errors = 0
     malformed = 0
+    identity: dict = {}
 
     with open(path, errors="replace") as fh:
         for line in fh:
@@ -127,6 +135,7 @@ def read_process(path: Path) -> ProcessRecord | None:
                 job = meta.get(BUILDKITE_JOB_ID_ENV)
                 py = meta.get("py")
                 retry = meta.get(BUILDKITE_RETRY_COUNT_ENV)
+                identity = header_identity(meta)
             elif tag == "#root":
                 effective_root = parts[1] if len(parts) > 1 and parts[1] else None
             elif tag in ("#stat", "#end"):
@@ -167,6 +176,7 @@ def read_process(path: Path) -> ProcessRecord | None:
         job=job,
         py=py,
         retry=retry,
+        identity=identity,
         functions=dict(functions),
         data_lines=len(raw),
         counter=counter,
@@ -175,6 +185,29 @@ def read_process(path: Path) -> ProcessRecord | None:
         outside_root=outside,
         malformed=malformed,
     )
+
+
+def header_identity(meta: dict) -> dict:
+    """Buildkite step fields from a recording header, shaped for `row_key`.
+
+    Lets a fold file a job under its step with no Buildkite API. Where the API
+    is available it wins, since it also sees jobs that uploaded nothing.
+    """
+    out = {}
+    key = meta.get(BUILDKITE_STEP_KEY_ENV)
+    if key:
+        out[JOB_META_KEY] = key
+    label = meta.get(BUILDKITE_LABEL_ENV)
+    if label:
+        out[JOB_META_LABEL] = label
+    for src, dest in (
+        (BUILDKITE_PARALLEL_INDEX_ENV, JOB_META_PARALLEL_INDEX),
+        (BUILDKITE_PARALLEL_TOTAL_ENV, JOB_META_PARALLEL_TOTAL),
+    ):
+        raw = meta.get(src)
+        if raw and raw.isdigit():
+            out[dest] = int(raw)
+    return out
 
 
 def row_key(meta: dict) -> tuple[str, bool]:
@@ -363,6 +396,10 @@ class Stamp:
     # byte-indistinguishable from a plain one, and "only the daily sweeps feed
     # the acting table" is prose with nothing enforcing it.
     pipeline_slug: str = ""
+    # Which reader produced this row's test outcomes. Nothing decides on
+    # it. It is here so a source later found wrong can be identified
+    # without re-reading the recordings, same as `pipeline_slug`.
+    evidence_source: str = ""
     # Contributing builds whose world file could not be read, so their env is
     # unknown rather than empty. Diagnostic: an unread world does not weaken
     # the recording, it only means `build_env` is short.

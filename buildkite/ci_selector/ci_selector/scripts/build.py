@@ -22,11 +22,20 @@ from __future__ import annotations
 
 import gzip
 import json
+import tempfile
+from datetime import datetime, timezone
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from ..coverage.joblog import read_counts
+from ..coverage.joblog import (
+    PLUGIN_MARKER,
+    PYTEST_SOURCE,
+    SESSION_GLOB,
+    LogSummary,
+    read_counts,
+    read_session_counts,
+)
 from ..coverage.model import (
     ENV_ABSENT,
     MIN_RECORD_RATE,
@@ -49,7 +58,7 @@ WORLD_ENV = (
     "TORCH_NIGHTLY",
     "RUN_ALL",
     "CONTINUE_ON_FAILURE",
-    "FNREC",
+    "VLLM_CI_FNREC",
     "VLLM_CI_BRANCH",
 )
 JOB_STATE_PASSED = "passed"
@@ -98,6 +107,9 @@ class BuildCensus:
     build: str = ""
     n_jobs: int = 0
     attempted: int = 0
+    # Jobs the generator armed, when the caller knows. A fold from artifacts
+    # only sees what arrived, so `attempted` alone cannot see a lost job.
+    expected: int = 0
     recorded: int = 0
     no_dir: list[str] = field(default_factory=list)
     no_record_files: list[str] = field(default_factory=list)
@@ -106,11 +118,12 @@ class BuildCensus:
 
     @property
     def rate(self) -> float:
-        return self.recorded / self.attempted if self.attempted else 0.0
+        denominator = max(self.attempted, self.expected)
+        return self.recorded / denominator if denominator else 0.0
 
     @property
     def collapsed(self) -> bool:
-        return not self.attempted or self.rate < MIN_RECORD_RATE
+        return not max(self.attempted, self.expected) or self.rate < MIN_RECORD_RATE
 
     def summary(self) -> str:
         causes = (
@@ -118,9 +131,11 @@ class BuildCensus:
             f"no {RECORD_GLOB} {len(self.no_record_files)} \u00b7 "
             f"no root {len(self.no_resolvable_root)}"
         )
+        # The denominator, not `attempted`, so a wrong expected count shows up
+        # here rather than quietly relaxing the check.
         return (
-            f"{self.build}: {self.recorded}/{self.attempted} started jobs recorded "
-            f"({self.rate:.2f})   {causes}"
+            f"{self.build}: {self.recorded}/{max(self.attempted, self.expected)} "
+            f"started jobs recorded ({self.rate:.2f})   {causes}"
         )
 
 
@@ -132,6 +147,91 @@ def _attempted(job: dict) -> bool:
     fails toward noticing.
     """
     return "started_at" not in job or job["started_at"] is not None
+
+
+def sweep_from_artifacts(
+    artifacts: Path,
+    dest: Path,
+    build: str,
+    commit: str,
+    pipeline: str,
+    expected_jobs: int = 0,
+) -> dict:
+    """Turn a build's downloaded `.fnrec/` artifacts into a sweep directory.
+
+    Folding still happens in `merge_build`; this only supplies what
+    `ci-fetch-build` normally reads from the Buildkite API.
+
+    The step's exit status is not trustworthy, so pass or fail comes from the
+    tarball, which `pack.sh` puts in place only after the whole command list
+    ran, and from `pytest.jsonl`. A job with neither counts as not passed.
+    """
+    from .fetch import TAR_SUFFIX, place_raw, unpack
+
+    jobs = []
+    dest.mkdir(parents=True, exist_ok=True)
+    for entry in sorted(artifacts.iterdir()):
+        name = entry.name
+        if entry.is_file() and name.endswith(TAR_SUFFIX):
+            job_id, delivery = name[: -len(TAR_SUFFIX)], "tar"
+        elif entry.is_dir():
+            job_id, delivery = name, "raw"
+        else:
+            continue
+        out = dest / "jobs" / job_id / "fnrec"
+        out.mkdir(parents=True, exist_ok=True)
+        if delivery == "tar":
+            with open(entry, "rb") as fh:
+                unpack(fh, str(out))
+        else:
+            for f in sorted(entry.iterdir()):
+                if f.is_file():
+                    place_raw(f.name, f.read_bytes(), str(out))
+        jobs.append(_job_from_recordings(job_id, out, delivery))
+
+    index = {
+        "org": "vllm",
+        "pipeline": pipeline,
+        "build": build,
+        "commit": commit,
+        "n_jobs": len(jobs),
+        "logs": False,
+        # What the generator armed. The job list here holds only what arrived,
+        # so without this the delivery rate is 1.0 whatever was lost.
+        "expected_jobs": expected_jobs,
+        "jobs": jobs,
+    }
+    (dest / "index.json").write_text(json.dumps(index, indent=1))
+    (dest / "build.json").write_text(json.dumps({"number": build, "commit": commit}))
+    return index
+
+
+def _job_from_recordings(job_id: str, fnrec_dir: Path, delivery: str) -> dict:
+    """One `index.json` job entry, built from what the job uploaded."""
+    job = {"job": job_id, "artifact": delivery, "started_at": job_id}
+    for path in sorted(fnrec_dir.glob(RECORD_GLOB)):
+        record = read_process(path)
+        # None when no root resolved, which a forked child that recorded
+        # nothing leaves behind. One of those must not end the build.
+        if record and record.identity:
+            job.update(record.identity)
+            break
+    # A tarball means the command list ran to its end.
+    passed = delivery == "tar"
+    if passed and any(fnrec_dir.glob(SESSION_GLOB)):
+        summary = read_session_counts(fnrec_dir)
+        # Every way pytest reports trouble, not just failed tests: a
+        # collection error raises `errors` and leaves `failed` at zero, and a
+        # usage error or an empty collection shows in neither.
+        passed = (
+            not summary.unreadable
+            and summary.counts.failed == 0
+            and summary.counts.errors == 0
+            and summary.worst_exit == 0
+        )
+    job["state"] = JOB_STATE_PASSED if passed else "failed"
+    job["exit_status"] = 0 if passed else 1
+    return job
 
 
 def merge_build(
@@ -153,6 +253,13 @@ def merge_build(
     # every file look absent at that commit, and the build merges to nothing.
     source.require_commit()
     slug, trigger, world_env, world_read = read_world(build_dir, index)
+    # A fold done in CI has the artifacts and no job logs.
+    has_logs = index.get("logs", True)
+    # Never below what was counted. An expected count that is too low
+    # leaves the check as dead as it was, silently; one that is too high
+    # refuses a build that was fine, so it must only ever count jobs that
+    # actually start.
+    expected_jobs = index.get("expected_jobs") or 0
 
     # Expected shard counts come from the pipeline, not from what recorded, so a
     # step whose shard never uploaded is visibly short rather than silently thin.
@@ -168,6 +275,7 @@ def merge_build(
 
     census = census if census is not None else BuildCensus()
     census.build = build_dir.name
+    census.expected = expected_jobs
 
     for job in index["jobs"]:
         census.n_jobs += 1
@@ -229,7 +337,8 @@ def merge_build(
                 seen.append(shard)
             stamp.shards_expected[build] = expected.get(key, job["parallel_total"])
 
-        log = read_counts(build_dir / "jobs" / job["job"] / "job.log.gz")
+        log = _job_counts(build_dir / "jobs" / job["job"], logs=has_logs)
+        stamp.evidence_source = _union_slug(stamp.evidence_source, log.source)
         if log.unreadable:
             stamp.logs_unreadable += 1
         else:
@@ -337,7 +446,7 @@ def _union_slug(a: str, b: str) -> str:
         return b
     if not b or a == b:
         return a
-    return "|".join(sorted(set(a.split("|")) | {b}))
+    return "|".join(sorted(set(a.split("|")) | set(b.split("|"))))
 
 
 def _union_shards(
@@ -350,6 +459,31 @@ def _union_shards(
     for key, seen in b.items():
         out[key] = sorted(set(out.get(key, [])) | set(seen))
     return out
+
+
+def _job_counts(job_dir: Path, logs: bool = True):
+    """Test outcomes for one job, preferring pytest's own counts.
+
+    `pytest.jsonl` comes from the recorder's plugin and beats a regex over the
+    log; it also survives a step that redirects pytest's output to a file. Jobs
+    recorded before the plugin have only the log.
+
+    `logs` is False for a fold that has no job logs at all. There a missing
+    `pytest.jsonl` means the step started no pytest, and calling it an
+    unreadable log instead would make every shell-script step look thin and
+    undroppable.
+    """
+    fnrec_dir = job_dir / "fnrec"
+    if any(fnrec_dir.glob(SESSION_GLOB)):
+        return read_session_counts(fnrec_dir)
+    if not logs:
+        # The marker means the plugin was there and this step started no
+        # pytest. Without it nothing could have recorded, so the row stays too
+        # thin to drop from.
+        if (fnrec_dir / PLUGIN_MARKER).is_file():
+            return LogSummary(source=PYTEST_SOURCE)
+        return LogSummary(unreadable=True, source=PYTEST_SOURCE)
+    return read_counts(job_dir / "job.log.gz")
 
 
 def union_rows(left: Row, right: Row) -> Row:
@@ -399,6 +533,7 @@ def union_rows(left: Row, right: Row) -> Row:
         jobs_summary_unparsed=a.jobs_summary_unparsed + b.jobs_summary_unparsed,
         logs_unreadable=a.logs_unreadable + b.logs_unreadable,
         pipeline_slug=_union_slug(a.pipeline_slug, b.pipeline_slug),
+        evidence_source=_union_slug(a.evidence_source, b.evidence_source),
         worlds_unread=a.worlds_unread + b.worlds_unread,
         sources=sorted(set(a.sources) | set(b.sources)),
         # Disagreeing builds keep both values, so a blended table is visible
@@ -437,10 +572,37 @@ def merge_builds(
     return table
 
 
+def table_source(rows: dict[str, Row]) -> dict:
+    """Where this table came from, for the published pointer to name.
+
+    Read off the rows, so it can only describe what the table holds. `build` is
+    the newest contributor and is what a pointer names; `builds` keeps the rest,
+    since a re-run topping up a few rows is normal. A table spanning more than
+    one commit leaves `commit` empty, and the publisher refuses it.
+    """
+    builds, commits, pipelines = set(), set(), set()
+    for row in rows.values():
+        builds.update(row.stamp.builds)
+        commits.update(row.stamp.commits)
+        if row.stamp.pipeline_slug:
+            pipelines.add(row.stamp.pipeline_slug)
+    ordered = sorted(builds, key=lambda b: (len(b), b))
+    return {
+        "pipeline": sorted(pipelines)[0] if len(pipelines) == 1 else "",
+        "pipelines": sorted(pipelines),
+        "build": ordered[-1] if ordered else "",
+        "builds": ordered,
+        "commit": sorted(commits)[0] if len(commits) == 1 else "",
+        "commits": sorted(commits),
+        "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
 def write_table(rows: dict[str, Row], out: Path) -> None:
     payload = {
         "version": TABLE_VERSION,
         "note": MIRROR_NOTE,
+        "source": table_source(rows),
         "rows": {
             key: {
                 "keyed": row.keyed,
@@ -465,7 +627,24 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("repo", type=Path)
-    ap.add_argument("builds", type=Path, nargs="+", help="sweep build directories")
+    ap.add_argument("builds", type=Path, nargs="*", help="sweep build directories")
+    ap.add_argument(
+        "--fnrec",
+        type=Path,
+        help="a build's downloaded .fnrec/ artifacts, instead of a sweep. "
+        "Needs --build and --commit; for the collect step, which has no "
+        "Buildkite API token",
+    )
+    ap.add_argument("--build", help="with --fnrec, the build number")
+    ap.add_argument("--commit", help="with --fnrec, the commit it ran at")
+    ap.add_argument("--pipeline", default="ci", help="with --fnrec")
+    ap.add_argument(
+        "--expected-jobs",
+        type=int,
+        default=0,
+        help="with --fnrec, how many jobs the generator armed. Without it a "
+        "build that lost most of its recordings looks complete",
+    )
     ap.add_argument("-o", "--out", type=Path, required=True)
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument(
@@ -474,9 +653,26 @@ def main() -> None:
         help="merge even when a build delivered almost nothing",
     )
     args = ap.parse_args()
+    if not args.builds and not args.fnrec:
+        ap.error("give a sweep directory, or --fnrec with --build and --commit")
+    if args.fnrec and not (args.build and args.commit):
+        ap.error("--fnrec needs --build and --commit")
 
     censuses: list[BuildCensus] = []
-    rows = merge_builds(args.builds, args.repo, verbose=args.verbose, censuses=censuses)
+    with tempfile.TemporaryDirectory() as tmp:
+        builds = list(args.builds)
+        if args.fnrec:
+            staged = Path(tmp) / f"build-{args.build}"
+            sweep_from_artifacts(
+                args.fnrec,
+                staged,
+                args.build,
+                args.commit,
+                args.pipeline,
+                expected_jobs=args.expected_jobs,
+            )
+            builds.append(staged)
+        rows = merge_builds(builds, args.repo, verbose=args.verbose, censuses=censuses)
 
     collapsed = [c for c in censuses if c.collapsed]
     if collapsed and not args.allow_partial:
@@ -497,7 +693,7 @@ def main() -> None:
     short = [k for k, r in rows.items() if not r.stamp.shards_complete]
     unfaithful = sorted({p for r in rows.values() for p in r.stamp.unfaithful_files})
     recorded = sum(c.recorded for c in censuses)
-    attempted = sum(c.attempted for c in censuses)
+    attempted = sum(max(c.attempted, c.expected) for c in censuses)
     print(f"\n{len(rows)} rows ({keyless} keyless)")
     print(f"  functions: {sum(r.stamp.n_functions for r in rows.values())}")
     print(f"  files:     {len({p for r in rows.values() for p in r.functions})}")

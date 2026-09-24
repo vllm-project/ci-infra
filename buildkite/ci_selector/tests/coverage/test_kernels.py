@@ -36,7 +36,7 @@ from ci_selector.coverage.rules import RowKeys
 from ci_selector.coverage.table import Table
 from ci_selector.decide import KERNEL_ATTRIBUTION_ENV, KERNEL_UNMATCHED_ENV, decide
 
-KERNREC = Path(__file__).resolve().parents[2] / "kernrec"
+KERNREC = Path(__file__).resolve().parents[2] / "recorders" / "kernrec"
 
 
 # --- writers in the producers' shapes ---------------------------------------

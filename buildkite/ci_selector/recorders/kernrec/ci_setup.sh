@@ -9,8 +9,8 @@
 #
 # Exports, on success:
 #   CUDA_INJECTION64_PATH  the driver dlopens this at cuInit in every process
-#   KERNREC_DIR            <checkout>/.fnrec/<job-id>, next to the Python
-#                          recorder's files, matched by artifact_paths
+#   KERNREC_DIR            <checkout>/.kernrec/<job-id>, this recorder's own
+#                          tree, matched by artifact_paths.
 #   LD_LIBRARY_PATH        gains torch's bundled CUPTI so the library resolves
 #                          even in a process that initializes CUDA before
 #                          torch has preloaded libcupti
@@ -54,13 +54,13 @@ kernrec_finish() {
     kernrec_write_sidecar "${rc:-0}"
   fi
   if [ -n "${KERNREC_ROOT:-}" ]; then
-    chmod -R a+rwX "$KERNREC_ROOT/.fnrec" 2>/dev/null || true
+    chmod -R a+rwX "$KERNREC_ROOT/.kernrec" 2>/dev/null || true
   fi
 }
 
 kernrec_setup() {
   local branch="${VLLM_CI_BRANCH:-main}"
-  local base="https://raw.githubusercontent.com/vllm-project/ci-infra/${branch}/buildkite/ci_selector/kernrec"
+  local base="https://raw.githubusercontent.com/vllm-project/ci-infra/${branch}/buildkite/ci_selector/recorders/kernrec"
   local dir=/tmp/kernrec
   mkdir -p "$dir" || { echo "kernrec: cannot create $dir"; return 1; }
 
@@ -79,14 +79,14 @@ kernrec_setup() {
     if [ -n "$cand" ] && [ -d "$cand" ]; then root="$cand"; break; fi
   done
   [ -n "$root" ] || root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-  export KERNREC_DIR="$root/.fnrec/${BUILDKITE_JOB_ID:-local}"
+  export KERNREC_DIR="$root/.kernrec/${BUILDKITE_JOB_ID:-local}"
 
   # Under the docker plugin this shell is root and the checkout is a bind
   # mount owned by the agent user. Anything root creates with default modes
   # cannot be removed by the agent's `git clean` and breaks every later job
   # on that machine. Create the directories world-writable up front, and
   # open up whatever the recorder wrote when the step ends, even on failure.
-  mkdir -p "$KERNREC_DIR" && chmod 0777 "$root/.fnrec" "$KERNREC_DIR"
+  mkdir -p "$KERNREC_DIR" && chmod 0777 "$root/.kernrec" "$KERNREC_DIR"
   KERNREC_ROOT="$root"
   export KERNREC_ROOT
   kernrec_write_sidecar null

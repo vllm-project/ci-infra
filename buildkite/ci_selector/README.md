@@ -6,9 +6,9 @@ Works out which vLLM CI jobs a diff needs to run. It derives the answer from the
 
 **The code map** reads the repo and the CI config (import graph, registries, step targets, container-build DAG) and works out which steps a diff could affect. When it cannot work something out it selects more, never less.
 
-**The coverage record** is a table of what each step actually ran on real CI builds, one row per step, produced by an instrumented build.
+**The coverage record** is a table of what each step actually ran on real CI builds, one row per step, produced by an instrumented build. The recorder that produces it is `recorders/fnrec/`, loaded into every Python process of a step when the build has `VLLM_CI_FNREC=1`; `scripts/` turns a build's recordings into the table.
 
-**The kernel record** is the same idea for `csrc/`, where no Python frame exists: a table of the GPU kernels each step launched (CUPTI, recorded on the nightly and daily runs) joined to a map of which csrc file each kernel was compiled from (read off the image build's objects). Both are produced by `buildkite/ci_selector/kernrec/`.
+**The kernel record** is the same idea for `csrc/`, where no Python frame exists: a table of the GPU kernels each step launched (CUPTI, recorded on the nightly and daily runs) joined to a map of which csrc file each kernel was compiled from (read off the image build's objects). Both are produced by `recorders/kernrec/`.
 
 Neither is a stage of the other. `decide.py` reads all of them, per changed file:
 
@@ -31,15 +31,16 @@ uv sync
 source .venv/bin/activate
 ```
 
-For the coverage half, put a table at `coverage-data/table.json.gz`, which is gitignored because it is a build artifact. Override the location with `--table` or `$CI_SELECTOR_TABLE`. Without one, the selector runs on the code map alone and says so on stderr.
-
-For the kernel record, which answers for `csrc/`, fetch the latest published pair into the same directory:
+Both coverage records are fetched the same way, into `coverage-data/`:
 
 ```bash
-ci-fetch-kernel-record
+ci-fetch-function-record        # the Python record
+ci-fetch-kernel-record          # the kernel record, which answers for csrc/
 ```
 
-That downloads `kernel_table.json.gz` and `kernel_symbol_map.json.gz` for the commit `latest.json` names in the public `vllm-ci-selector` bucket, validates both, and only then replaces what is on disk. Override with `--kernel-table` / `--kernel-symbol-map` or `$CI_SELECTOR_KERNEL_TABLE` / `$CI_SELECTOR_KERNEL_SYMBOL_MAP`. Without them, csrc files route on the code map alone, which today means every step on the CUDA image.
+Each follows its own `latest.json` in the public `vllm-ci-selector` bucket, validates what it downloaded, and only then replaces what is on disk.
+
+Override the locations with `--table` or `$CI_SELECTOR_TABLE`, and `--kernel-table` / `--kernel-symbol-map` or `$CI_SELECTOR_KERNEL_TABLE` / `$CI_SELECTOR_KERNEL_SYMBOL_MAP`. Without the Python record the selector runs on the code map alone and says so on stderr; without the kernel record csrc files do the same, which today means every step on the CUDA image.
 
 ## Commands
 

@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Last step of a recording build: fold every job's Python recordings into one
+# coverage table and publish it.
+#
+# No -e: every gate below exits on its own, and a publishing failure must not
+# look like a fold that produced nothing.
+set -uo pipefail
+
+BRANCH="${VLLM_CI_BRANCH:-main}"
+REPO_URL="https://github.com/vllm-project/ci-infra"
+BUCKET="${CI_SELECTOR_BUCKET:-vllm-ci-selector}"
+PIPELINE="${BUILDKITE_PIPELINE_SLUG:-ci}"
+COMMIT="${BUILDKITE_COMMIT:?}"
+BUILD="${BUILDKITE_BUILD_NUMBER:?}"
+# The fold reads the source at this commit to check the recorded names.
+VLLM_CHECKOUT="${FNREC_VLLM_REPO:-${BUILDKITE_BUILD_CHECKOUT_PATH:?}}"
+# A ci-infra checkout to take the table builder from, instead of cloning one.
+# For rerunning a fold by hand, and for the tests.
+CI_INFRA="${FNREC_CI_INFRA:-}"
+# How many jobs the generator armed. Without it the fold has no denominator
+# and cannot tell a build that lost its recordings from a small one.
+EXPECTED_JOBS="${FNREC_EXPECTED_JOBS:-}"
+
+WORK="$(mktemp -d)"
+cd "${WORK}" || exit 1
+trap 'rm -rf -- "${WORK}"' EXIT
+
+echo "--- :satellite: Collecting Python recordings of build ${BUILD}"
+if [[ -n "${FNREC_SOURCE_JOBS:-}" ]]; then
+  # One search per job: a single search over a whole build's artifacts times
+  # out. Two patterns each, since a glob does not cross a slash and a job
+  # killed before packing left raw files instead of a tarball.
+  printf '%s\n' ${FNREC_SOURCE_JOBS} | xargs -P 8 -I{} sh -c \
+    'buildkite-agent artifact download ".fnrec/{}.tar.gz" . >/dev/null 2>&1
+     buildkite-agent artifact download ".fnrec/{}/*" . >/dev/null 2>&1'
+else
+  buildkite-agent artifact download ".fnrec/*" . || echo "no packed recordings in this build"
+  buildkite-agent artifact download ".fnrec/*/*" . || echo "no raw recordings in this build"
+fi
+n_tar=$(find .fnrec -maxdepth 1 -name '*.tar.gz' 2>/dev/null | wc -l | tr -d ' ')
+n_raw=$(find .fnrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+echo "${n_tar} packed and ${n_raw} unpacked jobs"
+if [[ "$((n_tar + n_raw))" == "0" ]]; then
+  echo "nothing to fold; done"
+  exit 0
+fi
+
+if [[ -n "${CI_INFRA}" ]]; then
+  echo "--- :package: Using the table builder at ${CI_INFRA}"
+else
+  echo "--- :package: Fetching the table builder"
+  git clone --quiet --depth 1 --branch "${BRANCH}" "${REPO_URL}" ci-infra \
+    || { echo "cannot clone ${REPO_URL}@${BRANCH}" >&2; exit 1; }
+  CI_INFRA="${WORK}/ci-infra"
+fi
+BUILDER="${CI_INFRA}/buildkite/ci_selector"
+
+# The only third-party name the fold needs. Checked rather than installed
+# blindly, so an interpreter that already has it is left alone.
+python3 -c 'import regex' 2>/dev/null \
+  || python3 -m pip install --quiet --disable-pip-version-check regex \
+  || { echo "cannot install regex" >&2; exit 1; }
+
+echo "--- :table_tennis_paddle_and_ball: Building the coverage table"
+# The count the generator armed, so the fold can refuse a build that lost most
+# of its recordings. Printed, because a wrong one silently weakens that check.
+expected=()
+if [[ -n "${EXPECTED_JOBS}" ]]; then
+  expected=(--expected-jobs "${EXPECTED_JOBS}")
+  echo "expecting ${EXPECTED_JOBS} jobs"
+else
+  echo "no expected job count; the delivery check cannot fire"
+fi
+# From here failures exit non-zero: a half-built table must never be published
+# as a complete one.
+mkdir -p out
+PYTHONPATH="${BUILDER}" python3 -m ci_selector.scripts.build \
+  "${VLLM_CHECKOUT}" --fnrec .fnrec --build "${BUILD}" --commit "${COMMIT}" \
+  ${expected[@]+"${expected[@]}"} \
+  --pipeline "${PIPELINE}" --out out/table.json.gz \
+  || { echo "table build failed" >&2; exit 1; }
+
+read -r table_ok table_commit <<<"$(PYTHONPATH="${BUILDER}" python3 - <<'PY'
+import sys
+from pathlib import Path
+from ci_selector.coverage.table import load
+
+table = load(Path("out/table.json.gz"))
+print("yes" if table.available and len(table) else "no", table.commit or "-")
+print(table.unavailable, file=sys.stderr)
+PY
+)"
+
+echo "--- :arrow_up: Uploading the table as an artifact"
+(cd out && buildkite-agent artifact upload "*")
+
+# A backstop. Nothing recorded means nothing was delivered, which the check
+# above refuses first, so this only catches a table that loads but is empty.
+if [[ "${table_ok}" != "yes" ]]; then
+  echo "table has no usable rows; not publishing" >&2
+  exit 1
+fi
+# The prefix says which tree this table describes, so the table has to agree.
+# Otherwise every fetch refuses it, long after latest.json points at it.
+if [[ "${table_commit}" != "${COMMIT}" ]]; then
+  echo "table records commit ${table_commit}, this build is ${COMMIT}; not publishing" >&2
+  exit 1
+fi
+
+# Only main's recordings match the tree PRs are selected against, and only
+# postmerge agents can write the bucket. Other branches stop here, green.
+if [[ "${BUILDKITE_BRANCH:-main}" != "main" ]]; then
+  echo "branch ${BUILDKITE_BRANCH} is not main; not publishing (the artifacts above are the result)"
+  exit 0
+fi
+
+echo "--- :s3: Publishing to s3://${BUCKET}/${PIPELINE}/fnrec/${COMMIT}/"
+if ! command -v aws >/dev/null 2>&1; then
+  echo "aws cli not on this agent; the table is an artifact of this job only" >&2
+  exit 0
+fi
+if ! aws sts get-caller-identity >/dev/null 2>&1; then
+  echo "no AWS identity on this agent; the table is an artifact of this job only" >&2
+  exit 0
+fi
+if ! aws s3 cp out/table.json.gz "s3://${BUCKET}/${PIPELINE}/fnrec/${COMMIT}/table.json.gz" --only-show-errors; then
+  echo "S3 upload failed (bucket or write permission not in place?); the artifact is on this job" >&2
+  exit 1
+fi
+printf '{"commit":"%s","build":%s,"pipeline":"%s","published_at":"%s","files":["table.json.gz"]}\n' \
+  "${COMMIT}" "${BUILD}" "${PIPELINE}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > latest.json
+aws s3 cp latest.json "s3://${BUCKET}/${PIPELINE}/fnrec/latest.json" --only-show-errors \
+  && echo "published; latest.json -> ${COMMIT}"

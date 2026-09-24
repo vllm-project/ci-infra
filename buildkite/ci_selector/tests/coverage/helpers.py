@@ -69,21 +69,30 @@ def process_file(
     after_end: list[tuple[str, str]] | None = None,
     py: str = "3.12.13",
     job: str = "job-1",
+    step_key: str | None = None,
+    label: str | None = None,
+    parallel_index: int | None = None,
+    parallel_total: int | None = None,
 ) -> None:
     """Write one fnrec process file in the recorder's real on-disk shape."""
     shown = ROOT if header_root is None else header_root
-    lines = [
-        "\t".join(
-            [
-                "#start",
-                "pid=1",
-                f"root={shown}",
-                f"py={py}",
-                f"BUILDKITE_JOB_ID={job}",
-            ]
-        ),
-        f"#root\t{root}\tt=1",
+    header = [
+        "#start",
+        "pid=1",
+        f"root={shown}",
+        f"py={py}",
+        f"BUILDKITE_JOB_ID={job}",
     ]
+    # Without the Buildkite API, the header is the only place a job's step is named.
+    for name, value in (
+        ("BUILDKITE_STEP_KEY", step_key),
+        ("BUILDKITE_LABEL", label),
+        ("BUILDKITE_PARALLEL_JOB", parallel_index),
+        ("BUILDKITE_PARALLEL_JOB_COUNT", parallel_total),
+    ):
+        if value is not None:
+            header.append(f"{name}={value}")
+    lines = ["\t".join(header), f"#root\t{root}\tt=1"]
     lines += [f"{root}{rel}\t{name}\t1" for rel, name in entries]
     if clean_exit:
         total = len(entries) if counter is None else counter

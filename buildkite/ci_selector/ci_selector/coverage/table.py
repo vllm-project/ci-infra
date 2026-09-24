@@ -101,10 +101,26 @@ class Table:
         rows: dict[str, Row] | None,
         unavailable: str = "",
         rejected: dict[str, str] | None = None,
+        source: dict | None = None,
     ):
         self._rows = rows or {}
         self.unavailable = unavailable
         self.rejected = rejected or {}
+        # Where the table came from. Can be empty, and nothing in the
+        # selection path reads it.
+        self.source = source or {}
+
+    @property
+    def commit(self) -> str:
+        return str(self.source.get("commit") or "")
+
+    @property
+    def build(self) -> str:
+        return str(self.source.get("build") or "")
+
+    @property
+    def pipeline(self) -> str:
+        return str(self.source.get("pipeline") or "")
 
     @property
     def available(self) -> bool:
@@ -401,7 +417,7 @@ def load(path: Path) -> Table:
             unavailable=f"{path}: every row failed verification",
             rejected=rejected,
         )
-    return Table(rows, rejected=rejected)
+    return Table(rows, rejected=rejected, source=payload.get("source") or {})
 
 
 def apply(table: Table, query: Query, steps: list[str]) -> list[Verdict]:

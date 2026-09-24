@@ -6,6 +6,7 @@ on:
       - ".github/workflows/pipeline-generator-tests.yml"
       - "buildkite/pipeline_generator/**"
       - "buildkite/tests/**"
+      - "buildkite/ci_selector/recorders/**"
       - "pyproject.toml"
       - "requirements.txt"
 

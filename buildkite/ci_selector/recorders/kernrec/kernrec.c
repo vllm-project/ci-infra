@@ -5,8 +5,8 @@
  * command needs wrapping and every child process that touches CUDA records
  * itself. Nothing loads when the variable is unset, so PR jobs pay nothing.
  *
- * Output: $KERNREC_DIR/kern.<pid>.txt (default .fnrec/$BUILDKITE_JOB_ID, next
- * to the Python recorder's fn.*.txt). One mangled kernel name per line,
+ * Output: $KERNREC_DIR/kern.<pid>.txt (default .kernrec/$BUILDKITE_JOB_ID,
+ * this recorder's own tree). One mangled kernel name per line,
  * appended the first time the name is seen, so a SIGKILL loses nothing that
  * was written before it. Lines starting with '#' are metadata.
  *
@@ -161,7 +161,7 @@ static FILE *output(void) {
   const char *dir = getenv("KERNREC_DIR");
   if (!dir || !*dir) {
     const char *job = getenv("BUILDKITE_JOB_ID");
-    snprintf(dirbuf, sizeof dirbuf, ".fnrec/%s", job && *job ? job : "local");
+    snprintf(dirbuf, sizeof dirbuf, ".kernrec/%s", job && *job ? job : "local");
     dir = dirbuf;
   }
   char path[4096];

@@ -10,6 +10,8 @@ ci-select = "ci_selector.cli:main"
 ci-validate = "ci_selector.validate.__main__:main"
 ci-fetch-build = "ci_selector.scripts.fetch:main"
 ci-build-table = "ci_selector.scripts.build:main"
+ci-publish-function-record = "ci_selector.scripts.publish:main"
+ci-fetch-function-record = "ci_selector.scripts.fetch_functions:main"
 ci-fetch-kernel-record = "ci_selector.scripts.fetch_kernels:main"
 
 [dependency-groups]

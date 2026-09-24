@@ -1,6 +1,9 @@
 from step import Step
 from constants import DeviceType
+from recorder_switches import fnrec_enabled
 import copy
+
+DOCKER_CHECKOUT_MOUNT_PATH = "/workdir"
 
 docker_plugin_template = {
     "image": "",
@@ -142,6 +145,11 @@ def get_docker_plugin(step: Step, image: str):
     if step.device in (DeviceType.H200_18GB, DeviceType.H200_35GB):
         image = image.replace("public.ecr.aws", "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache")
         plugin["image"] = image
+
+    if fnrec_enabled():
+        plugin["mount-checkout"] = True
+        plugin["workdir"] = DOCKER_CHECKOUT_MOUNT_PATH
+
     if (
         step.label == "Benchmarks"
         or step.mount_buildkite_agent

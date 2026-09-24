@@ -2,11 +2,12 @@
 
 Off, nothing changes: no setup command, no artifact paths. On, every GPU step
 sources the setup script from the generating ci-infra branch and uploads
-`.fnrec/**`, while AMD, docker-build and no-plugin steps stay untouched.
+`.kernrec/**`, while AMD, docker-build and no-plugin steps stay untouched.
 """
 
 import buildkite_step
 import pytest
+import recorder_switches
 from step import Step
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
@@ -50,21 +51,24 @@ def _artifact_paths(rendered):
 
 
 def test_off_by_default(monkeypatch):
-    monkeypatch.delenv(buildkite_step.KERNREC_ENV_VAR, raising=False)
+    monkeypatch.delenv(recorder_switches.KERNREC_ENV_VAR, raising=False)
     rendered = _render(_gpu_step())
     assert not any("kernrec" in c for c in _commands(rendered))
     assert not _artifact_paths(rendered)
 
 
 def test_on_arms_gpu_steps_from_the_generating_branch(monkeypatch):
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     monkeypatch.setenv("VLLM_CI_BRANCH", "my-branch")
     rendered = _render(_gpu_step())
     commands = _commands(rendered)
 
     setup = [c for c in commands if "ci_setup.sh" in c]
     assert len(setup) == 1
-    assert "ci-infra/my-branch/buildkite/ci_selector/kernrec/ci_setup.sh" in setup[0]
+    assert (
+        "ci-infra/my-branch/buildkite/ci_selector/recorders/kernrec/ci_setup.sh"
+        in setup[0]
+    )
     # Setup runs before the step's own commands and after the cd, so the
     # script itself must find the checkout root (it uses git for that).
     assert commands.index(setup[0]) < commands.index(
@@ -79,15 +83,15 @@ def test_on_arms_gpu_steps_from_the_generating_branch(monkeypatch):
 
 
 def test_on_defaults_to_main_branch(monkeypatch):
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     monkeypatch.delenv("VLLM_CI_BRANCH", raising=False)
     rendered = _render(_gpu_step())
     setup = next(c for c in _commands(rendered) if "kernrec" in c)
-    assert "ci-infra/main/buildkite/ci_selector/kernrec/ci_setup.sh" in setup
+    assert "ci-infra/main/buildkite/ci_selector/recorders/kernrec/ci_setup.sh" in setup
 
 
 def test_on_leaves_docker_build_steps_alone(monkeypatch):
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     rendered = _render(
         _gpu_step(
             label=":docker: build image",
@@ -101,7 +105,7 @@ def test_on_leaves_docker_build_steps_alone(monkeypatch):
 
 
 def test_on_leaves_no_plugin_steps_alone(monkeypatch):
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     rendered = _render(_gpu_step(no_plugin=True))
     assert not any("kernrec" in c for c in _commands(rendered))
     assert not _artifact_paths(rendered)
@@ -110,7 +114,7 @@ def test_on_leaves_no_plugin_steps_alone(monkeypatch):
 def test_on_leaves_skipped_steps_alone(monkeypatch):
     """A step in KERNREC_SKIP_STEPS runs as if the recorder were off: no setup,
     no artifact paths, so no row, and the selector keeps it."""
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     (key,) = [k for k in buildkite_step.KERNREC_SKIP_STEPS if k == "quantization"]
     rendered = _render(_gpu_step(key=key, label=":nvidia: (H200) Quantization"))
     assert not any("kernrec" in c for c in _commands(rendered))
@@ -129,7 +133,7 @@ def _rendered_groups(*steps):
 def test_collect_group_depends_on_every_runnable_command_step(
     monkeypatch, fake_global_config
 ):
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     monkeypatch.setenv("VLLM_CI_BRANCH", "my-branch")
     fake_global_config["nightly"] = "1"  # every step runs, none is blocked
     groups = _rendered_groups(
@@ -146,14 +150,14 @@ def test_collect_group_depends_on_every_runnable_command_step(
     )
     assert step.soft_fail is True, "publishing must not turn the build red"
     assert (
-        "ci-infra/my-branch/buildkite/ci_selector/kernrec/collect.sh"
+        "ci-infra/my-branch/buildkite/ci_selector/recorders/kernrec/collect.sh"
         in step.commands[0]
     )
     assert step.agents["queue"] == buildkite_step.AgentQueue.SMALL_CPU_PREMERGE.value
 
 
 def test_collect_group_skips_steps_behind_a_block(monkeypatch, fake_global_config):
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     # Not a nightly and no matching file diff: the generator gates the step
     # behind a block step, so the collect step must not depend on it.
     groups = _rendered_groups(_gpu_step(key="kernels", group="kernels"))
@@ -167,7 +171,7 @@ def test_collect_group_skips_steps_behind_a_block(monkeypatch, fake_global_confi
 
 
 def test_collect_group_uses_postmerge_queue_on_main(monkeypatch, fake_global_config):
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     fake_global_config["branch"] = "main"
     fake_global_config["nightly"] = "1"
     (step,) = buildkite_step.kernrec_collect_group(_rendered_groups(_gpu_step())).steps
@@ -175,7 +179,7 @@ def test_collect_group_uses_postmerge_queue_on_main(monkeypatch, fake_global_con
 
 
 def test_collect_step_serializes_allow_dependency_failure(monkeypatch):
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     (step,) = buildkite_step.kernrec_collect_group(_rendered_groups(_gpu_step())).steps
     assert step.to_yaml()["allow_dependency_failure"] is True
     assert step.dict(exclude_none=True)["allow_dependency_failure"] is True
@@ -185,7 +189,7 @@ def test_on_finishes_the_sidecar_as_the_last_command(monkeypatch):
     """The EXIT trap in ci_setup.sh is replaced by vLLM's OTel prelude, so the
     generator records the exit status itself: after the step's commands,
     right before the exit."""
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
     commands = _commands(_render(_gpu_step()))
     finish = [c for c in commands if "kernrec_finish" in c]
@@ -204,7 +208,7 @@ def test_on_finishes_the_sidecar_as_the_last_command(monkeypatch):
 
 
 def test_on_finishes_the_sidecar_without_continue_on_failure(monkeypatch):
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     monkeypatch.delenv("CONTINUE_ON_FAILURE", raising=False)
     commands = _commands(_render(_gpu_step()))
     assert "kernrec_finish" in commands[-1], (
@@ -213,7 +217,7 @@ def test_on_finishes_the_sidecar_without_continue_on_failure(monkeypatch):
 
 
 def test_finish_stays_off_with_the_recorder(monkeypatch):
-    monkeypatch.delenv(buildkite_step.KERNREC_ENV_VAR, raising=False)
+    monkeypatch.delenv(recorder_switches.KERNREC_ENV_VAR, raising=False)
     monkeypatch.setenv("CONTINUE_ON_FAILURE", "1")
     assert not any("kernrec_finish" in c for c in _commands(_render(_gpu_step())))
 
@@ -230,9 +234,11 @@ def test_recording_gives_steps_a_timeout_margin(monkeypatch):
     """A recording run timed out steps whose tests all passed, because they
     finish within a minute of their limit even without a recorder."""
     step = _gpu_step(timeout_in_minutes=40)
-    monkeypatch.delenv(buildkite_step.KERNREC_ENV_VAR, raising=False)
+    monkeypatch.delenv(recorder_switches.KERNREC_ENV_VAR, raising=False)
+    # The last assertion below is about kernrec only: fnrec arms no_plugin steps.
+    monkeypatch.delenv(recorder_switches.FNREC_ENV_VAR, raising=False)
     assert _timeout(_render(step)) == 40
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     assert _timeout(_render(step)) == 50
     assert _timeout(_render(_gpu_step(timeout_in_minutes=40, no_plugin=True))) == 40, (
         "no recorder on the step, no margin"

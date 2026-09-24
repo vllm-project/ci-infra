@@ -28,7 +28,10 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 cp ci_setup.sh "$WORK/ci_setup_new.sh"
-git show "$OLD_REF:buildkite/ci_selector/kernrec/ci_setup.sh" > "$WORK/ci_setup_old.sh"
+
+git show "$OLD_REF:buildkite/ci_selector/recorders/kernrec/ci_setup.sh" \
+  > "$WORK/ci_setup_old.sh" 2>/dev/null \
+  || git show "$OLD_REF:buildkite/ci_selector/kernrec/ci_setup.sh" > "$WORK/ci_setup_old.sh"
 
 cat > "$WORK/inner.sh" <<'EOF'
 . /ci_setup.sh
@@ -54,9 +57,9 @@ if [ "$2" = kill ]; then
 else
   sh /scripts/inner.sh
 fi
-find /co/.fnrec -exec stat -c "   %A %u:%g %n" {} \;
+find /co/.kernrec -exec stat -c "   %A %u:%g %n" {} \;
 su agent -s /bin/sh -c 'cd /co && git clean -ffdxq' 2>&1 | sed 's/^/   /' | head -4
-[ -e /co/.fnrec ] && echo "RESULT: FAILED (leftover the agent cannot remove)" || echo "RESULT: OK"
+[ -e /co/.kernrec ] && echo "RESULT: FAILED (leftover the agent cannot remove)" || echo "RESULT: OK"
 EOF
 
 fail=0

@@ -1,0 +1,61 @@
+# recorders
+
+What each CI step actually ran, for the test selector. Both are off unless the build sets their switch. Meant for nightly and post-merge builds.
+
+| | records | switch | writes |
+| --- | --- | --- | --- |
+| [`fnrec/`](fnrec) | Python functions entered | `VLLM_CI_FNREC=1` | `.fnrec/<job-id>/` |
+| [`kernrec/`](kernrec) | CUDA kernels launched | `VLLM_CI_KERNREC=1` | `.kernrec/<job-id>/` |
+
+Independent: turn on either, or both. Each owns its own directory, so neither can touch the other's files and the order they run in does not matter.
+
+## Turning them on
+
+Set these on the build, then run it:
+
+```
+VLLM_CI_FNREC=1                  # Python
+VLLM_CI_KERNREC=1                # CUDA, plus the line below
+VLLM_KERNEL_SYMBOL_MAP=1         # maps kernel symbols back to source files
+```
+
+Optional:
+
+```
+VLLM_CI_BRANCH=<ci-infra branch>            # which branch the payloads come from
+VLLM_CI_ONLY_STEP_KEYS=["kernels-core-operation-test"]   # a few steps only
+```
+
+`VLLM_CI_BRANCH` defaults to `main`. Set it to test a recorder from a branch, or the build will fetch the payload from `main` regardless of what you changed.
+
+## Where the data goes
+
+Each publishes one record per commit under its own prefix, `s3://vllm-ci-selector/<pipeline>/<recorder>/<commit>/`, and moves that prefix's `latest.json` only once the files are in place. Whoever needs a record runs one command:
+
+```bash
+ci-fetch-function-record        # Python, into coverage-data/
+ci-fetch-kernel-record          # CUDA, into coverage-data/
+```
+
+Public bucket, plain HTTPS, no token either way.
+
+Each appends a collect step that folds the build and publishes from CI, added by its own switch. fnrec's table can also be folded offline, from a build's artifacts, and published by hand, which is how a build that was never armed gets one:
+
+```bash
+export BK_TOKEN=...
+ci-fetch-build https://buildkite.com/<org>/<pipeline>/builds/<n> --out sweeps/
+ci-build-table <vllm-repo> sweeps/<org>-<pipeline>-<n> -o table.json.gz
+ci-publish-function-record table.json.gz
+```
+
+Both collect steps publish only from `main`, and only what they can validate. A branch under test stops at its artifacts, green.
+
+## Coverage
+
+Neither records multi-node steps or docker builds. kernrec is CUDA only, so AMD and TPU steps fall back to the static map. fnrec covers AMD, and covers plugin-less steps through a per-job `PYTHONPATH` install.
+
+## Adding a third
+
+The convention is **directory, switch, file prefix and output directory all share a name**: `fnrec/` is `VLLM_CI_FNREC`, writes `fn.*.txt` into `.fnrec/`. A recorder owns its own directory outright and never touches another's.
+
+Payloads are fetched by `curl` at step time, so they stay stdlib-only and must run on the oldest Python an agent has. Nothing here imports the `ci_selector` package, and the generator references a recorder only as a URL.

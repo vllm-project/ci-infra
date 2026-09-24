@@ -11,6 +11,7 @@ of what the step is meant to cover. So the counts travel with the row.
 from __future__ import annotations
 
 import gzip
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -93,6 +94,78 @@ class TestCounts:
 class LogSummary:
     counts: TestCounts = field(default_factory=TestCounts)
     unreadable: bool = False
+    # The worst exit status any session reported. Zero from a job log, which
+    # does not carry one. pytest exits non-zero for failures the outcome
+    # counts never show, such as a collection error or a usage error.
+    worst_exit: int = 0
+    # Which reader produced these, "joblog" or "pytest". Travels onto the
+    # row, so a source later found wrong can be found without re-reading
+    # the recordings.
+    source: str = ""
+
+
+SESSION_GLOB = "pytest.*.jsonl"
+# What `LogSummary.source` says, and what lands on the row.
+PYTEST_SOURCE = "pytest"
+JOBLOG_SOURCE = "joblog"
+# Written when the plugin installs. Without it no session file could exist,
+# which is not the same as a step that ran no pytest.
+PLUGIN_MARKER = "pytest.installed"
+
+
+def read_session_counts(fnrec_dir: Path) -> LogSummary:
+    """The same counts as `read_counts`, but read from pytest, not the log.
+
+    The plugin writes two lines per session, so a step that sends pytest
+    output to a file is covered too. A file that will not parse is unreadable.
+    Whether no files at all is a problem is the caller's call; see
+    `PLUGIN_MARKER`.
+    """
+    files = sorted(fnrec_dir.glob(SESSION_GLOB))
+    if not files:
+        return LogSummary(unreadable=True)
+
+    counts = TestCounts()
+    worst_exit = 0
+    for path in files:
+        try:
+            text = path.read_text(errors="ignore")
+        except OSError:
+            return LogSummary(unreadable=True)
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                return LogSummary(unreadable=True)
+            if not isinstance(row, dict):
+                return LogSummary(unreadable=True)
+            if row.get("event") == "collected":
+                # The log counts collection before deselection; add the two
+                # halves back together to match it.
+                counts.collected += _int(row.get("selected")) + _int(
+                    row.get("deselected")
+                )
+            elif row.get("event") == "session":
+                for name in (
+                    "passed",
+                    "failed",
+                    "skipped",
+                    "deselected",
+                    "xfailed",
+                    "xpassed",
+                    "errors",
+                ):
+                    setattr(counts, name, getattr(counts, name) + _int(row.get(name)))
+                counts.invocations += 1
+                worst_exit = max(worst_exit, abs(_int(row.get("exitstatus"))))
+    return LogSummary(counts=counts, worst_exit=worst_exit, source=PYTEST_SOURCE)
+
+
+def _int(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def read_counts(path: Path) -> LogSummary:
@@ -116,7 +189,7 @@ def read_counts(path: Path) -> LogSummary:
             setattr(counts, name, getattr(counts, name) + int(number))
     counts.collected = sum(int(n) for n in re.findall(r"collected (\d+) items?", body))
     counts.invocations = len(summaries)
-    return LogSummary(counts=counts)
+    return LogSummary(counts=counts, source=JOBLOG_SOURCE)
 
 
 # A verbose per-test line: the node id, then the verdict. Stripping the
