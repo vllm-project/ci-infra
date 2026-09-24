@@ -130,9 +130,7 @@ def _rendered_groups(*steps):
     return buildkite_step.convert_group_step_to_buildkite_step(groups)
 
 
-def test_collect_group_depends_on_every_runnable_command_step(
-    monkeypatch, fake_global_config
-):
+def test_collect_group_depends_on_the_recording_steps(monkeypatch, fake_global_config):
     monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     monkeypatch.setenv("VLLM_CI_BRANCH", "my-branch")
     fake_global_config["nightly"] = "1"  # every step runs, none is blocked
@@ -154,6 +152,36 @@ def test_collect_group_depends_on_every_runnable_command_step(
         in step.commands[0]
     )
     assert step.agents["queue"] == buildkite_step.AgentQueue.SMALL_CPU_PREMERGE.value
+
+
+def test_collect_group_waits_on_nothing_that_records_no_kernels(
+    monkeypatch, fake_global_config
+):
+    """Nightly vllm/ci #90897: every NVIDIA job had finished and the kernel
+    collect still waited on 34 AMD jobs, none of which records a kernel."""
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    fake_global_config["run_amd"] = True
+    groups = _rendered_groups(
+        _gpu_step(
+            key="image-build",
+            group="build",
+            label=":docker: build image",
+            commands=["docker build ."],
+        ),
+        _gpu_step(
+            key="kernels",
+            depends_on=["image-build"],
+            mirror={"amd": {"device": "mi300_1"}},
+        ),
+        _gpu_step(key="host", group="host", label="Host step", no_plugin=True),
+    )
+    keys = [s.key for g in groups for s in g.steps if hasattr(s, "commands")]
+    assert {"amd-kernels", "host"} <= set(keys), f"premise: {keys}"
+    (step,) = buildkite_step.kernrec_collect_group(groups).steps
+    assert set(step.depends_on) == {"kernels", "image-build"}, (
+        "the recording step, and the image build that uploads the symbol map"
+    )
 
 
 def test_collect_group_skips_steps_behind_a_block(monkeypatch, fake_global_config):

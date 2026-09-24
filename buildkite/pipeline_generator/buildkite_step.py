@@ -470,6 +470,11 @@ def _recording_timeout(step: Step, minutes: int) -> int:
     return minutes
 
 
+# In the URL an armed step curls, so the collect step can read what was armed
+# back off the commands. See _carries.
+KERNREC_SETUP_PATH = "recorders/kernrec/ci_setup.sh"
+
+
 def _kernrec_setup_command() -> str:
     """Source the recorder's setup script at the start of the step.
 
@@ -479,7 +484,7 @@ def _kernrec_setup_command() -> str:
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
-        f"{branch}/buildkite/ci_selector/recorders/kernrec/ci_setup.sh"
+        f"{branch}/buildkite/ci_selector/{KERNREC_SETUP_PATH}"
     )
     return (
         'echo "--- :satellite: Kernel launch recorder"; '
@@ -615,10 +620,9 @@ def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroup
     """The recording build's last step: fold every job's kernel recordings
     into the per-step kernel table and publish it with the symbol map.
 
-    Depends on every command step that will actually run. Steps behind a
-    block step are left out, because a dependency that never starts would
-    hold this step forever. Runs whether they passed or failed: a failed
-    job's recording is still evidence, and the row carries the exit status.
+    Depends on the steps that record kernels and on what they wait for; see
+    _collect_step. Runs whether they passed or failed: a failed job's
+    recording is still evidence, and the row carries the exit status.
     """
     return BuildkiteGroupStep(
         group=COLLECT_GROUP,
@@ -649,17 +653,18 @@ def fnrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupSt
     )
 
 
-def _carries_fnrec(step: "BuildkiteCommandStep") -> bool:
+def _carries(step: "BuildkiteCommandStep", recorder: str) -> bool:
     """Whether this rendered step will load the recorder.
 
     Commands and env both, because an AMD mirror's only command is the runner
     script and its real commands ride in VLLM_TEST_COMMANDS. Reading the
-    emitted step rather than re-deciding keeps the count from disagreeing with
-    what was armed.
+    emitted step rather than re-deciding keeps the count and the dependencies
+    from disagreeing with what was armed.
     """
-    if any(FNREC_SETUP_PATH in c for c in (step.commands or [])):
+    path = {"kernrec": KERNREC_SETUP_PATH, "fnrec": FNREC_SETUP_PATH}[recorder]
+    if any(path in c for c in (step.commands or [])):
         return True
-    return any(FNREC_SETUP_PATH in str(v) for v in (step.env or {}).values())
+    return any(path in str(v) for v in (step.env or {}).values())
 
 
 def _collect_step(
@@ -681,7 +686,19 @@ def _collect_step(
         for s in g.steps
         if isinstance(s, BuildkiteCommandStep) and s.key not in blocked
     ]
-    depends_on = [s.key for s in runnable]
+    # Only the steps that record, and what they wait for: the image build
+    # uploads the kernel symbol map. Waiting on every step held the kernel
+    # collect of nightly vllm/ci #90897 behind 34 AMD jobs, none of which
+    # records a kernel. Steps behind a block step are left out, because a
+    # dependency that never starts would hold this step forever. A cancelled
+    # one ends it waiting_failed, allow_dependency_failure or not, and it
+    # cannot be retried; the collect scripts can fold the build from another.
+    armed = [s for s in runnable if _carries(s, recorder)]
+    runnable_keys = {s.key for s in runnable}
+    depends_on = [s.key for s in armed]
+    for dep in (d for s in armed for d in (s.depends_on or [])):
+        if dep in runnable_keys and dep not in depends_on:
+            depends_on.append(dep)
     env = None
     if count_armed:
         # The fold needs a denominator: its job list holds only what uploaded,
@@ -689,8 +706,7 @@ def _collect_step(
         # Taken off the same list that decides what this step waits for, so it
         # can never count a job that never starts. A step with parallelism N is
         # one step and N jobs, and a lost shard is the case this exists for.
-        armed = sum(s.parallelism or 1 for s in runnable if _carries_fnrec(s))
-        env = {"FNREC_EXPECTED_JOBS": str(armed)}
+        env = {"FNREC_EXPECTED_JOBS": str(sum(s.parallelism or 1 for s in armed))}
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
