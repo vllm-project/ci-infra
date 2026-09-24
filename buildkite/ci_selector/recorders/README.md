@@ -32,7 +32,7 @@ VLLM_CI_ONLY_STEP_KEYS=["kernels-core-operation-test"]   # a few steps only
 
 **kernrec** appends a collect step that folds every job's recordings into one table and publishes it, with the symbol map, to `s3://vllm-ci-selector/<pipeline>/<commit>/`. `ci-fetch-kernel-record` pulls the latest published pair into `coverage-data/`.
 
-**fnrec** is collected offline for now, from the build's artifacts:
+**fnrec** is folded by the same collect step, which the generator appends when either recorder is on. It builds the Python table from the build's own artifacts, with no Buildkite token: each job's `fnrec.json` (written by `pack.sh` with the step's exit status) says which step it was and whether it passed, and the `fnrec_pytest` plugin's `pytest.*.txt` say whether its tests ran. The table ships as an artifact of the collect step, and goes to S3 beside the kernel pair when one is published. The same table can still be built offline:
 
 ```bash
 export BK_TOKEN=...

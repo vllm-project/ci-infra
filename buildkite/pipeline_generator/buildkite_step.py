@@ -587,7 +587,9 @@ def _fnrec_artifact_paths(step: Step, setup_profile: SetupProfile) -> List[str]:
 
 
 def _fnrec_pack_command() -> str:
-    """Fold this job's records into one tarball, as the last command.
+    """Fold this job's records into one tarball, as the last command. It is
+    handed the step's status, which it writes to fnrec.json first, so the
+    collect step can judge the row without the Buildkite API.
 
     Packing, not delivery: artifact_paths ships the raw files either way. A
     final command rather than an EXIT trap, because a shell has one EXIT slot
@@ -598,7 +600,13 @@ def _fnrec_pack_command() -> str:
     `|| true` would bind to the whole chain and report success for a step
     whose tests failed.
     """
-    return f"{{ {FNREC_TMP_DIR}/pack.sh || true; }}"
+    return f'{{ {FNREC_TMP_DIR}/pack.sh "$${{CI_OVERALL_STATUS:-0}}" || true; }}'
+
+
+def recording_build() -> bool:
+    """Whether this build ends with the collect step: either recorder on. One
+    step folds both, the kernel pair and the Python table."""
+    return kernrec_enabled() or fnrec_enabled()
 
 
 KERNREC_COLLECT_KEY = "kernrec-collect"

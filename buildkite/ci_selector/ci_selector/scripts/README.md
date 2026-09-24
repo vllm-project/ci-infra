@@ -42,6 +42,23 @@ contain the commit the build ran at, or the merge aborts.
 | `-v` | per-build progress |
 | `--allow-partial` | merge even from a build that delivered almost nothing |
 
+## 2b. Or build it from the artifacts alone
+
+What the recording build's collect step does, with no token:
+
+```bash
+buildkite-agent artifact download ".fnrec/*.tar.gz" .
+buildkite-agent artifact download ".fnrec/*/*" .      # jobs that never packed
+ci-sweep-from-artifacts . --out sweeps/ci-<n>         # BUILDKITE_* env gives build/commit
+ci-build-table <vllm-repo> sweeps/ci-<n> -o table.json.gz
+```
+
+Job identity and exit status come from each job's `fnrec.json`, else the
+kernel recorder's `kernrec.json`, else the recorder's own file headers (no
+exit status, so the job reads as failed). Test counts come from the
+`fnrec_pytest` plugin's `pytest.*.txt`; a job without the plugin gets no log,
+which keeps its row thin.
+
 ## 3. Use it
 
 ```bash

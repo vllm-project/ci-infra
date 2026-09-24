@@ -92,9 +92,37 @@ Unlike the kernel recorder this also covers AMD and plugin-less steps.
 | `fnrec.py` | the recorder |
 | `install.py` | container install: `fnrec.py` and a `.pth` into site-packages |
 | `host_install.py` | host install: a per-job directory with `sitecustomize.py` |
-| `pack.sh` | folds this job's files into one tarball at the end of the step |
+| `pack.sh` | writes `fnrec.json` (step and exit status), then folds this job's files into one tarball at the end of the step |
+| `fnrec_pytest.py` | pytest plugin: each run's collected count and summary line, for the collect step's table |
+
+## Test outcomes
+
+A row built from a job whose tests all skipped holds little more than its
+imports, so the table's stamp carries each job's pytest counts. Offline they
+come off the Buildkite log. The collect step has no log, so the installers
+also write `fnrec_pytest.py` as a pytest plugin (a `pytest11` entry point
+beside `fnrec.py`) that writes each run's two log lines the parser reads, in
+pytest's own format, to `pytest.<pid>.txt`:
+
+```
+collected 12 items
+========== 10 passed, 2 skipped in 3.21s ==========
+```
+
+The collection line is written first and on its own, so a run killed before
+its summary reads as unparsed and keeps the row thin. `pytest.installed`
+marks that the plugin was in place; without it the collect step treats the
+job's counts as unknown. The plugin is optional: a failed download leaves the
+recorder working.
 
 ## Turning recordings into the table
+
+In the recording build: the collect step (`recorders/kernrec/collect.sh`)
+unpacks the tarballs, runs `ci-sweep-from-artifacts` and then
+`ci-build-table` against the build's own checkout, and ships
+`table.json.gz`. Identity and exit status come from each job's `fnrec.json`,
+which `pack.sh` writes from the status the generator hands it; a job that
+never reached its pack step has none and reads as not passed.
 
 Offline, after a recording build, using the tools in `ci_selector/scripts`:
 

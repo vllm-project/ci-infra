@@ -441,3 +441,58 @@ def test_recording_gives_steps_a_timeout_margin(monkeypatch):
     assert _timeout(step) == 40
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
     assert _timeout(step) == 50
+
+
+def test_pack_is_handed_the_step_status_and_files_it(tmp_path):
+    """The pack step writes fnrec.json with the status first, so the collect
+    step can judge the row without the Buildkite API."""
+    assert '"$${CI_OVERALL_STATUS:-0}"' in buildkite_step._fnrec_pack_command()
+    out = tmp_path / ".fnrec" / "job-7"
+    out.mkdir(parents=True)
+    (out / "fn.host.abc.1.txt").write_text("x\ty\t1\n")
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "FNREC_OUT": str(out),
+        "BUILDKITE_STEP_KEY": "kernels-core",
+        "BUILDKITE_PARALLEL_JOB": "1",
+        "BUILDKITE_PARALLEL_JOB_COUNT": "4",
+    }
+    pack = subprocess.run(
+        ["bash", str(PAYLOAD / "pack.sh"), "3"], capture_output=True, text=True, env=env
+    )
+    assert pack.returncode == 0, pack.stderr
+    import json
+    import tarfile
+
+    with tarfile.open(tmp_path / ".fnrec" / "job-7.tar.gz") as tf:
+        filed = json.load(tf.extractfile("job-7/fnrec.json"))
+    assert filed["exit_status"] == 3
+    assert (filed["step_key"], filed["parallel_job"], filed["parallel_job_count"]) == (
+        "kernels-core",
+        "1",
+        "4",
+    )
+
+
+def test_pack_without_a_status_files_null(tmp_path):
+    out = tmp_path / ".fnrec" / "job-8"
+    out.mkdir(parents=True)
+    env = {"PATH": "/usr/bin:/bin", "FNREC_OUT": str(out)}
+    subprocess.run(
+        ["bash", str(PAYLOAD / "pack.sh")], check=True, env=env, capture_output=True
+    )
+    import json
+    import tarfile
+
+    with tarfile.open(tmp_path / ".fnrec" / "job-8.tar.gz") as tf:
+        assert json.load(tf.extractfile("job-8/fnrec.json"))["exit_status"] is None
+
+
+@pytest.mark.parametrize(
+    "fnrec,kernrec,expected",
+    [("1", "", True), ("", "1", True), ("1", "1", True), ("", "", False)],
+)
+def test_either_recorder_gets_the_collect_step(monkeypatch, fnrec, kernrec, expected):
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, fnrec)
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, kernrec)
+    assert buildkite_step.recording_build() is expected

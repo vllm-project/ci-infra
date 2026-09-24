@@ -12,6 +12,8 @@
 #      S3 untouched: only main's recordings describe what PRs are compared to
 #   8. folding another build (KERNREC_SOURCE_BUILD_ID/_NUMBER/_JOBS): both
 #      downloads name it, recordings come per job, the table carries its number
+#   9. only the Python recorder ran: green, and nothing reaches S3 (the
+#      commit prefix and latest.json describe a published kernel pair)
 #   6. rerun of a commit already published, this time with a corrupt map
 #      -> exit 1 and every byte already under S3 (pair + latest.json) untouched
 #      (Codex P2 on #620: the commit prefix is written as a unit)
@@ -33,6 +35,13 @@ run_case() { # name expect_exit expect_latest(yes|no) expect_commit_upload(yes|n
   echo '{"step_key":"step-x","exit_status":0,"parallel_job":"","parallel_job_count":""}' > "$T/build/.kernrec/job-a/kernrec.json"
   # no-rows: a recording that cannot be filed (blank step key) -> a table with no rows
   [[ "$mode" == "no-rows" ]] && echo '{"step_key":"","exit_status":0}' > "$T/build/.kernrec/job-a/kernrec.json"
+  # python-only: the Python recorder ran and the kernel one did not
+  if [[ "$mode" == "python-only" ]]; then
+    rm -rf "$T/build/.kernrec"
+    mkdir -p "$T/build/.fnrec/job-a"
+    printf '#start\tpid=1\troot=vllm/\n' > "$T/build/.fnrec/job-a/fn.h.n.1.txt"
+    tar -czf "$T/build/.fnrec/job-a.tar.gz" -C "$T/build/.fnrec" job-a && rm -rf "$T/build/.fnrec/job-a"
+  fi
   # a usable symbol map unless the case says otherwise
   if [[ "$mode" != "no-map" ]]; then
     python3 - "$T/build/kernel_symbol_map.json.gz" <<'PY'
@@ -59,6 +68,7 @@ echo "\$*" >> "$T/agent.log"
 case "\$1 \$2" in
   "artifact download")
     if [[ "\$3" == *kernrec* ]]; then cp -R "$T/build/.kernrec" "\$4/" 2>/dev/null; fi
+    if [[ "\$3" == *.fnrec/* ]]; then cp -R "$T/build/.fnrec" "\$4/" 2>/dev/null; fi
     if [[ "\$3" == *kernel_symbol_map* ]]; then cp "$T/build/kernel_symbol_map.json.gz" "\$4/" 2>/dev/null || exit 1; fi
     ;;
   "artifact upload") for f in \$3; do cp "\$f" "$T/artifacts/"; done ;;
@@ -96,9 +106,13 @@ EOF
   local verdict=OK
   [[ "$rc" == "$want_rc" && "$latest" == "$want_latest" && "$commit" == "$want_commit" ]] || { verdict=FAIL; fail=1; }
   [[ "$want_untouched" == "no" || "$untouched" == "yes" ]] || { verdict=FAIL; fail=1; }
+  if [[ "$mode" == "python-only" ]]; then
+    grep -q "Python: 1 tarballs" "$T/log" && grep -q "the Python table is an artifact of this job only" "$T/log" \
+      || { verdict=FAIL; fail=1; echo "      the Python section never ran"; }
+  fi
   if [[ "$mode" == "other-build" ]]; then
     # both downloads went to the source build, per job, and the table is stamped with it
-    [[ "$(grep -c -- '--build src-uuid' "$T/agent.log")" == 2 ]] || { verdict=FAIL; fail=1; echo "      agent calls: $(cat "$T/agent.log")"; }
+    [[ "$(grep -E -c -- '^artifact download (\.kernrec|kernel_symbol_map).*--build src-uuid' "$T/agent.log")" == 2 ]] || { verdict=FAIL; fail=1; echo "      agent calls: $(cat "$T/agent.log")"; }
     grep -q '^artifact download .kernrec/job-a/\* ' "$T/agent.log" || { verdict=FAIL; fail=1; echo "      no per-job download"; }
     python3 -c 'import gzip,json,sys; t=json.load(gzip.open(sys.argv[1],"rt")); sys.exit(0 if t["source"]["build"] == 41 else 1)' "$T/artifacts/kernel_table.json.gz" \
       || { verdict=FAIL; fail=1; echo "      table not stamped with build 41"; }
@@ -116,4 +130,5 @@ run_case no-identity       0 no  no  no-identity
 run_case corrupt-map-rerun 1 yes yes corrupt-map-rerun yes
 run_case fork-branch       0 no  no  fork-branch yes
 run_case other-build       0 yes yes other-build
+run_case python-only       0 no  no  python-only yes
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" || { echo "collect.sh publishing rules: FAIL"; exit 1; }

@@ -47,7 +47,7 @@ WORK="$(mktemp -d)"
 cd "${WORK}" || exit 1
 trap 'rm -rf -- "${WORK}"' EXIT
 
-echo "--- :satellite: Collecting kernel recordings of build ${BUILD}"
+echo "--- :satellite: Collecting recordings of build ${BUILD}"
 if [[ -n "${KERNREC_SOURCE_JOBS:-}" ]]; then
   # One search per job: a build with the Python recorder on holds tens of
   # thousands of artifacts, and one search over all of them times out.
@@ -57,11 +57,68 @@ else
   buildkite-agent artifact download ".kernrec/**/*" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel recordings in this build"
 fi
 buildkite-agent artifact download "kernel_symbol_map.json.gz" . ${FROM[@]+"${FROM[@]}"} || echo "no kernel symbol map in this build"
+# The Python recorder's: one tarball per job (recorders/fnrec/pack.sh), or the
+# raw files of a job that never reached its pack step.
+if [[ -n "${KERNREC_SOURCE_JOBS:-}" ]]; then
+  printf '%s\n' ${KERNREC_SOURCE_JOBS} | xargs -P 8 -I{} sh -c \
+    'buildkite-agent artifact download ".fnrec/{}.tar.gz" . "$@" >/dev/null 2>&1; buildkite-agent artifact download ".fnrec/{}/*" . "$@" >/dev/null 2>&1; :' _ ${FROM[@]+"${FROM[@]}"}
+else
+  buildkite-agent artifact download ".fnrec/*.tar.gz" . ${FROM[@]+"${FROM[@]}"} >/dev/null 2>&1 || :
+  buildkite-agent artifact download ".fnrec/*/*" . ${FROM[@]+"${FROM[@]}"} >/dev/null 2>&1 || :
+fi
 n_files=$(find .kernrec -name 'kern.*.txt' 2>/dev/null | wc -l | tr -d ' ')
 n_jobs=$(find .kernrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
-echo "${n_files} recording files from ${n_jobs} jobs"
-if [[ "${n_files}" == "0" ]]; then
+n_py=$(find .fnrec \( -name '*.tar.gz' -o -name 'fn.*.txt' \) 2>/dev/null | wc -l | tr -d ' ')
+echo "kernel: ${n_files} recording files from ${n_jobs} jobs; Python: ${n_py} tarballs or raw files"
+if [[ "${n_files}" == "0" && "${n_py}" == "0" ]]; then
   echo "nothing to fold; done"
+  exit 0
+fi
+mkdir -p out
+
+echo "--- :snake: Building the Python coverage table"
+# Optional: the kernel pair publishes with or without it. Needs the
+# ci_selector package (uv, Python 3.12, the recorders' minor) and this build's
+# vLLM checkout, which the agent made for this step. Everything else comes off
+# the artifacts: identity and exit status from each job's fnrec.json (or the
+# kernel sidecar), test counts from the pytest plugin
+# (ci_selector/scripts/artifacts.py says how).
+py_ok=no
+CHECKOUT="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+if [[ "${n_py}" == "0" ]]; then
+  echo "no Python recordings in this build (VLLM_CI_FNREC unset?)"
+elif [[ -z "${CHECKOUT}" ]] || ! git -C "${CHECKOUT}" cat-file -e "${COMMIT}^{commit}" 2>/dev/null; then
+  echo "no vLLM checkout holding ${COMMIT}; skipping the Python table" >&2
+else
+  if ! command -v uv >/dev/null 2>&1; then
+    curl -LsSf --retry 3 https://astral.sh/uv/install.sh \
+      | env UV_INSTALL_DIR="${WORK}/bin" UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1
+    export PATH="${WORK}/bin:${PATH}"
+  fi
+  if command -v uv >/dev/null 2>&1 \
+     && git clone -q --depth 1 --branch "${BRANCH}" https://github.com/vllm-project/ci-infra "${WORK}/ci-infra"; then
+    SEL="${WORK}/ci-infra/buildkite/ci_selector"
+    run_sel() { uv run -q --no-dev --python 3.12 --project "${SEL}" "$@"; }
+    if run_sel ci-sweep-from-artifacts . --out "sweep/${PIPELINE}-${BUILD}" \
+         --build "${BUILD}" --commit "${COMMIT}" --pipeline "${PIPELINE}" \
+       && run_sel ci-build-table "${CHECKOUT}" "sweep/${PIPELINE}-${BUILD}" -o out/table.json.gz; then
+      py_ok=yes
+    else
+      echo "Python table build failed; the kernel record publishes without it" >&2
+      rm -f out/table.json.gz
+    fi
+  else
+    echo "no uv or no ci-infra checkout of ${BRANCH}; skipping the Python table" >&2
+  fi
+fi
+echo "Python table built: ${py_ok}"
+
+if [[ "${n_files}" == "0" ]]; then
+  echo "--- :arrow_up: Uploading as build artifacts"
+  (cd out && buildkite-agent artifact upload "*") || true
+  # Nothing reaches S3 without a kernel pair: the commit prefix and
+  # latest.json describe a published pair.
+  echo "no kernel recordings; the Python table is an artifact of this job only"
   exit 0
 fi
 
@@ -69,7 +126,6 @@ echo "--- :table_tennis_paddle_and_ball: Building the kernel table"
 # From here on a failure is a failure: soft_fail keeps the build green, but
 # a half-built result must never be published as if it were complete.
 curl -sSfL --retry 3 -o kernel_table.py "${RAW}/kernel_table.py" || { echo "cannot fetch kernel_table.py" >&2; exit 1; }
-mkdir -p out
 python3 kernel_table.py build --kernrec .kernrec --build "${BUILD}" --commit "${COMMIT}" \
   --pipeline "${PIPELINE}" --out out/kernel_table.json.gz || { echo "table build failed" >&2; exit 1; }
 python3 kernel_table.py show out/kernel_table.json.gz --top 10 || true

@@ -61,6 +61,13 @@ fnrec_setup() {
   python3 -m py_compile "$dir/fnrec.py" "$dir/$installer" 2>/dev/null \
     || { echo "fnrec: fetched payload does not compile"; return 1; }
   chmod +x "$dir/pack.sh"
+  # Optional: the pytest plugin that records test outcomes (fnrec_pytest.py).
+  # The installer writes it only if it is here and compiles.
+  if ! curl -sSfL --retry 3 --max-time 60 -o "$dir/fnrec_pytest.py" "$base/fnrec_pytest.py" \
+     || ! python3 -m py_compile "$dir/fnrec_pytest.py" 2>/dev/null; then
+    rm -f "$dir/fnrec_pytest.py"
+    echo "fnrec: no pytest plugin; the table will need job logs for test counts"
+  fi
 
   # The installer prints where vllm's code is. Its stderr is the only thing
   # separating a failed install from a job that ran no vLLM code, since both
