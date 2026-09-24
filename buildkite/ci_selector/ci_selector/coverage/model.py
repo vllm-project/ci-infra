@@ -52,6 +52,10 @@ MIN_RECORD_RATE = 0.50
 # A name held by more than this share of rows says nothing about any one of
 # them, so the add side will not select on it. `<module>` is in every row.
 MAX_ADD_ROW_SHARE = 0.90
+# Override for experiments: CI_SELECTOR_ADD_MAX_SHARE=0.25 adds only on names at
+# most a quarter of the rows hold, which keeps engine-path hub code (held by
+# about half the steps) from pulling in every step that runs it.
+ADD_MAX_SHARE_ENV = "CI_SELECTOR_ADD_MAX_SHARE"
 
 # Too few rows to measure a share at all: with 3 rows a name is in 33%, 67% or
 # 100% of them and none of those means anything. Under this count the gate

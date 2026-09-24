@@ -25,6 +25,8 @@ and the reasons.
 
 from __future__ import annotations
 
+import os
+
 import gzip
 import json
 import sys
@@ -35,6 +37,7 @@ from pathlib import Path
 
 from .changed_funcs import FileQuery, Query, mark_unfaithful
 from .model import (
+    ADD_MAX_SHARE_ENV,
     MAX_ADD_ROW_SHARE,
     MIN_ROWS_FOR_BREADTH,
     TABLE_VERSION,
@@ -43,6 +46,18 @@ from .model import (
     digest_of,
 )
 from .phase import DEFAULT_MODE, PhaseMode, row_shows_use
+
+
+def _max_add_share() -> float:
+    """MAX_ADD_ROW_SHARE, or its experiment override. A bad value fails loudly:
+    read as the default, it would make a capped sweep look uncapped."""
+    raw = os.environ.get(ADD_MAX_SHARE_ENV)
+    if not raw:
+        return MAX_ADD_ROW_SHARE
+    share = float(raw)
+    if not 0.0 < share <= 1.0:
+        raise ValueError(f"{ADD_MAX_SHARE_ENV}={raw!r}, expected a share in (0, 1]")
+    return share
 
 
 class Evidence(str, Enum):
@@ -165,7 +180,7 @@ class Table:
         if len(self._rows) < MIN_ROWS_FOR_BREADTH:
             return True
         held_by = self._breadth.get(path, {}).get(name, 0)
-        return held_by <= MAX_ADD_ROW_SHARE * len(self._rows)
+        return held_by <= _max_add_share() * len(self._rows)
 
     def row(self, step: str) -> Row | None:
         return self._rows.get(step)
