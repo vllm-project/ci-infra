@@ -13,16 +13,27 @@ import pytest
 import regex as re
 from ci_selector.codemap.graph.build import build_full_graph
 
-COLD_BUILD_BUDGET_S = 60
+# Sized for the slowest machine that gates: the GH runner (m6i.2xlarge) builds
+# in ~55-60s at the 2026-09 pin, and four runs on 2026-09-23 took 60.1-60.5s
+# against the old 60s budget. A laptop takes ~25s. 90s is 1.5x the runner's
+# worst, so noise and slow vLLM growth pass and a real slowdown (a second parse
+# pass, a quadratic walk) does not. The runner's number is the `setup` row for
+# test_cold_build_within_budget in the workflow's --durations table.
+COLD_BUILD_BUDGET_S = 90
 
 
 @pytest.fixture(scope="module")
 def graph_and_index(vllm_repo):
     t0 = time.monotonic()
     fg = build_full_graph(vllm_repo)
-    elapsed = time.monotonic() - t0
+    return fg.graph, fg.index, time.monotonic() - t0
+
+
+def test_cold_build_within_budget(graph_and_index):
+    """A test and not a fixture assert, so a slow build fails here alone
+    instead of erroring every test that reads the graph."""
+    _, _, elapsed = graph_and_index
     assert elapsed < COLD_BUILD_BUDGET_S, f"cold build took {elapsed:.1f}s"
-    return fg.graph, fg.index, elapsed
 
 
 def test_no_parse_errors(graph_and_index):
