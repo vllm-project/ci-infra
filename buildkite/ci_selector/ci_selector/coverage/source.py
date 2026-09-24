@@ -19,6 +19,12 @@ from .table import Table, load
 # `fetch_table` should need to change.
 COVERAGE_DIR = Path(__file__).resolve().parents[2] / "coverage-data"
 TABLE_NAME = "table.json.gz"
+# The kernel record's two halves, published together by the recording build
+# (`kernrec/collect.sh`) and fetched by `ci-fetch-kernel-record`.
+KERNEL_TABLE_NAME = "kernel_table.json.gz"
+KERNEL_MAP_NAME = "kernel_symbol_map.json.gz"
+KERNEL_TABLE_ENV = "CI_SELECTOR_KERNEL_TABLE"
+KERNEL_MAP_ENV = "CI_SELECTOR_KERNEL_SYMBOL_MAP"
 
 
 def table_path() -> Path:
@@ -43,3 +49,52 @@ def fetch_table(path: Path | None = None) -> Table:
             ),
         )
     return load(target)
+
+
+def kernel_paths() -> tuple[Path, Path]:
+    """Where the kernel table and symbol map are expected. The two environment
+    variables override them one at a time."""
+    t = os.environ.get(KERNEL_TABLE_ENV)
+    m = os.environ.get(KERNEL_MAP_ENV)
+    return (
+        Path(t) if t else COVERAGE_DIR / KERNEL_TABLE_NAME,
+        Path(m) if m else COVERAGE_DIR / KERNEL_MAP_NAME,
+    )
+
+
+def fetch_kernel_evidence(table_path: Path | None = None, map_path: Path | None = None):
+    """The kernel record, or evidence that authorizes nothing.
+
+    Missing files are not an error: the reason rides along and the selector
+    routes csrc on the code map alone, as it did before this record existed.
+    """
+    from .kernels import (
+        KernelEvidence,
+        KernelTable,
+        SymbolMap,
+        load_symbol_map,
+        load_table,
+    )
+
+    default_t, default_m = kernel_paths()
+    t = table_path or default_t
+    m = map_path or default_m
+    table = (
+        load_table(t)
+        if t.is_file()
+        else KernelTable(
+            None,
+            f"no kernel table at {t}. Run ci-fetch-kernel-record, or set "
+            f"{KERNEL_TABLE_ENV}. csrc runs on the code map alone.",
+        )
+    )
+    symbol_map = (
+        load_symbol_map(m)
+        if m.is_file()
+        else SymbolMap(
+            None,
+            unavailable=f"no kernel symbol map at {m}. Run ci-fetch-kernel-record, "
+            f"or set {KERNEL_MAP_ENV}. csrc runs on the code map alone.",
+        )
+    )
+    return KernelEvidence(table, symbol_map)

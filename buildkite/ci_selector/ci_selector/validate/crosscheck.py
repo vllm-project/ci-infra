@@ -33,7 +33,7 @@ from ..codemap.pipeline.match import (
     step_slug_candidates,
 )
 from ..codemap.worktree import git_out, state_for
-from ..coverage.source import fetch_table
+from ..coverage.source import fetch_kernel_evidence, fetch_table
 from ..decide import decide
 from ..gitdiff import changed_paths, diff_files
 from ..handwritten import PR_PIPELINE
@@ -153,7 +153,9 @@ def _totals(scored: list[dict]) -> dict:
     return total
 
 
-def crosscheck_pr(repo: Path, pr: int, remote: str | None = None, table=None) -> dict:
+def crosscheck_pr(
+    repo: Path, pr: int, remote: str | None = None, table=None, kernels=None
+) -> dict:
     data = _gh_pr(pr)
     ran = {}
     for c in data["statusCheckRollup"]:
@@ -187,7 +189,7 @@ def crosscheck_pr(repo: Path, pr: int, remote: str | None = None, table=None) ->
 
     # What the tool actually answers. `a_ids` is the code map alone, kept only
     # so the two halves stay distinguishable.
-    decision = decide(state, sel, repo, base, head, table=table)
+    decision = decide(state, sel, repo, base, head, table=table, kernels=kernels)
     f_ids = {s for s in decision.steps if s.startswith(f"{PR_PIPELINE}:")}
 
     # Steps today's rules reach ONLY through a blanket dependency, which we drop
@@ -330,6 +332,15 @@ def crosscheck_pr(repo: Path, pr: int, remote: str | None = None, table=None) ->
         # Empty when the record was used. Anything here means code map only, so
         # `final` equals `analyzer` and this is not the real comparison.
         "coverage_note": decision.coverage_note,
+        # The kernel record's half of `final`, kept apart the same way. Steps
+        # here are the ones its rows added or dropped; `kernel_files` says
+        # what it could do with each changed csrc file.
+        "kernel_added": sorted(decision.added_by_kernels),
+        "kernel_dropped": sorted(decision.dropped_by_kernels),
+        "kernel_note": decision.kernel_note,
+        "kernel_pair": decision.kernel_pair,
+        "kernel_reasons": decision.kernel_reasons,
+        "kernel_files": decision.kernel_files,
         # From the jobs that ran, so this is what CI spent rather than what the
         # pipeline defines.
         "them_steps": len(them_steps),
@@ -339,6 +350,14 @@ def crosscheck_pr(repo: Path, pr: int, remote: str | None = None, table=None) ->
         "them_jobs": them_jobs,
         "codemap_jobs": codemap_jobs,
         "final_jobs": final_jobs,
+        # Per step, how many jobs it expands to, for every step any side named,
+        # so a reader can re-total the comparison over a subset of steps
+        # (say, without AMD mirrors or image builds) without another replay.
+        "step_jobs": {
+            s: (vllm_steps[s].parallelism or 1)
+            for s in sorted(a_ids | t_ids | f_ids)
+            if s in vllm_steps
+        },
         # Positive means we eliminated jobs; negative means we ran more.
         "win": them_jobs - final_jobs,
         # Job slugs no step of ours explains. They are missing from
@@ -377,6 +396,14 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--table", type=Path, help="coverage table (default: the configured one)"
     )
+    parser.add_argument(
+        "--kernel-table", type=Path, help="kernel table (default: the configured one)"
+    )
+    parser.add_argument(
+        "--kernel-symbol-map",
+        type=Path,
+        help="kernel symbol map (default: the configured one)",
+    )
 
 
 def run(args) -> int:
@@ -384,16 +411,25 @@ def run(args) -> int:
     # Once. Every PR reads the same table, and reloading per PR would dominate
     # a long replay.
     table = fetch_table(args.table)
+    kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
     if not table.available:
-        print(f"NOTE: {table.unavailable}\n  final == codemap for every PR below.")
-    print("triples read: CI ran / codemap only / coverage + codemap\n")
+        print(f"NOTE: {table.unavailable}")
+    if kernels.unavailable:
+        print(f"NOTE: {kernels.unavailable}")
+    else:
+        print(f"kernel record: {kernels.describe()}")
+    if not table.available and kernels.unavailable:
+        print("  final == codemap for every PR below.")
+    print("triples read: CI ran / codemap only / records + codemap\n")
     results = []
     # TODO: parallelise. Each PR builds a worktree and a graph at its own base,
     # and `worktree.py` shares caches and a reaper across them without locking,
     # so a pool has to be processes rather than threads.
     for pr in args.prs:
         try:
-            r = crosscheck_pr(repo, pr, remote=args.remote, table=table)
+            r = crosscheck_pr(
+                repo, pr, remote=args.remote, table=table, kernels=kernels
+            )
         except subprocess.CalledProcessError as e:
             r = {"pr": pr, "skip": f"command failed: {e.stderr[:100]}"}
         results.append(r)
@@ -402,12 +438,18 @@ def run(args) -> int:
             continue
         steps = f"{r['them_steps']}/{r['codemap_steps']}/{r['final_steps']}"
         jobs = f"{r['them_jobs']}/{r['codemap_jobs']}/{r['final_jobs']}"
+        kern = (
+            ""
+            if r["kernel_note"]
+            else f"  kern +{len(r['kernel_added'])}/-{len(r['kernel_dropped'])}"
+        )
         print(
             f"PR #{pr}  steps {steps}  jobs {jobs}  win {r['win']:+d}  "
             f"missed {len(r['missed_failures'])}"
             # A win earned by bailing out to run-everything is not a win.
             f"{'  RUN_ALL' if r['a_run_all'] else ''}"
             f"{f'  catchall {n}' if (n := len(r['catchall_only_missed'])) else ''}"
+            f"{kern}"
             f"   {r['title'][:36]}",
             flush=True,
         )

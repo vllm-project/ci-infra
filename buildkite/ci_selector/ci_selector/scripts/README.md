@@ -63,3 +63,18 @@ ci-select --repo /path/to/vllm --diff <base>...<head> --table table.json.gz
 ```
 
 `CI_SELECTOR_TABLE` sets the same thing as an environment variable.
+
+## 4. The kernel record
+
+Not built here: the recording build publishes it (`kernrec/collect.sh`).
+This only fetches it.
+
+```bash
+ci-fetch-kernel-record                      # follows <bucket>/ci/latest.json
+ci-fetch-kernel-record --commit <sha>       # one published commit
+```
+
+Writes `kernel_table.json.gz` and `kernel_symbol_map.json.gz` into
+`coverage-data/`, after validating both and checking they were recorded at the
+same commit. Public bucket, plain HTTPS, no token. Exit 1 leaves whatever was
+on disk untouched.
