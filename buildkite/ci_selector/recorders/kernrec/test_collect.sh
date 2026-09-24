@@ -43,10 +43,10 @@ PY
   # rerun: an earlier build already published a valid pair for this commit and
   # latest.json points at it; this build's map is garbage
   if [[ "$mode" == "corrupt-map-rerun" ]]; then
-    mkdir -p "$T/s3/bkt/ci/abc"
-    cp "$T/build/kernel_symbol_map.json.gz" "$T/s3/bkt/ci/abc/"
-    printf 'table from build 41' | gzip > "$T/s3/bkt/ci/abc/kernel_table.json.gz"
-    echo '{"commit":"abc","build":41}' > "$T/s3/bkt/ci/latest.json"
+    mkdir -p "$T/s3/bkt/ci/kernrec/abc"
+    cp "$T/build/kernel_symbol_map.json.gz" "$T/s3/bkt/ci/kernrec/abc/"
+    printf 'table from build 41' | gzip > "$T/s3/bkt/ci/kernrec/abc/kernel_table.json.gz"
+    echo '{"commit":"abc","build":41}' > "$T/s3/bkt/ci/kernrec/latest.json"
     printf 'this is not gzip' > "$T/build/kernel_symbol_map.json.gz"
   fi
   local s3_before; s3_before=$(s3_digest "$T/s3")
@@ -90,8 +90,8 @@ EOF
   ( cd "$T" && PATH="$T/bin:$PATH" BUILDKITE_COMMIT=abc BUILDKITE_BUILD_NUMBER=42 BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
       env ${extra[@]+"${extra[@]}"} bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
   local latest=no commit=no untouched=no
-  [[ -f "$T/s3/bkt/ci/latest.json" ]] && latest=yes
-  [[ -f "$T/s3/bkt/ci/abc/kernel_table.json.gz" ]] && commit=yes
+  [[ -f "$T/s3/bkt/ci/kernrec/latest.json" ]] && latest=yes
+  [[ -f "$T/s3/bkt/ci/kernrec/abc/kernel_table.json.gz" ]] && commit=yes
   [[ "$(s3_digest "$T/s3")" == "$s3_before" ]] && untouched=yes
   local verdict=OK
   [[ "$rc" == "$want_rc" && "$latest" == "$want_latest" && "$commit" == "$want_commit" ]] || { verdict=FAIL; fail=1; }

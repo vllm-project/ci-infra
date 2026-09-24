@@ -7,7 +7,7 @@ from __future__ import annotations
 import gzip
 from pathlib import Path
 
-from ci_selector.coverage.joblog import read_counts
+from ci_selector.coverage.joblog import read_counts, read_session_counts
 
 
 def write(path: Path, body: str, *, gz: bool = False) -> Path:
@@ -116,3 +116,109 @@ class TestSummaryUnparsed:
             tmp_path / "job.log", "collected 3 items\n=== 3 passed in 1.0s ===\n"
         )
         assert not read_counts(log).counts.summary_unparsed
+
+
+class TestSessionRecord:
+    """The recorder's own pytest plugin, read instead of the log.
+
+    Each case is paired with the log the same run would have produced: the two
+    sources have to agree, or the two tables disagree on what to drop.
+    """
+
+    def sessions(self, tmp_path: Path, *lines: str) -> Path:
+        """One pytest.<pid>.jsonl per session, as the plugin writes them."""
+        d = tmp_path / "fnrec"
+        d.mkdir(exist_ok=True)
+        for pid, body in enumerate(lines, start=100):
+            (d / f"pytest.{pid}.jsonl").write_text(body)
+        return d
+
+    def both(self, tmp_path: Path, log_body: str, sessions: str):
+        log = read_counts(write(tmp_path / "job.log", log_body)).counts
+        rec = read_session_counts(self.sessions(tmp_path, sessions)).counts
+        return log, rec
+
+    def same(self, log, rec):
+        fields = (
+            "passed",
+            "failed",
+            "skipped",
+            "deselected",
+            "xfailed",
+            "xpassed",
+            "errors",
+            "collected",
+            "invocations",
+        )
+        assert [getattr(log, f) for f in fields] == [getattr(rec, f) for f in fields]
+        assert (log.executed, log.ran_nothing, log.summary_unparsed) == (
+            rec.executed,
+            rec.ran_nothing,
+            rec.summary_unparsed,
+        )
+
+    def test_agrees_with_the_log_on_a_mixed_run(self, tmp_path: Path):
+        log, rec = self.both(
+            tmp_path,
+            "collected 5 items\n=== 1 failed, 2 passed, 1 skipped, 1 xfailed in 0.0s ===\n",
+            '{"event":"collected","selected":5,"deselected":0}\n'
+            '{"event":"session","passed":2,"failed":1,"skipped":1,'
+            '"xfailed":1,"xpassed":0,"deselected":0,"errors":0,'
+            '"selected":5,"exitstatus":1}\n',
+        )
+        self.same(log, rec)
+
+    def test_agrees_that_an_all_skipped_run_ran_nothing(self, tmp_path: Path):
+        """The case exit status cannot see: pytest exits 0 having run no test."""
+        log, rec = self.both(
+            tmp_path,
+            "collected 3 items\n=== 3 skipped in 0.0s ===\n",
+            '{"event":"collected","selected":3,"deselected":0}\n'
+            '{"event":"session","passed":0,"failed":0,"skipped":3,'
+            '"xfailed":0,"xpassed":0,"deselected":0,"errors":0,'
+            '"selected":3,"exitstatus":0}\n',
+        )
+        assert rec.ran_nothing
+        self.same(log, rec)
+
+    def test_adds_deselected_back_to_match_the_collection_line(self, tmp_path: Path):
+        """pytest counts `collected` before deselection and reports `selected`
+        after it, so the plugin's two numbers have to be summed."""
+        log, rec = self.both(
+            tmp_path,
+            "collected 10 items / 6 deselected / 4 selected\n=== 4 passed, 6 deselected in 0.0s ===\n",
+            '{"event":"collected","selected":4,"deselected":6}\n'
+            '{"event":"session","passed":4,"failed":0,"skipped":0,'
+            '"xfailed":0,"xpassed":0,"deselected":6,"errors":0,'
+            '"selected":4,"exitstatus":0}\n',
+        )
+        assert rec.collected == 10
+        self.same(log, rec)
+
+    def test_sums_every_session_across_processes(self, tmp_path: Path):
+        """A step runs pytest several times, so only the total describes it."""
+        rec = read_session_counts(
+            self.sessions(
+                tmp_path,
+                '{"event":"session","passed":2,"selected":2,"exitstatus":0}\n',
+                '{"event":"session","passed":3,"failed":1,"selected":4,'
+                '"exitstatus":1}\n',
+            )
+        ).counts
+        assert (rec.passed, rec.failed, rec.invocations) == (5, 1, 2)
+
+    def test_a_killed_session_leaves_its_collected_count(self, tmp_path: Path):
+        """Why the count is written before the tests run: with no line at all,
+        a killed job reads as one that started no pytest, which looks healthy."""
+        rec = read_session_counts(
+            self.sessions(tmp_path, '{"event":"collected","selected":9}\n')
+        ).counts
+        assert rec.collected == 9
+        assert rec.invocations == 0
+        assert rec.summary_unparsed, "too weak to read a silence off"
+
+    def test_a_file_that_will_not_parse_is_unreadable(self, tmp_path: Path):
+        """Same direction as an unreadable log: weaken the row, never assume
+        the run was healthy."""
+        assert read_session_counts(self.sessions(tmp_path, "{oh no\n")).unreadable
+        assert read_session_counts(tmp_path / "nothing-here").unreadable

@@ -307,6 +307,22 @@ def _begin():
     os.register_at_fork(after_in_child=_after_in_child)
 
 
+def _arm_pytest_plugin():
+    """Have pytest load fnrec_pytest, which records each session's outcome.
+
+    PYTEST_PLUGINS is read after this module loads and is inherited by
+    subprocesses. Naming a module pytest cannot import aborts its startup, so
+    only set it once the file is there.
+    """
+    name = "fnrec_pytest"
+    if not os.path.exists(os.path.join(os.path.dirname(__file__), name + ".py")):
+        return
+    existing = os.environ.get("PYTEST_PLUGINS", "")
+    if name in existing.split(","):
+        return
+    os.environ["PYTEST_PLUGINS"] = f"{existing},{name}" if existing else name
+
+
 class _VllmImportTrigger:
     fired = False
 
@@ -339,5 +355,6 @@ if _OUT and _ROOT_ENV:
         os.makedirs(_OUT, exist_ok=True)
         os.chmod(_OUT, 0o777)
         sys.meta_path.insert(0, _VllmImportTrigger())
+        _arm_pytest_plugin()
     except Exception:
         pass

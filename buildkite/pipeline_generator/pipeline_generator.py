@@ -6,13 +6,17 @@ import yaml
 
 from amd import is_amd_device, normalize_amd_depends_on
 from buildkite_step import (
+    COLLECT_GROUP,
+    BuildkiteGroupStep,
     _generate_step_key,
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
+    fnrec_collect_group,
     kernrec_collect_group,
     kernrec_enabled,
     create_precommit_group_step,
 )
+from recorder_switches import fnrec_enabled
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
 
@@ -93,10 +97,18 @@ class PipelineGenerator:
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
 
-        # A recording build ends by folding every job's kernel recordings into
-        # the per-step table and publishing it (see kernrec/collect.sh).
+        # A recording build ends by collecting every job's recordings.
+        # Both recorders share one group, so they don't make two groups
+        # with the same name.
+        collect = []
         if kernrec_enabled():
-            buildkite_group_steps.append(kernrec_collect_group(buildkite_group_steps))
+            collect += kernrec_collect_group(buildkite_group_steps).steps
+        if fnrec_enabled():
+            collect += fnrec_collect_group(buildkite_group_steps).steps
+        if collect:
+            buildkite_group_steps.append(
+                BuildkiteGroupStep(group=COLLECT_GROUP, steps=collect)
+            )
 
         # Run pre-commit as a dedicated step in parallel with the image build.
         # Steps that depend on the image build also wait for pre-commit to pass.

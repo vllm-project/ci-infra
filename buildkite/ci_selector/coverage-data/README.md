@@ -1,15 +1,13 @@
-Put the coverage table here as `table.json.gz`.
+Where both coverage records live. Each is fetched with one command and
+gitignored on purpose: artifacts produced by an instrumented CI sweep, not
+source. Without one the selector says so on stderr and routes on the code map
+alone.
 
-It is gitignored on purpose: a 15 MB artifact produced by an instrumented CI
-sweep, not source. Without it the selector runs on the code map alone and says
-so on stderr.
+| file | fetch it with | read by |
+| --- | --- | --- |
+| `table.json.gz` | `ci-fetch-function-record` | `source.py::fetch_table` |
+| `kernel_table.json.gz` + `kernel_symbol_map.json.gz` | `ci-fetch-kernel-record` | `source.py::fetch_kernel_evidence` |
 
-`ci_selector/coverage/source.py::fetch_table` is the only code that knows this
-directory exists.
-
-The kernel record lives here too, as `kernel_table.json.gz` and
-`kernel_symbol_map.json.gz`. `ci-fetch-kernel-record` downloads the latest
-published pair from the public `vllm-ci-selector` bucket. Same rule: without
-them the selector says so and csrc routes on the code map alone.
-`ci_selector/coverage/source.py::fetch_kernel_evidence` is the only code that
-knows their names.
+Both come from the public `vllm-ci-selector` bucket, each recorder under its
+own prefix. `coverage/source.py` is the only code that knows this directory
+exists or what the files are called.

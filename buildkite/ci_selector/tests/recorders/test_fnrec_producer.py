@@ -46,7 +46,7 @@ def recorded(tmp_path_factory):
 
     staging = root / "payload"
     staging.mkdir()
-    for name in ("fnrec.py", "host_install.py"):
+    for name in ("fnrec.py", "fnrec_pytest.py", "host_install.py"):
         (staging / name).write_bytes((FNREC / name).read_bytes())
     installed = subprocess.run(
         [sys.executable, str(staging / "host_install.py")],

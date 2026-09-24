@@ -178,10 +178,13 @@ whether they passed or failed. It executes `collect.sh`:
    identity, to
 
    ```
-   s3://vllm-ci-selector/<pipeline>/<commit>/kernel_table.json.gz
-   s3://vllm-ci-selector/<pipeline>/<commit>/kernel_symbol_map.json.gz
-   s3://vllm-ci-selector/<pipeline>/latest.json
+   s3://vllm-ci-selector/<pipeline>/kernrec/<commit>/kernel_table.json.gz
+   s3://vllm-ci-selector/<pipeline>/kernrec/<commit>/kernel_symbol_map.json.gz
+   s3://vllm-ci-selector/<pipeline>/kernrec/latest.json
    ```
+
+   Its own prefix, beside the function record's. Each recorder owns its
+   tree here as it does in the checkout.
 
    The commit prefix is written as a unit and `latest.json` last, so a
    consumer following the pointer always finds a complete, validated pair.

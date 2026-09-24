@@ -52,13 +52,13 @@ fnrec_setup() {
     export FNREC_LIB="$FNREC_BASE/lib"
   fi
   local f
-  for f in fnrec.py "$installer" pack.sh; do
+  for f in fnrec.py fnrec_pytest.py "$installer" pack.sh; do
     curl -sSfL --retry 3 --max-time 60 -o "$dir/$f" "$base/$f" \
       || { echo "fnrec: download failed: $base/$f"; return 1; }
   done
   # A truncated download would otherwise surface much later, as a job that
   # recorded nothing.
-  python3 -m py_compile "$dir/fnrec.py" "$dir/$installer" 2>/dev/null \
+  python3 -m py_compile "$dir/fnrec.py" "$dir/fnrec_pytest.py" "$dir/$installer" 2>/dev/null \
     || { echo "fnrec: fetched payload does not compile"; return 1; }
   chmod +x "$dir/pack.sh"
 

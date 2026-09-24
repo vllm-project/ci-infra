@@ -1,9 +1,10 @@
 # scripts
 
-Offline tools that build the coverage table. They are not on the selection path
-and never run on a PR: `ci-select` reads the finished table off disk.
+Tools for the two coverage records: building one, publishing it, and fetching
+a published one. None is on the selection path and none runs on a PR.
+`ci-select` reads the finished records off disk.
 
-Both need the package installed (`uv sync` from `buildkite/ci_selector`).
+They all need the package installed (`uv sync` from `buildkite/ci_selector`).
 
 ## 1. Download a build
 
@@ -50,17 +51,30 @@ ci-select --repo /path/to/vllm --diff <base>...<head> --table table.json.gz
 
 `CI_SELECTOR_TABLE` sets the same thing as an environment variable.
 
-## 4. The kernel record
-
-Not built here: the recording build publishes it (`recorders/kernrec/collect.sh`).
-This only fetches it.
+## 4. Publish the function record
 
 ```bash
-ci-fetch-kernel-record                      # follows <bucket>/ci/latest.json
-ci-fetch-kernel-record --commit <sha>       # one published commit
+ci-publish-function-record table.json.gz    # --dry-run to see the target first
 ```
 
-Writes `kernel_table.json.gz` and `kernel_symbol_map.json.gz` into
-`coverage-data/`, after validating both and checking they were recorded at the
-same commit. Public bucket, plain HTTPS, no token. Exit 1 leaves whatever was
-on disk untouched.
+Uploads it to `<bucket>/<pipeline>/fnrec/<commit>/`, then moves that prefix's
+`latest.json`, so a reader following the pointer never finds a half-written
+table. Refuses a table that records no commit, or more than one, since neither
+has a prefix to publish under. Needs `aws` and write credentials.
+
+## 5. Fetch a published record
+
+```bash
+ci-fetch-function-record                 # follows <bucket>/ci/fnrec/latest.json
+ci-fetch-kernel-record                   # and <bucket>/ci/kernrec/latest.json
+ci-fetch-function-record --commit <sha>  # one published commit
+```
+
+The first writes `table.json.gz` into `coverage-data/`; the second writes
+`kernel_table.json.gz` and `kernel_symbol_map.json.gz`, after checking both
+were recorded at the same commit. Both validate what they downloaded before it
+replaces what is on disk. Public bucket, plain HTTPS, no token. Exit 1 leaves
+whatever was there untouched.
+
+The kernel record is not built here: its recording build folds and publishes
+itself (`recorders/kernrec/collect.sh`).

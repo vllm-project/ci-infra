@@ -44,7 +44,7 @@ def fetch_table(path: Path | None = None) -> Table:
         return Table(
             None,
             unavailable=(
-                f"no coverage table at {target}. Put one there (see the README) "
+                f"no coverage table at {target}. Run ci-fetch-function-record, "
                 f"or set CI_SELECTOR_TABLE. Running on the code map alone."
             ),
         )

@@ -122,7 +122,7 @@ if [[ "${BUILDKITE_BRANCH:-main}" != "main" ]]; then
   exit 0
 fi
 
-echo "--- :s3: Publishing to s3://${BUCKET}/${PIPELINE}/${COMMIT}/"
+echo "--- :s3: Publishing to s3://${BUCKET}/${PIPELINE}/kernrec/${COMMIT}/"
 if ! command -v aws >/dev/null 2>&1; then
   echo "aws cli not on this agent; the table and map are artifacts of this job only" >&2
   exit 0
@@ -131,12 +131,12 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
   echo "no AWS identity on this agent; the table and map are artifacts of this job only" >&2
   exit 0
 fi
-if ! aws s3 cp out/ "s3://${BUCKET}/${PIPELINE}/${COMMIT}/" --recursive --only-show-errors; then
+if ! aws s3 cp out/ "s3://${BUCKET}/${PIPELINE}/kernrec/${COMMIT}/" --recursive --only-show-errors; then
   echo "S3 upload failed (bucket or write permission not in place?); artifacts are on this job" >&2
   exit 1
 fi
 files=$(find out -maxdepth 1 -type f -exec basename {} \; | python3 -c 'import json,sys; print(json.dumps(sorted(sys.stdin.read().split())))')
 printf '{"commit":"%s","build":%s,"pipeline":"%s","published_at":"%s","files":%s}\n' \
   "${COMMIT}" "${BUILD}" "${PIPELINE}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${files}" > latest.json
-aws s3 cp latest.json "s3://${BUCKET}/${PIPELINE}/latest.json" --only-show-errors \
+aws s3 cp latest.json "s3://${BUCKET}/${PIPELINE}/kernrec/latest.json" --only-show-errors \
   && echo "published; latest.json -> ${COMMIT}"

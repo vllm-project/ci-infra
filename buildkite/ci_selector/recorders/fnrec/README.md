@@ -96,12 +96,15 @@ Unlike the kernel recorder this also covers AMD and plugin-less steps.
 
 ## Turning recordings into the table
 
-Offline, after a recording build, using the tools in `ci_selector/scripts`:
+Folded offline after a recording build, then published so nobody else has to
+repeat it. Tools are in `ci_selector/scripts`:
 
 ```bash
 export BK_TOKEN=...
 ci-fetch-build https://buildkite.com/<org>/<pipeline>/builds/<n> --out sweeps/
 ci-build-table <vllm-repo> sweeps/<org>-<pipeline>-<n> -o table.json.gz
+ci-publish-function-record table.json.gz
 ```
 
-The selector then reads that table. See `ci_selector/scripts/README.md`.
+Everyone else runs `ci-fetch-function-record`, which needs no token. See
+`ci_selector/scripts/README.md`.

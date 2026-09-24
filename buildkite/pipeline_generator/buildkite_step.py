@@ -602,7 +602,10 @@ def _fnrec_pack_command() -> str:
 
 
 KERNREC_COLLECT_KEY = "kernrec-collect"
-KERNREC_COLLECT_GROUP = "Coverage"
+FNREC_COLLECT_KEY = "fnrec-collect"
+COLLECT_GROUP = "Coverage"
+# Old name, still imported elsewhere.
+KERNREC_COLLECT_GROUP = COLLECT_GROUP
 
 
 def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupStep":
@@ -614,6 +617,37 @@ def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroup
     hold this step forever. Runs whether they passed or failed: a failed
     job's recording is still evidence, and the row carries the exit status.
     """
+    return BuildkiteGroupStep(
+        group=COLLECT_GROUP,
+        steps=[
+            _collect_step(
+                groups,
+                "kernrec",
+                KERNREC_COLLECT_KEY,
+                ":satellite: Collect kernel coverage",
+            )
+        ],
+    )
+
+
+def fnrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupStep":
+    """The collect group for the Python function recordings."""
+    return BuildkiteGroupStep(
+        group=COLLECT_GROUP,
+        steps=[
+            _collect_step(
+                groups,
+                "fnrec",
+                FNREC_COLLECT_KEY,
+                ":satellite: Collect Python coverage",
+            )
+        ],
+    )
+
+
+def _collect_step(
+    groups: "List[BuildkiteGroupStep]", recorder: str, key: str, label: str
+) -> "BuildkiteCommandStep":
     blocked = {
         s.key[len("block-") :]
         for g in groups
@@ -629,27 +663,26 @@ def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroup
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
-        f"{branch}/buildkite/ci_selector/recorders/kernrec/collect.sh"
+        f"{branch}/buildkite/ci_selector/recorders/{recorder}/collect.sh"
     )
     queue = (
         AgentQueue.SMALL_CPU_POSTMERGE
         if get_global_config()["branch"] == "main"
         else AgentQueue.SMALL_CPU_PREMERGE
     )
-    step = BuildkiteCommandStep(
-        label=":satellite: Collect kernel coverage",
-        key=KERNREC_COLLECT_KEY,
+    return BuildkiteCommandStep(
+        label=label,
+        key=key,
         agents={"queue": queue.value},
         commands=[
-            f'curl -sSfL --retry 3 --max-time 60 -o /tmp/kernrec-collect.sh "{url}"'
-            + " && bash /tmp/kernrec-collect.sh"
+            f'curl -sSfL --retry 3 --max-time 60 -o /tmp/{recorder}-collect.sh "{url}"'
+            + f" && bash /tmp/{recorder}-collect.sh"
         ],
         depends_on=depends_on,
         allow_dependency_failure=True,
         soft_fail=True,
-        timeout_in_minutes=90,  # tens of thousands of artifacts with the Python recorder on
+        timeout_in_minutes=90,  # downloading every job's recordings takes a while
     )
-    return BuildkiteGroupStep(group=KERNREC_COLLECT_GROUP, steps=[step])
 
 
 def _kernrec_finish_command() -> str:

@@ -31,7 +31,7 @@ from pathlib import Path
 from ..coverage.kernels import load_symbol_map, load_table
 from ..coverage.source import COVERAGE_DIR, KERNEL_MAP_NAME, KERNEL_TABLE_NAME
 
-DEFAULT_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci"
+DEFAULT_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/kernrec"
 URL_ENV = "CI_SELECTOR_KERNEL_RECORD_URL"
 TIMEOUT = 60
 

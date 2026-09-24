@@ -30,14 +30,22 @@ VLLM_CI_ONLY_STEP_KEYS=["kernels-core-operation-test"]   # a few steps only
 
 ## Where the data goes
 
-**kernrec** appends a collect step that folds every job's recordings into one table and publishes it, with the symbol map, to `s3://vllm-ci-selector/<pipeline>/<commit>/`. `ci-fetch-kernel-record` pulls the latest published pair into `coverage-data/`.
+Each publishes one record per commit under its own prefix, `s3://vllm-ci-selector/<pipeline>/<recorder>/<commit>/`, and moves that prefix's `latest.json` only once the files are in place. Whoever needs a record runs one command:
 
-**fnrec** is collected offline for now, from the build's artifacts:
+```bash
+ci-fetch-function-record        # Python, into coverage-data/
+ci-fetch-kernel-record          # CUDA, into coverage-data/
+```
+
+Public bucket, plain HTTPS, no token either way.
+
+They differ in who does the folding. **kernrec** appends a collect step that folds the build and publishes from CI. **fnrec** is still folded offline, from the build's artifacts, and published by hand:
 
 ```bash
 export BK_TOKEN=...
 ci-fetch-build https://buildkite.com/<org>/<pipeline>/builds/<n> --out sweeps/
 ci-build-table <vllm-repo> sweeps/<org>-<pipeline>-<n> -o table.json.gz
+ci-publish-function-record table.json.gz
 ```
 
 ## Coverage

@@ -4,8 +4,12 @@ import pathlib
 import site
 
 
-# ci_setup.sh fetches fnrec.py next to this script.
-FNREC_SOURCE = (pathlib.Path(__file__).parent / "fnrec.py").read_text()
+# ci_setup.sh fetches these next to this script.
+HERE = pathlib.Path(__file__).parent
+FNREC_SOURCE = (HERE / "fnrec.py").read_text()
+# Optional: a missing plugin costs the pytest record, not the recorder.
+PYTEST_FILE = HERE / "fnrec_pytest.py"
+PYTEST_SOURCE = PYTEST_FILE.read_text() if PYTEST_FILE.is_file() else None
 
 
 def site_dir():
@@ -25,9 +29,27 @@ def site_dir():
 
 target = pathlib.Path(site_dir())
 (target / "fnrec.py").write_text(FNREC_SOURCE)
+if PYTEST_SOURCE is not None:
+    (target / "fnrec_pytest.py").write_text(PYTEST_SOURCE)
+    # Marks the plugin as installed, so a job with no session file is not
+    # confused with one whose plugin never installed.
+    out = os.environ.get("FNREC_OUT")
+    if out:
+        # Best effort: this file is optional everywhere it is read, and the
+        # install must not fail for it. Without FNREC_ROOT nothing records.
+        try:
+            marker = pathlib.Path(out) / "pytest.installed"
+            marker.write_text("")
+            os.chmod(marker, 0o666)
+        except OSError:
+            pass
 # Loads fnrec at every interpreter start, including subprocesses.
 (target / "fnrec.pth").write_text("import fnrec\n")
 
 # FNREC_ROOT is where vllm's code is, not where we installed to.
 spec = importlib.util.find_spec("vllm")
-print(pathlib.Path(spec.origin).parent if spec is not None and spec.origin else target / "vllm")
+print(
+    pathlib.Path(spec.origin).parent
+    if spec is not None and spec.origin
+    else target / "vllm"
+)
