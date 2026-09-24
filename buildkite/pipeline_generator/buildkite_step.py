@@ -464,7 +464,8 @@ RECORDING_TIMEOUT_FACTOR = 1.25
 
 
 def _recording_timeout(step: Step, minutes: int) -> int:
-    if _kernrec_applies(step):
+    # Only the nvidia branch reaches here; AMD steps are capped separately.
+    if _kernrec_applies(step) or _fnrec_applies(step, "nvidia"):
         return math.ceil(minutes * RECORDING_TIMEOUT_FACTOR)
     return minutes
 

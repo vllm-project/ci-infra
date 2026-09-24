@@ -9,7 +9,7 @@ else about csrc falls to the map, which today routes a kernel file to every
 step that runs the CUDA image. This is the second record, and it answers for
 csrc directly.
 
-Two files, produced together by a recording build (`kernrec/README.md`):
+Two files, produced together by a recording build (`recorders/kernrec/README.md`):
 
   kernel_table.json.gz       one row per step: the set of kernel names the
                              step's processes launched (CUPTI), plus whether
@@ -34,7 +34,7 @@ file is the unit otherwise. Per changed file F and step S:
     no row, or F is nothing the map can answer for -> the map decides
 
 Usable is the row's health: every job passed, every shard reported, no
-dropped records (`kernrec/kernel_table.py::usable`). Clearable is the file's:
+dropped records (`recorders/kernrec/kernel_table.py::usable`). Clearable is the file's:
 the map compiled it into at least one object with kernels and into no object
 without, so no host-only code depends on it. A header that `torch_bindings.cpp`
 includes can change what every step does at import, and no kernel silence
@@ -61,7 +61,7 @@ from pathlib import Path
 
 from .rules import RowKeys
 
-#: `kernrec/kernel_table.py::TABLE_VERSION`. A drift test compares the two.
+#: `recorders/kernrec/kernel_table.py::TABLE_VERSION`. A drift test compares the two.
 TABLE_VERSION = 2
 #: What `tools/ci/kernel_symbol_map.py` in vLLM writes.
 MAP_VERSION = 1
@@ -84,7 +84,7 @@ class KernelRow:
 
     @property
     def usable(self) -> bool:
-        """The same three conditions as `kernrec/kernel_table.py::usable`."""
+        """The same three conditions as `recorders/kernrec/kernel_table.py::usable`."""
         return self.passed and self.complete and not self.dropped
 
 
@@ -215,7 +215,7 @@ def load_table(path: Path) -> KernelTable:
         return KernelTable(
             None,
             f"{path} is kernel table version {version!r}, expected {TABLE_VERSION}; "
-            "rebuild it from the recordings with kernrec/kernel_table.py",
+            "rebuild it from the recordings with recorders/kernrec/kernel_table.py",
         )
     names = payload.get("names")
     blobs = payload.get("rows")

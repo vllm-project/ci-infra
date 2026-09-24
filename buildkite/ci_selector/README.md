@@ -8,7 +8,7 @@ Works out which vLLM CI jobs a diff needs to run. It derives the answer from the
 
 **The coverage record** is a table of what each step actually ran on real CI builds, one row per step, produced by an instrumented build. The recorder that produces it is `recorders/fnrec/`, loaded into every Python process of a step when the build has `VLLM_CI_FNREC=1`; `scripts/` turns a build's recordings into the table.
 
-**The kernel record** is the same idea for `csrc/`, where no Python frame exists: a table of the GPU kernels each step launched (CUPTI, recorded on the nightly and daily runs) joined to a map of which csrc file each kernel was compiled from (read off the image build's objects). Both are produced by `buildkite/ci_selector/kernrec/`.
+**The kernel record** is the same idea for `csrc/`, where no Python frame exists: a table of the GPU kernels each step launched (CUPTI, recorded on the nightly and daily runs) joined to a map of which csrc file each kernel was compiled from (read off the image build's objects). Both are produced by `recorders/kernrec/`.
 
 Neither is a stage of the other. `decide.py` reads all of them, per changed file:
 

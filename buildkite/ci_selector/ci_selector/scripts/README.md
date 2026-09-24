@@ -52,7 +52,7 @@ ci-select --repo /path/to/vllm --diff <base>...<head> --table table.json.gz
 
 ## 4. The kernel record
 
-Not built here: the recording build publishes it (`kernrec/collect.sh`).
+Not built here: the recording build publishes it (`recorders/kernrec/collect.sh`).
 This only fetches it.
 
 ```bash

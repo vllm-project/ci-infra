@@ -413,3 +413,31 @@ def test_fnrec_does_not_mount_the_buildkite_agent(monkeypatch):
     Delivery is artifact_paths now, so fnrec needs nothing mounted."""
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
     assert "mount_buildkite_agent" not in get_docker_plugin(_step(), "img")
+
+
+def _timeout(step):
+    """The timeout the generator renders for this step."""
+    group = buildkite_step.convert_group_step_to_buildkite_step({step.group: [step]})[0]
+    steps = group["steps"] if isinstance(group, dict) else group.steps
+    rendered = next(
+        s
+        for s in steps
+        if getattr(s, "key", None) == step.key
+        or (isinstance(s, dict) and s.get("key") == step.key)
+    )
+    return (
+        rendered.get("timeout_in_minutes")
+        if isinstance(rendered, dict)
+        else rendered.timeout_in_minutes
+    )
+
+
+def test_recording_gives_steps_a_timeout_margin(monkeypatch):
+    """Recording costs the step time, and kernrec's margin is keyed on kernrec
+    alone, so a build with only fnrec on would keep the unrecorded limit."""
+    monkeypatch.delenv(recorder_switches.KERNREC_ENV_VAR, raising=False)
+    step = _step(timeout_in_minutes=40)
+    monkeypatch.delenv(recorder_switches.FNREC_ENV_VAR, raising=False)
+    assert _timeout(step) == 40
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
+    assert _timeout(step) == 50

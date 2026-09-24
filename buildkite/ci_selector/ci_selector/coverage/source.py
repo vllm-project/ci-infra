@@ -20,7 +20,7 @@ from .table import Table, load
 COVERAGE_DIR = Path(__file__).resolve().parents[2] / "coverage-data"
 TABLE_NAME = "table.json.gz"
 # The kernel record's two halves, published together by the recording build
-# (`kernrec/collect.sh`) and fetched by `ci-fetch-kernel-record`.
+# (`recorders/kernrec/collect.sh`) and fetched by `ci-fetch-kernel-record`.
 KERNEL_TABLE_NAME = "kernel_table.json.gz"
 KERNEL_MAP_NAME = "kernel_symbol_map.json.gz"
 KERNEL_TABLE_ENV = "CI_SELECTOR_KERNEL_TABLE"

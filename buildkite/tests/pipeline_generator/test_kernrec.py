@@ -114,7 +114,7 @@ def test_on_leaves_no_plugin_steps_alone(monkeypatch):
 def test_on_leaves_skipped_steps_alone(monkeypatch):
     """A step in KERNREC_SKIP_STEPS runs as if the recorder were off: no setup,
     no artifact paths, so no row, and the selector keeps it."""
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     (key,) = [k for k in buildkite_step.KERNREC_SKIP_STEPS if k == "quantization"]
     rendered = _render(_gpu_step(key=key, label=":nvidia: (H200) Quantization"))
     assert not any("kernrec" in c for c in _commands(rendered))
@@ -234,9 +234,11 @@ def test_recording_gives_steps_a_timeout_margin(monkeypatch):
     """A recording run timed out steps whose tests all passed, because they
     finish within a minute of their limit even without a recorder."""
     step = _gpu_step(timeout_in_minutes=40)
-    monkeypatch.delenv(buildkite_step.KERNREC_ENV_VAR, raising=False)
+    monkeypatch.delenv(recorder_switches.KERNREC_ENV_VAR, raising=False)
+    # The last assertion below is about kernrec only: fnrec arms no_plugin steps.
+    monkeypatch.delenv(recorder_switches.FNREC_ENV_VAR, raising=False)
     assert _timeout(_render(step)) == 40
-    monkeypatch.setenv(buildkite_step.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     assert _timeout(_render(step)) == 50
     assert _timeout(_render(_gpu_step(timeout_in_minutes=40, no_plugin=True))) == 40, (
         "no recorder on the step, no margin"

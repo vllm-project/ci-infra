@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Download the latest published kernel record into coverage-data/.
 
-The recording build's collect step (`kernrec/collect.sh`) publishes, per
+The recording build's collect step (`recorders/kernrec/collect.sh`) publishes, per
 commit, the kernel table and the kernel symbol map, and moves `latest.json`
 only once both are in place. This follows that pointer over plain HTTPS: the
 bucket is public-read, so no credentials are involved.

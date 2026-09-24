@@ -30,7 +30,7 @@ VLLM_CI_ONLY_STEP_KEYS=["kernels-core-operation-test"]   # a few steps only
 
 ## Where the data goes
 
-**kernrec** appends a collect step that folds every job's recordings into one table and publishes it, with the symbol map, to `s3://vllm-ci-selector/<pipeline>/<commit>/`.
+**kernrec** appends a collect step that folds every job's recordings into one table and publishes it, with the symbol map, to `s3://vllm-ci-selector/<pipeline>/<commit>/`. `ci-fetch-kernel-record` pulls the latest published pair into `coverage-data/`.
 
 **fnrec** is collected offline for now, from the build's artifacts:
 
