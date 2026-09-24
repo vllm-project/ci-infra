@@ -8,6 +8,7 @@ Infrastructure-as-Code and bootstrap scripts for vLLM's continuous integration p
 ci-infra/
 ├── .buildkite/            # Scheduled Buildkite pipelines (e.g. daily AMI rebuild)
 ├── buildkite/             # Bootstrap scripts, pipeline generation, and build helpers
+│   ├── bootstrap.sh       # CUDA/CPU CI entry point
 │   ├── bootstrap-amd.sh   # AMD/ROCm CI entry point
 │   ├── bootstrap-intel.sh # Intel CI entry point
 │   ├── pipeline_generator/  # Python-based pipeline generator
@@ -73,11 +74,12 @@ Results reported back (test results, coverage via Codecov)
 
 A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from YAML files in the vLLM repo (e.g. `.buildkite/test_areas/`, `.buildkite/image_build/`), groups them, and converts them into Buildkite YAML with proper agent queues, Docker/Kubernetes plugins, and environment configuration.
 
-**How it runs:** The bootstrap step installs `pipeline-generator` from ci-infra (`pip install git+...ci-infra.git@main#subdirectory=buildkite/pipeline_generator`) and invokes it with the vLLM repo's `.buildkite/ci_config.yaml`. The `VLLM_CI_BRANCH` environment variable controls which ci-infra branch to install from (defaults to `main`).
+**How it runs:** The bootstrap step installs `pipeline-generator` from ci-infra and invokes it with the vLLM repo's `.buildkite/ci_config.yaml`. The `VLLM_CI_BRANCH` environment variable controls which ci-infra branch to take it from (defaults to `main`).
 
 **Config:** Driven by a YAML config file (`ci_config.yaml`) that specifies job directories, registries, repositories, and `run_all_patterns`. See the [pipeline generator README](buildkite/pipeline_generator/README.md) for details.
 
 **Features:**
+
 - **Device types**: CPU, GPU (L4), A100, H100, H200, H200 18GB (MIG), B200, GH200, Intel CPU/HPU/GPU, ARM CPU, Ascend NPU, AMD MI250/MI325/MI355 (1-8 devices)
 - **Plugin generation**: Docker plugin for EC2-based queues, Kubernetes pod specs for H100/H200/A100
 - **AMD mirroring**: Steps can define `mirror.amd` to automatically create parallel AMD test runs
@@ -92,11 +94,13 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 ### Bootstrap Scripts
 
 | Script | Pipeline | Generation Method |
-|--------|----------|-------------------|
+| -------- | ---------- | ------------------- |
+| `bootstrap.sh` | CUDA/CPU CI | Pipeline generator (from `buildkite/uv.lock`) |
 | `bootstrap-intel.sh` | Intel CI | Pipeline generator (via ci-infra) |
 | `bootstrap-amd.sh` | AMD/ROCm CI | Jinja2 template (`test-template-amd.j2`) |
 
 The AMD and Intel bootstrap scripts additionally handle:
+
 - **Diff detection**: Computes changed files vs. `origin/main` (PRs) or `HEAD~1` (main branch).
 - **Docs-only skip**: If all changes are in `docs/`, `*.md`, or `mkdocs.yaml`, CI is skipped entirely.
 - **Run-all detection**: Changes to critical files (`Dockerfile`, `CMakeLists.txt`, `csrc/`, `setup.py`, `requirements/*.txt`) trigger all tests and build wheels from source.
@@ -115,7 +119,7 @@ Managed via Terraform in `terraform/aws/`. Uses the [Buildkite Elastic CI Stack 
 #### Agent Queues
 
 | Queue | Instance Type | Max | Purpose |
-|-------|--------------|-----|---------|
+| ------- | -------------- | ----- | --------- |
 | `small_cpu_queue_premerge` | r6in.large | 40 | Bootstrap, docs, lightweight tasks |
 | `medium_cpu_queue_premerge` | r6in.4xlarge | 40 | Medium CPU workloads |
 | `cpu_queue_premerge` | r6in.16xlarge (512GB) | 10 | CUDA kernel compilation |
@@ -127,6 +131,7 @@ Managed via Terraform in `terraform/aws/`. Uses the [Buildkite Elastic CI Stack 
 Equivalent postmerge and release queues exist with ECR write access for pushing images. Specialized hardware (H100, H200, B200, A100) is managed via Kubernetes or dedicated pools.
 
 **Each queue consists of:**
+
 - An EC2 Auto Scaling Group that scales instances based on workload
 - A Lambda function that polls Buildkite to assess capacity needs
 - Buildkite agents running on each instance, executing jobs in Docker containers
@@ -203,19 +208,22 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 1. Create a feature branch on this repo (contact @khluu for access if needed).
 2. Push your changes to the branch.
 3. Create a new build on Buildkite with the environment variable:
+
    ```
    VLLM_CI_BRANCH=my-feature-branch
    ```
+
    This tells the bootstrap script to fetch templates/code from your branch instead of `main`.
 
 **Notes:**
+
 - Run builds on your own vLLM feature branch/fork, preferably up-to-date with `main`.
 - For fork branches, use the full commit hash (not `HEAD`) and format the branch name as `<fork/username>:<branch>`.
 
 ### Key Environment Variables
 
 | Variable | Description |
-|----------|-------------|
+| ---------- | ------------- |
 | `VLLM_CI_BRANCH` | ci-infra branch to use for templates (default: `main`) |
 | `RUN_ALL` | Force all tests to run |
 | `SKIP_TIMEOUT` | Omit configured step timeouts from Python-generated pipelines when set to `1` |

@@ -7,8 +7,6 @@ main() {
     # Buildkite sets these to point a build at a ci-infra ref under test.
     CI_INFRA_REPO="${VLLM_CI_REPO:-vllm-project/ci-infra}"
     CI_INFRA_REF="${VLLM_CI_BRANCH:-main}"
-    # Absent unless a machine image baked uv in, which is not an error.
-    IMAGE_UV_BIN="${VLLM_CI_UV_BIN:-/opt/uv/uv}"
 
     PIPELINE_CONFIG_PATH=.buildkite/ci_config.yaml
     OUTPUT_PIPELINE_PATH=.buildkite/pipeline.yaml
@@ -19,7 +17,7 @@ main() {
 
     fail() {
         echo "ERROR: $1" >&2
-        # Own context, so this does not erase the generator's own annotations.
+        # Own context, so it does not erase the generator's annotations.
         timeout 30 buildkite-agent annotate "$1" --style error --context bootstrap || true
         exit 1
     }
@@ -34,7 +32,7 @@ main() {
     trap 'rm -rf "${WORK_DIR}" || true' EXIT
 
     # The generator runs `git add .` in the checkout, so a temp dir inside it
-    # would enter the changed-file list and break docs-only detection.
+    # would break docs-only detection.
     [[ "${WORK_DIR}" != "${VLLM_CHECKOUT}"/* ]] ||
         fail "TMPDIR is inside the vLLM checkout (${WORK_DIR})."
 
@@ -42,11 +40,22 @@ main() {
     # uv
     # ----------------------------------------------------------------------
     echo "--- :package: Setting up uv"
-    if [[ -f "${IMAGE_UV_BIN}" && -x "${IMAGE_UV_BIN}" ]]; then
-        UV_BIN="${IMAGE_UV_BIN}"
-        echo "Using the image's uv at ${UV_BIN}"
-        "${UV_BIN}" --version || fail "Image uv at ${UV_BIN} will not execute."
+    uv_is_pinned() { "$1" --version 2>/dev/null | grep -qE "^uv ${UV_VERSION}( |$)"; }
+
+    UV_BIN=""
+    if [[ -n "${VLLM_CI_UV_BIN:-}" ]]; then
+        # Naming a uv is a decision, so take it at its word.
+        [[ -f "${VLLM_CI_UV_BIN}" && -x "${VLLM_CI_UV_BIN}" ]] ||
+            fail "VLLM_CI_UV_BIN=${VLLM_CI_UV_BIN} is not an executable file."
+        UV_BIN="${VLLM_CI_UV_BIN}"
     else
+        # One that is just there is not, so use it only at the pinned version.
+        agent_uv="$(command -v uv || true)"
+        if [[ -n "${agent_uv}" ]] && uv_is_pinned "${agent_uv}"; then
+            UV_BIN="${agent_uv}"
+        fi
+    fi
+    if [[ -z "${UV_BIN}" ]]; then
         UV_DL="${WORK_DIR}/uv/${UV_TARBALL}"
         mkdir -p "${WORK_DIR}/uv"
         uv_downloaded=0
@@ -67,11 +76,11 @@ main() {
         tar -xzf "${UV_DL}" -C "${WORK_DIR}/uv" --strip-components=1 ||
             fail "Could not extract ${UV_TARBALL}."
         UV_BIN="${WORK_DIR}/uv/uv"
-        "${UV_BIN}" --version || fail "Downloaded uv at ${UV_BIN} will not execute."
     fi
+    "${UV_BIN}" --version || fail "uv at ${UV_BIN} will not execute."
 
     # ----------------------------------------------------------------------
-    # ci-infra: the tree uv syncs from. Nothing is on disk when this starts.
+    # The tree uv syncs from. Nothing is on disk yet.
     # ----------------------------------------------------------------------
     echo "--- :git: Fetching ${CI_INFRA_REPO} at ${CI_INFRA_REF}"
     CI_INFRA_DIR="${WORK_DIR}/ci-infra"
@@ -96,7 +105,7 @@ main() {
     echo "ci-infra ${CI_INFRA_REF} at $(git -C "${CI_INFRA_DIR}" rev-parse HEAD)"
 
     # ----------------------------------------------------------------------
-    # The declared environment: the lockfile decides versions, not the agent.
+    # The lockfile decides the versions, not the agent.
     # ----------------------------------------------------------------------
     echo "--- :snake: Building the environment"
     SYNC_LOG="${WORK_DIR}/uv-sync.log"
@@ -111,7 +120,7 @@ main() {
     [[ -x "${GENERATOR_BIN}" ]] || fail "uv sync did not produce ${GENERATOR_BIN}."
 
     # ----------------------------------------------------------------------
-    # Generate and upload. Every other job in the build comes from this.
+    # Every other job in the build comes from this.
     # ----------------------------------------------------------------------
     echo "--- :buildkite: Generating the pipeline"
     [[ -f "${PIPELINE_CONFIG_PATH}" ]] ||
@@ -121,8 +130,7 @@ main() {
         fail "Could not mark ${VLLM_CHECKOUT} as a git safe.directory."
 
     DOCS_ONLY_MARKER="$(dirname "${OUTPUT_PIPELINE_PATH}")/.docs_only"
-    # A committed one would skip CI on every build, so only trust a marker
-    # this run produced.
+    # A committed one would skip CI on every build.
     rm -f "${DOCS_ONLY_MARKER}"
 
     "${GENERATOR_BIN}" \

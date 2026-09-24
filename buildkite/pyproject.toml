@@ -1,7 +1,6 @@
 # Workspace root for the tools bootstrap installs.
-#
-# No [tool.pytest.ini_options] or [tool.ruff] here: both take config from the
-# nearest file walking up, so a table here silently re-roots all of buildkite/.
+# No [tool.pytest.ini_options] or [tool.ruff]: a table here would re-root
+# everything under buildkite/ that has no nearer config.
 [project]
 name = "vllm-ci-buildkite"
 version = "0.0.0"
