@@ -117,6 +117,26 @@ BUILDKITE_DENY = frozenset({
 DEFAULTS_ANNOTATION = "tpu-ci.google.com/defaults"
 DEFAULTS_STANDARD = "standard"
 
+# The `event` of the one JSON line emit_timing() prints per workload, so the
+# record can be found in the step log and in Cloud Logging when the BigQuery
+# insert did not land.
+TIMING_EVENT = "tpu_ci_workload_timing"
+
+# Buildkite's name for each field of the timing record that identifies the
+# run, so a record joins to the job it timed.
+TIMING_BUILDKITE_FIELDS = {
+    "pipeline": "BUILDKITE_PIPELINE_SLUG",
+    "build_number": "BUILDKITE_BUILD_NUMBER",
+    "build_id": "BUILDKITE_BUILD_ID",
+    "job_id": "BUILDKITE_JOB_ID",
+    "step_key": "BUILDKITE_STEP_KEY",
+    "label": "BUILDKITE_LABEL",
+    "branch": "BUILDKITE_BRANCH",
+    "commit": "BUILDKITE_COMMIT",
+    "source": "BUILDKITE_SOURCE",
+    "retry_count": "BUILDKITE_RETRY_COUNT",
+}
+
 
 POLL_SECONDS = 5
 # Used only until the first log line arrives. MultiKueue deletes the remote Job
@@ -168,6 +188,16 @@ METADATA_TOKEN_URL = (
     "http://metadata.google.internal/computeMetadata/v1/instance/"
     "service-accounts/default/token"
 )
+
+# The timing record goes to the registry's timing_table through BigQuery's
+# streaming insert. Each request is capped short because it runs after the
+# workload has finished, on every step, and a slow BigQuery must not stretch a
+# step that has already passed or failed.
+BIGQUERY_INSERT_URL = (
+    "https://bigquery.googleapis.com/bigquery/v2/projects/{project}/datasets/"
+    "{dataset}/tables/{table}/insertAll"
+)
+TIMING_INSERT_TIMEOUT_SECONDS = 5
 
 
 def log(msg):
@@ -463,7 +493,7 @@ def resolve_image(registry):
     return pin_digest(image)
 
 
-def access_token():
+def access_token(timeout=REGISTRY_TIMEOUT_SECONDS):
     """A token for the launcher's own identity, from the node's metadata server.
 
     The same source the Cloud CLI and the kubelet read, so it carries the
@@ -472,9 +502,7 @@ def access_token():
     request = urllib.request.Request(
         METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"}
     )
-    with urllib.request.urlopen(
-        request, timeout=REGISTRY_TIMEOUT_SECONDS
-    ) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.load(response)["access_token"]
 
 
@@ -1122,6 +1150,94 @@ def condition(obj, cond_type):
     return None
 
 
+def condition_time(obj, cond_type):
+    """When cond_type last became True, by the controller's clock, or None.
+
+    The controller's lastTransitionTime rather than when a poll noticed, so a
+    timing does not carry the poll interval.
+    """
+    cond = condition(obj, cond_type)
+    if cond and cond.get("status") == "True":
+        return cond.get("lastTransitionTime")
+    return None
+
+
+def utc_now():
+    """Now, in the RFC 3339 form Kubernetes timestamps use."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def note_pod_starts(timing, items):
+    """Record when the workload containers started, by the kubelet's clock.
+
+    The first start is when the chips began working; the last is when every
+    role of a multi-pod workload was up, and moves on if a pod is replaced.
+    RFC 3339 strings in UTC order the same as the times they name.
+    """
+    for pod in items or []:
+        for cs in pod.get("status", {}).get("containerStatuses", []) or []:
+            if cs.get("name") != WORKLOAD_CONTAINER:
+                continue
+            state = cs.get("state") or {}
+            started = (state.get("running") or state.get("terminated")
+                       or {}).get("startedAt")
+            if not started:
+                continue
+            first = timing.get("first_pod_started_at")
+            if first is None or started < first:
+                timing["first_pod_started_at"] = started
+            last = timing.get("last_pod_started_at")
+            if last is None or started > last:
+                timing["last_pod_started_at"] = started
+
+
+def emit_timing(timing, table):
+    """Print the workload's timing as one JSON line, then insert it into table.
+
+    Printed first, because a print cannot fail, so the record survives in the
+    step log whatever happens to the insert. Unset fields are left out rather
+    than sent as null.
+    """
+    record = {k: v for k, v in timing.items() if v is not None}
+    print(json.dumps(record, sort_keys=True), flush=True)
+    if table:
+        insert_timing(table, record)
+
+
+def insert_timing(table, record):
+    """Stream one timing record into BigQuery, best effort.
+
+    Never raises: the record describes a run that is already over, so losing
+    it must not change the step's result. ignoreUnknownValues keeps a record
+    that carries a field the table does not have yet, minus that field, rather
+    than losing all of it. The insertId is the workload name, one record per
+    workload, so BigQuery drops a duplicate send.
+    """
+    try:
+        project, dataset, table_id = table.split(".")
+        request = urllib.request.Request(
+            BIGQUERY_INSERT_URL.format(project=project, dataset=dataset,
+                                       table=table_id),
+            data=json.dumps({
+                "ignoreUnknownValues": True,
+                "rows": [{"insertId": record["workload"], "json": record}],
+            }).encode(),
+            headers={
+                "Authorization": "Bearer "
+                + access_token(timeout=TIMING_INSERT_TIMEOUT_SECONDS),
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(
+            request, timeout=TIMING_INSERT_TIMEOUT_SECONDS
+        ) as response:
+            errors = json.load(response).get("insertErrors")
+        if errors:
+            log(f"warning: timing record not stored in {table}: {errors}"[:300])
+    except Exception as exc:
+        log(f"warning: timing record not stored in {table}: {exc}"[:300])
+
+
 def startup_note(env, items):
     """Where a pod is between admission and running, in a few words.
 
@@ -1441,6 +1557,7 @@ class LogCollector:
 
 
 def main():
+    launcher_started = utc_now()
     log(f"python {sys.version.split()[0]} at {sys.executable}")
 
     parser = argparse.ArgumentParser(prog="launch")
@@ -1562,6 +1679,33 @@ def main():
              shlex.join(command) if command else None, manifest)
     kind = SUPPORTED_KINDS[doc["kind"]]
 
+    # One record per submitted workload, printed on every way out of the watch
+    # below. Times are UTC RFC 3339, taken from the controllers' own
+    # timestamps where one exists.
+    timing = {
+        "event": TIMING_EVENT,
+        "workload": name,
+        "kind": doc["kind"],
+        "manifest": manifest,
+        "queue": profile["queue"],
+        "machine_type": profile.get("machine_type"),
+        "topology": profile.get("topology"),
+        "hosts": int(profile["hosts"]),
+        "chips": int(profile["chips"]) * int(profile["hosts"]),
+        "launcher_started_at": launcher_started,
+        "requeues": 0,
+    }
+    for field, variable in TIMING_BUILDKITE_FIELDS.items():
+        timing[field] = os.environ.get(variable) or None
+    for field in ("build_number", "retry_count"):
+        value = timing[field]
+        timing[field] = int(value) if value and value.isdigit() else None
+
+    def finish(outcome, code):
+        timing["outcome"] = outcome
+        timing["exit_code"] = code
+        return code
+
     deleted = False
     collector = None
 
@@ -1587,6 +1731,7 @@ def main():
         input=json.dumps(doc), text=True, check=True,
         timeout=CLI_TIMEOUT_SECONDS,
     )
+    timing["submitted_at"] = utc_now()
 
     # Everything below holds an admitted workload, so the except clauses delete
     # it: the ownerReference only collects it once the launcher's own pod
@@ -1653,8 +1798,9 @@ def main():
             # The apply above succeeded, so something removed it since.
             log(f"{kind}/{name} was removed immediately after being created")
             stop_announcing()
-            return 1
+            return finish("removed", 1)
         uid = created["metadata"]["uid"]
+        timing["created_at"] = created["metadata"].get("creationTimestamp")
         admission_limit = admission_timeout(registry)
         dispatch_limit = int(registry["admission_max_seconds"])
         started = time.monotonic()
@@ -1671,13 +1817,20 @@ def main():
             if obj is None:
                 log(f"{kind}/{name} disappeared")
                 stop_announcing()
-                return 1
+                return finish("removed", 1)
 
             # Watched for the whole run, not just until admission: preemption
             # happens after it.
             workload = with_grace(find_workload, uid)
             note = describe_admission(workload)
             cluster = (workload or {}).get("status", {}).get("clusterName")
+            # The first of each, so a requeue does not hide the wait before it.
+            for key, cond_type in (("quota_reserved_at", "QuotaReserved"),
+                                   ("admitted_at", "Admitted")):
+                if timing.get(key) is None:
+                    timing[key] = condition_time(workload, cond_type)
+            if cluster:
+                timing["cluster"] = cluster
 
             # Retried on any poll where the cluster is known and there are no
             # credentials yet: one attempt at first admission would cost a whole
@@ -1701,6 +1854,8 @@ def main():
                 if reserved is None:
                     reserved = time.monotonic()
             else:
+                if reserved is not None:
+                    timing["requeues"] += 1
                 reserved = None
             if reserved is not None:
                 limit, since, what = dispatch_limit, reserved, "dispatched"
@@ -1714,7 +1869,7 @@ def main():
                 log(f"not {what} within {limit}s{blind} - capacity, not the test")
                 stop_announcing()
                 delete_workload(kind, name)
-                return 1
+                return finish("not_admitted", 1)
             if note != last_note:
                 log(note)
                 last_note = note
@@ -1724,8 +1879,9 @@ def main():
                     announce_waiting(waiting, profile["queue"], note)
                     announced = True
 
-            # One read of the workload's pods, for both readers below.
+            # One read of the workload's pods, for the readers below.
             items = worker_pods(genv, job_id) if genv else None
+            note_pod_starts(timing, items)
 
             # A failed read is not a started pod: leave it to the next turn.
             if admitted and items is not None and not running:
@@ -1765,6 +1921,8 @@ def main():
                 failed = bool(failed_cond and failed_cond.get("status") == "True") or wl_failed
 
             if done or failed:
+                timing["finished_at"] = (condition_time(workload, "Finished")
+                                         or utc_now())
                 if collector:
                     collector.sweep()     # last look before the pods are removed
                     if not collector.emitted:
@@ -1775,6 +1933,7 @@ def main():
                         "a cluster to fetch gateway credentials for, so none were "
                         "requested. Not a Connect Gateway permission problem.")
                 pods = worker_pods(genv, job_id) or [] if (failed and genv) else []
+                note_pod_starts(timing, pods)
                 for why in termination_reasons(pods):
                     log(f"container terminated: {why}")
 
@@ -1804,9 +1963,9 @@ def main():
                     # Expand the last section on the build page.
                     print("^^^ +++", flush=True)
                     log(f"{kind}/{name} failed")
-                    return workload_exit_code(pods) or 1
+                    return finish("failed", workload_exit_code(pods) or 1)
                 log(f"{kind}/{name} completed")
-                return 0
+                return finish("succeeded", 0)
 
             if collector and not collector.emitted:
                 time.sleep(FIRST_LOG_POLL_SECONDS)
@@ -1826,13 +1985,25 @@ def main():
                     "may still be running on its worker cluster and holding its "
                     "chips. It is collected when this pod's object is removed.")
         print("^^^ +++", flush=True)
-        return 1
-    except BaseException:
+        return finish("api_unreachable", 1)
+    except BaseException as exc:
+        # cleanup() exits with 128 + the signal on a Buildkite cancellation.
+        code = exc.code if isinstance(exc, SystemExit) else None
+        if isinstance(code, int) and code >= 128:
+            finish("cancelled", code)
+        else:
+            finish("error", None)
         stop_announcing()
         if not deleted:
             deleted = True
             delete_workload(kind, name)
         raise
+    finally:
+        timing["blind_seconds"] = round(blind_total)
+        timing["ended_at"] = utc_now()
+        # Last, so on every path the workload has already been deleted or has
+        # finished: the insert never delays freeing the chips.
+        emit_timing(timing, registry.get("timing_table"))
 
 
 if __name__ == "__main__":

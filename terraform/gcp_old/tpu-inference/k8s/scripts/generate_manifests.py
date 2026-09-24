@@ -133,6 +133,11 @@ CPU_JOB_SIZE = {
     "cpu_disk": "20Gi",
 }
 
+# The BigQuery table the launcher streams its timing records into, named as
+# modules/ci_monitoring and k8s/iam.tf name it.
+TIMING_DATASET = "ci_efficiency_metrics"
+TIMING_TABLE = "kube_workload_timing"
+
 # The identity Managed Prometheus scrapes Kueue as, and where its token lives.
 # The namespace is not a choice: it is the only one the Managed Prometheus
 # operator holds a Role to read Secrets in, and a scrape of Kueue needs a token.
@@ -609,6 +614,13 @@ def launcher_profiles(
             "queue_max_seconds": int(tfvars["tpu_queue_max_seconds"]),
             "runtime_max_seconds": int(tfvars["tpu_runtime_max_seconds"]),
             "admission_max_seconds": int(tfvars["tpu_admission_max_seconds"]),
+            # Where the launcher streams one timing record per workload. The
+            # table is modules/ci_monitoring's, beside the Buildkite step
+            # table it joins to on job_id; k8s/iam.tf lets the launcher write
+            # to it.
+            "timing_table": (
+                f"{tfvars['project_id']}.{TIMING_DATASET}.{TIMING_TABLE}"
+            ),
             # How the launcher gets from an admitted workload to the pod logs.
             # Kueue reports the cluster it dispatched to by MultiKueueCluster
             # name, which is also the Fleet membership ID; memberships live in

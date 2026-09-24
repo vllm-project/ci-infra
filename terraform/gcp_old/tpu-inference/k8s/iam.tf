@@ -110,3 +110,15 @@ resource "google_artifact_registry_repository_iam_member" "launcher" {
   role       = "roles/artifactregistry.reader"
   member     = local.launcher_principal
 }
+
+# The launcher streams one timing row per workload into this table. On the
+# table rather than the dataset, so the launcher can write nothing else there.
+# The table is modules/ci_monitoring's, applied from the
+# cloud-ullm-inference-ci-cd root, which has to run first.
+resource "google_bigquery_table_iam_member" "launcher_timing" {
+  project    = var.project_id
+  dataset_id = "ci_efficiency_metrics"
+  table_id   = "kube_workload_timing"
+  role       = "roles/bigquery.dataEditor"
+  member     = local.launcher_principal
+}
