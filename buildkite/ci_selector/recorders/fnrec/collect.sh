@@ -114,7 +114,8 @@ if [[ -z "${UV_BIN}" ]]; then
     || { echo "cannot extract ${UV_TARBALL}" >&2; exit 1; }
   UV_BIN="${WORK}/uv/uv"
 fi
-"${UV_BIN}" --version >/dev/null 2>&1 \
+echo "Using uv at ${UV_BIN}"
+"${UV_BIN}" --version \
   || { echo "uv at ${UV_BIN} will not run" >&2; exit 1; }
 
 # --locked so the lockfile picks the versions, --python so the interpreter

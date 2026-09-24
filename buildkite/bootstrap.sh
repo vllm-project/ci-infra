@@ -77,6 +77,7 @@ main() {
             fail "Could not extract ${UV_TARBALL}."
         UV_BIN="${WORK_DIR}/uv/uv"
     fi
+    echo "Using uv at ${UV_BIN}"
     "${UV_BIN}" --version || fail "uv at ${UV_BIN} will not execute."
 
     # ----------------------------------------------------------------------
