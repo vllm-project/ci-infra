@@ -20,6 +20,18 @@ CI_INFRA="${FNREC_CI_INFRA:-}"
 # How many jobs the generator armed. Without it the fold has no denominator
 # and cannot tell a build that lost its recordings from a small one.
 EXPECTED_JOBS="${FNREC_EXPECTED_JOBS:-}"
+# Fold another build of the same pipeline instead of this one, as the kernel
+# collect can. A recording build's own collect step never runs once one of its
+# dependencies is cancelled, allow_dependency_failure or not, and cannot be
+# retried. The source must be at this build's commit. The expected count comes
+# with it: this build's own describes this build.
+FROM=()
+if [[ -n "${FNREC_SOURCE_BUILD_ID:-}" ]]; then
+  FROM=(--build "${FNREC_SOURCE_BUILD_ID}")
+  BUILD="${FNREC_SOURCE_BUILD_NUMBER:?set with FNREC_SOURCE_BUILD_ID}"
+  EXPECTED_JOBS="${FNREC_SOURCE_EXPECTED_JOBS:-}"
+  echo "folding build ${BUILD} (${FNREC_SOURCE_BUILD_ID}) from build ${BUILDKITE_BUILD_NUMBER}"
+fi
 
 WORK="$(mktemp -d)"
 cd "${WORK}" || exit 1
@@ -31,11 +43,11 @@ if [[ -n "${FNREC_SOURCE_JOBS:-}" ]]; then
   # out. Two patterns each, since a glob does not cross a slash and a job
   # killed before packing left raw files instead of a tarball.
   printf '%s\n' ${FNREC_SOURCE_JOBS} | xargs -P 8 -I{} sh -c \
-    'buildkite-agent artifact download ".fnrec/{}.tar.gz" . >/dev/null 2>&1
-     buildkite-agent artifact download ".fnrec/{}/*" . >/dev/null 2>&1'
+    'buildkite-agent artifact download ".fnrec/{}.tar.gz" . "$@" >/dev/null 2>&1
+     buildkite-agent artifact download ".fnrec/{}/*" . "$@" >/dev/null 2>&1' _ ${FROM[@]+"${FROM[@]}"}
 else
-  buildkite-agent artifact download ".fnrec/*" . || echo "no packed recordings in this build"
-  buildkite-agent artifact download ".fnrec/*/*" . || echo "no raw recordings in this build"
+  buildkite-agent artifact download ".fnrec/*" . ${FROM[@]+"${FROM[@]}"} || echo "no packed recordings in this build"
+  buildkite-agent artifact download ".fnrec/*/*" . ${FROM[@]+"${FROM[@]}"} || echo "no raw recordings in this build"
 fi
 n_tar=$(find .fnrec -maxdepth 1 -name '*.tar.gz' 2>/dev/null | wc -l | tr -d ' ')
 n_raw=$(find .fnrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
