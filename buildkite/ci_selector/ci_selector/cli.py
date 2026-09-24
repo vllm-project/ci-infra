@@ -27,6 +27,8 @@ _DEFAULTS = {
     "pipeline": PR_PIPELINE,
     "no_base_worktree": False,
     "table": None,
+    "kernel_table": None,
+    "kernel_symbol_map": None,
 }
 
 
@@ -74,6 +76,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     codemap_p.set_defaults(_mode="codemap")
     parser.add_argument("--table", type=Path, help="coverage table to read")
+    parser.add_argument(
+        "--kernel-table",
+        type=Path,
+        help="kernel table to read (default: coverage-data/kernel_table.json.gz)",
+    )
+    parser.add_argument(
+        "--kernel-symbol-map",
+        type=Path,
+        help="kernel symbol map to read (default: coverage-data/kernel_symbol_map.json.gz)",
+    )
     return parser
 
 
@@ -134,13 +146,14 @@ def main(argv: list[str] | None = None) -> int:
     sel = select(state, paths, base=base, head=head)
 
     if args._mode != "codemap":
-        from .coverage.source import fetch_table
+        from .coverage.source import fetch_kernel_evidence, fetch_table
         from .decide import decide
 
         table = fetch_table(args.table)
         if table.dead_interpreter:
             print(f"coverage: {table.dead_interpreter}", file=sys.stderr)
-        d = decide(state, sel, repo, base, head, table=table)
+        kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
+        d = decide(state, sel, repo, base, head, table=table, kernels=kernels)
         if d.coverage_note:
             print(f"coverage: {d.coverage_note}", file=sys.stderr)
         else:
@@ -151,7 +164,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"{d.unreadable_rows}/{d.rows} rows unreadable)",
                 file=sys.stderr,
             )
-        sel = _restrict(sel, d.steps)
+        if d.kernel_note:
+            print(f"kernels: {d.kernel_note}", file=sys.stderr)
+        else:
+            print(
+                f"kernels: +{len(d.added_by_kernels)} added, "
+                f"-{len(d.dropped_by_kernels)} dropped "
+                f"({len(d.kernel_files)} changed files in the map; {d.kernel_pair})",
+                file=sys.stderr,
+            )
+            for path, what in sorted(d.kernel_files.items()):
+                print(f"kernels:   {path}: {what}", file=sys.stderr)
+        sel = _restrict(sel, d)
 
     if args.emit_keys:
         from .codemap.step_keys import emit, render
@@ -162,22 +186,29 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _restrict(sel, steps: set[str]):
-    """The selection narrowed to `steps`, with every parallel field kept in
-    step. `selected`, `selected_rules` and `selected_paths` are read by position
-    against each other, so they can only be filtered together."""
+def _restrict(sel, d):
+    """The selection narrowed to the decision's steps, with every parallel
+    field kept in step. `selected`, `selected_rules` and `selected_paths` are
+    read by position against each other, so they can only be filtered
+    together."""
     import dataclasses
 
-    added = {
-        s: ["coverage: a row shows this step ran a changed file"]
-        for s in steps - set(sel.selected)
+    steps = d.steps
+
+    def rule(s: str) -> str:
+        return "kernels" if s in d.added_by_kernels else "coverage"
+
+    why = {
+        "kernels": "kernels: a row shows this step launched a kernel compiled from a changed file",
+        "coverage": "coverage: a row shows this step ran a changed file",
     }
+    added = {s: [why[rule(s)]] for s in steps - set(sel.selected)}
     return dataclasses.replace(
         sel,
         selected={**{k: v for k, v in sel.selected.items() if k in steps}, **added},
         selected_rules={
             **{k: v for k, v in sel.selected_rules.items() if k in steps},
-            **{s: ["coverage"] for s in added},
+            **{s: [rule(s)] for s in added},
         },
         selected_paths={
             **{k: v for k, v in sel.selected_paths.items() if k in steps},

@@ -15,6 +15,7 @@ resolves toward keeping.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -23,6 +24,10 @@ from pathlib import Path
 from .changed_funcs import Query
 from .phase import DEFAULT_MODE, PhaseMode, row_shows_use
 from .table import Table
+
+# Lets a row add an optional step it shows executing the change; see
+# RowKeys.candidates.
+RECORD_OPTIONAL_ENV = "CI_SELECTOR_RECORD_OPTIONAL"
 
 
 def row_key_for(step_id: str) -> str | None:
@@ -92,20 +97,31 @@ class RowKeys:
     def resolve(cls, table: Table, repo: Path, ref: str) -> RowKeys:
         from ci_selector.codemap.worktree import state_for
 
-        rows = set(table._rows)
+        return cls.resolve_from_state(set(table._rows), state_for(repo, ref))
+
+    @classmethod
+    def resolve_from_state(cls, rows: set[str], state) -> RowKeys:
+        """`resolve` against a state the caller already holds.
+
+        The kernel record resolves at the PR's base, whose state `decide`
+        was handed, so this costs nothing where `resolve` builds a worktree.
+        `rows` is the table's row keys, whichever table.
+        """
         spellings: dict[str, str] = {}
         match_rate: dict[str, float] = {}
-        for pipeline in state_for(repo, ref).pipelines:
+        for pipeline in state.pipelines:
             idents = set()
             for step in pipeline.steps:
                 ident = step.buildkite_key or step.label
                 spellings[step.step_id] = ident
                 idents.add(ident)
-            match_rate[pipeline.config.name] = len(rows & idents) / len(rows)
+            match_rate[pipeline.config.name] = (
+                len(rows & idents) / len(rows) if rows else 0.0
+            )
         resolved = cls.from_match_rates(match_rate, spellings)
         resolved.steps = {
             step.step_id: step
-            for pipeline in state_for(repo, ref).pipelines
+            for pipeline in state.pipelines
             if pipeline.config.name in resolved.owners
             for step in pipeline.steps
         }
@@ -134,12 +150,18 @@ class RowKeys:
         The subtractive direction needs no such filter, its population being
         the map's selection, which holds no manual-only step.
         """
+        # CI_SELECTOR_RECORD_OPTIONAL=1 lifts the filter, an experiment and not
+        # a default: most confirmed selection leaks are optional evals that ran
+        # the changed code on main and never on the PR, and only a row can say
+        # so. The emitter would have to name them for them to run.
+        optional_ok = os.environ.get(RECORD_OPTIONAL_ENV) == "1"
         return [
             sid
             for sid, step in self.steps.items()
             # Defaults to manual_only=True: this filter is a safety gate, so an
             # object that cannot answer the question is not addable.
-            if self.key_for(sid) is not None and not getattr(step, "manual_only", True)
+            if self.key_for(sid) is not None
+            and (optional_ok or not getattr(step, "manual_only", True))
         ]
 
     def restrict_to(
@@ -199,6 +221,10 @@ class Reading:
     # Additions whose CI job actually failed: the recall this half buys, and
     # the mirror of dropped_and_failed.
     added_and_failed: list[str] = field(default_factory=list)
+    # Steps kept because a row shows them running a changed function. Read by
+    # the kernel record: a silence about kernels cannot overrule an observed
+    # call on another changed file.
+    executes: list[str] = field(default_factory=list)
 
 
 def unknown_names(
@@ -283,6 +309,7 @@ def read_pr(
             row_shows_use(row, f, name, mode) for f in query.files for name in f.names
         ):
             reading.kept.append(step_id)
+            reading.executes.append(step_id)
             reading.reasons["row-executes-a-changed-function"] += 1
             continue
 

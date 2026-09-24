@@ -193,7 +193,17 @@ whether they passed or failed. It executes `collect.sh`:
    policy (`terraform/aws/iam.tf`). The step is `soft_fail`: a publishing
    problem is reported, never a red build.
 
+## Consuming it
+
+`ci-fetch-kernel-record` (in `ci_selector/scripts/`) pulls the latest
+published pair into `coverage-data/`, and `ci_selector/coverage/kernels.py`
+reads it inside `decide.py`: a step whose row launched a kernel compiled from
+a changed csrc file is selected, a step whose healthy row launched none is
+dropped when that file was all the map had on it, and everything else falls
+to the map. The rule and its gates are in that module's docstring. First
+measured on PR 55755: 311 jobs from the map, 158 with the record.
+
 ## Not here yet
 
-The bootstrap fetch into `coverage-data/`, and the csrc decision rule in
-`decide.py`: record row decides, image-copy only as the fallback.
+Wiring `ci-select` into the Buildkite bootstrap. Nothing in CI calls the
+selector today (see `DESIGN.md` section 7).

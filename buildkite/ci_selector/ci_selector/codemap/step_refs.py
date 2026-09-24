@@ -59,6 +59,25 @@ def _source_dep_steps_ungated(
     }
 
 
+def steps_naming_file(state: RepoState, path: str) -> set[str]:
+    """Steps whose source_file_dependencies name `path` itself, not a
+    directory above it.
+
+    The floor under the kernel record (`classify.csrc_held_steps`): a file
+    named outright is a tie its owner wrote down, so a kernel silence never
+    drops the step. A directory entry such as `csrc/` is the blanket the
+    record exists to replace, so it holds nothing. Ignores the switch, since
+    this can only keep a step; reads the declarations directly for the same
+    reason `_declaring_deps` does.
+    """
+    return {
+        s.step_id
+        for p in state.pipelines
+        for s in p.steps
+        if path in (s.source_file_dependencies or ())
+    }
+
+
 def _source_dep_steps(
     state: RepoState, path: str, specific_only: bool = False
 ) -> set[str]:
