@@ -474,6 +474,22 @@ def test_collect_group_folds_the_build_from_the_generating_branch(
     )
 
 
+def test_collect_group_waits_only_on_steps_that_record(monkeypatch, fake_global_config):
+    """An AMD mirror records Python, so the Python collect waits on it; a step
+    the recorder never reaches is not waited on."""
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    fake_global_config["run_amd"] = True
+    groups = _rendered_groups(
+        _step(key="mirrored", group="g1", mirror={"amd": {"device": "mi300_1"}}),
+        _step(key="image", group="g2", label=":docker: build image", depends_on=None),
+    )
+    keys = [s.key for g in groups for s in g.steps if hasattr(s, "commands")]
+    assert {"amd-mirrored", "image"} <= set(keys), f"premise: {keys}"
+    step = buildkite_step.fnrec_collect_group(groups).steps[0]
+    assert set(step.depends_on) == {"mirrored", "amd-mirrored"}
+
+
 def test_the_two_collect_steps_share_one_group(monkeypatch, fake_global_config):
     """With both recorders on, the two collect steps share one group."""
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
