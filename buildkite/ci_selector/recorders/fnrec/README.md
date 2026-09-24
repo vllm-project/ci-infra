@@ -37,6 +37,18 @@ vllm/__init__.py	top	1
 #end	root=4	other=247	errors=0	last_error=	t=1790190284.827
 ```
 
+Beside them, two files per job rather than per process:
+
+| | |
+| --- | --- |
+| `pytest.<pid>.jsonl` | what each pytest session collected and what it did. Written by `fnrec_pytest.py` |
+| `pytest.installed` | the plugin was in place. Without it, a job with no session file could equally be one whose plugin never installed, and the table builder has to assume the worse of the two |
+
+The collected count is written before any test runs, so a session that is
+killed leaves a count and no outcome. That is what marks the row too weak to
+read a silence off. Writing only at the end would leave nothing, and nothing
+reads as "this step started no pytest", which is the healthy answer.
+
 `#`-prefixed lines are metadata. The header carries process and job identity
 and a short allowlist of environment values; names are listed one by one, never
 by prefix, because this file is uploaded and `BUILDKITE_*` or `HF_*` would sweep
@@ -92,7 +104,17 @@ Unlike the kernel recorder this also covers AMD and plugin-less steps.
 | `fnrec.py` | the recorder |
 | `install.py` | container install: `fnrec.py` and a `.pth` into site-packages |
 | `host_install.py` | host install: a per-job directory with `sitecustomize.py` |
+| `fnrec_pytest.py` | pytest plugin: what each session collected and ran |
 | `pack.sh` | folds this job's files into one tarball at the end of the step |
+| `collect.sh` | the build's last step: folds every job and publishes the table |
+| `test_collect.sh` | `collect.sh` against stubbed `buildkite-agent` and `aws` |
+
+Two overrides, for rerunning a fold by hand and for the tests:
+
+| | |
+| --- | --- |
+| `FNREC_CI_INFRA` | a ci-infra checkout to take the builder from, instead of cloning one |
+| `FNREC_VLLM_REPO` | the vLLM repo to resolve the recorded commit in, instead of the build's checkout |
 
 ## Turning recordings into the table
 

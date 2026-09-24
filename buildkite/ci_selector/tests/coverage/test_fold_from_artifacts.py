@@ -9,6 +9,7 @@ folding a build have to produce the same rows.
 
 from __future__ import annotations
 
+import copy
 import gzip
 import json
 import tarfile
@@ -272,3 +273,38 @@ def test_a_recording_with_no_root_does_not_kill_the_fold(tmp_path, tmp_repo):
     process_file(job / "fn.b.txt", [("mod.py", "plain")], job="job-y", step_key="s")
     index = sweep_from_artifacts(art, tmp_path / "s", "77", tmp_repo.head(), "ci")
     assert index["jobs"][0]["step_key"] == "s", "the usable recording still files it"
+
+
+def test_the_row_says_which_reader_answered(built, tmp_path):
+    """Nothing decides on it. It is there so a reader later found wrong can be
+    identified without going back to the recordings. Both halves, because a
+    fold from artifacts and one from a sweep read different files."""
+    sweep_root, artifacts, repo = built
+    staged = tmp_path / "src"
+    sweep_from_artifacts(artifacts, staged, "77", repo.head(), "ci")
+    from_artifacts = merge_builds([staged], repo.root)
+    assert {r.stamp.evidence_source for r in from_artifacts.values()} == {"pytest"}
+
+    # Offline the builder still prefers a session file where there is one, so
+    # only the job that has none falls back to its log.
+    offline = merge_build(sweep_root, repo.root)
+    assert offline["was-killed"].stamp.evidence_source == "joblog"
+    assert offline["runs-it"].stamp.evidence_source == "pytest"
+
+
+def test_a_blend_of_readers_is_visible(built, tmp_path):
+    """First-wins would hide that a row was built two different ways."""
+    from ci_selector.coverage.model import Stamp
+    from ci_selector.scripts.build import union_rows
+
+    _, artifacts, repo = built
+    staged = tmp_path / "src2"
+    sweep_from_artifacts(artifacts, staged, "77", repo.head(), "ci")
+    rows = merge_builds([staged], repo.root)
+    key = sorted(rows)[0]
+    # A copy: the same object on both sides would union a value with itself.
+    other = copy.deepcopy(rows[key])
+    other.stamp.evidence_source = "joblog"
+    merged = union_rows(rows[key], other)
+    assert set(merged.stamp.evidence_source.split("|")) == {"joblog", "pytest"}
+    assert Stamp().evidence_source == "", "and a row built by neither says nothing"

@@ -497,3 +497,75 @@ def test_the_collect_url_names_a_file_that_exists(monkeypatch, fake_global_confi
     command = buildkite_step.fnrec_collect_group(groups).steps[0].commands[0]
     name = command.split("recorders/fnrec/")[1].split('"')[0]
     assert (PAYLOAD / name).is_file(), f"{name} is not in {PAYLOAD}"
+
+
+def test_the_collect_step_carries_the_armed_job_count(monkeypatch, fake_global_config):
+    """The fold's job list holds only what uploaded, so without this a build
+    that lost most of its recordings would look complete."""
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    groups = _rendered_groups(
+        _step(key="plain", group="g1"),
+        _step(key="sharded", group="g2", label="Sharded", parallelism=6),
+    )
+    step = buildkite_step.fnrec_collect_group(groups).steps[0]
+    assert step.env["FNREC_EXPECTED_JOBS"] == "7", (
+        "a step with parallelism 6 is one step and six jobs, and a lost shard "
+        "is what the count exists to catch"
+    )
+
+
+def test_the_count_skips_steps_the_recorder_never_reaches(
+    monkeypatch, fake_global_config
+):
+    """Counting every step instead would put the rate below the floor on a
+    healthy build and refuse to publish it."""
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    groups = _rendered_groups(
+        _step(key="recorded", group="g1"),
+        _step(key="image", group="g2", label=":docker: build image"),
+    )
+    step = buildkite_step.fnrec_collect_group(groups).steps[0]
+    assert step.env["FNREC_EXPECTED_JOBS"] == "1"
+
+
+def test_the_count_follows_a_narrowed_build(monkeypatch, fake_global_config):
+    """A smoke build narrows to a few keys. Counting the whole pipeline would
+    put the delivery rate near zero and refuse to publish a healthy build."""
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    fake_global_config["only_step_keys"] = ["kept"]
+    groups = _rendered_groups(
+        _step(key="kept", group="g1"),
+        _step(key="dropped", group="g2", label="Dropped"),
+    )
+    step = buildkite_step.fnrec_collect_group(groups).steps[0]
+    assert step.env["FNREC_EXPECTED_JOBS"] == "1"
+
+
+def test_the_count_skips_steps_behind_a_block(monkeypatch, fake_global_config):
+    """A blocked step never starts, so it can never deliver. Counting it puts
+    the delivery rate below the floor and refuses a build that was fine."""
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
+    groups = _rendered_groups(
+        _step(key="a", group="g1"), _step(key="b", group="g2", label="Other")
+    )
+    step = buildkite_step.fnrec_collect_group(groups).steps[0]
+    assert step.depends_on == [], "the premise: both are behind a block"
+    assert step.env["FNREC_EXPECTED_JOBS"] == "0"
+
+
+def test_an_armed_amd_mirror_is_counted(monkeypatch, fake_global_config):
+    """AMD joins its commands into one string, so the setup element the count
+    looks for has to survive that join or every AMD job goes uncounted."""
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    fake_global_config["run_amd"] = True
+    groups = _rendered_groups(
+        _step(key="mirrored", group="g1", mirror={"amd": {"device": "mi300_1"}})
+    )
+    keys = [s.key for g in groups for s in g.steps if hasattr(s, "commands")]
+    assert any(k and k.startswith("amd-") for k in keys), f"premise: {keys}"
+    step = buildkite_step.fnrec_collect_group(groups).steps[0]
+    assert step.env["FNREC_EXPECTED_JOBS"] == "2", "the parent and its mirror"

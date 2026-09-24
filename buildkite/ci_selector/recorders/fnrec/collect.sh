@@ -14,6 +14,12 @@ COMMIT="${BUILDKITE_COMMIT:?}"
 BUILD="${BUILDKITE_BUILD_NUMBER:?}"
 # The fold reads the source at this commit to check the recorded names.
 VLLM_CHECKOUT="${FNREC_VLLM_REPO:-${BUILDKITE_BUILD_CHECKOUT_PATH:?}}"
+# A ci-infra checkout to take the table builder from, instead of cloning one.
+# For rerunning a fold by hand, and for the tests.
+CI_INFRA="${FNREC_CI_INFRA:-}"
+# How many jobs the generator armed. Without it the fold has no denominator
+# and cannot tell a build that lost its recordings from a small one.
+EXPECTED_JOBS="${FNREC_EXPECTED_JOBS:-}"
 
 WORK="$(mktemp -d)"
 cd "${WORK}" || exit 1
@@ -39,25 +45,42 @@ if [[ "$((n_tar + n_raw))" == "0" ]]; then
   exit 0
 fi
 
-echo "--- :package: Fetching the table builder"
-git clone --quiet --depth 1 --branch "${BRANCH}" "${REPO_URL}" ci-infra \
-  || { echo "cannot clone ${REPO_URL}@${BRANCH}" >&2; exit 1; }
-python3 -m pip install --quiet --disable-pip-version-check regex \
+if [[ -n "${CI_INFRA}" ]]; then
+  echo "--- :package: Using the table builder at ${CI_INFRA}"
+else
+  echo "--- :package: Fetching the table builder"
+  git clone --quiet --depth 1 --branch "${BRANCH}" "${REPO_URL}" ci-infra \
+    || { echo "cannot clone ${REPO_URL}@${BRANCH}" >&2; exit 1; }
+  CI_INFRA="${WORK}/ci-infra"
+fi
+BUILDER="${CI_INFRA}/buildkite/ci_selector"
+
+# The only third-party name the fold needs. Checked rather than installed
+# blindly, so an interpreter that already has it is left alone.
+python3 -c 'import regex' 2>/dev/null \
+  || python3 -m pip install --quiet --disable-pip-version-check regex \
   || { echo "cannot install regex" >&2; exit 1; }
 
 echo "--- :table_tennis_paddle_and_ball: Building the coverage table"
-# The offline fold refuses a build that lost most of its recordings. Here the
-# job list is built from what arrived, so that check cannot fire.
-echo "note: no delivery-rate check; the job list is whatever uploaded"
+# The count the generator armed, so the fold can refuse a build that lost most
+# of its recordings. Printed, because a wrong one silently weakens that check.
+expected=()
+if [[ -n "${EXPECTED_JOBS}" ]]; then
+  expected=(--expected-jobs "${EXPECTED_JOBS}")
+  echo "expecting ${EXPECTED_JOBS} jobs"
+else
+  echo "no expected job count; the delivery check cannot fire"
+fi
 # From here failures exit non-zero: a half-built table must never be published
 # as a complete one.
 mkdir -p out
-PYTHONPATH="${WORK}/ci-infra/buildkite/ci_selector" python3 -m ci_selector.scripts.build \
+PYTHONPATH="${BUILDER}" python3 -m ci_selector.scripts.build \
   "${VLLM_CHECKOUT}" --fnrec .fnrec --build "${BUILD}" --commit "${COMMIT}" \
+  ${expected[@]+"${expected[@]}"} \
   --pipeline "${PIPELINE}" --out out/table.json.gz \
   || { echo "table build failed" >&2; exit 1; }
 
-read -r table_ok table_commit <<<"$(PYTHONPATH="${WORK}/ci-infra/buildkite/ci_selector" python3 - <<'PY'
+read -r table_ok table_commit <<<"$(PYTHONPATH="${BUILDER}" python3 - <<'PY'
 import sys
 from pathlib import Path
 from ci_selector.coverage.table import load
@@ -71,6 +94,8 @@ PY
 echo "--- :arrow_up: Uploading the table as an artifact"
 (cd out && buildkite-agent artifact upload "*")
 
+# A backstop. Nothing recorded means nothing was delivered, which the check
+# above refuses first, so this only catches a table that loads but is empty.
 if [[ "${table_ok}" != "yes" ]]; then
   echo "table has no usable rows; not publishing" >&2
   exit 1

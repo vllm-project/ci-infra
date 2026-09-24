@@ -30,6 +30,7 @@ from pathlib import Path
 
 from ..coverage.joblog import (
     PLUGIN_MARKER,
+    PYTEST_SOURCE,
     SESSION_GLOB,
     LogSummary,
     read_counts,
@@ -106,6 +107,9 @@ class BuildCensus:
     build: str = ""
     n_jobs: int = 0
     attempted: int = 0
+    # Jobs the generator armed, when the caller knows. A fold from artifacts
+    # only sees what arrived, so `attempted` alone cannot see a lost job.
+    expected: int = 0
     recorded: int = 0
     no_dir: list[str] = field(default_factory=list)
     no_record_files: list[str] = field(default_factory=list)
@@ -114,11 +118,12 @@ class BuildCensus:
 
     @property
     def rate(self) -> float:
-        return self.recorded / self.attempted if self.attempted else 0.0
+        denominator = max(self.attempted, self.expected)
+        return self.recorded / denominator if denominator else 0.0
 
     @property
     def collapsed(self) -> bool:
-        return not self.attempted or self.rate < MIN_RECORD_RATE
+        return not max(self.attempted, self.expected) or self.rate < MIN_RECORD_RATE
 
     def summary(self) -> str:
         causes = (
@@ -126,9 +131,11 @@ class BuildCensus:
             f"no {RECORD_GLOB} {len(self.no_record_files)} \u00b7 "
             f"no root {len(self.no_resolvable_root)}"
         )
+        # The denominator, not `attempted`, so a wrong expected count shows up
+        # here rather than quietly relaxing the check.
         return (
-            f"{self.build}: {self.recorded}/{self.attempted} started jobs recorded "
-            f"({self.rate:.2f})   {causes}"
+            f"{self.build}: {self.recorded}/{max(self.attempted, self.expected)} "
+            f"started jobs recorded ({self.rate:.2f})   {causes}"
         )
 
 
@@ -143,7 +150,12 @@ def _attempted(job: dict) -> bool:
 
 
 def sweep_from_artifacts(
-    artifacts: Path, dest: Path, build: str, commit: str, pipeline: str
+    artifacts: Path,
+    dest: Path,
+    build: str,
+    commit: str,
+    pipeline: str,
+    expected_jobs: int = 0,
 ) -> dict:
     """Turn a build's downloaded `.fnrec/` artifacts into a sweep directory.
 
@@ -184,6 +196,9 @@ def sweep_from_artifacts(
         "commit": commit,
         "n_jobs": len(jobs),
         "logs": False,
+        # What the generator armed. The job list here holds only what arrived,
+        # so without this the delivery rate is 1.0 whatever was lost.
+        "expected_jobs": expected_jobs,
         "jobs": jobs,
     }
     (dest / "index.json").write_text(json.dumps(index, indent=1))
@@ -240,6 +255,11 @@ def merge_build(
     slug, trigger, world_env, world_read = read_world(build_dir, index)
     # A fold done in CI has the artifacts and no job logs.
     has_logs = index.get("logs", True)
+    # Never below what was counted. An expected count that is too low
+    # leaves the check as dead as it was, silently; one that is too high
+    # refuses a build that was fine, so it must only ever count jobs that
+    # actually start.
+    expected_jobs = index.get("expected_jobs") or 0
 
     # Expected shard counts come from the pipeline, not from what recorded, so a
     # step whose shard never uploaded is visibly short rather than silently thin.
@@ -255,6 +275,7 @@ def merge_build(
 
     census = census if census is not None else BuildCensus()
     census.build = build_dir.name
+    census.expected = expected_jobs
 
     for job in index["jobs"]:
         census.n_jobs += 1
@@ -317,6 +338,7 @@ def merge_build(
             stamp.shards_expected[build] = expected.get(key, job["parallel_total"])
 
         log = _job_counts(build_dir / "jobs" / job["job"], logs=has_logs)
+        stamp.evidence_source = _union_slug(stamp.evidence_source, log.source)
         if log.unreadable:
             stamp.logs_unreadable += 1
         else:
@@ -424,7 +446,7 @@ def _union_slug(a: str, b: str) -> str:
         return b
     if not b or a == b:
         return a
-    return "|".join(sorted(set(a.split("|")) | {b}))
+    return "|".join(sorted(set(a.split("|")) | set(b.split("|"))))
 
 
 def _union_shards(
@@ -459,8 +481,8 @@ def _job_counts(job_dir: Path, logs: bool = True):
         # pytest. Without it nothing could have recorded, so the row stays too
         # thin to drop from.
         if (fnrec_dir / PLUGIN_MARKER).is_file():
-            return LogSummary()
-        return LogSummary(unreadable=True)
+            return LogSummary(source=PYTEST_SOURCE)
+        return LogSummary(unreadable=True, source=PYTEST_SOURCE)
     return read_counts(job_dir / "job.log.gz")
 
 
@@ -511,6 +533,7 @@ def union_rows(left: Row, right: Row) -> Row:
         jobs_summary_unparsed=a.jobs_summary_unparsed + b.jobs_summary_unparsed,
         logs_unreadable=a.logs_unreadable + b.logs_unreadable,
         pipeline_slug=_union_slug(a.pipeline_slug, b.pipeline_slug),
+        evidence_source=_union_slug(a.evidence_source, b.evidence_source),
         worlds_unread=a.worlds_unread + b.worlds_unread,
         sources=sorted(set(a.sources) | set(b.sources)),
         # Disagreeing builds keep both values, so a blended table is visible
@@ -615,6 +638,13 @@ def main() -> None:
     ap.add_argument("--build", help="with --fnrec, the build number")
     ap.add_argument("--commit", help="with --fnrec, the commit it ran at")
     ap.add_argument("--pipeline", default="ci", help="with --fnrec")
+    ap.add_argument(
+        "--expected-jobs",
+        type=int,
+        default=0,
+        help="with --fnrec, how many jobs the generator armed. Without it a "
+        "build that lost most of its recordings looks complete",
+    )
     ap.add_argument("-o", "--out", type=Path, required=True)
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument(
@@ -634,7 +664,12 @@ def main() -> None:
         if args.fnrec:
             staged = Path(tmp) / f"build-{args.build}"
             sweep_from_artifacts(
-                args.fnrec, staged, args.build, args.commit, args.pipeline
+                args.fnrec,
+                staged,
+                args.build,
+                args.commit,
+                args.pipeline,
+                expected_jobs=args.expected_jobs,
             )
             builds.append(staged)
         rows = merge_builds(builds, args.repo, verbose=args.verbose, censuses=censuses)
@@ -658,7 +693,7 @@ def main() -> None:
     short = [k for k, r in rows.items() if not r.stamp.shards_complete]
     unfaithful = sorted({p for r in rows.values() for p in r.stamp.unfaithful_files})
     recorded = sum(c.recorded for c in censuses)
-    attempted = sum(c.attempted for c in censuses)
+    attempted = sum(max(c.attempted, c.expected) for c in censuses)
     print(f"\n{len(rows)} rows ({keyless} keyless)")
     print(f"  functions: {sum(r.stamp.n_functions for r in rows.values())}")
     print(f"  files:     {len({p for r in rows.values() for p in r.functions})}")

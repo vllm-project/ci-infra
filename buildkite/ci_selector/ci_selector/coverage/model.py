@@ -70,12 +70,12 @@ MIN_ROWS_FOR_BREADTH = 20
 # not know, which is the only thing stopping an older table from reading
 # healthier than it was recorded: a missing field takes its default, and every
 # default here is the healthy value.
-TABLE_VERSION = 4
+TABLE_VERSION = 5
 
 # Fingerprint of `Stamp`'s fields, so remembering to bump the version above is a
 # mechanism and not a discipline. A test recomputes it and fails when the two
 # disagree. Change both together, in the same commit that changes the stamp.
-STAMP_SHAPE = "060984df5663c507"
+STAMP_SHAPE = "710849dd809c75ad"
 
 MIRROR_NOTE = (
     "A mirror owns its own row and never inherits its parent's. Keyless mirrors "
@@ -396,6 +396,10 @@ class Stamp:
     # byte-indistinguishable from a plain one, and "only the daily sweeps feed
     # the acting table" is prose with nothing enforcing it.
     pipeline_slug: str = ""
+    # Which reader produced this row's test outcomes. Nothing decides on
+    # it. It is here so a source later found wrong can be identified
+    # without re-reading the recordings, same as `pipeline_slug`.
+    evidence_source: str = ""
     # Contributing builds whose world file could not be read, so their env is
     # unknown rather than empty. Diagnostic: an unread world does not weaken
     # the recording, it only means `build_env` is short.

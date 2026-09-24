@@ -98,9 +98,16 @@ class LogSummary:
     # does not carry one. pytest exits non-zero for failures the outcome
     # counts never show, such as a collection error or a usage error.
     worst_exit: int = 0
+    # Which reader produced these, "joblog" or "pytest". Travels onto the
+    # row, so a source later found wrong can be found without re-reading
+    # the recordings.
+    source: str = ""
 
 
 SESSION_GLOB = "pytest.*.jsonl"
+# What `LogSummary.source` says, and what lands on the row.
+PYTEST_SOURCE = "pytest"
+JOBLOG_SOURCE = "joblog"
 # Written when the plugin installs. Without it no session file could exist,
 # which is not the same as a step that ran no pytest.
 PLUGIN_MARKER = "pytest.installed"
@@ -154,7 +161,7 @@ def read_session_counts(fnrec_dir: Path) -> LogSummary:
                     setattr(counts, name, getattr(counts, name) + _int(row.get(name)))
                 counts.invocations += 1
                 worst_exit = max(worst_exit, abs(_int(row.get("exitstatus"))))
-    return LogSummary(counts=counts, worst_exit=worst_exit)
+    return LogSummary(counts=counts, worst_exit=worst_exit, source=PYTEST_SOURCE)
 
 
 def _int(value) -> int:
@@ -182,7 +189,7 @@ def read_counts(path: Path) -> LogSummary:
             setattr(counts, name, getattr(counts, name) + int(number))
     counts.collected = sum(int(n) for n in re.findall(r"collected (\d+) items?", body))
     counts.invocations = len(summaries)
-    return LogSummary(counts=counts)
+    return LogSummary(counts=counts, source=JOBLOG_SOURCE)
 
 
 # A verbose per-test line: the node id, then the verdict. Stripping the

@@ -504,6 +504,9 @@ FNREC_ARTIFACT_PATHS = (".fnrec/*.tar.gz", ".fnrec/*/*")
 # checkout. Job-scoped because a plugin-less step runs on the agent host, where
 # concurrent jobs would otherwise overwrite each other's download mid-read.
 FNREC_TMP_DIR = "/tmp/fnrec.$${BUILDKITE_JOB_ID:-local}"
+# In the URL an armed step curls, so counting armed jobs can read it back off
+# the commands rather than re-deciding and risking a different answer.
+FNREC_SETUP_PATH = "recorders/fnrec/ci_setup.sh"
 
 
 def _fnrec_checkout_path(step: Step, setup_profile: SetupProfile) -> str:
@@ -566,7 +569,7 @@ def _fnrec_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
-        f"{branch}/buildkite/ci_selector/recorders/fnrec/ci_setup.sh"
+        f"{branch}/buildkite/ci_selector/{FNREC_SETUP_PATH}"
     )
     checkout = _fnrec_checkout_path(step, setup_profile)
     mode = "host" if step.no_plugin else "container"
@@ -640,13 +643,31 @@ def fnrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupSt
                 "fnrec",
                 FNREC_COLLECT_KEY,
                 ":satellite: Collect Python coverage",
+                count_armed=True,
             )
         ],
     )
 
 
+def _carries_fnrec(step: "BuildkiteCommandStep") -> bool:
+    """Whether this rendered step will load the recorder.
+
+    Commands and env both, because an AMD mirror's only command is the runner
+    script and its real commands ride in VLLM_TEST_COMMANDS. Reading the
+    emitted step rather than re-deciding keeps the count from disagreeing with
+    what was armed.
+    """
+    if any(FNREC_SETUP_PATH in c for c in (step.commands or [])):
+        return True
+    return any(FNREC_SETUP_PATH in str(v) for v in (step.env or {}).values())
+
+
 def _collect_step(
-    groups: "List[BuildkiteGroupStep]", recorder: str, key: str, label: str
+    groups: "List[BuildkiteGroupStep]",
+    recorder: str,
+    key: str,
+    label: str,
+    count_armed: bool = False,
 ) -> "BuildkiteCommandStep":
     blocked = {
         s.key[len("block-") :]
@@ -654,12 +675,22 @@ def _collect_step(
         for s in g.steps
         if isinstance(s, BuildkiteBlockStep)
     }
-    depends_on = [
-        s.key
+    runnable = [
+        s
         for g in groups
         for s in g.steps
         if isinstance(s, BuildkiteCommandStep) and s.key not in blocked
     ]
+    depends_on = [s.key for s in runnable]
+    env = None
+    if count_armed:
+        # The fold needs a denominator: its job list holds only what uploaded,
+        # so without one a build that lost its recordings looks complete.
+        # Taken off the same list that decides what this step waits for, so it
+        # can never count a job that never starts. A step with parallelism N is
+        # one step and N jobs, and a lost shard is the case this exists for.
+        armed = sum(s.parallelism or 1 for s in runnable if _carries_fnrec(s))
+        env = {"FNREC_EXPECTED_JOBS": str(armed)}
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
@@ -673,6 +704,7 @@ def _collect_step(
     return BuildkiteCommandStep(
         label=label,
         key=key,
+        env=env,
         agents={"queue": queue.value},
         commands=[
             f'curl -sSfL --retry 3 --max-time 60 -o /tmp/{recorder}-collect.sh "{url}"'

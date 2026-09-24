@@ -39,7 +39,7 @@ ci-fetch-kernel-record          # CUDA, into coverage-data/
 
 Public bucket, plain HTTPS, no token either way.
 
-They differ in who does the folding. **kernrec** appends a collect step that folds the build and publishes from CI. **fnrec** is still folded offline, from the build's artifacts, and published by hand:
+Each appends a collect step that folds the build and publishes from CI, added by its own switch. fnrec's table can also be folded offline, from a build's artifacts, and published by hand, which is how a build that was never armed gets one:
 
 ```bash
 export BK_TOKEN=...
@@ -47,6 +47,8 @@ ci-fetch-build https://buildkite.com/<org>/<pipeline>/builds/<n> --out sweeps/
 ci-build-table <vllm-repo> sweeps/<org>-<pipeline>-<n> -o table.json.gz
 ci-publish-function-record table.json.gz
 ```
+
+Both collect steps publish only from `main`, and only what they can validate. A branch under test stops at its artifacts, green.
 
 ## Coverage
 

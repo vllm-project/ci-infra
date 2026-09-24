@@ -43,6 +43,28 @@ contain the commit the build ran at, or the merge aborts.
 | `-v` | per-build progress |
 | `--allow-partial` | merge even from a build that delivered almost nothing |
 
+The collect step calls the same builder on a build's downloaded artifacts,
+where there is no Buildkite token and so no sweep:
+
+```bash
+ci-build-table <vllm-repo> --fnrec .fnrec \
+  --build 42 --commit <sha> --expected-jobs 30 -o table.json.gz
+```
+
+| flag | |
+| --- | --- |
+| `--fnrec DIR` | fold this artifact tree instead of a sweep |
+| `--build` / `--commit` | required with `--fnrec`; a sweep carries them |
+| `--pipeline` | defaults to `ci` |
+| `--expected-jobs N` | how many jobs were armed, for the delivery check |
+
+A table is refused when fewer than half the expected jobs delivered. That is a
+delivery failure, not a build that ran no vLLM code.
+
+**Tables are versioned.** A table built before the version last changed loads
+as unavailable and has to be re-merged from its sweep; the selector runs on
+the code map alone until it is.
+
 ## 3. Use it
 
 ```bash
