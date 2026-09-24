@@ -55,11 +55,19 @@ else
 fi
 BUILDER="${CI_INFRA}/buildkite/ci_selector"
 
-# The only third-party name the fold needs. Checked rather than installed
-# blindly, so an interpreter that already has it is left alone.
-python3 -c 'import regex' 2>/dev/null \
-  || python3 -m pip install --quiet --disable-pip-version-check regex \
-  || { echo "cannot install regex" >&2; exit 1; }
+# The fold is the ci_selector package, run as the package: through uv, with
+# Python 3.12 and the package's own dependencies. Not the agent's python3,
+# which is 3.9 on the small CPU queue and has none of them: the package
+# imports the pipeline generator (handwritten.py imports amd, which needs
+# pyyaml), and under 3.9 the fold exits 0 with every recorded file marked
+# unfaithful (no code.co_qualname), a table that can drop nothing.
+if ! command -v uv >/dev/null 2>&1; then
+  curl -LsSf --retry 3 https://astral.sh/uv/install.sh \
+    | env UV_INSTALL_DIR="${WORK}/bin" UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1
+  export PATH="${WORK}/bin:${PATH}"
+fi
+command -v uv >/dev/null 2>&1 || { echo "cannot install uv" >&2; exit 1; }
+fold() { uv run --quiet --no-dev --python 3.12 --project "${BUILDER}" "$@"; }
 
 echo "--- :table_tennis_paddle_and_ball: Building the coverage table"
 # The count the generator armed, so the fold can refuse a build that lost most
@@ -74,13 +82,13 @@ fi
 # From here failures exit non-zero: a half-built table must never be published
 # as a complete one.
 mkdir -p out
-PYTHONPATH="${BUILDER}" python3 -m ci_selector.scripts.build \
+fold python -m ci_selector.scripts.build \
   "${VLLM_CHECKOUT}" --fnrec .fnrec --build "${BUILD}" --commit "${COMMIT}" \
   ${expected[@]+"${expected[@]}"} \
   --pipeline "${PIPELINE}" --out out/table.json.gz \
   || { echo "table build failed" >&2; exit 1; }
 
-read -r table_ok table_commit <<<"$(PYTHONPATH="${BUILDER}" python3 - <<'PY'
+read -r table_ok table_commit <<<"$(fold python - <<'PY'
 import sys
 from pathlib import Path
 from ci_selector.coverage.table import load

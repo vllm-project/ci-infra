@@ -11,8 +11,8 @@
 #   7. fewer jobs delivered than the generator armed -> exit 1, S3 untouched
 #
 # Real python3 and the real fold, so what is under test is what runs in CI.
-# The venv already has the package importable, so these exercise collect.sh's
-# gates rather than its PYTHONPATH wiring.
+# The fold runs through uv exactly as collect.sh runs it in CI, so these cover
+# how it is invoked as well as its gates.
 # FNREC_CI_INFRA points the script at this checkout instead of cloning, and
 # FNREC_VLLM_REPO at a throwaway repo holding the recorded file at the commit.
 set -uo pipefail
@@ -20,10 +20,10 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../../../.." && pwd)
 fail=0
 
-# The fold imports `regex`. Use the package's own venv when it is there, so a
-# test never pip-installs into whatever interpreter happened to be first.
-VENV="$REPO/buildkite/ci_selector/.venv/bin"
-[[ -x "$VENV/python3" ]] || { echo "no venv at $VENV; run uv sync in buildkite/ci_selector" >&2; exit 1; }
+# collect.sh runs the fold through uv, as in CI. Its PATH below gets no venv,
+# so a fold that went back to the bare python3 fails here the way it would on
+# an agent, where that python3 has no ci_selector and is 3.9.
+command -v uv >/dev/null 2>&1 || { echo "these tests need uv on PATH" >&2; exit 1; }
 
 s3_digest() { (cd "$1" && find . -type f | sort | xargs cksum 2>/dev/null); }
 
@@ -97,7 +97,7 @@ EOF
   chmod +x "$T/bin"/*
   local s3_before; s3_before=$(s3_digest "$T/s3")
 
-  ( cd "$T" && PATH="$T/bin:$VENV:$PATH" \
+  ( cd "$T" && PATH="$T/bin:$PATH" \
       BUILDKITE_COMMIT="$commit" BUILDKITE_BUILD_NUMBER=42 \
       BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
       FNREC_CI_INFRA="$REPO" FNREC_VLLM_REPO="$vllm" \
