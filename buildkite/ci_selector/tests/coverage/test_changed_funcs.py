@@ -204,3 +204,49 @@ class TestBuild:
         (only,) = build(sample_repo.root, base, head).files
         assert only.base_names == frozenset()
         assert only.head_names == {"<module>", "fresh"}
+
+
+class TestLineEndings:
+    """A carriage return at the end of a line changes nothing Python reads."""
+
+    @staticmethod
+    def _crlf(repo: Repo, path: str, text: str) -> None:
+        (repo.root / path).write_bytes(text.replace("\n", "\r\n").encode())
+
+    def test_a_crlf_rewrite_names_only_what_really_changed(self, sample_repo: Repo):
+        """vllm#58669: every line rewritten to CRLF, one body really edited."""
+        sample_repo.git("config", "core.autocrlf", "false")
+        base = sample_repo.head()
+        self._crlf(
+            sample_repo,
+            "vllm/mod.py",
+            SAMPLE.replace("inner = argument + 1", "inner = argument + 2"),
+        )
+        head = sample_repo.commit("crlf and edit")
+
+        (only,) = build(sample_repo.root, base, head).files
+        assert only.status is Attribution.ATTRIBUTED
+        assert only.names == {"plain"}, "not <module> and not every function"
+
+    def test_a_line_ending_only_file_changes_no_function(self, sample_repo: Repo):
+        sample_repo.git("config", "core.autocrlf", "false")
+        base = sample_repo.head()
+        self._crlf(sample_repo, "vllm/mod.py", SAMPLE)
+        head = sample_repo.commit("crlf only")
+
+        query = build(sample_repo.root, base, head)
+        assert query.files == [], "no function changed, so no question to ask"
+        assert query.eol_only == ["vllm/mod.py"]
+        assert not query.fail_open
+
+    def test_a_python_file_with_no_hunks_at_all_still_fails_open(
+        self, sample_repo: Repo
+    ):
+        """A mode change has no hunks with or without line endings: still
+        unanswerable, not mistaken for a line-ending-only change."""
+        base = sample_repo.head()
+        (sample_repo.root / "vllm/mod.py").chmod(0o755)
+        head = sample_repo.commit("mode")
+
+        (only,) = build(sample_repo.root, base, head).files
+        assert only.status is Attribution.FAILED and only.fail_open
