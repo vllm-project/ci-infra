@@ -109,6 +109,26 @@ resource "google_bigquery_table" "step_logs" {
 EOF
 }
 
+# One row per workload the kube launcher submitted, streamed by the launcher
+# itself when the workload ends (k8s/kueue/launcher/launch.py). The Buildkite
+# step clock above counts Kueue queueing as run time; these times split a kube
+# step into queued, dispatching, starting and running, from Kueue's and the
+# kubelet's own timestamps. Joins to step_execution_logs through job_id.
+resource "google_bigquery_table" "kube_workload_timing" {
+  dataset_id          = google_bigquery_dataset.ci_analytics.dataset_id
+  project             = var.project_id
+  table_id            = "kube_workload_timing"
+  deletion_protection = true
+
+  time_partitioning {
+    type  = "DAY"
+    field = "submitted_at"
+  }
+  clustering = ["pipeline", "queue"]
+
+  schema = file("${path.module}/schemas/kube_workload_timing.json")
+}
+
 # =====================================================================
 # PART 3: FUNCTION SOURCE CODE STORAGE (GCS)
 # =====================================================================
