@@ -62,6 +62,13 @@ A two-ended range is required. `origin/main...HEAD` is the PR's merge-base diff,
 ci-select --repo /path/to/vllm --diff origin/main...HEAD --emit-keys
 ```
 
+For a vLLM pull request, `ci-select pr` prints what the selector would run next to today's rules, as a PR comment; `--post` puts it on the PR, editing its own earlier comment instead of adding a new one. It fetches the latest published records first (`--no-fetch` to use what is in `coverage-data/`). Shadow only: it changes nothing about what CI runs.
+
+```bash
+ci-select pr 55755 --repo /path/to/vllm          # print the comment
+ci-select pr 55755 --repo /path/to/vllm --post   # post or update it on the PR
+```
+
 ### Crosscheck
 
 Replays real PRs and compares our selection against what CI actually ran, and what failed. Needs `gh`.
