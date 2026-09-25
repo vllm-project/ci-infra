@@ -65,6 +65,16 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
     enable_external_ips = true
   }
 
+  # CI jobs call GCS, Artifact Registry, BigQuery and Spanner with the VM's
+  # credentials, so the account needs the cloud-platform scope.
+  dynamic "service_account" {
+    for_each = var.service_account_email == null ? [] : [1]
+    content {
+      email = var.service_account_email
+      scope = ["https://www.googleapis.com/auth/cloud-platform"]
+    }
+  }
+
   dynamic "data_disks" {
     for_each = local.has_attached_disk ? [1] : []
     content {
