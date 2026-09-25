@@ -2,7 +2,16 @@
 
 import json
 
-from ci_selector.pr_comment import MARKER, PrSelection, StepView, post, render
+from types import SimpleNamespace
+
+from ci_selector.pr_comment import (
+    MARKER,
+    PrSelection,
+    StepView,
+    not_counted,
+    post,
+    render,
+)
 
 
 def _selection(**over):
@@ -100,3 +109,21 @@ def test_post_creates_when_it_has_no_comment_yet():
     post(5, "body", gh=gh)
     args, _ = _write_call(gh)
     assert args[2:4] == ("POST", "repos/vllm-project/vllm/issues/5/comments")
+
+
+def _step(key=None, device="h100", mirror_hw=None, always_runs=False):
+    return SimpleNamespace(
+        key=key, device=device, mirror_hw=mirror_hw, always_runs=always_runs
+    )
+
+
+def test_build_steps_and_retired_a100_steps_are_not_counted():
+    assert not_counted(_step("image-build", always_runs=True)) == "build"
+    assert not_counted(_step("arm64-image-build")) == "build", (
+        "an image build the generator does not always run is still not a test"
+    )
+    assert not_counted(_step("batch-invariance-a100", device="a100")) == "not emitted"
+    assert not_counted(_step("x-a100", device="a100", mirror_hw="amd")) == "", (
+        "the AMD mirror of an A100 step is still emitted"
+    )
+    assert not_counted(_step("kernels-core-operation-test")) == ""

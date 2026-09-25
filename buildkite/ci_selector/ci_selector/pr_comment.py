@@ -23,11 +23,28 @@ from .codemap.worktree import state_for
 from .coverage.source import fetch_kernel_evidence, fetch_table
 from .decide import decide
 from .gitdiff import changed_paths, diff_files
-from .handwritten import PR_PIPELINE
+from .handwritten import IMAGE_BUILD_KEY_PREFIX, PR_PIPELINE
 from .validate.crosscheck import GH_REPO, _gh_pr, _resolve_range, _upstream_remote
 from .validate.generator_replica import today_select
 
 MARKER = "<!-- ci-selector-shadow -->"
+# The generator's DeviceType.A100: the fleet is retired and only AMD mirrors
+# of those steps are still emitted.
+RETIRED_DEVICE = "a100"
+
+
+def not_counted(step) -> str:
+    """Why a step stays out of the counts, or "" when it is a test that runs.
+
+    Build steps (every image build, not only the always-run ones) are the same
+    on both sides and are not tests. A100 steps are still declared but the
+    generator never emits them, so listing one would name a job nobody runs.
+    """
+    if step.always_runs or IMAGE_BUILD_KEY_PREFIX in (step.key or ""):
+        return "build"
+    if step.device == RETIRED_DEVICE and not step.mirror_hw:
+        return "not emitted"
+    return ""
 
 
 @dataclass
@@ -48,8 +65,9 @@ class PrSelection:
     files: int
     today: list[StepView] = field(default_factory=list)
     selector: list[StepView] = field(default_factory=list)
-    # always-run plumbing (image builds and the like), the same on both sides
+    # build steps, the same on both sides, and declared steps never emitted
     plumbing: int = 0
+    never_emitted: int = 0
     today_run_all: bool = False
     run_all: str = ""
     docs_only: bool = False
@@ -90,7 +108,7 @@ def select_for_pr(
                 name(steps[i]), steps[i].parallelism or 1, steps[i].mirror_hw or ""
             )
             for i in ids
-            if i in steps and not steps[i].always_runs
+            if i in steps and not not_counted(steps[i])
         ]
         return sorted(out, key=lambda v: (v.mirror, v.name))
 
@@ -122,7 +140,8 @@ def select_for_pr(
         files=len(paths),
         today=view(t_ids),
         selector=view(f_ids),
-        plumbing=sum(1 for s in steps.values() if s.always_runs),
+        plumbing=sum(1 for s in steps.values() if not_counted(s) == "build"),
+        never_emitted=sum(1 for s in steps.values() if not_counted(s) == "not emitted"),
         today_run_all=bool(today.run_all.get(PR_PIPELINE)),
         run_all=run_all,
         docs_only=today.docs_only,
@@ -207,7 +226,8 @@ def render(s: PrSelection) -> str:
         ),
         "",
         f"<sub>{s.files} changed files · base `{s.base[:10]}` · head `{s.head[:10]}` · "
-        f"{' · '.join(s.records)} · {s.plumbing} always-run build steps not counted</sub>",
+        f"{' · '.join(s.records)} · not counted: {s.plumbing} build steps, "
+        f"{s.never_emitted} A100 steps the generator no longer emits</sub>",
     ]
     return "\n".join(lines) + "\n"
 
