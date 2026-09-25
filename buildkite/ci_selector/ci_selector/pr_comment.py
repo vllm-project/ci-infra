@@ -136,12 +136,7 @@ def select_for_pr(
 ) -> PrSelection:
     data = _gh_pr(pr)
     upstream = _upstream_remote(repo, remote)
-    # The range is merge-base(head, <upstream>/main), so a stale local main puts
-    # every main commit between it and the PR's real branch point into the diff.
-    # On 2026-09-25 a clone a day behind turned 10 of 11 PRs of one to three
-    # files into "run everything" through the pyproject.toml in that drift.
-    _fetch_main(repo, upstream)
-    base, head = _resolve_range(repo, pr, data, upstream)
+    base, head = pr_range(repo, pr, data, upstream)
     if base is None:
         raise RuntimeError(f"PR #{pr} is {data['state']} with no head to select for")
     paths = changed_paths(diff_files(repo, base, head))
@@ -225,17 +220,49 @@ def select_for_pr(
     )
 
 
-def _fetch_main(repo: Path, remote: str) -> None:
-    got = subprocess.run(
-        ["git", "-C", str(repo), "fetch", "-q", remote, GH_DEFAULT_BRANCH],
+def pr_range(repo: Path, pr: int, data: dict, remote: str):
+    """The PR's own diff: its head against the commit it branched from.
+
+    The branch point comes from GitHub's compare API, not from the clone's
+    main. Computed locally it is merge-base(head, <remote>/main), and a clone
+    whose main is behind the PR's branch point turns the stale main tip into
+    the base: on 2026-09-25 a clone a day behind put a day of main drift into
+    10 of 11 one-to-three-file PRs, and its pyproject.toml made each "run
+    everything". A merged PR keeps its merge commit against its parent, which
+    is exactly the change it landed.
+    """
+    if data.get("state") == "MERGED" and data.get("mergeCommit"):
+        return _resolve_range(repo, pr, data, remote)
+    head = data.get("headRefOid")
+    if not head:
+        return None, None
+    _ensure_commit(repo, remote, head, GH_PR_REFSPEC.format(pr=pr))
+    base = github_merge_base(head)
+    _ensure_commit(repo, remote, base, base)
+    return base, head
+
+
+def github_merge_base(head: str) -> str:
+    return _gh(
+        "api",
+        f"repos/{GH_REPO}/compare/{GH_DEFAULT_BRANCH}...{head}",
+        "--jq",
+        ".merge_base_commit.sha",
+    ).strip()
+
+
+def _ensure_commit(repo: Path, remote: str, sha: str, refspec: str) -> None:
+    """Fetch a commit the clone lacks. GitHub serves any reachable commit by
+    sha, so the base needs no branch to be current."""
+    have = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{sha}^{{commit}}"],
         capture_output=True,
-        text=True,
     )
-    if got.returncode:
-        # Not fatal by itself: check_drift catches a main stale enough to matter.
-        print(
-            f"warning: could not fetch {remote}/{GH_DEFAULT_BRANCH}: {got.stderr.strip()}",
-            file=sys.stderr,
+    if have.returncode:
+        subprocess.run(
+            ["git", "-C", str(repo), "fetch", "-q", remote, refspec],
+            capture_output=True,
+            check=True,
         )
 
 
@@ -259,13 +286,14 @@ def _changed_files(pr: int) -> int | None:
 
 
 def check_drift(pr: int, local: int, github: int | None) -> None:
-    """Refuse a diff far bigger than the PR. A rename counts twice locally, so
-    some slack; main drift is hundreds of files, not a handful."""
+    """Refuse a diff far bigger than the PR, whatever caused it: a comment
+    comparing someone else's changes is worse than none. A rename counts twice
+    locally, so some slack; drift is hundreds of files, not a handful."""
     if github is not None and local > 2 * github + 5:
         raise RuntimeError(
             f"PR #{pr}: the local diff has {local} files but GitHub says the PR "
-            f"changes {github}. The clone's main is probably behind the PR's "
-            "branch point; fetch it and rerun. Not posting a comparison of main drift."
+            f"changes {github}, so this is not the PR's diff. Not posting it; "
+            "send the command and output to the selector's owner."
         )
 
 

@@ -275,25 +275,34 @@ from ci_selector.pr_comment import check_drift  # noqa: E402
 def test_drift_far_beyond_the_pr_is_refused():
     check_drift(1, 5, 3)  # renames count twice locally: fine
     check_drift(1, 400, None)  # GitHub unreachable: nothing to compare with
-    with pytest.raises(RuntimeError, match="main is probably behind"):
+    with pytest.raises(RuntimeError, match="not the PR's diff"):
         check_drift(1, 400, 2)
 
 
-def test_main_is_fetched_before_the_range_is_resolved(monkeypatch, tmp_path):
-    """2026-09-25: a clone a day behind put a day of main into every diff."""
-    calls = []
-    monkeypatch.setattr(pr_comment, "_gh_pr", lambda pr: {"state": "OPEN"})
-    monkeypatch.setattr(pr_comment, "_upstream_remote", lambda repo, r: "origin")
+def test_an_open_prs_base_comes_from_github_not_the_clones_main(monkeypatch, tmp_path):
+    """2026-09-25: a clone a day behind put a day of main into every diff.
+    The base is GitHub's merge base for the head; the clone's main is never
+    consulted, and a diff that still dwarfs the PR is refused."""
     monkeypatch.setattr(
-        pr_comment, "_fetch_main", lambda repo, remote: calls.append("fetch")
+        pr_comment, "_gh_pr", lambda pr: {"state": "OPEN", "headRefOid": "h" * 40}
     )
+    monkeypatch.setattr(pr_comment, "_upstream_remote", lambda repo, r: "origin")
 
-    def resolve(repo, pr, data, remote):
-        calls.append("resolve")
-        return "b" * 40, "h" * 40
+    def no_local_main(*a):
+        raise AssertionError("the clone's main must not decide the base")
 
-    monkeypatch.setattr(pr_comment, "_resolve_range", resolve)
-    monkeypatch.setattr(pr_comment, "diff_files", lambda repo, b, h: None)
+    monkeypatch.setattr(pr_comment, "_resolve_range", no_local_main)
+    fetched = []
+    monkeypatch.setattr(
+        pr_comment, "_ensure_commit", lambda repo, remote, sha, ref: fetched.append(sha)
+    )
+    monkeypatch.setattr(pr_comment, "github_merge_base", lambda head: "m" * 40)
+    seen = {}
+
+    def diff_files(repo, base, head):
+        seen["range"] = (base, head)
+
+    monkeypatch.setattr(pr_comment, "diff_files", diff_files)
     monkeypatch.setattr(
         pr_comment, "changed_paths", lambda d: [f"f{i}.py" for i in range(300)]
     )
@@ -302,4 +311,18 @@ def test_main_is_fetched_before_the_range_is_resolved(monkeypatch, tmp_path):
         RuntimeError, match="300 files but GitHub says the PR changes 2"
     ):
         pr_comment.select_for_pr(tmp_path, 1)
-    assert calls == ["fetch", "resolve"]
+    assert seen["range"] == ("m" * 40, "h" * 40)
+    assert fetched == ["h" * 40, "m" * 40], "both ends are made local by sha"
+
+
+def test_a_merged_pr_keeps_its_merge_commit_against_its_parent(monkeypatch):
+    data = {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}}
+    monkeypatch.setattr(
+        pr_comment, "_resolve_range", lambda repo, pr, d, remote: ("p" * 40, "c" * 40)
+    )
+    monkeypatch.setattr(
+        pr_comment,
+        "github_merge_base",
+        lambda head: (_ for _ in ()).throw(AssertionError("not for a merged PR")),
+    )
+    assert pr_comment.pr_range(None, 1, data, "origin") == ("p" * 40, "c" * 40)
