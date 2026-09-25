@@ -102,6 +102,9 @@ class Query:
     base: str
     head: str | None
     files: list[FileQuery] = field(default_factory=list)
+    # Python files the diff changed only in line endings: no FileQuery, since
+    # no function changed. Kept for diagnosis.
+    eol_only: list[str] = field(default_factory=list)
 
     @property
     def fail_open(self) -> bool:
@@ -239,12 +242,20 @@ def attribute(source: str, path: str, lines: set[int]) -> tuple[frozenset[str], 
 
 
 def hunks(
-    repo: Path, base: str, head: str | None
+    repo: Path, base: str, head: str | None, ignore_cr_at_eol: bool = True
 ) -> dict[str, tuple[set[int], set[int]]]:
     """path -> (base-side changed lines, head-side changed lines). Keyed under
     both sides of a rename so either path finds it. A zero count on one side
     means nothing changed there, which is what a pure add or delete looks
-    like."""
+    like.
+
+    A line whose only change is a carriage return at its end is not changed:
+    Python reads either line ending the same way. Without this, a file an
+    editor saved with CRLF names every function in it, and a module's
+    import-time code runs in every step that imports it. vllm#58669 changed
+    two function bodies of one router and converted it to CRLF, and the
+    record added the 43 server-starting steps that import it.
+    """
     args = [
         "git",
         "-c",
@@ -255,6 +266,7 @@ def hunks(
         "-U0",
         "-M",
         "--no-prefix",
+        *(["--ignore-cr-at-eol"] if ignore_cr_at_eol else []),
         base,
     ]
     if head:
@@ -327,6 +339,8 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
     from ..gitdiff import diff_files
 
     by_path = hunks(repo, base, head)
+    # Only needed to tell a line-ending-only file from one with no hunks at all.
+    strict: dict[str, tuple[set[int], set[int]]] | None = None
     query = Query(base=base, head=head)
 
     for changed in diff_files(repo, base, head):
@@ -351,6 +365,17 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
             )
             continue
 
+        if not base_lines and not head_lines:
+            if strict is None:
+                strict = hunks(repo, base, head, ignore_cr_at_eol=False)
+            # Hunks only once line endings count: the file changed nothing but
+            # them, so it changed no function. The code map still sees the path.
+            if any(
+                key and strict.get(key, (set(), set())) != (set(), set())
+                for key in (path, old_path)
+            ):
+                query.eol_only.append(shown)
+                continue
         # A Python file git reported with no hunks at all: a mode change, a
         # binary blob, or a path our hunk parse failed to match. We cannot tell
         # which, so we do not get to say "nothing changed here".
