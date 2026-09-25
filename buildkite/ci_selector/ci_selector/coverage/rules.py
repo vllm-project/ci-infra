@@ -25,8 +25,8 @@ from .changed_funcs import Query
 from .phase import DEFAULT_MODE, PhaseMode, row_shows_use
 from .table import Table
 
-# Lets a row add an optional step it shows executing the change; see
-# RowKeys.candidates.
+# Whether a row may add an optional step it shows executing the change; on
+# unless set to 0. See RowKeys.candidates.
 RECORD_OPTIONAL_ENV = "CI_SELECTOR_RECORD_OPTIONAL"
 
 
@@ -142,19 +142,22 @@ class RowKeys:
         """Every step the table may ADD, which is not every step it can answer
         for.
 
-        The manual-only filter is doing real work here, not tidying: the sweeps
-        unblocked the optional steps so the table would cover them, so it holds
-        rows for nightlies and mirrors CI never runs on a PR. Picking one is
-        not over-selection, it names a step the generator will not emit.
+        Optional (manual-only) steps are addable. The nightlies record them,
+        so a row can show one executing the change, and the generator runs any
+        step VLLM_CI_ONLY_STEP_KEYS names, optional or not, ahead of its
+        optional check. Most confirmed selection leaks are optional evals that
+        ran the changed code on main and never on the PR, and only a row can
+        say so: on the 35-PR sweep with nightly vllm/ci #90897's record this
+        caught 14 of 19 optional leaks against none, for 1,055 optional jobs.
+        The goal is to retire the idea of optional steps and let selection
+        decide every one.
 
-        The subtractive direction needs no such filter, its population being
+        CI_SELECTOR_RECORD_OPTIONAL=0 restores the old filter.
+
+        The subtractive direction needs no such switch, its population being
         the map's selection, which holds no manual-only step.
         """
-        # CI_SELECTOR_RECORD_OPTIONAL=1 lifts the filter, an experiment and not
-        # a default: most confirmed selection leaks are optional evals that ran
-        # the changed code on main and never on the PR, and only a row can say
-        # so. The emitter would have to name them for them to run.
-        optional_ok = os.environ.get(RECORD_OPTIONAL_ENV) == "1"
+        optional_ok = os.environ.get(RECORD_OPTIONAL_ENV, "1") != "0"
         return [
             sid
             for sid, step in self.steps.items()

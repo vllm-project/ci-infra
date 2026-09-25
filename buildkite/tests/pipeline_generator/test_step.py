@@ -126,9 +126,7 @@ def test_selected_steps_support_label_generated_keys():
         (None, "multimodal-processor"),
     ],
 )
-def test_selected_steps_support_amd_mirror_keys(
-    fake_global_config, key, generated_key
-):
+def test_selected_steps_support_amd_mirror_keys(fake_global_config, key, generated_key):
     steps = [
         Step(label="AMD image", key="image-build-amd", commands=["build"]),
         Step(
@@ -151,9 +149,7 @@ def test_selected_steps_support_amd_mirror_keys(
         steps, frozenset({f"amd-{generated_key}"})
     )
     fake_global_config["only_step_keys"] = selected_keys
-    groups = buildkite_step.convert_group_step_to_buildkite_step(
-        group_steps(selected)
-    )
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(selected))
     generated_keys = [job.key for group in groups for job in group.steps]
 
     assert [step.key for step in selected] == [
@@ -163,6 +159,26 @@ def test_selected_steps_support_amd_mirror_keys(
     assert selected_keys == frozenset({"image-build-amd", f"amd-{generated_key}"})
     # The NVIDIA parent is neither emitted nor blocked; the mirror runs unblocked.
     assert generated_keys == ["image-build-amd", f"amd-{generated_key}"]
+
+
+def test_an_optional_step_named_by_the_selector_runs_unblocked(fake_global_config):
+    """The selector adds optional steps whose recording shows them running a
+    PR's change, and relies on this: a step VLLM_CI_ONLY_STEP_KEYS names runs,
+    optional or not. Blocked, it would be selected and still never run."""
+    steps = [
+        Step(
+            label="Nightly eval", key="nightly-eval", commands=["eval"], optional=True
+        ),
+        Step(label="Other", key="other", commands=["other"]),
+    ]
+    fake_global_config["only_step_keys"] = frozenset({"nightly-eval"})
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(steps))
+    emitted = [job for group in groups for job in group.steps]
+
+    assert [job.key for job in emitted] == ["nightly-eval"]
+    assert not any(
+        isinstance(job, buildkite_step.BuildkiteBlockStep) for job in emitted
+    )
 
 
 def test_a100_steps_are_not_emitted_but_amd_mirrors_are():

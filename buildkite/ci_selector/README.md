@@ -82,7 +82,7 @@ Run it after any change to selection. It exits 1 on a problem, and also when it 
 ci-validate leaks --repo /path/to/vllm
 ```
 
-Each leaked job scores as `selected` (in the emitted selection, so it runs), `optional reached` (a rule reached it, but the step is optional and the emitter leaves optional steps out; the generator would run it if named, so this is a policy choice), or `missed`. Today's rules score zero on this corpus by construction. Re-run it after any change to selection; the counts must never fall.
+Each leaked job scores as `selected` (in the emitted selection, so it runs), `optional reached` (a rule reached it, but the step is optional and the emitter leaves optional steps out; the generator would run it if named, so this is a policy choice), or `missed`. A record may add an optional step whose row shows it running the changed code, and such a step scores `selected`; `CI_SELECTOR_RECORD_OPTIONAL=0` turns that off. Today's rules score zero on this corpus by construction. Re-run it after any change to selection; the counts must never fall.
 
 ## Tests
 
