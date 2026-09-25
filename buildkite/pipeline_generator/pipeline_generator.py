@@ -14,9 +14,10 @@ from buildkite_step import (
     fnrec_collect_group,
     kernrec_collect_group,
     kernrec_enabled,
+    selector_shadow_group,
     create_precommit_group_step,
 )
-from recorder_switches import fnrec_enabled
+from recorder_switches import fnrec_enabled, selector_shadow_enabled
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
 
@@ -109,6 +110,11 @@ class PipelineGenerator:
             buildkite_group_steps.append(
                 BuildkiteGroupStep(group=COLLECT_GROUP, steps=collect)
             )
+
+        # The selector's shadow run: PR builds only, since main runs
+        # everything by design and is what the records are taken from.
+        if selector_shadow_enabled() and global_config["branch"] != "main":
+            buildkite_group_steps.append(selector_shadow_group())
 
         # Run pre-commit as a dedicated step in parallel with the image build.
         # Steps that depend on the image build also wait for pre-commit to pass.

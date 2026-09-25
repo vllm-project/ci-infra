@@ -733,6 +733,43 @@ def _collect_step(
     )
 
 
+SELECTOR_SHADOW_KEY = "ci-selector-shadow"
+SELECTOR_SHADOW_GROUP = "CI selector (shadow)"
+
+
+def selector_shadow_group() -> "BuildkiteGroupStep":
+    """The selector's shadow run on a PR build: what it would have run.
+
+    Gates nothing. It needs only the vLLM checkout, so it waits on nothing and
+    starts with the build; nothing may wait on it either, so a slow or broken
+    selector can never hold a test. soft_fail, so a crash shows up on the
+    build page without turning the build red. The payload writes its answer
+    as an artifact and an annotation, which `ci-validate shadow` reads back
+    against what the build really ran. Premerge agents cannot write S3, so
+    nothing is published.
+    """
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        f"{branch}/buildkite/ci_selector/shadow/run.sh"
+    )
+    step = BuildkiteCommandStep(
+        label=":crystal_ball: CI selector (shadow)",
+        key=SELECTOR_SHADOW_KEY,
+        env={"VLLM_CI_BRANCH": branch},
+        agents={"queue": AgentQueue.SMALL_CPU_PREMERGE.value},
+        commands=[
+            f'curl -sSfL --retry 3 --max-time 60 -o /tmp/ci-selector-shadow.sh "{url}"'
+            + " && bash /tmp/ci-selector-shadow.sh"
+        ],
+        soft_fail=True,
+        # One selection is a couple of minutes; the rest is uv, the clone and
+        # the records.
+        timeout_in_minutes=20,
+    )
+    return BuildkiteGroupStep(group=SELECTOR_SHADOW_GROUP, steps=[step])
+
+
 def _kernrec_finish_command() -> str:
     """Record the step's exit status in the recorder's sidecar, explicitly.
 
