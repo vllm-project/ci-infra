@@ -84,6 +84,24 @@ ci-validate leaks --repo /path/to/vllm
 
 Each leaked job scores as `selected` (in the emitted selection, so it runs), `optional reached` (a rule reached it, but the step is optional and the emitter leaves optional steps out; the generator would run it if named, so this is a policy choice), or `missed`. Today's rules score zero on this corpus by construction. Re-run it after any change to selection; the counts must never fall.
 
+### Shadow mode
+
+The selector running on real PR builds next to today's CI, gating nothing (DESIGN.md §8). Off unless the build has `VLLM_CI_SELECTOR_SHADOW=1`, set on the `ci` pipeline's environment for every PR build or on a single build's environment for a trial. On a non-main build the generator then adds one step, `ci-selector-shadow` (`:crystal_ball: CI selector (shadow)`): small premerge CPU queue, `soft_fail`, no dependencies, and nothing waits on it. It runs [`shadow/run.sh`](shadow/run.sh) from the generating branch (`VLLM_CI_BRANCH`, default `main`): merge-base of the PR head with vLLM main, the latest published records, `ci-select --emit-keys`. The answer lands as the `shadow/selection.json` artifact, with `shadow/selector.log`, and a `ci-selector-shadow` annotation.
+
+```
+VLLM_CI_SELECTOR_SHADOW=1
+VLLM_CI_BRANCH=<ci-infra branch>   # only to try an unmerged run.sh
+```
+
+Scoring finished builds needs a Buildkite token with `read_builds` and `read_artifacts`:
+
+```bash
+BUILDKITE_TOKEN=... ci-validate shadow --builds 91500 91501 --json-out shadow.json
+BUILDKITE_TOKEN=... ci-validate shadow --prs 55755 53280   # latest finished build of each head
+```
+
+Per build: jobs today ran against the ones the selection keeps, and each failure in a step it would skip as `flake` (passed on a retry in the same build), `pre-existing` (the same step key failed on a main build within `--window-hours`, default 48, of the PR's base commit), or `MISS`. `--repo` reads base commit times from a local checkout instead of `gh`. Kept steps' generator-added dependencies are not in the artifact, so a failure in one of those reads as would-skip: the count errs toward MISS. `shadow/test_run.sh` tests the payload under a mocked agent.
+
 ## Tests
 
 ```bash
