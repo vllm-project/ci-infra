@@ -7,6 +7,7 @@ Infrastructure-as-Code and bootstrap scripts for vLLM's continuous integration p
 ```
 ci-infra/
 ├── .buildkite/            # Scheduled Buildkite pipelines (e.g. daily AMI rebuild)
+├── .github/               # This repo's own GitHub Actions workflows
 ├── buildkite/             # Bootstrap scripts, pipeline generation, and build helpers
 │   ├── bootstrap-amd.sh   # AMD/ROCm CI entry point
 │   ├── bootstrap-intel.sh # Intel CI entry point
@@ -24,6 +25,7 @@ ci-infra/
 ├── infra-k8s/             # Kubernetes-based Buildkite agent deployment
 ├── github/                # GitHub Actions runner groups (Neural Magic, IBM)
 ├── claude-skills/         # Portable CI automations and investigation skills
+├── scripts/               # Host maintenance helpers (MIG setup, GPU reporter)
 └── usage-stats/           # Usage telemetry collection (Vector)
 ```
 
@@ -214,18 +216,21 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 
 ### Key Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `VLLM_CI_BRANCH` | ci-infra branch to use for templates (default: `main`) |
-| `RUN_ALL` | Force all tests to run |
-| `SKIP_TIMEOUT` | Omit configured step timeouts from Python-generated pipelines when set to `1` |
-| `NIGHTLY` | Include optional nightly tests |
-| `VLLM_USE_PRECOMPILED` | Use precompiled wheels (`1`) or build from source (`0`) |
-| `COV_ENABLED` | Enable pytest coverage collection and Codecov upload |
-| `DOCS_ONLY_DISABLE` | Skip docs-only detection (always run CI) |
-| `AMD_MIRROR_HW` | AMD hardware mirror target (default: `amdproduction`) |
-| `NOAUTO` | Set to `1` to gate all steps behind manual approval blocks |
-| `PRIORITY` | Set to `HIGH` for high-priority pipeline scheduling |
+| Variable                 | Default         | Description                                                                                                                                   |
+|--------------------------|-----------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `VLLM_CI_BRANCH`         | `main`          | ci-infra branch to use for templates and generator code                                                                                       |
+| `RUN_ALL`                | `0`             | Force all tests with `1`; also enabled by critical changes, `TORCH_NIGHTLY`, or the `ready-run-all-tests` label                               |
+| `SKIP_TIMEOUT`           | Not set         | Omit configured step timeouts from Python-generated pipelines when set to `1`; otherwise retain them                                          |
+| `NIGHTLY`                | `0`             | Include optional nightly tests with `1`; may also be enabled by PR labels or AMD-specific changes                                             |
+| `TORCH_NIGHTLY`          | `0`             | Build against PyTorch nightly and force the full test suite when set to `1`                                                                   |
+| `VLLM_USE_PRECOMPILED`   | Automatic       | Bootstrap selects precompiled wheels when eligible or source builds when required; the HCL fallback is `0`                                    |
+| `COV_ENABLED`            | `0`             | Enable pytest coverage collection and Codecov upload when set to `1`                                                                          |
+| `DOCS_ONLY_DISABLE`      | `0`             | Disable docs-only detection and always run CI when set to `1`                                                                                 |
+| `AMD_MIRROR_HW`          | `amdproduction` | AMD hardware mirror target; the legacy fastcheck path overrides it with `amdtentative`                                                        |
+| `NOAUTO`                 | Not set         | Gate all steps behind manual approval blocks when set to `1`; otherwise use automatic test selection                                          |
+| `PRIORITY`               | Not set         | Assign priority `1000` when set to `HIGH`; otherwise use priority `0`                                                                         |
+| `CONTINUE_ON_FAILURE`    | Not set         | Run every command in a step and exit with the aggregate status when set to `1`, instead of stopping at the first failure                      |
+| `VLLM_CI_ONLY_STEP_KEYS` | Not set         | JSON array of step keys; emit only those steps and their transitive dependencies, ignoring file-based selection. Unknown keys fail generation |
 
 ### Pre-commit Hooks
 
