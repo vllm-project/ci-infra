@@ -135,10 +135,17 @@ def select_for_pr(
     gh=None,
 ) -> PrSelection:
     data = _gh_pr(pr)
-    base, head = _resolve_range(repo, pr, data, _upstream_remote(repo, remote))
+    upstream = _upstream_remote(repo, remote)
+    # The range is merge-base(head, <upstream>/main), so a stale local main puts
+    # every main commit between it and the PR's real branch point into the diff.
+    # On 2026-09-25 a clone a day behind turned 10 of 11 PRs of one to three
+    # files into "run everything" through the pyproject.toml in that drift.
+    _fetch_main(repo, upstream)
+    base, head = _resolve_range(repo, pr, data, upstream)
     if base is None:
         raise RuntimeError(f"PR #{pr} is {data['state']} with no head to select for")
     paths = changed_paths(diff_files(repo, base, head))
+    check_drift(pr, len(set(paths)), _changed_files(pr))
     state = state_for(repo, base)
     sel = select(state, paths, base=base, head=head)
     today = today_select([(p.config, p.steps) for p in state.pipelines], paths)
@@ -216,6 +223,50 @@ def select_for_pr(
         records=records,
         results=outcome,
     )
+
+
+def _fetch_main(repo: Path, remote: str) -> None:
+    got = subprocess.run(
+        ["git", "-C", str(repo), "fetch", "-q", remote, GH_DEFAULT_BRANCH],
+        capture_output=True,
+        text=True,
+    )
+    if got.returncode:
+        # Not fatal by itself: check_drift catches a main stale enough to matter.
+        print(
+            f"warning: could not fetch {remote}/{GH_DEFAULT_BRANCH}: {got.stderr.strip()}",
+            file=sys.stderr,
+        )
+
+
+def _changed_files(pr: int) -> int | None:
+    try:
+        return int(
+            _gh(
+                "pr",
+                "view",
+                str(pr),
+                "--repo",
+                GH_REPO,
+                "--json",
+                "changedFiles",
+                "--jq",
+                ".changedFiles",
+            )
+        )
+    except (subprocess.CalledProcessError, ValueError):
+        return None
+
+
+def check_drift(pr: int, local: int, github: int | None) -> None:
+    """Refuse a diff far bigger than the PR. A rename counts twice locally, so
+    some slack; main drift is hundreds of files, not a handful."""
+    if github is not None and local > 2 * github + 5:
+        raise RuntimeError(
+            f"PR #{pr}: the local diff has {local} files but GitHub says the PR "
+            f"changes {github}. The clone's main is probably behind the PR's "
+            "branch point; fetch it and rerun. Not posting a comparison of main drift."
+        )
 
 
 def _tested_base(repo: Path, pr: int, data: dict, remote: str) -> str | None:

@@ -262,3 +262,44 @@ def test_the_results_section_names_misses_and_pre_existing_failures():
 def test_no_failures_reads_as_nothing_to_judge():
     body = render(_selection(results=Results(passed=3, checked_at="now")))
     assert "No failures to judge." in body
+
+
+# ---- the PR's range: main is fetched first, and drift is refused ------------
+
+import pytest  # noqa: E402
+
+from ci_selector import pr_comment  # noqa: E402
+from ci_selector.pr_comment import check_drift  # noqa: E402
+
+
+def test_drift_far_beyond_the_pr_is_refused():
+    check_drift(1, 5, 3)  # renames count twice locally: fine
+    check_drift(1, 400, None)  # GitHub unreachable: nothing to compare with
+    with pytest.raises(RuntimeError, match="main is probably behind"):
+        check_drift(1, 400, 2)
+
+
+def test_main_is_fetched_before_the_range_is_resolved(monkeypatch, tmp_path):
+    """2026-09-25: a clone a day behind put a day of main into every diff."""
+    calls = []
+    monkeypatch.setattr(pr_comment, "_gh_pr", lambda pr: {"state": "OPEN"})
+    monkeypatch.setattr(pr_comment, "_upstream_remote", lambda repo, r: "origin")
+    monkeypatch.setattr(
+        pr_comment, "_fetch_main", lambda repo, remote: calls.append("fetch")
+    )
+
+    def resolve(repo, pr, data, remote):
+        calls.append("resolve")
+        return "b" * 40, "h" * 40
+
+    monkeypatch.setattr(pr_comment, "_resolve_range", resolve)
+    monkeypatch.setattr(pr_comment, "diff_files", lambda repo, b, h: None)
+    monkeypatch.setattr(
+        pr_comment, "changed_paths", lambda d: [f"f{i}.py" for i in range(300)]
+    )
+    monkeypatch.setattr(pr_comment, "_changed_files", lambda pr: 2)
+    with pytest.raises(
+        RuntimeError, match="300 files but GitHub says the PR changes 2"
+    ):
+        pr_comment.select_for_pr(tmp_path, 1)
+    assert calls == ["fetch", "resolve"]
