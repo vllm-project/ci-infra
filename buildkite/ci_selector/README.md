@@ -67,7 +67,10 @@ For a vLLM pull request, `ci-select pr` prints what the selector would run next 
 ```bash
 ci-select pr 55755 --repo /path/to/vllm          # print the comment
 ci-select pr 55755 --repo /path/to/vllm --post   # post or update it on the PR
+ci-select pr 55755 --repo /path/to/vllm --results --post --json-out ledger.jsonl
 ```
+
+`--results`, once the PR's CI has run, adds every failed job and whether the selector would have run it. A failed job it would skip is checked against main's statuses near the commit the PR branched from, stopping before the PR's own merge, so a failure main already had reads as pre-existing rather than as a miss. GitHub statuses only; no Buildkite token. `--json-out` appends one line per run for tallying a trial across PRs.
 
 ### Crosscheck
 

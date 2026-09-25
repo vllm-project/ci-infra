@@ -8,6 +8,12 @@ post; `--post` puts it on the pull request, editing its own earlier comment
 
 The comparison is against today's rules, through the same replica of the
 generator the crosscheck scores against, at the PR's merge base.
+
+`--results`, once the PR's CI has run, adds what happened: every failed job,
+and whether the selector would have run it. A failed job it would have skipped
+is checked against main's statuses around the PR's base, so a failure main
+already had reads as pre-existing, not as a miss. GitHub statuses only; no
+Buildkite token.
 """
 
 from __future__ import annotations
@@ -15,19 +21,43 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .codemap.classify import select
-from .codemap.worktree import state_for
+from .codemap.pipeline.match import match_jobs
+from .codemap.worktree import git_out, state_for
 from .coverage.source import fetch_kernel_evidence, fetch_table
 from .decide import decide
 from .gitdiff import changed_paths, diff_files
 from .handwritten import IMAGE_BUILD_KEY_PREFIX, PR_PIPELINE
-from .validate.crosscheck import GH_REPO, _gh_pr, _resolve_range, _upstream_remote
+from .validate.crosscheck import (
+    BUILDKITE_CONTEXT_PREFIX,
+    GH_DEFAULT_BRANCH,
+    GH_PR_REFSPEC,
+    GH_REPO,
+    GH_STATE_FAILED,
+    NON_STEP_CONTEXTS,
+    _gh_pr,
+    _resolve_range,
+    _upstream_remote,
+)
 from .validate.generator_replica import today_select
 
 MARKER = "<!-- ci-selector-shadow -->"
+EXPLAINER = "https://github.com/vllm-project/ci-infra/tree/main/buildkite/ci_selector"
+# Main builds post each job as `buildkite/ci/<slug>`; PR builds as
+# `buildkite/ci/pr/<slug>`, with the same slug.
+MAIN_CONTEXT_PREFIX = "buildkite/ci/"
+# Main commits whose statuses are read for a pre-existing failure: the ones
+# nearest the main commit the PR's head branched from, since PR CI builds the
+# head as is and so tests that tree. Not the selection's base: for a merged PR
+# that is main at merge time, which can already carry the fix. vllm#55755's
+# head predated both fixes its failures needed; its merge base was one of them.
+MAIN_WINDOW_BEFORE = timedelta(hours=12)
+MAIN_WINDOW_AFTER = timedelta(hours=36)
+MAIN_COMMITS = 40
 # The generator's DeviceType.A100: the fleet is retired and only AMD mirrors
 # of those steps are still emitted.
 RETIRED_DEVICE = "a100"
@@ -74,10 +104,35 @@ class PrSelection:
     # (name, mirror) -> "kernel record" / "Python record" for record adds
     added_by: dict[tuple[str, str], str] = field(default_factory=dict)
     records: list[str] = field(default_factory=list)
+    results: Results | None = None
+
+
+@dataclass
+class FailedJob:
+    slug: str
+    # "ran": the selector would run it; "skipped": it would not; "unmapped":
+    # no step explains the job, so neither side can be judged
+    verdict: str
+    # main commits (short) where the same job failed, for a skipped one
+    main_failing: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Results:
+    passed: int = 0
+    pending: int = 0
+    failed: list[FailedJob] = field(default_factory=list)
+    checked_at: str = ""
 
 
 def select_for_pr(
-    repo: Path, pr: int, remote: str | None = None, table=None, kernels=None
+    repo: Path,
+    pr: int,
+    remote: str | None = None,
+    table=None,
+    kernels=None,
+    results: bool = False,
+    gh=None,
 ) -> PrSelection:
     data = _gh_pr(pr)
     base, head = _resolve_range(repo, pr, data, _upstream_remote(repo, remote))
@@ -132,6 +187,18 @@ def select_for_pr(
     else:
         kern = f"kernel record: {d.kernel_pair}"
     records = [py, kern]
+    outcome = None
+    if results:
+        tested = _tested_base(repo, pr, data, _upstream_remote(repo, remote)) or base
+        merge = (data.get("mergeCommit") or {}).get("oid")
+        outcome = ci_results(
+            data,
+            [steps[i] for i in f_ids],
+            list(steps.values()),
+            _commit_time(repo, tested),
+            gh or _gh,
+            merged_at=_commit_time(repo, merge) if merge else None,
+        )
     return PrSelection(
         pr=pr,
         title=data.get("title", ""),
@@ -147,7 +214,138 @@ def select_for_pr(
         docs_only=today.docs_only,
         added_by=added_by,
         records=records,
+        results=outcome,
     )
+
+
+def _tested_base(repo: Path, pr: int, data: dict, remote: str) -> str | None:
+    """The main commit the PR's head branched from: the tree its CI tested."""
+    head = data.get("headRefOid")
+    if not head:
+        return None
+    try:
+        git_out(repo, "cat-file", "-e", head)
+    except Exception:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "fetch",
+                "-q",
+                remote,
+                GH_PR_REFSPEC.format(pr=pr),
+            ],
+            capture_output=True,
+        )
+    try:
+        return git_out(
+            repo, "merge-base", head, f"{remote}/{GH_DEFAULT_BRANCH}"
+        ).strip()
+    except Exception:
+        return None
+
+
+def _commit_time(repo: Path, sha: str) -> datetime:
+    return datetime.fromisoformat(
+        git_out(repo, "show", "-s", "--format=%cI", sha).strip()
+    )
+
+
+def ran_on_pr(data: dict) -> dict[str, str]:
+    """job slug -> state, from the PR's Buildkite status contexts."""
+    ran = {}
+    for c in data.get("statusCheckRollup") or []:
+        ctx = c.get("context") or c.get("name") or ""
+        if ctx.startswith(BUILDKITE_CONTEXT_PREFIX):
+            slug = ctx[len(BUILDKITE_CONTEXT_PREFIX) :]
+            if slug not in NON_STEP_CONTEXTS:
+                ran[slug] = c.get("state") or c.get("conclusion") or ""
+    return ran
+
+
+def ci_results(
+    data, selected_steps, all_steps, base_time, gh, merged_at=None
+) -> Results:
+    """What the PR's CI did, against what the selector would have run."""
+    ran = ran_on_pr(data)
+    failed = {r: st for r, st in ran.items() if st in GH_STATE_FAILED}
+    out = Results(
+        passed=sum(st == "SUCCESS" for st in ran.values()),
+        pending=sum(st in ("PENDING", "EXPECTED", "") for st in ran.values()),
+        checked_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+    )
+    kept, not_kept, _ = match_jobs(failed, selected_steps)
+    _, unmapped, _ = match_jobs(dict(not_kept), all_steps)
+    skipped = sorted(r for r in not_kept if r not in unmapped)
+    on_main = main_failures(skipped, base_time, gh, merged_at) if skipped else {}
+    out.failed = (
+        [FailedJob(r, "ran") for r in sorted(kept)]
+        + [FailedJob(r, "skipped", on_main.get(r, [])) for r in skipped]
+        + [FailedJob(r, "unmapped") for r in sorted(unmapped)]
+    )
+    return out
+
+
+def _pages(raw: str) -> list:
+    """`gh api --paginate` prints one JSON array per page, back to back."""
+    items, decoder, i, raw = [], json.JSONDecoder(), 0, raw.strip()
+    while i < len(raw):
+        page, i = decoder.raw_decode(raw, i)
+        items.extend(page)
+        while i < len(raw) and raw[i].isspace():
+            i += 1
+    return items
+
+
+def main_failures(
+    slugs, base_time: datetime, gh, merged_at: datetime | None = None
+) -> dict[str, list[str]]:
+    """slug -> short shas of main commits whose latest status for that job is a
+    failure, in a window around the PR's base.
+
+    For a merged PR the window stops before its merge commit: main after the
+    merge carries the PR's own change, so a failure the PR caused would fail
+    there too and read as pre-existing.
+    """
+    since = (base_time - MAIN_WINDOW_BEFORE).astimezone(timezone.utc)
+    until = min(base_time + MAIN_WINDOW_AFTER, datetime.now(timezone.utc))
+    if merged_at is not None:
+        until = min(until, merged_at - timedelta(seconds=1))
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    listed = _pages(
+        gh(
+            "api",
+            "--paginate",
+            f"repos/{GH_REPO}/commits?sha=main&per_page=100"
+            f"&since={since.strftime(fmt)}&until={until.astimezone(timezone.utc).strftime(fmt)}",
+        )
+    )
+
+    def distance(c) -> float:
+        when = datetime.fromisoformat(
+            c["commit"]["committer"]["date"].replace("Z", "+00:00")
+        )
+        return abs((when - base_time).total_seconds())
+
+    shas = [c["sha"] for c in sorted(listed, key=distance)[:MAIN_COMMITS]]
+    wanted = {MAIN_CONTEXT_PREFIX + s: s for s in slugs}
+    hits: dict[str, list[str]] = {}
+    for sha in shas:
+        statuses = _pages(
+            gh(
+                "api",
+                "--paginate",
+                f"repos/{GH_REPO}/commits/{sha}/statuses?per_page=100",
+            )
+        )
+        latest: dict[str, str] = {}
+        for st in statuses:  # newest first, so the first per context is its state
+            latest.setdefault(st.get("context", ""), st.get("state", ""))
+        for ctx, slug in wanted.items():
+            if latest.get(ctx) in ("failure", "error"):
+                hits.setdefault(slug, []).append(sha[:10])
+    return hits
 
 
 def _line(v: StepView, note: str = "") -> str:
@@ -194,7 +392,11 @@ def render(s: PrSelection) -> str:
         head,
         "",
         "Shadow mode: this changes nothing about what CI runs. It shows what the "
-        "evidence-based selector would pick for this PR, next to today's rules.",
+        "evidence-based selector would pick for this PR, next to today's rules. "
+        f"[How it works]({EXPLAINER}).",
+        "",
+        "**Feedback welcome:** reply here if it would skip a step this change "
+        "needs, or runs something unrelated.",
         "",
         "| steps (jobs) | Today's rules | Selector | Would skip | Would add |",
         "|---|---|---|---|---|",
@@ -225,11 +427,85 @@ def render(s: PrSelection) -> str:
             note=lambda v: s.added_by.get(key(v), "code map"),
         ),
         "",
+        *(_render_results(s.results) if s.results else []),
         f"<sub>{s.files} changed files · base `{s.base[:10]}` · head `{s.head[:10]}` · "
         f"{' · '.join(s.records)} · not counted: {s.plumbing} build steps, "
         f"{s.never_emitted} A100 steps the generator no longer emits</sub>",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _render_results(r: Results) -> list[str]:
+    ran = [f for f in r.failed if f.verdict == "ran"]
+    skipped = [f for f in r.failed if f.verdict == "skipped"]
+    unmapped = [f for f in r.failed if f.verdict == "unmapped"]
+    misses = [f for f in skipped if not f.main_failing]
+    lines = [
+        f"#### CI results ({r.checked_at})",
+        "",
+        f"{r.passed} passed, {len(r.failed)} failed, {r.pending} pending.",
+    ]
+    if r.pending:
+        lines.append("CI is still running; the picture below is not final.")
+    if not r.failed:
+        lines += ["", "No failures to judge.", ""]
+        return lines
+    if misses:
+        verdict = f"**{len(misses)} possible miss(es):** failed here, the selector would have skipped them, and main was not failing them."
+    elif skipped:
+        verdict = "No misses: every failed job the selector would skip was also failing on main."
+    else:
+        verdict = "No misses: the selector would have run every failed job."
+    lines += ["", verdict, ""]
+    for f in ran:
+        lines.append(f"- `{f.slug}`: selector runs it")
+    for f in skipped:
+        if f.main_failing:
+            shas = ", ".join(f"`{x}`" for x in f.main_failing[:3])
+            lines.append(
+                f"- `{f.slug}`: selector would skip it; also failing on main ({shas}), pre-existing"
+            )
+        else:
+            lines.append(
+                f"- `{f.slug}`: **selector would skip it; not failing on main**"
+            )
+    for f in unmapped:
+        lines.append(f"- `{f.slug}`: no step matches this job, not judged")
+    lines.append("")
+    return lines
+
+
+def ledger_record(s: PrSelection) -> dict:
+    """One JSON line per run, for tallying the trial across PRs."""
+    key = lambda v: (v.name, v.mirror)  # noqa: E731
+    sel = {key(v) for v in s.selector}
+    today = {key(v) for v in s.today}
+    main = lambda vs: [v for v in vs if not v.mirror]  # noqa: E731
+    jobs = lambda vs: sum(v.jobs for v in vs)  # noqa: E731
+    rec = {
+        "pr": s.pr,
+        "title": s.title,
+        "base": s.base,
+        "head": s.head,
+        "files": s.files,
+        "run_all": s.run_all,
+        "today_steps": len(main(s.today)),
+        "today_jobs": jobs(main(s.today)),
+        "selector_steps": len(main(s.selector)),
+        "selector_jobs": jobs(main(s.selector)),
+        "would_skip": sorted(v.name for v in main(s.today) if key(v) not in sel),
+        "would_add": sorted(v.name for v in main(s.selector) if key(v) not in today),
+        "records": s.records,
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    if s.results:
+        rec["results"] = asdict(s.results)
+        rec["possible_misses"] = [
+            f.slug
+            for f in s.results.failed
+            if f.verdict == "skipped" and not f.main_failing
+        ]
+    return rec
 
 
 def _gh(*args: str, input_text: str | None = None) -> str:
@@ -245,18 +521,7 @@ def post(pr: int, body: str, gh=_gh) -> str:
     marker is edited, so nobody else's comment is ever touched.
     """
     login = gh("api", "user", "--jq", ".login").strip()
-    raw = gh("api", "--paginate", f"repos/{GH_REPO}/issues/{pr}/comments")
-    # --paginate concatenates one JSON array per page
-    comments = []
-    decoder = json.JSONDecoder()
-    i = 0
-    raw = raw.strip()
-    while i < len(raw):
-        page, j = decoder.raw_decode(raw, i)
-        comments.extend(page)
-        i = j
-        while i < len(raw) and raw[i].isspace():
-            i += 1
+    comments = _pages(gh("api", "--paginate", f"repos/{GH_REPO}/issues/{pr}/comments"))
     mine = [
         c
         for c in comments
@@ -305,10 +570,20 @@ def run(args) -> int:
         refresh_records()
     table = fetch_table(args.table)
     kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
-    result = select_for_pr(repo, args.number, args.remote, table=table, kernels=kernels)
+    result = select_for_pr(
+        repo,
+        args.number,
+        args.remote,
+        table=table,
+        kernels=kernels,
+        results=args.results,
+    )
     body = render(result)
     if args.out:
         Path(args.out).write_text(body)
+    if args.json_out:
+        with open(args.json_out, "a") as f:
+            f.write(json.dumps(ledger_record(result)) + "\n")
     if not args.post:
         print(body)
         return 0
@@ -323,6 +598,14 @@ def add_args(p) -> None:
         "--post", action="store_true", help="post (or update) the comment on the PR"
     )
     p.add_argument("--out", help="also write the comment body to this file")
+    p.add_argument(
+        "--results",
+        action="store_true",
+        help="add the PR's CI outcome: failed jobs, and whether the selector would have run them",
+    )
+    p.add_argument(
+        "--json-out", help="append one JSON line per run to this ledger file"
+    )
     p.add_argument("--remote", help="git remote for vllm-project/vllm (auto-detected)")
     p.add_argument(
         "--no-fetch",
