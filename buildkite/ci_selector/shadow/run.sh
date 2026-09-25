@@ -121,12 +121,12 @@ rec_lines=()
 if line="$(sel ci-fetch-function-record --out "${WORK}/rec" 2>&1)"; then
   records+=(--table "${WORK}/rec/table.json.gz")
 fi
-rec_lines+=("$(printf '%s' "${line}" | tail -1)")
+rec_lines+=("$(printf '%s' "${line}" | tail -1 | sed 's/ -> .*//')")
 if line="$(sel ci-fetch-kernel-record --out "${WORK}/rec" 2>&1)"; then
   records+=(--kernel-table "${WORK}/rec/kernel_table.json.gz"
     --kernel-symbol-map "${WORK}/rec/kernel_symbol_map.json.gz")
 fi
-rec_lines+=("$(printf '%s' "${line}" | tail -1)")
+rec_lines+=("$(printf '%s' "${line}" | tail -1 | sed 's/ -> .*//')")
 printf '%s\n' "${rec_lines[@]}"
 # Without a table argument ci-select would fall back to its own coverage-data/,
 # which is not what the fetch just said.

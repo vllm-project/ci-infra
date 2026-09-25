@@ -112,6 +112,7 @@ EOF
     grep -q -- "--table .*/rec/table.json.gz --kernel-table .*/rec/kernel_table.json.gz" "$T/select.args" \
       || { verdict=FAIL; fail=1; echo "      records not passed"; }
     grep -q "e33de821c0" "$T/annotation.md" || { verdict=FAIL; fail=1; echo "      record commit not annotated"; }
+    grep -q -- "-> " "$T/annotation.md" && { verdict=FAIL; fail=1; echo "      a local path leaked into the annotation"; }
     [[ -f "$T/artifacts/selector.log" ]] || { verdict=FAIL; fail=1; echo "      no selector.log artifact"; }
   fi
   if [[ "$mode" == shallow ]]; then
