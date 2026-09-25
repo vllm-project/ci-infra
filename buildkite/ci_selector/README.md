@@ -97,17 +97,23 @@ Each leaked job scores as `selected` (in the emitted selection, so it runs), `op
 ## Tests
 
 ```bash
-# All tests. VLLM_REPO is required; VLLM_PIN holds the commit we are green against.
-VLLM_REPO=/path/to/vllm uv run pytest tests -q
+# All tests, against the commit in VLLM_PIN.
+uv run pytest tests -q
 
 # Just the drift guards: the ones that fail when vLLM moved under us, or the
 # generator beside us did, rather than when our code is wrong.
-VLLM_REPO=/path/to/vllm uv run pytest tests -m drift -q
+uv run pytest tests -m drift -q
+
+# Against a checkout of your own, read as it is. This is how drift against a
+# newer vLLM gets found.
+VLLM_REPO=/path/to/vllm uv run pytest tests -q
 ```
 
-A `drift` failure means a hardcoded fact went stale. Usually the fix is editing `handwritten.py` or teaching a parser; for one of the values we re-export from the generator, it is editing the generator's own `amd.py`. `VLLM_REPO=/path/to/vllm pytest tests -m drift --collect-only -q` lists what is watched.
+The suite clones vLLM once into `~/.cache/vllm-ci-selector/vllm` and keeps it at the pin, so a run does not depend on what your own checkout is sitting at, and never touches it. `VLLM_REF` points that clone at another commit, `CI_SELECTOR_VLLM_CLONE` moves it, and `VLLM_REPO` bypasses it. Every run says which one it read, and says so again if it was not the pin.
 
-`tests/` covers the code map and needs a real vLLM checkout, named by `VLLM_REPO`. `tests/coverage/` covers the coverage half and builds throwaway repos, so it needs nothing.
+A `drift` failure means a hardcoded fact went stale. Usually the fix is editing `handwritten.py` or teaching a parser; for one of the values we re-export from the generator, it is editing the generator's own `amd.py`. `pytest tests -m drift --collect-only -q` lists what is watched.
+
+`tests/` covers the code map and reads a real vLLM checkout. `tests/coverage/` covers the coverage half and builds throwaway repos, so it needs nothing.
 
 ## The pin
 
@@ -115,4 +121,4 @@ A `drift` failure means a hardcoded fact went stale. Usually the fix is editing 
 
 **It only ever moves as part of a repair.** Teach the parser, then advance the pin, in one commit. A bump on its own is a claim nobody checked, and it silently turns a guard that was protecting you into one that is just green.
 
-It has to be a commit reachable in `vllm-project/vllm`, because CI clones that repo and checks it out.
+It has to be a commit reachable in `vllm-project/vllm`, because CI and the suite both clone that repo and check it out.
