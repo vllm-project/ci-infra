@@ -127,3 +127,138 @@ def test_build_steps_and_retired_a100_steps_are_not_counted():
         "the AMD mirror of an A100 step is still emitted"
     )
     assert not_counted(_step("kernels-core-operation-test")) == ""
+
+
+# ---- --results: the PR's CI outcome against the selection -----------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from ci_selector.pr_comment import (  # noqa: E402
+    FailedJob,
+    Results,
+    ci_results,
+    ledger_record,
+    main_failures,
+)
+
+
+def _job_step(key):
+    return SimpleNamespace(
+        step_id=f"vllm_ci:{key}",
+        key=key,
+        label=key,
+        mirror_hw=None,
+        mirror_label=None,
+        device=None,
+    )
+
+
+def _pr_data(**states):
+    return {
+        "statusCheckRollup": [
+            {"context": f"buildkite/ci/pr/{slug}", "state": st}
+            for slug, st in states.items()
+        ]
+        + [{"context": "buildkite/ci/pr/bootstrap", "state": "FAILURE"}]
+    }
+
+
+BASE = datetime(2026, 9, 8, 3, 0, tzinfo=timezone.utc)
+
+
+class MainGh:
+    """Main's commit list and per-commit statuses, newest status first."""
+
+    def __init__(self, commits, statuses):
+        self.commits = commits  # [(sha, datetime)]
+        self.statuses = statuses  # sha -> [(context, state)], newest first
+        self.urls = []
+
+    def __call__(self, *args, input_text=None):
+        url = args[-1]
+        self.urls.append(url)
+        if "/commits?" in url:
+            return json.dumps(
+                [
+                    {"sha": sha, "commit": {"committer": {"date": when.isoformat()}}}
+                    for sha, when in self.commits
+                ]
+            )
+        sha = url.split("/commits/")[1].split("/")[0]
+        return json.dumps(
+            [{"context": c, "state": s} for c, s in self.statuses.get(sha, [])]
+        )
+
+
+def test_failed_jobs_are_split_by_what_the_selector_would_run():
+    data = _pr_data(kept="FAILURE", dropped="FAILURE", odd="FAILURE", fine="SUCCESS")
+    gh = MainGh([("m1" * 20, BASE)], {"m1" * 20: [("buildkite/ci/dropped", "failure")]})
+    r = ci_results(
+        data,
+        [_job_step("kept")],
+        [_job_step("kept"), _job_step("dropped"), _job_step("fine")],
+        BASE,
+        gh,
+    )
+    got = {f.slug: (f.verdict, f.main_failing) for f in r.failed}
+    assert got == {
+        "kept": ("ran", []),
+        "dropped": ("skipped", ["m1m1m1m1m1"]),
+        "odd": ("unmapped", []),
+    }, "bootstrap is not a step, and a job no step explains is not judged"
+    assert (r.passed, r.pending) == (1, 0)
+
+
+def test_only_the_latest_main_status_counts():
+    """A job that failed on main and then passed on a rerun is not failing."""
+    gh = MainGh(
+        [("a" * 40, BASE)],
+        {"a" * 40: [("buildkite/ci/x", "success"), ("buildkite/ci/x", "failure")]},
+    )
+    assert main_failures(["x"], BASE, gh) == {}
+
+
+def test_main_after_the_merge_is_never_read():
+    """Main after the merge carries the PR's change; a failure it caused would
+    read as pre-existing there."""
+    merged = BASE + timedelta(hours=2)
+    gh = MainGh([], {})
+    main_failures(["x"], BASE, gh, merged_at=merged)
+    (listing,) = [u for u in gh.urls if "/commits?" in u]
+    assert "until=2026-09-08T04:59:59Z" in listing
+
+
+def test_the_nearest_main_commits_are_the_ones_read():
+    commits = [(f"{i:040d}", BASE + timedelta(hours=i)) for i in range(60)]
+    gh = MainGh(commits, {})
+    main_failures(["x"], BASE, gh)
+    read = [u for u in gh.urls if "/statuses" in u]
+    assert len(read) == 40
+    assert any(f"{0:040d}" in u for u in read), "the base's own commit is read"
+    assert not any(f"{59:040d}" in u for u in read), "the farthest is not"
+
+
+def test_the_results_section_names_misses_and_pre_existing_failures():
+    s = _selection(
+        results=Results(
+            passed=10,
+            failed=[
+                FailedJob("kept", "ran"),
+                FailedJob("old", "skipped", ["abc1234567"]),
+                FailedJob("new", "skipped"),
+            ],
+            checked_at="now",
+        )
+    )
+    body = render(s)
+    assert "**1 possible miss(es):**" in body
+    assert "`old`: selector would skip it; also failing on main (`abc1234567`)" in body
+    assert "`new`: **selector would skip it; not failing on main**" in body
+    rec = ledger_record(s)
+    assert rec["possible_misses"] == ["new"]
+    assert rec["selector_steps"] == 2 and rec["today_steps"] == 2
+
+
+def test_no_failures_reads_as_nothing_to_judge():
+    body = render(_selection(results=Results(passed=3, checked_at="now")))
+    assert "No failures to judge." in body
