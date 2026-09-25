@@ -1,0 +1,16 @@
+{
+ "status": "ok",
+ "omit": true,
+ "reason": "run-all: setup.py changed",
+ "emitted": 0,
+ "kept": 2,
+ "keys": [],
+ "unnameable": [],
+ "env": {},
+ "base": "5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed",
+ "head": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeeabcd",
+ "seconds": 71,
+ "records": [
+  "function record for e33de821c0 (build 91049): 390 step rows -> /tmp/rec"
+ ]
+}

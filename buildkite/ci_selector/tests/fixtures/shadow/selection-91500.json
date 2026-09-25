@@ -1,0 +1,19 @@
+{
+ "status": "ok",
+ "omit": false,
+ "reason": "",
+ "emitted": 2,
+ "kept": 2,
+ "keys": [
+  "kernels-core",
+  "models-basic"
+ ],
+ "unnameable": [],
+ "env": {},
+ "base": "5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed",
+ "head": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeeabcd",
+ "seconds": 71,
+ "records": [
+  "function record for e33de821c0 (build 91049): 390 step rows -> /tmp/rec"
+ ]
+}

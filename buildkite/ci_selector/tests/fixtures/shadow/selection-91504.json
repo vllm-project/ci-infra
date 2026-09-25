@@ -1,0 +1,6 @@
+{
+ "status": "no-base",
+ "reason": "no merge-base between c0ffee and vLLM main",
+ "base": null,
+ "head": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeeabcd"
+}

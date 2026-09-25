@@ -1,0 +1,173 @@
+{
+ "number": 91503,
+ "state": "running",
+ "branch": "someone:fix",
+ "commit": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeeabcd",
+ "created_at": "2026-09-05T11:30:00Z",
+ "web_url": "https://buildkite.com/vllm/ci/builds/91500",
+ "pull_request": {
+  "id": "2"
+ },
+ "jobs": [
+  {
+   "id": "wait-1",
+   "type": "waiter"
+  },
+  {
+   "id": "image-build-None-2026-09-05T11:00:00Z",
+   "type": "script",
+   "step_key": "image-build",
+   "name": "image-build",
+   "state": "passed",
+   "started_at": "2026-09-05T11:00:00Z",
+   "parallel_group_index": null,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#image-build"
+  },
+  {
+   "id": "image-build-amd-None-2026-09-05T11:00:00Z",
+   "type": "script",
+   "step_key": "image-build-amd",
+   "name": "image-build-amd",
+   "state": "failed",
+   "started_at": "2026-09-05T11:00:00Z",
+   "parallel_group_index": null,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#image-build-amd"
+  },
+  {
+   "id": "ci-selector-shadow-None-2026-09-05T12:00:00Z",
+   "type": "script",
+   "step_key": "ci-selector-shadow",
+   "name": "ci-selector-shadow",
+   "state": "passed",
+   "started_at": "2026-09-05T12:00:00Z",
+   "parallel_group_index": null,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#ci-selector-shadow"
+  },
+  {
+   "id": "kernels-core-None-2026-09-05T12:00:00Z",
+   "type": "script",
+   "step_key": "kernels-core",
+   "name": "kernels-core",
+   "state": "failed",
+   "started_at": "2026-09-05T12:00:00Z",
+   "parallel_group_index": null,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#kernels-core"
+  },
+  {
+   "id": "kernels-b200-1-2026-09-05T12:00:00Z",
+   "type": "script",
+   "step_key": "kernels-b200",
+   "name": "kernels-b200",
+   "state": "passed",
+   "started_at": "2026-09-05T12:00:00Z",
+   "parallel_group_index": 1,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#kernels-b200"
+  },
+  {
+   "id": "kernels-b200-2-2026-09-05T12:00:00Z",
+   "type": "script",
+   "step_key": "kernels-b200",
+   "name": "kernels-b200",
+   "state": "failed",
+   "started_at": "2026-09-05T12:00:00Z",
+   "parallel_group_index": 2,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#kernels-b200"
+  },
+  {
+   "id": "e1",
+   "type": "script",
+   "step_key": "entrypoints-llm",
+   "name": "entrypoints-llm",
+   "state": "failed",
+   "started_at": "2026-09-05T12:00:00Z",
+   "parallel_group_index": null,
+   "retried": true,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#entrypoints-llm"
+  },
+  {
+   "id": "e2",
+   "type": "script",
+   "step_key": "entrypoints-llm",
+   "name": "entrypoints-llm",
+   "state": "passed",
+   "started_at": "2026-09-05T12:30:00Z",
+   "parallel_group_index": null,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#entrypoints-llm"
+  },
+  {
+   "id": "helion-tests-None-2026-09-05T12:00:00Z",
+   "type": "script",
+   "step_key": "helion-tests",
+   "name": "helion-tests",
+   "state": "failed",
+   "started_at": "2026-09-05T12:00:00Z",
+   "parallel_group_index": null,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#helion-tests"
+  },
+  {
+   "id": "spec-decode-None-2026-09-05T12:00:00Z",
+   "type": "script",
+   "step_key": "spec-decode",
+   "name": "spec-decode",
+   "state": "timed_out",
+   "started_at": "2026-09-05T12:00:00Z",
+   "parallel_group_index": null,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#spec-decode"
+  },
+  {
+   "id": "lora-tests-None-2026-09-05T12:00:00Z",
+   "type": "script",
+   "step_key": "lora-tests",
+   "name": "lora-tests",
+   "state": "failed",
+   "started_at": "2026-09-05T12:00:00Z",
+   "parallel_group_index": null,
+   "retried": false,
+   "soft_failed": true,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#lora-tests"
+  },
+  {
+   "id": "models-basic-None-2026-09-05T12:00:00Z",
+   "type": "script",
+   "step_key": "models-basic",
+   "name": "models-basic",
+   "state": "passed",
+   "started_at": "2026-09-05T12:00:00Z",
+   "parallel_group_index": null,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#models-basic"
+  },
+  {
+   "id": "never-ran-None-2026-09-05T12:00:00Z",
+   "type": "script",
+   "step_key": "never-ran",
+   "name": "never-ran",
+   "state": "not_run",
+   "started_at": null,
+   "parallel_group_index": null,
+   "retried": false,
+   "soft_failed": false,
+   "web_url": "https://buildkite.com/vllm/ci/builds/91500#never-ran"
+  }
+ ]
+}
