@@ -3,12 +3,16 @@ name: Pipeline generator tests
 on:
   pull_request:
     paths:
-      - ".github/workflows/pipeline-generator-tests.yml"
+      # test_uv_pin.py reads each of these, so each has to be able to run it.
+      - ".github/workflows/*.yml"
       - "buildkite/pipeline_generator/**"
       - "buildkite/tests/**"
       - "buildkite/ci_selector/recorders/**"
-      - "pyproject.toml"
-      - "requirements.txt"
+      - "buildkite/ci_selector/pyproject.toml"
+      - "buildkite/*.sh"
+      - "buildkite/pyproject.toml"
+      - "buildkite/uv.lock"
+      - "buildkite/.python-version"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -28,15 +32,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          python-version: "3.12"
+          # The uv bootstrap.sh pins. No python-version: it sets
+          # UV_PYTHON, which overrides buildkite/.python-version.
+          version: "0.12.15"
 
       - name: Install test dependencies
-        run: |
-          python -m pip install -r requirements.txt
-          python -m pip install pytest ./buildkite/pipeline_generator
+        working-directory: buildkite
+        run: uv sync --locked --all-packages
 
       - name: Run tests
-        run: python -m pytest buildkite/tests
+        run: buildkite/.venv/bin/pytest buildkite/tests

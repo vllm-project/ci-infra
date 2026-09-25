@@ -3,7 +3,7 @@ from unittest.mock import mock_open, patch
 
 import pytest
 
-from buildkite.pipeline_generator.global_config import (
+from global_config import (
     ONLY_STEP_KEYS_ENV_VAR,
     _parse_only_step_keys,
     _validate_pipeline_config,
@@ -13,20 +13,23 @@ from buildkite.pipeline_generator.global_config import (
 
 @pytest.fixture(autouse=True)
 def reset_config():
-    import buildkite.pipeline_generator.global_config
+    """Restore it: the whole suite shares this module."""
+    import global_config
 
-    buildkite.pipeline_generator.global_config.config = None
+    saved, global_config.config = global_config.config, None
+    yield
+    global_config.config = saved
 
 
 @patch(
-    "buildkite.pipeline_generator.global_config.get_merge_base_commit",
+    "global_config.get_merge_base_commit",
     return_value="sha",
 )
 @patch(
-    "buildkite.pipeline_generator.global_config.get_list_file_diff",
+    "global_config.get_list_file_diff",
     return_value=[],
 )
-@patch("buildkite.pipeline_generator.global_config.get_pr_labels", return_value=[])
+@patch("global_config.get_pr_labels", return_value=[])
 @patch(
     "builtins.open",
     new_callable=mock_open,
@@ -42,14 +45,14 @@ def test_init_global_config_valid_branch(
 
 
 @patch(
-    "buildkite.pipeline_generator.global_config.get_merge_base_commit",
+    "global_config.get_merge_base_commit",
     return_value="sha",
 )
 @patch(
-    "buildkite.pipeline_generator.global_config.get_list_file_diff",
+    "global_config.get_list_file_diff",
     return_value=[],
 )
-@patch("buildkite.pipeline_generator.global_config.get_pr_labels", return_value=[])
+@patch("global_config.get_pr_labels", return_value=[])
 @patch(
     "builtins.open",
     new_callable=mock_open,
@@ -65,14 +68,14 @@ def test_init_global_config_invalid_branch(
 
 
 @patch(
-    "buildkite.pipeline_generator.global_config.get_merge_base_commit",
+    "global_config.get_merge_base_commit",
     return_value="sha",
 )
 @patch(
-    "buildkite.pipeline_generator.global_config.get_list_file_diff",
+    "global_config.get_list_file_diff",
     return_value=[],
 )
-@patch("buildkite.pipeline_generator.global_config.get_pr_labels", return_value=[])
+@patch("global_config.get_pr_labels", return_value=[])
 @patch(
     "builtins.open",
     new_callable=mock_open,
@@ -114,14 +117,14 @@ def test_parse_only_step_keys_rejects_invalid_values(value, message):
 
 
 @patch(
-    "buildkite.pipeline_generator.global_config.get_merge_base_commit",
+    "global_config.get_merge_base_commit",
     return_value="sha",
 )
 @patch(
-    "buildkite.pipeline_generator.global_config.get_list_file_diff",
+    "global_config.get_list_file_diff",
     return_value=[],
 )
-@patch("buildkite.pipeline_generator.global_config.get_pr_labels", return_value=[])
+@patch("global_config.get_pr_labels", return_value=[])
 @patch(
     "builtins.open",
     new_callable=mock_open,
@@ -131,7 +134,7 @@ def test_parse_only_step_keys_rejects_invalid_values(value, message):
 def test_init_global_config_reads_only_step_keys(
     mock_exists, mock_open, mock_pr_labels, mock_diff, mock_mb
 ):
-    import buildkite.pipeline_generator.global_config as global_config
+    import global_config
 
     with patch.dict(
         os.environ,

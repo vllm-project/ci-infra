@@ -28,8 +28,10 @@ Needs a local vLLM checkout to analyze against.
 
 ```bash
 uv sync
-source .venv/bin/activate
+source ../.venv/bin/activate
 ```
+
+This is a member of the `buildkite/` uv workspace, so the environment is the shared one at `buildkite/.venv` and the generator beside us resolves to the same dependency versions we do. `uv run` from here finds it without activating.
 
 Both coverage records are fetched the same way, into `coverage-data/`:
 

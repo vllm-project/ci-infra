@@ -73,13 +73,54 @@ BUILDER="${CI_INFRA}/buildkite/ci_selector"
 # imports the pipeline generator (handwritten.py imports amd, which needs
 # pyyaml), and under 3.9 the fold exits 0 with every recorded file marked
 # unfaithful (no code.co_qualname), a table that can drop nothing.
-if ! command -v uv >/dev/null 2>&1; then
-  curl -LsSf --retry 3 https://astral.sh/uv/install.sh \
-    | env UV_INSTALL_DIR="${WORK}/bin" UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1
-  export PATH="${WORK}/bin:${PATH}"
+
+# Pinned, so the fold does not change between builds. bootstrap.sh pins the
+# same one and test_uv_pin.py holds them equal.
+UV_VERSION=0.12.15
+UV_TARBALL="uv-x86_64-unknown-linux-gnu.tar.gz"
+UV_SHA256=f97935763c04be3e692460a7aaeaaab8fc3b78fcf8b389da820b38ae7423a638
+
+uv_is_pinned() { "$1" --version 2>/dev/null | grep -qE "^uv ${UV_VERSION}( |$)"; }
+
+UV_BIN=""
+if [[ -n "${VLLM_CI_UV_BIN:-}" ]]; then
+  [[ -f "${VLLM_CI_UV_BIN}" && -x "${VLLM_CI_UV_BIN}" ]] \
+    || { echo "VLLM_CI_UV_BIN=${VLLM_CI_UV_BIN} is not an executable file" >&2; exit 1; }
+  UV_BIN="${VLLM_CI_UV_BIN}"
+else
+  agent_uv="$(command -v uv || true)"
+  if [[ -n "${agent_uv}" ]] && uv_is_pinned "${agent_uv}"; then
+    UV_BIN="${agent_uv}"
+  fi
 fi
-command -v uv >/dev/null 2>&1 || { echo "cannot install uv" >&2; exit 1; }
-fold() { uv run --quiet --no-dev --python 3.12 --project "${BUILDER}" "$@"; }
+if [[ -z "${UV_BIN}" ]]; then
+  mkdir -p "${WORK}/uv"
+  downloaded=0
+  for base in \
+    "https://releases.astral.sh/github/uv/releases/download/${UV_VERSION}" \
+    "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}"; do
+    if curl --fail --remove-on-error --location --silent --show-error \
+            --retry 3 --retry-delay 2 --retry-max-time 120 --retry-connrefused \
+            --connect-timeout 10 --max-time 300 \
+            -o "${WORK}/uv/${UV_TARBALL}" "${base}/${UV_TARBALL}"; then
+      downloaded=1
+      break
+    fi
+  done
+  (( downloaded )) || { echo "cannot download uv ${UV_VERSION} from either mirror" >&2; exit 1; }
+  echo "${UV_SHA256}  ${WORK}/uv/${UV_TARBALL}" | sha256sum --strict -c - >/dev/null \
+    || { echo "uv ${UV_VERSION} did not match UV_SHA256 in collect.sh" >&2; exit 1; }
+  tar -xzf "${WORK}/uv/${UV_TARBALL}" -C "${WORK}/uv" --strip-components=1 \
+    || { echo "cannot extract ${UV_TARBALL}" >&2; exit 1; }
+  UV_BIN="${WORK}/uv/uv"
+fi
+echo "Using uv at ${UV_BIN}"
+"${UV_BIN}" --version \
+  || { echo "uv at ${UV_BIN} will not run" >&2; exit 1; }
+
+# --locked so the lockfile picks the versions, --python so the interpreter
+# matches .python-version.
+fold() { "${UV_BIN}" run --quiet --locked --no-dev --python 3.12 --project "${BUILDER}" "$@"; }
 
 echo "--- :table_tennis_paddle_and_ball: Building the coverage table"
 # The count the generator armed, so the fold can refuse a build that lost most
