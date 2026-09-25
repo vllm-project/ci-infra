@@ -45,6 +45,9 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
 {% macro amd_native_k8s_plugin(step) %}
         plugins:
           - kubernetes:
+              checkout:
+                cloneFlags: "-v --depth=1 --filter=blob:none"
+                fetchFlags: "-v --prune --depth=1"
               podSpecPatch:
                 automountServiceAccountToken: false
                 securityContext:
