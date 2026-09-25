@@ -75,6 +75,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="what the code alone says (import graph, registries, build DAG)",
     )
     codemap_p.set_defaults(_mode="codemap")
+    from .pr_comment import add_args as pr_add_args
+
+    pr_p = sub.add_parser(
+        "pr",
+        parents=[common],
+        help="what the selector would run for a vLLM PR, as a PR comment (shadow only)",
+    )
+    pr_add_args(pr_p)
+    pr_p.set_defaults(_mode="pr")
     parser.add_argument("--table", type=Path, help="coverage table to read")
     parser.add_argument(
         "--kernel-table",
@@ -95,6 +104,11 @@ def main(argv: list[str] | None = None) -> int:
     for name, default in _DEFAULTS.items():
         if not hasattr(args, name):
             setattr(args, name, default)
+
+    if args._mode == "pr":
+        from .pr_comment import run as run_pr
+
+        return run_pr(args)
 
     repo = args.repo.resolve()
 
