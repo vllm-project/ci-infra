@@ -4,7 +4,7 @@
       "label": "inferact-v7x-16-01: 2 host(s), 16 devices",
       "key": "inferact-v7x-16-01",
       "agents": {
-        "queue": "tpu_v7x_32_kevin_test",
+        "queue": "tpu_v7x_16_queue_test",
         "slice": "inferact-v7x-16-01"
       },
       "env": {
@@ -17,7 +17,7 @@
       "label": "inferact-v7x-16-02: 2 host(s), 16 devices",
       "key": "inferact-v7x-16-02",
       "agents": {
-        "queue": "tpu_v7x_32_kevin_test",
+        "queue": "tpu_v7x_16_queue_test",
         "slice": "inferact-v7x-16-02"
       },
       "env": {
@@ -30,7 +30,7 @@
       "label": "inferact-v7x-8-01: 1 host(s), 8 devices",
       "key": "inferact-v7x-8-01",
       "agents": {
-        "queue": "tpu_v7x_32_kevin_test",
+        "queue": "tpu_v7x_8_queue_test",
         "slice": "inferact-v7x-8-01"
       },
       "env": {
@@ -43,7 +43,7 @@
       "label": "inferact-v7x-8-02: 1 host(s), 8 devices",
       "key": "inferact-v7x-8-02",
       "agents": {
-        "queue": "tpu_v7x_32_kevin_test",
+        "queue": "tpu_v7x_8_queue_test",
         "slice": "inferact-v7x-8-02"
       },
       "env": {
@@ -56,7 +56,7 @@
       "label": "inferact-v7x-8-03: 1 host(s), 8 devices",
       "key": "inferact-v7x-8-03",
       "agents": {
-        "queue": "tpu_v7x_32_kevin_test",
+        "queue": "tpu_v7x_8_queue_test",
         "slice": "inferact-v7x-8-03"
       },
       "env": {
@@ -69,7 +69,7 @@
       "label": "inferact-v7x-8-04: 1 host(s), 8 devices",
       "key": "inferact-v7x-8-04",
       "agents": {
-        "queue": "tpu_v7x_32_kevin_test",
+        "queue": "tpu_v7x_8_queue_test",
         "slice": "inferact-v7x-8-04"
       },
       "env": {

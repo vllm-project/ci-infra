@@ -30,9 +30,11 @@ Operator access uses OS Login / IAP on port 22. CI SSH uses port 2222.
 
 ## Validation and admission
 
-Fresh instances start on `tpu_v7x_32_kevin_test`, tagged with `slice` and
-`target_queue`. Canary steps must select both the validation queue and slice;
-otherwise they might land on the original four-host test slice.
+Create `tpu_v7x_16_queue_test` and `tpu_v7x_8_queue_test` in the same Buildkite
+TPU cluster as the official queues before provisioning. Fresh instances start
+on the matching `_test` queue: two agents on `tpu_v7x_16_queue_test` and four
+on `tpu_v7x_8_queue_test`. Agents also have `slice` and `target_queue` tags.
+Canary steps select both the test queue and slice so every slice is validated.
 Run `TPU_RUN_TIMEOUT=600 tpu-run /opt/tpu-ci/venv/bin/python /opt/tpu-ci/smoke.py`
 to verify local device count, global device count, matrix multiplication and
 cross-host all-reduce. Check all six slices, plus launch failure/cancel cleanup.

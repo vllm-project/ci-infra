@@ -46,7 +46,7 @@ module "ci" {
   hosts_per_slice       = each.value.hosts_per_slice
   topology              = each.value.topology
   target_queue          = each.value.queue
-  validation_queue      = "tpu_v7x_32_kevin_test"
+  validation_queue      = "${each.value.queue}_test"
   project_id            = "inferact-vllm-tpu"
   zone                  = "us-central1-c"
   reservation_name      = "ghostfish-9mpeile911sjq"
@@ -57,10 +57,11 @@ module "ci" {
 
 output "pools" {
   value = { for key, pool in local.pools : key => {
-    target_queue    = pool.queue
-    agents          = pool.slice_count
-    hosts           = pool.slice_count * pool.hosts_per_slice
-    physical_chips  = pool.slice_count * pool.hosts_per_slice * 4
-    devices_per_job = pool.hosts_per_slice * 8
+    validation_queue = "${pool.queue}_test"
+    target_queue     = pool.queue
+    agents           = pool.slice_count
+    hosts            = pool.slice_count * pool.hosts_per_slice
+    physical_chips   = pool.slice_count * pool.hosts_per_slice * 4
+    devices_per_job  = pool.hosts_per_slice * 8
   } }
 }
