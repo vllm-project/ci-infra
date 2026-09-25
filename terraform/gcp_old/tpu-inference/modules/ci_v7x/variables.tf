@@ -55,3 +55,9 @@ variable "github_app_secret_name" {
   description = "The Buildkite secret name for the GitHub App PEM key."
   default     = "GITHUB_CI_BOT_PEM"
 }
+
+variable "service_account_email" {
+  type        = string
+  description = "Service account the TPU VMs run as. Null uses the project's default compute service account."
+  default     = null
+}
