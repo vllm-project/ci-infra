@@ -431,11 +431,20 @@ def test_a_drop_needs_every_selecting_file_cleared(tmp_path):
     )
 
 
-def test_manual_only_steps_are_never_added(tmp_path):
+def test_a_manual_only_step_that_launched_the_kernel_is_added(tmp_path, monkeypatch):
+    """Optional steps are addable by default, as in the Python record; set to 0
+    the switch keeps them out."""
+    from ci_selector.coverage.rules import RECORD_OPTIONAL_ENV
+
     ev = _evidence(
         tmp_path, {"nightly": {"kernels": ["kA"]}}, [_obj("csrc/a.cu", ["kA"])]
     )
-    r = _read(ev, _selection({}), ["csrc/a.cu"], _keys("nightly", manual=("nightly",)))
+    keys = _keys("nightly", manual=("nightly",))
+    monkeypatch.delenv(RECORD_OPTIONAL_ENV, raising=False)
+    r = _read(ev, _selection({}), ["csrc/a.cu"], keys)
+    assert r.added == ["vllm_ci:nightly"]
+    monkeypatch.setenv(RECORD_OPTIONAL_ENV, "0")
+    r = _read(ev, _selection({}), ["csrc/a.cu"], keys)
     assert r.added == []
 
 

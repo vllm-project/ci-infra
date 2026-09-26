@@ -245,15 +245,16 @@ class TestTheAdditiveHalf:
         {"vllm_ci"}, {"vllm_ci": 1.0}, steps={s: FakeStep() for s in ALL_STEPS}
     )
 
-    def test_a_manual_only_step_is_never_added(self, table):
-        """The sweeps unblocked the optional steps so the table would cover
-        them, so it holds rows for nightlies and AMD mirrors CI does not run on
-        a PR. Adding one is not over-selection, it is naming a step the
-        generator will not emit -- and it was 43% of the additive half's cost
-        before this filter. The subtractive direction needs no equivalent: its
+    def test_the_switch_off_keeps_manual_only_steps_out(self, table, monkeypatch):
+        """CI_SELECTOR_RECORD_OPTIONAL=0 is the old policy: the table holds rows
+        for nightlies and AMD mirrors CI does not run on a PR, and none of them
+        may be added. The subtractive direction needs no equivalent: its
         population is the map's selection, which never holds a manual-only
         step.
         """
+        from ci_selector.coverage.rules import RECORD_OPTIONAL_ENV
+
+        monkeypatch.setenv(RECORD_OPTIONAL_ENV, "0")
         owner = RowKeys(
             {"vllm_ci"},
             {"vllm_ci": 1.0},
@@ -270,11 +271,9 @@ class TestTheAdditiveHalf:
         )
         assert reading.added == []
 
-    def test_the_optional_experiment_lets_a_row_add_a_manual_only_step(
-        self, monkeypatch
-    ):
-        """CI_SELECTOR_RECORD_OPTIONAL=1 lifts the filter above and nothing
-        else: the step still needs a row, so a key the table cannot spell
+    def test_a_row_adds_a_manual_only_step_by_default(self, monkeypatch):
+        """Optional steps are addable unless switched off, and nothing else
+        changes: the step still needs a row, so a key the table cannot spell
         stays out."""
         from ci_selector.coverage.rules import RECORD_OPTIONAL_ENV
 
@@ -283,6 +282,8 @@ class TestTheAdditiveHalf:
             {"vllm_ci": 1.0},
             steps={"vllm_ci:elsewhere": FakeStep(manual_only=True)},
         )
+        monkeypatch.delenv(RECORD_OPTIONAL_ENV, raising=False)
+        assert owner.candidates() == ["vllm_ci:elsewhere"]
         monkeypatch.setenv(RECORD_OPTIONAL_ENV, "1")
         assert owner.candidates() == ["vllm_ci:elsewhere"]
         monkeypatch.setenv(RECORD_OPTIONAL_ENV, "0")
