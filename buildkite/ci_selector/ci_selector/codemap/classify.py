@@ -74,6 +74,7 @@ from .state import (
 from .step_refs import (
     _direct_step_refs,
     _hardware_family_steps,
+    hardware_steps_held,
     _source_dep_steps,
     _source_dep_steps_ungated,
 )
@@ -1312,7 +1313,9 @@ def _classify_graph(
         step_ids=direct_steps | key_steps | dep_steps | affinity,
         # hw_steps is subtracted, not just left out: it stands for compiled
         # reach nothing records, so a step it holds stays held.
-        droppable_step_ids=(inferred_steps | dep_steps) - hw_steps - affinity,
+        droppable_step_ids=(inferred_steps | dep_steps | hw_steps)
+        - hardware_steps_held(path, hw_steps)
+        - affinity,
         droppable_test_files=True,
     )
     # Here and not earlier, so _nothing_auto_runs claims (rule "graph" but
