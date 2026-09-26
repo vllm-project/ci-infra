@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .changed_funcs import Query
+from .model import ADD_BEYOND_TODAY_ENV, HUB_CAP_ENV, HUB_SHARE
 from .phase import DEFAULT_MODE, PhaseMode, row_shows_use
 from .table import Table
 
@@ -272,6 +273,7 @@ def read_pr(
     failed_ran: dict[str, str] | None = None,
     matched_slugs: dict[str, list[str]] | None = None,
     failed_missed: dict[str, str] | None = None,
+    today: frozenset[str] | None = None,
 ) -> Reading:
     """The record over one PR's map selection.
 
@@ -326,6 +328,21 @@ def read_pr(
             )
         else:
             direct = via_proxy = False
+        if (
+            direct
+            and today is not None
+            and step_id not in today
+            and step_id not in stale
+            and _hub_only(table, row, query, mode)
+            and _narrowable(step_id, attribution, unresolved)
+        ):
+            # The only use it shows is of names most steps call, and today's
+            # rules would not run it: the common path, not this change.
+            reading.dropped.append(step_id)
+            reading.reasons["hub-only-evidence-outside-today"] += 1
+            if set(matched.get(step_id, ())) & failed:
+                reading.dropped_and_failed.append(step_id)
+            continue
         if direct or via_proxy:
             reading.kept.append(step_id)
             reading.executes.append(step_id)
@@ -400,8 +417,35 @@ def read_pr(
         else:
             reading.kept.append(step_id)
 
-    _add_from_rows(table, selection, query, keys, reading, unresolved, failed_missed)
+    _add_from_rows(
+        table, selection, query, keys, reading, unresolved, failed_missed, today
+    )
     return reading
+
+
+def _hub_only(table: Table, row, query: Query, mode: PhaseMode) -> bool:
+    """Whether every changed name this row shows use of is a hub. False when
+    the cap is off or the row shows no use at all."""
+    if os.environ.get(HUB_CAP_ENV, "1") == "0":
+        return False
+    shown = [
+        (f.path, name)
+        for f in query.files
+        if not f.proxy
+        for name in f.names
+        if row_shows_use(row, f, name, mode)
+    ]
+    return bool(shown) and all(table.share(p, n) > HUB_SHARE for p, n in shown)
+
+
+def _narrowable(step_id: str, attribution, unresolved: dict[str, set[str]]) -> bool:
+    """The drop gates a hub drop must pass too: every reason the map had can
+    be overturned by function evidence, and no unknown code sits in its scope."""
+    reasons = attribution.get(step_id)
+    if not reasons or any(r is None for r in reasons):
+        return False
+    scope = {p for r in reasons for p in r}
+    return bool(scope) and not any(p in scope for p in unresolved)
 
 
 def _add_from_rows(
@@ -412,6 +456,7 @@ def _add_from_rows(
     reading: Reading,
     unresolved: dict[str, set[str]],
     failed_missed: dict[str, str] | None = None,
+    today: frozenset[str] | None = None,
 ) -> None:
     """The direction the record is usually forgotten to have: it SELECTS, not
     only removes.
@@ -433,6 +478,26 @@ def _add_from_rows(
     shard suffixes a raw key comparison misses.
     """
     already = set(selection.selected)
+    # Changed functions some kept step already calls. A step today's rules
+    # would not run is added only for a function outside this: beyond today,
+    # an add has to bring code no kept step exercises. vllm#58685 changed the
+    # JIT hook installer every GPU worker runs, and 41 steps were added though
+    # the kept engine step already calls it; vllm#58669 added the MRCR eval,
+    # which calls tokenize() only to count prompt tokens.
+    covered: set[tuple[str, str]] = set()
+    if today is not None and os.environ.get(ADD_BEYOND_TODAY_ENV, "1") != "0":
+        for kept_id in reading.kept:
+            kept_key = keys.key_for(kept_id)
+            kept_row = table.row(kept_key) if kept_key else None
+            if kept_row is None:
+                continue
+            covered |= {
+                (f.path, name)
+                for f in query.files
+                if not f.proxy
+                for name in f.names
+                if kept_row.contains_call(f.path, name)
+            }
     for step_id in keys.candidates():
         if step_id in already:
             continue
@@ -440,14 +505,32 @@ def _add_from_rows(
         row = table.row(key) if key else None
         if row is None:
             continue  # no row: the map decides, and the map did not pick it
-        if any(
-            row.contains_call(f.path, name) and table.discriminates(f.path, name)
+        hits = [
+            (f.path, name)
             # Stand-ins are drop evidence only.
             for f in query.files
             if not f.proxy
             for name in f.names - set(unresolved.get(f.path, ()))
+            if row.contains_call(f.path, name) and table.discriminates(f.path, name)
+        ]
+        if not hits:
+            continue
+        if (
+            today is not None
+            and step_id not in today
+            and os.environ.get(HUB_CAP_ENV, "1") != "0"
+            and all(table.share(p, n) > HUB_SHARE for p, n in hits)
         ):
-            reading.added.append(step_id)
+            reading.reasons["add-hub-only-outside-today"] += 1
+            continue
+        if (
+            today is not None
+            and step_id not in today
+            and all(h in covered for h in hits)
+        ):
+            reading.reasons["add-beyond-today-already-covered"] += 1
+            continue
+        reading.added.append(step_id)
 
     # Counted here, above the failure scoring, so this is how often the half
     # fired at all. Below the early return it only counted adds on PRs that
