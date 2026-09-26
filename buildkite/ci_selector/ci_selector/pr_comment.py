@@ -135,10 +135,12 @@ def select_for_pr(
     gh=None,
 ) -> PrSelection:
     data = _gh_pr(pr)
-    base, head = _resolve_range(repo, pr, data, _upstream_remote(repo, remote))
+    upstream = _upstream_remote(repo, remote)
+    base, head = pr_range(repo, pr, data, upstream)
     if base is None:
         raise RuntimeError(f"PR #{pr} is {data['state']} with no head to select for")
     paths = changed_paths(diff_files(repo, base, head))
+    check_drift(pr, len(set(paths)), _changed_files(pr))
     state = state_for(repo, base)
     sel = select(state, paths, base=base, head=head)
     today = today_select([(p.config, p.steps) for p in state.pipelines], paths)
@@ -218,31 +220,98 @@ def select_for_pr(
     )
 
 
+def pr_range(repo: Path, pr: int, data: dict, remote: str):
+    """The PR's own diff: its head against the commit it branched from.
+
+    The branch point comes from GitHub's compare API, not from the clone's
+    main. Computed locally it is merge-base(head, <remote>/main), and a clone
+    whose main is behind the PR's branch point turns the stale main tip into
+    the base: on 2026-09-25 a clone a day behind put a day of main drift into
+    10 of 11 one-to-three-file PRs, and its pyproject.toml made each "run
+    everything". A merged PR keeps its merge commit against its parent, which
+    is exactly the change it landed.
+    """
+    if data.get("state") == "MERGED" and data.get("mergeCommit"):
+        return _resolve_range(repo, pr, data, remote)
+    head = data.get("headRefOid")
+    if not head:
+        return None, None
+    _ensure_commit(repo, remote, head, GH_PR_REFSPEC.format(pr=pr))
+    base = github_merge_base(head)
+    _ensure_commit(repo, remote, base, base)
+    return base, head
+
+
+def github_merge_base(head: str) -> str:
+    return _gh(
+        "api",
+        f"repos/{GH_REPO}/compare/{GH_DEFAULT_BRANCH}...{head}",
+        "--jq",
+        ".merge_base_commit.sha",
+    ).strip()
+
+
+def _ensure_commit(repo: Path, remote: str, sha: str, refspec: str) -> None:
+    """Fetch a commit the clone lacks. GitHub serves any reachable commit by
+    sha, so the base needs no branch to be current."""
+    have = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{sha}^{{commit}}"],
+        capture_output=True,
+    )
+    if have.returncode:
+        subprocess.run(
+            ["git", "-C", str(repo), "fetch", "-q", remote, refspec],
+            capture_output=True,
+            check=True,
+        )
+
+
+def _changed_files(pr: int) -> int | None:
+    try:
+        return int(
+            _gh(
+                "pr",
+                "view",
+                str(pr),
+                "--repo",
+                GH_REPO,
+                "--json",
+                "changedFiles",
+                "--jq",
+                ".changedFiles",
+            )
+        )
+    except (subprocess.CalledProcessError, ValueError):
+        return None
+
+
+def check_drift(pr: int, local: int, github: int | None) -> None:
+    """Refuse a diff far bigger than the PR, whatever caused it: a comment
+    comparing someone else's changes is worse than none. A rename counts twice
+    locally, so some slack; drift is hundreds of files, not a handful."""
+    if github is not None and local > 2 * github + 5:
+        raise RuntimeError(
+            f"PR #{pr}: the local diff has {local} files but GitHub says the PR "
+            f"changes {github}, so this is not the PR's diff. Not posting it; "
+            "send the command and output to the selector's owner."
+        )
+
+
 def _tested_base(repo: Path, pr: int, data: dict, remote: str) -> str | None:
-    """The main commit the PR's head branched from: the tree its CI tested."""
+    """The main commit the PR's head branched from: the tree its CI tested.
+
+    GitHub's merge base, as for the diff, so a stale local main cannot move
+    the window of main commits read for pre-existing failures.
+    """
     head = data.get("headRefOid")
     if not head:
         return None
     try:
-        git_out(repo, "cat-file", "-e", head)
-    except Exception:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "fetch",
-                "-q",
-                remote,
-                GH_PR_REFSPEC.format(pr=pr),
-            ],
-            capture_output=True,
-        )
-    try:
-        return git_out(
-            repo, "merge-base", head, f"{remote}/{GH_DEFAULT_BRANCH}"
-        ).strip()
-    except Exception:
+        _ensure_commit(repo, remote, head, GH_PR_REFSPEC.format(pr=pr))
+        base = github_merge_base(head)
+        _ensure_commit(repo, remote, base, base)
+        return base
+    except (subprocess.CalledProcessError, OSError):
         return None
 
 
