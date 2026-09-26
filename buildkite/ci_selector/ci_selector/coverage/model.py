@@ -61,6 +61,18 @@ MAX_ADD_ROW_SHARE = 0.90
 # about half the steps) from pulling in every step that runs it.
 ADD_MAX_SHARE_ENV = "CI_SELECTOR_ADD_MAX_SHARE"
 
+# A changed name more than this share of rows calls is a hub: seeing it in a
+# row says the step runs the common path, not that it tests this change. Hub
+# evidence alone may not hold or add a step today's rules would not run, so a
+# hub edit is never selected wider than today. CI_SELECTOR_HUB_CAP=0 turns the
+# cap off. vllm#58686 changed one call in safe_apply_chat_template, which 75%
+# of rows call, and was selected at 166 steps against today's 47.
+HUB_SHARE = 0.5
+HUB_CAP_ENV = "CI_SELECTOR_HUB_CAP"
+# Adds beyond today's rules need a changed function no kept step calls; see
+# rules._add_from_rows. CI_SELECTOR_ADD_BEYOND_TODAY=0 turns it off.
+ADD_BEYOND_TODAY_ENV = "CI_SELECTOR_ADD_BEYOND_TODAY"
+
 # Too few rows to measure a share at all: with 3 rows a name is in 33%, 67% or
 # 100% of them and none of those means anything. Under this count the gate
 # above is skipped and every name is accepted.

@@ -198,6 +198,12 @@ class Table:
         held_by = self._breadth.get(path, {}).get(name, 0)
         return held_by <= _max_add_share() * len(self._rows)
 
+    def share(self, path: str, name: str) -> float:
+        """The fraction of rows holding this pair. 0 on an empty table."""
+        if not self._rows:
+            return 0.0
+        return self._breadth.get(path, {}).get(name, 0) / len(self._rows)
+
     def row(self, step: str) -> Row | None:
         return self._rows.get(step)
 
