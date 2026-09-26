@@ -946,12 +946,12 @@ class TestNoWiderThanToday:
             },
         )
 
-    def _read(self, rows, selected, names, today):
+    def _read(self, rows, selected, names, today, inert=()):
         files = [
             FileQuery(path=p, status=Attribution.ATTRIBUTED, head_names=frozenset({n}))
             for p, n in names
         ]
-        query = Query(base="base", head="head", files=files)
+        query = Query(base="base", head="head", files=files, inert=list(inert))
         owner = RowKeys(
             {"vllm_ci"},
             {"vllm_ci": 1.0},
@@ -1011,3 +1011,8 @@ class TestNoWiderThanToday:
         )
         assert "vllm_ci:hub1" in off.kept
         assert "vllm_ci:hub1" in reading.dropped
+
+    def test_a_step_picked_only_for_behaviour_preserving_files_drops(self, rows):
+        reading = self._read(rows, ["kept"], [], ["kept"], inert=["vllm/mod.py"])
+        assert reading.dropped == ["vllm_ci:kept"]
+        assert reading.reasons["only-behaviour-preserving-changes"] == 1

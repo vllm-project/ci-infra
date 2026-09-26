@@ -20,6 +20,7 @@ not look the same downstream.
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import types
 from dataclasses import dataclass, field
@@ -105,6 +106,10 @@ class Query:
     # Python files the diff changed only in line endings: no FileQuery, since
     # no function changed. Kept for diagnosis.
     eol_only: list[str] = field(default_factory=list)
+    # Python files whose change preserves behaviour: no code object changed
+    # apart from line numbers, or only annotations of undecorated functions.
+    # No FileQuery either, and a step selected only for these may be dropped.
+    inert: list[str] = field(default_factory=list)
 
     @property
     def fail_open(self) -> bool:
@@ -401,6 +406,21 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
         )
 
         note = "; ".join(n for n in (base_note, head_note) if n)
+        if not note and base_side and head_side and shown.endswith(".py"):
+            base_names, head_names, import_time, inert = _drop_unchanged(
+                repo,
+                base,
+                head,
+                base_side,
+                head_side,
+                base_names,
+                head_names,
+                base_import | head_import,
+            )
+            if inert:
+                query.inert.append(shown)
+                continue
+            base_import, head_import = import_time, frozenset()
         query.files.append(
             FileQuery(
                 path=shown,
@@ -415,6 +435,129 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
             )
         )
     return query
+
+
+def _equivalent(a: types.CodeType, b: types.CodeType) -> bool:
+    """Same code, line numbers aside: bytecode, names, locals, flags and
+    constants, nested code compared the same way."""
+    if (
+        a.co_code != b.co_code
+        or a.co_names != b.co_names
+        or a.co_varnames != b.co_varnames
+        or a.co_freevars != b.co_freevars
+        or a.co_cellvars != b.co_cellvars
+        or a.co_flags != b.co_flags
+        or a.co_argcount != b.co_argcount
+        or a.co_posonlyargcount != b.co_posonlyargcount
+        or a.co_kwonlyargcount != b.co_kwonlyargcount
+        or a.co_qualname != b.co_qualname
+        or len(a.co_consts) != len(b.co_consts)
+    ):
+        return False
+    for x, y in zip(a.co_consts, b.co_consts):
+        if isinstance(x, types.CodeType) or isinstance(y, types.CodeType):
+            if not (
+                isinstance(x, types.CodeType)
+                and isinstance(y, types.CodeType)
+                and _equivalent(x, y)
+            ):
+                return False
+        elif type(x) is not type(y) or x != y:
+            return False
+    return True
+
+
+# A module naming one of these may read function annotations at runtime:
+# torch custom op registration infers the op schema from them. vLLM's own
+# CustomOp class dispatches by name and reads none, so it is not listed.
+_ANNOTATION_READERS = (
+    "direct_register_custom_op",
+    "library.custom_op",
+    "infer_schema",
+    "get_type_hints",
+    "signature(",
+)
+
+
+def _strip_annotations(tree: ast.AST) -> ast.AST:
+    """Remove parameter and return annotations of undecorated functions. A
+    decorator may read them (FastAPI, pydantic, typer), so decorated ones
+    keep theirs, as do class-level field annotations (dataclasses)."""
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and not node.decorator_list
+        ):
+            node.returns = None
+            a = node.args
+            for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg):
+                if arg is not None:
+                    arg.annotation = None
+    return tree
+
+
+def _annotation_only(before: str, after: str) -> bool:
+    """Whether the two sources differ only in annotations _strip_annotations
+    removes."""
+    if any(m in before or m in after for m in _ANNOTATION_READERS):
+        return False
+    try:
+        a = ast.dump(_strip_annotations(ast.parse(before)), include_attributes=False)
+        b = ast.dump(_strip_annotations(ast.parse(after)), include_attributes=False)
+    except SyntaxError:
+        return False
+    return a == b
+
+
+def _drop_unchanged(
+    repo, base, head, base_side, head_side, base_names, head_names, import_time
+):
+    """Changed names whose code did not change, taken out, and whether nothing
+    of the file is left.
+
+    A changed line can belong to a function whose code is identical: a
+    signature line split differently, a comment, a blank. vllm#58687 added a
+    return annotation to fused_mm_input_norm_triton, which leaves the function
+    itself unchanged; its callers were selected anyway. An annotation does
+    change the module body, which builds it at import, so a file whose two
+    sides differ only there counts as unchanged too.
+    """
+    before, after = _read(repo, base, base_side), _read(repo, head, head_side)
+    if before is None or after is None:
+        return base_names, head_names, import_time, False
+    try:
+        old = {}
+        for c in code_objects(compile(before, base_side, "exec")):
+            old.setdefault(c.co_qualname, []).append(c)
+        new = {}
+        for c in code_objects(compile(after, head_side, "exec")):
+            new.setdefault(c.co_qualname, []).append(c)
+    except Exception:
+        return base_names, head_names, import_time, False
+
+    def same(name: str) -> bool:
+        a, b = old.get(name), new.get(name)
+        return (
+            a is not None
+            and b is not None
+            and len(a) == len(b)
+            and all(_equivalent(x, y) for x, y in zip(a, b))
+        )
+
+    unchanged = {n for n in base_names | head_names if same(n)}
+    left = (base_names | head_names) - unchanged
+    if left and left <= import_time:
+        if not _annotation_only(before, after):
+            # Only import-time names would be left, and under the default
+            # phase mode an import-time-only change counts every importer as
+            # a use: far wider than the callers the full name set reaches.
+            # All or nothing, then.
+            return base_names, head_names, import_time, False
+        unchanged |= left
+        left = frozenset()
+    base_names = frozenset(base_names - unchanged)
+    head_names = frozenset(head_names - unchanged)
+    return base_names, head_names, frozenset(import_time - unchanged), not left
 
 
 def mark_unfaithful(query: Query, unfaithful_paths: set[str]) -> Query:
