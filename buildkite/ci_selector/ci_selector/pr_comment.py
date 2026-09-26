@@ -298,30 +298,20 @@ def check_drift(pr: int, local: int, github: int | None) -> None:
 
 
 def _tested_base(repo: Path, pr: int, data: dict, remote: str) -> str | None:
-    """The main commit the PR's head branched from: the tree its CI tested."""
+    """The main commit the PR's head branched from: the tree its CI tested.
+
+    GitHub's merge base, as for the diff, so a stale local main cannot move
+    the window of main commits read for pre-existing failures.
+    """
     head = data.get("headRefOid")
     if not head:
         return None
     try:
-        git_out(repo, "cat-file", "-e", head)
-    except Exception:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "fetch",
-                "-q",
-                remote,
-                GH_PR_REFSPEC.format(pr=pr),
-            ],
-            capture_output=True,
-        )
-    try:
-        return git_out(
-            repo, "merge-base", head, f"{remote}/{GH_DEFAULT_BRANCH}"
-        ).strip()
-    except Exception:
+        _ensure_commit(repo, remote, head, GH_PR_REFSPEC.format(pr=pr))
+        base = github_merge_base(head)
+        _ensure_commit(repo, remote, base, base)
+        return base
+    except (subprocess.CalledProcessError, OSError):
         return None
 
 
