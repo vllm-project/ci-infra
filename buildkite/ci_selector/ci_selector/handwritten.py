@@ -155,7 +155,31 @@ EXCLUSIVE_NAMESPACES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] =
     ),
     (("csrc/rocm/",), (), "amd"),
     ((), ("vllm/platforms/tpu.py",), "tpu"),
-    (("vllm/v1/worker/xpu",), ("vllm/platforms/xpu.py",), "xpu"),
+    (
+        (
+            "vllm/v1/worker/xpu",
+            "vllm/lora/ops/xpu_ops/",
+            "vllm/models/deepseek_v4/xpu/",
+        ),
+        (
+            "vllm/platforms/xpu.py",
+            # XPU kernels and backends: never entered on another platform, and
+            # never recorded, since no XPU job records. vllm#58936 changed
+            # _xpu_ops.py and every step through its graph was held on names
+            # no row could know.
+            "vllm/_xpu_ops.py",
+            "vllm/device_allocator/xpumem.py",
+            "vllm/distributed/device_communicators/xpu_communicator.py",
+            "vllm/lora/punica_wrapper/punica_xpu.py",
+            "vllm/model_executor/kernels/linear/mixed_precision/xpu.py",
+            "vllm/model_executor/kernels/linear/mxfp4/xpu.py",
+            "vllm/model_executor/kernels/linear/mxfp8/xpu.py",
+            "vllm/model_executor/kernels/linear/scaled_mm/xpu.py",
+            "vllm/model_executor/layers/fused_moe/experts/xpu_moe.py",
+            "vllm/v1/attention/backends/mla/xpu_mla_sparse.py",
+        ),
+        "xpu",
+    ),
 )
 
 # Cross-family imports at module level that a runtime check really does guard:
@@ -164,6 +188,27 @@ EXCLUSIVE_NAMESPACES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] =
 # runs on every platform. If an importer is not guarded, leave it out and
 # selection disables that exclusion by itself.
 EXCLUSIVE_IMPORT_EXCEPTIONS: dict[tuple[str, str], str] = {
+    ("vllm/model_executor/layers/mamba/ops/mamba_ssm.py", "vllm/_xpu_ops.py"): (
+        "inside `if current_platform.is_xpu():`"
+    ),
+    ("vllm/model_executor/layers/sparse_attn_indexer_kpool.py", "vllm/_xpu_ops.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
+    ("vllm/v1/attention/backends/fa_utils.py", "vllm/_xpu_ops.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
+    ("vllm/v1/attention/ops/paged_attn.py", "vllm/_xpu_ops.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
+    ("vllm/models/deepseek_v4/__init__.py", "vllm/models/deepseek_v4/xpu/dspark.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
+    ("vllm/models/deepseek_v4/__init__.py", "vllm/models/deepseek_v4/xpu/model.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
+    ("vllm/models/deepseek_v4/__init__.py", "vllm/models/deepseek_v4/xpu/mtp.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
     (
         "vllm/compilation/passes/pass_manager.py",
         "vllm/compilation/passes/fusion/rocm_aiter_fusion.py",
