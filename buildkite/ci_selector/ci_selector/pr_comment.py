@@ -170,8 +170,11 @@ def select_for_pr(
         return sorted(out, key=lambda v: (v.mirror, v.name))
 
     run_all = sel.run_all.get(PR_PIPELINE, "")
-    f_ids = set(steps) if run_all else {s for s in d.steps if s in steps}
     t_ids = today.selected.get(PR_PIPELINE, set())
+    # Run-all hands CI no key list, and without one CI applies its own rules:
+    # the selection IS today's. Counting every pipeline step instead listed
+    # optional steps as adds that never run (vllm#58664: 79 of them).
+    f_ids = set(t_ids) if run_all else {s for s in d.steps if s in steps}
     added_by = {}
     for ids, who in (
         (d.added_by_kernels, "kernel record"),
@@ -445,7 +448,10 @@ def render(s: PrSelection) -> str:
     (k_main, k_mir), (a_main, a_mir) = split(skipped), split(added)
 
     if s.run_all:
-        head = f"### CI selector (shadow): would run everything ({s.run_all})"
+        head = (
+            "### CI selector (shadow): no narrower answer, so today's rules "
+            f"apply: {len(t_main)} test steps ({jobs(t_main)} jobs)"
+        )
     else:
         head = (
             f"### CI selector (shadow): {len(s_main)} test steps ({jobs(s_main)} jobs) "
@@ -473,6 +479,8 @@ def render(s: PrSelection) -> str:
         row("AMD mirrors", t_mir, s_mir, k_mir, a_mir),
         "",
     ]
+    if s.run_all:
+        lines += [f"Why: {s.run_all}", ""]
     if s.docs_only:
         lines += ["Docs-only change: today's rules run no tests.", ""]
     if s.today_run_all:

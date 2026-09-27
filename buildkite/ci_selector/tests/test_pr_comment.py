@@ -65,8 +65,14 @@ def test_an_amd_mirror_is_never_confused_with_its_parent():
 
 
 def test_run_all_says_so():
-    body = render(_selection(run_all="a changed file runs everything"))
-    assert "would run everything (a changed file runs everything)" in body
+    body = render(
+        _selection(
+            run_all="a changed file runs everything", selector=_selection().today
+        )
+    )
+    assert "no narrower answer, so today's rules apply: 2 test steps (3 jobs)" in body
+    assert "Why: a changed file runs everything" in body
+    assert "| NVIDIA, CPU and others | 2 (3) | 2 (3) | 0 (0) | 0 (0) |" in body
 
 
 class FakeGh:
