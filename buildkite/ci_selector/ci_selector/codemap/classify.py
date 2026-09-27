@@ -1481,7 +1481,7 @@ def _classify_test_helper(
     test_helpers. Behind the graph rule's own guards, and never where
     co-location answers, so it only ever replaces a file-level closure."""
     if (
-        not test_helpers.is_helper(path)
+        not (test_helpers.is_helper(path) or test_helpers.is_conftest(path))
         or path in state.preflight.parse_error_paths
         or path in state.preflight.unclassified_sites
         or colocation._classify_colocated_tests(state, path) is not None

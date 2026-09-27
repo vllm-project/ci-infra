@@ -247,3 +247,76 @@ def test_changed_names_and_the_fixpoint():
         "OpenAIServer",
         "make_server",
     }
+
+
+CONFTEST_BASE = """\
+import pytest
+
+from tests.utils import make_server
+
+
+def _prompts():
+    return ["a"]
+
+
+@pytest.fixture
+def prompts():
+    return _prompts()
+
+
+@pytest.fixture
+def unused_prompts():
+    return ["b"]
+
+
+@pytest.fixture(autouse=True)
+def reset():
+    yield
+
+
+def pytest_configure(config):
+    pass
+"""
+
+
+def _route_conftest(repo: Repo, text: str):
+    repo.write("tests/sub/conftest.py", CONFTEST_BASE)
+    repo.write("tests/sub/test_a.py", "def test_a(prompts):\n    assert prompts\n")
+    repo.write("tests/sub/test_b.py", "def test_b():\n    pass\n")
+    base = repo.commit()
+    repo.write("tests/sub/conftest.py", text)
+    head = repo.commit()
+    imports = {
+        "tests/sub/test_a.py": {"tests/sub/conftest.py"},
+        "tests/sub/test_b.py": {"tests/sub/conftest.py"},
+    }
+    state = SimpleNamespace(repo=repo.root, full=SimpleNamespace(graph=Graph(imports)))
+    ctx = DiffContext(base, head, {"tests/sub/conftest.py": "M"})
+    return route(state, "tests/sub/conftest.py", ctx)
+
+
+def test_deleting_an_unused_fixture_routes_nowhere(repo: Repo):
+    """vllm#58916: dead fixtures removed from tests/conftest.py."""
+    text = CONFTEST_BASE.replace(
+        '@pytest.fixture\ndef unused_prompts():\n    return ["b"]\n\n\n', ""
+    )
+    tests, _, _ = _route_conftest(repo, text)
+    assert tests == set()
+
+
+def test_a_helper_a_fixture_uses_reaches_the_tests_naming_the_fixture(repo: Repo):
+    text = CONFTEST_BASE.replace('return ["a"]', 'return ["c"]')
+    tests, _, _ = _route_conftest(repo, text)
+    assert tests == {"tests/sub/test_a.py"}
+
+
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        ("    yield\n", "    yield 1\n"),  # autouse fixture
+        ("def pytest_configure(config):\n    pass", "def pytest_configure(config):\n    return"),
+    ],
+    ids=["autouse", "hook"],
+)
+def test_what_reaches_every_test_keeps_the_file_level_claim(repo: Repo, old, new):
+    assert _route_conftest(repo, CONFTEST_BASE.replace(old, new)) is None

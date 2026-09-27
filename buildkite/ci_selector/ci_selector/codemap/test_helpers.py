@@ -36,10 +36,38 @@ from pathlib import Path
 from .repo import is_test_file
 
 TEST_ROOT = "tests/"
-# Fixture files hand out names by parameter, and autouse ones reach tests that
-# name nothing: they keep the file-level routing.
+# A conftest routes by the fixtures it changed (see route); an __init__ runs
+# on every import of its package.
 NOT_HELPERS = ("conftest.py", "__init__.py")
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def is_conftest(path: str) -> bool:
+    return path.startswith(TEST_ROOT) and path.rsplit("/", 1)[-1] == "conftest.py"
+
+
+def _fixture_kinds(tree: ast.Module) -> tuple[set[str], set[str], set[str]]:
+    """(fixtures, names bound by import, names that reach every test) in a
+    conftest. A test reaches a conftest only through fixtures it names, or
+    through ones the conftest imports from elsewhere; a hook, pytest_plugins
+    and an autouse fixture reach every test beneath it."""
+    fixtures: set[str] = set()
+    imported: set[str] = set()
+    everywhere: set[str] = set()
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            decorators = [ast.unparse(d) for d in stmt.decorator_list]
+            if stmt.name.startswith("pytest_"):
+                everywhere.add(stmt.name)
+            elif any("fixture" in d for d in decorators):
+                fixtures.add(stmt.name)
+                if any("autouse" in d for d in decorators):
+                    everywhere.add(stmt.name)
+        elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            imported |= _binds(stmt)
+        elif "pytest_plugins" in _binds(stmt):
+            everywhere.add("pytest_plugins")
+    return fixtures, imported, everywhere
 
 
 def is_helper(path: str) -> bool:
@@ -174,7 +202,8 @@ def seeds(repo: Path, base: str, importers: set[str], names: set[str]) -> set[st
 def route(state, path: str, ctx) -> tuple[set[str], set[str], str] | None:
     """(test files, script files, detail) for a modified helper, or None to
     leave it to the file-level graph claim."""
-    if ctx is None or ctx.status.get(path) != "M" or not is_helper(path):
+    conftest = is_conftest(path)
+    if ctx is None or ctx.status.get(path) != "M" or not (is_helper(path) or conftest):
         return None
     repo = Path(state.repo)
     diff = _git(repo, "diff", "-U0", "--no-color", ctx.base, ctx.head, "--", path)
@@ -198,6 +227,22 @@ def route(state, path: str, ctx) -> tuple[set[str], set[str], str] | None:
     affected = affected_names([base_tree, head_tree], changed)
     if affected is None:
         return None
+    if conftest:
+        # Only fixtures carry a conftest's change to a test: its other names
+        # reach a test through a fixture that uses them, which the fixpoint
+        # has already followed. vllm#58916 deleted an unused fixture from
+        # tests/conftest.py and 182 steps came along.
+        fixtures, imported, everywhere = set(), set(), set()
+        for tree in (base_tree, head_tree):
+            f, i, e = _fixture_kinds(tree)
+            fixtures |= f
+            imported |= i
+            everywhere |= e
+        if affected & everywhere:
+            return None
+        affected = affected & (fixtures | imported)
+        if not affected:
+            return set(), set(), f"{path}: changed no fixture {sorted(changed)[:3]}"
     graph = state.full.graph
     importers = set(graph.reverse.get(path, ()))
     seeded = seeds(repo, ctx.base, importers, affected)
