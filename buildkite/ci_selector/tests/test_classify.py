@@ -2325,11 +2325,14 @@ def test_a_rename_keeps_its_device_scope(state, vllm_repo):
     assert _classify(state, new, ctx).device_scope == expected
 
 
-def _head_stub(closure):
+def _head_stub(closure, reverse=None):
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        graph=SimpleNamespace(reverse_closure=lambda files, include_boot=True: closure)
+        graph=SimpleNamespace(
+            reverse_closure=lambda files, include_boot=True: closure,
+            reverse=reverse or {},
+        )
     )
 
 
@@ -2349,6 +2352,37 @@ def test_added_head_closure_maps_to_base_steps(state, monkeypatch):
     claim = _classify(state, "vllm/newarea/brand_new.py", ctx)
     assert claim.rule == "added-head-closure"
     assert not claim.run_all and claim.test_files
+
+
+@pytest.mark.parametrize("importer_status", ["M", None])
+def test_added_head_closure_is_weighed_by_its_changed_importers(
+    state, monkeypatch, importer_status
+):
+    """vllm#58686: a new module only a changed function of hf.py calls. When
+    every non-test importer changed in the same diff, the record can weigh
+    those importers, so the claim is droppable. An untouched importer keeps
+    the old, held routing."""
+    import ci_selector.codemap.classify as sel_mod
+    from ci_selector.codemap.classify import _classify
+    from ci_selector.codemap.state import DiffContext
+
+    new = "vllm/newarea/brand_new.py"
+    importer = "vllm/newarea/user.py"
+    closure = {new, importer, "tests/v1/e2e/spec_decode/eagle/test_head_new.py"}
+    reverse = {new: {importer, "tests/v1/e2e/spec_decode/eagle/test_head_new.py"}}
+    monkeypatch.setattr(
+        sel_mod, "_head_graph", lambda st, ctx: _head_stub(closure, reverse)
+    )
+    status = {new: "A"}
+    if importer_status:
+        status[importer] = importer_status
+    claim = _classify(state, new, DiffContext(base="b", head="h", status=status))
+    assert claim.rule == "added-head-closure"
+    if importer_status:
+        assert claim.droppable_test_files
+        assert claim.evidence_paths == frozenset({new, importer})
+    else:
+        assert not claim.droppable_test_files
 
 
 def test_added_head_closure_empty_falls_through(state, monkeypatch):
