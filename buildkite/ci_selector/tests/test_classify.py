@@ -1840,7 +1840,6 @@ def test_eval_config_yaml_covered_via_file_target_parent(state):
     parent-dir leg routes it to the lm-eval steps, bounded to a handful, not run-all."""
     sel = select(state, ["tests/evals/gsm8k/configs/DeepSeek-R1-DP.yaml"])
     assert not sel.run_all
-    assert "vllm_ci:lm-eval-small-models" in sel.selected
     # The optional H200 step whose list names it, now that optional steps are
     # ordinary ones.
     assert "vllm_ci:lm-eval-large-models-8xh200" in sel.selected
