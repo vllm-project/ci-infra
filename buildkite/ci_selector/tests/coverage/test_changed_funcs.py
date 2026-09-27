@@ -329,3 +329,45 @@ class TestBehaviourPreserving:
         )
         (only,) = self._build(repo, text).files
         assert "fused" in only.names and "<module>" in only.names
+
+
+def test_a_new_parameter_leaves_the_module_body_unchanged(tmp_path):
+    """vllm#58828: a new `expert_map=None` parameter changes the module body's
+    code object (the def builds a new function, with a new default), but
+    import runs the same code. Only the function stays changed."""
+    import subprocess
+
+    from ci_selector.coverage.changed_funcs import build
+
+    repo = tmp_path / "r"
+    (repo / "vllm").mkdir(parents=True)
+
+    def git(*a):
+        return subprocess.run(
+            ["git", "-C", str(repo), *a], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    src = "import os\n\n\ndef op(x, is_gated: bool = True):\n    return f(x, is_gated)\n"
+    (repo / "vllm/ops.py").write_text(src)
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    (repo / "vllm/ops.py").write_text(
+        src.replace("is_gated: bool = True)", "is_gated: bool = True, expert_map=None)")
+        .replace("f(x, is_gated)", "f(x, is_gated, expert_map)")
+    )
+    git("commit", "-qam", "param")
+    q = build(repo, base, git("rev-parse", "HEAD"))
+    (f,) = q.files
+    assert f.names == {"op"}, f.names
+
+    # A default that is an expression runs at import: the body stays changed.
+    (repo / "vllm/ops.py").write_text(src.replace("= True)", "= os.cpu_count())"))
+    git("commit", "-qam", "expr default")
+    head2 = git("rev-parse", "HEAD")
+    q = build(repo, git("rev-parse", "HEAD~1"), head2)
+    (f,) = q.files
+    assert "<module>" in f.names

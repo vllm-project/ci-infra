@@ -509,6 +509,46 @@ def _annotation_only(before: str, after: str) -> bool:
     return a == b
 
 
+class _Shell(ast.NodeTransformer):
+    """A module with what import does not run taken out: function bodies,
+    parameter lists and annotations, and defaults that are plain literals.
+    Decorators stay, and so does any default that is an expression, since
+    both run when the def does."""
+
+    def _fn(self, node):
+        args = node.args
+        kept = [
+            d
+            for d in [*args.defaults, *(k for k in args.kw_defaults if k is not None)]
+            if not isinstance(d, ast.Constant)
+        ]
+        for d in kept:
+            self.visit(d)
+        node.decorator_list = [self.visit(d) for d in node.decorator_list]
+        node.body = [ast.Pass()]
+        node.returns = None
+        node.args = ast.arguments(
+            posonlyargs=[], args=[], vararg=None, kwonlyargs=[],
+            kw_defaults=[], kwarg=None, defaults=kept,
+        )
+        if hasattr(node, "type_params"):
+            node.type_params = []
+        return node
+
+    visit_FunctionDef = visit_AsyncFunctionDef = _fn
+
+
+def _shell_equal(before: str, after: str) -> bool:
+    """Whether import runs the same code on both sides: the modules differ
+    only inside function bodies, in signatures, or in literal defaults."""
+    try:
+        a = _Shell().visit(ast.parse(before))
+        b = _Shell().visit(ast.parse(after))
+    except SyntaxError:
+        return False
+    return ast.dump(a) == ast.dump(b)
+
+
 def _drop_unchanged(
     repo, base, head, base_side, head_side, base_names, head_names, import_time
 ):
@@ -546,6 +586,14 @@ def _drop_unchanged(
 
     unchanged = {n for n in base_names | head_names if same(n)}
     left = (base_names | head_names) - unchanged
+    # A module or class body differs whenever a def in it does: the def builds
+    # its function from the new code, and a new parameter's default is a new
+    # constant. If that is all, import runs the same code. vllm#58828 added
+    # `expert_map=None` to get_cutlass_moe_mm_data, and `<module>` of
+    # _custom_ops.py kept 145 steps that only import it.
+    if left & import_time and left - import_time and _shell_equal(before, after):
+        unchanged |= left & import_time
+        left = left - import_time
     if left and left <= import_time:
         if not _annotation_only(before, after):
             # Only import-time names would be left, and under the default
