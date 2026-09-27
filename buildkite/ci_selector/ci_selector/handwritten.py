@@ -123,6 +123,14 @@ PATH_TOKEN_NOT_PLATFORM: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# The env-var module setup.py loads at build time (load_module_from_path), so
+# the Dockerfile copies it into the build stage. The build reads only the
+# variables setup.py names as `envs.<NAME>`; an entry nothing there reads
+# cannot change the image.
+# Update when: setup.py stops loading it, or loads another module the same way.
+BUILD_ENV_MODULE = "vllm/envs.py"
+BUILD_ENV_READER = "setup.py"
+
 # Every literal naming a platform or device, from the queue-side tables above.
 # Deliberately NOT DEVICE_NAME_FAMILIES: those tokens are the file side, and
 # widening dispatch's refusal set is a change to a different rule. A

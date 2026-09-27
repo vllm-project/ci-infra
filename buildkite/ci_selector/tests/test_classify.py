@@ -3282,3 +3282,50 @@ def test_host_memory_cpu_paths_exist(state):
             "an entry naming nothing exempts nothing",
             "update or delete it in PATH_TOKEN_NOT_PLATFORM in ci_selector/handwritten.py",
         )
+
+
+def test_an_env_var_the_build_never_reads_skips_the_image_union(tmp_path):
+    """vllm#58919: a new VLLM_MOONCAKE_CONNECTOR_TIMEOUT entry in vllm/envs.py
+    sent every image step along, because setup.py loads the module. The build
+    reads only what setup.py names as envs.<NAME>."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from ci_selector.codemap.classify import _env_change_misses_build
+    from ci_selector.codemap.state import DiffContext
+
+    repo = tmp_path / "r"
+    (repo / "vllm").mkdir(parents=True)
+
+    def git(*a):
+        return subprocess.run(
+            ["git", "-C", str(repo), *a], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    envs = (
+        "import os\n\nenvironment_variables = {\n"
+        '    "MAX_JOBS": lambda: os.getenv("MAX_JOBS"),\n'
+        '    "VLLM_A": lambda: os.getenv("VLLM_A"),\n}\n'
+    )
+    (repo / "vllm/envs.py").write_text(envs)
+    (repo / "setup.py").write_text("jobs = envs.MAX_JOBS\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+
+    def after(text):
+        (repo / "vllm/envs.py").write_text(text)
+        git("commit", "-qam", "c")
+        head = git("rev-parse", "HEAD")
+        state = SimpleNamespace(repo=repo)
+        return _env_change_misses_build(
+            state, "vllm/envs.py", DiffContext(base, head, {"vllm/envs.py": "M"})
+        )
+
+    added = envs.replace("}\n", '    "VLLM_NEW": lambda: float(\n        os.getenv("VLLM_NEW", "3")\n    ),\n}\n')
+    assert after(added)
+    assert not after(envs.replace('getenv("MAX_JOBS")', 'getenv("MAX_JOBS", "8")'))
+    assert not after(envs + "print('side effect')\n")

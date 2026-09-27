@@ -35,6 +35,8 @@ import yaml
 
 from ..gitdiff import diff_files
 from ..handwritten import (
+    BUILD_ENV_MODULE,
+    BUILD_ENV_READER,
     INERT_CI_PREFIXES,
     LEGACY_CI_FILES,
     PACKAGE_ROOTS,
@@ -732,8 +734,82 @@ def _classify_added_head_closure(
     )
 
 
+_HUNK_RANGE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _env_entries_touched(text: str, lines: set[int]) -> set[str] | None:
+    """The env var names whose `environment_variables` entry or TYPE_CHECKING
+    annotation holds a changed line, or None when a changed line is anywhere
+    else in the module."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    spans: list[tuple[range, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    spans.append((range(k.lineno, (v.end_lineno or k.lineno) + 1), k.value))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            spans.append((range(node.lineno, (node.end_lineno or node.lineno) + 1), node.target.id))
+    out: set[str] = set()
+    source = text.splitlines()
+    for n in lines:
+        line = source[n - 1].strip() if 0 < n <= len(source) else ""
+        if not line or line.startswith("#"):
+            continue
+        hits = {name for span, name in spans if n in span}
+        if not hits:
+            return None
+        out |= hits
+    return out
+
+
+def _env_change_misses_build(state: RepoState, path: str, ctx: DiffContext | None) -> bool:
+    """Whether a change to the build's env-var module touches only variables
+    the build never reads. vllm#58919 added VLLM_MOONCAKE_CONNECTOR_TIMEOUT
+    and every image step (210) came along, since setup.py loads the module."""
+    if path != BUILD_ENV_MODULE or ctx is None or ctx.status.get(path) != "M":
+        return False
+    repo = Path(state.repo)
+
+    def show(ref, p):
+        r = subprocess.run(["git", "-C", str(repo), "show", f"{ref}:{p}"],
+                           capture_output=True, text=True)
+        return r.stdout if r.returncode == 0 else None
+
+    diff = subprocess.run(
+        ["git", "-C", str(repo), "diff", "-U0", "--no-color", ctx.base, ctx.head, "--", path],
+        capture_output=True, text=True,
+    )
+    reader = show(ctx.base, BUILD_ENV_READER)
+    if diff.returncode != 0 or reader is None:
+        return False
+    base_lines: set[int] = set()
+    head_lines: set[int] = set()
+    for line in diff.stdout.splitlines():
+        m = _HUNK_RANGE.match(line)
+        if m:
+            b0, bn = int(m.group(1)), int(m.group(2) or 1)
+            h0, hn = int(m.group(3)), int(m.group(4) or 1)
+            base_lines.update(range(b0, b0 + bn))
+            head_lines.update(range(h0, h0 + hn))
+    touched: set[str] = set()
+    for ref, lines in ((ctx.base, base_lines), (ctx.head, head_lines)):
+        text = show(ref, path)
+        names = _env_entries_touched(text or "", lines) if text is not None else None
+        if names is None:
+            return False
+        touched |= names
+    read = set(re.findall(r"\benvs\.([A-Z_][A-Z0-9_]*)", reader))
+    return not (touched & read)
+
+
 def _classify(state: RepoState, path: str, ctx: DiffContext | None) -> Claim:
     claim = _apply_declarer_union(state, path, _classify_inner(state, path, ctx))
+    if _env_change_misses_build(state, path, ctx):
+        claim.image_union_exempt = True
     claim = _apply_image_input_union(state, path, claim)
     return _apply_csrc_droppability(state, path, claim)
 
