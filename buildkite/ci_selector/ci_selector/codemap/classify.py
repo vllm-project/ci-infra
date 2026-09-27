@@ -27,6 +27,8 @@ graph, so the status-A rules would never fire.
 from __future__ import annotations
 
 import ast
+import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -800,6 +802,144 @@ def _classify_image_input(state: RepoState, path: str) -> Claim | None:
     )
 
 
+_NATIVE_SOURCE_SUFFIXES = (".cu", ".cuh", ".cpp", ".cc", ".c", ".h", ".hpp", ".hip")
+_NATIVE_HEADER_SUFFIXES = (".h", ".hpp", ".cuh")
+_CMAKE_SOURCE_LINE = re.compile(
+    r'^\s*"?([A-Za-z0-9_./+-]+\.(?:cu|cuh|cpp|cc|c|h|hpp|hip))"?\s*$'
+)
+_IDENT = re.compile(r"[A-Za-z_]\w*")
+_REGISTRATION = re.compile(r"^\w+\.(?:def|impl)\s*\(")
+
+
+def _added_hunks(repo: Path, base: str, head: str, path: str) -> list[list[str]] | None:
+    """The added lines of each hunk, or None when git fails or any line was
+    removed: a removal edits what exists, which these rules never judge."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "diff", "-U0", "--no-color", base, head, "--", path],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    hunks: list[list[str]] = []
+    for line in proc.stdout.splitlines():
+        if line.startswith("@@"):
+            hunks.append([])
+        elif not hunks or line.startswith(("+++", "---")):
+            continue
+        elif line.startswith("-"):
+            return None
+        elif line.startswith("+"):
+            hunks[-1].append(line[1:])
+    return hunks
+
+
+def _classify_native_addition(
+    state: RepoState, path: str, ctx: DiffContext | None
+) -> Claim | None:
+    """A change that only brings new native code into being, routed by the PR's
+    other files rather than failing open.
+
+    vllm#58664 added one fused kernel: a new .cu, its line in CMakeLists.txt,
+    a prototype in ops.h and a def/impl pair in torch_bindings.cpp. Each fell
+    open to "run everything" or to every op in the file, though nothing
+    unchanged can call code that did not exist. What can reach it is the PR's
+    other changed files: the Python wrapper, the tests calling it, and the
+    always-run image builds that compile it. So these claim no steps and skip
+    the image widening; the other files carry the selection.
+
+    Three shapes, each declining on anything else:
+      a new file under csrc/;
+      a CMakeLists.txt whose only change adds quoted paths of new sources;
+      a header or registration file whose only change adds declarations or
+        def/impl statements for names absent at base, and names no op that
+        existed. A header hunk with a body ({ or }) or a macro declines, since
+        a hunk does not show the function it lands in.
+    """
+    if ctx is None:
+        return None
+    status = ctx.status.get(path)
+    if (
+        status == "A"
+        and path.startswith("csrc/")
+        and path.endswith(_NATIVE_SOURCE_SUFFIXES)
+    ):
+        return Claim(
+            "added-native-source",
+            f"{path} is a new native source: nothing unchanged can call into "
+            "it, so the PR's other files (op registration, wrappers, tests) "
+            "carry it, and the always-run image builds compile it",
+            image_union_exempt=True,
+        )
+    if status != "M":
+        return None
+    name = path.rsplit("/", 1)[-1]
+    is_cmake = name == "CMakeLists.txt"
+    if not is_cmake and not (
+        path.startswith("csrc/") and path.endswith(_NATIVE_SOURCE_SUFFIXES)
+    ):
+        return None
+    hunks = _added_hunks(state.repo, ctx.base, ctx.head, path)
+    if not hunks:
+        return None
+
+    if is_cmake:
+        listed: list[str] = []
+        for added in hunks:
+            for line in added:
+                if not line.strip():
+                    continue
+                m = _CMAKE_SOURCE_LINE.match(line)
+                if not m:
+                    return None
+                listed.append(m.group(1))
+        if not listed or any(ctx.status.get(p) != "A" for p in listed):
+            return None
+        return Claim(
+            "added-native-source",
+            f"{path} only adds new sources to the build ({', '.join(listed)}); "
+            "they route as new sources",
+            image_union_exempt=True,
+            evidence_paths=frozenset(listed),
+        )
+
+    no = state.native_ops
+    base_text = registry_diff.git_show(state.repo, ctx.base, path)
+    if no is None or no.error or base_text is None:
+        return None
+    is_header = path.endswith(_NATIVE_HEADER_SUFFIXES)
+    is_registry = "TORCH_LIBRARY" in base_text
+    if not (is_header or is_registry):
+        return None
+    base_ids = set(_IDENT.findall(base_text))
+    base_ops = set().union(*no.file_ops.values()) if no.file_ops else set()
+    fresh_all: set[str] = set()
+    for added in hunks:
+        text = "\n".join(line for line in added if not line.strip().startswith("//"))
+        if not text.strip():
+            continue
+        ids = set(_IDENT.findall(text))
+        fresh = ids - base_ids
+        if not fresh or ids & base_ops:
+            return None
+        if is_header:
+            if "{" in text or "}" in text or "#" in text:
+                return None
+        else:
+            statements = [s.strip() for s in text.split(";") if s.strip()]
+            if not all(_REGISTRATION.match(s) for s in statements):
+                return None
+        fresh_all |= fresh
+    if not fresh_all:
+        return None
+    return Claim(
+        "added-native-source",
+        f"{path} only declares or registers new names "
+        f"({', '.join(sorted(fresh_all)[:4])}); nothing unchanged can call them",
+        image_union_exempt=True,
+    )
+
+
 def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Claim:
     configs = [p.config for p in state.pipelines]
     image = _classify_image_input(state, path)
@@ -816,6 +956,9 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
             claim.step_ids |= state.family_steps(family)
         claim.step_ids |= _source_dep_steps(state, path)
         return claim
+    native = _classify_native_addition(state, path, ctx)
+    if native is not None:
+        return native
     if path.startswith(".buildkite/"):
         return _classify_buildkite(state, path, configs)
     # A file exclusive to a family with no live steps has nothing to run. The
