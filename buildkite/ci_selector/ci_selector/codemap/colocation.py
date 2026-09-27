@@ -32,6 +32,7 @@ from .state import RepoState
 from .step_refs import (
     _direct_step_refs,
     _hardware_family_steps,
+    hardware_steps_held,
     _source_dep_steps,
 )
 
@@ -167,7 +168,8 @@ def _colocated_claim(
         step_ids=inferred_steps | hw_steps,
         # Subtracted, not merely left out: hardware steps stand for compiled
         # reach nothing records, so a step one holds stays held.
-        droppable_step_ids=inferred_steps - hw_steps,
+        droppable_step_ids=(inferred_steps | hw_steps)
+        - hardware_steps_held(path, hw_steps),
         droppable_test_files=True,
     )
 

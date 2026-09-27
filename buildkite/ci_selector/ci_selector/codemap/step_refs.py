@@ -120,6 +120,26 @@ def _direct_step_refs(state: RepoState, path: str) -> set[str]:
     }
 
 
+PLATFORM_DIR = "vllm/platforms/"
+
+
+def hardware_steps_held(path: str, hw_steps: set[str]) -> set[str]:
+    """The part of a hardware-convention tagging the record may not drop.
+
+    All of it for compiled code, whose kernels reach a family's jobs where no
+    recording sees, and for the platform modules, which vLLM loads by a
+    qualname string the graph cannot follow and whose import-time code runs in
+    every job of the family. None of it for any other Python file: the import
+    graph found it, and the Python record, which has rows for AMD steps too,
+    sees every call into it. vllm#58689 renamed three classes in one ROCm-only
+    model file, and all 106 AMD mirror steps were held though none calls the
+    renamed code.
+    """
+    if path.endswith(".py") and not path.startswith(PLATFORM_DIR):
+        return set()
+    return set(hw_steps)
+
+
 def _hardware_family_steps(state: RepoState, path: str) -> tuple[str | None, set[str]]:
     """Steps a source file reaches by hardware naming convention.
 
