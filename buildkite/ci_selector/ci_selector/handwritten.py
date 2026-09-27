@@ -107,6 +107,22 @@ PATH_TOKEN_FAMILIES: tuple[tuple[frozenset[str], str], ...] = (
     (frozenset({"cpu"}), "cpu"),
 )
 
+# Paths whose family token names a feature, not the platform. They keep data in
+# host memory ("cpu") and run inside GPU jobs, so the token must not tag them
+# for the CPU family: vllm#58497 changed kv_offload/cpu and was sent to eight
+# CPU steps that record nothing, so no row could ever take them back.
+# Update when: a new host-memory feature lands under a `cpu` directory or name.
+PATH_TOKEN_NOT_PLATFORM: dict[str, tuple[str, ...]] = {
+    "cpu": (
+        "vllm/v1/kv_offload/cpu/",
+        "vllm/v1/simple_kv_offload/",
+        "vllm/distributed/ec_transfer/ec_connector/cpu/",
+        "vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py",
+        "tests/v1/kv_offload/cpu/",
+        "tests/v1/simple_kv_offload/",
+    ),
+}
+
 # Every literal naming a platform or device, from the queue-side tables above.
 # Deliberately NOT DEVICE_NAME_FAMILIES: those tokens are the file side, and
 # widening dispatch's refusal set is a change to a different rule. A
