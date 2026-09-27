@@ -272,6 +272,24 @@ def _apply_record(
             else:
                 unresolved.pop(path, None)
 
+    # Today's rules, for the hub cap: hub evidence may not hold or add a step
+    # outside them. Built at base like the rest; a failure leaves the cap off.
+    today: frozenset[str] | None = None
+    try:
+        from .gitdiff import changed_paths, diff_files
+        from .validate.generator_replica import today_select
+
+        base_state = state_for(repo, base)
+        chosen = today_select(
+            [(p.config, p.steps) for p in base_state.pipelines],
+            changed_paths(diff_files(repo, base, head)),
+        )
+        today = frozenset(s for ids in chosen.selected.values() for s in ids)
+        if any(chosen.run_all.values()):
+            today = frozenset(s.step_id for p in base_state.pipelines for s in p.steps)
+    except Exception:  # noqa: BLE001 - the cap only ever narrows; off is safe
+        today = None
+
     reading = read_pr(
         table,
         selection,
@@ -283,6 +301,7 @@ def _apply_record(
         keys,
         stale,
         mode=mode,
+        today=today,
     )
     out.stale_steps = len(stale)
     out.reasons = dict(reading.reasons)

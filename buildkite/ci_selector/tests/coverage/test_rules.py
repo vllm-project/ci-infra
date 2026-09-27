@@ -923,3 +923,91 @@ class TestProxyEvidence:
         assert "vllm_ci:runs-plain" in control.added  # the detection floor
         proxied = run(self._proxy_query("plain"))
         assert "vllm_ci:runs-plain" not in proxied.added
+
+
+class TestNoWiderThanToday:
+    """Beyond today's rules, evidence has to be specific: hub names (held by
+    more than half the rows) neither hold nor add such a step, and an add has
+    to bring a changed function no kept step calls."""
+
+    STEPS = ("kept", "hub1", "hub2", "dup", "new")
+
+    @pytest.fixture
+    def rows(self, tmp_path: Path, tmp_repo: Repo):
+        return make_table(
+            tmp_path,
+            tmp_repo,
+            {
+                "kept": [("mod.py", "plain"), ("mod.py", "Holder.method")],
+                "hub1": [("mod.py", "plain")],
+                "hub2": [("mod.py", "plain")],
+                "dup": [("mod.py", "Holder.method")],
+                "new": [("other.py", "elsewhere")],
+            },
+        )
+
+    def _read(self, rows, selected, names, today):
+        files = [
+            FileQuery(path=p, status=Attribution.ATTRIBUTED, head_names=frozenset({n}))
+            for p, n in names
+        ]
+        query = Query(base="base", head="head", files=files)
+        owner = RowKeys(
+            {"vllm_ci"},
+            {"vllm_ci": 1.0},
+            steps={f"vllm_ci:{s}": FakeStep() for s in self.STEPS},
+        )
+        return read_pr(
+            rows,
+            result_for(*(f"vllm_ci:{s}" for s in selected), paths=("vllm/mod.py",)),
+            query,
+            unknown_names(query, UNION, {}),
+            KNOWN,
+            owner,
+            today=frozenset(f"vllm_ci:{s}" for s in today),
+        )
+
+    def test_hub_only_evidence_drops_a_step_outside_today(self, rows):
+        """plain is held by 3 of 5 rows."""
+        reading = self._read(
+            rows, ["kept", "hub1"], [("vllm/mod.py", "plain")], ["kept"]
+        )
+        assert "vllm_ci:hub1" in reading.dropped
+        assert "vllm_ci:kept" in reading.kept, "today runs it: untouched"
+        assert reading.reasons["hub-only-evidence-outside-today"] == 1
+
+    def test_hub_evidence_never_adds_outside_today(self, rows):
+        reading = self._read(rows, ["dup"], [("vllm/mod.py", "plain")], [])
+        assert not {"vllm_ci:hub1", "vllm_ci:hub2", "vllm_ci:kept"} & set(reading.added)
+
+    def test_an_add_beyond_today_must_bring_uncovered_code(self, rows):
+        """Holder.method (2 of 5 rows, not a hub) is called by the kept step,
+        so dup adds nothing; elsewhere is called by no kept step."""
+        reading = self._read(
+            rows,
+            ["kept"],
+            [("vllm/mod.py", "Holder.method"), ("vllm/other.py", "elsewhere")],
+            ["kept"],
+        )
+        assert reading.added == ["vllm_ci:new"]
+        assert reading.reasons["add-beyond-today-already-covered"] == 1
+
+    def test_the_caps_are_off_without_today(self, rows):
+        reading = self._read(rows, ["kept", "hub1"], [("vllm/mod.py", "plain")], [])
+        # today=frozenset() still caps; None is the off switch
+        owner = RowKeys(
+            {"vllm_ci"},
+            {"vllm_ci": 1.0},
+            steps={f"vllm_ci:{s}": FakeStep() for s in self.STEPS},
+        )
+        query = query_for("vllm/mod.py", "plain")
+        off = read_pr(
+            rows,
+            result_for("vllm_ci:kept", "vllm_ci:hub1", paths=("vllm/mod.py",)),
+            query,
+            unknown_names(query, UNION, {}),
+            KNOWN,
+            owner,
+        )
+        assert "vllm_ci:hub1" in off.kept
+        assert "vllm_ci:hub1" in reading.dropped

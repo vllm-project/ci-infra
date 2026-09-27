@@ -703,11 +703,32 @@ def _classify_added_head_closure(
     }
     if not cover or not _covers_auto_step(state, path, cover):
         return None
+    # A new file is reached only through its importers. When every non-test
+    # one changed in this same diff, what can reach it is those changes, and
+    # the record can weigh them: a step whose row never calls the changed
+    # importer code never reaches the new file. vllm#58686 added a module one
+    # changed function of hf.py calls, and its closure (nearly every step
+    # through hf.py) was held undroppable. Any importer the diff did not touch
+    # keeps the old non-droppable routing.
+    reverse = getattr(head_full.graph, "reverse", None) or {}
+    importers = {
+        f
+        for f in reverse.get(path, set())
+        if not is_test_file(f) and not f.startswith(("examples/", "benchmarks/"))
+    }
+    changed = importers and all(ctx.status.get(f) in ("M", "A", "R") for f in importers)
+    detail = (
+        f"{path} is new; routed via its HEAD reverse closure "
+        f"({len(cover)} test/script dependents mapped onto base steps)"
+    )
+    if not changed:
+        return Claim("added-head-closure", detail, test_files=cover)
     return Claim(
         "added-head-closure",
-        f"{path} is new; routed via its HEAD reverse closure "
-        f"({len(cover)} test/script dependents mapped onto base steps)",
+        detail + f"; weighed by its changed importers {sorted(importers)[:3]}",
         test_files=cover,
+        droppable_test_files=True,
+        evidence_paths=frozenset({path} | importers),
     )
 
 
