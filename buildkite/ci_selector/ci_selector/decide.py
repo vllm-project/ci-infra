@@ -55,6 +55,9 @@ from .coverage.table import Table
 #: records: for the kernel record it means a csrc file whose source moved
 #: between the map's commit and the PR's base may select but not drop.
 FRESHNESS_ENV = "CI_SELECTOR_FRESHNESS"
+# On unless set to 0: new names reached only through changed code the record
+# knows, tests or imports stop blocking narrowing. See coverage/new_names.py.
+RESOLVE_NEW_NAMES_ENV = "CI_SELECTOR_RESOLVE_NEW_NAMES"
 #: Set to let the kernel record DROP when its table and map were recorded at
 #: different commits. Off, such a pair only selects: a kernel renamed between
 #: the two reads as never launched. The collect step publishes matched pairs,
@@ -256,18 +259,37 @@ def _apply_record(
 
     _append_op_proxies(query, repo, base, union_names, table)
 
+    unresolved = unknown_names(query, union_names, {})
+    resolved: dict[str, set[str]] = {}
+    if unresolved and os.environ.get(RESOLVE_NEW_NAMES_ENV, "1") != "0":
+        from .coverage import new_names
+
+        resolved = new_names.resolve(repo, base, head, query, unresolved)
+        for path, names in resolved.items():
+            left = unresolved.get(path, set()) - names
+            if left:
+                unresolved[path] = left
+            else:
+                unresolved.pop(path, None)
+
     reading = read_pr(
         table,
         selection,
         query,
-        unknown_names(query, union_names, {}),
-        frozenset(union_names),
+        unresolved,
+        # A new file stops being unseen only when every name in it resolved:
+        # one unresolved name must still block, as before.
+        frozenset(union_names) | frozenset(p for p in resolved if p not in unresolved),
         keys,
         stale,
         mode=mode,
     )
     out.stale_steps = len(stale)
     out.reasons = dict(reading.reasons)
+    if resolved:
+        out.reasons["new-names-reached-only-through-changed-code"] = sum(
+            len(n) for n in resolved.values()
+        )
     out.added_by_coverage = set(reading.added)
     out.dropped_by_coverage = set(reading.dropped)
     out.executes_by_coverage = set(reading.executes)
