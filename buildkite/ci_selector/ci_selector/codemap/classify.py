@@ -202,8 +202,11 @@ def _classify_rust(state: RepoState, path: str) -> Claim:
     """
     ws = state.rust_workspace
     bucket = ws.bucket_of(path) or "root"
-    gate_steps = state.keys.steps_naming_raw(set(RUST_GATE_ENV_VARS))
-    gate_steps |= state.keys.steps_naming_raw({"rust/", *RUST_TOOLCHAIN_FILES})
+    # What the step runs and sets, never a test's literals: vllm#58885 sent a
+    # rust change to an env-var listing test and a Dockerfile metadata test.
+    gate_steps = state.keys.steps_running(
+        {*RUST_GATE_ENV_VARS, "rust/", *RUST_TOOLCHAIN_FILES}
+    )
     gate_steps &= state.auto_step_ids
     image_steps: set[str] = set()
     for df in state.artifacts.explicit_images_of(path):
@@ -245,21 +248,31 @@ def _classify_requirements(state: RepoState, path: str) -> Claim | None:
     opts out of that widening. The manual-only fall-through applies there too.
     """
     if path in REQUIREMENTS_BUILD_VALIDATED:
-        # Ignores the switch: this rule picks steps from declarations by
-        # design. Silencing it sends the family-less files to run-all and
-        # leaves the rest with nothing.
-        declarers = _source_dep_steps_ungated(state, path)
-        if declarers & state.auto_step_ids:
-            return Claim(
-                "requirements",
-                f"{path}: build-validated, declaring steps only",
-                step_ids=declarers,
-                image_union_exempt=True,
-            )
-        return None
+        # Tooling no test imports: the always-run builds validate it, plus any
+        # step declaring it when the declarations switch is on.
+        # Steps that install it by name, from their own commands or scripts.
+        users = (
+            _direct_step_refs(state, path)
+            | state.keys.steps_running({path})
+            | _source_dep_steps_ungated(state, path)
+        )
+        return Claim(
+            "requirements",
+            f"{path}: build-validated; the always-run builds install it, plus "
+            f"{len(users)} steps naming it",
+            step_ids=users,
+            image_union_exempt=True,
+        )
     family = hardware.requirements_family_of_path(path)
     fam_steps = state.family_steps(family) if family else set()
-    step_ids = _source_dep_steps_ungated(state, path) | fam_steps
+    # Steps installing the file by name, then its device family: derived from
+    # what the steps run, not from what they declare.
+    step_ids = (
+        _direct_step_refs(state, path)
+        | state.keys.steps_running({path})
+        | fam_steps
+        | _source_dep_steps_ungated(state, path)
+    )
     if step_ids & state.auto_step_ids:
         return Claim(
             "requirements",
@@ -422,6 +435,11 @@ def _reached_by_nothing(state: RepoState, path: str) -> bool:
     if state.keys.for_file(path):
         return False
     if path in state.docker_inputs:
+        return False
+    # A file the native build compiles or includes is reached by every job
+    # that builds, whatever the knob scoping it says. Declarations used to be
+    # what caught cmake/cpu_extension.cmake here.
+    if path in state.build_map.families:
         return False
     if _source_dep_steps_ungated(state, path, specific_only=True):
         return False
@@ -1098,9 +1116,15 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
     # scoped fail-open, which would otherwise read its name as a device family.
     # A live-step declarer turns this off, since the file rejoined the tests.
     if path in state.release_refs and not (
-        # Ignores the switch: this only ever says "the file is still tested",
-        # so silencing it would invent empty answers.
-        _source_dep_steps_ungated(state, path) & state.auto_step_ids
+        # A live step running the file, or a test naming its path, says it is
+        # still tested.
+        (
+            _direct_step_refs(state, path)
+            # A test may build the path from parts, leaving the basename.
+            | state.keys.steps_naming_raw({path, path.rsplit("/", 1)[-1]})
+            | _source_dep_steps_ungated(state, path)
+        )
+        & state.auto_step_ids
     ):
         return Claim(
             "release-ci",
@@ -1289,6 +1313,18 @@ def _classify_buildkite(
             "inert-ci",
             f"{path} is in a CI tree no live pipeline consumes "
             "(external nightly/deprecated stub); nothing to run",
+        )
+    # A release script a live test reads by name is still tested: the Docker
+    # metadata test builds .buildkite/scripts/docker-build-metadata-args.sh
+    # from parts, so its basename is what the test's literals hold.
+    named = state.keys.steps_naming_raw({path, path.rsplit("/", 1)[-1]})
+    named &= state.auto_step_ids
+    if path in state.release_refs and named:
+        return Claim(
+            "buildkite",
+            f"{path} is referenced by the release pipeline and read by "
+            f"{len(named)} live steps' tests",
+            step_ids=named,
         )
     if path in RELEASE_PIPELINE_FILES or path in state.release_refs:
         detail = (

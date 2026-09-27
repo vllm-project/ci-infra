@@ -38,13 +38,18 @@ def test_mode_defaults_off_and_rejects_typos(monkeypatch):
 
 
 def test_the_gate_is_silent_by_default_and_open_when_switched_on(state, monkeypatch):
-    raw = _source_dep_steps_ungated(state, DECLARED_PROBE)
+    """Every read obeys the switch, the ungated helper included: the
+    declarations are what the selector is measured against."""
+    from helpers import declaring_steps
+
+    raw = declaring_steps(state, DECLARED_PROBE)
     assert raw, f"{DECLARED_PROBE} lost its declarers; pick a new probe"
     monkeypatch.delenv(ENV_VAR, raising=False)
     assert _source_dep_steps(state, DECLARED_PROBE) == set()
-    assert _source_dep_steps_ungated(state, DECLARED_PROBE) == raw
+    assert _source_dep_steps_ungated(state, DECLARED_PROBE) == set()
     monkeypatch.setenv(ENV_VAR, "on")
     assert _source_dep_steps(state, DECLARED_PROBE) == raw
+    assert _source_dep_steps_ungated(state, DECLARED_PROBE) == raw
 
 
 def _calls_of(tree: ast.AST, name: str) -> int:
@@ -98,10 +103,15 @@ def test_raw_reads_are_whitelisted_in_both_directions():
 
 
 def test_switch_off_keeps_the_requirements_route(state, monkeypatch):
+    """Off, a requirements file still routes by what the steps run: the
+    nightly-torch check installs its file from a script."""
     monkeypatch.setenv(ENV_VAR, "off")
     claim = classify._classify_requirements(state, "requirements/lint.txt")
-    assert claim is not None and claim.rule == "requirements"
-    assert claim.step_ids & state.auto_step_ids
+    assert claim is not None and claim.rule == "requirements" and not claim.run_all
+    claim = classify._classify_requirements(
+        state, "requirements/test/nightly-torch.txt"
+    )
+    assert claim is not None and claim.step_ids & state.auto_step_ids
 
 
 # --- lane 1: derived reference legs -----------------------------------------
@@ -315,13 +325,15 @@ def test_switch_off_only_loses_declarers_the_build_map_rules_out(state, monkeypa
         for s in state.auto_step_ids
         if s.startswith("vllm_intel_ci:") and "image-build" not in s
     }
+    from helpers import declaring_steps
+
     probe = None
     for p in sorted(state.native_ops.file_ops):
         if not state.native_ops.owns(p):
             continue
         if state.build_map.families.get(p) != frozenset({"cuda"}):
             continue
-        if not (_source_dep_steps_ungated(state, p) & intel):
+        if not (declaring_steps(state, p) & intel):
             continue
         claim = classify._classify_native_tests(state, p)
         # Only promised where the intel steps ride the declaration alone. A
@@ -345,17 +357,18 @@ def test_switch_off_still_never_selects_nothing_for_a_release_file(state, monkey
     """A release-referenced file with live declarers must not select nothing
     with the switch off, whether it re-routes or the guard adds the declarer
     steps back to the zero-claim."""
+    from helpers import declaring_steps
+
     live = [
         p
         for p in sorted(state.release_refs)
-        if _source_dep_steps_ungated(state, p) & state.auto_step_ids
+        if declaring_steps(state, p, auto_only=True)
     ]
     assert live, "no release-referenced file with live declarers; probe died"
     monkeypatch.setenv(ENV_VAR, "off")
     for p in live[:2]:
         claim = classify._classify(state, p, None)
-        want = _source_dep_steps_ungated(state, p) & state.auto_step_ids
-        assert claim.run_all or want <= claim.step_ids
+        assert claim.run_all or claim.step_ids & state.auto_step_ids, p
 
 
 def test_declaration_attribution_has_one_call_site():

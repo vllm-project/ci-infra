@@ -46,11 +46,13 @@ def _source_dep_steps_ungated(
     over-declaration, which would cap the saving at zero. Graph-blind files
     always take the full union, since the declaration is all they have.
 
-    Ignores the switch, for three callers: the requirements rule, which picks
-    steps from declarations by design, and the two places where a declaration
-    only ever says "this file is still tested". Silencing those would make the
-    switch invent empty answers. Everything that picks steps by declaration
-    goes through `_source_dep_steps` instead."""
+    Obeys the switch like every other read. It used to ignore it for the
+    requirements rule and for the places where a declaration only says "this
+    file is still tested", but the declarations are the rules this selector
+    is measured against, and a comparison cannot also be an input. With the
+    switch off (the default) nothing here reads them."""
+    if mode() == "off":
+        return set()
     return {
         s.step_id
         for p in state.pipelines
@@ -66,10 +68,11 @@ def steps_naming_file(state: RepoState, path: str) -> set[str]:
     The floor under the kernel record (`classify.csrc_held_steps`): a file
     named outright is a tie its owner wrote down, so a kernel silence never
     drops the step. A directory entry such as `csrc/` is the blanket the
-    record exists to replace, so it holds nothing. Ignores the switch, since
-    this can only keep a step; reads the declarations directly for the same
-    reason `_declaring_deps` does.
+    record exists to replace, so it holds nothing. Obeys the switch, off by
+    default, like every read of the declarations.
     """
+    if mode() == "off":
+        return set()
     return {
         s.step_id
         for p in state.pipelines
@@ -96,7 +99,7 @@ def _declaring_deps(
     Reads the declarations directly: calling `_source_dep_steps_ungated` would
     trip the call-count guard in the tests.
     """
-    if gated and mode() == "off":
+    if mode() == "off":
         return {}
     out: dict[str, str] = {}
     for p in state.pipelines:
