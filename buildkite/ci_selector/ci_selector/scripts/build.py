@@ -365,6 +365,7 @@ def merge_build(
             stamp.process_errors += process.errors
             if process.py and process.py not in stamp.interpreters:
                 stamp.interpreters.append(process.py)
+            stamp.packages = sorted(set(stamp.packages) | process.packages)
             for path, names in process.functions.items():
                 accumulated[key][path] |= names
 
@@ -539,6 +540,7 @@ def union_rows(left: Row, right: Row) -> Row:
         # Disagreeing builds keep both values, so a blended table is visible
         # rather than silently resolved in favour of whichever merged last.
         build_env=_union_env(a.build_env, b.build_env),
+        packages=sorted(set(a.packages) | set(b.packages)),
     )
     stamp.n_files = len(functions)
     stamp.n_functions = sum(len(v) for v in functions.values())

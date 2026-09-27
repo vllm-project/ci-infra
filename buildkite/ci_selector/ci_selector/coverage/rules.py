@@ -442,9 +442,11 @@ def _add_from_rows(
             continue  # no row: the map decides, and the map did not pick it
         if any(
             row.contains_call(f.path, name) and table.discriminates(f.path, name)
-            # Stand-ins are drop evidence only.
+            # Stand-ins are drop evidence only. A file outside the recorder
+            # scope may still be in a row (tests/ is recorded before the
+            # selector reads it), and adds nothing until the scope says so.
             for f in query.files
-            if not f.proxy
+            if not f.proxy and f.in_recorder_scope
             for name in f.names - set(unresolved.get(f.path, ()))
         ):
             reading.added.append(step_id)
