@@ -27,6 +27,7 @@ graph, so the status-A rules would never fire.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import re
 import subprocess
 from pathlib import Path
@@ -714,7 +715,214 @@ def _classify_added_head_closure(
     )
 
 
+_HUNK_RANGE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _op_named(text: str, ops: frozenset[str]) -> set[str]:
+    """Ops a line names as a callable or a registration: `op(`, `"op(` or
+    `"op"`, or a helper spelled `op_<suffix>(` such as `op_caller(`."""
+    return {
+        op for op in ops if re.search(rf'\b{re.escape(op)}(?:_\w+)?\s*[("]', text)
+    }
+
+
+_SCOPE_OPENER = re.compile(r'\b(namespace\b|extern\s+"C")')
+
+
+def _function_headers(lines: list[str]) -> list[int | None]:
+    """Per line, the index of the line opening the top-level body it belongs
+    to (the line holding that body's `{`), or None. A namespace or extern "C"
+    block is not a body: functions inside it are top-level. A signature line
+    before its `{` belongs to the body it opens. Braces in strings and
+    comments are rare enough here to ignore; a miss only makes a line
+    unattributable, which keeps the whole file."""
+    out: list[int | None] = [None] * len(lines)
+    stack: list[bool] = []  # per open brace: is it a function body level
+    body_depth = 0
+    opener = None
+    pending: list[int] = []  # depth-0 lines since the last boundary
+    for i, text in enumerate(lines):
+        code = text.split("//", 1)[0]
+        started_in_body = body_depth > 0
+        for ch in code:
+            if ch == "{":
+                scope = body_depth == 0 and bool(_SCOPE_OPENER.search(code))
+                if body_depth == 0 and not scope:
+                    opener = i
+                stack.append(not scope)
+                if not scope:
+                    body_depth += 1
+            elif ch == "}" and stack:
+                if stack.pop():
+                    body_depth -= 1
+        if started_in_body or body_depth > 0:
+            out[i] = opener
+            for j in pending:
+                out[j] = opener
+            pending = []
+        else:
+            stripped = code.strip()
+            if not stripped or stripped.endswith((";", "}")):
+                pending = []
+            else:
+                pending.append(i)
+    return out
+
+
+def _statement_op(lines: list[str], idx: int, ops: frozenset[str]) -> str | None:
+    """Walk back to the statement's first line, where a prototype, a call or
+    a registration names its op. A boundary first: no single op."""
+    for i in range(idx, max(-1, idx - 40), -1):
+        stripped = lines[i].strip()
+        if i != idx and (not stripped or stripped.endswith((";", "{", "}"))):
+            return None  # the previous statement ended: no op named this one
+        found = _op_named(lines[i], ops)
+        if len(found) == 1:
+            return found.pop()
+        if found:
+            return None
+    return None
+
+
+_CALLABLE = re.compile(r"([A-Za-z_]\w*)\s*(?:<[^()]*>)?\s*\(")
+
+
+def _header_name(lines: list[str], opener: int) -> str | None:
+    """The function a body belongs to: the identifier before the first paren
+    of its header, which runs back from the `{` line to a boundary."""
+    parts: list[str] = []
+    for i in range(opener, max(-1, opener - 20), -1):
+        stripped = lines[i].strip()
+        if i != opener and (not stripped or stripped.endswith((";", "}"))):
+            break
+        parts.insert(0, lines[i].split("{", 1)[0] if i == opener else lines[i])
+    m = _CALLABLE.search(" ".join(parts))
+    return m.group(1) if m else None
+
+
+def _enclosing_ops(
+    lines: list[str], lineno: int, ops: frozenset[str], headers: list[int | None]
+) -> frozenset[str] | None:
+    """The ops a line serves (1-based `lineno`), or None when unknown. The
+    statement first: a prototype, a registration inside a macro body, or a
+    call spanning lines names one op. Then the function around it: named for
+    an op, or called within this file only by functions that serve ops."""
+    idx = lineno - 1
+    if not 0 <= idx < len(lines):
+        return None
+    op = _statement_op(lines, idx, ops)
+    if op is not None:
+        return frozenset({op})
+    if headers[idx] is None:
+        return None
+    name = _header_name(lines, headers[idx])
+    if name is None:
+        return None
+    return _function_ops(lines, name, ops, headers, frozenset())
+
+
+def _function_ops(
+    lines: list[str],
+    name: str,
+    ops: frozenset[str],
+    headers: list[int | None],
+    seen: frozenset[str],
+) -> frozenset[str] | None:
+    """The ops a function serves: the one it is named for, or else the ops
+    of every same-file function calling it, five levels deep at most (a
+    device helper, its kernel, the launcher, the caller, the op). None when
+    any path ends somewhere unknown."""
+    named = _op_named(f"{name}(", ops)
+    if len(named) == 1:
+        return frozenset(named)
+    if named or name in seen or len(seen) >= 5:
+        return None
+    seen = seen | {name}
+    callers: set[str] = set()
+    call = re.compile(rf"\b{re.escape(name)}\s*(?:<[^;]*?>+)?\s*(?:\(|<<<)")
+    for i, text in enumerate(lines):
+        if headers[i] is None or not call.search(text):
+            continue
+        caller = _header_name(lines, headers[i])
+        if caller == name:
+            continue  # its own signature, or recursion
+        if caller is None:
+            return None
+        callers.add(caller)
+    if not callers:
+        return None
+    out: set[str] = set()
+    for caller in callers:
+        served = _function_ops(lines, caller, ops, headers, seen)
+        if served is None:
+            return None
+        out |= served
+    return frozenset(out)
+
+
+def _narrowed_native_state(
+    state: RepoState, path: str, ctx: DiffContext | None
+) -> RepoState | None:
+    """A state whose `path` owns only the ops the diff touched, or None.
+
+    A header or registration file owns every op it declares (ops.h and
+    torch_bindings.cpp own ~140), so any edit to it routed through all of
+    their tests plus every image step, droppable on nothing. vllm#58828 added
+    one parameter to get_cutlass_moe_mm_data in both and selected 465 steps
+    for each. When every changed line sits inside one op's declaration or
+    registration, the file is routed as if it owned just those ops, the way
+    the .cu implementing them is. Anything else keeps the whole file."""
+    if ctx is None or ctx.status.get(path) != "M":
+        return None
+    ops = state.native_ops.file_ops.get(path)
+    if not ops or len(ops) < 2 or native_ops.mode() != "on":
+        return None
+    repo = Path(state.repo)
+    diff = subprocess.run(
+        ["git", "-C", str(repo), "diff", "-U0", "--no-color", ctx.base, ctx.head,
+         "--", path],
+        capture_output=True, text=True,
+    )
+    sides = {}
+    for ref in (ctx.base, ctx.head):
+        shown = subprocess.run(
+            ["git", "-C", str(repo), "show", f"{ref}:{path}"],
+            capture_output=True, text=True,
+        )
+        if shown.returncode != 0:
+            return None
+        sides[ref] = shown.stdout.splitlines()
+    headers = {ref: _function_headers(text) for ref, text in sides.items()}
+    if diff.returncode != 0:
+        return None
+    touched: set[str] = set()
+    for line in diff.stdout.splitlines():
+        m = _HUNK_RANGE.match(line)
+        if not m:
+            continue
+        b0, bn = int(m.group(1)), int(m.group(2) or 1)
+        h0, hn = int(m.group(3)), int(m.group(4) or 1)
+        for ref, start, count in ((ctx.base, b0, bn), (ctx.head, h0, hn)):
+            for n in range(start, start + count):
+                text = sides[ref][n - 1].strip() if 0 < n <= len(sides[ref]) else ""
+                if not text or text.startswith(("//", "/*", "*")):
+                    continue  # blank or comment: changes no op
+                served = _enclosing_ops(sides[ref], n, ops, headers[ref])
+                if served is None:
+                    return None
+                touched |= served
+    if not touched or touched == ops:
+        return None
+    narrowed = dataclasses.replace(
+        state.native_ops, file_ops={**state.native_ops.file_ops, path: frozenset(touched)}
+    )
+    return dataclasses.replace(state, native_ops=narrowed)
+
+
 def _classify(state: RepoState, path: str, ctx: DiffContext | None) -> Claim:
+    narrowed = _narrowed_native_state(state, path, ctx)
+    if narrowed is not None:
+        state = narrowed
     claim = _apply_declarer_union(state, path, _classify_inner(state, path, ctx))
     claim = _apply_image_input_union(state, path, claim)
     return _apply_csrc_droppability(state, path, claim)
