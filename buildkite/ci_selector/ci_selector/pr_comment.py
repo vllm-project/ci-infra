@@ -74,6 +74,10 @@ def not_counted(step) -> str:
         return "build"
     if step.device == RETIRED_DEVICE and not step.mirror_hw:
         return "not emitted"
+    # The selector runs optional steps like any other, but today's rules
+    # never do, so counting them would compare different populations.
+    if getattr(step, "ci_optional", False):
+        return "optional"
     return ""
 
 
@@ -98,6 +102,8 @@ class PrSelection:
     # build steps, the same on both sides, and declared steps never emitted
     plumbing: int = 0
     never_emitted: int = 0
+    # optional steps the selector would run, left out of both sides' counts
+    optional_selected: int = 0
     today_run_all: bool = False
     run_all: str = ""
     docs_only: bool = False
@@ -214,6 +220,9 @@ def select_for_pr(
         selector=view(f_ids),
         plumbing=sum(1 for s in steps.values() if not_counted(s) == "build"),
         never_emitted=sum(1 for s in steps.values() if not_counted(s) == "not emitted"),
+        optional_selected=sum(
+            1 for i in f_ids if i in steps and not_counted(steps[i]) == "optional"
+        ),
         today_run_all=bool(today.run_all.get(PR_PIPELINE)),
         run_all=run_all,
         docs_only=today.docs_only,
@@ -508,7 +517,8 @@ def render(s: PrSelection) -> str:
         *(_render_results(s.results) if s.results else []),
         f"<sub>{s.files} changed files · base `{s.base[:10]}` · head `{s.head[:10]}` · "
         f"{' · '.join(s.records)} · not counted: {s.plumbing} build steps, "
-        f"{s.never_emitted} A100 steps the generator no longer emits</sub>",
+        f"{s.never_emitted} A100 steps the generator no longer emits, "
+        f"{s.optional_selected} optional steps the selector would also run</sub>",
     ]
     return "\n".join(lines) + "\n"
 
@@ -567,6 +577,7 @@ def ledger_record(s: PrSelection) -> dict:
         "head": s.head,
         "files": s.files,
         "run_all": s.run_all,
+        "optional_selected": s.optional_selected,
         "today_steps": len(main(s.today)),
         "today_jobs": jobs(main(s.today)),
         "selector_steps": len(main(s.selector)),
