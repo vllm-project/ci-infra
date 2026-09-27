@@ -70,7 +70,7 @@ def test_run_all_says_so():
             run_all="a changed file runs everything", selector=_selection().today
         )
     )
-    assert "no narrower answer, so today's rules apply: 2 test steps (3 jobs)" in body
+    assert "no narrower answer, every step runs: 2 test steps (3 jobs)" in body
     assert "Why: a changed file runs everything" in body
     assert "| NVIDIA, CPU and others | 2 (3) | 2 (3) | 0 (0) | 0 (0) |" in body
 

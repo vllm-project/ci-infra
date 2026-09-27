@@ -1000,7 +1000,8 @@ def test_joined_fixture_path_routes_to_consumers(state):
 def test_uncovered_member_inherits_its_registry(state):
     """A registered member whose own closure auto-runs nothing inherits its
     registry's coverage instead of running everything, and the steps that name
-    it only by key still ride along as manual hits."""
+    it only by key ride along: optional ones included, since an optional step
+    is an ordinary one to the selector."""
     specimen = "vllm/model_executor/layers/quantization/fbgemm_fp8.py"
     closure = state.full.graph.reverse_closure({specimen})
     assert not [f for f in closure if f in state.invoked], (
@@ -1011,7 +1012,7 @@ def test_uncovered_member_inherits_its_registry(state):
     sel = select(state, [specimen])
     assert not sel.run_all
     assert "inheriting the coverage of registry" in sel.claims[0].detail
-    assert any("kernels-fp8-moe" in s for s in sel.manual_hits)
+    assert any("kernels-fp8-moe" in s for s in sel.selected)
 
 
 def test_package_init_routes_to_package_steps(state):
@@ -1840,18 +1841,20 @@ def test_eval_config_yaml_covered_via_file_target_parent(state):
     sel = select(state, ["tests/evals/gsm8k/configs/DeepSeek-R1-DP.yaml"])
     assert not sel.run_all
     assert "vllm_ci:lm-eval-small-models" in sel.selected
-    assert len(_non_always(sel, state)) <= 8  # over-selection ceiling, not run-all
+    # The optional H200 step whose list names it, now that optional steps are
+    # ordinary ones.
+    assert "vllm_ci:lm-eval-large-models-8xh200" in sel.selected
 
 
-@pytest.mark.quiet_preflight
-def test_manual_only_script_ref_selects_nothing_with_manual_hits(state):
-    """A tests .sh referenced only by manual-only steps auto-selects nothing
-    but shows those steps as manual hits (the _nothing_auto_runs hook)."""
+def test_an_optional_steps_script_selects_that_step(state):
+    """A tests .sh only an optional step runs selects that step: optional is
+    CI's scheduling choice, not the selector's. It used to land in manual_hits
+    and run nothing."""
     path = "tests/weight_loading/run_model_weight_loading_test.sh"
     sel = select(state, [path])
     assert not sel.run_all
-    assert not _non_always(sel, state)
-    assert sel.manual_hits
+    assert "vllm_ci:weight-loading-multiple-gpu" in sel.selected
+    assert not sel.manual_hits
 
 
 def test_added_init_under_covered_tests_dir_routes(state, declared_deps_on):

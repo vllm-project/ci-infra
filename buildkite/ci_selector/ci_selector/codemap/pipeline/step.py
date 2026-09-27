@@ -9,6 +9,8 @@ always-run key shortcut, run_all, or a source_file_dependencies match, and
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +31,23 @@ def derive_step_key(label: str) -> str:
     """
     return _generate_step_key(label)
 
+
+
+OPTIONAL_ENV = "CI_SELECTOR_OPTIONAL"
+OPTIONAL_MODES = ("ordinary", "manual")
+
+
+def optional_mode() -> str:
+    """How the selector treats a step CI marks optional. "ordinary" (the
+    default): like any other step, since the selector replaces the reason
+    steps were made optional, running them on every PR. "manual": CI's
+    behaviour, never auto-run. A typo raises rather than defaulting."""
+    raw = os.environ.get(OPTIONAL_ENV) or "ordinary"
+    if raw not in OPTIONAL_MODES:
+        raise ValueError(
+            f"{OPTIONAL_ENV}={raw!r}, expected one of: {', '.join(OPTIONAL_MODES)}"
+        )
+    return raw
 
 @dataclass
 class PipelineConfig:
@@ -124,8 +143,17 @@ class Step:
         )
 
     @property
-    def manual_only(self) -> bool:
+    def ci_optional(self) -> bool:
+        """What CI does today: an optional step waits for a manual unblock.
+        The comparison and the leak scoring read this."""
         return self.optional and not self.always_runs
+
+    @property
+    def manual_only(self) -> bool:
+        """Whether the selector treats this step as never auto-run. Only with
+        CI_SELECTOR_OPTIONAL=manual: by default an optional step is an ordinary
+        one, selected when the evidence reaches it like any other."""
+        return self.ci_optional and optional_mode() == "manual"
 
 
 @dataclass

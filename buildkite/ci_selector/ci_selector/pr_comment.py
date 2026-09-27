@@ -171,10 +171,10 @@ def select_for_pr(
 
     run_all = sel.run_all.get(PR_PIPELINE, "")
     t_ids = today.selected.get(PR_PIPELINE, set())
-    # Run-all hands CI no key list, and without one CI applies its own rules:
-    # the selection IS today's. Counting every pipeline step instead listed
-    # optional steps as adds that never run (vllm#58664: 79 of them).
-    f_ids = set(t_ids) if run_all else {s for s in d.steps if s in steps}
+    # Run-all is every step, optional ones included: the selector has no
+    # optional steps, and today's rules are only the comparison, never its
+    # answer.
+    f_ids = set(steps) if run_all else {s for s in d.steps if s in steps}
     added_by = {}
     for ids, who in (
         (d.added_by_kernels, "kernel record"),
@@ -449,8 +449,9 @@ def render(s: PrSelection) -> str:
 
     if s.run_all:
         head = (
-            "### CI selector (shadow): no narrower answer, so today's rules "
-            f"apply: {len(t_main)} test steps ({jobs(t_main)} jobs)"
+            "### CI selector (shadow): no narrower answer, every step runs: "
+            f"{len(s_main)} test steps ({jobs(s_main)} jobs) instead of "
+            f"{len(t_main)} ({jobs(t_main)} jobs)"
         )
     else:
         head = (

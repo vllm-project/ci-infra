@@ -61,7 +61,7 @@ def _spellings(state) -> dict[str, str]:
 
 def _optional(state) -> dict[str, bool]:
     """step_id -> whether the step is optional (manual-only) at this checkout."""
-    return {s.step_id: bool(s.manual_only) for p in state.pipelines for s in p.steps}
+    return {s.step_id: bool(s.ci_optional) for p in state.pipelines for s in p.steps}
 
 
 def replay(repo: Path, merge: str, rows: list[dict], table=None, kernels=None) -> dict:
