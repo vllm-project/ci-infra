@@ -380,6 +380,16 @@ def read_pr(
             reading.kept.append(step_id)
             reading.reasons["no-attributed-file"] += 1
             continue
+        # Every file the map picked this step for changed without changing
+        # behaviour: line endings, or annotations and layout the code does not
+        # see. There is nothing for the step to test.
+        preserving = set(query.inert) | set(query.eol_only)
+        if preserving and scope <= preserving:
+            reading.dropped.append(step_id)
+            reading.reasons["only-behaviour-preserving-changes"] += 1
+            if set(matched.get(step_id, ())) & failed:
+                reading.dropped_and_failed.append(step_id)
+            continue
         # Counted so a stand-in that never fires cannot pass for one that
         # fired and found nothing.
         if proxy_paths and scope & proxy_paths:
