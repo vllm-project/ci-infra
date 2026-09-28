@@ -3010,6 +3010,67 @@ def test_the_site_file_itself_still_fails_open(state):
     assert _selected(sel) > _selected(select(state, [site]))
 
 
+def _as_site(state, path):
+    import dataclasses
+
+    return dataclasses.replace(
+        state,
+        preflight=dataclasses.replace(
+            state.preflight, unclassified_sites=frozenset({path})
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        "tests/v1/kv_connector/unit/offloading_connector/utils.py",
+        "tests/v1/kv_connector/nixl_integration/test_accuracy.py",
+    ],
+)
+def test_a_tests_site_routes_by_what_runs_it(state, site):
+    """vllm#58967: a ROCm PD helper under tests/ loads its connector's test by
+    f-string, and failing open on it ran 187 steps for the 2 that import it.
+    The unknown edges point out of the site, and its importers are known, so
+    it routes as if it held no dynamic import. Unlike vllm/, where that
+    reverse reach is most of the pipeline and the guard above stays."""
+    from ci_selector.codemap.classify import _classify
+
+    assert (state.repo / site).exists(), f"{site} moved; pick another specimen"
+    gated = _as_site(state, site)
+    claim = _classify(gated, site, None)
+    assert claim.rule != "fail-open" and not claim.run_all, claim.detail
+    assert _selected(select(gated, [site])) == _selected(select(state, [site]))
+
+
+def test_a_changed_tests_site_helper_keeps_its_file_level_closure(state):
+    """A site helper never routes by changed names. Its dynamic import may sit
+    in a module-level `m = import_module(...)`, which runs for every importer,
+    while the name rule would follow only the importers that spell `m`. The
+    specimen is vllm#52282's edit to tests/utils.py, replayed as if that
+    helper were a site: by name it reaches 162 test files, by closure 1545."""
+    import subprocess
+
+    from ci_selector.codemap.classify import _classify
+    from ci_selector.codemap.state import DiffContext
+
+    edit = "cb58bb9c1e38cd366910858873946c95be6328a9"
+    helper = "tests/utils.py"
+    probe = subprocess.run(
+        ["git", "-C", str(state.repo), "cat-file", "-e", f"{edit}^"],
+        capture_output=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip("vllm#52282 not present locally (shallow clone)")
+    ctx = DiffContext(f"{edit}^", edit, {helper: "M"})
+    by_name = _classify(state, helper, ctx)
+    assert by_name.rule == "test-helper-symbols", "specimen no longer narrows"
+    claim = _classify(_as_site(state, helper), helper, ctx)
+    assert claim.rule == "graph", (claim.rule, claim.detail)
+    assert claim.test_files == _classify(state, helper, None).test_files
+    assert by_name.test_files < claim.test_files
+
+
 @pytest.mark.quiet_preflight
 def test_selected_by_file_covers_every_attributable_step(state):
     """The per-file inverse of `selected`, and its completeness contract.
