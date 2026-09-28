@@ -107,6 +107,30 @@ PATH_TOKEN_FAMILIES: tuple[tuple[frozenset[str], str], ...] = (
     (frozenset({"cpu"}), "cpu"),
 )
 
+# Paths whose family token names a feature, not the platform. They keep data in
+# host memory ("cpu") and run inside GPU jobs, so the token must not tag them
+# for the CPU family: vllm#58497 changed kv_offload/cpu and was sent to eight
+# CPU steps that record nothing, so no row could ever take them back.
+# Update when: a new host-memory feature lands under a `cpu` directory or name.
+PATH_TOKEN_NOT_PLATFORM: dict[str, tuple[str, ...]] = {
+    "cpu": (
+        "vllm/v1/kv_offload/cpu/",
+        "vllm/v1/simple_kv_offload/",
+        "vllm/distributed/ec_transfer/ec_connector/cpu/",
+        "vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py",
+        "tests/v1/kv_offload/cpu/",
+        "tests/v1/simple_kv_offload/",
+    ),
+}
+
+# The env-var module setup.py loads at build time (load_module_from_path), so
+# the Dockerfile copies it into the build stage. The build reads only the
+# variables setup.py names as `envs.<NAME>`; an entry nothing there reads
+# cannot change the image.
+# Update when: setup.py stops loading it, or loads another module the same way.
+BUILD_ENV_MODULE = "vllm/envs.py"
+BUILD_ENV_READER = "setup.py"
+
 # Every literal naming a platform or device, from the queue-side tables above.
 # Deliberately NOT DEVICE_NAME_FAMILIES: those tokens are the file side, and
 # widening dispatch's refusal set is a change to a different rule. A
@@ -131,7 +155,31 @@ EXCLUSIVE_NAMESPACES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] =
     ),
     (("csrc/rocm/",), (), "amd"),
     ((), ("vllm/platforms/tpu.py",), "tpu"),
-    (("vllm/v1/worker/xpu",), ("vllm/platforms/xpu.py",), "xpu"),
+    (
+        (
+            "vllm/v1/worker/xpu",
+            "vllm/lora/ops/xpu_ops/",
+            "vllm/models/deepseek_v4/xpu/",
+        ),
+        (
+            "vllm/platforms/xpu.py",
+            # XPU kernels and backends: never entered on another platform, and
+            # never recorded, since no XPU job records. vllm#58936 changed
+            # _xpu_ops.py and every step through its graph was held on names
+            # no row could know.
+            "vllm/_xpu_ops.py",
+            "vllm/device_allocator/xpumem.py",
+            "vllm/distributed/device_communicators/xpu_communicator.py",
+            "vllm/lora/punica_wrapper/punica_xpu.py",
+            "vllm/model_executor/kernels/linear/mixed_precision/xpu.py",
+            "vllm/model_executor/kernels/linear/mxfp4/xpu.py",
+            "vllm/model_executor/kernels/linear/mxfp8/xpu.py",
+            "vllm/model_executor/kernels/linear/scaled_mm/xpu.py",
+            "vllm/model_executor/layers/fused_moe/experts/xpu_moe.py",
+            "vllm/v1/attention/backends/mla/xpu_mla_sparse.py",
+        ),
+        "xpu",
+    ),
 )
 
 # Cross-family imports at module level that a runtime check really does guard:
@@ -140,6 +188,27 @@ EXCLUSIVE_NAMESPACES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] =
 # runs on every platform. If an importer is not guarded, leave it out and
 # selection disables that exclusion by itself.
 EXCLUSIVE_IMPORT_EXCEPTIONS: dict[tuple[str, str], str] = {
+    ("vllm/model_executor/layers/mamba/ops/mamba_ssm.py", "vllm/_xpu_ops.py"): (
+        "inside `if current_platform.is_xpu():`"
+    ),
+    ("vllm/model_executor/layers/sparse_attn_indexer_kpool.py", "vllm/_xpu_ops.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
+    ("vllm/v1/attention/backends/fa_utils.py", "vllm/_xpu_ops.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
+    ("vllm/v1/attention/ops/paged_attn.py", "vllm/_xpu_ops.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
+    ("vllm/models/deepseek_v4/__init__.py", "vllm/models/deepseek_v4/xpu/dspark.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
+    ("vllm/models/deepseek_v4/__init__.py", "vllm/models/deepseek_v4/xpu/model.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
+    ("vllm/models/deepseek_v4/__init__.py", "vllm/models/deepseek_v4/xpu/mtp.py"): (
+        "inside `elif current_platform.is_xpu():`"
+    ),
     (
         "vllm/compilation/passes/pass_manager.py",
         "vllm/compilation/passes/fusion/rocm_aiter_fusion.py",

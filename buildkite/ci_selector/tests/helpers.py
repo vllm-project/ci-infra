@@ -155,11 +155,18 @@ def declaring_steps(
 ) -> set[str]:
     """Steps naming `path` in their source_file_dependencies.
 
-    Ungated on purpose: these tests check the derived path still reaches the
-    steps the declarations name, and the gate defaults to off, so the gated
-    call would return nothing and make the assertion pass for free.
+    Read straight off the steps, never through the selector's switch: these
+    tests check the derived path still reaches the steps the declarations
+    name, so the declarations are the oracle here, not an input.
     """
-    steps = _source_dep_steps_ungated(state, path)
+    from ci_selector.codemap.claim import step_declares
+
+    steps = {
+        s.step_id
+        for p in state.pipelines
+        for s in p.steps
+        if step_declares(s.source_file_dependencies, path, False)
+    }
     return steps & state.auto_step_ids if auto_only else steps
 
 

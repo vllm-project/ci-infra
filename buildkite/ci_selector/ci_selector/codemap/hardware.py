@@ -36,6 +36,9 @@ from ..handwritten import (
     PATH_TOKEN_FAMILIES as _PATH_TOKEN_FAMILIES,
 )
 from ..handwritten import (
+    PATH_TOKEN_NOT_PLATFORM as _PATH_TOKEN_NOT_PLATFORM,
+)
+from ..handwritten import (
     QUEUE_DEVICE_NAMES as _QUEUE_DEVICE_NAMES,
 )
 from ..handwritten import (
@@ -62,6 +65,8 @@ def family_of_path(path: str) -> str | None:
     tokens = set(re.split(r"[/_.]", path.lower()))
     for token_set, family in _PATH_TOKEN_FAMILIES:
         if tokens & token_set:
+            if path.startswith(_PATH_TOKEN_NOT_PLATFORM.get(family, ())):
+                continue
             return family
     return None
 
