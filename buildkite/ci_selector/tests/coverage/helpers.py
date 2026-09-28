@@ -73,6 +73,9 @@ def process_file(
     label: str | None = None,
     parallel_index: int | None = None,
     parallel_total: int | None = None,
+    tests: list[tuple[str, str]] | None = None,
+    tests_root: str = "/vllm-workspace/tests/",
+    packages: list[str] | None = None,
 ) -> None:
     """Write one fnrec process file in the recorder's real on-disk shape."""
     shown = ROOT if header_root is None else header_root
@@ -94,8 +97,12 @@ def process_file(
             header.append(f"{name}={value}")
     lines = ["\t".join(header), f"#root\t{root}\tt=1"]
     lines += [f"{root}{rel}\t{name}\t1" for rel, name in entries]
+    if tests:
+        lines.append(f"#tests\t{tests_root}")
+        lines += [f"{tests_root}{rel}\t{name}\t1" for rel, name in tests]
+    lines += [f"#pkg\t{pkg}" for pkg in packages or ()]
     if clean_exit:
-        total = len(entries) if counter is None else counter
+        total = len(entries) + len(tests or ()) if counter is None else counter
         lines.append(f"#end\troot={total}\tother=0\terrors=0\tlast_error=\tt=2")
     elif counter is not None:
         lines.append(f"#stat\troot={counter}\tother=0\terrors=0\tlast_error=\tt=2")

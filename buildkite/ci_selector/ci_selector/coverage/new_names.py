@@ -196,9 +196,18 @@ def resolve(
                 resolved.add(key)
                 changed = True
 
-    for (path, name), parent in nested.items():
-        if (path, parent) in resolved or parent in known.get(path, set()):
-            resolved.add((path, name))
+    # To a fixpoint as well: a lambda inside a lambda follows a parent that is
+    # itself nested, and one pass in dict order resolved it only when the
+    # parent happened to come first.
+    grew = True
+    while grew:
+        grew = False
+        for (path, name), parent in nested.items():
+            if (path, name) in resolved:
+                continue
+            if (path, parent) in resolved or parent in known.get(path, set()):
+                resolved.add((path, name))
+                grew = True
 
     out: dict[str, set[str]] = {}
     for path, name in resolved:

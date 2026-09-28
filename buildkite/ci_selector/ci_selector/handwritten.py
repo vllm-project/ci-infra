@@ -680,3 +680,7 @@ TEST_REGISTRY_CALL = "_HfExamplesInfo"
 # file outside this prefix. That is the recorder's behaviour, not our policy,
 # and it is why a changed file outside it can never be dropped on.
 RECORDER_SCOPE = "vllm/"
+# The recorder also writes the checkout's tests/ package, under this prefix.
+# Recorded, not yet read: a changed tests/ file stays outside RECORDER_SCOPE,
+# so it neither drops nor adds a step until the selector widens that scope.
+TESTS_SCOPE = "tests/"

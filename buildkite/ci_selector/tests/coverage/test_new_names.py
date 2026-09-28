@@ -146,3 +146,22 @@ def test_a_new_file_reached_only_through_changed_code_resolves_whole(repo: Repo)
         "prepare",
         "prepare.<locals>.<genexpr>",
     }
+
+
+def test_a_lambda_inside_a_lambda_follows_its_nested_parent(repo: Repo):
+    """The inner lambda's parent is the outer lambda, itself nested. Resolving
+    once in dict order left the inner one unknown whenever it came first."""
+    base = repo.head()
+    repo.write(
+        "vllm/mod.py",
+        BASE_MOD.replace("return x + 1", "return (lambda y: (lambda z: z)(y))(x) + 1"),
+    )
+    head = repo.commit("nested lambdas")
+    query = build(repo.root, base, head)
+    names = {n for f in query.files for n in f.names}
+    inner = "plan.<locals>.<lambda>.<locals>.<lambda>"
+    assert inner in names, names
+    unresolved = {"vllm/mod.py": {"plan.<locals>.<lambda>", inner}}
+    for order in (list(unresolved["vllm/mod.py"]), sorted(unresolved["vllm/mod.py"])):
+        got = resolve(repo.root, base, head, query, {"vllm/mod.py": set(order)})
+        assert got == {"vllm/mod.py": {"plan.<locals>.<lambda>", inner}}
