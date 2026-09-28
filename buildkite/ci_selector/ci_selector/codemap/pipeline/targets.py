@@ -57,6 +57,9 @@ class StepTargets:
     step_id: str
     targets: list[Target] = field(default_factory=list)
     data_files: list[str] = field(default_factory=list)
+    # The subset of data_files a --config-list-file named: lists whose entries a
+    # harness parametrizes over, relative to the list's own directory.
+    config_lists: list[str] = field(default_factory=list)
     ignored: list[str] = field(default_factory=list)
     benign: list[str] = field(default_factory=list)
     unparsable: list[str] = field(default_factory=list)
@@ -276,6 +279,7 @@ class CommandParser:
                     break
         if resolved:
             self.out.data_files.append(resolved)
+            self.out.config_lists.append(resolved)
         else:
             self._mark_dangling(value)
 

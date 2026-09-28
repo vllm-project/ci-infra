@@ -925,6 +925,29 @@ class TestProxyEvidence:
         assert "vllm_ci:runs-plain" not in proxied.added
 
 
+class TestBehaviourPreserving:
+    """A step the map picked only for files whose change the code cannot see
+    (annotations, layout, line endings) has nothing to test."""
+
+    def test_a_step_picked_only_for_inert_files_drops(self, table):
+        query = Query(base="base", head="head", files=[], inert=["vllm/mod.py"])
+        reading = read(table, query, "vllm_ci:runs-plain", paths=("vllm/mod.py",))
+        assert reading.dropped == ["vllm_ci:runs-plain"]
+        assert reading.reasons["only-behaviour-preserving-changes"] == 1
+
+    def test_a_real_change_beside_an_inert_file_keeps_it(self, table):
+        query = query_for("vllm/other.py", "elsewhere")
+        query.inert.append("vllm/mod.py")
+        reading = read(
+            table,
+            query,
+            "vllm_ci:elsewhere",
+            paths=("vllm/mod.py", "vllm/other.py"),
+        )
+        assert "vllm_ci:elsewhere" in reading.kept
+        assert not reading.reasons["only-behaviour-preserving-changes"]
+
+
 class TestRecorderScope:
     """tests/ is recorded before the selector reads it. A changed file outside
     the recorder scope adds nothing, even when rows hold its names."""

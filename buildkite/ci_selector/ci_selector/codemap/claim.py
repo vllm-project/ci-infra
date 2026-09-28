@@ -48,6 +48,7 @@ RULES = frozenset(
         "no-hardware",
         "graph",
         "colocated-tests",
+        "test-helper-symbols",
         "table-diff",
         "no-code",
         "added-conftest",
