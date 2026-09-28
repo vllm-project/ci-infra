@@ -358,3 +358,129 @@ def test_stand_in_evidence_does_not_protect_a_step_from_kernel_drops(monkeypatch
     assert _protected_from_kernel_drops(out) == {"vllm_ci:called"}
     monkeypatch.setenv(PROXY_HOLDS_ENV, "1")
     assert _protected_from_kernel_drops(out) == {"vllm_ci:called", "vllm_ci:compiles"}
+
+
+# vllm#58982's shape: a new module whose import-time build keeps its names
+# unknown, which a changed a.py imports.
+NEW_MODULE = """\
+class Registry:
+    def __init__(self):
+        self.items = []
+
+
+REG = Registry()
+"""
+B_BASE = "def g():\n    return 1\n\n\ndef other():\n    return 2\n"
+NEW_JOBS = {
+    "calls-a": [
+        ("a.py", "<module>"),
+        ("a.py", "f"),
+        ("b.py", "<module>"),
+        ("b.py", "g"),
+    ],
+    "imports-a": [("a.py", "<module>")],
+    "imports-b": [("b.py", "<module>"), ("b.py", "other")],
+    "elsewhere": [("other.py", "<module>"), ("other.py", "elsewhere")],
+}
+
+
+def _new_module_decision(tmp_path, tmp_repo, monkeypatch, b_head, extra=None):
+    """Every step selected for the new module, a.py and b.py, as its
+    head-closure claim would select them."""
+    tmp_repo.write("vllm/a.py", "def f():\n    return 1\n")
+    tmp_repo.write("vllm/b.py", B_BASE)
+    tmp_repo.write("vllm/c.py", "def h():\n    return 1\n")
+    base = tmp_repo.commit("base")
+    table = make_table(tmp_path, tmp_repo, NEW_JOBS)
+    tmp_repo.write("vllm/n.py", NEW_MODULE)
+    tmp_repo.write(
+        "vllm/a.py", "from vllm.n import REG\n\n\ndef f():\n    return len(REG.items)\n"
+    )
+    tmp_repo.write("vllm/b.py", b_head)
+    for path, text in (extra or {}).items():
+        tmp_repo.write(path, text)
+    head = tmp_repo.commit("head")
+
+    steps = [f"vllm_ci:{k}" for k in NEW_JOBS]
+    keys = RowKeys({"vllm_ci"}, {"vllm_ci": 1.0}, steps={s: FakeStep() for s in steps})
+
+    class Stub:
+        resolve = staticmethod(lambda *a, **k: keys)
+
+    monkeypatch.setattr("ci_selector.decide.RowKeys", Stub)
+    paths = ["vllm/n.py", "vllm/a.py", "vllm/b.py"]
+    sel = Selection(
+        selected={s: [] for s in steps},
+        selected_rules={s: ["graph"] for s in steps},
+        selected_paths={s: [paths] for s in steps},
+    )
+    return decide(None, sel, tmp_repo.root, base, head, table=table)
+
+
+@pytest.mark.parametrize("b_imports_a", [False, True])
+def test_a_new_module_runs_only_where_the_files_reaching_it_are_imported(
+    tmp_path, tmp_repo, monkeypatch, b_imports_a
+):
+    """vllm#58982 held 42 steps that never import kernel_warmup.py, the one
+    file importing its new module. A step whose row touches no file reaching
+    the new module drops. One importing a.py without calling it keeps, since
+    importing a.py runs the new module body. And when b.py now imports a.py,
+    a step that imports b.py reaches the new module through it, though its
+    row never shows a.py, so it keeps too."""
+    b_head = B_BASE.replace("return 1", "return 3")
+    if b_imports_a:
+        b_head = "import vllm.a\n\n\n" + b_head.replace("return 3", "return vllm.a.f()")
+    d = _new_module_decision(tmp_path, tmp_repo, monkeypatch, b_head)
+    assert not d.coverage_note
+    assert "vllm_ci:elsewhere" in d.dropped_by_coverage
+    assert {"vllm_ci:calls-a", "vllm_ci:imports-a"} <= d.steps
+    assert ("vllm_ci:imports-b" in d.steps) is b_imports_a
+
+
+def test_a_new_module_a_file_no_row_holds_reaches_stays_unseen(
+    tmp_path, tmp_repo, monkeypatch
+):
+    """c.py imports the new module too, and no row has ever run c.py, so
+    nothing says which steps import it: every step stays."""
+    d = _new_module_decision(
+        tmp_path,
+        tmp_repo,
+        monkeypatch,
+        B_BASE.replace("return 1", "return 3"),
+        extra={"vllm/c.py": "from vllm.n import REG\n\n\ndef h():\n    return REG\n"},
+    )
+    assert not d.coverage_note
+    assert not d.dropped_by_coverage
+    assert d.reasons["unknown-code-blocks-narrowing"] == 3
+
+
+def test_a_lazy_import_routed_by_key_still_reaches_the_new_module(
+    tmp_repo, monkeypatch
+):
+    """A function-local import into a file a parser routes by key is dropped
+    from the graph's edges, but the import still runs when the function does,
+    so its file reaches the new module like any importer."""
+    from types import SimpleNamespace
+
+    from ci_selector.decide import _reached_via
+
+    base = tmp_repo.head()
+    tmp_repo.write("vllm/n.py", NEW_MODULE)
+    head = tmp_repo.commit("new")
+    graphs = {
+        base: SimpleNamespace(imports={}, dropped_lazy=[]),
+        head: SimpleNamespace(
+            imports={"vllm/mod.py": {"vllm/n.py"}},
+            dropped_lazy=[("vllm/other.py", "vllm/n.py")],
+        ),
+    }
+    monkeypatch.setattr(
+        "ci_selector.codemap.worktree.full_graph_for",
+        lambda repo, ref: SimpleNamespace(graph=graphs[ref]),
+    )
+    unresolved = {"vllm/n.py": {"Registry"}}
+    recorded = {"vllm/mod.py": frozenset(), "vllm/other.py": frozenset()}
+    got = _reached_via(tmp_repo.root, base, head, unresolved, recorded)
+    assert got == {"vllm/n.py": frozenset({"vllm/mod.py", "vllm/other.py"})}
+    del recorded["vllm/other.py"]
+    assert _reached_via(tmp_repo.root, base, head, unresolved, recorded) == {}

@@ -291,6 +291,7 @@ def read_pr(
     failed_ran: dict[str, str] | None = None,
     matched_slugs: dict[str, list[str]] | None = None,
     failed_missed: dict[str, str] | None = None,
+    reached_via: dict[str, frozenset[str]] | None = None,
 ) -> Reading:
     """The record over one PR's map selection.
 
@@ -301,9 +302,12 @@ def read_pr(
     not.
 
     The query and the unknown-name set come from the caller, since both cost a
-    git read per file and both want the same answer.
+    git read per file and both want the same answer. So does `reached_via`: a
+    new file the record has never seen, mapped to the known files a step must
+    import to run it.
     """
     reading = Reading()
+    via = reached_via or {}
     failed = set(failed_ran or {})
     matched = matched_slugs or {}
     # Absent means the step is not droppable, not droppable against
@@ -411,7 +415,7 @@ def read_pr(
         # same mistake as the fail-open: an unknown name in a file unrelated to
         # this step's selection kept every step on the PR.
         local = {p: n for p, n in unresolved.items() if p in scope}
-        unseen = [p for p in local if p not in known_files]
+        unseen = [p for p in local if p not in known_files and p not in via]
         if unseen:
             reading.kept.append(step_id)
             reading.reasons["unknown-code-blocks-narrowing"] += 1
@@ -422,8 +426,11 @@ def read_pr(
             # The file projection the design specifies under an unknown
             # function: a step whose row touches a file carrying unknown code
             # keeps, because that code could be reached from what it does run.
+            # A new file's code runs wherever the files reaching it are
+            # imported, so those stand in for it.
+            touched = set(local).union(*(via.get(p, ()) for p in local))
             row = table.row(key)
-            if row is not None and any(p in row.functions for p in local):
+            if row is not None and any(p in row.functions for p in touched):
                 reading.kept.append(step_id)
                 reading.reasons["file-projection-keeps"] += 1
                 continue
