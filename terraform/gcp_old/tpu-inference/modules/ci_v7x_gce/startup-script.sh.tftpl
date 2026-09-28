@@ -70,6 +70,11 @@ KbdInteractiveAuthentication no
 PermitRootLogin no
 UsePAM no
 AllowUsers buildkite-agent
+# Without PAM, /etc/environment is never read and sessions get sshd's built-in
+# PATH, which lacks /snap/bin. gcloud and docker-credential-gcloud come from
+# the google-cloud-cli snap on this image, so `docker run` on a worker could not
+# pull from Artifact Registry. This is Ubuntu's /etc/environment PATH.
+SetEnv PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
 EOF
 
 # The package creates buildkite-agent with a locked password, and sshd without
