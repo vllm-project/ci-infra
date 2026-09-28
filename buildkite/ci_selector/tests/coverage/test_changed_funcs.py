@@ -374,10 +374,13 @@ def test_a_new_parameter_leaves_the_module_body_unchanged(tmp_path):
 
 
 PLATFORM_SRC = """\
+import vllm.envs as envs
 from vllm.platforms import current_platform
 
 
 def view(t):
+    if envs.VLLM_PIN_VIEWS:
+        t = t.pin_memory()
     if current_platform.is_xpu():
         if not t.is_pinned():
             t = t.contiguous()
@@ -394,11 +397,24 @@ def view(t):
         ("t = t.contiguous()", "t = t.clone()", "xpu"),
         ("return cuda(t)", "return cuda(t, 1)", None),  # is_cuda_alike: two families
         ("    return t\n", "    return t + 0\n", None),  # outside every guard
+        ("return xpu(t)", "from vllm import ops\n        return ops.xpu(t)", "xpu"),
+        # `envs` turns local to view, so its first line raises UnboundLocalError.
+        ("return xpu(t)", "import vllm.envs as envs\n        return xpu(t)", None),
+        ("return xpu(t)", "yield\n        return xpu(t)", None),  # now a generator
     ],
-    ids=["xpu-branch", "cuda-alike", "unguarded"],
+    ids=[
+        "xpu-branch",
+        "cuda-alike",
+        "unguarded",
+        "binds-a-new-name",
+        "rebinds-a-name-used-outside",
+        "makes-a-generator",
+    ],
 )
 def test_a_change_inside_one_platform_branch_is_tagged(tmp_path, old, new, family):
-    """vllm#54874 changed only the XPU branch of a function 315 CUDA rows call."""
+    """vllm#54874 changed only the XPU branch of a function 315 CUDA rows call.
+    A line there that changes how the rest of the function resolves a name,
+    or what kind of function it is, is not confined to it."""
     import subprocess
 
     from ci_selector.coverage.changed_funcs import build
