@@ -946,3 +946,50 @@ class TestBehaviourPreserving:
         )
         assert "vllm_ci:elsewhere" in reading.kept
         assert not reading.reasons["only-behaviour-preserving-changes"]
+
+
+class TestRecorderScope:
+    """tests/ is recorded before the selector reads it. A changed file outside
+    the recorder scope adds nothing, even when rows hold its names."""
+
+    def test_an_out_of_scope_file_never_adds(self, tmp_path: Path, tmp_repo: Repo):
+        from ci_selector.coverage.table import load
+        from ci_selector.scripts.build import merge_build, write_table
+
+        from .helpers import Build, process_file
+
+        tmp_repo.write("tests/utils.py", "def helper():\n    return 1\n")
+        build = Build(tmp_path / "sweep" / "b", "1", tmp_repo.commit("helper"))
+        process_file(
+            build.job("j0", step_key="runs-helper") / "fn.a.txt",
+            [("mod.py", "plain")],
+            tests=[("utils.py", "helper")],
+        )
+        process_file(
+            build.job("j1", step_key="quiet") / "fn.a.txt",
+            [("other.py", "elsewhere")],
+        )
+        out = tmp_path / "table.json"
+        write_table(merge_build(build.finish(), tmp_repo.root), out)
+        rows = load(out)
+        assert rows.row("runs-helper").contains_call("tests/utils.py", "helper")
+        keys = RowKeys(
+            {"vllm_ci"},
+            {"vllm_ci": 1.0},
+            steps={"vllm_ci:runs-helper": FakeStep(), "vllm_ci:quiet": FakeStep()},
+        )
+
+        def added(in_scope):
+            query = query_for("tests/utils.py", "helper", in_recorder_scope=in_scope)
+            reading = read_pr(
+                rows,
+                result_for("vllm_ci:quiet", paths=("tests/utils.py",)),
+                query,
+                unknown_names(query, {"tests/utils.py": frozenset({"helper"})}, {}),
+                KNOWN,
+                keys,
+            )
+            return reading.added
+
+        assert "vllm_ci:runs-helper" in added(True), "the detection floor"
+        assert added(False) == []

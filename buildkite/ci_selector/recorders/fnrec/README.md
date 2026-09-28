@@ -34,7 +34,11 @@ vllm/__init__.py	<module>	1
 vllm/__init__.py	Engine	5
 vllm/__init__.py	Engine.start	6
 vllm/__init__.py	top	1
-#end	root=4	other=247	errors=0	last_error=	t=1790190284.827
+#tests	/vllm-workspace/tests/
+/vllm-workspace/tests/utils.py	RemoteOpenAIServer.__init__	740
+#pkg	torch
+#pkg	flashinfer
+#end	root=5	other=247	errors=0	last_error=	t=1790190284.827
 ```
 
 Beside them, two files per job rather than per process:
@@ -68,8 +72,15 @@ reach the other's files and the order they run in does not matter.
 ## What it records
 
 Any function under the vLLM package directory, by file and qualified name, so
-fifty different `forward` methods stay distinct. Everything outside that
-directory is counted but not written.
+fifty different `forward` methods stay distinct. The same for the checkout's
+`tests/` package once something imports it: `#tests` names its root, and the
+reader files those lines under `tests/`. The selector does not read them yet;
+a changed `tests/` file stays outside its recorder scope until it opts in.
+
+Everything else is counted, and an installed library (anything under a
+`site-packages` or `dist-packages` directory) is written once per process by
+its top-level package, as `#pkg`. That is what a dependency bump can route on:
+the jobs that entered flashinfer, not every job in the image.
 
 Known limits:
 

@@ -165,6 +165,36 @@ class TestReadProcess:
         assert record.outside_root == 1
         assert record.functions == {"vllm/mod.py": {"plain"}}
 
+    def test_tests_lines_map_under_the_tests_prefix(self, tmp_path: Path):
+        p = tmp_path / "fn.a.txt"
+        process_file(
+            p, [("mod.py", "plain")], tests=[("utils.py", "RemoteServer.start")]
+        )
+        record = read_process(p)
+        assert record.functions == {
+            "vllm/mod.py": {"plain"},
+            "tests/utils.py": {"RemoteServer.start"},
+        }
+        assert record.outside_root == 0 and not record.lost_lines
+
+    def test_without_a_tests_root_those_lines_are_outside(self, tmp_path: Path):
+        """A recording from before the tests root existed reads as before."""
+        p = tmp_path / "fn.a.txt"
+        p.write_text(
+            f"#start\troot={ROOT}\tpy=3.12.13\n"
+            f"#root\t{ROOT}\tt=1\n"
+            "/vllm-workspace/tests/utils.py\thelper\t1\n"
+        )
+        assert read_process(p).outside_root == 1
+
+    def test_package_lines_are_packages_not_malformed(self, tmp_path: Path):
+        p = tmp_path / "fn.a.txt"
+        process_file(p, [("mod.py", "plain")], packages=["flashinfer", "torch"])
+        record = read_process(p)
+        assert record.packages == {"flashinfer", "torch"}
+        assert record.malformed == 0
+        assert record.functions == {"vllm/mod.py": {"plain"}}
+
     def test_a_process_with_no_resolvable_root_is_dropped(self, tmp_path: Path):
         p = tmp_path / "fn.a.txt"
         p.write_text("#start\tpid=1\n")
@@ -197,6 +227,15 @@ class TestMergeBuild:
         assert rows["lora"].stamp.processes == 4
         assert rows["lora"].stamp.shards_seen == {"1": [0, 1]}
         assert rows["lora"].stamp.shards_complete
+
+    def test_packages_fold_into_the_stamp(self, build: Build, tmp_repo: Repo):
+        d = build.job("j0", step_key="lora")
+        process_file(d / "fn.a.txt", [("mod.py", "plain")], packages=["torch"])
+        process_file(
+            d / "fn.b.txt", [("mod.py", "plain")], packages=["flashinfer", "torch"]
+        )
+        rows = merge_build(build.finish(), tmp_repo.root)
+        assert rows["lora"].stamp.packages == ["flashinfer", "torch"]
 
     def test_a_missing_shard_shows_as_short(self, build: Build, tmp_repo: Repo):
         d = build.job("j0", step_key="lora", parallel_index=0, parallel_total=3)

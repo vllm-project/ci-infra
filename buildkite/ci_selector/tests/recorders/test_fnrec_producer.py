@@ -30,6 +30,17 @@ class Engine:
 """
 
 
+TESTS_STUB = """\
+def helper():
+    return 2
+"""
+
+PROGRAM = (
+    "import vllm, tests.helpers, flashlib; "
+    "tests.helpers.helper(); flashlib.go(); vllm.Engine().start()"
+)
+
+
 @pytest.fixture(scope="module")
 def recorded(tmp_path_factory):
     """Install the recorder the way a plugin-less step does, and run it once.
@@ -41,6 +52,13 @@ def recorded(tmp_path_factory):
     root = tmp_path_factory.mktemp("fnrec")
     (root / "vllm").mkdir()
     (root / "vllm" / "__init__.py").write_text(VLLM_STUB)
+    # The checkout's tests package, and an installed library.
+    (root / "tests").mkdir()
+    (root / "tests" / "__init__.py").write_text("")
+    (root / "tests" / "helpers.py").write_text(TESTS_STUB)
+    site = root / "env" / "site-packages"
+    (site / "flashlib").mkdir(parents=True)
+    (site / "flashlib" / "__init__.py").write_text("def go():\n    return 3\n")
     lib, out = root / "lib", root / "rec"
     out.mkdir()
 
@@ -58,13 +76,13 @@ def recorded(tmp_path_factory):
     assert (lib / "fnrec.py").is_file() and (lib / "sitecustomize.py").is_file()
 
     run = subprocess.run(
-        [sys.executable, "-c", "import vllm; vllm.Engine().start()"],
+        [sys.executable, "-c", PROGRAM],
         capture_output=True,
         text=True,
         cwd=root,
         env={
             "PATH": "/usr/bin:/bin",
-            "PYTHONPATH": f"{lib}:{root}",
+            "PYTHONPATH": f"{lib}:{root}:{site}",
             "FNREC_OUT": str(out),
             "FNREC_ROOT": str(root / "vllm"),
         },
@@ -97,7 +115,25 @@ def test_recorded_paths_are_relative_to_the_recorder_scope(recorded):
     for every lookup the selector does."""
     record = read_process(recorded[0])
     assert record.functions, "nothing under the root was recorded"
-    assert all(path.startswith("vllm/") for path in record.functions), record.functions
+    assert all(path.startswith(("vllm/", "tests/")) for path in record.functions), (
+        record.functions
+    )
+    assert "vllm/__init__.py" in record.functions
+
+
+def test_the_tests_package_is_recorded_by_function(recorded):
+    """A test helper changes as often as the code it tests; without its names
+    the selector can only route it by file."""
+    record = read_process(recorded[0])
+    assert record.functions.get("tests/helpers.py", set()) >= {"<module>", "helper"}
+    assert record.outside_root == 0, "the reader could not place a tests/ line"
+
+
+def test_installed_libraries_are_recorded_by_package_only(recorded):
+    record = read_process(recorded[0])
+    assert "flashlib" in record.packages
+    assert not any("flashlib" in path for path in record.functions)
+    assert record.malformed == 0
 
 
 def test_the_counter_is_a_floor_on_what_was_recorded(recorded):
