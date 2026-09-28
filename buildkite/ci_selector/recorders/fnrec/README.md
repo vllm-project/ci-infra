@@ -9,7 +9,7 @@ uses them to drop steps that provably ran none of the changed code.
 
 Subscribes to CPython's `sys.monitoring` PY_START event and returns `DISABLE`
 from the callback, so each function costs one event in the life of a process.
-It starts on the first `vllm` import, not at interpreter startup, so other
+It starts on the first `vllm` or `aiter` import, not at interpreter startup, so other
 infrastructure in the image is left alone.
 
 Two install modes, chosen by the generator because only it knows the step:

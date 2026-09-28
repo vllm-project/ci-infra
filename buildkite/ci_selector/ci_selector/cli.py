@@ -88,12 +88,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--kernel-table",
         type=Path,
-        help="kernel table to read (default: coverage-data/kernel_table.json.gz)",
+        help="explicit kernel table override (default: CUDA and ROCm pairs)",
     )
     parser.add_argument(
         "--kernel-symbol-map",
         type=Path,
-        help="kernel symbol map to read (default: coverage-data/kernel_symbol_map.json.gz)",
+        help="explicit kernel symbol map override (default: CUDA and ROCm pairs)",
     )
     return parser
 
@@ -160,13 +160,13 @@ def main(argv: list[str] | None = None) -> int:
     sel = select(state, paths, base=base, head=head)
 
     if args._mode != "codemap":
-        from .coverage.source import fetch_kernel_evidence, fetch_table
+        from .coverage.source import fetch_kernel_records, fetch_table
         from .decide import decide
 
         table = fetch_table(args.table)
         if table.dead_interpreter:
             print(f"coverage: {table.dead_interpreter}", file=sys.stderr)
-        kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
+        kernels = fetch_kernel_records(args.kernel_table, args.kernel_symbol_map)
         d = decide(state, sel, repo, base, head, table=table, kernels=kernels)
         if d.coverage_note:
             print(f"coverage: {d.coverage_note}", file=sys.stderr)

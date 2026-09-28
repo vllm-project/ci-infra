@@ -41,6 +41,7 @@ to skip dropping entirely.
 from __future__ import annotations
 
 import os
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,7 +49,7 @@ from .coverage import freshness
 from .coverage.phase import DEFAULT_MODE, PhaseMode, mode_from_env
 from .coverage.kernels import KernelEvidence
 from .coverage.rules import RowKeys, newest_commit, read_pr, unknown_names
-from .coverage.source import fetch_kernel_evidence, fetch_table
+from .coverage.source import fetch_kernel_records, fetch_table
 from .coverage.table import Table
 
 #: Set to re-enable the freshness gate, which is off by default. Governs both
@@ -120,7 +121,7 @@ def decide(
     *,
     table: Table | None = None,
     mode: PhaseMode | None = None,
-    kernels: KernelEvidence | None = None,
+    kernels: KernelEvidence | list[KernelEvidence] | None = None,
 ) -> Decision:
     """Apply both records to the map's selection.
 
@@ -156,14 +157,19 @@ def decide(
             out.executes_by_proxy.clear()
             out.coverage_note = f"coverage unusable ({type(exc).__name__}: {exc})"
 
-    kernels = kernels if kernels is not None else fetch_kernel_evidence()
-    if kernels.unavailable:
-        out.kernel_note = kernels.unavailable
+    kernels = kernels if kernels is not None else fetch_kernel_records()
+    pairs = [kernels] if isinstance(kernels, KernelEvidence) else kernels
+    available = [pair for pair in pairs if not pair.unavailable]
+    if not available:
+        out.kernel_note = (
+            "; ".join(pair.unavailable for pair in pairs)
+            or "no kernel records configured"
+        )
     else:
-        out.kernel_pair = kernels.describe()
+        out.kernel_pair = "; ".join(pair.describe() for pair in available)
         try:
             _apply_kernel_record(
-                out, kernels, selection, state, repo, base, head, kernel_mode
+                out, available, selection, state, repo, base, head, kernel_mode
             )
         except Exception as exc:  # noqa: BLE001 - same reasoning as above
             out.steps = (
@@ -359,7 +365,7 @@ def _append_op_proxies(
 
 def _apply_kernel_record(
     out: Decision,
-    kernels: KernelEvidence,
+    kernels: list[KernelEvidence],
     selection,
     state,
     repo: Path,
@@ -380,29 +386,45 @@ def _apply_kernel_record(
 
     if not getattr(state, "pipelines", None):
         raise RuntimeError("no pipeline state to resolve step keys against")
-    keys = RowKeys.resolve_from_state(set(kernels.table._rows), state)
     changed = changed_paths(diff_files(repo, base, head))
-
-    stale: frozenset[str] = frozenset()
-    if os.environ.get(FRESHNESS_ENV):
-        stale = _csrc_moved_since(repo, kernels.symbol_map.commit, base, changed)
-
-    allow_drops = kernels.matched or bool(os.environ.get(KERNEL_UNMATCHED_ENV))
-    reading = kernel_rules.read_pr(
-        kernels,
-        selection,
-        changed,
-        keys,
-        held=lambda path: csrc_held_steps(state, path),
-        stale=stale,
-        allow_drops=allow_drops,
-        protected=_protected_from_kernel_drops(out),
-        attribute=_kernel_attribution(repo, base, head, attribution_mode),
-    )
-    out.kernel_reasons = dict(reading.reasons)
-    out.kernel_files = dict(reading.files)
-    out.added_by_kernels = set(reading.added)
-    out.dropped_by_kernels = set(reading.dropped)
+    added: set[str] = set()
+    dropped: set[str] = set()
+    held_by_record: set[str] = set()
+    reasons = Counter()
+    files: dict[str, list[str]] = {}
+    for pair in kernels:
+        keys = RowKeys.resolve_from_state(set(pair.table._rows), state)
+        stale: frozenset[str] = frozenset()
+        if os.environ.get(FRESHNESS_ENV):
+            stale = _csrc_moved_since(repo, pair.symbol_map.commit, base, changed)
+        reading = kernel_rules.read_pr(
+            pair,
+            selection,
+            changed,
+            keys,
+            held=lambda path: csrc_held_steps(state, path),
+            stale=stale,
+            allow_drops=pair.matched or bool(os.environ.get(KERNEL_UNMATCHED_ENV)),
+            protected=_protected_from_kernel_drops(out),
+            attribute=_kernel_attribution(repo, base, head, attribution_mode),
+        )
+        added.update(reading.added)
+        dropped.update(reading.dropped)
+        # A second pair can veto a drop only for steps it actually recorded.
+        # Missing rows in the other backend say nothing about this step.
+        held_by_record.update(
+            step
+            for step in reading.kept
+            if (row := pair.table.row(keys.key_for(step))) is not None
+            and row.backend in {pair.symbol_map.backend, "unknown"}
+        )
+        reasons.update(reading.reasons)
+        for path, note in reading.files.items():
+            files.setdefault(path, []).append(f"{pair.symbol_map.backend}: {note}")
+    out.kernel_reasons = dict(reasons)
+    out.kernel_files = {path: "; ".join(notes) for path, notes in files.items()}
+    out.added_by_kernels = added
+    out.dropped_by_kernels = dropped - added - held_by_record
     out.steps |= out.added_by_kernels
     out.steps -= out.dropped_by_kernels
 

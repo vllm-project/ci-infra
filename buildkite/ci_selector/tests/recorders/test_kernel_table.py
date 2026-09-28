@@ -25,11 +25,15 @@ kernel_table = _load("kernel_table")
 
 
 def _recording(path: Path, names, dropped=0, end=True):
-    lines = ["# kernrec v1 pid=1 ppid=0 exe=python"] + list(names)
+    lines = ["# kernrec v1 backend=cuda recorder=cupti pid=1 ppid=0 exe=python"] + list(
+        names
+    )
     if dropped:
         lines.append(f"# dropped={dropped}")
     if end:
-        lines.append(f"# end records=10 unique={len(names)} dropped={dropped}")
+        lines.append(
+            f"# end records=10 unique={len(names)} dropped={dropped} errors=0 unresolved=0"
+        )
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -297,3 +301,130 @@ def test_query_keeps_incomplete_rows_instead_of_dropping(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "drop     (0)" in text
     assert "keep, row not usable (1): step-x" in text
+
+
+def test_non_native_trace_cannot_authorize_drops(tmp_path):
+    """A clean profiler exit alone never authorizes skipping a ROCm test."""
+    fn = tmp_path / ".kernrec"
+    job = fn / "job"
+    _sidecar(job)
+    recording = job / "kern.1.txt"
+    _recording(recording, ["kA"])
+    lines = recording.read_text().splitlines()
+    lines[0] = lines[0].replace(
+        "backend=cuda recorder=cupti", "backend=rocm recorder=json-import"
+    )
+    recording.write_text("\n".join(lines) + "\n")
+    table, _ = _build_kernrec(tmp_path, fn)
+    row = table["rows"]["step-x"]
+    assert row["backend"] == "rocm"
+    assert row["trace_complete"] is False
+    assert not kernel_table.usable(row)
+    assert [table["names"][i] for i in row["kernels"]] == ["kA"]
+
+
+def test_same_step_cannot_mix_cuda_and_rocm_records(tmp_path):
+    fn = tmp_path / ".kernrec"
+    for name in ("cuda", "rocm"):
+        job = fn / name
+        _sidecar(job)
+        path = job / "kern.1.txt"
+        _recording(path, ["k"])
+        lines = path.read_text().splitlines()
+        lines[0] = lines[0].replace("backend=cuda", f"backend={name}")
+        path.write_text("\n".join(lines) + "\n")
+    table, _ = _build_kernrec(tmp_path, fn)
+    row = table["rows"]["step-x"]
+    assert row["backend"] == "unknown"
+    assert not kernel_table.usable(row)
+
+
+@pytest.mark.parametrize(
+    "backend,recorder", [("cuda", "cupti"), ("rocm", "rocprofiler-sdk")]
+)
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "none",
+        "no-footer",
+        "error",
+        "unresolved",
+        "trailing-data",
+        "legacy",
+        "malformed",
+    ],
+)
+def test_native_health_requires_complete_error_free_recording(
+    tmp_path, backend, recorder, damage
+):
+    """Identical loss gates protect CUDA and ROCm against false kernel silence."""
+    job = tmp_path / ".kernrec" / "job"
+    _sidecar(job)
+    path = job / "kern.1.txt"
+    _recording(path, ["observed"])
+    text = path.read_text().replace(
+        "backend=cuda recorder=cupti", f"backend={backend} recorder={recorder}"
+    )
+    if damage == "no-footer":
+        text = text[: text.index("# end")]
+    elif damage == "error":
+        text = text.replace("# end", "# error=flush_failed\n# end")
+    elif damage == "unresolved":
+        text = text.replace("unresolved=0", "unresolved=1")
+    elif damage == "trailing-data":
+        text += "late-kernel\n"
+    elif damage == "legacy":
+        text = text.replace(" errors=0 unresolved=0", "")
+    elif damage == "malformed":
+        text = text.replace("dropped=0", "dropped=unknown")
+    path.write_text(text)
+    table, _ = _build_kernrec(tmp_path, job.parent)
+    row = table["rows"]["step-x"]
+    assert row["passed"] is True
+    assert row["recording_available"] is True
+    assert row["trace_complete"] is (damage == "none")
+    assert kernel_table.usable(row) is (damage == "none")
+    assert "observed" in table["names"]
+
+
+def test_successful_job_without_recordings_cannot_authorize_drops(tmp_path):
+    job = tmp_path / ".kernrec" / "job"
+    _sidecar(job)
+    table, _ = _build_kernrec(tmp_path, job.parent)
+    row = table["rows"]["step-x"]
+    assert row["passed"] is True
+    assert row["recording_available"] is False
+    assert row["trace_complete"] is False
+    assert not kernel_table.usable(row)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "# kernrec v1 recorder=rocprofiler-sdk",
+        "# kernrec v1 backend=rocm recorder=cupti",
+        "# kernrec v2 backend=cuda recorder=cupti",
+        "# kernrec v1 backend=cuda backend=rocm recorder=rocprofiler-sdk",
+    ],
+)
+def test_invalid_native_identity_keeps_recording_additive(tmp_path, header):
+    path = tmp_path / "kern.1.txt"
+    _recording(path, ["k"])
+    _, rest = path.read_text().split("\n", 1)
+    path.write_text(header + "\n" + rest)
+    names, _, clean = kernel_table.read_recording(path)
+    assert names == {"k"} and not clean
+
+
+def test_unavailable_setup_cannot_reuse_stale_recordings(tmp_path):
+    job = tmp_path / ".kernrec" / "job"
+    _sidecar(job)
+    _recording(job / "kern.1.txt", ["old"])
+    meta_path = job / "kernrec.json"
+    meta = json.loads(meta_path.read_text())
+    meta.update(collection_available=False, collection_error="preflight failed")
+    meta_path.write_text(json.dumps(meta))
+    table, _ = _build_kernrec(tmp_path, job.parent)
+    row = table["rows"]["step-x"]
+    assert row["passed"] and not row["trace_complete"]
+    assert not row["recording_available"]

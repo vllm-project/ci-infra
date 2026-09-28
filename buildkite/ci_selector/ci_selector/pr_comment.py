@@ -28,7 +28,7 @@ from pathlib import Path
 from .codemap.classify import select
 from .codemap.pipeline.match import match_jobs
 from .codemap.worktree import git_out, state_for
-from .coverage.source import fetch_kernel_evidence, fetch_table
+from .coverage.source import fetch_kernel_records, fetch_table
 from .decide import decide
 from .gitdiff import changed_paths, diff_files
 from .handwritten import IMAGE_BUILD_KEY_PREFIX, PR_PIPELINE
@@ -644,11 +644,15 @@ def refresh_records() -> None:
     """Pull the latest published records into coverage-data/, as CI would."""
     from .scripts import fetch_functions, fetch_kernels
 
-    for mod in (fetch_functions, fetch_kernels):
-        rc = mod.main([])
+    for mod, argv in (
+        (fetch_functions, []),
+        (fetch_kernels, []),
+        (fetch_kernels, ["--backend", "rocm"]),
+    ):
+        rc = mod.main(argv)
         if rc:
             print(
-                f"warning: {mod.__name__} exited {rc}; using what is on disk",
+                f"warning: {mod.__name__} {argv} exited {rc}; using what is on disk",
                 file=sys.stderr,
             )
 
@@ -658,7 +662,7 @@ def run(args) -> int:
     if not args.no_fetch:
         refresh_records()
     table = fetch_table(args.table)
-    kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
+    kernels = fetch_kernel_records(args.kernel_table, args.kernel_symbol_map)
     result = select_for_pr(
         repo,
         args.number,

@@ -1,5 +1,8 @@
 # kernrec: which GPU kernels did this step launch?
 
+The CUDA recorder uses CUPTI. [ROCm collection](ROCM.md) uses the ROCProfiler
+SDK with the same per-process recording and row-health contract.
+
 A CUPTI injection library that records the *set* of kernel names a process
 launches, one mangled name per line. It is the kernel-side twin of the
 Python function recorder: the Python record says which functions a CI step
@@ -51,12 +54,12 @@ the conditions in Docker and checks both, including a SIGKILLed step.
 ## Output
 
 ```
-# kernrec v1 pid=4242 ppid=4200 exe=/usr/bin/python3
+# kernrec v1 backend=cuda recorder=cupti pid=4242 ppid=4200 exe=/usr/bin/python3
 _Z21fusedQKNormRopeKernelIN3c108BFloat16ENS0_ELi128ELb1EEvPvT_...
 fused_moe_kernel
 _ZN9deep_gemm...
 # dropped=0
-# end records=183220 unique=311 dropped=0
+# end records=183220 unique=311 dropped=0 errors=0 unresolved=0
 ```
 
 `# dropped=N` marks CUPTI buffer overflow: launches we never saw. A row with
@@ -74,8 +77,11 @@ Known limits:
 - One CUPTI activity client per process. If `torch.profiler` (Kineto) starts,
   it takes over the buffer callbacks and this recorder goes quiet. Steps that
   run profiler tests should not record.
-- CUDA only. ROCm has an equivalent hook (`ROCP_TOOL_LIBRARIES`), not written
-  yet. TPU has nothing. Those steps stay on the static map.
+- Both backends require every observed process to finish cleanly, with no
+  drops, errors, or unresolved names, before the row may authorize a drop.
+  Partial recordings still provide positive evidence. Neither backend proves
+  that every expected worker inherited the recording environment.
+- The [ROCm SDK recorder](ROCM.md) is the AMD counterpart. TPU has no recorder.
 
 ## Running it in CI
 
@@ -83,7 +89,8 @@ The pipeline generator arms it when the build has `VLLM_CI_KERNREC=1`:
 every GPU step gets a setup command that sources `ci_setup.sh` from the
 ci-infra branch that generated the pipeline (`VLLM_CI_BRANCH`, default
 `main`), and `artifact_paths: [".kernrec/**/*"]`. The setup script fetches the
-prebuilt `libkernrec.so` from the same branch, exports the variables above,
+prebuilt `libkernrec.so` for CUDA, or builds the ROCm tool against the image's
+pinned SDK, exports the injection variables,
 and never fails the step. To record a few steps from a branch under test:
 
 ```
@@ -170,7 +177,8 @@ whether they passed or failed. It executes `collect.sh`:
    a null status and the generator's last command, `kernrec_finish`, rewrites
    it with the real one. Not an EXIT trap alone: vLLM's OTel prelude installs
    its own and replaced ours, which read a whole nightly as failed once.
-2. `kernel_table.py build --kernrec .kernrec` folds them into one row per step:
+2. `kernel_table.py build --kernrec .kernrec --backend cuda` (or `rocm`) folds
+   each backend into one row per step:
    kernels launched, jobs, all-passed, processes, dropped records.
 3. The table and the build's `kernel_symbol_map.json.gz` are uploaded as
    artifacts of the collect job. Then, only if both validate (rows in the
@@ -199,7 +207,8 @@ whether they passed or failed. It executes `collect.sh`:
 ## Consuming it
 
 `ci-fetch-kernel-record` (in `ci_selector/scripts/`) pulls the latest
-published pair into `coverage-data/`, and `ci_selector/coverage/kernels.py`
+published CUDA pair into `coverage-data/`; `--backend rocm` fetches its independent
+pair. The selector reads both by default, and `ci_selector/coverage/kernels.py`
 reads it inside `decide.py`: a step whose row launched a kernel compiled from
 a changed csrc file is selected, a step whose healthy row launched none is
 dropped when that file was all the map had on it, and everything else falls

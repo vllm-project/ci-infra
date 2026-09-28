@@ -29,7 +29,7 @@ import urllib.request
 from pathlib import Path
 
 from ..coverage.kernels import load_symbol_map, load_table
-from ..coverage.source import COVERAGE_DIR, KERNEL_MAP_NAME, KERNEL_TABLE_NAME
+from ..coverage.source import COVERAGE_DIR
 
 DEFAULT_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/kernrec"
 URL_ENV = "CI_SELECTOR_KERNEL_RECORD_URL"
@@ -54,28 +54,38 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--out", type=Path, default=COVERAGE_DIR, help="directory to write into"
     )
+    ap.add_argument("--backend", choices=("cuda", "rocm"), default="cuda")
     args = ap.parse_args(argv)
+    suffix = ".rocm" if args.backend == "rocm" else ""
+    table_name = f"kernel_table{suffix}.json.gz"
+    map_name = f"kernel_symbol_map{suffix}.json.gz"
     url = args.url.rstrip("/")
 
     try:
         if args.commit:
             commit, build = args.commit, "?"
         else:
-            latest = json.loads(_get(f"{url}/latest.json"))
+            latest = json.loads(_get(f"{url}/latest{suffix}.json"))
             commit, build = latest["commit"], latest.get("build", "?")
         args.out.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=args.out) as tmp:
             staged = {}
-            for name in (KERNEL_TABLE_NAME, KERNEL_MAP_NAME):
+            for name in (table_name, map_name):
                 dest = Path(tmp) / name
                 dest.write_bytes(_get(f"{url}/{commit}/{name}"))
                 staged[name] = dest
-            table = load_table(staged[KERNEL_TABLE_NAME])
-            symbol_map = load_symbol_map(staged[KERNEL_MAP_NAME])
+            table = load_table(staged[table_name])
+            symbol_map = load_symbol_map(staged[map_name])
             for half in (table, symbol_map):
                 if not half.available:
                     print(f"error: {half.unavailable}", file=sys.stderr)
                     return 1
+            if symbol_map.backend != args.backend or any(
+                row.backend not in {args.backend, "unknown"}
+                for row in table._rows.values()
+            ):
+                print("error: pair contains a different backend", file=sys.stderr)
+                return 1
             if table.commit != symbol_map.commit:
                 print(
                     f"error: table is for {table.commit[:10]}, map for "

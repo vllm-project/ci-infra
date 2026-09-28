@@ -41,15 +41,13 @@ PROGRAM = (
 )
 
 
-@pytest.fixture(scope="module")
-def recorded(tmp_path_factory):
+def _record(root, program=PROGRAM, extra_env=None, editable_aiter=False):
     """Install the recorder the way a plugin-less step does, and run it once.
 
     Host mode rather than container mode: it installs into a directory on
     PYTHONPATH, so this needs no second interpreter, and it is the path that is
     otherwise only exercised on an agent.
     """
-    root = tmp_path_factory.mktemp("fnrec")
     (root / "vllm").mkdir()
     (root / "vllm" / "__init__.py").write_text(VLLM_STUB)
     # The checkout's tests package, and an installed library.
@@ -59,6 +57,9 @@ def recorded(tmp_path_factory):
     site = root / "env" / "site-packages"
     (site / "flashlib").mkdir(parents=True)
     (site / "flashlib" / "__init__.py").write_text("def go():\n    return 3\n")
+    aiter = (root if editable_aiter else site) / "aiter"
+    aiter.mkdir()
+    (aiter / "__init__.py").write_text("def go():\n    return 4\n")
     lib, out = root / "lib", root / "rec"
     out.mkdir()
 
@@ -76,7 +77,7 @@ def recorded(tmp_path_factory):
     assert (lib / "fnrec.py").is_file() and (lib / "sitecustomize.py").is_file()
 
     run = subprocess.run(
-        [sys.executable, "-c", PROGRAM],
+        [sys.executable, "-c", program],
         capture_output=True,
         text=True,
         cwd=root,
@@ -85,6 +86,7 @@ def recorded(tmp_path_factory):
             "PYTHONPATH": f"{lib}:{root}:{site}",
             "FNREC_OUT": str(out),
             "FNREC_ROOT": str(root / "vllm"),
+            **(extra_env or {}),
         },
     )
     assert run.returncode == 0, run.stderr
@@ -92,6 +94,11 @@ def recorded(tmp_path_factory):
     files = sorted(out.glob("fn.*.txt"))
     assert files, "the recorder wrote nothing"
     return files
+
+
+@pytest.fixture(scope="module")
+def recorded(tmp_path_factory):
+    return _record(tmp_path_factory.mktemp("fnrec"))
 
 
 def test_the_reader_parses_what_the_recorder_writes(recorded):
@@ -134,6 +141,52 @@ def test_installed_libraries_are_recorded_by_package_only(recorded):
     assert "flashlib" in record.packages
     assert not any("flashlib" in path for path in record.functions)
     assert record.malformed == 0
+
+
+@pytest.mark.parametrize("then_vllm", [False, True])
+def test_aiter_import_records_dependency_before_vllm(tmp_path, then_vllm):
+    """ROCm kernel tests can enter AITER without ever importing vLLM."""
+    program = "import aiter; aiter.go()"
+    if then_vllm:
+        program += "; import vllm; vllm.top_level()"
+    files = _record(tmp_path, program)
+    assert len(files) == 1
+    record = read_process(files[0])
+    assert record is not None and record.clean_exit
+    assert record.errors == record.malformed == 0
+    assert "aiter" in record.packages
+    if then_vllm:
+        assert "top_level" in record.functions["vllm/__init__.py"]
+    else:
+        assert not record.functions
+
+
+def test_spawned_aiter_process_records_dependency(tmp_path):
+    """Workers inherit the install even when their launcher imports no vLLM."""
+    files = _record(
+        tmp_path,
+        "import subprocess, sys; "
+        "subprocess.run([sys.executable, '-c', 'import aiter; aiter.go()'], "
+        "check=True)",
+    )
+    assert len(files) == 1
+    record = read_process(files[0])
+    assert record is not None and record.clean_exit
+    assert "aiter" in record.packages
+
+
+def test_rocm_device_and_dispatch_settings_are_preserved(tmp_path):
+    """A coverage artifact must identify which ROCm execution paths it sampled."""
+    env = {
+        "ROCR_VISIBLE_DEVICES": "2,3",
+        "HIP_VISIBLE_DEVICES": "0,1",
+        "VLLM_ROCM_USE_AITER": "1",
+        "VLLM_ROCM_USE_AITER_RMSNORM": "0",
+        "VLLM_ROCM_USE_AITER_CUSTOM_AR": "1",
+    }
+    files = _record(tmp_path, extra_env=env)
+    header = files[0].read_text().splitlines()[0].split("\t")
+    assert {f"{key}={value}" for key, value in env.items()} <= set(header)
 
 
 def test_the_counter_is_a_floor_on_what_was_recorded(recorded):
@@ -205,3 +258,9 @@ def test_the_recorder_arms_only_when_both_variables_are_set(tmp_path):
             check=False,
         )
         assert not list(out.glob("fn.*.txt")), f"armed with only {sorted(env)}"
+
+
+def test_editable_aiter_is_recorded_by_package(tmp_path):
+    """The ROCm image's source-installed AITER must retain package evidence."""
+    files = _record(tmp_path, "import aiter; aiter.go()", editable_aiter=True)
+    assert "aiter" in read_process(files[0]).packages

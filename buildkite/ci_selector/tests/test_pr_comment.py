@@ -347,3 +347,18 @@ def test_optional_steps_stay_out_of_the_comparison():
     assert not_counted(step) == "optional"
     step.ci_optional = False
     assert not_counted(step) == ""
+
+
+def test_refresh_downloads_rocm_even_when_cuda_is_unavailable(monkeypatch):
+    from ci_selector.scripts import fetch_functions, fetch_kernels
+
+    calls = []
+    monkeypatch.setattr(fetch_functions, "main", lambda argv: 0)
+
+    def fetch(argv):
+        calls.append(argv)
+        return 1 if not argv else 0
+
+    monkeypatch.setattr(fetch_kernels, "main", fetch)
+    pr_comment.refresh_records()
+    assert calls == [[], ["--backend", "rocm"]]
