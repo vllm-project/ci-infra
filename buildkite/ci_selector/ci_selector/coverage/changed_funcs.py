@@ -76,6 +76,10 @@ class FileQuery:
     # A stand-in for a file the recorder cannot see, not part of the diff.
     # The drop side weighs it like any file; the add side skips it.
     proxy: bool = False
+    # The one hardware family whose `current_platform.is_<x>()` branch holds
+    # every changed line, or None. Such code runs on no other family's jobs,
+    # whatever the recording says about the function around it.
+    platform: str | None = None
     note: str = ""  # why FAILED, for diagnosis; never load-bearing
 
     @property
@@ -421,6 +425,15 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
                 query.inert.append(shown)
                 continue
             base_import, head_import = import_time, frozenset()
+        platform = None
+        if shown.endswith(".py") and base_side and head_side and not note:
+            sides = [
+                _platform_of_lines(_read(repo, base, base_side), base_lines),
+                _platform_of_lines(_read(repo, head, head_side), head_lines),
+            ]
+            placed = {x for x in sides if x is not None}
+            if len(placed) == 1 and False not in placed:
+                platform = placed.pop()
         query.files.append(
             FileQuery(
                 path=shown,
@@ -432,9 +445,63 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
                 import_time=base_import | head_import,
                 in_recorder_scope=in_scope,
                 note=note,
+                platform=platform,
             )
         )
     return query
+
+
+# current_platform.is_<x>() -> the hardware family whose jobs run that branch.
+# Single families only: is_cuda_alike() spans two, and a plain `else` is
+# everything the guard is not.
+PLATFORM_GUARDS = {"is_xpu": "xpu", "is_rocm": "amd", "is_cpu": "cpu", "is_tpu": "tpu"}
+
+
+def _guard_family(test: ast.expr) -> str | None:
+    if (
+        isinstance(test, ast.Call)
+        and isinstance(test.func, ast.Attribute)
+        and test.func.attr in PLATFORM_GUARDS
+        and isinstance(test.func.value, ast.Name)
+        and test.func.value.id == "current_platform"
+        and not test.args
+    ):
+        return PLATFORM_GUARDS[test.func.attr]
+    return None
+
+
+def _platform_of_lines(text: str | None, lines: set[int]) -> str | None | bool:
+    """The family whose guarded branch holds every changed line, None when no
+    line needs placing, or False when some line sits outside such a branch.
+    Blank and comment lines place anywhere."""
+    if not lines:
+        return None
+    if text is None:
+        return False
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    spans: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            family = _guard_family(node.test)
+            if family and node.body:
+                spans.append((node.body[0].lineno, node.body[-1].end_lineno, family))
+    source = text.splitlines()
+    found: set[str] = set()
+    for n in lines:
+        stripped = source[n - 1].strip() if 0 < n <= len(source) else ""
+        if not stripped or stripped.startswith("#"):
+            continue
+        # Innermost guard wins: the narrowest span holding the line.
+        holding = sorted((b - a, fam) for a, b, fam in spans if a <= n <= b)
+        if not holding:
+            return False
+        found.add(holding[0][1])
+    if not found:
+        return None
+    return found.pop() if len(found) == 1 else False
 
 
 def _equivalent(a: types.CodeType, b: types.CodeType) -> bool:

@@ -993,3 +993,34 @@ class TestRecorderScope:
 
         assert "vllm_ci:runs-helper" in added(True), "the detection floor"
         assert added(False) == []
+
+
+class TestPlatformBranches:
+    """A file whose changes all sit in another family's platform branch
+    neither keeps nor adds a step, and a step picked only for it drops."""
+
+    def test_a_cuda_step_drops_an_xpu_only_change(self, table):
+        from dataclasses import replace
+
+        query = query_for("vllm/mod.py", "plain")
+        query.files[0] = replace(query.files[0], platform="xpu")
+        keys = RowKeys(
+            {"vllm_ci"},
+            {"vllm_ci": 1.0},
+            steps={
+                "vllm_ci:runs-plain": FakeStep(),
+                "vllm_ci:xpu-plain": FakeStep(),
+            },
+        )
+        keys.steps["vllm_ci:runs-plain"].device = "h200"
+        keys.steps["vllm_ci:runs-plain"].mirror_hw = ""
+        reading = read_pr(
+            table,
+            result_for("vllm_ci:runs-plain", paths=("vllm/mod.py",)),
+            query,
+            unknown_names(query, UNION, {}),
+            KNOWN,
+            keys,
+        )
+        assert reading.dropped == ["vllm_ci:runs-plain"]
+        assert reading.reasons["changed-code-runs-on-another-platform"] == 1
