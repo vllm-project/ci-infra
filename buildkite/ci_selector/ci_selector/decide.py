@@ -257,7 +257,7 @@ def _apply_record(
             union.setdefault(path, set()).update(names)
     union_names = {p: frozenset(n) for p, n in union.items()}
 
-    _append_op_proxies(query, repo, base, union_names, table)
+    _append_op_proxies(query, repo, base, union_names, table, head)
 
     unresolved = unknown_names(query, union_names, {})
     resolved: dict[str, set[str]] = {}
@@ -298,7 +298,9 @@ def _apply_record(
     out.steps -= out.dropped_by_coverage
 
 
-def _append_op_proxies(query, repo: Path, base: str, union_names, table) -> None:
+def _append_op_proxies(
+    query, repo: Path, base: str, union_names, table, head: str | None = None
+) -> None:
     """Stand-in queries for changed csrc files: the wrapper names the drop
     side weighs instead of the path, which is never recorded.
 
@@ -314,14 +316,27 @@ def _append_op_proxies(query, repo: Path, base: str, union_names, table) -> None
         return
     if not any(f.path.startswith("csrc/") for f in query.files):
         return
-    no = getattr(state_for(repo, base), "native_ops", None)
+    state = state_for(repo, base)
+    no = getattr(state, "native_ops", None)
     if no is None or no.error:
         return
+    from .codemap.classify import _narrowed_native_state
+    from .codemap.state import DiffContext
+
     proxies: dict[str, set[str]] = {}
     for f in query.files:
         if f.proxy or not no.owns(f.path):
             continue
-        for wf, quals in (no.proxies_for(f.path) or {}).items():
+        # The ops the diff touched, as the map routed them: a header edit to
+        # one op stands in for that op's wrappers, not all ~140.
+        owner = no
+        if head is not None:
+            narrowed = _narrowed_native_state(
+                state, f.path, DiffContext(base, head, {f.path: "M"})
+            )
+            if narrowed is not None:
+                owner = narrowed.native_ops
+        for wf, quals in (owner.proxies_for(f.path) or {}).items():
             proxies.setdefault(wf, set()).update(quals)
     for wf in sorted(proxies):
         quals = frozenset(proxies[wf])
