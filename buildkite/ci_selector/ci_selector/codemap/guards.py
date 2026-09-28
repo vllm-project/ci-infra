@@ -13,8 +13,8 @@ input that would quietly weaken selection surfaces here with a direction:
   gate instead of dropping suites.
 - fail one file open: a changed path that would not parse.
 - distrust the graph: an unmodeled dynamic import means the closure may be
-  missing edges, so rules that trust the graph over a step's declared deps
-  stand down until it is classified.
+  missing edges, so the site file itself runs everything until it is
+  classified.
 - warn only: steps that legitimately have no targets, steps whose tests live
   inside their container image rather than in this checkout, and steps with a
   pytest line the script scanner cannot read.

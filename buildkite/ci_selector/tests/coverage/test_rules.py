@@ -513,7 +513,7 @@ class TestPerReasonScoping:
         assert reading.reasons["query-cannot-answer"] == 1
 
     def test_one_not_droppable_reason_holds_the_step(self, table):
-        # A declared dep, hardware tagging, run-all, preflight or always-run.
+        # Hardware tagging, run-all, preflight or always-run.
         # It stands on its own no matter what the rows say about the rest.
         reading = read(
             table,

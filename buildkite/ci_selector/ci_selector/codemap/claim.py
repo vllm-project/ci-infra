@@ -65,7 +65,6 @@ RULES = frozenset(
         "target-coverage",
         "package-data",
         "native-tests",
-        "declared-deps",
         "fail-open",
     }
 )
@@ -105,8 +104,8 @@ class Claim:
     # csrc changes. The path itself is never recorded, so leaving it in would
     # keep every step.
     evidence_paths: frozenset[str] = frozenset()
-    # Per-step overrides of `detail` and `rule`, written by the union passes
-    # for the steps they add, so their sentence does not replay under every step.
+    # Per-step overrides of `detail` and `rule`, written by the image union
+    # for the steps it adds, so its sentence does not replay under every step.
     step_detail: dict[str, str] = field(default_factory=dict)
     step_rule: dict[str, str] = field(default_factory=dict)
 
@@ -152,8 +151,8 @@ def matches_source_dependency(dep: str, diff_file: str) -> bool:
 
 def is_catch_all_dep(dep: str) -> bool:
     """A declaration so broad it says nothing about this file: the step named a
-    whole package root rather than what it uses. One home, because the selector
-    and crosscheck both read it and must not disagree.
+    whole package root rather than what it uses. One home, because
+    `matching_deps` and crosscheck both read it and must not disagree.
 
     Exact match on a root, so `vllm/v1` counts as specific. Where that line
     sits is unmeasured: a root is just the one declaration that cannot narrow
