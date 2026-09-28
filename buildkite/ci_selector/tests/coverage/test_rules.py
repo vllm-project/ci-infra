@@ -1030,7 +1030,7 @@ class TestTestsRecordingAge:
     """A row recorded before the recorder wrote tests/ cannot speak for a
     changed tests/ file; one recorded after can."""
 
-    def _table(self, tmp_path, tmp_repo, with_tests: bool):
+    def _table(self, tmp_path, tmp_repo, new: bool, with_tests: bool = True):
         from ci_selector.coverage.table import load
         from ci_selector.scripts.build import merge_build, write_table
 
@@ -1038,10 +1038,13 @@ class TestTestsRecordingAge:
 
         tmp_repo.write("tests/utils.py", "def helper():\n    return 1\n\n\ndef other():\n    return 2\n")
         build = Build(tmp_path / "sweep" / "b", "1", tmp_repo.commit("helper"))
+        # The recorder that writes tests/ also writes `#pkg` lines; an old one
+        # writes neither.
         process_file(
             build.job("j0", step_key="runs-plain") / "fn.a.txt",
             [("mod.py", "plain")],
-            tests=[("utils.py", "other")] if with_tests else None,
+            tests=[("utils.py", "other")] if new and with_tests else None,
+            packages=["torch"] if new else None,
         )
         out = tmp_path / "table.json"
         write_table(merge_build(build.finish(), tmp_repo.root), out)
@@ -1059,10 +1062,17 @@ class TestTestsRecordingAge:
         )
 
     def test_an_old_row_keeps(self, tmp_path, tmp_repo):
-        reading = self._read(self._table(tmp_path, tmp_repo, with_tests=False))
+        reading = self._read(self._table(tmp_path, tmp_repo, new=False))
         assert reading.kept == ["vllm_ci:runs-plain"]
         assert reading.reasons["row-predates-tests-recording"] == 1
 
     def test_a_new_row_that_never_ran_the_helper_drops(self, tmp_path, tmp_repo):
-        reading = self._read(self._table(tmp_path, tmp_repo, with_tests=True))
+        reading = self._read(self._table(tmp_path, tmp_repo, new=True))
         assert reading.dropped == ["vllm_ci:runs-plain"]
+
+    def test_a_new_row_that_entered_no_tests_file_drops(self, tmp_path, tmp_repo):
+        # A step that runs only scripts (examples, lm-eval) records no tests/
+        # path at all. That is evidence, not an old recording.
+        reading = self._read(self._table(tmp_path, tmp_repo, new=True, with_tests=False))
+        assert reading.dropped == ["vllm_ci:runs-plain"]
+        assert not reading.reasons["row-predates-tests-recording"]

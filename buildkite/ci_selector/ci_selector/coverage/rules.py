@@ -420,7 +420,10 @@ def read_pr(
 
         # A row recorded before the recorder wrote tests/ holds no tests/ name
         # at all, and its silence about one is no evidence. Tables merge rows
-        # across builds, so old and new rows can sit side by side.
+        # across builds, so old and new rows can sit side by side. The same
+        # recorder change started writing `#pkg` lines, so a row with no
+        # packages is an old row. Having no tests/ path is not the sign: a
+        # step that runs only scripts (examples, lm-eval) enters none.
         row = table.row(key)
         if (
             row is not None
@@ -428,7 +431,7 @@ def read_pr(
                 f.path in scope and f.path.startswith(TESTS_SCOPE) and f.in_recorder_scope
                 for f in query.files
             )
-            and not any(p.startswith(TESTS_SCOPE) for p in row.functions)
+            and not row.stamp.packages
         ):
             reading.kept.append(step_id)
             reading.reasons["row-predates-tests-recording"] += 1
