@@ -1648,13 +1648,6 @@ def test_an_empty_scoped_complement_falls_back_to_run_all(state, monkeypatch):
     assert claim.rule == "fail-open" and claim.run_all
 
 
-def test_hipify_does_not_run_everything(state):
-    """`cmake/hipify.py` was a rocm-only run_all match. Nothing derived names
-    it, so it rests at the floor, whose AMD image builds are what run it."""
-    sel = select(state, ["cmake/hipify.py"])
-    assert not sel.run_all
-
-
 def test_family_exclusive_no_declarers_keeps_complement(state):
     """A family-exclusive path with no auto declarer keeps the device-family
     complement."""
@@ -3308,3 +3301,18 @@ def test_an_env_var_the_build_never_reads_skips_the_image_union(tmp_path):
     assert after(added)
     assert not after(envs.replace('getenv("MAX_JOBS")', 'getenv("MAX_JOBS", "8")'))
     assert not after(envs + "print('side effect')\n")
+
+
+@pytest.mark.parametrize(
+    "path", ["cmake/hipify.py", "cmake/patches/pytorch_stable_string.patch"]
+)
+def test_a_file_the_build_runs_by_path_is_not_inert(state, path):
+    """Nothing compiles either file, so the build map does not know them, but
+    CMake runs hipify.py and applies the patch by path. With declarations no
+    longer read, the inert floor called both "nothing to run"."""
+    from ci_selector.codemap.classify import _classify, _cmake_named_files
+
+    assert path in _cmake_named_files(state), "the CMake reference moved"
+    claim = _classify(state, path, None)
+    assert claim.rule != "inert"
+    assert claim.run_all or claim.step_ids & state.auto_step_ids

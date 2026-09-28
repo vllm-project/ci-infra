@@ -386,6 +386,38 @@ def _steps_targeting(state: RepoState, path: str, *, siblings: bool = True) -> s
     return covering | _workdir_affinity_steps(state, path)
 
 
+_CMAKE_ROOT_REF = re.compile(
+    r"\$\{CMAKE_(?:SOURCE_DIR|CURRENT_LIST_DIR|CURRENT_SOURCE_DIR)\}/([\w./-]+)"
+)
+_CMAKE_REFS: dict[str, frozenset[str]] = {}
+
+
+def _cmake_named_files(state: RepoState) -> frozenset[str]:
+    """Repo files the native build names by path from its CMake sources:
+    CMakeLists.txt and cmake/**/*.cmake, as ${CMAKE_SOURCE_DIR}/<path> and
+    its kin. cmake/hipify.py runs as a build command and the stable-ABI patch
+    is applied during the build; nothing compiles either, so the build map
+    does not know them. Paths are read against the repo root, which holds for
+    the top-level CMakeLists.txt and for cmake/utils.cmake's SOURCE_DIR refs;
+    a CURRENT_LIST_DIR ref in a nested file resolves wrong and simply matches
+    nothing, so it can only miss a file, never invent one."""
+    key = str(state.repo)
+    if key not in _CMAKE_REFS:
+        root = Path(state.repo)
+        sources = [root / "CMakeLists.txt", *sorted((root / "cmake").rglob("*.cmake"))]
+        found: set[str] = set()
+        for src in sources:
+            try:
+                text = src.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for ref in _CMAKE_ROOT_REF.findall(text):
+                if (root / ref).is_file():
+                    found.add(ref)
+        _CMAKE_REFS[key] = frozenset(found)
+    return _CMAKE_REFS[key]
+
+
 def _reached_by_nothing(state: RepoState, path: str) -> bool:
     """True when no derived surface reaches the file: no step targets it, no
     key routes it, no image COPYs it, no native build compiles it, and its path
@@ -403,6 +435,10 @@ def _reached_by_nothing(state: RepoState, path: str) -> bool:
     # that builds, whatever the knob scoping it says. Declarations used to be
     # what caught cmake/cpu_extension.cmake here.
     if path in state.build_map.families:
+        return False
+    # A file the build runs or applies by path, like cmake/hipify.py, reaches
+    # every job that builds even though nothing compiles it.
+    if path in _cmake_named_files(state):
         return False
     needles = {path}
     if path.endswith(".py"):
