@@ -3047,21 +3047,22 @@ def test_a_changed_tests_site_helper_keeps_its_file_level_closure(state):
     """A site helper never routes by changed names. Its dynamic import may sit
     in a module-level `m = import_module(...)`, which runs for every importer,
     while the name rule would follow only the importers that spell `m`. The
-    specimen is vllm#52282's edit to tests/utils.py, replayed as if that
-    helper were a site: by name it reaches 162 test files, by closure 1545."""
+    specimen is vllm#54379's edit to tests/utils.py, which changes only
+    function bodies, replayed as if that helper were a site: by name it
+    reaches 164 test files, by closure 1545."""
     import subprocess
 
     from ci_selector.codemap.classify import _classify
     from ci_selector.codemap.state import DiffContext
 
-    edit = "cb58bb9c1e38cd366910858873946c95be6328a9"
+    edit = "e41011129bd54c9e8e12b645ea9b964027d2363f"
     helper = "tests/utils.py"
     probe = subprocess.run(
         ["git", "-C", str(state.repo), "cat-file", "-e", f"{edit}^"],
         capture_output=True,
     )
     if probe.returncode != 0:
-        pytest.skip("vllm#52282 not present locally (shallow clone)")
+        pytest.skip("vllm#54379 not present locally (shallow clone)")
     ctx = DiffContext(f"{edit}^", edit, {helper: "M"})
     by_name = _classify(state, helper, ctx)
     assert by_name.rule == "test-helper-symbols", "specimen no longer narrows"
