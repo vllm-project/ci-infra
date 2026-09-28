@@ -1,9 +1,16 @@
-"""Record which vLLM functions were entered. Nothing else.
+"""Record which vLLM functions were entered, and which libraries.
 
 The selector only asks one bit per function: did this job enter it? Line
 coverage answers that but records every line to do so, which is where its
 slowdown comes from. sys.monitoring answers it directly: subscribe to
 PY_START and return DISABLE, so each function costs one event, once.
+
+Two roots are recorded by function: the vllm package, and the checkout's
+tests/ package once something imports it. A test helper changes as often as
+the code it tests, and without its names the selector can only route it by
+file. Everything else is recorded by top-level package only, one `#pkg` line
+each, so a dependency bump can be routed to the jobs that entered that
+library rather than to every job in the image.
 
 Needs FNREC_OUT and FNREC_ROOT. Starts on the first `vllm` import rather
 than at interpreter startup, leaving other infrastructure alone.
@@ -49,8 +56,15 @@ _tool_id = None
 _hooks_pid = None
 _origin = "import"
 _root_logged = False
+_tests_root = None
+_tests_logged = False
+_packages = set()
 _stats = {"root": 0, "other": 0, "errors": 0, "last_error": ""}
 _ended = False
+
+# Where installed libraries live. A path under one names its package by the
+# next segment: .../site-packages/flashinfer/sampling.py is flashinfer.
+_SITE_DIRS = (os.sep + "site-packages" + os.sep, os.sep + "dist-packages" + os.sep)
 
 
 def _now():
@@ -77,6 +91,44 @@ def _resolve_root():
             pass
     if _ROOT_ENV and os.path.isdir(_ROOT_ENV):
         return os.path.join(_ROOT_ENV, "")
+    return None
+
+
+def _resolve_tests_root():
+    """Where the checkout's tests package is, once imported, else None.
+
+    Asked of the live module, like the vllm root: pytest imports the package
+    before any file in it runs, so its __path__ is set by then. One under a
+    site directory is some wheel's stray `tests` package, not ours.
+    """
+    mod = sys.modules.get("tests")
+    path = getattr(mod, "__path__", None)
+    if not path:
+        return None
+    try:
+        # A namespace package can span several directories.
+        for entry in list(path):
+            root = os.path.join(entry, "")
+            if not any(d in root for d in _SITE_DIRS):
+                return root
+    except Exception:
+        pass
+    return None
+
+
+def _package_of(filename):
+    """The top-level package an installed file belongs to, or None for the
+    standard library, frozen modules, and anything not installed."""
+    for marker in _SITE_DIRS:
+        i = filename.rfind(marker)
+        if i >= 0:
+            top = filename[i + len(marker) :].split(os.sep, 1)[0]
+            if top.endswith(".py"):
+                top = top[:-3]
+            # .pth hooks, dist-info and the like carry no code anyone calls.
+            if top and top.isidentifier():
+                return top
+            return None
     return None
 
 
@@ -197,7 +249,7 @@ def _end():
 
 
 def _on_py_start(code, instruction_offset):
-    global _root, _root_logged, _root_tries
+    global _root, _root_logged, _root_tries, _tests_root
     if _root is None:
         _root = _resolve_root()
         if _root is None:
@@ -210,10 +262,16 @@ def _on_py_start(code, instruction_offset):
             return sys.monitoring.DISABLE
     filename = code.co_filename
     if not filename.startswith(_root):
-        _stats["other"] += 1
-        return sys.monitoring.DISABLE
+        if _tests_root is None:
+            _tests_root = _resolve_tests_root()
+        if _tests_root is None or not filename.startswith(_tests_root):
+            _stats["other"] += 1
+            _note_package(filename)
+            return sys.monitoring.DISABLE
     key = f"{filename}\t{code.co_qualname}\t{code.co_firstlineno}"
     with _lock:
+        if _tests_root is not None and not _tests_logged:
+            _log_tests_root()
         if not _root_logged:
             # The header goes out before the root is known, so record the
             # value in force. A record is unreadable without it.
@@ -239,6 +297,34 @@ def _on_py_start(code, instruction_offset):
     return sys.monitoring.DISABLE
 
 
+def _log_tests_root():
+    """Once per process, before its first tests/ line, so the reader can map
+    those lines. Two fields: an older reader skips it as malformed rather
+    than reading it as a function. Called under the lock."""
+    global _tests_logged
+    _tests_logged = True
+    try:
+        _out().write(f"#tests\t{_tests_root}\n")
+    except Exception:
+        pass
+
+
+def _note_package(filename):
+    """One `#pkg` line per installed package this process enters."""
+    pkg = _package_of(filename)
+    if pkg is None or pkg in _packages:
+        return
+    with _lock:
+        if pkg in _packages:
+            return
+        _packages.add(pkg)
+        try:
+            _out().write(f"#pkg\t{pkg}\n")
+        except Exception as exc:
+            _stats["errors"] += 1
+            _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
+
+
 def _after_in_child():
     """Give the child its own identity, lock, and events.
 
@@ -249,10 +335,12 @@ def _after_in_child():
     as an empty worker.
     """
     global _fh, _fh_pid, _seen, _lock, _nonce, _origin, _stats, _ended, _hooks_pid
-    global _root_logged, _root_tries
+    global _root_logged, _root_tries, _tests_logged, _packages
     _fh, _fh_pid, _hooks_pid = None, None, None
     _root_logged = False
+    _tests_logged = False
     _root_tries = 0
+    _packages = set()
     _seen = set()
     _lock = threading.Lock()
     _nonce = os.urandom(4).hex()
