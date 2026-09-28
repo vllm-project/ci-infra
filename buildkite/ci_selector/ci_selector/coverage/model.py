@@ -27,7 +27,7 @@ from dataclasses import asdict, dataclass, field
 from inspect import CO_OPTIMIZED
 from pathlib import Path
 
-from ..handwritten import RECORDER_SCOPE
+from ..handwritten import RECORDER_SCOPE, TESTS_SCOPE
 
 JOB_META_KEY = "step_key"
 JOB_META_LABEL = "label"
@@ -70,12 +70,12 @@ MIN_ROWS_FOR_BREADTH = 20
 # not know, which is the only thing stopping an older table from reading
 # healthier than it was recorded: a missing field takes its default, and every
 # default here is the healthy value.
-TABLE_VERSION = 5
+TABLE_VERSION = 6
 
 # Fingerprint of `Stamp`'s fields, so remembering to bump the version above is a
 # mechanism and not a discipline. A test recomputes it and fails when the two
 # disagree. Change both together, in the same commit that changes the stamp.
-STAMP_SHAPE = "710849dd809c75ad"
+STAMP_SHAPE = "d2817305f3714d26"
 
 MIRROR_NOTE = (
     "A mirror owns its own row and never inherits its parent's. Keyless mirrors "
@@ -102,6 +102,8 @@ class ProcessRecord:
     errors: int
     outside_root: int
     malformed: int
+    # Installed top-level packages the process entered, from `#pkg` lines.
+    packages: frozenset[str] = frozenset()
 
     @property
     def lost_lines(self) -> bool:
@@ -117,7 +119,8 @@ def _kv(parts: list[str]) -> dict[str, str]:
 def read_process(path: Path) -> ProcessRecord | None:
     """One fnrec process file, read all the way to EOF."""
     raw: list[tuple[str, str]] = []
-    header_root = effective_root = None
+    header_root = effective_root = tests_root = None
+    packages: set[str] = set()
     job = py = retry = None
     counter = None
     clean_exit = False
@@ -138,6 +141,11 @@ def read_process(path: Path) -> ProcessRecord | None:
                 identity = header_identity(meta)
             elif tag == "#root":
                 effective_root = parts[1] if len(parts) > 1 and parts[1] else None
+            elif tag == "#tests":
+                tests_root = parts[1] if len(parts) > 1 and parts[1] else None
+            elif tag == "#pkg":
+                if len(parts) > 1 and parts[1]:
+                    packages.add(parts[1])
             elif tag in ("#stat", "#end"):
                 meta = _kv(parts[1:])
                 if "root" in meta:
@@ -162,13 +170,21 @@ def read_process(path: Path) -> ProcessRecord | None:
     # The root ends at the package directory, so the repo-relative path keeps it.
     prefix = RECORDER_SCOPE
 
+    # The checkout's tests package, when the process imported it. Its root
+    # ends at the package directory too.
+    roots = [(root, prefix)]
+    if tests_root:
+        roots.append((tests_root.rstrip("/") + "/", TESTS_SCOPE))
+
     functions: dict[str, set[str]] = defaultdict(set)
     outside = 0
     for filename, qualname in raw:
-        if not filename.startswith(root):
+        for base, scope in roots:
+            if filename.startswith(base):
+                functions[scope + filename[len(base) :]].add(qualname)
+                break
+        else:
             outside += 1
-            continue
-        functions[prefix + filename[len(root) :]].add(qualname)
 
     return ProcessRecord(
         file=path.name,
@@ -184,6 +200,7 @@ def read_process(path: Path) -> ProcessRecord | None:
         errors=errors,
         outside_root=outside,
         malformed=malformed,
+        packages=frozenset(packages),
     )
 
 
@@ -406,6 +423,9 @@ class Stamp:
     worlds_unread: int = 0
     sources: list[str] = field(default_factory=list)  # "ui" / "schedule"
     build_env: dict[str, str] = field(default_factory=dict)
+    # Installed top-level packages any contributing process entered, sorted.
+    # Recorded, not yet read: it is what a dependency bump will route on.
+    packages: list[str] = field(default_factory=list)
     digest: str = ""
 
     @property
