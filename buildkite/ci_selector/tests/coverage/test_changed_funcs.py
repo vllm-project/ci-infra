@@ -371,3 +371,54 @@ def test_a_new_parameter_leaves_the_module_body_unchanged(tmp_path):
     q = build(repo, git("rev-parse", "HEAD~1"), head2)
     (f,) = q.files
     assert "<module>" in f.names
+
+
+PLATFORM_SRC = """\
+from vllm.platforms import current_platform
+
+
+def view(t):
+    if current_platform.is_xpu():
+        if not t.is_pinned():
+            t = t.contiguous()
+        return xpu(t)
+    elif current_platform.is_cuda_alike():
+        return cuda(t)
+    return t
+"""
+
+
+@pytest.mark.parametrize(
+    "old, new, family",
+    [
+        ("t = t.contiguous()", "t = t.clone()", "xpu"),
+        ("return cuda(t)", "return cuda(t, 1)", None),  # is_cuda_alike: two families
+        ("    return t\n", "    return t + 0\n", None),  # outside every guard
+    ],
+    ids=["xpu-branch", "cuda-alike", "unguarded"],
+)
+def test_a_change_inside_one_platform_branch_is_tagged(tmp_path, old, new, family):
+    """vllm#54874 changed only the XPU branch of a function 315 CUDA rows call."""
+    import subprocess
+
+    from ci_selector.coverage.changed_funcs import build
+
+    repo = tmp_path / "r"
+    (repo / "vllm").mkdir(parents=True)
+
+    def git(*a):
+        return subprocess.run(
+            ["git", "-C", str(repo), *a], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (repo / "vllm/u.py").write_text(PLATFORM_SRC)
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    (repo / "vllm/u.py").write_text(PLATFORM_SRC.replace(old, new))
+    git("commit", "-qam", "edit")
+    (f,) = build(repo, base, git("rev-parse", "HEAD")).files
+    assert f.platform == family

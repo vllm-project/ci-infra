@@ -259,6 +259,25 @@ def unknown_names(
     return dict(out)
 
 
+def _foreign(query: Query, step) -> set[str]:
+    """Changed files whose every changed line sits in another hardware
+    family's `current_platform.is_<x>()` branch: this step cannot run them,
+    whatever its row says about the functions around them. vllm#54874 changed
+    only the XPU branch of get_accelerator_view_from_cpu_tensor, which 315
+    CUDA rows call, and all of them came along."""
+    if step is None or not getattr(step, "device", None) and not getattr(
+        step, "mirror_hw", None
+    ):
+        return set()
+    from ..codemap.hardware import step_in_family
+
+    return {
+        f.path
+        for f in query.files
+        if getattr(f, "platform", None) and not step_in_family(step, f.platform)
+    }
+
+
 def read_pr(
     table: Table,
     selection,
@@ -311,11 +330,12 @@ def read_pr(
         # `look_up` re-makes this exact match further down, so both read the
         # same predicate or neither moves.
         row = table.row(key)
+        foreign = _foreign(query, keys.steps.get(step_id))
         if row is not None:
             direct = any(
                 row_shows_use(row, f, name, mode)
                 for f in query.files
-                if not f.proxy
+                if not f.proxy and f.path not in foreign
                 for name in f.names
             )
             via_proxy = not direct and any(
@@ -373,6 +393,14 @@ def read_pr(
             if set(matched.get(step_id, ())) & failed:
                 reading.dropped_and_failed.append(step_id)
             continue
+        if foreign and scope <= preserving | foreign:
+            # What is left runs only on another family's hardware.
+            reading.dropped.append(step_id)
+            reading.reasons["changed-code-runs-on-another-platform"] += 1
+            if set(matched.get(step_id, ())) & failed:
+                reading.dropped_and_failed.append(step_id)
+            continue
+        scope = scope - foreign
         # Counted so a stand-in that never fires cannot pass for one that
         # fired and found nothing.
         if proxy_paths and scope & proxy_paths:
@@ -450,8 +478,11 @@ def _add_from_rows(
         row = table.row(key) if key else None
         if row is None:
             continue  # no row: the map decides, and the map did not pick it
+        foreign = _foreign(query, keys.steps.get(step_id))
         if any(
-            row.contains_call(f.path, name) and table.discriminates(f.path, name)
+            f.path not in foreign
+            and row.contains_call(f.path, name)
+            and table.discriminates(f.path, name)
             # Stand-ins are drop evidence only. A file outside the recorder
             # scope may still be in a row (tests/ is recorded before the
             # selector reads it), and adds nothing until the scope says so.
