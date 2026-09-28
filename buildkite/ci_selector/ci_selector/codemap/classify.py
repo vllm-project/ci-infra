@@ -45,7 +45,15 @@ from ..handwritten import (
     RUST_PYO3_BRIDGE_FILE,
     RUST_TOOLCHAIN_FILES,
 )
-from . import build_map, colocation, hardware, native_ops, registry_diff, step_refs
+from . import (
+    build_map,
+    colocation,
+    hardware,
+    native_ops,
+    registry_diff,
+    step_refs,
+    test_helpers,
+)
 from .claim import (
     Claim,
     classify_world,
@@ -999,7 +1007,7 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
             f"{path} executes only on {family} hardware; no live CI step "
             f"runs on {family}; nothing to run",
         )
-    claim = _classify_graph(state, path)
+    claim = _classify_test_helper(state, path, ctx) or _classify_graph(state, path)
     if claim:
         return claim
     if is_no_code(path):
@@ -1485,6 +1493,46 @@ def _classify_graph(
     # Here and not earlier, so _nothing_auto_runs claims (rule "graph" but
     # grep-built, not closure-built) can never reach the hub gate.
     return colocation._colocated_hub(state, path, claim) or claim
+
+
+def _classify_test_helper(
+    state: RepoState, path: str, ctx: DiffContext | None
+) -> Claim | None:
+    """A modified helper under tests/, routed by the names it changed; see
+    test_helpers. Behind the graph rule's own guards, and never where
+    co-location answers, so it only ever replaces a file-level closure."""
+    if (
+        not (test_helpers.is_helper(path) or test_helpers.is_conftest(path))
+        or path in state.preflight.parse_error_paths
+        or path in state.preflight.unclassified_sites
+        or colocation._classify_colocated_tests(state, path) is not None
+    ):
+        return None
+    routed = test_helpers.route(state, path, ctx)
+    if routed is None:
+        return None
+    tests, scripts, detail = routed
+    invoked = tests & state.invoked
+    auto_scripts = {
+        f
+        for f in scripts
+        if f in state.auto_run_files
+        or (state.auto_prefixes and f.startswith(state.auto_prefixes))
+    }
+    direct = _direct_step_refs(state, path)
+    if (tests or scripts) and not invoked and not auto_scripts:
+        # Users only optional steps run: the graph rule's fallbacks decide.
+        return None
+    # No declared-dependency steps, even with CI_SELECTOR_DECLARED_DEPS=on: a
+    # step listing the whole helper says less than which tests name the change.
+    return Claim(
+        "test-helper-symbols",
+        detail,
+        test_files=tests | scripts,
+        step_ids=direct,
+        droppable_step_ids=direct,
+        droppable_test_files=True,
+    )
 
 
 def _inherit_table_coverage(
