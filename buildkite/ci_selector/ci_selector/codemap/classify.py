@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import posixpath
 import re
 import subprocess
 from pathlib import Path
@@ -46,7 +47,15 @@ from ..handwritten import (
     RUST_PYO3_BRIDGE_FILE,
     RUST_TOOLCHAIN_FILES,
 )
-from . import build_map, colocation, hardware, native_ops, registry_diff, step_refs
+from . import (
+    build_map,
+    colocation,
+    hardware,
+    native_ops,
+    registry_diff,
+    step_refs,
+    test_helpers,
+)
 from .claim import (
     Claim,
     classify_world,
@@ -447,8 +456,126 @@ def _named_in_invoked_tests(state: RepoState, path: str) -> bool:
     )
 
 
+def _list_entries(state: RepoState, path: str, ref: str | None) -> set[str]:
+    """The entries of a config list at `ref`, or on the base checkout when
+    None: one relative path per line, blanks and comments skipped as the
+    harness does. Empty when it cannot be read."""
+    if ref is None:
+        try:
+            text = (Path(state.repo) / path).read_text()
+        except (OSError, UnicodeDecodeError):
+            return set()
+    else:
+        proc = subprocess.run(
+            ["git", "-C", str(state.repo), "show", f"{ref}:{path}"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return set()
+        text = proc.stdout
+    return {
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+
+
+# What a config-list harness lists: its configs and the lists themselves.
+_CONFIG_SUFFIXES = (".yaml", ".yml", ".json", ".txt")
+# The harness's own default, for a step that passes no list: gsm8k's conftest
+# adds the option with default="configs/models-small.txt".
+_LIST_DEFAULT = re.compile(
+    r"""["']--config-list-file["'].*?default\s*=\s*["']([^"']+)["']""", re.S
+)
+
+
+def _default_list(state: RepoState, config_dir: str) -> str | None:
+    """The default config list of the nearest conftest at or above
+    `config_dir` that declares one, resolved against its directory."""
+    d = config_dir
+    while d.startswith("tests"):
+        try:
+            text = (Path(state.repo) / d / "conftest.py").read_text()
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        m = _LIST_DEFAULT.search(text)
+        if m:
+            return posixpath.normpath(posixpath.join(d, m.group(1)))
+        if "/" not in d:
+            break
+        d = d.rsplit("/", 1)[0]
+    return None
+
+
+def _config_list_readers(
+    state: RepoState, path: str, covering: set[str], ctx: DiffContext | None
+) -> set[str]:
+    """Of the steps covering a tests-side file, the ones that can read it.
+
+    A config-list harness (tests/evals/gsm8k and its kind) parametrizes over
+    the files a step's --config-list-file names, relative to the list's own
+    directory. Every step running the harness test sits beside every config,
+    so the directory legs of _steps_targeting hand each config to all of them.
+    vllm#56740 added one Blackwell config and its line in one list, and every
+    gsm8k step came along: turboquant, kv-offload, watermarking.
+
+    Config-like files only (yaml, json, txt). A step reading a
+    --config-list-file from the file's directory keeps the file only when it
+    is that list or one of its entries, at base or head. A step naming the
+    file directly (a data file, a script, a target) keeps it. A step passing no list reads the harness
+    default when there is one: the KV-offload steps run a test beside the
+    configs that reads none of them. With no list and no default in that
+    directory (a templated name the parser could not resolve, another harness)
+    the step is kept: it could read anything."""
+    if not path.endswith(_CONFIG_SUFFIXES):
+        return covering
+    config_dir, _, name = path.rpartition("/")
+    refs: list[str | None] = [None] if ctx is None else [ctx.base, ctx.head]
+    default = _default_list(state, config_dir)
+    if default is not None and default.rpartition("/")[0] != config_dir:
+        default = None
+    entries: dict[str, set[str]] = {}
+    kept: set[str] = set()
+    for p in state.pipelines:
+        for sid, st in p.targets.items():
+            if sid not in covering:
+                continue
+            if (
+                path in st.data_files
+                or path in st.scripts_seen
+                or any(t.path == path for t in st.targets)
+            ):
+                kept.add(sid)
+                continue
+            lists = [
+                d
+                for d in getattr(st, "config_lists", ())
+                if d.rpartition("/")[0] == config_dir
+            ]
+            if not lists and default is not None:
+                lists = [default]
+            if not lists:
+                kept.add(sid)
+                continue
+            for lst in lists:
+                if lst not in entries:
+                    entries[lst] = set().union(
+                        *(_list_entries(state, lst, ref) for ref in refs)
+                    )
+                if name in entries[lst]:
+                    kept.add(sid)
+                    break
+    # Steps the loop never saw (ride-along, workdir affinity) stay as they were.
+    seen = {sid for p in state.pipelines for sid in p.targets}
+    return kept | (covering - seen)
+
+
 def _classify_testside(
-    state: RepoState, path: str, ride_along: frozenset[str] | set[str] = frozenset()
+    state: RepoState,
+    path: str,
+    ride_along: frozenset[str] | set[str] = frozenset(),
+    ctx: DiffContext | None = None,
 ) -> Claim | None:
     """A leaf-side file the import graph cannot see: an unimported script,
     yaml or data file, or an added __init__. Routed by step-target coverage. An
@@ -466,6 +593,7 @@ def _classify_testside(
     if path.endswith(".py") and is_test_basename(path):
         return None
     covering = _steps_targeting(state, path) | set(ride_along)
+    covering = _config_list_readers(state, path, covering, ctx)
     if covering & state.auto_step_ids:
         step_ids = set(covering)
         detail = (
@@ -707,11 +835,32 @@ def _classify_added_head_closure(
     }
     if not cover or not _covers_auto_step(state, path, cover):
         return None
+    # A new file is reached only through its importers. When every non-test
+    # one changed in this same diff, what can reach it is those changes, and
+    # the record can weigh them: a step whose row never calls the changed
+    # importer code never reaches the new file. vllm#58686 added a module one
+    # changed function of hf.py calls, and its closure (nearly every step
+    # through hf.py) was held undroppable. Any importer the diff did not touch
+    # keeps the old non-droppable routing.
+    reverse = getattr(head_full.graph, "reverse", None) or {}
+    importers = {
+        f
+        for f in reverse.get(path, set())
+        if not is_test_file(f) and not f.startswith(("examples/", "benchmarks/"))
+    }
+    changed = importers and all(ctx.status.get(f) in ("M", "A", "R") for f in importers)
+    detail = (
+        f"{path} is new; routed via its HEAD reverse closure "
+        f"({len(cover)} test/script dependents mapped onto base steps)"
+    )
+    if not changed:
+        return Claim("added-head-closure", detail, test_files=cover)
     return Claim(
         "added-head-closure",
-        f"{path} is new; routed via its HEAD reverse closure "
-        f"({len(cover)} test/script dependents mapped onto base steps)",
+        detail + f"; weighed by its changed importers {sorted(importers)[:3]}",
         test_files=cover,
+        droppable_test_files=True,
+        evidence_paths=frozenset({path} | importers),
     )
 
 
@@ -1186,7 +1335,7 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
             f"{path} executes only on {family} hardware; no live CI step "
             f"runs on {family}; nothing to run",
         )
-    claim = _classify_graph(state, path)
+    claim = _classify_test_helper(state, path, ctx) or _classify_graph(state, path)
     if claim:
         return claim
     if is_no_code(path):
@@ -1349,7 +1498,7 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
             step_ids = (step_ids & _build_map_allowed(state, fams)) | direct
             detail += f"; build-map scoped to {sorted(fams)}"
         return Claim("fail-open", detail, step_ids=step_ids)
-    testside = _classify_testside(state, path)
+    testside = _classify_testside(state, path, ctx=ctx)
     if testside is not None:
         return testside
     pkg_data = _classify_package_data(state, path)
@@ -1672,6 +1821,46 @@ def _classify_graph(
     # Here and not earlier, so _nothing_auto_runs claims (rule "graph" but
     # grep-built, not closure-built) can never reach the hub gate.
     return colocation._colocated_hub(state, path, claim) or claim
+
+
+def _classify_test_helper(
+    state: RepoState, path: str, ctx: DiffContext | None
+) -> Claim | None:
+    """A modified helper under tests/, routed by the names it changed; see
+    test_helpers. Behind the graph rule's own guards, and never where
+    co-location answers, so it only ever replaces a file-level closure."""
+    if (
+        not (test_helpers.is_helper(path) or test_helpers.is_conftest(path))
+        or path in state.preflight.parse_error_paths
+        or path in state.preflight.unclassified_sites
+        or colocation._classify_colocated_tests(state, path) is not None
+    ):
+        return None
+    routed = test_helpers.route(state, path, ctx)
+    if routed is None:
+        return None
+    tests, scripts, detail = routed
+    invoked = tests & state.invoked
+    auto_scripts = {
+        f
+        for f in scripts
+        if f in state.auto_run_files
+        or (state.auto_prefixes and f.startswith(state.auto_prefixes))
+    }
+    direct = _direct_step_refs(state, path)
+    if (tests or scripts) and not invoked and not auto_scripts:
+        # Users only optional steps run: the graph rule's fallbacks decide.
+        return None
+    # No declared-dependency steps, even with CI_SELECTOR_DECLARED_DEPS=on: a
+    # step listing the whole helper says less than which tests name the change.
+    return Claim(
+        "test-helper-symbols",
+        detail,
+        test_files=tests | scripts,
+        step_ids=direct,
+        droppable_step_ids=direct,
+        droppable_test_files=True,
+    )
 
 
 def _inherit_table_coverage(

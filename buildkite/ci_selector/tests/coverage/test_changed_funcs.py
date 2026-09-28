@@ -250,3 +250,124 @@ class TestLineEndings:
 
         (only,) = build(sample_repo.root, base, head).files
         assert only.status is Attribution.FAILED and only.fail_open
+
+
+class TestBehaviourPreserving:
+    """Changed lines whose code did not change name nothing, and a file whose
+    change preserves behaviour leaves the query as inert."""
+
+    BASE = (
+        "import torch\n\n\n"
+        "def fused(x, y):\n    return x + y\n\n\n"
+        "def other(x):\n    return x * 2\n"
+    )
+
+    def _build(self, repo: Repo, text: str):
+        base = repo.head()
+        repo.write("vllm/mod.py", text)
+        head = repo.commit("edit")
+        return build(repo.root, base, head)
+
+    @pytest.fixture
+    def repo(self, tmp_path: Path) -> Repo:
+        root = tmp_path / "r"
+        root.mkdir()
+        r = Repo(root)
+        r.write("vllm/mod.py", self.BASE)
+        r.commit("base")
+        return r
+
+    def test_a_return_annotation_alone_is_inert(self, repo: Repo):
+        """vllm#58687: `) -> torch.Tensor:` on an undecorated function."""
+        q = self._build(
+            repo,
+            self.BASE.replace("def fused(x, y):", "def fused(x, y) -> torch.Tensor:"),
+        )
+        assert q.files == [] and q.inert == ["vllm/mod.py"]
+
+    def test_a_signature_split_over_lines_is_inert(self, repo: Repo):
+        q = self._build(
+            repo,
+            self.BASE.replace("def fused(x, y):", "def fused(\n    x,\n    y,\n):"),
+        )
+        assert q.files == [] and q.inert == ["vllm/mod.py"]
+
+    def test_a_real_body_change_keeps_only_that_function(self, repo: Repo):
+        text = self.BASE.replace("def fused(x, y):", "def fused(x, y) -> torch.Tensor:")
+        text = text.replace("return x * 2", "return x * 3")
+        (only,) = self._build(repo, text).files
+        assert only.function_names == {"other"}, "the annotated function did not change"
+
+    def test_a_decorated_function_keeps_its_annotation_as_a_change(self, repo: Repo):
+        """FastAPI, pydantic and friends read annotations at runtime."""
+        base = self.BASE.replace("def fused", "@decorate\ndef fused")
+        repo.write("vllm/mod.py", base)
+        repo.commit("decorated")
+        q = self._build(
+            repo, base.replace("def fused(x, y):", "def fused(x, y) -> torch.Tensor:")
+        )
+        assert q.inert == [] and q.files and "<module>" in q.files[0].names
+
+    def test_a_module_registering_a_custom_op_is_never_inert(self, repo: Repo):
+        """Custom op registration infers the schema from annotations."""
+        base = self.BASE + "\n\ndirect_register_custom_op('fused', fused)\n"
+        repo.write("vllm/mod.py", base)
+        repo.commit("op")
+        q = self._build(
+            repo, base.replace("def fused(x, y):", "def fused(x, y) -> torch.Tensor:")
+        )
+        assert q.inert == []
+
+    def test_only_import_time_left_but_not_annotations_keeps_every_name(
+        self, repo: Repo
+    ):
+        """All or nothing: dropping the unchanged function would leave a
+        module-only change, which counts every importer as a use."""
+        text = (
+            self.BASE.replace("def fused(x, y):", "def fused(\n    x, y\n):")
+            + "\nLIMIT = 3\n"
+        )
+        (only,) = self._build(repo, text).files
+        assert "fused" in only.names and "<module>" in only.names
+
+
+def test_a_new_parameter_leaves_the_module_body_unchanged(tmp_path):
+    """vllm#58828: a new `expert_map=None` parameter changes the module body's
+    code object (the def builds a new function, with a new default), but
+    import runs the same code. Only the function stays changed."""
+    import subprocess
+
+    from ci_selector.coverage.changed_funcs import build
+
+    repo = tmp_path / "r"
+    (repo / "vllm").mkdir(parents=True)
+
+    def git(*a):
+        return subprocess.run(
+            ["git", "-C", str(repo), *a], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    src = "import os\n\n\ndef op(x, is_gated: bool = True):\n    return f(x, is_gated)\n"
+    (repo / "vllm/ops.py").write_text(src)
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    (repo / "vllm/ops.py").write_text(
+        src.replace("is_gated: bool = True)", "is_gated: bool = True, expert_map=None)")
+        .replace("f(x, is_gated)", "f(x, is_gated, expert_map)")
+    )
+    git("commit", "-qam", "param")
+    q = build(repo, base, git("rev-parse", "HEAD"))
+    (f,) = q.files
+    assert f.names == {"op"}, f.names
+
+    # A default that is an expression runs at import: the body stays changed.
+    (repo / "vllm/ops.py").write_text(src.replace("= True)", "= os.cpu_count())"))
+    git("commit", "-qam", "expr default")
+    head2 = git("rev-parse", "HEAD")
+    q = build(repo, git("rev-parse", "HEAD~1"), head2)
+    (f,) = q.files
+    assert "<module>" in f.names
