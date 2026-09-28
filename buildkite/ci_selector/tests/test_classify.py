@@ -1835,13 +1835,116 @@ def test_tests_yaml_dir_target_coverage(state):
     assert any(c.rule == "target-coverage" for c in sel.claims)
 
 
-def test_eval_config_yaml_covered_via_file_target_parent(state):
-    """#49881: an eval config yaml sits beside a step's .py file-target, so the
-    parent-dir leg routes it to the lm-eval steps, bounded to a handful, not run-all."""
-    sel = select(state, ["tests/evals/gsm8k/configs/DeepSeek-R1-DP.yaml"])
-    assert not sel.run_all
-    assert "vllm_ci:lm-eval-small-models" in sel.selected
-    assert len(_non_always(sel, state)) <= 8  # over-selection ceiling, not run-all
+def test_eval_config_yaml_routes_to_the_lists_naming_it(state):
+    """#49881, sharpened by vllm#56740: an eval config yaml sits beside every
+    gsm8k step's test file, but the harness reads only the files a step's
+    --config-list-file names. DeepSeek-R1-DP.yaml is in models-h200.txt,
+    which only the optional H200 step reads, so nothing auto-runs it."""
+    from ci_selector.codemap.classify import _classify
+
+    claim = _classify(state, "tests/evals/gsm8k/configs/DeepSeek-R1-DP.yaml", None)
+    assert claim.rule == "target-coverage"
+    assert "vllm_ci:lm-eval-large-models-8xh200" in claim.step_ids
+    assert "vllm_ci:lm-eval-small-models" not in claim.step_ids
+    assert not claim.step_ids & state.auto_step_ids
+
+
+def test_eval_config_in_a_list_routes_to_that_lists_steps(state):
+    from ci_selector.codemap.classify import _classify
+
+    configs = state.repo / "tests/evals/gsm8k/configs"
+
+    def entries(name):
+        text = (configs / name).read_text()
+        return [l.strip() for l in text.splitlines() if l.strip() and l[0] != "#"]
+
+    small = entries("models-small.txt")
+    claim = _classify(state, f"tests/evals/gsm8k/configs/{small[0]}", None)
+    assert "vllm_ci:lm-eval-small-models" in claim.step_ids
+    assert "vllm_ci:lm-eval-large-models-8xh200" not in claim.step_ids
+    # Outside the harness default, a step passing no list cannot read it.
+    blackwell = next(e for e in entries("models-blackwell.txt") if e not in small)
+    claim = _classify(state, f"tests/evals/gsm8k/configs/{blackwell}", None)
+    assert "vllm_ci:lm-eval-small-models" not in claim.step_ids
+    assert "vllm_ci:kv-offload-small" not in claim.step_ids, (
+        "runs a test beside the configs that reads none of them"
+    )
+
+
+def test_a_config_list_routes_to_the_steps_reading_it(state):
+    from ci_selector.codemap.classify import _classify
+
+    claim = _classify(state, "tests/evals/gsm8k/configs/models-small.txt", None)
+    assert "vllm_ci:lm-eval-small-models" in claim.step_ids
+    assert "vllm_ci:lm-eval-large-models-8xh200" not in claim.step_ids
+
+
+def test_the_harness_default_list_is_read_from_its_conftest(state):
+    from ci_selector.codemap.classify import _default_list
+
+    assert (
+        _default_list(state, "tests/evals/gsm8k/configs")
+        == "tests/evals/gsm8k/configs/models-small.txt"
+    )
+    assert _default_list(state, "tests/v1/core") is None
+
+
+def test_a_config_named_only_at_head_follows_the_changed_list(tmp_path):
+    """vllm#56740 added a config and its line in models-blackwell-ep.txt in one
+    diff: at base no list names it, at head the changed one does."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from ci_selector.codemap.classify import _config_list_readers
+    from ci_selector.codemap.state import DiffContext
+
+    repo = tmp_path / "r"
+    cfg = repo / "tests/evals/h/configs"
+    cfg.mkdir(parents=True)
+
+    def git(*a):
+        return subprocess.run(
+            ["git", "-C", str(repo), *a], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (cfg / "a.txt").write_text("old.yaml\n")
+    (cfg / "b.txt").write_text("other.yaml\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    (cfg / "a.txt").write_text("old.yaml\nnew.yaml\n")
+    (cfg / "new.yaml").write_text("x: 1\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "head")
+    head = git("rev-parse", "HEAD")
+
+    def targets(*lists):
+        return SimpleNamespace(
+            data_files=list(lists), config_lists=list(lists), targets=[], scripts_seen=[]
+        )
+
+    state = SimpleNamespace(
+        repo=repo,
+        pipelines=[
+            SimpleNamespace(
+                targets={
+                    "reads-a": targets("tests/evals/h/configs/a.txt"),
+                    "reads-b": targets("tests/evals/h/configs/b.txt"),
+                    "no-list": targets(),
+                }
+            )
+        ],
+    )
+    ctx = DiffContext(base, head, {"tests/evals/h/configs/new.yaml": "A"})
+    covering = {"reads-a", "reads-b", "no-list", "affinity"}
+    got = _config_list_readers(state, "tests/evals/h/configs/new.yaml", covering, ctx)
+    assert got == {"reads-a", "no-list", "affinity"}, (
+        "no conftest declares a default here, so the list-less step could read "
+        "anything; a step outside the pipelines' targets is left alone"
+    )
 
 
 @pytest.mark.quiet_preflight
