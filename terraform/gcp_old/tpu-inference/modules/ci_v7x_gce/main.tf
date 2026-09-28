@@ -13,21 +13,18 @@ data "google_client_config" "config" {
 }
 
 locals {
-  shapes = {
-    "tpu7x-8"  = { hosts = 1, topology = null }
-    "tpu7x-16" = { hosts = 2, topology = "2x2x2" }
-  }
-  hosts_per_slice = local.shapes[var.accelerator_type].hosts
-  is_multi_host   = local.hosts_per_slice > 1
-  zone            = data.google_client_config.config.zone
+  is_multi_host = var.hosts_per_slice > 1
+  zone          = data.google_client_config.config.zone
 
-  # Same scheme as ci_v7x, so a Buildkite agent maps onto its slice.
-  slice_names = toset([for i in range(var.instance_count) :
-    "${var.accelerator_type}-ci-${i}-${var.project_short_name}-${local.zone}"
+  # Same scheme as ci_v7x, so a Buildkite agent maps onto its slice. The shape
+  # is spelled like a Cloud TPU accelerator type, which counts TensorCores:
+  # 8 per tpu7x-standard-4t host.
+  slice_names = toset([for i in range(var.slice_count) :
+    "tpu7x-${var.hosts_per_slice * 8}-ci-${i}-${var.project_short_name}-${local.zone}"
   ])
 
   # base_instance_name below numbers a slice's hosts -w-001, -w-002, ...
-  slice_hosts = { for s in local.slice_names : s => [for n in range(local.hosts_per_slice) :
+  slice_hosts = { for s in local.slice_names : s => [for n in range(var.hosts_per_slice) :
     format("%s-w-%03d.%s.c.%s.internal", s, n + 1, local.zone, var.project_id)
   ] }
 }
@@ -46,7 +43,7 @@ resource "google_compute_resource_policy" "slice" {
 
   workload_policy {
     type                 = "HIGH_THROUGHPUT"
-    accelerator_topology = local.shapes[var.accelerator_type].topology
+    accelerator_topology = var.topology
   }
 }
 
@@ -83,7 +80,7 @@ resource "google_compute_instance_template" "slice" {
       is_multi_host                   = local.is_multi_host
       host_name                       = each.key
       head_host                       = local.slice_hosts[each.key][0]
-      worker_hosts                    = join(" ", slice(local.slice_hosts[each.key], 1, local.hosts_per_slice))
+      worker_hosts                    = join(" ", slice(local.slice_hosts[each.key], 1, var.hosts_per_slice))
       private_key_pem                 = local.is_multi_host ? tls_private_key.internal_ssh_key[each.key].private_key_pem : ""
       public_key_openssh              = local.is_multi_host ? tls_private_key.internal_ssh_key[each.key].public_key_openssh : ""
       keep_agent_connected            = file("${path.module}/../shared/keep-agent-connected.sh")
@@ -121,7 +118,7 @@ resource "google_compute_instance_group_manager" "slice" {
   name               = each.key
   zone               = local.zone
   base_instance_name = "${each.key}-w-###[1]"
-  target_size        = local.hosts_per_slice
+  target_size        = var.hosts_per_slice
 
   version {
     instance_template = google_compute_instance_template.slice[each.key].self_link_unique

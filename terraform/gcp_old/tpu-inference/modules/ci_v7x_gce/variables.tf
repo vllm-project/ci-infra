@@ -1,16 +1,16 @@
-variable "accelerator_type" {
-  type        = string
-  description = "Slice shape, named like the Cloud TPU accelerator types: tpu7x-8 is one host, tpu7x-16 is two."
-
-  validation {
-    condition     = contains(["tpu7x-8", "tpu7x-16"], var.accelerator_type)
-    error_message = "Supported shapes are tpu7x-8 and tpu7x-16."
-  }
-}
-
-variable "instance_count" {
+variable "slice_count" {
   type        = number
   description = "Number of slices. Each slice runs one Buildkite agent, on its first host."
+}
+
+variable "hosts_per_slice" {
+  type        = number
+  description = "tpu7x-standard-4t hosts (4 chips each) per slice: 1 for a tpu7x-8 slice, 2 for tpu7x-16."
+}
+
+variable "topology" {
+  type        = string
+  description = "Chip topology of a multi-host slice, e.g. 2x2x2 for two hosts. Null for a single host, which takes no workload policy."
 }
 
 variable "buildkite_queue_name" {

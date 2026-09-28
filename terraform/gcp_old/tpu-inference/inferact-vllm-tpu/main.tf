@@ -35,8 +35,9 @@ module "ci_v7x_8" {
     google-beta = google-beta.us-central1-c
   }
 
-  accelerator_type                = "tpu7x-8"
-  instance_count                  = 8
+  slice_count                     = 8
+  hosts_per_slice                 = 1
+  topology                        = null
   buildkite_queue_name            = "tpu_v7x_8_queue"
   boot_disk_size                  = 4096 # the cicd v7x-8 agents' data disk size
   project_id                      = var.project_id
