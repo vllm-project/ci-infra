@@ -185,15 +185,29 @@ class TestBuild:
         assert only.status is Attribution.FAILED
         assert only.fail_open and only.note
 
-    def test_file_outside_the_recorder_root_fails_open(self, sample_repo: Repo):
-        # tests/ is real Python with real names, and no row can ever hold them.
+    def test_tests_files_are_in_scope_now_that_they_are_recorded(
+        self, sample_repo: Repo
+    ):
+        """The recorder writes tests/ since build 91572; a row recorded before
+        that holds no tests/ names, so they are unknown there and hold."""
         base = sample_repo.head()
         sample_repo.write("tests/test_thing.py", "def test_one():\n    assert True\n")
         head = sample_repo.commit("add test")
 
         (only,) = build(sample_repo.root, base, head).files
         assert only.status is Attribution.ATTRIBUTED
-        assert only.names  # names exist
+        assert only.names
+        assert only.in_recorder_scope and not only.fail_open
+
+    def test_file_outside_the_recorder_roots_fails_open(self, sample_repo: Repo):
+        # benchmarks/ is real Python with real names, and no row holds them.
+        base = sample_repo.head()
+        sample_repo.write("benchmarks/bench.py", "def run():\n    return 1\n")
+        head = sample_repo.commit("add bench")
+
+        (only,) = build(sample_repo.root, base, head).files
+        assert only.status is Attribution.ATTRIBUTED
+        assert only.names
         assert not only.in_recorder_scope and only.fail_open
 
     def test_added_file_has_no_base_side(self, sample_repo: Repo):

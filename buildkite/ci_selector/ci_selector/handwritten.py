@@ -681,6 +681,9 @@ TEST_REGISTRY_CALL = "_HfExamplesInfo"
 # and it is why a changed file outside it can never be dropped on.
 RECORDER_SCOPE = "vllm/"
 # The recorder also writes the checkout's tests/ package, under this prefix.
-# Recorded, not yet read: a changed tests/ file stays outside RECORDER_SCOPE,
-# so it neither drops nor adds a step until the selector widens that scope.
 TESTS_SCOPE = "tests/"
+# What the selector reads recordings for: a changed file under one of these
+# can drop or add a step on function evidence. A row recorded before tests/
+# was (build 91486 and older) holds no tests/ names, so a changed tests/ name
+# is unknown there and holds the step, as any unrecorded name does.
+SELECTOR_SCOPE = (RECORDER_SCOPE, TESTS_SCOPE)
