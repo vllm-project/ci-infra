@@ -842,12 +842,12 @@ def test_optional_steps_never_auto_selected(state):
 
 
 def test_requirements_tpu_is_scoped_not_run_all(state):
-    """#50522: requirements/tpu.txt failed open to run-all; it must now scope to the ray
-    dep-check step (real TPU jobs are an external, unmodeled pipeline)."""
+    """#50522: requirements/tpu.txt failed open to run-all. Real TPU jobs are an
+    external, unmodeled pipeline and no step installs the file by name, so it
+    runs nothing here."""
     sel = select(state, ["requirements/tpu.txt"])
     assert not sel.run_all
     assert any(c.rule == "requirements" for c in sel.claims)
-    assert any("ray-dependency" in s for s in sel.selected)
 
 
 def test_requirements_cpu_unions_device_family(state):
@@ -857,7 +857,6 @@ def test_requirements_cpu_unions_device_family(state):
     assert not sel.run_all
     cpu_family = state.family_steps("cpu")
     assert cpu_family and cpu_family <= set(sel.selected)
-    assert any("ray-dependency" in s for s in sel.selected)
 
 
 def test_requirements_test_xpu_unions_xpu_family(state):
@@ -871,8 +870,8 @@ def test_requirements_test_xpu_unions_xpu_family(state):
 
 
 def test_requirements_nightly_torch_hits_declaring_step(state):
-    """test/nightly-torch.txt is named in a step's source_file_dependencies, a file
-    the import graph can't reach."""
+    """test/nightly-torch.txt is installed by the script a step runs, a file the
+    import graph can't reach."""
     sel = select(state, ["requirements/test/nightly-torch.txt"])
     assert not sel.run_all
     assert any("nightly-dependency" in s for s in sel.selected)
@@ -1001,7 +1000,8 @@ def test_joined_fixture_path_routes_to_consumers(state):
 def test_uncovered_member_inherits_its_registry(state):
     """A registered member whose own closure auto-runs nothing inherits its
     registry's coverage instead of running everything, and the steps that name
-    it only by key still ride along as manual hits."""
+    it only by key ride along: optional ones included, since an optional step
+    is an ordinary one to the selector."""
     specimen = "vllm/model_executor/layers/quantization/fbgemm_fp8.py"
     closure = state.full.graph.reverse_closure({specimen})
     assert not [f for f in closure if f in state.invoked], (
@@ -1012,7 +1012,7 @@ def test_uncovered_member_inherits_its_registry(state):
     sel = select(state, [specimen])
     assert not sel.run_all
     assert "inheriting the coverage of registry" in sel.claims[0].detail
-    assert any("kernels-fp8-moe" in s for s in sel.manual_hits)
+    assert any("kernels-fp8-moe" in s for s in sel.selected)
 
 
 def test_package_init_routes_to_package_steps(state):
@@ -1839,14 +1839,13 @@ def test_eval_config_yaml_routes_to_the_lists_naming_it(state):
     """#49881, sharpened by vllm#56740: an eval config yaml sits beside every
     gsm8k step's test file, but the harness reads only the files a step's
     --config-list-file names. DeepSeek-R1-DP.yaml is in models-h200.txt,
-    which only the optional H200 step reads, so nothing auto-runs it."""
+    which only the H200 step reads (optional to CI, ordinary to the selector)."""
     from ci_selector.codemap.classify import _classify
 
     claim = _classify(state, "tests/evals/gsm8k/configs/DeepSeek-R1-DP.yaml", None)
     assert claim.rule == "target-coverage"
     assert "vllm_ci:lm-eval-large-models-8xh200" in claim.step_ids
     assert "vllm_ci:lm-eval-small-models" not in claim.step_ids
-    assert not claim.step_ids & state.auto_step_ids
 
 
 def test_eval_config_in_a_list_routes_to_that_lists_steps(state):
@@ -1947,15 +1946,15 @@ def test_a_config_named_only_at_head_follows_the_changed_list(tmp_path):
     )
 
 
-@pytest.mark.quiet_preflight
-def test_manual_only_script_ref_selects_nothing_with_manual_hits(state):
-    """A tests .sh referenced only by manual-only steps auto-selects nothing
-    but shows those steps as manual hits (the _nothing_auto_runs hook)."""
+def test_an_optional_steps_script_selects_that_step(state):
+    """A tests .sh only an optional step runs selects that step: optional is
+    CI's scheduling choice, not the selector's. It used to land in manual_hits
+    and run nothing."""
     path = "tests/weight_loading/run_model_weight_loading_test.sh"
     sel = select(state, [path])
     assert not sel.run_all
-    assert not _non_always(sel, state)
-    assert sel.manual_hits
+    assert "vllm_ci:weight-loading-multiple-gpu" in sel.selected
+    assert not sel.manual_hits
 
 
 def test_added_init_under_covered_tests_dir_routes(state, declared_deps_on):
@@ -2256,8 +2255,9 @@ def test_package_data_zero_auto_coverage_falls_open(state):
 
 
 def test_release_file_with_auto_declarer_selects_it(state):
-    """A release-pipeline file a live auto step also declares as a source dep must
-    select it: Docker Build Metadata runs docker-build-metadata-args.sh in its test."""
+    """A release-pipeline file a live test reads must select that test's step:
+    Docker Build Metadata runs docker-build-metadata-args.sh in its test, which
+    names it by basename. The declaration is only this test's oracle."""
     path = ".buildkite/scripts/docker-build-metadata-args.sh"
     declarers = declaring_steps(state, path, auto_only=True)
     assert declarers, drift_message(
@@ -2270,7 +2270,6 @@ def test_release_file_with_auto_declarer_selects_it(state):
     sel = select(state, [path])
     assert not sel.run_all
     assert declarers <= set(sel.selected)
-    assert any(c.rule == "release-ci" for c in sel.claims)
 
 
 @pytest.mark.quiet_preflight
@@ -3134,7 +3133,7 @@ def test_rust_file_keeps_env_keyed_steps(state):
     runs on rust changes."""
     from ci_selector.handwritten import RUST_GATE_ENV_VARS
 
-    gate_steps = state.keys.steps_naming_raw(set(RUST_GATE_ENV_VARS))
+    gate_steps = state.keys.steps_running(set(RUST_GATE_ENV_VARS))
     assert gate_steps, "no step exports the rust gates; leg 1 is dead"
     sel = select(state, ["rust/src/server/src/lib.rs"])
     assert gate_steps & state.auto_step_ids <= set(sel.selected)
@@ -3257,12 +3256,11 @@ def test_requirements_cuda_token_stays_inside_requirements():
 
 def test_requirements_build_validated_files_select_the_floor(state):
     """lint.txt and dev.txt exist for tooling no test imports, so their honest
-    reach is the declaring steps plus the always-run builds, not the full
-    docker-image widening."""
+    reach is the steps installing them by name plus the always-run builds, not
+    the full docker-image widening."""
     for path in ("requirements/lint.txt", "requirements/dev.txt"):
         sel = select(state, [path])
         assert not sel.run_all, path
-        assert "vllm_ci:ray-dependency-compatibility-check" in sel.selected, path
         assert len(sel.selected) < 20, (path, len(sel.selected))
 
 
@@ -3292,9 +3290,10 @@ def test_requirements_cuda_keeps_unlabeled_consumers(state):
     assert "vllm_ci:kernels-attention-test" in sel.selected
 
 
-def test_build_validated_manual_only_declarers_fall_open(state, declared_deps_on):
-    """Same guarantee as the plain requirements rule: if every declarer is
-    manual-only the floor would select nothing real, so fall open."""
+def test_build_validated_manual_only_declarers_keep_the_floor(state, declared_deps_on):
+    """A build-validated file is validated by the always-run builds, which
+    install it whatever the declarers say: with every declarer manual-only it
+    keeps that floor rather than running everything."""
     import dataclasses
 
     from ci_selector.codemap.classify import _classify, _source_dep_steps
@@ -3304,7 +3303,7 @@ def test_build_validated_manual_only_declarers_fall_open(state, declared_deps_on
     assert declarers, "fixture drift: nothing declares lint.txt"
     st2 = dataclasses.replace(state, auto_step_ids=state.auto_step_ids - declarers)
     claim = _classify(st2, path, None)
-    assert claim.rule == "fail-open" and claim.run_all
+    assert claim.rule == "requirements" and not claim.run_all
 
 
 def test_reasons_are_attributed_per_step(state):
@@ -3382,5 +3381,85 @@ def test_per_step_reason_keys_stay_within_step_ids(state):
             checked += len(claim.step_detail)
             seen |= set(claim.step_rule.values())
     assert checked > 0, "no per-step reason was written anywhere; the sweep is blind"
-    # Both, so a regression in the rarer one cannot hide behind the other.
-    assert {"image-copy", "declared-deps"} <= seen, sorted(seen)
+    # declared-deps appears only with CI_SELECTOR_DECLARED_DEPS=on.
+    assert "image-copy" in seen, sorted(seen)
+
+
+@pytest.mark.parametrize(
+    "path, family",
+    [
+        ("vllm/v1/kv_offload/cpu/spec.py", None),
+        ("vllm/distributed/ec_transfer/ec_connector/cpu/connector.py", None),
+        (
+            "vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py",
+            None,
+        ),
+        ("vllm/platforms/cpu.py", "cpu"),
+        ("vllm/model_executor/layers/fused_moe/experts/cpu_moe.py", "cpu"),
+    ],
+)
+def test_host_memory_cpu_paths_are_not_the_cpu_platform(path, family):
+    """vllm#58497: kv_offload/cpu keeps KV blocks in host memory inside GPU
+    jobs, and the `cpu` token sent it to eight CPU steps that record nothing."""
+    from ci_selector.codemap.hardware import family_of_path
+
+    assert family_of_path(path) == family
+
+
+@pytest.mark.drift
+def test_host_memory_cpu_paths_exist(state):
+    from ci_selector.handwritten import PATH_TOKEN_NOT_PLATFORM
+
+    for prefix in PATH_TOKEN_NOT_PLATFORM["cpu"]:
+        assert (state.repo / prefix).exists(), drift_message(
+            f"{prefix} is gone",
+            "an entry naming nothing exempts nothing",
+            "update or delete it in PATH_TOKEN_NOT_PLATFORM in ci_selector/handwritten.py",
+        )
+
+
+def test_an_env_var_the_build_never_reads_skips_the_image_union(tmp_path):
+    """vllm#58919: a new VLLM_MOONCAKE_CONNECTOR_TIMEOUT entry in vllm/envs.py
+    sent every image step along, because setup.py loads the module. The build
+    reads only what setup.py names as envs.<NAME>."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from ci_selector.codemap.classify import _env_change_misses_build
+    from ci_selector.codemap.state import DiffContext
+
+    repo = tmp_path / "r"
+    (repo / "vllm").mkdir(parents=True)
+
+    def git(*a):
+        return subprocess.run(
+            ["git", "-C", str(repo), *a], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    envs = (
+        "import os\n\nenvironment_variables = {\n"
+        '    "MAX_JOBS": lambda: os.getenv("MAX_JOBS"),\n'
+        '    "VLLM_A": lambda: os.getenv("VLLM_A"),\n}\n'
+    )
+    (repo / "vllm/envs.py").write_text(envs)
+    (repo / "setup.py").write_text("jobs = envs.MAX_JOBS\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+
+    def after(text):
+        (repo / "vllm/envs.py").write_text(text)
+        git("commit", "-qam", "c")
+        head = git("rev-parse", "HEAD")
+        state = SimpleNamespace(repo=repo)
+        return _env_change_misses_build(
+            state, "vllm/envs.py", DiffContext(base, head, {"vllm/envs.py": "M"})
+        )
+
+    added = envs.replace("}\n", '    "VLLM_NEW": lambda: float(\n        os.getenv("VLLM_NEW", "3")\n    ),\n}\n')
+    assert after(added)
+    assert not after(envs.replace('getenv("MAX_JOBS")', 'getenv("MAX_JOBS", "8")'))
+    assert not after(envs + "print('side effect')\n")

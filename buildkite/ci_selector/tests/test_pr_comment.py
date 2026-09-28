@@ -70,7 +70,7 @@ def test_run_all_says_so():
             run_all="a changed file runs everything", selector=_selection().today
         )
     )
-    assert "no narrower answer, so today's rules apply: 2 test steps (3 jobs)" in body
+    assert "no narrower answer, every step runs: 2 test steps (3 jobs)" in body
     assert "Why: a changed file runs everything" in body
     assert "| NVIDIA, CPU and others | 2 (3) | 2 (3) | 0 (0) | 0 (0) |" in body
 
@@ -332,3 +332,18 @@ def test_a_merged_pr_keeps_its_merge_commit_against_its_parent(monkeypatch):
         lambda head: (_ for _ in ()).throw(AssertionError("not for a merged PR")),
     )
     assert pr_comment.pr_range(None, 1, data, "origin") == ("p" * 40, "c" * 40)
+
+
+def test_optional_steps_stay_out_of_the_comparison():
+    """The selector may run an optional step; today's rules never do, so the
+    counts leave it out on both sides."""
+    from types import SimpleNamespace
+
+    from ci_selector.pr_comment import not_counted
+
+    step = SimpleNamespace(
+        always_runs=False, key="x", device="h200", mirror_hw="", ci_optional=True
+    )
+    assert not_counted(step) == "optional"
+    step.ci_optional = False
+    assert not_counted(step) == ""

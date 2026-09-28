@@ -91,6 +91,9 @@ class KeyIndex:
     # config files + target-test literals), kept so ad-hoc keys that were
     # not registered at build time (table-diff head-side ids) can be matched
     searchable: dict[str, str] = field(default_factory=dict)
+    # step_id -> the same text without any test file's literals: what the step
+    # itself runs and sets. A literal in a test names a thing; it does not run it.
+    commands: dict[str, str] = field(default_factory=dict)
     # key -> mechanism (register|parser|enum|quant|arch|hf_id|class_table)
     key_mechanism: dict[str, str] = field(default_factory=dict)
     # gating literal -> why the mint deliberately declined to register it.
@@ -204,7 +207,19 @@ class KeyIndex:
                 index.searchable[sid] = (
                     stripped + "\n" + "\n".join(sorted(target_literals))
                 )
+                index.commands[sid] = stripped
         return index
+
+    def steps_running(self, needles: set[str]) -> set[str]:
+        """Steps whose own commands, scripts, env or config files contain a
+        needle. Unlike steps_naming_raw, a test file's string literal does not
+        count: an env-var listing test names VLLM_USE_RUST_BENCH without ever
+        running the rust binary."""
+        return {
+            sid
+            for sid, text in self.commands.items()
+            if any(n in text for n in needles)
+        }
 
     def for_file(self, path: str) -> set[str]:
         keys: set[str] = set()
