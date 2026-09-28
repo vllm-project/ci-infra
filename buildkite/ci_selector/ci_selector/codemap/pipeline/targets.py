@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import posixpath
 import shlex
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -96,6 +97,33 @@ def working_dir_to_repo_rel(working_dir: str) -> str:
     return ""  # unknown absolute dir: fall back to repo root
 
 
+def console_scripts(repo: Path) -> dict[str, str]:
+    """Console-script name -> the repo file holding its entry point, read from
+    pyproject.toml's [project.scripts].
+
+    `vllm serve` runs vllm/entrypoints/cli/main.py as surely as `python x.py`
+    runs x.py, and that module imports vllm.collect_env and every subcommand on
+    each call. vllm#58978 edited collect_env.py, and the steps whose scripts
+    only run `vllm serve` or `vllm snapshot` had no route to it. An entry that
+    names no file here is left out, so its command stays as unknown as before.
+    """
+    try:
+        table = tomllib.loads((repo / "pyproject.toml").read_text())["project"][
+            "scripts"
+        ]
+        entries = {name: str(entry) for name, entry in table.items()}
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError, AttributeError):
+        return {}
+    out: dict[str, str] = {}
+    for name, entry in entries.items():
+        base = entry.split(":", 1)[0].strip().replace(".", "/")
+        for candidate in (f"{base}.py", f"{base}/__init__.py"):
+            if (repo / candidate).is_file():
+                out[name] = candidate
+                break
+    return out
+
+
 class CommandParser:
     """Parse one step's commands. Script recursion is delegated to the scanner,
     which calls back into parse_pytest, resolve_path, chdir, cwd and out."""
@@ -106,6 +134,7 @@ class CommandParser:
         self.out = StepTargets(step_id=step.step_id)
         self.cwd = working_dir_to_repo_rel(step.working_dir)
         self.script_scanner = script_scanner
+        self.console_scripts = console_scripts(repo)
 
     def run(self) -> StepTargets:
         for command in self.step.commands:
@@ -193,6 +222,10 @@ class CommandParser:
             return
         if cmd == "torchrun":
             self._parse_torchrun(tokens[1:], raw)
+            return
+        if cmd in self.console_scripts:
+            self.out.add_target(self.console_scripts[cmd], "script")
+            self._collect_file_args(tokens[1:])
             return
         if cmd in ("bash", "sh") or cmd.endswith(".sh"):
             args = tokens[1:] if cmd in ("bash", "sh") else tokens

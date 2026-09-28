@@ -264,3 +264,15 @@ def _graph_known(state: RepoState, path: str) -> bool:
         or path in g.imports
         or path in g.reverse
     )
+
+
+def run_files(state: RepoState, files) -> set[str]:
+    """The members of `files` a step runs as its body rather than collects:
+    example and benchmark scripts, anything a command runs by path, and a
+    console script's entry module. A closure member here is coverage just as a
+    test file is."""
+    return {
+        f
+        for f in files
+        if f.startswith(("examples/", "benchmarks/")) or f in state.auto_run_files
+    }

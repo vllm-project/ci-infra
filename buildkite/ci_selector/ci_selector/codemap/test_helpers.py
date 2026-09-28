@@ -34,6 +34,7 @@ import subprocess
 from pathlib import Path
 
 from .repo import is_test_file
+from .state import run_files
 
 TEST_ROOT = "tests/"
 # A conftest routes by the fixtures it changed (see route); an __init__ runs
@@ -253,7 +254,7 @@ def route(state, path: str, ctx) -> tuple[set[str], set[str], str] | None:
         return set(), set(), f"{path}: no importer names {sorted(changed)[:3]}"
     closure = graph.reverse_closure(seeded)
     tests = {f for f in closure if is_test_file(f)}
-    scripts = {f for f in closure if f.startswith(("examples/", "benchmarks/"))}
+    scripts = run_files(state, closure)
     detail = (
         f"{path} changed {sorted(changed)[:3]}; {len(seeded)} of its "
         f"{len(importers)} importers name them or their users in the file, "

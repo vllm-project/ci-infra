@@ -138,7 +138,9 @@ def _route(repo: Repo, helper_text: str, imports=IMPORTS, extra=None):
     for path, text in (extra or {}).items():
         repo.write(path, text)
     head = repo.commit()
-    state = SimpleNamespace(repo=repo.root, full=SimpleNamespace(graph=Graph(imports)))
+    state = SimpleNamespace(
+        repo=repo.root, full=SimpleNamespace(graph=Graph(imports)), auto_run_files=set()
+    )
     ctx = DiffContext(base, head, {"tests/utils.py": "M"})
     return route(state, "tests/utils.py", ctx)
 
@@ -215,7 +217,9 @@ def test_nothing_naming_the_change_routes_nowhere(repo: Repo):
 
 def test_only_modified_helpers_route(repo: Repo):
     base = repo.git("rev-parse", "HEAD")
-    state = SimpleNamespace(repo=repo.root, full=SimpleNamespace(graph=Graph(IMPORTS)))
+    state = SimpleNamespace(
+        repo=repo.root, full=SimpleNamespace(graph=Graph(IMPORTS)), auto_run_files=set()
+    )
     for status in ("A", "D", "R"):
         ctx = DiffContext(base, base, {"tests/utils.py": status})
         assert route(state, "tests/utils.py", ctx) is None
@@ -290,7 +294,9 @@ def _route_conftest(repo: Repo, text: str):
         "tests/sub/test_a.py": {"tests/sub/conftest.py"},
         "tests/sub/test_b.py": {"tests/sub/conftest.py"},
     }
-    state = SimpleNamespace(repo=repo.root, full=SimpleNamespace(graph=Graph(imports)))
+    state = SimpleNamespace(
+        repo=repo.root, full=SimpleNamespace(graph=Graph(imports)), auto_run_files=set()
+    )
     ctx = DiffContext(base, head, {"tests/sub/conftest.py": "M"})
     return route(state, "tests/sub/conftest.py", ctx)
 

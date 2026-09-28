@@ -90,6 +90,38 @@ def test_an_empty_mirror_stays_empty_even_when_importers_exist():
     )
 
 
+def _claim_state(invoked):
+    """Enough RepoState for `_colocated_claim`: no steps name the file, and the
+    `vllm` console script's entry imports it, as the real one imports every
+    CLI subcommand. A script target is in `invoked` like any other target."""
+    from types import SimpleNamespace
+
+    entry = "vllm/entrypoints/cli/main.py"
+    return SimpleNamespace(
+        pipelines=[],
+        auto_step_ids=set(),
+        invoked={entry, *invoked},
+        auto_run_files={entry},
+        full=SimpleNamespace(
+            graph=SimpleNamespace(reverse={"vllm/a/thing.py": {entry}})
+        ),
+    )
+
+
+def test_a_script_importer_joins_a_colocated_answer_but_never_makes_one():
+    """A step running `vllm serve` reaches every subcommand the entry imports,
+    so the entry joins the claim. It cannot stand in for co-located tests: on
+    vllm#57045's base, letting it pass the gate swapped cli/openai.py's graph
+    answer (138 steps) for one naming two files (40)."""
+    path, tests = "vllm/a/thing.py", frozenset({"tests/a/test_beside.py"})
+    lone = colocation._colocated_claim(_claim_state(()), path, tests, "tests/a/", "x")
+    assert lone is None
+    claim = colocation._colocated_claim(
+        _claim_state(tests), path, tests, "tests/a/", "x"
+    )
+    assert claim.test_files == set(tests) | {"vllm/entrypoints/cli/main.py"}
+
+
 def test_the_env_switch_reads_three_modes_and_rejects_anything_else(monkeypatch):
     """A typo must kill the run. Read as "off" it would send every cycle file
     back to graph reach, which looks exactly like the rule doing nothing.
