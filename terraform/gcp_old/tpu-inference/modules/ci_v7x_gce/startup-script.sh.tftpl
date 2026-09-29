@@ -175,13 +175,17 @@ sudo usermod -a -G docker buildkite-agent
 sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
-# TPU jobs in containers need unlimited locked memory, which this image's
-# Docker does not grant by default.
+# TPU jobs in containers need unlimited locked memory, and benchmark clients
+# need more than 1024 open files (one socket per in-flight request). This
+# image's Docker grants neither by default: containers inherit systemd's 1024
+# soft nofile limit. 1048576 matches containers on the Cloud TPU runtime image.
 python3 - <<'EOF'
 import json, pathlib
 p = pathlib.Path('/etc/docker/daemon.json')
 c = json.loads(p.read_text()) if p.exists() else {}
-c.setdefault('default-ulimits', {})['memlock'] = {'Name': 'memlock', 'Hard': -1, 'Soft': -1}
+ulimits = c.setdefault('default-ulimits', {})
+ulimits['memlock'] = {'Name': 'memlock', 'Hard': -1, 'Soft': -1}
+ulimits['nofile'] = {'Name': 'nofile', 'Hard': 1048576, 'Soft': 1048576}
 p.write_text(json.dumps(c, indent=2) + '\n')
 EOF
 systemctl restart docker
