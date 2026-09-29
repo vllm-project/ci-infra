@@ -420,16 +420,33 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
             )
 
         # A multi-host slice is admitted and built whole, so quota that is not
-        # a multiple of hosts is quota this shape can never use, and a floor or
-        # ceiling that is not one is a node pool GKE cannot build. Fail here
-        # rather than as a workload that queues forever.
-        for field in ("min_nodes", "nominal_nodes", "max_nodes"):
-            if hosts > 1 and int(pool[field]) % hosts:
+        # whole slices is quota this shape can never use, and a floor or
+        # ceiling other than one slice is a node pool GKE cannot build. Fail
+        # here rather than as a workload that queues forever.
+        if hosts > 1:
+            stated = [f for f in ("min_nodes", "max_nodes") if f in pool]
+            if stated:
                 raise ValueError(
-                    f"{name}: {field}={pool[field]} is not a multiple of the "
-                    f"{hosts} hosts in a {topology} slice; every count for a "
-                    "multi-host shape has to be whole slices"
+                    f"{name}: a multi-host shape is sized by slices; GKE sizes "
+                    f"each of its pools at exactly one slice ({hosts} hosts), "
+                    f"so leave {' and '.join(stated)} out"
                 )
+            capacity = int(pool.get("slices", 1)) * slice_chips
+        else:
+            if "slices" in pool:
+                raise ValueError(
+                    f"{name}: slices is for multi-host shapes; a single-host "
+                    "shape is sized by min_nodes and max_nodes"
+                )
+            if "max_nodes" not in pool:
+                raise ValueError(f"{name}: a single-host shape needs max_nodes")
+            capacity = int(pool["max_nodes"]) * chips
+        quota = int(pool["nominal_quota"])
+        if quota % slice_chips or quota > capacity:
+            raise ValueError(
+                f"{name}: nominal_quota={quota} has to be whole {slice_chips}-chip "
+                f"slices and at most the {capacity} chips its pools can hold"
+            )
 
         memory_gb = machine_memory_gb.get(machine_type)
         if memory_gb is None:
@@ -456,7 +473,7 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
             "memory_request": memory_request(memory_gb, chips),
             # The one number here that is a policy rather than a fact, and the
             # only one Kueue reads: this shape's share of the reservation.
-            "quota": int(pool["nominal_nodes"]) * chips * int(pool.get("slices", 1)),
+            "quota": quota,
         }
     return out
 

@@ -366,6 +366,15 @@ resource "google_container_node_pool" "worker_tpu" {
       node_config[0].shielded_instance_config,
       upgrade_settings,
     ]
+
+    precondition {
+      condition     = each.value.is_multi_host || (each.value.max_nodes != null && each.value.stated_slices == null)
+      error_message = "${each.value.shape}: a single-host shape is sized by min_nodes and max_nodes (max_nodes required); slices is for multi-host shapes."
+    }
+    precondition {
+      condition     = !each.value.is_multi_host || (each.value.stated_min_nodes == null && each.value.stated_max_nodes == null)
+      error_message = "${each.value.shape}: a multi-host shape is sized by slices; GKE sizes each of its pools at exactly one slice (${each.value.hosts} hosts), so leave min_nodes and max_nodes out."
+    }
   }
 }
 

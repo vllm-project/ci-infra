@@ -38,27 +38,36 @@ locals {
           # below is one expression: Terraform has no product(), and v7x
           # topologies are 3D where v6e's are 2D.
           for dims in [concat([for d in split("x", pool.topology) : parseint(d, 10)], [1, 1])] : [
-          for slice in range(pool.slices) :
-          merge(pool, {
-            shape = "${pool.machine_type}-${pool.topology}"
-            name  = pool.slices > 1 ? "${pool.machine_type}-${pool.topology}-${slice}" : "${pool.machine_type}-${pool.topology}"
+            for chips_per_vm in [parseint(trimsuffix(reverse(split("-", pool.machine_type))[0], "t"), 10)] : [
+              for slice in range(coalesce(pool.slices, 1)) :
+              merge(pool, {
+                shape = "${pool.machine_type}-${pool.topology}"
+                name  = dims[0] * dims[1] * dims[2] > chips_per_vm ? "${pool.machine_type}-${pool.topology}-${slice}" : "${pool.machine_type}-${pool.topology}"
 
-            # short_name is carried alongside the key because a Kubernetes
-            # label value may not hold the slash that key has in it.
-            worker     = worker_name
-            short_name = worker.short_name
+                # short_name is carried alongside the key because a Kubernetes
+                # label value may not hold the slash that key has in it.
+                worker     = worker_name
+                short_name = worker.short_name
 
-            # A slice wider than one VM is placed as a unit and needs a
-            # placement policy. The machine type's suffix is chips per VM -
-            # unlike the Buildkite queue names, where tpu7x-8 counts
-            # TensorCores and is a four-chip tpu7x-standard-4t.
-            is_multi_host = dims[0] * dims[1] * dims[2] > parseint(
-              trimsuffix(reverse(split("-", pool.machine_type))[0], "t"), 10
-            )
+                # A slice wider than one VM is placed as a unit and needs a
+                # placement policy. The machine type's suffix is chips per VM -
+                # unlike the Buildkite queue names, where tpu7x-8 counts
+                # TensorCores and is a four-chip tpu7x-standard-4t.
+                is_multi_host = dims[0] * dims[1] * dims[2] > chips_per_vm
+                hosts         = max(1, floor(dims[0] * dims[1] * dims[2] / chips_per_vm))
 
-            family = split("-", pool.machine_type)[0]
-          })
-        ]]
+                min_nodes = dims[0] * dims[1] * dims[2] > chips_per_vm ? 0 : coalesce(pool.min_nodes, 0)
+                max_nodes = (dims[0] * dims[1] * dims[2] > chips_per_vm
+                  ? floor(dims[0] * dims[1] * dims[2] / chips_per_vm)
+                : pool.max_nodes)
+                slices           = coalesce(pool.slices, 1)
+                stated_min_nodes = pool.min_nodes
+                stated_max_nodes = pool.max_nodes
+                stated_slices    = pool.slices
+
+                family = split("-", pool.machine_type)[0]
+              })
+        ]]]
       ]
     ]) : "${pool.worker}/${pool.name}" => pool
   }
