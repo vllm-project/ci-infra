@@ -122,13 +122,18 @@ jobSets:
     # Only the failure that means the fleet. A child Job reports
     # BackoffLimitExceeded once it has spent every pod retry, which the
     # podFailurePolicy above lets it do only on pods that never ran the
-    # workload. A test returning non-zero fails as PodFailurePolicy, matches
-    # nothing here, and stays red on the first attempt.
+    # workload.
     rules:
       - name: fleet_took_the_pods
         action: RestartJobSet
         onJobFailureReasons:
           - BackoffLimitExceeded
+      # Everything else - a test returning non-zero (PodFailurePolicy), a run
+      # past its deadline (DeadlineExceeded) - stays red on the first attempt.
+      # JobSet restarts a failure no rule matches, and an empty
+      # onJobFailureReasons matches every reason.
+      - name: the_run_failed
+        action: FailJobSet
     # A restart repeats the whole run, so one: twice over is the fleet being
     # unusable, which should surface.
     maxRestarts: 1
