@@ -243,3 +243,46 @@ metadata:
   namespace: buildkite
 spec:
   clusterQueue: tpu7x-standard-4t-2x2x2
+---
+# One queue per TPU shape, all of a generation's queues in one cohort, so that
+# nominalQuota is chips this shape can always have and no other shape can hold
+# the reservation against it, while whatever it is not using is lent out.
+#
+# Both preemption policies stay Never: eviction returns the accounting at once
+# but not the hardware, since eight chips freed across eight single-chip nodes
+# still have to scale down before an 8-chip node can boot, and the jobs killed
+# to get there have to run again. Priority decides who goes next, not who stops.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: tpu7x-standard-4t-2x2x4
+spec:
+  cohortName: tpu7x
+  preemption:
+    reclaimWithinCohort: Never
+    withinClusterQueue: Never
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  resourceGroups:
+    # One resource under quota: google.com/tpu for a TPU shape, cpu for the cpu
+    # queue (see CPU_QUEUE_RESOURCE in generate_manifests.py). Everything else a pod
+    # requests is left to the kube scheduler. See quotaCheckStrategy in
+    # common-config.yaml.
+    - coveredResources:
+        - google.com/tpu
+      flavors:
+        - name: tpu7x
+          resources:
+            - name: google.com/tpu
+              # Chips, not nodes. This is a ceiling on what Kueue will admit at
+              # once, not a promise that a slice of the right shape is free.
+              nominalQuota: 32
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: tpu7x-standard-4t-2x2x4
+  namespace: buildkite
+spec:
+  clusterQueue: tpu7x-standard-4t-2x2x4

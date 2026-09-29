@@ -231,12 +231,17 @@ A machine type and a topology together identify a shape, and both are needed: a
 `ct6e-standard-4t`, and which it is decides the host, the pod count and the
 quota.
 
-All three counts are in **nodes**, not chips — the generator multiplies
-`nominal_nodes` by the machine type's chips per VM to get the ClusterQueue's
-`nominalQuota`. Summed across a cluster, `nominal_nodes` should come to the chips
-the reservation actually has free; `max_nodes` deliberately oversubscribes so a
-shape can borrow, and `min_nodes` is the only one that really partitions the
+`min_nodes` and `max_nodes` are in **nodes**, as on a GKE node pool;
+`nominal_quota` is in **chips**, as the ClusterQueue's `nominalQuota`. Summed
+across a cluster, `nominal_quota` should come to the chips the reservation
+actually has free; `max_nodes` deliberately oversubscribes so a shape can
+borrow, and `min_nodes` is the only one that really partitions the
 reservation, since those chips stay with one shape once booted.
+
+A single-host entry sizes its pool with `min_nodes` and `max_nodes`. A
+multi-host entry takes `slices` instead: GKE sizes each multi-host pool at
+exactly one slice and rejects any other size, so `slices` is how many slice
+pools the shape gets.
 
 ### Rotate the Buildkite agent token
 

@@ -166,6 +166,17 @@ data:
         shm_size: 128Gi
         memory_request: 290Gi
         max_runtime_seconds: 28800
+      tpu7x-standard-4t-2x2x4:
+        queue: tpu7x-standard-4t-2x2x4
+        machine_type: tpu7x-standard-4t
+        chips: 4
+        hosts: 4
+        topology: 2x2x4
+        accelerator_label: tpu7x
+        fuse_cache_size: 80Gi
+        shm_size: 128Gi
+        memory_request: 290Gi
+        max_runtime_seconds: 28800
 ---
 # Referenced from a pipeline step as:
 #
