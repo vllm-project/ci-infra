@@ -106,6 +106,11 @@ tpu_queue_max_seconds = 43200
 # two-host slice is built in their place.
 tpu_admission_max_seconds = 3600
 
+# Five minutes reserved with no worker named, against a normal dispatch of a few
+# seconds, is a dropped dispatch rather than a slow one; see variables.tf.
+tpu_dispatch_retry_seconds = 300
+tpu_dispatch_retries       = 2
+
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
 # than the repository. Trailing slash required: without it the prefix would also

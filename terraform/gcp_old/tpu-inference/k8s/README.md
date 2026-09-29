@@ -346,6 +346,16 @@ step held by a `concurrency_group` is `limited`, has a null `started_at`, and
 burns no clock. The launcher annotates what it is waiting for; read that before
 assuming a fault.
 
+**A reservation that never reaches a worker is resubmitted, not waited out.**
+MultiKueue sometimes reconciles a fresh reservation once, creates no copy on
+any worker and never comes back to it: the chips are reserved, nothing runs,
+and the step shows `waiting for admission` until `tpu_admission_max_seconds`.
+The launcher deletes and recreates such a workload after
+`tpu_dispatch_retry_seconds` with no worker named, up to `tpu_dispatch_retries`
+times, and logs `resubmitting`. A workload waiting on a worker for a slice to be
+rebuilt names that worker (`dispatching to ...`) and is left alone. The timing
+table counts resubmissions in `redispatches`.
+
 **us-central1 holds both the manager and a worker.** They are separate clusters
 with separate control-plane CIDRs, but they share the region's Cloud Router and
 Cloud NAT, and both pull from the same Artifact Registry. Do not declare a second
