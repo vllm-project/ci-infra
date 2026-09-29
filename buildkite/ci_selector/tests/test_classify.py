@@ -2700,7 +2700,10 @@ def test_nothing_colocation_narrows_away_is_lost_to_decide(state):
     rule-off answer selects is still selected or in `unnarrowed`, for both arms
     and the package-data swap. vllm#58947: scheduler.py is in the cycle, and
     the CPU engine step it needs has no row."""
-    for path in (*COLOCATED_HUBS, "vllm/v1/core/sched/scheduler.py", _H20_TABLE):
+    # A chat template is package data whose owners all sit in the cycle. The
+    # H20 table is too, but a step running `vllm serve` now reaches it anyway.
+    template = "vllm/transformers_utils/chat_templates/template_basic.jinja"
+    for path in (*COLOCATED_HUBS, "vllm/v1/core/sched/scheduler.py", template):
         on = select(state, [path])
         off = _select_without_colocation(state, path)
         assert on.unnarrowed, f"{path}: nothing was narrowed"
