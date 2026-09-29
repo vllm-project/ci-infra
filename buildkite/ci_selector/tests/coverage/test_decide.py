@@ -140,10 +140,10 @@ def thin_table(tmp_path, tmp_repo):
     return make_table(tmp_path, tmp_repo, jobs, thin_keys={"thin"})
 
 
-def _narrowed(*step_ids, selected=("vllm_ci:runs-mod",)):
+def _narrowed(*step_ids, selected=("vllm_ci:runs-mod",), path="vllm/mod.py"):
     """A map that selected `selected` and let co-location narrow the rest away."""
-    sel = _selection(*selected)
-    sel.unnarrowed = set(step_ids)
+    sel = _selection(*selected, path=path)
+    sel.unnarrowed = {s: [[path]] for s in step_ids}
     return sel
 
 
@@ -160,6 +160,24 @@ def test_colocation_narrows_only_where_a_usable_row_can_speak(
     assert d.unnarrowed == {"vllm_ci:thin", "vllm_ci:no-row"}
     assert d.unnarrowed <= d.steps
     assert "vllm_ci:elsewhere" not in d.steps
+
+
+def test_a_narrowed_step_stays_out_when_the_change_gives_it_nothing_to_run(
+    table, tmp_repo, unstaled
+):
+    """The record drops a map step picked only for a file whose change keeps
+    behaviour, row or no row, so co-location's narrowing of one stands too.
+    vllm#58687 only annotated a return type, and 6 steps with no usable row
+    came back for it."""
+    base = tmp_repo.head()
+    tmp_repo.write(
+        "vllm/mod.py", MODULE_SOURCE.replace("def plain():", "def plain() -> int:")
+    )
+    head = tmp_repo.commit("annotate plain")
+    sel = _narrowed("vllm_ci:no-row")
+    d = decide(None, sel, tmp_repo.root, base, head, table=table)
+    assert d.unnarrowed == set()
+    assert "vllm_ci:no-row" not in d.steps
 
 
 def test_without_the_record_every_narrowed_step_comes_back(

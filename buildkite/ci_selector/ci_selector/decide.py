@@ -45,9 +45,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .coverage import freshness
+from .coverage.changed_funcs import Query
 from .coverage.phase import DEFAULT_MODE, PhaseMode, mode_from_env
 from .coverage.kernels import KernelEvidence
-from .coverage.rules import RowKeys, newest_commit, read_pr, unknown_names
+from .coverage.rules import (
+    RowKeys,
+    _foreign,
+    newest_commit,
+    nothing_to_run,
+    read_pr,
+    unknown_names,
+)
 from .coverage.source import fetch_kernel_evidence, fetch_table
 from .coverage.table import Table
 
@@ -138,7 +146,7 @@ def decide(
     out = Decision(steps=set(selection.selected), from_map=set(selection.selected))
 
     table = table if table is not None else fetch_table()
-    keys = None
+    read = None
     if not table.available:
         out.coverage_note = table.unavailable
     else:
@@ -148,7 +156,7 @@ def decide(
         if getattr(state, "pipelines", None):
             out.unreadable_rows = _unreadable_rows(state, table)
         try:
-            keys = _apply_record(out, table, selection, repo, base, head, mode)
+            read = _apply_record(out, table, selection, repo, base, head, mode)
         except Exception as exc:  # noqa: BLE001 - see the module docstring
             # Broad on purpose. A narrower handler would have to decide what
             # to do with a half-built reading, and the only safe answer is
@@ -159,7 +167,7 @@ def decide(
             out.executes_by_coverage.clear()
             out.executes_by_proxy.clear()
             out.coverage_note = f"coverage unusable ({type(exc).__name__}: {exc})"
-    _give_back_unnarrowed(out, selection, table, keys)
+    _give_back_unnarrowed(out, selection, table, read)
 
     kernels = kernels if kernels is not None else fetch_kernel_evidence()
     if kernels.unavailable:
@@ -237,7 +245,7 @@ def _apply_record(
     base: str,
     head: str | None,
     mode: PhaseMode = DEFAULT_MODE,
-) -> RowKeys:
+) -> tuple[RowKeys, Query]:
     from .codemap.worktree import state_for
     from .coverage.changed_funcs import build as build_query
     from .coverage.changed_funcs import mark_unfaithful
@@ -301,24 +309,33 @@ def _apply_record(
     out.executes_by_proxy = set(reading.executes_by_proxy)
     out.steps |= out.added_by_coverage
     out.steps -= out.dropped_by_coverage
-    return keys
+    return keys, query
 
 
-def _give_back_unnarrowed(out: Decision, selection, table: Table, keys) -> None:
+def _give_back_unnarrowed(out: Decision, selection, table: Table, read) -> None:
     """Co-location narrows the map on the record's credit. It drops steps the
-    graph reaches and trusts a row to add back any that runs the change. A step
+    graph reaches and trusts a row to add back any that calls the change. A step
     with no row, or one too weak to read a silence off, never gets that chance,
-    so the graph rule's answer selects it. vllm#58947 lost the one CPU engine
-    step this way: scheduler.py sits in the import cycle and the CPU family has
-    no rows. If the record did not run at all, no step had that chance.
+    so the graph rule's answer selects it. Unless the change leaves it nothing
+    to run, which the record reads off no row: picked only for a change that
+    keeps behaviour, or that runs on another platform, it stays out as a map
+    step would. vllm#58947 lost the one CPU engine step this way: scheduler.py
+    sits in the import cycle and the CPU family has no rows. If the record did
+    not run at all, no step had that chance.
     """
-    out.unnarrowed = {
-        s
-        for s in selection.unnarrowed - out.steps
-        if keys is None
-        or (key := keys.key_for(s)) is None
-        or table.unreadable(key) is not None
-    }
+    keys, query = read or (None, None)
+    for step_id, reasons in selection.unnarrowed.items():
+        if step_id in out.steps:
+            continue
+        key = keys.key_for(step_id) if keys is not None else None
+        if key is not None:
+            if table.unreadable(key) is None:
+                continue
+            scope = {p for r in reasons for p in r or ()}
+            foreign = _foreign(query, keys.steps.get(step_id))
+            if None not in reasons and scope and nothing_to_run(query, scope, foreign):
+                continue
+        out.unnarrowed.add(step_id)
     out.steps |= out.unnarrowed
 
 

@@ -850,6 +850,24 @@ class TestTheBreadthGate:
         )
         assert "vllm_ci:narrow" in reading.added
 
+    def test_a_step_colocation_narrowed_away_is_added_on_any_call(self, wide_table):
+        """Co-location narrowed `row1` away on the credit of this add, and with
+        co-location off the drop side, which applies no breadth, would have kept
+        it. So the gate may not refuse it. An edit to VllmConfig.__post_init__
+        otherwise lost 147 such steps. `row2` was never the graph's, and stays
+        out."""
+        query = query_for("vllm/mod.py", "plain")
+        narrowed = {"vllm_ci:row1": [["vllm/mod.py"]]}
+        reading = read_pr(
+            wide_table,
+            result_for("vllm_ci:row0", unnarrowed=narrowed),
+            query,
+            unknown_names(query, UNION, {}),
+            KNOWN,
+            self._owner(self.WIDE),
+        )
+        assert reading.added == ["vllm_ci:row1"]
+
     def test_the_gate_stands_down_on_a_table_too_small_to_measure(
         self, tmp_path: Path, tmp_repo: Repo
     ):

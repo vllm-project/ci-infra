@@ -109,10 +109,6 @@ class Claim:
     # for the steps they add, so their sentence does not replay under every step.
     step_detail: dict[str, str] = field(default_factory=dict)
     step_rule: dict[str, str] = field(default_factory=dict)
-    # The graph rule's own answers that co-location replaced with this narrower
-    # one. The narrowing trusts a row to add back any step that runs the change,
-    # so `decide` gives these back for a step no usable row can speak for.
-    unnarrowed: list[Claim] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.rule not in RULES:

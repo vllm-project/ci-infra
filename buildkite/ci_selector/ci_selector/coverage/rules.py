@@ -278,6 +278,22 @@ def _foreign(query: Query, step) -> set[str]:
     }
 
 
+def nothing_to_run(query: Query, scope: set[str], foreign: set[str]) -> str | None:
+    """Why a step picked for the changed files in `scope` has nothing there to
+    run, or None. No row is read, so it holds for a step with none.
+
+    Either every one of them changed without changing behaviour (line endings,
+    or annotations and layout the code does not see), or what is left runs only
+    on another family's hardware.
+    """
+    preserving = set(query.inert) | set(query.eol_only)
+    if preserving and scope <= preserving:
+        return "only-behaviour-preserving-changes"
+    if foreign and scope <= preserving | foreign:
+        return "changed-code-runs-on-another-platform"
+    return None
+
+
 def read_pr(
     table: Table,
     selection,
@@ -383,20 +399,10 @@ def read_pr(
             reading.kept.append(step_id)
             reading.reasons["no-attributed-file"] += 1
             continue
-        # Every file the map picked this step for changed without changing
-        # behaviour: line endings, or annotations and layout the code does not
-        # see. There is nothing for the step to test.
-        preserving = set(query.inert) | set(query.eol_only)
-        if preserving and scope <= preserving:
+        idle = nothing_to_run(query, scope, foreign)
+        if idle:
             reading.dropped.append(step_id)
-            reading.reasons["only-behaviour-preserving-changes"] += 1
-            if set(matched.get(step_id, ())) & failed:
-                reading.dropped_and_failed.append(step_id)
-            continue
-        if foreign and scope <= preserving | foreign:
-            # What is left runs only on another family's hardware.
-            reading.dropped.append(step_id)
-            reading.reasons["changed-code-runs-on-another-platform"] += 1
+            reading.reasons[idle] += 1
             if set(matched.get(step_id, ())) & failed:
                 reading.dropped_and_failed.append(step_id)
             continue
@@ -462,7 +468,12 @@ def _add_from_rows(
 
     The one gate judges the evidence rather than the row. `Table.discriminates`
     refuses a name nearly every row holds, which says only "the step imported
-    the file" and would hand back most of a narrower map's saving.
+    the file" and would hand back most of a narrower map's saving. Not for a
+    step co-location narrowed away, though. That narrowing was made on the
+    credit of this add, and with co-location off the step would have met the
+    drop side, which applies no breadth. An edit to VllmConfig.__post_init__,
+    which 389 of 412 rows call, lost 147 such steps to the gate, e2e-core-1-gpu
+    and the distributed steps among them.
 
     `unresolved` brackets the result: our table postdates the measured PRs, so
     it holds functions production could never have recorded.
@@ -471,6 +482,7 @@ def _add_from_rows(
     shard suffixes a raw key comparison misses.
     """
     already = set(selection.selected)
+    narrowed = selection.unnarrowed
     for step_id in keys.candidates():
         if step_id in already:
             continue
@@ -482,7 +494,7 @@ def _add_from_rows(
         if any(
             f.path not in foreign
             and row.contains_call(f.path, name)
-            and table.discriminates(f.path, name)
+            and (step_id in narrowed or table.discriminates(f.path, name))
             # Stand-ins are drop evidence only. A file outside the recorder
             # scope may still be in a row (tests/ is recorded before the
             # selector reads it), and adds nothing until the scope says so.
