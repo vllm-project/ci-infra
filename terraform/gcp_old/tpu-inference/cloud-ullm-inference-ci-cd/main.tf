@@ -71,6 +71,9 @@ module "ci_v7x_2" {
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
+# Eight more tpu7x-8 agents serve the same queue from inferact-vllm-tpu (see
+# that env), so this fleet runs ten and the other 32 chips of the reservation
+# are free for other work.
 module "ci_v7x_8" {
   source = "../modules/ci_v7x"
   providers = {
@@ -79,7 +82,7 @@ module "ci_v7x_8" {
 
   accelerator_type                = "tpu7x-8"
   reserved                        = true
-  instance_count                  = 18
+  instance_count                  = 10
   buildkite_queue_name            = "tpu_v7x_8_queue"
   disk_size                       = 4096
   project_id                      = var.project_id
