@@ -4,6 +4,10 @@ End-to-end workflow for cutting a new vLLM release branch, tagging release
 candidates, and launching all validation builds. Use when the user asks to
 "kick off vX.Y.Z release" or "cut a release branch".
 
+**RC numbering:** the branch-cut commit is tagged `vX.Y.Zrc0`. Each later
+cherry-pick round is `rc1`, `rc2`, …. Below, `rcN` means the RC you are
+building right now, so it is `rc0` for the first cut.
+
 ---
 
 ## Prerequisites
@@ -25,8 +29,10 @@ bk build list --pipeline vllm/ci --branch main --message "Full CI run" \
   --limit 10 --summary --json
 ```
 
-Filter to **completed** builds only (state is `passed` or `failed`, not
-`running` or `failing`). For each of the 3 most recent completed builds,
+Skip "Full CI run torch nightly" builds. The message filter matches them
+too, but they test against torch nightly, not the torch the release ships
+with. Filter to **completed** builds only (state is `passed` or `failed`,
+not `running` or `failing`). For each of the 3 most recent completed builds,
 count failed jobs:
 
 ```bash
@@ -42,15 +48,27 @@ print(f'Build #{b[\"number\"]}: {failed} failed / {passed} passed, commit={b[\"c
 Pick the build with the **fewest failed jobs**. If tied, pick the more recent
 one. Note the full commit SHA — this is the branch cut point.
 
+A newer build that is still running can be picked if the jobs it has
+finished are already greener than the completed builds. If you pick one,
+list its still-pending jobs in the announcement.
+
 ---
 
-## Step 2: Create and push the release branch
+## Step 2: Create and push the release branch, tag rc0
+
+Push the branch, then tag the cut commit `vX.Y.Zrc0` and push the tag right
+away:
 
 ```bash
 git fetch origin main
 git checkout -b releases/vX.Y.Z <commit_sha>
 git push origin releases/vX.Y.Z
+git tag vX.Y.Zrc0 <commit_sha>
+git push origin vX.Y.Zrc0
 ```
+
+Pushing the branch starts the release-v2 build (see step 4). Pushing the
+tag does not start anything.
 
 ---
 
@@ -65,7 +83,23 @@ Note the milestone number and URL for the Slack announcement.
 
 ---
 
-## Step 4: Trigger the release-v2 build
+## Step 4: Find the release-v2 build and unblock it
+
+A push of a `releases/*` branch, or of new commits to it, starts a
+release-v2 build of the branch HEAD on its own. The build's message is the
+commit title. Do NOT `bk build create` another one: the duplicate just
+queues behind the first on `small_cpu_queue_release`. Find the build:
+
+```bash
+bk build list --pipeline vllm/release-v2 --branch releases/vX.Y.Z \
+  --limit 5 --json | python3 -c "
+import json, sys
+for b in json.load(sys.stdin):
+    print(b['number'], b['state'], b['commit'][:12], b.get('message', '').splitlines()[0])"
+```
+
+If no build shows up for the HEAD commit (e.g. the webhook missed the
+push), create one by hand as a last resort:
 
 ```bash
 bk build create --yes \
@@ -75,8 +109,9 @@ bk build create --yes \
   --message "vX.Y.ZrcN release"
 ```
 
-Wait ~1–2 minutes for the pipeline to bootstrap and load all steps. Then find
-the job ID for the **"Unblock to build release Docker images"** block step:
+The block step appears only after the Bootstrap job uploads the pipeline.
+Bootstrap can wait on the queue for a while. Once it has run, find the job
+ID for the **"Unblock to build release Docker images"** block step:
 
 ```bash
 bk build view --pipeline vllm/release-v2 <build_number> --json | python3 -c "
@@ -87,8 +122,15 @@ for j in b.get('jobs', []):
         print(j['id'])"
 ```
 
-Unblock it via the Buildkite REST API. Use your Buildkite API token
-(typically stored in `~/.config/bk.yaml` by the `bk` CLI):
+Unblock it with the CLI. It takes only the job ID, with no `--pipeline` flag:
+
+```bash
+bk job unblock <job_id>
+```
+
+If the CLI fails, use the REST API with your Buildkite API token (the `bk`
+CLI usually stores it in `~/.config/bk.yaml`). For an input step, the PUT
+body is `{"fields": {"key": "value"}}`:
 
 ```bash
 curl -s -X PUT \
@@ -105,28 +147,41 @@ curl -s -X PUT \
 
 ## Step 5: Wait for the release images
 
-Monitor both the x86_64 CUDA 13.0 and ROCm image builds until they pass
-(~30–60 min each):
+Monitor the x86_64 CUDA 13.0 and ROCm image builds until they pass
+(~30–60 min each). Also watch the CUDA 12.9 x86_64 images
+(`build-release-image-x86-cuda-12-9` and its `-ubuntu2404` variant). These
+jobs stay blocked on main's release-v2 builds, so a build break that only
+affects 12.9 first shows up at the cut. In v0.31.0 the snapshot runtime
+helper needed CUDA 13 headers. vllm-project/vllm#59118 fixed it and was
+cherry-picked.
+
+macOS has no `timeout` command, so the loop wraps each API call in a Python
+subprocess timeout. That way a hung call can't stall the monitor:
 
 ```bash
-while true; do
-  states=$(bk build view --pipeline vllm/release-v2 <build_number> --json \
-    | python3 -c "
-import json, sys
-b = json.load(sys.stdin)
-for j in b.get('jobs', []):
-    sk = j.get('step_key', '')
-    if sk in ('build-release-image-x86', 'build-rocm-release-image'):
-        print(f'{sk}={j.get(\"state\", \"unknown\")}')")
-  echo "$(date '+%H:%M:%S') $states"
-  cuda=$(echo "$states" | grep 'build-release-image-x86=' | cut -d= -f2)
-  rocm=$(echo "$states" | grep 'build-rocm-release-image=' | cut -d= -f2)
-  if [[ "$cuda" == "passed" || "$cuda" == "failed" ]] && \
-     [[ "$rocm" == "passed" || "$rocm" == "failed" ]]; then
-    break
-  fi
-  sleep 60
-done
+python3 - <<'EOF'
+import json, subprocess, time
+BUILD = "<build_number>"
+KEYS = ["build-release-image-x86", "build-release-image-x86-cuda-12-9",
+        "build-release-image-x86-cuda-12-9-ubuntu2404", "build-rocm-release-image"]
+DONE = {"passed", "failed", "canceled", "timed_out", "broken", "skipped"}
+while True:
+    try:
+        out = subprocess.run(
+            ["bk", "build", "view", "--pipeline", "vllm/release-v2", BUILD, "--json"],
+            capture_output=True, text=True, timeout=60).stdout
+        jobs = {j.get("step_key"): j.get("state")
+                for j in json.loads(out).get("jobs", []) if not j.get("retried")}
+    except (subprocess.TimeoutExpired, ValueError) as e:
+        print(time.strftime("%H:%M:%S"), "bk call failed:", type(e).__name__, flush=True)
+        time.sleep(60)
+        continue
+    states = {k: jobs.get(k, "missing") for k in KEYS}
+    print(time.strftime("%H:%M:%S"), " ".join(f"{k}={v}" for k, v in states.items()), flush=True)
+    if all(v in DONE for v in states.values()):
+        break
+    time.sleep(60)
+EOF
 ```
 
 The resulting image URIs follow these patterns:
@@ -134,6 +189,9 @@ The resulting image URIs follow these patterns:
 ```
 # x86_64 CUDA 13.0
 public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-x86_64
+
+# x86_64 CUDA 12.9 (Ubuntu 24.04 variant: ...-x86_64-cu129-ubuntu2404)
+public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-x86_64-cu129
 
 # ROCm
 public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-rocm
@@ -210,11 +268,25 @@ bk job reprioritize <job_id> 50 --yes
 
 Watch the build until all jobs complete. Common failure patterns:
 
-- **exit_status=-1**: Infra issue (agent died, never ran). Safe to retry.
+- **exit_status=-1** (agent lost, never ran): infra. Safe to retry.
+- **pip/network `ReadTimeoutError`** during setup: infra. Safe to retry.
 - **exit_status=1 with `NotImplementedError`**: Real code issue — check if
   the workload config is compatible with the release branch.
 - **Health check timeout**: Server never came up. Could be OOM, model loading
   issue, or infra. Check logs and retry.
+- **`timed_out` after hitting `timeout_in_minutes`**: not infra. Before you
+  retry, look at the same job in earlier nightly/RC builds. A job that
+  always runs past its limit will just time out again. It needs a higher
+  timeout in perf-eval. For example, `glm_5_3-h200` hit its 120 min limit
+  on every run through v0.31.0rc1.
+
+Fetch a job's log (the flag is `--build-number`, not `--build`). Logs are
+large, so save to a file, strip ANSI codes, and grep:
+
+```bash
+bk job log <job_id> --pipeline vllm/perf-eval --build-number <build_number> \
+  | sed 's/\x1b\[[0-9;]*m//g' > job.log
+```
 
 Retry failed jobs:
 
@@ -240,9 +312,15 @@ for b in json.load(sys.stdin):
     print(b['number'], b['state'], b.get('message', ''))"
 ```
 
+Sometimes the final release tag had no perf-eval run of its own. If it
+differs from its last RC only by build-only commits, use that RC's images
+as the baseline. For example, v0.30.0 final (`ced6857a`) had no run, so
+rc2 (`fa6ff060`) was used.
+
 Pull the release image URIs from that build's env (`VLLM_IMAGE_CUDA` /
 `VLLM_IMAGE_ROCM`), then query the compare API once per platform — the
-`baseline` is the previous release image, `candidate` is the new one:
+`baseline` is the previous release image, `candidate` is the new one. Use
+curl. Python `urllib` fails SSL verification on macOS:
 
 ```bash
 curl -s "https://ci.vllm.ai/api/compare?baseline=<prev_image>&candidate=<new_image>" > compare.json
@@ -262,17 +340,28 @@ Things to watch for when reading results:
   filing.
 - **Check the baseline before bisecting code:** a flagged regression can be
   a *lucky baseline* rather than a slow candidate. Before digging through
-  commits, compare recent nightly builds (`bk build list --pipeline
-  vllm/perf-eval --branch main`, message "Nightly run ...") against the same
-  baseline image — the per-day candidate values form a free bisection and
-  reveal the metric's steady-state band. If the baseline sits outside that
-  band, the regression is an artifact. Definitive check: rerun the workload
-  with `VLLM_IMAGE_CUDA` pointing at the *baseline* image and see if it
-  reproduces the baseline number.
-- **Agent identity matters:** record which Buildkite agent each compared
-  run executed on (job detail API). Only same-host comparisons are
-  trustworthy; some perf hosts are intermittently slow, so a bad run on an
-  unverified host is noise until reproduced on a known-good one.
+  commits, compare recent nightly builds against the same baseline image.
+  Find them with `bk build list --pipeline vllm/perf-eval --branch main`.
+  Their message is "Nightly run YYYY-MM-DD: commit …", and they run CUDA
+  only. The per-day candidate values form a day-by-day series: a free
+  bisection that also shows the metric's steady-state band. If the baseline
+  sits outside that band, the regression is an artifact. Definitive check:
+  rerun the workload with `VLLM_IMAGE_CUDA` pointing at the *baseline* image
+  and see if it reproduces the baseline number.
+- **Agent identity matters:** group results by the agent each job ran on
+  (job detail API). For example, `h200-ci-1` and `mithril-h200-*` differ a
+  lot. Only same-host comparisons are trustworthy. Some perf hosts are
+  intermittently slow, so a bad run on an unverified host is noise until
+  it reproduces on a known-good one.
+- **Explain trade-offs from server logs:** grep each run's job log for
+  `GPU KV cache size` and `Using … attention backend`. A changed KV cache
+  size or attention backend usually explains a throughput-vs-latency shift.
+- **Workload coverage:** check `summary.missingBaseline` /
+  `missingCandidate` — renamed or newly added workloads won't have a
+  comparison. ROCm comparisons often match few workloads across releases;
+  that's expected, not an error.
+- Share the browser version of the link in the Slack announcement:
+  `https://ci.vllm.ai/compare?baseline=<prev_image>&candidate=<new_image>`
 
 To confirm a regression with a targeted rerun, launch a new perf-eval
 build with `WORKLOADS` (comma-separated workload stems from the
@@ -293,12 +382,6 @@ bk build create --yes --pipeline vllm/perf-eval --branch main \
 A passed job cannot be retried in place, so a fresh targeted build is the
 way to get a clean-agent data point. Rerun results upload under the same
 image URI and supersede the earlier runs in the compare API.
-- **Workload coverage:** check `summary.missingBaseline` /
-  `missingCandidate` — renamed or newly added workloads won't have a
-  comparison. ROCm comparisons often match few workloads across releases;
-  that's expected, not an error.
-- Share the browser version of the link in the Slack announcement:
-  `https://ci.vllm.ai/compare?baseline=<prev_image>&candidate=<new_image>`
 
 Include significant regressions in the Slack announcement and flag them to
 the release manager as cherry-pick candidates.
@@ -359,7 +442,8 @@ git -c core.hooksPath=/dev/null cherry-pick <commit_sha>
 git -c core.hooksPath=/dev/null cherry-pick --continue --no-edit
 ```
 
-After cherry-picking, push and tag:
+After cherry-picking, push and tag the next RC. The first cherry-pick round
+after the rc0 cut is `rc1`:
 
 ```bash
 git push origin releases/vX.Y.Z
@@ -367,7 +451,9 @@ git tag vX.Y.ZrcN
 git push origin vX.Y.ZrcN
 ```
 
-Then repeat steps 4–8 with the new HEAD commit.
+The branch push starts the release-v2 build of the new HEAD on its own.
+Then repeat steps 4–8 with the new HEAD commit, starting from finding that
+build instead of creating one.
 
 ---
 
@@ -377,39 +463,41 @@ Post to the appropriate channel with:
 
 - **Branch name** and commit SHA it was cut from
 - **Link to the CI build** used as the basis (initial cut only)
-- **List of failing job names** from that CI run (initial cut only)
+- **List of failing job names** from that CI run, plus any jobs still
+  pending if it was still running (initial cut only)
 - **Link to the milestone** for cherry-pick tracking
 - **Links to all builds**: full CI, release-v2, perf-eval
 - **List of cherry-picked PRs** since the previous RC
 
-> **Formatting:** write the message in **Slack mrkdwn**, not Markdown.
-> Slack does NOT render `**double asterisks**` or `[text](url)` — they show
-> up as literal characters. Use `*single asterisks*` for bold, single
-> backticks for inline code (branch names, tags, commit SHAs), and
-> `<https://full-url|link text>` for hyperlinks on PR numbers, build
-> numbers, and the milestone title.
+> **Formatting:** the human usually pastes the message into Slack's
+> composer. The composer does not render mrkdwn: `<url|text>` and
+> `*bold*` show up as literal characters, and so do Markdown's `**bold**`
+> and `[text](url)`. So give them **rendered rich text** that keeps bold
+> and links when copied. For example, write an HTML preview (`<b>`,
+> `<a href>`, `<ul>`) they open, select all, and copy, or send a rendered
+> Markdown message. Use the mrkdwn templates below only when posting
+> through the Slack API or a bot. In mrkdwn, `*single asterisks*` make
+> bold, backticks make inline code (branches, tags, SHAs), and
+> `<https://full-url|link text>` makes a link.
 
-Template for initial branch cut:
+Template for the initial branch cut (rc0):
 
 ```
 *vX.Y.Z branch cut* :scissors:
 
-The `releases/vX.Y.Z` branch has been cut from commit `<sha>` (based on
-<https://buildkite.com/vllm/ci/builds/NNN|full CI run #NNN>, the greenest
-of the last 3 runs).
+The `releases/vX.Y.Z` branch has been cut from commit `<sha>` and tagged
+`vX.Y.Zrc0` (based on <https://buildkite.com/vllm/ci/builds/NNNNN|full CI run #NNNNN>,
+the greenest of the last 3 runs).
 
 *Known failing jobs (N):*
 • Job 1
 • Job 2
 ...
+(Still running at cut time: Job X, Job Y)
 
-*Milestone:* <https://github.com/vllm-project/vllm/milestone/NN|vX.Y.Z cherry picks>
-— please tag PRs for cherry-picking here.
+*Milestone:* <https://github.com/vllm-project/vllm/milestone/NN|vX.Y.Z cherry picks> — please tag PRs for cherry-picking here.
 
-*Builds:*
-• Full CI: <https://buildkite.com/vllm/ci/builds/NNNNN|#NNNNN> (run_all + nightly)
-• Release: <https://buildkite.com/vllm/release-v2/builds/NNNNN|#NNNNN>
-• Perf-eval: <https://buildkite.com/vllm/perf-eval/builds/NNN|#NNN> (CUDA + ROCm)
+*Builds:* <https://buildkite.com/vllm/ci/builds/NNNNN|Full CI #NNNNN> (run_all + nightly) · <https://buildkite.com/vllm/release-v2/builds/NNNNN|Release #NNNNN> · <https://buildkite.com/vllm/perf-eval/builds/NNNN|Perf-eval #NNNN> (all workloads, CUDA + ROCm)
 ```
 
 Template for subsequent RCs:
@@ -423,10 +511,7 @@ Release candidate `vX.Y.ZrcN` tagged on `releases/vX.Y.Z` at commit `<full_sha>`
 • <https://github.com/vllm-project/vllm/pull/NNNNN|#NNNNN> Title
 ...
 
-*Builds:*
-• Full CI: <https://buildkite.com/vllm/ci/builds/NNNNN|#NNNNN> (run_all + nightly)
-• Release: <https://buildkite.com/vllm/release-v2/builds/NNNNN|#NNNNN>
-• Perf-eval: <https://buildkite.com/vllm/perf-eval/builds/NNNNN|#NNNNN> (CUDA + ROCm)
+*Builds:* <https://buildkite.com/vllm/ci/builds/NNNNN|Full CI #NNNNN> (run_all + nightly) · <https://buildkite.com/vllm/release-v2/builds/NNNNN|Release #NNNNN> · <https://buildkite.com/vllm/perf-eval/builds/NNNN|Perf-eval #NNNN> (all workloads, CUDA + ROCm)
 
 *Milestone:* <https://github.com/vllm-project/vllm/milestone/NN|vX.Y.Z cherry picks>
 ```
@@ -521,9 +606,21 @@ Prefer each model's recipe-recommended hardware.
   fields) require the REST API rather than the `bk` CLI. Set
   `BUILDKITE_API_TOKEN` as an env var or retrieve it from your `bk` CLI
   config.
-- **Unblocking input steps via API:** The Buildkite unblock endpoint for
-  input steps expects `{"fields": {"key": "value"}}` in the POST body, not
-  flat key-value pairs.
+- **Unblocking input steps via API:** The endpoint is
+  `PUT .../jobs/<id>/unblock`. For input steps it expects
+  `{"fields": {"key": "value"}}` in the PUT body, not flat key-value pairs.
+  For a plain block step, `bk job unblock <job_id>` is enough.
+- **Release builds start on push:** a push of `releases/*` (or of new
+  commits to it) starts a release-v2 build of the HEAD, with the commit
+  title as its message. A manual `bk build create` only adds a duplicate
+  that queues behind it on `small_cpu_queue_release`. Tag pushes don't
+  start builds.
+- **CUDA 12.9 images build only at the cut:** they stay blocked on main's
+  release-v2 builds. So a 12.9-only compile break first surfaces on the
+  release branch. In v0.31.0 it was vllm-project/vllm#59118, and it had to
+  be cherry-picked.
+- **`bk job log` flags:** `bk job log <job_id> --pipeline vllm/<p>
+  --build-number <N>`. The flag is `--build-number`, not `--build`.
 - **Image naming:** The x86_64 CUDA 13.0 release image is
   `public.ecr.aws/q9t5s3a7/vllm-release-repo:<full_commit_sha>-x86_64`.
   The ROCm image is `...:<full_commit_sha>-rocm`. The commit SHA is the
