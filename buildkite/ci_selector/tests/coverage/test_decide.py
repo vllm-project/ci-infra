@@ -384,11 +384,13 @@ NEW_JOBS = {
 }
 
 
-def _new_module_decision(tmp_path, tmp_repo, monkeypatch, b_head, extra=None):
+def _new_module_decision(
+    tmp_path, tmp_repo, monkeypatch, b_head, extra=None, b_base=B_BASE
+):
     """Every step selected for the new module, a.py and b.py, as its
     head-closure claim would select them."""
     tmp_repo.write("vllm/a.py", "def f():\n    return 1\n")
-    tmp_repo.write("vllm/b.py", B_BASE)
+    tmp_repo.write("vllm/b.py", b_base)
     tmp_repo.write("vllm/c.py", "def h():\n    return 1\n")
     base = tmp_repo.commit("base")
     table = make_table(tmp_path, tmp_repo, NEW_JOBS)
@@ -454,6 +456,37 @@ def test_a_new_module_a_file_no_row_holds_reaches_stays_unseen(
     assert d.reasons["unknown-code-blocks-narrowing"] == 3
 
 
+def test_an_import_moved_to_module_level_reaches_the_new_module(
+    tmp_path, tmp_repo, monkeypatch
+):
+    """b.py imported a.py only inside g() at base, so a row that imports b.py
+    without calling g() never shows a.py. At module level the import runs
+    wherever b.py is imported, and the new module with it: the pair is in
+    both graphs, and still a new edge."""
+    lazy = B_BASE.replace("return 1", "import vllm.a\n\n    return vllm.a.f()")
+    eager = "import vllm.a\n\n\n" + B_BASE.replace("return 1", "return vllm.a.f()")
+    d = _new_module_decision(tmp_path, tmp_repo, monkeypatch, eager, b_base=lazy)
+    assert not d.coverage_note
+    assert "vllm_ci:elsewhere" in d.dropped_by_coverage
+    assert "vllm_ci:imports-b" in d.steps
+
+
+def test_a_new_module_nothing_imports_stays_unseen(tmp_path, tmp_repo, monkeypatch):
+    """With no importer, whatever loads the new module is a route the graph
+    cannot read, and no row says which steps take it: every step stays. The
+    record holds every other changed name, so nothing else keeps them."""
+    d = _new_module_decision(
+        tmp_path,
+        tmp_repo,
+        monkeypatch,
+        B_BASE.replace("return 1", "return 3"),
+        extra={"vllm/a.py": "def f():\n    return 3\n"},
+    )
+    assert not d.coverage_note
+    assert not d.dropped_by_coverage
+    assert d.reasons["unknown-code-blocks-narrowing"] == 3
+
+
 def test_a_lazy_import_routed_by_key_still_reaches_the_new_module(
     tmp_repo, monkeypatch
 ):
@@ -476,7 +509,7 @@ def test_a_lazy_import_routed_by_key_still_reaches_the_new_module(
     }
     monkeypatch.setattr(
         "ci_selector.codemap.worktree.full_graph_for",
-        lambda repo, ref: SimpleNamespace(graph=graphs[ref]),
+        lambda repo, ref: SimpleNamespace(graph=graphs[ref], plain_reverse={}),
     )
     unresolved = {"vllm/n.py": {"Registry"}}
     recorded = {"vllm/mod.py": frozenset(), "vllm/other.py": frozenset()}

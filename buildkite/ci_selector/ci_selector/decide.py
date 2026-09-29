@@ -126,6 +126,10 @@ def decide(
 
     When a record cannot be used, for any reason at all, it changes nothing
     and the reason lands in `coverage_note` or `kernel_note`.
+
+    `state` is the one `select` read, built at `base`. A new file's reach is
+    its graph against HEAD's, so a state built anywhere else hides edges the
+    PR added.
     """
     # Resolved above the try on purpose. A bad env value has to kill the run:
     # below, the broad handler would swallow it, every PR would come back
@@ -311,11 +315,13 @@ def _reached_via(
     import-time registry kept its names unknown, and held 42 steps that never
     import kernel_warmup.py, the one file importing it. Every edge into a new
     file is new too, so a step reaches one only through a file that existed at
-    base and gained an import edge into its HEAD closure: an importer, or a
-    file that now imports one. When the record knows every such file, the new
-    file's unknown code projects onto them, as a known file's does onto
-    itself. No such file, or one the record does not know, leaves the new
-    file unseen.
+    base and gained an import edge into its HEAD closure: an importer, a file
+    that now imports one, or one that moved such an import out of a function.
+    When the record knows every such file, the new file's unknown code
+    projects onto them, as a known file's does onto itself. No such file, or
+    one the record does not know, leaves the new file unseen. A module-level
+    `if` that now takes an import it skipped at base changes no edge and is
+    not seen, as for a known file.
     """
     from .gitdiff import diff_files
 
@@ -329,18 +335,21 @@ def _reached_via(
         return {}
     from .codemap.worktree import full_graph_for
 
-    def edges(graph) -> set[tuple[str, str]]:
+    def edges(full) -> set[tuple[str, str, bool]]:
         # A lazy import into a file a parser routes by key leaves `imports`,
-        # and still runs.
+        # and still runs. Whether an edge runs on import is part of it: one
+        # moved out of a function now runs wherever its file is imported.
+        graph = full.graph
         pairs = {(src, dst) for src, dsts in graph.imports.items() for dst in dsts}
-        return pairs | set(graph.dropped_lazy)
+        pairs |= set(graph.dropped_lazy)
+        return {(s, d, s in full.plain_reverse.get(d, ())) for s, d in pairs}
 
-    at_head = edges(full_graph_for(repo, head).graph)
-    # `state` is the base's and already holds its graph.
-    at_base = (getattr(state, "full", None) or full_graph_for(repo, base)).graph
-    gained = at_head - edges(at_base)
+    at_head = edges(full_graph_for(repo, head))
+    # `state` is the base's, as `select`'s is, and already holds its graph.
+    at_base = edges(getattr(state, "full", None) or full_graph_for(repo, base))
+    gained = {(s, d) for s, d, _ in at_head - at_base}
     importers: dict[str, set[str]] = {}
-    for src, dst in at_head:
+    for src, dst, _ in at_head:
         importers.setdefault(dst, set()).add(src)
     out: dict[str, frozenset[str]] = {}
     for path in fresh:
