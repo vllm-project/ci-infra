@@ -272,8 +272,7 @@ def _oracle_build_stage_files(vllm_repo, dockerfiles):
     """Exact-file COPY sources landing in a stage some later `--from=` consumes.
 
     Independent of the parser under test: a line scanner over the Dockerfiles,
-    not `copy_inputs`. Nothing in the tool is stage-aware, so a build input is
-    indistinguishable from runtime payload anywhere else.
+    not `copy_inputs` or `payload_sources`.
     """
     build: set[str] = set()
     for rel in dockerfiles:
@@ -345,6 +344,54 @@ def test_a_build_stage_input_keeps_its_image_union(state, vllm_repo):
         "collect_env.py is a runtime-stage COPY (docker/Dockerfile:852); the "
         "scanner has stopped distinguishing build stages from payload"
     )
+
+
+_STAGED = """\
+FROM ${BASE} AS base
+COPY tools/setup_step.py tools/setup_step.py
+RUN python3 tools/setup_step.py
+FROM base AS deps
+COPY vllm/inherited.py vllm/inherited.py
+FROM deps AS test
+RUN python3 -m vllm.inherited --check
+FROM base AS build
+COPY vllm/envs.py vllm/envs.py
+RUN python3 setup.py bdist_wheel
+FROM base AS mounted
+COPY vllm/mounted.py vllm/mounted.py
+FROM base AS runtime
+COPY ./vllm/collect_env.py .
+RUN --mount=type=bind,from=mounted,src=/w,target=/w pip install dist/*.whl
+FROM runtime AS final
+COPY --from=build /workspace/dist /dist
+"""
+
+
+def test_a_named_copy_is_payload_only_where_no_build_step_runs_it():
+    """Run means: a line of its stage or of one built FROM it names the file
+    or its module, or from= reads such a stage into another. The FROM leg is
+    the one a --from-only reading misses: `inherited.py` lands in `deps` and
+    runs in `test`, which `FROM deps` inherits."""
+    from ci_selector.codemap.externals import payload_sources
+
+    assert payload_sources(_STAGED) == {"vllm/collect_env.py"}
+    # An ARG-built stage name could be any stage, so nothing is payload.
+    assert payload_sources(_STAGED + "COPY --from=${PICK} /a /a\n") == set()
+
+
+def test_a_payload_copy_of_a_routed_module_is_not_an_image_input(state):
+    """docker/Dockerfile copies vllm/collect_env.py into vllm-base for users,
+    and Dockerfile.cpu leaves it in its test stage. Neither build runs it, yet
+    the union put every step of three images on it: vllm#58978 went from 40
+    counted steps to 18 without it. What imports the module is the graph's to
+    answer, including the steps that run `vllm serve`."""
+    path = "vllm/collect_env.py"
+    assert path in state.docker_inputs, "no longer copied by name; test moot"
+    assert path not in state.artifacts.inputs_of
+    step = "vllm_ci:deepseek-v2-lite-prefetch-offload-accuracy-h100"
+    sel = select(state, [path])
+    assert step in sel.selected
+    assert "image-copy" not in sel.selected_rules[step]
 
 
 def test_image_input_union_does_not_resurrect_a_zero_claim(state):

@@ -10,8 +10,9 @@ unselected on a `csrc/` change.
 
 Image inputs are read too, but a build stage copies whole trees in, so the COPY
 list says what is inside the image, not what makes it rebuild. A directory copy
-is only used when the import graph cannot route its contents anyway. Inputs are
-added as a union and not a claim, so they cannot override hardware scoping.
+is only used when the import graph cannot route its contents anyway, and a file
+copy of a module it routes only where the build runs it. Inputs are added as a
+union and not a claim, so they cannot override hardware scoping.
 """
 
 from __future__ import annotations
@@ -169,6 +170,7 @@ def add_image_inputs(
     files: dict[str, set[str]],
     dirs: dict[str, set[str]],
     blanket: set[str],
+    payload: dict[str, set[str]],
     is_graph_known,
     family_of,
 ) -> None:
@@ -193,6 +195,12 @@ def add_image_inputs(
         return set(dockerfiles) | (blanket if shared else set())
 
     for src, dockerfiles in files.items():
+        if src.endswith(".py") and is_graph_known(src):
+            # The graph routes what imports the module. The image adds only
+            # what its build runs, and a payload copy is not that.
+            dockerfiles = set(dockerfiles) - payload.get(src, set())
+            if not dockerfiles:
+                continue
         graph.explicit_inputs_of.setdefault(src, set()).update(dockerfiles)
         graph.inputs_of.setdefault(src, set()).update(images_for(dockerfiles))
 

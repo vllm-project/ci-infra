@@ -148,13 +148,14 @@ class RepoState:
         state.build_map = BuildMap.build(repo)
         state.native_ops = NativeOps.build(repo, state.catalog)
         dockerfiles = {d for fs in state.artifacts.defined_by.values() for d in fs}
-        in_files, in_dirs, blanket = copy_inputs(repo, dockerfiles)
+        in_files, in_dirs, blanket, payload = copy_inputs(repo, dockerfiles)
         add_image_inputs(
             repo,
             state.artifacts,
             in_files,
             in_dirs,
             blanket,
+            payload,
             lambda f: _graph_known(state, f),
             hardware.family_of_path,
         )
