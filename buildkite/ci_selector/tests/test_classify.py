@@ -2694,6 +2694,23 @@ def test_a_cycle_file_is_routed_by_colocation_and_selects_far_less(state):
     )
 
 
+def test_nothing_colocation_narrows_away_is_lost_to_decide(state):
+    """Co-location drops steps on the record's credit, so what it gives up must
+    reach `decide`, which adds back the steps no usable row speaks for. Every
+    step the rule-off answer selects is still selected or in `unnarrowed`, for
+    both arms and the package-data swap. vllm#58947: scheduler.py is in the
+    cycle, and the CPU engine step it needs has no row."""
+    for path in (*COLOCATED_HUBS, "vllm/v1/core/sched/scheduler.py", _H20_TABLE):
+        on = select(state, [path])
+        off = _select_without_colocation(state, path)
+        assert on.unnarrowed - set(on.selected), f"{path}: nothing was narrowed"
+        lost = set(off.selected) - set(on.selected) - on.unnarrowed
+        assert not lost, f"{path}: {len(lost)} steps lost, e.g. {sorted(lost)[:3]}"
+    cpu = "vllm_ci:cpu-language-generation-and-pooling-model-tests"
+    scheduler = select(state, ["vllm/v1/core/sched/scheduler.py"])
+    assert cpu in scheduler.unnarrowed and cpu not in scheduler.selected
+
+
 def _without_colocation(call):
     import os
 

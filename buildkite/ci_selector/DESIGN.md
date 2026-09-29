@@ -169,7 +169,7 @@ Two gaps are open.
 
 ## 8. Limits
 
-- **Core changes still run most of the pipeline.** Roughly 900 files under `vllm/` sit in one import cycle, so reach cannot tell them apart. Routing those by the tests beside them was the single biggest improvement, and it still plateaus, because the end-to-end jobs do execute that code. Running nearly everything for a hot core function is the correct answer.
+- **Core changes still run most of the pipeline.** Roughly 900 files under `vllm/` sit in one import cycle, so reach cannot tell them apart. Routing those by the tests beside them was the single biggest improvement. It narrows on the record's credit, trusting a row to add back any step that runs the change, so a step with no usable row keeps what reach selects. It still plateaus, because the end-to-end jobs do execute that code. Running nearly everything for a hot core function is the correct answer.
 - **Non-Python changes can add jobs but mostly cannot drop them**, outside the op bridge.
 - **Hardware families whose images do not carry the recorder have no rows**, so nothing there is ever dropped. CPU, Arm, TPU, XPU and several others start their own containers, so the recorder never loads into the interpreter that runs the tests. (Fixable upstream: three flags on each hardware script's `docker run`.)
 - **One file of hardcoded facts about the tree survives**, `handwritten.py`. It is the real maintenance surface, and what most of the guards below watch.

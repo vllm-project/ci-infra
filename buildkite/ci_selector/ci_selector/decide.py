@@ -88,6 +88,9 @@ class Decision:
     unreadable_rows: int = 0
     rows: int = 0
     reasons: dict = field(default_factory=dict)
+    # Steps co-location narrowed away that no usable row can add back, so the
+    # graph rule's own answer selects them.
+    unnarrowed: set[str] = field(default_factory=set)
     # Steps the Python record kept on positive evidence. The kernel record
     # may not drop these.
     executes_by_coverage: set[str] = field(default_factory=set)
@@ -135,6 +138,7 @@ def decide(
     out = Decision(steps=set(selection.selected), from_map=set(selection.selected))
 
     table = table if table is not None else fetch_table()
+    keys = None
     if not table.available:
         out.coverage_note = table.unavailable
     else:
@@ -144,7 +148,7 @@ def decide(
         if getattr(state, "pipelines", None):
             out.unreadable_rows = _unreadable_rows(state, table)
         try:
-            _apply_record(out, table, selection, repo, base, head, mode)
+            keys = _apply_record(out, table, selection, repo, base, head, mode)
         except Exception as exc:  # noqa: BLE001 - see the module docstring
             # Broad on purpose. A narrower handler would have to decide what
             # to do with a half-built reading, and the only safe answer is
@@ -155,6 +159,7 @@ def decide(
             out.executes_by_coverage.clear()
             out.executes_by_proxy.clear()
             out.coverage_note = f"coverage unusable ({type(exc).__name__}: {exc})"
+    _give_back_unnarrowed(out, selection, table, keys)
 
     kernels = kernels if kernels is not None else fetch_kernel_evidence()
     if kernels.unavailable:
@@ -167,7 +172,7 @@ def decide(
             )
         except Exception as exc:  # noqa: BLE001 - same reasoning as above
             out.steps = (
-                set(out.from_map) | out.added_by_coverage
+                set(out.from_map) | out.added_by_coverage | out.unnarrowed
             ) - out.dropped_by_coverage
             out.added_by_kernels.clear()
             out.dropped_by_kernels.clear()
@@ -232,7 +237,7 @@ def _apply_record(
     base: str,
     head: str | None,
     mode: PhaseMode = DEFAULT_MODE,
-) -> None:
+) -> RowKeys:
     from .codemap.worktree import state_for
     from .coverage.changed_funcs import build as build_query
     from .coverage.changed_funcs import mark_unfaithful
@@ -296,6 +301,25 @@ def _apply_record(
     out.executes_by_proxy = set(reading.executes_by_proxy)
     out.steps |= out.added_by_coverage
     out.steps -= out.dropped_by_coverage
+    return keys
+
+
+def _give_back_unnarrowed(out: Decision, selection, table: Table, keys) -> None:
+    """Co-location narrows the map on the record's credit. It drops steps the
+    graph reaches and trusts a row to add back any that runs the change. A step
+    with no row, or one too weak to read a silence off, never gets that chance,
+    so the graph rule's answer selects it. vllm#58947 lost the one CPU engine
+    step this way: scheduler.py sits in the import cycle and the CPU family has
+    no rows. If the record did not run at all, no step had that chance.
+    """
+    out.unnarrowed = {
+        s
+        for s in selection.unnarrowed - out.steps
+        if keys is None
+        or (key := keys.key_for(s)) is None
+        or table.unreadable(key) is not None
+    }
+    out.steps |= out.unnarrowed
 
 
 def _append_op_proxies(

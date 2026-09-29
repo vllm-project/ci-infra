@@ -169,6 +169,13 @@ def select(
         weighed = set(claim.evidence_paths) or ({path} | carried)
         for pdata in state.pipelines:
             _apply_claim_to_pipeline(state, sel, claim, pdata, path, weighed)
+        # What co-location gave up, answered the same way but kept out of the
+        # selection: only `decide` knows which of it no row can add back.
+        whole = Selection()
+        for given_up in claim.unnarrowed:
+            for pdata in state.pipelines:
+                _apply_claim_to_pipeline(state, whole, given_up, pdata, path)
+        sel.unnarrowed |= set(whole.selected)
     for path in dict.fromkeys(paths):
         if path in state.exclusive_disabled:
             sel.notes.append(
@@ -238,6 +245,7 @@ def _classify_rust(state: RepoState, path: str) -> Claim:
         claim.step_ids |= bridge.step_ids
         claim.test_files |= bridge.test_files
         claim.run_all |= bridge.run_all
+        claim.unnarrowed += bridge.unnarrowed
         claim.step_detail.update(
             {
                 sid: f"via {RUST_PYO3_BRIDGE_FILE}: {d}"
@@ -746,13 +754,16 @@ def _classify_package_data(state: RepoState, path: str) -> Claim | None:
     if not owning:
         return None
     test_files: set[str] = set()
+    given_up: set[str] = set()
     swapped = 0
     for f in owning:
+        closure = _boot_gated_tests(state, f, graph.reverse_closure({f}))
         colocated = _cycle_colocated_tests(state, f)
         if colocated is None:
-            test_files |= _boot_gated_tests(state, f, graph.reverse_closure({f}))
+            test_files |= closure
             continue
         test_files |= colocated
+        given_up |= closure
         swapped += 1
     # Scripts come off the package's whole reach either way: a member reaches
     # the same ones whether its tests come from reach or co-location, and the
@@ -802,13 +813,20 @@ def _classify_package_data(state: RepoState, path: str) -> Claim | None:
         detail += f"; {family} device family from filename adds {len(fam_steps)} steps"
     if device_scope:
         detail += f"; scoped to device {device_scope}"
-    return Claim(
+    claim = Claim(
         "package-data",
         detail,
         test_files=test_files | script_files,
         step_ids=fam_steps,
         device_scope=device_scope,
     )
+    if given_up:
+        claim.unnarrowed.append(
+            Claim(
+                "package-data", detail, test_files=given_up, device_scope=device_scope
+            )
+        )
+    return claim
 
 
 def _head_graph(state: RepoState, ctx: DiffContext):
@@ -1529,6 +1547,7 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
                     sid: f"via {old}: {d}" for sid, d in sub.step_detail.items()
                 },
                 step_rule=dict(sub.step_rule),
+                unnarrowed=list(sub.unnarrowed),
             )
             family = hardware.family_of_path(path)
             if family:
@@ -1822,12 +1841,13 @@ def colocation_routes(state: RepoState, path: str) -> bool:
 
 
 def _classify_graph(
-    state: RepoState, path: str, *, inherit: bool = True
+    state: RepoState, path: str, *, inherit: bool = True, colocate: bool = True
 ) -> Claim | None:
     """The graph rule: four separate lookups so each stays checkable. Direct
     step references, the test closure, registered-key routing, and hardware
     tagging by name. `inherit=False` blocks a second hop when
-    _inherit_table_coverage recurses in."""
+    _inherit_table_coverage recurses in. `colocate=False` is the answer
+    co-location replaces, which its claim carries as `unnarrowed`."""
     if path in state.preflight.parse_error_paths:
         return Claim(
             "fail-open",
@@ -1854,8 +1874,11 @@ def _classify_graph(
         )
     # After the two guards above, never before: both say the graph is known to
     # be incomplete here, and co-location would be trusting it anyway.
-    colocated = colocation._classify_colocated_tests(state, path)
+    colocated = colocation._classify_colocated_tests(state, path) if colocate else None
     if colocated is not None:
+        whole = _classify_graph(state, path, inherit=inherit, colocate=False)
+        if whole is not None:
+            colocated.unnarrowed.append(whole)
         return colocated
     direct_steps = _direct_step_refs(state, path)
     graph = state.full.graph
@@ -1929,7 +1952,7 @@ def _classify_graph(
     )
     # Here and not earlier, so _nothing_auto_runs claims (rule "graph" but
     # grep-built, not closure-built) can never reach the hub gate.
-    return colocation._colocated_hub(state, path, claim) or claim
+    return (colocate and colocation._colocated_hub(state, path, claim)) or claim
 
 
 def _classify_test_helper(
@@ -1994,6 +2017,7 @@ def _inherit_table_coverage(
     # table's leg marks it droppable, or its hardware coverage could be dropped.
     held: set[str] = set(manual_steps)
     inherited: list[str] = []
+    unnarrowed: list[Claim] = []
     for table in sorted(tables):
         if table == path:
             continue
@@ -2008,6 +2032,7 @@ def _inherit_table_coverage(
         step_ids |= sub.step_ids
         droppable |= sub.droppable_step_ids
         held |= sub.step_ids - sub.droppable_step_ids
+        unnarrowed += sub.unnarrowed
         inherited.append(table)
     if not inherited:
         return None
@@ -2019,6 +2044,7 @@ def _inherit_table_coverage(
         step_ids=step_ids,
         droppable_step_ids=(droppable & step_ids) - held,
         droppable_test_files=True,
+        unnarrowed=unnarrowed,
     )
 
 
@@ -2169,6 +2195,7 @@ def _classify_table(
                 if sub is not None:
                     claim.test_files |= sub.test_files
                     claim.step_ids |= sub.step_ids
+                    claim.unnarrowed += sub.unnarrowed
                     claim.droppable_step_ids |= sub.droppable_step_ids
                     held |= sub.step_ids - sub.droppable_step_ids
                     claim.run_all |= sub.run_all  # empty-closure propagates

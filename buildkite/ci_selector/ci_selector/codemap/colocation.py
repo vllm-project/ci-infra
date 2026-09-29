@@ -278,4 +278,5 @@ def _colocated_hub(state: RepoState, path: str, graph_claim: Claim) -> Claim | N
     )
     if hub is None or len(_pr_auto_selected(state, hub)) >= len(before):
         return None
+    hub.unnarrowed.append(graph_claim)
     return hub
