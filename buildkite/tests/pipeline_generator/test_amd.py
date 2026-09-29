@@ -93,6 +93,11 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkey
         ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX, False, "1"),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX, True, "1"),
+        # MI350X SPX: all four sizes share one Buildkite queue (amd_shadow for testing).
+        ("mi350x_1", AgentQueue.AMD_MI350X, False, "1"),
+        ("mi350x_2", AgentQueue.AMD_MI350X, False, "2"),
+        ("mi350x_4", AgentQueue.AMD_MI350X, False, "4"),
+        ("mi350x_8", AgentQueue.AMD_MI350X, False, "8"),
     ],
 )
 def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_count):
@@ -137,6 +142,10 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
             assert "resources" not in container
         else:
             assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
+
+    # MI350X: all sizes share one queue; only the GPU count in the podSpecPatch differs.
+    if device.startswith("mi350x_"):
+        assert command_step.agents["queue"] == AgentQueue.AMD_MI350X
             assert (
                 container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
             )

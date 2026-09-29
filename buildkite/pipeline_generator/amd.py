@@ -150,6 +150,14 @@ AMD_DEVICE_CONFIGS = {
     DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2),
     DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4),
     DeviceType.AMD_MI355_8.value: AmdDeviceConfig(AgentQueue.AMD_MI355_8, 8),
+    # MI350X SPX — all four sizes share one Buildkite queue (AgentQueue.AMD_MI350X).
+    # GPU count comes from default_gpu_count; the queue name does not encode size.
+    # Each controller also carries a gpu_size=N agent tag (set in rocOps Helm values)
+    # so Buildkite routes the job to the controller whose pod-spec-patch requests N GPUs.
+    DeviceType.AMD_MI350X_1.value: AmdDeviceConfig(AgentQueue.AMD_MI350X, 1),
+    DeviceType.AMD_MI350X_2.value: AmdDeviceConfig(AgentQueue.AMD_MI350X, 2),
+    DeviceType.AMD_MI350X_4.value: AmdDeviceConfig(AgentQueue.AMD_MI350X, 4),
+    DeviceType.AMD_MI350X_8.value: AmdDeviceConfig(AgentQueue.AMD_MI350X, 8),
 }
 
 

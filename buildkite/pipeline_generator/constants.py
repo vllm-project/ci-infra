@@ -37,6 +37,13 @@ class DeviceType(str, Enum):
     AMD_MI355_2 = "mi355_2"
     AMD_MI355_4 = "mi355_4"
     AMD_MI355_8 = "mi355_8"
+    # MI350X SPX — DO DOKS cluster, amd.com/gpu device plugin (not DRA).
+    # All four sizes share one Buildkite queue (amd_mi350); each controller
+    # also carries a gpu_size=N agent tag so jobs route to the right controller.
+    AMD_MI350X_1 = "mi350x_1"
+    AMD_MI350X_2 = "mi350x_2"
+    AMD_MI350X_4 = "mi350x_4"
+    AMD_MI350X_8 = "mi350x_8"
     DGX_SPARK = "dgx-spark"
     AMD_ZEN5_CPU = "zen5"
 
@@ -85,6 +92,9 @@ class AgentQueue(str, Enum):
     AMD_MI355_2 = "amd_mi355_2"
     AMD_MI355_4 = "amd_mi355_4"
     AMD_MI355_8 = "amd_mi355_8"
+    # Single Buildkite queue for all MI350X SPX GPU sizes.
+    # "amd_shadow" is the shadow/test queue name — rename to "amd_mi350" for production.
+    AMD_MI350X = "amd_shadow"
     DGX_SPARK = "dgx-spark"
     REDHAT_H100_FRANKFURT = "RedHat-H100-Frankfurt"
     AMD_ZEN5_CPU = "amd-zen5-cpu"
