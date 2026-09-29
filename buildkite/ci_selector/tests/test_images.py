@@ -346,19 +346,21 @@ def test_a_build_stage_input_keeps_its_image_union(state, vllm_repo):
     )
 
 
+# Every copy but the tree-keeping envs.py lands outside the source tree, so
+# only the stage legs decide whether it runs.
 _STAGED = """\
 FROM ${BASE} AS base
-COPY tools/setup_step.py tools/setup_step.py
-RUN python3 tools/setup_step.py
+COPY tools/setup_step.py /tmp/
+RUN python3 /tmp/setup_step.py
 FROM base AS deps
-COPY vllm/inherited.py vllm/inherited.py
+COPY vllm/inherited.py /opt/check.py
 FROM deps AS test
-RUN python3 -m vllm.inherited --check
+RUN python3 /opt/check.py
 FROM base AS build
 COPY vllm/envs.py vllm/envs.py
 RUN python3 setup.py bdist_wheel
 FROM base AS mounted
-COPY vllm/mounted.py vllm/mounted.py
+COPY vllm/mounted.py /w/
 FROM base AS runtime
 COPY ./vllm/collect_env.py .
 RUN --mount=type=bind,from=mounted,src=/w,target=/w pip install dist/*.whl
@@ -377,6 +379,36 @@ def test_a_named_copy_is_payload_only_where_no_build_step_runs_it():
     assert payload_sources(_STAGED) == {"vllm/collect_env.py"}
     # An ARG-built stage name could be any stage, so nothing is payload.
     assert payload_sources(_STAGED + "COPY --from=${PICK} /a /a\n") == set()
+    unread = _STAGED.replace("FROM deps AS test", "FROM base AS test")
+    assert payload_sources(unread) == {"vllm/collect_env.py", "vllm/inherited.py"}
+
+
+def test_a_module_left_in_the_source_tree_is_never_payload():
+    """setup.py loads vllm/envs.py by path, and `pip install .` packages every
+    module where it sits, so a build can run a copy without naming it. Here
+    no from= reads the stage either: the wheel is built in the last one. Read
+    as payload, envs.py would lose the image routing only this rule gives it."""
+    from ci_selector.codemap.externals import payload_sources
+
+    wheel = (
+        "FROM python:3.12 AS base\n"
+        "FROM base AS wheel\n"
+        "COPY vllm/envs.py vllm/envs.py\n"
+        "COPY vllm/__init__.py vllm/\n"
+        "COPY setup.py setup.py\n"
+        "RUN python3 setup.py bdist_wheel\n"
+    )
+    assert payload_sources(wheel) == set()
+    installed = (
+        "FROM python:3.12 AS test\n"
+        "COPY vllm/envs.py /workspace/vllm/envs.py\n"
+        "COPY setup.py pyproject.toml ./\n"
+        "RUN pip install --no-build-isolation .\n"
+    )
+    assert payload_sources(installed) == set()
+    # Moved out of the tree, the same module is carried, not built.
+    moved = installed.replace("/workspace/vllm/envs.py", "/workspace/envs.py")
+    assert payload_sources(moved) == {"vllm/envs.py"}
 
 
 def test_a_payload_copy_of_a_routed_module_is_not_an_image_input(state):

@@ -164,7 +164,9 @@ def _colocated_claim(
     # A script a step runs that imports the file directly reaches it as surely
     # as a test importing it: `vllm serve` runs the entry module that imports
     # every CLI subcommand. Joined after the gate above, since a script is
-    # coverage and not a co-located answer.
+    # coverage and not a co-located answer. Direct importers only, as with
+    # tests, so a file deeper in the entry's closure (cli/types.py,
+    # engine/arg_utils.py) does not reach every step that runs `vllm`.
     runners = run_files(state, state.full.graph.reverse.get(path, ()))
     return Claim(
         "colocated-tests",

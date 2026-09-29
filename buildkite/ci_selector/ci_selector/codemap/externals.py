@@ -54,23 +54,25 @@ def release_pipeline_refs(repo: Path) -> frozenset[str]:
     return frozenset(refs)
 
 
+def _copy_args(line: str) -> tuple[list[str], str] | None:
+    """(sources, destination) of one COPY/ADD line, None for any other line and
+    for a `--from=` stage copy, whose sources are image paths and not repo
+    files."""
+    if not line.upper().startswith(("COPY ", "ADD ")) or "--from=" in line:
+        return None
+    tokens = [t for t in line.split()[1:] if not t.startswith("--")]
+    if len(tokens) < 2:
+        return None
+    return [s[2:] if s.startswith("./") else s for s in tokens[:-1]], tokens[-1]
+
+
 def _copy_sources(text: str) -> list[str]:
-    """Sources of every COPY/ADD, minus `--from=` stage copies, whose sources
-    are image paths and not repo files."""
-    joined = join_continuations(text)
+    """Sources of every COPY/ADD, minus `--from=` stage copies."""
     out: list[str] = []
-    for raw in joined.splitlines():
-        line = raw.strip()
-        upper = line.upper()
-        if not (upper.startswith("COPY ") or upper.startswith("ADD ")):
-            continue
-        if "--from=" in line:
-            continue
-        tokens = [t for t in line.split()[1:] if not t.startswith("--")]
-        if len(tokens) < 2:
-            continue
-        for src in tokens[:-1]:  # last token is the destination
-            out.append(src[2:] if src.startswith("./") else src)
+    for raw in join_continuations(text).splitlines():
+        args = _copy_args(raw.strip())
+        if args:
+            out += args[0]
     return out
 
 
@@ -93,19 +95,21 @@ def _stage_refs(token: str, names: list[str]) -> set[int]:
 
 
 def payload_sources(text: str) -> set[str]:
-    """Named COPY/ADD sources the build carries without running: no line of
-    their stage or of a stage built FROM it names the file, other than a copy,
-    and no from= reads one of those stages into another. Any line, not only a
-    RUN, so a heredoc body counts.
+    """Named COPY/ADD sources the build carries without running: moved out of
+    the source tree, no line of their stage or of a stage built FROM it names
+    the file, other than a copy, and no from= reads one of those stages into
+    another. Any line, not only a RUN, so a heredoc body counts.
 
     vllm#58978 edited vllm/collect_env.py, which docker/Dockerfile copies into
     vllm-base for users and Dockerfile.cpu leaves in its test stage. Neither
     build runs it, and a test imports the module from the wheel like any
-    other. vllm/envs.py lands in csrc-build, which --from reads, so setup.py
-    loading it by path keeps it a build input.
+    other. A copy that keeps its repo path is what a build reads without naming
+    it: setup.py loads vllm/envs.py by path, and `pip install .` packages every
+    module where it sits.
     """
     stages: list[tuple[str, str, list[str]]] = []  # name, FROM token, lines
     copies: list[tuple[int, str, set[str]]] = []  # stage, source, names
+    in_tree: set[str] = set()
     reads: list[str] = []
     for raw in join_continuations(text).splitlines():
         line = raw.strip()
@@ -119,36 +123,37 @@ def payload_sources(text: str) -> set[str]:
         reads += _STAGE_READ_RE.findall(line)
         if not line.upper().startswith(("COPY ", "ADD ")):
             stages[-1][2].append(line)
-        elif "--from=" not in line:
-            tokens = [t for t in line.split()[1:] if not t.startswith("--")]
-            srcs, dest = tokens[:-1], tokens[-1] if tokens else ""
-            for src in srcs:
-                src = (src[2:] if src.startswith("./") else src).rstrip("/")
-                # The module name too: `python -m vllm.collect_env` runs it.
-                wanted = {posixpath.splitext(posixpath.basename(src))[0]}
-                if len(srcs) == 1 and not dest.endswith("/") and dest != ".":
-                    wanted.add(posixpath.splitext(posixpath.basename(dest))[0])
-                copies.append((len(stages) - 1, src, wanted))
+            continue
+        srcs, dest = _copy_args(line) or ([], "")
+        to_file = len(srcs) == 1 and not dest.endswith("/") and dest != "."
+        for src in srcs:
+            src = src.rstrip("/")
+            base = posixpath.basename(src)
+            landed = posixpath.normpath(dest if to_file else f"{dest}/{base}")
+            if landed == src or landed.endswith(f"/{src}"):
+                in_tree.add(src)
+            # The module name too: `python -m vllm.collect_env` runs it.
+            wanted = {posixpath.splitext(base)[0]}
+            if to_file:
+                wanted.add(posixpath.splitext(posixpath.basename(dest))[0])
+            copies.append((len(stages) - 1, src, wanted))
     names = [name for name, _, _ in stages]
     read = {i for token in reads for i in _stage_refs(token, names)}
-    children: dict[int, set[int]] = {i: set() for i in range(len(stages))}
-    for i, (_, parent, _) in enumerate(stages):
-        for p in _stage_refs(parent, names[:i]):
-            children[p].add(i)
+    # Each stage with every stage built FROM it. A FROM names only an earlier
+    # stage, so walking back finishes a stage before its parent takes it in.
+    built_on = [{i} for i in range(len(stages))]
+    for i in reversed(range(len(stages))):
+        for parent in _stage_refs(stages[i][1], names[:i]):
+            built_on[parent] |= built_on[i]
     ran: set[str] = set()
     carried: set[str] = set()
     for stage, src, wanted in copies:
-        built_on, frontier = {stage}, [stage]
-        while frontier:
-            for child in children[frontier.pop()] - built_on:
-                built_on.add(child)
-                frontier.append(child)
         runs = any(
             j in read or any(n in line for line in stages[j][2] for n in wanted)
-            for j in built_on
+            for j in built_on[stage]
         )
         (ran if runs else carried).add(src)
-    return carried - ran
+    return carried - ran - in_tree
 
 
 def docker_image_inputs(repo: Path) -> dict[str, str]:

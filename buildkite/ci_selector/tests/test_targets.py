@@ -325,6 +325,23 @@ def test_a_console_script_targets_its_entry_module(tmp_path):
     assert not st.unparsable
 
 
+def test_a_background_command_ends_at_its_ampersand(tmp_path):
+    """Before `vllm` parsed, `vllm serve m & pytest y` was unparsable and ran
+    its step on every PR. Parsed, the `&` has to end the server call, or y is
+    read as its argument and a change to y selects nothing. `sleep 5 & pytest
+    y` already lost y that way."""
+    entry = _console_repo(tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("")
+    for server, targets in (
+        ("vllm serve m --port 8000", [entry, "tests/test_x.py"]),
+        ("sleep 5", ["tests/test_x.py"]),
+    ):
+        st = map_step(tmp_path, _wrap_step([f"{server} & pytest -v tests/test_x.py"]))
+        assert [t.path for t in st.targets] == targets
+        assert not st.unparsable
+
+
 def test_a_console_script_with_no_entry_file_stays_unknown(tmp_path):
     """An entry this checkout cannot resolve to a file routes nothing, so the
     command is still unparsable and preflight still runs the step."""

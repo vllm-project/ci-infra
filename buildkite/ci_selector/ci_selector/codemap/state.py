@@ -26,7 +26,7 @@ from .pipeline.images import ArtifactGraph, add_image_inputs, build_artifact_gra
 from .pipeline.invoked_tests import invoked_files, legacy_amd_invoked
 from .pipeline.scripts import scan_script
 from .pipeline.step import LoadReport, PipelineConfig, Step
-from .pipeline.targets import StepTargets, map_step
+from .pipeline.targets import StepTargets, console_scripts, map_step
 from .registered_names import KeyIndex
 from .repo import TestIndex, build_test_index, is_test_file, test_file_catalog
 from .rust_workspace import RustWorkspace
@@ -96,11 +96,12 @@ class RepoState:
     def build(cls, repo: Path) -> RepoState:
         report = LoadReport()
         pipelines = []
+        scripts = console_scripts(repo)
         for config in load_pipeline_configs(repo):
             steps = load_steps(repo, config, report)
             detect_duplicate_ids(steps, report)
             targets = {
-                s.step_id: map_step(repo, s, script_scanner=scan_script) for s in steps
+                s.step_id: map_step(repo, s, scan_script, scripts) for s in steps
             }
             pipelines.append(PipelineData(config, steps, targets))
         full = build_full_graph(repo)

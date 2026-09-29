@@ -15,7 +15,7 @@ import yaml
 from ...handwritten import DEFAULT_WORKING_DIR, LEGACY_CI_FILES
 from .scripts import scan_script
 from .step import Step
-from .targets import StepTargets, map_step
+from .targets import StepTargets, console_scripts, map_step
 
 
 def invoked_files(catalog: list[str], targets: list[StepTargets]) -> set[str]:
@@ -59,5 +59,6 @@ def legacy_amd_invoked(repo: Path, catalog: list[str]) -> set[str]:
                 working_dir=raw.get("working_dir") or DEFAULT_WORKING_DIR,
             )
         )
-    targets = [map_step(repo, s, script_scanner=scan_script) for s in steps]
+    scripts = console_scripts(repo)
+    targets = [map_step(repo, s, scan_script, scripts) for s in steps]
     return invoked_files(catalog, targets)

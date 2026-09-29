@@ -11,6 +11,7 @@ quiet return, or the tests those lines run would look like nothing runs them.
 
 from __future__ import annotations
 
+import functools
 import shlex
 
 import regex as re
@@ -54,7 +55,7 @@ def scan_script(script: str, parser, depth: int = 0) -> None:
         return
     # Raw text, not joined: key matching reads words, not commands.
     parser.out.haystack += "\n" + text
-    console = _console_script_re(parser.console_scripts)
+    console = _console_script_re(tuple(parser.console_scripts))
     saved_cwd = parser.cwd
     joined = join_continuations(text)
     payloads = [m.span() for m in CONTAINER_PAYLOAD_RE.finditer(joined)]
@@ -106,7 +107,8 @@ def scan_script(script: str, parser, depth: int = 0) -> None:
     parser.cwd = saved_cwd
 
 
-def _console_script_re(scripts: dict[str, str]):
+@functools.cache
+def _console_script_re(names: tuple[str, ...]):
     """A console-script name followed by a subcommand: `vllm serve`, `$(vllm
     collect-env)`, `CMD=(vllm serve ...)`, `"${WRAP[@]}" vllm snapshot`.
     Loose, since a false hit only adds a target; a quoted `pkill -f "vllm
@@ -114,10 +116,10 @@ def _console_script_re(scripts: dict[str, str]):
     `pip install vllm --pre`, a path ending in /vllm, and "this vllm version."
     in an annotation heredoc, whose step would otherwise run on every change
     the entry module reaches."""
-    if not scripts:
+    if not names:
         return None
-    names = "|".join(re.escape(n) for n in sorted(scripts, key=len, reverse=True))
-    return re.compile(rf"(?:^|[\s;&|(\"'=])({names})\s+[a-z][\w-]*(?=$|[\s;&|)\"'`])")
+    alts = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    return re.compile(rf"(?:^|[\s;&|(\"'=])({alts})\s+[a-z][\w-]*(?=$|[\s;&|)\"'`])")
 
 
 def _tokenize(argstr: str) -> list[str] | None:

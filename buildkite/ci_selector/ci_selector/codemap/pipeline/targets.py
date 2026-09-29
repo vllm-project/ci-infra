@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import posixpath
 import shlex
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import regex as re
+import tomllib
 
 from ...handwritten import (
     BENIGN_CMDS,
@@ -40,7 +40,7 @@ NOT_NAME_RE = re.compile(r"-not\s+-name\s+'?\"?([\w*.\[\]-]+)")
 IF_THEN_RE = re.compile(
     r"^if\s+.*?;\s*then\s+(?P<then>.*?)(?:;\s*else\s+(?P<else>.*?))?;\s*fi\s*;?\s*$"
 )
-OPERATORS = {"&&", "||", ";"}
+OPERATORS = {"&&", "||", ";", "&"}
 # A `case` arm label.
 CASE_ARM_RE = re.compile(r"^[\w*?|\[\]-]+\)$")
 
@@ -128,13 +128,13 @@ class CommandParser:
     """Parse one step's commands. Script recursion is delegated to the scanner,
     which calls back into parse_pytest, resolve_path, chdir, cwd and out."""
 
-    def __init__(self, repo: Path, step: Step, script_scanner=None):
+    def __init__(self, repo: Path, step: Step, script_scanner=None, scripts=None):
         self.repo = repo
         self.step = step
         self.out = StepTargets(step_id=step.step_id)
         self.cwd = working_dir_to_repo_rel(step.working_dir)
         self.script_scanner = script_scanner
-        self.console_scripts = console_scripts(repo)
+        self.console_scripts = console_scripts(repo) if scripts is None else scripts
 
     def run(self) -> StepTargets:
         for command in self.step.commands:
@@ -478,14 +478,17 @@ class CommandParser:
             self.out.dangling.append(token)
 
 
-def map_step(repo: Path, step: Step, script_scanner=None) -> StepTargets:
-    return CommandParser(repo, step, script_scanner).run()
+def map_step(repo: Path, step: Step, script_scanner=None, scripts=None) -> StepTargets:
+    """`scripts` is `console_scripts(repo)`, read once by a caller mapping many
+    steps."""
+    return CommandParser(repo, step, script_scanner, scripts).run()
 
 
 def _split_segments(tokens: list[str]) -> list[list[str]]:
     """Split on shell operators. The right side of a pipe is skipped, but `&&`
     and `;` resume, so `torchrun x.py | grep ok && pytest y` still yields the
-    pytest call."""
+    pytest call. So does a background `&`, or `vllm serve m & pytest y` reads
+    as one server call with the test as its arguments."""
     segments: list[list[str]] = [[]]
     skipping = False
     for tok in tokens:
