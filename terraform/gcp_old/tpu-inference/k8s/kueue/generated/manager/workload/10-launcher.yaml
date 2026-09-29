@@ -92,6 +92,8 @@ data:
     queue_max_seconds: 43200
     runtime_max_seconds: 43200
     admission_max_seconds: 3600
+    dispatch_retry_seconds: 300
+    dispatch_retries: 2
     timing_table: cloud-ullm-inference-ci-cd.ci_efficiency_metrics.kube_workload_timing
     workers:
       tpu-ci-us-central1:

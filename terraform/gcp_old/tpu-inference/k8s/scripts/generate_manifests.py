@@ -651,6 +651,8 @@ def launcher_profiles(
             "queue_max_seconds": int(tfvars["tpu_queue_max_seconds"]),
             "runtime_max_seconds": int(tfvars["tpu_runtime_max_seconds"]),
             "admission_max_seconds": int(tfvars["tpu_admission_max_seconds"]),
+            "dispatch_retry_seconds": int(tfvars["tpu_dispatch_retry_seconds"]),
+            "dispatch_retries": int(tfvars["tpu_dispatch_retries"]),
             # Where the launcher streams one timing record per workload. The
             # table is modules/ci_monitoring's, beside the Buildkite step
             # table it joins to on job_id; k8s/iam.tf lets the launcher write
