@@ -661,6 +661,22 @@ def job_specs(doc):
     return [rj["template"]["spec"] for rj in doc["spec"].get("replicatedJobs", [])]
 
 
+def chip_hosts(doc):
+    """How many hosts the workload holds chips on: one per pod holding chips.
+
+    Counted over every role and replica, since the profile describes one
+    slice and a disaggregated workload can hold a slice per role.
+    """
+    if doc["kind"] == "Job":
+        roles = [(1, doc["spec"])]
+    else:
+        roles = [(rj.get("replicas", 1), rj["template"]["spec"])
+                 for rj in doc["spec"].get("replicatedJobs", [])]
+    return sum(int(replicas) * int(job.get("parallelism", 1))
+               for replicas, job in roles
+               if pod_chips(job["template"]["spec"]))
+
+
 def pod_metadatas(doc):
     return [t.setdefault("metadata", {}) for t in pod_templates(doc)]
 
@@ -1720,6 +1736,8 @@ def main():
     finalise(doc, profile, registry, name, labels, owner_reference(),
              shlex.join(command) if command else None, manifest)
     kind = SUPPORTED_KINDS[doc["kind"]]
+    # The cpu profile's one host when no pod holds chips.
+    hosts = chip_hosts(doc) or int(profile["hosts"])
 
     # One record per submitted workload, printed on every way out of the watch
     # below. Times are UTC RFC 3339, taken from the controllers' own
@@ -1732,8 +1750,8 @@ def main():
         "queue": profile["queue"],
         "machine_type": profile.get("machine_type"),
         "topology": profile.get("topology"),
-        "hosts": int(profile["hosts"]),
-        "chips": int(profile["chips"]) * int(profile["hosts"]),
+        "hosts": hosts,
+        "chips": int(profile["chips"]) * hosts,
         "launcher_started_at": launcher_started,
         "requeues": 0,
         "redispatches": 0,
@@ -1768,7 +1786,7 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
 
     log(f"submitting {doc['kind']} {name} to {profile['queue']} "
-        f"({profile['hosts']} x {profile['chips']} chips, from {manifest})")
+        f"({hosts} x {profile['chips']} chips, from {manifest})")
     subprocess.run(
         ["kubectl", "-n", NAMESPACE, "apply", "-f", "-"],
         input=json.dumps(doc), text=True, check=True,
