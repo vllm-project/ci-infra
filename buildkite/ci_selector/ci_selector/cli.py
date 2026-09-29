@@ -210,11 +210,14 @@ def _restrict(sel, d):
     steps = d.steps
 
     def rule(s: str) -> str:
-        return "kernels" if s in d.added_by_kernels else "coverage"
+        if s in d.added_by_kernels:
+            return "kernels"
+        return "graph" if s in d.unnarrowed else "coverage"
 
     why = {
         "kernels": "kernels: a row shows this step launched a kernel compiled from a changed file",
         "coverage": "coverage: a row shows this step ran a changed file",
+        "graph": "graph: co-location narrowed this step away and no usable row can add it back",
     }
     added = {s: [why[rule(s)]] for s in steps - set(sel.selected)}
     return dataclasses.replace(

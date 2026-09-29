@@ -133,6 +133,74 @@ def test_a_step_with_no_row_is_left_to_the_map(table, tmp_repo, diff, unstaled):
     assert "vllm_ci:no-row" not in d.dropped_by_coverage
 
 
+@pytest.fixture
+def thin_table(tmp_path, tmp_repo):
+    """`table` plus a row too thin to read a silence off, for another file."""
+    jobs = {**JOBS, "thin": [("other.py", "elsewhere")]}
+    return make_table(tmp_path, tmp_repo, jobs, thin_keys={"thin"})
+
+
+def _narrowed(*step_ids, selected=("vllm_ci:runs-mod",), path="vllm/mod.py"):
+    """A map that selected `selected` and let co-location narrow the rest away."""
+    sel = _selection(*selected, path=path)
+    sel.unnarrowed = {s: [[path]] for s in step_ids}
+    return sel
+
+
+def test_colocation_narrows_only_where_a_usable_row_can_speak(
+    thin_table, tmp_repo, diff, unstaled
+):
+    """Co-location narrows on the record's credit, trusting a row to add back
+    any step that runs the change. `elsewhere`'s healthy row shows it ran none
+    of it, so that narrowing stands. `no-row` has nothing to add it back and
+    `thin`'s silence cannot be read, so the graph rule's answer selects both.
+    vllm#58947 lost the CPU engine step this way."""
+    sel = _narrowed("vllm_ci:elsewhere", "vllm_ci:thin", "vllm_ci:no-row")
+    d = decide(None, sel, tmp_repo.root, *diff, table=thin_table)
+    assert d.unnarrowed == {"vllm_ci:thin", "vllm_ci:no-row"}
+    assert d.unnarrowed <= d.steps
+    assert "vllm_ci:elsewhere" not in d.steps
+
+
+def test_a_narrowed_step_stays_out_when_the_change_gives_it_nothing_to_run(
+    table, tmp_repo, unstaled
+):
+    """The record drops a map step picked only for a file whose change keeps
+    behaviour, row or no row, so co-location's narrowing of one stands too.
+    vllm#58687 only annotated a return type, and 6 steps with no usable row
+    came back for it."""
+    base = tmp_repo.head()
+    tmp_repo.write(
+        "vllm/mod.py", MODULE_SOURCE.replace("def plain():", "def plain() -> int:")
+    )
+    head = tmp_repo.commit("annotate plain")
+    sel = _narrowed("vllm_ci:no-row")
+    d = decide(None, sel, tmp_repo.root, base, head, table=table)
+    assert d.unnarrowed == set()
+    assert "vllm_ci:no-row" not in d.steps
+
+
+def test_without_the_record_every_narrowed_step_comes_back(
+    table, tmp_repo, diff, monkeypatch
+):
+    """No table, or a record that failed, read no row at all, so nothing
+    co-location narrowed away could have been added back. `elsewhere` would
+    keep its narrowing if the record had run."""
+    from ci_selector.coverage.table import Table
+
+    sel = _narrowed("vllm_ci:elsewhere", "vllm_ci:no-row")
+    missing = Table(None, unavailable="no table here")
+    d = decide(None, sel, tmp_repo.root, *diff, table=missing)
+    assert d.steps == {"vllm_ci:runs-mod", "vllm_ci:elsewhere", "vllm_ci:no-row"}
+
+    def boom(*a, **k):
+        raise RuntimeError("commit not in this checkout")
+
+    monkeypatch.setattr("ci_selector.decide.newest_commit", boom)
+    d = decide(None, sel, tmp_repo.root, *diff, table=table)
+    assert d.steps == {"vllm_ci:runs-mod", "vllm_ci:elsewhere", "vllm_ci:no-row"}
+
+
 def test_the_freshness_gate_blocks_a_drop(table, tmp_repo, diff, monkeypatch):
     """The gate, and the reason it exists: a row whose step has moved since it
     was recorded describes a step that no longer exists, so it may not drop.

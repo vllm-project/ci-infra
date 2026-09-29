@@ -2694,6 +2694,25 @@ def test_a_cycle_file_is_routed_by_colocation_and_selects_far_less(state):
     )
 
 
+def test_nothing_colocation_narrows_away_is_lost_to_decide(state):
+    """Co-location drops steps on the record's credit, so what it gives up must
+    reach `decide`, which weighs each as the record would. Every step the
+    rule-off answer selects is still selected or in `unnarrowed`, for both arms
+    and the package-data swap. vllm#58947: scheduler.py is in the cycle, and
+    the CPU engine step it needs has no row."""
+    # A chat template is package data whose owners all sit in the cycle. The
+    # H20 table is too, but a step running `vllm serve` now reaches it anyway.
+    template = "vllm/transformers_utils/chat_templates/template_basic.jinja"
+    for path in (*COLOCATED_HUBS, "vllm/v1/core/sched/scheduler.py", template):
+        on = select(state, [path])
+        off = _select_without_colocation(state, path)
+        assert on.unnarrowed, f"{path}: nothing was narrowed"
+        assert set(on.unnarrowed) == set(off.selected) - set(on.selected), path
+    cpu = "vllm_ci:cpu-language-generation-and-pooling-model-tests"
+    scheduler = select(state, ["vllm/v1/core/sched/scheduler.py"])
+    assert cpu in scheduler.unnarrowed and cpu not in scheduler.selected
+
+
 def _without_colocation(call):
     import os
 

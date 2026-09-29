@@ -23,6 +23,7 @@ direct importers is what makes that case rare.
 
 from __future__ import annotations
 
+import contextlib
 import os
 
 from ..handwritten import PR_PIPELINE
@@ -59,6 +60,9 @@ MIN_GRAPH_STEPS = 90
 
 MODES = ("on", "off", "cycle-only")
 
+# Set only inside `switched_off`.
+_switched_off = False
+
 
 def mode() -> str:
     """Which arms of the rule are live. Unset means "on", the full rule.
@@ -67,12 +71,26 @@ def mode() -> str:
     arm and the escape hatch. An unrecognized value raises, since reading a typo
     as "off" would look exactly like the rule doing nothing.
     """
+    if _switched_off:
+        return "off"
     raw = os.environ.get(ENV_VAR)
     if raw is None or raw == "":
         return "on"
     if raw in MODES:
         return raw
     raise ValueError(f"{ENV_VAR}={raw!r}, expected one of: {', '.join(MODES)}")
+
+
+@contextlib.contextmanager
+def switched_off():
+    """Every arm off, whatever the env says: how `select` gets the graph rule's
+    own answer to hand `decide` beside the narrower one."""
+    global _switched_off
+    was, _switched_off = _switched_off, True
+    try:
+        yield
+    finally:
+        _switched_off = was
 
 
 def colocated_tests(state: RepoState, path: str) -> tuple[frozenset[str], str | None]:

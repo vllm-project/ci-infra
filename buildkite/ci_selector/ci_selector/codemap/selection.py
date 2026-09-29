@@ -40,6 +40,9 @@ class Selection:
     # `selected`, and the only thing that answers "what does the map say about
     # this one file". A step in no value here is always selected anyway.
     selected_by_file: dict[str, list[str]] = field(default_factory=dict)
+    # auto steps the answer with co-location off selects and this one does not,
+    # shaped like `selected_paths`. Not selected: `decide` weighs them.
+    unnarrowed: dict[str, list[list[str] | None]] = field(default_factory=dict)
     # pipeline -> the changed file whose claim escalated it to run-all
     run_all_paths: dict[str, str] = field(default_factory=dict)
     manual_paths: dict[str, list[list[str] | None]] = field(default_factory=dict)

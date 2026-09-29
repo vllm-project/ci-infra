@@ -178,6 +178,16 @@ def select(
     _apply_preflight(state, sel)
     _apply_run_all(state, sel)
     _add_always_run(state, sel)
+    if colocation.mode() != "off":
+        # Co-location narrows on the record's credit, so what it gave up goes
+        # to `decide` too, kept out of the selection.
+        with colocation.switched_off():
+            whole = select(state, paths, base=base, head=head)
+        sel.unnarrowed = {
+            s: paths
+            for s, paths in whole.selected_paths.items()
+            if s not in sel.selected
+        }
     return sel
 
 
