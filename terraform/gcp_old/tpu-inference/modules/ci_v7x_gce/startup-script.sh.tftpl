@@ -11,6 +11,14 @@ timeout 30 systemctl stop buildkite-agent 2>/dev/null \
   || systemctl kill -s SIGKILL buildkite-agent 2>/dev/null \
   || true
 
+# vllm-torchtpu's Raiden KV-offload controllers listen on fixed ports in
+# 47800-48899, inside Linux's ephemeral range. When the kernel hands one of them
+# to another socket first, an offload worker probing for its controller
+# "registers" with that socket instead, and its engine times out waiting for a
+# registration that never comes. Keep the kernel from assigning them.
+echo 'net.ipv4.ip_local_reserved_ports = 47800-48899' > /etc/sysctl.d/60-tpu-ci-reserved-ports.conf
+sysctl -p /etc/sysctl.d/60-tpu-ci-reserved-ports.conf
+
 apt-get update
 # Unlike the Cloud TPU runtime image, the accelerator image has no Docker.
 apt-get install -y curl build-essential jq git python3 python3-pip docker.io
