@@ -438,3 +438,88 @@ def test_a_change_inside_one_platform_branch_is_tagged(tmp_path, old, new, famil
     git("commit", "-qam", "edit")
     (f,) = build(repo, base, git("rev-parse", "HEAD")).files
     assert f.platform == family
+
+
+SCOPES_SRC = """\
+import vllm.envs as envs
+from vllm.platforms import current_platform
+
+k = 1
+
+if current_platform.is_xpu():
+    def step():
+        yield 1
+
+
+def step():
+    if current_platform.is_xpu():
+        step.calls = 0
+    return 1
+
+
+if current_platform.is_xpu():
+    step.calls = 1
+
+
+def pick(ts):
+    if current_platform.is_xpu():
+        ts = sorted(ts, key=lambda t: t.numel())
+    size = lambda t: numel(t)
+    if current_platform.is_xpu():
+        ts = ts[:1]
+    pinned = lambda: envs.VLLM_PIN_VIEWS
+    return [size(t) for t in ts if pinned()]
+
+
+class Views:
+    if current_platform.is_xpu():
+        pass
+    k = 2
+"""
+
+MOVE_A_LAMBDA = [
+    ("ts = sorted(ts, key=lambda t: t.numel())", "ts = list(ts)"),
+    ("ts = ts[:1]", "ts = sorted(ts, key=lambda u: u.numel())"),
+]
+
+
+@pytest.mark.parametrize(
+    "edits, family",
+    [
+        (MOVE_A_LAMBDA, "xpu"),
+        # `numel` turns free in `size`, which raises NameError on CUDA.
+        ([*MOVE_A_LAMBDA, ("ts = list(ts)", "from vllm.utils import numel")], None),
+        ([("ts = ts[:1]", "import vllm.envs as envs")], None),  # read by `pinned`
+        ([("pass", "global k")], None),  # `k = 2` now sets the module's `k`
+        (
+            [
+                ("    def step():\n        yield 1", "    step = None"),
+                ("step.calls = 0", "yield"),  # the `step` CUDA runs, a generator
+                ("step.calls = 1", "def step():\n        return 1"),
+            ],
+            None,
+        ),
+    ],
+    ids=[
+        "moves-a-lambda",
+        "moves-a-lambda-and-rebinds-for-another",
+        "rebinds-for-a-closure",
+        "globals-a-class-name",
+        "moves-a-generator-and-makes-one",
+    ],
+)
+def test_a_platform_branch_leaves_every_other_scope_as_it_was(tmp_path, edits, family):
+    """A branch that rebinds a name a nested scope or a class body reads
+    reaches past it too. Scopes of one name pair up in order, so a lambda
+    moved from one XPU branch to another must not pair an unchanged lambda
+    with the wrong one and hide a name it now reads free."""
+    repo = Repo(tmp_path)
+    repo.write("vllm/u.py", SCOPES_SRC)
+    base = repo.commit("base")
+    text = SCOPES_SRC
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    repo.write("vllm/u.py", text)
+    (f,) = build(repo.root, base, repo.commit("edit")).files
+    assert f.platform == family

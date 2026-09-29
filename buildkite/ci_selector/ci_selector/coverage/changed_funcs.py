@@ -438,7 +438,7 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
             if (
                 len(placed) == 1
                 and False not in placed
-                and _resolves_alike(before, after, shown)
+                and _resolves_alike(before, base_lines, after, head_lines, shown)
             ):
                 platform = placed.pop()
         query.files.append(
@@ -511,17 +511,21 @@ def _platform_of_lines(text: str | None, lines: set[int]) -> str | None | bool:
     return found.pop() if len(found) == 1 else False
 
 
-def _scopes(source: str, path: str) -> dict[str, list[dict[str, object]]]:
+def _scopes(
+    source: str, path: str, lines: set[int]
+) -> dict[str, list[dict[str, object]]]:
     """Per scope, keyed by the path it nests in: how each name it uses
     resolves, local, free or global. Per code object, under its qualname: its
     flags, which tell a generator or a coroutine. The compiler fixes both per
-    scope, not per line."""
+    scope, not per line. Scopes that start on one of `lines` are left out."""
     found: dict[str, list[dict[str, object]]] = {}
 
     def how(s: symtable.Symbol) -> str:
         return "local" if s.is_local() else "free" if s.is_free() else "global"
 
     def walk(table: symtable.SymbolTable, key: str) -> None:
+        if table.get_lineno() in lines:
+            return
         found.setdefault(key, []).append(
             {s.get_name(): how(s) for s in table.get_symbols()}
         )
@@ -530,11 +534,18 @@ def _scopes(source: str, path: str) -> dict[str, list[dict[str, object]]]:
 
     walk(symtable.symtable(source, path, "exec"), "")
     for c in code_objects(compile(source, path, "exec")):
-        found.setdefault(c.co_qualname, []).append({"co_flags": c.co_flags})
+        if c.co_firstlineno not in lines:
+            found.setdefault(c.co_qualname, []).append({"co_flags": c.co_flags})
     return found
 
 
-def _resolves_alike(before: str | None, after: str | None, path: str) -> bool:
+def _resolves_alike(
+    before: str | None,
+    base_lines: set[int],
+    after: str | None,
+    head_lines: set[int],
+    path: str,
+) -> bool:
     """Whether each scope both sides have resolves each name both use the same
     way, and keeps its flags.
 
@@ -542,14 +553,18 @@ def _resolves_alike(before: str | None, after: str | None, path: str) -> bool:
     Reviewing vllm#58948 showed that an `import vllm.envs as envs` added to a
     function's XPU branch makes `envs` local to all of it, so a use outside
     the branch raises UnboundLocalError on CUDA; a `yield` there makes the
-    function a generator. A name or a scope only one side has is used only on
-    changed lines, so it decides nothing elsewhere. Local and cell are one: a
-    closure capturing a local does not change how the function reads it.
+    function a generator. A scope that starts on a changed line lies inside
+    the branch, so it is left out and the rest pair up in order: lambdas all
+    share one key, and one moved from an XPU branch to another must not pair
+    an unchanged lambda with the wrong one. A name only one of a pair uses is
+    used on changed lines, or by a nested scope that then resolves it
+    differently. Local and cell are one: a closure capturing a local does not
+    change how the function reads it.
     """
     if before is None or after is None:
         return False
     try:
-        a, b = _scopes(before, path), _scopes(after, path)
+        a, b = _scopes(before, path, base_lines), _scopes(after, path, head_lines)
     except Exception:
         return False
     return all(
