@@ -393,6 +393,9 @@ variable "worker_clusters" {
       # lend out whatever is idle. Summed across a cluster it should be the
       # chips the reservation actually has free, which max_nodes oversubscribes.
       nominal_nodes = number
+
+      slices                = optional(number, 1)
+      reclaim_within_cohort = optional(string, "Never")
     })), [])
   }))
   description = "Worker clusters. location is a region; the cluster pins no zones, because only a TPU node cares which zone it is in and its own node pool pins it there."
@@ -427,6 +430,24 @@ variable "worker_clusters" {
       ])) == length(w.tpu_node_pools)
     ])
     error_message = "Two tpu_node_pools in one worker cluster have the same machine type and topology. The node pool is named for that pair, so the second would overwrite the first."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for w in var.worker_clusters : [
+        for p in w.tpu_node_pools : p.slices >= 1 && floor(p.slices) == p.slices
+      ]
+    ]))
+    error_message = "tpu_node_pools[*].slices must be a whole number, at least 1."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for w in var.worker_clusters : [
+        for p in w.tpu_node_pools : contains(["Never", "LowerPriority", "Any"], p.reclaim_within_cohort)
+      ]
+    ]))
+    error_message = "tpu_node_pools[*].reclaim_within_cohort must be Never, LowerPriority or Any."
   }
 }
 

@@ -37,9 +37,11 @@ locals {
           # The topology's dimensions padded to three with 1s, so the product
           # below is one expression: Terraform has no product(), and v7x
           # topologies are 3D where v6e's are 2D.
-          for dims in [concat([for d in split("x", pool.topology) : parseint(d, 10)], [1, 1])] :
+          for dims in [concat([for d in split("x", pool.topology) : parseint(d, 10)], [1, 1])] : [
+          for slice in range(pool.slices) :
           merge(pool, {
-            name = "${pool.machine_type}-${pool.topology}"
+            shape = "${pool.machine_type}-${pool.topology}"
+            name  = pool.slices > 1 ? "${pool.machine_type}-${pool.topology}-${slice}" : "${pool.machine_type}-${pool.topology}"
 
             # short_name is carried alongside the key because a Kubernetes
             # label value may not hold the slash that key has in it.
@@ -56,7 +58,7 @@ locals {
 
             family = split("-", pool.machine_type)[0]
           })
-        ]
+        ]]
       ]
     ]) : "${pool.worker}/${pool.name}" => pool
   }

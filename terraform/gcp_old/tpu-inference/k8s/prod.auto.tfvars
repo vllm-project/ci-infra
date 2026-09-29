@@ -193,7 +193,7 @@ worker_clusters = [
 
         min_nodes     = 0
         nominal_nodes = 0
-        max_nodes     = 8
+        max_nodes     = 40
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -203,7 +203,7 @@ worker_clusters = [
 
         min_nodes     = 0
         nominal_nodes = 2
-        max_nodes     = 2
+        max_nodes     = 10
       },
       {
         # Eight chips as one slice across two VMs: the multi-host shape, placed
@@ -217,6 +217,19 @@ worker_clusters = [
         min_nodes     = 0
         nominal_nodes = 0
         max_nodes     = 2
+      },
+      {
+        machine_type     = "tpu7x-standard-4t"
+        topology         = "2x2x4"
+        reservation_name = "cloudtpu-20251114223000-2002888989"
+        zone             = "us-central1-c"
+
+        min_nodes     = 0
+        nominal_nodes = 4
+        max_nodes     = 4
+        slices        = 2
+
+        reclaim_within_cohort = "Any"
       },
     ]
   },

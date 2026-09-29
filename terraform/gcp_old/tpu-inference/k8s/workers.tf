@@ -317,7 +317,7 @@ resource "google_container_node_pool" "worker_tpu" {
 
     labels = {
       "tpu-ci.google.com/worker"  = each.value.short_name
-      "tpu-ci.google.com/profile" = each.value.name
+      "tpu-ci.google.com/profile" = each.value.shape
     }
 
     taint {

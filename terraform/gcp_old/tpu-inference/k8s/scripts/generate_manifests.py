@@ -456,8 +456,22 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
             "memory_request": memory_request(memory_gb, chips),
             # The one number here that is a policy rather than a fact, and the
             # only one Kueue reads: this shape's share of the reservation.
-            "quota": int(pool["nominal_nodes"]) * chips,
+            "quota": int(pool["nominal_nodes"]) * chips * int(pool.get("slices", 1)),
         }
+    return out
+
+
+def reclaim_policies(tfvars: dict) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for worker in tfvars["worker_clusters"]:
+        for pool in worker.get("tpu_node_pools", []):
+            name = f"{pool['machine_type']}-{pool['topology']}"
+            policy = pool.get("reclaim_within_cohort", "Never")
+            if out.setdefault(name, policy) != policy:
+                raise ValueError(
+                    f"{name}: worker clusters disagree on reclaim_within_cohort "
+                    f"({out[name]} vs {policy}); it is one queue on the manager"
+                )
     return out
 
 
@@ -494,7 +508,12 @@ def priority_classes() -> str:
     )
 
 
-def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
+def queues(
+    shapes: dict[str, int],
+    namespace: str,
+    checks: bool,
+    reclaim: dict[str, str] | None = None,
+) -> str:
     """A flavor per machine family, then a queue per shape sharing it."""
     out = [priority_classes()] + [
         render("resource_flavor", ACCELERATOR=family)
@@ -512,6 +531,7 @@ def queues(shapes: dict[str, int], namespace: str, checks: bool) -> str:
                 ),
                 NOMINAL_QUOTA=CPU_QUEUE_CORES if name == CPU_QUEUE else chips,
                 ADMISSION_CHECKS=dispatch_check(name, checks),
+                RECLAIM_WITHIN_COHORT=(reclaim or {}).get(name, "Never"),
             )
         )
     return "".join(out)
@@ -911,6 +931,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             {name: entry["quota"] for name, entry in fleet.items()},
             namespace,
             checks=True,
+            reclaim=reclaim_policies(tfvars),
         ),
     )
     write(
