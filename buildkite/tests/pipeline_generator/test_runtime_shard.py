@@ -281,21 +281,25 @@ def test_generator_on_mode_moves_the_step_into_the_plan(
     assert template == {"steps": [plain.dict(exclude_none=True)]}
     [command] = plan.commands
     assert command.startswith("curl ") and " plan model-executor " in command
+    # Like every job: a lost agent or an infra hook failure is retried once.
+    assert (
+        plan.retry == collect.retry == buildkite_step.ensure_infra_failure_retry(None)
+    )
 
 
 @pytest.mark.parametrize("uploaded_first", [False, True])
 def test_shell_fallback_uploads_the_job_once(
     fake_global_config, tmp_path, uploaded_first
 ):
-    """Run the plan command in a shell whose planner crashes, before or after
-    its own upload. The normal job is uploaded, with a warning, only if the
-    planner hadn't uploaded it already."""
+    """Run the plan command in a shell whose planner is killed (status 137),
+    before or after its own upload. The status is logged either way; the normal
+    job is uploaded, with a warning, only if the planner hadn't uploaded it."""
     fake_global_config["run_all"] = True
     _, plan = _render(_step(automatic_shard=True))
     log = tmp_path / "log"
     fakes = {
         "curl": "exit 0",
-        "python3": "exit 1",
+        "python3": "exit 137",
         "buildkite-agent": f"""echo "$*" >> {log}
 case "$1 $2" in
   "step get") [ -n "$STEP_EXISTS" ] && echo running || exit 1 ;;
@@ -312,12 +316,16 @@ esac""",
     }
     # Buildkite turns `$$` into `$` when it uploads the pipeline.
     [command] = [c.replace("$$", "$") for c in plan.commands]
-    subprocess.run(["sh", "-ec", command], env=env, check=True)
+    run = subprocess.run(
+        ["sh", "-ec", command], env=env, check=True, capture_output=True, text=True
+    )
+    failed = "fetching or running the planner failed with status 137"
+    assert f"runtime-shard: {failed}" in run.stdout
     calls = log.read_text()
     if uploaded_first:
         assert "annotate" not in calls and "pipeline upload" not in calls
     else:
-        assert "annotate --style warning" in calls
+        assert "annotate --style warning" in calls and f"{failed}." in calls
         uploaded = json.loads((tmp_path / "uploaded").read_text())
         assert uploaded == rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])
 
