@@ -34,10 +34,11 @@ config:
   # the controller has not picked up is invisible, so a fleet that is saturated
   # and one that is merely capped read the same from Buildkite.
   #
-  # Set above what the chips can admit rather than equal to it. The ClusterQueues
-  # ration hardware; this only rations how much of the backlog is visible, and
-  # the fleet is expected to grow.
-  max-in-flight: 50
+  # Set well above what the chips can admit. The ClusterQueues ration hardware;
+  # this only rations how much of the backlog is visible, and it is one limit
+  # across every queue: when it binds, Buildkite's order decides what runs, not
+  # Kueue. A waiting job pod asks for 100m CPU and 1Gi.
+  max-in-flight: 200
 
   # How long a container may sit unable to start before the controller gives
   # up on the step. The chart's thirty seconds assumes a warm node and a small
