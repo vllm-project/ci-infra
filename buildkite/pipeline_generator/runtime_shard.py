@@ -462,11 +462,17 @@ def pytest_collection_modifyitems(session, config, items):
     config.hook.pytest_deselected(items=[i for i in items if i not in kept])
     items[:] = kept
     _EMPTY["value"] = not kept
-    print(
-        f"\nruntime-shard: shard {index + 1}/{len(shard_plan['shards'])}, "
-        f"command {matches[0] + 1}: running {len(kept)} tests",
-        flush=True,
+    _EMPTY["label"] = (
+        f"shard {index + 1}/{len(shard_plan['shards'])}, command {matches[0] + 1}"
     )
+
+
+def pytest_collection_finish(session):
+    if "label" in _EMPTY:  # after every filter, including the command's own -m
+        print(
+            f"\nruntime-shard: {_EMPTY['label']}: running {len(session.items)} tests",
+            flush=True,
+        )
 
 
 def pytest_sessionfinish(session, exitstatus):
