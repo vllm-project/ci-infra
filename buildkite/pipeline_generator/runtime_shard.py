@@ -52,7 +52,11 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
     """(setup, pytest commands), or None if the step can't be split by file:
     it needs at least one pytest command and nothing but plain pytest
     commands after the first one."""
-    first = next((i for i, c in enumerate(commands) if c.startswith("pytest ")), None)
+    first = None
+    for position, command in enumerate(commands):
+        if command.startswith("pytest "):
+            first = position
+            break
     if first is None:
         return None
     tests = commands[first:]
@@ -139,11 +143,12 @@ def plan(
             unknown_files.append(unit[1])
 
     if timings is None:  # equal file counts, as a safe default
-        k = min(NO_TIMING_SHARDS, len(units))
-        shards = [
-            list(range(i * len(units) // k, (i + 1) * len(units) // k))
-            for i in range(k)
-        ]
+        count = min(NO_TIMING_SHARDS, len(units))
+        shards = []
+        for number in range(count):
+            start = number * len(units) // count
+            end = (number + 1) * len(units) // count
+            shards.append(list(range(start, end)))
         sizes = [0.0] * len(units)
         unknown_files = []
     else:
@@ -172,8 +177,11 @@ def plan(
                 if inventory[c]["prefix"]
                 else ""
             )
-            targets = [file] if whole else nodeids
-            targets = [t[len(prefix) :] if t.startswith(prefix) else t for t in targets]
+            targets = []
+            for target in [file] if whole else nodeids:
+                if target.startswith(prefix):
+                    target = target[len(prefix) :]
+                targets.append(target)
             if not commands or commands[-1]["index"] != c:
                 commands.append({"index": c, "targets": [], "tests": 0})
             commands[-1]["targets"] += targets
@@ -215,17 +223,19 @@ def check(result: Dict, inventory: List[Dict]) -> None:
             prefix = entry["prefix"].rstrip("/") + "/" if entry["prefix"] else ""
             for target in command["targets"]:
                 full = prefix + target
-                matched = [
-                    n
-                    for n in entry["nodeids"]
-                    if n == full or ("::" not in full and n.split("::")[0] == full)
-                ]
+                matched = []
+                for nodeid in entry["nodeids"]:
+                    if nodeid == full or nodeid.split("::")[0] == full:
+                        matched.append(nodeid)
                 if not matched:
                     raise ValueError("target matches no collected test: " + target)
-                for n in matched:
-                    key = (command["index"], n)
+                for nodeid in matched:
+                    key = (command["index"], nodeid)
                     assigned[key] = assigned.get(key, 0) + 1
-    expected = {(c, n) for c, e in enumerate(inventory) for n in e["nodeids"]}
+    expected = set()
+    for index, entry in enumerate(inventory):
+        for nodeid in entry["nodeids"]:
+            expected.add((index, nodeid))
     if set(assigned) != expected or any(v != 1 for v in assigned.values()):
         raise ValueError("plan does not assign every collected test exactly once")
 
@@ -435,52 +445,68 @@ def pytest_collection_modifyitems(session, config, items):
     shard_plan = decode(encoded)
     index = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
     args = list(config.invocation_params.args)
-    matches = [
-        c
-        for c, command in enumerate(shard_plan["commands"])
-        if shlex.split(command)[1:] == args
-    ]
+    matches = []
+    for position, command in enumerate(shard_plan["commands"]):
+        if shlex.split(command)[1:] == args:
+            matches.append(position)
     if len(matches) != 1 or index >= len(shard_plan["shards"]):
         raise pytest.UsageError(
             f"runtime-shard: no single planned command for shard {index + 1} and {args}"
         )
+    this_command = matches[0]
 
-    def planned(shards):
-        return {
-            t
-            for shard in shards
-            for c in shard
-            if c["index"] == matches[0]
-            for t in c["targets"]
-        }
+    # Targets are whole files or single test IDs, for this command only.
+    mine = set()  # this shard's targets
+    anywhere = set()  # every shard's targets
+    for number, shard in enumerate(shard_plan["shards"]):
+        for command in shard:
+            if command["index"] != this_command:
+                continue
+            anywhere.update(command["targets"])
+            if number == index:
+                mine.update(command["targets"])
 
-    def within(item, targets):
-        return item.nodeid in targets or item.nodeid.split("::")[0] in targets
+    def target_of(item, targets):
+        """The target that covers this test, or None."""
+        if item.nodeid in targets:
+            return item.nodeid
+        file = item.nodeid.split("::")[0]
+        return file if file in targets else None
 
-    targets = planned([shard_plan["shards"][index]])
-    everywhere = planned(shard_plan["shards"])
-    # A test this job collects that no shard was given (collection differed
-    # from the collect step's) is never dropped: shard 1 runs it.
-    strays = [i for i in items if not within(i, everywhere)]
+    kept, deselected, strays = [], [], []
+    found = set()  # targets that matched at least one collected test
+    for item in items:
+        target = target_of(item, mine)
+        if target is not None:
+            kept.append(item)
+            found.add(target)
+        elif target_of(item, anywhere) is not None:
+            deselected.append(item)
+        else:
+            # Collected here but given to no shard (collection differed from
+            # the collect step's): never drop it, shard 1 runs it.
+            strays.append(item)
+            if index == 0:
+                kept.append(item)
+            else:
+                deselected.append(item)
     if strays:
+        where = "running them here" if index == 0 else "shard 1 runs them"
         print(
-            f"\nruntime-shard: {len(strays)} collected tests are in no shard"
-            f"{'; running them here' if index == 0 else ', shard 1 runs them'}:"
-            f" {[i.nodeid for i in strays[:5]]}",
+            f"\nruntime-shard: {len(strays)} collected tests are in no shard;"
+            f" {where}: {[item.nodeid for item in strays[:5]]}",
             flush=True,
         )
-    kept = [i for i in items if within(i, targets) or (index == 0 and i in strays)]
-    found = {i.nodeid for i in kept} | {i.nodeid.split("::")[0] for i in kept}
-    missing = [t for t in targets if t not in found]
+    missing = sorted(mine - found)
     if missing:
         raise pytest.UsageError(
             f"runtime-shard: planned tests were not collected: {missing[:5]}"
         )
-    config.hook.pytest_deselected(items=[i for i in items if i not in kept])
+    config.hook.pytest_deselected(items=deselected)
     items[:] = kept
     _EMPTY["value"] = not kept
     _EMPTY["label"] = (
-        f"shard {index + 1}/{len(shard_plan['shards'])}, command {matches[0] + 1}"
+        f"shard {index + 1}/{len(shard_plan['shards'])}, command {this_command + 1}"
     )
 
 
