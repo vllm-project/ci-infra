@@ -21,6 +21,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..handwritten import TESTS_SCOPE
 from .changed_funcs import Query
 from .phase import DEFAULT_MODE, PhaseMode, row_shows_use
 from .table import Table
@@ -415,6 +416,25 @@ def read_pr(
         if unseen:
             reading.kept.append(step_id)
             reading.reasons["unknown-code-blocks-narrowing"] += 1
+            continue
+
+        # A row recorded before the recorder wrote tests/ holds no tests/ name
+        # at all, and its silence about one is no evidence. Tables merge rows
+        # across builds, so old and new rows can sit side by side. The same
+        # recorder change started writing `#pkg` lines, so a row with no
+        # packages is an old row. Having no tests/ path is not the sign: a
+        # step that runs only scripts (examples, lm-eval) enters none.
+        row = table.row(key)
+        if (
+            row is not None
+            and any(
+                f.path in scope and f.path.startswith(TESTS_SCOPE) and f.in_recorder_scope
+                for f in query.files
+            )
+            and not row.stamp.packages
+        ):
+            reading.kept.append(step_id)
+            reading.reasons["row-predates-tests-recording"] += 1
             continue
 
         evidence = table.look_up(key, scoped, mode).evidence

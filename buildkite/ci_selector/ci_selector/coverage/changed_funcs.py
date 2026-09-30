@@ -31,7 +31,7 @@ from pathlib import Path
 import regex as re
 
 from ..handwritten import (
-    RECORDER_SCOPE,
+    SELECTOR_SCOPE,
 )
 
 MODULE = "<module>"
@@ -361,7 +361,7 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
                 head_lines |= by_path[key][1]
 
         shown = path if changed.status != "D" else (old_path or path)
-        in_scope = shown.startswith(RECORDER_SCOPE)
+        in_scope = shown.startswith(SELECTOR_SCOPE)
 
         if not shown.endswith(".py"):
             query.files.append(
