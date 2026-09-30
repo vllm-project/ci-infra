@@ -28,7 +28,7 @@ import os
 from ..handwritten import PR_PIPELINE
 from .claim import Claim
 from .selection import _targets_cover
-from .state import RepoState
+from .state import RepoState, run_files
 from .step_refs import (
     _direct_step_refs,
     _hardware_family_steps,
@@ -155,10 +155,17 @@ def _colocated_claim(
         detail += f"; its own registered key(s) name it in {len(own_key_steps)} steps"
     if family:
         detail += f"; {family} hardware-convention tagging adds {len(hw_steps)} steps"
+    # A script a step runs that imports the file directly reaches it as surely
+    # as a test importing it: `vllm serve` runs the entry module that imports
+    # every CLI subcommand. Joined after the gate above, since a script is
+    # coverage and not a co-located answer. Direct importers only, as with
+    # tests, so a file deeper in the entry's closure (cli/types.py,
+    # engine/arg_utils.py) does not reach every step that runs `vllm`.
+    runners = run_files(state, state.full.graph.reverse.get(path, ()))
     return Claim(
         "colocated-tests",
         detail,
-        test_files=set(tests),
+        test_files=set(tests) | runners,
         step_ids=inferred_steps | hw_steps,
         # Subtracted, not merely left out: hardware steps stand for compiled
         # reach nothing records, so a step one holds stays held.

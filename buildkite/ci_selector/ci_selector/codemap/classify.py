@@ -82,6 +82,7 @@ from .state import (
     DiffContext,
     RepoState,
     _graph_known,
+    run_files,
 )
 from .step_refs import (
     _direct_step_refs,
@@ -675,7 +676,7 @@ def _classify_added_init(state: RepoState, path: str, ctx: DiffContext) -> Claim
         return None
     closure = graph.reverse_closure(set(base_files))
     test_files = {f for f in closure if is_test_file(f)}
-    script_files = {f for f in closure if f.startswith(("examples/", "benchmarks/"))}
+    script_files = run_files(state, closure)
     invoked, auto_scripts = _auto_run_hits(state, test_files, script_files)
     if not invoked and not auto_scripts:
         return None
@@ -742,11 +743,7 @@ def _classify_package_data(state: RepoState, path: str) -> Claim | None:
     # Scripts come off the package's whole reach either way: a member reaches
     # the same ones whether its tests come from reach or co-location, and the
     # closure of the union is the union of the closures.
-    script_files = {
-        c
-        for c in graph.reverse_closure(set(owning))
-        if c.startswith(("examples/", "benchmarks/"))
-    }
+    script_files = run_files(state, graph.reverse_closure(set(owning)))
     filename = path.rsplit("/", 1)[-1]
     family = hardware.family_of_filename(filename, path)
     device_scope = hardware.device_name_of_filename(filename, path)
@@ -835,9 +832,7 @@ def _classify_added_head_closure(
     if head_full is None:
         return None
     closure = head_full.graph.reverse_closure({path})
-    cover = {f for f in closure if is_test_file(f)} | {
-        f for f in closure if f.startswith(("examples/", "benchmarks/"))
-    }
+    cover = {f for f in closure if is_test_file(f)} | run_files(state, closure)
     if not cover or not _covers_auto_step(state, path, cover):
         return None
     # A new file is reached only through its importers. When every non-test
@@ -1831,9 +1826,9 @@ def _classify_graph(
 
     closure = graph.reverse_closure({path})
     test_files = _boot_gated_tests(state, path, closure)
-    # Steps run example and benchmark scripts as test bodies too, so a closure
-    # member there counts as coverage.
-    script_files = {f for f in closure if f.startswith(("examples/", "benchmarks/"))}
+    # Steps run scripts as test bodies too, so a closure member there counts
+    # as coverage.
+    script_files = run_files(state, closure)
     keys, key_steps = _key_routed_steps(state, path, closure)
 
     # Only coverage an auto-run step actually executes counts. A file whose

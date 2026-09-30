@@ -26,7 +26,7 @@ from .pipeline.images import ArtifactGraph, add_image_inputs, build_artifact_gra
 from .pipeline.invoked_tests import invoked_files, legacy_amd_invoked
 from .pipeline.scripts import scan_script
 from .pipeline.step import LoadReport, PipelineConfig, Step
-from .pipeline.targets import StepTargets, map_step
+from .pipeline.targets import StepTargets, console_scripts, map_step
 from .registered_names import KeyIndex
 from .repo import TestIndex, build_test_index, is_test_file, test_file_catalog
 from .rust_workspace import RustWorkspace
@@ -96,11 +96,12 @@ class RepoState:
     def build(cls, repo: Path) -> RepoState:
         report = LoadReport()
         pipelines = []
+        scripts = console_scripts(repo)
         for config in load_pipeline_configs(repo):
             steps = load_steps(repo, config, report)
             detect_duplicate_ids(steps, report)
             targets = {
-                s.step_id: map_step(repo, s, script_scanner=scan_script) for s in steps
+                s.step_id: map_step(repo, s, scan_script, scripts) for s in steps
             }
             pipelines.append(PipelineData(config, steps, targets))
         full = build_full_graph(repo)
@@ -148,13 +149,14 @@ class RepoState:
         state.build_map = BuildMap.build(repo)
         state.native_ops = NativeOps.build(repo, state.catalog)
         dockerfiles = {d for fs in state.artifacts.defined_by.values() for d in fs}
-        in_files, in_dirs, blanket = copy_inputs(repo, dockerfiles)
+        in_files, in_dirs, blanket, payload = copy_inputs(repo, dockerfiles)
         add_image_inputs(
             repo,
             state.artifacts,
             in_files,
             in_dirs,
             blanket,
+            payload,
             lambda f: _graph_known(state, f),
             hardware.family_of_path,
         )
@@ -264,3 +266,15 @@ def _graph_known(state: RepoState, path: str) -> bool:
         or path in g.imports
         or path in g.reverse
     )
+
+
+def run_files(state: RepoState, files) -> set[str]:
+    """The members of `files` a step runs as its body rather than collects:
+    example and benchmark scripts, anything a command runs by path, and a
+    console script's entry module. A closure member here is coverage just as a
+    test file is."""
+    return {
+        f
+        for f in files
+        if f.startswith(("examples/", "benchmarks/")) or f in state.auto_run_files
+    }
