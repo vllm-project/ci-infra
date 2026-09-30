@@ -1801,11 +1801,17 @@ def _classify_graph(
     #
     # Measured, so nobody rebuilds it: adding "every step that reaches the site
     # file" looks like the honest bound and is useless, because reverse
-    # reachability here has collapsed. Nearly every file reaches nearly every
-    # other, so that union is most of the pipeline for every site, worse than
-    # the catch-all declarers it replaced. Narrowing needs knowing what the
-    # site loads, which is a parser's job and not a graph walk's.
-    if path in state.preflight.unclassified_sites:
+    # reachability inside vllm/ has collapsed. Nearly every file reaches nearly
+    # every other, so that union is most of the pipeline for every site, worse
+    # than the catch-all declarers it replaced. Narrowing needs knowing what
+    # the site loads, which is a parser's job and not a graph walk's.
+    #
+    # Under tests/ that bound has not collapsed, so a site there skips this
+    # guard and routes by its reverse closure below. The unknown edges point
+    # out of the site; who runs it is known. vllm#58967 edited a ROCm PD helper
+    # that loads its connector's test by f-string: failing open ran 187 steps
+    # for the 2 that import it.
+    if path in state.preflight.unclassified_sites and not path.startswith("tests/"):
         return Claim(
             "fail-open",
             f"{path} holds an unmodeled dynamic import; what it loads is "
@@ -1894,6 +1900,9 @@ def _classify_test_helper(
     if (
         not (test_helpers.is_helper(path) or test_helpers.is_conftest(path))
         or path in state.preflight.parse_error_paths
+        # Every site, tests/ included: a module-level `m = import_module(...)`
+        # runs on every import, but route reads it as a name only its users
+        # reach. The file-level closure is the right answer there.
         or path in state.preflight.unclassified_sites
         or colocation._classify_colocated_tests(state, path) is not None
     ):
