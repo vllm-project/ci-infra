@@ -440,7 +440,7 @@ def test_plugin_runs_tests_no_shard_was_given_in_shard_1(tmp_path):
     assert "2 collected tests are in no shard; running them here" in first.stdout
     second = _plugin_run(tmp_path, shard_plan, 1)
     assert second.returncode == 0 and "1 passed, 2 deselected" in second.stdout
-    assert "shard 1 runs them" in second.stdout
+    assert "no shard; shard 1 runs them" in second.stdout
 
 
 def test_plugin_fails_loudly_rather_than_run_the_wrong_tests(tmp_path):
