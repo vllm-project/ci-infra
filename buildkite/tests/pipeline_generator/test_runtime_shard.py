@@ -403,3 +403,31 @@ def test_plugin_fails_loudly_rather_than_run_the_wrong_tests(tmp_path):
     assert _plugin_run(tmp_path, missing, 0).returncode not in (0, 5)
     other = {"commands": ["pytest -v other"], "shards": [[]]}
     assert _plugin_run(tmp_path, other, 0).returncode not in (0, 5)
+
+
+def test_plugin_reports_the_count_after_the_commands_own_filters(tmp_path):
+    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers = slow_test\n")
+    pkg = tmp_path / "tests" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "test_a.py").write_text(
+        "import pytest\ndef test_x(): pass\n@pytest.mark.slow_test\ndef test_s(): pass\n"
+    )
+    shard_plan = {
+        "commands": ["pytest -v pkg -m 'not slow_test'"],
+        "shards": [[{"index": 0, "targets": ["tests/pkg/test_a.py"]}]],
+    }
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": str(Path(rs.__file__).parent),
+        "PYTEST_ADDOPTS": "-p runtime_shard",
+        "RUNTIME_SHARD_PLAN": rs.encode(shard_plan),
+    }
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-v", "pkg", "-m", "not slow_test"],
+        cwd=tmp_path / "tests",
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0 and "1 passed, 1 deselected" in run.stdout
+    assert "runtime-shard: shard 1/1, command 1: running 1 tests" in run.stdout
