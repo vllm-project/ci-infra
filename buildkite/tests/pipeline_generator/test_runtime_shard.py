@@ -1,11 +1,13 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 import buildkite_step
 import runtime_shard as rs
+from pipeline_generator import select_steps_and_dependencies
 from step import Step
 
 SETUP = ["apt-get update && apt-get install -y curl", "export PYTHONFAULTHANDLER=1"]
@@ -170,6 +172,7 @@ def _render(step):
 def test_generator_adds_shadow_collect_and_plan_steps(fake_global_config, monkeypatch):
     fake_global_config["run_all"] = True
     monkeypatch.setenv("VLLM_CI_BRANCH", "agent/runtime-shard-planner")
+    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "shadow")
     plain = _render(_step())
     main, collect, plan = _render(_step(automatic_shard=True))
     assert main.to_yaml() == plain[0].to_yaml()  # shadow: the step is unchanged
@@ -185,7 +188,8 @@ def test_generator_adds_shadow_collect_and_plan_steps(fake_global_config, monkey
     assert [rs.decode(c.split()[4]) for c in collect.commands[4:]] == TESTS
     assert plan.depends_on == [collect.key] and plan.allow_dependency_failure
     assert plan.soft_fail and plan.agents == {"queue": "small_cpu_queue_premerge"}
-    assert rs.decode(plan.commands[1].split()[-1]) == TESTS
+    assert plan.commands[1].endswith(" shadow") and plan.env is None
+    assert rs.decode(plan.commands[1].split()[-2]) == TESTS
     # The endpoint labels a command by the preview the generator echoes before it.
     assert f"): {rs.command_preview(TESTS[0])}'" in " ".join(main.commands).replace(
         '"', "'"
@@ -251,3 +255,151 @@ def test_run_plan_annotates_and_never_raises(tmp_path, monkeypatch):
     rs.run_plan("model-executor", rs.encode(TESTS))
     assert calls[-1][5] == "info" and "would run as **4 shards**" in calls[-1][6]
     assert json.loads((out / "plan.json").read_text())["tests"] == 6
+
+
+def test_generator_on_mode_moves_the_step_into_the_plan(
+    fake_global_config, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    [plain] = _render(_step())
+    collect, plan = _render(_step(automatic_shard=True))
+    assert collect.key == "model-executor-shard-collect"
+    # The plan step uploads the step's own job; it fails loudly, never softly.
+    assert not plan.soft_fail and plan.allow_dependency_failure
+    template = rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])
+    assert template == {"steps": [plain.dict(exclude_none=True)]}
+    [command] = plan.commands
+    assert command.startswith("curl ") and " plan model-executor " in command
+    # Even if the planner can't start, the normal job is uploaded.
+    assert command.endswith(
+        '|| (echo "$$RUNTIME_SHARD_TEMPLATE" | base64 -d | buildkite-agent pipeline upload)'
+    )
+
+
+def test_generator_rollback_switch_and_recording_builds(
+    fake_global_config, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "off")
+    assert [s.key for s in _render(_step(automatic_shard=True))] == ["model-executor"]
+    monkeypatch.delenv("VLLM_CI_RUNTIME_SHARD")
+    monkeypatch.setattr(buildkite_step, "fnrec_enabled", lambda: True)
+    assert [s.key for s in _render(_step(automatic_shard=True))] == ["model-executor"]
+
+
+def test_retry_keys_of_the_generated_steps_select_the_step(fake_global_config):
+    steps = [_step(automatic_shard=True, depends_on=None)]
+    for key in ("model-executor-shard-collect", "model-executor-shard-plan"):
+        _, selected = select_steps_and_dependencies(steps, frozenset({key}))
+        assert selected == frozenset({"model-executor"})
+
+
+def _inventories(tmp_path):
+    out = tmp_path / ".runtime-shard" / "model-executor"
+    out.mkdir(parents=True)
+    for i, command in enumerate(TESTS):
+        entry = _entry(command, {f"f{i}_{j}.py": 1 for j in range(3)})
+        (out / f"inventory-{i}.json").write_text(json.dumps({**entry, "exitstatus": 0}))
+
+
+def _run_plan_on(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        rs.subprocess,
+        "run",
+        lambda args, check, **kw: calls.append((args, kw.get("input"))),
+    )
+    monkeypatch.setattr(rs, "fetch_timings", lambda key: None)
+    template = {
+        "label": "ME",
+        "key": "model-executor",
+        "commands": ["cd /t", "pytest x"],
+        "env": {"A": "1"},
+    }
+    monkeypatch.setenv("RUNTIME_SHARD_TEMPLATE", rs.encode({"steps": [template]}))
+    monkeypatch.setenv("RUNTIME_SHARD_SCRIPT_URL", "https://example/runtime_shard.py")
+    rs.run_plan("model-executor", rs.encode(TESTS), "on")
+    [upload] = [
+        json.loads(i)["steps"] for a, i in calls if a[1:3] == ["pipeline", "upload"]
+    ]
+    return template, upload, calls[-1][0]
+
+
+def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
+    _inventories(tmp_path)
+    template, [step], annotate = _run_plan_on(tmp_path, monkeypatch)
+    assert step["key"] == "model-executor" and step["parallelism"] == 4
+    assert step["commands"][2:] == template["commands"]
+    assert "https://example/runtime_shard.py" in step["commands"][0]
+    assert (
+        step["env"]["A"] == "1" and step["env"]["PYTEST_ADDOPTS"] == "-p runtime_shard"
+    )
+    shard_plan = rs.decode(step["env"]["RUNTIME_SHARD_PLAN"])
+    assert shard_plan["commands"] == TESTS
+    # 6 files, no timings: 4 shards of 1, 2, 1, 2 files
+    assert shard_plan["shards"][0] == [{"index": 0, "targets": ["tests/f0_0.py"]}]
+    assert annotate[5] == "info" and "running as **4 shards**" in annotate[6]
+
+
+def test_run_plan_falls_back_to_the_single_job(tmp_path, monkeypatch):
+    template, [step], annotate = _run_plan_on(
+        tmp_path, monkeypatch
+    )  # nothing collected
+    assert step == template
+    assert annotate[5] == "warning" and "runs as one job" in annotate[6]
+
+
+def _plugin_run(tmp_path, shard_plan, index, target="pkg"):
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    pkg = tmp_path / "tests" / "pkg"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "test_a.py").write_text("def test_x(): pass\n")
+    (pkg / "test_b.py").write_text("def test_y(): pass\ndef test_z(): pass\n")
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": str(Path(rs.__file__).parent),
+        "PYTEST_ADDOPTS": "-p runtime_shard",
+        "BUILDKITE_PARALLEL_JOB": str(index),
+        "RUNTIME_SHARD_PLAN": rs.encode(shard_plan),
+    }
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-v", target],
+        cwd=tmp_path / "tests",
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_plugin_runs_only_this_shards_tests(tmp_path):
+    shard_plan = {
+        "commands": ["pytest -v pkg"],
+        "shards": [
+            [
+                {
+                    "index": 0,
+                    "targets": ["tests/pkg/test_a.py", "tests/pkg/test_b.py::test_y"],
+                }
+            ],
+            [{"index": 0, "targets": ["tests/pkg/test_b.py::test_z"]}],
+            [],  # no tests of this command in the last shard
+        ],
+    }
+    first = _plugin_run(tmp_path, shard_plan, 0)
+    assert first.returncode == 0 and "2 passed, 1 deselected" in first.stdout
+    assert "test_z" not in first.stdout.split("deselected")[0].split("collected")[1]
+    second = _plugin_run(tmp_path, shard_plan, 1)
+    assert second.returncode == 0 and "1 passed, 2 deselected" in second.stdout
+    empty = _plugin_run(tmp_path, shard_plan, 2)
+    assert empty.returncode == 0 and "3 deselected" in empty.stdout
+
+
+def test_plugin_fails_loudly_rather_than_run_the_wrong_tests(tmp_path):
+    missing = {
+        "commands": ["pytest -v pkg"],
+        "shards": [[{"index": 0, "targets": ["tests/pkg/test_gone.py"]}]],
+    }
+    assert _plugin_run(tmp_path, missing, 0).returncode not in (0, 5)
+    other = {"commands": ["pytest -v other"], "shards": [[]]}
+    assert _plugin_run(tmp_path, other, 0).returncode not in (0, 5)
