@@ -21,7 +21,9 @@ not look the same downstream.
 from __future__ import annotations
 
 import ast
+import io
 import subprocess
+import tokenize
 import types
 from dataclasses import dataclass, field
 from enum import Enum
@@ -111,7 +113,8 @@ class Query:
     # no function changed. Kept for diagnosis.
     eol_only: list[str] = field(default_factory=list)
     # Python files whose change preserves behaviour: no code object changed
-    # apart from line numbers, or only annotations of undecorated functions.
+    # apart from line numbers, or only docstrings of undecorated functions
+    # and annotations of the undecorated ones import defines.
     # No FileQuery either, and a step selected only for these may be dropped.
     inert: list[str] = field(default_factory=list)
 
@@ -535,45 +538,120 @@ def _equivalent(a: types.CodeType, b: types.CodeType) -> bool:
 
 
 # A module naming one of these may read function annotations at runtime:
-# torch custom op registration infers the op schema from them. vLLM's own
-# CustomOp class dispatches by name and reads none, so it is not listed.
+# torch custom op registration infers the op schema from them, and
+# support_torch_compile the dynamic dims from forward's. vLLM's own CustomOp
+# class dispatches by name and reads none, so it is not listed.
 _ANNOTATION_READERS = (
     "direct_register_custom_op",
     "library.custom_op",
     "infer_schema",
     "get_type_hints",
     "signature(",
+    "support_torch_compile",
 )
 
 
 def _strip_annotations(tree: ast.AST) -> ast.AST:
-    """Remove parameter and return annotations of undecorated functions. A
-    decorator may read them (FastAPI, pydantic, typer), so decorated ones
-    keep theirs, as do class-level field annotations (dataclasses)."""
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and not node.decorator_list
-        ):
+    """Remove parameter and return annotations of undecorated functions that
+    import defines. A decorator may read them (FastAPI, pydantic, typer), so
+    decorated ones keep theirs, as do class-level field annotations
+    (dataclasses). A def inside a function evaluates its annotations each
+    time that function runs, so those stay too."""
+    todo = [(tree, False)]
+    while todo:
+        node, in_function = todo.pop()
+        is_def = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if is_def and not in_function and not node.decorator_list:
             node.returns = None
             a = node.args
             for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg):
                 if arg is not None:
                     arg.annotation = None
+        todo.extend((c, in_function or is_def) for c in ast.iter_child_nodes(node))
     return tree
 
 
-def _annotation_only(before: str, after: str) -> bool:
-    """Whether the two sources differ only in annotations _strip_annotations
-    removes."""
-    if any(m in before or m in after for m in _ANNOTATION_READERS):
-        return False
+def _strip_docstrings(tree: ast.AST) -> list[tuple[str, str | None]]:
+    """Remove the leading docstring of every undecorated function, and return
+    (name, docstring) for each in walk order.
+
+    Functions only: vllm/engine/arg_utils.py turns config classes' docstrings
+    into CLI help. A decorator may read one (register_op in vllm/ir/op.py keeps
+    it for the op's str), so decorated functions keep theirs.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and not node.decorator_list
+        ):
+            doc = ast.get_docstring(node, clean=False)
+            if doc is not None:
+                node.body = node.body[1:]
+            found.append((node.name, doc))
+    return found
+
+
+def _logical_lines(text: str) -> list[str]:
+    """Each statement line of the source, a call wrapped over lines joined
+    back, comments left out. The whole text when it does not tokenize."""
+    lines, cur = [], []
     try:
-        a = ast.dump(_strip_annotations(ast.parse(before)), include_attributes=False)
-        b = ast.dump(_strip_annotations(ast.parse(after)), include_attributes=False)
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                lines.append(" ".join(cur))
+                cur = []
+            elif tok.type not in (tokenize.COMMENT, tokenize.NL):
+                cur.append(tok.string)
+    except (tokenize.TokenError, SyntaxError):
+        return [text]
+    return lines
+
+
+def _docstring_read(repo: Path, ref: str | None, names: set[str]) -> bool:
+    """Whether a Python statement that reads `__doc__` or `getdoc` names one
+    of these: arg_utils.py appends human_readable_int's docstring to CLI help.
+    Per statement, not per line, since ruff wraps a long call and puts the
+    name on a line of its own. A search that fails counts as a read."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "grep", "-l", "-z", "-I", "-E", "__doc__|getdoc"]
+        + ([ref] if ref else [])
+        + ["--", "*.py"],
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if proc.returncode not in (0, 1):
+        return True
+    word = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(names))) + r")\b")
+    for hit in filter(None, proc.stdout.split("\0")):
+        path = hit[len(ref) + 1 :] if ref else hit
+        text = _read(repo, ref, path)
+        if text is None:
+            return True
+        for line in _logical_lines(text):
+            if ("__doc__" in line or "getdoc" in line) and word.search(line):
+                return True
+    return False
+
+
+def _preserving(repo: Path, ref: str | None, before: str, after: str) -> bool:
+    """Whether the two sources differ only in annotations _strip_annotations
+    removes and docstrings _strip_docstrings removes, with no changed
+    docstring read at runtime (searched at `ref`)."""
+    annotations = not any(m in before or m in after for m in _ANNOTATION_READERS)
+    try:
+        trees = [ast.parse(before), ast.parse(after)]
     except SyntaxError:
         return False
-    return a == b
+    if annotations:
+        trees = [_strip_annotations(t) for t in trees]
+    old_docs, new_docs = (_strip_docstrings(t) for t in trees)
+    if ast.dump(trees[0]) != ast.dump(trees[1]):
+        return False
+    # Equal trees walk in the same order, so the lists pair up.
+    edited = {n for (n, a), (_, b) in zip(old_docs, new_docs) if a != b}
+    return not edited or not _docstring_read(repo, ref, edited)
 
 
 class _Shell(ast.NodeTransformer):
@@ -628,6 +706,11 @@ def _drop_unchanged(
     itself unchanged; its callers were selected anyway. An annotation does
     change the module body, which builds it at import, so a file whose two
     sides differ only there counts as unchanged too.
+
+    A docstring is a constant of its function, so rewording one changes the
+    code object though nothing it runs. vllm#59008 reworded packed_qk_rope_'s
+    and kept ~30 steps. Compared on the AST, never by skipping the first
+    constant: CPython shares it with an equal string the body uses.
     """
     before, after = _read(repo, base, base_side), _read(repo, head, head_side)
     if before is None or after is None:
@@ -653,6 +736,10 @@ def _drop_unchanged(
 
     unchanged = {n for n in base_names | head_names if same(n)}
     left = (base_names | head_names) - unchanged
+    # Judged on the whole file, so all or nothing.
+    if left and _preserving(repo, head, before, after):
+        unchanged |= left
+        left = frozenset()
     # A module or class body differs whenever a def in it does: the def builds
     # its function from the new code, and a new parameter's default is a new
     # constant. If that is all, import runs the same code. vllm#58828 added
@@ -662,14 +749,11 @@ def _drop_unchanged(
         unchanged |= left & import_time
         left = left - import_time
     if left and left <= import_time:
-        if not _annotation_only(before, after):
-            # Only import-time names would be left, and under the default
-            # phase mode an import-time-only change counts every importer as
-            # a use: far wider than the callers the full name set reaches.
-            # All or nothing, then.
-            return base_names, head_names, import_time, False
-        unchanged |= left
-        left = frozenset()
+        # Only import-time names would be left, and under the default phase
+        # mode an import-time-only change counts every importer as a use: far
+        # wider than the callers the full name set reaches. All or nothing,
+        # then.
+        return base_names, head_names, import_time, False
     base_names = frozenset(base_names - unchanged)
     head_names = frozenset(head_names - unchanged)
     return base_names, head_names, frozenset(import_time - unchanged), not left
