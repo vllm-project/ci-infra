@@ -25,6 +25,7 @@ fail=0
 # so a fold that went back to the bare python3 fails here the way it would on
 # an agent, where that python3 has no ci_selector and is 3.9.
 command -v uv >/dev/null 2>&1 || { echo "these tests need uv on PATH" >&2; exit 1; }
+UV_ON_PATH=$(command -v uv)
 
 s3_digest() { (cd "$1" && find . -type f | sort | xargs cksum 2>/dev/null); }
 
@@ -114,7 +115,7 @@ EOF
       BUILDKITE_COMMIT="$commit" BUILDKITE_BUILD_NUMBER=42 \
       BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
       FNREC_CI_INFRA="$REPO" FNREC_VLLM_REPO="$vllm" \
-      FNREC_EXPECTED_JOBS="$expected" \
+      FNREC_EXPECTED_JOBS="$expected" VLLM_CI_UV_BIN="$UV_ON_PATH" \
       env ${source_env[@]+"${source_env[@]}"} bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
 
   local latest=no commit_up=no untouched=no
