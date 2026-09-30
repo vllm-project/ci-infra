@@ -1035,17 +1035,20 @@ def _runtime_shard_steps(
     )
     env = None
     if mode == "on":
-        # If the planner can't even start, upload the step's normal job, with a
-        # warning. Skip it if the planner died after its own upload: the key is
-        # taken, so a second upload would only fail and turn this step red.
+        # If the planner can't be fetched or crashes, log its exit status and
+        # upload the step's normal job, with a warning. Skip the upload if the
+        # planner died after its own: the key is taken, so a second upload
+        # would only fail and turn this step red.
+        failed = "fetching or running the planner failed with status $$status"
         plan_command = (
             f"{fetch} && {plan_command} || "
-            f'[ -n "$$(buildkite-agent step get state --step {step_key} 2>/dev/null)" ]'
+            f'{{ status=$$?; echo "runtime-shard: {failed}";'
+            f' [ -n "$$(buildkite-agent step get state --step {step_key} 2>/dev/null)" ]'
             " || (buildkite-agent annotate --style warning --context"
-            f' runtime-shard-{step_key} "**Runtime sharding for {step_key}:** the'
-            ' planner crashed. The step runs as one job, as it would without sharding.";'
+            f' runtime-shard-{step_key} "**Runtime sharding for {step_key}:** {failed}.'
+            ' The step runs as one job, as it would without sharding.";'
             ' echo "$$RUNTIME_SHARD_TEMPLATE" | base64 -d'
-            " | buildkite-agent pipeline upload)"
+            " | buildkite-agent pipeline upload); }"
         )
         template = {"steps": [command_step.dict(exclude_none=True)]}
         env = {
@@ -1060,6 +1063,9 @@ def _runtime_shard_steps(
         env=env,
         depends_on=[collect_key],
         allow_dependency_failure=True,
+        # A lost CPU agent must not leave the step with no jobs. A retry after
+        # the shards were uploaded is harmless: the fallback sees the step.
+        retry=ensure_infra_failure_retry(None),
         soft_fail=mode == "shadow",
         timeout_in_minutes=_get_timeout_in_minutes(10),
     )
