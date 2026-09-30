@@ -430,6 +430,19 @@ def test_plugin_runs_only_this_shards_tests(tmp_path):
     assert empty.returncode == 0 and "3 deselected" in empty.stdout
 
 
+def test_plugin_runs_tests_no_shard_was_given_in_shard_1(tmp_path):
+    shard_plan = {  # test_b.py was collected but planned nowhere
+        "commands": ["pytest -v pkg"],
+        "shards": [[], [{"index": 0, "targets": ["tests/pkg/test_a.py"]}]],
+    }
+    first = _plugin_run(tmp_path, shard_plan, 0)
+    assert first.returncode == 0 and "2 passed, 1 deselected" in first.stdout
+    assert "2 collected tests are in no shard; running them here" in first.stdout
+    second = _plugin_run(tmp_path, shard_plan, 1)
+    assert second.returncode == 0 and "1 passed, 2 deselected" in second.stdout
+    assert "shard 1 runs them" in second.stdout
+
+
 def test_plugin_fails_loudly_rather_than_run_the_wrong_tests(tmp_path):
     missing = {
         "commands": ["pytest -v pkg"],
