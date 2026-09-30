@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -404,19 +405,30 @@ def test_run_plan_falls_back_to_the_single_job(tmp_path, monkeypatch):
     assert annotate[5] == "warning" and "runs as one job" in annotate[6]
 
 
+def _plugin_env(shard_plan, **extra):
+    """This interpreter's environment plus the plugin's inputs. A bare env
+    drops settings such as LD_LIBRARY_PATH that a CI runner's interpreter
+    needs to find its own site-packages, and so pytest."""
+    env = {}
+    for name, value in os.environ.items():
+        if not name.startswith(("BUILDKITE_", "RUNTIME_SHARD_", "PYTEST_")):
+            env[name] = value
+    env.update(
+        PYTHONPATH=str(Path(rs.__file__).parent),
+        PYTEST_ADDOPTS="-p runtime_shard",
+        RUNTIME_SHARD_PLAN=rs.encode(shard_plan),
+        **extra,
+    )
+    return env
+
+
 def _plugin_run(tmp_path, shard_plan, index, target="pkg"):
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     pkg = tmp_path / "tests" / "pkg"
     pkg.mkdir(parents=True, exist_ok=True)
     (pkg / "test_a.py").write_text("def test_x(): pass\n")
     (pkg / "test_b.py").write_text("def test_y(): pass\ndef test_z(): pass\n")
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "PYTHONPATH": str(Path(rs.__file__).parent),
-        "PYTEST_ADDOPTS": "-p runtime_shard",
-        "BUILDKITE_PARALLEL_JOB": str(index),
-        "RUNTIME_SHARD_PLAN": rs.encode(shard_plan),
-    }
+    env = _plugin_env(shard_plan, BUILDKITE_PARALLEL_JOB=str(index))
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-v", target],
         cwd=tmp_path / "tests",
@@ -483,12 +495,7 @@ def test_plugin_reports_the_count_after_the_commands_own_filters(tmp_path):
         "commands": ["pytest -v pkg -m 'not slow_test'"],
         "shards": [[{"index": 0, "targets": ["tests/pkg/test_a.py"]}]],
     }
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "PYTHONPATH": str(Path(rs.__file__).parent),
-        "PYTEST_ADDOPTS": "-p runtime_shard",
-        "RUNTIME_SHARD_PLAN": rs.encode(shard_plan),
-    }
+    env = _plugin_env(shard_plan)
     run = subprocess.run(
         [sys.executable, "-m", "pytest", "-v", "pkg", "-m", "not slow_test"],
         cwd=tmp_path / "tests",
