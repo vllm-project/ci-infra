@@ -24,9 +24,11 @@ env_secrets = {
   # Test Engine. The collector runs inside the workload rather than in the
   # agent, so the token has to reach the pod; without it a suite still passes
   # and reports nothing, which is the failure mode worth designing against.
+  # The vllm org's, as the ci-cd bare-metal hosts use: a token names its org
+  # and suite, and the tpu-commons one reports into an org being retired.
   BUILDKITE_ANALYTICS_TOKEN = {
     project = "cloud-tpu-inference-test"
-    secret  = "tpu_commons_buildkite_analytics_token"
+    secret  = "vllm_buildkite_analytics_token"
   }
 }
 
