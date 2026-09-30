@@ -9,10 +9,15 @@ like the recorders' scripts:
            pytest command to the checkout, for the agent to upload.
   plan     runs on a CPU agent. It reads those lists and main's timings for
            the step, packs whole files into contiguous shards, checks every
-           test lands exactly once and annotates the build. Shadow mode: the
-           step itself still runs as one job.
+           test lands exactly once and annotates the build. Then it uploads
+           the step's own job with `parallelism: N`; in shadow mode it uploads
+           nothing, because the step already runs as one job.
+  plugin   `-p runtime_shard` in each shard job: keeps only the tests the plan
+           gave this BUILDKITE_PARALLEL_JOB, so the commands stay unchanged.
 
-Planning never fails a build: anything unexpected becomes an annotation.
+Sharding never blocks the step: if collection or planning fails, the plan step
+uploads the step's normal single job instead (see run_plan and the generator's
+shell fallback).
 """
 
 import base64
@@ -225,13 +230,15 @@ def check(result: Dict, inventory: List[Dict]) -> None:
         raise ValueError("plan does not assign every collected test exactly once")
 
 
-def annotation(step_key: str, result: Dict) -> str:
+def annotation(step_key: str, result: Dict, shadow: bool = True) -> str:
     shards = result["shards"]
+    count = f"**{len(shards)} shard{'s' if len(shards) != 1 else ''}**"
     lines = [
-        f"**Runtime sharding (shadow) for `{step_key}`:** would run as "
-        f"**{len(shards)} shard{'s' if len(shards) != 1 else ''}** "
-        f"({result['tests']} tests in {result['files']} files, ceiling "
-        f"{result['rules']['ceiling']}). This build still ran the step as one job."
+        f"**Runtime sharding{' (shadow)' if shadow else ''} for `{step_key}`:** "
+        + (f"would run as {count}" if shadow else f"running as {count}")
+        + f" ({result['tests']} tests in {result['files']} files, ceiling "
+        f"{result['rules']['ceiling']})."
+        + (" This build still ran the step as one job." if shadow else "")
     ]
     source = result["timingSource"]
     if source:
@@ -307,10 +314,63 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
         raise SystemExit(f"runtime-shard: collection failed (pytest exit {status})")
 
 
-def run_plan(step_key: str, commands_b64: str) -> None:
-    """On a CPU agent: plan from the collect step's artifacts and annotate."""
+def shard_step(
+    template: Dict, result: Dict, inventory: List[Dict], script_url: str
+) -> Dict:
+    """The step's own rendered job, run as one parallel job per shard. Each job
+    loads the plugin below and finds its tests in RUNTIME_SHARD_PLAN."""
+    shards = []
+    for shard in result["shards"]:
+        commands = []
+        for command in shard["commands"]:
+            entry = inventory[command["index"]]
+            prefix = entry["prefix"].rstrip("/") + "/" if entry["prefix"] else ""
+            commands.append(
+                {
+                    "index": command["index"],
+                    "targets": [prefix + t for t in command["targets"]],
+                }
+            )
+        shards.append(commands)
+    step = json.loads(json.dumps(template))
+    env = dict(step.get("env") or {})
+    env["RUNTIME_SHARD_PLAN"] = encode(
+        {"commands": [e["command"] for e in inventory], "shards": shards}
+    )
+    env["PYTEST_ADDOPTS"] = (
+        env.get("PYTEST_ADDOPTS", "") + " -p runtime_shard"
+    ).strip()
+    step["env"] = env
+    step["parallelism"] = len(shards)
+    step["commands"] = [
+        f'curl -sSfL --retry 3 --max-time 60 -o /tmp/runtime_shard.py "{script_url}"',
+        'python3 -c "import shutil, sysconfig; shutil.copy('
+        "'/tmp/runtime_shard.py', sysconfig.get_paths()['purelib'])\"",
+        *step["commands"],
+    ]
+    return step
+
+
+def _upload(step: Dict) -> None:
+    subprocess.run(
+        ["buildkite-agent", "pipeline", "upload"],
+        input=json.dumps({"steps": [step]}),
+        text=True,
+        check=True,
+    )
+
+
+def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
+    """On a CPU agent: plan from the collect step's artifacts, annotate, and
+    (mode "on") upload the step as shards, or as its single job if anything
+    went wrong. Raises only if even that upload fails, which the generator's
+    shell fallback then retries."""
     commands = decode(commands_b64)
-    context = f"runtime-shard-{step_key}"
+    shadow = mode == "shadow"
+    template = (
+        None if shadow else decode(os.environ["RUNTIME_SHARD_TEMPLATE"])["steps"][0]
+    )
+    step = template
     try:
         pattern = f"{INVENTORY_DIR}/{step_key}/inventory-*.json"
         subprocess.run(
@@ -334,26 +394,84 @@ def run_plan(step_key: str, commands_b64: str) -> None:
         with open(path, "w") as f:
             json.dump(result, f, indent=1)
         subprocess.run(["buildkite-agent", "artifact", "upload", path], check=False)
-        message, style = annotation(step_key, result), "info"
+        if not shadow and len(result["shards"]) > 1:
+            step = shard_step(
+                template, result, inventory, os.environ["RUNTIME_SHARD_SCRIPT_URL"]
+            )
+        message, style = annotation(step_key, result, shadow), "info"
     except Exception as error:
         message = (
-            f"**Runtime sharding (shadow) for `{step_key}`:** no plan ({error}). "
-            "The step ran as one job, as it would without sharding."
+            f"**Runtime sharding{' (shadow)' if shadow else ''} for `{step_key}`:** "
+            f"no plan ({error}). The step runs as one job, as it would without sharding."
         )
         style = "warning"
+    if step is not None:
+        _upload(step)
     print(message)
     subprocess.run(
         [
             "buildkite-agent",
             "annotate",
             "--context",
-            context,
+            f"runtime-shard-{step_key}",
             "--style",
             style,
             message,
         ],
         check=False,
     )
+
+
+_EMPTY: Dict[str, bool] = {}
+
+
+def pytest_collection_modifyitems(session, config, items):
+    """Plugin: keep this shard's tests. A no-op without RUNTIME_SHARD_PLAN."""
+    encoded = os.environ.get("RUNTIME_SHARD_PLAN")
+    if not encoded:
+        return
+    import pytest
+
+    shard_plan = decode(encoded)
+    index = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
+    args = list(config.invocation_params.args)
+    matches = [
+        c
+        for c, command in enumerate(shard_plan["commands"])
+        if shlex.split(command)[1:] == args
+    ]
+    if len(matches) != 1 or index >= len(shard_plan["shards"]):
+        raise pytest.UsageError(
+            f"runtime-shard: no single planned command for shard {index + 1} and {args}"
+        )
+    targets = [
+        t
+        for c in shard_plan["shards"][index]
+        if c["index"] == matches[0]
+        for t in c["targets"]
+    ]
+    kept = [
+        i for i in items if i.nodeid in targets or i.nodeid.split("::")[0] in targets
+    ]
+    found = {i.nodeid for i in kept} | {i.nodeid.split("::")[0] for i in kept}
+    missing = [t for t in targets if t not in found]
+    if missing:
+        raise pytest.UsageError(
+            f"runtime-shard: planned tests were not collected: {missing[:5]}"
+        )
+    config.hook.pytest_deselected(items=[i for i in items if i not in kept])
+    items[:] = kept
+    _EMPTY["value"] = not kept
+    print(
+        f"\nruntime-shard: shard {index + 1}/{len(shard_plan['shards'])}, "
+        f"command {matches[0] + 1}: running {len(kept)} tests",
+        flush=True,
+    )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if _EMPTY.get("value") and exitstatus == 5:  # no tests of this command here
+        session.exitstatus = 0
 
 
 if __name__ == "__main__":

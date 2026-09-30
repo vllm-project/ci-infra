@@ -949,17 +949,26 @@ def ensure_infra_failure_retry(
     return retry_policy
 
 
-def _runtime_shard_steps(step: Step, step_key: str) -> List[BuildkiteCommandStep]:
-    """Shadow runtime sharding for a step with `automatic_shard: true`.
+# "off" is the rollback switch: enrolled steps run as their normal single job.
+RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
 
-    Adds a collect step (the step's own image, queue and setup commands, then
-    `pytest --collect-only` per command) and a plan step on a CPU agent that
-    annotates the build with the shards the step would run as. The step
-    itself is untouched, and both new steps soft-fail. See runtime_shard.py.
-    """
-    split = runtime_shard.split_commands(step.commands or [])
+
+def _runtime_shard_mode(
+    step: Step, step_key: str, list_file_diff: List[str]
+) -> Optional[str]:
+    """How to run a step with `automatic_shard: true`: "on" (as shards),
+    "shadow" (one job, plus an annotation of the plan), or None (as usual)."""
+    if not step.automatic_shard or not _step_should_run(step, list_file_diff):
+        return None
+    mode = os.getenv(RUNTIME_SHARD_ENV_VAR) or "on"
+    if mode not in ("on", "shadow"):
+        return None
+    if fnrec_enabled() or kernrec_enabled():
+        # The recorders count their jobs at generation time; shards come later.
+        print(f"automatic_shard ignored on {step_key}: recording build")
+        return None
     if (
-        split is None
+        runtime_shard.split_commands(step.commands or []) is None
         or step.no_plugin
         or _uses_k8s_plugin(step)
         or is_amd_device(step.device)
@@ -969,8 +978,23 @@ def _runtime_shard_steps(step: Step, step_key: str) -> List[BuildkiteCommandStep
             f"automatic_shard ignored on {step_key}: only single-node docker steps "
             "whose test commands are all plain pytest can be sharded"
         )
-        return []
-    setup, tests = split
+        return None
+    return mode
+
+
+def _runtime_shard_steps(
+    step: Step, step_key: str, command_step: BuildkiteCommandStep, mode: str
+) -> List[BuildkiteCommandStep]:
+    """The collect and plan steps for an enrolled step (see runtime_shard.py).
+
+    collect: the step's own image, queue and setup commands, then
+    `pytest --collect-only` per command. plan: a CPU step that plans the shards
+    and annotates the build. In "on" mode the plan step also uploads
+    `command_step`, the step's normal job: as parallel shards, or unchanged if
+    anything failed, so sharding never blocks the step's tests. In "shadow"
+    mode the step runs as usual and both new steps soft-fail.
+    """
+    setup, tests = runtime_shard.split_commands(step.commands or [])
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
@@ -1006,17 +1030,31 @@ def _runtime_shard_steps(step: Step, step_key: str) -> List[BuildkiteCommandStep
         if get_global_config()["branch"] == "main"
         else AgentQueue.SMALL_CPU_PREMERGE
     )
+    plan_command = (
+        f"python3 {script} plan {step_key} {runtime_shard.encode(tests)} {mode}"
+    )
+    env = None
+    if mode == "on":
+        # If the planner can't even start, upload the step's normal job.
+        plan_command = (
+            f"{fetch} && {plan_command} || "
+            '(echo "$$RUNTIME_SHARD_TEMPLATE" | base64 -d'
+            " | buildkite-agent pipeline upload)"
+        )
+        template = {"steps": [command_step.dict(exclude_none=True)]}
+        env = {
+            "RUNTIME_SHARD_TEMPLATE": runtime_shard.encode(template),
+            "RUNTIME_SHARD_SCRIPT_URL": url,
+        }
     plan = BuildkiteCommandStep(
         label=f"Runtime shard plan: {step.label}",
         key=f"{step_key}-shard-plan",
         agents={"queue": queue.value},
-        commands=[
-            fetch,
-            f"python3 {script} plan {step_key} {runtime_shard.encode(tests)}",
-        ],
+        commands=[fetch, plan_command] if mode == "shadow" else [plan_command],
+        env=env,
         depends_on=[collect_key],
         allow_dependency_failure=True,
-        soft_fail=True,
+        soft_fail=mode == "shadow",
         timeout_in_minutes=_get_timeout_in_minutes(10),
     )
     return [collect, plan]
@@ -1166,14 +1204,17 @@ def convert_group_step_to_buildkite_step(
                 if step.device == DeviceType.L4 and not step.retry:
                     buildkite_step.retry = K8S_RETRY
 
-            if include_step:
+            shard_mode = (
+                _runtime_shard_mode(step, step_key, list_file_diff)
+                if include_step
+                else None
+            )
+            if include_step and shard_mode != "on":
                 group_steps_list.append(buildkite_step)
-            if (
-                include_step
-                and step.automatic_shard
-                and _step_should_run(step, list_file_diff)
-            ):
-                group_steps_list.extend(_runtime_shard_steps(step, step_key))
+            if shard_mode:
+                group_steps_list.extend(
+                    _runtime_shard_steps(step, step_key, buildkite_step, shard_mode)
+                )
 
             # Create AMD mirror step and its block step if specified/applicable
             if (
