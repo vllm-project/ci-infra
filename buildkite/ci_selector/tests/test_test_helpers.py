@@ -164,14 +164,39 @@ def test_an_unrelated_function_edit_follows_conftest(repo: Repo):
     assert "tests/test_other.py" in tests and "tests/test_server.py" in tests
 
 
-def test_a_changed_import_counts_its_names(repo: Repo):
-    """The import binds a name importers may take from the helper."""
-    extra = {"tests/test_other.py": "from tests.utils import sys\n"}
-    repo.write("tests/test_other.py", extra["tests/test_other.py"])
+@pytest.mark.parametrize(
+    "edit",
+    [
+        HELPER.replace("import os", "import os, sys"),  # an import runs on import
+        HELPER.replace("import os", "import os\nimport importlib\n\n_mod = importlib.import_module('os')"),
+        HELPER.replace("def wait_for_memory():", "@register\ndef wait_for_memory():"),
+        HELPER + "\n\nSERVER = make_server()\n",  # a new call at import time
+    ],
+    ids=["import", "dynamic-import", "registering-decorator", "import-time-call"],
+)
+def test_a_change_that_runs_on_import_keeps_the_file_level_claim(repo: Repo, edit):
+    """Every importer runs it, whatever names it binds: a changed
+    `m = importlib.import_module(...)` broke all 45 importers of a helper in a
+    probe, and routing by `m` selected none."""
+    assert _route(repo, edit) is None
+
+
+def test_an_import_time_call_of_an_affected_name_keeps_the_file_level_claim(
+    repo: Repo,
+):
+    repo.write("tests/utils.py", HELPER + "\n\nSERVER = make_server()\n")
+    repo.commit()
+    edit = HELPER.replace("return 1", "return 2") + "\n\nSERVER = make_server()\n"
+    assert _route(repo, edit) is None
+
+
+def test_a_plain_value_change_still_routes_by_its_name(repo: Repo):
+    """No call, no import: only the importers naming it read it."""
+    repo.write("tests/utils.py", HELPER + "\n\nLIMIT = 1\n")
+    repo.write("tests/test_other.py", "from tests.utils import LIMIT\n")
     repo.commit()
     imports = {**IMPORTS, "tests/test_other.py": {"tests/utils.py"}}
-    edit = HELPER.replace("import os", "import os, sys")
-    tests = _route(repo, edit, imports=imports)[0]
+    tests = _route(repo, HELPER + "\n\nLIMIT = 2\n", imports=imports)[0]
     assert tests == {"tests/test_other.py"}
 
 
@@ -320,3 +345,10 @@ def test_a_helper_a_fixture_uses_reaches_the_tests_naming_the_fixture(repo: Repo
 )
 def test_what_reaches_every_test_keeps_the_file_level_claim(repo: Repo, old, new):
     assert _route_conftest(repo, CONFTEST_BASE.replace(old, new)) is None
+
+
+def test_a_wrap_only_decorator_still_routes_by_name(repo: Repo):
+    """`@staticmethod`, `@pytest.fixture` and the like touch nothing else."""
+    edit = HELPER.replace("def wait_for_memory():", "@functools.cache\ndef wait_for_memory():")
+    tests = _route(repo, edit)[0]
+    assert "tests/test_other.py" in tests, "conftest's fixture uses wait_for_memory"
