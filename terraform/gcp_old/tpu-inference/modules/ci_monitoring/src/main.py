@@ -3,6 +3,7 @@
 import os
 import json
 import datetime
+import concurrent.futures
 import requests
 import functions_framework
 from google.cloud import bigquery
@@ -29,16 +30,38 @@ USING (
     JSON_VALUE(r, '$.state') AS state,
     CAST(JSON_VALUE(r, '$.wait_duration_sec') AS FLOAT64) AS wait_duration_sec,
     CAST(JSON_VALUE(r, '$.run_duration_sec') AS FLOAT64) AS run_duration_sec,
-    TIMESTAMP(JSON_VALUE(r, '$.created_at')) AS created_at
+    TIMESTAMP(JSON_VALUE(r, '$.created_at')) AS created_at,
+    JSON_VALUE(r, '$.job_id') AS job_id,
+    JSON_VALUE(r, '$.step_key') AS step_key,
+    JSON_VALUE(r, '$.queue') AS queue,
+    JSON_VALUE(r, '$.agent_name') AS agent_name,
+    JSON_VALUE(r, '$.agent_hostname') AS agent_hostname,
+    SAFE_CAST(JSON_VALUE(r, '$.exit_status') AS INT64) AS exit_status,
+    SAFE_CAST(JSON_VALUE(r, '$.soft_failed') AS BOOL) AS soft_failed,
+    SAFE_CAST(JSON_VALUE(r, '$.retried') AS BOOL) AS retried,
+    JSON_VALUE(r, '$.retry_type') AS retry_type,
+    SAFE_CAST(JSON_VALUE(r, '$.build_number') AS INT64) AS build_number,
+    JSON_VALUE(r, '$.build_source') AS build_source,
+    TIMESTAMP(JSON_VALUE(r, '$.runnable_at')) AS runnable_at,
+    TIMESTAMP(JSON_VALUE(r, '$.started_at')) AS started_at,
+    TIMESTAMP(JSON_VALUE(r, '$.finished_at')) AS finished_at,
+    TIMESTAMP(JSON_VALUE(r, '$.build_created_at')) AS build_created_at,
+    TIMESTAMP(JSON_VALUE(r, '$.build_finished_at')) AS build_finished_at
   FROM UNNEST(@rows) AS r
 ) S
 ON T.row_key = S.row_key
 WHEN NOT MATCHED THEN INSERT (
   row_key, build_id, org_slug, commit_hash, step_name, pipeline_slug,
-  branch, state, wait_duration_sec, run_duration_sec, created_at
+  branch, state, wait_duration_sec, run_duration_sec, created_at,
+  job_id, step_key, queue, agent_name, agent_hostname, exit_status,
+  soft_failed, retried, retry_type, build_number, build_source,
+  runnable_at, started_at, finished_at, build_created_at, build_finished_at
 ) VALUES (
   row_key, build_id, org_slug, commit_hash, step_name, pipeline_slug,
-  branch, state, wait_duration_sec, run_duration_sec, created_at
+  branch, state, wait_duration_sec, run_duration_sec, created_at,
+  job_id, step_key, queue, agent_name, agent_hostname, exit_status,
+  soft_failed, retried, retry_type, build_number, build_source,
+  runnable_at, started_at, finished_at, build_created_at, build_finished_at
 )
 """
 
@@ -48,6 +71,8 @@ PIPELINE_SLUGS = json.loads(os.environ.get("PIPELINE_SLUGS", "[]"))
 # [{"org": ..., "token_env": ...}]. A Buildkite token is scoped to one org, so
 # each names the env var holding its own, injected by Terraform.
 ORGS = json.loads(os.environ.get("ORGS_JSON", "[]"))
+
+FETCH_WORKERS = 8
 
 @functions_framework.http
 def handle_webhook(request):
@@ -63,16 +88,26 @@ def handle_webhook(request):
     pairs = []
     failures = []
 
+    targets = []
     for entry in ORGS:
         org = entry["org"]
         token = os.environ.get(entry["token_env"])
         if not token:
             failures.append(f"{org}: {entry['token_env']} is unset")
             continue
+        targets.extend((org, token, pipeline) for pipeline in PIPELINE_SLUGS)
 
-        for pipeline in PIPELINE_SLUGS:
+    # Concurrently: each target is a request of up to 30s, and one after
+    # another two dozen of them outlast the function's timeout.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+        futures = {
+            pool.submit(fetch_rows, org, token, pipeline, finished_from): (org, pipeline)
+            for org, token, pipeline in targets
+        }
+        for future in concurrent.futures.as_completed(futures):
+            org, pipeline = futures[future]
             try:
-                pairs.extend(fetch_rows(org, token, pipeline, finished_from))
+                pairs.extend(future.result())
             except requests.RequestException as e:
                 # Keep going so one bad target cannot drop the others; the
                 # lookback re-covers this window next run.
@@ -114,33 +149,42 @@ def fetch_rows(org, token, pipeline, finished_from):
     url = f"https://api.buildkite.com/v2/organizations/{org}/pipelines/{pipeline}/builds"
     params = {
         "finished_from": finished_from,
-        "state": "finished"
+        "state": "finished",
+        # Every attempt, not only the last: a failure a retry rescued is what
+        # a first-attempt pass rate and a flake rate are made of.
+        "include_retried_jobs": "true",
+        "per_page": 100,
     }
-
-    response = requests.get(url, headers=headers, params=params, timeout=30)
-    response.raise_for_status()
 
     # Row keys dedup the builds the lookback re-sends. Key on the job UUID, not
     # the step name: parallel jobs share a name and would collapse into one.
     rows = []
-    for build in response.json():
-        # 1. Capture E2E Summary
-        rows.append((
-            f"{build['id']}_E2E_SUMMARY",
-            construct_bq_row(org, build, "E2E_SUMMARY", build),
-        ))
+    while url:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
 
-        # 2. Capture Individual Steps
-        for job in build.get("jobs", []):
-            if job.get("type") == "script" and job.get("finished_at"):
-                rows.append((
-                    f"{build['id']}_{job['id']}",
-                    construct_bq_row(org, build, job.get("name"), job),
-                ))
+        for build in response.json():
+            # 1. Capture E2E Summary
+            rows.append((
+                f"{build['id']}_E2E_SUMMARY",
+                construct_bq_row(org, build, "E2E_SUMMARY", build),
+            ))
+
+            # 2. Capture Individual Steps
+            for job in build.get("jobs", []):
+                if job.get("type") == "script" and job.get("finished_at"):
+                    rows.append((
+                        f"{build['id']}_{job['id']}",
+                        construct_bq_row(org, build, job.get("name"), job, job=job),
+                    ))
+
+        # The next page's URL carries the query string itself.
+        url = response.links.get("next", {}).get("url")
+        params = None
 
     return rows
 
-def construct_bq_row(org, build, step_name, timing_source):
+def construct_bq_row(org, build, step_name, timing_source, job=None):
     runnable_at = parse_ts(timing_source.get("runnable_at"))
     started_at = parse_ts(timing_source.get("started_at"))
     finished_at = parse_ts(timing_source.get("finished_at"))
@@ -157,6 +201,8 @@ def construct_bq_row(org, build, step_name, timing_source):
     if started_at and finished_at:
         run_sec = (finished_at - started_at).total_seconds()
 
+    job = job or {}
+    agent = job.get("agent") or {}
     return {
         "build_id": build.get("id"),
         "org_slug": org,
@@ -167,8 +213,37 @@ def construct_bq_row(org, build, step_name, timing_source):
         "state": timing_source.get("state"),
         "wait_duration_sec": max(0, wait_sec),
         "run_duration_sec": max(0, run_sec),
-        "created_at": parse_ts(timing_source.get("created_at")).isoformat() if timing_source.get("created_at") else None
+        "created_at": parse_ts(timing_source.get("created_at")).isoformat() if timing_source.get("created_at") else None,
+        # The raw times as well as the durations above, so a window, a busy
+        # share or a time to signal can be computed after the fact. The agent
+        # and queue outlive the agent itself, which a torn-down fleet needs.
+        "job_id": job.get("id"),
+        "step_key": job.get("step_key"),
+        "queue": queue_of(job),
+        "agent_name": agent.get("name"),
+        "agent_hostname": agent.get("hostname"),
+        "exit_status": job.get("exit_status"),
+        "soft_failed": job.get("soft_failed") if job else None,
+        "retried": job.get("retried") if job else None,
+        "retry_type": job.get("retry_type"),
+        "build_number": build.get("number"),
+        "build_source": build.get("source"),
+        "runnable_at": iso(runnable_at),
+        "started_at": iso(started_at),
+        "finished_at": iso(finished_at),
+        "build_created_at": iso(parse_ts(build.get("created_at"))),
+        "build_finished_at": iso(parse_ts(build.get("finished_at"))),
     }
+
+def queue_of(job):
+    """The queue a job asked for, from its agent query rules."""
+    for rule in job.get("agent_query_rules") or []:
+        if rule.startswith("queue="):
+            return rule[len("queue="):]
+    return None
+
+def iso(ts):
+    return ts.isoformat() if ts else None
 
 def parse_ts(ts_str):
     if not ts_str: return None

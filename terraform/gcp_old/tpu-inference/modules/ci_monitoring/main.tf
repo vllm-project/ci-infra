@@ -104,7 +104,23 @@ resource "google_bigquery_table" "step_logs" {
   {"name": "run_duration_sec", "type": "FLOAT", "mode": "NULLABLE"},
   {"name": "created_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
   {"name": "org_slug", "type": "STRING", "mode": "NULLABLE"},
-  {"name": "row_key", "type": "STRING", "mode": "NULLABLE"}
+  {"name": "row_key", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "job_id", "type": "STRING", "mode": "NULLABLE", "description": "Buildkite job UUID; NULL on E2E_SUMMARY rows. Joins kube_workload_timing.job_id"},
+  {"name": "step_key", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "queue", "type": "STRING", "mode": "NULLABLE", "description": "From the job's agent query rules; kube for every kube step"},
+  {"name": "agent_name", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "agent_hostname", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "exit_status", "type": "INTEGER", "mode": "NULLABLE"},
+  {"name": "soft_failed", "type": "BOOLEAN", "mode": "NULLABLE", "description": "A failed job whose step allows failure; state is still failed"},
+  {"name": "retried", "type": "BOOLEAN", "mode": "NULLABLE", "description": "A later attempt replaced this one. NULL on rows written before retried jobs were collected, which were all final attempts"},
+  {"name": "retry_type", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "build_number", "type": "INTEGER", "mode": "NULLABLE"},
+  {"name": "build_source", "type": "STRING", "mode": "NULLABLE", "description": "schedule, webhook, api, ui or trigger_job"},
+  {"name": "runnable_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+  {"name": "started_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+  {"name": "finished_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+  {"name": "build_created_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+  {"name": "build_finished_at", "type": "TIMESTAMP", "mode": "NULLABLE"}
 ]
 EOF
 }
@@ -211,8 +227,8 @@ resource "google_cloudfunctions2_function" "webhook_receiver" {
   service_config {
     max_instance_count = 3
     available_memory   = "256M"
-    # One request per org/pipeline pair, sequential, 30s each. Under the
-    # scheduler's 320s deadline.
+    # One request of up to 30s per org/pipeline pair (more for a page past
+    # the first), eight at a time. Under the scheduler's 320s deadline.
     timeout_seconds       = 240
     service_account_email = google_service_account.function_sa.email
 
