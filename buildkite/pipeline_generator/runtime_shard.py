@@ -426,6 +426,15 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
         )
     )
     os.makedirs(out_dir, exist_ok=True)
+    # In a container root writes into an agent-owned checkout, so these land
+    # root-owned. Deleting a file needs write on its directory, not the file, so
+    # 0777 is what lets the next job's checkout clean up. Without it every later
+    # job on that agent fails to clone.
+    for path in (os.path.dirname(os.path.abspath(out_dir)), out_dir):
+        try:
+            os.chmod(path, 0o777)
+        except OSError:
+            pass
     with open(os.path.join(out_dir, f"inventory-{index}.json"), "w") as f:
         json.dump(
             {"index": int(index), "command": command, "exitstatus": status, **found}, f
