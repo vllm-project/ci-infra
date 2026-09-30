@@ -328,6 +328,65 @@ def test_amd_recorder_helpers_do_not_mask_an_earlier_command_failure(command):
     assert result.returncode == 1
 
 
+@pytest.mark.parametrize("mirror", [False, True])
+@pytest.mark.parametrize("kernrec,fnrec", [(0, 0), (1, 0), (0, 1), (1, 1)])
+@pytest.mark.parametrize(
+    "command,returncode",
+    [
+        ("case yes in yes) export RECORDER_TEST_VALUE=ready ;; esac\n", 0),
+        ("export RECORDER_TEST_VALUE=ready # trailing comment", 0),
+        ("read -r RECORDER_TEST_VALUE <<'EOF'\nready\nEOF\n", 0),
+        ("export RECORDER_TEST_VALUE=ready\nfalse # final failure", 1),
+    ],
+)
+def test_amd_multiline_commands_preserve_state_status_and_recorder_epilogues(
+    monkeypatch,
+    fake_global_config,
+    tmp_path,
+    mirror,
+    kernrec,
+    fnrec,
+    command,
+    returncode,
+):
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, str(kernrec))
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, str(fnrec))
+    monkeypatch.delenv("CONTINUE_ON_FAILURE", raising=False)
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(buildkite_step, "get_amd_setup_commands", lambda: [])
+    monkeypatch.setattr(
+        buildkite_step,
+        "_kernrec_setup_command",
+        lambda backend="cuda": (
+            'kernrec_finish() { printf "kernrec:%s:%s\\n" '
+            '"$$1" "$$RECORDER_TEST_VALUE"; }'
+        ),
+    )
+    monkeypatch.setattr(buildkite_step, "_fnrec_setup_commands", lambda *args: [])
+    monkeypatch.setattr(
+        buildkite_step,
+        "_fnrec_pack_command",
+        lambda: 'printf "fnrec:%s\\n" "$$RECORDER_TEST_VALUE"',
+    )
+    step = _gpu_step(
+        working_dir=str(tmp_path),
+        commands=[command, 'test "$$RECORDER_TEST_VALUE" = ready'],
+        **(
+            {"mirror": {"amd": {"device": "mi300_1", "dind": False}}}
+            if mirror
+            else {"device": "mi300_1", "dind": False}
+        ),
+    )
+    key = "amd-kernels" if mirror else "kernels"
+    rendered = next(s for g in _rendered_groups(step) for s in g.steps if s.key == key)
+    script = rendered.env["VLLM_TEST_COMMANDS"].replace("$$", "$")
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == returncode, result.stderr
+    lines = result.stdout.splitlines()
+    assert ("kernrec:0:ready" in lines) is bool(kernrec and returncode == 0)
+    assert ("fnrec:ready" in lines) is bool(fnrec and returncode == 0)
+
+
 def _timeout(rendered):
     return (
         rendered.get("timeout_in_minutes")

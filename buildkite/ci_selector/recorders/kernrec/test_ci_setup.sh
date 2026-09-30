@@ -21,7 +21,7 @@ cc -shared -fPIC "$WORK/fixtures/tool.c" -o "$WORK/fixtures/tool.so"
 cc -shared -fPIC "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/sdk.so"
 cc -shared -fPIC -DPATCH=3 "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/wrong-sdk.so"
 
-for mode in cuda rocm missing-sdk missing-compiler failed-build wrong-version conflict stale; do
+for mode in cuda rocm rocm-spawn rocm-fork rocm-forkserver missing-sdk missing-compiler failed-build wrong-version conflict stale; do
   case_dir="$WORK/$mode"
   mkdir -p "$case_dir/checkout" "$case_dir/cache" "$case_dir/source" \
     "$case_dir/rocm/include/rocprofiler-sdk" "$case_dir/rocm/lib" "$case_dir/bin"
@@ -51,7 +51,7 @@ CURL
   existing_tool=""; [[ "$mode" != conflict ]] || existing_tool=existing-profiler
   mkdir -p "$case_dir/other-checkout"
   rc=0
-  env -u KERNREC_ACTIVE_DIR \
+  env -u KERNREC_ACTIVE_DIR -u VLLM_WORKER_MULTIPROC_METHOD -u VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS \
     CASE_DIR="$case_dir" MODE="$mode" TOOL_FIXTURE="$WORK/fixtures/tool.so" \
     PATH="$case_dir/bin:$PATH" CXX="$compiler" ROCM_PATH="$case_dir/rocm" \
     KERNREC_CACHE_DIR="$case_dir/cache" KERNREC_SOURCE_DIR="$case_dir/source" \
@@ -62,6 +62,11 @@ CURL
     HSA_OVERRIDE_GFX_VERSION=9.4.2 \
     bash -c '
       set -eu
+      case "$MODE" in
+        rocm-spawn) export VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS=17 ;;
+        rocm-fork) export VLLM_WORKER_MULTIPROC_METHOD=fork ;;
+        rocm-forkserver) export VLLM_WORKER_MULTIPROC_METHOD=forkserver ;;
+      esac
       . "$1/ci_setup.sh"
       if [[ "$MODE" == rocm ]]; then . "$1/ci_setup.sh"; fi
       "$KERNREC_PYTHON" - <<'"'"'PY'"'"'
@@ -74,6 +79,8 @@ root = Path(os.environ["CASE_DIR"])
     "cuda": os.environ.get("CUDA_INJECTION64_PATH"),
     "tool": os.environ.get("ROCP_TOOL_LIBRARIES"),
     "preload": os.environ.get("LD_PRELOAD"),
+    "worker_method": os.environ.get("VLLM_WORKER_MULTIPROC_METHOD"),
+    "worker_shutdown": os.environ.get("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS"),
 }))
 with (root / "workload").open("a") as stream:
     stream.write("once\n")
@@ -94,19 +101,26 @@ assert initial["sidecar"]["exit_status"] is None
 assert final["exit_status"] == 7
 assert final["label"] == 'quoted "label"\nline'
 assert final["provenance"]["environment"]["HSA_OVERRIDE_GFX_VERSION"] == "9.4.2"
-assert final["collection_available"] == (mode in {"cuda", "rocm"})
-if mode == "rocm":
+assert final["collection_available"] == (mode in {"cuda", "rocm", "rocm-spawn"})
+if mode in {"rocm", "rocm-spawn"}:
     assert initial["tool"] == str(root / "cache/libkernrec_rocm.so")
     assert initial["preload"] == str(root / "rocm/lib/librocprofiler-sdk.so") + ":" + previous_preload
     assert (root / "builds").read_text() == "build\n", "reuse the job's successful build"
     assert final["provenance"]["versions"]["rocprofiler-sdk"] == "1.3.2"
+    assert initial["worker_method"] == "spawn"
+    assert initial["worker_shutdown"] == ("17" if mode == "rocm-spawn" else "30")
+    assert final["provenance"]["environment"]["VLLM_WORKER_MULTIPROC_METHOD"] == "spawn"
+    assert final["provenance"]["environment"]["VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS"] == initial["worker_shutdown"]
 elif mode == "cuda":
     assert initial["cuda"] == str(root / "cache/libkernrec.so")
     assert initial["preload"] == previous_preload
+    assert initial["worker_method"] is initial["worker_shutdown"] is None
 else:
     assert final["collection_error"]
     assert initial["preload"] == previous_preload
     assert initial["tool"] == ("existing-profiler" if mode == "conflict" else "")
+    assert initial["worker_method"] == ({"rocm-fork": "fork", "rocm-forkserver": "forkserver"}.get(mode))
+    assert initial["worker_shutdown"] is None
     if mode == "stale":
         assert (root / "checkout/.kernrec/job/kern.99.txt").read_text() == "previous_kernel\n"
 PY

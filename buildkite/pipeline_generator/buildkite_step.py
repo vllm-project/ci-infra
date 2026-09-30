@@ -679,17 +679,25 @@ def _collect_step(
     label: str,
     count_armed: bool = False,
 ) -> "BuildkiteCommandStep":
-    blocked = {
-        s.key[len("block-") :]
-        for g in groups
-        for s in g.steps
-        if isinstance(s, BuildkiteBlockStep)
-    }
+    steps = [s for g in groups for s in g.steps]
+    blocked = {s.key for s in steps if isinstance(s, BuildkiteBlockStep)}
+    # Block keys do not consistently encode the command they gate: directly
+    # declared AMD jobs use block-amd-<key> without adding amd- to the job.
+    # Follow the actual edges, including jobs waiting on a blocked image or
+    # another blocked job, so collection never waits for manual approval.
+    dependents: Dict[str, List[str]] = {}
+    for step in steps:
+        if isinstance(step, BuildkiteCommandStep):
+            for dependency in step.depends_on or []:
+                dependents.setdefault(dependency, []).append(step.key)
+    pending = list(blocked)
+    while pending:
+        for dependent in dependents.get(pending.pop(), []):
+            if dependent not in blocked:
+                blocked.add(dependent)
+                pending.append(dependent)
     runnable = [
-        s
-        for g in groups
-        for s in g.steps
-        if isinstance(s, BuildkiteCommandStep) and s.key not in blocked
+        s for s in steps if isinstance(s, BuildkiteCommandStep) and s.key not in blocked
     ]
     # Only the steps that record, and what they wait for: the image build
     # uploads the kernel symbol map. Waiting on every step held the kernel
@@ -844,6 +852,10 @@ def _prepare_commands(
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
                 commands.append(f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1")
+            elif setup_profile == "amd":
+                # AMD joins commands with &&. Keep comments, heredocs and trailing
+                # newlines inside a shell group without losing exports or cd.
+                commands.append(f"{{\n{prepared_command}\n}}")
             else:
                 commands.append(prepared_command)
 

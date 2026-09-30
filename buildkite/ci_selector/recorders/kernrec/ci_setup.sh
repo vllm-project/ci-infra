@@ -29,7 +29,8 @@ try:
 except OSError:
     pass
 names = {"ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
-         "HSA_OVERRIDE_GFX_VERSION"}
+         "HSA_OVERRIDE_GFX_VERSION", "VLLM_WORKER_MULTIPROC_METHOD",
+         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS"}
 backend = env.get("KERNREC_BACKEND", "cuda")
 data = {
     "step_key": env.get("BUILDKITE_STEP_KEY", ""),
@@ -115,6 +116,10 @@ PY
       export CUDA_INJECTION64_PATH="$dir/libkernrec.so"
       ;;
     rocm)
+      # Torch import initializes the SDK before vLLM's first device call.
+      # Respect workloads that explicitly require fork by leaving them unarmed.
+      KERNREC_COLLECTION_ERROR="ROCm collection requires VLLM_WORKER_MULTIPROC_METHOD=spawn"
+      [[ "${VLLM_WORKER_MULTIPROC_METHOD:-spawn}" == spawn ]] || return 1
       local rocm="${ROCM_PATH:-/opt/rocm}" sdk_include sdk_lib source file
       sdk_include="${ROCPROFILER_SDK_INCLUDE:-$rocm/include}"
       sdk_lib="${ROCPROFILER_SDK_LIB:-$rocm/lib}"
@@ -151,6 +156,8 @@ if status != 0 or actual != (1, 3, 2):
 ctypes.CDLL(sys.argv[2])
 print("ROCProfiler SDK 1.3.2 and recorder dependencies loaded")
 PY
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      export VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS="${VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS:-30}"
       export KERNREC_SDK_VERSION=1.3.2
       export ROCP_TOOL_LIBRARIES="$dir/libkernrec_rocm.so"
       case ":${LD_PRELOAD:-}:" in

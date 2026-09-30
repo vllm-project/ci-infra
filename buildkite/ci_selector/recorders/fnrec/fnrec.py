@@ -430,15 +430,15 @@ def _arm_pytest_plugin():
     os.environ["PYTEST_PLUGINS"] = f"{existing},{name}" if existing else name
 
 
-class _ImportTrigger:
+class _VllmImportTrigger:
     fired = False
 
     def find_spec(self, fullname, path=None, target=None):
-        if _ImportTrigger.fired:
+        if _VllmImportTrigger.fired:
             return None
         if fullname.partition(".")[0] not in ("vllm", "aiter"):
             return None
-        _ImportTrigger.fired = True
+        _VllmImportTrigger.fired = True
         try:
             sys.meta_path.remove(self)
         except ValueError:
@@ -461,7 +461,7 @@ if _OUT and _ROOT_ENV:
         _host = socket.gethostname().split(".")[0][:32]
         os.makedirs(_OUT, exist_ok=True)
         os.chmod(_OUT, 0o777)
-        sys.meta_path.insert(0, _ImportTrigger())
+        sys.meta_path.insert(0, _VllmImportTrigger())
         _arm_pytest_plugin()
     except Exception:
         pass

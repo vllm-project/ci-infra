@@ -215,6 +215,9 @@ dropped when that file was all the map had on it, and everything else falls
 to the map. The rule and its gates are in that module's docstring. First
 measured on PR 55755: 311 jobs from the map, 158 with the record.
 
+Legacy CUDA tables and traces can select tests but cannot justify skips;
+refresh them with the updated recorder and table builder.
+
 ## Not here yet
 
 Wiring `ci-select` into the Buildkite bootstrap. Nothing in CI calls the

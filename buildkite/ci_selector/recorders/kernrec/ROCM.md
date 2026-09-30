@@ -12,14 +12,20 @@ Use the ROCm CI image's pinned ROCProfiler SDK **1.3.2** headers and runtime.
 revision. The recorder rejects other SDK versions until they have been validated.
 A C++17 compiler is needed to build the small injection library in the image.
 
-`VLLM_CI_KERNREC=1` enables recording on eligible AMD and NVIDIA steps. AMD
-native jobs and single-node Docker jobs are supported; multi-node AMD jobs remain
+`VLLM_CI_KERNREC=1` enables recording on eligible AMD steps. Native
+jobs and single-node Docker jobs are supported; multi-node AMD jobs remain
 unarmed until remote injection and artifact collection are validated. On AMD,
 `ci_setup.sh` builds the recorder against the installed SDK and checks the runtime
 version and shared-library dependencies before exporting the injection variables.
 Missing dependencies leave the workload running once without recording; the job
 sidecar reports collection unavailable. Test jobs do not install or upgrade ROCm.
 Provision missing SDK packages in the image build using the matching ROCm release.
+
+After preflight, setup defaults `VLLM_WORKER_MULTIPROC_METHOD=spawn` and
+`VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS=30`. An explicit non-spawn worker method
+leaves collection unavailable and the workload's process behavior unchanged;
+an explicit shutdown timeout is preserved. Recorded library scripts must use
+an `if __name__ == "__main__":` guard and support spawned workers.
 
 For a local run, from the ci-infra checkout, using an existing workload environment:
 
@@ -28,6 +34,8 @@ KERNREC="$PWD/buildkite/ci_selector/recorders/kernrec"
 VLLM_DIR=/path/to/vllm
 bash "$KERNREC/build-rocm.sh" /tmp/libkernrec_rocm.so
 KERNREC_DIR=/tmp/kernrec-run \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS=30 \
 ROCP_TOOL_LIBRARIES=/tmp/libkernrec_rocm.so \
 LD_PRELOAD=/opt/rocm/lib/librocprofiler-sdk.so \
   "$VLLM_DIR/.venv/bin/python" -m pytest "$VLLM_DIR/tests/kernels/core/test_layernorm.py"
@@ -35,9 +43,11 @@ LD_PRELOAD=/opt/rocm/lib/librocprofiler-sdk.so \
 
 Use a fresh output directory for each run. Preserve any required existing
 `LD_PRELOAD` entries. Preload the SDK, and name the recorder in
-`ROCP_TOOL_LIBRARIES`; preloading the recorder itself would initialize profiling
-too early for fork-before-HIP workloads. Avoid simultaneous GPU profilers in the
-same process. Profiler-specific tests are excluded from normal recording.
+`ROCP_TOOL_LIBRARIES`. Torch import initializes the SDK before the first GPU
+operation; forking after that point cannot record child kernels. Launchers that
+call `os.fork()` directly still require separate validation. Allow workers to
+finish shutdown: force-killed processes leave incomplete traces. Avoid
+simultaneous GPU profilers; profiler-specific tests are excluded from recording.
 
 ## Recording contract
 
@@ -106,12 +116,6 @@ The existing `--kernel-table` and `--kernel-symbol-map` options select a single
 explicit pair. An observation or unusable matching row in one pair prevents
 another pair from dropping that same step. Tables and maps from different
 backends are never joined.
-
-Deploy consumers before producers: table schema 3 adds backend and trace health;
-map schema 2 adds backend. Older consumers reject unsupported versions and use
-static selection. New consumers read CUDA table schema 2/map schema 1, but legacy
-tables lack error/completion evidence and therefore only add steps. Rebuild the
-CUDA library and refresh recordings to restore validated negative evidence.
 
 ## rocprofv3 diagnostics
 
