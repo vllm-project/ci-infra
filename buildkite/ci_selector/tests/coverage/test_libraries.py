@@ -138,9 +138,10 @@ class TestTheDrop:
         """rows: step key -> the `process_file` extras its one process gets."""
         build = Build(tmp_path / "sweep" / "b", "1", tmp_repo.head())
         for i, (key, extra) in enumerate(rows.items()):
+            extra = dict(extra)
             process_file(
                 build.job(f"j{i}", step_key=key) / "fn.a.txt",
-                [("mod.py", "plain")],
+                [("mod.py", "plain"), *extra.pop("entries", ())],
                 **{"packages": ["torch"], **extra},
             )
         out = tmp_path / "table.json"
@@ -235,6 +236,56 @@ class TestTheDrop:
     def test_no_bump_weighs_nothing(self, tmp_path, tmp_repo):
         table = self._table(tmp_path, tmp_repo, quiet=self.WATCHED)
         assert self._read(table, self._selection("quiet"), bumped={}) == ([], {})
+
+    DG = {"cmake/external_projects/deepgemm.cmake": frozenset({"deep_gemm"})}
+    DG_WATCHED = {"libs": ["deep_gemm"]}
+    DG_WRAPPER = {"deep_gemm": libraries.LIBRARY_WRAPPERS["deep_gemm"]}
+
+    def _read_dg(self, table, key, wrappers):
+        sel = self._selection(key, by=tuple(self.DG))
+        keys = RowKeys({"vllm_ci"}, {"vllm_ci": 1.0})
+        return read_pr(table, sel, self.DG, keys, frozenset(), wrappers)
+
+    def test_a_kernel_through_the_wrapper_is_a_call(self, tmp_path, tmp_repo):
+        """DeepGEMM's entry points are compiled: build 91980's DeepGEMM step
+        recorded no call into it, only vLLM's wrapper running fp8_gemm_nt."""
+        tmp_repo.write("vllm/utils/deep_gemm.py", "def fp8_gemm_nt():\n    pass\n")
+        tmp_repo.commit("wrapper")
+        row = {**self.DG_WATCHED, "entries": [("utils/deep_gemm.py", "fp8_gemm_nt")]}
+        table = self._table(tmp_path, tmp_repo, gemm=row)
+        dropped, why = self._read_dg(table, "gemm", self.DG_WRAPPER)
+        assert dropped == [] and why["row-calls-the-bumped-library"] == 1
+
+    def test_an_availability_check_is_not_a_call(self, tmp_path, tmp_repo):
+        checks = [
+            ("utils/deep_gemm.py", "is_deep_gemm_supported"),
+            ("utils/deep_gemm.py", "DeepGemmQuantScaleFMT.init_oracle_cache"),
+        ]
+        tmp_repo.write(
+            "vllm/utils/deep_gemm.py",
+            "class DeepGemmQuantScaleFMT:\n    def init_oracle_cache(self):\n        pass\n"
+            "\n\ndef is_deep_gemm_supported():\n    pass\n",
+        )
+        tmp_repo.commit("wrapper")
+        row = {**self.DG_WATCHED, "entries": checks}
+        table = self._table(tmp_path, tmp_repo, check=row)
+        dropped, _ = self._read_dg(table, "check", self.DG_WRAPPER)
+        assert dropped == ["vllm_ci:check"]
+
+    def test_a_moved_wrapper_keeps_every_step(self, tmp_path, tmp_repo):
+        """Without the wrapper at the base, a silence may just be a rename."""
+        table = self._table(tmp_path, tmp_repo, quiet=self.DG_WATCHED)
+        dropped, why = self._read_dg(table, "quiet", {})
+        assert dropped == [] and why["library-wrapper-moved"] == 1
+
+
+def test_the_wrapper_is_found_only_where_it_exists(tmp_repo: Repo):
+    tmp_repo.write("vllm/other.py", "x = 1\n")
+    without = tmp_repo.commit("no wrapper")
+    tmp_repo.write("vllm/utils/deep_gemm.py", "def fp8_gemm_nt():\n    pass\n")
+    with_it = tmp_repo.commit("wrapper")
+    assert "deep_gemm" not in libraries.wrappers_at(tmp_repo.root, without)
+    assert "deep_gemm" in libraries.wrappers_at(tmp_repo.root, with_it)
 
 
 def test_torch_is_not_watched():

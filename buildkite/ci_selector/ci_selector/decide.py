@@ -444,7 +444,12 @@ def _apply_library_record(
         raise RuntimeError("no pipeline state to resolve step keys against")
     keys = RowKeys.resolve_from_state(set(table._rows), state)
     dropped, reasons = libraries.read_pr(
-        table, selection, out.bumped, keys, frozenset(out.executes_by_coverage)
+        table,
+        selection,
+        out.bumped,
+        keys,
+        frozenset(out.executes_by_coverage),
+        libraries.wrappers_at(repo, base),
     )
     out.library_reasons = dict(reasons)
     out.dropped_by_libraries = set(dropped) & out.steps

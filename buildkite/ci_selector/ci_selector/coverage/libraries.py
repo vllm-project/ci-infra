@@ -46,6 +46,37 @@ LIBRARY_PINS: dict[str, tuple[str, ...]] = {
     "triton": ("triton",),
 }
 
+# Watched library -> vLLM's own wrapper module for it and the wrapper's names
+# that call nothing in the library. For a library whose entry points are
+# compiled, the recorder sees no frame of it at all: DeepGEMM's functions come
+# straight from its C extension, and build 91980's DeepGEMM kernel step, which
+# ran fp8_gemm_nt through the wrapper, recorded no call. A call into any other
+# name of the wrapper is then the call into the library.
+# The skipped names are availability checks and loading, which nearly every
+# step runs. A new check missing here only keeps more steps; a moved wrapper
+# keeps every step (`wrappers_at`).
+# Update when: vLLM moves the wrapper, or a compiled library joins.
+LIBRARY_WRAPPERS: dict[str, tuple[str, frozenset[str]]] = {
+    "deep_gemm": (
+        "vllm/utils/deep_gemm.py",
+        frozenset(
+            {
+                "<module>",
+                "DeepGemmQuantScaleFMT",
+                "is_deep_gemm_supported",
+                "is_deep_gemm_e8m0_used",
+                "should_auto_disable_deep_gemm",
+                "should_use_deepgemm_for_fp8_linear",
+                "_apply_pdl",
+                "_import_deep_gemm",
+                "_lazy_init",
+                "_missing",
+            }
+        ),
+    ),
+}
+
+
 # A version or a commit, the only token a bump may change.
 _VERSION = re.compile(r"(?<![\w.+-])\d[\w.+!-]*|\b[0-9a-f]{7,40}\b")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
@@ -185,6 +216,7 @@ def read_pr(
     bumped: dict[str, frozenset[str]],
     keys,
     protected: frozenset[str] = frozenset(),
+    wrappers: dict[str, tuple[str, frozenset[str]]] | None = None,
 ) -> tuple[list[str], Counter]:
     """(steps to drop, why each weighed step went the way it did).
 
@@ -192,7 +224,11 @@ def read_pr(
     `selected_by_file` as the kernel record does: the image and requirements
     rules pick them non-droppably, since a function row says nothing about an
     image, and a row of library calls is the evidence that can.
+
+    `wrappers` holds the entries of LIBRARY_WRAPPERS whose wrapper exists at
+    the base; a mapped library missing from it keeps every step.
     """
+    wrappers = wrappers or {}
     dropped: list[str] = []
     reasons: Counter = Counter()
     by_step: dict[str, set[str]] = defaultdict(set)
@@ -218,13 +254,37 @@ def read_pr(
         if unusable is not None:
             reasons[unusable.evidence.value] += 1
             continue
-        calls = table.row(key).stamp.libcalls
-        if not libs <= calls.keys():
+        row = table.row(key)
+        calls = row.stamp.libcalls
+        if any(lib in LIBRARY_WRAPPERS and lib not in wrappers for lib in libs):
+            reasons["library-wrapper-moved"] += 1
+        elif not libs <= calls.keys():
             # Recorded before the recorder watched the library.
             reasons["row-predates-library-recording"] += 1
-        elif any(calls[lib] for lib in libs):
+        elif any(
+            calls[lib] or (lib in wrappers and _through_wrapper(row, *wrappers[lib]))
+            for lib in libs
+        ):
             reasons["row-calls-the-bumped-library"] += 1
         else:
             reasons["row-never-calls-the-bumped-library"] += 1
             dropped.append(step_id)
     return dropped, reasons
+
+
+def _through_wrapper(row, path: str, skipped) -> bool:
+    """Whether the row ran a name of the wrapper at `path` that calls into
+    the library: anything but a skipped name or a method of one."""
+    return any(
+        not any(n == k or n.startswith(k + ".") for k in skipped)
+        for n in row.functions.get(path, ())
+    )
+
+
+def wrappers_at(repo: Path, base: str) -> dict[str, tuple[str, frozenset[str]]]:
+    """The LIBRARY_WRAPPERS entries whose wrapper file exists at `base`."""
+    return {
+        lib: entry
+        for lib, entry in LIBRARY_WRAPPERS.items()
+        if _show(repo, base, entry[0]) is not None
+    }
