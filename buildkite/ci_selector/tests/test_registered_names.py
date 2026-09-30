@@ -209,6 +209,238 @@ def test_wide_dispatch_key_survives(state):
     assert any("lm-eval" in s for s in routed), sorted(routed)[:5]
 
 
+def test_dispatch_key_matches_only_as_a_value():
+    """vllm#58975: fope.py minted the dispatch key 'default' from
+    `rope_type == "default"`, and the bare word routed rust-frontend-cargo-*
+    through rustup's --default-toolchain and ray-dependency-compatibility-check
+    through echo prose. A gating literal is a config value, so it selects its
+    member only where it stands as one. Every shape here is one CI uses, one
+    case per branch of the pattern."""
+    from ci_selector.codemap.registered_names import _typed_pattern
+
+    values = {
+        "mtp": [
+            '--speculative-config \'{"method":"mtp","num_speculative_tokens":1}\'',
+            "VLLM_SERVE_EXTRA_ARGS=--spec-method,mtp,--spec-tokens,1",
+            'mtp_config="SD_METHOD=mtp MODEL_NAME=Qwen/Qwen3.5-0.8B"',
+            "  --max-num-seqs 256\n  --spec-method mtp\n",
+            "method: mtp",
+            "SD_METHOD=${SD_METHOD:-mtp}",
+            # a step env entry, rendered KEY=value into the haystack
+            "VLLM_SERVE_EXTRA_ARGS=--spec-method mtp",
+            "export VLLM_SERVE_EXTRA_ARGS='--trust-remote-code,--spec-method mtp'",
+            "SERVE_ARGS=(--speculative-method mtp --num-speculative-tokens 1)",
+            "speculative_methods:\n  - mtp\n",
+        ],
+        "dspark": [
+            "  --speculative-config.method dspark\n",
+            # vLLM infers the method from a draft model's name
+            '"model": "RedHatAI/Kimi-K3-speculator.dspark",',
+        ],
+        "eagle3": [
+            '--speculative-config \'{"model": '
+            '"RedHatAI/Qwen3-8B-speculator.eagle3", "num_speculative_tokens": 3}\'',
+        ],
+        "eagle": [
+            "spec_decode_offline.py --test --method eagle --num_spec_tokens 3",
+            '\'{"model":"abhigoyal/vllm-eagle-llama-68m-random"}\'',
+        ],
+        "moonep": ["--enable-expert-parallel --all2all-backend=moonep"],
+        "deepep_low_latency": [
+            'BACKENDS=("deepep_high_throughput" "deepep_low_latency")',
+            '--all2all-backends "deepep_low_latency,naive"',
+        ],
+        # Llama-3.2 is a llama3-rope model; a version suffix is the same name
+        "llama3": [
+            "pytest tool_use --models llama3.2 -k 'not x'",
+            "test_chat_completion_with_tools[llama3.2]",
+        ],
+    }
+    not_values = {
+        "default": [
+            "curl https://sh.rustup.rs | sh -s -- -y --default-toolchain none",
+            'echo ">>>          Falling back to default PyPI (resolution may differ)"',
+            'echo ">>> Using PyTorch index: ${TORCH_INDEX_URL:-PyPI default}"',
+            'label="default backend"',
+            'run_tests "default backend" ""',
+            'local default="docker/Dockerfile.rocm_base"',
+            '  echo "Commands sourced from default YAML: ${DEFAULT_YAML}"',
+            "--default-chat-template-kwargs '{\"enable_thinking\": false}'",
+        ],
+        "linear": ["--linear-backend humming", "w8a8-fp8-linear)"],
+        "suffix": ['local suffix=""', "--serialized-directory /tmp/ --suffix v1"],
+        "mtp": ["pytest -v -s v1/e2e/spec_decode/mtp/", "--config mtp.yaml"],
+    }
+    for key, texts in values.items():
+        pat = _typed_pattern(key, "dispatch")
+        for text in texts:
+            assert pat.search(text), (key, text)
+    for key, texts in not_values.items():
+        pat = _typed_pattern(key, "dispatch")
+        for text in texts:
+            assert not pat.search(text), (key, text)
+
+
+def test_list_made_only_of_dispatch_keys_routes_each():
+    """A space list reads like prose to the value pattern, which must not take
+    'label="default backend"'. A list made only of dispatch keys is values:
+    every backend of an all2all matrix, every method of a sweep."""
+    from ci_selector.codemap.registered_names import _listed_keys
+
+    keys = {"deepep_low_latency", "deepep_high_throughput", "mtp", "eagle3"}
+    keys |= {"ngram", "default", "linear"}
+    listed = {
+        'ALL2ALL_BACKENDS="deepep_low_latency deepep_high_throughput" bash x.sh': {
+            "deepep_low_latency",
+            "deepep_high_throughput",
+        },
+        "BACKENDS=(deepep_low_latency deepep_high_throughput)": {
+            "deepep_low_latency",
+            "deepep_high_throughput",
+        },
+        'for m in eagle3 mtp ngram; do\n  bash run.sh --spec-method "$m"\ndone': {
+            "eagle3",
+            "mtp",
+            "ngram",
+        },
+        '\\"mtp,eagle3\\"': {"mtp", "eagle3"},
+    }
+    for text, want in listed.items():
+        assert _listed_keys(text, keys) == want, text
+    for text in (
+        'label="default backend"',
+        'echo "running with default linear scaling"',
+        "for f in *.yaml; do",
+        'pytest -k "eagle3 and not mtp"',
+    ):
+        assert not _listed_keys(text, keys), text
+
+
+def test_value_contexts_key_a_built_step(state):
+    """Both value readers feed step_keys through KeyIndex.build: a step that
+    only sweeps methods in a list, or only names a speculators draft model
+    (vLLM infers eagle3 from it), is keyed; the vllm#58975 prose is not. No
+    step at pinning time depends on either shape alone, so without this a
+    build that dropped one would pass every other test."""
+    from ci_selector.codemap.pipeline.targets import StepTargets
+    from ci_selector.codemap.registered_names import KeyIndex
+    from ci_selector.codemap.state import PipelineData
+
+    for key in ("mtp", "eagle3", "ngram", "default"):
+        assert state.keys.key_mechanism.get(key) == "dispatch", (
+            f"specimen moved: {key!r} is no longer a dispatch key"
+        )
+    texts = {
+        "sweep": 'SD_METHODS="eagle3 mtp ngram" bash sweep.sh',
+        "draft": "vllm serve Qwen/Qwen3-8B --speculative-config "
+        '\'{"model": "RedHatAI/Qwen3-8B-speculator.eagle3"}\'',
+        "prose": 'echo "Falling back to default PyPI"\nlabel="default backend"',
+    }
+    pdata = PipelineData(
+        config=state.pipelines[0].config,
+        steps=[],
+        targets={sid: StepTargets(sid, haystack=t) for sid, t in texts.items()},
+    )
+    keys = KeyIndex.build(state.repo, state.full, [pdata]).step_keys
+    assert {"eagle3", "mtp", "ngram"} <= keys.get("sweep", set()), keys
+    assert "eagle3" in keys.get("draft", set()), keys
+    assert "default" not in keys.get("prose", set()), keys
+
+
+def test_generic_dispatch_word_routes_no_step_by_prose(state):
+    """vllm#58975 end to end. None of these steps has a recording row, so a
+    key route to them is a step nothing narrows afterwards: every change
+    reaching fope.py ran rust lint and a ray resolver check."""
+    assert state.keys.key_mechanism.get("default") == "dispatch", (
+        "specimen moved: 'default' is no longer a dispatch key; pick another "
+        "gating literal that is an ordinary word in step commands"
+    )
+    named = state.keys.steps_naming({"default"})
+    word = re.compile(r"\bdefault\b")
+    for sid in (
+        "vllm_ci:rust-frontend-cargo-style-clippy",
+        "vllm_ci:rust-frontend-cargo-tests",
+        "vllm_ci:ray-dependency-compatibility-check",
+    ):
+        assert word.search(state.keys.commands.get(sid, "")), (
+            f"specimen moved: {sid} no longer says 'default'"
+        )
+        assert sid not in named, sid
+
+
+def test_dispatch_key_config_contexts_pinned(state):
+    """The no-loss side of value-only matching: a step that sets a method or
+    backend to a dispatch key ('"method":"mtp"', '--spec-method,mtp',
+    '--speculative-config.method dspark', '--all2all-backend=moonep') is keyed
+    by it.
+
+    A copy of the shape rather than a call to the matcher, so premise and
+    assertion are not the same code."""
+    dispatch = {k for k, m in state.keys.key_mechanism.items() if m == "dispatch"}
+    setting = re.compile(
+        r"(?i:method|backend)[\"']?(?:[ \t]*[:=,][ \t]*|[ \t]+)[\"']?([\w-]+)"
+    )
+    found: dict[str, set[str]] = {}
+    for sid, text in state.keys.commands.items():
+        named = set(setting.findall(text)) & dispatch
+        if named:
+            found[sid] = named
+    keys = {k for ks in found.values() for k in ks}
+    # mtp, eagle, eagle3 and dspark at pinning time, in 35 steps
+    assert len(keys) >= 3, drift_message(
+        f"only {sorted(keys)} are set as a method or backend in step commands",
+        "this is the evidence that value-only matching still routes the eval "
+        "and PD-accuracy jobs that pick a speculator or all2all backend by "
+        "name; with fewer contexts it proves little",
+        "if the jobs moved these settings elsewhere, widen `setting` here",
+    )
+    for sid, named in sorted(found.items()):
+        missing = named - state.keys.step_keys.get(sid, set())
+        assert not missing, f"{sid} sets {sorted(missing)}, unkeyed"
+
+
+def test_value_matching_drops_only_word_routes(state):
+    """The no-loss side over every dispatch key and every context: steps whose
+    commands have the key as a word but are not keyed by it. At pinning time
+    those keys are ordinary words (default, linear, suffix, dynamic) and one
+    config-file-name fragment (cutedsl in ...-fi-cutedsl-deepep-ll.yaml).
+    Any other key here is a value context the pattern stopped reading, such
+    as a pytest node id (`tools[llama3.2]`) or a draft model's name.
+
+    `\\bkey\\b` is the matcher dispatch keys had before, kept as a copy so
+    the premise is not the code under test."""
+    dispatch = {k for k, m in state.keys.key_mechanism.items() if m == "dispatch"}
+    dropped: dict[str, set[str]] = {}
+    for key in dispatch:
+        word = re.compile(rf"\b{re.escape(key)}\b")
+        for sid, text in state.keys.commands.items():
+            if word.search(text) and key not in state.keys.step_keys.get(sid, ()):
+                dropped.setdefault(key, set()).add(sid)
+    known = {"default", "linear", "suffix", "dynamic", "cutedsl"}
+    new = {k: sorted(v)[:3] for k, v in dropped.items() if k not in known}
+    assert not new, drift_message(
+        f"dispatch keys stop routing steps that name them as a word: {new}",
+        "if the step sets the key as a value, the member's change no longer "
+        "selects it, and nothing else does: demotion cut the import edge",
+        "if the context is a value, teach _value_pattern or _listed_keys its "
+        "shape and add a case to test_dispatch_key_matches_only_as_a_value",
+        "if it is prose or part of a longer name, add the key to `known` here",
+    )
+
+
+def test_shared_gating_literal_keys_every_member(state):
+    """Dispatch keys are typed now, and the mint refuses a literal a typed
+    registration already owns. A literal gating a second member is shared,
+    not owned: 'mtp' gates both eagle.py and gemma4.py."""
+    assert not any(
+        why == "typed-owned (dispatch)" for why in state.keys.refused.values()
+    ), state.keys.refused
+    for member in ("vllm/v1/spec_decode/eagle.py", "vllm/v1/spec_decode/gemma4.py"):
+        assert "mtp" in state.keys.for_file(member), (
+            f"specimen moved: mtp no longer gates {member}"
+        )
+
+
 def test_dropped_edges_separates_refused_from_unrouted():
     """The old predicate asked whether a literal existed anywhere in the index,
     so one owned by another file counted as routing this member, and a deleted
