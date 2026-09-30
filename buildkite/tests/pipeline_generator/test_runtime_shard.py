@@ -52,6 +52,17 @@ def test_contiguous_keeps_order_and_uses_fewest_runs():
     assert len(over) <= 6 and sum(over, []) == list(range(10))
 
 
+def test_plan_keeps_a_file_main_timed_at_zero_seconds():
+    inventory = [_entry(TESTS[0], {"model_executor/a.py": 2, "model_executor/b.py": 1})]
+    timings = _timings(TESTS[0], {"model_executor/a.py": 0, "model_executor/b.py": 60})
+    result = rs.plan(inventory, timings)
+    rs.check(result, inventory)  # used to drop a.py: ceil(0 / budget) = 0 parts
+    assert result["shards"][0]["commands"][0]["targets"] == [
+        "model_executor/a.py",
+        "model_executor/b.py",
+    ]
+
+
 def test_split_commands():
     assert rs.split_commands(SETUP + TESTS) == (SETUP, TESTS)
     assert rs.split_commands(SETUP) is None
@@ -129,7 +140,7 @@ def test_plan_without_timings_uses_four_equal_shards():
     )
 
 
-def test_plan_over_the_ceiling_still_assigns_everything():
+def test_plan_over_max_number_of_shards_still_assigns_everything():
     files = {f"model_executor/t{i}.py": 1 for i in range(10)}
     inventory = [_entry(TESTS[0], files)]
     result = rs.plan(inventory, _timings(TESTS[0], {f: 1100 for f in files}))

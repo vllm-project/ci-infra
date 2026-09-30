@@ -32,9 +32,9 @@ import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
-ROOM_SECONDS = 1200  # test time per shard; setup is not counted
-UNKNOWN_SECONDS = 150  # a file main has no timing for
-CEILING = 6
+MAX_SHARD_SECONDS = 1200  # test time per shard; setup is not counted
+UNKNOWN_FILE_SECONDS = 150  # a file main has no timing for
+MAX_NUMBER_OF_SHARDS = 6
 NO_TIMING_SHARDS = 4
 INVENTORY_DIR = ".runtime-shard"
 # pytest-shard would select a subset a second time on top of the plan.
@@ -43,15 +43,33 @@ _SHELL_SYNTAX = ("&&", "||", ";", "|", ">", "<", "`", "$", "\n")
 
 
 def command_preview(command: str) -> str:
-    """The label main's timing spans carry for a command: the same preview the
-    generator echoes before running it (see _prepare_commands)."""
+    """The label main's timing spans carry for a command.
+
+    It is the same preview the generator echoes before running the command
+    (see _prepare_commands), so it matches timings back to commands.
+
+    Args:
+        command: A pytest command of the step, as written in its YAML.
+
+    Returns:
+        The first 80 characters, with quotes and `$` removed.
+
+    """
     return command[:80].replace("'", "").replace('"', "").replace("$", "")
 
 
 def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]:
-    """(setup, pytest commands), or None if the step can't be split by file:
-    it needs at least one pytest command and nothing but plain pytest
-    commands after the first one."""
+    """Separate a step's setup commands from its pytest commands.
+
+    Args:
+        commands: The step's commands, in order.
+
+    Returns:
+        (setup commands, pytest commands), or None if the step can't be
+        sharded: it needs at least one pytest command, and only plain pytest
+        commands (no shell syntax, no pytest-shard flags) after the first.
+
+    """
     first = None
     for position, command in enumerate(commands):
         if command.startswith("pytest "):
@@ -78,144 +96,203 @@ def decode(text: str):
     return json.loads(base64.b64decode(text))
 
 
-def contiguous(sizes: List[float], room: float, ceiling: int) -> List[List[int]]:
-    """Fewest runs of consecutive units that each fit room (at most ceiling),
-    then the smallest largest-load for that count. Returns index lists."""
+def contiguous(
+    unit_seconds: List[float], max_shard_seconds: float, max_number_of_shards: int
+) -> List[List[int]]:
+    """Group consecutive units into shards.
 
-    def cut(limit: float) -> List[List[int]]:  # greedy fill: fewest runs at this limit
+    Uses the fewest shards that keep each one within max_shard_seconds (but no
+    more than max_number_of_shards), then evens out the load across that many shards.
+
+    Args:
+        unit_seconds: Estimated test time of each unit, in collection order.
+        max_shard_seconds: Test-time budget for one shard.
+        max_number_of_shards: Upper bound on the number of shards.
+
+    Returns:
+        One list of unit indexes per shard, in order.
+
+    """
+
+    def fill(max_seconds: float) -> List[List[int]]:
+        """Fill shards in order, starting a new one when the next unit would
+        take the current one past max_seconds."""
         shards: List[List[int]] = [[]]
         load = 0.0
-        for i, size in enumerate(sizes):
-            if shards[-1] and load + size > limit:
+        for unit, seconds in enumerate(unit_seconds):
+            if shards[-1] and load + seconds > max_seconds:
                 shards.append([])
                 load = 0.0
-            shards[-1].append(i)
-            load += size
+            shards[-1].append(unit)
+            load += seconds
         return shards
 
-    n = min(len(cut(room)), ceiling)
-    lo, hi = max(sizes), sum(sizes)
-    for _ in range(60):  # bisect the largest load that still gives <= n runs
-        mid = (lo + hi) / 2
-        if len(cut(mid)) <= n:
-            hi = mid
+    shard_count = min(len(fill(max_shard_seconds)), max_number_of_shards)
+    # Bisect for the smallest largest-shard load that still fits in
+    # shard_count shards, so the shards come out even, not full, full, rest.
+    low, high = max(unit_seconds), sum(unit_seconds)
+    for _ in range(60):
+        middle = (low + high) / 2
+        if len(fill(middle)) <= shard_count:
+            high = middle
         else:
-            lo = mid
-    return cut(hi)
+            low = middle
+    return fill(high)
 
 
 def plan(
     inventory: List[Dict],
     timings: Optional[Dict],
-    room: float = ROOM_SECONDS,
-    unknown: float = UNKNOWN_SECONDS,
-    ceiling: int = CEILING,
+    max_shard_seconds: float = MAX_SHARD_SECONDS,
+    unknown_file_seconds: float = UNKNOWN_FILE_SECONDS,
+    max_number_of_shards: int = MAX_NUMBER_OF_SHARDS,
 ) -> Dict:
-    """Shards for one step.
+    """Assign one step's collected tests to shards.
 
-    inventory: one entry per pytest command, in order: {"command": the
-      step's command, "prefix": its working dir relative to pytest's rootdir,
-      "nodeids": the collected IDs, in collection order}.
-    timings: the timing endpoint's response for the step, or None.
+    Whole files are the unit, kept inside their own pytest command and in
+    collection order. Only a file whose time alone exceeds max_shard_seconds
+    is split, into consecutive runs of its tests.
 
-    Whole files are the unit, kept inside their own command and in collection
-    order. Only a file bigger than room is split, into consecutive runs of its
-    tests. Every shard's targets are relative to the command's working dir.
+    Args:
+        inventory: One entry per pytest command of the step, in order:
+            {"command": the command, "prefix": its working dir relative to
+            pytest's rootdir, "nodeids": the collected test IDs, in collection
+            order}.
+        timings: The timing endpoint's response for the step, or None when
+            main has no usable timings.
+        max_shard_seconds: Test-time budget for one shard.
+        unknown_file_seconds: Time assumed for a file main has no timing for.
+        max_number_of_shards: Upper bound on the number of shards.
+
+    Returns:
+        The plan. "shards" holds, per shard, its "estimateSeconds" and its
+        "commands", each with the command "index" and the "targets" (files or
+        test IDs relative to the command's working dir). The rest are counts,
+        the timing source, flagged files and the rules used.
+
     """
-    seconds = {}
-    for f in (timings or {}).get("files", []):
-        if f["timingStatus"] != "skip_only":
-            seconds[(f["command"], f["file"])] = f["observedMs"] / 1000
+    file_seconds = {}  # (command preview, file) -> seconds on main
+    for timing in (timings or {}).get("files", []):
+        if timing["timingStatus"] != "skip_only":
+            key = (timing["command"], timing["file"])
+            file_seconds[key] = timing["observedMs"] / 1000
 
-    units = []  # [command index, file, node IDs, seconds]
-    unknown_files, oversized = [], []
-    for c, entry in enumerate(inventory):
+    # One unit per file of each command, in collection order.
+    units: List[Dict] = []
+    for command_index, entry in enumerate(inventory):
         for nodeid in entry["nodeids"]:
             file = nodeid.split("::")[0]
-            if units and units[-1][0] == c and units[-1][1] == file:
-                units[-1][2].append(nodeid)
+            last = units[-1] if units else None
+            if last and last["command"] == command_index and last["file"] == file:
+                last["nodeids"].append(nodeid)
             else:
-                units.append([c, file, [nodeid], None])
+                units.append(
+                    {
+                        "command": command_index,
+                        "file": file,
+                        "nodeids": [nodeid],
+                        "seconds": None,
+                        "split": False,
+                    }
+                )
+    files = set()
+    unknown_files = []
     for unit in units:
-        unit[3] = seconds.get((command_preview(inventory[unit[0]]["command"]), unit[1]))
-        if unit[3] is None:
-            unit[3] = unknown
-            unknown_files.append(unit[1])
+        files.add((unit["command"], unit["file"]))
+        preview = command_preview(inventory[unit["command"]]["command"])
+        unit["seconds"] = file_seconds.get((preview, unit["file"]))
+        if unit["seconds"] is None:
+            unit["seconds"] = unknown_file_seconds
+            unknown_files.append(unit["file"])
 
+    oversized = []
     if timings is None:  # equal file counts, as a safe default
+        unknown_files = []
         count = min(NO_TIMING_SHARDS, len(units))
         shards = []
         for number in range(count):
             start = number * len(units) // count
             end = (number + 1) * len(units) // count
             shards.append(list(range(start, end)))
-        sizes = [0.0] * len(units)
-        unknown_files = []
     else:
-        split = []
-        for c, file, nodeids, size in units:
-            parts = min(math.ceil(size / room), len(nodeids))
+        split_units = []
+        for unit in units:
+            nodeids = unit["nodeids"]
+            parts = math.ceil(unit["seconds"] / max_shard_seconds)
+            parts = max(1, min(parts, len(nodeids)))  # a 0 s file is still 1 part
             if parts > 1:
-                oversized.append(file)
-            for p in range(parts):  # ponytail: tests share the file's time evenly
-                chunk = nodeids[
-                    p * len(nodeids) // parts : (p + 1) * len(nodeids) // parts
-                ]
-                split.append([c, file, chunk, size / parts, parts > 1])
-        units = split
-        sizes = [u[3] for u in units]
-        shards = contiguous(sizes, room, ceiling)
+                oversized.append(unit["file"])
+            for part in range(parts):  # ponytail: tests share the file's time evenly
+                start = part * len(nodeids) // parts
+                end = (part + 1) * len(nodeids) // parts
+                piece = dict(unit, nodeids=nodeids[start:end], split=parts > 1)
+                piece["seconds"] = unit["seconds"] / parts
+                split_units.append(piece)
+        units = split_units
+        shards = contiguous(
+            [unit["seconds"] for unit in units], max_shard_seconds, max_number_of_shards
+        )
 
     result = []
     for shard in shards:
         commands: List[Dict] = []
-        for i in shard:
-            c, file, nodeids = units[i][:3]
-            whole = timings is None or not units[i][4]
-            prefix = (
-                inventory[c]["prefix"].rstrip("/") + "/"
-                if inventory[c]["prefix"]
-                else ""
-            )
+        for unit_index in shard:
+            unit = units[unit_index]
+            prefix = inventory[unit["command"]]["prefix"]
+            prefix = prefix.rstrip("/") + "/" if prefix else ""
             targets = []
-            for target in [file] if whole else nodeids:
+            for target in unit["nodeids"] if unit["split"] else [unit["file"]]:
                 if target.startswith(prefix):
                     target = target[len(prefix) :]
                 targets.append(target)
-            if not commands or commands[-1]["index"] != c:
-                commands.append({"index": c, "targets": [], "tests": 0})
+            if not commands or commands[-1]["index"] != unit["command"]:
+                commands.append({"index": unit["command"], "targets": [], "tests": 0})
             commands[-1]["targets"] += targets
-            commands[-1]["tests"] += len(nodeids)
-        result.append(
-            {
-                "estimateSeconds": round(sum(sizes[i] for i in shard), 1)
-                if timings
-                else None,
-                "commands": commands,
-            }
-        )
+            commands[-1]["tests"] += len(unit["nodeids"])
+        estimate = None
+        if timings:
+            estimate = round(sum(units[i]["seconds"] for i in shard), 1)
+        result.append({"estimateSeconds": estimate, "commands": commands})
+
+    timing_source = None
+    if timings is not None:
+        timing_source = {}
+        for key in ("buildNumber", "commit", "finishedAt"):
+            timing_source[key] = timings.get(key)
+    over_budget = False
+    if timings:
+        for shard in result:
+            if shard["estimateSeconds"] > max_shard_seconds:
+                over_budget = True
     return {
         "shards": result,
-        "tests": sum(len(e["nodeids"]) for e in inventory),
-        "files": len({(u[0], u[1]) for u in units}),
-        "timingSource": None
-        if timings is None
-        else {k: timings.get(k) for k in ("buildNumber", "commit", "finishedAt")},
+        "tests": sum(len(entry["nodeids"]) for entry in inventory),
+        "files": len(files),
+        "timingSource": timing_source,
         "unknownFiles": unknown_files,
         "oversizedFiles": oversized,
-        "overBudget": bool(timings)
-        and any(s["estimateSeconds"] > room for s in result),
+        "overBudget": over_budget,
         "rules": {
             "packing": "contiguous",
-            "roomSeconds": room,
-            "unknownSeconds": unknown,
-            "ceiling": ceiling,
+            "maxShardSeconds": max_shard_seconds,
+            "unknownFileSeconds": unknown_file_seconds,
+            "maxNumberOfShards": max_number_of_shards,
         },
     }
 
 
 def check(result: Dict, inventory: List[Dict]) -> None:
-    """Every collected test is assigned exactly once, and nothing else is."""
+    """Verify every collected test is assigned exactly once, and nothing else.
+
+    Args:
+        result: A plan from plan().
+        inventory: The inventory the plan was made from.
+
+    Raises:
+        ValueError: A target matches no collected test, or a collected test is
+            assigned zero or several times.
+
+    """
     assigned: Dict[Tuple[int, str], int] = {}
     for shard in result["shards"]:
         for command in shard["commands"]:
@@ -241,13 +318,24 @@ def check(result: Dict, inventory: List[Dict]) -> None:
 
 
 def annotation(step_key: str, result: Dict, shadow: bool = True) -> str:
+    """The build annotation describing a plan.
+
+    Args:
+        step_key: The enrolled step's key.
+        result: A plan from plan().
+        shadow: Whether the step still runs as one job (shadow mode).
+
+    Returns:
+        Markdown: the shard count, estimates, flagged files and a table.
+
+    """
     shards = result["shards"]
     count = f"**{len(shards)} shard{'s' if len(shards) != 1 else ''}**"
     lines = [
         f"**Runtime sharding{' (shadow)' if shadow else ''} for `{step_key}`:** "
         + (f"would run as {count}" if shadow else f"running as {count}")
-        + f" ({result['tests']} tests in {result['files']} files, ceiling "
-        f"{result['rules']['ceiling']})."
+        + f" ({result['tests']} tests in {result['files']} files, at most "
+        f"{result['rules']['maxNumberOfShards']} shards)."
         + (" This build still ran the step as one job." if shadow else "")
     ]
     source = result["timingSource"]
@@ -263,7 +351,7 @@ def annotation(step_key: str, result: Dict, shadow: bool = True) -> str:
         )
     if result["unknownFiles"]:
         lines.append(
-            f"No timing, counted as {result['rules']['unknownSeconds'] / 60:.1f} min each: "
+            f"No timing, counted as {result['rules']['unknownFileSeconds'] / 60:.1f} min each: "
             + ", ".join(f"`{f}`" for f in result["unknownFiles"])
         )
     if result["oversizedFiles"]:
@@ -273,8 +361,8 @@ def annotation(step_key: str, result: Dict, shadow: bool = True) -> str:
         )
     if result["overBudget"]:
         lines.append(
-            ":warning: At the ceiling, a shard is still over "
-            f"{result['rules']['roomSeconds'] / 60:.0f} min of test time."
+            ":warning: At the most shards allowed, a shard is still over "
+            f"{result['rules']['maxShardSeconds'] / 60:.0f} min of test time."
         )
     rows = ["| Shard | Tests | Estimate (min) | Targets |", "|---|---|---|---|"]
     for n, s in enumerate(shards, 1):
@@ -287,6 +375,15 @@ def annotation(step_key: str, result: Dict, shadow: bool = True) -> str:
 
 
 def fetch_timings(step_key: str) -> Optional[Dict]:
+    """Per-file timings from main's latest passing build of the step.
+
+    Args:
+        step_key: The enrolled step's key.
+
+    Returns:
+        The timing endpoint's response, or None if it has none or is down.
+
+    """
     url = TIMINGS_URL + "?" + urllib.parse.urlencode({"stepKey": step_key})
     try:
         with urllib.request.urlopen(url, timeout=30) as response:
@@ -297,7 +394,20 @@ def fetch_timings(step_key: str) -> Optional[Dict]:
 
 
 def run_collect(index: str, command_b64: str, out_dir: str) -> None:
-    """In the test image: collect one pytest command's selected node IDs."""
+    """Collect one pytest command's tests, in the step's test image.
+
+    Writes inventory-<index>.json with the command, pytest's exit status, the
+    selected node IDs and the working dir relative to pytest's rootdir.
+
+    Args:
+        index: The command's position among the step's pytest commands.
+        command_b64: The command, encoded with encode().
+        out_dir: Where to write the inventory file, for artifact upload.
+
+    Raises:
+        SystemExit: Collection failed or selected no tests.
+
+    """
     import pytest
 
     command = decode(command_b64)
@@ -327,8 +437,21 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
 def shard_step(
     template: Dict, result: Dict, inventory: List[Dict], script_url: str
 ) -> Dict:
-    """The step's own rendered job, run as one parallel job per shard. Each job
-    loads the plugin below and finds its tests in RUNTIME_SHARD_PLAN."""
+    """The step's own job, run as one parallel job per shard.
+
+    Each job installs this file, loads it as a pytest plugin and finds its
+    tests in RUNTIME_SHARD_PLAN, so the step's commands stay unchanged.
+
+    Args:
+        template: The step's normal rendered job.
+        result: A checked plan from plan().
+        inventory: The inventory the plan was made from.
+        script_url: Where the shard jobs fetch this file from.
+
+    Returns:
+        The job to upload, with parallelism set to the shard count.
+
+    """
     shards = []
     for shard in result["shards"]:
         commands = []
@@ -371,10 +494,19 @@ def _upload(step: Dict) -> None:
 
 
 def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
-    """On a CPU agent: plan from the collect step's artifacts, annotate, and
-    (mode "on") upload the step as shards, or as its single job if anything
-    went wrong. Raises only if even that upload fails, which the generator's
-    shell fallback then retries."""
+    """Plan the step's shards on a CPU agent, annotate, and upload the jobs.
+
+    If collection, timings or planning fail, the step's normal single job is
+    uploaded instead. This raises only if that upload fails too, and then the
+    generator's shell fallback uploads the single job.
+
+    Args:
+        step_key: The enrolled step's key.
+        commands_b64: The step's pytest commands, encoded with encode().
+        mode: "on" uploads the jobs; "shadow" only annotates, because the step
+            already runs as one job.
+
+    """
     commands = decode(commands_b64)
     shadow = mode == "shadow"
     template = (
