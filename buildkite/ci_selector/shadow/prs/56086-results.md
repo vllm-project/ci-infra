@@ -1,5 +1,5 @@
 <!-- ci-selector-shadow -->
-### CI selector (shadow): 11 test steps (14 jobs) instead of 36 (49 jobs)
+### CI selector (shadow): 9 test steps (12 jobs) instead of 36 (49 jobs)
 
 Shadow mode: this changes nothing about what CI runs. It shows what the evidence-based selector would pick for this PR, next to today's rules. [How it works](https://github.com/vllm-project/ci-infra/tree/main/buildkite/ci_selector).
 
@@ -7,25 +7,23 @@ Shadow mode: this changes nothing about what CI runs. It shows what the evidence
 
 | steps (jobs) | Today's rules | Selector | Would skip | Would add |
 |---|---|---|---|---|
-| NVIDIA, CPU and others | 36 (49) | 11 (14) | 27 (37) | 2 (2) |
-| AMD mirrors | 30 (41) | 8 (11) | 24 (32) | 2 (2) |
+| NVIDIA, CPU and others | 36 (49) | 9 (12) | 28 (38) | 1 (1) |
+| AMD mirrors | 30 (41) | 6 (9) | 25 (33) | 1 (1) |
 
-<details><summary>Selector would run (11)</summary>
+<details><summary>Selector would run (9)</summary>
 
 - `cpu-params-env-tokenizers-parser`
 - `cpu-reasoning-renderers`
 - `cpu-tool-parsers`
 - `entrypoints-integration-api-server` ×4
 - `entrypoints-integration-api-server-generate`
-- `entrypoints-integration-api-server-openai-chat_completion`
 - `entrypoints-integration-api-server-openai-completion`
 - `entrypoints-integration-responses-api`
 - `entrypoints-unit-tests`
-- `mrcr-eval-small-models`
 - `rust-frontend-tool-use`
 </details>
 
-<details><summary>Would skip (today's rules run them) (27)</summary>
+<details><summary>Would skip (today's rules run them) (28)</summary>
 
 - `basic-correctness` ×2
 - `basic-correctness-cpu-offload`
@@ -38,6 +36,7 @@ Shadow mode: this changes nothing about what CI runs. It shows what the evidence
 - `benchmarks-cli-test`
 - `cpu-language-generation-and-pooling-model-tests` ×3
 - `cpu-multimodal-config`
+- `entrypoints-integration-api-server-openai-chat_completion`
 - `entrypoints-integration-llm`
 - `entrypoints-integration-multimodal`
 - `entrypoints-integration-pooling`
@@ -56,13 +55,12 @@ Shadow mode: this changes nothing about what CI runs. It shows what the evidence
 - `multi-modal-processor-cpu` ×4
 </details>
 
-<details><summary>Would add (today's rules do not run them) (2)</summary>
+<details><summary>Would add (today's rules do not run them) (1)</summary>
 
 - `entrypoints-unit-tests` (code map)
-- `mrcr-eval-small-models` (Python record)
 </details>
 
-<details><summary>AMD mirrors: would skip (24)</summary>
+<details><summary>AMD mirrors: would skip (25)</summary>
 
 - `basic-correctness` ×2
 - `basic-correctness-cpu-offload`
@@ -73,6 +71,7 @@ Shadow mode: this changes nothing about what CI runs. It shows what the evidence
 - `basic-models-tests-initialization`
 - `basic-models-tests-other`
 - `benchmarks-cli-test`
+- `entrypoints-integration-api-server-openai-chat_completion`
 - `entrypoints-integration-llm`
 - `entrypoints-integration-multimodal`
 - `entrypoints-integration-pooling`
@@ -90,16 +89,15 @@ Shadow mode: this changes nothing about what CI runs. It shows what the evidence
 - `pytorch-compilation-passes-unit-tests`
 </details>
 
-<details><summary>AMD mirrors: would add (2)</summary>
+<details><summary>AMD mirrors: would add (1)</summary>
 
 - `entrypoints-unit-tests` (code map)
-- `mrcr-eval-small-models` (Python record)
 </details>
 
-#### CI results (2026-09-30 04:23 UTC)
+#### CI results (2026-09-30 05:32 UTC)
 
 83 passed, 0 failed, 0 pending.
 
 No failures to judge.
 
-<sub>6 changed files · base `0376f81530` · head `2b9b55c7f1` · Python record: build 91312 at `7871963fcc` · kernel record: table d882bddbea (build 91957), map d882bddbea · not counted: 10 build steps, 5 A100 steps the generator no longer emits</sub>
+<sub>6 changed files · base `0376f81530` · head `2b9b55c7f1` · Python record: not used (/tmp/ci-infra-selector/buildkite/ci_selector/coverage-data/table.json.gz is table version 5, expected 7; re-merge it from the raw recordings) · kernel record: table d882bddbea (build 91957), map d882bddbea · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 0 optional steps the selector would also run</sub>

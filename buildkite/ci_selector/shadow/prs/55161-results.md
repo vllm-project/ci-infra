@@ -106,10 +106,10 @@ none
 none
 </details>
 
-#### CI results (2026-09-30 04:26 UTC)
+#### CI results (2026-09-30 05:34 UTC)
 
 111 passed, 0 failed, 0 pending.
 
 No failures to judge.
 
-<sub>2 changed files · base `a9eafde59c` · head `0d448a441a` · Python record: build 91312 at `7871963fcc` · kernel record: table d882bddbea (build 91957), map d882bddbea · not counted: 10 build steps, 5 A100 steps the generator no longer emits</sub>
+<sub>2 changed files · base `a9eafde59c` · head `0d448a441a` · Python record: not used (/tmp/ci-infra-selector/buildkite/ci_selector/coverage-data/table.json.gz is table version 5, expected 7; re-merge it from the raw recordings) · kernel record: table d882bddbea (build 91957), map d882bddbea · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 0 optional steps the selector would also run</sub>
