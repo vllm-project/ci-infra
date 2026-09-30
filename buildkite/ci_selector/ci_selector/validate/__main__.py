@@ -7,7 +7,7 @@ Subcommands:
   leaks            replay the confirmed selection leaks: would we have reached the job that broke main?
 
 Everything checkable from a plain checkout is a drift-marked test instead:
-`VLLM_REPO=/path/to/vllm pytest tests -m drift`.
+`pytest tests -m drift`.
 """
 
 from __future__ import annotations
