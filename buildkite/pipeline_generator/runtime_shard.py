@@ -444,15 +444,32 @@ def pytest_collection_modifyitems(session, config, items):
         raise pytest.UsageError(
             f"runtime-shard: no single planned command for shard {index + 1} and {args}"
         )
-    targets = [
-        t
-        for c in shard_plan["shards"][index]
-        if c["index"] == matches[0]
-        for t in c["targets"]
-    ]
-    kept = [
-        i for i in items if i.nodeid in targets or i.nodeid.split("::")[0] in targets
-    ]
+
+    def planned(shards):
+        return {
+            t
+            for shard in shards
+            for c in shard
+            if c["index"] == matches[0]
+            for t in c["targets"]
+        }
+
+    def within(item, targets):
+        return item.nodeid in targets or item.nodeid.split("::")[0] in targets
+
+    targets = planned([shard_plan["shards"][index]])
+    everywhere = planned(shard_plan["shards"])
+    # A test this job collects that no shard was given (collection differed
+    # from the collect step's) is never dropped: shard 1 runs it.
+    strays = [i for i in items if not within(i, everywhere)]
+    if strays:
+        print(
+            f"\nruntime-shard: {len(strays)} collected tests are in no shard"
+            f"{'; running them here' if index == 0 else ', shard 1 runs them'}:"
+            f" {[i.nodeid for i in strays[:5]]}",
+            flush=True,
+        )
+    kept = [i for i in items if within(i, targets) or (index == 0 and i in strays)]
     found = {i.nodeid for i in kept} | {i.nodeid.split("::")[0] for i in kept}
     missing = [t for t in targets if t not in found]
     if missing:
