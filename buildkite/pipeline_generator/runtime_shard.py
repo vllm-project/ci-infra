@@ -32,7 +32,9 @@ import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
-MAX_SHARD_SECONDS = 1200  # test time per shard; setup is not counted
+# Test time per shard; setup is not counted. Planned below the 20-minute limit
+# so run-to-run noise rarely pushes a real shard over it.
+MAX_SHARD_SECONDS = 1080
 UNKNOWN_FILE_SECONDS = 150  # a file main has no timing for
 MAX_NUMBER_OF_SHARDS = 6
 NO_TIMING_SHARDS = 4
