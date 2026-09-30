@@ -32,6 +32,7 @@ from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
 from recorder_switches import fnrec_enabled, kernrec_enabled
+import runtime_shard
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -960,6 +961,79 @@ def ensure_infra_failure_retry(
     return retry_policy
 
 
+def _runtime_shard_steps(step: Step, step_key: str) -> List[BuildkiteCommandStep]:
+    """Shadow runtime sharding for a step with `automatic_shard: true`.
+
+    Adds a collect step (the step's own image, queue and setup commands, then
+    `pytest --collect-only` per command) and a plan step on a CPU agent that
+    annotates the build with the shards the step would run as. The step
+    itself is untouched, and both new steps soft-fail. See runtime_shard.py.
+    """
+    split = runtime_shard.split_commands(step.commands or [])
+    if (
+        split is None
+        or step.no_plugin
+        or _uses_k8s_plugin(step)
+        or is_amd_device(step.device)
+        or (step.num_nodes and step.num_nodes >= 2)
+    ):
+        print(
+            f"automatic_shard ignored on {step_key}: only single-node docker steps "
+            "whose test commands are all plain pytest can be sharded"
+        )
+        return []
+    setup, tests = split
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        f"{branch}/buildkite/pipeline_generator/runtime_shard.py"
+    )
+    script = "/tmp/runtime-shard.$${BUILDKITE_JOB_ID:-local}.py"
+    fetch = f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
+    out_dir = f"{runtime_shard.INVENTORY_DIR}/{step_key}"
+    # ponytail: setup runs as written; no variable injection or recorders here
+    collect_commands = [f"cd {step.working_dir}"] if step.working_dir else []
+    collect_commands += [*setup, fetch]
+    collect_commands += [
+        f"python3 {script} collect {i} {runtime_shard.encode(command)} "
+        f"{DOCKER_CHECKOUT_MOUNT_PATH}/{out_dir}"
+        for i, command in enumerate(tests)
+    ]
+    collect_key = f"{step_key}-shard-collect"
+    collect = BuildkiteCommandStep(
+        label=f"Runtime shard collect: {step.label}",
+        key=collect_key,
+        agents=_get_step_agents(step),
+        commands=collect_commands,
+        depends_on=step.depends_on,
+        env=step.env,
+        plugins=[_get_step_plugin(step)],
+        artifact_paths=[f"{out_dir}/*.json"],
+        retry=ensure_infra_failure_retry(None),
+        soft_fail=True,
+        timeout_in_minutes=_get_timeout_in_minutes(20),
+    )
+    queue = (
+        AgentQueue.SMALL_CPU_POSTMERGE
+        if get_global_config()["branch"] == "main"
+        else AgentQueue.SMALL_CPU_PREMERGE
+    )
+    plan = BuildkiteCommandStep(
+        label=f"Runtime shard plan: {step.label}",
+        key=f"{step_key}-shard-plan",
+        agents={"queue": queue.value},
+        commands=[
+            fetch,
+            f"python3 {script} plan {step_key} {runtime_shard.encode(tests)}",
+        ],
+        depends_on=[collect_key],
+        allow_dependency_failure=True,
+        soft_fail=True,
+        timeout_in_minutes=_get_timeout_in_minutes(10),
+    )
+    return [collect, plan]
+
+
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
@@ -1106,6 +1180,12 @@ def convert_group_step_to_buildkite_step(
 
             if include_step:
                 group_steps_list.append(buildkite_step)
+            if (
+                include_step
+                and step.automatic_shard
+                and _step_should_run(step, list_file_diff)
+            ):
+                group_steps_list.extend(_runtime_shard_steps(step, step_key))
 
             # Create AMD mirror step and its block step if specified/applicable
             if (

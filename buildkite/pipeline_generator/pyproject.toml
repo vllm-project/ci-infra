@@ -26,6 +26,7 @@ py-modules = [
     "constants",
     "recorder_switches",
     "amd",
+    "runtime_shard",
 ]
 
 [tool.setuptools.packages.find]
