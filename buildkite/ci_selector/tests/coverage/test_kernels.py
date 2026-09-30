@@ -534,13 +534,9 @@ def test_decide_applies_the_kernel_record(tmp_path, csrc_diff, monkeypatch):
     d = decide(state, sel, root, base, head, table=no_python_table, kernels=ev)
     assert d.used_kernels and not d.used_coverage
     assert d.dropped_by_kernels == {"vllm_ci:silent", "vllm_ci:declared"}, (
-        "a declaration is not evidence unless CI_SELECTOR_DECLARED_DEPS=on"
+        "a declaration is not evidence"
     )
     assert d.steps == {"vllm_ci:launched"}
-    monkeypatch.setenv("CI_SELECTOR_DECLARED_DEPS", "on")
-    d = decide(state, sel, root, base, head, table=no_python_table, kernels=ev)
-    assert d.steps == {"vllm_ci:launched", "vllm_ci:declared"}
-    assert d.kernel_reasons["held-by-declaration-or-build"] == 1
     assert "abc" in d.kernel_pair and "DIFFERENT" not in d.kernel_pair
     assert d.kernel_files["csrc/a.cu"].endswith("; may select and drop")
     assert d.kernel_files["csrc/a.cu"].startswith("1 of 1 kernel symbols (changed: kA)")

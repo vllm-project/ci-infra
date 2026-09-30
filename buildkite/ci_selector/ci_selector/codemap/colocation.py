@@ -33,7 +33,6 @@ from .step_refs import (
     _direct_step_refs,
     _hardware_family_steps,
     hardware_steps_held,
-    _source_dep_steps,
 )
 
 ENV_VAR = "CI_SELECTOR_COLOCATION"
@@ -139,12 +138,9 @@ def _colocated_claim(
     """
     # Everything the graph rule reaches WITHOUT the closure is kept, since the
     # cycle never collapsed it; only the closure-derived half is replaced.
-    # Declarers matter most: `source_file_dependencies` is vLLM's hand-written
-    # source-to-test map, and it names coverage co-location cannot see.
     direct_steps = _direct_step_refs(state, path)
-    dep_steps = _source_dep_steps(state, path, specific_only=True)
     family, hw_steps = _hardware_family_steps(state, path)
-    inferred_steps = direct_steps | dep_steps | own_key_steps
+    inferred_steps = direct_steps | own_key_steps
     if (
         not (tests & state.invoked)
         and not ((inferred_steps | hw_steps) & state.auto_step_ids)
@@ -157,8 +153,6 @@ def _colocated_claim(
     )
     if own_key_steps:
         detail += f"; its own registered key(s) name it in {len(own_key_steps)} steps"
-    if dep_steps:
-        detail += f"; {len(dep_steps)} steps declare it as a source dep"
     if family:
         detail += f"; {family} hardware-convention tagging adds {len(hw_steps)} steps"
     return Claim(

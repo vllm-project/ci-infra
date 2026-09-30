@@ -13,7 +13,6 @@ import pytest
 import regex as re
 from ci_selector.codemap.classify import select
 from ci_selector.codemap.native_ops import ENV_VAR, NativeOps, mode
-from ci_selector.codemap.step_refs import _source_dep_steps
 from helpers import drift_message
 
 NVFP4 = "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
@@ -398,8 +397,6 @@ def test_a_joined_tu_gets_droppable_steps_with_proxy_paths(state):
     assert claim.droppable_step_ids, "a fully wrapped file granted nothing"
     assert claim.droppable_step_ids <= claim.step_ids
     assert "vllm/_custom_ops.py" in claim.evidence_paths
-    declared = _source_dep_steps(state, NVFP4)
-    assert not claim.droppable_step_ids & declared
     producers = {s for ss in state.artifacts.producers_of.values() for s in ss}
     builders = {s for ss in state.artifacts.self_builders.values() for s in ss}
     assert not claim.droppable_step_ids & (producers | builders)

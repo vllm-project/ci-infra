@@ -88,7 +88,7 @@ def _mini_state():
 
 def test_vllm_zero_coverage_unreferenced_selects_nothing():
     """A vllm file with an empty closure that nothing names -- no step text,
-    key, specific declarer, or invoked-test literal -- cannot be run by any
+    key, or invoked-test literal -- cannot be run by any
     job, so it selects the floor."""
     state, _sid = _mini_state()
     claim = _classify_graph(state, "vllm/foo.py")
