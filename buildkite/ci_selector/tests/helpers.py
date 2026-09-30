@@ -21,7 +21,6 @@ from ci_selector.codemap.graph.demote import (
 from ci_selector.codemap.pipeline.step import Step
 from ci_selector.codemap.repo import is_test_basename
 from ci_selector.codemap.state import RepoState
-from ci_selector.codemap.step_refs import _source_dep_steps_ungated
 
 
 def leaf_origin_drops(state: RepoState) -> list[tuple[str, str]]:
@@ -155,7 +154,7 @@ def declaring_steps(
 ) -> set[str]:
     """Steps naming `path` in their source_file_dependencies.
 
-    Read straight off the steps, never through the selector's switch: these
+    Read straight off the steps, since the selector never reads them: these
     tests check the derived path still reaches the steps the declarations
     name, so the declarations are the oracle here, not an input.
     """

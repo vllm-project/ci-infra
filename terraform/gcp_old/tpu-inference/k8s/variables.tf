@@ -286,6 +286,26 @@ variable "tpu_admission_max_seconds" {
   EOT
 }
 
+variable "tpu_dispatch_retry_seconds" {
+  type        = number
+  description = <<-EOT
+    How long a workload may hold a reservation without MultiKueue placing it or
+    naming a worker before the launcher resubmits it.
+
+    The one stuck state inside tpu_admission_max_seconds that has a fix: the
+    multikueue controller reconciles a fresh reservation once, creates no remote
+    copy, and never looks again, so the chips sit reserved and idle until the
+    hour runs out. Normal dispatch names a worker within seconds, and a
+    workload waiting on a slice rebuild names its worker, so only the stall
+    reaches this.
+  EOT
+}
+
+variable "tpu_dispatch_retries" {
+  type        = number
+  description = "How many times the launcher resubmits a workload whose dispatch stalled (see tpu_dispatch_retry_seconds) before leaving it to tpu_admission_max_seconds."
+}
+
 variable "tpu_runtime_max_seconds" {
   type        = number
   description = <<-EOT
@@ -363,10 +383,11 @@ variable "worker_clusters" {
     rapid_cache_zones = optional(list(string), [])
 
     # One per TPU shape this cluster can run. The node pool's name is its shape
-    # - <machine type>-<topology>, e.g. ct6e-standard-8t-2x4 - and locals.tf
-    # derives it from the two fields below rather than taking it from here, so
-    # it cannot name hardware the pool does not have. generate_manifests.py
-    # names the shape's Kueue queue the same way.
+    # - <machine type>-<topology>, e.g. ct6e-standard-8t-2x4, plus -<slice> for
+    # each of a multi-host shape's slice pools, e.g. tpu7x-standard-4t-2x2x2-0 -
+    # and locals.tf derives it from the two fields below rather than taking it
+    # from here, so it cannot name hardware the pool does not have.
+    # generate_manifests.py names the shape's Kueue queue the same way.
     tpu_node_pools = optional(list(object({
       # A topology does not imply a machine type: 2x4 is eight chips either as
       # one ct6e-standard-8t or as two ct6e-standard-4t, and those differ in pod
@@ -381,18 +402,22 @@ variable "worker_clusters" {
 
       # Scale-down floor: nodes this shape keeps once it has booted them. Those
       # chips are unavailable to the other shapes from then on, idle or not.
-      min_nodes = number
+      min_nodes = optional(number)
       # Above this pool's share of the reservation, so the shapes compete for
       # free chips; the reservation running out is what stops a scale-up.
-      max_nodes = number
+      # Single-host shapes only, as is min_nodes: a multi-host shape sets slices
+      # instead, since GKE sizes each of its pools at exactly one slice.
+      max_nodes = optional(number)
 
-      # This shape's share of the reservation, in nodes. The only one of the
-      # three counts no resource here reads: generate_manifests.py multiplies it
-      # by chips per VM to get the nominalQuota of the shape's ClusterQueue -
-      # chips the shape can always have, while the queues sit in one cohort and
-      # lend out whatever is idle. Summed across a cluster it should be the
-      # chips the reservation actually has free, which max_nodes oversubscribes.
-      nominal_nodes = number
+      # This shape's share of the reservation, in chips: the nominalQuota of
+      # its ClusterQueue, which no resource here reads - chips the shape can
+      # always have, while the queues sit in one cohort and lend out whatever
+      # is idle. Summed across a cluster it should be the chips the reservation
+      # actually has free, which max_nodes oversubscribes.
+      nominal_quota = number
+
+      slices                = optional(number)
+      reclaim_within_cohort = optional(string, "Never")
     })), [])
   }))
   description = "Worker clusters. location is a region; the cluster pins no zones, because only a TPU node cares which zone it is in and its own node pool pins it there."
@@ -428,11 +453,29 @@ variable "worker_clusters" {
     ])
     error_message = "Two tpu_node_pools in one worker cluster have the same machine type and topology. The node pool is named for that pair, so the second would overwrite the first."
   }
+
+  validation {
+    condition = alltrue(flatten([
+      for w in var.worker_clusters : [
+        for p in w.tpu_node_pools : p.slices == null || (p.slices >= 1 && floor(p.slices) == p.slices)
+      ]
+    ]))
+    error_message = "tpu_node_pools[*].slices must be a whole number, at least 1."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for w in var.worker_clusters : [
+        for p in w.tpu_node_pools : contains(["Never", "LowerPriority", "Any"], p.reclaim_within_cohort)
+      ]
+    ]))
+    error_message = "tpu_node_pools[*].reclaim_within_cohort must be Never, LowerPriority or Any."
+  }
 }
 
 
 variable "machine_memory_gb" {
-  type = map(number)
+  type        = map(number)
   description = <<-EOT
     Host memory per TPU machine type, in the decimal GB the accelerator-
     optimized machine family documentation quotes.

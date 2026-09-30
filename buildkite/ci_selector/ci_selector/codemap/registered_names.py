@@ -34,7 +34,8 @@ RAW_KEY_MIN_LEN = 8  # table-diff archs are 8-11 chars; higher drops them
 # flag/config field; a register key (connector/backend/engine) only as a
 # quoted or assigned value ('"NixlConnector"', 'KV_CONNECTOR=${X:-Nixl..}').
 # This is what keeps 'ipc' from matching docker's --ipc=host and
-# 'granite' from matching ibm-granite/ model ids. quant/enum/arch/hf_id
+# 'granite' from matching ibm-granite/ model ids. A dispatch key (a demoted
+# member's gating literal) only as a whole value. quant/enum/arch/hf_id
 # keys stay untyped: their legitimate contexts (eval configs, backend
 # matrices) cannot be enumerated without risking eval coverage.
 _PARSER_FLAG_RE = "(?:" + "|".join(PARSER_SELECTING_FLAGS) + ")"
@@ -52,7 +53,56 @@ def _typed_pattern(key: str, mechanism: str) -> re.Pattern | None:
         )
     if mechanism == "register":
         return re.compile(r"(?::-|[\"'=:])\s*\\?[\"']?" + esc + r"\b")
+    if mechanism == "dispatch":
+        return _value_pattern(esc)
     return None
+
+
+def _value_pattern(esc: str) -> re.Pattern:
+    """The key standing as a whole value: quoted on its own or first in a
+    quoted comma list, assigned (METHOD=mtp, method: mtp, ${X:-mtp}, ,mtp,
+    [llama3.2]), a flag's argument (--spec-method mtp, also as ARGS=--x v,
+    'a,--x v' or (--x v)), a YAML list item, or a component of a model id.
+
+    A dispatch key is a gating literal, the value some config is compared to,
+    so step text selects the member only where it stands as a value. vllm#58975:
+    fope.py minted 'default' from `rope_type == "default"`, and the bare word
+    routed 138 steps through --default-toolchain, `local default=` and echo
+    prose. The key inside a longer name (--linear-backend, default.yaml) is not
+    that value. With a version suffix (llama3.2) it is, and inside a model id
+    too: vLLM infers the speculative method from the draft model's name
+    (config/speculative.py), so RedHatAI/Qwen3-8B-speculator.eagle3 runs
+    eagle3 with no method set. The price is FP8-dynamic quant ids keying the
+    dynamic-NTK rope."""
+    bare = rf"{esc}(?![\w/-]|\.\D)"
+    return re.compile(
+        rf"\\?\"{esc}(?:\\?\"|,)|\\?'{esc}(?:\\?'|,)"
+        rf"|(?::-|[\[=:,])[ \t]*{bare}"
+        rf"|(?<![^\s\"'=,(])--?\w[\w.-]*[ \t]+{bare}"
+        rf"|(?m:^)[ \t]*-[ \t]+{bare}"
+        rf"|(?<![\w./:-])[\w.-]+/(?:[\w.-]*[.-])?{esc}(?:[.-][\w.-]*)?(?![\w./-])"
+    )
+
+
+# A quoted string, bash array, or `for` loop list, one line each.
+_LIST_RE = re.compile(
+    r"\\?\"([^\"\n]*?)\\?\"|'([^'\n]*)'|=\(([^()\n]*)\)"
+    r"|\bfor[ \t]+\w+[ \t]+in[ \t]+([^;\n]*)"
+)
+
+
+def _listed_keys(text: str, keys: set[str]) -> set[str]:
+    """Keys listed together in a list made only of keys
+    ('BACKENDS="deepep_low_latency naive"', `for m in eagle3 mtp`). A space
+    list looks like prose to the value pattern ('label="default backend"'),
+    and every item being a key is what tells the two apart."""
+    found: set[str] = set()
+    for m in _LIST_RE.finditer(text):
+        body = next(g for g in m.groups() if g is not None)
+        items = re.findall(r"[^\s,\"'\\]+", body)
+        if len(items) > 1 and keys.issuperset(items):
+            found.update(items)
+    return found
 
 
 def _strip_comment_lines(text: str) -> str:
@@ -131,7 +181,8 @@ class KeyIndex:
                 continue
             for lit in lits:
                 mech = index.key_mechanism.get(lit)
-                if mech and _typed_pattern(lit, mech):
+                # another member's gating literal is shared, not owned
+                if mech and mech != "dispatch" and _typed_pattern(lit, mech):
                     index.refused.setdefault(lit, f"typed-owned ({mech})")
                     continue
                 if _is_scalar_literal(lit):
@@ -146,6 +197,7 @@ class KeyIndex:
             if (pat := _typed_pattern(k, index.key_mechanism[k]))
         }
         untyped = all_keys - set(typed)
+        dispatch_keys = {k for k in typed if index.key_mechanism[k] == "dispatch"}
         substring_keys = {
             k for k in untyped if "/" in k or len(k) >= SUBSTRING_KEY_MIN_LEN
         }
@@ -196,6 +248,7 @@ class KeyIndex:
                     target_literals | dir_literals,
                     stripped,
                 )
+                hits |= _listed_keys(stripped, dispatch_keys)
                 if hits:
                     index.step_keys[sid] = hits
                 # Store the comment-stripped text: steps_naming_raw searches

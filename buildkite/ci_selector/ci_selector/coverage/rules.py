@@ -21,6 +21,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..handwritten import TESTS_SCOPE
 from .changed_funcs import Query
 from .phase import DEFAULT_MODE, PhaseMode, row_shows_use
 from .table import Table
@@ -291,6 +292,7 @@ def read_pr(
     failed_ran: dict[str, str] | None = None,
     matched_slugs: dict[str, list[str]] | None = None,
     failed_missed: dict[str, str] | None = None,
+    reached_via: dict[str, frozenset[str]] | None = None,
 ) -> Reading:
     """The record over one PR's map selection.
 
@@ -301,9 +303,12 @@ def read_pr(
     not.
 
     The query and the unknown-name set come from the caller, since both cost a
-    git read per file and both want the same answer.
+    git read per file and both want the same answer. So does `reached_via`: a
+    new file the record has never seen, mapped to the known files a step must
+    import to run it.
     """
     reading = Reading()
+    via = reached_via or {}
     failed = set(failed_ran or {})
     matched = matched_slugs or {}
     # Absent means the step is not droppable, not droppable against
@@ -411,10 +416,29 @@ def read_pr(
         # same mistake as the fail-open: an unknown name in a file unrelated to
         # this step's selection kept every step on the PR.
         local = {p: n for p, n in unresolved.items() if p in scope}
-        unseen = [p for p in local if p not in known_files]
+        unseen = [p for p in local if p not in known_files and p not in via]
         if unseen:
             reading.kept.append(step_id)
             reading.reasons["unknown-code-blocks-narrowing"] += 1
+            continue
+
+        # A row recorded before the recorder wrote tests/ holds no tests/ name
+        # at all, and its silence about one is no evidence. Tables merge rows
+        # across builds, so old and new rows can sit side by side. The same
+        # recorder change started writing `#pkg` lines, so a row with no
+        # packages is an old row. Having no tests/ path is not the sign: a
+        # step that runs only scripts (examples, lm-eval) enters none.
+        row = table.row(key)
+        if (
+            row is not None
+            and any(
+                f.path in scope and f.path.startswith(TESTS_SCOPE) and f.in_recorder_scope
+                for f in query.files
+            )
+            and not row.stamp.packages
+        ):
+            reading.kept.append(step_id)
+            reading.reasons["row-predates-tests-recording"] += 1
             continue
 
         evidence = table.look_up(key, scoped, mode).evidence
@@ -422,8 +446,11 @@ def read_pr(
             # The file projection the design specifies under an unknown
             # function: a step whose row touches a file carrying unknown code
             # keeps, because that code could be reached from what it does run.
+            # A new file's code runs wherever the files reaching it are
+            # imported, so those stand in for it.
+            touched = set(local).union(*(via.get(p, ()) for p in local))
             row = table.row(key)
-            if row is not None and any(p in row.functions for p in local):
+            if row is not None and any(p in row.functions for p in touched):
                 reading.kept.append(step_id)
                 reading.reasons["file-projection-keeps"] += 1
                 continue

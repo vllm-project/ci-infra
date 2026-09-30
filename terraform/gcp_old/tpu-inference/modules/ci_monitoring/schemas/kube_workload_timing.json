@@ -30,5 +30,6 @@
   {"name": "requeues", "type": "INTEGER", "mode": "NULLABLE", "description": "Times a granted reservation was lost, e.g. to preemption"},
   {"name": "blind_seconds", "type": "INTEGER", "mode": "NULLABLE", "description": "Seconds the manager API did not answer"},
   {"name": "outcome", "type": "STRING", "mode": "NULLABLE", "description": "succeeded, failed, not_admitted, removed, api_unreachable, cancelled, error"},
-  {"name": "exit_code", "type": "INTEGER", "mode": "NULLABLE"}
+  {"name": "exit_code", "type": "INTEGER", "mode": "NULLABLE"},
+  {"name": "redispatches", "type": "INTEGER", "mode": "NULLABLE", "description": "Times the launcher resubmitted a reservation MultiKueue never dispatched"}
 ]

@@ -272,8 +272,7 @@ def _oracle_build_stage_files(vllm_repo, dockerfiles):
     """Exact-file COPY sources landing in a stage some later `--from=` consumes.
 
     Independent of the parser under test: a line scanner over the Dockerfiles,
-    not `copy_inputs`. Nothing in the tool is stage-aware, so a build input is
-    indistinguishable from runtime payload anywhere else.
+    not `copy_inputs` or `payload_sources`.
     """
     build: set[str] = set()
     for rel in dockerfiles:
@@ -345,6 +344,86 @@ def test_a_build_stage_input_keeps_its_image_union(state, vllm_repo):
         "collect_env.py is a runtime-stage COPY (docker/Dockerfile:852); the "
         "scanner has stopped distinguishing build stages from payload"
     )
+
+
+# Every copy but the tree-keeping envs.py lands outside the source tree, so
+# only the stage legs decide whether it runs.
+_STAGED = """\
+FROM ${BASE} AS base
+COPY tools/setup_step.py /tmp/
+RUN python3 /tmp/setup_step.py
+FROM base AS deps
+COPY vllm/inherited.py /opt/check.py
+FROM deps AS test
+RUN python3 /opt/check.py
+FROM base AS build
+COPY vllm/envs.py vllm/envs.py
+RUN python3 setup.py bdist_wheel
+FROM base AS mounted
+COPY vllm/mounted.py /w/
+FROM base AS runtime
+COPY ./vllm/collect_env.py .
+RUN --mount=type=bind,from=mounted,src=/w,target=/w pip install dist/*.whl
+FROM runtime AS final
+COPY --from=build /workspace/dist /dist
+"""
+
+
+def test_a_named_copy_is_payload_only_where_no_build_step_runs_it():
+    """Run means: a line of its stage or of one built FROM it names the file
+    or its module, or from= reads such a stage into another. The FROM leg is
+    the one a --from-only reading misses: `inherited.py` lands in `deps` and
+    runs in `test`, which `FROM deps` inherits."""
+    from ci_selector.codemap.externals import payload_sources
+
+    assert payload_sources(_STAGED) == {"vllm/collect_env.py"}
+    # An ARG-built stage name could be any stage, so nothing is payload.
+    assert payload_sources(_STAGED + "COPY --from=${PICK} /a /a\n") == set()
+    unread = _STAGED.replace("FROM deps AS test", "FROM base AS test")
+    assert payload_sources(unread) == {"vllm/collect_env.py", "vllm/inherited.py"}
+
+
+def test_a_module_left_in_the_source_tree_is_never_payload():
+    """setup.py loads vllm/envs.py by path, and `pip install .` packages every
+    module where it sits, so a build can run a copy without naming it. Here
+    no from= reads the stage either: the wheel is built in the last one. Read
+    as payload, envs.py would lose the image routing only this rule gives it."""
+    from ci_selector.codemap.externals import payload_sources
+
+    wheel = (
+        "FROM python:3.12 AS base\n"
+        "FROM base AS wheel\n"
+        "COPY vllm/envs.py vllm/envs.py\n"
+        "COPY vllm/__init__.py vllm/\n"
+        "COPY setup.py setup.py\n"
+        "RUN python3 setup.py bdist_wheel\n"
+    )
+    assert payload_sources(wheel) == set()
+    installed = (
+        "FROM python:3.12 AS test\n"
+        "COPY vllm/envs.py /workspace/vllm/envs.py\n"
+        "COPY setup.py pyproject.toml ./\n"
+        "RUN pip install --no-build-isolation .\n"
+    )
+    assert payload_sources(installed) == set()
+    # Moved out of the tree, the same module is carried, not built.
+    moved = installed.replace("/workspace/vllm/envs.py", "/workspace/envs.py")
+    assert payload_sources(moved) == {"vllm/envs.py"}
+
+
+def test_a_payload_copy_of_a_routed_module_is_not_an_image_input(state):
+    """docker/Dockerfile copies vllm/collect_env.py into vllm-base for users,
+    and Dockerfile.cpu leaves it in its test stage. Neither build runs it, yet
+    the union put every step of three images on it: vllm#58978 went from 40
+    counted steps to 18 without it. What imports the module is the graph's to
+    answer, including the steps that run `vllm serve`."""
+    path = "vllm/collect_env.py"
+    assert path in state.docker_inputs, "no longer copied by name; test moot"
+    assert path not in state.artifacts.inputs_of
+    step = "vllm_ci:deepseek-v2-lite-prefetch-offload-accuracy-h100"
+    sel = select(state, [path])
+    assert step in sel.selected
+    assert "image-copy" not in sel.selected_rules[step]
 
 
 def test_image_input_union_does_not_resurrect_a_zero_claim(state):

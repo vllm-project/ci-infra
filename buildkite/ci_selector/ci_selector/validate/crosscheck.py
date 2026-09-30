@@ -89,11 +89,14 @@ def _gh_pr(pr: int) -> dict:
 def _upstream_remote(repo: Path, override: str | None = None) -> str:
     if override:
         return override
+    # On github.com, not merely containing the name: a clone of a local
+    # checkout at ~/vllm-project/vllm has a remote whose path matches too, and
+    # fetching pull/N/head from it fails.
     for line in git_out(repo, "remote", "-v").splitlines():
         parts = line.split()
-        if len(parts) >= 2 and GH_REPO in parts[1]:
+        if len(parts) >= 2 and "github.com" in parts[1] and GH_REPO in parts[1]:
             return parts[0]
-    raise RuntimeError(f"no git remote points at {GH_REPO}; pass --remote")
+    raise RuntimeError(f"no git remote points at github.com/{GH_REPO}; pass --remote")
 
 
 def _resolve_range(repo: Path, pr: int, data: dict, remote: str):

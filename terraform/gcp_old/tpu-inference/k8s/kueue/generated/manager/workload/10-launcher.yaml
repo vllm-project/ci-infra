@@ -92,6 +92,8 @@ data:
     queue_max_seconds: 43200
     runtime_max_seconds: 43200
     admission_max_seconds: 3600
+    dispatch_retry_seconds: 300
+    dispatch_retries: 2
     timing_table: cloud-ullm-inference-ci-cd.ci_efficiency_metrics.kube_workload_timing
     workers:
       tpu-ci-us-central1:
@@ -161,6 +163,17 @@ data:
         chips: 4
         hosts: 2
         topology: 2x2x2
+        accelerator_label: tpu7x
+        fuse_cache_size: 80Gi
+        shm_size: 128Gi
+        memory_request: 290Gi
+        max_runtime_seconds: 28800
+      tpu7x-standard-4t-2x2x4:
+        queue: tpu7x-standard-4t-2x2x4
+        machine_type: tpu7x-standard-4t
+        chips: 4
+        hosts: 4
+        topology: 2x2x4
         accelerator_label: tpu7x
         fuse_cache_size: 80Gi
         shm_size: 128Gi

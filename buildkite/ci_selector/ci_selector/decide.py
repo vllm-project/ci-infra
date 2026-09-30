@@ -31,6 +31,11 @@ authority: it selects on one observation and drops only behind every gate,
 and it runs after the Python record, never overruling a step that record kept
 on an observed call.
 
+A third answers for a dependency bump, where the changed file is a version pin
+and no frame of it runs: the library record (`coverage/libraries.py`), the
+functions of a few watched libraries each step called. It only drops, only
+steps the map picked for such a bump alone, and runs last.
+
 WHEN ANYTHING GOES WRONG, THE MAP'S SELECTION STANDS UNCHANGED -- and note the
 shape of that. It is NOT "carry on with an empty stale set": an empty stale set
 means nothing is disqualified, so every step stays droppable, and the failure
@@ -101,6 +106,12 @@ class Decision:
     kernel_reasons: dict = field(default_factory=dict)
     # changed csrc file -> what the kernel record could do with it
     kernel_files: dict = field(default_factory=dict)
+    # The library record's contribution, and the version-only pin changes it
+    # weighed: changed file -> the libraries it bumps.
+    dropped_by_libraries: set[str] = field(default_factory=set)
+    library_note: str = ""
+    library_reasons: dict = field(default_factory=dict)
+    bumped: dict = field(default_factory=dict)
 
     @property
     def used_coverage(self) -> bool:
@@ -126,6 +137,10 @@ def decide(
 
     When a record cannot be used, for any reason at all, it changes nothing
     and the reason lands in `coverage_note` or `kernel_note`.
+
+    `state` is the one `select` read, built at `base`. A new file's reach is
+    its graph against HEAD's, so a state built anywhere else hides edges the
+    PR added.
     """
     # Resolved above the try on purpose. A bad env value has to kill the run:
     # below, the broad handler would swallow it, every PR would come back
@@ -144,7 +159,7 @@ def decide(
         if getattr(state, "pipelines", None):
             out.unreadable_rows = _unreadable_rows(state, table)
         try:
-            _apply_record(out, table, selection, repo, base, head, mode)
+            _apply_record(out, table, selection, repo, base, head, mode, state)
         except Exception as exc:  # noqa: BLE001 - see the module docstring
             # Broad on purpose. A narrower handler would have to decide what
             # to do with a half-built reading, and the only safe answer is
@@ -172,6 +187,16 @@ def decide(
             out.added_by_kernels.clear()
             out.dropped_by_kernels.clear()
             out.kernel_note = f"kernel record unusable ({type(exc).__name__}: {exc})"
+
+    if not table.available:
+        out.library_note = table.unavailable
+    else:
+        try:
+            _apply_library_record(out, table, selection, state, repo, base, head)
+        except Exception as exc:  # noqa: BLE001 - same reasoning as above
+            out.dropped_by_libraries.clear()
+            out.library_note = f"library record unusable ({type(exc).__name__}: {exc})"
+        out.steps -= out.dropped_by_libraries
     return out
 
 
@@ -232,6 +257,7 @@ def _apply_record(
     base: str,
     head: str | None,
     mode: PhaseMode = DEFAULT_MODE,
+    state=None,
 ) -> None:
     from .codemap.worktree import state_for
     from .coverage.changed_funcs import build as build_query
@@ -277,12 +303,13 @@ def _apply_record(
         selection,
         query,
         unresolved,
-        # A new file stops being unseen only when every name in it resolved:
-        # one unresolved name must still block, as before.
+        # A new file stops being unseen only when every name in it resolved,
+        # or when `reached_via` names the files a step must import to run it.
         frozenset(union_names) | frozenset(p for p in resolved if p not in unresolved),
         keys,
         stale,
         mode=mode,
+        reached_via=_reached_via(repo, base, head, unresolved, union_names, state),
     )
     out.stale_steps = len(stale)
     out.reasons = dict(reading.reasons)
@@ -296,6 +323,66 @@ def _apply_record(
     out.executes_by_proxy = set(reading.executes_by_proxy)
     out.steps |= out.added_by_coverage
     out.steps -= out.dropped_by_coverage
+
+
+def _reached_via(
+    repo: Path, base: str, head: str | None, unresolved, union_names, state=None
+) -> dict[str, frozenset[str]]:
+    """New vllm/ files holding unknown code, each with the files a step must
+    import to run any of it.
+
+    A file absent at base has no row, so one unknown name in it held every
+    step its HEAD closure reaches. vllm#58982 added triton_autotune.py, whose
+    import-time registry kept its names unknown, and held 42 steps that never
+    import kernel_warmup.py, the one file importing it. Every edge into a new
+    file is new too, so a step reaches one only through a file that existed at
+    base and gained an import edge into its HEAD closure: an importer, a file
+    that now imports one, or one that moved such an import out of a function.
+    When the record knows every such file, the new file's unknown code
+    projects onto them, as a known file's does onto itself. No such file, or
+    one the record does not know, leaves the new file unseen. A module-level
+    `if` that now takes an import it skipped at base changes no edge and is
+    not seen, as for a known file.
+    """
+    from .gitdiff import diff_files
+
+    if head is None:
+        return {}
+    added = {
+        f.path for f in diff_files(repo, base, head) if f.status in ("A", "R", "C")
+    }
+    fresh = [p for p in unresolved if p in added and p.startswith("vllm/")]
+    if not fresh:
+        return {}
+    from .codemap.worktree import full_graph_for
+
+    def edges(full) -> set[tuple[str, str, bool]]:
+        # A lazy import into a file a parser routes by key leaves `imports`,
+        # and still runs. Whether an edge runs on import is part of it: one
+        # moved out of a function now runs wherever its file is imported.
+        graph = full.graph
+        pairs = {(src, dst) for src, dsts in graph.imports.items() for dst in dsts}
+        pairs |= set(graph.dropped_lazy)
+        return {(s, d, s in full.plain_reverse.get(d, ())) for s, d in pairs}
+
+    at_head = edges(full_graph_for(repo, head))
+    # `state` is the base's, as `select`'s is, and already holds its graph.
+    at_base = edges(getattr(state, "full", None) or full_graph_for(repo, base))
+    gained = {(s, d) for s, d, _ in at_head - at_base}
+    importers: dict[str, set[str]] = {}
+    for src, dst, _ in at_head:
+        importers.setdefault(dst, set()).add(src)
+    out: dict[str, frozenset[str]] = {}
+    for path in fresh:
+        closure, todo = {path}, [path]
+        while todo:
+            for src in importers.get(todo.pop(), set()) - closure:
+                closure.add(src)
+                todo.append(src)
+        via = frozenset(s for s, d in gained if d in closure and s not in added)
+        if via and via.issubset(union_names):
+            out[path] = via
+    return out
 
 
 def _append_op_proxies(
@@ -405,6 +492,33 @@ def _apply_kernel_record(
     out.dropped_by_kernels = set(reading.dropped)
     out.steps |= out.added_by_kernels
     out.steps -= out.dropped_by_kernels
+
+
+def _apply_library_record(
+    out: Decision, table: Table, selection, state, repo: Path, base, head
+) -> None:
+    """Steps the map picked only for a library's version pin, dropped when
+    their rows never called it. Keys resolve at the base, as for kernels. A
+    step the Python record kept on an observed call stays."""
+    from .coverage import libraries
+    from .gitdiff import diff_files
+
+    out.bumped = libraries.bumps(repo, base, head, diff_files(repo, base, head))
+    if not out.bumped:
+        return
+    if not getattr(state, "pipelines", None):
+        raise RuntimeError("no pipeline state to resolve step keys against")
+    keys = RowKeys.resolve_from_state(set(table._rows), state)
+    dropped, reasons = libraries.read_pr(
+        table,
+        selection,
+        out.bumped,
+        keys,
+        frozenset(out.executes_by_coverage),
+        libraries.wrappers_at(repo, base),
+    )
+    out.library_reasons = dict(reasons)
+    out.dropped_by_libraries = set(dropped) & out.steps
 
 
 def _protected_from_kernel_drops(out: Decision) -> frozenset[str]:

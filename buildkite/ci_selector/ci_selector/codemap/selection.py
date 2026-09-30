@@ -130,7 +130,7 @@ def _apply_claim_to_pipeline(
         # The closure coverage of a device-named data file is ordinary pytest,
         # but a step on a different device loads its own config and not this
         # file, so scope that routing to the file's device. step_ids is left
-        # alone: a declared dep is the generator's own trigger and must run.
+        # alone: the rule already scoped its family floor when it built them.
         if claim.device_scope and hardware.device_scoped_out(
             step, claim.device_scope, state.gpu_name_aliases
         ):

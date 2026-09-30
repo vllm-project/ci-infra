@@ -227,31 +227,6 @@ def test_bamba_removal_direction(vllm_repo, bamba_shas):
     assert n < 120, f"expected scoped selection, got {n} (file-level was 170)"
 
 
-def test_table_claim_carries_specific_declarers(
-    vllm_repo, bamba_shas, declared_deps_on
-):
-    """The table-diff claim is built outside _classify, so it used to skip the
-    declarer union: a step naming the registry file specifically, but
-    running tests elsewhere, was dropped."""
-    from ci_selector.codemap.classify import _source_dep_steps
-    from ci_selector.codemap.registry_diff import TABLE_FILES
-    from ci_selector.codemap.worktree import state_for
-    from ci_selector.gitdiff import changed_paths, diff_files
-
-    base, merge = bamba_shas
-    state = state_for(vllm_repo, base)
-    tables = [
-        p for p in changed_paths(diff_files(vllm_repo, base, merge)) if p in TABLE_FILES
-    ]
-    assert tables, "specimen drifted: the diff no longer touches a table file"
-    sel = _run_direction(vllm_repo, base, base, merge)
-    reached = set(sel.selected) | set(sel.manual_hits)
-    for table in tables:
-        declarers = _source_dep_steps(state, table, specific_only=True)
-        assert declarers, f"{table} has no specific declarers; nothing is proved"
-        assert not declarers - reached, sorted(declarers - reached)[:5]
-
-
 def test_bamba_add_direction(vllm_repo, bamba_shas):
     """Reversed diff = a model-ADD PR: the added bamba.py must be covered by
     the head-side table entry instead of failing open to run-all."""

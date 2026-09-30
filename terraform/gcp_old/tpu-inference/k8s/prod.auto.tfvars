@@ -106,6 +106,11 @@ tpu_queue_max_seconds = 43200
 # two-host slice is built in their place.
 tpu_admission_max_seconds = 3600
 
+# Five minutes reserved with no worker named, against a normal dispatch of a few
+# seconds, is a dropped dispatch rather than a slow one; see variables.tf.
+tpu_dispatch_retry_seconds = 300
+tpu_dispatch_retries       = 2
+
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
 # than the repository. Trailing slash required: without it the prefix would also
@@ -130,7 +135,7 @@ worker_clusters = [
     rapid_cache_zones = ["us-east5-a"]
 
     # Reservation cloudtpu-20260828173000-731402396 in us-east5-a: 128 v6e
-    # chips, 102 in use, 26 free. nominal_nodes splits those 26 between the
+    # chips, 102 in use, 26 free. nominal_quota splits those 26 between the
     # shapes so neither starves the other; max_nodes sums to more, so a shape
     # borrowing the cohort's idle quota can still boot the nodes for it.
     # min_nodes is the part that really does partition the reservation, since
@@ -143,8 +148,8 @@ worker_clusters = [
         zone             = "us-east5-a"
 
         min_nodes     = 2
-        nominal_nodes = 18
         max_nodes     = 26
+        nominal_quota = 18
       },
       {
         machine_type     = "ct6e-standard-8t"
@@ -157,8 +162,8 @@ worker_clusters = [
         min_nodes = 0
         # One slice guaranteed, and room for two more by borrowing whatever the
         # single-chip queue is not using.
-        nominal_nodes = 1
         max_nodes     = 3
+        nominal_quota = 8
       },
     ]
   },
@@ -192,8 +197,8 @@ worker_clusters = [
         zone             = "us-central1-c"
 
         min_nodes     = 0
-        nominal_nodes = 0
-        max_nodes     = 8
+        max_nodes     = 40
+        nominal_quota = 0
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -202,8 +207,8 @@ worker_clusters = [
         zone             = "us-central1-c"
 
         min_nodes     = 0
-        nominal_nodes = 2
-        max_nodes     = 2
+        max_nodes     = 10
+        nominal_quota = 8
       },
       {
         # Eight chips as one slice across two VMs: the multi-host shape, placed
@@ -214,9 +219,18 @@ worker_clusters = [
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
-        min_nodes     = 0
-        nominal_nodes = 0
-        max_nodes     = 2
+        nominal_quota = 0
+      },
+      {
+        machine_type     = "tpu7x-standard-4t"
+        topology         = "2x2x4"
+        reservation_name = "cloudtpu-20251114223000-2002888989"
+        zone             = "us-central1-c"
+
+        slices        = 2
+        nominal_quota = 32
+
+        reclaim_within_cohort = "Any"
       },
     ]
   },

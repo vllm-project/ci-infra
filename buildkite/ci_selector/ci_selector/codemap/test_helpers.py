@@ -34,6 +34,7 @@ import subprocess
 from pathlib import Path
 
 from .repo import is_test_file
+from .state import run_files
 
 TEST_ROOT = "tests/"
 # A conftest routes by the fixtures it changed (see route); an __init__ runs
@@ -135,14 +136,101 @@ def _names_used(stmt: ast.stmt) -> set[str]:
     return out
 
 
+# Decorators that only wrap the function they decorate: applying one at
+# import touches nothing else, so it reaches only what names the function.
+# Anything else (a registry, a plugin hook) may act on every importer.
+_WRAP_ONLY_DECORATORS = frozenset(
+    {
+        "pytest.fixture",
+        "pytest.mark.parametrize",
+        "pytest.mark.skipif",
+        "pytest.mark.skip",
+        "pytest.mark.slow",
+        "staticmethod",
+        "classmethod",
+        "property",
+        "abstractmethod",
+        "abc.abstractmethod",
+        "functools.cache",
+        "functools.lru_cache",
+        "functools.cached_property",
+        "functools.wraps",
+        "cache",
+        "lru_cache",
+        "cached_property",
+        "wraps",
+        "dataclass",
+        "dataclasses.dataclass",
+        "overload",
+        "typing.overload",
+        "contextmanager",
+        "contextlib.contextmanager",
+    }
+)
+
+
+def _applied(decorator: ast.expr) -> ast.expr:
+    """A decorator as the code it runs at import: nothing beyond its own
+    arguments for a wrap-only one, otherwise a call, so `@register` counts as
+    running code as `@register()` does."""
+    target = decorator.func if isinstance(decorator, ast.Call) else decorator
+    if ast.unparse(target) in _WRAP_ONLY_DECORATORS:
+        return decorator
+    return ast.copy_location(ast.Call(func=decorator, args=[], keywords=[]), decorator)
+
+
+def _import_time(stmt: ast.stmt) -> list[ast.AST]:
+    """The parts of a top-level statement that run when the module is
+    imported: all of a plain statement; a def's decorators and defaults, not
+    its body; a class's bases, keywords and decorators, and its body by the
+    same rule."""
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        args = stmt.args
+        return [
+            *(_applied(d) for d in stmt.decorator_list),
+            *args.defaults,
+            *(d for d in args.kw_defaults if d is not None),
+        ]
+    if isinstance(stmt, ast.ClassDef):
+        out: list[ast.AST] = [
+            *(_applied(d) for d in stmt.decorator_list),
+            *stmt.bases,
+            *stmt.keywords,
+        ]
+        for item in stmt.body:
+            out += _import_time(item)
+        return out
+    return [stmt]
+
+
+def _runs_code(node: ast.AST) -> bool:
+    return any(
+        isinstance(n, (ast.Call, ast.Import, ast.ImportFrom)) for n in ast.walk(node)
+    )
+
+
+def _lines_of(node: ast.AST) -> range:
+    return range(node.lineno, (node.end_lineno or node.lineno) + 1)
+
+
 def changed_names(tree: ast.Module, lines: set[int]) -> set[str] | None:
     """Top-level names whose statements hold a changed line. None when a
-    changed statement binds nothing: it runs on import. A line no statement
-    holds is a comment or blank line between them, and changes nothing."""
+    changed line is in code that runs on import and runs anything (an
+    import, a call, a decorator): every importer runs it, whatever names it
+    binds. A changed `m = importlib.import_module(...)` broke all 45
+    importers of a helper in a probe, and routing by `m` selected none. None
+    too when a changed statement binds nothing. A line no statement holds is
+    a comment or blank line between them, and changes nothing."""
     out: set[str] = set()
     for stmt in tree.body:
         if not lines.intersection(_span(stmt)):
             continue
+        if any(
+            lines.intersection(_lines_of(n)) and _runs_code(n)
+            for n in _import_time(stmt)
+            if hasattr(n, "lineno")
+        ):
+            return None
         bound = _binds(stmt)
         if not bound:
             return None
@@ -162,6 +250,13 @@ def affected_names(trees: list[ast.Module], changed: set[str]) -> set[str] | Non
             for stmt in tree.body:
                 if not (_names_used(stmt) & affected):
                     continue
+                # Import-time code calling an affected name (a decorator, a
+                # default, `SERVER = make_server()`) runs it for every importer.
+                if any(
+                    _names_used(n) & affected and _runs_code(n)
+                    for n in _import_time(stmt)
+                ):
+                    return None
                 bound = _binds(stmt)
                 if not bound:
                     return None
@@ -253,7 +348,7 @@ def route(state, path: str, ctx) -> tuple[set[str], set[str], str] | None:
         return set(), set(), f"{path}: no importer names {sorted(changed)[:3]}"
     closure = graph.reverse_closure(seeded)
     tests = {f for f in closure if is_test_file(f)}
-    scripts = {f for f in closure if f.startswith(("examples/", "benchmarks/"))}
+    scripts = run_files(state, closure)
     detail = (
         f"{path} changed {sorted(changed)[:3]}; {len(seeded)} of its "
         f"{len(importers)} importers name them or their users in the file, "

@@ -185,15 +185,29 @@ class TestBuild:
         assert only.status is Attribution.FAILED
         assert only.fail_open and only.note
 
-    def test_file_outside_the_recorder_root_fails_open(self, sample_repo: Repo):
-        # tests/ is real Python with real names, and no row can ever hold them.
+    def test_tests_files_are_in_scope_now_that_they_are_recorded(
+        self, sample_repo: Repo
+    ):
+        """The recorder writes tests/ since build 91572; a row recorded before
+        that holds no tests/ names, so they are unknown there and hold."""
         base = sample_repo.head()
         sample_repo.write("tests/test_thing.py", "def test_one():\n    assert True\n")
         head = sample_repo.commit("add test")
 
         (only,) = build(sample_repo.root, base, head).files
         assert only.status is Attribution.ATTRIBUTED
-        assert only.names  # names exist
+        assert only.names
+        assert only.in_recorder_scope and not only.fail_open
+
+    def test_file_outside_the_recorder_roots_fails_open(self, sample_repo: Repo):
+        # benchmarks/ is real Python with real names, and no row holds them.
+        base = sample_repo.head()
+        sample_repo.write("benchmarks/bench.py", "def run():\n    return 1\n")
+        head = sample_repo.commit("add bench")
+
+        (only,) = build(sample_repo.root, base, head).files
+        assert only.status is Attribution.ATTRIBUTED
+        assert only.names
         assert not only.in_recorder_scope and only.fail_open
 
     def test_added_file_has_no_base_side(self, sample_repo: Repo):
@@ -318,6 +332,52 @@ class TestBehaviourPreserving:
         )
         assert q.inert == []
 
+    def test_a_torch_compiled_model_is_never_inert(self, repo: Repo):
+        """support_torch_compile infers dynamic dims from forward's
+        annotations, and raises when it finds none."""
+        base = self.BASE + (
+            "\n\n@support_torch_compile\nclass Model:\n"
+            "    def forward(self, x: torch.Tensor):\n        return x\n"
+        )
+        repo.write("vllm/mod.py", base)
+        repo.commit("model")
+        q = self._build(repo, base.replace("x: torch.Tensor", "x: list"))
+        assert q.inert == [] and q.files and "Model.forward" in q.files[0].names
+
+    @pytest.mark.parametrize(
+        "nested, outer",
+        [
+            (
+                (
+                    "def outer(x):\n"
+                    "    def inner(y: int) -> int:\n        return y\n"
+                    "    return inner(x)\n"
+                ),
+                "outer",
+            ),
+            (
+                (
+                    "class C:\n    def run(self, x):\n"
+                    "        def inner(y: int) -> int:\n            return y\n"
+                    "        return inner(x)\n"
+                ),
+                "C.run",
+            ),
+        ],
+        ids=["function", "method"],
+    )
+    def test_a_def_inside_a_function_keeps_its_annotation_as_a_change(
+        self, repo: Repo, nested, outer
+    ):
+        """Its annotations run each time the enclosing function does: a name
+        imported only under TYPE_CHECKING raises NameError there."""
+        base = self.BASE + "\n\n" + nested
+        repo.write("vllm/mod.py", base)
+        repo.commit("nested")
+        q = self._build(repo, base.replace("-> int:", "-> Tensor:"))
+        (only,) = q.files
+        assert q.inert == [] and only.function_names == {outer}
+
     def test_only_import_time_left_but_not_annotations_keeps_every_name(
         self, repo: Repo
     ):
@@ -329,6 +389,125 @@ class TestBehaviourPreserving:
         )
         (only,) = self._build(repo, text).files
         assert "fused" in only.names and "<module>" in only.names
+
+
+class TestDocstrings:
+    """vllm#59008 reworded one function's docstring. That changes its code
+    object, a constant of it, and nothing it runs."""
+
+    BASE = (
+        '"""Module."""\n\n\n'
+        'def fused(x, y):\n    """Add them."""\n    return x + y\n\n\n'
+        "def other(x):\n    return x * 2\n\n\n"
+        'class Holder:\n    """Holds."""\n\n'
+        '    def method(self):\n        """Three."""\n        return 3\n'
+    )
+
+    @pytest.fixture
+    def repo(self, tmp_path: Path) -> Repo:
+        root = tmp_path / "r"
+        root.mkdir()
+        r = Repo(root)
+        r.write("vllm/mod.py", self.BASE)
+        r.commit("base")
+        return r
+
+    def _build(self, repo: Repo, text: str, path: str = "vllm/mod.py"):
+        base = repo.head()
+        repo.write(path, text)
+        head = repo.commit("edit")
+        return build(repo.root, base, head)
+
+    @pytest.mark.parametrize(
+        "old, new",
+        [
+            ('"""Add them."""', '"""Add them.\n\n    Twice over.\n    """'),
+            ('"""Three."""', '"""Always three."""'),
+            ("def other(x):\n", 'def other(x):\n    """Double."""\n'),
+        ],
+        ids=["function", "method", "added"],
+    )
+    def test_a_function_docstring_alone_is_inert(self, repo: Repo, old, new):
+        q = self._build(repo, self.BASE.replace(old, new))
+        assert q.files == [] and q.inert == ["vllm/mod.py"]
+
+    def test_a_docstring_and_an_annotation_together_are_inert(self, repo: Repo):
+        text = self.BASE.replace('"""Add them."""', '"""Sum."""').replace(
+            "def other(x):", "def other(x) -> int:"
+        )
+        q = self._build(repo, text)
+        assert q.files == [] and q.inert == ["vllm/mod.py"]
+
+    def test_a_docstring_beside_a_code_change_in_the_same_function(self, repo: Repo):
+        text = self.BASE.replace('"""Add them."""', '"""Sum."""').replace(
+            "return x + y", "return y + x"
+        )
+        (only,) = self._build(repo, text).files
+        assert only.function_names == {"fused"}
+
+    def test_a_code_change_elsewhere_keeps_the_docstring_edit(self, repo: Repo):
+        """All or nothing: the file is judged whole, as for annotations."""
+        text = self.BASE.replace('"""Add them."""', '"""Sum."""').replace(
+            "return x * 2", "return x * 3"
+        )
+        (only,) = self._build(repo, text).files
+        assert only.function_names == {"fused", "other"}
+
+    def test_a_class_docstring_is_a_change(self, repo: Repo):
+        """arg_utils.py turns config classes' docstrings into CLI help."""
+        q = self._build(repo, self.BASE.replace('"""Holds."""', '"""Keeps."""'))
+        assert q.inert == [] and q.files and "Holder" in q.files[0].names
+
+    def test_a_module_docstring_is_a_change(self, repo: Repo):
+        """Scripts pass `description=__doc__` to argparse."""
+        q = self._build(repo, self.BASE.replace('"""Module."""', '"""Mod."""'))
+        assert q.inert == [] and q.files and "<module>" in q.files[0].names
+
+    def test_a_decorated_function_keeps_its_docstring_as_a_change(self, repo: Repo):
+        """register_op in vllm/ir/op.py reads the docstring it is handed."""
+        base = self.BASE.replace("def fused", "@register_op\ndef fused")
+        repo.write("vllm/mod.py", base)
+        repo.commit("decorated")
+        q = self._build(repo, base.replace('"""Add them."""', '"""Sum."""'))
+        assert q.inert == [] and q.files and "fused" in q.files[0].names
+
+    @pytest.mark.parametrize(
+        "reader, where",
+        [
+            ('HELP = f"{fused.__doc__}"\n', "vllm/cli.py"),
+            ("HELP = inspect.getdoc(mod.fused)\n", "vllm/cli.py"),
+            ("HELP = inspect.getdoc(\n    fused\n)\n", "vllm/cli.py"),
+            ("p = ArgumentParser(description=fused.__doc__)\n", "tests/tool.py"),
+        ],
+        ids=["__doc__", "getdoc", "wrapped", "outside-vllm"],
+    )
+    def test_a_docstring_read_at_runtime_is_a_change(self, repo: Repo, reader, where):
+        """arg_utils.py appends human_readable_int.__doc__ to CLI help. Ruff
+        wraps a long call, putting the name on a line of its own."""
+        repo.write(where, reader)
+        repo.commit("reader")
+        q = self._build(repo, self.BASE.replace('"""Add them."""', '"""Sum."""'))
+        assert q.inert == [] and q.files and "fused" in q.files[0].names
+
+    def test_a_reader_of_another_name_does_not_block(self, repo: Repo):
+        repo.write("vllm/cli.py", 'HELP = f"{fused_other.__doc__}"\n\nfused(1, 2)\n')
+        repo.commit("reader")
+        q = self._build(repo, self.BASE.replace('"""Add them."""', '"""Sum."""'))
+        assert q.files == [] and q.inert == ["vllm/mod.py"]
+
+    def test_a_docstring_shared_with_the_body_is_not_skipped(self, repo: Repo):
+        """CPython merges equal constants, so the docstring is also what this
+        returns. Only the first constant differs, and it is a real change."""
+        before = 'def tag():\n    """doc"""\n    return "doc"\n'
+        after = before.replace("doc", "new")
+        a, b = (compile(s, "m.py", "exec").co_consts[0] for s in (before, after))
+        assert a.co_code == b.co_code and a.co_consts[1:] == b.co_consts[1:]
+        assert a.co_consts[0] != b.co_consts[0]
+
+        repo.write("vllm/tag.py", before)
+        repo.commit("tag")
+        q = self._build(repo, after, "vllm/tag.py")
+        assert q.inert == [] and q.files and "tag" in q.files[0].names
 
 
 def test_a_new_parameter_leaves_the_module_body_unchanged(tmp_path):
