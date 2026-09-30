@@ -201,16 +201,9 @@ class Table:
     def row(self, step: str) -> Row | None:
         return self._rows.get(step)
 
-    def look_up(
-        self, step: str, query: Query, mode: PhaseMode = DEFAULT_MODE
-    ) -> Verdict:
-        """What the table can say about one step, given a diff. Not the drop
-        rule itself: no completeness check, no caller walk, no file-level
-        fallback. This is the reading those are built on.
-
-        `mode` must be whatever the keep check in `rules.py` used. The match
-        below is the same one it makes, so the two disagreeing means one of
-        them decides nothing."""
+    def unusable(self, step: str) -> Verdict | None:
+        """Why this step's row cannot read a silence, or None when it can.
+        Only the run behind the row, not what anyone asks of it."""
         if not self.available:
             return Verdict(step, Evidence.NO_TABLE, self.unavailable)
         if step in self.rejected:
@@ -237,6 +230,22 @@ class Table:
                 Evidence.ROW_FAILED_JOB,
                 f"{len(row.stamp.failed_jobs)} contributing job(s) did not pass",
             )
+        return None
+
+    def look_up(
+        self, step: str, query: Query, mode: PhaseMode = DEFAULT_MODE
+    ) -> Verdict:
+        """What the table can say about one step, given a diff. Not the drop
+        rule itself: no completeness check, no caller walk, no file-level
+        fallback. This is the reading those are built on.
+
+        `mode` must be whatever the keep check in `rules.py` used. The match
+        below is the same one it makes, so the two disagreeing means one of
+        them decides nothing."""
+        unusable = self.unusable(step)
+        if unusable is not None:
+            return unusable
+        row = self._rows[step]
         mismatch = _interpreter_mismatch(row.stamp)
         if mismatch:
             return Verdict(step, Evidence.INTERPRETER_MISMATCH, mismatch)

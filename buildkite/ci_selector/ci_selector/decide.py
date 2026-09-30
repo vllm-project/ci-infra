@@ -31,6 +31,11 @@ authority: it selects on one observation and drops only behind every gate,
 and it runs after the Python record, never overruling a step that record kept
 on an observed call.
 
+A third answers for a dependency bump, where the changed file is a version pin
+and no frame of it runs: the library record (`coverage/libraries.py`), the
+functions of a few watched libraries each step called. It only drops, only
+steps the map picked for such a bump alone, and runs last.
+
 WHEN ANYTHING GOES WRONG, THE MAP'S SELECTION STANDS UNCHANGED -- and note the
 shape of that. It is NOT "carry on with an empty stale set": an empty stale set
 means nothing is disqualified, so every step stays droppable, and the failure
@@ -101,6 +106,12 @@ class Decision:
     kernel_reasons: dict = field(default_factory=dict)
     # changed csrc file -> what the kernel record could do with it
     kernel_files: dict = field(default_factory=dict)
+    # The library record's contribution, and the version-only pin changes it
+    # weighed: changed file -> the libraries it bumps.
+    dropped_by_libraries: set[str] = field(default_factory=set)
+    library_note: str = ""
+    library_reasons: dict = field(default_factory=dict)
+    bumped: dict = field(default_factory=dict)
 
     @property
     def used_coverage(self) -> bool:
@@ -172,6 +183,16 @@ def decide(
             out.added_by_kernels.clear()
             out.dropped_by_kernels.clear()
             out.kernel_note = f"kernel record unusable ({type(exc).__name__}: {exc})"
+
+    if not table.available:
+        out.library_note = table.unavailable
+    else:
+        try:
+            _apply_library_record(out, table, selection, state, repo, base, head)
+        except Exception as exc:  # noqa: BLE001 - same reasoning as above
+            out.dropped_by_libraries.clear()
+            out.library_note = f"library record unusable ({type(exc).__name__}: {exc})"
+        out.steps -= out.dropped_by_libraries
     return out
 
 
@@ -405,6 +426,33 @@ def _apply_kernel_record(
     out.dropped_by_kernels = set(reading.dropped)
     out.steps |= out.added_by_kernels
     out.steps -= out.dropped_by_kernels
+
+
+def _apply_library_record(
+    out: Decision, table: Table, selection, state, repo: Path, base, head
+) -> None:
+    """Steps the map picked only for a library's version pin, dropped when
+    their rows never called it. Keys resolve at the base, as for kernels. A
+    step the Python record kept on an observed call stays."""
+    from .coverage import libraries
+    from .gitdiff import diff_files
+
+    out.bumped = libraries.bumps(repo, base, head, diff_files(repo, base, head))
+    if not out.bumped:
+        return
+    if not getattr(state, "pipelines", None):
+        raise RuntimeError("no pipeline state to resolve step keys against")
+    keys = RowKeys.resolve_from_state(set(table._rows), state)
+    dropped, reasons = libraries.read_pr(
+        table,
+        selection,
+        out.bumped,
+        keys,
+        frozenset(out.executes_by_coverage),
+        libraries.wrappers_at(repo, base),
+    )
+    out.library_reasons = dict(reasons)
+    out.dropped_by_libraries = set(dropped) & out.steps
 
 
 def _protected_from_kernel_drops(out: Decision) -> frozenset[str]:

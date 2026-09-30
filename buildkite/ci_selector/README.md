@@ -10,6 +10,8 @@ Works out which vLLM CI jobs a diff needs to run. It derives the answer from the
 
 **The kernel record** is the same idea for `csrc/`, where no Python frame exists: a table of the GPU kernels each step launched (CUPTI, recorded on the nightly and daily runs) joined to a map of which csrc file each kernel was compiled from (read off the image build's objects). Both are produced by `recorders/kernrec/`.
 
+**The library record** answers for a dependency bump, where the changed file is a version pin: the same recorder also writes, per step, which functions of a few watched libraries (flashinfer, DeepGEMM, flash-attn, Triton; `coverage/libraries.py`) code outside them called at runtime. A diff that only moves such a pin runs the steps that called the library instead of every step on its image. It only drops, only steps selected for such pins alone, and a row recorded before the library was watched keeps its step. Torch is not watched: a torch bump runs everything.
+
 Neither is a stage of the other. `decide.py` reads all of them, per changed file:
 
 | for file F and step S | decides |

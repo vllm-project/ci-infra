@@ -141,7 +141,7 @@ None of it routes through imports, so each surface has its own derived mechanism
 | `csrc/`, `.cu`, `.cpp`, headers | CMake device families, plus the op-to-wrapper bridge | yes: the kernel record, per file, for a file compiled only into kernels; the wrapper names otherwise |
 | `cmake/` | the same build map, inheriting the context it is included from | no |
 | `rust/` | which shipped artifact the crate feeds, not which image copies it | no |
-| Dockerfiles, `requirements/` | the image build graph | no |
+| Dockerfiles, `requirements/` | the image build graph | only a file whose whole change moves a watched library's pin: the library record, by the steps whose rows called it |
 | `.buildkite/` config | twelve ordered rules: defines steps, matches a step's targets, is a Dockerfile input, and so on | no |
 | docs, `.github/`, markdown | nothing to run; a docs-only diff emits nothing | n/a |
 

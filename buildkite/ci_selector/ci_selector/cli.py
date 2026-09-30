@@ -189,6 +189,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             for path, what in sorted(d.kernel_files.items()):
                 print(f"kernels:   {path}: {what}", file=sys.stderr)
+        if d.library_note:
+            print(f"libraries: {d.library_note}", file=sys.stderr)
+        elif d.bumped:
+            bumped = sorted({lib for libs in d.bumped.values() for lib in libs})
+            print(
+                f"libraries: -{len(d.dropped_by_libraries)} dropped "
+                f"({', '.join(bumped)} bumped in {len(d.bumped)} files; "
+                f"{d.library_reasons})",
+                file=sys.stderr,
+            )
         sel = _restrict(sel, d)
 
     if args.emit_keys:
