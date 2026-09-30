@@ -1035,10 +1035,16 @@ def _runtime_shard_steps(
     )
     env = None
     if mode == "on":
-        # If the planner can't even start, upload the step's normal job.
+        # If the planner can't even start, upload the step's normal job, with a
+        # warning. Skip it if the planner died after its own upload: the key is
+        # taken, so a second upload would only fail and turn this step red.
         plan_command = (
             f"{fetch} && {plan_command} || "
-            '(echo "$$RUNTIME_SHARD_TEMPLATE" | base64 -d'
+            f'[ -n "$$(buildkite-agent step get state --step {step_key} 2>/dev/null)" ]'
+            " || (buildkite-agent annotate --style warning --context"
+            f' runtime-shard-{step_key} "**Runtime sharding for {step_key}:** the'
+            ' planner crashed. The step runs as one job, as it would without sharding.";'
+            ' echo "$$RUNTIME_SHARD_TEMPLATE" | base64 -d'
             " | buildkite-agent pipeline upload)"
         )
         template = {"steps": [command_step.dict(exclude_none=True)]}
