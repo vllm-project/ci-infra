@@ -553,10 +553,13 @@ def test_a_new_parameter_leaves_the_module_body_unchanged(tmp_path):
 
 
 PLATFORM_SRC = """\
+import vllm.envs as envs
 from vllm.platforms import current_platform
 
 
 def view(t):
+    if envs.VLLM_PIN_VIEWS:
+        t = t.pin_memory()
     if current_platform.is_xpu():
         if not t.is_pinned():
             t = t.contiguous()
@@ -573,11 +576,24 @@ def view(t):
         ("t = t.contiguous()", "t = t.clone()", "xpu"),
         ("return cuda(t)", "return cuda(t, 1)", None),  # is_cuda_alike: two families
         ("    return t\n", "    return t + 0\n", None),  # outside every guard
+        ("return xpu(t)", "from vllm import ops\n        return ops.xpu(t)", "xpu"),
+        # `envs` turns local to view, so its first line raises UnboundLocalError.
+        ("return xpu(t)", "import vllm.envs as envs\n        return xpu(t)", None),
+        ("return xpu(t)", "yield\n        return xpu(t)", None),  # now a generator
     ],
-    ids=["xpu-branch", "cuda-alike", "unguarded"],
+    ids=[
+        "xpu-branch",
+        "cuda-alike",
+        "unguarded",
+        "binds-a-new-name",
+        "rebinds-a-name-used-outside",
+        "makes-a-generator",
+    ],
 )
 def test_a_change_inside_one_platform_branch_is_tagged(tmp_path, old, new, family):
-    """vllm#54874 changed only the XPU branch of a function 315 CUDA rows call."""
+    """vllm#54874 changed only the XPU branch of a function 315 CUDA rows call.
+    A line there that changes how the rest of the function resolves a name,
+    or what kind of function it is, is not confined to it."""
     import subprocess
 
     from ci_selector.coverage.changed_funcs import build
@@ -600,4 +616,89 @@ def test_a_change_inside_one_platform_branch_is_tagged(tmp_path, old, new, famil
     (repo / "vllm/u.py").write_text(PLATFORM_SRC.replace(old, new))
     git("commit", "-qam", "edit")
     (f,) = build(repo, base, git("rev-parse", "HEAD")).files
+    assert f.platform == family
+
+
+SCOPES_SRC = """\
+import vllm.envs as envs
+from vllm.platforms import current_platform
+
+k = 1
+
+if current_platform.is_xpu():
+    def step():
+        yield 1
+
+
+def step():
+    if current_platform.is_xpu():
+        step.calls = 0
+    return 1
+
+
+if current_platform.is_xpu():
+    step.calls = 1
+
+
+def pick(ts):
+    if current_platform.is_xpu():
+        ts = sorted(ts, key=lambda t: t.numel())
+    size = lambda t: numel(t)
+    if current_platform.is_xpu():
+        ts = ts[:1]
+    pinned = lambda: envs.VLLM_PIN_VIEWS
+    return [size(t) for t in ts if pinned()]
+
+
+class Views:
+    if current_platform.is_xpu():
+        pass
+    k = 2
+"""
+
+MOVE_A_LAMBDA = [
+    ("ts = sorted(ts, key=lambda t: t.numel())", "ts = list(ts)"),
+    ("ts = ts[:1]", "ts = sorted(ts, key=lambda u: u.numel())"),
+]
+
+
+@pytest.mark.parametrize(
+    "edits, family",
+    [
+        (MOVE_A_LAMBDA, "xpu"),
+        # `numel` turns free in `size`, which raises NameError on CUDA.
+        ([*MOVE_A_LAMBDA, ("ts = list(ts)", "from vllm.utils import numel")], None),
+        ([("ts = ts[:1]", "import vllm.envs as envs")], None),  # read by `pinned`
+        ([("pass", "global k")], None),  # `k = 2` now sets the module's `k`
+        (
+            [
+                ("    def step():\n        yield 1", "    step = None"),
+                ("step.calls = 0", "yield"),  # the `step` CUDA runs, a generator
+                ("step.calls = 1", "def step():\n        return 1"),
+            ],
+            None,
+        ),
+    ],
+    ids=[
+        "moves-a-lambda",
+        "moves-a-lambda-and-rebinds-for-another",
+        "rebinds-for-a-closure",
+        "globals-a-class-name",
+        "moves-a-generator-and-makes-one",
+    ],
+)
+def test_a_platform_branch_leaves_every_other_scope_as_it_was(tmp_path, edits, family):
+    """A branch that rebinds a name a nested scope or a class body reads
+    reaches past it too. Scopes of one name pair up in order, so a lambda
+    moved from one XPU branch to another must not pair an unchanged lambda
+    with the wrong one and hide a name it now reads free."""
+    repo = Repo(tmp_path)
+    repo.write("vllm/u.py", SCOPES_SRC)
+    base = repo.commit("base")
+    text = SCOPES_SRC
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    repo.write("vllm/u.py", text)
+    (f,) = build(repo.root, base, repo.commit("edit")).files
     assert f.platform == family
