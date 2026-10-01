@@ -401,6 +401,7 @@ def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
     _inventories(tmp_path)
     template, [step], annotate = _run_plan_on(tmp_path, monkeypatch)
     assert step["key"] == "model-executor" and step["parallelism"] == 4
+    assert step["label"] == "ME shard %N/%t"
     assert step["commands"][2:] == template["commands"]
     assert "https://example/runtime_shard.py" in step["commands"][0]
     assert (
