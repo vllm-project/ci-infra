@@ -84,6 +84,7 @@ resource "google_compute_instance_template" "slice" {
       private_key_pem                 = local.is_multi_host ? tls_private_key.internal_ssh_key[each.key].private_key_pem : ""
       public_key_openssh              = local.is_multi_host ? tls_private_key.internal_ssh_key[each.key].public_key_openssh : ""
       keep_agent_connected            = file("${path.module}/../shared/keep-agent-connected.sh")
+      git_setup                       = chomp(var.vllm_torchtpu_ssh_checkout ? file("${path.module}/../shared/git-ssh-checkout-setup.sh") : file("${path.module}/../shared/git-https-setup.sh"))
     })
   }
 

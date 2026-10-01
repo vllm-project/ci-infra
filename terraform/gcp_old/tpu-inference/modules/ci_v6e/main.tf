@@ -131,16 +131,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       chmod +x /etc/buildkite-agent/git-credential-github-app
       chown -R buildkite-agent:buildkite-agent /etc/buildkite-agent/
 
-      # Configure Git system-wide (/etc/gitconfig) and globally to use the credential helper and redirect SSH to HTTPS
-      git config --system credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-      git config --system --add url."https://github.com/".insteadOf "git@github.com:"
-      git config --system --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-      sudo -H -u buildkite-agent git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-      sudo -H -u buildkite-agent git config --global --add url."https://github.com/".insteadOf "git@github.com:"
-      sudo -H -u buildkite-agent git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-      HOME=/root git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-      HOME=/root git config --global --add url."https://github.com/".insteadOf "git@github.com:"
-      HOME=/root git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+      ${chomp(var.vllm_torchtpu_ssh_checkout ? file("${path.module}/../shared/git-ssh-checkout-setup.sh") : file("${path.module}/../shared/git-https-setup.sh"))}
       # ==========================================
 
       sudo usermod -a -G docker buildkite-agent

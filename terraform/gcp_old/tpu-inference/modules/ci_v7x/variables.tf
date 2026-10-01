@@ -61,3 +61,14 @@ variable "service_account_email" {
   description = "Service account the TPU VMs run as. Null uses the project's default compute service account."
   default     = null
 }
+
+variable "vllm_torchtpu_ssh_checkout" {
+  type        = bool
+  description = <<-DESC
+    Check vllm-torchtpu out over SSH with its read-only deploy key instead of
+    over HTTPS with the CI bot's GitHub App token. A pre-checkout hook reads the
+    key per job from the Buildkite secret VLLM_TORCHTPU_DEPLOY_KEY, whose access
+    policy limits it to the pipelines that need it. Pushes still go over HTTPS.
+  DESC
+  default     = false
+}
