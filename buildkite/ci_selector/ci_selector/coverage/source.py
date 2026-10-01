@@ -98,3 +98,21 @@ def fetch_kernel_evidence(table_path: Path | None = None, map_path: Path | None 
         )
     )
     return KernelEvidence(table, symbol_map)
+
+
+def fetch_kernel_records(table_path: Path | None = None, map_path: Path | None = None):
+    """Load CUDA and ROCm independently, or one explicitly configured pair."""
+    if table_path is not None or map_path is not None:
+        return [fetch_kernel_evidence(table_path, map_path)]
+    rocm_table = Path(
+        os.environ.get(
+            "CI_SELECTOR_ROCM_KERNEL_TABLE", COVERAGE_DIR / "kernel_table.rocm.json.gz"
+        )
+    )
+    rocm_map = Path(
+        os.environ.get(
+            "CI_SELECTOR_ROCM_KERNEL_SYMBOL_MAP",
+            COVERAGE_DIR / "kernel_symbol_map.rocm.json.gz",
+        )
+    )
+    return [fetch_kernel_evidence(), fetch_kernel_evidence(rocm_table, rocm_map)]

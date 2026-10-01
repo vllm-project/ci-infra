@@ -64,6 +64,23 @@ static pid_t g_out_pid = 0;
 static char **g_keys = NULL; /* open-addressing set of strdup'd names */
 static size_t g_cap = 0, g_count = 0;
 static unsigned long g_records = 0, g_dropped = 0;
+static unsigned long g_errors = 0, g_unresolved = 0;
+
+static FILE *output(void);
+
+/* Caller holds g_lock. Errors survive even when the workload passes. */
+static void record_error(const char *operation) {
+  g_errors++;
+  FILE *f = output();
+  if (f) fprintf(f, "# error=%s\n", operation);
+}
+
+static void check_status(CUptiResult status, const char *operation) {
+  if (status == CUPTI_SUCCESS) return;
+  pthread_mutex_lock(&g_lock);
+  record_error(operation);
+  pthread_mutex_unlock(&g_lock);
+}
 static int g_initialized = 0;
 
 /* Flush thread; see the header comment. g_flush_pid guards the join: a forked
@@ -90,7 +107,7 @@ static uint64_t fnv1a(const char *s) {
 static void set_grow(void) {
   size_t ncap = g_cap ? g_cap * 2 : 4096;
   char **nk = calloc(ncap, sizeof(char *));
-  if (!nk) return;
+  if (!nk) { record_error("set-allocation"); return; }
   for (size_t i = 0; i < g_cap; ++i) {
     if (!g_keys[i]) continue;
     size_t j = fnv1a(g_keys[i]) & (ncap - 1);
@@ -105,14 +122,17 @@ static void set_grow(void) {
 /* Returns 1 when the name was not seen before. Caller holds g_lock. */
 static int set_insert(const char *name) {
   if (g_count * 2 >= g_cap) set_grow();
-  if (!g_keys) return 0;
+  if (!g_keys || g_count + 1 >= g_cap) {
+    record_error("set-capacity");
+    return 0;
+  }
   size_t i = fnv1a(name) & (g_cap - 1);
   while (g_keys[i]) {
     if (strcmp(g_keys[i], name) == 0) return 0;
     i = (i + 1) & (g_cap - 1);
   }
   g_keys[i] = strdup(name);
-  if (!g_keys[i]) return 0;
+  if (!g_keys[i]) { record_error("name-allocation"); return 0; }
   g_count++;
   return 1;
 }
@@ -165,8 +185,8 @@ static FILE *output(void) {
     dir = dirbuf;
   }
   char path[4096];
-  if (mkdir_p(dir) ||
-      snprintf(path, sizeof path, "%s/kern.%ld.txt", dir, (long)pid) < 0 ||
+  int length = snprintf(path, sizeof path, "%s/kern.%ld.txt", dir, (long)pid);
+  if (mkdir_p(dir) || length < 0 || (size_t)length >= sizeof path ||
       !(g_out = fopen(path, "a"))) {
     fprintf(stderr, "kernrec: cannot write under %s: %s\n", dir,
             strerror(errno));
@@ -177,7 +197,7 @@ static FILE *output(void) {
   setvbuf(g_out, NULL, _IOLBF, 0);
   char exe[1024] = {0};
   ssize_t r = readlink("/proc/self/exe", exe, sizeof exe - 1);
-  fprintf(g_out, "# kernrec v1 pid=%ld ppid=%ld exe=%s\n", (long)pid,
+  fprintf(g_out, "# kernrec v1 backend=cuda recorder=cupti pid=%ld ppid=%ld exe=%s\n", (long)pid,
           (long)getppid(), r > 0 ? exe : "?");
   return g_out;
 }
@@ -190,6 +210,11 @@ static void CUPTIAPI buffer_requested(uint8_t **buffer, size_t *size,
   *buffer = malloc(HOST_BUF_SIZE);
   *size = *buffer ? HOST_BUF_SIZE : 0;
   *max_records = 0; /* as many as fit */
+  if (!*buffer) {
+    pthread_mutex_lock(&g_lock);
+    record_error("buffer-allocation");
+    pthread_mutex_unlock(&g_lock);
+  }
 }
 
 static void CUPTIAPI buffer_completed(CUcontext ctx, uint32_t stream_id,
@@ -200,13 +225,16 @@ static void CUPTIAPI buffer_completed(CUcontext ctx, uint32_t stream_id,
   pthread_mutex_lock(&g_lock);
   for (;;) {
     CUptiResult st = cuptiActivityGetNextRecord(buffer, valid, &rec);
-    if (st != CUPTI_SUCCESS) break; /* MAX_LIMIT_REACHED ends the buffer */
+    if (st != CUPTI_SUCCESS) {
+      if (st != CUPTI_ERROR_MAX_LIMIT_REACHED) record_error("read-buffer");
+      break;
+    }
     if (rec->kind != CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL &&
         rec->kind != CUPTI_ACTIVITY_KIND_KERNEL)
       continue;
     const KernelRec *k = (const KernelRec *)rec;
     g_records++;
-    if (!k->name) continue;
+    if (!k->name || !*k->name) { g_unresolved++; continue; }
     if (set_insert(k->name)) {
       FILE *f = output();
       if (f) {
@@ -218,9 +246,9 @@ static void CUPTIAPI buffer_completed(CUcontext ctx, uint32_t stream_id,
   /* A dropped record is a launch we never saw. Leave a mark so build-table
    * can treat the row as suspect instead of trusting a hole. */
   size_t dropped = 0;
-  if (cuptiActivityGetNumDroppedRecords(ctx, stream_id, &dropped) ==
-          CUPTI_SUCCESS &&
-      dropped) {
+  CUptiResult status = cuptiActivityGetNumDroppedRecords(ctx, stream_id, &dropped);
+  if (status != CUPTI_SUCCESS) record_error("read-drop-count");
+  if (dropped) {
     g_dropped += dropped;
     FILE *f = output();
     if (f) fprintf(f, "# dropped=%zu\n", dropped);
@@ -261,7 +289,8 @@ static void *flush_loop(void *arg) {
      * g_lock, and at_exit takes g_flush_lock to stop us. */
     tick++;
     int forced = g_force_every > 0 && tick % g_force_every == 0;
-    cuptiActivityFlushAll(forced ? CUPTI_ACTIVITY_FLAG_FLUSH_FORCED : 0);
+    check_status(cuptiActivityFlushAll(forced ? CUPTI_ACTIVITY_FLAG_FLUSH_FORCED : 0),
+                 "periodic-flush");
     pthread_mutex_lock(&g_flush_lock);
   }
   pthread_mutex_unlock(&g_flush_lock);
@@ -296,11 +325,13 @@ static void stop_flush_thread(void) {
 static void at_exit(void) {
   stop_flush_thread();
   /* Drain records still sitting in device buffers. */
-  cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
+  check_status(cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED),
+               "final-flush");
   pthread_mutex_lock(&g_lock);
   if (g_out && g_out_pid == getpid()) {
-    fprintf(g_out, "# end records=%lu unique=%zu dropped=%lu\n", g_records,
-            g_count, g_dropped);
+    if (fflush(g_out) != 0 || ferror(g_out)) g_errors++;
+    fprintf(g_out, "# end records=%lu unique=%zu dropped=%lu errors=%lu unresolved=%lu\n",
+            g_records, g_count, g_dropped, g_errors, g_unresolved);
     fclose(g_out);
     g_out = NULL;
   }
@@ -318,30 +349,31 @@ static const char *cupti_err(CUptiResult st) {
 int InitializeInjection(void) {
   if (g_initialized) return 1;
   g_initialized = 1;
+  pthread_mutex_lock(&g_lock);
+  output();
+  pthread_mutex_unlock(&g_lock);
+  atexit(at_exit);
 
   CUptiResult st = cuptiActivityRegisterCallbacks(buffer_requested,
                                                   buffer_completed);
   if (st != CUPTI_SUCCESS) {
     fprintf(stderr, "kernrec: cuptiActivityRegisterCallbacks: %s\n",
             cupti_err(st));
+    check_status(st, "register-callbacks");
     return 1; /* never break the workload */
   }
   /* Bigger device buffers: fewer flushes, fewer dropped records. */
   size_t attr_size = sizeof(size_t), dev_buf = DEVICE_BUF_SIZE;
-  cuptiActivitySetAttribute(CUPTI_ACTIVITY_ATTR_DEVICE_BUFFER_SIZE, &attr_size,
-                            &dev_buf);
+  check_status(cuptiActivitySetAttribute(CUPTI_ACTIVITY_ATTR_DEVICE_BUFFER_SIZE,
+                                         &attr_size, &dev_buf),
+               "set-buffer-size");
   st = cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
   if (st != CUPTI_SUCCESS) {
     fprintf(stderr, "kernrec: cuptiActivityEnable(CONCURRENT_KERNEL): %s\n",
             cupti_err(st));
+    check_status(st, "enable-kernel-activity");
     return 1;
   }
-  /* Open the file now, not at the first record, so a process killed before
-   * its first flush still leaves a header saying it initialised CUDA. */
-  pthread_mutex_lock(&g_lock);
-  output();
-  pthread_mutex_unlock(&g_lock);
-  atexit(at_exit);
   start_flush_thread();
   return 1;
 }

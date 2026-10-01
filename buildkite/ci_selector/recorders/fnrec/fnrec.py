@@ -16,8 +16,8 @@ that code outside the library called at runtime, one `#lib` line each. That
 is what a dependency bump routes on, the jobs that called flashinfer rather
 than every job in the image.
 
-Needs FNREC_OUT and FNREC_ROOT. Starts on the first `vllm` import rather
-than at interpreter startup, leaving other infrastructure alone.
+Needs FNREC_OUT and FNREC_ROOT. Starts on the first `vllm` or `aiter` import
+rather than at interpreter startup, leaving other infrastructure alone.
 
 The rest exists because this runs on machines we cannot reach, so every
 artifact has to be diagnosable afterwards. A process that recorded nothing
@@ -43,6 +43,20 @@ _ENV_KEYS = (
     "BUILDKITE_PARALLEL_JOB_COUNT",
     "VLLM_WORKER_MULTIPROC_METHOD",
     "CUDA_VISIBLE_DEVICES",
+    "ROCR_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "VLLM_ROCM_USE_AITER",
+    "VLLM_ROCM_USE_AITER_RMSNORM",
+    "VLLM_ROCM_USE_AITER_LINEAR",
+    "VLLM_ROCM_USE_AITER_MOE",
+    "VLLM_ROCM_USE_AITER_MLA",
+    "VLLM_ROCM_USE_AITER_MHA",
+    "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION",
+    "VLLM_ROCM_USE_AITER_CUSTOM_AR",
+    "VLLM_ROCM_USE_AITER_TRITON_GEMM",
+    "VLLM_ROCM_USE_AITER_TRITON_ROPE",
+    "AITER_TRITON_ONLY",
+    "AITER_AOT_IMPORT",
 )
 
 _STAT_EVERY = 500
@@ -134,6 +148,11 @@ def _resolve_tests_root():
 def _package_of(filename):
     """The top-level package an installed file belongs to, or None for the
     standard library, frozen modules, and anything not installed."""
+    # AITER CI commonly installs from a source checkout, outside site-packages.
+    aiter = sys.modules.get("aiter")
+    for root in getattr(aiter, "__path__", ()):
+        if filename.startswith(os.path.join(os.path.abspath(root), "")):
+            return "aiter"
     for marker in _SITE_DIRS:
         i = filename.rfind(marker)
         if i >= 0:
@@ -359,7 +378,7 @@ def _note_libcall(lib, code, frame):
     module is being imported is a startup side effect, not use, so the event
     stays armed for a later runtime call. Anything else is an entry, recorded
     once. Either way the steady state costs nothing: every code object ends
-    DISABLEd on its first runtime call.
+    disabled on its first runtime call.
     """
     pkg, rel = lib or (None, "")
     caller = frame.f_back
@@ -508,7 +527,7 @@ class _VllmImportTrigger:
     def find_spec(self, fullname, path=None, target=None):
         if _VllmImportTrigger.fired:
             return None
-        if fullname != "vllm" and not fullname.startswith("vllm."):
+        if fullname.partition(".")[0] not in ("vllm", "aiter"):
             return None
         _VllmImportTrigger.fired = True
         try:
@@ -518,7 +537,7 @@ class _VllmImportTrigger:
         try:
             _begin()
         except Exception:
-            # Runs inside `import vllm`; raising would fail the import and
+            # Runs inside an application import; raising would fail it and
             # take the job with it.
             pass
         return None

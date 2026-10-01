@@ -44,7 +44,7 @@ from pathlib import Path
 
 from ..codemap.classify import select
 from ..codemap.worktree import git_out, state_for
-from ..coverage.source import fetch_kernel_evidence, fetch_table
+from ..coverage.source import fetch_kernel_records, fetch_table
 from ..decide import decide
 from ..gitdiff import changed_paths, diff_files
 from .crosscheck import base_in_window
@@ -163,9 +163,10 @@ def run(args) -> int:
     table = fetch_table(args.table)
     if not table.available:
         print(f"NOTE: {table.unavailable}")
-    kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
-    if kernels.unavailable:
-        print(f"NOTE: {kernels.unavailable}")
+    kernels = fetch_kernel_records(args.kernel_table, args.kernel_symbol_map)
+    for pair in kernels:
+        if pair.unavailable:
+            print(f"NOTE: {pair.unavailable}")
     by_pr: OrderedDict[int, dict] = OrderedDict()
     for r in records:
         pr = r["culprit_pr"]["number"]

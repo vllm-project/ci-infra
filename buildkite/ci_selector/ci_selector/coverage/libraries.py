@@ -248,7 +248,7 @@ def read_pr(
             reasons["unmappable-step-id"] += 1
             continue
         if step_id in protected:
-            reasons["held-by-the-python-record"] += 1
+            reasons["held-by-an-execution-record"] += 1
             continue
         unusable = table.unusable(key)
         if unusable is not None:

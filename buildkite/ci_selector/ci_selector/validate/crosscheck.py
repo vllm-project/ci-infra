@@ -33,7 +33,7 @@ from ..codemap.pipeline.match import (
     step_slug_candidates,
 )
 from ..codemap.worktree import git_out, state_for
-from ..coverage.source import fetch_kernel_evidence, fetch_table
+from ..coverage.source import fetch_kernel_records, fetch_table
 from ..decide import decide
 from ..gitdiff import changed_paths, diff_files
 from ..handwritten import PR_PIPELINE
@@ -414,14 +414,15 @@ def run(args) -> int:
     # Once. Every PR reads the same table, and reloading per PR would dominate
     # a long replay.
     table = fetch_table(args.table)
-    kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
+    kernels = fetch_kernel_records(args.kernel_table, args.kernel_symbol_map)
     if not table.available:
         print(f"NOTE: {table.unavailable}")
-    if kernels.unavailable:
-        print(f"NOTE: {kernels.unavailable}")
-    else:
-        print(f"kernel record: {kernels.describe()}")
-    if not table.available and kernels.unavailable:
+    for pair in kernels:
+        if pair.unavailable:
+            print(f"NOTE: {pair.unavailable}")
+        else:
+            print(f"kernel record: {pair.describe()}")
+    if not table.available and all(pair.unavailable for pair in kernels):
         print("  final == codemap for every PR below.")
     print("triples read: CI ran / codemap only / records + codemap\n")
     results = []

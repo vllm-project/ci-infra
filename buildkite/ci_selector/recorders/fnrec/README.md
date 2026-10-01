@@ -9,7 +9,7 @@ uses them to drop steps that provably ran none of the changed code.
 
 Subscribes to CPython's `sys.monitoring` PY_START event and returns `DISABLE`
 from the callback, so each function costs one event in the life of a process.
-It starts on the first `vllm` import, not at interpreter startup, so other
+It starts on the first `vllm` or `aiter` import, not at interpreter startup, so other
 infrastructure in the image is left alone.
 
 Two install modes, chosen by the generator because only it knows the step:
@@ -89,7 +89,7 @@ in it that code outside the library called at runtime. Not the library's own
 internals, which DISABLE on their first call, and not module or class bodies.
 A call made while any module is being imported is startup, not use, so its
 event stays armed for a later runtime call; everything else is recorded once
-and DISABLEd, so the steady state costs nothing. A copy vendored under
+and disabled, so the steady state costs nothing. A copy vendored under
 `vllm/third_party/` is recorded the same way. The header's `libs=` names the
 list in force, so a row whose header lacks it predates this and its silence
 proves nothing. That is what a dependency bump routes on: the jobs that called

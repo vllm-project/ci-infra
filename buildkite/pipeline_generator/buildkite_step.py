@@ -445,13 +445,14 @@ KERNREC_SKIP_STEPS = {
 }
 
 
-def _kernrec_applies(step: Step) -> bool:
-    """The steps _get_setup_commands arms with the nvidia profile."""
+def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool:
+    """Whether the step can load a backend-specific kernel recorder."""
     return (
         kernrec_enabled()
         and not step.no_plugin
         and not step.label.startswith(":docker:")
         and step.key not in KERNREC_SKIP_STEPS
+        and not (setup_profile == "amd" and step.num_nodes and step.num_nodes > 1)
     )
 
 
@@ -475,7 +476,7 @@ def _recording_timeout(step: Step, minutes: int) -> int:
 KERNREC_SETUP_PATH = "recorders/kernrec/ci_setup.sh"
 
 
-def _kernrec_setup_command() -> str:
+def _kernrec_setup_command(backend: Literal["cuda", "rocm"] = "cuda") -> str:
     """Source the recorder's setup script at the start of the step.
 
     Double quotes only: _prepare_commands rewrites single quotes. The chain
@@ -487,11 +488,15 @@ def _kernrec_setup_command() -> str:
         f"{branch}/buildkite/ci_selector/{KERNREC_SETUP_PATH}"
     )
     return (
-        'echo "--- :satellite: Kernel launch recorder"; '
-        "mkdir -p /tmp/kernrec && "
-        f'curl -sSfL --retry 3 --max-time 60 -o /tmp/kernrec/ci_setup.sh "{url}" && '
-        ". /tmp/kernrec/ci_setup.sh || "
-        'echo "kernrec: setup skipped"'
+        '{ echo "--- :satellite: Kernel launch recorder"; '
+        f"export KERNREC_BACKEND={backend}; "
+        f'export KERNREC_BRANCH="{branch}"; '
+        'export KERNREC_CACHE_DIR="/tmp/kernrec/$${BUILDKITE_JOB_ID:-local}"; '
+        'mkdir -p "$$KERNREC_CACHE_DIR" && '
+        "curl -sSfL --retry 3 --max-time 60 "
+        f'-o "$$KERNREC_CACHE_DIR/ci_setup.sh" "{url}" && '
+        '. "$$KERNREC_CACHE_DIR/ci_setup.sh" || '
+        'echo "kernrec: setup skipped"; }'
     )
 
 
@@ -674,17 +679,25 @@ def _collect_step(
     label: str,
     count_armed: bool = False,
 ) -> "BuildkiteCommandStep":
-    blocked = {
-        s.key[len("block-") :]
-        for g in groups
-        for s in g.steps
-        if isinstance(s, BuildkiteBlockStep)
-    }
+    steps = [s for g in groups for s in g.steps]
+    blocked = {s.key for s in steps if isinstance(s, BuildkiteBlockStep)}
+    # Block keys do not consistently encode the command they gate: directly
+    # declared AMD jobs use block-amd-<key> without adding amd- to the job.
+    # Follow the actual edges, including jobs waiting on a blocked image or
+    # another blocked job, so collection never waits for manual approval.
+    dependents: Dict[str, List[str]] = {}
+    for step in steps:
+        if isinstance(step, BuildkiteCommandStep):
+            for dependency in step.depends_on or []:
+                dependents.setdefault(dependency, []).append(step.key)
+    pending = list(blocked)
+    while pending:
+        for dependent in dependents.get(pending.pop(), []):
+            if dependent not in blocked:
+                blocked.add(dependent)
+                pending.append(dependent)
     runnable = [
-        s
-        for g in groups
-        for s in g.steps
-        if isinstance(s, BuildkiteCommandStep) and s.key not in blocked
+        s for s in steps if isinstance(s, BuildkiteCommandStep) and s.key not in blocked
     ]
     # Only the steps that record, and what they wait for: the image build
     # uploads the kernel symbol map. Waiting on every step held the kernel
@@ -749,8 +762,8 @@ def _kernrec_finish_command() -> str:
     like the setup command.
     """
     return (
-        "command -v kernrec_finish >/dev/null 2>&1 && "
-        'kernrec_finish "$${CI_OVERALL_STATUS:-0}" || echo "kernrec: finish skipped"'
+        "{ command -v kernrec_finish >/dev/null 2>&1 && "
+        'kernrec_finish "$${CI_OVERALL_STATUS:-0}" || echo "kernrec: finish skipped"; }'
     )
 
 
@@ -781,7 +794,10 @@ def _get_setup_commands(step: Step, setup_profile: SetupProfile) -> List[str]:
         return commands
 
     if setup_profile == "amd":
-        return get_amd_setup_commands()
+        commands = get_amd_setup_commands()
+        if _kernrec_applies(step, "amd"):
+            commands.append(_kernrec_setup_command("rocm"))
+        return commands
 
     raise ValueError(f"Unsupported setup profile: {setup_profile}")
 
@@ -836,10 +852,14 @@ def _prepare_commands(
                 # Note: We don't use a subshell here to preserve environment changes between commands
                 # (export, cd, etc).
                 commands.append(f"{{ {prepared_command}\n}} || CI_OVERALL_STATUS=1")
+            elif setup_profile == "amd":
+                # AMD joins commands with &&. Keep comments, heredocs and trailing
+                # newlines inside a shell group without losing exports or cd.
+                commands.append(f"{{\n{prepared_command}\n}}")
             else:
                 commands.append(prepared_command)
 
-    if setup_profile == "nvidia" and _kernrec_applies(step):
+    if setup_profile != "none" and _kernrec_applies(step, setup_profile):
         # After the step's own commands and before the exit, so the sidecar
         # carries the status the step is about to exit with.
         commands.append(_kernrec_finish_command())
@@ -1004,7 +1024,10 @@ def convert_group_step_to_buildkite_step(
                     concurrency_group=step.concurrency_group,
                     timeout_in_minutes=step.timeout_in_minutes,
                     agent_tags=step.agent_tags,
-                    extra_artifact_paths=_fnrec_artifact_paths(step, "amd"),
+                    extra_artifact_paths=_fnrec_artifact_paths(step, "amd")
+                    + (
+                        [KERNREC_ARTIFACT_PATH] if _kernrec_applies(step, "amd") else []
+                    ),
                 )
                 if not _step_should_run(step, list_file_diff):
                     block_step = _create_block_step(
@@ -1034,6 +1057,11 @@ def convert_group_step_to_buildkite_step(
 
             if step.env:
                 buildkite_step.env = step.env
+            if kernrec_enabled() and step_key in {"image-build", "image-build-amd"}:
+                buildkite_step.env = {
+                    **(buildkite_step.env or {}),
+                    "VLLM_KERNEL_SYMBOL_MAP": "1",
+                }
             # Each recorder writes under its own <checkout>/.<name>/<job-id>,
             # which the agent collects from the checkout. _prepare_commands
             # above used its default profile, so this is the nvidia path.
@@ -1117,6 +1145,7 @@ def convert_group_step_to_buildkite_step(
                             "commands": custom_commands,
                             "working_dir": amd.get("working_dir", step.working_dir),
                             "no_plugin": amd_no_plugin,
+                            "num_nodes": amd.get("num_nodes", step.num_nodes),
                         }
                     )
                     amd_commands_str = " && ".join(
@@ -1128,7 +1157,10 @@ def convert_group_step_to_buildkite_step(
                     )
                 else:
                     amd_command_step = step.model_copy(
-                        update={"no_plugin": amd_no_plugin}
+                        update={
+                            "no_plugin": amd_no_plugin,
+                            "num_nodes": amd.get("num_nodes", step.num_nodes),
+                        }
                     )
                     amd_commands_str = " && ".join(
                         _prepare_commands(
@@ -1161,7 +1193,12 @@ def convert_group_step_to_buildkite_step(
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
                     display_label=amd.get("label"),
-                    extra_artifact_paths=_fnrec_artifact_paths(amd_command_step, "amd"),
+                    extra_artifact_paths=_fnrec_artifact_paths(amd_command_step, "amd")
+                    + (
+                        [KERNREC_ARTIFACT_PATH]
+                        if _kernrec_applies(amd_command_step, "amd")
+                        else []
+                    ),
                 )
                 if not _amd_mirror_should_run(
                     _step_should_run(
