@@ -67,6 +67,7 @@ An import graph alone is not enough. vLLM reaches code by name, through registri
 | the CMake build map | which device families compile a given `csrc` or `cmake` file |
 | native op registration sites, joined to `torch.ops.<ns>.<op>` call sites | which Python wrappers dispatch to a given kernel |
 | the Cargo workspace | which shipped artifact a Rust crate feeds |
+| the defs, classes and signatures of a changed `vllm/` module, base against head | the steps running another project's tests from their own image (vllm-ascend's interface check), which only vLLM's importable API reaches |
 
 All of it is parsed, with tests. A file that fits no mechanism runs everything.
 

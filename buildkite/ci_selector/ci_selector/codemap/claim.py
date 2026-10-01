@@ -71,9 +71,17 @@ RULES = frozenset(
 
 # Emitted alongside selected steps, never as a Claim.rule. "coverage" and
 # "kernels" are written by the CLI for steps a record added, which skip
-# `_record`.
+# `_record`. "image-copy" and "plugin-api" are the passes in unions.py.
 SYNTHETIC_RULES = frozenset(
-    {"preflight", "run-all", "always-run", "coverage", "kernels", "image-copy"}
+    {
+        "preflight",
+        "run-all",
+        "always-run",
+        "coverage",
+        "kernels",
+        "image-copy",
+        "plugin-api",
+    }
 )
 
 OUTPUT_RULES = RULES | SYNTHETIC_RULES
