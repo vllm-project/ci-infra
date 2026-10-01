@@ -244,6 +244,19 @@ def test_collect_writes_node_ids_relative_to_rootdir(tmp_path):
     assert result["shards"][0]["commands"][0]["targets"] == ["pkg/test_a.py"]
 
 
+def test_collect_leaves_inventory_dirs_deletable_by_any_user(tmp_path):
+    """Root writes these into the agent's checkout; the agent must delete them."""
+    (tmp_path / "test_a.py").write_text("def test_x(): pass\n")
+    out = tmp_path / rs.INVENTORY_DIR / "model-executor"
+    subprocess.run(
+        [sys.executable, rs.__file__, "collect", "0", rs.encode("pytest ."), str(out)],
+        cwd=tmp_path,
+        check=True,
+    )
+    for path in (out.parent, out):
+        assert path.stat().st_mode & 0o777 == 0o777
+
+
 def test_run_plan_annotates_and_never_raises(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     calls = []
