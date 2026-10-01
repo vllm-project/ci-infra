@@ -143,6 +143,10 @@ def test_present_when_enabled(monkeypatch):
         # Multi-node gets no plugin and spans hosts, so no install can be
         # scoped to one job.
         ({"num_nodes": 2, "no_plugin": True}, "nvidia"),
+        # A hardware runner starts its own container without the recorder's
+        # env, so arming it only made the collect step wait for it.
+        ({"commands": ["bash .buildkite/scripts/hardware_ci/run-hpu-test.sh"]}, "nvidia"),
+        ({"commands": ['bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "pytest x"']}, "nvidia"),
     ],
 )
 def test_steps_that_must_not_be_armed(monkeypatch, step_kwargs, profile):
@@ -585,3 +589,10 @@ def test_an_armed_amd_mirror_is_counted(monkeypatch, fake_global_config):
     assert any(k and k.startswith("amd-") for k in keys), f"premise: {keys}"
     step = buildkite_step.fnrec_collect_group(groups).steps[0]
     assert step.env["FNREC_EXPECTED_JOBS"] == "2", "the parent and its mirror"
+
+
+def test_the_amd_runner_still_records(monkeypatch):
+    """AMD mirrors pass the recorder through run-amd-test, and their rows exist."""
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
+    step = _step(commands=["bash .buildkite/scripts/hardware_ci/run-amd-test.sh"])
+    assert buildkite_step._fnrec_applies(step, "nvidia")

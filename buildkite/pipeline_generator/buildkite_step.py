@@ -541,19 +541,31 @@ def _fnrec_checkout_path(step: Step, setup_profile: SetupProfile) -> str:
     return DOCKER_CHECKOUT_MOUNT_PATH
 
 
+# Hardware runner scripts that start their own container without passing the
+# recorder's environment in, so a step calling one records nothing: every
+# hardware_ci runner but the AMD one. Arming such a step only made the collect
+# step wait for it: nightly vllm/ci #92249 published its table 25 hours late,
+# held by intel-hpu-test, which never started and expired.
+# Update when: a runner forwards FNREC_* into its container; narrow the
+# pattern so that runner's steps are armed again.
+FNREC_BLIND_RUNNER = re.compile(r"\.buildkite/scripts/hardware_ci/run-(?!amd-)")
+
+
 def _fnrec_applies(step: Step, setup_profile: SetupProfile) -> bool:
     """Every step whose Python the recorder can reach.
 
     Unlike the kernel recorder this keeps plugin-less steps: they run on the
     agent host, so ci_setup.sh installs into a per-job directory instead of
     site-packages. Multi-node steps stay out, because nothing scopes an
-    install to one job across several hosts.
+    install to one job across several hosts, and so do steps that hand their
+    tests to a hardware runner's own container (FNREC_BLIND_RUNNER).
     """
     return (
         fnrec_enabled()
         and setup_profile != "none"
         and not step.label.startswith(":docker:")
         and not (step.num_nodes and step.num_nodes >= 2)
+        and not any(FNREC_BLIND_RUNNER.search(c) for c in step.commands or [])
     )
 
 
