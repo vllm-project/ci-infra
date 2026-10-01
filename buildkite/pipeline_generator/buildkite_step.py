@@ -982,12 +982,11 @@ def _runtime_shard_mode(
     if (
         runtime_shard.split_commands(step.commands or []) is None
         or step.no_plugin
-        or _uses_k8s_plugin(step)
         or is_amd_device(step.device)
         or (step.num_nodes and step.num_nodes >= 2)
     ):
         print(
-            f"automatic_shard ignored on {step_key}: only single-node docker steps "
+            f"automatic_shard ignored on {step_key}: only single-node NVIDIA steps "
             "whose test commands are all plain pytest can be sharded"
         )
         return None
@@ -1015,12 +1014,14 @@ def _runtime_shard_steps(
     script = "/tmp/runtime-shard.$${BUILDKITE_JOB_ID:-local}.py"
     fetch = f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
     out_dir = f"{runtime_shard.INVENTORY_DIR}/{step_key}"
+    # /workdir under the docker plugin; a k8s pod's own checkout path otherwise.
+    checkout = _fnrec_checkout_path(step, "nvidia")
     # ponytail: setup runs as written; no variable injection or recorders here
     collect_commands = [f"cd {step.working_dir}"] if step.working_dir else []
     collect_commands += [*setup, fetch]
     collect_commands += [
         f"python3 {script} collect {i} {runtime_shard.encode(command)} "
-        f"{DOCKER_CHECKOUT_MOUNT_PATH}/{out_dir}"
+        f"{checkout}/{out_dir}"
         for i, command in enumerate(tests)
     ]
     collect_key = f"{step_key}-shard-collect"

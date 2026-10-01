@@ -216,9 +216,31 @@ def test_generator_ignores_the_flag_on_an_ineligible_step(fake_global_config):
     assert (
         len(_render(_step(automatic_shard=True, commands=[*TESTS, "echo done"]))) == 1
     )
-    assert len(_render(_step(automatic_shard=True, device="h100"))) == 1  # k8s
+    assert len(_render(_step(automatic_shard=True, num_nodes=2, num_devices=2))) == 1
     fake_global_config["run_all"] = False  # behind a manual block: block + step only
     assert len(_render(_step(automatic_shard=True))) == 2
+
+
+@pytest.mark.parametrize(
+    "device, checkout",
+    [
+        ("h200_35gb", "/workdir"),  # docker plugin: the checkout's mount point
+        # A pod has no /workdir; its checkout is where the agent uploads from.
+        ("h100", "$${BUILDKITE_BUILD_CHECKOUT_PATH:-/tmp/fnrec-no-checkout}"),
+        ("l4", "$${BUILDKITE_BUILD_CHECKOUT_PATH:-/tmp/fnrec-no-checkout}"),
+    ],
+)
+def test_collect_runs_in_the_steps_own_job_and_writes_to_its_checkout(
+    fake_global_config, device, checkout
+):
+    fake_global_config["run_all"] = True
+    [plain] = _render(_step(device=device))
+    collect, plan = _render(_step(automatic_shard=True, device=device))
+    assert collect.plugins == plain.plugins and collect.agents == plain.agents
+    out = f"{checkout}/.runtime-shard/model-executor"
+    assert [c.split()[-1] for c in collect.commands[4:]] == [out] * len(TESTS)
+    template = rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])
+    assert template == {"steps": [plain.dict(exclude_none=True)]}
 
 
 def test_collect_writes_node_ids_relative_to_rootdir(tmp_path):
@@ -373,7 +395,7 @@ def _inventories(tmp_path):
         (out / f"inventory-{i}.json").write_text(json.dumps({**entry, "exitstatus": 0}))
 
 
-def _run_plan_on(tmp_path, monkeypatch):
+def _run_plan_on(tmp_path, monkeypatch, template=None):
     monkeypatch.chdir(tmp_path)
     calls = []
     monkeypatch.setattr(
@@ -382,7 +404,7 @@ def _run_plan_on(tmp_path, monkeypatch):
         lambda args, check, **kw: calls.append((args, kw.get("input"))),
     )
     monkeypatch.setattr(rs, "fetch_timings", lambda key: None)
-    template = {
+    template = template or {
         "label": "ME",
         "key": "model-executor",
         "commands": ["cd /t", "pytest x"],
@@ -412,6 +434,23 @@ def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
     # 6 files, no timings: 4 shards of 1, 2, 1, 2 files
     assert shard_plan["shards"][0] == [{"index": 0, "targets": ["tests/f0_0.py"]}]
     assert annotate[5] == "info" and "running as **4 shards**" in annotate[6]
+
+
+def test_run_plan_shards_a_kubernetes_job_with_its_pod_spec_and_env(
+    fake_global_config, tmp_path, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    _, plan = _render(_step(automatic_shard=True, device="l4", env={"A": "1"}))
+    [template] = rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])["steps"]
+    assert "kubernetes" in template["plugins"][0]
+    _inventories(tmp_path)
+    _, [step], _ = _run_plan_on(tmp_path, monkeypatch, template)
+    # One Buildkite job per shard, each its own pod from the same pod spec.
+    assert step["parallelism"] == 4 and step["plugins"] == template["plugins"]
+    assert step["retry"] == template["retry"] == buildkite_step.K8S_RETRY
+    assert template["env"].items() <= step["env"].items()
+    assert step["env"]["PYTEST_ADDOPTS"] == "-p runtime_shard"
+    assert rs.decode(step["env"]["RUNTIME_SHARD_PLAN"])["commands"] == TESTS
 
 
 def test_run_plan_falls_back_to_the_single_job(tmp_path, monkeypatch):
