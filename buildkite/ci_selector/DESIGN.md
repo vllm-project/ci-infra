@@ -78,6 +78,8 @@ It is collected by instrumenting full CI runs. The recorder (`recorders/fnrec/fn
 
 Every row carries a trust stamp: which builds and jobs fed it, whether they passed, whether tests executed, whether every parallel slice reported. A row whose stamp shows any weakness can add jobs but never remove one.
 
+A step whose job recorded nothing in a build, such as one that died at checkout, keeps its row from the previously published table as long as its commands have not changed. That carried row, recorded at another commit, can likewise add jobs but never remove one.
+
 A second record covers what no Python frame can: **the kernel record**. A CUPTI injection library on the nightly and daily runs writes the set of GPU kernel names each step launched (`recorders/kernrec/`), and the image build emits a map from every compiled csrc object to its source file, the headers it included, and the kernel symbols it defines. Joined, they say which steps ran code compiled from a changed `.cu` or header. The rows carry the same kind of health (every job passed, every shard reported, no dropped records), and a row with any weakness can select but never drop.
 
 ### 3.3 Why both
@@ -108,17 +110,19 @@ Per changed file, never per diff.
 | --- | --- |
 | a row shows S ran changed code in F | run S. One observation is enough, and nothing about the row's health can make it untrue |
 | a row shows S ran none of it | drop S, if the lookup below allows it |
-| S has no row, or F is something the recorder cannot see | the map decides; the record has nothing to say |
+| S has no row, but a step running exactly S's commands has one that shows it ran changed code in F | run S. The other way round it proves nothing, so it never drops |
+| S has no row and no such twin, or F is something the recorder cannot see | the map decides; the record has nothing to say |
 
 ### 5.1 Dropping
 
-Selecting takes one observation and no gates. Dropping means trusting a silence, and a silence is only evidence if the recorder was watching: watching that file, during a run that finished, on code that still exists. The lookup returns one of thirteen verdicts, and two of them permit a drop.
+Selecting takes one observation and no gates. Dropping means trusting a silence, and a silence is only evidence if the recorder was watching: watching that file, during a run that finished, on code that still exists. The lookup returns one of fourteen verdicts, and two of them permit a drop.
 
 | verdict | result |
 | --- | --- |
 | no table loaded, or it failed to parse | keep |
 | the row failed verification at load | keep |
 | the step has no row | keep |
+| the row was carried forward from an earlier build, which recorded it at another commit | keep |
 | the row is present and empty | keep |
 | the row is too thin to read a silence from: a slice missing, tests all skipped, lines lost | keep |
 | some job that built the row was not marked passed | keep |

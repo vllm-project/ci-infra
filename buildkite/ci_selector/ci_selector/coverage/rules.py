@@ -5,7 +5,8 @@
 differently.
 
 ADD: a row showing a step ran a changed file selects it, whatever the code map
-concluded. Ungated, because one observation proves presence.
+concluded. Ungated, because one observation proves presence. A step with no
+row of its own reads the rows of steps that run exactly its commands.
 
 DROP: a row showing a step ran none of them removes it, but only once every
 gate below agrees. Proving ABSENCE needs the recorder to have been watching the
@@ -44,9 +45,12 @@ def newest_commit(table: Table, repo: Path) -> str:
     """The checkout to resolve row keys against: the latest commit any row saw.
 
     Picked by history rather than sort order, which agreed only by luck.
-    Production reads one sweep, so one commit, and takes the early return with
-    no subprocess; the ordering is for multi-build tables we measure with.
+    Production reads one sweep, which names its commit even when it carries
+    rows recorded at older ones, and takes the early return with no
+    subprocess; the ordering is for multi-build tables we measure with.
     """
+    if table.commit:
+        return table.commit
     commits = {c for row in table._rows.values() for c in row.stamp.commits}
     if not commits:
         return "HEAD"
@@ -494,22 +498,40 @@ def _add_from_rows(
     `unresolved` brackets the result: our table postdates the measured PRs, so
     it holds functions production could never have recorded.
 
+    A step with no row of its own reads the rows of its twins, the steps that
+    run exactly its commands in the same directory: a mirror that kept its
+    parent's commands, or the same test on other hardware. Build 92059 recorded
+    nothing for sequence-parallel-correctness-tests-2xb200, and its AMD mirror,
+    running the same command, recorded fine. Only to add. The table note's rule
+    that a mirror never inherits its parent's row is about clearing a step, and
+    a twin's row still clears nothing. Identical and nothing looser, because a
+    mirror may bring its own commands: basic-models-tests-other's AMD mirror
+    runs another test list, so its row says nothing about the parent's.
+
     Failures match through the crosscheck's own matcher, since job slugs carry
     shard suffixes a raw key comparison misses.
     """
+    twins: dict[tuple, list] = defaultdict(list)
+    for sid, step in keys.steps.items():
+        key = keys.key_for(sid)
+        row = table.row(key) if key else None
+        if row is not None and _runs(step):
+            twins[_runs(step)].append(row)
     already = set(selection.selected)
     for step_id in keys.candidates():
         if step_id in already:
             continue
         key = keys.key_for(step_id)
         row = table.row(key) if key else None
-        if row is None:
-            continue  # no row: the map decides, and the map did not pick it
+        rows = [row] if row is not None else twins.get(_runs(keys.steps[step_id]), [])
+        if not rows:
+            continue  # no row and no twin: the map decides, and it did not pick it
         foreign = _foreign(query, keys.steps.get(step_id))
         if any(
             f.path not in foreign
-            and row.contains_call(f.path, name)
+            and seen.contains_call(f.path, name)
             and table.discriminates(f.path, name)
+            for seen in rows
             # Stand-ins are drop evidence only. A file outside the recorder
             # scope may still be in a row (tests/ is recorded before the
             # selector reads it), and adds nothing until the scope says so.
@@ -518,6 +540,8 @@ def _add_from_rows(
             for name in f.names - set(unresolved.get(f.path, ()))
         ):
             reading.added.append(step_id)
+            if row is None:
+                reading.reasons["twin-row-adds-a-step-with-no-row"] += 1
 
     # Counted here, above the failure scoring, so this is how often the half
     # fired at all. Below the early return it only counted adds on PRs that
@@ -537,3 +561,13 @@ def _add_from_rows(
     steps = [keys.steps[s] for s in reading.added if s in keys.steps]
     _, _, by_step = match_jobs(dict(missed), steps)
     reading.added_and_failed = sorted(by_step)
+
+
+def _runs(step) -> tuple | None:
+    """What a step runs, as its twins share it: its commands and the directory
+    they run in. None for a step with no commands, or every such step would be
+    every other's twin."""
+    commands = tuple(getattr(step, "commands", None) or ())
+    if not commands:
+        return None
+    return commands, getattr(step, "working_dir", "")

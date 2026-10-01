@@ -150,12 +150,20 @@ OWNER = RowKeys({"vllm_ci"}, {"vllm_ci": 1.0})
 
 
 class FakeStep:
-    """The slice of `Step` that `RowKeys.candidates()` and `restrict_to` read."""
+    """The slice of `Step` that `RowKeys.candidates()`, `restrict_to` and the
+    twin lookup read."""
 
-    def __init__(self, manual_only: bool = False, identity: tuple | None = None):
+    def __init__(
+        self,
+        manual_only: bool = False,
+        identity: tuple | None = None,
+        commands: tuple[str, ...] = (),
+    ):
         self.manual_only = manual_only
         # Rename-tolerant, so a test can pose the same step under two labels.
         self.identity = identity
+        self.commands = list(commands)
+        self.working_dir = "/vllm-workspace/tests"
 
 
 # CI outcomes are not part of a Selection; they reach the rule as keywords.
@@ -395,9 +403,10 @@ class TestTheAdditiveHalf:
         assert reading.added == []
 
     def test_a_step_with_no_row_is_never_added(self, table):
-        """The third arm. No row is not evidence of anything, so the record
-        must stay quiet rather than add on a hunch. The subtractive twin of
-        this lives in test_decide.py under nearly the same name."""
+        """The third arm. No row, and no step running its commands, is not
+        evidence of anything, so the record must stay quiet rather than add on
+        a hunch. The subtractive twin of this lives in test_decide.py under
+        nearly the same name."""
         owner = RowKeys(
             {"vllm_ci"}, {"vllm_ci": 1.0}, steps={"vllm_ci:never-recorded": object()}
         )
@@ -410,6 +419,72 @@ class TestTheAdditiveHalf:
             owner,
         )
         assert reading.added == []
+
+    def _twins(self, table, query, *selected, twin=("pytest -v -s e.py",)):
+        """`elsewhere` has a row; `elsewhere-amd` has none and runs `twin`."""
+        steps = {
+            "vllm_ci:runs-plain": FakeStep(commands=("pytest -v -s p.py",)),
+            "vllm_ci:elsewhere": FakeStep(commands=("pytest -v -s e.py",)),
+            "vllm_ci:elsewhere-amd": FakeStep(commands=twin),
+        }
+        return read_pr(
+            table,
+            result_for(*selected, paths=tuple(f.path for f in query.files)),
+            query,
+            unknown_names(query, UNION, {}),
+            KNOWN,
+            RowKeys({"vllm_ci"}, {"vllm_ci": 1.0}, steps=steps),
+        )
+
+    def test_a_twin_row_adds_a_step_with_no_row(self, table):
+        """A step with no row reads the row of a step running exactly its
+        commands. Build 92059 recorded nothing for
+        sequence-parallel-correctness-tests-2xb200 while its AMD mirror, on the
+        same command, recorded fine."""
+        reading = self._twins(
+            table, query_for("vllm/other.py", "elsewhere"), "vllm_ci:runs-plain"
+        )
+        assert sorted(reading.added) == ["vllm_ci:elsewhere", "vllm_ci:elsewhere-amd"]
+        assert reading.reasons["twin-row-adds-a-step-with-no-row"] == 1
+
+    def test_a_step_running_other_commands_is_no_twin(self, table):
+        """A mirror may bring its own commands, as basic-models-tests-other's
+        does, and then its row says nothing about its parent's."""
+        reading = self._twins(
+            table,
+            query_for("vllm/other.py", "elsewhere"),
+            "vllm_ci:runs-plain",
+            twin=("pytest -v -s e.py", "pytest -v -s rocm_only.py"),
+        )
+        assert reading.added == ["vllm_ci:elsewhere"]
+
+    def test_steps_with_no_commands_are_no_twins(self, table):
+        steps = {
+            "vllm_ci:elsewhere": FakeStep(),
+            "vllm_ci:never-recorded": FakeStep(),
+        }
+        reading = read_pr(
+            table,
+            result_for("vllm_ci:runs-plain", paths=("vllm/other.py",)),
+            query_for("vllm/other.py", "elsewhere"),
+            {},
+            KNOWN,
+            RowKeys({"vllm_ci"}, {"vllm_ci": 1.0}, steps=steps),
+        )
+        assert reading.added == ["vllm_ci:elsewhere"]
+
+    def test_a_twin_row_never_drops(self, table):
+        """`elsewhere`'s row lacks `plain`, which would drop `elsewhere`. The
+        step with no row is still kept: a twin is evidence of presence only."""
+        reading = self._twins(
+            table,
+            query_for("vllm/mod.py", "plain"),
+            "vllm_ci:elsewhere",
+            "vllm_ci:elsewhere-amd",
+        )
+        assert reading.dropped == ["vllm_ci:elsewhere"]
+        assert "vllm_ci:elsewhere-amd" in reading.kept
+        assert reading.reasons["no-row"] == 1
 
     def test_the_gate_is_counted_in_the_reason_histogram(self, table):
         """`row-adds-a-step-the-map-missed` is what says whether this half ran
