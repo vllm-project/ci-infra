@@ -139,9 +139,14 @@ def test_build_steps_and_retired_a100_steps_are_not_counted():
 
 from datetime import datetime, timedelta, timezone  # noqa: E402
 
+import urllib.error  # noqa: E402
+
+from ci_selector import pr_comment  # noqa: E402
 from ci_selector.pr_comment import (  # noqa: E402
+    BuildkiteJobs,
     FailedJob,
     Results,
+    buildkite_token,
     ci_results,
     ledger_record,
     main_failures,
@@ -192,7 +197,10 @@ class MainGh:
             )
         sha = url.split("/commits/")[1].split("/")[0]
         return json.dumps(
-            [{"context": c, "state": s} for c, s in self.statuses.get(sha, [])]
+            [
+                {"context": c, "state": s, "target_url": u[0] if u else None}
+                for c, s, *u in self.statuses.get(sha, [])
+            ]
         )
 
 
@@ -268,13 +276,150 @@ def test_the_results_section_names_misses_and_pre_existing_failures():
 def test_no_failures_reads_as_nothing_to_judge():
     body = render(_selection(results=Results(passed=3, checked_at="now")))
     assert "No failures to judge." in body
+    assert "Soft-failed" not in body, "Buildkite was read, so nothing to qualify"
+
+
+def test_a_failure_no_step_matches_is_never_no_misses():
+    """vllm#59229: the failing step was one the PR added, so no step at the
+    base matched it, and the comment said "No misses"."""
+    s = _selection(
+        results=Results(
+            passed=32,
+            failed=[
+                FailedJob("kept", "ran"),
+                FailedJob("new-step-shard-1", "unmapped"),
+            ],
+            checked_at="now",
+        )
+    )
+    body = render(s)
+    assert "No misses" not in body
+    assert "**1 failed job(s) not judged:**" in body
+    assert "`new-step-shard-1`: **no step matches this job; not judged**" in body
+    assert ledger_record(s)["possible_misses"] == ["new-step-shard-1"]
+
+
+BK_BUILD = "https://buildkite.com/vllm/ci/builds/{n}#{job}"
+BK_API = "https://api.buildkite.com/v2/organizations/vllm/pipelines/ci/builds/{n}"
+
+
+class FakeBuildkite:
+    """Build number -> its jobs, as the builds endpoint returns them."""
+
+    def __init__(self, builds):
+        self.builds = builds
+        self.urls = []
+
+    def __call__(self, url):
+        self.urls.append(url)
+        n = int(url.rsplit("/", 1)[1])
+        return {"jobs": self.builds[n]} if n in self.builds else None
+
+
+def _linked_pr(**jobs):
+    """PR statuses that link to build 7, as Buildkite posts them."""
+    return {
+        "statusCheckRollup": [
+            {
+                "context": f"buildkite/ci/pr/{slug}",
+                "state": st,
+                "targetUrl": BK_BUILD.format(n=7, job=f"j-{slug}"),
+            }
+            for slug, st in jobs.items()
+        ]
+    }
+
+
+def test_a_soft_failed_job_is_read_from_buildkite():
+    """vllm#53558 and vllm#58997: ascend-npu-test soft-failed, broken by the
+    PR, and GitHub showed it as passed, so the comment said "No misses"."""
+    data = _linked_pr(ascend="SUCCESS", fine="SUCCESS", kept="FAILURE")
+    bk = FakeBuildkite(
+        {
+            7: [
+                {"id": "j-ascend", "state": "failed", "soft_failed": True},
+                {"id": "j-fine", "state": "passed", "soft_failed": False},
+                {"id": "j-kept", "state": "failed", "soft_failed": False},
+            ],
+            8: [{"id": "m-ascend", "state": "passed", "soft_failed": False}],
+        }
+    )
+    main = MainGh(
+        [("m1" * 20, BASE)],
+        {
+            "m1" * 20: [
+                ("buildkite/ci/ascend", "success", BK_BUILD.format(n=8, job="m-ascend"))
+            ]
+        },
+    )
+    steps = [_job_step("kept"), _job_step("ascend"), _job_step("fine")]
+    r = ci_results(data, [_job_step("kept")], steps, BASE, main, jobs=BuildkiteJobs(bk))
+    got = {f.slug: (f.verdict, f.main_failing, f.soft) for f in r.failed}
+    assert got == {"kept": ("ran", [], False), "ascend": ("skipped", [], True)}
+    assert (r.passed, r.soft_unchecked) == (1, "")
+    assert bk.urls == [BK_API.format(n=7), BK_API.format(n=8)], (
+        "each build is read once, however many statuses point into it"
+    )
+    body = render(_selection(results=r))
+    assert "**1 possible miss(es):**" in body
+    assert (
+        "`ascend` (soft-failed; GitHub shows it as passed): "
+        "**selector would skip it; not failing on main**"
+    ) in body
+
+
+def test_a_soft_failure_main_shares_is_pre_existing():
+    """Main's statuses hide a soft failure just as the PR's do."""
+    bk = FakeBuildkite({8: [{"id": "m-x", "state": "failed", "soft_failed": True}]})
+    main = MainGh(
+        [("a" * 40, BASE)],
+        {"a" * 40: [("buildkite/ci/x", "success", BK_BUILD.format(n=8, job="m-x"))]},
+    )
+    jobs = BuildkiteJobs(bk)
+    assert main_failures(["x"], BASE, main, jobs=jobs, soft={"x"}) == {
+        "x": ["aaaaaaaaaa"]
+    }
+    assert main_failures(["x"], BASE, main, jobs=jobs) == {}, (
+        "a job that hard-failed on the PR is not looked up on Buildkite for main"
+    )
+
+
+def test_without_buildkite_the_comment_says_soft_failures_went_unchecked():
+    data = _linked_pr(fine="SUCCESS")
+    r = ci_results(data, [], [_job_step("fine")], BASE, MainGh([], {}))
+    assert r.soft_unchecked == "no Buildkite token"
+    body = render(_selection(results=r))
+    assert "Soft-failed jobs were not checked (no Buildkite token)" in body
+    assert "No failures to judge." in body
+
+    def refused(url):
+        raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+    r = ci_results(
+        data, [], [_job_step("fine")], BASE, MainGh([], {}), jobs=BuildkiteJobs(refused)
+    )
+    assert r.soft_unchecked.startswith("Buildkite unreadable: HTTP Error 401")
+    assert r.passed == 1
+
+
+def test_the_buildkite_token_comes_from_the_env_then_the_bk_cli(monkeypatch, tmp_path):
+    for var in pr_comment.BUILDKITE_TOKEN_VARS:
+        monkeypatch.delenv(var, raising=False)
+    cfg = tmp_path / "bk.yaml"
+    monkeypatch.setattr(pr_comment, "BK_CLI_CONFIG", cfg)
+    assert buildkite_token() is None, "no env, no bk config"
+    cfg.write_text(
+        "organizations:\n  other:\n    api_token: o\n  vllm:\n    api_token: v\n"
+    )
+    assert buildkite_token() == "v", "the vllm organization's, not another's"
+    monkeypatch.setenv("BK_TOKEN", "e")
+    assert buildkite_token() == "e"
 
 
 # ---- the PR's range: main is fetched first, and drift is refused ------------
 
 import pytest  # noqa: E402
 
-from ci_selector import pr_comment  # noqa: E402
 from ci_selector.pr_comment import check_drift  # noqa: E402
 
 

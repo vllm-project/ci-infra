@@ -12,18 +12,23 @@ generator the crosscheck scores against, at the PR's merge base.
 `--results`, once the PR's CI has run, adds what happened: every failed job,
 and whether the selector would have run it. A failed job it would have skipped
 is checked against main's statuses around the PR's base, so a failure main
-already had reads as pre-existing, not as a miss. GitHub statuses only; no
-Buildkite token.
+already had reads as pre-existing, not as a miss. The jobs come from GitHub
+statuses; with a Buildkite token, the builds they link to are read too, since
+a soft-failed job reports to GitHub as passed.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import urllib.error
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import yaml
 
 from .codemap.classify import select
 from .codemap.pipeline.match import match_jobs
@@ -32,6 +37,8 @@ from .coverage.source import fetch_kernel_evidence, fetch_table
 from .decide import decide
 from .gitdiff import changed_paths, diff_files
 from .handwritten import IMAGE_BUILD_KEY_PREFIX, PR_PIPELINE
+from .scripts.fetch import API as BUILDKITE_API
+from .scripts.fetch import BUILD_URL_RE, HttpTransport, Throttle
 from .validate.crosscheck import (
     BUILDKITE_CONTEXT_PREFIX,
     GH_DEFAULT_BRANCH,
@@ -61,6 +68,12 @@ MAIN_COMMITS = 40
 # The generator's DeviceType.A100: the fleet is retired and only AMD mirrors
 # of those steps are still emitted.
 RETIRED_DEVICE = "a100"
+# Where a Buildkite token is looked for: the variables the other scripts here
+# read, then the bk CLI's own config, which keeps one per organization.
+BUILDKITE_TOKEN_VARS = ("BUILDKITE_TOKEN", "BK_TOKEN", "BUILDKITE_API_TOKEN")
+BK_CLI_CONFIG = Path.home() / ".config" / "bk.yaml"
+BUILDKITE_ORG = "vllm"
+BUILDKITE_RATE = 140  # requests a minute, as fetch.py spaces them
 
 
 def not_counted(step) -> str:
@@ -121,6 +134,8 @@ class FailedJob:
     verdict: str
     # main commits (short) where the same job failed, for a skipped one
     main_failing: list[str] = field(default_factory=list)
+    # Buildkite soft-failed it, so GitHub shows it as passed
+    soft: bool = False
 
 
 @dataclass
@@ -129,6 +144,8 @@ class Results:
     pending: int = 0
     failed: list[FailedJob] = field(default_factory=list)
     checked_at: str = ""
+    # Why soft-failed jobs went unread, or "" when Buildkite was read
+    soft_unchecked: str = ""
 
 
 def select_for_pr(
@@ -202,6 +219,7 @@ def select_for_pr(
     if results:
         tested = _tested_base(repo, pr, data, _upstream_remote(repo, remote)) or base
         merge = (data.get("mergeCommit") or {}).get("oid")
+        token = buildkite_token()
         outcome = ci_results(
             data,
             [steps[i] for i in f_ids],
@@ -209,6 +227,9 @@ def select_for_pr(
             _commit_time(repo, tested),
             gh or _gh,
             merged_at=_commit_time(repo, merge) if merge else None,
+            jobs=BuildkiteJobs(HttpTransport(token, Throttle(BUILDKITE_RATE)).get_json)
+            if token
+            else None,
         )
     return PrSelection(
         pr=pr,
@@ -333,37 +354,108 @@ def _commit_time(repo: Path, sha: str) -> datetime:
     )
 
 
-def ran_on_pr(data: dict) -> dict[str, str]:
-    """job slug -> state, from the PR's Buildkite status contexts."""
-    ran = {}
+def _job_statuses(data: dict) -> dict[str, dict]:
+    """job slug -> its status, from the PR's Buildkite status contexts."""
+    out = {}
     for c in data.get("statusCheckRollup") or []:
         ctx = c.get("context") or c.get("name") or ""
         if ctx.startswith(BUILDKITE_CONTEXT_PREFIX):
             slug = ctx[len(BUILDKITE_CONTEXT_PREFIX) :]
             if slug not in NON_STEP_CONTEXTS:
-                ran[slug] = c.get("state") or c.get("conclusion") or ""
-    return ran
+                out[slug] = c
+    return out
+
+
+def ran_on_pr(data: dict) -> dict[str, str]:
+    """job slug -> state, from the PR's Buildkite status contexts."""
+    return {
+        slug: c.get("state") or c.get("conclusion") or ""
+        for slug, c in _job_statuses(data).items()
+    }
+
+
+def buildkite_token(org: str = BUILDKITE_ORG) -> str | None:
+    for var in BUILDKITE_TOKEN_VARS:
+        if os.environ.get(var):
+            return os.environ[var]
+    try:
+        return yaml.safe_load(BK_CLI_CONFIG.read_text())["organizations"][org][
+            "api_token"
+        ]
+    except (OSError, yaml.YAMLError, KeyError, TypeError):
+        return None
+
+
+class BuildkiteJobs:
+    """Job states from the Buildkite builds that status links point into.
+
+    A soft-failed job posts SUCCESS to GitHub, so statuses alone never show
+    one: ascend-npu-test failed on vllm#53558 and vllm#58997, broken both
+    times by the PR, and both comments said "No misses". Each build is fetched
+    once, however many statuses point into it.
+    """
+
+    def __init__(self, get_json):
+        self._get_json = get_json  # build API url -> its JSON, None if absent
+        self._builds: dict[str, dict[str, dict]] = {}
+
+    def failed(self, target_url: str | None) -> bool:
+        """Whether Buildkite failed the job a status links to, soft or not."""
+        build = BUILD_URL_RE.search(target_url or "")
+        job = (target_url or "").partition("#")[2]
+        if not build or not job:
+            return False
+        url = (
+            f"{BUILDKITE_API}/organizations/{build['org']}/pipelines/"
+            f"{build['pipeline']}/builds/{build['number']}"
+        )
+        if url not in self._builds:
+            jobs = (self._get_json(url) or {}).get("jobs") or []
+            self._builds[url] = {j.get("id"): j for j in jobs}
+        j = self._builds[url].get(job) or {}
+        return j.get("state") == "failed" or bool(j.get("soft_failed"))
 
 
 def ci_results(
-    data, selected_steps, all_steps, base_time, gh, merged_at=None
+    data, selected_steps, all_steps, base_time, gh, merged_at=None, jobs=None
 ) -> Results:
-    """What the PR's CI did, against what the selector would have run."""
+    """What the PR's CI did, against what the selector would have run.
+
+    `jobs` reads Buildkite for the soft failures GitHub shows as passed;
+    without it the comment says they went unchecked.
+    """
     ran = ran_on_pr(data)
+    soft, unchecked = set(), "no Buildkite token"
+    if jobs is not None:
+        try:
+            soft = {
+                r
+                for r, c in _job_statuses(data).items()
+                if ran[r] not in GH_STATE_FAILED and jobs.failed(c.get("targetUrl"))
+            }
+            unchecked = ""
+        except (urllib.error.URLError, OSError) as e:
+            unchecked, jobs = f"Buildkite unreadable: {e}", None
+    ran.update(dict.fromkeys(soft, "FAILURE"))
     failed = {r: st for r, st in ran.items() if st in GH_STATE_FAILED}
     out = Results(
         passed=sum(st == "SUCCESS" for st in ran.values()),
         pending=sum(st in ("PENDING", "EXPECTED", "") for st in ran.values()),
         checked_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        soft_unchecked=unchecked,
     )
     kept, not_kept, _ = match_jobs(failed, selected_steps)
     _, unmapped, _ = match_jobs(dict(not_kept), all_steps)
     skipped = sorted(r for r in not_kept if r not in unmapped)
-    on_main = main_failures(skipped, base_time, gh, merged_at) if skipped else {}
+    on_main = (
+        main_failures(skipped, base_time, gh, merged_at, jobs, soft & set(skipped))
+        if skipped
+        else {}
+    )
     out.failed = (
-        [FailedJob(r, "ran") for r in sorted(kept)]
-        + [FailedJob(r, "skipped", on_main.get(r, [])) for r in skipped]
-        + [FailedJob(r, "unmapped") for r in sorted(unmapped)]
+        [FailedJob(r, "ran", soft=r in soft) for r in sorted(kept)]
+        + [FailedJob(r, "skipped", on_main.get(r, []), r in soft) for r in skipped]
+        + [FailedJob(r, "unmapped", soft=r in soft) for r in sorted(unmapped)]
     )
     return out
 
@@ -380,7 +472,12 @@ def _pages(raw: str) -> list:
 
 
 def main_failures(
-    slugs, base_time: datetime, gh, merged_at: datetime | None = None
+    slugs,
+    base_time: datetime,
+    gh,
+    merged_at: datetime | None = None,
+    jobs: BuildkiteJobs | None = None,
+    soft=frozenset(),
 ) -> dict[str, list[str]]:
     """slug -> short shas of main commits whose latest status for that job is a
     failure, in a window around the PR's base.
@@ -388,6 +485,9 @@ def main_failures(
     For a merged PR the window stops before its merge commit: main after the
     merge carries the PR's own change, so a failure the PR caused would fail
     there too and read as pre-existing.
+
+    A job that soft-failed on the PR is looked up on Buildkite for main too,
+    where its passing status may hide the same soft failure.
     """
     since = (base_time - MAIN_WINDOW_BEFORE).astimezone(timezone.utc)
     until = min(base_time + MAIN_WINDOW_AFTER, datetime.now(timezone.utc))
@@ -420,11 +520,17 @@ def main_failures(
                 f"repos/{GH_REPO}/commits/{sha}/statuses?per_page=100",
             )
         )
-        latest: dict[str, str] = {}
+        latest: dict[str, dict] = {}
         for st in statuses:  # newest first, so the first per context is its state
-            latest.setdefault(st.get("context", ""), st.get("state", ""))
+            latest.setdefault(st.get("context", ""), st)
         for ctx, slug in wanted.items():
-            if latest.get(ctx) in ("failure", "error"):
+            st = latest.get(ctx) or {}
+            if st.get("state") in ("failure", "error") or (
+                slug in soft
+                and jobs is not None
+                and st.get("state") == "success"
+                and jobs.failed(st.get("target_url"))
+            ):
                 hits.setdefault(slug, []).append(sha[:10])
     return hits
 
@@ -524,6 +630,9 @@ def render(s: PrSelection) -> str:
 
 
 def _render_results(r: Results) -> list[str]:
+    """The CI results section. A failed job no step matches is counted with
+    the possible misses, never under "No misses": on vllm#59229 the failing
+    step was one the PR added, which the selector would not have run."""
     ran = [f for f in r.failed if f.verdict == "ran"]
     skipped = [f for f in r.failed if f.verdict == "skipped"]
     unmapped = [f for f in r.failed if f.verdict == "unmapped"]
@@ -533,32 +642,49 @@ def _render_results(r: Results) -> list[str]:
         "",
         f"{r.passed} passed, {len(r.failed)} failed, {r.pending} pending.",
     ]
+    if r.soft_unchecked:
+        lines.append(
+            f"Soft-failed jobs were not checked ({r.soft_unchecked}): GitHub "
+            "shows them as passed, so any are counted as passed here."
+        )
     if r.pending:
         lines.append("CI is still running; the picture below is not final.")
     if not r.failed:
         lines += ["", "No failures to judge.", ""]
         return lines
+    verdicts = []
     if misses:
-        verdict = f"**{len(misses)} possible miss(es):** failed here, the selector would have skipped them, and main was not failing them."
+        verdicts.append(
+            f"**{len(misses)} possible miss(es):** failed here, the selector would have skipped them, and main was not failing them."
+        )
+    if unmapped:
+        verdicts.append(
+            f"**{len(unmapped)} failed job(s) not judged:** no step the selector read matches them, so it may have skipped them; count them as possible misses."
+        )
+    if verdicts:
+        verdict = " ".join(verdicts)
     elif skipped:
         verdict = "No misses: every failed job the selector would skip was also failing on main."
     else:
         verdict = "No misses: the selector would have run every failed job."
     lines += ["", verdict, ""]
+
+    def job(f):
+        soft = " (soft-failed; GitHub shows it as passed)" if f.soft else ""
+        return f"`{f.slug}`{soft}"
+
     for f in ran:
-        lines.append(f"- `{f.slug}`: selector runs it")
+        lines.append(f"- {job(f)}: selector runs it")
     for f in skipped:
         if f.main_failing:
             shas = ", ".join(f"`{x}`" for x in f.main_failing[:3])
             lines.append(
-                f"- `{f.slug}`: selector would skip it; also failing on main ({shas}), pre-existing"
+                f"- {job(f)}: selector would skip it; also failing on main ({shas}), pre-existing"
             )
         else:
-            lines.append(
-                f"- `{f.slug}`: **selector would skip it; not failing on main**"
-            )
+            lines.append(f"- {job(f)}: **selector would skip it; not failing on main**")
     for f in unmapped:
-        lines.append(f"- `{f.slug}`: no step matches this job, not judged")
+        lines.append(f"- {job(f)}: **no step matches this job; not judged**")
     lines.append("")
     return lines
 
@@ -592,7 +718,8 @@ def ledger_record(s: PrSelection) -> dict:
         rec["possible_misses"] = [
             f.slug
             for f in s.results.failed
-            if f.verdict == "skipped" and not f.main_failing
+            if f.verdict == "unmapped"
+            or (f.verdict == "skipped" and not f.main_failing)
         ]
     return rec
 

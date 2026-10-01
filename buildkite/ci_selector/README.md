@@ -72,7 +72,7 @@ ci-select pr 55755 --repo /path/to/vllm --post   # post or update it on the PR
 ci-select pr 55755 --repo /path/to/vllm --results --post --json-out ledger.jsonl
 ```
 
-`--results`, once the PR's CI has run, adds every failed job and whether the selector would have run it. A failed job it would skip is checked against main's statuses near the commit the PR branched from, stopping before the PR's own merge, so a failure main already had reads as pre-existing rather than as a miss. GitHub statuses only; no Buildkite token. `--json-out` appends one line per run for tallying a trial across PRs.
+`--results`, once the PR's CI has run, adds every failed job and whether the selector would have run it. A failed job it would skip is checked against main's statuses near the commit the PR branched from, stopping before the PR's own merge, so a failure main already had reads as pre-existing rather than as a miss. A failed job no step matches is not judged and counts as a possible miss. Jobs come from GitHub statuses, where a soft-failed job shows as passed; with a Buildkite token (`BUILDKITE_TOKEN`, `BK_TOKEN`, or the `bk` CLI's `~/.config/bk.yaml`) the builds they link to are read too, and without one the comment says soft failures were not checked. `--json-out` appends one line per run for tallying a trial across PRs.
 
 ### Crosscheck
 
