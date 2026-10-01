@@ -97,6 +97,7 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
       has_attached_disk               = local.has_attached_disk
       disk_size_bytes                 = var.disk_size * 1073741824
       keep_agent_connected            = file("${path.module}/../shared/keep-agent-connected.sh")
+      git_setup                       = chomp(var.vllm_torchtpu_ssh_checkout ? file("${path.module}/../shared/git-ssh-checkout-setup.sh") : file("${path.module}/../shared/git-https-setup.sh"))
     })
   }
 }

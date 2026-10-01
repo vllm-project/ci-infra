@@ -67,3 +67,14 @@ variable "github_app_secret_name" {
   description = "The Buildkite secret name for the GitHub App PEM key."
   default     = "GITHUB_CI_BOT_PEM"
 }
+
+variable "vllm_torchtpu_ssh_checkout" {
+  type        = bool
+  description = <<-DESC
+    Check vllm-torchtpu out over SSH with its read-only deploy key instead of
+    over HTTPS with the CI bot's GitHub App token. A pre-checkout hook reads the
+    key per job from the Buildkite secret VLLM_TORCHTPU_DEPLOY_KEY, whose access
+    policy limits it to the pipelines that need it. Pushes still go over HTTPS.
+  DESC
+  default     = false
+}

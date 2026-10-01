@@ -69,6 +69,8 @@ module "ci_v7x_2" {
   buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
   buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+
+  vllm_torchtpu_ssh_checkout = true
 }
 
 # Eight more tpu7x-8 agents serve the same queue from inferact-vllm-tpu (see
@@ -90,6 +92,8 @@ module "ci_v7x_8" {
   buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
   buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+
+  vllm_torchtpu_ssh_checkout = true
 }
 
 module "ci_v7x_16" {
@@ -108,6 +112,8 @@ module "ci_v7x_16" {
   buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
   # disk_size defaults to 0, disable attached disk
+
+  vllm_torchtpu_ssh_checkout = true
 }
 
 # 4 hosts x 4 chips (2x2x4). Same multi-host shape as tpu7x-16: the agent runs
@@ -133,6 +139,8 @@ module "ci_v7x_32" {
   buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
   buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+
+  vllm_torchtpu_ssh_checkout = true
 }
 
 # purpose puts these on the self-describing naming scheme,
@@ -148,6 +156,8 @@ module "ci_cpu_vllm_zone_b" {
   instance_count          = 8
   buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+
+  vllm_torchtpu_ssh_checkout = true
 }
 
 module "ci_cpu_64_core_vllm_zone_b" {
@@ -165,6 +175,8 @@ module "ci_cpu_64_core_vllm_zone_b" {
 
   buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+
+  vllm_torchtpu_ssh_checkout = true
 }
 
 module "ci_cpu_64_core_vllm_zone_f" {
@@ -182,6 +194,8 @@ module "ci_cpu_64_core_vllm_zone_f" {
 
   buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
   huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+
+  vllm_torchtpu_ssh_checkout = true
 }
 
 module "ci_monitoring" {

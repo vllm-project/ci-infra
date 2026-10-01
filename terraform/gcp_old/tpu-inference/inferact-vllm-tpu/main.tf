@@ -48,4 +48,6 @@ module "ci_v7x_8" {
   buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
   buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+
+  vllm_torchtpu_ssh_checkout = true
 }
