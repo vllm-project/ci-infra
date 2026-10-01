@@ -77,6 +77,17 @@ TABLE_VERSION = 7
 # disagree. Change both together, in the same commit that changes the stamp.
 STAMP_SHAPE = "9d3fc3a03453ab23"
 
+# Older table versions `load` still reads, each with the Stamp fields its rows
+# lack. Safe only when every missing field's default means "no data" to the
+# code that reads it, never the healthy value. A v6 row has no libcalls, and
+# libraries.py reads a library missing from libcalls as never watched and keeps
+# the step. #697's bump to 7 left the selector with no usable table for two
+# days: nothing read v6, and no v7 existed until a nightly's collect finished.
+# Update when: bumping TABLE_VERSION. Add the old version only if all its
+# missing fields default to "no data"; otherwise leave it out.
+# Guard: test_model_and_build pins each entry to the shape that version had.
+READABLE_OLDER: dict[int, frozenset[str]] = {6: frozenset({"libcalls"})}
+
 MIRROR_NOTE = (
     "A mirror owns its own row and never inherits its parent's. Keyless mirrors "
     "carry their own label, which already produces that; do not 'fix' it into "
@@ -519,11 +530,14 @@ def digest_of(
     functions: dict[str, frozenset[str]],
     stamp: Stamp | None = None,
     import_time: dict[str, frozenset[str]] | None = None,
+    omit: frozenset[str] = frozenset(),
 ) -> str:
     """Sign the functions AND the stamp that judges them. Signing only the
     functions left every field droppability turns on unsigned, so deleting a
     health counter from a stored row still verified clean. The stamp's own
-    digest is excluded, being written into the thing it signs."""
+    digest is excluded, being written into the thing it signs. `omit` names
+    fields an older table version did not have, so its rows verify as
+    written."""
     h = hashlib.sha256()
     for path in sorted(functions):
         h.update(path.encode())
@@ -545,6 +559,8 @@ def digest_of(
                 h.update(b"\0")
             h.update(b"\1")
     if stamp is not None:
-        fields = {k: v for k, v in asdict(stamp).items() if k != "digest"}
+        fields = {
+            k: v for k, v in asdict(stamp).items() if k != "digest" and k not in omit
+        }
         h.update(json.dumps(fields, sort_keys=True, default=str).encode())
     return h.hexdigest()

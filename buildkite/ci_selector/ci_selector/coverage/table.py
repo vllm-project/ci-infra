@@ -40,6 +40,7 @@ from .model import (
     ADD_MAX_SHARE_ENV,
     MAX_ADD_ROW_SHARE,
     MIN_ROWS_FOR_BREADTH,
+    READABLE_OLDER,
     TABLE_VERSION,
     Row,
     Stamp,
@@ -341,9 +342,14 @@ def _interpreter_mismatch(stamp: Stamp) -> str:
     return ""
 
 
-def _verify(key: str, blob: dict) -> tuple[Row | None, str]:
-    """A row is usable only if its content still matches the stamp that built it."""
+def _verify(
+    key: str, blob: dict, missing: frozenset[str] = frozenset()
+) -> tuple[Row | None, str]:
+    """A row is usable only if its content still matches the stamp that built
+    it. `missing` names the Stamp fields an older table version lacks."""
     try:
+        if missing & set(blob["stamp"]):
+            return None, f"older row carries {sorted(missing & set(blob['stamp']))}"
         stamp = Stamp(**blob["stamp"])
         functions = {p: frozenset(n) for p, n in blob["functions"].items()}
         import_time = {p: frozenset(n) for p, n in blob["import_time"].items()}
@@ -370,7 +376,7 @@ def _verify(key: str, blob: dict) -> tuple[Row | None, str]:
     # writer sets one unconditionally, so leniency here protects nothing.
     if not stamp.digest:
         return None, "unsigned row"
-    if digest_of(functions, stamp, import_time) != stamp.digest:
+    if digest_of(functions, stamp, import_time, missing) != stamp.digest:
         return None, "digest mismatch"
     return Row(
         key=key,
@@ -398,7 +404,8 @@ def load(path: Path) -> Table:
     # value, so an older table would read healthier than it was recorded.
     # Refusing is the only reading that fails safe.
     version = payload.get("version")
-    if version != TABLE_VERSION:
+    missing = READABLE_OLDER.get(version, frozenset())
+    if version != TABLE_VERSION and version not in READABLE_OLDER:
         return Table(
             None,
             unavailable=f"{path} is table version {version!r}, expected "
@@ -415,7 +422,7 @@ def load(path: Path) -> Table:
     rows: dict[str, Row] = {}
     rejected: dict[str, str] = {}
     for key, blob in blobs.items():
-        row, why = _verify(key, blob)
+        row, why = _verify(key, blob, missing)
         if row is None:
             rejected[key] = why
         else:
