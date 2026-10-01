@@ -486,6 +486,8 @@ def shard_step(
     ).strip()
     step["env"] = env
     step["parallelism"] = len(shards)
+    # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
+    step["label"] = f"{step.get('label', '')} shard %N/%t".strip()
     step["commands"] = [
         f'curl -sSfL --retry 3 --max-time 60 -o /tmp/runtime_shard.py "{script_url}"',
         'python3 -c "import shutil, sysconfig; shutil.copy('
