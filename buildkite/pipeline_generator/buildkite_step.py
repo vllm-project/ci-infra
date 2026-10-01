@@ -1046,7 +1046,8 @@ def _runtime_shard_steps(
     plan_command = (
         f"python3 {script} plan {step_key} {runtime_shard.encode(tests)} {mode}"
     )
-    env = None
+    # The plan step reads only artifacts and the fetched planner, never the repo.
+    env = {"BUILDKITE_SKIP_CHECKOUT": "true"}
     if mode == "on":
         # If the planner can't be fetched or crashes, log its exit status and
         # upload the step's normal job, with a warning. Skip the upload if the
@@ -1064,10 +1065,8 @@ def _runtime_shard_steps(
             " | buildkite-agent pipeline upload); }"
         )
         template = {"steps": [command_step.dict(exclude_none=True)]}
-        env = {
-            "RUNTIME_SHARD_TEMPLATE": runtime_shard.encode(template),
-            "RUNTIME_SHARD_SCRIPT_URL": url,
-        }
+        env["RUNTIME_SHARD_TEMPLATE"] = runtime_shard.encode(template)
+        env["RUNTIME_SHARD_SCRIPT_URL"] = url
     plan = BuildkiteCommandStep(
         label=f"{step_key}: runtime shard plan",
         key=f"{step_key}-shard-plan",
