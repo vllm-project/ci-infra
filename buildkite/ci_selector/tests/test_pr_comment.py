@@ -347,3 +347,25 @@ def test_optional_steps_stay_out_of_the_comparison():
     assert not_counted(step) == "optional"
     step.ci_optional = False
     assert not_counted(step) == ""
+
+
+def test_missing_records_are_said_up_front():
+    """A footer-only note went unnoticed for the shadow trial's first day."""
+    body = render(_selection(records=["Python record: not used (table version 5)", "kernel record: x"]))
+    assert "[!WARNING]" in body and "table version 5" in body.split("<details>")[0]
+    assert "[!WARNING]" not in render(_selection())
+
+
+def test_a_record_that_cannot_be_fetched_is_not_reused(tmp_path, monkeypatch):
+    from ci_selector import pr_comment
+    from ci_selector.coverage import source
+    from ci_selector.scripts import fetch_functions, fetch_kernels
+
+    (tmp_path / source.TABLE_NAME).write_text("stale")
+    (tmp_path / source.KERNEL_TABLE_NAME).write_text("kept")
+    monkeypatch.setattr(source, "COVERAGE_DIR", tmp_path)
+    monkeypatch.setattr(fetch_functions, "main", lambda argv: 1)
+    monkeypatch.setattr(fetch_kernels, "main", lambda argv: 0)
+    pr_comment.refresh_records()
+    assert not (tmp_path / source.TABLE_NAME).exists()
+    assert (tmp_path / source.KERNEL_TABLE_NAME).exists()

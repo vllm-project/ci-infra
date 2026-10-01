@@ -489,6 +489,17 @@ def render(s: PrSelection) -> str:
         row("AMD mirrors", t_mir, s_mir, k_mir, a_mir),
         "",
     ]
+    unused = [r for r in s.records if ": not used" in r]
+    if unused:
+        # In the footer alone this went unnoticed for two days: every comment
+        # of the shadow trial's first day came from the code map without the
+        # Python record (a table version the code no longer read).
+        lines += [
+            "> [!WARNING]",
+            "> Records missing, so this answer is narrower evidence than usual: "
+            + "; ".join(unused),
+            "",
+        ]
     if s.run_all:
         lines += [f"Why: {s.run_all}", ""]
     if s.docs_only:
@@ -641,16 +652,32 @@ def post(pr: int, body: str, gh=_gh) -> str:
 
 
 def refresh_records() -> None:
-    """Pull the latest published records into coverage-data/, as CI would."""
+    """Pull the latest published records into coverage-data/, as CI would.
+
+    A record that cannot be fetched is removed rather than reused: the copy on
+    disk is from some earlier day, possibly a version the code no longer reads,
+    and a stale record answering silently is worse than none, which the comment
+    then says out loud."""
+    from .coverage.source import (
+        COVERAGE_DIR,
+        KERNEL_MAP_NAME,
+        KERNEL_TABLE_NAME,
+        TABLE_NAME,
+    )
     from .scripts import fetch_functions, fetch_kernels
 
-    for mod in (fetch_functions, fetch_kernels):
+    for mod, names in (
+        (fetch_functions, (TABLE_NAME,)),
+        (fetch_kernels, (KERNEL_TABLE_NAME, KERNEL_MAP_NAME)),
+    ):
         rc = mod.main([])
         if rc:
             print(
-                f"warning: {mod.__name__} exited {rc}; using what is on disk",
+                f"warning: {mod.__name__} exited {rc}; not using a stale copy",
                 file=sys.stderr,
             )
+            for name in names:
+                (COVERAGE_DIR / name).unlink(missing_ok=True)
 
 
 def run(args) -> int:
