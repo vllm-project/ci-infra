@@ -38,6 +38,7 @@ from ..gitdiff import diff_files
 from ..handwritten import (
     BUILD_ENV_MODULE,
     BUILD_ENV_READER,
+    DATA_READ_TESTS,
     INERT_CI_PREFIXES,
     LEGACY_CI_FILES,
     PACKAGE_ROOTS,
@@ -1145,7 +1146,34 @@ def _classify(state: RepoState, path: str, ctx: DiffContext | None) -> Claim:
     if _env_change_misses_build(state, path, ctx):
         claim.image_union_exempt = True
     claim = _apply_image_input_union(state, path, claim)
-    return _apply_csrc_droppability(state, path, claim)
+    claim = _apply_csrc_droppability(state, path, claim)
+    return _apply_data_read_union(state, path, ctx, claim)
+
+
+def _apply_data_read_union(
+    state: RepoState, path: str, ctx: DiffContext | None, claim: Claim
+) -> Claim:
+    """Add the steps running a test that reads this file as data
+    (DATA_READ_TESTS): any CI yaml, or a test file added, removed or renamed.
+    Not droppable, since a row records the functions a step ran, never the
+    files it opened."""
+    status = ctx.status.get(path) if ctx is not None else None
+    ci_yaml = path.startswith(CI_DIR + "/") and path.endswith((".yaml", ".yml"))
+    steps: set[str] = set()
+    for test, prefixes in DATA_READ_TESTS.items():
+        if any(
+            path.startswith(prefix) and (ci_yaml or status in ("A", "D", "R"))
+            for prefix in prefixes
+        ):
+            steps |= _steps_targeting(state, test, siblings=False)
+    steps &= state.auto_step_ids
+    if not steps - claim.step_ids:
+        return claim
+    claim.step_ids |= steps
+    claim.droppable_step_ids -= steps
+    for sid in steps:
+        claim.step_detail.setdefault(sid, f"a test this step runs reads {path} as data")
+    return claim
 
 
 def csrc_held_steps(state: RepoState, path: str) -> set[str]:
@@ -1687,23 +1715,26 @@ def _classify_buildkite(
             f"{path} is used by these steps' commands",
             step_ids=referencing,
         )
+    # A file a live test reads by name is still tested, whatever else feeds
+    # it: the Docker metadata test builds
+    # .buildkite/scripts/docker-build-metadata-args.sh from parts, and the
+    # tethering test parses the retired test-amd.yaml (vllm#59256).
+    named = state.keys.steps_naming_raw({path, path.rsplit("/", 1)[-1]})
+    named &= state.auto_step_ids
     if path in LEGACY_CI_FILES:
         return Claim(
             "legacy-ci",
             f"{path} feeds only the retired external AMD pipeline; "
             "no live-pipeline jobs",
+            step_ids=named,
         )
     if path.startswith(INERT_CI_PREFIXES):
         return Claim(
             "inert-ci",
             f"{path} is in a CI tree no live pipeline consumes "
             "(external nightly/deprecated stub); nothing to run",
+            step_ids=named,
         )
-    # A release script a live test reads by name is still tested: the Docker
-    # metadata test builds .buildkite/scripts/docker-build-metadata-args.sh
-    # from parts, so its basename is what the test's literals hold.
-    named = state.keys.steps_naming_raw({path, path.rsplit("/", 1)[-1]})
-    named &= state.auto_step_ids
     if path in state.release_refs and named:
         return Claim(
             "buildkite",
