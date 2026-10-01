@@ -21,7 +21,10 @@ the parallel index, never from the label.
 from __future__ import annotations
 
 import gzip
+import io
 import json
+import subprocess
+import tarfile
 import tempfile
 from datetime import datetime, timezone
 from collections import defaultdict
@@ -49,6 +52,7 @@ from ..coverage.model import (
     read_process,
     row_key,
 )
+from ..coverage.table import load
 
 # Build env worth keeping on a recorded row, by name. Wholesale capture is not
 # an option: a recording is a public artifact and the agent token lives in that
@@ -591,22 +595,139 @@ def merge_builds(
     return table
 
 
-def table_source(rows: dict[str, Row]) -> dict:
+def step_commands(repo: Path, commit: str) -> dict[str, set[tuple]] | None:
+    """Row key -> what the steps spelled that way run, at one commit.
+
+    Read off the pipeline yaml alone, pulled out with `git archive`, so it needs
+    no worktree and leaves the fold's checkout untouched. Spelled as `RowKeys`
+    spells a step, so a key here is a row key. None when the commit or its
+    pipeline cannot be read, which is not the same answer as "no such step".
+    """
+    from ..codemap.pipeline.buildkite import (
+        CI_DIR,
+        load_pipeline_configs,
+        load_steps,
+    )
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "archive", "--format=tar", commit, CI_DIR],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    out: dict[str, set[tuple]] = defaultdict(set)
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = Path(tmp)
+        try:
+            with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
+                tar.extractall(tree, filter="data")
+            for config in load_pipeline_configs(tree):
+                for step in load_steps(tree, config):
+                    out[step.buildkite_key or step.label].add(
+                        (tuple(step.commands), step.working_dir)
+                    )
+        # Broad on purpose: a pipeline we cannot unpack or parse is one we
+        # cannot compare, and the only safe answer to that is to carry nothing.
+        except Exception:  # noqa: BLE001
+            return None
+    return dict(out)
+
+
+def carry_forward(rows: dict[str, Row], previous: Path, repo: Path) -> dict[str, Row]:
+    """Rows from the last published table for steps this build has no row for.
+
+    One job failing before it records anything takes its step's row out of the
+    table, and a step with no row is one the record can never add. Build 92059's
+    basic-models-tests-other job died at checkout (exit 128), so the table had no
+    row for it. vllm#57865 changed Worker.determine_available_memory and
+    vllm#59200 Worker.init_device, both of which the previous night's row shows
+    it running, and neither PR selected it. A job that never ran is the same
+    case: a fold from artifacts cannot tell the two apart.
+
+    The row is carried as it was recorded, stamp and digest untouched, so its
+    builds and commits name where it came from and `Table.unusable` can tell it
+    from this build's own rows. A carried row adds and never drops: a silence
+    recorded at another commit says nothing about this one.
+
+    Refused outright when the previous table does not load, which is what a
+    TABLE_VERSION change does, or belongs to another pipeline. Refused per row
+    when the step is gone, or runs different commands now than at any commit
+    its row was recorded at, since that row describes another step. A commit
+    we cannot read is treated the same way.
+    """
+    prior = load(previous)
+    if not prior.available:
+        print(f"carrying nothing forward: {prior.unavailable}")
+        return {}
+    source = table_source(rows)
+    commit = source["commit"]
+    if not commit:
+        print("carrying nothing forward: this fold spans more than one commit")
+        return {}
+    if prior.pipeline and source["pipeline"] and prior.pipeline != source["pipeline"]:
+        print(
+            f"carrying nothing forward: {previous} is pipeline {prior.pipeline}, "
+            f"this build is {source['pipeline']}"
+        )
+        return {}
+    missing = {key: row for key, row in prior._rows.items() if key not in rows}
+    if not missing:
+        return {}
+
+    runs_at: dict[str, dict[str, set[tuple]] | None] = {}
+
+    def runs(sha: str) -> dict[str, set[tuple]] | None:
+        if sha not in runs_at:
+            runs_at[sha] = step_commands(repo, sha)
+        return runs_at[sha]
+
+    now = runs(commit)
+    if now is None:
+        print(f"carrying nothing forward: cannot read the pipeline at {commit[:10]}")
+        return {}
+    carried: dict[str, Row] = {}
+    refused: dict[str, list[str]] = defaultdict(list)
+    for key, row in sorted(missing.items()):
+        then = [runs(sha) for sha in row.stamp.commits]
+        if key not in now:
+            refused["no such step now"].append(key)
+        elif not then or any(at is None for at in then):
+            refused["recording commit unreadable"].append(key)
+        elif any(at.get(key) != now[key] for at in then):
+            refused["commands changed"].append(key)
+        else:
+            carried[key] = row
+    builds = sorted({b for row in carried.values() for b in row.stamp.builds})
+    print(f"carried forward {len(carried)} row(s) from build(s) {builds}")
+    for key in carried:
+        print(f"    {key}")
+    for why, keys in sorted(refused.items()):
+        print(f"  not carried, {why}: {len(keys)} {keys[:5]}")
+    return carried
+
+
+def table_source(rows: dict[str, Row], carried: frozenset[str] = frozenset()) -> dict:
     """Where this table came from, for the published pointer to name.
 
     Read off the rows, so it can only describe what the table holds. `build` is
     the newest contributor and is what a pointer names; `builds` keeps the rest,
     since a re-run topping up a few rows is normal. A table spanning more than
     one commit leaves `commit` empty, and the publisher refuses it.
+
+    Rows carried forward from an earlier table are listed under `carried` and
+    left out of the rest, since this build did not record them: they would
+    otherwise make every table that carries one span two commits.
     """
     builds, commits, pipelines = set(), set(), set()
-    for row in rows.values():
+    for key, row in rows.items():
+        if key in carried:
+            continue
         builds.update(row.stamp.builds)
         commits.update(row.stamp.commits)
         if row.stamp.pipeline_slug:
             pipelines.add(row.stamp.pipeline_slug)
     ordered = sorted(builds, key=lambda b: (len(b), b))
-    return {
+    source = {
         "pipeline": sorted(pipelines)[0] if len(pipelines) == 1 else "",
         "pipelines": sorted(pipelines),
         "build": ordered[-1] if ordered else "",
@@ -615,13 +736,18 @@ def table_source(rows: dict[str, Row]) -> dict:
         "commits": sorted(commits),
         "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if carried:
+        source["carried"] = sorted(carried)
+    return source
 
 
-def write_table(rows: dict[str, Row], out: Path) -> None:
+def write_table(
+    rows: dict[str, Row], out: Path, carried: frozenset[str] = frozenset()
+) -> None:
     payload = {
         "version": TABLE_VERSION,
         "note": MIRROR_NOTE,
-        "source": table_source(rows),
+        "source": table_source(rows, carried),
         "rows": {
             key: {
                 "keyed": row.keyed,
@@ -664,6 +790,12 @@ def main() -> None:
         help="with --fnrec, how many jobs the generator armed. Without it a "
         "build that lost most of its recordings looks complete",
     )
+    ap.add_argument(
+        "--previous",
+        type=Path,
+        help="the last published table. A step this build recorded no row for "
+        "keeps its row from there, if its commands have not changed",
+    )
     ap.add_argument("-o", "--out", type=Path, required=True)
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument(
@@ -705,7 +837,10 @@ def main() -> None:
         )
         raise SystemExit(2)
 
-    write_table(rows, args.out)
+    # After the refusal above, so carried rows can never paper over a build
+    # that lost its recordings.
+    carried = carry_forward(rows, args.previous, args.repo) if args.previous else {}
+    write_table({**rows, **carried}, args.out, frozenset(carried))
 
     keyless = sum(1 for r in rows.values() if not r.keyed)
     lossy = sum(1 for r in rows.values() if r.stamp.lost_lines)
@@ -713,7 +848,7 @@ def main() -> None:
     unfaithful = sorted({p for r in rows.values() for p in r.stamp.unfaithful_files})
     recorded = sum(c.recorded for c in censuses)
     attempted = sum(max(c.attempted, c.expected) for c in censuses)
-    print(f"\n{len(rows)} rows ({keyless} keyless)")
+    print(f"\n{len(rows)} rows ({keyless} keyless), {len(carried)} carried forward")
     print(f"  functions: {sum(r.stamp.n_functions for r in rows.values())}")
     print(f"  files:     {len({p for r in rows.values() for p in r.functions})}")
     print(f"  builds:    {len(censuses)}   jobs recorded {recorded}/{attempted}")
