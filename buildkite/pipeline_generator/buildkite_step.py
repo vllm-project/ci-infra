@@ -1025,7 +1025,7 @@ def _runtime_shard_steps(
     ]
     collect_key = f"{step_key}-shard-collect"
     collect = BuildkiteCommandStep(
-        label=f"Runtime shard collect: {step.label}",
+        label=f"{step_key}: runtime shard collect",
         key=collect_key,
         agents=_get_step_agents(step),
         commands=collect_commands,
@@ -1068,7 +1068,7 @@ def _runtime_shard_steps(
             "RUNTIME_SHARD_SCRIPT_URL": url,
         }
     plan = BuildkiteCommandStep(
-        label=f"Runtime shard plan: {step.label}",
+        label=f"{step_key}: runtime shard plan",
         key=f"{step_key}-shard-plan",
         agents={"queue": queue.value},
         commands=[fetch, plan_command] if mode == "shadow" else [plan_command],
