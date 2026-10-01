@@ -32,7 +32,7 @@ from ..codemap.pipeline.match import (
     slug_matches_any,
     step_slug_candidates,
 )
-from ..codemap.worktree import git_out, state_for
+from ..codemap.worktree import git_out, state_for, with_head_steps
 from ..coverage.source import fetch_kernel_evidence, fetch_table
 from ..decide import decide
 from ..gitdiff import changed_paths, diff_files
@@ -178,7 +178,7 @@ def crosscheck_pr(
     # The only channel that can see the upstream docs-only predicate drift:
     # jobs that RAN on a diff our copy of it calls docs-only.
     docs_only_but_ran = sorted(ran) if docs_only(paths) and ran else []
-    state = state_for(repo, base)
+    state = with_head_steps(state_for(repo, base), repo, head, paths)
     sel = select(state, paths, base=base, head=head)
     today = today_select([(p.config, p.steps) for p in state.pipelines], paths)
     vllm_steps = {

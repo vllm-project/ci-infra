@@ -140,7 +140,8 @@ def decide(
 
     `state` is the one `select` read, built at `base`. A new file's reach is
     its graph against HEAD's, so a state built anywhere else hides edges the
-    PR added.
+    PR added. Its steps are the head's (`worktree.with_head_steps`), the ones
+    the emitter names.
     """
     # Resolved above the try on purpose. A bad env value has to kill the run:
     # below, the broad handler would swallow it, every PR would come back
@@ -267,7 +268,7 @@ def _apply_record(
 
     recorded_at = newest_commit(table, repo)
     keys = RowKeys.resolve(table, repo, recorded_at)
-    keys.restrict_to(*_steps_at(repo, base))
+    keys.restrict_to(*_steps_at(repo, head or base))
 
     stale: frozenset[str] = frozenset()
     if os.environ.get(FRESHNESS_ENV):
@@ -456,10 +457,10 @@ def _apply_kernel_record(
 ) -> None:
     """The kernel record over the map's selection, after the Python record.
 
-    Keys resolve at the PR's base from the state `decide` was handed, since
-    the table's rows carry the generator's step keys and the emitter names
-    steps from the base. Raises rather than guessing when there is no state
-    to spell them with; `decide` turns that into a note.
+    Keys resolve against the state `decide` was handed, whose steps are the
+    head's: the table's rows carry the generator's step keys, and the emitter
+    names steps from that same state. Raises rather than guessing when there
+    is no state to spell them with; `decide` turns that into a note.
     """
     from .codemap.classify import csrc_held_steps
     from .coverage import kernels as kernel_rules
@@ -498,7 +499,7 @@ def _apply_library_record(
     out: Decision, table: Table, selection, state, repo: Path, base, head
 ) -> None:
     """Steps the map picked only for a library's version pin, dropped when
-    their rows never called it. Keys resolve at the base, as for kernels. A
+    their rows never called it. Keys resolve against `state`, as for kernels. A
     step the Python record kept on an observed call stays."""
     from .coverage import libraries
     from .gitdiff import diff_files

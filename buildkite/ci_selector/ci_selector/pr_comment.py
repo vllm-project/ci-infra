@@ -7,7 +7,7 @@ post; `--post` puts it on the pull request, editing its own earlier comment
 (found by a marker) rather than adding one per run.
 
 The comparison is against today's rules, through the same replica of the
-generator the crosscheck scores against, at the PR's merge base.
+generator the crosscheck scores against, on the steps the PR's head defines.
 
 `--results`, once the PR's CI has run, adds what happened: every failed job,
 and whether the selector would have run it. A failed job it would have skipped
@@ -27,7 +27,7 @@ from pathlib import Path
 
 from .codemap.classify import select
 from .codemap.pipeline.match import match_jobs
-from .codemap.worktree import git_out, state_for
+from .codemap.worktree import git_out, state_for, with_head_steps
 from .coverage.source import fetch_kernel_evidence, fetch_table
 from .decide import decide
 from .gitdiff import changed_paths, diff_files
@@ -147,7 +147,10 @@ def select_for_pr(
         raise RuntimeError(f"PR #{pr} is {data['state']} with no head to select for")
     paths = changed_paths(diff_files(repo, base, head))
     check_drift(pr, len(set(paths)), _changed_files(pr))
-    state = state_for(repo, base)
+    # The head's steps throughout: CI generates the PR's pipeline from its
+    # head, so today's rules and the failed jobs are read against those, and a
+    # step the PR added is one the selector can run and a failure can match.
+    state = with_head_steps(state_for(repo, base), repo, head, paths)
     sel = select(state, paths, base=base, head=head)
     today = today_select([(p.config, p.steps) for p in state.pipelines], paths)
     d = decide(state, sel, repo, base, head, table=table, kernels=kernels)

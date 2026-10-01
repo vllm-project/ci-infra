@@ -54,7 +54,7 @@ Two independent sources of evidence. The map proposes, the record adjusts in bot
 
 ### 3.1 The map
 
-Built from the checkout at the commit the pull request branched from. It never looks at the diff, so it is the same work for any pull request against that base, and takes seconds on CPU.
+Built from the checkout at the commit the pull request branched from. It never looks at the diff, so it is the same work for any pull request against that base, and takes seconds on CPU. The step definitions are the exception: they are read at the pull request's head, which is what the generator runs, so a step the pull request adds can be selected and named.
 
 An import graph alone is not enough. vLLM reaches code by name, through registries, shell commands and container images, and an import-only view is blind to all of it. So the map derives several things and routes each changed file through whichever fits:
 
@@ -142,7 +142,7 @@ None of it routes through imports, so each surface has its own derived mechanism
 | `cmake/` | the same build map, inheriting the context it is included from | no |
 | `rust/` | which shipped artifact the crate feeds, not which image copies it | no |
 | Dockerfiles, `requirements/` | the image build graph | only a file whose whole change moves a watched library's pin: the library record, by the steps whose rows called it |
-| `.buildkite/` config | twelve ordered rules: defines steps, matches a step's targets, is a Dockerfile input, and so on | no |
+| `.buildkite/` config | twelve ordered rules: adds or changes steps (an edited job file selects only the steps whose definition changed, outside `source_file_dependencies` and labels), matches a step's targets, is a Dockerfile input, and so on | no |
 | docs, `.github/`, markdown | nothing to run; a docs-only diff emits nothing | n/a |
 
 Measured on 25 C++/cmake/requirements pull requests: 4,284 jobs against CI's own 4,511. `cmake/cpu_extension.cmake` alone goes from 244 jobs to 20, against CI's 21. On 13 Rust pull requests the routing took selection from 9.2x of CI down to 1.1x, with a Rust-only change picking 16 jobs against CI's 14.
