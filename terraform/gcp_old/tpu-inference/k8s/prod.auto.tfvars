@@ -11,15 +11,15 @@ namespace = "buildkite"
 agent_token_secret_id = "vllm_buildkite_agent_token"
 
 # Credentials any pipeline may ask for by name, keyed by the environment
-# variable a workload reads them from. None is created here: each belongs to
-# another project, and is shared with the bare-metal lane so that the two lanes
-# fetch a gated model under one account and report into one suite.
+# variable a workload reads them from. None is created here: each is created
+# with gcloud in this project and shared with the bare-metal lane, so that the
+# two lanes fetch a gated model under one account and report into one suite.
 env_secrets = {
   # A gated model cannot be fetched without it, and the fleet's model cache is
   # shared, so the first step to want one pays for every later one.
   HF_TOKEN = {
-    project = "cloud-tpu-inference-test"
-    secret  = "bm-agent-hf-token"
+    project = "cloud-ullm-inference-ci-cd"
+    secret  = "vllm_buildkite_hf_token"
   }
   # Test Engine. The collector runs inside the workload rather than in the
   # agent, so the token has to reach the pod; without it a suite still passes
@@ -27,7 +27,7 @@ env_secrets = {
   # The vllm org's, as the ci-cd bare-metal hosts use: a token names its org
   # and suite, and the tpu-commons one reports into an org being retired.
   BUILDKITE_ANALYTICS_TOKEN = {
-    project = "cloud-tpu-inference-test"
+    project = "cloud-ullm-inference-ci-cd"
     secret  = "vllm_buildkite_analytics_token"
   }
 }
