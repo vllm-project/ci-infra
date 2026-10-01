@@ -1,30 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The two passes that run after a rule has answered, not rules themselves.
+"""The pass that runs after a rule has answered, not a rule itself.
 
-A rule decides what a path IS. These add what every path owes regardless: the
-steps that declare it, and the steps running on an image it is built into.
-Running them in one place is what stops a new rule under-selecting by
-forgetting either. Both are idempotent, both skip run-all, and each keeps its own exempt
-set.
+A rule decides what a path IS. This adds what every path owes regardless: the
+steps running on an image it is built into. Running it in one place is what
+stops a new rule under-selecting by forgetting it. Idempotent, skips run-all,
+and keeps its own exempt set.
 """
 
 from __future__ import annotations
 
 from . import build_map, hardware
 from .claim import Claim
-from .state import RepoState, _graph_known
-from .step_refs import (
-    _declaring_deps,
-    _source_dep_steps,
-    _source_dep_steps_ungated,
-)
-
-# Only the rules that are certain nothing runs are exempt: a doc cannot break a
-# build, and dead hardware runs nothing. release-ci is NOT here, because a
-# release script can also carry a live test, so it must still pick up its
-# genuine declarers.
-_DEP_UNION_EXEMPT = frozenset({"no-code", "no-hardware"})
+from .state import RepoState
 
 
 def _pin_existing(claim: Claim) -> None:
@@ -35,61 +23,11 @@ def _pin_existing(claim: Claim) -> None:
         claim.step_detail.setdefault(sid, claim.detail)
 
 
-def _apply_declarer_union(state: RepoState, path: str, claim: Claim) -> Claim:
-    """Add the steps that declare `path`, on top of whatever rule fired. Doing
-    it in one place makes it impossible for a classifier to under-select by
-    forgetting declarers, so every claim passes through here, including the
-    ones built outside `_classify`. Idempotent. Skipped for run-all, which is
-    already everything, and for the exempt rules."""
-    if claim.run_all or claim.rule in _DEP_UNION_EXEMPT:
-        return claim
-    # On a file the graph knows, the graph is the better answer, so drop
-    # declarers that matched only through a catch-all prefix. Graph-blind files
-    # keep the full union.
-    #
-    # An unmodeled dynamic import used to put the catch-all deps back, on the
-    # grounds that missing edges undercut the graph. Removed: it leaned on the
-    # very yaml this project exists to delete, and catch-all declarers are a
-    # small slice of the pipeline, so they could not have covered an unknown
-    # edge anyway. What is left is the warning, the fail-open on the site file,
-    # and the check going red.
-    if claim.rule == "release-ci":
-        # This claim says nothing runs, and a declarer is the evidence that
-        # the file is still tested, so the switch must not silence it.
-        declarers = _source_dep_steps_ungated(state, path)
-        specific_only, gated = False, False
-        omitted = 0
-    elif _graph_known(state, path):
-        declarers = _source_dep_steps(state, path, specific_only=True)
-        specific_only, gated = True, True
-        omitted = len(_source_dep_steps(state, path) - declarers)
-    else:
-        declarers = _source_dep_steps(state, path)
-        specific_only, gated = False, True
-        omitted = 0
-    added = declarers - claim.step_ids
-    if added:
-        _pin_existing(claim)
-        claim.step_ids |= added
-        claim.detail += f"; +{len(added)} steps declare it as a source dep"
-        deps = _declaring_deps(state, path, specific_only, gated=gated)
-        for sid in added:
-            dep = deps.get(sid)
-            if dep:
-                claim.step_detail[sid] = f"this step declares '{dep}' as a source dep"
-                claim.step_rule[sid] = "declared-deps"
-    if omitted:
-        claim.detail += f"; {omitted} catch-all-only declarers omitted"
-    return claim
-
-
 # Every "nothing to run" rule, plus the one rule that already read the build
 # graph and scoped its own answer. The union must not revive a path a rule
 # established runs nothing (retired yamls, release-only scripts, inert CI
 # trees and inert files all get copied into images), and must not undo the
-# rust rule's scoping, which deliberately dropped the borrowed images. A
-# separate set from _DEP_UNION_EXEMPT on purpose: "inert" stays out of that
-# one, since a declarer is the evidence that disproves the veto.
+# rust rule's scoping, which deliberately dropped the borrowed images.
 _IMAGE_UNION_EXEMPT = frozenset(
     {"no-code", "no-hardware", "legacy-ci", "inert-ci", "inert", "release-ci", "rust"}
 )

@@ -185,15 +185,29 @@ class TestBuild:
         assert only.status is Attribution.FAILED
         assert only.fail_open and only.note
 
-    def test_file_outside_the_recorder_root_fails_open(self, sample_repo: Repo):
-        # tests/ is real Python with real names, and no row can ever hold them.
+    def test_tests_files_are_in_scope_now_that_they_are_recorded(
+        self, sample_repo: Repo
+    ):
+        """The recorder writes tests/ since build 91572; a row recorded before
+        that holds no tests/ names, so they are unknown there and hold."""
         base = sample_repo.head()
         sample_repo.write("tests/test_thing.py", "def test_one():\n    assert True\n")
         head = sample_repo.commit("add test")
 
         (only,) = build(sample_repo.root, base, head).files
         assert only.status is Attribution.ATTRIBUTED
-        assert only.names  # names exist
+        assert only.names
+        assert only.in_recorder_scope and not only.fail_open
+
+    def test_file_outside_the_recorder_roots_fails_open(self, sample_repo: Repo):
+        # benchmarks/ is real Python with real names, and no row holds them.
+        base = sample_repo.head()
+        sample_repo.write("benchmarks/bench.py", "def run():\n    return 1\n")
+        head = sample_repo.commit("add bench")
+
+        (only,) = build(sample_repo.root, base, head).files
+        assert only.status is Attribution.ATTRIBUTED
+        assert only.names
         assert not only.in_recorder_scope and only.fail_open
 
     def test_added_file_has_no_base_side(self, sample_repo: Repo):
@@ -318,6 +332,52 @@ class TestBehaviourPreserving:
         )
         assert q.inert == []
 
+    def test_a_torch_compiled_model_is_never_inert(self, repo: Repo):
+        """support_torch_compile infers dynamic dims from forward's
+        annotations, and raises when it finds none."""
+        base = self.BASE + (
+            "\n\n@support_torch_compile\nclass Model:\n"
+            "    def forward(self, x: torch.Tensor):\n        return x\n"
+        )
+        repo.write("vllm/mod.py", base)
+        repo.commit("model")
+        q = self._build(repo, base.replace("x: torch.Tensor", "x: list"))
+        assert q.inert == [] and q.files and "Model.forward" in q.files[0].names
+
+    @pytest.mark.parametrize(
+        "nested, outer",
+        [
+            (
+                (
+                    "def outer(x):\n"
+                    "    def inner(y: int) -> int:\n        return y\n"
+                    "    return inner(x)\n"
+                ),
+                "outer",
+            ),
+            (
+                (
+                    "class C:\n    def run(self, x):\n"
+                    "        def inner(y: int) -> int:\n            return y\n"
+                    "        return inner(x)\n"
+                ),
+                "C.run",
+            ),
+        ],
+        ids=["function", "method"],
+    )
+    def test_a_def_inside_a_function_keeps_its_annotation_as_a_change(
+        self, repo: Repo, nested, outer
+    ):
+        """Its annotations run each time the enclosing function does: a name
+        imported only under TYPE_CHECKING raises NameError there."""
+        base = self.BASE + "\n\n" + nested
+        repo.write("vllm/mod.py", base)
+        repo.commit("nested")
+        q = self._build(repo, base.replace("-> int:", "-> Tensor:"))
+        (only,) = q.files
+        assert q.inert == [] and only.function_names == {outer}
+
     def test_only_import_time_left_but_not_annotations_keeps_every_name(
         self, repo: Repo
     ):
@@ -329,6 +389,125 @@ class TestBehaviourPreserving:
         )
         (only,) = self._build(repo, text).files
         assert "fused" in only.names and "<module>" in only.names
+
+
+class TestDocstrings:
+    """vllm#59008 reworded one function's docstring. That changes its code
+    object, a constant of it, and nothing it runs."""
+
+    BASE = (
+        '"""Module."""\n\n\n'
+        'def fused(x, y):\n    """Add them."""\n    return x + y\n\n\n'
+        "def other(x):\n    return x * 2\n\n\n"
+        'class Holder:\n    """Holds."""\n\n'
+        '    def method(self):\n        """Three."""\n        return 3\n'
+    )
+
+    @pytest.fixture
+    def repo(self, tmp_path: Path) -> Repo:
+        root = tmp_path / "r"
+        root.mkdir()
+        r = Repo(root)
+        r.write("vllm/mod.py", self.BASE)
+        r.commit("base")
+        return r
+
+    def _build(self, repo: Repo, text: str, path: str = "vllm/mod.py"):
+        base = repo.head()
+        repo.write(path, text)
+        head = repo.commit("edit")
+        return build(repo.root, base, head)
+
+    @pytest.mark.parametrize(
+        "old, new",
+        [
+            ('"""Add them."""', '"""Add them.\n\n    Twice over.\n    """'),
+            ('"""Three."""', '"""Always three."""'),
+            ("def other(x):\n", 'def other(x):\n    """Double."""\n'),
+        ],
+        ids=["function", "method", "added"],
+    )
+    def test_a_function_docstring_alone_is_inert(self, repo: Repo, old, new):
+        q = self._build(repo, self.BASE.replace(old, new))
+        assert q.files == [] and q.inert == ["vllm/mod.py"]
+
+    def test_a_docstring_and_an_annotation_together_are_inert(self, repo: Repo):
+        text = self.BASE.replace('"""Add them."""', '"""Sum."""').replace(
+            "def other(x):", "def other(x) -> int:"
+        )
+        q = self._build(repo, text)
+        assert q.files == [] and q.inert == ["vllm/mod.py"]
+
+    def test_a_docstring_beside_a_code_change_in_the_same_function(self, repo: Repo):
+        text = self.BASE.replace('"""Add them."""', '"""Sum."""').replace(
+            "return x + y", "return y + x"
+        )
+        (only,) = self._build(repo, text).files
+        assert only.function_names == {"fused"}
+
+    def test_a_code_change_elsewhere_keeps_the_docstring_edit(self, repo: Repo):
+        """All or nothing: the file is judged whole, as for annotations."""
+        text = self.BASE.replace('"""Add them."""', '"""Sum."""').replace(
+            "return x * 2", "return x * 3"
+        )
+        (only,) = self._build(repo, text).files
+        assert only.function_names == {"fused", "other"}
+
+    def test_a_class_docstring_is_a_change(self, repo: Repo):
+        """arg_utils.py turns config classes' docstrings into CLI help."""
+        q = self._build(repo, self.BASE.replace('"""Holds."""', '"""Keeps."""'))
+        assert q.inert == [] and q.files and "Holder" in q.files[0].names
+
+    def test_a_module_docstring_is_a_change(self, repo: Repo):
+        """Scripts pass `description=__doc__` to argparse."""
+        q = self._build(repo, self.BASE.replace('"""Module."""', '"""Mod."""'))
+        assert q.inert == [] and q.files and "<module>" in q.files[0].names
+
+    def test_a_decorated_function_keeps_its_docstring_as_a_change(self, repo: Repo):
+        """register_op in vllm/ir/op.py reads the docstring it is handed."""
+        base = self.BASE.replace("def fused", "@register_op\ndef fused")
+        repo.write("vllm/mod.py", base)
+        repo.commit("decorated")
+        q = self._build(repo, base.replace('"""Add them."""', '"""Sum."""'))
+        assert q.inert == [] and q.files and "fused" in q.files[0].names
+
+    @pytest.mark.parametrize(
+        "reader, where",
+        [
+            ('HELP = f"{fused.__doc__}"\n', "vllm/cli.py"),
+            ("HELP = inspect.getdoc(mod.fused)\n", "vllm/cli.py"),
+            ("HELP = inspect.getdoc(\n    fused\n)\n", "vllm/cli.py"),
+            ("p = ArgumentParser(description=fused.__doc__)\n", "tests/tool.py"),
+        ],
+        ids=["__doc__", "getdoc", "wrapped", "outside-vllm"],
+    )
+    def test_a_docstring_read_at_runtime_is_a_change(self, repo: Repo, reader, where):
+        """arg_utils.py appends human_readable_int.__doc__ to CLI help. Ruff
+        wraps a long call, putting the name on a line of its own."""
+        repo.write(where, reader)
+        repo.commit("reader")
+        q = self._build(repo, self.BASE.replace('"""Add them."""', '"""Sum."""'))
+        assert q.inert == [] and q.files and "fused" in q.files[0].names
+
+    def test_a_reader_of_another_name_does_not_block(self, repo: Repo):
+        repo.write("vllm/cli.py", 'HELP = f"{fused_other.__doc__}"\n\nfused(1, 2)\n')
+        repo.commit("reader")
+        q = self._build(repo, self.BASE.replace('"""Add them."""', '"""Sum."""'))
+        assert q.files == [] and q.inert == ["vllm/mod.py"]
+
+    def test_a_docstring_shared_with_the_body_is_not_skipped(self, repo: Repo):
+        """CPython merges equal constants, so the docstring is also what this
+        returns. Only the first constant differs, and it is a real change."""
+        before = 'def tag():\n    """doc"""\n    return "doc"\n'
+        after = before.replace("doc", "new")
+        a, b = (compile(s, "m.py", "exec").co_consts[0] for s in (before, after))
+        assert a.co_code == b.co_code and a.co_consts[1:] == b.co_consts[1:]
+        assert a.co_consts[0] != b.co_consts[0]
+
+        repo.write("vllm/tag.py", before)
+        repo.commit("tag")
+        q = self._build(repo, after, "vllm/tag.py")
+        assert q.inert == [] and q.files and "tag" in q.files[0].names
 
 
 def test_a_new_parameter_leaves_the_module_body_unchanged(tmp_path):
@@ -374,10 +553,13 @@ def test_a_new_parameter_leaves_the_module_body_unchanged(tmp_path):
 
 
 PLATFORM_SRC = """\
+import vllm.envs as envs
 from vllm.platforms import current_platform
 
 
 def view(t):
+    if envs.VLLM_PIN_VIEWS:
+        t = t.pin_memory()
     if current_platform.is_xpu():
         if not t.is_pinned():
             t = t.contiguous()
@@ -394,11 +576,24 @@ def view(t):
         ("t = t.contiguous()", "t = t.clone()", "xpu"),
         ("return cuda(t)", "return cuda(t, 1)", None),  # is_cuda_alike: two families
         ("    return t\n", "    return t + 0\n", None),  # outside every guard
+        ("return xpu(t)", "from vllm import ops\n        return ops.xpu(t)", "xpu"),
+        # `envs` turns local to view, so its first line raises UnboundLocalError.
+        ("return xpu(t)", "import vllm.envs as envs\n        return xpu(t)", None),
+        ("return xpu(t)", "yield\n        return xpu(t)", None),  # now a generator
     ],
-    ids=["xpu-branch", "cuda-alike", "unguarded"],
+    ids=[
+        "xpu-branch",
+        "cuda-alike",
+        "unguarded",
+        "binds-a-new-name",
+        "rebinds-a-name-used-outside",
+        "makes-a-generator",
+    ],
 )
 def test_a_change_inside_one_platform_branch_is_tagged(tmp_path, old, new, family):
-    """vllm#54874 changed only the XPU branch of a function 315 CUDA rows call."""
+    """vllm#54874 changed only the XPU branch of a function 315 CUDA rows call.
+    A line there that changes how the rest of the function resolves a name,
+    or what kind of function it is, is not confined to it."""
     import subprocess
 
     from ci_selector.coverage.changed_funcs import build
@@ -421,4 +616,89 @@ def test_a_change_inside_one_platform_branch_is_tagged(tmp_path, old, new, famil
     (repo / "vllm/u.py").write_text(PLATFORM_SRC.replace(old, new))
     git("commit", "-qam", "edit")
     (f,) = build(repo, base, git("rev-parse", "HEAD")).files
+    assert f.platform == family
+
+
+SCOPES_SRC = """\
+import vllm.envs as envs
+from vllm.platforms import current_platform
+
+k = 1
+
+if current_platform.is_xpu():
+    def step():
+        yield 1
+
+
+def step():
+    if current_platform.is_xpu():
+        step.calls = 0
+    return 1
+
+
+if current_platform.is_xpu():
+    step.calls = 1
+
+
+def pick(ts):
+    if current_platform.is_xpu():
+        ts = sorted(ts, key=lambda t: t.numel())
+    size = lambda t: numel(t)
+    if current_platform.is_xpu():
+        ts = ts[:1]
+    pinned = lambda: envs.VLLM_PIN_VIEWS
+    return [size(t) for t in ts if pinned()]
+
+
+class Views:
+    if current_platform.is_xpu():
+        pass
+    k = 2
+"""
+
+MOVE_A_LAMBDA = [
+    ("ts = sorted(ts, key=lambda t: t.numel())", "ts = list(ts)"),
+    ("ts = ts[:1]", "ts = sorted(ts, key=lambda u: u.numel())"),
+]
+
+
+@pytest.mark.parametrize(
+    "edits, family",
+    [
+        (MOVE_A_LAMBDA, "xpu"),
+        # `numel` turns free in `size`, which raises NameError on CUDA.
+        ([*MOVE_A_LAMBDA, ("ts = list(ts)", "from vllm.utils import numel")], None),
+        ([("ts = ts[:1]", "import vllm.envs as envs")], None),  # read by `pinned`
+        ([("pass", "global k")], None),  # `k = 2` now sets the module's `k`
+        (
+            [
+                ("    def step():\n        yield 1", "    step = None"),
+                ("step.calls = 0", "yield"),  # the `step` CUDA runs, a generator
+                ("step.calls = 1", "def step():\n        return 1"),
+            ],
+            None,
+        ),
+    ],
+    ids=[
+        "moves-a-lambda",
+        "moves-a-lambda-and-rebinds-for-another",
+        "rebinds-for-a-closure",
+        "globals-a-class-name",
+        "moves-a-generator-and-makes-one",
+    ],
+)
+def test_a_platform_branch_leaves_every_other_scope_as_it_was(tmp_path, edits, family):
+    """A branch that rebinds a name a nested scope or a class body reads
+    reaches past it too. Scopes of one name pair up in order, so a lambda
+    moved from one XPU branch to another must not pair an unchanged lambda
+    with the wrong one and hide a name it now reads free."""
+    repo = Repo(tmp_path)
+    repo.write("vllm/u.py", SCOPES_SRC)
+    base = repo.commit("base")
+    text = SCOPES_SRC
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    repo.write("vllm/u.py", text)
+    (f,) = build(repo.root, base, repo.commit("edit")).files
     assert f.platform == family

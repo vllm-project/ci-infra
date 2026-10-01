@@ -13,7 +13,6 @@ import pytest
 from ci_selector.codemap import unions
 from ci_selector.codemap.build_map import ALL_FAMILIES, ENV_VAR, BuildMap, mode
 from ci_selector.codemap.classify import select
-from ci_selector.codemap.step_refs import _source_dep_steps
 from helpers import HW, drift_message
 
 CUDA_TU = "csrc/libtorch_stable/quantization/machete/machete_pytorch.cu"
@@ -425,17 +424,17 @@ def test_csrc_data_readers_keep_their_steps(vllm_repo, state, live_map):
 
 
 def _positive_bound(state, path):
-    """What may survive outside the mapped families: CI's own declarers plus
-    the steps running the file's op tests, which exist on every pipeline."""
+    """What may survive outside the mapped families: the steps running the
+    file's op tests, which exist on every pipeline."""
     from ci_selector.codemap.classify import _classify_native_tests
 
     native = _classify_native_tests(state, path)
-    return _source_dep_steps(state, path) | (native.step_ids if native else set())
+    return native.step_ids if native else set()
 
 
 def test_a_cuda_only_tu_sheds_the_other_families_steps(state):
-    """Only a declarer or a step running the file's op tests may survive
-    outside the mapped families."""
+    """Only a step running the file's op tests may survive outside the mapped
+    families."""
     sel = select(state, [CUDA_TU])
     per, union, nonfamily = state.family_partition()
     picked = set(sel.selected)

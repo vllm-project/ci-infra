@@ -64,6 +64,15 @@ def test_upstream_remote_detection(tmp_path):
     )
     with pytest.raises(RuntimeError):
         _upstream_remote(vllm_repo)
+    # A local path containing the repo name is not the upstream.
+    subprocess.run(
+        ["git", "remote", "add", "local", "/Users/me/vllm-project/vllm"],
+        cwd=vllm_repo,
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(RuntimeError):
+        _upstream_remote(vllm_repo)
     subprocess.run(
         ["git", "remote", "add", "origin", "https://github.com/vllm-project/vllm.git"],
         cwd=vllm_repo,

@@ -28,12 +28,11 @@ import os
 from ..handwritten import PR_PIPELINE
 from .claim import Claim
 from .selection import _targets_cover
-from .state import RepoState
+from .state import RepoState, run_files
 from .step_refs import (
     _direct_step_refs,
     _hardware_family_steps,
     hardware_steps_held,
-    _source_dep_steps,
 )
 
 ENV_VAR = "CI_SELECTOR_COLOCATION"
@@ -139,12 +138,9 @@ def _colocated_claim(
     """
     # Everything the graph rule reaches WITHOUT the closure is kept, since the
     # cycle never collapsed it; only the closure-derived half is replaced.
-    # Declarers matter most: `source_file_dependencies` is vLLM's hand-written
-    # source-to-test map, and it names coverage co-location cannot see.
     direct_steps = _direct_step_refs(state, path)
-    dep_steps = _source_dep_steps(state, path, specific_only=True)
     family, hw_steps = _hardware_family_steps(state, path)
-    inferred_steps = direct_steps | dep_steps | own_key_steps
+    inferred_steps = direct_steps | own_key_steps
     if (
         not (tests & state.invoked)
         and not ((inferred_steps | hw_steps) & state.auto_step_ids)
@@ -157,14 +153,19 @@ def _colocated_claim(
     )
     if own_key_steps:
         detail += f"; its own registered key(s) name it in {len(own_key_steps)} steps"
-    if dep_steps:
-        detail += f"; {len(dep_steps)} steps declare it as a source dep"
     if family:
         detail += f"; {family} hardware-convention tagging adds {len(hw_steps)} steps"
+    # A script a step runs that imports the file directly reaches it as surely
+    # as a test importing it: `vllm serve` runs the entry module that imports
+    # every CLI subcommand. Joined after the gate above, since a script is
+    # coverage and not a co-located answer. Direct importers only, as with
+    # tests, so a file deeper in the entry's closure (cli/types.py,
+    # engine/arg_utils.py) does not reach every step that runs `vllm`.
+    runners = run_files(state, state.full.graph.reverse.get(path, ()))
     return Claim(
         "colocated-tests",
         detail,
-        test_files=set(tests),
+        test_files=set(tests) | runners,
         step_ids=inferred_steps | hw_steps,
         # Subtracted, not merely left out: hardware steps stand for compiled
         # reach nothing records, so a step one holds stays held.

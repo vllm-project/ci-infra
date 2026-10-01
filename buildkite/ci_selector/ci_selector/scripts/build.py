@@ -366,6 +366,8 @@ def merge_build(
             if process.py and process.py not in stamp.interpreters:
                 stamp.interpreters.append(process.py)
             stamp.packages = sorted(set(stamp.packages) | process.packages)
+            for lib, names in process.libcalls.items():
+                stamp.libcalls[lib] = sorted(set(stamp.libcalls.get(lib, ())) | names)
             for path, names in process.functions.items():
                 accumulated[key][path] |= names
 
@@ -487,6 +489,20 @@ def _job_counts(job_dir: Path, logs: bool = True):
     return read_counts(job_dir / "job.log.gz")
 
 
+def _union_libcalls(
+    a: dict[str, list[str]], b: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    """Calls union. A library stays watched only if both builds watched it or
+    one saw it called: a build that did not watch it cannot vouch for the
+    other's silence."""
+    out = {}
+    for lib in set(a) | set(b):
+        names = sorted(set(a.get(lib, ())) | set(b.get(lib, ())))
+        if names or (lib in a and lib in b):
+            out[lib] = names
+    return out
+
+
 def union_rows(left: Row, right: Row) -> Row:
     """Combine the same step's rows from two builds. Union, never replace."""
     if left.key != right.key:
@@ -541,6 +557,7 @@ def union_rows(left: Row, right: Row) -> Row:
         # rather than silently resolved in favour of whichever merged last.
         build_env=_union_env(a.build_env, b.build_env),
         packages=sorted(set(a.packages) | set(b.packages)),
+        libcalls=_union_libcalls(a.libcalls, b.libcalls),
     )
     stamp.n_files = len(functions)
     stamp.n_functions = sum(len(v) for v in functions.values())

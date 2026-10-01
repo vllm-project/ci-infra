@@ -2,112 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Steps a path reaches by a route the import graph cannot see.
 
-Three of them: a step naming the file outright, a step declaring it as a source
-dependency, and the hardware naming convention. Shared, because both the graph
-rule and the co-location rule need all three and neither owns them.
+Two of them: a step naming the file outright, and the hardware naming
+convention. Shared, because both the graph rule and the co-location rule need
+both and neither owns them. The hand-written `source_file_dependencies` lists
+are never read here: they are what the selector is measured against.
 """
 
 from __future__ import annotations
 
-import os
-
 from . import hardware
-from .claim import matching_deps, step_declares
 from .state import RepoState
-
-ENV_VAR = "CI_SELECTOR_DECLARED_DEPS"
-MODES = ("on", "off")
-
-
-def mode() -> str:
-    """Whether the hand-written `source_file_dependencies` lists pick steps.
-    Unset means "off": everything is derived from the code. "on" adds the
-    declared steps back on top. An unrecognized value raises rather than
-    defaulting, since a swallowed typo looks exactly like the switch doing
-    nothing."""
-    raw = os.environ.get(ENV_VAR)
-    if raw is None or raw == "":
-        return "off"
-    if raw in MODES:
-        return raw
-    raise ValueError(f"{ENV_VAR}={raw!r}, expected one of: {', '.join(MODES)}")
-
-
-def _source_dep_steps_ungated(
-    state: RepoState, path: str, specific_only: bool = False
-) -> set[str]:
-    """Steps that declare `path` in their source_file_dependencies. For a file
-    the import graph cannot reach, the declaration is the ground truth, since
-    it is the generator's own mechanism.
-
-    With specific_only, a step counts only when a dep more specific than a
-    catch-all prefix matches. On a file the graph knows, the graph is the
-    better answer and a blanket `vllm/` adds only the CI config's
-    over-declaration, which would cap the saving at zero. Graph-blind files
-    always take the full union, since the declaration is all they have.
-
-    Obeys the switch like every other read. It used to ignore it for the
-    requirements rule and for the places where a declaration only says "this
-    file is still tested", but the declarations are the rules this selector
-    is measured against, and a comparison cannot also be an input. With the
-    switch off (the default) nothing here reads them."""
-    if mode() == "off":
-        return set()
-    return {
-        s.step_id
-        for p in state.pipelines
-        for s in p.steps
-        if step_declares(s.source_file_dependencies, path, specific_only)
-    }
-
-
-def steps_naming_file(state: RepoState, path: str) -> set[str]:
-    """Steps whose source_file_dependencies name `path` itself, not a
-    directory above it.
-
-    The floor under the kernel record (`classify.csrc_held_steps`): a file
-    named outright is a tie its owner wrote down, so a kernel silence never
-    drops the step. A directory entry such as `csrc/` is the blanket the
-    record exists to replace, so it holds nothing. Obeys the switch, off by
-    default, like every read of the declarations.
-    """
-    if mode() == "off":
-        return set()
-    return {
-        s.step_id
-        for p in state.pipelines
-        for s in p.steps
-        if path in (s.source_file_dependencies or ())
-    }
-
-
-def _source_dep_steps(
-    state: RepoState, path: str, specific_only: bool = False
-) -> set[str]:
-    """The one place the switch acts: every read that picks steps from the
-    declared lists comes through here."""
-    if mode() == "off":
-        return set()
-    return _source_dep_steps_ungated(state, path, specific_only)
-
-
-def _declaring_deps(
-    state: RepoState, path: str, specific_only: bool = False, *, gated: bool = True
-) -> dict[str, str]:
-    """step_id -> the declared dep that matched `path`.
-
-    Reads the declarations directly: calling `_source_dep_steps_ungated` would
-    trip the call-count guard in the tests.
-    """
-    if mode() == "off":
-        return {}
-    out: dict[str, str] = {}
-    for p in state.pipelines:
-        for s in p.steps:
-            hits = matching_deps(s.source_file_dependencies, path, specific_only)
-            if hits:
-                out[s.step_id] = hits[0]
-    return out
 
 
 def _direct_step_refs(state: RepoState, path: str) -> set[str]:

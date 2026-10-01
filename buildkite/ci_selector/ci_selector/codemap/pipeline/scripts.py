@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Scan the shell scripts a live step runs for the shapes the YAML parser
-already knows: pytest lines, python drivers, nested bash, and cd. The rest of a
-script is docker and setup logic and is skipped.
+already knows: pytest lines, python drivers and console scripts, nested bash,
+and cd. The rest of a script is docker and setup logic and is skipped.
 
 Only scripts a step actually invokes are read, so a script nothing runs cannot
 invent targets. Giving up is always recorded and shown by preflight, never a
@@ -11,6 +11,7 @@ quiet return, or the tests those lines run would look like nothing runs them.
 
 from __future__ import annotations
 
+import functools
 import shlex
 
 import regex as re
@@ -54,6 +55,7 @@ def scan_script(script: str, parser, depth: int = 0) -> None:
         return
     # Raw text, not joined: key matching reads words, not commands.
     parser.out.haystack += "\n" + text
+    console = _console_script_re(tuple(parser.console_scripts))
     saved_cwd = parser.cwd
     joined = join_continuations(text)
     payloads = [m.span() for m in CONTAINER_PAYLOAD_RE.finditer(joined)]
@@ -94,7 +96,30 @@ def scan_script(script: str, parser, depth: int = 0) -> None:
             resolved = parser.resolve_path(m.group(1))
             if resolved:
                 parser.out.add_target(resolved, "script", via=script)
+        # A console script is a python driver under another name. Echoed text
+        # and comments are prose that names it.
+        code = line.split(" #", 1)[0]
+        if console and not code.startswith(("echo ", "printf ")):
+            for name in set(console.findall(code)):
+                parser.out.add_target(
+                    parser.console_scripts[name], "script", via=script
+                )
     parser.cwd = saved_cwd
+
+
+@functools.cache
+def _console_script_re(names: tuple[str, ...]):
+    """A console-script name followed by a subcommand: `vllm serve`, `$(vllm
+    collect-env)`, `CMD=(vllm serve ...)`, `"${WRAP[@]}" vllm snapshot`.
+    Loose, since a false hit only adds a target; a quoted `pkill -f "vllm
+    serve"` sits in a script that runs it anyway. What it refuses is prose:
+    `pip install vllm --pre`, a path ending in /vllm, and "this vllm version."
+    in an annotation heredoc, whose step would otherwise run on every change
+    the entry module reaches."""
+    if not names:
+        return None
+    alts = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    return re.compile(rf"(?:^|[\s;&|(\"'=])({alts})\s+[a-z][\w-]*(?=$|[\s;&|)\"'`])")
 
 
 def _tokenize(argstr: str) -> list[str] | None:

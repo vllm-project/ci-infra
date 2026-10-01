@@ -70,12 +70,12 @@ MIN_ROWS_FOR_BREADTH = 20
 # not know, which is the only thing stopping an older table from reading
 # healthier than it was recorded: a missing field takes its default, and every
 # default here is the healthy value.
-TABLE_VERSION = 6
+TABLE_VERSION = 7
 
 # Fingerprint of `Stamp`'s fields, so remembering to bump the version above is a
 # mechanism and not a discipline. A test recomputes it and fails when the two
 # disagree. Change both together, in the same commit that changes the stamp.
-STAMP_SHAPE = "d2817305f3714d26"
+STAMP_SHAPE = "9d3fc3a03453ab23"
 
 MIRROR_NOTE = (
     "A mirror owns its own row and never inherits its parent's. Keyless mirrors "
@@ -104,6 +104,10 @@ class ProcessRecord:
     malformed: int
     # Installed top-level packages the process entered, from `#pkg` lines.
     packages: frozenset[str] = frozenset()
+    # Watched library -> the functions in it called from outside it, from
+    # `#lib` lines. Every library the recorder watched is a key, called or
+    # not; an older recorder watched none.
+    libcalls: dict[str, set[str]] = field(default_factory=dict)
 
     @property
     def lost_lines(self) -> bool:
@@ -121,6 +125,7 @@ def read_process(path: Path) -> ProcessRecord | None:
     raw: list[tuple[str, str]] = []
     header_root = effective_root = tests_root = None
     packages: set[str] = set()
+    libcalls: dict[str, set[str]] = {}
     job = py = retry = None
     counter = None
     clean_exit = False
@@ -139,6 +144,8 @@ def read_process(path: Path) -> ProcessRecord | None:
                 py = meta.get("py")
                 retry = meta.get(BUILDKITE_RETRY_COUNT_ENV)
                 identity = header_identity(meta)
+                for lib in filter(None, meta.get("libs", "").split(",")):
+                    libcalls.setdefault(lib, set())
             elif tag == "#root":
                 effective_root = parts[1] if len(parts) > 1 and parts[1] else None
             elif tag == "#tests":
@@ -146,6 +153,11 @@ def read_process(path: Path) -> ProcessRecord | None:
             elif tag == "#pkg":
                 if len(parts) > 1 and parts[1]:
                     packages.add(parts[1])
+            elif tag == "#lib":
+                if len(parts) == 3 and parts[1] and parts[2]:
+                    libcalls.setdefault(parts[1], set()).add(parts[2])
+                else:
+                    malformed += 1
             elif tag in ("#stat", "#end"):
                 meta = _kv(parts[1:])
                 if "root" in meta:
@@ -201,6 +213,7 @@ def read_process(path: Path) -> ProcessRecord | None:
         outside_root=outside,
         malformed=malformed,
         packages=frozenset(packages),
+        libcalls=libcalls,
     )
 
 
@@ -426,6 +439,10 @@ class Stamp:
     # Installed top-level packages any contributing process entered, sorted.
     # Recorded, not yet read: it is what a dependency bump will route on.
     packages: list[str] = field(default_factory=list)
+    # Watched library -> the functions in it the step called at runtime from
+    # outside it, sorted. A library that is a key was watched; one that is not
+    # was not, so the row's silence about it proves nothing.
+    libcalls: dict[str, list[str]] = field(default_factory=dict)
     digest: str = ""
 
     @property

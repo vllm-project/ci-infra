@@ -5,6 +5,7 @@
 import shlex
 
 import pytest
+from ci_selector.codemap.classify import select
 from ci_selector.codemap.pipeline.buildkite import load_pipeline_configs, load_steps
 from ci_selector.codemap.pipeline.invoked_tests import invoked_files
 from ci_selector.codemap.pipeline.scripts import ARG_CUT_RE, PYTEST_LINE_RE, scan_script
@@ -288,3 +289,86 @@ def test_genuinely_unbalanced_quote_still_recorded(tmp_path):
     st = map_step(tmp_path, _wrap_step(["bash run.sh"]), script_scanner=scan_script)
     assert not st.targets
     assert st.unlexable == ['pytest -k "slow tests/test_a.py']
+
+
+def _console_repo(tmp_path, entry="vllm.entrypoints.cli.main:main"):
+    (tmp_path / "pyproject.toml").write_text(f'[project.scripts]\nvllm = "{entry}"\n')
+    main = tmp_path / "vllm" / "entrypoints" / "cli" / "main.py"
+    main.parent.mkdir(parents=True)
+    main.write_text("def main(): pass\n")
+    return "vllm/entrypoints/cli/main.py"
+
+
+def test_a_console_script_targets_its_entry_module(tmp_path):
+    """`vllm serve` runs the module pyproject.toml names for `vllm`, as
+    `python x.py` runs x.py, from a step command or a script it runs. Prose
+    naming the package is not a call: each false hit would run its step on
+    nearly every change, since the entry imports most of the tree."""
+    entry = _console_repo(tmp_path)
+    (tmp_path / "run.sh").write_text(
+        "pip install vllm --pre\n"
+        'echo "starting vllm serve"\n'
+        "docker run -v ~/.cache/vllm:/root/.cache/vllm --rm img\n"
+        "Ray cannot accommodate this vllm version.\n"
+        'CMD=(vllm serve "$MODEL")\n'
+        "out=$(vllm collect-env)\n"
+        'run "create" 1200 "${WRAP[@]}" vllm snapshot create m \\\n  --out /tmp/a\n'
+    )
+    st = map_step(
+        tmp_path,
+        _wrap_step(["vllm serve m --port 8000", "bash run.sh"]),
+        script_scanner=scan_script,
+    )
+    assert [(t.path, t.via) for t in st.targets] == [(entry, None)] + [
+        (entry, "run.sh")
+    ] * 3
+    assert not st.unparsable
+
+
+def test_a_background_command_ends_at_its_ampersand(tmp_path):
+    """Before `vllm` parsed, `vllm serve m & pytest y` was unparsable and ran
+    its step on every PR. Parsed, the `&` has to end the server call, or y is
+    read as its argument and a change to y selects nothing. `sleep 5 & pytest
+    y` already lost y that way."""
+    entry = _console_repo(tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("")
+    for server, targets in (
+        ("vllm serve m --port 8000", [entry, "tests/test_x.py"]),
+        ("sleep 5", ["tests/test_x.py"]),
+    ):
+        st = map_step(tmp_path, _wrap_step([f"{server} & pytest -v tests/test_x.py"]))
+        assert [t.path for t in st.targets] == targets
+        assert not st.unparsable
+
+
+def test_a_console_script_with_no_entry_file_stays_unknown(tmp_path):
+    """An entry this checkout cannot resolve to a file routes nothing, so the
+    command is still unparsable and preflight still runs the step."""
+    _console_repo(tmp_path, entry="vllm.gone:main")
+    st = map_step(tmp_path, _wrap_step(["vllm serve m"]))
+    assert not st.targets
+    assert st.unparsable == ["vllm serve m"]
+
+
+def test_a_vllm_cli_step_routes_from_the_modules_its_entry_runs(state):
+    """A step whose script only runs `vllm serve` reaches the subcommand
+    modules and what they import, through the entry module. vllm#58978 edited
+    vllm/collect_env.py, and select() on it or on vllm/entrypoints/cli/ never
+    named deepseek-v2-lite-prefetch-offload-accuracy-h100."""
+    step = "vllm_ci:deepseek-v2-lite-prefetch-offload-accuracy-h100"
+    entry = "vllm/entrypoints/cli/main.py"
+    runners = {
+        sid
+        for p in state.pipelines
+        for sid, st in p.targets.items()
+        if any(t.path == entry for t in st.targets)
+    }
+    assert len(runners) >= 10 and step in runners, sorted(runners)
+    for path in (
+        entry,
+        "vllm/entrypoints/cli/serve.py",
+        "vllm/entrypoints/cli/collect_env.py",
+        "vllm/collect_env.py",
+    ):
+        assert step in select(state, [path]).selected, path

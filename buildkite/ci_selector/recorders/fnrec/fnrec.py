@@ -9,8 +9,12 @@ Two roots are recorded by function: the vllm package, and the checkout's
 tests/ package once something imports it. A test helper changes as often as
 the code it tests, and without its names the selector can only route it by
 file. Everything else is recorded by top-level package only, one `#pkg` line
-each, so a dependency bump can be routed to the jobs that entered that
-library rather than to every job in the image.
+each. Entering a package says little: vLLM imports most of them at startup.
+
+A short list of libraries is recorded by call as well: the functions in them
+that code outside the library called at runtime, one `#lib` line each. That
+is what a dependency bump routes on, the jobs that called flashinfer rather
+than every job in the image.
 
 Needs FNREC_OUT and FNREC_ROOT. Starts on the first `vllm` or `aiter` import
 rather than at interpreter startup, leaving other infrastructure alone.
@@ -56,6 +60,7 @@ _ENV_KEYS = (
 )
 
 _STAT_EVERY = 500
+_CO_OPTIMIZED = 0x0001  # inspect.CO_OPTIMIZED: set on functions, not bodies
 _MAX_ROOT_TRIES = 1000
 
 _root = None
@@ -73,12 +78,22 @@ _root_logged = False
 _tests_root = None
 _tests_logged = False
 _packages = set()
+_libcalls = set()
 _stats = {"root": 0, "other": 0, "errors": 0, "last_error": ""}
 _ended = False
 
 # Where installed libraries live. A path under one names its package by the
 # next segment: .../site-packages/flashinfer/sampling.py is flashinfer.
 _SITE_DIRS = (os.sep + "site-packages" + os.sep, os.sep + "dist-packages" + os.sep)
+
+# Libraries recorded by call, by top-level package. Torch is left out on
+# purpose: a torch bump runs everything. This file imports nothing from
+# ci_selector, so a test pins the list to handwritten.LIBRARY_PINS.
+_LIBS = ("deep_gemm", "flash_attn", "flashinfer", "triton")
+# vLLM also vendors some of them under its own tree, where they are gitignored
+# build output the table cannot name, so they are recorded as the library.
+_VENDORED = "third_party" + os.sep
+_IMPORTING = "<frozen importlib._bootstrap"
 
 
 def _now():
@@ -232,6 +247,9 @@ def _header(pid):
         f"root={_root or ''}",
         f"root_env={_ROOT_ENV or ''}",
         f"tool={_tool_id}",
+        # Which libraries this recorder watches. A reader seeing none knows
+        # the process predates `#lib` lines, so their absence proves nothing.
+        f"libs={','.join(_LIBS)}",
         f"py={sys.version.split()[0]}",
         f"exe={sys.executable}",
         f"argv={_argv()!r}",
@@ -285,8 +303,13 @@ def _on_py_start(code, instruction_offset):
             _tests_root = _resolve_tests_root()
         if _tests_root is None or not filename.startswith(_tests_root):
             _stats["other"] += 1
-            _note_package(filename)
+            if _note_package(filename) in _LIBS:
+                return _note_libcall(_library_of(filename), code, sys._getframe(1))
             return sys.monitoring.DISABLE
+    elif filename.startswith(_VENDORED, len(_root)):
+        lib = _library_of(filename)
+        if lib is not None:
+            return _note_libcall(lib, code, sys._getframe(1))
     key = f"{filename}\t{code.co_qualname}\t{code.co_firstlineno}"
     with _lock:
         if _tests_root is not None and not _tests_logged:
@@ -329,19 +352,86 @@ def _log_tests_root():
 
 
 def _note_package(filename):
-    """One `#pkg` line per installed package this process enters."""
+    """One `#pkg` line per installed package this process enters. Returns
+    the package, or None."""
     pkg = _package_of(filename)
     if pkg is None or pkg in _packages:
-        return
+        return pkg
     with _lock:
         if pkg in _packages:
-            return
+            return pkg
         _packages.add(pkg)
         try:
             _out().write(f"#pkg\t{pkg}\n")
         except Exception as exc:
             _stats["errors"] += 1
             _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
+    return pkg
+
+
+def _note_libcall(lib, code, frame):
+    """One `#lib` line per function of a watched library that code outside it
+    called at runtime: the entry points, not the library's own internals.
+
+    Three outcomes, and only one records. A call from inside the library, or a
+    module or class body, is never an entry: DISABLE. A call made while a
+    module is being imported is a startup side effect, not use, so the event
+    stays armed for a later runtime call. Anything else is an entry, recorded
+    once. Either way the steady state costs nothing: every code object ends
+    disabled on its first runtime call.
+    """
+    pkg, rel = lib or (None, "")
+    caller = frame.f_back
+    if pkg is None or not code.co_flags & _CO_OPTIMIZED or caller is None:
+        return sys.monitoring.DISABLE
+    inside = _library_of(caller.f_code.co_filename)
+    if inside is not None and inside[0] == pkg:
+        return sys.monitoring.DISABLE
+    f = caller
+    while f is not None:
+        if f.f_code.co_filename.startswith(_IMPORTING):
+            return None
+        f = f.f_back
+    name = f"{_module_of(rel)}.{code.co_qualname}"
+    with _lock:
+        if (pkg, name) not in _libcalls:
+            _libcalls.add((pkg, name))
+            try:
+                _out().write(f"#lib\t{pkg}\t{name}\n")
+            except Exception as exc:
+                _stats["errors"] += 1
+                _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
+    return sys.monitoring.DISABLE
+
+
+def _library_of(filename):
+    """(watched library, the file's path from the directory holding it), or
+    None. Vendored first: vLLM itself may be installed under site-packages."""
+    rel = None
+    under_root = _root and filename.startswith(_root)
+    if under_root and filename.startswith(_VENDORED, len(_root)):
+        rel = filename[len(_root) + len(_VENDORED) :]
+    else:
+        for marker in _SITE_DIRS:
+            i = filename.rfind(marker)
+            if i >= 0:
+                rel = filename[i + len(marker) :]
+                break
+    if rel is None:
+        return None
+    pkg = rel.split(os.sep, 1)[0]
+    return (pkg, rel) if pkg in _LIBS else None
+
+
+def _module_of(rel):
+    """`flashinfer.sampling` for flashinfer/sampling.py, spelled the same
+    whether the library is installed or vendored."""
+    if rel.endswith(".py"):
+        rel = rel[:-3]
+    parts = rel.split(os.sep)
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
 
 
 def _after_in_child():
@@ -354,12 +444,13 @@ def _after_in_child():
     as an empty worker.
     """
     global _fh, _fh_pid, _seen, _lock, _nonce, _origin, _stats, _ended, _hooks_pid
-    global _root_logged, _root_tries, _tests_logged, _packages
+    global _root_logged, _root_tries, _tests_logged, _packages, _libcalls
     _fh, _fh_pid, _hooks_pid = None, None, None
     _root_logged = False
     _tests_logged = False
     _root_tries = 0
     _packages = set()
+    _libcalls = set()
     _seen = set()
     _lock = threading.Lock()
     _nonce = os.urandom(4).hex()

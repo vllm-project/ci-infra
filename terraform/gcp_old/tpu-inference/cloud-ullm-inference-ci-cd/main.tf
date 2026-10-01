@@ -71,6 +71,9 @@ module "ci_v7x_2" {
   huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
+# Eight more tpu7x-8 agents serve the same queue from inferact-vllm-tpu (see
+# that env), so this fleet runs ten and the other 32 chips of the reservation
+# are free for other work.
 module "ci_v7x_8" {
   source = "../modules/ci_v7x"
   providers = {
@@ -79,7 +82,7 @@ module "ci_v7x_8" {
 
   accelerator_type                = "tpu7x-8"
   reserved                        = true
-  instance_count                  = 18
+  instance_count                  = 10
   buildkite_queue_name            = "tpu_v7x_8_queue"
   disk_size                       = 4096
   project_id                      = var.project_id
@@ -187,8 +190,38 @@ module "ci_monitoring" {
     google-beta = google-beta.us-central1-b
   }
 
-  project_id               = var.project_id
-  bq_puller_pipeline_slugs = ["tpu-inference-ci", "vllm-torchtpu-ci"]
+  project_id = var.project_id
+  # Every TPU pipeline, bare metal and kube, so both lanes land in one table
+  # with one shape and the bare baseline outlives the bare queues.
+  bq_puller_pipeline_slugs = [
+    # Bare metal.
+    "tpu-inference-ci",
+    "tpu-inference-benchmark",
+    "tpu-inference-dev",
+    "tpu-inference-disagg-gke-benchmark",
+    "tpu-inference-kernel-tuning",
+    "tpu-tokamax-integration",
+    "tpu-vllm-integration",
+    "vllm-torchtpu-ci",
+    "vllm-torchtpu-dev",
+    "vllm-torchtpu-image",
+    "vllm-torchtpu-integration",
+    "vllm-torchtpu-nightly-image",
+    "vllm-torchtpu-pd-disagg-pipeline",
+    "vllm-torchtpu-torchtpu-nightly",
+    # Kube.
+    "tpu-inference-benchmark-kube",
+    "tpu-inference-pd-disagg-kube",
+    "tpu-inference-pipeline-features-kube",
+    "tpu-inference-pipeline-jax-kube",
+    "tpu-inference-pipeline-models-kube",
+    "tpu-inference-pipeline-parallelism-kube",
+    "tpu-inference-pipeline-rl-kube",
+    "vllm-torchtpu-pd-disagg-kube",
+    "vllm-torchtpu-pipeline-integration-kube",
+    "vllm-torchtpu-pipeline-perf-kube",
+    "vllm-torchtpu-pipeline-tests-kube",
+  ]
 
   buildkite_token_secret_ids = {
     "vllm" = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"

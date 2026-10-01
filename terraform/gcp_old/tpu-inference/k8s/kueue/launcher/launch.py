@@ -162,6 +162,11 @@ CLI_TIMEOUT_SECONDS = 120
 # what it is watching.
 API_GRACE_SECONDS = 600
 
+# How long a resubmission waits for the old object to go before creating the
+# new one under the same name. Deleting a Job or JobSet takes its Workload with
+# it through garbage collection, which is seconds on a healthy manager.
+RESUBMIT_WAIT_SECONDS = 120
+
 # Deadline for the signal handler's delete, which races the pod's termination
 # grace period (SIGKILL 30s after SIGTERM) rather than the step timeout: a
 # delete still in flight then is a delete that never happened, and the workload
@@ -332,6 +337,43 @@ def delete_workload(kind, name, timeout=CLI_TIMEOUT_SECONDS):
     else:
         log(f"WARNING: could not delete {kind}/{name}: {proc.stderr.strip()[:200]}")
     return proc.returncode == 0
+
+
+def never_dispatched(workload):
+    """Reserved, and MultiKueue has not placed it or even picked a worker.
+
+    The state a stalled dispatch leaves: the reservation is made and the
+    multikueue controller reconciles once without creating the remote copy or
+    coming back to it. A workload waiting on a worker - a slice being rebuilt
+    for its shape - names that worker in nominatedClusterNames instead, and is
+    not stuck.
+    """
+    status = (workload or {}).get("status", {})
+    admitted = condition(workload, "Admitted")
+    return (quota_reserved(workload) and not status.get("clusterName")
+            and not status.get("nominatedClusterNames")
+            and not (admitted and admitted.get("status") == "True"))
+
+
+def resubmit(kind, name, doc):
+    """Delete the object and create it again under the same name.
+
+    The new object, or None if the old one did not go in time. Waits for it to
+    go because the name is reused: applying over an object still being deleted
+    updates the doomed one rather than making a fresh one Kueue will queue.
+    """
+    delete_workload(kind, name)
+    deadline = time.monotonic() + RESUBMIT_WAIT_SECONDS
+    while kubectl_json("get", kind, name) is not None:
+        if time.monotonic() > deadline:
+            return None
+        time.sleep(POLL_SECONDS)
+    subprocess.run(
+        ["kubectl", "-n", NAMESPACE, "apply", "-f", "-"],
+        input=json.dumps(doc), text=True, check=True,
+        timeout=CLI_TIMEOUT_SECONDS,
+    )
+    return kubectl_json("get", kind, name)
 
 
 def load_registry():
@@ -617,6 +659,22 @@ def job_specs(doc):
     if doc["kind"] == "Job":
         return [doc["spec"]]
     return [rj["template"]["spec"] for rj in doc["spec"].get("replicatedJobs", [])]
+
+
+def chip_hosts(doc):
+    """How many hosts the workload holds chips on: one per pod holding chips.
+
+    Counted over every role and replica, since the profile describes one
+    slice and a disaggregated workload can hold a slice per role.
+    """
+    if doc["kind"] == "Job":
+        roles = [(1, doc["spec"])]
+    else:
+        roles = [(rj.get("replicas", 1), rj["template"]["spec"])
+                 for rj in doc["spec"].get("replicatedJobs", [])]
+    return sum(int(replicas) * int(job.get("parallelism", 1))
+               for replicas, job in roles
+               if pod_chips(job["template"]["spec"]))
 
 
 def pod_metadatas(doc):
@@ -1678,6 +1736,8 @@ def main():
     finalise(doc, profile, registry, name, labels, owner_reference(),
              shlex.join(command) if command else None, manifest)
     kind = SUPPORTED_KINDS[doc["kind"]]
+    # The cpu profile's one host when no pod holds chips.
+    hosts = chip_hosts(doc) or int(profile["hosts"])
 
     # One record per submitted workload, printed on every way out of the watch
     # below. Times are UTC RFC 3339, taken from the controllers' own
@@ -1690,10 +1750,11 @@ def main():
         "queue": profile["queue"],
         "machine_type": profile.get("machine_type"),
         "topology": profile.get("topology"),
-        "hosts": int(profile["hosts"]),
-        "chips": int(profile["chips"]) * int(profile["hosts"]),
+        "hosts": hosts,
+        "chips": int(profile["chips"]) * hosts,
         "launcher_started_at": launcher_started,
         "requeues": 0,
+        "redispatches": 0,
     }
     for field, variable in TIMING_BUILDKITE_FIELDS.items():
         timing[field] = os.environ.get(variable) or None
@@ -1725,7 +1786,7 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
 
     log(f"submitting {doc['kind']} {name} to {profile['queue']} "
-        f"({profile['hosts']} x {profile['chips']} chips, from {manifest})")
+        f"({hosts} x {profile['chips']} chips, from {manifest})")
     subprocess.run(
         ["kubectl", "-n", NAMESPACE, "apply", "-f", "-"],
         input=json.dumps(doc), text=True, check=True,
@@ -1803,8 +1864,16 @@ def main():
         timing["created_at"] = created["metadata"].get("creationTimestamp")
         admission_limit = admission_timeout(registry)
         dispatch_limit = int(registry["admission_max_seconds"])
+        # Defaults as well as registry keys, so a launcher script deployed ahead
+        # of the registry that names them still runs.
+        redispatch_after = int(registry.get("dispatch_retry_seconds", 300))
+        redispatch_max = int(registry.get("dispatch_retries", 2))
         started = time.monotonic()
         reserved = None
+        # Since when the current submission has been reserved without MultiKueue
+        # placing it or naming a worker; see never_dispatched().
+        undispatched = None
+        dispatch_seen = False
         admitted = False
         running = False
         last_startup = None
@@ -1861,12 +1930,51 @@ def main():
                 limit, since, what = dispatch_limit, reserved, "dispatched"
             else:
                 limit, since, what = admission_limit, started, "admitted"
+
+            # A dispatch Kueue dropped: the chips are held and nothing will
+            # place the workload, so waiting out dispatch_limit only delays
+            # the failure. A fresh object gets a fresh reconcile. Never after
+            # admission, where losing the reservation is preemption and Kueue
+            # requeues it itself.
+            status = (workload or {}).get("status", {})
+            if cluster or status.get("nominatedClusterNames"):
+                dispatch_seen = True
+            if not admitted and not dispatch_seen and never_dispatched(workload):
+                if undispatched is None:
+                    undispatched = time.monotonic()
+            else:
+                undispatched = None
+            if (undispatched is not None
+                    and time.monotonic() - undispatched > redispatch_after
+                    and timing["redispatches"] < redispatch_max):
+                timing["redispatches"] += 1
+                log(f"quota reserved {time.monotonic() - undispatched:.0f}s ago "
+                    "but not dispatched to any worker - resubmitting (attempt "
+                    f"{timing['redispatches']}/{redispatch_max})")
+                created = with_grace(resubmit, kind, name, doc)
+                if created is None:
+                    log(f"{kind}/{name} was not deleted within "
+                        f"{RESUBMIT_WAIT_SECONDS}s, so it cannot be resubmitted")
+                    stop_announcing()
+                    delete_workload(kind, name)
+                    return finish("not_admitted", 1)
+                uid = created["metadata"]["uid"]
+                reserved = None
+                undispatched = None
+                last_note = None
+                continue
+
             if not admitted and time.monotonic() - since > limit:
                 # Time spent unable to reach the manager counts against this on
                 # purpose: the budget is carved so the run still fits inside the
                 # step's own deadline, which a blind spell does not move.
                 blind = f", {blind_total:.0f}s of it blind" if blind_total else ""
-                log(f"not {what} within {limit}s{blind} - capacity, not the test")
+                if what == "dispatched":
+                    why = ("chips were reserved but no worker admitted it, "
+                           "so neither capacity nor the test")
+                else:
+                    why = "capacity, not the test"
+                log(f"not {what} within {limit}s{blind} - {why}")
                 stop_announcing()
                 delete_workload(kind, name)
                 return finish("not_admitted", 1)

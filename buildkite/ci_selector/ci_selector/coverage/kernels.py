@@ -348,6 +348,8 @@ class KernelReading:
     added: list[str] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
     kept: list[str] = field(default_factory=list)
+    # Positive observations, including steps the map already selected.
+    executes: list[str] = field(default_factory=list)
     reasons: Counter = field(default_factory=Counter)
     #: changed file -> what this record could do with it, for the report
     files: dict[str, str] = field(default_factory=dict)
@@ -433,13 +435,13 @@ def read_pr(
     # ADD. Ungated: one launch proves the step runs code from the file, and a
     # failed or incomplete row is still a record of what did run.
     already = set(selection.selected)
-    for step_id in keys.candidates():
-        if step_id in already:
-            continue
+    for step_id in dict.fromkeys([*keys.candidates(), *selection.selected]):
         key = keys.key_for(step_id)
         row = table.row(key) if key else None
         if row is not None and launched(row):
-            reading.added.append(step_id)
+            reading.executes.append(step_id)
+            if step_id not in already:
+                reading.added.append(step_id)
     reading.reasons["row-adds-a-step-the-map-missed"] += len(reading.added)
 
     # DROP. Every gate resolves toward keeping.

@@ -38,6 +38,7 @@ vllm/__init__.py	top	1
 /vllm-workspace/tests/utils.py	RemoteOpenAIServer.__init__	740
 #pkg	torch
 #pkg	flashinfer
+#lib	flashinfer	flashinfer.sampling.top_k_top_p_sampling_from_probs
 #end	root=5	other=247	errors=0	last_error=	t=1790190284.827
 ```
 
@@ -79,8 +80,20 @@ a changed `tests/` file stays outside its recorder scope until it opts in.
 
 Everything else is counted, and an installed library (anything under a
 `site-packages` or `dist-packages` directory) is written once per process by
-its top-level package, as `#pkg`. That is what a dependency bump can route on:
-the jobs that entered flashinfer, not every job in the image.
+its top-level package, as `#pkg`. vLLM imports most of them at startup, so
+entering one says little.
+
+A short list of libraries (`_LIBS`: flashinfer, deep_gemm, flash_attn, triton)
+is also recorded by call, as `#lib <library> <module.qualname>`: each function
+in it that code outside the library called at runtime. Not the library's own
+internals, which DISABLE on their first call, and not module or class bodies.
+A call made while any module is being imported is startup, not use, so its
+event stays armed for a later runtime call; everything else is recorded once
+and disabled, so the steady state costs nothing. A copy vendored under
+`vllm/third_party/` is recorded the same way. The header's `libs=` names the
+list in force, so a row whose header lacks it predates this and its silence
+proves nothing. That is what a dependency bump routes on: the jobs that called
+flashinfer, not every job in the image.
 
 Known limits:
 

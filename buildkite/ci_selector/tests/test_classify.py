@@ -29,7 +29,7 @@ def test_docs_only_short_circuit(state):
     assert sel.docs_only and not sel.selected
 
 
-def test_shared_build_inputs_reach_every_platform(state, declared_deps_on):
+def test_shared_build_inputs_reach_every_platform(state):
     """The guard for the two pipelines nothing else watches.
 
     The shared build inputs reach the AMD and Intel steps only through the
@@ -43,7 +43,7 @@ def test_shared_build_inputs_reach_every_platform(state, declared_deps_on):
 
     Since the build map shipped: an unmapped shared input must still reach
     every platform, while a mapped cuda+amd source keeps its own families wide
-    and loses the intel pipeline down to CI's own declarers. The mapped
+    and loses the intel pipeline down to its own op-test steps. The mapped
     fixture is asserted to exist and be mapped, because the file this test
     used before had been deleted and so pinned nothing.
     """
@@ -64,7 +64,7 @@ def test_shared_build_inputs_reach_every_platform(state, declared_deps_on):
     # a trivially-everything selector cannot pass the assertion above it.
     narrow = select(state, ["requirements/test/rocm.txt"])
 
-    for path in ("cmake/hipify.py", "requirements/common.txt"):
+    for path in ("requirements/common.txt",):
         assert path not in state.build_map.families
         sel = select(state, [path])
         assert not sel.run_all, f"{path} escalated instead of routing"
@@ -85,7 +85,6 @@ def test_shared_build_inputs_reach_every_platform(state, declared_deps_on):
             )
 
     from ci_selector.codemap import classify
-    from ci_selector.codemap.step_refs import _source_dep_steps
 
     shared_tu = "csrc/libtorch_stable/cache_kernels.cu"
     assert (state.repo / shared_tu).is_file(), "the mapped fixture went ghost"
@@ -99,22 +98,19 @@ def test_shared_build_inputs_reach_every_platform(state, declared_deps_on):
     assert len(picked & per["amd"]) >= len(per["amd"]) // 2
     # And the narrowing is live. Without this the test cannot tell if the
     # wider answer came back.
-    declared = _source_dep_steps(state, shared_tu)
     native = classify._classify_native_tests(state, shared_tu)
     derived_core = native.step_ids if native else set()
-    assert picked & per["xpu"] <= declared | derived_core, (
-        f"{shared_tu} reaches intel steps beyond its declarers and its own "
-        "op-test joints; the family scoping stopped applying"
+    assert picked & per["xpu"] <= derived_core, (
+        f"{shared_tu} reaches intel steps beyond its own op-test joints; the "
+        "family scoping stopped applying"
     )
 
 
-def test_csrc_cpu_routes_to_declarers_plus_cpu_family(state, declared_deps_on):
-    """csrc/cpu/ is cpu-exclusive and unclaimed: route via the blanket csrc/
-    declarers plus the cpu family, not the bare complement (GPU jobs can't run it)."""
+def test_csrc_cpu_routes_to_the_cpu_family(state):
+    """csrc/cpu/ is cpu-exclusive and unclaimed: route to the cpu family, not
+    the bare complement (GPU jobs can't run it)."""
     sel = select(state, ["csrc/cpu/cpu_attn.cpp"])
     assert "vllm_ci" not in sel.run_all
-    assert any(c.rule == "declared-deps" for c in sel.claims)
-    assert "vllm_ci:torch-stable-abi-audit" in sel.selected
     assert "vllm_ci:cpu-kernel-tests" in sel.selected
     # device-less GPU suites and rust cargo steps the bare complement kept are gone
     assert "vllm_ci:rust-frontend-cargo-tests" not in sel.selected
@@ -192,38 +188,14 @@ def test_no_vllm_file_imports_tests(state):
     assert not leaks, leaks[:5]
 
 
-def test_engine_gate_on_worker_file_keeps_catching_job(state, declared_deps_on):
+def test_engine_gate_on_worker_file_routes(state):
     """#49364: the engine-starting gate trims non-engine tests reached through a
-    boot edge, but the catching job (V1 Sample + Logits) must survive.
+    boot edge, and the file still routes rather than running everything.
 
-    DECLARED-DEPS ONLY: rides a declaration the derived default gives up, so
-    by default this file alone does not select the catching job. A derived
-    route is queued in todo."""
+    This file alone does not select the catching job (V1 Sample + Logits):
+    only its declaration reached it. A derived route is queued in todo."""
     sel = select(state, ["vllm/v1/worker/gpu/cudagraph_utils.py"])
     assert "vllm_ci" not in sel.run_all
-    labels = {
-        s.label for p in state.pipelines for s in p.steps if s.step_id in sel.selected
-    }
-    assert any("Sample" in lbl and "Logits" in lbl for lbl in labels), (
-        "the #49364 catching job must survive the engine gate"
-    )
-
-
-def test_gpu_worker_namespace_reaches_cpu_jobs(state, declared_deps_on):
-    """cpu_worker.py subclasses gpu_worker.Worker, so gpu-namespace changes must reach
-    intel_cpu jobs (the old subtractive rule under-selected).
-
-    DECLARED-DEPS ONLY: rides a declaration the derived default gives up. CPU
-    steps cannot record, so the add side cannot restore them either. A derived
-    route is queued in todo."""
-    sel = select(state, ["vllm/v1/worker/gpu_worker.py"])
-    cpu_selected = {
-        s.label
-        for p in state.pipelines
-        for s in p.steps
-        if s.step_id in sel.selected and s.device in ("intel_cpu", "arm_cpu")
-    }
-    assert cpu_selected, "gpu_worker.py must reach at least one CPU job"
 
 
 def test_var_prefixed_python_driver_in_script(state):
@@ -366,56 +338,10 @@ def test_model_named_in_step_env_var(state):
     assert any("Invariance" in lbl for lbl in labels), sorted(labels)[:10]
 
 
-def test_lm_eval_routes_by_declared_deps(state, declared_deps_on):
-    """lm-eval steps route by source_file_dependencies, not the import graph, so a
-    quant file and a base-model file select different lm-eval jobs."""
-    quant = set(
-        select(state, ["vllm/model_executor/layers/quantization/fp8.py"]).selected
-    )
-    assert "vllm_ci:lm-eval-small-models" in quant
+def test_base_model_change_skips_lm_eval_small_models(state):
+    """A base-model change must not select the small-models lm-eval job."""
     model = set(select(state, ["vllm/model_executor/models/llama.py"]).selected)
-    # declares quantization, not models -> a base-model change must NOT select it
     assert "vllm_ci:lm-eval-small-models" not in model
-    # the amd mirror declares vllm/model_executor/models/ -> it must
-    assert "vllm_ci:lm-eval-small-models-amd:amd" in model
-
-
-def test_no_classifier_drops_declared_source_deps(state, declared_deps_on):
-    """A step declaring a path in source_file_dependencies must survive into that path's
-    claim; dropping it is under-selection. Probes a deep new-subpackage file under every
-    declared dir plus every declared file. Exempts run-all and authoritative-nothing
-    claims; on a graph-known file catch-all (bare `vllm/`) declarers are omitted
-    (specific-only)."""
-    from ci_selector.codemap.classify import (
-        _classify,
-        _graph_known,
-        _source_dep_steps,
-    )
-    from ci_selector.codemap.unions import _DEP_UNION_EXEMPT
-
-    probes: set[str] = set()
-    for p in state.pipelines:
-        for s in p.steps:
-            for dep in s.source_file_dependencies or []:
-                d = dep.rstrip("/")
-                if (state.repo / d).is_dir():
-                    probes.add(f"{d}/__ci_probe_pkg__/__init__.py")
-                else:
-                    probes.add(d)
-    checked = 0
-    for probe in sorted(probes):
-        declarers = _source_dep_steps(
-            state, probe, specific_only=_graph_known(state, probe)
-        )
-        if not declarers:
-            continue
-        claim = _classify(state, probe, None)
-        if claim.run_all or claim.rule in _DEP_UNION_EXEMPT:
-            continue
-        missing = declarers - claim.step_ids
-        assert not missing, f"{probe} ({claim.rule}) drops {sorted(missing)[:5]}"
-        checked += 1
-    assert checked >= 5, f"only {checked} probes exercised the invariant"
 
 
 def _modelled_dep(dep: str) -> bool:
@@ -469,20 +395,24 @@ def test_negated_dep_carves_out_of_a_broader_positive(state):
     assert live, "no negated deps in the live config any more: specimen drifted"
 
 
-def test_catch_all_declarers_omitted_on_graph_known_leaf(state, declared_deps_on):
-    """On a graph-known leaf the graph is authoritative, so a step declaring only
-    bare `vllm/` is omitted (graph closure plus SPECIFIC declarers, not CI blanket)."""
-    from ci_selector.codemap.classify import _source_dep_steps
+def test_graph_known_leaf_routes_by_the_graph(state):
+    """On a graph-known leaf the graph is authoritative: it routes, not run-all,
+    and a step declaring only bare `vllm/` is not picked up for it."""
+    from ci_selector.codemap.claim import step_declares
     from ci_selector.codemap.state import _graph_known
 
     leaf = "vllm/model_executor/layers/quantization/experts_int8.py"
     assert _graph_known(state, leaf), "specimen drifted (no longer graph-known)"
-    full = _source_dep_steps(state, leaf)
-    specific = _source_dep_steps(state, leaf, specific_only=True)
+    full = declaring_steps(state, leaf)
+    specific = {
+        s.step_id
+        for p in state.pipelines
+        for s in p.steps
+        if step_declares(s.source_file_dependencies, leaf, True)
+    }
     assert specific < full, "specimen has no catch-all declarers to omit"
     sel = select(state, [leaf])
     assert "vllm_ci" not in sel.run_all
-    assert any("catch-all-only declarers omitted" in c.detail for c in sel.claims)
     assert (full - specific) - set(sel.selected), (
         "narrowing dropped nothing -- every catch-all declarer also rides the graph"
     )
@@ -684,8 +614,6 @@ def test_no_rule_above_graph_swallows_a_closure_routed_hub(state):
     old `assert checked` could not see it because it counted claims rather than
     what they proved.
     """
-    from ci_selector.codemap.classify import _source_dep_steps
-
     always_run = always_run_ids(state)
     for path in CLOSURE_HUBS:
         claim = _closure_hub_guards(state, path)
@@ -695,15 +623,13 @@ def test_no_rule_above_graph_swallows_a_closure_routed_hub(state):
         # Steps selected regardless of which claim won, so containing them
         # proves nothing about rule ordering.
         free = (
-            state.artifacts.steps_for_input(path)
-            | _source_dep_steps(state, path, specific_only=True)
-            | always_run
+            state.artifacts.steps_for_input(path) | always_run
         ) & state.auto_step_ids
         residual = want - free
         assert residual, (
             f"{path} proves nothing about rule ordering: all {len(want)} of its "
-            "closure steps are supplied by the image union, its declarers or the "
-            "always-run floor. Replace the fixture."
+            "closure steps are supplied by the image union or the always-run "
+            "floor. Replace the fixture."
         )
         missing = residual - set(sel.selected)
         assert not missing, (
@@ -967,17 +893,10 @@ def test_plugin_package_file_selects_plugin_step(state, vllm_repo):
 
 @pytest.mark.quiet_preflight
 def test_orphan_test_file_selects_nothing(state):
-    """An orphan test file no step declares runs nowhere: zero jobs with a claim, not
-    run-all. A declared orphan differs (see
-    test_no_classifier_drops_declared_source_deps); specimen derived from HEAD."""
-    from ci_selector.codemap.classify import _source_dep_steps
-
-    orphans = [
-        f
-        for f in sorted(set(state.catalog) - state.invoked - state.legacy_invoked)
-        if not _source_dep_steps(state, f)
-    ]
-    assert orphans, "no undeclared orphan test files at HEAD to exercise the rule"
+    """An orphan test file runs nowhere: zero jobs with a claim, not run-all.
+    Specimen derived from HEAD."""
+    orphans = sorted(set(state.catalog) - state.invoked - state.legacy_invoked)
+    assert orphans, "no orphan test files at HEAD to exercise the rule"
     path = orphans[0]
     sel = select(state, [path])
     assert not sel.run_all
@@ -1023,15 +942,14 @@ def test_package_init_routes_to_package_steps(state):
     assert any("basic-correctness" in s for s in _selected(sel))
 
 
-def test_boot_edge_reaches_conftest_server_suites(state, declared_deps_on):
-    """A boot-edge diff must select suites whose engine boot happens in a
-    conftest server fixture, not just direct entrypoint importers.
+def test_boot_edge_file_routes(state):
+    """A boot-edge diff routes rather than running everything.
 
-    DECLARED-DEPS ONLY: rides a declaration the derived default gives up. A
-    derived route is queued in todo."""
+    It does not reach the suites whose engine boot happens in a conftest server
+    fixture (metrics-tracing): only a declaration reached them. A derived route
+    is queued in todo."""
     sel = select(state, ["vllm/v1/worker/gpu_model_runner.py"])
     assert "vllm_ci" not in sel.run_all
-    assert any("metrics-tracing" in s for s in _selected(sel))
 
 
 @pytest.mark.quiet_preflight
@@ -1410,8 +1328,8 @@ def test_a_docker_file_the_build_dag_knows_does_not_run_everything(state):
 
 def test_an_unclaimed_unreferenced_file_is_inert(state):
     """A file no derived surface reaches -- no step target, key, docker COPY,
-    specific declarer, or command text names it -- selects nothing beyond the
-    floor, because no job can execute it. Files under package roots keep the
+    or command text names it -- selects nothing beyond the floor, because no
+    job can execute it. Files under package roots keep the
     fail-open (see test_brand_new_file_fails_open)."""
     from ci_selector.codemap.classify import _classify
 
@@ -1613,7 +1531,7 @@ def test_no_examples_file_reaches_the_terminal_fail_open(state):
     )
 
 
-# ---- declared-deps routing -------------------------------------------------
+# ---- graph-blind files -----------------------------------------------------
 
 
 def _rust_declarers(state, path):
@@ -1660,15 +1578,12 @@ def test_rust_toolchain_routes_to_cargo_steps(state):
     assert "vllm_ci:rust-frontend-cargo-tests" in sel.selected
 
 
-def test_cmake_cpu_extension_routes_to_declarers_plus_cpu_family(
-    state, declared_deps_on
-):
-    """Real CI's route (the declaring steps) plus the CPU family whose suites compile
-    the extension in-step without declaring it (previously excluded, then run-all)."""
+def test_cmake_cpu_extension_routes_to_the_cpu_family(state):
+    """The CPU family, whose suites compile the extension in-step (previously
+    excluded, then run-all)."""
     sel = select(state, ["cmake/cpu_extension.cmake"])
     assert not sel.run_all
     for sid in (
-        "vllm_ci:torch-stable-abi-audit",
         "vllm_ci:cpu-kernel-tests",
         "vllm_rocm_ci:cpu-kernel-tests",
     ):
@@ -1688,26 +1603,6 @@ def test_rocm_named_rust_file_selects_rust_steps(state):
 def test_undeclared_oddball_still_fails_open(state):
     sel = select(state, ["tools/install_gdrcopy.sh"])
     assert set(sel.run_all) == {"vllm_ci", "vllm_intel_ci", "vllm_rocm_ci"}
-
-
-def test_all_manual_declarers_fall_open(state, declared_deps_on):
-    """Direction guard: with no auto-run declarer the rule must not silently
-    select nothing. cmake/cpu_extension.cmake is graph-blind and declared only
-    by steps this test strips from `auto_step_ids`, so it falls through — and
-    since the build map scopes it, the fail-open runs its device family
-    instead of everything."""
-    import dataclasses
-
-    from ci_selector.codemap.classify import _classify, _source_dep_steps
-
-    path = "cmake/cpu_extension.cmake"
-    declarers = _source_dep_steps(state, path)
-    assert declarers, "fixture drift: no step declares cmake/cpu_extension.cmake"
-    st2 = dataclasses.replace(state, auto_step_ids=state.auto_step_ids - declarers)
-    claim = _classify(st2, path, None)
-    assert claim.rule == "fail-open" and not claim.run_all
-    assert "build-map scoped" in claim.detail
-    assert claim.step_ids
 
 
 def test_a_mapped_build_file_fails_open_scoped_not_run_all(state):
@@ -1753,46 +1648,20 @@ def test_an_empty_scoped_complement_falls_back_to_run_all(state, monkeypatch):
     assert claim.rule == "fail-open" and claim.run_all
 
 
-def test_requirements_all_manual_declarers_fall_open(state, declared_deps_on):
-    import dataclasses
-
-    from ci_selector.codemap.classify import _classify, _source_dep_steps
-
-    path = "requirements/nightly_torch_test.txt"
-    declarers = _source_dep_steps(state, path)
-    assert declarers, "fixture drift: no step declares the nightly torch file"
-    st2 = dataclasses.replace(state, auto_step_ids=state.auto_step_ids - declarers)
-    claim = _classify(st2, path, None)
-    assert claim.rule == "fail-open" and claim.run_all
-
-
-def test_hipify_also_selects_declaring_abi_step(state, declared_deps_on):
-    """`cmake/hipify.py` was a rocm-only run_all match, but vllm_ci's
-    torch-abi audit declares cmake/: real CI runs it, so must we. Derived, the
-    declarer route is what carries it now that the sweep is gone."""
-    sel = select(state, ["cmake/hipify.py"])
-    assert not sel.run_all
-    assert "vllm_ci:torch-stable-abi-audit" in sel.selected
-
-
 def test_family_exclusive_no_declarers_keeps_complement(state):
     """A family-exclusive path with no auto declarer keeps the device-family
-    complement (the declarers-consult must not silence it)."""
+    complement."""
     from ci_selector.codemap.classify import _classify
 
     claim = _classify(state, "tools/rocm_env_check.sh", None)
     assert claim.rule == "fail-open" and not claim.run_all and claim.step_ids
 
 
-def test_family_exclusive_inside_roots_keeps_complement(state, declared_deps_on):
-    """The roots gate holds inside the scoped consult: a cpu-exclusive vllm asset with
-    blanket vllm/ declarers keeps the complement, not the (narrowing) declarers."""
-    from ci_selector.codemap.classify import _classify, _source_dep_steps
+def test_family_exclusive_inside_roots_keeps_complement(state):
+    """A cpu-exclusive vllm asset keeps the complement."""
+    from ci_selector.codemap.classify import _classify
 
     path = "vllm/v1/worker/cpu_tuning_table.json"
-    assert _source_dep_steps(state, path) & state.auto_step_ids, (
-        "fixture drift: expected blanket vllm/ auto declarers"
-    )
     claim = _classify(state, path, None)
     assert claim.rule == "fail-open" and not claim.run_all
 
@@ -1802,10 +1671,10 @@ def test_manual_only_declarers_keep_complement(state):
     the complement rather than selecting nothing."""
     import dataclasses
 
-    from ci_selector.codemap.classify import _classify, _source_dep_steps
+    from ci_selector.codemap.classify import _classify
 
     path = "csrc/cpu/cpu_attn.cpp"
-    declarers = _source_dep_steps(state, path)
+    declarers = declaring_steps(state, path)
     st2 = dataclasses.replace(state, auto_step_ids=state.auto_step_ids - declarers)
     claim = _classify(st2, path, None)
     assert claim.rule == "fail-open" and not claim.run_all and claim.step_ids
@@ -1818,10 +1687,10 @@ def test_tests_side_script_zero_coverage_selects_nothing(state):
     """#50110: an unimported .sh in a directory no step covers or declares routes to
     nothing. Synthetic path because every real tests/*.sh now sits under a declared
     tree, so this exercises the truly-unclaimed branch."""
-    from ci_selector.codemap.classify import _classify, _source_dep_steps
+    from ci_selector.codemap.classify import _classify
 
     path = "tests/__unclaimed_helper_area__/run_nothing.sh"
-    assert not _source_dep_steps(state, path), "synthetic path unexpectedly declared"
+    assert not declaring_steps(state, path), "synthetic path unexpectedly declared"
     claim = _classify(state, path, None)
     assert claim.rule == "target-coverage"
     assert not claim.run_all and not claim.step_ids
@@ -1957,7 +1826,7 @@ def test_an_optional_steps_script_selects_that_step(state):
     assert not sel.manual_hits
 
 
-def test_added_init_under_covered_tests_dir_routes(state, declared_deps_on):
+def test_added_init_under_covered_tests_dir_routes(state):
     """#50330 shape: an added tests __init__ under a directory a step targets
     routes to that step (not run-all)."""
     from ci_selector.codemap.classify import _classify
@@ -2052,13 +1921,12 @@ def test_helion_config_json_routes_to_consumers(state):
     assert set(sel.selected) & state.family_steps("cuda")
 
 
-def test_declared_deps_never_fires_inside_graph_roots(state):
-    """An unmodelable vllm asset (tuning json) is owned by package-data now,
-    not the blanket vllm/ declarers, and never runs-all via declared-deps."""
-    from ci_selector.codemap.classify import _classify, _classify_declared_deps
+def test_unmodelable_vllm_asset_is_package_data(state):
+    """An unmodelable vllm asset (tuning json) is owned by package-data and
+    never runs-all."""
+    from ci_selector.codemap.classify import _classify
 
     path = "vllm/model_executor/layers/fused_moe/configs/zzz_probe.json"
-    assert _classify_declared_deps(state, path) is None
     claim = _classify(state, path, None)
     assert claim.rule == "package-data" and not claim.run_all
 
@@ -2884,9 +2752,9 @@ def test_colocated_claims_keep_the_droppability_contract(state):
         assert not (claim.droppable_step_ids & state.family_steps(family))
 
 
-def test_declared_deps_are_droppable_but_hardware_tagging_is_not(state):
+def test_reach_steps_are_droppable_but_hardware_tagging_is_not(state):
     from ci_selector.codemap import hardware
-    from ci_selector.codemap.classify import _classify, _source_dep_steps
+    from ci_selector.codemap.classify import _classify
 
     # Both reachability rules owe the same contract, so assert it on both
     # rather than on whichever one happens to claim this path today.
@@ -2895,9 +2763,6 @@ def test_declared_deps_are_droppable_but_hardware_tagging_is_not(state):
     claim = _classify(state, path, None)
     assert claim.rule in reach_rules
     assert claim.droppable_step_ids <= claim.step_ids
-    assert _source_dep_steps(state, path, specific_only=True) <= (
-        claim.droppable_step_ids
-    )
     # An empty droppable set would stop scoping silently, reading as a clean 0.
     assert claim.droppable_test_files
 
@@ -3008,6 +2873,68 @@ def test_the_site_file_itself_still_fails_open(state):
     assert claim.rule == "fail-open", claim.rule
     assert "unmodeled dynamic import" in claim.detail
     assert _selected(sel) > _selected(select(state, [site]))
+
+
+def _as_site(state, path):
+    import dataclasses
+
+    return dataclasses.replace(
+        state,
+        preflight=dataclasses.replace(
+            state.preflight, unclassified_sites=frozenset({path})
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        "tests/v1/kv_connector/unit/offloading_connector/utils.py",
+        "tests/v1/kv_connector/nixl_integration/test_accuracy.py",
+    ],
+)
+def test_a_tests_site_routes_by_what_runs_it(state, site):
+    """vllm#58967: a ROCm PD helper under tests/ loads its connector's test by
+    f-string, and failing open on it ran 187 steps for the 2 that import it.
+    The unknown edges point out of the site, and its importers are known, so
+    it routes as if it held no dynamic import. Unlike vllm/, where that
+    reverse reach is most of the pipeline and the guard above stays."""
+    from ci_selector.codemap.classify import _classify
+
+    assert (state.repo / site).exists(), f"{site} moved; pick another specimen"
+    gated = _as_site(state, site)
+    claim = _classify(gated, site, None)
+    assert claim.rule != "fail-open" and not claim.run_all, claim.detail
+    assert _selected(select(gated, [site])) == _selected(select(state, [site]))
+
+
+def test_a_changed_tests_site_helper_keeps_its_file_level_closure(state):
+    """A site helper never routes by changed names. Its dynamic import may sit
+    in a module-level `m = import_module(...)`, which runs for every importer,
+    while the name rule would follow only the importers that spell `m`. The
+    specimen is vllm#54379's edit to tests/utils.py, which changes only
+    function bodies, replayed as if that helper were a site: by name it
+    reaches 164 test files, by closure 1545."""
+    import subprocess
+
+    from ci_selector.codemap.classify import _classify
+    from ci_selector.codemap.state import DiffContext
+
+    edit = "e41011129bd54c9e8e12b645ea9b964027d2363f"
+    helper = "tests/utils.py"
+    probe = subprocess.run(
+        ["git", "-C", str(state.repo), "cat-file", "-e", f"{edit}^"],
+        capture_output=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip("vllm#54379 not present locally (shallow clone)")
+    ctx = DiffContext(f"{edit}^", edit, {helper: "M"})
+    by_name = _classify(state, helper, ctx)
+    assert by_name.rule == "test-helper-symbols", "specimen no longer narrows"
+    claim = _classify(_as_site(state, helper), helper, ctx)
+    assert claim.rule == "graph", (claim.rule, claim.detail)
+    assert claim.test_files == _classify(state, helper, None).test_files
+    assert by_name.test_files < claim.test_files
 
 
 @pytest.mark.quiet_preflight
@@ -3142,9 +3069,8 @@ def test_rust_file_keeps_env_keyed_steps(state):
 def test_image_union_exempt_membership(state):
     """Every entry is a decision that a rule's own answer beats the build
     graph's, so force a re-read on any change. "inert" is here so the image
-    COPY does not borrow consumer steps back onto a file proved unreferenced,
-    but stays out of _DEP_UNION_EXEMPT since a declarer disproves the veto."""
-    from ci_selector.codemap.unions import _DEP_UNION_EXEMPT, _IMAGE_UNION_EXEMPT
+    COPY does not borrow consumer steps back onto a file proved unreferenced."""
+    from ci_selector.codemap.unions import _IMAGE_UNION_EXEMPT
 
     assert (
         frozenset(
@@ -3160,7 +3086,6 @@ def test_image_union_exempt_membership(state):
         )
         == _IMAGE_UNION_EXEMPT
     )
-    assert "inert" not in _DEP_UNION_EXEMPT
     # "buildkite" must stay out: step yamls opt out per path, via
     # Claim.image_union_exempt. Exempting the rule would take the union off
     # every other file the rule claims, which the membership diff alone reads
@@ -3290,22 +3215,6 @@ def test_requirements_cuda_keeps_unlabeled_consumers(state):
     assert "vllm_ci:kernels-attention-test" in sel.selected
 
 
-def test_build_validated_manual_only_declarers_keep_the_floor(state, declared_deps_on):
-    """A build-validated file is validated by the always-run builds, which
-    install it whatever the declarers say: with every declarer manual-only it
-    keeps that floor rather than running everything."""
-    import dataclasses
-
-    from ci_selector.codemap.classify import _classify, _source_dep_steps
-
-    path = "requirements/lint.txt"
-    declarers = _source_dep_steps(state, path)
-    assert declarers, "fixture drift: nothing declares lint.txt"
-    st2 = dataclasses.replace(state, auto_step_ids=state.auto_step_ids - declarers)
-    claim = _classify(st2, path, None)
-    assert claim.rule == "requirements" and not claim.run_all
-
-
 def test_reasons_are_attributed_per_step(state):
     """Each step is told why it was selected, not why the claim exists."""
     from ci_selector.codemap.classify import _classify
@@ -3315,8 +3224,6 @@ def test_reasons_are_attributed_per_step(state):
     path = "csrc/attention/attention_dtypes.h"
     claim = _classify(state, path, None)
     copied = {s for s, rule in claim.step_rule.items() if rule == "image-copy"}
-    # Every override, not just the image ones: under DECLARED_DEPS=on the
-    # declarer union pins its own reasons here too, and those are not "own".
     own = claim.step_ids - set(claim.step_rule)
     assert copied, "the image copy added nothing; this specimen no longer bites"
     assert own, "every step was image-copied; nothing left to contrast against"
@@ -3326,8 +3233,9 @@ def test_reasons_are_attributed_per_step(state):
         assert "runs on that image" in claim.step_detail[sid]
         assert claim.detail != claim.step_detail[sid]
 
-    # The claim's own steps share the reason frozen before the unions appended
-    # their sentences, so they never inherit a summary of steps they are not.
+    # The claim's own steps share the reason frozen before the image union
+    # appended its sentence, so they never inherit a summary of steps they are
+    # not.
     pinned = {claim.step_detail[sid] for sid in own}
     assert len(pinned) == 1, pinned
     frozen = pinned.pop()
@@ -3338,26 +3246,19 @@ def test_reasons_are_attributed_per_step(state):
         assert sid not in claim.step_rule
 
 
-def test_declarer_reasons_name_the_dep_they_matched(state):
-    """A declarer-added step names the declaration that matched it, not the
-    claim's own reason. release-ci is the leg that fires with the switch off."""
+def test_release_pipeline_yaml_selects_nothing(state):
+    """The release pipeline's own yaml is a release-ci claim, and no step is
+    added to it: a declaration of the file is never read."""
     from ci_selector.codemap.classify import _classify
 
     path = ".buildkite/release-pipeline.yaml"
     claim = _classify(state, path, None)
     assert claim.rule == "release-ci"
-    declared = {sid for sid, rule in claim.step_rule.items() if rule == "declared-deps"}
-    assert declared == claim.step_ids, (
-        "every step on a release-ci claim arrives through the declarer union"
-    )
-    for sid in declared:
-        assert claim.step_detail[sid] == (
-            f"this step declares '{path}' as a source dep"
-        )
+    assert not claim.step_ids and not claim.step_rule
 
 
 def test_per_step_reason_keys_stay_within_step_ids(state):
-    """The dataclass check runs at construction and the union passes mutate
+    """The dataclass check runs at construction and the image union mutates
     after it, so only a sweep catches a stray key."""
     import subprocess
 
@@ -3381,7 +3282,6 @@ def test_per_step_reason_keys_stay_within_step_ids(state):
             checked += len(claim.step_detail)
             seen |= set(claim.step_rule.values())
     assert checked > 0, "no per-step reason was written anywhere; the sweep is blind"
-    # declared-deps appears only with CI_SELECTOR_DECLARED_DEPS=on.
     assert "image-copy" in seen, sorted(seen)
 
 
@@ -3463,3 +3363,18 @@ def test_an_env_var_the_build_never_reads_skips_the_image_union(tmp_path):
     assert after(added)
     assert not after(envs.replace('getenv("MAX_JOBS")', 'getenv("MAX_JOBS", "8")'))
     assert not after(envs + "print('side effect')\n")
+
+
+@pytest.mark.parametrize(
+    "path", ["cmake/hipify.py", "cmake/patches/pytorch_stable_string.patch"]
+)
+def test_a_file_the_build_runs_by_path_is_not_inert(state, path):
+    """Nothing compiles either file, so the build map does not know them, but
+    CMake runs hipify.py and applies the patch by path. With declarations no
+    longer read, the inert floor called both "nothing to run"."""
+    from ci_selector.codemap.classify import _classify, _cmake_named_files
+
+    assert path in _cmake_named_files(state), "the CMake reference moved"
+    claim = _classify(state, path, None)
+    assert claim.rule != "inert"
+    assert claim.run_all or claim.step_ids & state.auto_step_ids

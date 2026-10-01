@@ -14,7 +14,7 @@ metadata:
 spec:
   cohortName: ${ACCELERATOR}
   preemption:
-    reclaimWithinCohort: Never
+    reclaimWithinCohort: ${RECLAIM_WITHIN_COHORT}
     withinClusterQueue: Never
   namespaceSelector:
     matchLabels:

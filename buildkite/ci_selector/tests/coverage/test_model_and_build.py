@@ -195,6 +195,28 @@ class TestReadProcess:
         assert record.malformed == 0
         assert record.functions == {"vllm/mod.py": {"plain"}}
 
+    def test_library_calls_are_read_per_watched_library(self, tmp_path: Path):
+        p = tmp_path / "fn.a.txt"
+        process_file(
+            p,
+            [("mod.py", "plain")],
+            libs=["flashinfer", "triton"],
+            libcalls=[("flashinfer", "flashinfer.sampling.top_k")],
+        )
+        record = read_process(p)
+        # Watched and called, watched and silent: both are keys.
+        assert record.libcalls == {
+            "flashinfer": {"flashinfer.sampling.top_k"},
+            "triton": set(),
+        }
+        assert record.malformed == 0 and not record.lost_lines
+        assert record.functions == {"vllm/mod.py": {"plain"}}
+
+    def test_an_older_recorder_watched_no_library(self, tmp_path: Path):
+        p = tmp_path / "fn.a.txt"
+        process_file(p, [("mod.py", "plain")], packages=["flashinfer"])
+        assert read_process(p).libcalls == {}
+
     def test_a_process_with_no_resolvable_root_is_dropped(self, tmp_path: Path):
         p = tmp_path / "fn.a.txt"
         p.write_text("#start\tpid=1\n")
@@ -236,6 +258,26 @@ class TestMergeBuild:
         )
         rows = merge_build(build.finish(), tmp_repo.root)
         assert rows["lora"].stamp.packages == ["flashinfer", "torch"]
+
+    def test_library_calls_fold_into_the_stamp(self, build: Build, tmp_repo: Repo):
+        d = build.job("j0", step_key="lora")
+        process_file(
+            d / "fn.a.txt",
+            [("mod.py", "plain")],
+            libs=["flashinfer", "triton"],
+            libcalls=[("flashinfer", "flashinfer.b")],
+        )
+        process_file(
+            d / "fn.b.txt",
+            [("mod.py", "plain")],
+            libs=["flashinfer", "triton"],
+            libcalls=[("flashinfer", "flashinfer.a")],
+        )
+        rows = merge_build(build.finish(), tmp_repo.root)
+        assert rows["lora"].stamp.libcalls == {
+            "flashinfer": ["flashinfer.a", "flashinfer.b"],
+            "triton": [],
+        }
 
     def test_a_missing_shard_shows_as_short(self, build: Build, tmp_repo: Repo):
         d = build.job("j0", step_key="lora", parallel_index=0, parallel_total=3)
@@ -582,6 +624,31 @@ class TestCrossBuild:
         assert row.stamp.builds == ["1", "2"]
         assert sorted(row.stamp.jobs) == ["j0", "j1"]
         assert row.stamp.n_functions == 2
+
+    def test_a_library_one_build_did_not_watch_is_unwatched(
+        self, tmp_path: Path, tmp_repo: Repo
+    ):
+        """A build that did not watch a library cannot vouch for the other's
+        silence about it; calls either one saw still count."""
+        commit = tmp_repo.head()
+        first = Build(tmp_path / "s" / "b1", "1", commit)
+        process_file(
+            first.job("j0", step_key="lora") / "fn.a.txt",
+            [("mod.py", "plain")],
+            libs=["flashinfer", "triton"],
+        )
+        second = Build(tmp_path / "s" / "b2", "2", commit)
+        process_file(
+            second.job("j1", step_key="lora") / "fn.a.txt",
+            [("mod.py", "plain")],
+            libs=["flashinfer"],
+            libcalls=[("deep_gemm", "deep_gemm.fp8_gemm_nt")],
+        )
+        rows = merge_builds([first.finish(), second.finish()], tmp_repo.root)
+        assert rows["lora"].stamp.libcalls == {
+            "flashinfer": [],
+            "deep_gemm": ["deep_gemm.fp8_gemm_nt"],
+        }
 
     def test_union_refuses_to_mix_two_different_steps(
         self, tmp_path: Path, tmp_repo: Repo

@@ -165,6 +165,27 @@ def test_selected_steps_support_amd_mirror_keys(
     assert generated_keys == ["image-build-amd", f"amd-{generated_key}"]
 
 
+def test_an_optional_step_named_by_the_selector_runs_unblocked(fake_global_config):
+    """The selector treats optional steps as ordinary ones and names them in
+    VLLM_CI_ONLY_STEP_KEYS when the evidence reaches them. That relies on this:
+    a named step runs, optional or not. Blocked, it would be selected and still
+    never run."""
+    steps = [
+        Step(
+            label="Nightly eval", key="nightly-eval", commands=["eval"], optional=True
+        ),
+        Step(label="Other", key="other", commands=["other"]),
+    ]
+    fake_global_config["only_step_keys"] = frozenset({"nightly-eval"})
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(steps))
+    emitted = [job for group in groups for job in group.steps]
+
+    assert [job.key for job in emitted] == ["nightly-eval"]
+    assert not any(
+        isinstance(job, buildkite_step.BuildkiteBlockStep) for job in emitted
+    )
+
+
 def test_a100_steps_are_not_emitted_but_amd_mirrors_are():
     step = Step(
         label="A100 test",
