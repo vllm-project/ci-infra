@@ -151,6 +151,14 @@ def test_plan_over_max_number_of_shards_still_assigns_everything():
     assert "still over" in rs.annotation("k", result)
 
 
+def test_annotation_names_the_timings_as_a_median_of_main_builds():
+    command = "pytest -v -s tests"
+    timings = dict(_timings(command, {"a.py": 60}), buildNumbers=[7, 6, 5])
+    result = rs.plan([_entry(command, {"a.py": 2})], timings)
+    assert result["timingSource"]["buildNumbers"] == [7, 6, 5]
+    assert "median of 3 main builds, the newest 7 (`abc`)" in rs.annotation("k", result)
+
+
 def test_check_rejects_a_lost_or_repeated_test():
     inventory = [_entry(TESTS[0], {"model_executor/a.py": 1, "model_executor/b.py": 1})]
     result = rs.plan(inventory, None)
@@ -203,7 +211,8 @@ def test_generator_adds_shadow_collect_and_plan_steps(fake_global_config, monkey
     assert [rs.decode(c.split()[4]) for c in collect.commands[4:]] == TESTS
     assert plan.depends_on == [collect.key] and plan.allow_dependency_failure
     assert plan.soft_fail and plan.agents == {"queue": "small_cpu_queue_premerge"}
-    assert plan.commands[1].endswith(" shadow") and plan.env is None
+    assert plan.commands[1].endswith(" shadow")
+    assert plan.env == {"BUILDKITE_SKIP_CHECKOUT": "true"}  # it never reads the repo
     assert rs.decode(plan.commands[1].split()[-2]) == TESTS
     # The endpoint labels a command by the preview the generator echoes before it.
     assert f"): {rs.command_preview(TESTS[0])}'" in " ".join(main.commands).replace(
@@ -320,6 +329,7 @@ def test_generator_on_mode_moves_the_step_into_the_plan(
     assert template == {"steps": [plain.dict(exclude_none=True)]}
     [command] = plan.commands
     assert command.startswith("curl ") and " plan model-executor " in command
+    assert plan.env["BUILDKITE_SKIP_CHECKOUT"] == "true"
     # Like every job: a lost agent or an infra hook failure is retried once.
     assert (
         plan.retry == collect.retry == buildkite_step.ensure_infra_failure_retry(None)
