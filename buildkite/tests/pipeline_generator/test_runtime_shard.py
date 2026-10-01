@@ -189,6 +189,9 @@ def test_generator_adds_shadow_collect_and_plan_steps(fake_global_config, monkey
     main, collect, plan = _render(_step(automatic_shard=True))
     assert main.to_yaml() == plain[0].to_yaml()  # shadow: the step is unchanged
     assert collect.key == "model-executor-shard-collect" and collect.soft_fail
+    # The build page truncates labels, so the step key comes first.
+    assert collect.label == "model-executor: runtime shard collect"
+    assert plan.label == "model-executor: runtime shard plan"
     assert collect.depends_on == ["image-build"] and collect.agents == main.agents
     assert collect.plugins == main.plugins
     assert collect.artifact_paths == [".runtime-shard/model-executor/*.json"]
