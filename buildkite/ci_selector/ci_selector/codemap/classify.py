@@ -20,7 +20,8 @@ claims, then per file the first matching claim wins:
 Then `unions.py` adds what every path owes, then preflight escalations.
 
 State is built at the diff BASE. At head the added files are already in the
-graph, so the status-A rules would never fire.
+graph, so the status-A rules would never fire. Its steps are the head's
+(`worktree.with_head_steps`), since CI generates the pipeline from the head.
 """
 
 from __future__ import annotations
@@ -65,7 +66,7 @@ from .claim import (
 )
 from .externals import DOCKER_DIR
 from .graph.model_registry import resolve_module_name
-from .pipeline.buildkite import CI_DIR
+from .pipeline.buildkite import CI_DIR, edited_steps
 from .pipeline.step import PipelineConfig
 from .pipeline.targets import working_dir_to_repo_rel
 from .repo import is_test_basename, is_test_file
@@ -1377,7 +1378,7 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
     if native is not None:
         return native
     if path.startswith(".buildkite/"):
-        return _classify_buildkite(state, path, configs)
+        return _classify_buildkite(state, path, configs, ctx)
     # A file exclusive to a family with no live steps has nothing to run. The
     # link is re-derived every build, so that family appearing in any job yaml
     # switches selection back on. A device the taxonomy cannot map turns the
@@ -1639,7 +1640,10 @@ def _run_all_escalation(path: str, configs: list[PipelineConfig]) -> set[str]:
 
 
 def _classify_buildkite(
-    state: RepoState, path: str, configs: list[PipelineConfig]
+    state: RepoState,
+    path: str,
+    configs: list[PipelineConfig],
+    ctx: DiffContext | None = None,
 ) -> Claim:
     """Ordered: live consumers first, then the legacy and inert zero-claims, so
     a retired file that ever rejoins the live pipelines is claimed by its steps
@@ -1654,22 +1658,32 @@ def _classify_buildkite(
     defining = {
         s.step_id for p in state.pipelines for s in p.steps if s.source_file == path
     }
-    if defining:
+    edited = _edited_steps(state, path, configs, ctx)
+    if edited is not None and not edited <= defining:
+        # The state holds the base's step definitions, so it cannot name the
+        # steps this edit added: claim the whole file, as before.
+        edited = None
+    if defining or edited is not None:
+        claimed = defining if edited is None else edited
         # The generator reads a step yaml on the agent before any container
         # starts, so no job in an image it is copied into can execute it. The
         # targeting leg below is unreachable once this returns, so union it in.
-        targeted = _steps_targeting(state, path) - defining
+        targeted = _steps_targeting(state, path) - claimed
         # This leg returns before the escalation branch far below can run, so
         # a yaml on its own pipeline's run_all list would silently propose
         # only the steps it defines, all of which may be always-run.
         escalates = _run_all_escalation(path, configs)
-        detail = f"{path} defines these steps"
+        detail = (
+            f"{path} defines these steps"
+            if edited is None
+            else f"{path} adds or changes these steps"
+        )
         if escalates:
             detail += f"; the generator also escalates {sorted(escalates)} on it"
         return Claim(
             "buildkite",
             detail,
-            step_ids=defining | targeted,
+            step_ids=claimed | targeted,
             run_all=escalates,
             image_union_exempt=True,
             step_detail={
@@ -1764,6 +1778,44 @@ def _classify_buildkite(
         f"{path} is unrecognized CI infra; running everything",
         run_all={c.name for c in configs},
     )
+
+
+def _edited_steps(
+    state: RepoState,
+    path: str,
+    configs: list[PipelineConfig],
+    ctx: DiffContext | None,
+) -> frozenset[str] | None:
+    """The steps the diff adds or changes in the job file `path`, or None for
+    the whole file: no diff, not a job file, or a side git could not show.
+
+    The ids are the head's, so only a state holding the head's step
+    definitions (`worktree.with_head_steps`) can name every one of them.
+    """
+    pipelines = [
+        c.name
+        for c in configs
+        if any(path.startswith(d.rstrip("/") + "/") for d in c.job_dirs)
+    ]
+    if ctx is None or not pipelines:
+        return None
+    status = ctx.status.get(path, "M")
+    sides = []
+    for ref, absent in (
+        (ctx.base, status in ("A", "R", "C")),
+        (ctx.head, status == "D"),
+    ):
+        text = None if absent else registry_diff.git_show(state.repo, ref, path)
+        if text is None and not absent:
+            return None
+        sides.append(text)
+    out: set[str] = set()
+    for name in pipelines:
+        edited = edited_steps(*sides, path, name)
+        if edited is None:
+            return None
+        out |= edited
+    return frozenset(out)
 
 
 def colocation_routes(state: RepoState, path: str) -> bool:

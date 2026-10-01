@@ -47,7 +47,7 @@ def test_split_by_optional_scores_optional_steps_by_reach():
                 {"verdict": "optional reached", "optional": True},
                 {"verdict": "selected", "optional": True},
                 {"verdict": "missed", "optional": True},
-                {"verdict": "step absent at base", "optional": None},
+                {"verdict": "step absent at head", "optional": None},
             ]
         },
         {"skip": "pre-restructure base", "rows": [{"id": "x"}]},

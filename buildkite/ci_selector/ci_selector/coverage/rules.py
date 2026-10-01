@@ -170,17 +170,17 @@ class RowKeys:
         step_ids: frozenset[str],
         identities: frozenset[tuple] = frozenset(),
     ) -> None:
-        """Drop addable steps that do not exist at the PR's base.
+        """Drop addable steps that do not exist at the PR's head.
 
         Two clocks: these ids come from the TABLE's commit while the emitter
-        names steps from the base. Naming a step that is not there makes the
+        names steps from the head. Naming a step that is not there makes the
         emitter omit the variable, and that runs everything.
 
         A step survives if its `step_id` OR its rename-tolerant `Step.identity`
-        is at base. Id alone was the defect, since it falls back to the label
+        is at head. Id alone was the defect, since it falls back to the label
         and a reword gives one step two ids.
 
-        An empty id set means we could not read the base pipeline, which is not
+        An empty id set means we could not read the head pipeline, which is not
         the same as "no step is there", so it changes nothing.
         """
         if not step_ids:

@@ -143,11 +143,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # A ranged diff is analyzed at its BASE, because added-file routing and
     # table scoping assume state built there. The working tree is only right
-    # when it happens to BE the base.
+    # when it happens to BE the base. The steps are the head's, since CI
+    # generates the pipeline from the head.
     if base and head and not args.no_base_worktree:
-        from .codemap.worktree import state_for
+        from .codemap.worktree import state_for, with_head_steps
 
-        state = state_for(repo, base)
+        state = with_head_steps(state_for(repo, base), repo, head, paths)
     else:
         if head is not None:
             _warn_if_stale_checkout(repo, head)

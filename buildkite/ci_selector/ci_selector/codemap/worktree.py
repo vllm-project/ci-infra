@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import dataclasses
 import fcntl
 import os
 import shutil
@@ -21,7 +22,10 @@ from pathlib import Path
 from typing import TypeVar
 
 from .graph.build import FullGraph, build_full_graph
-from .state import RepoState
+from .pipeline.buildkite import load_pipeline_configs, load_steps
+from .pipeline.scripts import scan_script
+from .pipeline.targets import console_scripts, map_step
+from .state import PipelineData, RepoState
 
 T = TypeVar("T")
 
@@ -311,6 +315,63 @@ def _cached_by_tree(
 
 def state_for(repo: Path, base: str) -> RepoState:
     return _cached_by_tree(_STATE_CACHE, MAX_CACHED_STATES, repo, base, RepoState.build)
+
+
+def with_head_steps(state: RepoState, repo: Path, head: str, paths) -> RepoState:
+    """`state` with the step definitions `head` leaves, when the diff edits
+    any. CI generates the PR's pipeline from its head, not its base.
+
+    A step the PR adds exists only there, and it is usually the one running
+    the PR's new test: vllm#59229 added kimi-k3-prefix-cache-4xb200, both its
+    shards failed in CI, and the selector could neither pick the step nor
+    match the failures to it. A step the PR removes or renames is gone, and
+    the generator refuses a key it does not know.
+
+    Only the steps and their targets change: an unchanged step keeps its
+    targets, a changed one is mapped at the head. The graph stays the base's,
+    which the added-file rules need, and so does every index built from the
+    steps, so a step only the head defines is reached through its job file's
+    claim and its own targets, never through the key index or preflight.
+
+    Returns `state` itself when the diff edits no job file or ci_config, and
+    when the head's pipeline does not load, which leaves every edited job
+    file claimed whole.
+    """
+    configs = [p.config for p in state.pipelines]
+    if not any(
+        path == c.config_file
+        or any(path.startswith(d.rstrip("/") + "/") for d in c.job_dirs)
+        for path in paths
+        for c in configs
+    ):
+        return state
+    tree = worktree_at(repo, head)
+    try:
+        loaded = [(c, load_steps(tree, c)) for c in load_pipeline_configs(tree)]
+    except Exception:  # noqa: BLE001 - an unloadable head keeps the base's view
+        return state
+    old = {
+        s.step_id: (s, p.targets.get(s.step_id))
+        for p in state.pipelines
+        for s in p.steps
+    }
+    scripts = console_scripts(tree)
+    pipelines = []
+    for config, steps in loaded:
+        targets = {}
+        for s in steps:
+            was, st = old.get(s.step_id, (None, None))
+            if was != s or st is None:
+                st = map_step(tree, s, scan_script, scripts)
+            targets[s.step_id] = st
+        pipelines.append(PipelineData(config, steps, targets))
+    return dataclasses.replace(
+        state,
+        pipelines=pipelines,
+        auto_step_ids={
+            s.step_id for p in pipelines for s in p.steps if not s.manual_only
+        },
+    )
 
 
 def full_graph_for(repo: Path, ref: str) -> FullGraph:
