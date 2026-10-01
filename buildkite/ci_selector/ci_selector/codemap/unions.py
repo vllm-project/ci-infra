@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The pass that runs after a rule has answered, not a rule itself.
+"""The passes that run after a rule has answered, not rules themselves.
 
-A rule decides what a path IS. This adds what every path owes regardless: the
-steps running on an image it is built into. Running it in one place is what
-stops a new rule under-selecting by forgetting it. Idempotent, skips run-all,
-and keeps its own exempt set.
+A rule decides what a path IS. These add what every path owes regardless: the
+steps running on an image it is built into, and the steps testing vLLM from
+outside when it breaks the API they import. Running them in one place is what
+stops a new rule under-selecting by forgetting them. Both are idempotent and
+neither adds to a pipeline that already runs everything; the image union also
+keeps its own exempt set.
 """
 
 from __future__ import annotations
 
-from . import build_map, hardware
+from . import build_map, hardware, plugin_api
 from .claim import Claim
-from .state import RepoState
+from .state import DiffContext, RepoState
 
 
 def _pin_existing(claim: Claim) -> None:
@@ -78,6 +80,44 @@ def _apply_image_input_union(state: RepoState, path: str, claim: Claim) -> Claim
                     sid, f"copied into {df}; this step runs on that image"
                 )
                 claim.step_rule.setdefault(sid, "image-copy")
+    return claim
+
+
+def _apply_plugin_api_union(
+    state: RepoState, path: str, claim: Claim, ctx: DiffContext | None
+) -> Claim:
+    """Add the steps testing vLLM from outside when this file breaks the API
+    they import. See plugin_api.py.
+
+    A pass and not a rule because every rule can answer for a vllm/ module and
+    none can see these steps: no edge reaches a test that lives in an image.
+    Table claims get it too, since a registry is importable like any module.
+
+    Added non-droppably: such a step has no row, and no row could speak for
+    another project's tests.
+    """
+    steps = {
+        sid
+        for pdata in state.pipelines
+        if pdata.config.name not in claim.run_all
+        for sid in plugin_api.outside_steps(pdata)
+    } - claim.step_ids
+    if not steps:
+        return claim
+    broken = plugin_api.diff_breaks(state.repo, path, ctx)
+    if not broken:
+        return claim
+    shown = "; ".join(broken[:3]) + (
+        f"; +{len(broken) - 3} more" if len(broken) > 3 else ""
+    )
+    _pin_existing(claim)
+    claim.step_ids |= steps
+    claim.detail += (
+        f"; +{len(steps)} steps test vLLM from outside and it breaks their API"
+    )
+    for sid in steps:
+        claim.step_detail[sid] = f"breaks the API out-of-tree tests import ({shown})"
+        claim.step_rule[sid] = "plugin-api"
     return claim
 
 

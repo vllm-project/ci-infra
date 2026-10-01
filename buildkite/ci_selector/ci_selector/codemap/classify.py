@@ -17,7 +17,8 @@ claims, then per file the first matching claim wins:
   package-data -> native-tests -> docker image-union deferral ->
   build-map-scoped fail-open -> inert floor -> terminal fail-open run-all.
 
-Then `unions.py` adds what every path owes, then preflight escalations.
+Then `unions.py` adds what every path owes, table claims included for the
+plugin API pass, then preflight escalations.
 
 State is built at the diff BASE. At head the added files are already in the
 graph, so the status-A rules would never fire. Its steps are the head's
@@ -92,6 +93,7 @@ from .step_refs import (
 )
 from .unions import (
     _apply_image_input_union,
+    _apply_plugin_api_union,
     _build_map_allowed,
 )
 from .worktree import full_graph_for
@@ -149,6 +151,7 @@ def select(
             )
         else:
             claim = _classify(state, path, ctx)
+        claim = _apply_plugin_api_union(state, path, claim, ctx)
         sel.claims.append(claim)
         for pipeline in claim.run_all:
             if pipeline not in sel.run_all:

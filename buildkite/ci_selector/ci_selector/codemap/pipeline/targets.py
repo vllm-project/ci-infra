@@ -67,7 +67,8 @@ class StepTargets:
     dangling: list[str] = field(default_factory=list)
     # Test paths in a container payload that are missing from this checkout.
     # Reported, never escalated: an image-only path and a renamed one look the
-    # same here, and escalating both runs the step on every PR.
+    # same here, and escalating both runs the step on every PR. What selects
+    # such a step is a diff breaking vLLM's API (codemap/plugin_api.py).
     container_tests: list[str] = field(default_factory=list)
     # pytest lines in a script whose argv would not lex. Warned in preflight,
     # never escalated: these come from how we slice the script, not from a
