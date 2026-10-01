@@ -455,6 +455,38 @@ def _plugin_run(tmp_path, shard_plan, index, target="pkg"):
     )
 
 
+def test_collect_ignores_a_trailing_shell_comment(tmp_path):
+    """vLLM writes `pytest x.py # needs a clean process`; the shell drops it."""
+    (tmp_path / "test_a.py").write_text("def test_x(): pass\n")
+    out = tmp_path / "out"
+    subprocess.run(
+        [
+            sys.executable,
+            rs.__file__,
+            "collect",
+            "0",
+            rs.encode("pytest -v test_a.py # it needs a clean process"),
+            str(out),
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    entry = json.loads((out / "inventory-0.json").read_text())
+    assert entry["exitstatus"] == 0 and entry["nodeids"] == ["test_a.py::test_x"]
+
+
+def test_plugin_matches_a_command_with_a_trailing_shell_comment(tmp_path):
+    shard_plan = {
+        "commands": ["pytest -v pkg # needs a clean process"],
+        "shards": [
+            [{"index": 0, "targets": ["tests/pkg/test_a.py"]}],
+            [{"index": 0, "targets": ["tests/pkg/test_b.py"]}],
+        ],
+    }
+    run = _plugin_run(tmp_path, shard_plan, 0)
+    assert run.returncode == 0 and "1 passed, 2 deselected" in run.stdout
+
+
 def test_plugin_runs_only_this_shards_tests(tmp_path):
     shard_plan = {
         "commands": ["pytest -v pkg"],

@@ -85,7 +85,10 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
             s in command for s in _SHELL_SYNTAX
         ):
             return None
-        if any(a.split("=")[0] in _UNSHARDABLE_ARGS for a in shlex.split(command)):
+        if any(
+            a.split("=")[0] in _UNSHARDABLE_ARGS
+            for a in shlex.split(command, comments=True)
+        ):
             return None
     return commands[:first], tests
 
@@ -424,7 +427,8 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
 
     status = int(
         pytest.main(
-            [*shlex.split(command)[1:], "--collect-only", "-q"], plugins=[Probe()]
+            [*shlex.split(command, comments=True)[1:], "--collect-only", "-q"],
+            plugins=[Probe()],
         )
     )
     os.makedirs(out_dir, exist_ok=True)
@@ -592,7 +596,7 @@ def pytest_collection_modifyitems(session, config, items):
     args = list(config.invocation_params.args)
     matches = []
     for position, command in enumerate(shard_plan["commands"]):
-        if shlex.split(command)[1:] == args:
+        if shlex.split(command, comments=True)[1:] == args:
             matches.append(position)
     if len(matches) != 1 or index >= len(shard_plan["shards"]):
         raise pytest.UsageError(
