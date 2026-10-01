@@ -1,17 +1,19 @@
 # Fetch git@github.com remotes over SSH with the read-only deploy key that the
 # pre-checkout hook loads per job, and push them over HTTPS with the app token,
 # since a deploy key can't push. --replace-all keeps reruns of this script on
-# reboot from piling up duplicate entries.
+# reboot from piling up duplicate entries. --unset-all exits 5 when there is
+# nothing to unset, which is every boot after the first, and cpu_64_core's
+# startup script runs under set -e, so those calls must not fail the script.
 git config --system credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-git config --system --unset-all url."https://github.com/".insteadOf
+git config --system --unset-all url."https://github.com/".insteadOf || true
 git config --system --replace-all url."https://github.com/".pushInsteadOf "git@github.com:"
 git config --system --add url."https://github.com/".pushInsteadOf "ssh://git@github.com/"
 sudo -H -u buildkite-agent git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-sudo -H -u buildkite-agent git config --global --unset-all url."https://github.com/".insteadOf
+sudo -H -u buildkite-agent git config --global --unset-all url."https://github.com/".insteadOf || true
 sudo -H -u buildkite-agent git config --global --replace-all url."https://github.com/".pushInsteadOf "git@github.com:"
 sudo -H -u buildkite-agent git config --global --add url."https://github.com/".pushInsteadOf "ssh://git@github.com/"
 HOME=/root git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-HOME=/root git config --global --unset-all url."https://github.com/".insteadOf
+HOME=/root git config --global --unset-all url."https://github.com/".insteadOf || true
 HOME=/root git config --global --replace-all url."https://github.com/".pushInsteadOf "git@github.com:"
 HOME=/root git config --global --add url."https://github.com/".pushInsteadOf "ssh://git@github.com/"
 
