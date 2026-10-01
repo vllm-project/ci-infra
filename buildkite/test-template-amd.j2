@@ -30,7 +30,13 @@
 {%- endmacro %}
 
 {% macro amd_step_slug(step) -%}
+{%- set slug -%}
 {%- if step.agent_pool -%}{{ step.agent_pool }}-{%- endif -%}{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
+{%- endset -%}
+{# Preserve existing valid slugs; replace any remaining invalid key characters. #}
+{%- for char in slug -%}
+{{- char if char in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_:-" else "-" -}}
+{%- endfor -%}
 {%- endmacro %}
 
 {# Native in-pod ROCm CI: per-job container-0 image via kubernetes podSpecPatch. #}
