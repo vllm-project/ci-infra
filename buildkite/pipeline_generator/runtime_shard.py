@@ -262,7 +262,7 @@ def plan(
     timing_source = None
     if timings is not None:
         timing_source = {}
-        for key in ("buildNumber", "commit", "finishedAt"):
+        for key in ("buildNumber", "buildNumbers", "commit", "finishedAt"):
             timing_source[key] = timings.get(key)
     over_budget = False
     if timings:
@@ -346,9 +346,11 @@ def annotation(step_key: str, result: Dict, shadow: bool = True) -> str:
     source = result["timingSource"]
     if source:
         estimates = ", ".join(f"{s['estimateSeconds'] / 60:.1f}" for s in shards)
+        builds = len(source.get("buildNumbers") or [source["buildNumber"]])
         lines.append(
-            f"Estimated test time per shard (min): {estimates}. Timings from "
-            f"main build {source['buildNumber']} (`{(source['commit'] or '')[:12]}`)."
+            f"Estimated test time per shard (min): {estimates}. Timings: median of "
+            f"{builds} main build{'s' if builds != 1 else ''}, the newest "
+            f"{source['buildNumber']} (`{(source['commit'] or '')[:12]}`)."
         )
     else:
         lines.append(
