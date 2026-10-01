@@ -1,18 +1,3 @@
-data "google_secret_manager_secret_version" "buildkite_agent_token_ci_cluster" {
-  secret = "projects/${var.project_id}/secrets/tpu_commons_buildkite_agent_token"
-  version = "latest"
-}
-
-data "google_secret_manager_secret_version" "buildkite_analytics_token_ci_cluster" {
-  secret  = "projects/${var.project_id}/secrets/tpu_commons_buildkite_analytics_token"
-  version = "latest"
-}
-
-data "google_secret_manager_secret_version" "huggingface_token" {
-  secret  = "projects/${var.project_id}/secrets/tpu_commons_buildkite_hf_token"
-  version = "latest"
-}
-
 module "ci_v7x_2" {
   source    = "../modules/ci_v7x"
   providers = {
@@ -26,9 +11,9 @@ module "ci_v7x_2" {
   disk_size                        = 512
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
-  buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-  buildkite_analytics_token_value  = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
-  huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  buildkite_token_secret_name           = "projects/${var.project_id}/secrets/tpu_commons_buildkite_agent_token"
+  buildkite_analytics_token_secret_name = "projects/${var.project_id}/secrets/tpu_commons_buildkite_analytics_token"
+  huggingface_token_secret_name         = "projects/${var.project_id}/secrets/tpu_commons_buildkite_hf_token"
 
   vllm_torchtpu_ssh_checkout = true
 }
@@ -46,9 +31,9 @@ module "ci_v7x_8" {
   disk_size                        = 1024
   project_id                       = var.project_id
   project_short_name               = var.project_short_name
-  buildkite_token_value            = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
-  buildkite_analytics_token_value  = data.google_secret_manager_secret_version.buildkite_analytics_token_ci_cluster.secret_data
-  huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  buildkite_token_secret_name           = "projects/${var.project_id}/secrets/tpu_commons_buildkite_agent_token"
+  buildkite_analytics_token_secret_name = "projects/${var.project_id}/secrets/tpu_commons_buildkite_analytics_token"
+  huggingface_token_secret_name         = "projects/${var.project_id}/secrets/tpu_commons_buildkite_hf_token"
 
   vllm_torchtpu_ssh_checkout = true
 }

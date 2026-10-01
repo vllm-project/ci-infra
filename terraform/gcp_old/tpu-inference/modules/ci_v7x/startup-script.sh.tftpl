@@ -117,9 +117,14 @@ sudo usermod -a -G docker buildkite-agent
 sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
+${read_secret_function}
+BUILDKITE_AGENT_TOKEN=$(read_secret "${buildkite_token_secret_name}") || exit 1
+HF_TOKEN=$(read_secret "${huggingface_token_secret_name}") || exit 1
+BUILDKITE_ANALYTICS_TOKEN=$(read_secret "${buildkite_analytics_token_secret_name}") || exit 1
+
 # This script re-runs on every boot, so match the whole line rather than the
 # pristine "xxx" placeholder, which is gone after the first boot.
-sudo sed -i -E 's|^token=.*|token="${buildkite_token_value}"|' /etc/buildkite-agent/buildkite-agent.cfg
+sudo sed -i -E "s|^token=.*|token=\"$BUILDKITE_AGENT_TOKEN\"|" /etc/buildkite-agent/buildkite-agent.cfg
 
 # Worker ID is provided by GCP metadata for Multi-host slices.
 WORKER_ID=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/agent-worker-number 2>/dev/null || echo "0")
@@ -132,8 +137,8 @@ echo 'tags="queue=${buildkite_queue_name},hostname='"$HOST_NAME_VAL"'"' | sudo t
 # tee echoes to stdout, which the startup script sends to the serial console,
 # where anyone with compute.instances.getSerialPortOutput can read it. Secrets
 # go to the file only.
-echo 'HF_TOKEN=${huggingface_token_value}' | sudo tee -a /etc/environment > /dev/null
-echo 'BUILDKITE_ANALYTICS_TOKEN=${buildkite_analytics_token_value}' | sudo tee -a /etc/environment > /dev/null
+echo "HF_TOKEN=$HF_TOKEN" | sudo tee -a /etc/environment > /dev/null
+echo "BUILDKITE_ANALYTICS_TOKEN=$BUILDKITE_ANALYTICS_TOKEN" | sudo tee -a /etc/environment > /dev/null
 echo 'TPU_VERSION=tpu7x' | sudo tee -a /etc/environment
 
 # Also provide HF_TOKEN and BUILDKITE_ANALYTICS_TOKEN through the agent's own
@@ -144,7 +149,7 @@ sudo touch /etc/buildkite-agent/hooks/environment
 sudo chown root:buildkite-agent /etc/buildkite-agent/hooks/environment
 sudo chmod 750 /etc/buildkite-agent/hooks/environment
 printf '#!/bin/bash\nexport HF_TOKEN=%q\nexport BUILDKITE_ANALYTICS_TOKEN=%q\n' \
-  '${huggingface_token_value}' '${buildkite_analytics_token_value}' \
+  "$HF_TOKEN" "$BUILDKITE_ANALYTICS_TOKEN" \
   | sudo tee /etc/buildkite-agent/hooks/environment > /dev/null
 
 %{ if has_attached_disk ~}

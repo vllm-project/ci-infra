@@ -7,14 +7,14 @@ variable "instance_count" {
   description = "Number of VM instance"
 }
 
-variable "buildkite_token_value" {
+variable "buildkite_token_secret_name" {
   type        = string
-  description = "Agent token used to connect to Buildkite."
+  description = "Secret Manager secret holding the Buildkite agent token, as projects/<project>/secrets/<name>. The VM reads its latest version at boot, so its service account needs secretAccessor on it."
 }
 
-variable "huggingface_token_value" {
+variable "huggingface_token_secret_name" {
   type        = string
-  description = "Hugging Face token for vLLM model serving usage."
+  description = "Secret Manager secret holding the Hugging Face token, as projects/<project>/secrets/<name>. The VM reads its latest version at boot, so its service account needs secretAccessor on it."
 }
 
 variable "purpose" {
