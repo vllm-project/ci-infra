@@ -24,6 +24,7 @@ import base64
 import json
 import math
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -42,6 +43,11 @@ INVENTORY_DIR = ".runtime-shard"
 # pytest-shard would select a subset a second time on top of the plan.
 _UNSHARDABLE_ARGS = ("--num-shards", "--shard-id")
 _SHELL_SYNTAX = ("&&", "||", ";", "|", ">", "<", "`", "$", "\n")
+# The section header the generator echoes before each command. The rendered
+# step has it in double quotes; the preview in it has no quotes of its own.
+_COMMAND_HEADER = re.compile(
+    r"""echo (['"])\+\+\+ :test_tube: Command \((\d+/\d+)\): (.*)\1"""
+)
 
 
 def command_preview(command: str) -> str:
@@ -545,7 +551,8 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
     """Collect one pytest command's tests, in the step's test image.
 
     Writes inventory-<index>.json with the command, pytest's exit status, the
-    selected node IDs and the working dir relative to pytest's rootdir.
+    selected node IDs, the working dir relative to pytest's rootdir and the
+    command's arguments that pytest took as paths.
 
     Args:
         index: The command's position among the step's pytest commands.
@@ -559,7 +566,7 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
     import pytest
 
     command = decode(command_b64)
-    found: Dict = {"nodeids": [], "prefix": ""}
+    found: Dict = {"nodeids": [], "prefix": "", "paths": []}
 
     class Probe:
         def pytest_collection_finish(self, session):
@@ -567,6 +574,7 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
             # Node IDs are relative to rootdir; run targets to the working dir.
             prefix = os.path.relpath(os.getcwd(), str(session.config.rootpath))
             found["prefix"] = "" if prefix == "." else prefix
+            found["paths"] = list(session.config.args)
 
     status = int(
         pytest.main(
@@ -598,7 +606,8 @@ def shard_step(
     """The step's own job, run as one parallel job per shard.
 
     Each job installs this file, loads it as a pytest plugin and finds its
-    tests in RUNTIME_SHARD_PLAN, so the step's commands stay unchanged.
+    tests in RUNTIME_SHARD_PLAN, so the step's commands stay unchanged. Only
+    each test command's log header changes: it shows the shard's own command.
 
     Args:
         template: The step's normal rendered job.
@@ -639,9 +648,65 @@ def shard_step(
         f'curl -sSfL --retry 3 --max-time 60 -o /tmp/runtime_shard.py "{script_url}"',
         'python3 -c "import shutil, sysconfig; shutil.copy('
         "'/tmp/runtime_shard.py', sysconfig.get_paths()['purelib'])\"",
-        *step["commands"],
+        *_shard_headers(step["commands"], result, inventory),
     ]
     return step
+
+
+def _shard_headers(
+    commands: List[str], result: Dict, inventory: List[Dict]
+) -> List[str]:
+    """The job's commands, with each test command's log header replaced by
+    one that prints, for the shard running it, a pytest command that runs
+    just that shard's tests of it.
+
+    Args:
+        commands: The step's rendered commands.
+        result: A checked plan from plan().
+        inventory: The inventory the plan was made from.
+
+    Returns:
+        The commands, headers replaced.
+
+    """
+    previews = [command_preview(entry["command"]) for entry in inventory]
+    total = len(result["shards"])
+    replaced = []
+    for line in commands:
+        match = _COMMAND_HEADER.fullmatch(line)
+        if not match or match.group(3) not in previews:
+            replaced.append(line)
+            continue
+        index = previews.index(match.group(3))
+        entry = inventory[index]
+        options = shlex.split(entry["command"], comments=True)[1:]
+        for path in entry["paths"]:
+            if path in options:
+                options.remove(path)
+        branches = []
+        for number, shard in enumerate(result["shards"]):
+            header = f"+++ :test_tube: Command ({match.group(2)}): {match.group(3)}"
+            lines = [f"{header}, shard {number + 1}/{total}: no tests"]
+            for command in shard["commands"]:
+                if command["index"] != index:
+                    continue
+                files = {target.split("::")[0] for target in command["targets"]}
+                lines = [
+                    f"{header}, shard {number + 1}/{total}:"
+                    f" {_plural(command['tests'], 'test')}"
+                    f" in {_plural(len(files), 'file')}",
+                    shlex.join(["pytest", *options]) + " \\",
+                ]
+                for target in command["targets"]:
+                    lines.append(f"  {shlex.quote(target)} \\")
+                lines[-1] = lines[-1][: -len(" \\")]
+            # Buildkite interpolates the uploaded step: $$ is a literal $.
+            printed = " ".join(shlex.quote(text) for text in lines).replace("$", "$$")
+            branches.append(f"{number}) printf '%s\\n' {printed};;")
+        replaced.append(
+            'case "$$BUILDKITE_PARALLEL_JOB" in ' + " ".join(branches) + " esac"
+        )
+    return replaced
 
 
 def _upload(step: Dict) -> None:
@@ -813,57 +878,12 @@ def pytest_collection_modifyitems(session, config, items):
         raise pytest.UsageError(
             f"runtime-shard: planned tests were not collected: {missing[:5]}"
         )
-    _print_shard_command(config, shard_plan, index, this_command, len(kept))
     config.hook.pytest_deselected(items=deselected)
     items[:] = kept
     _EMPTY["value"] = not kept
     _EMPTY["label"] = (
         f"shard {index + 1}/{len(shard_plan['shards'])}, command {this_command + 1}"
     )
-
-
-def _print_shard_command(
-    config, shard_plan: Dict, index: int, command: int, tests: int
-):
-    """Print a log section with a pytest command that runs this shard's tests
-    of one planned command: its options, with its paths replaced by the
-    shard's targets. It runs without the plugin, to reproduce the shard.
-
-    Args:
-        config: pytest's config, whose args are the command's paths.
-        shard_plan: The decoded RUNTIME_SHARD_PLAN.
-        index: This shard's BUILDKITE_PARALLEL_JOB.
-        command: The planned command's position.
-        tests: How many tests this shard keeps of it.
-
-    """
-    # Targets are node IDs, relative to rootdir; the command runs from its
-    # own directory.
-    prefix = os.path.relpath(str(config.invocation_params.dir), str(config.rootpath))
-    prefix = "" if prefix == "." else prefix + "/"
-    targets: List[str] = []
-    for entry in shard_plan["shards"][index]:
-        if entry["index"] != command:
-            continue
-        for target in entry["targets"]:
-            targets.append(
-                target[len(prefix) :] if target.startswith(prefix) else target
-            )
-    options = list(config.invocation_params.args)
-    for path in config.args:
-        if path in options:
-            options.remove(path)
-    files = set()
-    for target in targets:
-        files.add(target.split("::")[0])
-    total = len(shard_plan["shards"])
-    print(
-        f"\n+++ :scissors: Runtime shard {index + 1}/{total}, command {command + 1}:"
-        f" {tests} tests in {len(files)} files",
-        flush=True,
-    )
-    if targets:
-        print(shlex.join(["pytest", *options, *targets]), flush=True)
 
 
 def pytest_collection_finish(session):
