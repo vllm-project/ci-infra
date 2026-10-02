@@ -478,6 +478,8 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
             # The one number here that is a policy rather than a fact, and the
             # only one Kueue reads: this shape's share of the reservation.
             "quota": quota,
+            # Kueue's too: the most chips its pools can hold. See queues().
+            "capacity": capacity,
         }
     return out
 
@@ -534,8 +536,16 @@ def queues(
     namespace: str,
     checks: bool,
     reclaim: dict[str, str] | None = None,
+    capacities: dict[str, int | None] | None = None,
 ) -> str:
-    """A flavor per machine family, then a queue per shape sharing it."""
+    """A flavor per machine family, then a queue per shape sharing it.
+
+    A TPU queue also gets a borrowing limit, so its nominal quota plus what it
+    borrows is at most what its node pools can hold. The cohort can be larger
+    than any one shape's pools, and Kueue counts chips, not nodes or slices: a
+    workload admitted past the pools' size holds quota while its pods wait for
+    hardware that cannot exist, where it should wait in the queue instead.
+    """
     out = [priority_classes()] + [
         render("resource_flavor", ACCELERATOR=family)
         for family in sorted({cohort(name) for name in shapes})
@@ -553,9 +563,17 @@ def queues(
                 NOMINAL_QUOTA=CPU_QUEUE_CORES if name == CPU_QUEUE else chips,
                 ADMISSION_CHECKS=dispatch_check(name, checks),
                 RECLAIM_WITHIN_COHORT=(reclaim or {}).get(name, "Never"),
+                BORROWING_LIMIT=borrowing_limit(chips, (capacities or {}).get(name)),
             )
         )
     return "".join(out)
+
+
+def borrowing_limit(quota: int, capacity: int | None) -> str:
+    """The borrowingLimit line a queue's quota carries, or nothing."""
+    if capacity is None:
+        return ""
+    return f"\n              borrowingLimit: {capacity - quota}"
 
 
 def fleet_secret_docs(tfvars: dict, namespace: str) -> str:
@@ -687,7 +705,7 @@ def launcher_profiles(
                         for key, value in entry["shape"].items()
                         # Kueue's, not the launcher's: what a shape's queue may
                         # hold says nothing about where one workload runs.
-                        if key != "quota"
+                        if key not in ("quota", "capacity")
                     },
                     "max_runtime_seconds": int(tfvars["tpu_test_max_seconds"]),
                 }
@@ -775,6 +793,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             "chips": 0,
             "hosts": 1,
             "quota": 0,
+            "capacity": None,
             # What the compute class builds a node against. One size for the
             # lane; a step wanting another states its own manifest.
             **CPU_JOB_SIZE,
@@ -782,8 +801,12 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         for name, shape in local.items():
             # The shape is stored once, not summed: two clusters running it
             # run the same hardware. Only the quota adds up.
-            entry = fleet.setdefault(name, {"quota": 0, "workers": [], "shape": shape})
+            entry = fleet.setdefault(
+                name, {"quota": 0, "capacity": None, "workers": [], "shape": shape}
+            )
             entry["quota"] += shape["quota"]
+            if shape["capacity"] is not None:
+                entry["capacity"] = (entry["capacity"] or 0) + shape["capacity"]
             entry["workers"].append(cluster_name)
 
         base = out_dir / worker_dir
@@ -818,6 +841,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 {name: shape["quota"] for name, shape in local.items()},
                 namespace,
                 checks=False,
+                capacities={name: shape["capacity"] for name, shape in local.items()},
             ),
         )
         write(
@@ -957,6 +981,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             namespace,
             checks=True,
             reclaim=reclaim_policies(tfvars),
+            capacities={name: entry["capacity"] for name, entry in fleet.items()},
         ),
     )
     write(
