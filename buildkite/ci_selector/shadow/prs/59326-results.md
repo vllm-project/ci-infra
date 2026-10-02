@@ -1,0 +1,138 @@
+<!-- ci-selector-shadow -->
+### CI selector (shadow): 95 test steps (132 jobs) instead of 95 (132 jobs)
+
+Shadow mode: this changes nothing about what CI runs. It shows what the evidence-based selector would pick for this PR, next to today's rules. [How it works](https://github.com/vllm-project/ci-infra/tree/main/buildkite/ci_selector).
+
+**Feedback welcome:** reply here if it would skip a step this change needs, or runs something unrelated.
+
+| steps (jobs) | Today's rules | Selector | Would skip | Would add |
+|---|---|---|---|---|
+| NVIDIA, CPU and others | 95 (132) | 95 (132) | 0 (0) | 0 (0) |
+| AMD mirrors | 82 (116) | 82 (116) | 0 (0) | 0 (0) |
+
+<details><summary>Selector would run (95)</summary>
+
+- `amd-fp8-moe-kernels-mi355`
+- `amd-kernels-mi355`
+- `amd-lm-eval-small-models-harness`
+- `amd-native-quantization-kernels-mi355`
+- `deepseek-v4-kernel-test-b200`
+- `deepseek-v4-kernel-test-h100`
+- `distributed-comm-ops`
+- `distributed-compile-comm-4-gpus`
+- `distributed-compile-rpc-tests-2-gpus`
+- `distributed-compile-unit-tests-2xh100`
+- `distributed-dp-tests-2-gpus`
+- `distributed-dp-tests-4-gpus`
+- `distributed-tests-8xh100`
+- `distributed-torchrun-examples-4-gpus`
+- `distributed-torchrun-shutdown-tests-2-gpus`
+- `e2e-core-1-gpu`
+- `e2e-core-large-memory`
+- `e2e-scheduling-1-gpu`
+- `e2e-scheduling-accuracy-1-gpu`
+- `engine`
+- `engine-1-gpu`
+- `entrypoints-integration-api-server` ×4
+- `entrypoints-integration-api-server-generate`
+- `entrypoints-integration-api-server-openai-chat_completion`
+- `entrypoints-integration-api-server-openai-completion`
+- `entrypoints-integration-llm`
+- `entrypoints-integration-multimodal`
+- `entrypoints-integration-pooling`
+- `entrypoints-integration-responses-api`
+- `entrypoints-integration-speech_to_text`
+- `entrypoints-unit-tests`
+- `fusion-and-compile-unit-tests-2xb200`
+- `fusion-e2e-config-sweep-h100`
+- `fusion-e2e-quick-h100`
+- `fusion-e2e-tp2-ar-rms-config-sweep-h100`
+- `fusion-e2e-tp2-asynctp-config-sweep-h100`
+- `fusion-e2e-tp2-b200`
+- `fusion-e2e-tp2-quick-h100`
+- `gemm-rs-ar-2xb200`
+- `kernels-attention-diffkv-test-h100`
+- `kernels-attention-test` ×7
+- `kernels-b200` ×3
+- `kernels-core-operation-test` ×3
+- `kernels-deepgemm-test-h100`
+- `kernels-fla-ops-test-b200`
+- `kernels-flashmla-test-h100`
+- `kernels-fusedmoe-layer-test-2-b200s`
+- `kernels-fusedmoe-layer-test-2-h100s`
+- `kernels-helion-test` ×5
+- `kernels-mamba-test`
+- `kernels-mhc-test-b200`
+- `kernels-minimax-reduce-rms-test-2-gpus`
+- `kernels-moe-test` ×5
+- `kernels-quantization-test` ×6
+- `kernels-root-misc-test-b200`
+- `kv-offload-large`
+- `kv-offload-medium`
+- `kv-offload-small`
+- `language-models-tests-extra-standard` ×2
+- `language-models-tests-granite-l4-compatibility`
+- `language-models-tests-hybrid` ×2
+- `language-models-tests-standard`
+- `lm-eval-dspark-watermark-2xh100`
+- `lm-eval-small-models`
+- `lm-eval-turboquant-k3v4nc`
+- `lm-eval-turboquant-k8v4`
+- `lm-eval-turboquant-t3nc`
+- `lm-eval-turboquant-t4nc`
+- `lm-eval-watermarking`
+- `model-executor`
+- `mrcr-eval-small-models`
+- `multi-modal-accuracy-eval-small-models`
+- `multi-modal-models-standard-1-qwen2`
+- `multi-modal-models-standard-2-qwen3-gemma`
+- `multi-modal-models-standard-3-llava-qwen2-vl`
+- `multi-modal-models-standard-4-other-whisper`
+- `multi-modal-processor` ×4
+- `multi-modal-processor-cpu` ×4
+- `openai-api-correctness`
+- `pipeline-context-parallelism-4-gpus`
+- `pytorch-compilation-dynamic-shapes`
+- `pytorch-compilation-passes-unit-tests`
+- `pytorch-compilation-unit-tests`
+- `pytorch-compilation-unit-tests-h100`
+- `pytorch-fullgraph-cudagraph-l4-compatibility`
+- `pytorch-fullgraph-test`
+- `pytorch-nightly-dependency-override-check`
+- `quantization` ×4
+- `quantized-fusions`
+- `quantized-models-test`
+- `quantized-moe-test-b200`
+- `rayexecutorv2-4-gpus`
+- `replayssm-e2e`
+- `sharded-rdt-weight-transfer`
+- `vllm-ir-tests`
+</details>
+
+<details><summary>Would skip (today's rules run them) (0)</summary>
+
+none
+</details>
+
+<details><summary>Would add (today's rules do not run them) (0)</summary>
+
+none
+</details>
+
+<details><summary>AMD mirrors: would skip (0)</summary>
+
+none
+</details>
+
+<details><summary>AMD mirrors: would add (0)</summary>
+
+none
+</details>
+
+#### CI results (2026-10-02 21:05 UTC)
+
+0 passed, 0 failed, 0 pending.
+
+No failures to judge.
+
+<sub>11 changed files · base `6e517b15c1` · head `88732ff5a4` · Python record: build 92561 at `4056c8ac1f` · kernel record: table 4056c8ac1f (build 92561), map 4056c8ac1f · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 81 optional steps the selector would also run</sub>
