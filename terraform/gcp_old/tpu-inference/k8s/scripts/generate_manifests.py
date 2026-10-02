@@ -93,10 +93,6 @@ MANAGER_COMPUTE_CLASS = "manager-system"
 # No namespace default goes with it, unlike the manager's: see the template.
 WORKER_COMPUTE_CLASS = "worker-cpu"
 
-# The node pool node_poll_idle.yaml.tpl selects. A worker without it gets no
-# DaemonSet rather than one that schedules nowhere.
-POLL_IDLE_QUEUE = "ct6e-standard-1t-1x1"
-
 # What a workload's place in the queue is worth: the rungs both repos'
 # pipeline_config.sh already rank work by, so a step keeps its standing when it
 # moves between bare metal and here. A workload naming no class scores 0, so
@@ -825,8 +821,6 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 ),
             ),
         )
-        if POLL_IDLE_QUEUE in local:
-            write(base / "system" / "20-node-poll-idle.yaml", render("node_poll_idle"))
         # Both sides of a MultiKueue admission keep their own quota and their own
         # pending count, so a worker is scraped for the same reasons the manager
         # is - a workload the manager admitted can still be waiting here.
