@@ -292,12 +292,13 @@ variable "tpu_dispatch_retry_seconds" {
     How long a workload may hold a reservation without MultiKueue placing it or
     naming a worker before the launcher resubmits it.
 
-    The one stuck state inside tpu_admission_max_seconds that has a fix: the
+    The stuck states inside tpu_admission_max_seconds that have a fix: the
     multikueue controller reconciles a fresh reservation once, creates no remote
-    copy, and never looks again, so the chips sit reserved and idle until the
-    hour runs out. Normal dispatch names a worker within seconds, and a
-    workload waiting on a slice rebuild names its worker, so only the stall
-    reaches this.
+    copy, and never looks again; or it names a worker, the worker admits the
+    copy, and recording that on the manager is rejected because the nomination
+    is gone. Either way the chips sit reserved until the hour runs out. Normal
+    dispatch names a worker within seconds, and a workload waiting on a slice
+    rebuild keeps its worker named, so only the stalls reach this.
   EOT
 }
 

@@ -167,6 +167,12 @@ API_GRACE_SECONDS = 600
 # it through garbage collection, which is seconds on a healthy manager.
 RESUBMIT_WAIT_SECONDS = 120
 
+# How long a resubmission waits for a worker that was offered the old object to
+# drop its pods. MultiKueue deletes the remote copy as soon as the manager's
+# Workload goes, and the pods then get their termination grace period, so this
+# is a minute or two.
+REMOTE_GONE_WAIT_SECONDS = 300
+
 # Deadline for the signal handler's delete, which races the pod's termination
 # grace period (SIGKILL 30s after SIGTERM) rather than the step timeout: a
 # delete still in flight then is a delete that never happened, and the workload
@@ -355,25 +361,55 @@ def never_dispatched(workload):
             and not (admitted and admitted.get("status") == "True"))
 
 
-def resubmit(kind, name, doc):
+def resubmit(kind, name, doc, before_create=None):
     """Delete the object and create it again under the same name.
 
-    The new object, or None if the old one did not go in time. Waits for it to
-    go because the name is reused: applying over an object still being deleted
-    updates the doomed one rather than making a fresh one Kueue will queue.
+    The new object, or None if the old one did not go in time or before_create
+    returned false. Waits for it to go because the name is reused: applying over
+    an object still being deleted updates the doomed one rather than making a
+    fresh one Kueue will queue.
     """
     delete_workload(kind, name)
     deadline = time.monotonic() + RESUBMIT_WAIT_SECONDS
     while kubectl_json("get", kind, name) is not None:
         if time.monotonic() > deadline:
+            log(f"{kind}/{name} was not deleted within {RESUBMIT_WAIT_SECONDS}s")
             return None
         time.sleep(POLL_SECONDS)
+    if before_create is not None and not before_create():
+        return None
     subprocess.run(
         ["kubectl", "-n", NAMESPACE, "apply", "-f", "-"],
         input=json.dumps(doc), text=True, check=True,
         timeout=CLI_TIMEOUT_SECONDS,
     )
     return kubectl_json("get", kind, name)
+
+
+def remote_copy_gone(clusters, job_id, registry):
+    """Whether every worker the workload was offered has dropped its pods.
+
+    A worker can admit the remote copy while the manager fails to record that
+    it did, so the copy may be running when the launcher gives up on the
+    submission. A resubmission reuses the name, and while a remote Job of that
+    name exists MultiKueue copies its status onto the new object instead of
+    creating a fresh one. Pods are the only thing the launcher may read on a
+    worker; MultiKueue deletes the remote Job in the background, so the Job is
+    gone before its last pod is.
+    """
+    deadline = time.monotonic() + REMOTE_GONE_WAIT_SECONDS
+    for cluster in sorted(clusters):
+        env = worker_env(cluster, registry)
+        if env is None:
+            log(f"cannot check {cluster} for the old copy, so not resubmitting")
+            return False
+        while worker_pods(env, job_id) != []:
+            if time.monotonic() > deadline:
+                log(f"{cluster} still had pods for this step "
+                    f"{REMOTE_GONE_WAIT_SECONDS}s after the old copy was deleted")
+                return False
+            time.sleep(POLL_SECONDS)
+    return True
 
 
 def load_registry():
@@ -1385,6 +1421,23 @@ def workload_exit_code(items):
     return code if 0 < code < 256 else None
 
 
+def storage_eviction(items):
+    """The kubelet's message if it evicted a pod for its disk use, else None.
+
+    The eviction carries DisruptionTarget, which the pod failure policy ignores
+    so that losing a node does not fail the run. But the replacement pod writes
+    the same files and is evicted again, so the Job reruns the step until its
+    deadline. The message names the container and how much it wrote.
+    """
+    for pod in items or []:
+        status = pod.get("status", {})
+        message = status.get("message") or ""
+        if (status.get("reason") == "Evicted"
+                and ("ephemeral" in message or "EmptyDir volume" in message)):
+            return f"{pod['metadata']['name']}: {message.strip()}"
+    return None
+
+
 def describe_admission(workload):
     if workload is None:
         return "waiting for Kueue to create the workload"
@@ -1873,7 +1926,8 @@ def main():
         # Since when the current submission has been reserved without MultiKueue
         # placing it or naming a worker; see never_dispatched().
         undispatched = None
-        dispatch_seen = False
+        # Workers the current submission has been offered to.
+        offered = set()
         admitted = False
         running = False
         last_startup = None
@@ -1936,10 +1990,15 @@ def main():
             # the failure. A fresh object gets a fresh reconcile. Never after
             # admission, where losing the reservation is preemption and Kueue
             # requeues it itself.
+            #
+            # Two ways in. Either no worker was ever named, or one was and the
+            # nomination went without an admission: the worker admitted the
+            # copy, the manager's attempt to record that was rejected, and
+            # every retry fails the same way because the nomination it must
+            # match is gone.
             status = (workload or {}).get("status", {})
-            if cluster or status.get("nominatedClusterNames"):
-                dispatch_seen = True
-            if not admitted and not dispatch_seen and never_dispatched(workload):
+            offered.update(status.get("nominatedClusterNames") or [])
+            if not admitted and never_dispatched(workload):
                 if undispatched is None:
                     undispatched = time.monotonic()
             else:
@@ -1948,19 +2007,28 @@ def main():
                     and time.monotonic() - undispatched > redispatch_after
                     and timing["redispatches"] < redispatch_max):
                 timing["redispatches"] += 1
+                if offered:
+                    why = (f"its offer to {', '.join(sorted(offered))} was "
+                           "withdrawn without an admission")
+                else:
+                    why = "not dispatched to any worker"
                 log(f"quota reserved {time.monotonic() - undispatched:.0f}s ago "
-                    "but not dispatched to any worker - resubmitting (attempt "
+                    f"but {why} - resubmitting (attempt "
                     f"{timing['redispatches']}/{redispatch_max})")
-                created = with_grace(resubmit, kind, name, doc)
+                was_offered = set(offered)
+                created = with_grace(
+                    resubmit, kind, name, doc,
+                    (lambda: remote_copy_gone(was_offered, job_id, registry))
+                    if was_offered else None)
                 if created is None:
-                    log(f"{kind}/{name} was not deleted within "
-                        f"{RESUBMIT_WAIT_SECONDS}s, so it cannot be resubmitted")
+                    log(f"{kind}/{name} cannot be resubmitted")
                     stop_announcing()
                     delete_workload(kind, name)
                     return finish("not_admitted", 1)
                 uid = created["metadata"]["uid"]
                 reserved = None
                 undispatched = None
+                offered = set()
                 last_note = None
                 continue
 
@@ -1990,6 +2058,19 @@ def main():
             # One read of the workload's pods, for the readers below.
             items = worker_pods(genv, job_id) if genv else None
             note_pod_starts(timing, items)
+
+            evicted = storage_eviction(items)
+            if evicted:
+                timing["finished_at"] = utc_now()
+                if collector:
+                    collector.sweep()
+                print("^^^ +++", flush=True)
+                log(f"pod evicted for its disk use: {evicted}"[:600])
+                log("failing now rather than rerunning it: the rerun writes the "
+                    "same files and is evicted again. Point whatever wrote them "
+                    "at /cache/jax or /dev/shm.")
+                delete_workload(kind, name)
+                return finish("evicted_storage", 1)
 
             # A failed read is not a started pod: leave it to the next turn.
             if admitted and items is not None and not running:
