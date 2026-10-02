@@ -142,12 +142,16 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
       sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
+      ${file("${path.module}/../shared/read-secret.sh")}
+      BUILDKITE_AGENT_TOKEN=$(read_secret "${var.buildkite_token_secret_name}") || exit 1
+      HF_TOKEN=$(read_secret "${var.huggingface_token_secret_name}") || exit 1
+
       # This script re-runs on every boot, so match the whole line rather than
       # the pristine package default, which is gone after the first boot. The
       # name below needs no such treatment: it is the instance name, which is
       # ForceNew, so a rename recreates the VM and this sed always runs against
       # a freshly installed cfg.
-      sudo sed -i -E 's|^token=.*|token="${var.buildkite_token_value}"|' /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i -E "s|^token=.*|token=\"$BUILDKITE_AGENT_TOKEN\"|" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="${local.node_names[count.index]}"/' /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i '/^tags=/d' /etc/buildkite-agent/buildkite-agent.cfg
       echo 'tags="${var.agent_tags}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
@@ -155,7 +159,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       # tee echoes to stdout, which the startup script sends to the serial
       # console, where anyone with compute.instances.getSerialPortOutput can
       # read it. Secrets go to the file only.
-      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment > /dev/null
+      echo "HF_TOKEN=$HF_TOKEN" | sudo tee -a /etc/environment > /dev/null
 
       ${file("${path.module}/../shared/keep-agent-connected.sh")}
 

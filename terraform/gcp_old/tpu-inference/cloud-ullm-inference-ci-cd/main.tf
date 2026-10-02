@@ -1,18 +1,11 @@
-data "google_secret_manager_secret_version" "buildkite_agent_token_vllm" {
-  secret  = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
-  version = "latest"
+# Secrets the agent VMs read at boot through modules/shared/read-secret.sh.
+# They are created, filled and shared with the VMs' service accounts outside
+# Terraform, with gcloud, so no token is in instance metadata or state.
+locals {
+  buildkite_token_secret_name           = "projects/${var.project_id}/secrets/vllm_buildkite_agent_token"
+  huggingface_token_secret_name         = "projects/${var.project_id}/secrets/vllm_buildkite_hf_token"
+  buildkite_analytics_token_secret_name = "projects/${var.project_id}/secrets/vllm_buildkite_analytics_token"
 }
-
-data "google_secret_manager_secret_version" "buildkite_analytics_token_vllm" {
-  secret  = "projects/${var.secret_project_id}/secrets/vllm_buildkite_analytics_token"
-  version = "latest"
-}
-
-data "google_secret_manager_secret_version" "huggingface_token" {
-  secret  = "projects/${var.secret_project_id}/secrets/tpu_commons_buildkite_hf_token"
-  version = "latest"
-}
-
 
 module "ci_v6e_1_vllm" {
   source = "../modules/ci_v6e"
@@ -20,17 +13,17 @@ module "ci_v6e_1_vllm" {
     google-beta = google-beta.us-east5-a
   }
 
-  accelerator_type                = "v6e-1"
-  reserved                        = true
-  purpose                         = "vllm"
-  instance_count                  = 30
-  disk_size                       = 1024
-  buildkite_queue_name            = "tpu_v6e_queue"
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "v6e-1"
+  reserved                              = true
+  purpose                               = "vllm"
+  instance_count                        = 30
+  disk_size                             = 1024
+  buildkite_queue_name                  = "tpu_v6e_queue"
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
 }
 
 module "ci_v6e_8_vllm" {
@@ -39,17 +32,17 @@ module "ci_v6e_8_vllm" {
     google-beta = google-beta.us-east5-a
   }
 
-  accelerator_type                = "v6e-8"
-  reserved                        = true
-  purpose                         = "vllm"
-  instance_count                  = 9
-  disk_size                       = 4096
-  buildkite_queue_name            = "tpu_v6e_8_queue"
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "v6e-8"
+  reserved                              = true
+  purpose                               = "vllm"
+  instance_count                        = 9
+  disk_size                             = 4096
+  buildkite_queue_name                  = "tpu_v6e_8_queue"
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
 }
 
 
@@ -59,16 +52,16 @@ module "ci_v7x_2" {
     google-beta = google-beta.us-central1-c
   }
 
-  accelerator_type                = "tpu7x-2"
-  reserved                        = true
-  instance_count                  = 16
-  buildkite_queue_name            = "tpu_v7x_2_queue"
-  disk_size                       = 2048
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "tpu7x-2"
+  reserved                              = true
+  instance_count                        = 16
+  buildkite_queue_name                  = "tpu_v7x_2_queue"
+  disk_size                             = 2048
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
 }
@@ -82,16 +75,16 @@ module "ci_v7x_8" {
     google-beta = google-beta.us-central1-c
   }
 
-  accelerator_type                = "tpu7x-8"
-  reserved                        = true
-  instance_count                  = 10
-  buildkite_queue_name            = "tpu_v7x_8_queue"
-  disk_size                       = 4096
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "tpu7x-8"
+  reserved                              = true
+  instance_count                        = 10
+  buildkite_queue_name                  = "tpu_v7x_8_queue"
+  disk_size                             = 4096
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
 }
@@ -102,15 +95,15 @@ module "ci_v7x_16" {
     google-beta = google-beta.us-central1-c
   }
 
-  accelerator_type                = "tpu7x-16"
-  reserved                        = true
-  instance_count                  = 2
-  buildkite_queue_name            = "tpu_v7x_16_queue"
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "tpu7x-16"
+  reserved                              = true
+  instance_count                        = 2
+  buildkite_queue_name                  = "tpu_v7x_16_queue"
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
   # disk_size defaults to 0, disable attached disk
 
   vllm_torchtpu_ssh_checkout = true
@@ -130,15 +123,15 @@ module "ci_v7x_32" {
     google-beta = google-beta.us-central1-c
   }
 
-  accelerator_type                = "tpu7x-32"
-  reserved                        = true
-  instance_count                  = 0
-  buildkite_queue_name            = "tpu_v7x_32_queue"
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "tpu7x-32"
+  reserved                              = true
+  instance_count                        = 0
+  buildkite_queue_name                  = "tpu_v7x_32_queue"
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
 }
@@ -151,11 +144,11 @@ module "ci_cpu_vllm_zone_b" {
   providers = {
     google-beta = google-beta.us-central1-b
   }
-  purpose                 = "vllm"
-  project_id              = var.project_id
-  instance_count          = 8
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  purpose                       = "vllm"
+  project_id                    = var.project_id
+  instance_count                = 8
+  buildkite_token_secret_name   = local.buildkite_token_secret_name
+  huggingface_token_secret_name = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
 }
@@ -173,8 +166,8 @@ module "ci_cpu_64_core_vllm_zone_b" {
   disk_type            = "pd-balanced"
   buildkite_queue_name = "cpu_64_core"
 
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  buildkite_token_secret_name   = local.buildkite_token_secret_name
+  huggingface_token_secret_name = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
 }
@@ -192,8 +185,8 @@ module "ci_cpu_64_core_vllm_zone_f" {
   disk_type            = "pd-balanced"
   buildkite_queue_name = "cpu_64_core"
 
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  buildkite_token_secret_name   = local.buildkite_token_secret_name
+  huggingface_token_secret_name = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
 }
@@ -238,7 +231,7 @@ module "ci_monitoring" {
   ]
 
   buildkite_token_secret_ids = {
-    "vllm" = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
+    "vllm" = local.buildkite_token_secret_name
   }
 
   bq_puller_orgs = {

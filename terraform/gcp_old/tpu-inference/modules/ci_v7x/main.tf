@@ -85,19 +85,20 @@ resource "google_tpu_v2_vm" "tpu_v7x_ci" {
 
   metadata = {
     "startup-script" = templatefile("${path.module}/startup-script.sh.tftpl", {
-      buildkite_token_value           = var.buildkite_token_value
-      huggingface_token_value         = var.huggingface_token_value
-      buildkite_analytics_token_value = var.buildkite_analytics_token_value
-      buildkite_queue_name            = var.buildkite_queue_name
-      github_app_secret_name          = var.github_app_secret_name
-      is_multi_host                   = local.is_multi_host
-      host_name                       = local.node_names[count.index]
-      private_key_pem                 = local.is_multi_host ? tls_private_key.internal_ssh_key[count.index].private_key_pem : ""
-      public_key_openssh              = local.is_multi_host ? tls_private_key.internal_ssh_key[count.index].public_key_openssh : ""
-      has_attached_disk               = local.has_attached_disk
-      disk_size_bytes                 = var.disk_size * 1073741824
-      keep_agent_connected            = file("${path.module}/../shared/keep-agent-connected.sh")
-      git_setup                       = chomp(var.vllm_torchtpu_ssh_checkout ? file("${path.module}/../shared/git-ssh-checkout-setup.sh") : file("${path.module}/../shared/git-https-setup.sh"))
+      buildkite_token_secret_name           = var.buildkite_token_secret_name
+      huggingface_token_secret_name         = var.huggingface_token_secret_name
+      buildkite_analytics_token_secret_name = var.buildkite_analytics_token_secret_name
+      read_secret_function                  = file("${path.module}/../shared/read-secret.sh")
+      buildkite_queue_name                  = var.buildkite_queue_name
+      github_app_secret_name                = var.github_app_secret_name
+      is_multi_host                         = local.is_multi_host
+      host_name                             = local.node_names[count.index]
+      private_key_pem                       = local.is_multi_host ? tls_private_key.internal_ssh_key[count.index].private_key_pem : ""
+      public_key_openssh                    = local.is_multi_host ? tls_private_key.internal_ssh_key[count.index].public_key_openssh : ""
+      has_attached_disk                     = local.has_attached_disk
+      disk_size_bytes                       = var.disk_size * 1073741824
+      keep_agent_connected                  = file("${path.module}/../shared/keep-agent-connected.sh")
+      git_setup                             = chomp(var.vllm_torchtpu_ssh_checkout ? file("${path.module}/../shared/git-ssh-checkout-setup.sh") : file("${path.module}/../shared/git-https-setup.sh"))
     })
   }
 }

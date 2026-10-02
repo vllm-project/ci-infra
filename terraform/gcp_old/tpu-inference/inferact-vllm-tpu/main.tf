@@ -1,18 +1,3 @@
-data "google_secret_manager_secret_version" "buildkite_agent_token_vllm" {
-  secret  = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
-  version = "latest"
-}
-
-data "google_secret_manager_secret_version" "buildkite_analytics_token_vllm" {
-  secret  = "projects/${var.secret_project_id}/secrets/vllm_buildkite_analytics_token"
-  version = "latest"
-}
-
-data "google_secret_manager_secret_version" "huggingface_token" {
-  secret  = "projects/${var.secret_project_id}/secrets/tpu_commons_buildkite_hf_token"
-  version = "latest"
-}
-
 # This project, outside the google.com org, gets v7x only through Compute
 # Engine: the Cloud TPU API that ci_v7x uses offers it no tpu7x types. The
 # agents join the same queues as the cicd fleet. The CI grants on our
@@ -35,19 +20,21 @@ module "ci_v7x_8" {
     google-beta = google-beta.us-central1-c
   }
 
-  slice_count                     = 8
-  hosts_per_slice                 = 1
-  topology                        = null
-  buildkite_queue_name            = "tpu_v7x_8_queue"
-  boot_disk_size                  = 4096 # the cicd v7x-8 agents' data disk size
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  service_account_email           = local.service_account_email
-  reservation_name                = local.reservation_name
-  subnetwork                      = google_compute_subnetwork.ci.id
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  slice_count           = 8
+  hosts_per_slice       = 1
+  topology              = null
+  buildkite_queue_name  = "tpu_v7x_8_queue"
+  boot_disk_size        = 4096 # the cicd v7x-8 agents' data disk size
+  project_id            = var.project_id
+  project_short_name    = var.project_short_name
+  service_account_email = local.service_account_email
+  reservation_name      = local.reservation_name
+  subnetwork            = google_compute_subnetwork.ci.id
+  # The hosts read these at boot. Their vllm-ci account's access is granted
+  # in cloud-ullm-inference-ci-cd/secrets.tf, next to the secrets.
+  buildkite_token_secret_name           = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
+  buildkite_analytics_token_secret_name = "projects/${var.secret_project_id}/secrets/vllm_buildkite_analytics_token"
+  huggingface_token_secret_name         = "projects/${var.secret_project_id}/secrets/vllm_buildkite_hf_token"
 
   vllm_torchtpu_ssh_checkout = true
 }
