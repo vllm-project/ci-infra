@@ -177,10 +177,15 @@ def plan(
 
     """
     file_seconds = {}  # (command preview, file) -> seconds on main
+    # Files whose every test was skipped on main: they run in about 0 s on
+    # this step's hardware too, so their measured time is used, not the
+    # unknown-file default.
+    skip_only = set()
     for timing in (timings or {}).get("files", []):
-        if timing["timingStatus"] != "skip_only":
-            key = (timing["command"], timing["file"])
-            file_seconds[key] = timing["observedMs"] / 1000
+        key = (timing["command"], timing["file"])
+        file_seconds[key] = timing["observedMs"] / 1000
+        if timing["timingStatus"] == "skip_only":
+            skip_only.add(key)
 
     # One unit per file of each command, in collection order.
     units: List[Dict] = []
@@ -202,6 +207,7 @@ def plan(
                 )
     files = set()
     unknown_files = []
+    skipped_files = []
     for unit in units:
         files.add((unit["command"], unit["file"]))
         preview = command_preview(inventory[unit["command"]]["command"])
@@ -209,6 +215,8 @@ def plan(
         if unit["seconds"] is None:
             unit["seconds"] = unknown_file_seconds
             unknown_files.append(unit["file"])
+        elif (preview, unit["file"]) in skip_only:
+            skipped_files.append(unit["file"])
 
     oversized = []
     if timings is None:  # equal file counts, as a safe default
@@ -275,6 +283,7 @@ def plan(
         "files": len(files),
         "timingSource": timing_source,
         "unknownFiles": unknown_files,
+        "skippedFiles": skipped_files,
         "oversizedFiles": oversized,
         "overBudget": over_budget,
         "rules": {
@@ -396,6 +405,12 @@ def annotation(
         lines.append(
             f"No timing, counted as {result['rules']['unknownFileSeconds'] / 60:.1f} min each: "
             + ", ".join(f"`{f}`" for f in result["unknownFiles"])
+        )
+    if result.get("skippedFiles"):
+        lines.append(
+            "Skipped on main (every test skipped in recent main runs), counted at "
+            "their measured time: "
+            + ", ".join(f"`{f}`" for f in result["skippedFiles"])
         )
     if result["oversizedFiles"]:
         lines.append(

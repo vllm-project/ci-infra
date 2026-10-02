@@ -151,6 +151,20 @@ def test_plan_over_max_number_of_shards_still_assigns_everything():
     assert "still over" in rs.annotation("k", result)
 
 
+def test_plan_counts_a_file_skipped_on_main_at_its_measured_time():
+    command = "pytest -v -s tests"
+    timings = _timings(command, {"ran.py": 600, "rocm_only.py": 0})
+    timings["files"][1]["timingStatus"] = "skip_only"
+    result = rs.plan([_entry(command, {"ran.py": 2, "rocm_only.py": 3})], timings)
+    # It has a timing, so it is not "unknown", and adds no 2.5 min guess.
+    assert result["unknownFiles"] == [] and result["skippedFiles"] == [
+        "tests/rocm_only.py"
+    ]
+    assert result["shards"][0]["estimateSeconds"] == 600
+    assert "Skipped on main" in rs.annotation("k", result)
+    assert "No timing" not in rs.annotation("k", result)
+
+
 def test_annotation_lists_each_shards_files_per_command():
     small, big = "pytest -v -s small", "pytest -v -s big"
     inventory = [
