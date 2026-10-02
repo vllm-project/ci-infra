@@ -71,6 +71,9 @@ def test_split_commands():
     assert rs.split_commands([TESTS[0], "echo done"]) is None
     assert rs.split_commands([TESTS[0] + " && echo done"]) is None
     assert rs.split_commands(["pytest -v x --shard-id=1 --num-shards=2"]) is None
+    # Tests before the first plain pytest would run in full in every shard.
+    assert rs.split_commands(["TP_SIZE=1 pytest -v a.py", *TESTS]) is None
+    assert rs.split_commands(["torchrun --nproc-per-node=2 a.py", *TESTS]) is None
 
 
 def test_plan_packs_whole_files_in_order_and_covers_every_test():
@@ -413,6 +416,19 @@ def test_collect_runs_in_the_steps_own_job_and_writes_to_its_checkout(
     assert [c.split()[-1] for c in collect.commands[4:]] == [out] * len(TESTS)
     template = rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])
     assert template == {"steps": [plain.dict(exclude_none=True)]}
+
+
+def test_uploaded_template_waits_for_pre_commit_on_a_pull_request(
+    fake_global_config,
+):
+    fake_global_config["run_all"] = True
+    fake_global_config["pull_request"] = "123"
+    collect, plan = _render(_step(automatic_shard=True))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[collect, plan])
+    buildkite_step.add_precommit_dependency([group])
+    [template] = rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])["steps"]
+    assert collect.depends_on == ["image-build", "pre-commit"]
+    assert template["depends_on"] == ["image-build", "pre-commit"]
 
 
 def test_collect_writes_node_ids_relative_to_rootdir(tmp_path):

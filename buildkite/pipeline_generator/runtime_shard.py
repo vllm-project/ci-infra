@@ -68,8 +68,9 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
 
     Returns:
         (setup commands, pytest commands), or None if the step can't be
-        sharded: it needs at least one pytest command, and only plain pytest
-        commands (no shell syntax, no pytest-shard flags) after the first.
+        sharded: it needs at least one pytest command, only plain pytest
+        commands (no shell syntax, no pytest-shard flags) after the first,
+        and no tests before it, since setup runs in full in every shard.
 
     """
     first = None
@@ -78,6 +79,8 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
             first = position
             break
     if first is None:
+        return None
+    if any("pytest" in c or "torchrun" in c for c in commands[:first]):
         return None
     tests = commands[first:]
     for command in tests:
