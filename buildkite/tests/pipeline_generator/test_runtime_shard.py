@@ -643,14 +643,14 @@ def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
     template, [step], annotate = _run_plan_on(tmp_path, monkeypatch)
     assert step["key"] == "model-executor" and step["parallelism"] == 4
     assert step["label"] == "ME shard %N/%t" and step["env"] == template["env"]
-    # Setup as is; each pytest command and its header become a case per shard.
-    assert step["commands"][0] == "cd /t" and len(step["commands"]) == 5
+    # Setup as is; each pytest command and its header become one case.
+    assert step["commands"][0] == "cd /t" and len(step["commands"]) == 3
     assert all(
         c.startswith('case "$$BUILDKITE_PARALLEL_JOB" in') for c in step["commands"][1:]
     )
     # 6 files, no timings: 4 shards of 1, 2, 1, 2 files
-    first = step["commands"][2].split(";;")[0]
-    assert first.endswith("\npytest -v -s -m '(not slow_test)' --timeout=900 f0_0.py\n")
+    first = step["commands"][1].split(";;")[0]
+    assert "\n{ pytest -v -s -m '(not slow_test)' --timeout=900 f0_0.py\n}" in first
     # No main timings, so equal file counts: worth a look, so a warning.
     assert annotate[5] == "warning" and "running as **4 shards**" in annotate[6]
 
@@ -678,10 +678,11 @@ def test_run_plan_shards_a_kubernetes_job_with_its_pod_spec_and_env(
     assert step["parallelism"] == 4 and step["plugins"] == template["plugins"]
     assert step["retry"] == template["retry"] == buildkite_step.K8S_RETRY
     assert step["env"] == template["env"]
-    # The setup commands' headers stay; both pytest commands become cases.
+    # The setup commands' headers stay; each pytest command and its header
+    # become one case.
     cases = [c for c in step["commands"] if c.startswith('case "$$BUILDKITE_')]
     assert (
-        len(cases) == 4 and step["commands"][: -len(cases)] == template["commands"][:-4]
+        len(cases) == 2 and step["commands"][: -len(cases)] == template["commands"][:-4]
     )
 
 
@@ -760,7 +761,7 @@ def _result(*shards):
     return result
 
 
-def test_each_shard_runs_and_logs_only_its_own_tests(tmp_path):
+def test_each_file_of_a_shard_runs_as_its_own_command(tmp_path):
     command = "pytest -v pkg -m 'not slow'"
     entry = _collected(
         tmp_path,
@@ -768,54 +769,67 @@ def test_each_shard_runs_and_logs_only_its_own_tests(tmp_path):
         {
             "pkg/test_a.py": "def test_x(): pass\n",
             "pkg/test_b.py": "def test_y(): pass\ndef test_z(): pass\n",
+            "pkg/test_c.py": "def test_v(): pass\ndef test_w(): pass\n",
         },
     )
     assert entry["paths"] == ["pkg"]
     result = _result(
-        ["pkg/test_a.py", "pkg/test_b.py::test_y"], ["pkg/test_b.py::test_z"], []
+        ["pkg/test_a.py", "pkg/test_b.py::test_y"],
+        ["pkg/test_b.py::test_z", "pkg/test_c.py"],
+        [],
     )
     step = rs.shard_step({"commands": _rendered([command])}, result, [entry])
 
     first = _run_shard(step, 0, tmp_path / "tests")
     assert first.returncode == 0, first.stdout + first.stderr
-    lines = first.stdout.splitlines()
-    assert lines[:4] == [
-        "+++ :test_tube: Command (1/1), shard 1/3: 2 tests in 2 files",
-        "pytest -v -m 'not slow' \\",
-        "  pkg/test_a.py \\",
-        "  pkg/test_b.py::test_y",
+    headers = [line for line in first.stdout.splitlines() if line.startswith("+++")]
+    assert headers == [
+        "+++ :test_tube: Command 1/2: pytest -v -m 'not slow' pkg/test_a.py",
+        "+++ :test_tube: Command 2/2: pytest -v -m 'not slow' pkg/test_b.py"
+        "   (1 of 2 tests)",
     ]
-    assert "2 passed" in first.stdout and "test_z" not in first.stdout
+    assert first.stdout.count("1 passed") == 2 and "test_z" not in first.stdout
 
     second = _run_shard(step, 1, tmp_path / "tests")
-    assert second.returncode == 0 and "1 passed" in second.stdout
-    assert "test_b.py::test_z PASSED" in second.stdout
+    assert second.returncode == 0 and "test_b.py::test_z PASSED" in second.stdout
+    # A whole file needs no count, however many tests it has.
+    headers = [line for line in second.stdout.splitlines() if line.startswith("+++")]
+    assert (
+        headers[1]
+        == "+++ :test_tube: Command 2/2: pytest -v -m 'not slow' pkg/test_c.py"
+    )
+    assert "2 passed" in second.stdout
 
     empty = _run_shard(step, 2, tmp_path / "tests")
     assert empty.returncode == 0 and empty.stdout == (
-        "+++ :test_tube: Command (1/1), shard 3/3: no tests of pytest -v pkg -m not slow\n"
+        "runtime-shard: no tests of pytest -v pkg -m not slow in this shard\n"
     )
 
 
-def test_a_shards_failing_test_fails_its_job(tmp_path):
+def test_a_failing_file_fails_the_job_after_the_shards_other_files(tmp_path):
     command = "pytest -v pkg"
     entry = _collected(
         tmp_path,
         command,
         {
-            "pkg/test_a.py": "def test_x(): pass\n",
-            "pkg/test_b.py": "def test_y(): assert 0\n",
+            "pkg/test_a.py": "def test_x(): assert 0\n",
+            "pkg/test_b.py": "def test_y(): pass\n",
         },
     )
-    result = _result(["pkg/test_a.py"], ["pkg/test_b.py"])
-    step = rs.shard_step({"commands": _rendered([command])}, result, [entry])
-    assert _run_shard(step, 0, tmp_path / "tests").returncode == 0
-    assert _run_shard(step, 1, tmp_path / "tests").returncode == 1
+    result = _result(["pkg/test_a.py", "pkg/test_b.py"])
+    step = rs.shard_step(
+        {"commands": [*_rendered([command]), "echo after"]}, result, [entry]
+    )
+    run = _run_shard(step, 0, tmp_path / "tests")
+    assert run.returncode == 1 and "test_b.py::test_y PASSED" in run.stdout
+    # As the step's own failing command would, it stops the job there.
+    assert "after" not in run.stdout
 
 
 def test_a_shard_keeps_the_generators_wrapping_and_a_commands_variables(tmp_path):
-    """Tracing labels the command by its preview, for main's timings; the
-    command's own NAME=value assignments reach collect and every shard."""
+    """Tracing labels each file's command by the step command's preview, for
+    main's timings; the command's own NAME=value assignments reach collect and
+    every shard."""
     command = "N=3 pytest -v test_n.py"
     entry = _collected(
         tmp_path,
@@ -834,15 +848,15 @@ def test_a_shard_keeps_the_generators_wrapping_and_a_commands_variables(tmp_path
         ["test_n.py::test_i[0]"], ["test_n.py::test_i[1]", "test_n.py::test_i[2]"]
     )
     step = rs.shard_step({"commands": [header, traced]}, result, [entry])
-    shard_2 = step["commands"][1].split("1)\n")[1].split("\n;;")[0]
-    assert shard_2 == (
-        f"ci_otel_start 1 {preview} || :\n"
+    [case] = step["commands"]
+    assert (
+        f"{{ ci_otel_start 1 {preview} || :\n"
         "N=3 pytest -v 'test_n.py::test_i[1]' 'test_n.py::test_i[2]'\n"
-        "status=$$?\n(exit $$status)"
-    )
-    step["commands"][1] = step["commands"][1].replace(
-        f"ci_otel_start 1 {preview} || :", ":"
-    )
+        "status=$$?\n(exit $$status)\n} || runtime_shard_status=1"
+    ) in case
+    step["commands"][0] = case.replace(f"ci_otel_start 1 {preview} || :", ":")
     run = _run_shard(step, 1, tmp_path / "tests")
     assert run.returncode == 0 and "2 passed" in run.stdout
-    assert "N=3 pytest -v \\" in run.stdout.splitlines()
+    assert run.stdout.splitlines()[0] == (
+        "+++ :test_tube: Command 1/1: N=3 pytest -v test_n.py   (2 of 3 tests)"
+    )

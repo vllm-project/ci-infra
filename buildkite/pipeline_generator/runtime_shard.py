@@ -12,8 +12,8 @@ like the recorders' scripts:
            test lands exactly once and annotates the build. Then it uploads
            the step's own job with `parallelism: N`; in shadow mode it uploads
            nothing, because the step already runs as one job.
-  shards   each parallel job runs its shard's own pytest commands, naming
-           its files, picked by BUILDKITE_PARALLEL_JOB.
+  shards   each parallel job runs one pytest command per file of its shard,
+           picked by BUILDKITE_PARALLEL_JOB, each under its own log header.
 
 Sharding never blocks the step: if collection or planning fails, the plan step
 uploads the step's normal single job instead (see run_plan and the generator's
@@ -640,8 +640,8 @@ def shard_step(template: Dict, result: Dict, inventory: List[Dict]) -> Dict:
     """The step's own job, run as one parallel job per shard.
 
     Parallel jobs share their commands, so each pytest command becomes a
-    `case` on BUILDKITE_PARALLEL_JOB: a job runs only its shard's pytest
-    command, which names the shard's files, and its log header shows it.
+    `case` on BUILDKITE_PARALLEL_JOB: a job runs one pytest command per file
+    of its shard, each under a log header that shows it.
 
     Args:
         template: The step's normal rendered job.
@@ -690,11 +690,38 @@ def _shard_command(entry: Dict, targets: List[str]) -> List[str]:
     return parts
 
 
+def _files_by_shard(result: Dict) -> List[List[Tuple[int, str, List[str]]]]:
+    """Each shard's files, in plan order: (command index, file, its targets).
+
+    Args:
+        result: A checked plan from plan().
+
+    Returns:
+        One list per shard.
+
+    """
+    shards = []
+    for shard in result["shards"]:
+        files = []
+        for planned in shard["commands"]:
+            by_file: Dict[str, List[str]] = {}
+            for target in planned["targets"]:
+                by_file.setdefault(target.split("::")[0], []).append(target)
+            for file, targets in by_file.items():
+                files.append((planned["index"], file, targets))
+        shards.append(files)
+    return shards
+
+
 def _shard_commands(
     commands: List[str], result: Dict, inventory: List[Dict]
 ) -> List[str]:
     """The job's commands, with each pytest command and its log header
-    replaced by a `case` that runs and shows only this shard's part of it.
+    replaced by a `case` on the shard: one pytest command per file of the
+    shard, each under its own log header.
+
+    A failing file doesn't stop the shard's other files of the command; the
+    job then fails after them, where the step's own command would have.
 
     Args:
         commands: The step's rendered commands.
@@ -709,7 +736,7 @@ def _shard_commands(
 
     """
     previews = [command_preview(entry["command"]) for entry in inventory]
-    total = len(result["shards"])
+    shard_files = _files_by_shard(result)
     replaced = []
     done = set()  # the planned commands replaced so far
     position = 0
@@ -723,7 +750,7 @@ def _shard_commands(
         index = previews.index(match.group(3))
         entry = inventory[index]
         # The generator wraps the command (tracing, continue-on-failure) and
-        # renders its ' as ". Each shard gets the wrapped line with its own
+        # renders its ' as ". Each file gets the wrapped line with its own
         # command in place of the step's.
         if position + 1 >= len(commands):
             raise ValueError(f"command {index + 1} is missing from the step's job")
@@ -731,44 +758,41 @@ def _shard_commands(
         before, found, after = wrapped.rpartition(entry["command"].replace("'", '"'))
         if not found:
             raise ValueError(f"command {index + 1} is missing from the step's job")
+        prefix = entry["prefix"].rstrip("/") + "/" if entry["prefix"] else ""
+        file_tests: Dict[str, int] = {}
+        for nodeid in entry["nodeids"]:
+            file = nodeid.split("::")[0][len(prefix) :]
+            file_tests[file] = file_tests.get(file, 0) + 1
 
-        headers = []
-        runs = []
-        for number, shard in enumerate(result["shards"]):
-            title = f"+++ :test_tube: Command ({match.group(2)}), shard {number + 1}/{total}"
-            targets = []
-            tests = 0
-            for planned in shard["commands"]:
-                if planned["index"] == index:
-                    targets += planned["targets"]
-                    tests += planned["tests"]
-            if not targets:
-                printed = [f"{title}: no tests of {match.group(3)}"]
-                run = ":"
-            else:
-                files = {target.split("::")[0] for target in targets}
+        branches = []
+        for number, files in enumerate(shard_files):
+            lines = []
+            for position_in_shard, (planned, file, targets) in enumerate(files):
+                if planned != index:
+                    continue
                 parts = _shard_command(entry, targets)
-                # One target per line, as a command that can be pasted.
-                lines = [parts[0]]
-                for part in parts[1:]:
-                    lines[-1] += " \\"
-                    lines.append("  " + part)
-                printed = [
-                    f"{title}: {_plural(tests, 'test')} in {_plural(len(files), 'file')}",
-                    *lines,
-                ]
+                title = (
+                    f"+++ :test_tube: Command {position_in_shard + 1}/{len(files)}:"
+                    f" {parts[0]} {shlex.quote(file)}"
+                )
+                # A split file's targets are its test IDs, one per test.
+                if any("::" in target for target in targets):
+                    title += f"   ({len(targets)} of {file_tests[file]} tests)"
                 # Buildkite interpolates the uploaded step: $$ is a literal $.
                 # The generator's own lines are already escaped.
+                lines.append(f"printf '%s\\n' {shlex.quote(title)}".replace("$", "$$"))
                 run = before + " ".join(parts).replace("$", "$$") + after
-            quoted = " ".join(shlex.quote(text) for text in printed).replace("$", "$$")
-            headers.append(f"{number}) printf '%s\\n' {quoted};;")
-            runs.append(f"{number})\n{run}\n;;")
-        replaced.append(
-            'case "$$BUILDKITE_PARALLEL_JOB" in ' + " ".join(headers) + " esac"
-        )
+                lines.append(f"{{ {run}\n}} || runtime_shard_status=1")
+            if lines:
+                lines.insert(0, "runtime_shard_status=0")
+                lines.append("(exit $$runtime_shard_status)")
+            else:
+                note = f"runtime-shard: no tests of {match.group(3)} in this shard"
+                lines.append(f"echo {shlex.quote(note)}".replace("$", "$$"))
+            branches.append(f"{number})\n" + "\n".join(lines) + "\n;;")
         replaced.append(
             'case "$$BUILDKITE_PARALLEL_JOB" in\n'
-            + "\n".join(runs)
+            + "\n".join(branches)
             + '\n*) echo "runtime-shard: no shard $$BUILDKITE_PARALLEL_JOB"; exit 1;;'
             + "\nesac"
         )
