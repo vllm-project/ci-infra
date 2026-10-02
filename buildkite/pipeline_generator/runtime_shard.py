@@ -164,7 +164,10 @@ def plan(
             pytest's rootdir, "nodeids": the collected test IDs, in collection
             order}.
         timings: The timing endpoint's response for the step, or None when
-            main has no usable timings.
+            main has no usable timings. A files[] entry whose median exceeds
+            the requested testsOverMs may carry a "tests" list of
+            {"nodeid", "observedMs"}; a split file with that data is cut by
+            its tests' times instead of their count.
         max_shard_seconds: Test-time budget for one shard.
         unknown_file_seconds: Time assumed for a file main has no timing for.
         max_number_of_shards: Upper bound on the number of shards.
@@ -177,6 +180,7 @@ def plan(
 
     """
     file_seconds = {}  # (command preview, file) -> seconds on main
+    file_tests = {}  # (command preview, file) -> {nodeid: seconds on main}
     # Files whose every test was skipped on main: they run in about 0 s on
     # this step's hardware too, so their measured time is used, not the
     # unknown-file default.
@@ -186,6 +190,10 @@ def plan(
         file_seconds[key] = timing["observedMs"] / 1000
         if timing["timingStatus"] == "skip_only":
             skip_only.add(key)
+        if timing.get("tests"):
+            file_tests[key] = {
+                t["nodeid"]: t["observedMs"] / 1000 for t in timing["tests"]
+            }
 
     # One unit per file of each command, in collection order.
     units: List[Dict] = []
@@ -235,12 +243,25 @@ def plan(
             parts = max(1, min(parts, len(nodeids)))  # a 0 s file is still 1 part
             if parts > 1:
                 oversized.append(unit["file"])
-            for part in range(parts):  # ponytail: tests share the file's time evenly
-                start = part * len(nodeids) // parts
-                end = (part + 1) * len(nodeids) // parts
-                piece = dict(unit, nodeids=nodeids[start:end], split=parts > 1)
-                piece["seconds"] = unit["seconds"] / parts
-                split_units.append(piece)
+            preview = command_preview(inventory[unit["command"]]["command"])
+            tests = file_tests.get((preview, unit["file"])) if parts > 1 else None
+            if tests:
+                # One unit per test at its own median, so the packing below
+                # cuts the file by time, adding a shard if that is what keeps
+                # every shard within budget. A test main has no timing for
+                # gets the file's average per test.
+                average = unit["seconds"] / len(nodeids)
+                for nodeid in nodeids:
+                    piece = dict(unit, nodeids=[nodeid], split=True)
+                    piece["seconds"] = tests.get(nodeid, average)
+                    split_units.append(piece)
+            else:  # no per-test data: tests share the file's time evenly
+                for part in range(parts):
+                    start = part * len(nodeids) // parts
+                    end = (part + 1) * len(nodeids) // parts
+                    piece = dict(unit, nodeids=nodeids[start:end], split=parts > 1)
+                    piece["seconds"] = unit["seconds"] / parts
+                    split_units.append(piece)
         units = split_units
         shards = contiguous(
             [unit["seconds"] for unit in units], max_shard_seconds, max_number_of_shards
@@ -479,7 +500,8 @@ def annotation(
 
 
 def fetch_timings(step_key: str) -> Optional[Dict]:
-    """Per-file timings from main's latest passing build of the step.
+    """Per-file timings from main's latest passing build of the step, with
+    per-test medians for the files over one shard's budget.
 
     Args:
         step_key: The enrolled step's key.
@@ -488,7 +510,8 @@ def fetch_timings(step_key: str) -> Optional[Dict]:
         The timing endpoint's response, or None if it has none or is down.
 
     """
-    url = TIMINGS_URL + "?" + urllib.parse.urlencode({"stepKey": step_key})
+    query = {"stepKey": step_key, "testsOverMs": MAX_SHARD_SECONDS * 1000}
+    url = TIMINGS_URL + "?" + urllib.parse.urlencode(query)
     try:
         with urllib.request.urlopen(url, timeout=30) as response:
             return json.load(response)
