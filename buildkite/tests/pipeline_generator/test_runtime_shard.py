@@ -131,6 +131,90 @@ def test_plan_splits_only_a_file_bigger_than_a_shard():
     ]
 
 
+def _with_tests(timings, command, file, test_seconds):
+    """Attach per-test medians, in test_i order, to one file of a _timings()
+    response. A None entry leaves that test with no timing of its own."""
+    preview = rs.command_preview(command)
+    for entry in timings["files"]:
+        if entry["command"] == preview and entry["file"] == f"tests/{file}":
+            entry["tests"] = [
+                {"nodeid": f"tests/{file}::test_{i}", "observedMs": s * 1000}
+                for i, s in enumerate(test_seconds)
+                if s is not None
+            ]
+    return timings
+
+
+def test_plan_adds_a_shard_when_the_files_parts_cannot_fit_the_budget():
+    """ceil(18 / 10) = 2 parts, but 2 contiguous parts of these tests are 12 s."""
+    inventory = [_entry(TESTS[0], {"model_executor/big.py": 3})]
+    timings = _with_tests(
+        _timings(TESTS[0], {"model_executor/big.py": 18}),
+        TESTS[0],
+        "model_executor/big.py",
+        [6, 6, 6],
+    )
+    result = rs.plan(inventory, timings, max_shard_seconds=10)
+    rs.check(result, inventory)
+    assert [s["estimateSeconds"] for s in result["shards"]] == [6, 6, 6]
+    assert not result["overBudget"]
+
+
+def test_plan_splits_an_oversized_files_tests_by_time_not_count():
+    inventory = [_entry(TESTS[0], {"model_executor/big.py": 4})]
+    timings = _with_tests(
+        _timings(TESTS[0], {"model_executor/big.py": 200}),
+        TESTS[0],
+        "model_executor/big.py",
+        [170, 10, 10, 10],
+    )
+    result = rs.plan(inventory, timings, max_shard_seconds=100)
+    rs.check(result, inventory)
+    # Equal-count would give test_0,1 | test_2,3; time-based keeps the one
+    # slow test alone instead of pairing it with a fast one.
+    first, second = (s["commands"][0]["targets"] for s in result["shards"])
+    assert first == ["model_executor/big.py::test_0"]
+    assert second == [
+        "model_executor/big.py::test_1",
+        "model_executor/big.py::test_2",
+        "model_executor/big.py::test_3",
+    ]
+    assert [s["estimateSeconds"] for s in result["shards"]] == [170, 30]
+
+
+def test_plan_gives_a_test_with_no_timing_the_files_average():
+    inventory = [_entry(TESTS[0], {"model_executor/big.py": 4})]
+    timings = _with_tests(
+        _timings(TESTS[0], {"model_executor/big.py": 2000}),
+        TESTS[0],
+        "model_executor/big.py",
+        [1700, None, 100, 100],  # test_1 has no timing of its own
+    )
+    result = rs.plan(inventory, timings)
+    rs.check(result, inventory)
+    # test_1 gets the file average (2000 / 4 = 500s) and lands with test_2, 3.
+    first, second = (s["commands"][0]["targets"] for s in result["shards"])
+    assert first == ["model_executor/big.py::test_0"]
+    assert second == [
+        "model_executor/big.py::test_1",
+        "model_executor/big.py::test_2",
+        "model_executor/big.py::test_3",
+    ]
+    assert [s["estimateSeconds"] for s in result["shards"]] == [1700, 700]
+
+
+def test_plan_without_per_test_data_still_splits_by_count():
+    """No "tests" on the oversized file: unchanged, today's equal split."""
+    inventory = [_entry(TESTS[0], {"model_executor/big.py": 4})]
+    timings = _timings(TESTS[0], {"model_executor/big.py": 200})
+    result = rs.plan(inventory, timings, max_shard_seconds=100)
+    rs.check(result, inventory)
+    first, second = (s["commands"][0]["targets"] for s in result["shards"])
+    assert first == ["model_executor/big.py::test_0", "model_executor/big.py::test_1"]
+    assert second == ["model_executor/big.py::test_2", "model_executor/big.py::test_3"]
+    assert [s["estimateSeconds"] for s in result["shards"]] == [100, 100]
+
+
 def test_plan_without_timings_uses_four_equal_shards():
     inventory = [_entry(TESTS[0], {f"model_executor/t{i}.py": 1 for i in range(8)})]
     result = rs.plan(inventory, None)
