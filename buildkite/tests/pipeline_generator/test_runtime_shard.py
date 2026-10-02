@@ -643,3 +643,26 @@ def test_plugin_reports_the_count_after_the_commands_own_filters(tmp_path):
     )
     assert run.returncode == 0 and "1 passed, 1 deselected" in run.stdout
     assert "runtime-shard: shard 1/1, command 1: running 1 tests" in run.stdout
+
+
+def test_plugin_does_not_count_a_test_the_commands_own_filter_drops(tmp_path):
+    """The collect step applied -m, so the plan left the slow test out."""
+    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers = slow_test\n")
+    pkg = tmp_path / "tests" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "test_a.py").write_text(
+        "import pytest\ndef test_x(): pass\n@pytest.mark.slow_test\ndef test_s(): pass\n"
+    )
+    shard_plan = {
+        "commands": ["pytest -v pkg -m 'not slow_test'"],
+        "shards": [[{"index": 0, "targets": ["tests/pkg/test_a.py::test_x"]}]],
+    }
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-v", "pkg", "-m", "not slow_test"],
+        cwd=tmp_path / "tests",
+        env=_plugin_env(shard_plan),
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0 and "1 passed, 1 deselected" in run.stdout
+    assert "in no shard" not in run.stdout and "test_s PASSED" not in run.stdout
