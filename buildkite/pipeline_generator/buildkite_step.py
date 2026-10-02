@@ -187,15 +187,20 @@ def add_precommit_dependency(
     """
     for group_step in buildkite_group_steps:
         for step in group_step.steps:
-            if not isinstance(step, BuildkiteCommandStep) or not step.depends_on:
-                continue
-            # Don't gate the image build steps themselves on pre-commit.
-            if step.key and "image-build" in step.key:
-                continue
-            if not any("image-build" in dep for dep in step.depends_on):
-                continue
-            if PRECOMMIT_STEP_KEY not in step.depends_on:
-                step.depends_on.append(PRECOMMIT_STEP_KEY)
+            if isinstance(step, BuildkiteCommandStep):
+                _add_step_precommit_dependency(step)
+
+
+def _add_step_precommit_dependency(step: "BuildkiteCommandStep") -> None:
+    if not step.depends_on:
+        return
+    # Don't gate the image build steps themselves on pre-commit.
+    if step.key and "image-build" in step.key:
+        return
+    if not any("image-build" in dep for dep in step.depends_on):
+        return
+    if PRECOMMIT_STEP_KEY not in step.depends_on:
+        step.depends_on.append(PRECOMMIT_STEP_KEY)
 
 
 def _get_step_agents(step: Step) -> Dict[str, str]:
@@ -974,6 +979,10 @@ def _runtime_shard_mode(
         return None
     mode = os.getenv(RUNTIME_SHARD_ENV_VAR) or "on"
     if mode not in ("on", "shadow"):
+        if mode != "off":
+            print(
+                f"automatic_shard ignored on {step_key}: {RUNTIME_SHARD_ENV_VAR}={mode} is not on, shadow or off"
+            )
         return None
     if fnrec_enabled() or kernrec_enabled():
         # The recorders count their jobs at generation time; shards come later.
@@ -1064,6 +1073,11 @@ def _runtime_shard_steps(
             ' echo "$$RUNTIME_SHARD_TEMPLATE" | base64 -d'
             " | buildkite-agent pipeline upload); }"
         )
+        # The template leaves the pipeline before add_precommit_dependency
+        # runs, so gate it on pre-commit here, as the unsharded step would be.
+        pull_request = get_global_config()["pull_request"]
+        if pull_request and pull_request != "false":
+            _add_step_precommit_dependency(command_step)
         template = {"steps": [command_step.dict(exclude_none=True)]}
         env["RUNTIME_SHARD_TEMPLATE"] = runtime_shard.encode(template)
         env["RUNTIME_SHARD_SCRIPT_URL"] = url
