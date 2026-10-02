@@ -78,3 +78,9 @@ variable "vllm_torchtpu_ssh_checkout" {
   DESC
   default     = false
 }
+
+variable "service_account_email" {
+  type        = string
+  default     = null
+  description = "Service account the agent VMs run as. Null keeps the project's default compute service account."
+}

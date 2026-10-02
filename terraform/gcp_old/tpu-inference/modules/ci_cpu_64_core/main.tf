@@ -40,6 +40,7 @@ resource "google_compute_instance" "buildkite-agent-instance" {
   }
 
   service_account {
+    email  = var.service_account_email
     scopes = ["cloud-platform"]
   }
 

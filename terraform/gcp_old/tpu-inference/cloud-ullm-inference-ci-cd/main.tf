@@ -24,6 +24,8 @@ module "ci_v6e_1_vllm" {
   buildkite_token_secret_name           = local.buildkite_token_secret_name
   buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
   huggingface_token_secret_name         = local.huggingface_token_secret_name
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
 module "ci_v6e_8_vllm" {
@@ -43,6 +45,8 @@ module "ci_v6e_8_vllm" {
   buildkite_token_secret_name           = local.buildkite_token_secret_name
   buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
   huggingface_token_secret_name         = local.huggingface_token_secret_name
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
 
@@ -64,6 +68,8 @@ module "ci_v7x_2" {
   huggingface_token_secret_name         = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
 # Eight more tpu7x-8 agents serve the same queue from inferact-vllm-tpu (see
@@ -87,6 +93,8 @@ module "ci_v7x_8" {
   huggingface_token_secret_name         = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
 module "ci_v7x_16" {
@@ -107,6 +115,8 @@ module "ci_v7x_16" {
   # disk_size defaults to 0, disable attached disk
 
   vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
 # 4 hosts x 4 chips (2x2x4). Same multi-host shape as tpu7x-16: the agent runs
@@ -134,6 +144,8 @@ module "ci_v7x_32" {
   huggingface_token_secret_name         = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
 # purpose puts these on the self-describing naming scheme,
@@ -151,6 +163,8 @@ module "ci_cpu_vllm_zone_b" {
   huggingface_token_secret_name = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_cpu.email
 }
 
 module "ci_cpu_64_core_vllm_zone_b" {
@@ -170,6 +184,8 @@ module "ci_cpu_64_core_vllm_zone_b" {
   huggingface_token_secret_name = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_cpu.email
 }
 
 module "ci_cpu_64_core_vllm_zone_f" {
@@ -189,6 +205,8 @@ module "ci_cpu_64_core_vllm_zone_f" {
   huggingface_token_secret_name = local.huggingface_token_secret_name
 
   vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_cpu.email
 }
 
 module "ci_monitoring" {
