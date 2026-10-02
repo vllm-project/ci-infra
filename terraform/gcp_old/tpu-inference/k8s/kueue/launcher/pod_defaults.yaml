@@ -107,6 +107,21 @@ tpuJobs:
           operator: NotIn
           values: [0]
 
+# Merged into the template of each role that holds chips on a multi-host shape,
+# and only a JobSet's. JobSet's exclusive placement gives each of the role's
+# Jobs one node pool - one GKE TPU slice - and keeps every other JobSet's pods
+# out of it. Kueue admits chips, not slices, and the scheduler places pods one
+# at a time, so without it two JobSets admitted at once can each put a pod on a
+# host of the same slice and wait for the rest of it until they time out.
+#
+# Not for a role without chips, which shares a CPU pool with everything else,
+# nor for single-host roles, which share their shape's one node pool: either
+# marked exclusive would wait for the whole pool. A JobSet that sets the
+# annotation itself keeps its own.
+multiHostJobs:
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+
 # Merged into the submitted object itself.
 workload:
   # Long enough for the launcher's last log poll after the pods exit.

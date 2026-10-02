@@ -213,14 +213,17 @@ worker_clusters = [
         nominal_quota = 8
       },
       {
-        # Eight chips as one slice across two VMs: the multi-host shape, placed
-        # from the named workload policy in workers.tf. It takes the whole
-        # cohort, which means it waits for every other v7x workload to finish.
+        # Eight chips as one slice across two VMs, placed from the named
+        # workload policy in workers.tf. Five slices is all forty chips, as
+        # the single-host pools can take, so the cohort decides how many
+        # multi-host tests run at once; pod_defaults.yaml keeps each
+        # JobSet's pods in one slice.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x2"
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
+        slices        = 5
         nominal_quota = 0
       },
       {

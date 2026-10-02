@@ -32,7 +32,7 @@ spec:
             - name: ${COVERED_RESOURCE}
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
-              nominalQuota: ${NOMINAL_QUOTA}
+              nominalQuota: ${NOMINAL_QUOTA}${BORROWING_LIMIT}
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
