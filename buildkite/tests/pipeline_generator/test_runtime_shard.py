@@ -1,4 +1,5 @@
 import json
+import shlex
 import os
 import subprocess
 import sys
@@ -474,7 +475,8 @@ def test_run_plan_annotates_and_never_raises(tmp_path, monkeypatch):
         entry = _entry(command, {f"f{i}_{j}.py": 1 for j in range(3)})
         (out / f"inventory-{i}.json").write_text(json.dumps({**entry, "exitstatus": 0}))
     rs.run_plan("model-executor", rs.encode(TESTS))
-    assert calls[-1][5] == "info" and "would run as **4 shards**" in calls[-1][6]
+    # No main timings: equal file counts, worth a look.
+    assert calls[-1][5] == "warning" and "would run as **4 shards**" in calls[-1][6]
     assert json.loads((out / "plan.json").read_text())["tests"] == 6
 
 
@@ -567,7 +569,7 @@ def _inventories(tmp_path):
         (out / f"inventory-{i}.json").write_text(json.dumps({**entry, "exitstatus": 0}))
 
 
-def _run_plan_on(tmp_path, monkeypatch, template=None):
+def _run_plan_on(tmp_path, monkeypatch, template=None, timings=None):
     monkeypatch.chdir(tmp_path)
     calls = []
     monkeypatch.setattr(
@@ -575,7 +577,7 @@ def _run_plan_on(tmp_path, monkeypatch, template=None):
         "run",
         lambda args, check, **kw: calls.append((args, kw.get("input"))),
     )
-    monkeypatch.setattr(rs, "fetch_timings", lambda key: None)
+    monkeypatch.setattr(rs, "fetch_timings", lambda key: timings)
     template = template or {
         "label": "ME",
         "key": "model-executor",
@@ -588,7 +590,8 @@ def _run_plan_on(tmp_path, monkeypatch, template=None):
     [upload] = [
         json.loads(i)["steps"] for a, i in calls if a[1:3] == ["pipeline", "upload"]
     ]
-    return template, upload, calls[-1][0]
+    annotations = [a for a, i in calls if a[1:2] == ["annotate"]]
+    return template, upload, annotations[0] if annotations else None
 
 
 def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
@@ -605,7 +608,18 @@ def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
     assert shard_plan["commands"] == TESTS
     # 6 files, no timings: 4 shards of 1, 2, 1, 2 files
     assert shard_plan["shards"][0] == [{"index": 0, "targets": ["tests/f0_0.py"]}]
-    assert annotate[5] == "info" and "running as **4 shards**" in annotate[6]
+    # No main timings, so equal file counts: worth a look, so a warning.
+    assert annotate[5] == "warning" and "running as **4 shards**" in annotate[6]
+
+
+def test_run_plan_leaves_the_build_page_alone_for_a_good_plan(tmp_path, monkeypatch):
+    _inventories(tmp_path)
+    timings = _timings(TESTS[0], {f"f0_{j}.py": 600 for j in range(3)})
+    timings["files"] += _timings(TESTS[1], {f"f1_{j}.py": 600 for j in range(3)})[
+        "files"
+    ]
+    _, [step], annotate = _run_plan_on(tmp_path, monkeypatch, timings=timings)
+    assert step["parallelism"] > 1 and annotate is None
 
 
 def test_run_plan_shards_a_kubernetes_job_with_its_pod_spec_and_env(
@@ -788,3 +802,39 @@ def test_plugin_does_not_count_a_test_the_commands_own_filter_drops(tmp_path):
     )
     assert run.returncode == 0 and "1 passed, 1 deselected" in run.stdout
     assert "in no shard" not in run.stdout and "test_s PASSED" not in run.stdout
+
+
+def test_plugin_prints_a_command_that_runs_the_shards_tests(tmp_path):
+    shard_plan = {
+        "commands": ["pytest -v pkg"],
+        "shards": [
+            [
+                {
+                    "index": 0,
+                    "targets": ["tests/pkg/test_a.py", "tests/pkg/test_b.py::test_y"],
+                }
+            ],
+            [{"index": 0, "targets": ["tests/pkg/test_b.py::test_z"]}],
+        ],
+    }
+    run = _plugin_run(tmp_path, shard_plan, 0)
+    lines = run.stdout.splitlines()
+    header = [i for i, line in enumerate(lines) if line.startswith("+++ ")]
+    assert lines[header[0]] == (
+        "+++ :scissors: Runtime shard 1/2, command 1: 2 tests in 2 files"
+    )
+    command = shlex.split(lines[header[0] + 1])
+    assert command == ["pytest", "-v", "pkg/test_a.py", "pkg/test_b.py::test_y"]
+    # Run without the plugin, it selects exactly what this shard ran.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    alone = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", *command[2:]],
+        cwd=tmp_path / "tests",
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert alone.stdout.splitlines()[:2] == [
+        "tests/pkg/test_a.py::test_x",
+        "tests/pkg/test_b.py::test_y",
+    ]

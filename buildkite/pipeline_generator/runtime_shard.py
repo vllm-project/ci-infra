@@ -651,7 +651,7 @@ def _upload(step: Dict) -> None:
 
 
 def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
-    """Plan the step's shards on a CPU agent, annotate, and upload the jobs.
+    """Plan the step's shards on a CPU agent and upload the jobs.
 
     If collection, timings or planning fail, the step's normal single job is
     uploaded instead. This raises only if that upload fails too, and then the
@@ -660,7 +660,7 @@ def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
     Args:
         step_key: The enrolled step's key.
         commands_b64: The step's pytest commands, encoded with encode().
-        mode: "on" uploads the jobs; "shadow" only annotates, because the step
+        mode: "on" uploads the jobs; "shadow" only plans, because the step
             already runs as one job.
 
     """
@@ -698,7 +698,11 @@ def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
                 template, result, inventory, os.environ["RUNTIME_SHARD_SCRIPT_URL"]
             )
         message = annotation(step_key, result, shadow, commands)
-        style = "info"
+        # Only a plan someone should look at gets a build annotation, so the
+        # build page stays readable with many enrolled steps. Every plan is in
+        # this job's log and plan.json, and each shard prints its own command.
+        degraded = result["overBudget"] or result["timingSource"] is None
+        style = "warning" if degraded else None
     except Exception as error:
         message = (
             f"**Runtime sharding{' (shadow)' if shadow else ''} for `{step_key}`:** "
@@ -708,6 +712,8 @@ def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
     if step is not None:
         _upload(step)
     print(message)
+    if style is None:
+        return
     subprocess.run(
         [
             "buildkite-agent",
@@ -804,12 +810,57 @@ def pytest_collection_modifyitems(session, config, items):
         raise pytest.UsageError(
             f"runtime-shard: planned tests were not collected: {missing[:5]}"
         )
+    _print_shard_command(config, shard_plan, index, this_command, len(kept))
     config.hook.pytest_deselected(items=deselected)
     items[:] = kept
     _EMPTY["value"] = not kept
     _EMPTY["label"] = (
         f"shard {index + 1}/{len(shard_plan['shards'])}, command {this_command + 1}"
     )
+
+
+def _print_shard_command(
+    config, shard_plan: Dict, index: int, command: int, tests: int
+):
+    """Print a log section with a pytest command that runs this shard's tests
+    of one planned command: its options, with its paths replaced by the
+    shard's targets. It runs without the plugin, to reproduce the shard.
+
+    Args:
+        config: pytest's config, whose args are the command's paths.
+        shard_plan: The decoded RUNTIME_SHARD_PLAN.
+        index: This shard's BUILDKITE_PARALLEL_JOB.
+        command: The planned command's position.
+        tests: How many tests this shard keeps of it.
+
+    """
+    # Targets are node IDs, relative to rootdir; the command runs from its
+    # own directory.
+    prefix = os.path.relpath(str(config.invocation_params.dir), str(config.rootpath))
+    prefix = "" if prefix == "." else prefix + "/"
+    targets: List[str] = []
+    for entry in shard_plan["shards"][index]:
+        if entry["index"] != command:
+            continue
+        for target in entry["targets"]:
+            targets.append(
+                target[len(prefix) :] if target.startswith(prefix) else target
+            )
+    options = list(config.invocation_params.args)
+    for path in config.args:
+        if path in options:
+            options.remove(path)
+    files = set()
+    for target in targets:
+        files.add(target.split("::")[0])
+    total = len(shard_plan["shards"])
+    print(
+        f"\n+++ :scissors: Runtime shard {index + 1}/{total}, command {command + 1}:"
+        f" {tests} tests in {len(files)} files",
+        flush=True,
+    )
+    if targets:
+        print(shlex.join(["pytest", *options, *targets]), flush=True)
 
 
 def pytest_collection_finish(session):
