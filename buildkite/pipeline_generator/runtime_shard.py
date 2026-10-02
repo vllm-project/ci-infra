@@ -246,15 +246,33 @@ def plan(
             preview = command_preview(inventory[unit["command"]]["command"])
             tests = file_tests.get((preview, unit["file"])) if parts > 1 else None
             if tests:
-                # One unit per test at its own median, so the packing below
-                # cuts the file by time, adding a shard if that is what keeps
-                # every shard within budget. A test main has no timing for
-                # gets the file's average per test.
+                # One unit per test function, its parametrized cases at the
+                # sum of their own medians, so the packing below cuts the file
+                # by time, adding a shard if that is what keeps every shard
+                # within budget. The cases stay together because they share
+                # setup (a model, compiled kernels) that main paid only once,
+                # in the first case. A function over budget is cut per case.
+                # A test main has no timing for gets the file's average.
                 average = unit["seconds"] / len(nodeids)
+                functions: List[List[str]] = []
                 for nodeid in nodeids:
-                    piece = dict(unit, nodeids=[nodeid], split=True)
-                    piece["seconds"] = tests.get(nodeid, average)
-                    split_units.append(piece)
+                    function = nodeid.split("[")[0]
+                    if functions and functions[-1][0].split("[")[0] == function:
+                        functions[-1].append(nodeid)
+                    else:
+                        functions.append([nodeid])
+                for cases in functions:
+                    seconds = [tests.get(nodeid, average) for nodeid in cases]
+                    if sum(seconds) > max_shard_seconds:
+                        pieces = [
+                            ([nodeid], time) for nodeid, time in zip(cases, seconds)
+                        ]
+                    else:
+                        pieces = [(cases, sum(seconds))]
+                    for piece_ids, piece_seconds in pieces:
+                        piece = dict(unit, nodeids=piece_ids, split=True)
+                        piece["seconds"] = piece_seconds
+                        split_units.append(piece)
             else:  # no per-test data: tests share the file's time evenly
                 for part in range(parts):
                     start = part * len(nodeids) // parts

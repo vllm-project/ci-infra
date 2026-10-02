@@ -182,6 +182,44 @@ def test_plan_splits_an_oversized_files_tests_by_time_not_count():
     assert [s["estimateSeconds"] for s in result["shards"]] == [170, 30]
 
 
+def test_plan_keeps_a_test_functions_cases_in_one_shard():
+    """Main paid the cases' shared setup once; split apart, each pays it."""
+    file = "model_executor/big.py"
+    inventory = [
+        {
+            "command": TESTS[0],
+            "prefix": "tests",
+            "nodeids": [
+                f"tests/{file}::test_b",
+                f"tests/{file}::test_a[v1]",
+                f"tests/{file}::test_a[v2]",
+                f"tests/{file}::test_c[x]",
+                f"tests/{file}::test_c[y]",
+                f"tests/{file}::test_c[z]",
+            ],
+        }
+    ]
+    timings = _timings(TESTS[0], {file: 200})
+    timings["files"][0]["tests"] = [
+        {"nodeid": f"tests/{file}::{name}", "observedMs": s * 1000}
+        for name, s in [
+            ("test_b", 60),
+            ("test_a[v1]", 30),
+            ("test_a[v2]", 30),
+            ("test_c[x]", 50),
+            ("test_c[y]", 50),
+            ("test_c[z]", 50),
+        ]
+    ]
+    result = rs.plan(inventory, timings, max_shard_seconds=100)
+    rs.check(result, inventory)
+    targets = [s["commands"][0]["targets"] for s in result["shards"]]
+    # test_a's cases stay together; test_c (150 s) is over budget, so cut.
+    assert [f"{file}::test_a[v1]", f"{file}::test_a[v2]"] in targets
+    assert sum(len(t) for t in targets) == 6
+    assert all(s["estimateSeconds"] <= 100 for s in result["shards"])
+
+
 def test_plan_gives_a_test_with_no_timing_the_files_average():
     inventory = [_entry(TESTS[0], {"model_executor/big.py": 4})]
     timings = _with_tests(
