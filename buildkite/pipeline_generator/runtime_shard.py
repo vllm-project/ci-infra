@@ -683,13 +683,25 @@ def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
 
 _EMPTY: Dict[str, bool] = {}
 
+try:  # only the plugin needs pytest; the plan step's python3 has none
+    import pytest
 
+    _after_other_filters = pytest.hookimpl(trylast=True)
+except ImportError:
+
+    def _after_other_filters(hook):
+        return hook
+
+
+# Last, so the command's own -m and -k and conftest filters have run: the
+# collect step recorded the tests left after them, and a test they drop
+# is not a stray.
+@_after_other_filters
 def pytest_collection_modifyitems(session, config, items):
     """Plugin: keep this shard's tests. A no-op without RUNTIME_SHARD_PLAN."""
     encoded = os.environ.get("RUNTIME_SHARD_PLAN")
     if not encoded:
         return
-    import pytest
 
     shard_plan = decode(encoded)
     index = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
