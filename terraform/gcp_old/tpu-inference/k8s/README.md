@@ -350,11 +350,26 @@ assuming a fault.
 MultiKueue sometimes reconciles a fresh reservation once, creates no copy on
 any worker and never comes back to it: the chips are reserved, nothing runs,
 and the step shows `waiting for admission` until `tpu_admission_max_seconds`.
-The launcher deletes and recreates such a workload after
-`tpu_dispatch_retry_seconds` with no worker named, up to `tpu_dispatch_retries`
-times, and logs `resubmitting`. A workload waiting on a worker for a slice to be
-rebuilt names that worker (`dispatching to ...`) and is left alone. The timing
-table counts resubmissions in `redispatches`.
+It can also name a worker, have the worker admit the copy, and then fail to
+record that on the manager: the webhook rejects `clusterName` because the
+nomination it must match is already gone, so the step shows `dispatching to
+...` followed by `waiting for admission` and the manager's controller log
+repeats `must be one of the nominatedClusterNames`. In either state the
+launcher deletes and recreates the workload after `tpu_dispatch_retry_seconds`
+with no worker named, up to `tpu_dispatch_retries` times, and logs
+`resubmitting`. In the second it first waits for that worker to drop the old
+copy's pods, since MultiKueue would otherwise adopt the old remote Job for the
+new object. A workload waiting on a worker for a slice to be rebuilt keeps that
+worker named and is left alone. The timing table counts resubmissions in
+`redispatches`.
+
+**A pod evicted for its disk use fails the step.** The pod failure policy
+ignores `DisruptionTarget` so a lost node reruns the pod rather than failing the
+run, and a kubelet eviction carries that condition too. For an eviction over
+ephemeral storage or an `emptyDir` limit the rerun writes the same files and is
+evicted again, until the step's deadline. The launcher fails the step on the
+first such eviction, prints the kubelet's message, which names the container and
+how much it used, and records the outcome `evicted_storage`.
 
 **us-central1 holds both the manager and a worker.** They are separate clusters
 with separate control-plane CIDRs, but they share the region's Cloud Router and

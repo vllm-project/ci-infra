@@ -29,7 +29,7 @@
   {"name": "ended_at", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "When the launcher wrote this row"},
   {"name": "requeues", "type": "INTEGER", "mode": "NULLABLE", "description": "Times a granted reservation was lost, e.g. to preemption"},
   {"name": "blind_seconds", "type": "INTEGER", "mode": "NULLABLE", "description": "Seconds the manager API did not answer"},
-  {"name": "outcome", "type": "STRING", "mode": "NULLABLE", "description": "succeeded, failed, not_admitted, removed, api_unreachable, cancelled, error"},
+  {"name": "outcome", "type": "STRING", "mode": "NULLABLE", "description": "succeeded, failed, evicted_storage, not_admitted, removed, api_unreachable, cancelled, error"},
   {"name": "exit_code", "type": "INTEGER", "mode": "NULLABLE"},
-  {"name": "redispatches", "type": "INTEGER", "mode": "NULLABLE", "description": "Times the launcher resubmitted a reservation MultiKueue never dispatched"}
+  {"name": "redispatches", "type": "INTEGER", "mode": "NULLABLE", "description": "Times the launcher resubmitted a reservation MultiKueue never placed on a worker"}
 ]
