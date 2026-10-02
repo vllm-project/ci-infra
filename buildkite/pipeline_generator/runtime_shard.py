@@ -322,16 +322,52 @@ def check(result: Dict, inventory: List[Dict]) -> None:
         raise ValueError("plan does not assign every collected test exactly once")
 
 
-def annotation(step_key: str, result: Dict, shadow: bool = True) -> str:
+def _plural(number: int, word: str) -> str:
+    return f"{number} {word}{'' if number == 1 else 's'}"
+
+
+def _shard_files(command: Dict) -> List[Tuple[str, int, bool]]:
+    """The files one shard runs for one command, in order.
+
+    Args:
+        command: One command of a shard in a plan from plan().
+
+    Returns:
+        (file, number of its tests in this shard, whether the file is split by
+        test ID). A whole-file target counts as 0 tests here; the caller has
+        the command's total.
+
+    """
+    files: List[Tuple[str, int, bool]] = []
+    for target in command["targets"]:
+        file = target.split("::")[0]
+        split = "::" in target
+        if split and files and files[-1][0] == file:
+            files[-1] = (file, files[-1][1] + 1, True)
+        else:
+            files.append((file, 1 if split else 0, split))
+    return files
+
+
+def annotation(
+    step_key: str,
+    result: Dict,
+    shadow: bool = True,
+    commands: Optional[List[str]] = None,
+) -> str:
     """The build annotation describing a plan.
 
     Args:
         step_key: The enrolled step's key.
         result: A plan from plan().
         shadow: Whether the step still runs as one job (shadow mode).
+        commands: The step's pytest commands, to name them in the file list;
+            without them the list says "command 1", "command 2", ...
 
     Returns:
-        Markdown: the shard count, estimates, flagged files and a table.
+        Markdown: the shard count, estimates, flagged files, a link to
+        plan.json, a table with each shard's files per command, and a folded
+        list of every shard's files.
 
     """
     shards = result["shards"]
@@ -371,14 +407,60 @@ def annotation(step_key: str, result: Dict, shadow: bool = True) -> str:
             ":warning: At the most shards allowed, a shard is still over "
             f"{result['rules']['maxShardSeconds'] / 60:.0f} min of test time."
         )
-    rows = ["| Shard | Tests | Estimate (min) | Targets |", "|---|---|---|---|"]
+    lines.append(
+        f'Full plan: <a href="artifact://{INVENTORY_DIR}/{step_key}/plan.json">'
+        "plan.json</a>"
+    )
+
+    # How many tests each split file has across all shards, for "N of M tests".
+    split_totals: Dict[Tuple[int, str], int] = {}
+    for s in shards:
+        for command in s["commands"]:
+            for file, tests, split in _shard_files(command):
+                if split:
+                    key = (command["index"], file)
+                    split_totals[key] = split_totals.get(key, 0) + tests
+
+    rows = [
+        "| Shard | Tests | Files | Estimate (min) | Breakdown |",
+        "|---|---|---|---|---|",
+    ]
+    details = ["<details>", "<summary>Files per shard</summary>", ""]
     for n, s in enumerate(shards, 1):
-        targets = sum(len(c["targets"]) for c in s["commands"])
+        breakdown = []
+        shard_files = 0
+        details.append(
+            f"**Shard {n}** ({_plural(sum(c['tests'] for c in s['commands']), 'test')})"
+        )
+        details.append("")
+        for command in s["commands"]:
+            files = _shard_files(command)
+            shard_files += len(files)
+            split_count = sum(1 for _, _, split in files if split)
+            part = f"command {command['index'] + 1}: {_plural(len(files), 'file')} ({_plural(command['tests'], 'test')}"
+            if split_count:
+                part += f"; {split_count} split by test ID"
+            breakdown.append(part + ")")
+            name = (
+                commands[command["index"]]
+                if commands
+                else f"command {command['index'] + 1}"
+            )
+            details.append(f"- `{name}`")
+            for file, tests, split in files:
+                if split:
+                    total = split_totals[(command["index"], file)]
+                    details.append(f"  - `{file}`: {tests} of {total} tests")
+                else:
+                    details.append(f"  - `{file}`")
+        details.append("")
         est = "" if s["estimateSeconds"] is None else f"{s['estimateSeconds'] / 60:.1f}"
         rows.append(
-            f"| {n} | {sum(c['tests'] for c in s['commands'])} | {est} | {targets} |"
+            f"| {n} | {sum(c['tests'] for c in s['commands'])} | "
+            f"{_plural(shard_files, 'file')} | {est} | {'; '.join(breakdown)} |"
         )
-    return "\n\n".join(lines) + "\n\n" + "\n".join(rows)
+    details.append("</details>")
+    return "\n\n".join(lines) + "\n\n" + "\n".join(rows) + "\n\n" + "\n".join(details)
 
 
 def fetch_timings(step_key: str) -> Optional[Dict]:
@@ -559,7 +641,8 @@ def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
             step = shard_step(
                 template, result, inventory, os.environ["RUNTIME_SHARD_SCRIPT_URL"]
             )
-        message, style = annotation(step_key, result, shadow), "info"
+        message = annotation(step_key, result, shadow, commands)
+        style = "info"
     except Exception as error:
         message = (
             f"**Runtime sharding{' (shadow)' if shadow else ''} for `{step_key}`:** "

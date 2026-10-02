@@ -151,6 +151,32 @@ def test_plan_over_max_number_of_shards_still_assigns_everything():
     assert "still over" in rs.annotation("k", result)
 
 
+def test_annotation_lists_each_shards_files_per_command():
+    small, big = "pytest -v -s small", "pytest -v -s big"
+    inventory = [
+        _entry(small, {"a.py": 1, "b.py": 2}),
+        _entry(big, {"big.py": 4}),
+    ]
+    timings = _timings(small, {"a.py": 60, "b.py": 60})
+    timings["files"] += _timings(big, {"big.py": 2000})["files"]
+    result = rs.plan(inventory, timings)  # [a.py, b.py], [big.py half], [big.py half]
+    text = rs.annotation("k", result, shadow=False, commands=[small, big])
+    assert '<a href="artifact://.runtime-shard/k/plan.json">plan.json</a>' in text
+    assert "| 1 | 3 | 2 files | 2.0 | command 1: 2 files (3 tests) |" in text
+    assert (
+        "| 2 | 2 | 1 file | 16.7 | command 2: 1 file (2 tests; 1 split by test ID) |"
+        in text
+    )
+    # The folded list names each command and its files; split files say how much.
+    files = text[text.index("<details>") :]
+    assert (
+        "**Shard 1** (3 tests)\n\n- `pytest -v -s small`\n  - `a.py`\n  - `b.py`"
+        in files
+    )
+    assert "- `pytest -v -s big`\n  - `big.py`: 2 of 4 tests" in files
+    assert files.endswith("</details>")
+
+
 def test_annotation_names_the_timings_as_a_median_of_main_builds():
     command = "pytest -v -s tests"
     timings = dict(_timings(command, {"a.py": 60}), buildNumbers=[7, 6, 5])
