@@ -1080,7 +1080,6 @@ def _runtime_shard_steps(
             _add_step_precommit_dependency(command_step)
         template = {"steps": [command_step.dict(exclude_none=True)]}
         env["RUNTIME_SHARD_TEMPLATE"] = runtime_shard.encode(template)
-        env["RUNTIME_SHARD_SCRIPT_URL"] = url
     plan = BuildkiteCommandStep(
         label=f"{step_key}: runtime shard plan",
         key=f"{step_key}-shard-plan",

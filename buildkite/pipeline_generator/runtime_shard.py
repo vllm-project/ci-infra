@@ -12,8 +12,8 @@ like the recorders' scripts:
            test lands exactly once and annotates the build. Then it uploads
            the step's own job with `parallelism: N`; in shadow mode it uploads
            nothing, because the step already runs as one job.
-  plugin   `-p runtime_shard` in each shard job: keeps only the tests the plan
-           gave this BUILDKITE_PARALLEL_JOB, so the commands stay unchanged.
+  shards   each parallel job runs its shard's own pytest commands, naming
+           its files, picked by BUILDKITE_PARALLEL_JOB.
 
 Sharding never blocks the step: if collection or planning fails, the plan step
 uploads the step's normal single job instead (see run_plan and the generator's
@@ -636,65 +636,65 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
         raise SystemExit(f"runtime-shard: collection failed (pytest exit {status})")
 
 
-def shard_step(
-    template: Dict, result: Dict, inventory: List[Dict], script_url: str
-) -> Dict:
+def shard_step(template: Dict, result: Dict, inventory: List[Dict]) -> Dict:
     """The step's own job, run as one parallel job per shard.
 
-    Each job installs this file, loads it as a pytest plugin and finds its
-    tests in RUNTIME_SHARD_PLAN, so the step's commands stay unchanged. Only
-    each test command's log header changes: it shows the shard's own command.
+    Parallel jobs share their commands, so each pytest command becomes a
+    `case` on BUILDKITE_PARALLEL_JOB: a job runs only its shard's pytest
+    command, which names the shard's files, and its log header shows it.
 
     Args:
         template: The step's normal rendered job.
         result: A checked plan from plan().
         inventory: The inventory the plan was made from.
-        script_url: Where the shard jobs fetch this file from.
 
     Returns:
         The job to upload, with parallelism set to the shard count.
 
+    Raises:
+        ValueError: A pytest command is not where the generator puts it.
+
     """
-    shards = []
-    for shard in result["shards"]:
-        commands = []
-        for command in shard["commands"]:
-            entry = inventory[command["index"]]
-            prefix = entry["prefix"].rstrip("/") + "/" if entry["prefix"] else ""
-            commands.append(
-                {
-                    "index": command["index"],
-                    "targets": [prefix + t for t in command["targets"]],
-                }
-            )
-        shards.append(commands)
     step = json.loads(json.dumps(template))
-    env = dict(step.get("env") or {})
-    env["RUNTIME_SHARD_PLAN"] = encode(
-        {"commands": [e["command"] for e in inventory], "shards": shards}
-    )
-    env["PYTEST_ADDOPTS"] = (
-        env.get("PYTEST_ADDOPTS", "") + " -p runtime_shard"
-    ).strip()
-    step["env"] = env
-    step["parallelism"] = len(shards)
+    step["parallelism"] = len(result["shards"])
     # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
     step["label"] = f"{step.get('label', '')} shard %N/%t".strip()
-    step["commands"] = [
-        f'curl -sSfL --retry 3 --max-time 60 -o /tmp/runtime_shard.py "{script_url}"',
-        'python3 -c "import shutil, sysconfig; shutil.copy('
-        "'/tmp/runtime_shard.py', sysconfig.get_paths()['purelib'])\"",
-        *_shard_headers(step["commands"], result, inventory),
-    ]
+    step["commands"] = _shard_commands(step["commands"], result, inventory)
     return step
 
 
-def _shard_headers(
+def _shard_command(entry: Dict, targets: List[str]) -> List[str]:
+    """The pytest command that runs these targets of one planned command: its
+    own NAME=value assignments and options, with its paths replaced by the
+    targets.
+
+    Args:
+        entry: The command's inventory entry.
+        targets: The targets, relative to the command's working dir.
+
+    Returns:
+        The command's parts, shell-quoted: assignments, pytest and options
+        first, then one part per target.
+
+    """
+    env, words = env_and_words(entry["command"])
+    options = words[1:]
+    for path in entry["paths"]:
+        if path in options:
+            options.remove(path)
+    # NAME='a b', not 'NAME=a b', which the shell would run as a program.
+    assignments = [f"{name}={shlex.quote(value)}" for name, value in env.items()]
+    parts = [" ".join([*assignments, shlex.join(["pytest", *options])])]
+    for target in targets:
+        parts.append(shlex.quote(target))
+    return parts
+
+
+def _shard_commands(
     commands: List[str], result: Dict, inventory: List[Dict]
 ) -> List[str]:
-    """The job's commands, with each test command's log header replaced by
-    one that prints, for the shard running it, a pytest command that runs
-    just that shard's tests of it.
+    """The job's commands, with each pytest command and its log header
+    replaced by a `case` that runs and shows only this shard's part of it.
 
     Args:
         commands: The step's rendered commands.
@@ -702,49 +702,82 @@ def _shard_headers(
         inventory: The inventory the plan was made from.
 
     Returns:
-        The commands, headers replaced.
+        The commands for the shard jobs.
+
+    Raises:
+        ValueError: A pytest command is not where the generator puts it.
 
     """
     previews = [command_preview(entry["command"]) for entry in inventory]
     total = len(result["shards"])
     replaced = []
-    for line in commands:
+    done = set()  # the planned commands replaced so far
+    position = 0
+    while position < len(commands):
+        line = commands[position]
         match = _COMMAND_HEADER.fullmatch(line)
         if not match or match.group(3) not in previews:
             replaced.append(line)
+            position += 1
             continue
         index = previews.index(match.group(3))
         entry = inventory[index]
-        env, options = env_and_words(entry["command"])
-        options = options[1:]
-        # NAME='a b', not 'NAME=a b', which the shell would run as a program.
-        assignments = [f"{name}={shlex.quote(value)}" for name, value in env.items()]
-        for path in entry["paths"]:
-            if path in options:
-                options.remove(path)
-        branches = []
+        # The generator wraps the command (tracing, continue-on-failure) and
+        # renders its ' as ". Each shard gets the wrapped line with its own
+        # command in place of the step's.
+        if position + 1 >= len(commands):
+            raise ValueError(f"command {index + 1} is missing from the step's job")
+        wrapped = commands[position + 1]
+        before, found, after = wrapped.rpartition(entry["command"].replace("'", '"'))
+        if not found:
+            raise ValueError(f"command {index + 1} is missing from the step's job")
+
+        headers = []
+        runs = []
         for number, shard in enumerate(result["shards"]):
-            header = f"+++ :test_tube: Command ({match.group(2)}): {match.group(3)}"
-            lines = [f"{header}, shard {number + 1}/{total}: no tests"]
-            for command in shard["commands"]:
-                if command["index"] != index:
-                    continue
-                files = {target.split("::")[0] for target in command["targets"]}
-                lines = [
-                    f"{header}, shard {number + 1}/{total}:"
-                    f" {_plural(command['tests'], 'test')}"
-                    f" in {_plural(len(files), 'file')}",
-                    " ".join([*assignments, shlex.join(["pytest", *options])]) + " \\",
+            title = f"+++ :test_tube: Command ({match.group(2)}), shard {number + 1}/{total}"
+            targets = []
+            tests = 0
+            for planned in shard["commands"]:
+                if planned["index"] == index:
+                    targets += planned["targets"]
+                    tests += planned["tests"]
+            if not targets:
+                printed = [f"{title}: no tests of {match.group(3)}"]
+                run = ":"
+            else:
+                files = {target.split("::")[0] for target in targets}
+                parts = _shard_command(entry, targets)
+                # One target per line, as a command that can be pasted.
+                lines = [parts[0]]
+                for part in parts[1:]:
+                    lines[-1] += " \\"
+                    lines.append("  " + part)
+                printed = [
+                    f"{title}: {_plural(tests, 'test')} in {_plural(len(files), 'file')}",
+                    *lines,
                 ]
-                for target in command["targets"]:
-                    lines.append(f"  {shlex.quote(target)} \\")
-                lines[-1] = lines[-1][: -len(" \\")]
-            # Buildkite interpolates the uploaded step: $$ is a literal $.
-            printed = " ".join(shlex.quote(text) for text in lines).replace("$", "$$")
-            branches.append(f"{number}) printf '%s\\n' {printed};;")
+                # Buildkite interpolates the uploaded step: $$ is a literal $.
+                # The generator's own lines are already escaped.
+                run = before + " ".join(parts).replace("$", "$$") + after
+            quoted = " ".join(shlex.quote(text) for text in printed).replace("$", "$$")
+            headers.append(f"{number}) printf '%s\\n' {quoted};;")
+            runs.append(f"{number})\n{run}\n;;")
         replaced.append(
-            'case "$$BUILDKITE_PARALLEL_JOB" in ' + " ".join(branches) + " esac"
+            'case "$$BUILDKITE_PARALLEL_JOB" in ' + " ".join(headers) + " esac"
         )
+        replaced.append(
+            'case "$$BUILDKITE_PARALLEL_JOB" in\n'
+            + "\n".join(runs)
+            + '\n*) echo "runtime-shard: no shard $$BUILDKITE_PARALLEL_JOB"; exit 1;;'
+            + "\nesac"
+        )
+        done.add(index)
+        position += 2
+    # A command left as is would run in full in every shard.
+    for index in range(len(inventory)):
+        if index not in done:
+            raise ValueError(f"command {index + 1} is missing from the step's job")
     return replaced
 
 
@@ -801,13 +834,11 @@ def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
             json.dump(result, f, indent=1)
         subprocess.run(["buildkite-agent", "artifact", "upload", path], check=False)
         if not shadow and len(result["shards"]) > 1:
-            step = shard_step(
-                template, result, inventory, os.environ["RUNTIME_SHARD_SCRIPT_URL"]
-            )
+            step = shard_step(template, result, inventory)
         message = annotation(step_key, result, shadow, commands)
         # Only a plan someone should look at gets a build annotation, so the
         # build page stays readable with many enrolled steps. Every plan is in
-        # this job's log and plan.json, and each shard prints its own command.
+        # this job's log and plan.json, and each shard's log shows its command.
         degraded = result["overBudget"] or result["timingSource"] is None
         style = "warning" if degraded else None
     except Exception as error:
@@ -833,109 +864,6 @@ def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
         ],
         check=False,
     )
-
-
-_EMPTY: Dict[str, bool] = {}
-
-try:  # only the plugin needs pytest; the plan step's python3 has none
-    import pytest
-
-    _after_other_filters = pytest.hookimpl(trylast=True)
-except ImportError:
-
-    def _after_other_filters(hook):
-        return hook
-
-
-# Last, so the command's own -m and -k and conftest filters have run: the
-# collect step recorded the tests left after them, and a test they drop
-# is not a stray.
-@_after_other_filters
-def pytest_collection_modifyitems(session, config, items):
-    """Plugin: keep this shard's tests. A no-op without RUNTIME_SHARD_PLAN."""
-    encoded = os.environ.get("RUNTIME_SHARD_PLAN")
-    if not encoded:
-        return
-
-    shard_plan = decode(encoded)
-    index = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
-    args = list(config.invocation_params.args)
-    matches = []
-    for position, command in enumerate(shard_plan["commands"]):
-        if env_and_words(command)[1][1:] == args:
-            matches.append(position)
-    if len(matches) != 1 or index >= len(shard_plan["shards"]):
-        raise pytest.UsageError(
-            f"runtime-shard: no single planned command for shard {index + 1} and {args}"
-        )
-    this_command = matches[0]
-
-    # Targets are whole files or single test IDs, for this command only.
-    mine = set()  # this shard's targets
-    anywhere = set()  # every shard's targets
-    for number, shard in enumerate(shard_plan["shards"]):
-        for command in shard:
-            if command["index"] != this_command:
-                continue
-            anywhere.update(command["targets"])
-            if number == index:
-                mine.update(command["targets"])
-
-    def target_of(item, targets):
-        """The target that covers this test, or None."""
-        if item.nodeid in targets:
-            return item.nodeid
-        file = item.nodeid.split("::")[0]
-        return file if file in targets else None
-
-    kept, deselected, strays = [], [], []
-    found = set()  # targets that matched at least one collected test
-    for item in items:
-        target = target_of(item, mine)
-        if target is not None:
-            kept.append(item)
-            found.add(target)
-        elif target_of(item, anywhere) is not None:
-            deselected.append(item)
-        else:
-            # Collected here but given to no shard (collection differed from
-            # the collect step's): never drop it, shard 1 runs it.
-            strays.append(item)
-            if index == 0:
-                kept.append(item)
-            else:
-                deselected.append(item)
-    if strays:
-        where = "running them here" if index == 0 else "shard 1 runs them"
-        print(
-            f"\nruntime-shard: {len(strays)} collected tests are in no shard;"
-            f" {where}: {[item.nodeid for item in strays[:5]]}",
-            flush=True,
-        )
-    missing = sorted(mine - found)
-    if missing:
-        raise pytest.UsageError(
-            f"runtime-shard: planned tests were not collected: {missing[:5]}"
-        )
-    config.hook.pytest_deselected(items=deselected)
-    items[:] = kept
-    _EMPTY["value"] = not kept
-    _EMPTY["label"] = (
-        f"shard {index + 1}/{len(shard_plan['shards'])}, command {this_command + 1}"
-    )
-
-
-def pytest_collection_finish(session):
-    if "label" in _EMPTY:  # after every filter, including the command's own -m
-        print(
-            f"\nruntime-shard: {_EMPTY['label']}: running {len(session.items)} tests",
-            flush=True,
-        )
-
-
-def pytest_sessionfinish(session, exitstatus):
-    if _EMPTY.get("value") and exitstatus == 5:  # no tests of this command here
-        session.exitstatus = 0
 
 
 if __name__ == "__main__":

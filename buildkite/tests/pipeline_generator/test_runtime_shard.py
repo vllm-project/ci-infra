@@ -3,7 +3,6 @@ import shlex
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -602,6 +601,19 @@ def _inventories(tmp_path):
         (out / f"inventory-{i}.json").write_text(json.dumps({**entry, "exitstatus": 0}))
 
 
+def _rendered(commands):
+    """Commands as the generator renders them: a log header before each, and
+    ' turned into "."""
+    rendered = []
+    for i, command in enumerate(commands):
+        preview = rs.command_preview(command)
+        rendered.append(
+            f'echo "+++ :test_tube: Command ({i + 1}/{len(commands)}): {preview}"'
+        )
+        rendered.append(command.replace("'", '"'))
+    return rendered
+
+
 def _run_plan_on(tmp_path, monkeypatch, template=None, timings=None):
     monkeypatch.chdir(tmp_path)
     calls = []
@@ -614,11 +626,10 @@ def _run_plan_on(tmp_path, monkeypatch, template=None, timings=None):
     template = template or {
         "label": "ME",
         "key": "model-executor",
-        "commands": ["cd /t", "pytest x"],
+        "commands": ["cd /t", *_rendered(TESTS)],
         "env": {"A": "1"},
     }
     monkeypatch.setenv("RUNTIME_SHARD_TEMPLATE", rs.encode({"steps": [template]}))
-    monkeypatch.setenv("RUNTIME_SHARD_SCRIPT_URL", "https://example/runtime_shard.py")
     rs.run_plan("model-executor", rs.encode(TESTS), "on")
     [upload] = [
         json.loads(i)["steps"] for a, i in calls if a[1:3] == ["pipeline", "upload"]
@@ -631,16 +642,15 @@ def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
     _inventories(tmp_path)
     template, [step], annotate = _run_plan_on(tmp_path, monkeypatch)
     assert step["key"] == "model-executor" and step["parallelism"] == 4
-    assert step["label"] == "ME shard %N/%t"
-    assert step["commands"][2:] == template["commands"]
-    assert "https://example/runtime_shard.py" in step["commands"][0]
-    assert (
-        step["env"]["A"] == "1" and step["env"]["PYTEST_ADDOPTS"] == "-p runtime_shard"
+    assert step["label"] == "ME shard %N/%t" and step["env"] == template["env"]
+    # Setup as is; each pytest command and its header become a case per shard.
+    assert step["commands"][0] == "cd /t" and len(step["commands"]) == 5
+    assert all(
+        c.startswith('case "$$BUILDKITE_PARALLEL_JOB" in') for c in step["commands"][1:]
     )
-    shard_plan = rs.decode(step["env"]["RUNTIME_SHARD_PLAN"])
-    assert shard_plan["commands"] == TESTS
     # 6 files, no timings: 4 shards of 1, 2, 1, 2 files
-    assert shard_plan["shards"][0] == [{"index": 0, "targets": ["tests/f0_0.py"]}]
+    first = step["commands"][2].split(";;")[0]
+    assert first.endswith("\npytest -v -s -m '(not slow_test)' --timeout=900 f0_0.py\n")
     # No main timings, so equal file counts: worth a look, so a warning.
     assert annotate[5] == "warning" and "running as **4 shards**" in annotate[6]
 
@@ -667,17 +677,12 @@ def test_run_plan_shards_a_kubernetes_job_with_its_pod_spec_and_env(
     # One Buildkite job per shard, each its own pod from the same pod spec.
     assert step["parallelism"] == 4 and step["plugins"] == template["plugins"]
     assert step["retry"] == template["retry"] == buildkite_step.K8S_RETRY
-    assert template["env"].items() <= step["env"].items()
-    assert step["env"]["PYTEST_ADDOPTS"] == "-p runtime_shard"
-    assert rs.decode(step["env"]["RUNTIME_SHARD_PLAN"])["commands"] == TESTS
-    # Each test command's log header now names the shard's own files.
-    headers = [c for c in step["commands"] if "+++ :test_tube: Command" in c]
-    assert [h.startswith('case "$$BUILDKITE_PARALLEL_JOB" in ') for h in headers] == [
-        False,
-        False,
-        True,
-        True,
-    ]
+    assert step["env"] == template["env"]
+    # The setup commands' headers stay; both pytest commands become cases.
+    cases = [c for c in step["commands"] if c.startswith('case "$$BUILDKITE_')]
+    assert (
+        len(cases) == 4 and step["commands"][: -len(cases)] == template["commands"][:-4]
+    )
 
 
 def test_run_plan_falls_back_to_the_single_job(tmp_path, monkeypatch):
@@ -688,93 +693,13 @@ def test_run_plan_falls_back_to_the_single_job(tmp_path, monkeypatch):
     assert annotate[5] == "warning" and "runs as one job" in annotate[6]
 
 
-def _plugin_env(shard_plan, **extra):
-    """This interpreter's environment plus the plugin's inputs. A bare env
-    drops settings such as LD_LIBRARY_PATH that a CI runner's interpreter
-    needs to find its own site-packages, and so pytest."""
-    env = {}
-    for name, value in os.environ.items():
-        if not name.startswith(("BUILDKITE_", "RUNTIME_SHARD_", "PYTEST_")):
-            env[name] = value
-    env.update(
-        PYTHONPATH=str(Path(rs.__file__).parent),
-        PYTEST_ADDOPTS="-p runtime_shard",
-        RUNTIME_SHARD_PLAN=rs.encode(shard_plan),
-        **extra,
-    )
-    return env
-
-
-def _plugin_run(tmp_path, shard_plan, index, target="pkg"):
-    (tmp_path / "pytest.ini").write_text("[pytest]\n")
-    pkg = tmp_path / "tests" / "pkg"
-    pkg.mkdir(parents=True, exist_ok=True)
-    (pkg / "test_a.py").write_text("def test_x(): pass\n")
-    (pkg / "test_b.py").write_text("def test_y(): pass\ndef test_z(): pass\n")
-    env = _plugin_env(shard_plan, BUILDKITE_PARALLEL_JOB=str(index))
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "-v", target],
-        cwd=tmp_path / "tests",
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-
-
-def test_collect_and_the_plugin_keep_a_commands_own_variables(tmp_path):
-    """`N=3 pytest ...`: collection sees N, the plugin matches the command,
-    and the shard's logged command keeps N."""
-    (tmp_path / "test_n.py").write_text(
-        "import os, pytest\n"
-        "@pytest.mark.parametrize('i', range(int(os.environ.get('N', '1'))))\n"
-        "def test_i(i): pass\n"
-    )
-    command = "N=3 pytest -v test_n.py"
-    out = tmp_path / "out"
-    subprocess.run(
-        [sys.executable, rs.__file__, "collect", "0", rs.encode(command), str(out)],
-        cwd=tmp_path,
-        check=True,
-    )
-    [entry] = [json.loads((out / "inventory-0.json").read_text())]
-    assert len(entry["nodeids"]) == 3 and entry["paths"] == ["test_n.py"]
-
-    shard_plan = {
-        "commands": [command],
-        "shards": [
-            [{"index": 0, "targets": ["test_n.py::test_i[0]"]}],
-            [{"index": 0, "targets": ["test_n.py::test_i[1]", "test_n.py::test_i[2]"]}],
-        ],
-    }
-    run = subprocess.run(
-        [sys.executable, "-m", "pytest", "-v", "test_n.py"],
-        cwd=tmp_path,
-        env=_plugin_env(shard_plan, BUILDKITE_PARALLEL_JOB="1", N="3"),
-        capture_output=True,
-        text=True,
-    )
-    assert run.returncode == 0 and "2 passed, 1 deselected" in run.stdout
-
-    result = {"shards": []}
-    for [planned] in shard_plan["shards"]:
-        targets = planned["targets"]
-        command_plan = {"index": 0, "targets": targets, "tests": len(targets)}
-        result["shards"].append({"commands": [command_plan]})
-    header = f'echo "+++ :test_tube: Command (1/1): {rs.command_preview(command)}"'
-    step = rs.shard_step({"commands": [header]}, result, [entry], "u")
-    script = step["commands"][2].replace("$$", "$")
-    logged = subprocess.run(
-        ["bash", "-c", script],
-        env={**os.environ, "BUILDKITE_PARALLEL_JOB": "1"},
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.splitlines()
-    assert logged[1:] == [
-        "N=3 pytest -v \\",
-        "  'test_n.py::test_i[1]' \\",
-        "  'test_n.py::test_i[2]'",
-    ]
+def test_run_plan_falls_back_if_a_command_is_not_in_the_job(tmp_path, monkeypatch):
+    """A pytest command the shards can't replace would run in full in each."""
+    _inventories(tmp_path)
+    template = {"label": "ME", "key": "model-executor", "commands": ["cd /t"]}
+    template, [step], annotate = _run_plan_on(tmp_path, monkeypatch, template)
+    assert step == template
+    assert "command 1 is missing" in annotate[6]
 
 
 def test_collect_ignores_a_trailing_shell_comment(tmp_path):
@@ -797,180 +722,127 @@ def test_collect_ignores_a_trailing_shell_comment(tmp_path):
     assert entry["exitstatus"] == 0 and entry["nodeids"] == ["test_a.py::test_x"]
 
 
-def test_plugin_matches_a_command_with_a_trailing_shell_comment(tmp_path):
-    shard_plan = {
-        "commands": ["pytest -v pkg # needs a clean process"],
-        "shards": [
-            [{"index": 0, "targets": ["tests/pkg/test_a.py"]}],
-            [{"index": 0, "targets": ["tests/pkg/test_b.py"]}],
-        ],
-    }
-    run = _plugin_run(tmp_path, shard_plan, 0)
-    assert run.returncode == 0 and "1 passed, 2 deselected" in run.stdout
-
-
-def test_plugin_runs_only_this_shards_tests(tmp_path):
-    shard_plan = {
-        "commands": ["pytest -v pkg"],
-        "shards": [
-            [
-                {
-                    "index": 0,
-                    "targets": ["tests/pkg/test_a.py", "tests/pkg/test_b.py::test_y"],
-                }
-            ],
-            [{"index": 0, "targets": ["tests/pkg/test_b.py::test_z"]}],
-            [],  # no tests of this command in the last shard
-        ],
-    }
-    first = _plugin_run(tmp_path, shard_plan, 0)
-    assert first.returncode == 0 and "2 passed, 1 deselected" in first.stdout
-    assert "test_z" not in first.stdout.split("deselected")[0].split("collected")[1]
-    second = _plugin_run(tmp_path, shard_plan, 1)
-    assert second.returncode == 0 and "1 passed, 2 deselected" in second.stdout
-    empty = _plugin_run(tmp_path, shard_plan, 2)
-    assert empty.returncode == 0 and "3 deselected" in empty.stdout
-
-
-def test_plugin_runs_tests_no_shard_was_given_in_shard_1(tmp_path):
-    shard_plan = {  # test_b.py was collected but planned nowhere
-        "commands": ["pytest -v pkg"],
-        "shards": [[], [{"index": 0, "targets": ["tests/pkg/test_a.py"]}]],
-    }
-    first = _plugin_run(tmp_path, shard_plan, 0)
-    assert first.returncode == 0 and "2 passed, 1 deselected" in first.stdout
-    assert "2 collected tests are in no shard; running them here" in first.stdout
-    second = _plugin_run(tmp_path, shard_plan, 1)
-    assert second.returncode == 0 and "1 passed, 2 deselected" in second.stdout
-    assert "no shard; shard 1 runs them" in second.stdout
-
-
-def test_plugin_fails_loudly_rather_than_run_the_wrong_tests(tmp_path):
-    missing = {
-        "commands": ["pytest -v pkg"],
-        "shards": [[{"index": 0, "targets": ["tests/pkg/test_gone.py"]}]],
-    }
-    assert _plugin_run(tmp_path, missing, 0).returncode not in (0, 5)
-    other = {"commands": ["pytest -v other"], "shards": [[]]}
-    assert _plugin_run(tmp_path, other, 0).returncode not in (0, 5)
-
-
-def test_plugin_reports_the_count_after_the_commands_own_filters(tmp_path):
-    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers = slow_test\n")
-    pkg = tmp_path / "tests" / "pkg"
-    pkg.mkdir(parents=True)
-    (pkg / "test_a.py").write_text(
-        "import pytest\ndef test_x(): pass\n@pytest.mark.slow_test\ndef test_s(): pass\n"
-    )
-    shard_plan = {
-        "commands": ["pytest -v pkg -m 'not slow_test'"],
-        "shards": [[{"index": 0, "targets": ["tests/pkg/test_a.py"]}]],
-    }
-    env = _plugin_env(shard_plan)
-    run = subprocess.run(
-        [sys.executable, "-m", "pytest", "-v", "pkg", "-m", "not slow_test"],
-        cwd=tmp_path / "tests",
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert run.returncode == 0 and "1 passed, 1 deselected" in run.stdout
-    assert "runtime-shard: shard 1/1, command 1: running 1 tests" in run.stdout
-
-
-def test_plugin_does_not_count_a_test_the_commands_own_filter_drops(tmp_path):
-    """The collect step applied -m, so the plan left the slow test out."""
-    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers = slow_test\n")
-    pkg = tmp_path / "tests" / "pkg"
-    pkg.mkdir(parents=True)
-    (pkg / "test_a.py").write_text(
-        "import pytest\ndef test_x(): pass\n@pytest.mark.slow_test\ndef test_s(): pass\n"
-    )
-    shard_plan = {
-        "commands": ["pytest -v pkg -m 'not slow_test'"],
-        "shards": [[{"index": 0, "targets": ["tests/pkg/test_a.py::test_x"]}]],
-    }
-    run = subprocess.run(
-        [sys.executable, "-m", "pytest", "-v", "pkg", "-m", "not slow_test"],
-        cwd=tmp_path / "tests",
-        env=_plugin_env(shard_plan),
-        capture_output=True,
-        text=True,
-    )
-    assert run.returncode == 0 and "1 passed, 1 deselected" in run.stdout
-    assert "in no shard" not in run.stdout and "test_s PASSED" not in run.stdout
-
-
-def test_each_shard_logs_a_command_that_runs_its_tests(tmp_path):
+def _collected(tmp_path, command, files):
+    """Collect `command` over these test files, in tmp_path/tests."""
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
-    pkg = tmp_path / "tests" / "pkg"
-    pkg.mkdir(parents=True)
-    (pkg / "test_a.py").write_text("def test_x(): pass\n")
-    (pkg / "test_b.py").write_text("def test_y(): pass\ndef test_z(): pass\n")
-    command = "pytest -v pkg -m 'not slow'"
+    tests = tmp_path / "tests"
+    for name, text in files.items():
+        (tests / name).parent.mkdir(parents=True, exist_ok=True)
+        (tests / name).write_text(text)
     out = tmp_path / "out"
     subprocess.run(
         [sys.executable, rs.__file__, "collect", "0", rs.encode(command), str(out)],
-        cwd=tmp_path / "tests",
+        cwd=tests,
         check=True,
     )
-    inventory = [json.loads((out / "inventory-0.json").read_text())]
-    result = {
-        "shards": [
-            {
-                "commands": [
-                    {
-                        "index": 0,
-                        "targets": ["pkg/test_a.py", "pkg/test_b.py::test_y"],
-                        "tests": 2,
-                    }
-                ]
-            },
-            {
-                "commands": [
-                    {"index": 0, "targets": ["pkg/test_b.py::test_z"], "tests": 1}
-                ]
-            },
-            {"commands": []},
-        ]
-    }
-    # As the generator renders it.
-    header = f'echo "+++ :test_tube: Command (1/1): {rs.command_preview(command)}"'
-    step = rs.shard_step(
-        {"commands": [header, command]}, result, inventory, "https://example/x.py"
+    return json.loads((out / "inventory-0.json").read_text())
+
+
+def _run_shard(step, shard, cwd):
+    """Run a shard job's commands as its agent would: $$ is a literal $."""
+    script = "\n".join(step["commands"]).replace("$$", "$")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env["BUILDKITE_PARALLEL_JOB"] = str(shard)
+    env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env["PATH"]
+    return subprocess.run(
+        ["bash", "-ec", script], cwd=cwd, env=env, capture_output=True, text=True
     )
-    assert step["commands"][3] == command  # the command itself is unchanged
 
-    def logged(shard):
-        # As Buildkite runs it: the upload turns $$ into $.
-        script = step["commands"][2].replace("$$", "$")
-        env = {**os.environ, "BUILDKITE_PARALLEL_JOB": str(shard)}
-        return subprocess.run(
-            ["bash", "-c", script], env=env, capture_output=True, text=True, check=True
-        ).stdout.splitlines()
 
-    first = logged(0)
-    assert first == [
-        "+++ :test_tube: Command (1/1): pytest -v pkg -m not slow,"
-        " shard 1/3: 2 tests in 2 files",
+def _result(*shards):
+    """A plan of one command, from each shard's targets."""
+    result = {"shards": []}
+    for targets in shards:
+        commands = []
+        if targets:
+            commands.append({"index": 0, "targets": targets, "tests": len(targets)})
+        result["shards"].append({"commands": commands})
+    return result
+
+
+def test_each_shard_runs_and_logs_only_its_own_tests(tmp_path):
+    command = "pytest -v pkg -m 'not slow'"
+    entry = _collected(
+        tmp_path,
+        command,
+        {
+            "pkg/test_a.py": "def test_x(): pass\n",
+            "pkg/test_b.py": "def test_y(): pass\ndef test_z(): pass\n",
+        },
+    )
+    assert entry["paths"] == ["pkg"]
+    result = _result(
+        ["pkg/test_a.py", "pkg/test_b.py::test_y"], ["pkg/test_b.py::test_z"], []
+    )
+    step = rs.shard_step({"commands": _rendered([command])}, result, [entry])
+
+    first = _run_shard(step, 0, tmp_path / "tests")
+    assert first.returncode == 0, first.stdout + first.stderr
+    lines = first.stdout.splitlines()
+    assert lines[:4] == [
+        "+++ :test_tube: Command (1/1), shard 1/3: 2 tests in 2 files",
         "pytest -v -m 'not slow' \\",
         "  pkg/test_a.py \\",
         "  pkg/test_b.py::test_y",
     ]
-    assert logged(2) == [
-        "+++ :test_tube: Command (1/1): pytest -v pkg -m not slow, shard 3/3: no tests"
-    ]
-    # Run without the plugin, the logged command selects exactly shard 1's tests.
-    printed = shlex.split(" ".join(line.rstrip("\\") for line in first[1:]))
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
-    alone = subprocess.run(
-        [sys.executable, "-m", "pytest", *printed[1:], "--collect-only", "-qq"],
-        cwd=tmp_path / "tests",
-        env=env,
-        capture_output=True,
-        text=True,
+    assert "2 passed" in first.stdout and "test_z" not in first.stdout
+
+    second = _run_shard(step, 1, tmp_path / "tests")
+    assert second.returncode == 0 and "1 passed" in second.stdout
+    assert "test_b.py::test_z PASSED" in second.stdout
+
+    empty = _run_shard(step, 2, tmp_path / "tests")
+    assert empty.returncode == 0 and empty.stdout == (
+        "+++ :test_tube: Command (1/1), shard 3/3: no tests of pytest -v pkg -m not slow\n"
     )
-    assert alone.stdout.splitlines()[:2] == [
-        "tests/pkg/test_a.py::test_x",
-        "tests/pkg/test_b.py::test_y",
-    ]
+
+
+def test_a_shards_failing_test_fails_its_job(tmp_path):
+    command = "pytest -v pkg"
+    entry = _collected(
+        tmp_path,
+        command,
+        {
+            "pkg/test_a.py": "def test_x(): pass\n",
+            "pkg/test_b.py": "def test_y(): assert 0\n",
+        },
+    )
+    result = _result(["pkg/test_a.py"], ["pkg/test_b.py"])
+    step = rs.shard_step({"commands": _rendered([command])}, result, [entry])
+    assert _run_shard(step, 0, tmp_path / "tests").returncode == 0
+    assert _run_shard(step, 1, tmp_path / "tests").returncode == 1
+
+
+def test_a_shard_keeps_the_generators_wrapping_and_a_commands_variables(tmp_path):
+    """Tracing labels the command by its preview, for main's timings; the
+    command's own NAME=value assignments reach collect and every shard."""
+    command = "N=3 pytest -v test_n.py"
+    entry = _collected(
+        tmp_path,
+        command,
+        {
+            "test_n.py": "import os, pytest\n"
+            "@pytest.mark.parametrize('i', range(int(os.environ.get('N', '1'))))\n"
+            "def test_i(i): pass\n"
+        },
+    )
+    assert len(entry["nodeids"]) == 3 and entry["paths"] == ["test_n.py"]
+    header, _ = _rendered([command])
+    preview = shlex.quote(rs.command_preview(command)).replace("'", '"')
+    traced = f"ci_otel_start 1 {preview} || :\n{command}\nstatus=$$?\n(exit $$status)"
+    result = _result(
+        ["test_n.py::test_i[0]"], ["test_n.py::test_i[1]", "test_n.py::test_i[2]"]
+    )
+    step = rs.shard_step({"commands": [header, traced]}, result, [entry])
+    shard_2 = step["commands"][1].split("1)\n")[1].split("\n;;")[0]
+    assert shard_2 == (
+        f"ci_otel_start 1 {preview} || :\n"
+        "N=3 pytest -v 'test_n.py::test_i[1]' 'test_n.py::test_i[2]'\n"
+        "status=$$?\n(exit $$status)"
+    )
+    step["commands"][1] = step["commands"][1].replace(
+        f"ci_otel_start 1 {preview} || :", ":"
+    )
+    run = _run_shard(step, 1, tmp_path / "tests")
+    assert run.returncode == 0 and "2 passed" in run.stdout
+    assert "N=3 pytest -v \\" in run.stdout.splitlines()
