@@ -77,9 +77,19 @@ def test_split_commands():
     assert rs.split_commands([TESTS[0], "echo done"]) is None
     assert rs.split_commands([TESTS[0] + " && echo done"]) is None
     assert rs.split_commands(["pytest -v x --shard-id=1 --num-shards=2"]) is None
-    # Tests before the first plain pytest would run in full in every shard.
-    assert rs.split_commands(["TP_SIZE=1 pytest -v a.py", *TESTS]) is None
-    assert rs.split_commands(["torchrun --nproc-per-node=2 a.py", *TESTS]) is None
+    # A command's program decides, not its first word or a substring.
+    with_env = "TP_SIZE=1 DP_SIZE=2 pytest -v -s a.py"
+    assert rs.split_commands(["export A=1", with_env, *TESTS]) == (
+        ["export A=1"],
+        [with_env, *TESTS],
+    )
+    pip = "pip install pytest-timeout pytest-forked"
+    assert rs.split_commands([pip, *TESTS]) == ([pip], TESTS)
+    # torchrun in setup would run in full in every shard.
+    torchrun = "VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=2 a.py"
+    assert rs.split_commands([torchrun, *TESTS]) is None
+    # Only the shell can expand $: collect would see different tests.
+    assert rs.split_commands(["PYTHONPATH=$PWD pytest -v a.py"]) is None
 
 
 def test_plan_packs_whole_files_in_order_and_covers_every_test():
@@ -709,6 +719,62 @@ def _plugin_run(tmp_path, shard_plan, index, target="pkg"):
         capture_output=True,
         text=True,
     )
+
+
+def test_collect_and_the_plugin_keep_a_commands_own_variables(tmp_path):
+    """`N=3 pytest ...`: collection sees N, the plugin matches the command,
+    and the shard's logged command keeps N."""
+    (tmp_path / "test_n.py").write_text(
+        "import os, pytest\n"
+        "@pytest.mark.parametrize('i', range(int(os.environ.get('N', '1'))))\n"
+        "def test_i(i): pass\n"
+    )
+    command = "N=3 pytest -v test_n.py"
+    out = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, rs.__file__, "collect", "0", rs.encode(command), str(out)],
+        cwd=tmp_path,
+        check=True,
+    )
+    [entry] = [json.loads((out / "inventory-0.json").read_text())]
+    assert len(entry["nodeids"]) == 3 and entry["paths"] == ["test_n.py"]
+
+    shard_plan = {
+        "commands": [command],
+        "shards": [
+            [{"index": 0, "targets": ["test_n.py::test_i[0]"]}],
+            [{"index": 0, "targets": ["test_n.py::test_i[1]", "test_n.py::test_i[2]"]}],
+        ],
+    }
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-v", "test_n.py"],
+        cwd=tmp_path,
+        env=_plugin_env(shard_plan, BUILDKITE_PARALLEL_JOB="1", N="3"),
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0 and "2 passed, 1 deselected" in run.stdout
+
+    result = {"shards": []}
+    for [planned] in shard_plan["shards"]:
+        targets = planned["targets"]
+        command_plan = {"index": 0, "targets": targets, "tests": len(targets)}
+        result["shards"].append({"commands": [command_plan]})
+    header = f'echo "+++ :test_tube: Command (1/1): {rs.command_preview(command)}"'
+    step = rs.shard_step({"commands": [header]}, result, [entry], "u")
+    script = step["commands"][2].replace("$$", "$")
+    logged = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "BUILDKITE_PARALLEL_JOB": "1"},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert logged[1:] == [
+        "N=3 pytest -v \\",
+        "  'test_n.py::test_i[1]' \\",
+        "  'test_n.py::test_i[2]'",
+    ]
 
 
 def test_collect_ignores_a_trailing_shell_comment(tmp_path):

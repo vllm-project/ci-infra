@@ -43,6 +43,7 @@ INVENTORY_DIR = ".runtime-shard"
 # pytest-shard would select a subset a second time on top of the plan.
 _UNSHARDABLE_ARGS = ("--num-shards", "--shard-id")
 _SHELL_SYNTAX = ("&&", "||", ";", "|", ">", "<", "`", "$", "\n")
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # The section header the generator echoes before each command. The rendered
 # step has it in double quotes; the preview in it has no quotes of its own.
 _COMMAND_HEADER = re.compile(
@@ -66,8 +67,42 @@ def command_preview(command: str) -> str:
     return command[:80].replace("'", "").replace('"', "").replace("$", "")
 
 
+def env_and_words(command: str) -> Tuple[Dict[str, str], List[str]]:
+    """Split a command into its leading NAME=value assignments and the rest.
+
+    Args:
+        command: A shell command, like `TP_SIZE=1 pytest -v x.py`.
+
+    Returns:
+        ({"TP_SIZE": "1"}, ["pytest", "-v", "x.py"]).
+
+    Raises:
+        ValueError: The command doesn't parse as shell words.
+
+    """
+    words = shlex.split(command, comments=True)
+    env = {}
+    while words and _ASSIGNMENT.match(words[0]):
+        name, value = words.pop(0).split("=", 1)
+        env[name] = value
+    return env, words
+
+
+def _program(command: str) -> Optional[str]:
+    """The program a command runs, after its NAME=value assignments."""
+    try:
+        _, words = env_and_words(command)
+    except ValueError:  # e.g. a multi-line script
+        return None
+    return words[0] if words else None
+
+
 def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]:
     """Separate a step's setup commands from its pytest commands.
+
+    A pytest command is one whose program is pytest, after any NAME=value
+    assignments: `TP_SIZE=1 pytest x.py` is one, `pip install pytest-timeout`
+    is not.
 
     Args:
         commands: The step's commands, in order.
@@ -76,23 +111,21 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
         (setup commands, pytest commands), or None if the step can't be
         sharded: it needs at least one pytest command, only plain pytest
         commands (no shell syntax, no pytest-shard flags) after the first,
-        and no tests before it, since setup runs in full in every shard.
+        and no torchrun before it, since setup runs in full in every shard.
 
     """
     first = None
     for position, command in enumerate(commands):
-        if command.startswith("pytest "):
+        if _program(command) == "pytest":
             first = position
             break
     if first is None:
         return None
-    if any("pytest" in c or "torchrun" in c for c in commands[:first]):
+    if any(_program(c) == "torchrun" for c in commands[:first]):
         return None
     tests = commands[first:]
     for command in tests:
-        if not command.startswith("pytest ") or any(
-            s in command for s in _SHELL_SYNTAX
-        ):
+        if _program(command) != "pytest" or any(s in command for s in _SHELL_SYNTAX):
             return None
         if any(
             a.split("=")[0] in _UNSHARDABLE_ARGS
@@ -566,6 +599,9 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
     import pytest
 
     command = decode(command_b64)
+    # The command's own NAME=value assignments can change what it collects.
+    env, words = env_and_words(command)
+    os.environ.update(env)
     found: Dict = {"nodeids": [], "prefix": "", "paths": []}
 
     class Probe:
@@ -578,7 +614,7 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
 
     status = int(
         pytest.main(
-            [*shlex.split(command, comments=True)[1:], "--collect-only", "-q"],
+            [*words[1:], "--collect-only", "-q"],
             plugins=[Probe()],
         )
     )
@@ -679,7 +715,10 @@ def _shard_headers(
             continue
         index = previews.index(match.group(3))
         entry = inventory[index]
-        options = shlex.split(entry["command"], comments=True)[1:]
+        env, options = env_and_words(entry["command"])
+        options = options[1:]
+        # NAME='a b', not 'NAME=a b', which the shell would run as a program.
+        assignments = [f"{name}={shlex.quote(value)}" for name, value in env.items()]
         for path in entry["paths"]:
             if path in options:
                 options.remove(path)
@@ -695,7 +734,7 @@ def _shard_headers(
                     f"{header}, shard {number + 1}/{total}:"
                     f" {_plural(command['tests'], 'test')}"
                     f" in {_plural(len(files), 'file')}",
-                    shlex.join(["pytest", *options]) + " \\",
+                    " ".join([*assignments, shlex.join(["pytest", *options])]) + " \\",
                 ]
                 for target in command["targets"]:
                     lines.append(f"  {shlex.quote(target)} \\")
@@ -823,7 +862,7 @@ def pytest_collection_modifyitems(session, config, items):
     args = list(config.invocation_params.args)
     matches = []
     for position, command in enumerate(shard_plan["commands"]):
-        if shlex.split(command, comments=True)[1:] == args:
+        if env_and_words(command)[1][1:] == args:
             matches.append(position)
     if len(matches) != 1 or index >= len(shard_plan["shards"]):
         raise pytest.UsageError(
