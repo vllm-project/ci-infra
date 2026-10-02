@@ -123,9 +123,10 @@ metadata:
 With that annotation the launcher merges in `pod_defaults.yaml` — the cache
 volumes and their mounts, the gcsfuse sidecar settings, the TPU toleration, the
 service account, `restartPolicy`, the two env names every workload wants, the
-TTL, and the retry rules that let a pod survive its node being repaired. The
-memory request comes from the shape's profile, since it is a fraction of the
-host the pod landed on.
+TTL, and the retry rules that let a pod survive its node being repaired. A
+JobSet's multi-host roles also get JobSet's exclusive placement, one slice per
+Job. The memory request comes from the shape's profile, since it is a fraction
+of the host the pod landed on.
 
 The merge is additive: anything the manifest sets itself is left alone, so a
 role can add a volume or override a default it needs to differ on. Inherited

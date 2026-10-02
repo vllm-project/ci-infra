@@ -1100,6 +1100,19 @@ def inherit_defaults(doc, profile):
         for key, value in (defaults.get("tpuJobs") or {}).items():
             job.setdefault(key, copy.deepcopy(value))
 
+    # On the replicatedJob, not the JobSet, so that only the multi-host roles
+    # holding chips get it; see multiHostJobs in pod_defaults.yaml.
+    if doc["kind"] == "JobSet" and int(profile["hosts"]) > 1:
+        multi_host = (defaults.get("multiHostJobs") or {}).get("annotations") or {}
+        for rj in doc["spec"].get("replicatedJobs", []):
+            if not pod_chips(rj["template"]["spec"]["template"]["spec"]):
+                continue
+            on_job = rj["template"].setdefault("metadata", {}).setdefault(
+                "annotations", {})
+            for key, value in multi_host.items():
+                if key not in annotations:
+                    on_job.setdefault(key, value)
+
 
 def size_host_volumes(doc, profile):
     """How large this host lets the memory-backed volumes grow.
