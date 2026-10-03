@@ -1,5 +1,5 @@
 <!-- ci-selector-shadow -->
-### CI selector (shadow): 95 test steps (132 jobs) instead of 95 (132 jobs)
+### CI selector (shadow): 97 test steps (134 jobs) instead of 97 (134 jobs)
 
 Shadow mode: this changes nothing about what CI runs. It shows what the evidence-based selector would pick for this PR, next to today's rules. [How it works](https://github.com/vllm-project/ci-infra/tree/main/buildkite/ci_selector).
 
@@ -7,10 +7,10 @@ Shadow mode: this changes nothing about what CI runs. It shows what the evidence
 
 | steps (jobs) | Today's rules | Selector | Would skip | Would add |
 |---|---|---|---|---|
-| NVIDIA, CPU and others | 95 (132) | 95 (132) | 0 (0) | 0 (0) |
-| AMD mirrors | 82 (116) | 82 (116) | 0 (0) | 0 (0) |
+| NVIDIA, CPU and others | 97 (134) | 97 (134) | 0 (0) | 0 (0) |
+| AMD mirrors | 89 (123) | 89 (123) | 0 (0) | 0 (0) |
 
-<details><summary>Selector would run (95)</summary>
+<details><summary>Selector would run (97)</summary>
 
 - `amd-fp8-moe-kernels-mi355`
 - `amd-kernels-mi355`
@@ -47,6 +47,8 @@ Shadow mode: this changes nothing about what CI runs. It shows what the evidence
 - `fusion-e2e-config-sweep-h100`
 - `fusion-e2e-quick-h100`
 - `fusion-e2e-tp2-ar-rms-config-sweep-h100`
+- `fusion-e2e-tp2-ar-rms-dynamo-partition-amd`
+- `fusion-e2e-tp2-ar-rms-inductor-partition-amd`
 - `fusion-e2e-tp2-asynctp-config-sweep-h100`
 - `fusion-e2e-tp2-b200`
 - `fusion-e2e-tp2-quick-h100`
@@ -129,10 +131,10 @@ none
 none
 </details>
 
-#### CI results (2026-10-02 21:28 UTC)
+#### CI results (2026-10-03 06:02 UTC)
 
 0 passed, 0 failed, 0 pending.
 
 No failures to judge.
 
-<sub>11 changed files · base `6e517b15c1` · head `88732ff5a4` · Python record: build 92561 at `4056c8ac1f` · kernel record: table 4056c8ac1f (build 92561), map 4056c8ac1f · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 81 optional steps the selector would also run</sub>
+<sub>11 changed files · base `1a001d5842` · head `6fb8a09fd8` · Python record: build 92706 at `6e517b15c1` · kernel record: table 6e517b15c1 (build 92706), map 6e517b15c1 · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 88 optional steps the selector would also run</sub>
