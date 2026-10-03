@@ -765,8 +765,15 @@ def _shard_commands(
             file_tests[file] = file_tests.get(file, 0) + 1
 
         # The headers keep the step's own numbering, "Command (4/5)", so a
-        # number means the same YAML command in every shard.
+        # number means the same YAML command in every shard, and name only
+        # the file; the exact command is the first line of its section.
         command = f"+++ :test_tube: Command ({match.group(2)})"
+        total = len(shard_files)
+        shards_with_tests = []  # the shards that run some of this command
+        for number, files in enumerate(shard_files):
+            if any(planned == index for planned, _, _ in files):
+                shards_with_tests.append(f"{number + 1}/{total}")
+        where = " ".join(entry["paths"]) or match.group(3)
         branches = []
         for number, files in enumerate(shard_files):
             mine = []  # this command's files in this shard
@@ -776,23 +783,24 @@ def _shard_commands(
             lines = []
             for file_number, (file, targets) in enumerate(mine):
                 parts = _shard_command(entry, targets)
-                title = (
-                    f"{command}, file {file_number + 1}/{len(mine)}:"
-                    f" {parts[0]} {shlex.quote(file)}"
-                )
+                title = f"{command}, file {file_number + 1}/{len(mine)}: {file}"
                 # A split file's targets are its test IDs, one per test.
                 if any("::" in target for target in targets):
                     title += f"   ({len(targets)} of {file_tests[file]} tests)"
+                shown = " ".join(shlex.quote(text) for text in (title, " ".join(parts)))
                 # Buildkite interpolates the uploaded step: $$ is a literal $.
                 # The generator's own lines are already escaped.
-                lines.append(f"printf '%s\\n' {shlex.quote(title)}".replace("$", "$$"))
+                lines.append(f"printf '%s\\n' {shown}".replace("$", "$$"))
                 run = before + " ".join(parts).replace("$", "$$") + after
                 lines.append(f"{{ {run}\n}} || runtime_shard_status=1")
             if lines:
                 lines.insert(0, "runtime_shard_status=0")
                 lines.append("(exit $$runtime_shard_status)")
             else:
-                title = f"{command}: no tests in this shard ({match.group(3)})"
+                shards = "shards " if len(shards_with_tests) > 1 else "shard "
+                title = (
+                    f"{command}: {where} runs in {shards}{', '.join(shards_with_tests)}"
+                )
                 lines.append(f"printf '%s\\n' {shlex.quote(title)}".replace("$", "$$"))
             branches.append(f"{number})\n" + "\n".join(lines) + "\n;;")
         replaced.append(
