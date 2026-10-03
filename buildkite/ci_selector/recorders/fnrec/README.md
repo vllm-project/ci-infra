@@ -130,15 +130,16 @@ Unlike the kernel recorder this also covers AMD and plugin-less steps.
 | `host_install.py` | host install: a per-job directory with `sitecustomize.py` |
 | `fnrec_pytest.py` | pytest plugin: what each session collected and ran |
 | `pack.sh` | folds this job's files into one tarball at the end of the step |
-| `collect.sh` | the build's last step: folds every job and publishes the table |
+| `collect.sh` | the build's last step: folds every job, keeps the published row of a step that recorded nothing, and publishes the table |
 | `test_collect.sh` | `collect.sh` against stubbed `buildkite-agent` and `aws` |
 
-Two overrides, for rerunning a fold by hand and for the tests:
+Three overrides, for rerunning a fold by hand and for the tests:
 
 | | |
 | --- | --- |
 | `FNREC_CI_INFRA` | a ci-infra checkout to take the builder from, instead of cloning one |
 | `FNREC_VLLM_REPO` | the vLLM repo to resolve the recorded commit in, instead of the build's checkout |
+| `CI_SELECTOR_FUNCTION_RECORD_URL` | where to fetch the previous table from, as for `ci-fetch-function-record` |
 
 ## Turning recordings into the table
 

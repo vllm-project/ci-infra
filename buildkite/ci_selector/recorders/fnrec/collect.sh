@@ -81,6 +81,17 @@ fi
 command -v uv >/dev/null 2>&1 || { echo "cannot install uv" >&2; exit 1; }
 fold() { uv run --quiet --no-dev --python 3.12 --project "${BUILDER}" "$@"; }
 
+echo "--- :rewind: Fetching the published table to carry rows forward from"
+# A step whose job recorded nothing in this build keeps its row from the last
+# published table, so one failed checkout does not take the step out of the
+# record. Nothing published, or a table of another version, carries nothing.
+previous=()
+if fold python -m ci_selector.scripts.fetch_functions --out previous; then
+  previous=(--previous previous/table.json.gz)
+else
+  echo "no previous table; a step that recorded nothing in this build has no row"
+fi
+
 echo "--- :table_tennis_paddle_and_ball: Building the coverage table"
 # The count the generator armed, so the fold can refuse a build that lost most
 # of its recordings. Printed, because a wrong one silently weakens that check.
@@ -96,7 +107,7 @@ fi
 mkdir -p out
 fold python -m ci_selector.scripts.build \
   "${VLLM_CHECKOUT}" --fnrec .fnrec --build "${BUILD}" --commit "${COMMIT}" \
-  ${expected[@]+"${expected[@]}"} \
+  ${expected[@]+"${expected[@]}"} ${previous[@]+"${previous[@]}"} \
   --pipeline "${PIPELINE}" --out out/table.json.gz \
   || { echo "table build failed" >&2; exit 1; }
 
