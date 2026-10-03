@@ -784,25 +784,27 @@ def test_each_file_of_a_shard_runs_as_its_own_command(tmp_path):
     assert first.returncode == 0, first.stdout + first.stderr
     headers = [line for line in first.stdout.splitlines() if line.startswith("+++")]
     assert headers == [
-        "+++ :test_tube: Command (1/1), file 1/2: pytest -v -m 'not slow' pkg/test_a.py",
-        "+++ :test_tube: Command (1/1), file 2/2: pytest -v -m 'not slow' pkg/test_b.py"
-        "   (1 of 2 tests)",
+        "+++ :test_tube: Command (1/1), file 1/2: pkg/test_a.py",
+        "+++ :test_tube: Command (1/1), file 2/2: pkg/test_b.py   (1 of 2 tests)",
     ]
+    # The section starts with the exact command, ready to paste.
+    lines = first.stdout.splitlines()
+    assert lines[lines.index(headers[1]) + 1] == (
+        "pytest -v -m 'not slow' pkg/test_b.py::test_y"
+    )
     assert first.stdout.count("1 passed") == 2 and "test_z" not in first.stdout
 
     second = _run_shard(step, 1, tmp_path / "tests")
     assert second.returncode == 0 and "test_b.py::test_z PASSED" in second.stdout
     # A whole file needs no count, however many tests it has.
     headers = [line for line in second.stdout.splitlines() if line.startswith("+++")]
-    assert (
-        headers[1]
-        == "+++ :test_tube: Command (1/1), file 2/2: pytest -v -m 'not slow' pkg/test_c.py"
-    )
+    assert headers[1] == "+++ :test_tube: Command (1/1), file 2/2: pkg/test_c.py"
     assert "2 passed" in second.stdout
 
     empty = _run_shard(step, 2, tmp_path / "tests")
+    # A shard with none of the command's tests says which shards run it.
     assert empty.returncode == 0 and empty.stdout == (
-        "+++ :test_tube: Command (1/1): no tests in this shard (pytest -v pkg -m not slow)\n"
+        "+++ :test_tube: Command (1/1): pkg runs in shards 1/3, 2/3\n"
     )
 
 
@@ -857,7 +859,7 @@ def test_a_shard_keeps_the_generators_wrapping_and_a_commands_variables(tmp_path
     step["commands"][0] = case.replace(f"ci_otel_start 1 {preview} || :", ":")
     run = _run_shard(step, 1, tmp_path / "tests")
     assert run.returncode == 0 and "2 passed" in run.stdout
-    assert run.stdout.splitlines()[0] == (
-        "+++ :test_tube: Command (1/1), file 1/1: N=3 pytest -v test_n.py"
-        "   (2 of 3 tests)"
-    )
+    assert run.stdout.splitlines()[:2] == [
+        "+++ :test_tube: Command (1/1), file 1/1: test_n.py   (2 of 3 tests)",
+        "N=3 pytest -v 'test_n.py::test_i[1]' 'test_n.py::test_i[2]'",
+    ]
