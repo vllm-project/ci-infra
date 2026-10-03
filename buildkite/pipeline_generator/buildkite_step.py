@@ -32,6 +32,7 @@ from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
 from recorder_switches import fnrec_enabled, kernrec_enabled
+import runtime_shard
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -186,15 +187,20 @@ def add_precommit_dependency(
     """
     for group_step in buildkite_group_steps:
         for step in group_step.steps:
-            if not isinstance(step, BuildkiteCommandStep) or not step.depends_on:
-                continue
-            # Don't gate the image build steps themselves on pre-commit.
-            if step.key and "image-build" in step.key:
-                continue
-            if not any("image-build" in dep for dep in step.depends_on):
-                continue
-            if PRECOMMIT_STEP_KEY not in step.depends_on:
-                step.depends_on.append(PRECOMMIT_STEP_KEY)
+            if isinstance(step, BuildkiteCommandStep):
+                _add_step_precommit_dependency(step)
+
+
+def _add_step_precommit_dependency(step: "BuildkiteCommandStep") -> None:
+    if not step.depends_on:
+        return
+    # Don't gate the image build steps themselves on pre-commit.
+    if step.key and "image-build" in step.key:
+        return
+    if not any("image-build" in dep for dep in step.depends_on):
+        return
+    if PRECOMMIT_STEP_KEY not in step.depends_on:
+        step.depends_on.append(PRECOMMIT_STEP_KEY)
 
 
 def _get_step_agents(step: Step) -> Dict[str, str]:
@@ -960,6 +966,137 @@ def ensure_infra_failure_retry(
     return retry_policy
 
 
+# "off" is the rollback switch: enrolled steps run as their normal single job.
+RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
+
+
+def _runtime_shard_mode(
+    step: Step, step_key: str, list_file_diff: List[str]
+) -> Optional[str]:
+    """How to run a step with `automatic_shard: true`: "on" (as shards),
+    "shadow" (one job, plus an annotation of the plan), or None (as usual)."""
+    if not step.automatic_shard or not _step_should_run(step, list_file_diff):
+        return None
+    mode = os.getenv(RUNTIME_SHARD_ENV_VAR) or "on"
+    if mode not in ("on", "shadow"):
+        if mode != "off":
+            print(
+                f"automatic_shard ignored on {step_key}: {RUNTIME_SHARD_ENV_VAR}={mode} is not on, shadow or off"
+            )
+        return None
+    if fnrec_enabled() or kernrec_enabled():
+        # The recorders count their jobs at generation time; shards come later.
+        print(f"automatic_shard ignored on {step_key}: recording build")
+        return None
+    if (
+        runtime_shard.split_commands(step.commands or []) is None
+        or step.no_plugin
+        or is_amd_device(step.device)
+        or (step.num_nodes and step.num_nodes >= 2)
+    ):
+        print(
+            f"automatic_shard ignored on {step_key}: only single-node NVIDIA steps "
+            "whose test commands are all plain pytest can be sharded"
+        )
+        return None
+    return mode
+
+
+def _runtime_shard_steps(
+    step: Step, step_key: str, command_step: BuildkiteCommandStep, mode: str
+) -> List[BuildkiteCommandStep]:
+    """The collect and plan steps for an enrolled step (see runtime_shard.py).
+
+    collect: the step's own image, queue and setup commands, then
+    `pytest --collect-only` per command. plan: a CPU step that plans the shards
+    and annotates the build. In "on" mode the plan step also uploads
+    `command_step`, the step's normal job: as parallel shards, or unchanged if
+    anything failed, so sharding never blocks the step's tests. In "shadow"
+    mode the step runs as usual and both new steps soft-fail.
+    """
+    setup, tests = runtime_shard.split_commands(step.commands or [])
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        f"{branch}/buildkite/pipeline_generator/runtime_shard.py"
+    )
+    script = "/tmp/runtime-shard.$${BUILDKITE_JOB_ID:-local}.py"
+    fetch = f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
+    out_dir = f"{runtime_shard.INVENTORY_DIR}/{step_key}"
+    # /workdir under the docker plugin; a k8s pod's own checkout path otherwise.
+    checkout = _fnrec_checkout_path(step, "nvidia")
+    # ponytail: setup runs as written; no variable injection or recorders here
+    collect_commands = [f"cd {step.working_dir}"] if step.working_dir else []
+    collect_commands += [*setup, fetch]
+    collect_commands += [
+        f"python3 {script} collect {i} {runtime_shard.encode(command)} "
+        f"{checkout}/{out_dir}"
+        for i, command in enumerate(tests)
+    ]
+    collect_key = f"{step_key}-shard-collect"
+    collect = BuildkiteCommandStep(
+        label=f"{step_key}: runtime shard collect",
+        key=collect_key,
+        agents=_get_step_agents(step),
+        commands=collect_commands,
+        depends_on=step.depends_on,
+        env=step.env,
+        plugins=[_get_step_plugin(step)],
+        artifact_paths=[f"{out_dir}/*.json"],
+        retry=ensure_infra_failure_retry(None),
+        soft_fail=True,
+        timeout_in_minutes=_get_timeout_in_minutes(20),
+    )
+    queue = (
+        AgentQueue.SMALL_CPU_POSTMERGE
+        if get_global_config()["branch"] == "main"
+        else AgentQueue.SMALL_CPU_PREMERGE
+    )
+    plan_command = (
+        f"python3 {script} plan {step_key} {runtime_shard.encode(tests)} {mode}"
+    )
+    # The plan step reads only artifacts and the fetched planner, never the repo.
+    env = {"BUILDKITE_SKIP_CHECKOUT": "true"}
+    if mode == "on":
+        # If the planner can't be fetched or crashes, log its exit status and
+        # upload the step's normal job, with a warning. Skip the upload if the
+        # planner died after its own: the key is taken, so a second upload
+        # would only fail and turn this step red.
+        failed = "fetching or running the planner failed with status $$status"
+        plan_command = (
+            f"{fetch} && {plan_command} || "
+            f'{{ status=$$?; echo "runtime-shard: {failed}";'
+            f' [ -n "$$(buildkite-agent step get state --step {step_key} 2>/dev/null)" ]'
+            " || (buildkite-agent annotate --style warning --context"
+            f' runtime-shard-{step_key} "**Runtime sharding for {step_key}:** {failed}.'
+            ' The step runs as one job, as it would without sharding.";'
+            ' echo "$$RUNTIME_SHARD_TEMPLATE" | base64 -d'
+            " | buildkite-agent pipeline upload); }"
+        )
+        # The template leaves the pipeline before add_precommit_dependency
+        # runs, so gate it on pre-commit here, as the unsharded step would be.
+        pull_request = get_global_config()["pull_request"]
+        if pull_request and pull_request != "false":
+            _add_step_precommit_dependency(command_step)
+        template = {"steps": [command_step.dict(exclude_none=True)]}
+        env["RUNTIME_SHARD_TEMPLATE"] = runtime_shard.encode(template)
+    plan = BuildkiteCommandStep(
+        label=f"{step_key}: runtime shard plan",
+        key=f"{step_key}-shard-plan",
+        agents={"queue": queue.value},
+        commands=[fetch, plan_command] if mode == "shadow" else [plan_command],
+        env=env,
+        depends_on=[collect_key],
+        allow_dependency_failure=True,
+        # A lost CPU agent must not leave the step with no jobs. A retry after
+        # the shards were uploaded is harmless: the fallback sees the step.
+        retry=ensure_infra_failure_retry(None),
+        soft_fail=mode == "shadow",
+        timeout_in_minutes=_get_timeout_in_minutes(10),
+    )
+    return [collect, plan]
+
+
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
@@ -1104,8 +1241,17 @@ def convert_group_step_to_buildkite_step(
                 if step.device == DeviceType.L4 and not step.retry:
                     buildkite_step.retry = K8S_RETRY
 
-            if include_step:
+            shard_mode = (
+                _runtime_shard_mode(step, step_key, list_file_diff)
+                if include_step
+                else None
+            )
+            if include_step and shard_mode != "on":
                 group_steps_list.append(buildkite_step)
+            if shard_mode:
+                group_steps_list.extend(
+                    _runtime_shard_steps(step, step_key, buildkite_step, shard_mode)
+                )
 
             # Create AMD mirror step and its block step if specified/applicable
             if (

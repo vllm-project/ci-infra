@@ -479,6 +479,9 @@ KNOWN_STEP_FIELDS = {
     "agent_pool",
     "concurrency",
     "concurrency_group",
+    # Runtime sharding: splits the step's own tests across jobs at build time
+    # without changing which tests run, so selection needs nothing from it.
+    "automatic_shard",
     # Buildkite built-in, absent from the generator's Step model, so it is
     # dropped before reaching a command. Governs ordering after a failure.
     "allow_dependency_failure",
