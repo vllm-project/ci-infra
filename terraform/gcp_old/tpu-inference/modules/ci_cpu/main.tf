@@ -40,13 +40,15 @@ resource "google_compute_instance" "buildkite-agent-instance" {
   }
 
   service_account {
+    email  = var.service_account_email
     scopes = ["cloud-platform"]
   }
 
-  can_ip_forward      = false
-  deletion_protection = false
-  enable_display      = false
-  machine_type        = "e2-standard-2"
+  can_ip_forward            = false
+  deletion_protection       = false
+  enable_display            = false
+  allow_stopping_for_update = true
+  machine_type              = "e2-standard-2"
 
   network_interface {
     access_config {

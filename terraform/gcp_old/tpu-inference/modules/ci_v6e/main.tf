@@ -38,6 +38,14 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
     vm_name = local.node_names[count.index]
   }
 
+  dynamic "service_account" {
+    for_each = var.service_account_email == null ? [] : [1]
+    content {
+      email = var.service_account_email
+      scope = ["https://www.googleapis.com/auth/cloud-platform"]
+    }
+  }
+
   dynamic "scheduling_config" {
     for_each = var.reserved ? [1] : []
     content {
