@@ -766,14 +766,10 @@ def _shard_commands(
 
         # The headers keep the step's own numbering, "Command (4/5)", so a
         # number means the same YAML command in every shard, and name only
-        # the file; the exact command is the first line of its section.
+        # the file; the exact command is the first line of its section. A
+        # shard shows only the commands it runs: check() made sure every test
+        # runs in some shard.
         command = f"+++ :test_tube: Command ({match.group(2)})"
-        total = len(shard_files)
-        shards_with_tests = []  # the shards that run some of this command
-        for number, files in enumerate(shard_files):
-            if any(planned == index for planned, _, _ in files):
-                shards_with_tests.append(f"{number + 1}/{total}")
-        where = " ".join(entry["paths"]) or match.group(3)
         branches = []
         for number, files in enumerate(shard_files):
             mine = []  # this command's files in this shard
@@ -797,11 +793,7 @@ def _shard_commands(
                 lines.insert(0, "runtime_shard_status=0")
                 lines.append("(exit $$runtime_shard_status)")
             else:
-                shards = "shards " if len(shards_with_tests) > 1 else "shard "
-                title = (
-                    f"{command}: {where} runs in {shards}{', '.join(shards_with_tests)}"
-                )
-                lines.append(f"printf '%s\\n' {shlex.quote(title)}".replace("$", "$$"))
+                lines.append(":")
             branches.append(f"{number})\n" + "\n".join(lines) + "\n;;")
         replaced.append(
             'case "$$BUILDKITE_PARALLEL_JOB" in\n'
