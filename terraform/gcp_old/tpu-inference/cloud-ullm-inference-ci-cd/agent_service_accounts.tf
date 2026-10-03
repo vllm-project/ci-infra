@@ -157,6 +157,21 @@ resource "google_storage_bucket_iam_member" "ci_agent" {
   member = local.ci_agent_members[each.value.fleet]
 }
 
+# The object roles don't include storage.buckets.get, which GCS client
+# libraries need to look a bucket up before reading it (vLLM's model loader,
+# for one).
+resource "google_storage_bucket_iam_member" "ci_agent_bucket_viewer" {
+  for_each = merge([
+    for bucket, grant in local.ci_agent_bucket_roles : {
+      for fleet in grant.fleets : "${bucket}/${fleet}" => { bucket = bucket, fleet = fleet }
+    }
+  ]...)
+
+  bucket = data.google_storage_bucket.ci_agent[each.value.bucket].name
+  role   = "roles/storage.bucketViewer"
+  member = local.ci_agent_members[each.value.fleet]
+}
+
 # Only jobs on the TPU queues upload benchmark results.
 resource "google_bigquery_dataset_iam_member" "ci_agent_tpu" {
   project    = data.google_bigquery_dataset.benchmark.project
