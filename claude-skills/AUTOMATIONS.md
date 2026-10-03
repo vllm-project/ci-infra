@@ -148,6 +148,9 @@ These files guide an agent but do not install timers or send scheduled alerts:
 - [`vllm-main-ci-triage/`](vllm-main-ci-triage/): diagnose hard main-CI
   failures, prepare narrow fixes, audit exact pull-request job coverage, and
   record confirmed test-selection leaks.
+- [`vllm-release-notes/`](vllm-release-notes/): write the GitHub release
+  body and Slack announcement for a new vLLM release from the commit range
+  between two tags, with finished examples for every release since v0.22.0.
 
 ## Validate changes
 
