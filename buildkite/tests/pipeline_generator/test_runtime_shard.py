@@ -802,10 +802,8 @@ def test_each_file_of_a_shard_runs_as_its_own_command(tmp_path):
     assert "2 passed" in second.stdout
 
     empty = _run_shard(step, 2, tmp_path / "tests")
-    # A shard with none of the command's tests says which shards run it.
-    assert empty.returncode == 0 and empty.stdout == (
-        "+++ :test_tube: Command (1/1): pkg runs in shards 1/3, 2/3\n"
-    )
+    # A shard with none of the command's tests skips it without a header.
+    assert empty.returncode == 0 and empty.stdout == ""
 
 
 def test_a_failing_file_fails_the_job_after_the_shards_other_files(tmp_path):
