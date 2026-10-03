@@ -23,6 +23,12 @@ resource "google_service_account" "ci_agent_tpu" {
   display_name = "Buildkite agents: v6e and v7x fleets"
 }
 
+# The cpu_64_core fleet stays on this account until ci-agent-cpu can read
+# what its image builds pull from other projects.
+data "google_compute_default_service_account" "default" {
+  project = var.project_id
+}
+
 locals {
   ci_agent_members = {
     cpu = "serviceAccount:${google_service_account.ci_agent_cpu.email}"
@@ -70,6 +76,7 @@ locals {
     "tpu-inference-hf-llm-model-checkpoints" = { role = "roles/storage.objectViewer", fleets = ["tpu"] }
     "ullm-ci-cache"                          = { role = "roles/storage.objectUser", fleets = ["tpu"] }
     "vllm-bm-bk-storage"                     = { role = "roles/storage.objectCreator", fleets = ["tpu"] }
+    "vllm-cb-storage2"                       = { role = "roles/storage.objectViewer", fleets = ["tpu"] }
   }
 }
 

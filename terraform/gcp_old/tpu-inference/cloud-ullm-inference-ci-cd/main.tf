@@ -185,7 +185,11 @@ module "ci_cpu_64_core_vllm_zone_b" {
 
   vllm_torchtpu_ssh_checkout = true
 
-  service_account_email = google_service_account.ci_agent_cpu.email
+  # Stays on the default compute service account for now: the image builds
+  # here read from registries and buckets in other projects that haven't
+  # granted ci-agent-cpu access yet. Named explicitly because leaving the
+  # email unset keeps whatever account the VM already has.
+  service_account_email = data.google_compute_default_service_account.default.email
 }
 
 module "ci_cpu_64_core_vllm_zone_f" {
@@ -206,7 +210,8 @@ module "ci_cpu_64_core_vllm_zone_f" {
 
   vllm_torchtpu_ssh_checkout = true
 
-  service_account_email = google_service_account.ci_agent_cpu.email
+  # Default compute service account for now; see ci_cpu_64_core_vllm_zone_b.
+  service_account_email = data.google_compute_default_service_account.default.email
 }
 
 module "ci_monitoring" {
