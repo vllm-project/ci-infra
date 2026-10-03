@@ -784,8 +784,8 @@ def test_each_file_of_a_shard_runs_as_its_own_command(tmp_path):
     assert first.returncode == 0, first.stdout + first.stderr
     headers = [line for line in first.stdout.splitlines() if line.startswith("+++")]
     assert headers == [
-        "+++ :test_tube: Command 1/2: pytest -v -m 'not slow' pkg/test_a.py",
-        "+++ :test_tube: Command 2/2: pytest -v -m 'not slow' pkg/test_b.py"
+        "+++ :test_tube: Command (1/1), file 1/2: pytest -v -m 'not slow' pkg/test_a.py",
+        "+++ :test_tube: Command (1/1), file 2/2: pytest -v -m 'not slow' pkg/test_b.py"
         "   (1 of 2 tests)",
     ]
     assert first.stdout.count("1 passed") == 2 and "test_z" not in first.stdout
@@ -796,13 +796,13 @@ def test_each_file_of_a_shard_runs_as_its_own_command(tmp_path):
     headers = [line for line in second.stdout.splitlines() if line.startswith("+++")]
     assert (
         headers[1]
-        == "+++ :test_tube: Command 2/2: pytest -v -m 'not slow' pkg/test_c.py"
+        == "+++ :test_tube: Command (1/1), file 2/2: pytest -v -m 'not slow' pkg/test_c.py"
     )
     assert "2 passed" in second.stdout
 
     empty = _run_shard(step, 2, tmp_path / "tests")
     assert empty.returncode == 0 and empty.stdout == (
-        "runtime-shard: no tests of pytest -v pkg -m not slow in this shard\n"
+        "+++ :test_tube: Command (1/1): no tests in this shard (pytest -v pkg -m not slow)\n"
     )
 
 
@@ -858,5 +858,6 @@ def test_a_shard_keeps_the_generators_wrapping_and_a_commands_variables(tmp_path
     run = _run_shard(step, 1, tmp_path / "tests")
     assert run.returncode == 0 and "2 passed" in run.stdout
     assert run.stdout.splitlines()[0] == (
-        "+++ :test_tube: Command 1/1: N=3 pytest -v test_n.py   (2 of 3 tests)"
+        "+++ :test_tube: Command (1/1), file 1/1: N=3 pytest -v test_n.py"
+        "   (2 of 3 tests)"
     )

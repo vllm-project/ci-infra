@@ -764,15 +764,20 @@ def _shard_commands(
             file = nodeid.split("::")[0][len(prefix) :]
             file_tests[file] = file_tests.get(file, 0) + 1
 
+        # The headers keep the step's own numbering, "Command (4/5)", so a
+        # number means the same YAML command in every shard.
+        command = f"+++ :test_tube: Command ({match.group(2)})"
         branches = []
         for number, files in enumerate(shard_files):
+            mine = []  # this command's files in this shard
+            for planned, file, targets in files:
+                if planned == index:
+                    mine.append((file, targets))
             lines = []
-            for position_in_shard, (planned, file, targets) in enumerate(files):
-                if planned != index:
-                    continue
+            for file_number, (file, targets) in enumerate(mine):
                 parts = _shard_command(entry, targets)
                 title = (
-                    f"+++ :test_tube: Command {position_in_shard + 1}/{len(files)}:"
+                    f"{command}, file {file_number + 1}/{len(mine)}:"
                     f" {parts[0]} {shlex.quote(file)}"
                 )
                 # A split file's targets are its test IDs, one per test.
@@ -787,8 +792,8 @@ def _shard_commands(
                 lines.insert(0, "runtime_shard_status=0")
                 lines.append("(exit $$runtime_shard_status)")
             else:
-                note = f"runtime-shard: no tests of {match.group(3)} in this shard"
-                lines.append(f"echo {shlex.quote(note)}".replace("$", "$$"))
+                title = f"{command}: no tests in this shard ({match.group(3)})"
+                lines.append(f"printf '%s\\n' {shlex.quote(title)}".replace("$", "$$"))
             branches.append(f"{number})\n" + "\n".join(lines) + "\n;;")
         replaced.append(
             'case "$$BUILDKITE_PARALLEL_JOB" in\n'
