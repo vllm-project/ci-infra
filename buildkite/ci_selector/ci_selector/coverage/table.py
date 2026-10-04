@@ -353,7 +353,10 @@ def _verify(
         stamp = Stamp(**blob["stamp"])
         functions = {p: frozenset(n) for p, n in blob["functions"].items()}
         import_time = {p: frozenset(n) for p, n in blob["import_time"].items()}
-    except (KeyError, TypeError) as exc:
+        lines = {
+            p: frozenset(expand_ranges(r)) for p, r in blob.get("lines", {}).items()
+        }
+    except (KeyError, TypeError, ValueError) as exc:
         return None, f"unreadable row: {exc}"
 
     if len(functions) != stamp.n_files:
@@ -371,12 +374,16 @@ def _verify(
         for path, names in import_time.items()
     ):
         return None, "import-time names absent from the row's functions"
+    if sum(len(v) for v in lines.values()) != stamp.n_lines:
+        return None, f"line count != stamp {stamp.n_lines}"
+    if not lines.keys() <= functions.keys():
+        return None, "lines for a file the row never entered"
     # Not `if stamp.digest and ...`: an empty digest used to skip the check and
     # admit the row, which is the exact hole signing was built to close. Every
     # writer sets one unconditionally, so leniency here protects nothing.
     if not stamp.digest:
         return None, "unsigned row"
-    if digest_of(functions, stamp, import_time, missing) != stamp.digest:
+    if digest_of(functions, stamp, import_time, missing, lines) != stamp.digest:
         return None, "digest mismatch"
     return Row(
         key=key,
@@ -384,7 +391,29 @@ def _verify(
         functions=functions,
         stamp=stamp,
         import_time=import_time,
+        lines=lines,
     ), ""
+
+
+def compress_ranges(lines) -> list[list[int]]:
+    """Sorted line numbers as [first, last] runs: executed lines cluster, and
+    a table of bare numbers is several times the size."""
+    out: list[list[int]] = []
+    for n in sorted(lines):
+        if out and n == out[-1][1] + 1:
+            out[-1][1] = n
+        else:
+            out.append([n, n])
+    return out
+
+
+def expand_ranges(ranges) -> list[int]:
+    out: list[int] = []
+    for first, last in ranges:
+        if not (isinstance(first, int) and isinstance(last, int)) or last < first:
+            raise ValueError(f"bad line range {first}..{last}")
+        out.extend(range(first, last + 1))
+    return out
 
 
 def load(path: Path) -> Table:

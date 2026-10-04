@@ -88,6 +88,9 @@ class Decision:
     coverage_note: str = ""
     # Steps whose row no longer describes them, so it cannot authorise a drop.
     stale_steps: int = 0
+    # Changed functions the record's lines could answer for, rather than
+    # whether a step entered the function at all.
+    line_probes: int = 0
     # Rows nothing in this checkout can address, and the size of the table they
     # sit in. They already behave as `no row`.
     unreadable_rows: int = 0
@@ -262,8 +265,10 @@ def _apply_record(
     from .codemap.worktree import state_for
     from .coverage.changed_funcs import build as build_query
     from .coverage.changed_funcs import mark_unfaithful
+    from .coverage.lines import attach_line_probes
 
     query = mark_unfaithful(build_query(repo, base, head), table.unfaithful_paths)
+    out.line_probes = attach_line_probes(query, repo, base, head, table)
 
     recorded_at = newest_commit(table, repo)
     keys = RowKeys.resolve(table, repo, recorded_at)

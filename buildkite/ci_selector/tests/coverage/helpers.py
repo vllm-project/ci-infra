@@ -78,8 +78,10 @@ def process_file(
     packages: list[str] | None = None,
     libs: list[str] | None = None,
     libcalls: list[tuple[str, str]] | None = None,
+    ran_lines: list[tuple[str, int]] | None = None,
 ) -> None:
-    """Write one fnrec process file in the recorder's real on-disk shape."""
+    """Write one fnrec process file in the recorder's real on-disk shape.
+    `ran_lines` writes a line-recording process: (relative file, line)."""
     shown = ROOT if header_root is None else header_root
     header = [
         "#start",
@@ -100,6 +102,8 @@ def process_file(
     # The libraries a recorder watched. None writes an older recorder's header.
     if libs is not None:
         header.append(f"libs={','.join(libs)}")
+    if ran_lines is not None:
+        header.append("lines=1")
     lines = ["\t".join(header), f"#root\t{root}\tt=1"]
     lines += [f"{root}{rel}\t{name}\t1" for rel, name in entries]
     if tests:
@@ -107,9 +111,16 @@ def process_file(
         lines += [f"{tests_root}{rel}\t{name}\t1" for rel, name in tests]
     lines += [f"#pkg\t{pkg}" for pkg in packages or ()]
     lines += [f"#lib\t{lib}\t{name}" for lib, name in libcalls or ()]
+    files: dict[str, int] = {}
+    for rel, number in ran_lines or ():
+        if rel not in files:
+            files[rel] = len(files)
+            lines.append(f"#lf\t{files[rel]}\t{root}{rel}")
+        lines.append(f"#ln\t{files[rel]}\t{number}")
     if clean_exit:
         total = len(entries) + len(tests or ()) if counter is None else counter
-        lines.append(f"#end\troot={total}\tother=0\terrors=0\tlast_error=\tt=2")
+        ran = f"\tlines={len(ran_lines)}" if ran_lines is not None else ""
+        lines.append(f"#end\troot={total}\tother=0{ran}\terrors=0\tlast_error=\tt=2")
     elif counter is not None:
         lines.append(f"#stat\troot={counter}\tother=0\terrors=0\tlast_error=\tt=2")
     lines += [f"{root}{rel}\t{name}\t1" for rel, name in (after_end or [])]
@@ -209,6 +220,7 @@ def make_table(
     *,
     build_no: str = "1",
     thin_keys: set | None = None,
+    ran_lines: dict | None = None,
 ):
     """A loaded table from {row key: [(relative file, qualname), ...]}.
 
@@ -225,6 +237,7 @@ def make_table(
             entries,
             # No clean exit anywhere is one of the things that makes a row thin.
             clean_exit=key not in (thin_keys or set()),
+            ran_lines=(ran_lines or {}).get(key),
         )
     out = tmp_path / f"table-{build_no}.json"
     write_table(merge_build(build.finish(), repo.root), out)

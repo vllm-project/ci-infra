@@ -60,13 +60,26 @@ class PhaseMode(str, Enum):
 DEFAULT_MODE = PhaseMode.CARVED
 
 
+def ran_changed_lines(row: Row, changed: FileQuery, name: str) -> bool | None:
+    """Whether the row ran a line its change to `name` needs, or None when
+    line evidence cannot answer and the function-level reading stands."""
+    probes = changed.line_probes.get(name) if changed.line_probes else None
+    if probes is None:
+        return None
+    return row.ran_any_line(changed.path, probes)
+
+
 def row_shows_use(row: Row, changed: FileQuery, name: str, mode: PhaseMode) -> bool:
-    """Whether this row's record of `changed.path` counts as running `name`."""
+    """Whether this row's record of `changed.path` counts as running `name`.
+    Entering the function is not enough when the row's lines show it never
+    reached the change."""
     if mode is PhaseMode.OFF:
-        return row.contains(changed.path, name)
-    if mode is PhaseMode.CARVED and not changed.function_names:
-        return row.contains(changed.path, name)
-    return row.contains_call(changed.path, name)
+        entered = row.contains(changed.path, name)
+    elif mode is PhaseMode.CARVED and not changed.function_names:
+        entered = row.contains(changed.path, name)
+    else:
+        entered = row.contains_call(changed.path, name)
+    return entered and ran_changed_lines(row, changed, name) is not False
 
 
 def mode_from_env() -> PhaseMode:

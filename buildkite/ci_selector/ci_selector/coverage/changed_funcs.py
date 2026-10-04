@@ -85,6 +85,10 @@ class FileQuery:
     # recording says about the function around it.
     platform: str | None = None
     note: str = ""  # why FAILED, for diagnosis; never load-bearing
+    # Changed function -> the lines, at the record's commit, a run reaching
+    # its change must have executed (coverage/lines.py). A function absent
+    # here is read at function grain.
+    line_probes: dict[str, frozenset[int]] = field(default_factory=dict)
 
     @property
     def names(self) -> frozenset[str]:

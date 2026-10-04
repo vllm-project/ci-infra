@@ -27,7 +27,16 @@ def top_level():
 class Engine:
     def start(self):
         return top_level()
+
+
+def branchy(rare):
+    if rare:
+        return 1
+    return 2
 """
+# Lines of VLLM_STUB: branchy's untaken branch, and the line it does run.
+UNTAKEN_LINE = 12
+TAKEN_LINE = 13
 
 
 TESTS_STUB = """\
@@ -92,6 +101,7 @@ def fp8_gemm_nt():
 PROGRAM = (
     "import vllm, vllm.uses_libs, tests.helpers, flashlib; "
     "tests.helpers.helper(); flashlib.go(); vllm.Engine().start(); "
+    "vllm.branchy(False); "
     "vllm.uses_libs.run()"
 )
 
@@ -294,3 +304,14 @@ def test_the_recorder_arms_only_when_both_variables_are_set(tmp_path):
             check=False,
         )
         assert not list(out.glob("fn.*.txt")), f"armed with only {sorted(env)}"
+
+
+def test_the_lines_a_process_ran_are_recorded(recorded):
+    """A changed line a job never ran is one the job cannot break."""
+    record = read_process(recorded[0])
+    assert record.records_lines and not record.lost_line_records
+    ran = record.lines["vllm/__init__.py"]
+    assert {2, 7, TAKEN_LINE} <= ran, ran
+    assert UNTAKEN_LINE not in ran
+    assert "tests/helpers.py" in record.lines
+    assert not any("flashlib" in path for path in record.lines)

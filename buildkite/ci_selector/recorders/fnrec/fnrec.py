@@ -11,6 +11,12 @@ the code it tests, and without its names the selector can only route it by
 file. Everything else is recorded by top-level package only, one `#pkg` line
 each. Entering a package says little: vLLM imports most of them at startup.
 
+Lines too, in vllm and tests only: each line that ran, once per process, one
+`#ln` line each against a per-process file index (`#lf`). A function whose
+changed lines a job never ran is one the job cannot break. Line events are
+switched on per code object when it first starts, so nothing outside the
+two roots pays for them, and each line DISABLEs after its first event.
+
 A short list of libraries is recorded by call as well: the functions in them
 that code outside the library called at runtime, one `#lib` line each. That
 is what a dependency bump routes on, the jobs that called flashinfer rather
@@ -65,7 +71,8 @@ _tests_root = None
 _tests_logged = False
 _packages = set()
 _libcalls = set()
-_stats = {"root": 0, "other": 0, "errors": 0, "last_error": ""}
+_line_files = {}
+_stats = {"root": 0, "other": 0, "lines": 0, "errors": 0, "last_error": ""}
 _ended = False
 
 # Where installed libraries live. A path under one names its package by the
@@ -231,6 +238,9 @@ def _header(pid):
         # Which libraries this recorder watches. A reader seeing none knows
         # the process predates `#lib` lines, so their absence proves nothing.
         f"libs={','.join(_LIBS)}",
+        # Lines recorded too. A reader seeing no flag knows the process
+        # predates `#ln` lines, so their absence proves nothing.
+        "lines=1",
         f"py={sys.version.split()[0]}",
         f"exe={sys.executable}",
         f"argv={_argv()!r}",
@@ -243,6 +253,7 @@ def _header(pid):
 def _stat_line(tag):
     return (
         f"{tag}\troot={_stats['root']}\tother={_stats['other']}"
+        f"\tlines={_stats['lines']}"
         f"\terrors={_stats['errors']}\tlast_error={_stats['last_error']}"
         f"\tt={_now()}\n"
     )
@@ -291,6 +302,13 @@ def _on_py_start(code, instruction_offset):
         lib = _library_of(filename)
         if lib is not None:
             return _note_libcall(lib, code, sys._getframe(1))
+    try:
+        # This code object's lines, from its next instruction on. Local events
+        # outlive the DISABLE below and survive fork.
+        sys.monitoring.set_local_events(_tool_id, code, sys.monitoring.events.LINE)
+    except Exception as exc:
+        _stats["errors"] += 1
+        _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
     key = f"{filename}\t{code.co_qualname}\t{code.co_firstlineno}"
     with _lock:
         if _tests_root is not None and not _tests_logged:
@@ -317,6 +335,26 @@ def _on_py_start(code, instruction_offset):
                 # record is visibly thin.
                 _stats["errors"] += 1
                 _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
+    return sys.monitoring.DISABLE
+
+
+def _on_line(code, line):
+    """One `#ln` per line of vllm or tests code this process ran. Enabled
+    only on code objects `_on_py_start` accepted."""
+    filename = code.co_filename
+    with _lock:
+        try:
+            fh = _out()
+            idx = _line_files.get(filename)
+            if idx is None:
+                idx = _line_files[filename] = len(_line_files)
+                fh.write(f"#lf\t{idx}\t{filename}\n")
+            fh.write(f"#ln\t{idx}\t{line}\n")
+            _stats["lines"] += 1
+        except Exception as exc:
+            # Lost like a function is: the event is DISABLEd either way.
+            _stats["errors"] += 1
+            _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
     return sys.monitoring.DISABLE
 
 
@@ -426,7 +464,9 @@ def _after_in_child():
     """
     global _fh, _fh_pid, _seen, _lock, _nonce, _origin, _stats, _ended, _hooks_pid
     global _root_logged, _root_tries, _tests_logged, _packages, _libcalls
+    global _line_files
     _fh, _fh_pid, _hooks_pid = None, None, None
+    _line_files = {}
     _root_logged = False
     _tests_logged = False
     _root_tries = 0
@@ -436,7 +476,7 @@ def _after_in_child():
     _lock = threading.Lock()
     _nonce = os.urandom(4).hex()
     _origin = f"fork:{os.getppid()}"
-    _stats = {"root": 0, "other": 0, "errors": 0, "last_error": ""}
+    _stats = {"root": 0, "other": 0, "lines": 0, "errors": 0, "last_error": ""}
     _ended = False
     try:
         sys.monitoring.restart_events()
@@ -480,6 +520,7 @@ def _begin():
     _root = _resolve_root()
     mon = sys.monitoring
     mon.register_callback(_tool_id, mon.events.PY_START, _on_py_start)
+    mon.register_callback(_tool_id, mon.events.LINE, _on_line)
     mon.set_events(_tool_id, mon.events.PY_START)
 
     _out()  # Announce this process even if it goes on to record nothing.
