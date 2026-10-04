@@ -766,6 +766,182 @@ def _shell_equal(before: str, after: str) -> bool:
     return ast.dump(a) == ast.dump(b)
 
 
+# Decorators that wrap a function without running or registering anything
+# at import, matched on the last part of their name.
+INERT_DECORATORS = frozenset(
+    {
+        "cache",
+        "lru_cache",
+        "cached_property",
+        "property",
+        "staticmethod",
+        "classmethod",
+        "overload",
+        "final",
+        "contextmanager",
+        "asynccontextmanager",
+        "wraps",
+    }
+)
+
+
+def _imported(tree: ast.Module) -> set[str]:
+    """Every module the file imports, at any depth."""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            out.add(node.module)
+    return out
+
+
+def _bound(tree: ast.Module) -> set[str]:
+    """Names the module body binds, not counting what functions bind."""
+    out: set[str] = set()
+    for st in tree.body:
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(st.name)
+            continue
+        for node in ast.walk(st):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                out.add(node.name)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                out.add(node.id)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                out |= {(a.asname or a.name).split(".")[0] for a in node.names}
+    return out
+
+
+def _literal(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return all(_literal(e) for e in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(k is not None and _literal(k) for k in node.keys) and all(
+            _literal(v) for v in node.values
+        )
+    return False
+
+
+def _module_provided(module: str, imported: set[str]) -> bool:
+    import sys
+
+    root = module.split(".")[0]
+    return (
+        module in imported
+        or module == "vllm.logger"
+        or (root in sys.stdlib_module_names and root != "__future__")
+    )
+
+
+def _inert(st: ast.stmt, bound: set[str], imported: set[str]) -> bool:
+    """A statement added to a module body that changes nothing an importer
+    sees. Classes never are: their body runs and a base can register them."""
+    if isinstance(st, ast.Import):
+        return all(_module_provided(a.name, imported) for a in st.names)
+    if isinstance(st, ast.ImportFrom):
+        return (
+            bool(st.module) and not st.level and _module_provided(st.module, imported)
+        )
+    if isinstance(st, (ast.Assign, ast.AnnAssign)):
+        targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+        if not all(isinstance(t, ast.Name) and t.id not in bound for t in targets):
+            return False
+        value = st.value
+        logger = (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "init_logger"
+            and len(value.args) == 1
+            and isinstance(value.args[0], ast.Name)
+            and value.args[0].id == "__name__"
+            and not value.keywords
+        )
+        return value is None or logger or _literal(value)
+    if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if st.name in bound:
+            return False
+        for d in st.decorator_list:
+            target = d.func if isinstance(d, ast.Call) else d
+            name = (
+                target.attr
+                if isinstance(target, ast.Attribute)
+                else getattr(target, "id", "")
+            )
+            if name not in INERT_DECORATORS:
+                return False
+        return True
+    if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant):
+        return True
+    return False
+
+
+def _only_inert_additions(before: str, after: str) -> bool:
+    """Whether the module body changed only by gaining inert statements, with
+    function bodies and signatures left out of the comparison as
+    `_shell_equal` leaves them."""
+    import copy
+    import difflib
+
+    try:
+        old, new = ast.parse(before), ast.parse(after)
+    except SyntaxError:
+        return False
+    bound, imported = _bound(old), _imported(old)
+    shells_old = [ast.dump(_Shell().visit(copy.deepcopy(st))) for st in old.body]
+    shells_new = [ast.dump(_Shell().visit(copy.deepcopy(st))) for st in new.body]
+    ops = difflib.SequenceMatcher(
+        None, shells_old, shells_new, autojunk=False
+    ).get_opcodes()
+    added = False
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            continue
+        if tag == "replace" and i2 - i1 == j2 - j1:
+            # A statement that only gained names: `from m import a` growing
+            # `, b`, or `__all__` growing an entry.
+            pairs = zip(old.body[i1:i2], new.body[j1:j2])
+            if not all(_only_grew(a, b) for a, b in pairs):
+                return False
+            added = True
+            continue
+        if tag != "insert":
+            return False
+        for st in new.body[j1:j2]:
+            if not _inert(st, bound, imported):
+                return False
+            added = True
+    return added
+
+
+def _str_list(node: ast.AST) -> list[str] | None:
+    if isinstance(node, (ast.List, ast.Tuple)) and all(
+        isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts
+    ):
+        return [e.value for e in node.elts]
+    return None
+
+
+def _only_grew(old: ast.stmt, new: ast.stmt) -> bool:
+    """Whether `new` is `old` with names added and none changed: an import
+    from the same module, or an `__all__` list of strings."""
+    if isinstance(old, ast.ImportFrom) and isinstance(new, ast.ImportFrom):
+        before = {(a.name, a.asname) for a in old.names}
+        after = {(a.name, a.asname) for a in new.names}
+        return old.module == new.module and old.level == new.level and before < after
+    if isinstance(old, ast.Assign) and isinstance(new, ast.Assign):
+        targets = [ast.dump(t) for t in old.targets]
+        if targets != [ast.dump(t) for t in new.targets] or targets != [
+            ast.dump(ast.Name("__all__", ast.Store()))
+        ]:
+            return False
+        a, b = _str_list(old.value), _str_list(new.value)
+        return a is not None and b is not None and set(a) < set(b)
+    return False
+
+
 def _drop_unchanged(
     repo, base, head, base_side, head_side, base_names, head_names, import_time
 ):
@@ -820,6 +996,21 @@ def _drop_unchanged(
     if left & import_time and left - import_time and _shell_equal(before, after):
         unchanged |= left & import_time
         left = left - import_time
+    # The module body only gained statements that change nothing an importer
+    # sees: imports of modules the file or the standard library already
+    # provide, a logger, new functions and constants. vllm#55671 added a
+    # logger and a cached helper beside its real change and selected every
+    # importer, 142 steps that run none of it. Only while a change to a
+    # function that already existed is left in the file: the steps that
+    # change selects import the module too, so an import that breaks still
+    # fails one of them.
+    elif (
+        (left & import_time) == {MODULE}
+        and (left - import_time) & base_names
+        and _only_inert_additions(before, after)
+    ):
+        unchanged.add(MODULE)
+        left = left - {MODULE}
     if left and left <= import_time:
         # Only import-time names would be left, and under the default phase
         # mode an import-time-only change counts every importer as a use: far
