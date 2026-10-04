@@ -702,3 +702,132 @@ def test_a_platform_branch_leaves_every_other_scope_as_it_was(tmp_path, edits, f
     repo.write("vllm/u.py", text)
     (f,) = build(repo.root, base, repo.commit("edit")).files
     assert f.platform == family
+
+
+INERT_SRC = """\
+import functools
+
+import torch
+
+LIMIT = 4
+
+
+def work(x):
+    return x + 1
+
+
+def other(x):
+    return x
+"""
+
+LOGGER = "from vllm.logger import init_logger\n\nlogger = init_logger(__name__)\n"
+CACHED = "\n\n@functools.cache\ndef has_v2() -> bool:\n    return True\n"
+
+
+@pytest.mark.parametrize(
+    "edit, module_changed",
+    [
+        # vllm#55671: a logger and a cached helper beside a real change
+        (
+            lambda t: t.replace("import torch\n", "import torch\n" + LOGGER).replace(
+                "x + 1", "x + 2"
+            )
+            + CACHED,
+            False,
+        ),
+        # the same additions alone: nothing else selects an importer, so keep
+        (
+            lambda t: t.replace("import torch\n", "import torch\n" + LOGGER) + CACHED,
+            True,
+        ),
+        # a module the file never imported can fail or register on import
+        (
+            lambda t: t.replace(
+                "import torch\n", "import torch\nimport flashinfer\n"
+            ).replace("x + 1", "x + 2"),
+            True,
+        ),
+        # a submodule of one it did import, and the standard library, cannot
+        (
+            lambda t: t.replace(
+                "import torch\n", "import torch\nimport os\nimport torch\n"
+            ).replace("x + 1", "x + 2"),
+            False,
+        ),
+        # a class body runs on import and its base may register it
+        (lambda t: t.replace("x + 1", "x + 2") + "\n\nclass New:\n    pass\n", True),
+        # a registering decorator runs on import
+        (
+            lambda t: t.replace("x + 1", "x + 2")
+            + "\n\n@register\ndef new():\n    pass\n",
+            True,
+        ),
+        # a changed constant is a changed module
+        (lambda t: t.replace("LIMIT = 4", "LIMIT = 5").replace("x + 1", "x + 2"), True),
+        # a removed import can break a user of it
+        (lambda t: t.replace("import functools\n", "").replace("x + 1", "x + 2"), True),
+        # an import swapped for another is a changed module
+        (
+            lambda t: t.replace("import torch\n", "import numpy\n").replace(
+                "x + 1", "x + 2"
+            ),
+            True,
+        ),
+    ],
+    ids=[
+        "logger-and-cached-helper",
+        "additions-alone",
+        "new-third-party-import",
+        "stdlib-and-known-import",
+        "new-class",
+        "registering-decorator",
+        "changed-constant",
+        "removed-import",
+        "swapped-import",
+    ],
+)
+def test_inert_module_additions_do_not_count_as_a_module_change(
+    tmp_path, edit, module_changed
+):
+    repo = Repo(tmp_path)
+    repo.write("vllm/w.py", INERT_SRC)
+    base = repo.commit("base")
+    repo.write("vllm/w.py", edit(INERT_SRC))
+    (f,) = build(repo.root, base, repo.commit("edit")).files
+    assert ("<module>" in f.names) == module_changed, sorted(f.names)
+
+
+GROW_SRC = """\
+from functools import cache
+
+__all__ = ["work"]
+
+
+def work(x):
+    return x + 1
+"""
+
+
+@pytest.mark.parametrize(
+    "old, new, module_changed",
+    [
+        # vllm#55671: a name added to an existing `from` import
+        ("from functools import cache", "from functools import cache, wraps", False),
+        ("from functools import cache", "from functools import wraps", True),
+        ('["work"]', '["work", "extra"]', False),
+        ('["work"]', '["extra"]', True),
+    ],
+    ids=[
+        "import-gains-a-name",
+        "import-swaps-a-name",
+        "all-gains-a-name",
+        "all-swaps-a-name",
+    ],
+)
+def test_a_statement_that_only_gains_names_is_inert(tmp_path, old, new, module_changed):
+    repo = Repo(tmp_path)
+    repo.write("vllm/g.py", GROW_SRC)
+    base = repo.commit("base")
+    repo.write("vllm/g.py", GROW_SRC.replace(old, new).replace("x + 1", "x + 2"))
+    (f,) = build(repo.root, base, repo.commit("edit")).files
+    assert ("<module>" in f.names) == module_changed, sorted(f.names)
