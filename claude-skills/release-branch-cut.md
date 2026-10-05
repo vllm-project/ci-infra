@@ -1,7 +1,8 @@
 # vLLM Release Branch Cut
 
 End-to-end workflow for cutting a new vLLM release branch, tagging release
-candidates, and launching all validation builds. Use when the user asks to
+candidates, launching all validation builds, and smoke testing the release
+images (Step 11). Use when the user asks to
 "kick off vX.Y.Z release" or "cut a release branch".
 
 **RC numbering:** the branch-cut commit is tagged `vX.Y.Zrc0`. Each later
@@ -518,76 +519,159 @@ Release candidate `vX.Y.ZrcN` tagged on `releases/vX.Y.Z` at commit `<full_sha>`
 
 ---
 
-## Step 11: Smoke test the release artifacts (final release only)
+## Step 11: Smoke test the release images
 
-For the **final** release (not RCs), once the release-v2 build has produced
-wheels and images, smoke test what users will actually install before the
-announcement goes out. Keep it shallow: install/boot + one request, not
-benchmarks.
+Run this on each RC once its x86_64 image passes, and again on the final
+release. Keep it shallow: serve each popular model with its recipe command,
+wait for `/health`, hit `/v1/models`, send one chat completion ("What is
+2+2?"), tear down. The scripts live in `claude-skills/release-smoke/`:
 
-**What to test:**
+- `make_plan.py`: renders serve commands from recipes.vllm.ai.
+- `runner.py`: runs a plan on one host.
+- `rerun.py`: retries startup failures with the fix the error asks for.
 
-- **Wheel:** once `vllm==X.Y.Z` appears on PyPI (`upload-release-wheels`
-  job; poll `https://pypi.org/pypi/vllm/json`): on a clean linux x86_64
-  machine, `python3.12 -m venv /tmp/vllm-smoke && pip install vllm==X.Y.Z`,
-  then `python -c "import vllm; print(vllm.__version__)"` and
-  `from vllm import LLM, SamplingParams` import check. A short offline
-  generation with a tiny cached model is a good bonus but optional.
-- **Image:** the release-repo ECR images are the exact content that the
-  publish steps later push to DockerHub:
-  `public.ecr.aws/q9t5s3a7/vllm-release-repo:<full_sha>-x86_64` (and
-  `-aarch64` for Grace/ARM). `docker run` the image, `vllm serve` a model,
-  wait for `/health`, hit `/v1/models`, send one chat completion
-  ("What is 2+2?", max_tokens 64), then tear down.
+v0.31.0rc5 took about 3h on B200 (two lanes) and about 3.5h on H200; 9/9 passed on each.
 
-**Model × hardware matrix:** cover the currently popular models on each GPU
-generation (e.g. GLM-5.3-Flash, MiniMax-M3, Qwen3.8-Flash-Next,
-DeepSeek-V4.x-Flash across H200 / B200 / GB200). Use the exact serve command
-from the model's recipe — `https://recipes.vllm.ai/models.json` is
-machine-readable; each recipe has per-hardware `command`/`env` blocks.
-Prefer each model's recipe-recommended hardware.
+### Hosts and how to free them
 
-**Machines available for smoke testing:**
+These are shared CI machines. Never `docker run` on GPUs that CI may
+schedule onto. Free the host first, and put it back afterwards.
 
-- H200: `ssh h200-ci-1` (8×H200; HF cache at `/mnt/vllm-ci`, set
-  `HF_HOME=/mnt/vllm-ci` and mount it into the container)
-- GB200: `gcloud compute ssh gb200-rack1-07 --zone us-central1-b
-  --ssh-key-file ~/.ssh/id_ed25519` (also `gb200-rack1-08`; 4×GB200 each;
-  model cache on Lustre at `/mnt/lustre/hf-models`)
-- B200: `ssh dgxb200-15` / `ssh dgxb200-16` (8×B200)
+| GPU | Host | Free it | Restore | HF cache (`HF_HOME`) |
+|---|---|---|---|---|
+| B200 ×8 | `ssh dgxb200-01` (or any Ready k8s node) | cordon, then wait until no GPU pods are left | uncordon | `/raid/hf_cache` (22T free on `/raid`) |
+| H200 ×8 | `ssh h200-ci-1` (perf-eval H200 agent) | pause the Buildkite agent; it finishes its current job | resume | `/mnt/vllm-ci` (perf-eval models are cached) |
+| GB200 ×4 | `gcloud compute ssh gb200-rack1-07 --zone us-central1-b --ssh-key-file ~/.ssh/id_ed25519` | check `docker ps` / `nvidia-smi` are idle | none | `/mnt/lustre/hf-models` |
 
-**Practical notes:**
+Don't use these:
 
-- These are shared CI machines — wait for a CI-free window before starting
-  (no containers in `docker ps`, no processes in
-  `nvidia-smi --query-compute-apps=pid`). Never run a TP8 server alongside
-  a CI job; you'd poison both.
-- The release image's entrypoint is `["vllm", "serve"]` — so
-  `docker run <img> <model> <serve args...>` works directly (do NOT add
-  `serve` yourself; `docker run <img> serve <model>` becomes
-  `vllm serve serve <model>` and fails with
-  `unrecognized arguments: <model>`). For `bench` or anything else, override
-  the entrypoint: `--entrypoint vllm` (bench) or `--entrypoint python3`.
-- Always pass `--ipc=host` — DP/TP servers need >64 MiB of /dev/shm
-  (docker's default) and die with
-  `Insufficient space in /dev/shm: ... required, 64 MiB free`.
-- Pulling release-repo images from a fresh host: anonymous ECR Public pulls
-  hit "Data limit exceeded" quickly at 30 GB/image. Log in first:
-  `aws ecr-public get-login-password --region us-east-1 | ssh <host> 'sudo docker login --username AWS --password-stdin public.ecr.aws'`.
-- With `VLLM_USE_RUST_FRONTEND=1`, the frontend gives up after 600s if the
-  engine is still downloading/loading a model — set
-  `VLLM_ENGINE_READY_TIMEOUT_S=3600` for first-time (uncached) models.
-- Use `--network host`, and mount the HF cache dir with
-  `-e HF_HOME=<path> -v <path>:<path>`.
-- Big models take 5–60 min to load even from cache; wait on `/health` up to
-  90 min (GB200 + Lustre can be slow) and bail early if the container exits.
-- Docker needs `sudo` on the mithril/GB200 hosts.
-- If a release-pipeline step fails on infra (e.g. the triton-cpu sleef
-  submodule flake in `build-cpu-release-image-x86`), retry it once; if it
-  repeats, it's the known `--shallow-submodules --filter=blob:none` issue —
-  see vllm#57871.
+- **dgxb200-13:** SSH times out. Cordoned since 2026-09-21.
+- **dgxb200-15:** NVLink faults; `nvidia-smi` hangs. Cordoned since 2026-08-21.
+- **h200-ci-5:** split into 56 MIG slices for H200 MIG CI, so no full GPUs.
+
+**B200: cordon a node.** The B200 nodes are k8s workers. Cordon one so no
+new CI pods land on it:
+
+```bash
+ssh dgxb200-01 'K="sudo kubectl --kubeconfig /etc/kubernetes/admin.conf"; $K cordon dgxb200-01 && $K annotate node dgxb200-01 --overwrite cordon-reason="vX.Y.ZrcN smoke test (<you>)"'
+```
+
+Then wait until no GPU pods are left on the node:
+
+```bash
+ssh dgxb200-01 'sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get pods -A --field-selector spec.nodeName=dgxb200-01 -o wide; nvidia-smi --query-compute-apps=pid --format=csv,noheader | wc -l'
+```
+
+Afterwards:
+
+```bash
+ssh dgxb200-01 'K="sudo kubectl --kubeconfig /etc/kubernetes/admin.conf"; $K uncordon dgxb200-01 && $K annotate node dgxb200-01 cordon-reason-'
+```
+
+**H200: pause the Buildkite agent.** It finishes its in-flight perf job,
+then takes no new ones. Get the agent id with
+`bk api "/agents?hostname=h200-ci-1"`, or from the Buildkite MCP
+`list_agents hostname=h200-ci-1`. Then:
+
+```bash
+bk api --method PUT "/agents/<agent-id>/pause" --data '{"note":"vX.Y.ZrcN smoke test","timeout_in_minutes":480}'
+bk api --method PUT "/agents/<agent-id>/resume" --data '{}'   # afterwards
+```
+
+### Build the plan
+
+Run `make_plan.py` locally, once per platform:
+- Pick the models users run now; v0.31.0 used DeepSeek-V4.1-Flash, Qwen3.5-397B, Qwen3.8-Flash-Next, GLM-5.3, GLM-5.3-Flash, MiniMax-M3, Kimi-K2.5, gpt-oss-120b and Nemotron-3-Super.
+- Use each recipe's Blackwell checkpoint on B200 (`:nvfp4` variants).
+- On H200, use checkpoints already in `/mnt/vllm-ci` where you can.
+- Use two lanes on B200 (GPUs 0-3 and 4-7, TP ≤ 4) and one lane on H200.
+
+```bash
+cd claude-skills/release-smoke
+python3 make_plan.py --hw b200 --lanes 2 --out plan_b200.json \
+  deepseek-ai/DeepSeek-V4.1-Flash zai-org/GLM-5.3:nvfp4 moonshotai/Kimi-K2.5:nvfp4 openai/gpt-oss-120b \
+  Qwen/Qwen3.5-397B-A17B:nvfp4 Qwen/Qwen3.8-Flash-Next:fp8 zai-org/GLM-5.3-Flash MiniMaxAI/MiniMax-M3:nvfp4 \
+  nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+python3 make_plan.py --hw h200 --lanes 1 --out plan_h200.json \
+  deepseek-ai/DeepSeek-V4.1-Flash zai-org/GLM-5.3 Qwen/Qwen3.5-397B-A17B:fp8 zai-org/GLM-5.3-Flash \
+  MiniMaxAI/MiniMax-M3 moonshotai/Kimi-K2.5 openai/gpt-oss-120b \
+  nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 Qwen/Qwen3.8-Flash-Next:fp8
+```
+
+`make_plan.py` writes plain JSON, so edit it by hand where needed. For
+v0.31.0 the H200 Qwen3.5 checkpoint was swapped to the cached
+`Qwen/Qwen3.5-397B-A17B-FP8`.
+
+### Deploy and run
+
+Run everything detached on the host. An SSH session or a local
+background job won't last for hours. `IMG` is the RC's x86_64 image:
+`public.ecr.aws/q9t5s3a7/vllm-release-repo:<full_sha>-x86_64`.
+
+```bash
+HOST=dgxb200-01; DIR=/raid/smoke-rcN; HF=/raid/hf_cache; PLAN=plan_b200.json
+# H200: HOST=h200-ci-1; DIR=/raid0/smoke-rcN; HF=/mnt/vllm-ci; PLAN=plan_h200.json
+IMG=public.ecr.aws/q9t5s3a7/vllm-release-repo:<full_sha>-x86_64
+
+ssh $HOST "sudo mkdir -p $DIR && sudo chown \$(id -u) $DIR"
+scp runner.py rerun.py $PLAN $HOST:$DIR/
+aws ecr-public get-login-password --region us-east-1 | ssh $HOST 'sudo docker login --username AWS --password-stdin public.ecr.aws'
+printf '#!/bin/bash\ncd %s\ndocker pull %s > pull.log 2>&1\npython3 runner.py %s %s %s %s/out > runner.out 2>&1\n' \
+  $DIR $IMG $PLAN $IMG $HF $DIR | ssh $HOST "cat > $DIR/launch.sh && chmod +x $DIR/launch.sh"
+ssh $HOST "sudo setsid nohup $DIR/launch.sh > /dev/null 2>&1 < /dev/null &
+           sudo setsid nohup python3 $DIR/rerun.py $DIR/$PLAN $IMG $HF $DIR/out > $DIR/rerun.out 2>&1 < /dev/null &"
+```
+
+Notes on the run:
+- On H200, have `launch.sh` wait until `docker ps` shows no `perf-eval-*` container and `nvidia-smi` shows no compute processes. The paused agent's in-flight job can run for hours.
+- `runner.py` prefetches every model with `hf download` inside the image, then runs each lane in order.
+- Uncached models download at about 0.5–1 GB/s; DeepSeek-V4.1-Flash took about 40 min.
+
+### Check progress
+
+```bash
+ssh $HOST "tail -3 $DIR/out/runner.log; cat $DIR/out/results.jsonl $DIR/out/rerun/results.jsonl 2>/dev/null | python3 -c 'import json,sys; [print(d[\"status\"], d[\"model\"], d[\"variant\"], \"tp\", d[\"tp\"], d.get(\"stage\",\"\"), d.get(\"startup_s\")) for d in map(json.loads, sys.stdin)]'"
+```
+
+- Each result has `status` (`PASS` / `CHECK` / `FAIL`), `stage`, `startup_s` and, on failure, `log_tail`.
+- Full server logs go to `$DIR/out/smoke-*.log`.
+- `rerun.py` waits for `ALL DONE` in `runner.log`, then retries startup failures with the fix the error asks for. Results go to `out/rerun/`:
+  - `KV cache is needed`: doubles TP up to 8, then adds `--max-model-len` from vLLM's own estimate, capped at 262144.
+  - An unsupported `--moe-backend`: drops the flag.
+- Count a model as passing if its rerun passes, and note the extra flag.
+- Report recipe gaps upstream (see the practical notes).
+
+When both hosts show `ALL DONE` (including `out/rerun/runner.log`) and
+`docker ps` has no `smoke-*` containers left, restore the hosts:
+uncordon the B200 node and resume the H200 agent.
+
+### Final release only: the wheel
+
+Once `vllm==X.Y.Z` is on PyPI (the `upload-release-wheels` job; poll
+`https://pypi.org/pypi/vllm/json`), on a clean linux x86_64 machine run:
+
+```bash
+python3.12 -m venv /tmp/vllm-smoke && /tmp/vllm-smoke/bin/pip install vllm==X.Y.Z
+/tmp/vllm-smoke/bin/python -c "import vllm; print(vllm.__version__); from vllm import LLM, SamplingParams"
+```
+
+### Practical notes
+
+- **Entrypoint:** the release image's entrypoint is `["vllm", "serve"]`. So `docker run <img> <model> <args>` works. Don't add `serve` yourself: it becomes `vllm serve serve <model>`. For `hf`, `bench` or `python3`, override with `--entrypoint`.
+- **Shared memory:** always pass `--ipc=host`. DP/TP servers need more than docker's 64 MiB `/dev/shm`.
+- **Image pull:** anonymous ECR Public pulls hit "Data limit exceeded" at 30 GB per image. Run `docker login` first (shown above).
+- **Startup timeout:** with `VLLM_USE_RUST_FRONTEND=1`, set `VLLM_ENGINE_READY_TIMEOUT_S=3600` or the frontend gives up after 600 s. `runner.py` sets it.
+- **Startup times:** big models take 5–25 min to start even from cache. `runner.py` waits up to 90 min and bails as soon as the container exits.
+- **TP from `vram_minimum_gb`:** it ignores KV cache. 1M-context models then fail with "KV cache is needed" (GLM-5.3 NVFP4 at TP4 and MiniMax-M3 NVFP4 at TP2 on B200). Fix with more TP, or `--max-model-len` on H200. `rerun.py` does this.
+- **Recipe gaps found in v0.31.0rc5:**
+  - Qwen3.5-397B's NVIDIA-wide `--moe-backend flashinfer_trtllm` is Blackwell-only, so it fails on H200 ([recipes#1069](https://github.com/vllm-project/recipes/pull/1069)).
+  - GLM-5.3 and MiniMax-M3 don't fit a 1M context on 8×H200. They need `--max-model-len` of about 262k and 82k ([recipes#1070](https://github.com/vllm-project/recipes/pull/1070), [recipes#1071](https://github.com/vllm-project/recipes/pull/1071)).
+  - When the smoke test finds a recipe gap, open a PR on `vllm-project/recipes` that fixes the model's YAML. Check the rendered `public/<org>/<repo>/hw/<gpu>.json` with `node scripts/build-recipes-api.mjs`, and commit with `-s` (DCO).
+- **Docker on hosts:** it needs `sudo` on the B200, H200 and GB200 hosts.
+- **Release-pipeline flakes:** if a step fails on infra (e.g. the triton-cpu sleef submodule flake in `build-cpu-release-image-x86`), retry it once. If it repeats, it's the known `--shallow-submodules --filter=blob:none` issue; see vllm#57871.
 
 ---
+
 
 ## Gotchas
 
