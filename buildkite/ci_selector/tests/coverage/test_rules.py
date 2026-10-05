@@ -1003,7 +1003,7 @@ class TestPlatformBranches:
         from dataclasses import replace
 
         query = query_for("vllm/mod.py", "plain")
-        query.files[0] = replace(query.files[0], platform="xpu")
+        query.files[0] = replace(query.files[0], platform=frozenset({"xpu"}))
         keys = RowKeys(
             {"vllm_ci"},
             {"vllm_ci": 1.0},
@@ -1024,6 +1024,45 @@ class TestPlatformBranches:
         )
         assert reading.dropped == ["vllm_ci:runs-plain"]
         assert reading.reasons["changed-code-runs-on-another-platform"] == 1
+
+    def test_a_step_that_ran_a_platform_patching_test_keeps(self, table):
+        """vllm#51274's test sets `is_rocm` true on a CUDA job, so a ROCm-only
+        change runs there. A step whose row ran the changed file and a test
+        listed for it keeps it; one that ran no such test does not."""
+        from dataclasses import replace
+
+        query = query_for("vllm/mod.py", "plain")
+        query.files[0] = replace(
+            query.files[0],
+            platform=frozenset({"amd"}),
+            platform_guards=frozenset({"is_rocm"}),
+        )
+        keys = RowKeys(
+            {"vllm_ci"},
+            {"vllm_ci": 1.0},
+            steps={"vllm_ci:runs-plain": FakeStep()},
+        )
+        keys.steps["vllm_ci:runs-plain"].device = "h200"
+        keys.steps["vllm_ci:runs-plain"].mirror_hw = ""
+
+        def read(mockers):
+            return read_pr(
+                table,
+                result_for("vllm_ci:runs-plain", paths=("vllm/mod.py",)),
+                query,
+                unknown_names(query, UNION, {}),
+                KNOWN,
+                keys,
+                platform_mockers=mockers,
+            )
+
+        # the fixture row holds no tests/ path, so the changed file stands in
+        assert read({}).dropped == ["vllm_ci:runs-plain"]
+        assert read({"vllm/mod.py": frozenset({"tests/elsewhere.py"})}).dropped == [
+            "vllm_ci:runs-plain"
+        ]
+        kept = read({"vllm/mod.py": frozenset({"vllm/mod.py"})})
+        assert kept.dropped == [] and kept.executes == ["vllm_ci:runs-plain"]
 
 
 class TestTestsRecordingAge:

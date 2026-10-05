@@ -573,10 +573,10 @@ def view(t):
 @pytest.mark.parametrize(
     "old, new, family",
     [
-        ("t = t.contiguous()", "t = t.clone()", "xpu"),
-        ("return cuda(t)", "return cuda(t, 1)", None),  # is_cuda_alike: two families
+        ("t = t.contiguous()", "t = t.clone()", {"xpu"}),
+        ("return cuda(t)", "return cuda(t, 1)", {"cuda", "amd"}),  # is_cuda_alike
         ("    return t\n", "    return t + 0\n", None),  # outside every guard
-        ("return xpu(t)", "from vllm import ops\n        return ops.xpu(t)", "xpu"),
+        ("return xpu(t)", "from vllm import ops\n        return ops.xpu(t)", {"xpu"}),
         # `envs` turns local to view, so its first line raises UnboundLocalError.
         ("return xpu(t)", "import vllm.envs as envs\n        return xpu(t)", None),
         ("return xpu(t)", "yield\n        return xpu(t)", None),  # now a generator
@@ -616,7 +616,7 @@ def test_a_change_inside_one_platform_branch_is_tagged(tmp_path, old, new, famil
     (repo / "vllm/u.py").write_text(PLATFORM_SRC.replace(old, new))
     git("commit", "-qam", "edit")
     (f,) = build(repo, base, git("rev-parse", "HEAD")).files
-    assert f.platform == family
+    assert f.platform == (frozenset(family) if family else None)
 
 
 SCOPES_SRC = """\
@@ -665,7 +665,7 @@ MOVE_A_LAMBDA = [
 @pytest.mark.parametrize(
     "edits, family",
     [
-        (MOVE_A_LAMBDA, "xpu"),
+        (MOVE_A_LAMBDA, {"xpu"}),
         # `numel` turns free in `size`, which raises NameError on CUDA.
         ([*MOVE_A_LAMBDA, ("ts = list(ts)", "from vllm.utils import numel")], None),
         ([("ts = ts[:1]", "import vllm.envs as envs")], None),  # read by `pinned`
@@ -701,4 +701,159 @@ def test_a_platform_branch_leaves_every_other_scope_as_it_was(tmp_path, edits, f
         text = text.replace(old, new)
     repo.write("vllm/u.py", text)
     (f,) = build(repo.root, base, repo.commit("edit")).files
-    assert f.platform == family
+    assert f.platform == (frozenset(family) if family else None)
+
+
+GUARDS_SRC = """\
+from vllm.platforms import current_platform
+
+
+def route(x):
+    if not current_platform.is_rocm():
+        return None
+    y = x + 1
+    return y
+
+
+def pick(x):
+    if current_platform.is_cuda() and x:
+        a = 1
+    else:
+        a = 2
+    if current_platform.is_xpu() or current_platform.is_cpu():
+        b = 3
+    return a, b
+
+
+def flag(x):
+    use = x and current_platform.is_cuda()
+    return use
+"""
+
+
+@pytest.mark.parametrize(
+    "old, new, family",
+    [
+        # an early return confines everything after it
+        ("    y = x + 1\n", "    y = x + 2\n", {"amd"}),
+        (
+            "        return None\n",
+            "        return 0\n",
+            "all-but-amd",
+        ),  # the guard body
+        ("        a = 1\n", "        a = 4\n", {"cuda"}),  # `and`: needs the guard true
+        (
+            "        a = 2\n",
+            "        a = 5\n",
+            None,
+        ),  # `else` of a mixed test: anywhere
+        ("        b = 3\n", "        b = 6\n", {"xpu", "cpu"}),  # `or`
+        # vllm#51406: a guard swapped for a wider one changes only the new family
+        (
+            "use = x and current_platform.is_cuda()",
+            "use = x and current_platform.is_cuda_alike()",
+            {"amd"},
+        ),
+        (
+            "use = x and current_platform.is_cuda()",
+            "use = current_platform.is_cuda()",
+            None,
+        ),
+    ],
+    ids=[
+        "after-an-early-return",
+        "the-early-return-itself",
+        "and-guard",
+        "else-of-a-mixed-test",
+        "or-guards",
+        "guard-swap",
+        "not-only-a-swap",
+    ],
+)
+def test_guards_confine_a_change_to_the_families_that_reach_it(
+    tmp_path, old, new, family
+):
+    repo = Repo(tmp_path)
+    repo.write("vllm/g.py", GUARDS_SRC)
+    base = repo.commit("base")
+    assert GUARDS_SRC.count(old) == 1, old
+    repo.write("vllm/g.py", GUARDS_SRC.replace(old, new))
+    (f,) = build(repo.root, base, repo.commit("edit")).files
+    if family == "all-but-amd":
+        from ci_selector.coverage.changed_funcs import all_families
+
+        family = all_families() - {"amd"}
+    assert f.platform == (frozenset(family) if family else None)
+
+
+@pytest.mark.parametrize(
+    "old, new, guards",
+    [
+        ("    y = x + 1\n", "    y = x + 2\n", {"is_rocm"}),
+        ("        b = 3\n", "        b = 6\n", {"is_xpu", "is_cpu"}),
+        (
+            "use = x and current_platform.is_cuda()",
+            "use = x and current_platform.is_cuda_alike()",
+            {"is_cuda", "is_cuda_alike"},
+        ),
+    ],
+    ids=["early-return", "or-guards", "guard-swap"],
+)
+def test_a_confined_change_names_only_the_guards_that_confine_it(
+    tmp_path, old, new, guards
+):
+    """A test patching some other guard in the file cannot run this change
+    on another family, so only the confining guards count."""
+    repo = Repo(tmp_path)
+    repo.write("vllm/g.py", GUARDS_SRC)
+    base = repo.commit("base")
+    repo.write("vllm/g.py", GUARDS_SRC.replace(old, new))
+    (f,) = build(repo.root, base, repo.commit("edit")).files
+    assert f.platform_guards == guards
+
+
+def test_platform_patching_tests_are_found(tmp_path):
+    """A test counts for a confined change when it patches one of the file's
+    guards, or the whole platform, and names the file or a changed function."""
+    from ci_selector.coverage.changed_funcs import FileQuery, platform_mockers
+
+    repo = Repo(tmp_path)
+    patch_rocm = 'patch("vllm.platforms.current_platform.is_rocm", return_value=True)\n'
+    repo.write("tests/test_a.py", "from vllm.ops import route\n" + patch_rocm)
+    repo.write(
+        "tests/test_b.py",
+        "from vllm.ops import route\n"
+        "def test(monkeypatch):\n"
+        '    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)\n',
+    )
+    repo.write("tests/test_c.py", "import vllm.other\n" + patch_rocm)
+    repo.write(
+        "tests/test_d.py",
+        "from vllm.ops import route\n"
+        'patch("vllm.platforms.current_platform.device_type", "cpu")\n',
+    )
+    repo.write(
+        "tests/test_e.py",
+        'import vllm.ops\npatch("vllm.platforms.current_platform", object())\n',
+    )
+    # rebinds the name in another module only
+    repo.write(
+        "tests/test_f.py",
+        'import vllm.ops\npatch("vllm.vision.current_platform", object())\n',
+    )
+    repo.write(
+        "tests/test_g.py",
+        "from vllm import ops\n"
+        'monkeypatch.setattr(ops, "current_platform", object())\n',
+    )
+    ref = repo.commit("tests")
+    changed = FileQuery(
+        path="vllm/ops.py",
+        status=Attribution.ATTRIBUTED,
+        head_names=frozenset({"route"}),
+        platform=frozenset({"amd"}),
+        platform_guards=frozenset({"is_rocm"}),
+    )
+    assert platform_mockers(repo.root, ref, [changed]) == {
+        "vllm/ops.py": {"tests/test_a.py", "tests/test_e.py", "tests/test_g.py"}
+    }
