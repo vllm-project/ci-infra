@@ -155,6 +155,11 @@ def unpack(text: str) -> List[str]:
     return json.loads(zlib.decompress(base64.b64decode(text)))
 
 
+def _prefix(entry: Dict) -> str:
+    """The command's working dir as a node ID prefix: "" or "tests/"."""
+    return entry["prefix"].rstrip("/") + "/" if entry["prefix"] else ""
+
+
 def contiguous(
     unit_seconds: List[float], max_shard_seconds: float, max_number_of_shards: int
 ) -> List[List[int]]:
@@ -350,8 +355,7 @@ def plan(
         commands: List[Dict] = []
         for unit_index in shard:
             unit = units[unit_index]
-            prefix = inventory[unit["command"]]["prefix"]
-            prefix = prefix.rstrip("/") + "/" if prefix else ""
+            prefix = _prefix(inventory[unit["command"]])
             whole = not unit["split"] and unit["command"] not in by_id
             targets = []
             for target in [unit["file"]] if whole else unit["nodeids"]:
@@ -411,7 +415,7 @@ def check(result: Dict, inventory: List[Dict]) -> None:
     for shard in result["shards"]:
         for command in shard["commands"]:
             entry = inventory[command["index"]]
-            prefix = entry["prefix"].rstrip("/") + "/" if entry["prefix"] else ""
+            prefix = _prefix(entry)
             for target in command["targets"]:
                 full = prefix + target
                 matched = []
@@ -435,27 +439,13 @@ def _plural(number: int, word: str) -> str:
     return f"{number} {word}{'' if number == 1 else 's'}"
 
 
-def _shard_files(command: Dict) -> List[Tuple[str, int, bool]]:
-    """The files one shard runs for one command, in order.
-
-    Args:
-        command: One command of a shard in a plan from plan().
-
-    Returns:
-        (file, number of its tests in this shard, whether the file is split by
-        test ID). A whole-file target counts as 0 tests here; the caller has
-        the command's total.
-
-    """
-    files: List[Tuple[str, int, bool]] = []
+def _targets_by_file(command: Dict) -> Dict[str, List[str]]:
+    """One shard's targets of one planned command, by file, in plan order: a
+    file's targets are the file itself or its test IDs, one per test."""
+    by_file: Dict[str, List[str]] = {}
     for target in command["targets"]:
-        file = target.split("::")[0]
-        split = "::" in target
-        if split and files and files[-1][0] == file:
-            files[-1] = (file, files[-1][1] + 1, True)
-        else:
-            files.append((file, 1 if split else 0, split))
-    return files
+        by_file.setdefault(target.split("::")[0], []).append(target)
+    return by_file
 
 
 def annotation(
@@ -527,14 +517,15 @@ def annotation(
         "plan.json</a>"
     )
 
-    # How many tests each split file has across all shards, for "N of M tests".
+    # How many tests each file named by test ID has across all shards, for
+    # "N of M tests".
     split_totals: Dict[Tuple[int, str], int] = {}
     for s in shards:
         for command in s["commands"]:
-            for file, tests, split in _shard_files(command):
-                if split:
+            for file, targets in _targets_by_file(command).items():
+                if "::" in targets[0]:
                     key = (command["index"], file)
-                    split_totals[key] = split_totals.get(key, 0) + tests
+                    split_totals[key] = split_totals.get(key, 0) + len(targets)
 
     rows = [
         "| Shard | Tests | Files | Estimate (min) | Breakdown |",
@@ -549,12 +540,12 @@ def annotation(
         )
         details.append("")
         for command in s["commands"]:
-            files = []
-            for file, tests, split in _shard_files(command):
+            files = []  # (file, its tests here, whether split across shards)
+            for file, targets in _targets_by_file(command).items():
                 # Test IDs that are all of the file's tests: not split.
-                if split and tests == split_totals[(command["index"], file)]:
-                    split = False
-                files.append((file, tests, split))
+                key = (command["index"], file)
+                split = "::" in targets[0] and len(targets) < split_totals[key]
+                files.append((file, len(targets), split))
             shard_files += len(files)
             split_count = sum(1 for _, _, split in files if split)
             part = f"command {command['index'] + 1}: {_plural(len(files), 'file')} ({_plural(command['tests'], 'test')}"
@@ -729,29 +720,6 @@ def _shard_command(entry: Dict, targets: List[str]) -> List[str]:
     return parts
 
 
-def _files_by_shard(result: Dict) -> List[List[Tuple[int, str, List[str]]]]:
-    """Each shard's files, in plan order: (command index, file, its targets).
-
-    Args:
-        result: A checked plan from plan().
-
-    Returns:
-        One list per shard.
-
-    """
-    shards = []
-    for shard in result["shards"]:
-        files = []
-        for planned in shard["commands"]:
-            by_file: Dict[str, List[str]] = {}
-            for target in planned["targets"]:
-                by_file.setdefault(target.split("::")[0], []).append(target)
-            for file, targets in by_file.items():
-                files.append((planned["index"], file, targets))
-        shards.append(files)
-    return shards
-
-
 def _shard_commands(
     commands: List[str], result: Dict, inventory: List[Dict]
 ) -> List[str]:
@@ -775,7 +743,6 @@ def _shard_commands(
 
     """
     previews = [command_preview(entry["command"]) for entry in inventory]
-    shard_files = _files_by_shard(result)
     replaced = []
     done = set()  # the planned commands replaced so far
     position = 0
@@ -797,11 +764,10 @@ def _shard_commands(
         before, found, after = wrapped.rpartition(entry["command"].replace("'", '"'))
         if not found:
             raise ValueError(f"command {index + 1} is missing from the step's job")
-        prefix = entry["prefix"].rstrip("/") + "/" if entry["prefix"] else ""
-        file_tests: Dict[str, int] = {}
+        prefix = _prefix(entry)
+        file_nodeids: Dict[str, List[str]] = {}  # file from rootdir -> its tests
         for nodeid in entry["nodeids"]:
-            file = nodeid.split("::")[0][len(prefix) :]
-            file_tests[file] = file_tests.get(file, 0) + 1
+            file_nodeids.setdefault(nodeid.split("::")[0], []).append(nodeid)
 
         # The headers keep the step's own numbering, "Command (4/5)", so a
         # number means the same YAML command in every shard, and name only
@@ -810,26 +776,26 @@ def _shard_commands(
         # runs in some shard.
         command = f"+++ :test_tube: Command ({match.group(2)})"
         branches = []
-        for number, files in enumerate(shard_files):
+        for number, shard in enumerate(result["shards"]):
             mine = []  # this command's files in this shard
-            for planned, file, targets in files:
-                if planned == index:
-                    mine.append((file, targets))
+            for planned in shard["commands"]:
+                if planned["index"] == index:
+                    mine += _targets_by_file(planned).items()
             lines = []
             for file_number, (file, targets) in enumerate(mine):
                 parts = _shard_command(entry, targets)
+                # A split file's targets are its test IDs, one per test.
+                by_id = "::" in targets[0]
+                total = len(file_nodeids[prefix + file])
                 # The plugin fails the file's command if one of these is not
                 # among the tests it runs.
-                full = {prefix + target for target in targets}
-                expected = []
-                for nodeid in entry["nodeids"]:
-                    if nodeid in full or nodeid.split("::")[0] in full:
-                        expected.append(nodeid)
+                expected = file_nodeids[prefix + file]
+                if by_id:
+                    expected = [prefix + target for target in targets]
                 lines.append(f"export RUNTIME_SHARD_TESTS={pack(expected)}")
                 title = f"{command}, file {file_number + 1}/{len(mine)}: {file}"
-                # A split file's targets are its test IDs, one per test.
-                if "::" in targets[0] and len(targets) < file_tests[file]:
-                    title += f"   ({len(targets)} of {file_tests[file]} tests)"
+                if by_id and len(targets) < total:
+                    title += f"   ({len(targets)} of {total} tests)"
                 shown = " ".join(shlex.quote(text) for text in (title, " ".join(parts)))
                 # Buildkite interpolates the uploaded step: $$ is a literal $.
                 # The generator's own lines are already escaped.
