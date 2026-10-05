@@ -664,9 +664,9 @@ python3.12 -m venv /tmp/vllm-smoke && /tmp/vllm-smoke/bin/pip install vllm==X.Y.
 - **Startup times:** big models take 5–25 min to start even from cache. `runner.py` waits up to 90 min and bails as soon as the container exits.
 - **TP from `vram_minimum_gb`:** it ignores KV cache. 1M-context models then fail with "KV cache is needed" (GLM-5.3 NVFP4 at TP4 and MiniMax-M3 NVFP4 at TP2 on B200). Fix with more TP, or `--max-model-len` on H200. `rerun.py` does this.
 - **Recipe gaps found in v0.31.0rc5:**
-  - Qwen3.5-397B's NVIDIA-wide `--moe-backend flashinfer_trtllm` is Blackwell-only, so it fails on H200.
-  - GLM-5.3 and MiniMax-M3 don't fit a 1M context on 8×H200. They need `--max-model-len` of about 262k and 82k.
-  - Re-check these on the next release.
+  - Qwen3.5-397B's NVIDIA-wide `--moe-backend flashinfer_trtllm` is Blackwell-only, so it fails on H200 ([recipes#1069](https://github.com/vllm-project/recipes/pull/1069)).
+  - GLM-5.3 and MiniMax-M3 don't fit a 1M context on 8×H200. They need `--max-model-len` of about 262k and 82k ([recipes#1070](https://github.com/vllm-project/recipes/pull/1070), [recipes#1071](https://github.com/vllm-project/recipes/pull/1071)).
+  - When the smoke test finds a recipe gap, open a PR on `vllm-project/recipes` that fixes the model's YAML. Check the rendered `public/<org>/<repo>/hw/<gpu>.json` with `node scripts/build-recipes-api.mjs`, and commit with `-s` (DCO).
 - **Docker on hosts:** it needs `sudo` on the B200, H200 and GB200 hosts.
 - **Release-pipeline flakes:** if a step fails on infra (e.g. the triton-cpu sleef submodule flake in `build-cpu-release-image-x86`), retry it once. If it repeats, it's the known `--shallow-submodules --filter=blob:none` issue; see vllm#57871.
 
