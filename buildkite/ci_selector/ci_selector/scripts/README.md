@@ -42,6 +42,16 @@ contain the commit the build ran at, or the merge aborts.
 | `-o FILE` | required, the table to write |
 | `-v` | per-build progress |
 | `--allow-partial` | merge even from a build that delivered almost nothing |
+| `--previous FILE` | the last published table, to carry rows forward from |
+
+With `--previous`, a step this build recorded no row for, because its job
+failed before recording or never ran, keeps its row from that table. Only when
+the table loads (so not across a version change), is the same pipeline, and
+the step runs the same commands now as at every commit the row was recorded
+at, read from the pipeline yaml. A carried row keeps its own stamp, so its
+builds and commits say where it came from, and the table's `source.carried`
+lists them. It can add a step and never drop one. The collect step passes the
+table `ci-fetch-function-record` downloads.
 
 The collect step calls the same builder on a build's downloaded artifacts,
 where there is no Buildkite token and so no sweep:

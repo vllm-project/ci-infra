@@ -54,7 +54,7 @@ Two independent sources of evidence. The map proposes, the record adjusts in bot
 
 ### 3.1 The map
 
-Built from the checkout at the commit the pull request branched from. It never looks at the diff, so it is the same work for any pull request against that base, and takes seconds on CPU.
+Built from the checkout at the commit the pull request branched from. It never looks at the diff, so it is the same work for any pull request against that base, and takes seconds on CPU. The step definitions are the exception: they are read at the pull request's head, which is what the generator runs, so a step the pull request adds can be selected and named.
 
 An import graph alone is not enough. vLLM reaches code by name, through registries, shell commands and container images, and an import-only view is blind to all of it. So the map derives several things and routes each changed file through whichever fits:
 
@@ -67,6 +67,7 @@ An import graph alone is not enough. vLLM reaches code by name, through registri
 | the CMake build map | which device families compile a given `csrc` or `cmake` file |
 | native op registration sites, joined to `torch.ops.<ns>.<op>` call sites | which Python wrappers dispatch to a given kernel |
 | the Cargo workspace | which shipped artifact a Rust crate feeds |
+| the defs, classes and signatures of a changed `vllm/` module, base against head | the steps running another project's tests from their own image (vllm-ascend's interface check), which only vLLM's importable API reaches |
 
 All of it is parsed, with tests. A file that fits no mechanism runs everything.
 
@@ -77,6 +78,8 @@ One row per step, holding the function names that step was observed to enter, ke
 It is collected by instrumenting full CI runs. The recorder (`recorders/fnrec/fnrec.py`, armed by `VLLM_CI_FNREC=1`) subscribes to CPython's `sys.monitoring` function-start event and returns `DISABLE` from the callback, so each function costs one event ever. Across the 222 jobs that both an instrumented sweep and a plain scheduled run passed, total wall clock was 83.2 hours against 83.3.
 
 Every row carries a trust stamp: which builds and jobs fed it, whether they passed, whether tests executed, whether every parallel slice reported. A row whose stamp shows any weakness can add jobs but never remove one.
+
+A step whose job recorded nothing in a build, such as one that died at checkout, keeps its row from the previously published table as long as its commands have not changed. That carried row, recorded at another commit, can likewise add jobs but never remove one.
 
 A second record covers what no Python frame can: **the kernel record**. A CUPTI injection library on the nightly and daily runs writes the set of GPU kernel names each step launched (`recorders/kernrec/`), and the image build emits a map from every compiled csrc object to its source file, the headers it included, and the kernel symbols it defines. Joined, they say which steps ran code compiled from a changed `.cu` or header. The rows carry the same kind of health (every job passed, every shard reported, no dropped records), and a row with any weakness can select but never drop.
 
@@ -108,17 +111,19 @@ Per changed file, never per diff.
 | --- | --- |
 | a row shows S ran changed code in F | run S. One observation is enough, and nothing about the row's health can make it untrue |
 | a row shows S ran none of it | drop S, if the lookup below allows it |
-| S has no row, or F is something the recorder cannot see | the map decides; the record has nothing to say |
+| S has no row, but a step running exactly S's commands has one that shows it ran changed code in F | run S. The other way round it proves nothing, so it never drops |
+| S has no row and no such twin, or F is something the recorder cannot see | the map decides; the record has nothing to say |
 
 ### 5.1 Dropping
 
-Selecting takes one observation and no gates. Dropping means trusting a silence, and a silence is only evidence if the recorder was watching: watching that file, during a run that finished, on code that still exists. The lookup returns one of thirteen verdicts, and two of them permit a drop.
+Selecting takes one observation and no gates. Dropping means trusting a silence, and a silence is only evidence if the recorder was watching: watching that file, during a run that finished, on code that still exists. The lookup returns one of fourteen verdicts, and two of them permit a drop.
 
 | verdict | result |
 | --- | --- |
 | no table loaded, or it failed to parse | keep |
 | the row failed verification at load | keep |
 | the step has no row | keep |
+| the row was carried forward from an earlier build, which recorded it at another commit | keep |
 | the row is present and empty | keep |
 | the row is too thin to read a silence from: a slice missing, tests all skipped, lines lost | keep |
 | some job that built the row was not marked passed | keep |
@@ -142,7 +147,7 @@ None of it routes through imports, so each surface has its own derived mechanism
 | `cmake/` | the same build map, inheriting the context it is included from | no |
 | `rust/` | which shipped artifact the crate feeds, not which image copies it | no |
 | Dockerfiles, `requirements/` | the image build graph | only a file whose whole change moves a watched library's pin: the library record, by the steps whose rows called it |
-| `.buildkite/` config | twelve ordered rules: defines steps, matches a step's targets, is a Dockerfile input, and so on | no |
+| `.buildkite/` config | twelve ordered rules: adds or changes steps (an edited job file selects only the steps whose definition changed, outside `source_file_dependencies` and labels), matches a step's targets, is a Dockerfile input, and so on | no |
 | docs, `.github/`, markdown | nothing to run; a docs-only diff emits nothing | n/a |
 
 Measured on 25 C++/cmake/requirements pull requests: 4,284 jobs against CI's own 4,511. `cmake/cpu_extension.cmake` alone goes from 244 jobs to 20, against CI's 21. On 13 Rust pull requests the routing took selection from 9.2x of CI down to 1.1x, with a Rust-only change picking 16 jobs against CI's 14.

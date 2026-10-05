@@ -12,6 +12,7 @@ So the states are kept apart rather than collapsed into a bool:
   no table at all          nothing was loaded; the record does not run
   nothing to match on      the diff named no function at all; keep it
   no row for this step     the step was never recorded; keep it
+  row from another build   carried forward, as this build recorded none; keep it
   row with no functions    the step recorded and entered no vLLM code; keep it
   row too thin to read     the run behind it was too weak to trust a silence
   row that fails its stamp the bytes disagree with what built them; keep it
@@ -66,6 +67,7 @@ class Evidence(str, Enum):
 
     NO_TABLE = "no-table"
     NO_ROW = "no-row"
+    ROW_CARRIED = "row-carried-from-an-earlier-build"
     ROW_EMPTY = "row-has-no-functions"
     ROW_THIN = "row-too-thin-to-read-a-silence"
     ROW_FAILED_JOB = "row-built-from-a-failed-job"
@@ -107,8 +109,10 @@ class Table:
         self._rows = rows or {}
         self.unavailable = unavailable
         self.rejected = rejected or {}
-        # Where the table came from. Can be empty, and nothing in the
-        # selection path reads it.
+        # Where the table came from. Can be empty. The selection path reads
+        # only `commit`, to tell a carried row from this build's own, and an
+        # empty one treats every row as its own, as tables did before rows
+        # were carried.
         self.source = source or {}
 
     @property
@@ -212,6 +216,17 @@ class Table:
         row = self._rows.get(step)
         if row is None:
             return Verdict(step, Evidence.NO_ROW)
+        # Carried forward from an earlier table because this build recorded
+        # nothing for the step (`carry_forward`). It still shows what the step
+        # ran, so the add side reads it, but a silence recorded at another
+        # commit is not one about this commit.
+        if self.commit and self.commit not in row.stamp.commits:
+            return Verdict(
+                step,
+                Evidence.ROW_CARRIED,
+                f"recorded by build {', '.join(row.stamp.builds) or '?'}, "
+                f"not at the table's commit {self.commit[:10]}",
+            )
         if not row.stamp.has_evidence:
             return Verdict(step, Evidence.ROW_EMPTY)
         # A silence is only worth as much as the run behind it. A row can hold

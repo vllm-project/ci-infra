@@ -43,7 +43,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from ..codemap.classify import select
-from ..codemap.worktree import git_out, state_for
+from ..codemap.worktree import git_out, state_for, with_head_steps
 from ..coverage.source import fetch_kernel_evidence, fetch_table
 from ..decide import decide
 from ..gitdiff import changed_paths, diff_files
@@ -71,7 +71,7 @@ def replay(repo: Path, merge: str, rows: list[dict], table=None, kernels=None) -
     if not base_in_window(repo, base):
         return {"merge": merge, "skip": "pre-restructure base", "rows": rows}
     paths = changed_paths(diff_files(repo, base, head))
-    state = state_for(repo, base)
+    state = with_head_steps(state_for(repo, base), repo, head, paths)
     sel = select(state, paths, base=base, head=head)
     decision = decide(state, sel, repo, base, head, table=table, kernels=kernels)
     key_of = _spellings(state)
@@ -100,7 +100,7 @@ def replay(repo: Path, merge: str, rows: list[dict], table=None, kernels=None) -
         elif sid:
             verdict = "missed"
         else:
-            verdict = "step absent at base"
+            verdict = "step absent at head"
         out_rows.append(
             {
                 "id": r["id"],
@@ -177,7 +177,7 @@ def run(args) -> int:
         "selected": 0,
         "optional reached": 0,
         "missed": 0,
-        "step absent at base": 0,
+        "step absent at head": 0,
     }
     print(f"{len(records)} leaked jobs across {len(by_pr)} pull requests\n")
     for pr, d in by_pr.items():
@@ -211,8 +211,8 @@ def run(args) -> int:
     scored = sum(tally.values())
     print(
         f"\nTOTAL {scored} leaked jobs: selected {tally['selected']}, optional reached "
-        f"{tally['optional reached']}, missed {tally['missed']}, step absent at base "
-        f"{tally['step absent at base']}"
+        f"{tally['optional reached']}, missed {tally['missed']}, step absent at head "
+        f"{tally['step absent at head']}"
     )
     if scored:
         run = tally["selected"]

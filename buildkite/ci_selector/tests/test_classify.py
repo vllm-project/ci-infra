@@ -3450,3 +3450,27 @@ def test_a_file_the_build_runs_by_path_is_not_inert(state, path):
     claim = _classify(state, path, None)
     assert claim.rule != "inert"
     assert claim.run_all or claim.step_ids & state.auto_step_ids
+
+
+def test_a_test_that_reads_the_tree_as_data_is_selected_by_its_inputs(state):
+    """vllm#59256 trimmed the retired test-amd.yaml and vllm#59229 edited a
+    step yaml and added a test module; the tethering test parses all of them."""
+    from ci_selector.codemap.state import DiffContext
+    from ci_selector.handwritten import DATA_READ_TESTS
+
+    if not all((state.repo / test).is_file() for test in DATA_READ_TESTS):
+        pytest.skip("a DATA_READ_TESTS test is not in the pinned vLLM tree")
+    runs = set()
+    for test in DATA_READ_TESTS:
+        runs |= _steps_targeting(state, test, siblings=False)
+    assert runs, "no step runs a data-reading test"
+    yaml = next(s.source_file for p in state.pipelines for s in p.steps if s.source_file)
+    for path, status in (
+        (yaml, "M"),
+        (".buildkite/test-amd.yaml", "M"),
+        ("tests/v1/test_brand_new_module.py", "A"),
+    ):
+        claim = _classify(state, path, DiffContext("a", "b", {path: status}))
+        assert runs & claim.step_ids, path
+    edited = _classify(state, "tests/v1/test_brand_new_module.py", None)
+    assert not runs & edited.step_ids, "an in-place test edit is not an input"

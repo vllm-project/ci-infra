@@ -10,6 +10,7 @@
 #   6. a branch that is not main    -> artifacts only, exit 0, S3 untouched
 #   7. fewer jobs delivered than the generator armed -> exit 1, S3 untouched
 #   8. folding another build, per job -> its recordings, number and count
+#   9. a step that recorded nothing    -> keeps the published table's row
 #
 # Real python3 and the real fold, so what is under test is what runs in CI.
 # The fold runs through uv exactly as collect.sh runs it in CI, so these cover
@@ -114,7 +115,7 @@ EOF
       BUILDKITE_COMMIT="$commit" BUILDKITE_BUILD_NUMBER=42 \
       BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
       FNREC_CI_INFRA="$REPO" FNREC_VLLM_REPO="$vllm" \
-      FNREC_EXPECTED_JOBS="$expected" \
+      FNREC_EXPECTED_JOBS="$expected" CI_SELECTOR_FUNCTION_RECORD_URL="file://$T/s3/bkt/ci/fnrec" \
       env ${source_env[@]+"${source_env[@]}"} bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
 
   local latest=no commit_up=no untouched=no
@@ -146,6 +147,67 @@ EOF
   rm -rf "$T"
 }
 
+# Two nights. The first records both steps and publishes; on the second,
+# step-y's job dies before recording, and the table published that night must
+# still hold step-y's row from the first, under the second night's commit. The
+# stand-in bucket is also the public one the previous table is fetched from.
+carry_case() {
+  local T; T=$(mktemp -d)
+  mkdir -p "$T/bin" "$T/s3" "$T/artifacts"
+  make_vllm_repo "$T/vllm" >/dev/null
+  mkdir -p "$T/vllm/.buildkite/test_areas"
+  printf 'name: vllm_ci\njob_dirs:\n  - ".buildkite/test_areas"\n' > "$T/vllm/.buildkite/ci_config.yaml"
+  printf 'group: g\nsteps:\n  - label: x\n    key: step-x\n    commands:\n      - pytest a.py\n  - label: y\n    key: step-y\n    commands:\n      - pytest b.py\n' \
+    > "$T/vllm/.buildkite/test_areas/x.yaml"
+  git -C "$T/vllm" add -A && git -C "$T/vllm" commit --quiet -m pipeline
+  cat > "$T/bin/buildkite-agent" <<STUB
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "artifact download") mkdir -p .fnrec && cp -R "$T/build/.fnrec/." .fnrec/ 2>/dev/null ;;
+  "artifact upload") for f in \$3; do cp "\$f" "$T/artifacts/" 2>/dev/null; done ;;
+esac
+STUB
+  cat > "$T/bin/aws" <<STUB
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "sts get-caller-identity") echo '{"Account":"1"}' ;;
+  "s3 cp") dst="\${4#s3://}"; mkdir -p "$T/s3/\$(dirname "\$dst")" && cp "\$3" "$T/s3/\$dst" ;;
+esac
+STUB
+  chmod +x "$T/bin"/*
+  night() { # build_number step...
+    local number=$1; shift
+    rm -rf "$T/build" && mkdir -p "$T/build/.fnrec"
+    for key in "$@"; do write_job "$T/build/.fnrec/job-$number-$key" "$key"; done
+    ( cd "$T" && PATH="$T/bin:$PATH" \
+        BUILDKITE_COMMIT="$(git -C "$T/vllm" rev-parse HEAD)" BUILDKITE_BUILD_NUMBER="$number" \
+        BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH=main \
+        FNREC_CI_INFRA="$REPO" FNREC_VLLM_REPO="$T/vllm" FNREC_EXPECTED_JOBS=2 \
+        CI_SELECTOR_FUNCTION_RECORD_URL="file://$T/s3/bkt/ci/fnrec" \
+        bash "$HERE/collect.sh" >>"$T/log" 2>&1 )
+  }
+  night 42 step-x step-y; local rc1=$?
+  printf 'moved on\n' > "$T/vllm/README"
+  git -C "$T/vllm" add -A && git -C "$T/vllm" commit --quiet -m on
+  local second; second=$(git -C "$T/vllm" rev-parse HEAD)
+  night 43 step-x; local rc2=$?
+  local got
+  got=$(python3 - "$T/s3/bkt/ci/fnrec/$second/table.json.gz" 2>&1 <<'PY'
+import gzip, json, sys
+t = json.loads(gzip.decompress(open(sys.argv[1], "rb").read()))
+y = t["rows"].get("step-y", {}).get("stamp", {})
+print(t["source"]["commit"][:7], t["source"].get("carried"), y.get("builds"))
+PY
+)
+  local want="${second:0:7} ['step-y'] ['42']"
+  local verdict=OK
+  [[ "$rc1" == 0 && "$rc2" == 0 && "$got" == "$want" ]] || { verdict=FAIL; fail=1; }
+  printf '%-4s %-14s exit=%s,%s (want 0,0)  table=%s (want %s)\n' \
+    "$verdict" carry-forward "$rc1" "$rc2" "$got" "$want"
+  [[ "$verdict" == FAIL ]] && sed 's/^/      /' "$T/log" | tail -30
+  rm -rf "$T"
+}
+
 run_case happy          0 yes yes happy
 run_case no-recordings  0 no  no  no-recordings
 run_case fold-fails     1 no  no  fold-fails
@@ -154,5 +216,6 @@ run_case no-identity    0 no  no  no-identity
 run_case fork-branch    0 no  no  fork-branch  yes
 run_case below-floor    1 no  no  below-floor  yes
 run_case another-build  0 yes yes another-build
+carry_case
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" \
   || { echo "collect.sh publishing rules: FAIL"; exit 1; }

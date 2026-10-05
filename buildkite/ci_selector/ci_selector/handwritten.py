@@ -595,6 +595,17 @@ CATCH_ALL_DEP_PREFIXES = frozenset({"vllm", "tests"})
 # If it rejoins a job_dir a drift test catches it.
 LEGACY_CI_FILES = (".buildkite/test-amd.yaml",)
 
+# Tests that read repo files as data rather than importing them: the test
+# file -> the path prefixes it parses. The tethering test parses every CI yaml
+# (one it cannot parse fails it) and lists tests/ to check each test is run by
+# a step, so a yaml edit or an added or removed test file is its input.
+# vllm#59229 and vllm#59256 changed both kinds and never selected it.
+# Update when: a test starts or stops reading the repo tree this way.
+# Guard: tests/test_classify.py pins that each entry's test exists.
+DATA_READ_TESTS: dict[str, tuple[str, ...]] = {
+    "tests/tools/test_check_test_tethering.py": (".buildkite/", "tests/"),
+}
+
 # CI trees no live pipeline consumes. Do NOT try to derive this as "yaml in no
 # job_dir": the lm-eval-harness configs fit that shape and a live step does read
 # them, through a manifest. Deriving it would give zero jobs to the file that

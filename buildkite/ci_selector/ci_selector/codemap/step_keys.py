@@ -56,7 +56,14 @@ class Emission:
 
 
 def emit(state: RepoState, sel: Selection, pipeline: str = PR_PIPELINE) -> Emission:
-    """The step-key list for one pipeline, or a reasoned refusal to send one."""
+    """The step-key list for one pipeline, or a reasoned refusal to send one.
+
+    `state` has to carry the head's steps (`worktree.with_head_steps`). The
+    generator runs at the head, fails on a key it does not know, and adds a
+    step's prerequisites from the head's `depends_on`; a step the PR added has
+    a key nowhere else. vllm#55840 added e2e-scheduling-accuracy-1-gpu, and
+    the base could not name it.
+    """
     if sel.run_all.get(pipeline):
         return Emission(omit=True, reason=f"run-all: {sel.run_all[pipeline]}")
 
