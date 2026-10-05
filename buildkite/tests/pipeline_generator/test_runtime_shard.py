@@ -208,6 +208,7 @@ def test_plan_keeps_a_test_functions_cases_in_one_shard():
         {
             "command": TESTS[0],
             "prefix": "tests",
+            "paths": ["model_executor"],
             "nodeids": [
                 f"tests/{file}::test_b",
                 f"tests/{file}::test_a[v1]",
@@ -630,6 +631,7 @@ def _run_plan_on(tmp_path, monkeypatch, template=None, timings=None):
         "env": {"A": "1"},
     }
     monkeypatch.setenv("RUNTIME_SHARD_TEMPLATE", rs.encode({"steps": [template]}))
+    monkeypatch.setenv("RUNTIME_SHARD_SCRIPT_URL", "https://x/runtime_shard.py")
     rs.run_plan("model-executor", rs.encode(TESTS), "on")
     [upload] = [
         json.loads(i)["steps"] for a, i in calls if a[1:3] == ["pipeline", "upload"]
@@ -642,14 +644,17 @@ def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
     _inventories(tmp_path)
     template, [step], annotate = _run_plan_on(tmp_path, monkeypatch)
     assert step["key"] == "model-executor" and step["parallelism"] == 4
-    assert step["label"] == "ME shard %N/%t" and step["env"] == template["env"]
-    # Setup as is; each pytest command and its header become one case.
-    assert step["commands"][0] == "cd /t" and len(step["commands"]) == 3
+    assert step["label"] == "ME shard %N/%t"
+    assert step["env"] == {"A": "1", "PYTEST_ADDOPTS": "-p runtime_shard"}
+    # The plugin's install, then setup as is; each pytest command and its
+    # header become one case.
+    assert "https://x/runtime_shard.py" in step["commands"][0]
+    assert step["commands"][2] == "cd /t" and len(step["commands"]) == 5
     assert all(
-        c.startswith('case "$$BUILDKITE_PARALLEL_JOB" in') for c in step["commands"][1:]
+        c.startswith('case "$$BUILDKITE_PARALLEL_JOB" in') for c in step["commands"][3:]
     )
     # 6 files, no timings: 4 shards of 1, 2, 1, 2 files
-    first = step["commands"][1].split(";;")[0]
+    first = step["commands"][3].split(";;")[0]
     assert "\n{ pytest -v -s -m '(not slow_test)' --timeout=900 f0_0.py\n}" in first
     # No main timings, so equal file counts: worth a look, so a warning.
     assert annotate[5] == "warning" and "running as **4 shards**" in annotate[6]
@@ -677,12 +682,13 @@ def test_run_plan_shards_a_kubernetes_job_with_its_pod_spec_and_env(
     # One Buildkite job per shard, each its own pod from the same pod spec.
     assert step["parallelism"] == 4 and step["plugins"] == template["plugins"]
     assert step["retry"] == template["retry"] == buildkite_step.K8S_RETRY
-    assert step["env"] == template["env"]
-    # The setup commands' headers stay; each pytest command and its header
-    # become one case.
+    assert step["env"] == {**template["env"], "PYTEST_ADDOPTS": "-p runtime_shard"}
+    # After the plugin's install, the setup commands' headers stay; each
+    # pytest command and its header become one case.
     cases = [c for c in step["commands"] if c.startswith('case "$$BUILDKITE_')]
     assert (
-        len(cases) == 2 and step["commands"][: -len(cases)] == template["commands"][:-4]
+        len(cases) == 2
+        and step["commands"][2 : -len(cases)] == template["commands"][:-4]
     )
 
 
@@ -740,9 +746,11 @@ def _collected(tmp_path, command, files):
 
 
 def _run_shard(step, shard, cwd):
-    """Run a shard job's commands as its agent would: $$ is a literal $."""
-    script = "\n".join(step["commands"]).replace("$$", "$")
+    """Run a shard job's commands as its agent would: $$ is a literal $. The
+    plugin loads from this checkout, not its install from GitHub."""
+    script = "\n".join(step["commands"][2:]).replace("$$", "$")
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env.update(step["env"], PYTHONPATH=os.path.dirname(rs.__file__))
     env["BUILDKITE_PARALLEL_JOB"] = str(shard)
     env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env["PATH"]
     return subprocess.run(
@@ -778,7 +786,7 @@ def test_each_file_of_a_shard_runs_as_its_own_command(tmp_path):
         ["pkg/test_b.py::test_z", "pkg/test_c.py"],
         [],
     )
-    step = rs.shard_step({"commands": _rendered([command])}, result, [entry])
+    step = rs.shard_step({"commands": _rendered([command])}, result, [entry], "u")
 
     first = _run_shard(step, 0, tmp_path / "tests")
     assert first.returncode == 0, first.stdout + first.stderr
@@ -818,7 +826,7 @@ def test_a_failing_file_fails_the_job_after_the_shards_other_files(tmp_path):
     )
     result = _result(["pkg/test_a.py", "pkg/test_b.py"])
     step = rs.shard_step(
-        {"commands": [*_rendered([command]), "echo after"]}, result, [entry]
+        {"commands": [*_rendered([command]), "echo after"]}, result, [entry], "u"
     )
     run = _run_shard(step, 0, tmp_path / "tests")
     assert run.returncode == 1 and "test_b.py::test_y PASSED" in run.stdout
@@ -847,17 +855,59 @@ def test_a_shard_keeps_the_generators_wrapping_and_a_commands_variables(tmp_path
     result = _result(
         ["test_n.py::test_i[0]"], ["test_n.py::test_i[1]", "test_n.py::test_i[2]"]
     )
-    step = rs.shard_step({"commands": [header, traced]}, result, [entry])
-    [case] = step["commands"]
+    step = rs.shard_step({"commands": [header, traced]}, result, [entry], "u")
+    case = step["commands"][2]
     assert (
         f"{{ ci_otel_start 1 {preview} || :\n"
         "N=3 pytest -v 'test_n.py::test_i[1]' 'test_n.py::test_i[2]'\n"
         "status=$$?\n(exit $$status)\n} || runtime_shard_status=1"
     ) in case
-    step["commands"][0] = case.replace(f"ci_otel_start 1 {preview} || :", ":")
+    step["commands"][2] = case.replace(f"ci_otel_start 1 {preview} || :", ":")
     run = _run_shard(step, 1, tmp_path / "tests")
     assert run.returncode == 0 and "2 passed" in run.stdout
     assert run.stdout.splitlines()[:2] == [
         "+++ :test_tube: Command (1/1), file 1/1: test_n.py   (2 of 3 tests)",
         "N=3 pytest -v 'test_n.py::test_i[1]' 'test_n.py::test_i[2]'",
     ]
+
+
+def test_a_command_that_names_test_ids_runs_only_those(tmp_path):
+    command = "pytest -v test_a.py::test_selected test_b.py"
+    entry = _collected(
+        tmp_path,
+        command,
+        {
+            "test_a.py": "def test_selected(): pass\ndef test_excluded(): assert 0\n",
+            "test_b.py": "def test_y(): pass\n",
+        },
+    )
+    result = rs.plan([entry], None)
+    rs.check(result, [entry])
+    assert result["shards"][0]["commands"][0]["targets"] == ["test_a.py::test_selected"]
+    step = rs.shard_step({"commands": _rendered([command])}, result, [entry], "u")
+    run = _run_shard(step, 0, tmp_path / "tests")
+    assert run.returncode == 0 and "test_excluded" not in run.stdout
+    # All of the file's selected tests: no "(1 of 1 tests)".
+    assert "+++ :test_tube: Command (1/1), file 1/1: test_a.py" in run.stdout
+
+
+def test_a_shard_fails_if_a_planned_test_does_not_run(tmp_path):
+    """A conftest hook that drops a test only in the shard jobs: without the
+    plugin, the test would run nowhere and every shard would pass."""
+    command = "pytest -v pkg"
+    files = {
+        "pkg/test_a.py": "def test_x(): pass\ndef test_y(): pass\ndef test_z(): pass\n",
+        "conftest.py": "import os\n"
+        "def pytest_collection_modifyitems(items):\n"
+        "    if 'BUILDKITE_PARALLEL_JOB' in os.environ:\n"
+        "        items[:] = [i for i in items if 'test_z' not in i.nodeid]\n",
+    }
+    entry = _collected(tmp_path, command, files)
+    assert len(entry["nodeids"]) == 3
+    result = _result(["pkg/test_a.py"])
+    step = rs.shard_step({"commands": _rendered([command])}, result, [entry], "u")
+    run = _run_shard(step, 0, tmp_path / "tests")
+    assert run.returncode == 1
+    assert "1 planned test would not run: ['tests/pkg/test_a.py::test_z']" in (
+        run.stderr
+    )

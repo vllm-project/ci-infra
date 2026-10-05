@@ -14,6 +14,8 @@ like the recorders' scripts:
            nothing, because the step already runs as one job.
   shards   each parallel job runs one pytest command per file of its shard,
            picked by BUILDKITE_PARALLEL_JOB, each under its own log header.
+  plugin   `-p runtime_shard` in each shard job: fails a file's command if a
+           test the plan gave it does not run there.
 
 Sharding never blocks the step: if collection or planning fails, the plan step
 uploads the step's normal single job instead (see run_plan and the generator's
@@ -30,6 +32,7 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
+import zlib
 from typing import Dict, List, Optional, Tuple
 
 TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
@@ -141,6 +144,15 @@ def encode(value) -> str:
 
 def decode(text: str):
     return json.loads(base64.b64decode(text))
+
+
+def pack(nodeids: List[str]) -> str:
+    """encode(), compressed: every file's tests go into a shard job's script."""
+    return base64.b64encode(zlib.compress(json.dumps(nodeids).encode())).decode()
+
+
+def unpack(text: str) -> List[str]:
+    return json.loads(zlib.decompress(base64.b64decode(text)))
 
 
 def contiguous(
@@ -327,6 +339,12 @@ def plan(
             [unit["seconds"] for unit in units], max_shard_seconds, max_number_of_shards
         )
 
+    # A command that names test IDs, like `pytest a.py::test_x b.py`, runs
+    # only those of a.py: a whole-file target would run all of them.
+    by_id = set()
+    for command_index, entry in enumerate(inventory):
+        if any("::" in path for path in entry["paths"]):
+            by_id.add(command_index)
     result = []
     for shard in shards:
         commands: List[Dict] = []
@@ -334,8 +352,9 @@ def plan(
             unit = units[unit_index]
             prefix = inventory[unit["command"]]["prefix"]
             prefix = prefix.rstrip("/") + "/" if prefix else ""
+            whole = not unit["split"] and unit["command"] not in by_id
             targets = []
-            for target in unit["nodeids"] if unit["split"] else [unit["file"]]:
+            for target in [unit["file"]] if whole else unit["nodeids"]:
                 if target.startswith(prefix):
                     target = target[len(prefix) :]
                 targets.append(target)
@@ -530,7 +549,12 @@ def annotation(
         )
         details.append("")
         for command in s["commands"]:
-            files = _shard_files(command)
+            files = []
+            for file, tests, split in _shard_files(command):
+                # Test IDs that are all of the file's tests: not split.
+                if split and tests == split_totals[(command["index"], file)]:
+                    split = False
+                files.append((file, tests, split))
             shard_files += len(files)
             split_count = sum(1 for _, _, split in files if split)
             part = f"command {command['index'] + 1}: {_plural(len(files), 'file')} ({_plural(command['tests'], 'test')}"
@@ -636,17 +660,22 @@ def run_collect(index: str, command_b64: str, out_dir: str) -> None:
         raise SystemExit(f"runtime-shard: collection failed (pytest exit {status})")
 
 
-def shard_step(template: Dict, result: Dict, inventory: List[Dict]) -> Dict:
+def shard_step(
+    template: Dict, result: Dict, inventory: List[Dict], script_url: str
+) -> Dict:
     """The step's own job, run as one parallel job per shard.
 
     Parallel jobs share their commands, so each pytest command becomes a
     `case` on BUILDKITE_PARALLEL_JOB: a job runs one pytest command per file
-    of its shard, each under a log header that shows it.
+    of its shard, each under a log header that shows it. Each job installs
+    this file as a pytest plugin, which checks that every test the plan gave
+    a file's command runs.
 
     Args:
         template: The step's normal rendered job.
         result: A checked plan from plan().
         inventory: The inventory the plan was made from.
+        script_url: Where the shard jobs fetch this file from.
 
     Returns:
         The job to upload, with parallelism set to the shard count.
@@ -659,7 +688,17 @@ def shard_step(template: Dict, result: Dict, inventory: List[Dict]) -> Dict:
     step["parallelism"] = len(result["shards"])
     # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
     step["label"] = f"{step.get('label', '')} shard %N/%t".strip()
-    step["commands"] = _shard_commands(step["commands"], result, inventory)
+    env = dict(step.get("env") or {})
+    env["PYTEST_ADDOPTS"] = (
+        env.get("PYTEST_ADDOPTS", "") + " -p runtime_shard"
+    ).strip()
+    step["env"] = env
+    step["commands"] = [
+        f'curl -sSfL --retry 3 --max-time 60 -o /tmp/runtime_shard.py "{script_url}"',
+        'python3 -c "import shutil, sysconfig; shutil.copy('
+        "'/tmp/runtime_shard.py', sysconfig.get_paths()['purelib'])\"",
+        *_shard_commands(step["commands"], result, inventory),
+    ]
     return step
 
 
@@ -779,9 +818,17 @@ def _shard_commands(
             lines = []
             for file_number, (file, targets) in enumerate(mine):
                 parts = _shard_command(entry, targets)
+                # The plugin fails the file's command if one of these is not
+                # among the tests it runs.
+                full = {prefix + target for target in targets}
+                expected = []
+                for nodeid in entry["nodeids"]:
+                    if nodeid in full or nodeid.split("::")[0] in full:
+                        expected.append(nodeid)
+                lines.append(f"export RUNTIME_SHARD_TESTS={pack(expected)}")
                 title = f"{command}, file {file_number + 1}/{len(mine)}: {file}"
                 # A split file's targets are its test IDs, one per test.
-                if any("::" in target for target in targets):
+                if "::" in targets[0] and len(targets) < file_tests[file]:
                     title += f"   ({len(targets)} of {file_tests[file]} tests)"
                 shown = " ".join(shlex.quote(text) for text in (title, " ".join(parts)))
                 # Buildkite interpolates the uploaded step: $$ is a literal $.
@@ -791,6 +838,7 @@ def _shard_commands(
                 lines.append(f"{{ {run}\n}} || runtime_shard_status=1")
             if lines:
                 lines.insert(0, "runtime_shard_status=0")
+                lines.append("unset RUNTIME_SHARD_TESTS")
                 lines.append("(exit $$runtime_shard_status)")
             else:
                 lines.append(":")
@@ -863,7 +911,9 @@ def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
             json.dump(result, f, indent=1)
         subprocess.run(["buildkite-agent", "artifact", "upload", path], check=False)
         if not shadow and len(result["shards"]) > 1:
-            step = shard_step(template, result, inventory)
+            step = shard_step(
+                template, result, inventory, os.environ["RUNTIME_SHARD_SCRIPT_URL"]
+            )
         message = annotation(step_key, result, shadow, commands)
         # Only a plan someone should look at gets a build annotation, so the
         # build page stays readable with many enrolled steps. Every plan is in
@@ -893,6 +943,30 @@ def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
         ],
         check=False,
     )
+
+
+def pytest_collection_finish(session):
+    """Plugin: fail a shard's file command if a test the plan gave it is not
+    among the tests it runs, after every filter. Otherwise a test that the
+    shard's collection lost would run in no shard while every shard passed.
+    A no-op without RUNTIME_SHARD_TESTS.
+    """
+    # Popped, so a pytest that a test itself starts doesn't check against it.
+    packed = os.environ.pop("RUNTIME_SHARD_TESTS", None)
+    if not packed:
+        return
+    import pytest
+
+    running = {item.nodeid for item in session.items}
+    missing = []
+    for nodeid in unpack(packed):
+        if nodeid not in running:
+            missing.append(nodeid)
+    if missing:
+        raise pytest.UsageError(
+            f"runtime-shard: {_plural(len(missing), 'planned test')} would not run:"
+            f" {missing[:5]}"
+        )
 
 
 if __name__ == "__main__":
