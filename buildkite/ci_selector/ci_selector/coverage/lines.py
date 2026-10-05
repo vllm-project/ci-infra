@@ -253,7 +253,14 @@ def probes_at_base(
 
 def attach_line_probes(query, repo: Path, base: str, head: str | None, table) -> int:
     """Set `line_probes` on each changed file the record's lines can answer
-    for, at the record's numbering. Returns how many functions got probes."""
+    for, at the record's numbering. Returns how many functions got probes.
+
+    Probes come from the base side: the old lines a run reaching the change
+    executes. When the record already holds the PR's own code (a PR re-read
+    after it merged), the old lines are gone from it and the new ones are
+    there, so the head side answers instead: the new lines a run reaching
+    the change executes. An open PR's new lines never exist at the record,
+    so that side never answers for one."""
     commits = table.source.get("commits") or ([table.commit] if table.commit else [])
     if len(commits) != 1 or not any(
         r.stamp.lines_recorded for r in table._rows.values()
@@ -271,19 +278,27 @@ def attach_line_probes(query, repo: Path, base: str, head: str | None, table) ->
         names = (f.base_names | f.head_names) - f.import_time
         if not names:
             continue
-        source = _read(repo, base, f.path)
         hunks = _diff_hunks(repo, base, head, f.path)
-        to_record = line_map(repo, record, base, f.path)
-        if source is None or not hunks or to_record is None:
+        if not hunks:
             continue
-        probes = {}
-        head_text = _read(repo, head, f.path)
-        for name, lines in probes_at_base(
-            source, f.path, hunks, names, head_text
-        ).items():
-            mapped = {to_record(n) for n in lines}
-            if mapped and None not in mapped:
-                probes[name] = frozenset(mapped)
+        before, after = _read(repo, base, f.path), _read(repo, head, f.path)
+        probes: dict[str, frozenset[int]] = {}
+        sides = (
+            (before, after, hunks, base),
+            # the same hunks read from the head side
+            (after, before, [(n, nc, o, oc) for o, oc, n, nc in hunks], head),
+        )
+        for source, other, side_hunks, ref in sides:
+            to_record = line_map(repo, record, ref, f.path) if ref else None
+            if source is None or to_record is None:
+                continue
+            left = names - probes.keys()
+            for name, lines in probes_at_base(
+                source, f.path, side_hunks, left, other
+            ).items():
+                mapped = {to_record(n) for n in lines}
+                if mapped and None not in mapped:
+                    probes[name] = frozenset(mapped)
         if probes:
             f.line_probes = probes
             attached += len(probes)

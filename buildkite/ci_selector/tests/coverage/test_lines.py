@@ -171,3 +171,17 @@ def test_a_function_new_at_base_or_run_at_import_gets_no_probes():
         probes_at_base(SCHED, "vllm/sched.py", [(6, 1, 6, 1)], {"fresh", "<module>"})
         == {}
     )
+
+
+def test_a_record_holding_the_change_answers_from_the_head_side(tmp_path):
+    """Re-read after merge, the record holds the new lines, not the old."""
+    repo = _repo(tmp_path)
+    base = repo.head()
+    edited = SCHED.replace("total = -1", "total = -2")
+    repo.write("vllm/sched.py", edited)
+    head = repo.commit("edit")
+    table = _table(tmp_path, repo)  # recorded with the change in
+    query, attached = _query(repo, base, head, table)
+    assert attached == 1 and query.files[0].line_probes == {"schedule": {6}}
+    assert table.look_up("common", query).evidence is Evidence.ABSENT_FROM_ROW
+    assert table.look_up("rare", query).evidence is Evidence.EXECUTES_CHANGE
