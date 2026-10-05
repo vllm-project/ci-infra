@@ -74,8 +74,8 @@ locals {
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
       Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
-      RootVolumeIops                       = 16000
-      RootVolumeThroughput                 = 1000
+      RootVolumeIops                       = 20000
+      RootVolumeThroughput                 = 2000
       # Use custom AMI from SSM parameter (managed by rebuild-cpu-ami pipeline)
       ImageIdParameter                     = "/buildkite/cpu-build-ami/us-east-1"
     }
@@ -133,8 +133,8 @@ locals {
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
       Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
-      RootVolumeIops                       = 16000
-      RootVolumeThroughput                 = 1000
+      RootVolumeIops                       = 20000
+      RootVolumeThroughput                 = 2000
       # Use custom AMI from SSM parameter (managed by rebuild-cpu-ami pipeline)
       ImageIdParameter                     = "/buildkite/cpu-build-ami/us-east-1"
     }
@@ -154,8 +154,8 @@ locals {
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
       Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
-      RootVolumeIops                       = 16000
-      RootVolumeThroughput                 = 1000
+      RootVolumeIops                       = 20000
+      RootVolumeThroughput                 = 2000
       ImageIdParameter                     = "/buildkite/cpu-build-ami/us-east-1"
     }
 
@@ -172,8 +172,8 @@ locals {
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
       Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
-      RootVolumeIops                       = 16000
-      RootVolumeThroughput                 = 1000
+      RootVolumeIops                       = 20000
+      RootVolumeThroughput                 = 2000
       # Use custom AMI from SSM parameter (managed by rebuild-cpu-ami pipeline)
       ImageIdParameter                     = "/buildkite/cpu-build-ami/us-east-1"
     }
@@ -191,8 +191,8 @@ locals {
       VpcId                                = module.vpc_us_east_1.vpc_id
       SecurityGroupIds                     = module.vpc_us_east_1.default_security_group_id
       Subnets                              = join(",", module.vpc_us_east_1.public_subnets)
-      RootVolumeIops                       = 16000
-      RootVolumeThroughput                 = 1000
+      RootVolumeIops                       = 20000
+      RootVolumeThroughput                 = 2000
     }
   }
 
