@@ -23,12 +23,6 @@ resource "google_service_account" "ci_agent_tpu" {
   display_name = "Buildkite agents: v6e and v7x fleets"
 }
 
-# The cpu_64_core fleet stays on this account until ci-agent-cpu can read
-# what its image builds pull from other projects.
-data "google_compute_default_service_account" "default" {
-  project = var.project_id
-}
-
 locals {
   ci_agent_members = {
     cpu = "serviceAccount:${google_service_account.ci_agent_cpu.email}"
@@ -60,7 +54,9 @@ locals {
     "vllm_buildkite_hf_token",
   ]
 
-  # Artifact Registry repositories (in this project) the agents push to.
+  # Artifact Registry repositories (in this project) the agents push to. The
+  # vllm-torchtpu image builds also install torch-tpu from a Python registry in
+  # another project, which grants ci-agent-cpu read access outside this repo.
   # Both repos build CI images on cpu_64_core, and tpu-inference also builds
   # on the TPU hosts (run_in_docker.sh). Nightly published images
   # (publish_nightly_images.sh) build on cpu_64_core.
