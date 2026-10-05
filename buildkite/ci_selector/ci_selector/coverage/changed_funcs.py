@@ -79,11 +79,15 @@ class FileQuery:
     # A stand-in for a file the recorder cannot see, not part of the diff.
     # The drop side weighs it like any file; the add side skips it.
     proxy: bool = False
-    # The one hardware family whose `current_platform.is_<x>()` branch holds
-    # every changed line, while the rest of the file resolves its names as
-    # before, or None. Such code runs on no other family's jobs, whatever the
-    # recording says about the function around it.
-    platform: str | None = None
+    # The hardware families whose jobs can reach a changed line, when platform
+    # guards (`current_platform.is_<x>()`) leave fewer than all of them and the
+    # rest of the file resolves its names as before; otherwise None. Changed
+    # code runs on no other family's jobs, whatever the recording says about
+    # the function around it.
+    platform: frozenset[str] | None = None
+    # The guards that confine it: a test patching one of them can run the
+    # change on another family's job.
+    platform_guards: frozenset[str] = frozenset()
     note: str = ""  # why FAILED, for diagnosis; never load-bearing
     # Changed function -> the lines, at the record's commit, a run reaching
     # its change must have executed (coverage/lines.py). A function absent
@@ -435,19 +439,12 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
                 continue
             base_import, head_import = import_time, frozenset()
         platform = None
+        guards: frozenset[str] = frozenset()
         if shown.endswith(".py") and base_side and head_side and not note:
             before, after = _read(repo, base, base_side), _read(repo, head, head_side)
-            sides = [
-                _platform_of_lines(before, base_lines),
-                _platform_of_lines(after, head_lines),
-            ]
-            placed = {x for x in sides if x is not None}
-            if (
-                len(placed) == 1
-                and False not in placed
-                and _resolves_alike(before, base_lines, after, head_lines, shown)
-            ):
-                platform = placed.pop()
+            placed, by = _platforms_reached(before, base_lines, after, head_lines)
+            if placed and _resolves_alike(before, base_lines, after, head_lines, shown):
+                platform, guards = placed, by
         query.files.append(
             FileQuery(
                 path=shown,
@@ -460,62 +457,309 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
                 in_recorder_scope=in_scope,
                 note=note,
                 platform=platform,
+                platform_guards=guards,
             )
         )
     return query
 
 
-# current_platform.is_<x>() -> the hardware family whose jobs run that branch.
-# Single families only: is_cuda_alike() spans two, and a plain `else` is
-# everything the guard is not.
-PLATFORM_GUARDS = {"is_xpu": "xpu", "is_rocm": "amd", "is_cpu": "cpu", "is_tpu": "tpu"}
+# current_platform.is_<x>() -> the hardware families whose jobs see it return
+# True. Out-of-tree platforms (hpu, npu) answer False to all of these.
+PLATFORM_GUARDS: dict[str, frozenset[str]] = {
+    "is_cuda": frozenset({"cuda"}),
+    "is_rocm": frozenset({"amd"}),
+    "is_cuda_alike": frozenset({"cuda", "amd"}),
+    "is_xpu": frozenset({"xpu"}),
+    "is_cpu": frozenset({"cpu"}),
+    "is_tpu": frozenset({"tpu"}),
+}
+_EXITS = (ast.Return, ast.Raise, ast.Continue, ast.Break)
 
 
-def _guard_family(test: ast.expr) -> str | None:
+def all_families() -> frozenset[str]:
+    """Every hardware family a CI step can run on."""
+    from ..handwritten import FAMILY_DEVICE_EXACT, FAMILY_DEVICE_PREFIXES
+
+    return frozenset(FAMILY_DEVICE_PREFIXES) | frozenset(FAMILY_DEVICE_EXACT)
+
+
+def _guard(node: ast.AST) -> frozenset[str] | None:
     if (
-        isinstance(test, ast.Call)
-        and isinstance(test.func, ast.Attribute)
-        and test.func.attr in PLATFORM_GUARDS
-        and isinstance(test.func.value, ast.Name)
-        and test.func.value.id == "current_platform"
-        and not test.args
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in PLATFORM_GUARDS
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "current_platform"
+        and not node.args
+        and not node.keywords
     ):
-        return PLATFORM_GUARDS[test.func.attr]
+        return PLATFORM_GUARDS[node.func.attr]
     return None
 
 
-def _platform_of_lines(text: str | None, lines: set[int]) -> str | None | bool:
-    """The family whose guarded branch holds every changed line, None when no
-    line needs placing, or False when some line sits outside such a branch.
-    Blank and comment lines place anywhere."""
+def _truth(test: ast.expr, every: frozenset[str]) -> tuple[frozenset, frozenset]:
+    """(families where `test` can be true, families where it can be false).
+    Anything but platform guards under `not`, `and` and `or` can be either."""
+    fam = _guard(test)
+    if fam is not None:
+        return fam & every, every - fam
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        t, f = _truth(test.operand, every)
+        return f, t
+    if isinstance(test, ast.BoolOp):
+        parts = [_truth(v, every) for v in test.values]
+        ts = [p[0] for p in parts]
+        fs = [p[1] for p in parts]
+        if isinstance(test.op, ast.And):
+            return frozenset.intersection(*ts), frozenset.union(*fs)
+        return frozenset.union(*ts), frozenset.intersection(*fs)
+    return every, every
+
+
+def _guards_in(test: ast.expr) -> frozenset[str]:
+    return frozenset(n.func.attr for n in ast.walk(test) if _guard(n) is not None)
+
+
+def _reach(tree: ast.Module, every: frozenset[str]) -> list[tuple]:
+    """(first line, last line, families that can run it, guards that
+    narrowed it) for every statement.
+
+    A statement inside `if <guard>:` runs only where the guard can be true, one
+    in its `else` only where it can be false. An `if` with no `else` whose body
+    always leaves (return, raise, continue, break) narrows the statements after
+    it the same way, so `if not current_platform.is_rocm(): return` confines
+    the rest of the function to ROCm. A def's body runs where the def ran.
+    """
+    spans: list[tuple] = []
+
+    def suite(stmts: list[ast.stmt], reach: frozenset, by: frozenset) -> None:
+        for st in stmts:
+            first = min(
+                [st.lineno, *(d.lineno for d in getattr(st, "decorator_list", ()))]
+            )
+            spans.append((first, st.end_lineno or st.lineno, reach, by))
+            if isinstance(st, ast.If):
+                t, f = _truth(st.test, every)
+                named = by | _guards_in(st.test)
+                suite(st.body, reach & t, named if t != every else by)
+                suite(st.orelse, reach & f, named if f != every else by)
+                if not st.orelse and st.body and isinstance(st.body[-1], _EXITS):
+                    if f != every:
+                        reach, by = reach & f, named
+                continue
+            if isinstance(st, ast.Match):
+                for case in st.cases:
+                    suite(case.body, reach, by)
+                continue
+            for attr in ("body", "orelse", "finalbody"):
+                inner = getattr(st, attr, None)
+                if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
+                    suite(inner, reach, by)
+            for handler in getattr(st, "handlers", ()):
+                spans.append(
+                    (handler.lineno, handler.end_lineno or handler.lineno, reach, by)
+                )
+                suite(handler.body, reach, by)
+
+    suite(tree.body, every, frozenset())
+    return spans
+
+
+def _place(text: str | None, lines: set[int], every: frozenset[str]):
+    """(the families that can reach any of `lines`, the guards that narrowed
+    them): None when no line needs placing, False when that is every family
+    or cannot be told. Blank and comment lines place anywhere; a line no
+    statement holds reaches all."""
     if not lines:
         return None
     if text is None:
         return False
     try:
-        tree = ast.parse(text)
+        spans = _reach(ast.parse(text), every)
     except SyntaxError:
         return False
-    spans: list[tuple[int, int, str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.If):
-            family = _guard_family(node.test)
-            if family and node.body:
-                spans.append((node.body[0].lineno, node.body[-1].end_lineno, family))
     source = text.splitlines()
     found: set[str] = set()
+    guards: set[str] = set()
+    placed = False
     for n in lines:
         stripped = source[n - 1].strip() if 0 < n <= len(source) else ""
         if not stripped or stripped.startswith("#"):
             continue
-        # Innermost guard wins: the narrowest span holding the line.
-        holding = sorted((b - a, fam) for a, b, fam in spans if a <= n <= b)
+        holding = [(b - a, r, g) for a, b, r, g in spans if a <= n <= b]
         if not holding:
             return False
-        found.add(holding[0][1])
-    if not found:
+        _w, reach, by = min(holding, key=lambda h: h[0])
+        found |= reach
+        guards |= by
+        placed = True
+    return (frozenset(found), frozenset(guards)) if placed else None
+
+
+def _innermost(spans_of, lines: set[int], source: list[str]):
+    """The innermost statement holding each non-blank changed line."""
+    nodes = []
+    for n in sorted(lines):
+        stripped = source[n - 1].strip() if 0 < n <= len(source) else ""
+        if not stripped or stripped.startswith("#"):
+            continue
+        holding = [
+            (st.end_lineno - st.lineno, st)
+            for st in spans_of
+            if st.lineno <= n <= (st.end_lineno or st.lineno)
+        ]
+        if not holding:
+            return None
+        node = min(holding, key=lambda h: h[0])[1]
+        if not nodes or nodes[-1] is not node:
+            nodes.append(node)
+    return nodes
+
+
+class _Unguard(ast.NodeTransformer):
+    def __init__(self):
+        self.guards: list[str] = []
+
+    def visit_Call(self, node: ast.Call):
+        if _guard(node) is not None:
+            self.guards.append(node.func.attr)
+            return ast.Name(id="__platform_guard__", ctx=ast.Load())
+        return self.generic_visit(node)
+
+
+def _guard_swap(before, base_lines, after, head_lines, every):
+    """The families on which a change behaves differently when all it does is
+    swap one platform guard for another, like `is_cuda()` for
+    `is_cuda_alike()` in vllm#51406: only where the two guards disagree.
+    None when the change is anything else."""
+    import copy
+
+    try:
+        old_tree, new_tree = ast.parse(before), ast.parse(after)
+    except SyntaxError:
         return None
-    return found.pop() if len(found) == 1 else False
+    old_stmts = [n for n in ast.walk(old_tree) if isinstance(n, ast.stmt)]
+    new_stmts = [n for n in ast.walk(new_tree) if isinstance(n, ast.stmt)]
+    old = _innermost(old_stmts, base_lines, before.splitlines())
+    new = _innermost(new_stmts, head_lines, after.splitlines())
+    if not old or not new or len(old) != len(new):
+        return None
+    reach = {(a, b): r for a, b, r, _g in _reach(old_tree, every)}
+    differ: set[str] = set()
+    swapped: set[str] = set()
+    for a, b in zip(old, new):
+        ua, ub = _Unguard(), _Unguard()
+        da = ast.dump(ua.visit(copy.deepcopy(a)))
+        db = ast.dump(ub.visit(copy.deepcopy(b)))
+        if da != db or len(ua.guards) != len(ub.guards):
+            return None
+        span_a = (
+            min([a.lineno, *(d.lineno for d in getattr(a, "decorator_list", ()))]),
+            a.end_lineno,
+        )
+        where = reach.get(span_a, every)
+        for ga, gb in zip(ua.guards, ub.guards):
+            if ga != gb:
+                differ |= (PLATFORM_GUARDS[ga] ^ PLATFORM_GUARDS[gb]) & where
+                swapped |= {ga, gb}
+    return (frozenset(differ), frozenset(swapped)) if differ else None
+
+
+def _platforms_reached(before, base_lines, after, head_lines):
+    """(the families that can run the change, the guards that confine it),
+    when fewer than all families; else (None, empty)."""
+    every = all_families()
+    swapped = _guard_swap(before, base_lines, after, head_lines, every)
+    if swapped is not None:
+        return swapped
+    sides = [_place(before, base_lines, every), _place(after, head_lines, every)]
+    if False in sides:
+        return None, frozenset()
+    sides = [s for s in sides if s]
+    placed = frozenset().union(*(s[0] for s in sides))
+    if not placed or placed >= every:
+        return None, frozenset()
+    return placed, frozenset().union(*(s[1] for s in sides))
+
+
+# How a test patches the platform. A guard by name: a patch target ending in
+# `current_platform.is_<x>`, or setattr / patch.object on current_platform
+# naming one; the platform object is shared, so that reaches every module.
+# The whole platform: a target `<module>.current_platform`, or a setattr /
+# patch.object of `current_platform` on a module, which rebinds the name in
+# that module only. Anything else on it (device_type, say) leaves every
+# guard's answer alone.
+_MOCKED_GUARD = re.compile(
+    r"""['"][\w.]*current_platform\.(is_\w+)['"]"""
+    r"""|(?:setattr|patch\.object)\(\s*[\w.]*current_platform\s*,\s*['"](is_\w+)['"]"""
+)
+_MOCKED_PLATFORM = re.compile(
+    r"""['"]([\w.]*?)\.?current_platform['"]"""
+    r"""|(?:setattr|patch\.object)\(\s*([\w.]+)\s*,\s*['"]current_platform['"]"""
+)
+
+
+def _mentions(text: str, f: "FileQuery") -> bool:
+    """Whether a test's text names the changed file's module or one of its
+    changed functions. Over-matching only keeps more."""
+    dotted = f.path.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
+    words = {dotted.rsplit(".", 1)[-1], *(n.rsplit(".", 1)[-1] for n in f.names)}
+    words.discard("<module>")
+    return dotted in text or any(
+        re.search(rf"(?<![\w]){re.escape(w)}(?![\w])", text) for w in words if w
+    )
+
+
+def platform_mockers(repo: Path, ref: str, files) -> dict[str, frozenset[str]]:
+    """Per platform-confined changed file, the test files at `ref` that can
+    run it on another family's job: ones that patch one of its guards, or
+    the whole platform, and name its module or a changed function. Read from
+    text, so it over-counts, which only keeps more."""
+    files = [f for f in files if f.platform]
+    if not files:
+        return {}
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "grep",
+            "-l",
+            "--all-match",
+            "-e",
+            "patch\\|setattr",
+            "-e",
+            "current_platform",
+            ref,
+            "--",
+            "tests/",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    out: dict[str, set[str]] = {}
+    for line in proc.stdout.splitlines():
+        path = line.split(":", 1)[1] if line.startswith(f"{ref}:") else line
+        if not path.endswith(".py"):
+            continue
+        text = _read(repo, ref, path) or ""
+        guards = {g for m in _MOCKED_GUARD.finditer(text) for g in m.groups() if g}
+        swapped = {
+            m.group(1) or m.group(2) or "" for m in _MOCKED_PLATFORM.finditer(text)
+        }
+        if not guards and not swapped:
+            continue
+        for f in files:
+            module = (
+                f.path.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
+            )
+            whole = any(
+                w in ("", "vllm.platforms", module) or w == module.rsplit(".", 1)[-1]
+                for w in swapped
+            )
+            if (whole or guards & f.platform_guards) and _mentions(text, f):
+                out.setdefault(f.path, set()).add(path)
+    return {p: frozenset(t) for p, t in out.items()}
 
 
 def _scopes(

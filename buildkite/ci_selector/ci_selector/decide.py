@@ -264,7 +264,7 @@ def _apply_record(
 ) -> None:
     from .codemap.worktree import state_for
     from .coverage.changed_funcs import build as build_query
-    from .coverage.changed_funcs import mark_unfaithful
+    from .coverage.changed_funcs import mark_unfaithful, platform_mockers
     from .coverage.lines import attach_line_probes
 
     query = mark_unfaithful(build_query(repo, base, head), table.unfaithful_paths)
@@ -315,6 +315,7 @@ def _apply_record(
         stale,
         mode=mode,
         reached_via=_reached_via(repo, base, head, unresolved, union_names, state),
+        platform_mockers=platform_mockers(repo, base, query.files),
     )
     out.stale_steps = len(stale)
     out.reasons = dict(reading.reasons)

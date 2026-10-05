@@ -260,22 +260,41 @@ def unknown_names(
     return dict(out)
 
 
-def _foreign(query: Query, step) -> set[str]:
-    """Changed files whose every changed line sits in another hardware
-    family's `current_platform.is_<x>()` branch: this step cannot run them,
-    whatever its row says about the functions around them. vllm#54874 changed
-    only the XPU branch of get_accelerator_view_from_cpu_tensor, which 315
-    CUDA rows call, and all of them came along."""
-    if step is None or not getattr(step, "device", None) and not getattr(
+def _foreign(
+    query: Query, step, row=None, mockers: dict[str, frozenset[str]] | None = None
+) -> set[str]:
+    """Changed files whose every changed line only other hardware families'
+    jobs can reach, through `current_platform.is_<x>()` guards: this step
+    cannot run them, whatever its row says about the functions around them.
+    vllm#54874 changed only the XPU branch of get_accelerator_view_from_cpu_tensor,
+    which 315 CUDA rows call, and all of them came along.
+
+    A test can patch the platform and run another family's branch on this
+    one: vllm#51274's test sets `is_rocm` true on a CUDA job. So a step whose
+    row ran the changed file and one of the tests `mockers` lists for it
+    keeps it. A step on no known family keeps everything."""
+    if step is None:
+        return set()
+    from ..codemap.hardware import family_of_device, step_in_family
+
+    if family_of_device(getattr(step, "device", None)) is None and not getattr(
         step, "mirror_hw", None
     ):
         return set()
-    from ..codemap.hardware import step_in_family
+
+    def patched_here(f) -> bool:
+        return (
+            row is not None
+            and f.path in row.functions
+            and any(t in row.functions for t in (mockers or {}).get(f.path, ()))
+        )
 
     return {
         f.path
         for f in query.files
-        if getattr(f, "platform", None) and not step_in_family(step, f.platform)
+        if getattr(f, "platform", None)
+        and not any(step_in_family(step, fam) for fam in f.platform)
+        and not patched_here(f)
     }
 
 
@@ -293,6 +312,7 @@ def read_pr(
     matched_slugs: dict[str, list[str]] | None = None,
     failed_missed: dict[str, str] | None = None,
     reached_via: dict[str, frozenset[str]] | None = None,
+    platform_mockers: dict[str, frozenset[str]] | None = None,
 ) -> Reading:
     """The record over one PR's map selection.
 
@@ -335,7 +355,7 @@ def read_pr(
         # `look_up` re-makes this exact match further down, so both read the
         # same predicate or neither moves.
         row = table.row(key)
-        foreign = _foreign(query, keys.steps.get(step_id))
+        foreign = _foreign(query, keys.steps.get(step_id), row, platform_mockers)
         if row is not None:
             direct = any(
                 row_shows_use(row, f, name, mode)
@@ -465,7 +485,16 @@ def read_pr(
         else:
             reading.kept.append(step_id)
 
-    _add_from_rows(table, selection, query, keys, reading, unresolved, failed_missed)
+    _add_from_rows(
+        table,
+        selection,
+        query,
+        keys,
+        reading,
+        unresolved,
+        failed_missed,
+        platform_mockers,
+    )
     return reading
 
 
@@ -477,6 +506,7 @@ def _add_from_rows(
     reading: Reading,
     unresolved: dict[str, set[str]],
     failed_missed: dict[str, str] | None = None,
+    platform_mockers: dict[str, frozenset[str]] | None = None,
 ) -> None:
     """The direction the record is usually forgotten to have: it SELECTS, not
     only removes.
@@ -505,7 +535,7 @@ def _add_from_rows(
         row = table.row(key) if key else None
         if row is None:
             continue  # no row: the map decides, and the map did not pick it
-        foreign = _foreign(query, keys.steps.get(step_id))
+        foreign = _foreign(query, keys.steps.get(step_id), row, platform_mockers)
         if any(
             f.path not in foreign
             and row.contains_call(f.path, name)
