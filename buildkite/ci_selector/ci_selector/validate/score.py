@@ -83,6 +83,7 @@ def score_case(case: dict, repo: Path, cache: Path) -> dict:
     from ..decide import decide
     from ..gitdiff import changed_paths, diff_files
     from ..handwritten import PR_PIPELINE
+    from .generator_replica import today_select
 
     rec = _records(cache, case["record"])
     table = fetch_table(rec / "table.json.gz")
@@ -101,6 +102,12 @@ def score_case(case: dict, repo: Path, cache: Path) -> dict:
     known = set(names.values())
     needed = set(case["needed"]) & known
     uncertain = set(case.get("uncertain", ())) & known - needed
+
+    # Today's rules on the same diff, scored the same way: the comparison
+    # the selector has to beat, never an input to it.
+    today = today_select([(p.config, p.steps) for p in state.pipelines], paths)
+    legacy_ids = {i for i in today.selected.get(PR_PIPELINE, set()) if i in steps}
+    legacy = {names[i]: steps[i].parallelism or 1 for i in legacy_ids}
     return {
         "id": case["id"],
         "pr": case["pr"],
@@ -116,6 +123,16 @@ def score_case(case: dict, repo: Path, cache: Path) -> dict:
         "unknown_labels": sorted(
             (set(case["needed"]) | set(case.get("uncertain", ()))) - known
         ),
+        "legacy": {
+            "run_all": bool(today.run_all.get(PR_PIPELINE)),
+            "selected": sorted(legacy),
+            "jobs": sum(legacy.values()),
+            "needed": sorted(needed),
+            "needed_selected": sorted(needed & legacy.keys()),
+            "missed": sorted(needed - legacy.keys()),
+            "uncertain_selected": sorted(uncertain & legacy.keys()),
+            "unneeded_selected": sorted(legacy.keys() - needed - uncertain),
+        },
     }
 
 
@@ -135,11 +152,14 @@ def _run_group(group: list[dict], repo: str, cache: str) -> list[dict]:
     return out
 
 
-def summarize(results: list[dict]) -> dict:
+def summarize(results: list[dict], side: str | None = None) -> dict:
+    """Totals over the cases the selector does not run everything on. `side`
+    "legacy" scores today's rules on those same cases."""
     ok = [r for r in results if "error" not in r]
     narrow = [r for r in ok if not r["run_all"]]
     t = defaultdict(int)
-    for r in narrow:
+    for case in narrow:
+        r = case[side] if side else case
         t["steps"] += len(r["selected"])
         t["jobs"] += r["jobs"]
         t["needed"] += len(r["needed"])
@@ -186,6 +206,9 @@ def run(args) -> int:
     results.sort(key=lambda r: r["id"])
     summary = summarize(results)
     print(json.dumps(summary, indent=1))
+    if all("legacy" in r for r in results if "error" not in r):
+        summary["legacy"] = summarize(results, "legacy")
+        print(f"today's rules on the same cases: {json.dumps(summary['legacy'])}")
     if args.baseline:
         before = {r["id"]: r for r in json.loads(args.baseline.read_text())["results"]}
         lost = []
