@@ -1,5 +1,5 @@
 <!-- ci-selector-shadow -->
-### CI selector (shadow): no narrower answer, every step runs: 189 test steps (264 jobs) instead of 189 (264 jobs)
+### CI selector (shadow): no narrower answer, every step runs: 193 test steps (269 jobs) instead of 193 (269 jobs)
 
 Shadow mode: this changes nothing about what CI runs. It shows what the evidence-based selector would pick for this PR, next to today's rules. [How it works](https://github.com/vllm-project/ci-infra/tree/main/buildkite/ci_selector).
 
@@ -7,19 +7,20 @@ Shadow mode: this changes nothing about what CI runs. It shows what the evidence
 
 | steps (jobs) | Today's rules | Selector | Would skip | Would add |
 |---|---|---|---|---|
-| NVIDIA, CPU and others | 189 (264) | 189 (264) | 0 (0) | 0 (0) |
-| AMD mirrors | 156 (220) | 156 (220) | 0 (0) | 0 (0) |
+| NVIDIA, CPU and others | 193 (269) | 193 (269) | 0 (0) | 0 (0) |
+| AMD mirrors | 163 (227) | 163 (227) | 0 (0) | 0 (0) |
 
 Why: fail-open: CMakeLists.txt is a docker-image build input (docker/Dockerfile COPY); the CI image is rebuilt from it; running everything
 
 Today's rules run everything for this diff.
 
-<details><summary>Selector would run (189)</summary>
+<details><summary>Selector would run (193)</summary>
 
 - `amd-fp8-moe-kernels-mi355`
 - `amd-kernels-mi355`
 - `amd-lm-eval-small-models-harness`
 - `amd-native-quantization-kernels-mi355`
+- `amd-qwen3-next-mtp-async-eplb-accuracy`
 - `arm-cpu-test` ×3
 - `ascend-npu-test`
 - `async-engine-inputs-utils-worker`
@@ -94,6 +95,8 @@ Today's rules run everything for this diff.
 - `fusion-e2e-config-sweep-h100`
 - `fusion-e2e-quick-h100`
 - `fusion-e2e-tp2-ar-rms-config-sweep-h100`
+- `fusion-e2e-tp2-ar-rms-dynamo-partition-amd`
+- `fusion-e2e-tp2-ar-rms-inductor-partition-amd`
 - `fusion-e2e-tp2-asynctp-config-sweep-h100`
 - `fusion-e2e-tp2-b200`
 - `fusion-e2e-tp2-quick-h100`
@@ -120,6 +123,7 @@ Today's rules run everything for this diff.
 - `kernels-moe-test` ×5
 - `kernels-quantization-test` ×6
 - `kernels-root-misc-test-b200`
+- `kimi-k3-prefix-cache-4xb200` ×2
 - `kimi-k3-unit-tests-b200`
 - `kv-offload-large`
 - `kv-offload-medium`
@@ -227,10 +231,10 @@ none
 none
 </details>
 
-#### CI results (2026-10-01 23:58 UTC)
+#### CI results (2026-10-06 18:54 UTC)
 
 0 passed, 0 failed, 0 pending.
 
 No failures to judge.
 
-<sub>15 changed files · base `ca65eb67d9` · head `5f2b1021cb` · Python record: build 92249 at `73c7cae4d7` · kernel record: table 73c7cae4d7 (build 92249), map 73c7cae4d7 · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 128 optional steps the selector would also run</sub>
+<sub>15 changed files · base `3403e0f176` · head `259f9a33c9` · Python record: build 93039 at `1e5d0ea888` · kernel record: table 1e5d0ea888 (build 93039), map 1e5d0ea888 · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 138 optional steps the selector would also run</sub>
