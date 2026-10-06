@@ -546,7 +546,9 @@ class TestUnionCoversEveryStampField:
     the counts and the digest from whatever it was handed.
     """
 
-    RECOMPUTED = frozenset({"n_files", "n_functions", "n_import_time", "digest"})
+    RECOMPUTED = frozenset(
+        {"n_files", "n_functions", "n_import_time", "n_lines", "digest"}
+    )
 
     def test_union_rows_carries_every_field(self):
         source = inspect.getsource(union_rows)
@@ -603,35 +605,49 @@ class TestStampShapeIsPinned:
         """Without its listed fields, the stamp must hash to the shape pinned
         when that version was current, so a field added since is never read
         from an older row as its default by accident."""
-        pinned = {6: "d2817305f3714d26"}
+        pinned = {6: "d2817305f3714d26", 7: "9d3fc3a03453ab23"}
         for version, missing in READABLE_OLDER.items():
             assert self.shape(missing) == pinned[version], version
 
-    def test_an_older_table_loads_and_its_rows_verify(self, tmp_path):
-        """A v6 table is the v7 one minus libcalls, signed without it."""
+    @pytest.mark.parametrize("version", sorted(READABLE_OLDER))
+    def test_an_older_table_loads_and_its_rows_verify(self, tmp_path, version):
+        """An older table is the current one minus the fields its version
+        lacked, signed without them, and it reads those fields as no data."""
         import gzip
         import json
 
         from ci_selector.coverage.model import Stamp, digest_of
         from ci_selector.coverage.table import load
 
+        missing = READABLE_OLDER[version]
         stamp = Stamp(n_files=1, n_functions=1, clean_exits=1, jobs=1)
         functions = {"vllm/a.py": frozenset({"f"})}
         fields = dataclasses.asdict(stamp)
-        fields.pop("libcalls")
-        fields["digest"] = digest_of(functions, stamp, {}, frozenset({"libcalls"}))
+        for name in missing:
+            fields.pop(name)
+        fields["digest"] = digest_of(functions, stamp, {}, missing)
         blob = {"stamp": fields, "functions": {"vllm/a.py": ["f"]}, "import_time": {}}
         path = tmp_path / "t.json.gz"
         path.write_bytes(
-            gzip.compress(json.dumps({"version": 6, "rows": {"s": blob}}).encode())
+            gzip.compress(
+                json.dumps({"version": version, "rows": {"s": blob}}).encode()
+            )
         )
         table = load(path)
-        assert table.available and table.row("s").stamp.libcalls == {}
-        fields["libcalls"] = {}
-        path.write_bytes(
-            gzip.compress(json.dumps({"version": 6, "rows": {"s": blob}}).encode())
+        row = table.row("s")
+        assert table.available and row.stamp.libcalls == {} or "libcalls" not in missing
+        assert (
+            not row.stamp.lines_recorded and row.ran_any_line("vllm/a.py", {1}) is None
         )
-        assert not load(path).row("s"), "a v6 row carrying a v7 field is rejected"
+        fields[sorted(missing)[0]] = dataclasses.asdict(Stamp())[sorted(missing)[0]]
+        path.write_bytes(
+            gzip.compress(
+                json.dumps({"version": version, "rows": {"s": blob}}).encode()
+            )
+        )
+        assert not load(path).row("s"), (
+            "an older row carrying a newer field is rejected"
+        )
 
     def test_the_shape_is_not_vacuous(self):
         # Guard the guard: an emptied or renamed Stamp must not hash to

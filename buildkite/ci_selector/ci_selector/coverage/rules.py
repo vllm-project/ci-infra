@@ -23,7 +23,7 @@ from pathlib import Path
 
 from ..handwritten import TESTS_SCOPE
 from .changed_funcs import Query
-from .phase import DEFAULT_MODE, PhaseMode, row_shows_use
+from .phase import DEFAULT_MODE, PhaseMode, ran_changed_lines, row_shows_use
 from .table import Table
 
 # Lets a row add an optional step it shows executing the change; see
@@ -539,6 +539,7 @@ def _add_from_rows(
         if any(
             f.path not in foreign
             and row.contains_call(f.path, name)
+            and ran_changed_lines(row, f, name) is not False
             and table.discriminates(f.path, name)
             # Stand-ins are drop evidence only. A file outside the recorder
             # scope may still be in a row (tests/ is recorded before the
