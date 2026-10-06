@@ -297,7 +297,7 @@ def _get_step_plugin(step: Step):
         DeviceType.CPU_SMALL,
         DeviceType.CPU_MEDIUM,
     )
-    use_arm64 = step.device == DeviceType.DGX_SPARK
+    use_arm64 = step.device in (DeviceType.DGX_SPARK, DeviceType.GH200)
     if _uses_k8s_plugin(step):
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
