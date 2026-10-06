@@ -1377,10 +1377,8 @@ def startup_note(env, items):
         name = cs.get("name") or ""
         if "gcsfuse" not in name:
             continue
-        tail = subprocess.run(
-            ["kubectl", "-n", NAMESPACE, "logs", pod["metadata"]["name"],
-             "-c", name, "--tail=3"],
-            env=env, capture_output=True, text=True, check=False, timeout=60,
+        tail = worker_kubectl(
+            env, "logs", pod["metadata"]["name"], "-c", name, "--tail=3",
         )
         last = " / ".join(l.strip() for l in tail.stdout.splitlines() if l.strip())
         if last:
@@ -1509,6 +1507,24 @@ def worker_env(cluster_name, registry):
     return env
 
 
+def worker_kubectl(env, *args, timeout=60):
+    """One read from the worker through Connect Gateway, never raising.
+
+    Every caller is inside the watch loop and treats a failed read as "ask
+    again next turn". A read that hangs past its timeout is the same case, so
+    it comes back as a failed call too. Raised, it would end the launcher,
+    which deletes a workload that is running fine.
+    """
+    try:
+        return subprocess.run(
+            ["kubectl", "-n", NAMESPACE, *args],
+            env=env, capture_output=True, text=True, check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 1, "", f"timed out after {timeout}s")
+
+
 def worker_pods(env, job_id):
     """This workload's pods on the worker, or None if they could not be read.
 
@@ -1518,10 +1534,8 @@ def worker_pods(env, job_id):
     None rather than an empty list, because "no pods yet" and "could not ask"
     read differently in a step log.
     """
-    proc = subprocess.run(
-        ["kubectl", "-n", NAMESPACE, "get", "pods",
-         "-l", f"buildkite.com/job-id={job_id}", "-o", "json"],
-        env=env, capture_output=True, text=True, check=False, timeout=60,
+    proc = worker_kubectl(
+        env, "get", "pods", "-l", f"buildkite.com/job-id={job_id}", "-o", "json",
     )
     if proc.returncode != 0:
         return None
@@ -1589,14 +1603,15 @@ class LogCollector:
         # whose timestamps advance independently, and one cursor per pod cannot
         # represent that - a chatty sidecar drags the cursor forward and the
         # workload's own lines are discarded as already seen.
-        cmd = ["kubectl", "-n", NAMESPACE, "logs", pod["name"],
-               "--container", WORKLOAD_CONTAINER, "--timestamps=true"]
+        args = ["logs", pod["name"], "--container", WORKLOAD_CONTAINER,
+                "--timestamps=true"]
         since = self.cursor.get(pod["name"])
         if since:
-            cmd += ["--since-time", since]
-        proc = subprocess.run(cmd, env=self.env, capture_output=True,
-                              text=True, check=False, timeout=120)
+            args += ["--since-time", since]
+        proc = worker_kubectl(self.env, *args, timeout=120)
         # A pod that is Pending, or already deleted, is normal - not an error.
+        # Nor is a timed-out read: the cursor has not moved, so the next poll
+        # asks for the same lines.
         return proc.stdout if proc.returncode == 0 else ""
 
     def sweep(self):
