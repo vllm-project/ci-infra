@@ -87,6 +87,7 @@ data:
     priorities:
     - integration
     - low
+    - oncall-fix
     - post-merge
     - pre-merge
     queue_max_seconds: 43200

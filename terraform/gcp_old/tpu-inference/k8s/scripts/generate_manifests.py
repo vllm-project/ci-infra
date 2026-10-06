@@ -99,6 +99,7 @@ WORKER_COMPUTE_CLASS = "worker-cpu"
 # "default" is the gap rather than a class; `low` covers nightlies and
 # autotuning. Only the order of the numbers matters to Kueue.
 WORKLOAD_PRIORITIES = {
+    "oncall-fix": (120, "A pull request labelled oncall-fix: ahead of everything"),
     "post-merge": (100, "Tests of what is already on main"),
     "pre-merge": (50, "Tests gating a pull request"),
     "integration": (30, "The integration suite"),

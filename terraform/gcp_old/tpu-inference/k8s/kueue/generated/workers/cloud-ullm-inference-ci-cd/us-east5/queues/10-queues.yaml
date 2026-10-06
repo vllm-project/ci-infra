@@ -11,6 +11,17 @@
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: WorkloadPriorityClass
 metadata:
+  name: oncall-fix
+value: 120
+description: "A pull request labelled oncall-fix: ahead of everything"
+---
+# What a workload's place in the queue is worth, mirroring the rungs
+# bootstrap.sh applies on bare metal. A workload naming no class scores 0.
+#
+# Ordering only - nothing running is ever taken away; see queue_group.yaml.tpl.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
   name: post-merge
 value: 100
 description: "Tests of what is already on main"

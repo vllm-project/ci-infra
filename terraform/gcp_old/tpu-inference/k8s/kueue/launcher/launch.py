@@ -77,6 +77,11 @@ QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 PRIORITY_LABEL = "kueue.x-k8s.io/priority-class"
 PRIORITY_ENV = "WORKLOAD_PRIORITY"
 
+# Where a build's bootstrap.sh records the class for every workload of the
+# build, beside the JOB_PRIORITY it ranks bare-metal jobs by. A step's own
+# WORKLOAD_PRIORITY wins.
+PRIORITY_META_DATA = "WORKLOAD_PRIORITY"
+
 # GKE's name, not ours: the gcsfuse sidecar looks for an emptyDir called this
 # and uses it as its file cache.
 FUSE_CACHE_VOLUME = "gke-gcsfuse-cache"
@@ -870,18 +875,47 @@ def render(path, image, name, shape):
     return coerce_ints(doc)
 
 
+def build_priority():
+    """The class the build's bootstrap recorded, or "" if it recorded none or
+    it could not be read. Best effort: a run without one is ordered at 0, not
+    refused."""
+    try:
+        proc = subprocess.run(
+            [AGENT_CLI, "meta-data", "get", PRIORITY_META_DATA, "--default", ""],
+            capture_output=True, text=True, timeout=CLI_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"warning: could not read {PRIORITY_META_DATA} meta-data: {exc}")
+        return ""
+    if proc.returncode != 0:
+        log(f"warning: could not read {PRIORITY_META_DATA} meta-data: "
+            f"{proc.stderr.strip()[:200]}")
+        return ""
+    return proc.stdout.strip()
+
+
 def resolve_priority(registry):
     """Which WorkloadPriorityClass this run is worth, or None for the default.
 
-    Unlabelled scores 0, which the ladder leaves empty, so a step that says
-    nothing needs no class. A name no class answers to is not a demotion but a
-    refusal - Kueue will not create the Workload - so it is checked here, where
-    the valid names are known, rather than failing inside admission.
+    The step's WORKLOAD_PRIORITY if it names one, otherwise the class the
+    build's bootstrap recorded. Unlabelled scores 0, which the ladder leaves
+    empty, so a build that says nothing needs no class. A name no class
+    answers to is not a demotion but a refusal - Kueue will not create the
+    Workload - so the step's is checked here, where the valid names are known,
+    rather than failing inside admission. The build's is dropped instead: one
+    bad meta-data value should not fail every step of the build.
     """
     known = registry.get("priorities") or []
     asked = os.environ.get(PRIORITY_ENV, "").strip()
     if not asked:
-        return None
+        recorded = build_priority()
+        if recorded and recorded not in known:
+            log(f"warning: the build's {PRIORITY_META_DATA} {recorded!r} is not "
+                "a priority the fleet defines; submitting unclassed")
+            return None
+        if recorded:
+            log(f"priority class {recorded} (from the build's {PRIORITY_META_DATA})")
+        return recorded or None
     if asked not in known:
         raise SystemExit(
             f"{PRIORITY_ENV}={asked!r} is not a priority the fleet defines. "
