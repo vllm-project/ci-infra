@@ -131,6 +131,11 @@ class ProcessRecord:
     lines: dict[str, set[int]] = field(default_factory=dict)
     records_lines: bool = False
     lost_line_records: bool = False
+    # Config objects the process built, as (class, JSON of scalar fields),
+    # from `#cfg` lines; and the platform and device capability it ran on,
+    # from `#plat`. Absent from an older recorder's files.
+    configs: list[tuple[str, str]] = field(default_factory=list)
+    platform: dict[str, str] = field(default_factory=dict)
 
     @property
     def lost_lines(self) -> bool:
@@ -159,6 +164,8 @@ def read_process(path: Path) -> ProcessRecord | None:
     errors = 0
     malformed = 0
     identity: dict = {}
+    configs: list[tuple[str, str]] = []
+    platform: dict[str, str] = {}
 
     with open(path, errors="replace") as fh:
         for line in fh:
@@ -186,6 +193,13 @@ def read_process(path: Path) -> ProcessRecord | None:
                     libcalls.setdefault(parts[1], set()).add(parts[2])
                 else:
                     malformed += 1
+            elif tag == "#cfg":
+                if len(parts) == 3 and parts[1] and parts[2].startswith("{"):
+                    configs.append((parts[1], parts[2]))
+                else:
+                    malformed += 1
+            elif tag == "#plat":
+                platform.update(_kv(parts[1:]))
             elif tag == "#lf":
                 if len(parts) == 3 and parts[1] and parts[2]:
                     line_files[parts[1]] = parts[2]
@@ -264,6 +278,8 @@ def read_process(path: Path) -> ProcessRecord | None:
         lines=dict(lines),
         records_lines=records_lines,
         lost_line_records=line_counter is not None and len(raw_lines) < line_counter,
+        configs=configs,
+        platform=platform,
     )
 
 

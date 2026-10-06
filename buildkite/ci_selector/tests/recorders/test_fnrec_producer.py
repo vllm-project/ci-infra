@@ -98,7 +98,32 @@ def fp8_gemm_nt():
     return _inner()
 """
 
+CONFIG_STUB = """\
+from dataclasses import dataclass, field
+
+
+@dataclass
+class SchedulerConfig:
+    interval: int = 1
+    policy: str = "fcfs"
+
+    def __post_init__(self):
+        pass
+
+
+@dataclass
+class VllmConfig:
+    scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
+    seed: int = 0
+
+    def __post_init__(self):
+        # Settles a section's value after the section was built.
+        self.scheduler_config.policy = "priority"
+"""
+
 PROGRAM = (
+    "import vllm.config as c; "
+    "c.VllmConfig(scheduler_config=c.SchedulerConfig(interval=4)); "
     "import vllm, vllm.uses_libs, tests.helpers, flashlib; "
     "tests.helpers.helper(); flashlib.go(); vllm.Engine().start(); "
     "vllm.branchy(False); "
@@ -118,6 +143,8 @@ def recorded(tmp_path_factory):
     (root / "vllm").mkdir()
     (root / "vllm" / "__init__.py").write_text(VLLM_STUB)
     (root / "vllm" / "uses_libs.py").write_text(USES_LIBS_STUB)
+    (root / "vllm" / "config").mkdir()
+    (root / "vllm" / "config" / "__init__.py").write_text(CONFIG_STUB)
     (root / "vllm" / "third_party" / "deep_gemm").mkdir(parents=True)
     (root / "vllm" / "third_party" / "__init__.py").write_text("")
     (root / "vllm" / "third_party" / "deep_gemm" / "__init__.py").write_text(
@@ -315,3 +342,16 @@ def test_the_lines_a_process_ran_are_recorded(recorded):
     assert UNTAKEN_LINE not in ran
     assert "tests/helpers.py" in record.lines
     assert not any("flashlib" in path for path in record.lines)
+
+
+def test_the_config_objects_a_process_builds_are_recorded(recorded):
+    """Runtime state: each config, once per distinct field set, and the
+    sections again as VllmConfig left them."""
+    import json
+
+    record = read_process(recorded[0])
+    seen = {(cls, json.dumps(json.loads(text), sort_keys=True)) for cls, text in record.configs}
+    assert ("SchedulerConfig", '{"interval": 4, "policy": "fcfs"}') in seen
+    assert ("SchedulerConfig", '{"interval": 4, "policy": "priority"}') in seen
+    assert ("VllmConfig", '{"seed": 0}') in seen
+    assert record.malformed == 0 and record.errors == 0

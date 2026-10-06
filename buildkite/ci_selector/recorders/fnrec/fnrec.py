@@ -17,6 +17,13 @@ changed lines a job never ran is one the job cannot break. Line events are
 switched on per code object when it first starts, so nothing outside the
 two roots pays for them, and each line DISABLEs after its first event.
 
+Runtime state too: each vLLM config object a process builds, its scalar
+fields once per distinct value set (`#cfg`), and at exit the platform and
+the CUDA device capability when the process already initialized CUDA
+(`#plat`). Which GPU, model and features a job ran with decide whether a
+change behind a condition on them can reach it at all. CUDA is never
+initialized here: a parent that touched it would break fork workers.
+
 A short list of libraries is recorded by call as well: the functions in them
 that code outside the library called at runtime, one `#lib` line each. That
 is what a dependency bump routes on, the jobs that called flashinfer rather
@@ -72,6 +79,7 @@ _tests_logged = False
 _packages = set()
 _libcalls = set()
 _line_files = {}
+_configs = set()
 _stats = {"root": 0, "other": 0, "lines": 0, "errors": 0, "last_error": ""}
 _ended = False
 
@@ -271,6 +279,10 @@ def _end():
         return
     _ended = True
     try:
+        _note_platform()
+    except Exception:
+        pass
+    try:
         _fh.write(_stat_line("#end"))
         _fh.flush()
     except Exception:
@@ -464,9 +476,10 @@ def _after_in_child():
     """
     global _fh, _fh_pid, _seen, _lock, _nonce, _origin, _stats, _ended, _hooks_pid
     global _root_logged, _root_tries, _tests_logged, _packages, _libcalls
-    global _line_files
+    global _line_files, _configs
     _fh, _fh_pid, _hooks_pid = None, None, None
     _line_files = {}
+    _configs = set()
     _root_logged = False
     _tests_logged = False
     _root_tries = 0
@@ -525,6 +538,7 @@ def _begin():
 
     _out()  # Announce this process even if it goes on to record nothing.
     os.register_at_fork(after_in_child=_after_in_child)
+    sys.meta_path.insert(0, _ConfigHook())
 
 
 def _arm_pytest_plugin():
@@ -541,6 +555,152 @@ def _arm_pytest_plugin():
     if name in existing.split(","):
         return
     os.environ["PYTEST_PLUGINS"] = f"{existing},{name}" if existing else name
+
+
+_SCALARS = (bool, int, float, str, type(None))
+_MAX_CONFIGS = 2000
+
+
+def _scalar(value):
+    """A JSON-safe scalar for a config field, or None to leave it out."""
+    import enum
+
+    if isinstance(value, enum.Enum):
+        return str(value.name)
+    if isinstance(value, _SCALARS):
+        if isinstance(value, str) and len(value) > 200:
+            return value[:200]
+        return value
+    if isinstance(value, (list, tuple)) and len(value) <= 16:
+        if all(isinstance(v, _SCALARS) for v in value):
+            return list(value)
+    return None
+
+
+def _note_config(obj):
+    """Write one config object's scalar fields, once per distinct set."""
+    import dataclasses
+    import json
+
+    if len(_configs) >= _MAX_CONFIGS or not dataclasses.is_dataclass(obj):
+        return
+    fields = {}
+    for f in dataclasses.fields(obj):
+        try:
+            v = _scalar(getattr(obj, f.name))
+        except Exception:
+            continue
+        if v is not None or getattr(obj, f.name, 0) is None:
+            fields[f.name] = v
+    cls = type(obj).__name__
+    if cls == "ModelConfig":
+        # What the gates most often ask: which model family, which format.
+        for name in ("architectures", "model_type"):
+            try:
+                v = getattr(obj, name, None)
+                if name == "model_type":
+                    v = getattr(getattr(obj, "hf_config", None), "model_type", None)
+                fields[name] = _scalar(v)
+            except Exception:
+                pass
+    text = json.dumps(fields, sort_keys=True, default=str)
+    key = (cls, hash(text))
+    if key in _configs:
+        return
+    _configs.add(key)
+    with _lock:
+        _out().write(f"#cfg\t{cls}\t{text}\n")
+
+
+def _wrap_post_init(cls, resolve_children):
+    original = cls.__dict__.get("__post_init__")
+    if original is None or getattr(original, "_fnrec", False):
+        return
+
+    def __post_init__(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        try:
+            _note_config(self)
+            if resolve_children:
+                # VllmConfig settles its sections' defaults after they were
+                # built: record them as they end up, too.
+                import dataclasses
+
+                for f in dataclasses.fields(self):
+                    child = getattr(self, f.name, None)
+                    if dataclasses.is_dataclass(child):
+                        _note_config(child)
+        except Exception as exc:
+            _stats["errors"] += 1
+            _stats["last_error"] = f"cfg:{type(exc).__name__}"
+        return result
+
+    __post_init__._fnrec = True
+    __post_init__.__wrapped__ = original
+    cls.__post_init__ = __post_init__
+
+
+def _patch_configs(module):
+    """Wrap `__post_init__` of every config class vllm.config exports."""
+    import dataclasses
+
+    for name in dir(module):
+        cls = getattr(module, name, None)
+        if isinstance(cls, type) and dataclasses.is_dataclass(cls):
+            if (cls.__module__ or "").startswith("vllm.config"):
+                _wrap_post_init(cls, resolve_children=cls.__name__ == "VllmConfig")
+
+
+class _ConfigHook:
+    """Patches the config classes once `vllm.config` has been imported."""
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != "vllm.config":
+            return None
+        try:
+            sys.meta_path.remove(self)
+        except ValueError:
+            pass
+        import importlib.util
+
+        try:
+            spec = importlib.util.find_spec(fullname)
+        except Exception:
+            return None
+        if spec is None or spec.loader is None:
+            return spec
+        loader_exec = spec.loader.exec_module
+
+        def exec_module(module):
+            loader_exec(module)
+            try:
+                _patch_configs(module)
+            except Exception as exc:
+                _stats["errors"] += 1
+                _stats["last_error"] = f"cfgpatch:{type(exc).__name__}"
+
+        spec.loader.exec_module = exec_module
+        return spec
+
+
+def _note_platform():
+    """At exit: the platform vLLM resolved, and the device capability when
+    this process already initialized CUDA. Never initializes anything."""
+    parts = []
+    plat = sys.modules.get("vllm.platforms")
+    current = getattr(plat, "_current_platform", None) if plat else None
+    if current is not None:
+        parts.append(f"platform={type(current).__name__}")
+    torch = sys.modules.get("torch")
+    try:
+        if torch is not None and torch.cuda.is_initialized():
+            major, minor = torch.cuda.get_device_capability()
+            parts.append(f"capability={major * 10 + minor}")
+            parts.append(f"hip={1 if getattr(torch.version, 'hip', None) else 0}")
+    except Exception:
+        pass
+    if parts and _fh is not None:
+        _fh.write("#plat\t" + "\t".join(parts) + "\n")
 
 
 class _VllmImportTrigger:

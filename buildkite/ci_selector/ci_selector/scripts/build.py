@@ -240,11 +240,13 @@ def merge_build(
     repo: Path,
     verbose: bool = False,
     census: BuildCensus | None = None,
+    states: dict | None = None,
 ) -> dict[str, Row]:
     """Every recorded job in one build, folded into rows.
 
     `census` is an optional out-parameter so existing callers stay untouched;
-    when omitted a local one is built and printed.
+    when omitted a local one is built and printed. So is `states`: row key ->
+    the runtime state its processes recorded (see `fold_states`).
     """
     index = json.loads((build_dir / "index.json").read_text())
     commit = index["commit"]
@@ -379,6 +381,8 @@ def merge_build(
             lines_whole[key] = lines_whole.get(key, True) and (
                 process.records_lines and not process.lost_line_records
             )
+            if states is not None:
+                fold_states(states.setdefault(key, {}), process)
 
         if verbose:
             print(f"  {key}: {len(accumulated[key])} files")
@@ -612,13 +616,14 @@ def merge_builds(
     repo: Path,
     verbose: bool = False,
     censuses: list[BuildCensus] | None = None,
+    states: dict | None = None,
 ) -> dict[str, Row]:
     table: dict[str, Row] = {}
     for build_dir in build_dirs:
         if verbose:
             print(f"reading {build_dir.name}")
         census = BuildCensus()
-        rows = merge_build(build_dir, repo, verbose=verbose, census=census)
+        rows = merge_build(build_dir, repo, verbose=verbose, census=census, states=states)
         if censuses is not None:
             censuses.append(census)
         for key, row in rows.items():
@@ -650,6 +655,41 @@ def table_source(rows: dict[str, Row]) -> dict:
         "commits": sorted(commits),
         "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+
+
+def fold_states(acc: dict, process) -> None:
+    """One process's runtime state into its row: each config class's distinct
+    field sets, each platform, and how many processes ran vllm code without
+    building a config (those ran under state nobody recorded)."""
+    configs = acc.setdefault("configs", {})
+    for cls, text in process.configs:
+        configs.setdefault(cls, set()).add(text)
+    if process.platform:
+        acc.setdefault("platforms", set()).add(
+            json.dumps(process.platform, sort_keys=True)
+        )
+    if process.functions and not process.configs:
+        acc["stateless"] = acc.get("stateless", 0) + 1
+    acc["processes"] = acc.get("processes", 0) + 1
+
+
+def write_states(states: dict, out: Path) -> None:
+    """The runtime-state sidecar next to a table: row key -> configs (class ->
+    field dicts), platforms, and process counts."""
+    data = {
+        key: {
+            "configs": {
+                cls: [json.loads(t) for t in sorted(texts)]
+                for cls, texts in sorted(acc.get("configs", {}).items())
+            },
+            "platforms": [json.loads(p) for p in sorted(acc.get("platforms", ()))],
+            "stateless": acc.get("stateless", 0),
+            "processes": acc.get("processes", 0),
+        }
+        for key, acc in sorted(states.items())
+    }
+    with gzip.open(out, "wt") as fh:
+        json.dump(data, fh, separators=(",", ":"))
 
 
 def write_table(rows: dict[str, Row], out: Path) -> None:
@@ -727,7 +767,10 @@ def main() -> None:
                 expected_jobs=args.expected_jobs,
             )
             builds.append(staged)
-        rows = merge_builds(builds, args.repo, verbose=args.verbose, censuses=censuses)
+        states: dict = {}
+        rows = merge_builds(
+            builds, args.repo, verbose=args.verbose, censuses=censuses, states=states
+        )
 
     collapsed = [c for c in censuses if c.collapsed]
     if collapsed and not args.allow_partial:
@@ -742,6 +785,10 @@ def main() -> None:
         raise SystemExit(2)
 
     write_table(rows, args.out)
+    if locals().get("states"):
+        # Runtime state rides beside the table, unsigned: it can only narrow
+        # what a gate keeps, and a row without it reads as before.
+        write_states(states, args.out.with_name("state_table.json.gz"))
 
     keyless = sum(1 for r in rows.values() if not r.keyed)
     lossy = sum(1 for r in rows.values() if r.stamp.lost_lines)
