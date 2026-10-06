@@ -9,7 +9,7 @@ locals {
     Subnets                               = join(",", module.vpc.public_subnets)
     RootVolumeSize                        = 512   # Gb
     EnableDockerUserNamespaceRemap        = false # Turn off remap so we can run dind
-    BuildkiteAgentTimestampLines          = true
+    BuildkiteAgentTimestampLines          = true # Stack v7 removed this; the stack resources drop it for v7+ stacks
     BuildkiteTerminateInstanceAfterJob    = true
   }
 
@@ -58,6 +58,8 @@ locals {
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      elastic_ci_stack_version             = "7.2.0" # Stack v7.2.0 bakes agent 4.1.0; canary for the agent v4 rollout
+      BootstrapScriptUrl                   = "https://vllm-ci.s3.us-west-2.amazonaws.com/instance-bootstrap.sh"
     }
   }
 
@@ -289,7 +291,7 @@ locals {
 resource "aws_cloudformation_stack" "bk_queue_premerge" {
   for_each   = local.merged_parameters_premerge
   name       = "bk-${each.key}"
-  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
+  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" && !(k == "BuildkiteAgentTimestampLines" && tonumber(split(".", each.value["elastic_ci_stack_version"])[0]) >= 7) }
 
   template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
@@ -305,7 +307,7 @@ resource "aws_cloudformation_stack" "bk_queue_premerge" {
 resource "aws_cloudformation_stack" "bk_queue_premerge_us_east_1" {
   for_each   = local.merged_parameters_premerge_us_east_1
   name       = "bk-${each.key}"
-  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
+  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" && !(k == "BuildkiteAgentTimestampLines" && tonumber(split(".", each.value["elastic_ci_stack_version"])[0]) >= 7) }
 
   template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
@@ -323,7 +325,7 @@ resource "aws_cloudformation_stack" "bk_queue_premerge_us_east_1" {
 resource "aws_cloudformation_stack" "bk_queue_postmerge" {
   for_each   = local.merged_parameters_postmerge
   name       = "bk-${each.key}"
-  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
+  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" && !(k == "BuildkiteAgentTimestampLines" && tonumber(split(".", each.value["elastic_ci_stack_version"])[0]) >= 7) }
 
   template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
@@ -339,7 +341,7 @@ resource "aws_cloudformation_stack" "bk_queue_postmerge" {
 resource "aws_cloudformation_stack" "bk_queue_postmerge_us_east_1" {
   for_each   = local.merged_parameters_postmerge_us_east_1
   name       = "bk-${each.key}"
-  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
+  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" && !(k == "BuildkiteAgentTimestampLines" && tonumber(split(".", each.value["elastic_ci_stack_version"])[0]) >= 7) }
 
   template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
@@ -357,7 +359,7 @@ resource "aws_cloudformation_stack" "bk_queue_postmerge_us_east_1" {
 resource "aws_cloudformation_stack" "bk_queue_release" {
   for_each   = local.merged_parameters_release
   name       = "bk-${each.key}"
-  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
+  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" && !(k == "BuildkiteAgentTimestampLines" && tonumber(split(".", each.value["elastic_ci_stack_version"])[0]) >= 7) }
 
   template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
@@ -375,7 +377,7 @@ resource "aws_cloudformation_stack" "bk_queue_release" {
 resource "aws_cloudformation_stack" "bk_queue_ci_gpu" {
   for_each   = local.merged_parameters_ci_gpu
   name       = "bk-${each.key}"
-  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
+  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" && !(k == "BuildkiteAgentTimestampLines" && tonumber(split(".", each.value["elastic_ci_stack_version"])[0]) >= 7) }
 
   template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
@@ -391,7 +393,7 @@ resource "aws_cloudformation_stack" "bk_queue_ci_gpu" {
 resource "aws_cloudformation_stack" "bk_queue" {
   for_each   = local.merged_parameters
   name       = "bk-${each.key}"
-  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" }
+  parameters = { for k, v in each.value : k => v if k != "elastic_ci_stack_version" && !(k == "BuildkiteAgentTimestampLines" && tonumber(split(".", each.value["elastic_ci_stack_version"])[0]) >= 7) }
 
   template_url = "https://s3.amazonaws.com/buildkite-aws-stack/v${each.value["elastic_ci_stack_version"]}/aws-stack.yml"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"]
