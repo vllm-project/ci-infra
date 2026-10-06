@@ -72,8 +72,8 @@ module "ci_v7x_2" {
   service_account_email = google_service_account.ci_agent_tpu.email
 }
 
-# Eight more tpu7x-8 agents serve the same queue from inferact-vllm-tpu (see
-# that env), so this fleet runs ten and the other 32 chips of the reservation
+# Twelve more tpu7x-8 agents serve the same queue from inferact-vllm-tpu (see
+# that env), so this fleet runs six and the other 48 chips of the reservation
 # are free for other work.
 module "ci_v7x_8" {
   source = "../modules/ci_v7x"
@@ -83,7 +83,7 @@ module "ci_v7x_8" {
 
   accelerator_type                      = "tpu7x-8"
   reserved                              = true
-  instance_count                        = 10
+  instance_count                        = 6
   buildkite_queue_name                  = "tpu_v7x_8_queue"
   disk_size                             = 4096
   project_id                            = var.project_id
@@ -126,7 +126,7 @@ module "ci_v7x_16" {
 #
 # instance_count is 0 because the project's tpu7x reservation is fully used
 # and a tpu7x-32 needs 16 chips. The hand-built slice still holds them. Raise
-# to 1 after that slice is deleted (or 4 tpu7x-8 nodes are released).
+# to 1 after that slice is deleted.
 module "ci_v7x_32" {
   source = "../modules/ci_v7x"
   providers = {
