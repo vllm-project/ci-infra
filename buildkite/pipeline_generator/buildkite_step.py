@@ -32,6 +32,7 @@ from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
 from recorder_switches import fnrec_enabled, kernrec_enabled
+import runtime_shard
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -960,6 +961,76 @@ def ensure_infra_failure_retry(
     return retry_policy
 
 
+# "off" is the rollback switch: enrolled steps run as their normal single job.
+RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
+
+
+def _runtime_shard_mode(
+    step: Step, step_key: str, list_file_diff: List[str]
+) -> Optional[str]:
+    """How to run a step with `automatic_shard: true`: "on" (as shards),
+    "shadow" (one job, plus an annotation of the plan), or None (as usual)."""
+    if not step.automatic_shard or not _step_should_run(step, list_file_diff):
+        return None
+    mode = os.getenv(RUNTIME_SHARD_ENV_VAR) or "on"
+    if mode not in ("on", "shadow"):
+        if mode != "off":
+            print(
+                f"automatic_shard ignored on {step_key}: {RUNTIME_SHARD_ENV_VAR}={mode} is not on, shadow or off"
+            )
+        return None
+    if fnrec_enabled() or kernrec_enabled():
+        # The recorders expect each step to run as one job.
+        print(f"automatic_shard ignored on {step_key}: recording build")
+        return None
+    if (
+        runtime_shard.split_commands(step.commands or []) is None
+        or step.no_plugin
+        or is_amd_device(step.device)
+        or (step.num_nodes and step.num_nodes >= 2)
+    ):
+        print(
+            f"automatic_shard ignored on {step_key}: only single-node NVIDIA steps "
+            "whose test commands are all plain pytest can be sharded"
+        )
+        return None
+    return mode
+
+
+def _shard_at_generation(
+    step: Step, step_key: str, command_step: BuildkiteCommandStep, mode: str
+) -> None:
+    """Plan an enrolled step's shards from the checkout (runtime_shard.py)
+    and, in "on" mode, run its job as one parallel job per shard: the same
+    commands, after installing the plugin that keeps each job's tests. Short
+    of a plan of two or more shards, the job is left as it is, so sharding
+    never blocks the step's tests. "shadow" only annotates the plan.
+    """
+    result, text = runtime_shard.plan_step(
+        step_key, step.commands or [], step.working_dir, os.getcwd()
+    )
+    print(text)
+    if mode == "shadow":
+        runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
+        return
+    if result is None or result["overBudget"]:
+        runtime_shard.annotate(step_key, text, "warning")
+    if result is None or result["shards"] < 2:
+        return
+    command_step.parallelism = result["shards"]
+    # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
+    command_step.label = f"{command_step.label} shard %N/%t"
+    env = dict(command_step.env or {})
+    env["PYTEST_ADDOPTS"] = (
+        f"{env.get('PYTEST_ADDOPTS', '')} -p {runtime_shard.PLUGIN_MODULE}".strip()
+    )
+    plan = {"shards": result["shards"], "commands": result["commands"]}
+    env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
+    env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()
+    command_step.env = env
+    command_step.commands = runtime_shard.shard_job_setup() + command_step.commands
+
+
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
 ) -> List[BuildkiteGroupStep]:
@@ -1104,6 +1175,13 @@ def convert_group_step_to_buildkite_step(
                 if step.device == DeviceType.L4 and not step.retry:
                     buildkite_step.retry = K8S_RETRY
 
+            shard_mode = (
+                _runtime_shard_mode(step, step_key, list_file_diff)
+                if include_step
+                else None
+            )
+            if shard_mode:
+                _shard_at_generation(step, step_key, buildkite_step, shard_mode)
             if include_step:
                 group_steps_list.append(buildkite_step)
 
