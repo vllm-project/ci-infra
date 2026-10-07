@@ -271,4 +271,8 @@ dashboard_buildkite_token_secret_id = "vllm_org_buildkite_rest_api_token"
 
 dashboard_viewers = [
   "user:mhhua@google.com",
+  # The tpu-inference team, whose pipelines run on this fleet beside
+  # vllm-torchtpu's. Already admins of cloud-tpu-inference-test, where the
+  # tpu-inference CI lives.
+  "group:cloud-tpu-inference@twosync.google.com",
 ]
