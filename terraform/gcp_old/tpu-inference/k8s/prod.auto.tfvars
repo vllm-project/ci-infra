@@ -257,3 +257,22 @@ labels = {
   owner       = "tpu-inference"
 }
 
+
+# The Buildkite cluster the kube queue is in, beside the bare-metal TPU queues.
+buildkite_org        = "vllm"
+buildkite_cluster_id = "0219f117-7dc6-4a04-aee2-1619736fd800"
+
+# Built by dashboard/cloudbuild.yaml; the tag is the build revision there.
+dashboard_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/queue-dashboard:1"
+
+# The token modules/ci_monitoring's BigQuery puller already lists these
+# pipelines' builds with.
+dashboard_buildkite_token_secret_id = "vllm_org_buildkite_rest_api_token"
+
+dashboard_viewers = [
+  "user:mhhua@google.com",
+  # The tpu-inference team, whose pipelines run on this fleet beside
+  # vllm-torchtpu's. Already admins of cloud-tpu-inference-test, where the
+  # tpu-inference CI lives.
+  "group:cloud-tpu-inference@twosync.google.com",
+]

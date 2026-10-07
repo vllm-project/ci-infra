@@ -491,3 +491,43 @@ variable "machine_memory_gb" {
     have to be edited together.
   EOT
 }
+
+variable "buildkite_org" {
+  type        = string
+  description = "Buildkite organization slug the fleet's pipelines belong to. Read by the queue dashboard; see dashboard.tf."
+}
+
+variable "buildkite_cluster_id" {
+  type        = string
+  description = <<-EOT
+    UUID of the Buildkite cluster the kube queue is in. The dashboard finds
+    the pipelines whose kube steps it reports by it.
+  EOT
+}
+
+variable "dashboard_image" {
+  type        = string
+  description = <<-EOT
+    Image the queue dashboard runs. Built by hand from dashboard/Dockerfile -
+    the command is in dashboard/cloudbuild.yaml - and bumped here when
+    dashboard/app.py changes.
+  EOT
+}
+
+variable "dashboard_buildkite_token_secret_id" {
+  type        = string
+  description = <<-EOT
+    Secret Manager secret in project_id holding a Buildkite REST API token
+    with read_builds and read_pipelines, which the dashboard lists jobs with.
+    Not created here, for the same reason as agent_token_secret_id.
+  EOT
+}
+
+variable "dashboard_viewers" {
+  type        = list(string)
+  description = <<-EOT
+    IAM principals IAP lets through to the dashboard, as user:, group: or
+    domain: members. Nothing else reaches it: the service accepts only
+    requests IAP has authenticated.
+  EOT
+}
