@@ -183,13 +183,15 @@ worker_clusters = [
     # The zone all three v7x pools sit in.
     rapid_cache_zones = ["us-central1-c"]
 
-    # Three shapes over the v7x reservation's free chips, which is every shape
-    # the tests ask for. The quota is not split between them: the chips will not
-    # divide three ways and still leave each a whole slice, so all of it is
-    # nominal on 2x2x1 and the other two run on what that one is
-    # not using. Every pool's max_nodes is the full eight chips, so the cohort
-    # accounting decides how many run at once and the node pools only decide
-    # what a chip can be shaped into.
+    # Four shapes over the 72 v7x chips the bare-metal agents leave free in the
+    # reservation (128, of which the agents hold 56). Nominal quota is what a
+    # shape can always get back: 32 on 2x2x4 (two slices, the Kimi-K3 1P1D),
+    # and the other 40 on the single-host shapes in proportion to what they
+    # run (10-04..10-07: 2x2x1 averaged 13.4 chips busy, 1x1x1 3.8), so 32 on
+    # 2x2x1 and 8 on 1x1x1. 2x2x2 owns none and borrows.
+    # Every pool can grow to all 72 chips, so a shape can borrow whatever the
+    # others leave idle: the cohort accounting decides how many run at once and
+    # the node pools only decide what a chip can be shaped into.
     #
     # min_nodes is 0 throughout: the reservation has no slack, so a floor is
     # chips held out of it permanently rather than a warm node.
@@ -201,8 +203,8 @@ worker_clusters = [
         zone             = "us-central1-c"
 
         min_nodes     = 0
-        max_nodes     = 40
-        nominal_quota = 0
+        max_nodes     = 72
+        nominal_quota = 8
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -211,13 +213,13 @@ worker_clusters = [
         zone             = "us-central1-c"
 
         min_nodes     = 0
-        max_nodes     = 10
-        nominal_quota = 8
+        max_nodes     = 18
+        nominal_quota = 32
       },
       {
         # Eight chips as one slice across two VMs, placed from the named
-        # workload policy in workers.tf. Five slices is forty chips, as many as
-        # the single-host pools can take, so the cohort decides how many
+        # workload policy in workers.tf. Nine slices is all 72 chips, as many
+        # as the single-host pools can take, so the cohort decides how many
         # multi-host tests run at once; pod_defaults.yaml keeps each
         # JobSet's pods in one slice.
         machine_type     = "tpu7x-standard-4t"
@@ -225,19 +227,21 @@ worker_clusters = [
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
-        slices        = 5
+        slices        = 9
         nominal_quota = 0
       },
       {
-        # Three slices, so a two-slice workload (the Kimi-K3 1P1D) and a
-        # one-slice v7x-32 test can run at the same time.
+        # Two slices nominal for the Kimi-K3 1P1D, which takes them back from
+        # borrowers when it starts. Four slice pools, so 2x2x4 can borrow up to
+        # two more slices (64 chips, the most of the 72 that whole slices fill)
+        # for v7x-32 tests and bring-ups when the cohort is idle.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x4"
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
-        slices        = 3
-        nominal_quota = 48
+        slices        = 4
+        nominal_quota = 32
 
         reclaim_within_cohort = "Any"
       },

@@ -159,8 +159,8 @@ spec:
             - name: google.com/tpu
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
-              nominalQuota: 0
-              borrowingLimit: 40
+              nominalQuota: 8
+              borrowingLimit: 64
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -203,8 +203,8 @@ spec:
             - name: google.com/tpu
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
-              nominalQuota: 8
-              borrowingLimit: 32
+              nominalQuota: 32
+              borrowingLimit: 40
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -248,7 +248,7 @@ spec:
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
               nominalQuota: 0
-              borrowingLimit: 40
+              borrowingLimit: 72
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -291,8 +291,8 @@ spec:
             - name: google.com/tpu
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
-              nominalQuota: 48
-              borrowingLimit: 0
+              nominalQuota: 32
+              borrowingLimit: 32
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
