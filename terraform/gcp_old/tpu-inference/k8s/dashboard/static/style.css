@@ -8,7 +8,7 @@
      validate as a set, and the lightest step of slot 1's ramp for quota nobody
      is using. Busy (slot 3) is under 3:1 on white, so every chart has its
      values in a table below it. */
-  --own: #2a78d6; --borrowed: #eb6834; --busy: #1baf7a; --idle: #cde2fb;
+  --own: #2a78d6; --borrowed: #eb6834; --busy: #1baf7a; --idle: #cde2fb; --nodes: #eb6834;
   --borrowed-bg: #fdf0ea; --idle-bg: #edf4fd;
   /* Status colors are reserved for health and always ship with an icon and a
      label, never color alone. */
@@ -55,8 +55,6 @@ main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 48px; }
   color: var(--muted); margin: 28px 0 10px; }
 .queue { border-left: 3px solid var(--own); }
 .queue.other { border-left-color: var(--line); }
-.queue-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 16px; }
-.queue-grid .card { margin: 0; }
 .errors { margin-top: 10px; }
 .error { color: var(--critical); font-weight: 600; }
 
@@ -138,7 +136,7 @@ i.sw.own { background: var(--own); } i.sw.borrowed { background: var(--borrowed)
 i.sw.idle { background: var(--idle); }
 i.k { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
 i.k.used, i.k.pending { background: var(--own); } i.k.busy { background: var(--busy); }
-i.k.ref { background: var(--muted); }
+i.k.ref { background: var(--muted); } i.k.nodes { background: var(--nodes); }
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
@@ -157,6 +155,7 @@ td.barcell, th.barcell { width: 24%; vertical-align: middle; }
 .sub-row { color: var(--muted); font-size: 12px; }
 
 /* Charts */
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 .chart { margin: 4px 0 8px; }
 figcaption { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 figcaption .title { font-size: 13px; font-weight: 600; color: var(--ink-2); margin-right: auto; }
@@ -165,12 +164,12 @@ svg { width: 100%; height: auto; display: block; overflow: visible; }
 .grid { stroke: var(--line-2); stroke-width: 1; } .axis { stroke: var(--line); stroke-width: 1; }
 .tick { font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
 .line { fill: none; stroke: var(--own); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.line.busy { stroke: var(--busy); }
+.line.busy { stroke: var(--busy); } .line.nodes { stroke: var(--nodes); }
 .area { stroke: none; fill: var(--own); opacity: 0.10; }
-.area.busy { fill: var(--busy); }
+.area.busy { fill: var(--busy); } .area.nodes { fill: var(--nodes); }
 .ref { fill: none; stroke: var(--muted); stroke-width: 1.25; }
 .ref-label { font-size: 10px; fill: var(--muted); }
-.dot { fill: var(--own); stroke: var(--card); stroke-width: 2; } .dot.busy { fill: var(--busy); }
+.dot { fill: var(--own); stroke: var(--card); stroke-width: 2; } .dot.busy { fill: var(--busy); } .dot.nodes { fill: var(--nodes); }
 .crosshair { stroke: var(--muted); stroke-width: 1; visibility: hidden; }
 .tip { position: absolute; top: 0; pointer-events: none; background: var(--card);
   border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 12px;
@@ -182,7 +181,7 @@ svg { width: 100%; height: auto; display: block; overflow: visible; }
 .reasons li { color: var(--ink-2); } .reasons li b { color: var(--ink); margin-right: 4px; }
 details { margin-top: 10px; } summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
 @media (max-width: 800px) {
+  .charts { grid-template-columns: 1fr; }
   .tiles { grid-template-columns: 1fr 1fr; }
-  .queue-grid { grid-template-columns: 1fr; }
   .custom { margin-left: 0; }
 }

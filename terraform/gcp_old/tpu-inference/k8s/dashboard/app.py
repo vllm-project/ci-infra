@@ -93,6 +93,8 @@ class Live:
             ),
             "events": Source("Events", lambda: fleet.fetch_events(cfg), ttl),
             "health": Source("Metrics", lambda: fleet.fetch_health(cfg), ttl),
+            # Node pools change when Terraform does; an hour is soon enough.
+            "pools": Source("GKE", lambda: fleet.fetch_node_pools(cfg), 3600),
             # The health checks' 24-hour failure counts; BigQuery need not be
             # asked every minute.
             "stats24": Source(
@@ -160,10 +162,11 @@ class History:
             hit = self._cache.get(key)
             if hit and time.time() - hit[2] < hit[3]:
                 return hit[0], hit[1]
-        # The queue list and cohort membership come from Kueue as it is now.
-        kueue = self.live.sources["kueue"]
+        # The queue list, cohort membership and node pools are as they are now.
+        kueue, pools = self.live.sources["kueue"], self.live.sources["pools"]
         kueue.refresh_if_stale()
-        sources = {"kueue": kueue.status()}
+        pools.refresh_if_stale()
+        sources = {"kueue": kueue.status(), "pools": pools.status()}
         calls = {
             "history": (
                 "Metrics",
@@ -188,6 +191,7 @@ class History:
         view = views.build_history(
             self.cfg,
             (kueue.data or {}).get("queues", []),
+            pools.data or [],
             results["history"],
             results["stats"],
             span,

@@ -21,6 +21,13 @@
         head has a reason; the rest are queued behind it.</td></tr>
       <tr><th>Busy</th><td>TensorCore duty cycle, summed in chips: the compute actually happening. Admitted
         minus busy is chips held without computing - startup, compile, model load.</td></tr>
+      <tr><th>Chips on nodes</th><td>TPU chips on the nodes GKE has up, whether or not a workload holds
+        them. Nodes scale up when Kueue admits a workload no node can take, and down once a node has held nothing
+        for a while.</td></tr>
+      <tr><th>Idle on nodes</th><td>Chips on nodes that no admitted workload holds: scale-down lag, a pool's
+        minimum, or a node waiting for the workload it came for.</td></tr>
+      <tr><th>Nodes created</th><td>Nodes a pool scaled up during the range. Lifetime is appearing to
+        disappearing.</td></tr>
       <tr><th>Utilization</th><td>Mean admitted (or busy) chips over the range, over mean nominal.</td></tr>
       <tr><th>Requeue</th><td>A workload that lost its reservation, usually to preemption, and went back in
         line.</td></tr>

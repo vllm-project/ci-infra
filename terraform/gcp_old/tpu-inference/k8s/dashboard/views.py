@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import collections
 import html
 import re
+import statistics
 import string
 import time
 from pathlib import Path
@@ -42,6 +44,17 @@ FLEET_WARNINGS = {
     "OOMKilling",
     "FailedAttachVolume",
 }
+
+# JobSet's exclusive placement rejects every follower pod of a multi-host slice
+# until the slice's leader pod has a node, and the Job controller retries, so a
+# FailedCreate with one of these messages comes with every start and restart of
+# a multi-host JobSet. Measured 2026-09-30..10-07: followers then start a median
+# 7-10 s after the leader. Not a fleet problem; any other FailedCreate is.
+PLACEMENT_HANDSHAKE = (
+    "follower pod node selector",
+    "leader pod not yet scheduled",
+    "expected 1 leader pod",
+)
 
 # Thresholds for the health checks, as a share of the budgets the launcher
 # enforces - a workload past them is about to be killed by the fleet itself.
@@ -140,9 +153,7 @@ def build_link(r: dict) -> str:
     title = E(
         f"{r['branch']} - {r['message']}" if r.get("message") else r.get("branch", "")
     )
-    return (
-        f'<a href="{E(r["url"])}" title="{title}">{E(r["pipeline"])} #{r["number"]}</a>'
-    )
+    return f'<a href="{E(r["url"])}" title="{title}" target="_blank" rel="noopener">{E(r["pipeline"])} #{r["number"]}</a>'
 
 
 def mean(values: list) -> float | None:
@@ -168,6 +179,56 @@ def resample(points: list[tuple[float, float]], ticks: list[float], step: int) -
             i += 1
         ok = i >= 0 and t - points[i][0] <= 2 * step
         out.append(round(points[i][1], 1) if ok else None)
+    return out
+
+
+def exact(points: list[tuple[float, float]], ticks: list[float]) -> list:
+    """A series' value at each tick, None where it has none. For node presence,
+    where a missing point means the node was gone, not - as resample assumes for
+    a gauge - a scrape that came late."""
+    at = {int(round(t)): v for t, v in points}
+    return [at.get(int(t)) for t in ticks]
+
+
+def pool_index(pools: list) -> dict:
+    return {h: p for p in pools for h in p["hashes"]}
+
+
+def pool_of(by_hash: dict, key: str) -> dict | None:
+    """The node pool of a "cluster|gke-tpu-<hash>-<id>" series key."""
+    parts = key.partition("|")[2].split("-")
+    return by_hash.get(parts[2]) if len(parts) >= 4 else None
+
+
+def live_nodes(pools: list, present: dict) -> dict:
+    """Per Kueue queue: TPU nodes up now, and the pools' bounds."""
+    by_hash = pool_index(pools)
+    per_pool = collections.Counter()
+    for key in present:
+        p = pool_of(by_hash, key)
+        if p:
+            per_pool[(p["cluster"], p["name"])] += 1
+    out: dict = {}
+    for p in pools:
+        n = out.setdefault(
+            p["queue"],
+            {
+                "up": 0,
+                "chips": 0.0,
+                "min": 0,
+                "max": 0,
+                "pools": 0,
+                "pools_up": 0,
+                "multi_host": p["multi_host"],
+            },
+        )
+        up = per_pool[(p["cluster"], p["name"])]
+        n["up"] += up
+        n["chips"] += up * p["chips_per_node"]
+        n["min"] += p["min_nodes"]
+        n["max"] += p["max_nodes"]
+        n["pools"] += 1
+        n["pools_up"] += bool(up)
     return out
 
 
@@ -301,6 +362,9 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             }
         )
     queues = sort_queues(queues)
+    nodes = live_nodes(data.get("pools") or [], health.get("nodes", {}))
+    for q in queues:
+        q["nodes"] = nodes.get(q["name"])
 
     cohorts: dict[str, dict] = {}
     for q in queues:
@@ -325,7 +389,10 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
         c["free"] = max(0.0, c["nominal"] - c["used"])
         model = DUTY_MODELS.get(c["family"], "")
         c["busy"] = health.get("busy", {}).get(model)
-        c["on_nodes"] = health.get("present", {}).get(model)
+        members = [
+            q["nodes"] for q in queues if q["cohort"] == c["name"] and q["nodes"]
+        ]
+        c["on_nodes"] = sum(n["chips"] for n in members) if members else None
 
     snapshot = {
         "generated_at": now,
@@ -424,7 +491,11 @@ def group_events(events: list, job_builds: dict, org: str) -> list:
     for g in groups.values():
         g["objects"] = len(g["objects"])
         g["builds"] = sorted(g["builds"].items())
-        g["fleet"] = g["type"] == "Warning" and g["reason"] in FLEET_WARNINGS
+        g["fleet"] = (
+            g["type"] == "Warning"
+            and g["reason"] in FLEET_WARNINGS
+            and not any(m in g["message"] for m in PLACEMENT_HANDSHAKE)
+        )
         out.append(g)
     return sorted(out, key=lambda g: (-g["fleet"], g["type"] != "Warning", -g["last"]))
 
@@ -805,7 +876,7 @@ def render_events(snap: dict) -> str:
 <td>{E(g["reason"])}<div class="sub-row">{E(g["kind"])}{" · Warning" if g["type"] == "Warning" else ""}</div></td>
 <td class="n">{num(g["count"])}{f'<div class="sub-row">{g["objects"]} objects</div>' if g["objects"] > 1 else ""}</td>
 <td class="msg">{E(g["message"][:300])}</td>
-<td class="nowrap">{"<br>".join(f'<a href="{E(url)}">{E(name)}</a>' for name, url in g["builds"][:3])}{f'<div class="sub-row">+{len(g["builds"]) - 3} more</div>' if len(g["builds"]) > 3 else ""}</td></tr>"""
+<td class="nowrap">{"<br>".join(f'<a href="{E(url)}" target="_blank" rel="noopener">{E(name)}</a>' for name, url in g["builds"][:3])}{f'<div class="sub-row">+{len(g["builds"]) - 3} more</div>' if len(g["builds"]) > 3 else ""}</td></tr>"""
                 for g in groups[:60]
             )
             or f'<tr><td colspan="6" class="empty">{empty}</td></tr>'
@@ -835,7 +906,7 @@ scale-ups, preemptions, agent teardown, test failures.</p>
 
 
 def job_link(j: dict) -> str:
-    return f'<a href="{E(j["url"])}">{E(j["label"] or "(unnamed step)")}</a>'
+    return f'<a href="{E(j["url"])}" target="_blank" rel="noopener">{E(j["label"] or "(unnamed step)")}</a>'
 
 
 def render_jobs(snap: dict) -> str:
@@ -887,7 +958,7 @@ def render_jobs(snap: dict) -> str:
         return f'<details class="steps"><summary>{label}</summary><ul>{items}{more}</ul></details>'
 
     def build_cell(g: dict) -> str:
-        return f'<a href="{E(g["url"].split("#")[0])}">{E(g["pipeline"])} #{g["number"]}</a>'
+        return f'<a href="{E(g["url"].split("#")[0])}" target="_blank" rel="noopener">{E(g["pipeline"])} #{g["number"]}</a>'
 
     waiting = [j for j in jobs if j["real"] != "running"]
     running = [j for j in jobs if j["real"] == "running"]
@@ -961,7 +1032,7 @@ def render_live(snap: dict) -> str:
 
 
 def build_history(
-    cfg: Config, queues: list, hist: dict, stats: dict, span: dict
+    cfg: Config, queues: list, pools: list, hist: dict, stats: dict, span: dict
 ) -> dict:
     start, end, step = span["start"], span["end"], span["step"]
     ticks = list(range(start, end + 1, step))
@@ -1038,6 +1109,76 @@ def build_history(
             }
         )
 
+    # Every TPU node that existed in the range, summed by the queue its pool
+    # serves.
+    by_hash = pool_index(pools)
+    agg: dict = {}
+    for key, points in hist.get("nodes", {}).items():
+        p = pool_of(by_hash, key)
+        if not p:
+            continue
+        values = exact(points, ticks)
+        seen = [i for i, v in enumerate(values) if v]
+        if not seen:
+            continue
+        a = agg.setdefault(
+            p["queue"],
+            {
+                "nodes": [0.0] * len(ticks),
+                "chips": [0.0] * len(ticks),
+                "created": 0,
+                "lifetimes": [],
+            },
+        )
+        # A step's share; a subquery boundary can add one sample.
+        values = [None if v is None else min(v, 1.0) for v in values]
+        for i, v in enumerate(values):
+            if v:
+                a["nodes"][i] += v
+                a["chips"][i] += v * p["chips_per_node"]
+        # Appeared after the range began: a node the pool scaled up for.
+        if seen[0] > 0:
+            a["created"] += 1
+            # And gone before it ended: a whole lifetime.
+            if seen[-1] < len(ticks) - 1:
+                a["lifetimes"].append(sum(v or 0 for v in values) * step)
+    pool_bounds: dict = {}
+    for p in pools:
+        b = pool_bounds.setdefault(
+            p["queue"], {"pools": 0, "max": 0, "multi_host": p["multi_host"]}
+        )
+        b["pools"] += 1
+        b["max"] += p["max_nodes"]
+    hours = step / 3600
+    for q in rows:
+        a, b = agg.get(q["name"]), pool_bounds.get(q["name"])
+        if not b:
+            q["nodes"] = None
+            continue
+        a = a or {
+            "nodes": [0.0] * len(ticks),
+            "chips": [0.0] * len(ticks),
+            "created": 0,
+            "lifetimes": [],
+        }
+        used = [u or 0.0 for u in q["history"]["used"]]
+        on_hours = sum(a["chips"]) * hours
+        held_hours = sum(min(c, u) for c, u in zip(a["chips"], used)) * hours
+        q["nodes"] = {
+            **b,
+            "chips": [round(v, 1) for v in a["chips"]],
+            "count": [round(v, 1) for v in a["nodes"]],
+            "created": a["created"],
+            "lifetime_p50": statistics.median(a["lifetimes"])
+            if a["lifetimes"]
+            else None,
+            "peak": max(a["nodes"], default=0.0),
+            "node_hours": sum(a["nodes"]) * hours,
+            "chip_hours": on_hours,
+            "idle_chip_hours": max(0.0, on_hours - held_hours),
+            "held_share": held_hours / on_hours if on_hours else None,
+        }
+
     cohorts: dict[str, dict] = {}
     for q in rows:
         if q["resource"] != TPU:
@@ -1057,7 +1198,14 @@ def build_history(
         c["nominal"] = add_series(*(q["history"]["nominal"] for q in c["members"]))
         model = DUTY_MODELS.get(c["family"], "")
         c["busy"] = history("busy", model) if model else [None] * len(ticks)
-        c["on_nodes"] = history("present", model) if model else [None] * len(ticks)
+        on_nodes = [q["nodes"]["chips"] for q in c["members"] if q["nodes"]]
+        c["on_nodes"] = add_series(*on_nodes) if on_nodes else [None] * len(ticks)
+        on_hours = sum(q["nodes"]["chip_hours"] for q in c["members"] if q["nodes"])
+        idle_hours = sum(
+            q["nodes"]["idle_chip_hours"] for q in c["members"] if q["nodes"]
+        )
+        c["held_share"] = (on_hours - idle_hours) / on_hours if on_hours else None
+        c["idle_chip_hours"] = idle_hours
         admitted, nominal, busy = (
             mean(c["admitted"]),
             mean(c["nominal"]),
@@ -1113,11 +1261,11 @@ def render_history(h: dict, sources: dict, query: str) -> str:
   <div class="tiles">
     <div class="tile"><span>Admitted, average</span><b>{pct(c["utilization"])}</b><small>of nominal</small></div>
     <div class="tile"><span>Busy, average</span><b>{pct(c["busy_share"])}</b><small>of nominal, by TensorCore duty</small></div>
-    <div class="tile"><span>Admitted chip-hours</span><b>{num(c["chip_hours"])}</b><small>peak {num(c["peak"])} chips at once</small></div>
+    <div class="tile"><span>Node chips held</span><b>{pct(c["held_share"])}</b><small>{num(c["idle_chip_hours"])} chip-hours on nodes idle</small></div>
     <div class="tile"><span>Workloads finished</span><b>{num(c["finished"])}</b><small>{num(c["failed"])} test, {num(c["infra"])} infra failures</small></div>
   </div>
-  {line_chart("Chips admitted and busy", ticks, [("used", "admitted", c["admitted"]), ("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), extra=[("chips on nodes", c["on_nodes"])], fmt=fmt, width=1080, height=240)}
-  {values_table(ticks, [("Admitted", c["admitted"]), ("Busy", c["busy"]), ("Nominal", c["nominal"]), ("On nodes", c["on_nodes"])], every, "Values")}
+  {line_chart("Chips on nodes, admitted and busy", ticks, [("nodes", "on nodes", c["on_nodes"]), ("used", "admitted", c["admitted"]), ("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
+  {values_table(ticks, [("On nodes", c["on_nodes"]), ("Admitted", c["admitted"]), ("Busy", c["busy"]), ("Nominal", c["nominal"])], every, "Values")}
 </div>"""
         for c in h["cohorts"]
     )
@@ -1135,6 +1283,30 @@ def render_history(h: dict, sources: dict, query: str) -> str:
 <td class="n">{num(q["stats"]["chip_hours"])}</td></tr>"""
         for q in tpu
     )
+    autoscaled = [q for q in tpu if q.get("nodes")]
+    node_rows = (
+        "".join(
+            f"""<tr><td class="nowrap">{queue_link(q)}</td>
+<td class="n">{q["nodes"]["pools"]}{" slices" if q["nodes"]["multi_host"] else ""} · max {num(q["nodes"]["max"])}</td>
+<td class="n"><b>{num(q["nodes"]["created"])}</b></td><td class="n">{ago(q["nodes"]["lifetime_p50"])}</td>
+<td class="n">{num(q["nodes"]["peak"])}</td><td class="n">{num(q["nodes"]["node_hours"])}</td>
+<td class="n">{num(q["nodes"]["chip_hours"])}</td><td class="n">{pct(q["nodes"]["held_share"])}</td>
+<td class="n">{num(q["nodes"]["idle_chip_hours"])}</td>
+<td class="n nowrap">{ago(q["stats"]["startup_p50"])} / {ago(q["stats"]["startup_p90"])}</td></tr>"""
+            for q in autoscaled
+        )
+        or '<tr><td colspan="10" class="empty">No node pool data.</td></tr>'
+    )
+    autoscaling = f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Topology</th><th class="n">Pools</th>
+<th class="n">Nodes created</th><th class="n">Node lifetime p50</th><th class="n">Peak nodes</th><th class="n">Node-hours</th>
+<th class="n">Chip-hours on nodes</th><th class="n">Held by workloads</th><th class="n">Idle chip-hours</th>
+<th class="n">Admitted → running p50 / p90</th></tr></thead><tbody>{node_rows}</tbody></table></div>
+<p class="muted note">From GKE's per-node metrics: every TPU node that existed in the range, tied to its pool by the
+pool's instance group. <i>Nodes created</i> counts nodes that appeared during the range, each one a node the pool scaled
+up for; <i>lifetime</i> is appearing to disappearing, for nodes that did both. <i>Idle chip-hours</i> are chips on nodes
+that no admitted workload held - scale-down lag, a pool's minimum, or a node waiting for the workload it came for.
+<i>Admitted → running</i> includes the wait for a node when the pool had to scale up.</p>"""
+
     pipeline_rows = (
         "".join(
             f"""<tr><td>{E(p["pipeline"])}</td><td class="n">{num(p["finished"])}</td><td class="n">{success_rate(p)}</td>
@@ -1162,9 +1334,11 @@ submitted to quota reserved; startup is admitted to the first workload container
         return f"""<div class="card queue{"" if q["resource"] == TPU else " other"}" id="{E(q["name"])}">
   <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
     <span class="sub">{num(q["stats"]["finished"])} finished · avg {num(q["mean_used"])} {u}</span></div>
-  {line_chart(f"{u.capitalize()} in use", ticks, [("used", "in use", q["history"]["used"])], ref=("nominal", q["history"]["nominal"]) if q["resource"] == TPU else None, fmt=fmt, width=520, height=180)}
-  {line_chart("Workloads pending", ticks, [("pending", "pending", q["history"]["pending"])], fmt=fmt, width=520, height=150)}
-  {values_table(ticks, [(f"{u.capitalize()} in use", q["history"]["used"]), ("Nominal", q["history"]["nominal"]), ("Pending", q["history"]["pending"])], every, "Values")}
+  <div class="charts">
+  {line_chart(f"{u.capitalize()} on nodes and in use" if q.get("nodes") else f"{u.capitalize()} in use", ticks, ([("nodes", "on nodes", q["nodes"]["chips"])] if q.get("nodes") else []) + [("used", "in use", q["history"]["used"])], ref=("nominal", q["history"]["nominal"]) if q["resource"] == TPU else None, fmt=fmt, width=520, height=180)}
+  {line_chart("Workloads pending", ticks, [("pending", "pending", q["history"]["pending"])], fmt=fmt, width=520, height=180)}
+  </div>
+  {values_table(ticks, ([("On nodes", q["nodes"]["chips"])] if q.get("nodes") else []) + [(f"{u.capitalize()} in use", q["history"]["used"]), ("Nominal", q["history"]["nominal"]), ("Pending", q["history"]["pending"])], every, "Values")}
 </div>"""
 
     presets = "".join(
@@ -1180,6 +1354,7 @@ submitted to quota reserved; startup is admitted to the first workload container
         end=span["end"],
         step=ago(span["step"]),
         cohorts=cohorts,
+        autoscaling=autoscaling,
         outcomes=outcomes,
         queues="".join(queue_card(q) for q in h["queues"]),
         query=E(query),
