@@ -108,9 +108,11 @@ tpu_queue_max_seconds = 43200
 # two-host slice is built in their place.
 tpu_admission_max_seconds = 3600
 
-# Five minutes reserved with no worker named, against a normal dispatch of a few
-# seconds, is a dropped dispatch rather than a slow one; see variables.tf.
-tpu_dispatch_retry_seconds = 300
+# Two minutes reserved with no worker named, against a normal dispatch of a few
+# seconds, is a dropped dispatch rather than a slow one; see variables.tf. The
+# stall is permanent within a second of starting, and the resubmission waits for
+# any copy a worker already holds to go, so waiting longer only holds the chips.
+tpu_dispatch_retry_seconds = 120
 tpu_dispatch_retries       = 2
 
 # Every CI image this fleet runs is built into the manager project's Artifact
