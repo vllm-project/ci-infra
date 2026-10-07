@@ -139,9 +139,11 @@ worker_clusters = [
     rapid_cache_zones = ["us-east5-a"]
 
     # Reservation cloudtpu-20260828173000-731402396 in us-east5-a: 128 v6e
-    # chips, 102 in use, 26 free. nominal_quota splits those 26 between the
-    # shapes so neither starves the other; max_nodes sums to more, so a shape
-    # borrowing the cohort's idle quota can still boot the nodes for it.
+    # chips, 44 held by the bare-metal agents (twelve v6e-1, four v6e-8), 84
+    # here. nominal_quota splits the 84 by what each shape runs (10-04..10-07:
+    # 2x4 averaged 7.1 chips busy, 1x1 2.0), so 64 on 2x4 (eight slots) and
+    # 20 on 1x1; each pool can grow to all 84, so a shape borrowing the
+    # cohort's idle quota can still boot the nodes for it.
     # min_nodes is the part that really does partition the reservation, since
     # those chips stay with one shape once booted, so it is kept small.
     tpu_node_pools = [
@@ -152,8 +154,8 @@ worker_clusters = [
         zone             = "us-east5-a"
 
         min_nodes     = 2
-        max_nodes     = 26
-        nominal_quota = 18
+        max_nodes     = 84
+        nominal_quota = 20
       },
       {
         machine_type     = "ct6e-standard-8t"
@@ -164,10 +166,10 @@ worker_clusters = [
         # No floor: eight chips is too much of what is free to leave parked, so
         # this shape boots a node per job.
         min_nodes = 0
-        # One slice guaranteed, and room for two more by borrowing whatever the
-        # single-chip queue is not using.
-        max_nodes     = 3
-        nominal_quota = 8
+        # Eight slots guaranteed, and room for two more by borrowing whatever
+        # the single-chip queue is not using.
+        max_nodes     = 10
+        nominal_quota = 64
       },
     ]
   },

@@ -16,7 +16,7 @@ module "ci_v6e_1_vllm" {
   accelerator_type                      = "v6e-1"
   reserved                              = true
   purpose                               = "vllm"
-  instance_count                        = 30
+  instance_count                        = 12
   disk_size                             = 1024
   buildkite_queue_name                  = "tpu_v6e_queue"
   project_id                            = var.project_id
@@ -37,7 +37,7 @@ module "ci_v6e_8_vllm" {
   accelerator_type                      = "v6e-8"
   reserved                              = true
   purpose                               = "vllm"
-  instance_count                        = 9
+  instance_count                        = 4
   disk_size                             = 4096
   buildkite_queue_name                  = "tpu_v6e_8_queue"
   project_id                            = var.project_id
