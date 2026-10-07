@@ -83,7 +83,6 @@ details.glossary summary { font-size: 13px; font-weight: 600; color: var(--ink-2
 .pill.borrowed { background: var(--borrowed-bg); color: #9a3a12; }
 .pill.idle { background: var(--idle-bg); color: #1c5cab; }
 .pill.attn { background: var(--warning-bg); color: #8a5a00; }
-.pill.idle-nodes { background: var(--borrowed-bg); color: #9a3a12; }
 a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
 
 /* Health */

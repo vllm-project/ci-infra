@@ -440,9 +440,6 @@ agent pod starts.
 - **Quota now** - per cohort, chips in use against nominal, free, pending and
   busy; per queue, its nominal, usage, what it borrows or leaves idle, and
   whether it evicts borrowers.
-- **Nodes now** - per topology, TPU nodes up against the node pools' bounds,
-  slices up, chips on nodes against chips in use: idle chips on nodes, or
-  admitted chips still waiting for a scale-up.
 - **Per queue** - workloads admitted and pending, the builds they belong to,
   Kueue's reason for anything pending. Only the head of a BestEffortFIFO queue
   carries a reason; the rest are counted as queued behind it.

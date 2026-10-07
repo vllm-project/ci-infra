@@ -364,17 +364,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
     queues = sort_queues(queues)
     nodes = live_nodes(data.get("pools") or [], health.get("nodes", {}))
     for q in queues:
-        n = nodes.get(q["name"])
-        q["nodes"] = (
-            {
-                **n,
-                "idle_chips": max(0.0, n["chips"] - q["used"]),
-                # Admitted, with no node yet: a scale-up in flight.
-                "waiting_chips": max(0.0, q["used"] - n["chips"]),
-            }
-            if n
-            else None
-        )
+        q["nodes"] = nodes.get(q["name"])
 
     cohorts: dict[str, dict] = {}
     for q in queues:
@@ -831,48 +821,6 @@ def render_live_summary(snap: dict) -> str:
     return "".join(out)
 
 
-def chips(n: float) -> str:
-    return f"{num(n)} chip{'' if round(n, 1) == 1 else 's'}"
-
-
-def nodes_vs_workloads(n: dict) -> str:
-    if n["waiting_chips"]:
-        return f'<span class="pill attn">{chips(n["waiting_chips"])} waiting for nodes</span>'
-    if n["idle_chips"]:
-        return f'<span class="pill idle-nodes">{chips(n["idle_chips"])} idle</span>'
-    return '<span class="muted">matched</span>'
-
-
-def render_live_nodes(snap: dict) -> str:
-    out = []
-    by_name = {q["name"]: q for q in snap["queues"]}
-    for c in snap["cohorts"]:
-        if c["resource"] != TPU:
-            continue
-        rows = "".join(
-            f"""<tr><td class="nowrap">{queue_link(q)}</td>
-<td class="n"><b>{num(q["nodes"]["up"])}</b></td><td class="n">{num(q["nodes"]["min"])}–{num(q["nodes"]["max"])}</td>
-<td class="n">{f"{q['nodes']['pools_up']} of {q['nodes']['pools']}" if q["nodes"]["multi_host"] else "-"}</td>
-<td class="n">{num(q["nodes"]["chips"])}</td><td class="n">{num(q["used"])}</td>
-<td>{nodes_vs_workloads(q["nodes"])}</td></tr>"""
-            for q in (by_name[n] for n in c["queues"])
-            if q.get("nodes")
-        )
-        if rows:
-            out.append(
-                f'<div class="cohort"><h3>{E(c["generation"] or c["name"])}</h3>'
-                '<div class="table-wrap"><table><thead><tr><th>Topology</th><th class="n">Nodes up</th>'
-                '<th class="n">Pool min–max</th><th class="n">Slices up</th><th class="n">Chips on nodes</th>'
-                f'<th class="n">Chips in use</th><th>Nodes vs workloads</th></tr></thead><tbody>{rows}</tbody></table></div></div>'
-            )
-    return ("".join(out) or '<p class="muted">No node pool data.</p>') + (
-        "<p class=\"muted note\">TPU nodes up now, from GKE's node metrics, against the node pools' autoscaling "
-        "bounds. <i>Idle</i> is chips on nodes that no admitted workload holds: scale-down lag, a pool's minimum, "
-        "or a node that has just arrived for a workload about to start. <i>Waiting for nodes</i> is chips Kueue "
-        "has admitted that no node is up for yet: a scale-up in flight.</p>"
-    )
-
-
 def render_live_queue(q: dict) -> str:
     builds = (
         "".join(
@@ -1071,7 +1019,6 @@ def render_live(snap: dict) -> str:
         glossary=GLOSSARY,
         checks=checks,
         summary=render_live_summary(snap),
-        nodes=render_live_nodes(snap),
         cpu_line=cpu_line or "none",
         queues="".join(render_live_queue(q) for q in tpu),
         events=render_events(snap),
