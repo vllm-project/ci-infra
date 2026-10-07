@@ -8,7 +8,7 @@
      validate as a set, and the lightest step of slot 1's ramp for quota nobody
      is using. Busy (slot 3) is under 3:1 on white, so every chart has its
      values in a table below it. */
-  --own: #2a78d6; --borrowed: #eb6834; --busy: #1baf7a; --idle: #cde2fb;
+  --own: #2a78d6; --borrowed: #eb6834; --busy: #1baf7a; --idle: #cde2fb; --nodes: #eb6834;
   --borrowed-bg: #fdf0ea; --idle-bg: #edf4fd;
   /* Status colors are reserved for health and always ship with an icon and a
      label, never color alone. */
@@ -83,6 +83,7 @@ details.glossary summary { font-size: 13px; font-weight: 600; color: var(--ink-2
 .pill.borrowed { background: var(--borrowed-bg); color: #9a3a12; }
 .pill.idle { background: var(--idle-bg); color: #1c5cab; }
 .pill.attn { background: var(--warning-bg); color: #8a5a00; }
+.pill.idle-nodes { background: var(--borrowed-bg); color: #9a3a12; }
 a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
 
 /* Health */
@@ -136,7 +137,7 @@ i.sw.own { background: var(--own); } i.sw.borrowed { background: var(--borrowed)
 i.sw.idle { background: var(--idle); }
 i.k { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
 i.k.used, i.k.pending { background: var(--own); } i.k.busy { background: var(--busy); }
-i.k.ref { background: var(--muted); }
+i.k.ref { background: var(--muted); } i.k.nodes { background: var(--nodes); }
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
@@ -164,12 +165,12 @@ svg { width: 100%; height: auto; display: block; overflow: visible; }
 .grid { stroke: var(--line-2); stroke-width: 1; } .axis { stroke: var(--line); stroke-width: 1; }
 .tick { font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
 .line { fill: none; stroke: var(--own); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.line.busy { stroke: var(--busy); }
+.line.busy { stroke: var(--busy); } .line.nodes { stroke: var(--nodes); }
 .area { stroke: none; fill: var(--own); opacity: 0.10; }
-.area.busy { fill: var(--busy); }
+.area.busy { fill: var(--busy); } .area.nodes { fill: var(--nodes); }
 .ref { fill: none; stroke: var(--muted); stroke-width: 1.25; }
 .ref-label { font-size: 10px; fill: var(--muted); }
-.dot { fill: var(--own); stroke: var(--card); stroke-width: 2; } .dot.busy { fill: var(--busy); }
+.dot { fill: var(--own); stroke: var(--card); stroke-width: 2; } .dot.busy { fill: var(--busy); } .dot.nodes { fill: var(--nodes); }
 .crosshair { stroke: var(--muted); stroke-width: 1; visibility: hidden; }
 .tip { position: absolute; top: 0; pointer-events: none; background: var(--card);
   border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 12px;

@@ -599,6 +599,21 @@ def duty_selector(cfg: Config) -> str:
     return f'project_id="{cfg.project}",cluster_name=~"{names}"'
 
 
+def node_selector(cfg: Config) -> str:
+    """TPU nodes only. GKE names a TPU node gke-tpu-<hash>-<id>, the hash being its
+    node pool's instance group; CPU nodes carry the cluster name there instead."""
+    return f'{duty_selector(cfg)},node_name=~"gke-tpu-[0-9a-f]{{8}}-[a-z0-9]+"'
+
+
+def node_presence(cfg: Config) -> str:
+    """1 per TPU node while it exists. allocatable_cores is reported for every
+    node, unlike the duty cycle, which some multi-host nodes never report."""
+    return (
+        "count by (cluster_name, node_name) (last_over_time("
+        f"kubernetes_io:node_cpu_allocatable_cores{{{node_selector(cfg)}}}[2m]))"
+    )
+
+
 def current(metric: str, by: str) -> str:
     """One value per `by` group, from whichever controller pod reported last.
 
@@ -640,7 +655,7 @@ def fetch_health(cfg: Config) -> dict:
         ),
         # Chips computing right now: one series per node, no controller to roll.
         "busy": (f"sum by (model) (last_over_time({duty}[2m])) / 100", ("model",)),
-        "present": (f"count by (model) (last_over_time({duty}[2m]))", ("model",)),
+        "nodes": (node_presence(cfg), ("cluster_name", "node_name")),
     }
     with concurrent.futures.ThreadPoolExecutor(len(queries)) as pool:
         futures = {
@@ -663,7 +678,13 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
     duty = f"kubernetes_io:node_accelerator_duty_cycle{{{duty_selector(cfg)}}}"
     # Fifteen samples a step: enough to average a step fairly, few enough that
     # a week of hourly points answers in a couple of seconds.
-    window = f"[{step}s:{max(60, step // 15)}s]"
+    res = max(60, step // 15)
+    window = f"[{step}s:{res}s]"
+    # A node or chip that is absent has no sample rather than a zero, so
+    # avg_over_time would average over the minutes it existed and count a node
+    # up for ten minutes of an hour as up all hour. Summing the samples and
+    # dividing by the step counts it for the ten minutes.
+    share = f"* {res} / {step}"
     per_queue = "cluster_queue, flavor, resource"
     queries = {
         "pending": (
@@ -683,12 +704,15 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
         # Busy chips: TensorCore duty cycle, percent per chip, summed. Nodes that
         # do not report it - the disagg multi-host pods' - count as idle.
         "busy": (
-            f"avg_over_time((sum by (model) (last_over_time({duty}[2m])) / 100){window})",
+            f"sum_over_time((sum by (model) (last_over_time({duty}[2m])) / 100){window}) {share}",
             ("model",),
         ),
-        "present": (
-            f"avg_over_time((count by (model) (last_over_time({duty}[2m]))){window})",
-            ("model",),
+        # Each TPU node's share of each step, by name, for views.py to sum by
+        # node pool: a week is a few thousand node lifetimes and a few hundred
+        # KiB.
+        "nodes": (
+            f"sum_over_time(({node_presence(cfg)}){window}) {share}",
+            ("cluster_name", "node_name"),
         ),
     }
     with concurrent.futures.ThreadPoolExecutor(len(queries) + 1) as pool:
@@ -706,6 +730,57 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
         out = {k: f.result() for k, f in futures.items()}
         out["evictions"] = evictions.result()
         return out
+
+
+def fetch_node_pools(cfg: Config) -> list:
+    """Every TPU node pool in the fleet, from the GKE API: its shape, autoscaling
+    bounds, and the instance-group hashes its nodes are named by.
+
+    The node metrics carry a node's name and nothing else, and a pool's instance
+    group outlives every node it creates, so the hash ties a node seen in the
+    metrics a week ago to its pool - even a pool scaled to zero since.
+    """
+    pools = []
+    for c in cfg.clusters:
+        m = re.search(r"/locations/([^/]+)/gkeMemberships/([^/]+)$", c["gateway"])
+        if not m:
+            continue
+        location, name = m.groups()
+        url = (
+            f"https://container.googleapis.com/v1/projects/{cfg.project}/locations/{location}"
+            f"/clusters/{name}/nodePools"
+        )
+        for p in google(url).get("nodePools", []):
+            chips = re.search(r"-(\d+)t$", p["config"]["machineType"])
+            if not chips:
+                continue
+            auto = p.get("autoscaling", {})
+            multi_host = bool(p.get("placementPolicy", {}).get("tpuTopology"))
+            pools.append(
+                {
+                    "cluster": name,
+                    "name": p["name"],
+                    # The Kueue queue it serves: a multi-host pool is one slice,
+                    # named <shape>-<slice>.
+                    "queue": re.sub(r"-\d+$", "", p["name"])
+                    if multi_host
+                    else p["name"],
+                    "multi_host": multi_host,
+                    "chips_per_node": int(chips[1]),
+                    "min_nodes": int(
+                        auto.get("minNodeCount") or auto.get("totalMinNodeCount") or 0
+                    ),
+                    "max_nodes": int(
+                        auto.get("maxNodeCount") or auto.get("totalMaxNodeCount") or 0
+                    ),
+                    "hashes": [
+                        h[1]
+                        for u in p.get("instanceGroupUrls", [])
+                        if (h := re.search(r"-([0-9a-f]{8})-grp$", u))
+                    ],
+                }
+            )
+    return pools
 
 
 # --------------------------------------------------------------------------

@@ -440,6 +440,9 @@ agent pod starts.
 - **Quota now** - per cohort, chips in use against nominal, free, pending and
   busy; per queue, its nominal, usage, what it borrows or leaves idle, and
   whether it evicts borrowers.
+- **Nodes now** - per topology, TPU nodes up against the node pools' bounds,
+  slices up, chips on nodes against chips in use: idle chips on nodes, or
+  admitted chips still waiting for a scale-up.
 - **Per queue** - workloads admitted and pending, the builds they belong to,
   Kueue's reason for anything pending. Only the head of a BestEffortFIFO queue
   carries a reason; the rest are counted as queued behind it.
@@ -453,10 +456,14 @@ agent pod starts.
 chips admitted against chips busy (TensorCore duty) per cohort, outcomes per
 queue and per pipeline from `kube_workload_timing` split into test and
 infrastructure failures, wait, startup and run percentiles, and per-queue usage
-and backlog. Each chart point is the step's average, taken over the fleet-wide
+and backlog. **Node autoscaling** compares topologies: nodes created, node
+lifetime, peak nodes, chip-hours on nodes and the share workloads held, and
+admitted → running, which includes the wait for a scale-up. Each chart point is the step's average, taken over the fleet-wide
 value at each minute - collapsed to the newest Kueue controller pod and summed
 over nodes first, so a controller roll or a node that came and went does not
-inflate it.
+inflate it. Node history comes from GKE's per-node metrics, which name a node
+and nothing else; the GKE API's list of node pools ties each name to its pool
+through the pool's instance group, which outlives the nodes it creates.
 
 It reads every cluster through Connect Gateway as `tpu-ci-dashboard@`: the
 manager with `kueue/templates/dashboard_rbac.yaml.tpl`, the workers with

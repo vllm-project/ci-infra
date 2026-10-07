@@ -47,6 +47,16 @@ resource "google_project_iam_member" "dashboard_gateway" {
   member  = google_service_account.dashboard.member
 }
 
+# The node pools of every cluster - shape, autoscaling bounds, and the instance
+# groups a node's name ties it to - read from the GKE API. Cluster viewer is
+# read-only cluster metadata and nothing inside the cluster, and GKE grants it
+# per project or not at all.
+resource "google_project_iam_member" "dashboard_cluster_viewer" {
+  project = var.project_id
+  role    = "roles/container.clusterViewer"
+  member  = google_service_account.dashboard.member
+}
+
 # Kueue's and the Buildkite controller's metrics in Managed Prometheus, and
 # GKE's TPU duty cycle. Monitoring has no grant narrower than the project.
 resource "google_project_iam_member" "dashboard_monitoring" {
