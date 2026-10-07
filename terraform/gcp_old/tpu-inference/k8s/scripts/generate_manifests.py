@@ -890,6 +890,16 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             base / "workload" / "20-launcher-rbac.yaml",
             render("launcher_rbac_worker", NAMESPACE=namespace, PROJECT_ID=project),
         )
+        # Events only: a TPU pod's scheduling and failure events are recorded
+        # where it runs. The dashboard's account is the manager project's.
+        write(
+            base / "workload" / "40-dashboard-rbac.yaml",
+            render(
+                "dashboard_rbac_worker",
+                NAMESPACE=namespace,
+                DASHBOARD_SERVICE_ACCOUNT=dashboard_service_account(prefix, project),
+            ),
+        )
 
     worker_names = sorted(c["name"] for c in clusters if c["role"] == "worker")
 
@@ -966,8 +976,9 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         base / "workload" / "30-monitoring.yaml",
         render("monitoring_agent_stack", NAMESPACE=namespace),
     )
-    # Manager only: the dashboard reports the manager's queues, which admit for
-    # the whole fleet. Under workload/ for the namespace its Role is in.
+    # The dashboard reads queues, workloads and the rest here, where admission
+    # for the whole fleet happens; workers grant it events only, above. Under
+    # workload/ for the namespace its Role is in.
     write(
         base / "workload" / "40-dashboard-rbac.yaml",
         render(

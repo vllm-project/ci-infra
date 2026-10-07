@@ -500,9 +500,8 @@ variable "buildkite_org" {
 variable "buildkite_cluster_id" {
   type        = string
   description = <<-EOT
-    UUID of the Buildkite cluster holding both the bare-metal TPU queues and
-    the kube queue. The dashboard reports jobs from this cluster only, and
-    finds its pipelines by it.
+    UUID of the Buildkite cluster the kube queue is in. The dashboard finds
+    the pipelines whose kube steps it reports by it.
   EOT
 }
 
@@ -530,25 +529,5 @@ variable "dashboard_viewers" {
     IAM principals IAP lets through to the dashboard, as user:, group: or
     domain: members. Nothing else reaches it: the service accepts only
     requests IAP has authenticated.
-  EOT
-}
-
-variable "dashboard_topologies" {
-  type = list(object({
-    label      = string
-    bare_queue = string
-    kube_queue = string
-    chips      = number
-  }))
-  description = <<-EOT
-    The dashboard's rows: each bare-metal Buildkite queue beside the Kueue
-    queue that replaces it, in display order. chips is the chips one job of
-    that topology holds, which turns the exporter's busy-agent count into
-    chips so the two fleets share a unit.
-
-    Stated rather than derived because the pairing is not in the names:
-    Buildkite queue names count TensorCores (tpu_v7x_8_queue is a four-chip
-    2x2x1), Kueue names count chips. A queue in neither list still shows,
-    under "Other queues".
   EOT
 }

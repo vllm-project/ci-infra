@@ -1,13 +1,32 @@
-# The queue dashboard: per TPU topology, the bare-metal Buildkite queue beside
-# the Kueue queue replacing it, and which builds each is running and holding.
-# The program and what it reads are described in dashboard/app.py.
+# The kube fleet's health dashboard: health checks from Buildkite to a TPU pod,
+# Kueue quota and borrowing, utilization and outcomes over 24 hours or 7 days,
+# per-queue workloads and builds, and cluster events. The program and what it
+# reads are described in dashboard/app.py.
 #
 # Cloud Run rather than a Deployment on the manager, because nothing it needs is
 # inside the cluster boundary that Connect Gateway does not already expose:
-# Kueue is read through the gateway like any operator reads it, and the rest is
-# Buildkite and Cloud Monitoring. Off the manager it cannot compete with the
+# every cluster is read through the gateway like any operator reads it, and the
+# rest is Buildkite, Cloud Monitoring and BigQuery. Off the manager it cannot compete with the
 # launchers for nodes, and IAP in front of Cloud Run needs no load balancer,
 # certificate or domain.
+
+locals {
+  # Every cluster's Connect Gateway endpoint, keyed by membership. workers.tf
+  # registers each cluster into this project's fleet under its own name, in its
+  # own region.
+  dashboard_gateways = {
+    for name, location in merge(
+      { (google_container_cluster.manager.name) = var.manager_region },
+      { for w in google_container_cluster.worker : w.name => w.location },
+    ) :
+    name => join("/", [
+      "https://${location}-connectgateway.googleapis.com/v1",
+      "projects/${data.google_project.manager.number}",
+      "locations/${location}",
+      "gkeMemberships/${name}",
+    ])
+  }
+}
 
 resource "google_service_account" "dashboard" {
   project      = var.project_id
@@ -15,11 +34,11 @@ resource "google_service_account" "dashboard" {
   display_name = "TPU CI queue dashboard"
 }
 
-# Connect Gateway, read-only. On the project for the reason launcher_gateway in
-# iam.tf gives: the gateway checks its own gkeMemberships resource, which a
-# binding on the membership does not cover. What the dashboard may read inside
-# the manager is bounded by the RBAC in kueue/templates/dashboard_rbac.yaml.tpl,
-# not by this.
+# Connect Gateway, read-only, to the manager and every worker. On the project
+# for the reason launcher_gateway in iam.tf gives: the gateway checks its own
+# gkeMemberships resource, which a binding on the membership does not cover.
+# What the dashboard may read inside a cluster is bounded by the RBAC in
+# kueue/templates/dashboard_rbac*.yaml.tpl, not by this.
 resource "google_project_iam_member" "dashboard_gateway" {
   for_each = toset(["roles/gkehub.gatewayReader", "roles/gkehub.viewer"])
 
@@ -28,11 +47,28 @@ resource "google_project_iam_member" "dashboard_gateway" {
   member  = google_service_account.dashboard.member
 }
 
-# Kueue's metrics in Managed Prometheus and the agent exporter's in Cloud
-# Monitoring. Monitoring has no grant narrower than the project.
+# Kueue's and the Buildkite controller's metrics in Managed Prometheus, and
+# GKE's TPU duty cycle. Monitoring has no grant narrower than the project.
 resource "google_project_iam_member" "dashboard_monitoring" {
   project = var.project_id
   role    = "roles/monitoring.viewer"
+  member  = google_service_account.dashboard.member
+}
+
+# The launcher's per-workload record, for outcomes and phase timings. Read on
+# the table, like the launcher's write in iam.tf; running a query is a job, and
+# jobs are granted on the project or not at all.
+resource "google_bigquery_table_iam_member" "dashboard_timing" {
+  project    = var.project_id
+  dataset_id = "ci_efficiency_metrics"
+  table_id   = "kube_workload_timing"
+  role       = "roles/bigquery.dataViewer"
+  member     = google_service_account.dashboard.member
+}
+
+resource "google_project_iam_member" "dashboard_bigquery_jobs" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
   member  = google_service_account.dashboard.member
 }
 
@@ -90,12 +126,13 @@ resource "google_cloud_run_v2_service" "dashboard" {
         value = var.project_id
       }
       env {
-        name = "GATEWAY_URL"
-        value = join("/", [
-          "https://${var.manager_region}-connectgateway.googleapis.com/v1",
-          "projects/${data.google_project.manager.number}",
-          "locations/${var.manager_region}",
-          "gkeMemberships/${google_container_cluster.manager.name}",
+        name  = "GATEWAY_URL"
+        value = local.dashboard_gateways[google_container_cluster.manager.name]
+      }
+      env {
+        name = "CLUSTERS"
+        value = jsonencode([
+          for name, gateway in local.dashboard_gateways : { name = name, gateway = gateway }
         ])
       }
       env {
@@ -115,8 +152,22 @@ resource "google_cloud_run_v2_service" "dashboard" {
         value = var.buildkite_cluster_id
       }
       env {
-        name  = "TOPOLOGIES"
-        value = jsonencode(var.dashboard_topologies)
+        name  = "BUILDKITE_QUEUE"
+        value = var.buildkite_queue
+      }
+      env {
+        name  = "TIMING_TABLE"
+        value = "${var.project_id}.ci_efficiency_metrics.kube_workload_timing"
+      }
+      # The launcher's budgets, which the health checks measure waits and runs
+      # against: past them the fleet kills the step itself.
+      env {
+        name  = "QUEUE_BUDGET_SECONDS"
+        value = tostring(var.tpu_queue_max_seconds)
+      }
+      env {
+        name  = "TEST_BUDGET_SECONDS"
+        value = tostring(var.tpu_test_max_seconds)
       }
       env {
         name = "BUILDKITE_API_TOKEN"
@@ -136,20 +187,9 @@ resource "google_cloud_run_v2_service" "dashboard" {
     }
   }
 
-  lifecycle {
-    # A row naming a queue the fleet does not have would show as an empty
-    # topology forever rather than failing anywhere.
-    precondition {
-      condition = alltrue([
-        for t in var.dashboard_topologies :
-        contains([for p in local.tpu_node_pools : p.shape], t.kube_queue)
-      ])
-      error_message = "Every dashboard_topologies kube_queue must be a shape some worker's tpu_node_pools provides."
-    }
-  }
-
   depends_on = [
     google_secret_manager_secret_iam_member.dashboard_buildkite_token,
+    google_bigquery_table_iam_member.dashboard_timing,
   ]
 }
 
@@ -182,6 +222,6 @@ resource "google_iap_web_cloud_run_service_iam_member" "dashboard_viewers" {
 }
 
 output "dashboard_url" {
-  description = "The queue dashboard, behind IAP."
+  description = "The kube fleet's health dashboard, behind IAP."
   value       = google_cloud_run_v2_service.dashboard.uri
 }

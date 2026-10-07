@@ -39,7 +39,7 @@ manager where the launcher built the podspec.
 | `kueue/generated/` | The YAML that actually gets applied. Committed on purpose — see below. |
 | `kueue/launcher/` | The program every TPU step runs, its Job, and its image build. |
 | `kueue/launcher/pod_defaults.yaml` | What the fleet gives a workload's pods: caches, gcsfuse settings, eviction and retry policy. One definition, inherited by the built-in Job and by every manifest. |
-| `dashboard.tf`, `dashboard/` | The queue dashboard: per topology, the bare-metal queue beside its Kueue queue. A Cloud Run service, its program and its image build. |
+| `dashboard.tf`, `dashboard/` | The fleet's health dashboard. A Cloud Run service, its program, page template and image build. |
 
 Terraform stops at the cluster; `deploy_manifests.py` starts there. The
 Kubernetes and Helm providers need a reachable API server at plan time, which
@@ -279,9 +279,9 @@ a tag always names one set of bytes. The staging directory has to be named: the
 default is a multi-region `us` bucket, which `constraints/gcp.resourceLocations`
 refuses in this org.
 
-### Rebuild the queue dashboard
+### Rebuild the dashboard
 
-After any change to `dashboard/app.py` or its Dockerfile, bump `_REVISION`:
+After any change under `dashboard/`, bump `_REVISION`:
 
 ```bash
 cd dashboard
@@ -297,8 +297,9 @@ your own credentials - gcloud for Google APIs, the `bk` CLI for Buildkite - with
 the environment `dashboard.tf` sets:
 
 ```bash
-PROJECT_ID=... GATEWAY_URL=... KUEUE_METRICS_CLUSTER=tpu-ci-manager \
-  BUILDKITE_ORG=vllm BUILDKITE_CLUSTER_ID=... TOPOLOGIES='[...]' \
+PROJECT_ID=... GATEWAY_URL=... CLUSTERS='[{"name": ..., "gateway": ...}, ...]' \
+  KUEUE_METRICS_CLUSTER=tpu-ci-manager BUILDKITE_ORG=vllm BUILDKITE_CLUSTER_ID=... \
+  TIMING_TABLE=cloud-ullm-inference-ci-cd.ci_efficiency_metrics.kube_workload_timing \
   ./dashboard/app.py --local --port 8080
 ```
 
@@ -414,25 +415,38 @@ guessing — and note the chart pastes our block under keys of its own, so
 anything it derives must be left out of the template or the controller's decoder
 rejects the duplicate.
 
-## The queue dashboard
+## The health dashboard
 
 `terraform output dashboard_url`, behind IAP; `dashboard_viewers` in
-`prod.auto.tfvars` says who gets in. It is the Buildkite queue page for both
-fleets at once. Buildkite cannot show kube by topology, because every kube step
-is on the one `kube` queue until the launcher picks a Kueue queue for it.
+`prod.auto.tfvars` says who gets in. It is the page Buildkite cannot give the
+kube fleet, where every step is on the one `kube` queue until the launcher picks
+a Kueue queue for it. Top to bottom:
 
-Per topology it shows the bare-metal queue and the Kueue queue replacing it:
-agents or chips in use, what is waiting and for how long, which builds hold and
-wait on each, and Kueue's reason for anything pending. Only the head of a
-BestEffortFIFO queue carries a reason; the rest are counted as queued behind
-it. Kube steps Buildkite has not handed over yet - concurrency-limited, or
-waiting for an agent pod - are listed apart, since their topology is not known
-until the launcher runs.
+- **Health** - one check per stage from Buildkite to a TPU pod: the Buildkite
+  controller polling and creating, Kueue up on every cluster, workers
+  connected, dispatches not stalled, the oldest pending workload against
+  `tpu_queue_max_seconds`, admitted workloads near `tpu_test_max_seconds`,
+  infrastructure failures and evictions in the last 24 hours, fleet warnings
+  in the last hour, agent pods the manager cannot schedule, and steps no agent
+  picked up.
+- **Quota now** - per cohort, chips in use against nominal, free, pending and
+  utilization; per queue, its nominal, usage, what it borrows or leaves idle,
+  and whether it evicts borrowers.
+- **Last 24 hours / 7 days** - admitted against busy (TensorCore duty) chips per
+  cohort, then per queue and per pipeline the outcomes from
+  `kube_workload_timing`, split into test and infrastructure failures, with
+  wait, startup and run percentiles.
+- **Per queue** - workloads admitted and pending, the builds they belong to,
+  Kueue's reason for anything pending. Only the head of a BestEffortFIFO queue
+  carries a reason; the rest are counted as queued behind it.
+- **Cluster events** from every cluster's `buildkite` namespace, repeats
+  grouped, and kube steps Buildkite has not handed over yet.
 
-It reads the manager through Connect Gateway as `tpu-ci-dashboard@`, with the
-read-only RBAC in `kueue/templates/dashboard_rbac.yaml.tpl`; that file is
-applied by `deploy_manifests.py` like the rest, so the dashboard shows a Kueue
-error until it is. A source that fails is named at the top of the page, and the
+It reads every cluster through Connect Gateway as `tpu-ci-dashboard@`: the
+manager with `kueue/templates/dashboard_rbac.yaml.tpl`, the workers with
+`dashboard_rbac_worker.yaml.tpl`, events only. Both are applied by
+`deploy_manifests.py` like the rest, so the page reports those reads as failed
+until they are. A source that fails is named at the top of the page, and the
 rest still render.
 
 ## Reading the metrics
