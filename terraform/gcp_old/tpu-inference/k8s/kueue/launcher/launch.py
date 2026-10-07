@@ -2077,11 +2077,17 @@ def main():
                 log(f"quota reserved {time.monotonic() - undispatched:.0f}s ago "
                     f"but {why} - resubmitting (attempt "
                     f"{timing['redispatches']}/{redispatch_max})")
-                was_offered = set(offered)
+                # "Not dispatched" is the manager's view, not the workers'. A
+                # worker can create the remote copy within seconds while the
+                # manager never records it, and the nomination can come and go
+                # between two polls, so with no offer seen every worker is
+                # checked. A resubmission that skips this reuses the name while
+                # the old copy's pods are still terminating: two Ray heads under
+                # one slice-0-0 DNS name, and the hosts split between them.
+                may_hold = set(offered) or set(registry.get("workers") or {})
                 created = with_grace(
                     resubmit, kind, name, doc,
-                    (lambda: remote_copy_gone(was_offered, job_id, registry))
-                    if was_offered else None)
+                    lambda: remote_copy_gone(may_hold, job_id, registry))
                 if created is None:
                     log(f"{kind}/{name} cannot be resubmitted")
                     stop_announcing()
