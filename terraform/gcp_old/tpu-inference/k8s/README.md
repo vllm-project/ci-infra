@@ -39,7 +39,7 @@ manager where the launcher built the podspec.
 | `kueue/generated/` | The YAML that actually gets applied. Committed on purpose — see below. |
 | `kueue/launcher/` | The program every TPU step runs, its Job, and its image build. |
 | `kueue/launcher/pod_defaults.yaml` | What the fleet gives a workload's pods: caches, gcsfuse settings, eviction and retry policy. One definition, inherited by the built-in Job and by every manifest. |
-| `dashboard.tf`, `dashboard/` | The fleet's health dashboard. A Cloud Run service, its program, page template and image build. |
+| `dashboard.tf`, `dashboard/` | The fleet's health dashboard: a Cloud Run service, its program (`app.py` serves, `fleet.py` reads, `views.py` and `charts.py` render), templates, static files and image build. |
 
 Terraform stops at the cluster; `deploy_manifests.py` starts there. The
 Kubernetes and Helm providers need a reachable API server at plan time, which
@@ -420,7 +420,10 @@ rejects the duplicate.
 `terraform output dashboard_url`, behind IAP; `dashboard_viewers` in
 `prod.auto.tfvars` says who gets in. It is the page Buildkite cannot give the
 kube fleet, where every step is on the one `kube` queue until the launcher picks
-a Kueue queue for it. Top to bottom:
+a Kueue queue for it, and where a step shows as running from the moment its
+agent pod starts.
+
+**Live** (`/`), refreshed every minute:
 
 - **Health** - one check per stage from Buildkite to a TPU pod: the Buildkite
   controller polling and creating, Kueue up on every cluster, workers
@@ -429,18 +432,27 @@ a Kueue queue for it. Top to bottom:
   infrastructure failures and evictions in the last 24 hours, fleet warnings
   in the last hour, agent pods the manager cannot schedule, and steps no agent
   picked up.
+- **Kube jobs** - every Buildkite kube job where it actually is: held by a
+  concurrency group, waiting for an agent pod, agent pod pending, agent up
+  without a workload yet, pending in Kueue, dispatching, pods starting,
+  running. Buildkite shows the first two as waiting and all the rest as
+  running.
 - **Quota now** - per cohort, chips in use against nominal, free, pending and
-  utilization; per queue, its nominal, usage, what it borrows or leaves idle,
-  and whether it evicts borrowers.
-- **Last 24 hours / 7 days** - admitted against busy (TensorCore duty) chips per
-  cohort, then per queue and per pipeline the outcomes from
-  `kube_workload_timing`, split into test and infrastructure failures, with
-  wait, startup and run percentiles.
+  busy; per queue, its nominal, usage, what it borrows or leaves idle, and
+  whether it evicts borrowers.
 - **Per queue** - workloads admitted and pending, the builds they belong to,
   Kueue's reason for anything pending. Only the head of a BestEffortFIFO queue
   carries a reason; the rest are counted as queued behind it.
-- **Cluster events** from every cluster's `buildkite` namespace, repeats
-  grouped, and kube steps Buildkite has not handed over yet.
+- **Cluster events** from every cluster's `buildkite` namespace, repeats grouped.
+
+**History** (`/history`), for a preset or any range of dates up to 90 days:
+chips admitted against chips busy (TensorCore duty) per cohort, outcomes per
+queue and per pipeline from `kube_workload_timing` split into test and
+infrastructure failures, wait, startup and run percentiles, and per-queue usage
+and backlog. Each chart point is the step's average, taken over the fleet-wide
+value at each minute - collapsed to the newest Kueue controller pod and summed
+over nodes first, so a controller roll or a node that came and went does not
+inflate it.
 
 It reads every cluster through Connect Gateway as `tpu-ci-dashboard@`: the
 manager with `kueue/templates/dashboard_rbac.yaml.tpl`, the workers with

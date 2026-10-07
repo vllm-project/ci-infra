@@ -1,9 +1,11 @@
-# The health dashboard: one Python program that imports nothing outside the
-# standard library, and the page template it fills, so the interpreter is the
-# whole image.
+# The health dashboard: a Python program that imports nothing outside the
+# standard library, its page templates and its static files, so the interpreter
+# is the whole image.
 FROM python:3.13-slim
 
-COPY app.py page.html /app/
+COPY *.py /app/
+COPY templates /app/templates
+COPY static /app/static
 
 # Any unprivileged UID: the program writes nothing to disk.
 USER 65532
