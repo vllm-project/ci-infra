@@ -31,11 +31,12 @@ locals {
       BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "medium_cpu_queue_premerge"
       InstanceTypes                        = "r6in.4xlarge"
-      MaxSize                              = 40
+      MaxSize                              = 60 # also runs PR image builds
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
       EnableInstanceStorage                = "true"
+      BootstrapScriptUrl                  = "https://vllm-ci.s3.us-west-2.amazonaws.com/instance-bootstrap.sh"
     }
 
     cpu-queue-premerge = {
