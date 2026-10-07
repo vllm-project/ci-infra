@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
+import json
 import math
 import os
 import re
@@ -970,6 +971,26 @@ def ensure_infra_failure_retry(
 RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
 
 
+def _ci_infra_ref() -> str:
+    """The ci-infra commit this generator was installed from (pip records it
+    in direct_url.json), so every job of a build fetches the same
+    runtime_shard.py, however the branch moves meanwhile. The branch name if
+    pip recorded no commit, as for a local install.
+    """
+    try:
+        from importlib.metadata import distribution
+
+        info = json.loads(
+            distribution("pipeline-generator").read_text("direct_url.json") or "{}"
+        )
+        commit = info.get("vcs_info", {}).get("commit_id")
+        if commit:
+            return commit
+    except Exception:  # not installed, or no direct_url.json
+        pass
+    return os.getenv("VLLM_CI_BRANCH") or "main"
+
+
 def _runtime_shard_mode(
     step: Step, step_key: str, list_file_diff: List[str]
 ) -> Optional[str]:
@@ -1015,10 +1036,9 @@ def _runtime_shard_steps(
     mode the step runs as usual and both new steps soft-fail.
     """
     setup, tests = runtime_shard.split_commands(step.commands or [])
-    branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
-        f"{branch}/buildkite/pipeline_generator/runtime_shard.py"
+        f"{_ci_infra_ref()}/buildkite/pipeline_generator/runtime_shard.py"
     )
     script = "/tmp/runtime-shard.$${BUILDKITE_JOB_ID:-local}.py"
     fetch = f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'

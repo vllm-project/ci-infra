@@ -41,7 +41,6 @@ TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
 MAX_SHARD_SECONDS = 1080
 UNKNOWN_FILE_SECONDS = 150  # a file main has no timing for
 MAX_NUMBER_OF_SHARDS = 6
-NO_TIMING_SHARDS = 4
 INVENTORY_DIR = ".runtime-shard"
 # pytest-shard would select a subset a second time on top of the plan.
 _UNSHARDABLE_ARGS = ("--num-shards", "--shard-id")
@@ -223,8 +222,9 @@ def plan(
             pytest's rootdir, "nodeids": the collected test IDs, in collection
             order}.
         timings: The timing endpoint's response for the step, or None when
-            main has no usable timings. A files[] entry whose median exceeds
-            the requested testsOverMs may carry a "tests" list of
+            main has no usable timings. Without a timing for any of the
+            step's files, the plan is one shard. A files[] entry whose median
+            exceeds the requested testsOverMs may carry a "tests" list of
             {"nodeid", "observedMs"}; a split file with that data is cut by
             its tests' times instead of their count.
         max_shard_seconds: Test-time budget for one shard.
@@ -244,15 +244,29 @@ def plan(
     # this step's hardware too, so their measured time is used, not the
     # unknown-file default.
     skip_only = set()
+    previews: Dict[str, List[str]] = {}  # file -> previews main ran it under
     for timing in (timings or {}).get("files", []):
         key = (timing["command"], timing["file"])
         file_seconds[key] = timing["observedMs"] / 1000
+        previews.setdefault(timing["file"], []).append(timing["command"])
         if timing["timingStatus"] == "skip_only":
             skip_only.add(key)
         if timing.get("tests"):
             file_tests[key] = {
                 t["nodeid"]: t["observedMs"] / 1000 for t in timing["tests"]
             }
+
+    def timing_key(command: str, file: str) -> Optional[Tuple[str, str]]:
+        """The key of a file's timing on main. A step runs a file under one
+        command in practice, so the file alone finds it: a PR that edits the
+        command (and so its preview) keeps main's timings. The preview only
+        picks between commands that run the same file."""
+        key = (command_preview(command), file)
+        if key in file_seconds:
+            return key
+        if len(previews.get(file, [])) == 1:
+            return (previews[file][0], file)
+        return None
 
     # One unit per file of each command, in collection order.
     units: List[Dict] = []
@@ -277,23 +291,24 @@ def plan(
     skipped_files = []
     for unit in units:
         files.add((unit["command"], unit["file"]))
-        preview = command_preview(inventory[unit["command"]]["command"])
-        unit["seconds"] = file_seconds.get((preview, unit["file"]))
-        if unit["seconds"] is None:
+        unit["key"] = timing_key(inventory[unit["command"]]["command"], unit["file"])
+        if unit["key"] is None:
             unit["seconds"] = unknown_file_seconds
             unknown_files.append(unit["file"])
-        elif (preview, unit["file"]) in skip_only:
-            skipped_files.append(unit["file"])
+        else:
+            unit["seconds"] = file_seconds[unit["key"]]
+            if unit["key"] in skip_only:
+                skipped_files.append(unit["file"])
+    if len(unknown_files) == len(units):
+        # Main has no timing for any of the step's files (the endpoint is
+        # down, or the step is newly enrolled): a split would be a guess that
+        # costs GPU jobs, so the step runs as its normal single job.
+        timings = None
 
     oversized = []
-    if timings is None:  # equal file counts, as a safe default
+    if timings is None:
         unknown_files = []
-        count = min(NO_TIMING_SHARDS, len(units))
-        shards = []
-        for number in range(count):
-            start = number * len(units) // count
-            end = (number + 1) * len(units) // count
-            shards.append(list(range(start, end)))
+        shards = [list(range(len(units)))]
     else:
         split_units = []
         for unit in units:
@@ -302,8 +317,7 @@ def plan(
             parts = max(1, min(parts, len(nodeids)))  # a 0 s file is still 1 part
             if parts > 1:
                 oversized.append(unit["file"])
-            preview = command_preview(inventory[unit["command"]]["command"])
-            tests = file_tests.get((preview, unit["file"])) if parts > 1 else None
+            tests = file_tests.get(unit["key"]) if parts > 1 else None
             if tests:
                 # One unit per test function, its parametrized cases at the
                 # sum of their own medians, so the packing below cuts the file
@@ -488,9 +502,7 @@ def annotation(
             f"{source['buildNumber']} (`{(source['commit'] or '')[:12]}`)."
         )
     else:
-        lines.append(
-            f"No main timings for this step: {len(shards)} shards with equal file counts."
-        )
+        lines.append("No main timings for this step's files, so it runs as one job.")
     if result["unknownFiles"]:
         lines.append(
             f"No timing, counted as {result['rules']['unknownFileSeconds'] / 60:.1f} min each: "
@@ -685,9 +697,12 @@ def shard_step(
     ).strip()
     step["env"] = env
     step["commands"] = [
-        f'curl -sSfL --retry 3 --max-time 60 -o /tmp/runtime_shard.py "{script_url}"',
-        'python3 -c "import shutil, sysconfig; shutil.copy('
-        "'/tmp/runtime_shard.py', sysconfig.get_paths()['purelib'])\"",
+        # A failed download would fail the shard like a failing test, so
+        # retry it on any error.
+        "curl -sSfL --retry 5 --retry-all-errors --max-time 60 --create-dirs"
+        f' -o /tmp/runtime-shard/runtime_shard.py "{script_url}"',
+        # On the path of whichever python runs pytest (a venv's included).
+        'export PYTHONPATH="/tmp/runtime-shard$${PYTHONPATH:+:$$PYTHONPATH}"',
         *_shard_commands(step["commands"], result, inventory),
     ]
     return step

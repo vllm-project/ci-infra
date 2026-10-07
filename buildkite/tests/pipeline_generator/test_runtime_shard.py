@@ -1,3 +1,4 @@
+import importlib.metadata
 import json
 import shlex
 import os
@@ -273,14 +274,40 @@ def test_plan_without_per_test_data_still_splits_by_count():
     assert [s["estimateSeconds"] for s in result["shards"]] == [100, 100]
 
 
-def test_plan_without_timings_uses_four_equal_shards():
+def test_plan_without_timings_runs_the_step_as_one_job():
+    """With nothing to split by, a split would be a guess that costs GPU jobs:
+    the endpoint is down, or main has no timing for any of the step's files."""
     inventory = [_entry(TESTS[0], {f"model_executor/t{i}.py": 1 for i in range(8)})]
-    result = rs.plan(inventory, None)
-    rs.check(result, inventory)
-    assert [len(s["commands"][0]["targets"]) for s in result["shards"]] == [2, 2, 2, 2]
-    assert result["timingSource"] is None and "equal file counts" in rs.annotation(
-        "k", result
-    )
+    other_files = _timings(TESTS[0], {"model_executor/gone.py": 600})
+    for timings in (None, other_files, dict(other_files, files=[])):
+        result = rs.plan(inventory, timings)
+        rs.check(result, inventory)
+        assert len(result["shards"]) == 1 and result["timingSource"] is None
+        assert "runs as one job" in rs.annotation("k", result)
+
+
+def test_plan_finds_main_timings_after_a_pr_edits_the_command():
+    """Main's timings carry the command's 80-character preview; a PR that adds
+    a flag changes it, and every file would otherwise count as unknown."""
+    files = {f"model_executor/t{i}.py": 1 for i in range(4)}
+    timings = _timings(TESTS[0], {f: 500 for f in files})
+    edited = TESTS[0].replace("pytest -v -s", "pytest -v -s -x")
+    result = rs.plan([_entry(edited, files)], timings)
+    assert result["unknownFiles"] == [] and len(result["shards"]) == 2
+    assert [s["estimateSeconds"] for s in result["shards"]] == [1000, 1000]
+
+
+def test_plan_tells_apart_commands_that_run_the_same_file():
+    files = {"model_executor/a.py": 1}
+    one, two = TESTS[0], TESTS[0] + " -k fast"
+    timings = _timings(one, {"model_executor/a.py": 900})
+    timings["files"] += _timings(two, {"model_executor/a.py": 30})["files"]
+    result = rs.plan([_entry(one, files), _entry(two, files)], timings)
+    assert [s["estimateSeconds"] for s in result["shards"]] == [930]
+    # Neither preview matches: no telling which time is this command's.
+    edited = TESTS[0].replace("pytest -v -s", "pytest -v -s -x")
+    result = rs.plan([_entry(edited, files), _entry(two, files)], timings)
+    assert result["unknownFiles"] == ["tests/model_executor/a.py"]
 
 
 def test_plan_over_max_number_of_shards_still_assigns_everything():
@@ -508,8 +535,9 @@ def test_run_plan_annotates_and_never_raises(tmp_path, monkeypatch):
         entry = _entry(command, {f"f{i}_{j}.py": 1 for j in range(3)})
         (out / f"inventory-{i}.json").write_text(json.dumps({**entry, "exitstatus": 0}))
     rs.run_plan("model-executor", rs.encode(TESTS))
-    # No main timings: equal file counts, worth a look.
-    assert calls[-1][5] == "warning" and "would run as **4 shards**" in calls[-1][6]
+    # No main timings: one job, worth a look.
+    assert calls[-1][5] == "warning" and "would run as **1 shard**" in calls[-1][6]
+    assert "runs as one job" in calls[-1][6]
     assert json.loads((out / "plan.json").read_text())["tests"] == 6
 
 
@@ -587,6 +615,27 @@ def test_generator_rollback_switch_and_recording_builds(
     assert [s.key for s in _render(_step(automatic_shard=True))] == ["model-executor"]
 
 
+def test_scripts_come_from_the_generators_own_commit(monkeypatch):
+    """Every job of a build fetches the same runtime_shard.py, even if the
+    branch moves while the build runs."""
+
+    class Installed:
+        def read_text(self, name):
+            assert name == "direct_url.json"
+            vcs = {"vcs": "git", "commit_id": "abc123", "requested_revision": "x"}
+            return json.dumps({"url": "https://github.com/x.git", "vcs_info": vcs})
+
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda name: Installed())
+    assert buildkite_step._ci_infra_ref() == "abc123"
+
+    def missing(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "distribution", missing)
+    monkeypatch.setenv("VLLM_CI_BRANCH", "my-branch")
+    assert buildkite_step._ci_infra_ref() == "my-branch"
+
+
 def test_retry_keys_of_the_generated_steps_select_the_step(fake_global_config):
     steps = [_step(automatic_shard=True, depends_on=None)]
     for key in ("model-executor-shard-collect", "model-executor-shard-plan"):
@@ -615,7 +664,7 @@ def _rendered(commands):
     return rendered
 
 
-def _run_plan_on(tmp_path, monkeypatch, template=None, timings=None):
+def _run_plan_on(tmp_path, monkeypatch, template=None, timings=...):
     monkeypatch.chdir(tmp_path)
     calls = []
     monkeypatch.setattr(
@@ -623,6 +672,11 @@ def _run_plan_on(tmp_path, monkeypatch, template=None, timings=None):
         "run",
         lambda args, check, **kw: calls.append((args, kw.get("input"))),
     )
+    if timings is ...:  # the inventories' 6 files at 400 s: 3 shards of 2
+        timings = _timings(TESTS[0], {f"f0_{j}.py": 400 for j in range(3)})
+        timings["files"] += _timings(TESTS[1], {f"f1_{j}.py": 400 for j in range(3)})[
+            "files"
+        ]
     monkeypatch.setattr(rs, "fetch_timings", lambda key: timings)
     template = template or {
         "label": "ME",
@@ -643,21 +697,28 @@ def _run_plan_on(tmp_path, monkeypatch, template=None, timings=None):
 def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
     _inventories(tmp_path)
     template, [step], annotate = _run_plan_on(tmp_path, monkeypatch)
-    assert step["key"] == "model-executor" and step["parallelism"] == 4
+    assert step["key"] == "model-executor" and step["parallelism"] == 3
     assert step["label"] == "ME shard %N/%t"
     assert step["env"] == {"A": "1", "PYTEST_ADDOPTS": "-p runtime_shard"}
     # The plugin's install, then setup as is; each pytest command and its
     # header become one case.
     assert "https://x/runtime_shard.py" in step["commands"][0]
+    assert "--retry-all-errors" in step["commands"][0]
+    # On the path of any python, not copied into one python's site-packages.
+    assert step["commands"][1] == (
+        'export PYTHONPATH="/tmp/runtime-shard$${PYTHONPATH:+:$$PYTHONPATH}"'
+    )
     assert step["commands"][2] == "cd /t" and len(step["commands"]) == 5
     assert all(
         c.startswith('case "$$BUILDKITE_PARALLEL_JOB" in') for c in step["commands"][3:]
     )
-    # 6 files, no timings: 4 shards of 1, 2, 1, 2 files
+    # 6 files at 400 s: 3 shards of 2 files, each command run once per shard
     first = step["commands"][3].split(";;")[0]
-    assert "\npytest -v -s -m '(not slow_test)' --timeout=900 f0_0.py\n" in first
-    # No main timings, so equal file counts: worth a look, so a warning.
-    assert annotate[5] == "warning" and "running as **4 shards**" in annotate[6]
+    assert "\npytest -v -s -m '(not slow_test)' --timeout=900 f0_0.py f0_1.py\n" in (
+        first
+    )
+    # A plan within budget leaves the build page alone.
+    assert annotate is None
 
 
 def test_run_plan_leaves_the_build_page_alone_for_a_good_plan(tmp_path, monkeypatch):
@@ -680,7 +741,7 @@ def test_run_plan_shards_a_kubernetes_job_with_its_pod_spec_and_env(
     _inventories(tmp_path)
     _, [step], _ = _run_plan_on(tmp_path, monkeypatch, template)
     # One Buildkite job per shard, each its own pod from the same pod spec.
-    assert step["parallelism"] == 4 and step["plugins"] == template["plugins"]
+    assert step["parallelism"] == 3 and step["plugins"] == template["plugins"]
     assert step["retry"] == template["retry"] == buildkite_step.K8S_RETRY
     assert step["env"] == {**template["env"], "PYTEST_ADDOPTS": "-p runtime_shard"}
     # After the plugin's install, the setup commands' headers stay; each
@@ -903,12 +964,15 @@ def test_a_command_that_names_test_ids_runs_only_those(tmp_path):
     )
     result = rs.plan([entry], None)
     rs.check(result, [entry])
-    assert result["shards"][0]["commands"][0]["targets"] == ["test_a.py::test_selected"]
+    assert result["shards"][0]["commands"][0]["targets"] == [
+        "test_a.py::test_selected",
+        "test_b.py::test_y",
+    ]
     step = rs.shard_step({"commands": _rendered([command])}, result, [entry], "u")
     run = _run_shard(step, 0, tmp_path / "tests")
     assert run.returncode == 0 and "test_excluded" not in run.stdout
     # All of the file's selected tests: no "(1 of 1 tests)".
-    assert "--- :test_tube: Command (1/1), file 1/1: test_a.py" in _groups(run.stdout)
+    assert "--- :test_tube: Command (1/1), file 1/2: test_a.py" in _groups(run.stdout)
 
 
 def test_a_shard_fails_if_a_planned_test_does_not_run(tmp_path):
