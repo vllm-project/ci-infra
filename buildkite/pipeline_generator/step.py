@@ -24,6 +24,7 @@ class Step(BaseModel):
     parallelism: Optional[int] = None
     concurrency: Optional[int] = Field(default=None, gt=0, strict=True)
     concurrency_group: Optional[str] = None
+    if_condition: Optional[str] = None
     timeout_in_minutes: Optional[int] = None
     mount_buildkite_agent: Optional[bool] = False
     env: Optional[Dict[str, str]] = None
@@ -96,7 +97,9 @@ def read_steps_from_job_dir(job_dir: str):
                         and global_config["github_repo_name"] == "vllm-project/vllm"
                     ):
                         step.working_dir = "/vllm-workspace/tests"
-                    step.source_file_dependencies = getattr(step, "source_file_dependencies", [])
+                    step.source_file_dependencies = getattr(
+                        step, "source_file_dependencies", []
+                    )
                     if not step.source_file_dependencies:
                         step.source_file_dependencies = []
                     step.source_file_dependencies.append(os.path.relpath(yaml_path))
