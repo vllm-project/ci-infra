@@ -12,10 +12,10 @@ like the recorders' scripts:
            test lands exactly once and annotates the build. Then it uploads
            the step's own job with `parallelism: N`; in shadow mode it uploads
            nothing, because the step already runs as one job.
-  shards   each parallel job runs one pytest command per file of its shard,
-           picked by BUILDKITE_PARALLEL_JOB, each under its own log header.
-  plugin   `-p runtime_shard` in each shard job: fails a file's command if a
-           test the plan gave it does not run there.
+  shards   each parallel job runs each pytest command once, on the files of
+           its shard, picked by BUILDKITE_PARALLEL_JOB.
+  plugin   `-p runtime_shard` in each shard job: opens a log group per file,
+           and fails the command if a test the plan gave it does not run.
 
 Sharding never blocks the step: if collection or planning fails, the plan step
 uploads the step's normal single job instead (see run_plan and the generator's
@@ -146,12 +146,12 @@ def decode(text: str):
     return json.loads(base64.b64decode(text))
 
 
-def pack(nodeids: List[str]) -> str:
-    """encode(), compressed: every file's tests go into a shard job's script."""
-    return base64.b64encode(zlib.compress(json.dumps(nodeids).encode())).decode()
+def pack(value) -> str:
+    """encode(), compressed: a shard's test IDs go into its job's script."""
+    return base64.b64encode(zlib.compress(json.dumps(value).encode())).decode()
 
 
-def unpack(text: str) -> List[str]:
+def unpack(text: str):
     return json.loads(zlib.decompress(base64.b64decode(text)))
 
 
@@ -657,10 +657,10 @@ def shard_step(
     """The step's own job, run as one parallel job per shard.
 
     Parallel jobs share their commands, so each pytest command becomes a
-    `case` on BUILDKITE_PARALLEL_JOB: a job runs one pytest command per file
-    of its shard, each under a log header that shows it. Each job installs
-    this file as a pytest plugin, which checks that every test the plan gave
-    a file's command runs.
+    `case` on BUILDKITE_PARALLEL_JOB: a job runs the command once, on the
+    files of its shard. Each job installs this file as a pytest plugin, which
+    opens a log group per file and checks that every test the plan gave the
+    command runs.
 
     Args:
         template: The step's normal rendered job.
@@ -724,11 +724,11 @@ def _shard_commands(
     commands: List[str], result: Dict, inventory: List[Dict]
 ) -> List[str]:
     """The job's commands, with each pytest command and its log header
-    replaced by a `case` on the shard: one pytest command per file of the
-    shard, each under its own log header.
+    replaced by a `case` on the shard: the command once, on the shard's files.
 
-    A failing file doesn't stop the shard's other files of the command; the
-    job then fails after them, where the step's own command would have.
+    One pytest process per command, as in the step's own job: a process per
+    file would pay pytest's startup and exit (~12 s with vLLM's conftest) per
+    file. The plugin gives each file its own log group instead.
 
     Args:
         commands: The step's rendered commands.
@@ -756,8 +756,8 @@ def _shard_commands(
         index = previews.index(match.group(3))
         entry = inventory[index]
         # The generator wraps the command (tracing, continue-on-failure) and
-        # renders its ' as ". Each file gets the wrapped line with its own
-        # command in place of the step's.
+        # renders its ' as ". The shard's command takes the step's place in
+        # the wrapped line.
         if position + 1 >= len(commands):
             raise ValueError(f"command {index + 1} is missing from the step's job")
         wrapped = commands[position + 1]
@@ -769,45 +769,55 @@ def _shard_commands(
         for nodeid in entry["nodeids"]:
             file_nodeids.setdefault(nodeid.split("::")[0], []).append(nodeid)
 
-        # The headers keep the step's own numbering, "Command (4/5)", so a
-        # number means the same YAML command in every shard, and name only
-        # the file; the exact command is the first line of its section. A
-        # shard shows only the commands it runs: check() made sure every test
-        # runs in some shard.
-        command = f"+++ :test_tube: Command ({match.group(2)})"
+        # The header keeps the step's own numbering, "Command (4/5)", so a
+        # number means the same YAML command in every shard; the exact command
+        # is the first line of its section. A shard shows only the commands it
+        # runs: check() made sure every test runs in some shard.
+        label = f"Command ({match.group(2)})"
         branches = []
         for number, shard in enumerate(result["shards"]):
-            mine = []  # this command's files in this shard
+            mine = []  # this command's files in this shard, in plan order
             for planned in shard["commands"]:
                 if planned["index"] == index:
                     mine += _targets_by_file(planned).items()
-            lines = []
-            for file_number, (file, targets) in enumerate(mine):
-                parts = _shard_command(entry, targets)
+            if not mine:
+                branches.append(f"{number})\n:\n;;")
+                continue
+            targets = []
+            # The plugin fails the command if one of these is not among the
+            # tests it runs.
+            expected = []
+            totals = {}  # a file split across shards -> its tests in all
+            for file, file_targets in mine:
+                targets += file_targets
                 # A split file's targets are its test IDs, one per test.
-                by_id = "::" in targets[0]
-                total = len(file_nodeids[prefix + file])
-                # The plugin fails the file's command if one of these is not
-                # among the tests it runs.
-                expected = file_nodeids[prefix + file]
-                if by_id:
-                    expected = [prefix + target for target in targets]
-                lines.append(f"export RUNTIME_SHARD_TESTS={pack(expected)}")
-                title = f"{command}, file {file_number + 1}/{len(mine)}: {file}"
-                if by_id and len(targets) < total:
-                    title += f"   ({len(targets)} of {total} tests)"
-                shown = " ".join(shlex.quote(text) for text in (title, " ".join(parts)))
-                # Buildkite interpolates the uploaded step: $$ is a literal $.
-                # The generator's own lines are already escaped.
-                lines.append(f"printf '%s\\n' {shown}".replace("$", "$$"))
-                run = before + " ".join(parts).replace("$", "$$") + after
-                lines.append(f"{{ {run}\n}} || runtime_shard_status=1")
-            if lines:
-                lines.insert(0, "runtime_shard_status=0")
-                lines.append("unset RUNTIME_SHARD_TESTS")
-                lines.append("(exit $$runtime_shard_status)")
-            else:
-                lines.append(":")
+                if "::" in file_targets[0]:
+                    expected += [prefix + target for target in file_targets]
+                    total = len(file_nodeids[prefix + file])
+                    if len(file_targets) < total:
+                        totals[file] = total
+                else:
+                    expected += file_nodeids[prefix + file]
+            plugin = {
+                "label": label,
+                "prefix": prefix,
+                "tests": expected,
+                "totals": totals,
+            }
+            parts = _shard_command(entry, targets)
+            title = (
+                f"+++ :test_tube: {label}: {_plural(len(mine), 'file')}, "
+                f"{_plural(len(expected), 'test')}"
+            )
+            shown = " ".join(shlex.quote(text) for text in (title, " ".join(parts)))
+            # Buildkite interpolates the uploaded step: $$ is a literal $.
+            # The generator's own lines are already escaped.
+            lines = [
+                f"export RUNTIME_SHARD_TESTS={pack(plugin)}",
+                f"printf '%s\\n' {shown}".replace("$", "$$"),
+                before + " ".join(parts).replace("$", "$$") + after,
+                "unset RUNTIME_SHARD_TESTS",
+            ]
             branches.append(f"{number})\n" + "\n".join(lines) + "\n;;")
         replaced.append(
             'case "$$BUILDKITE_PARALLEL_JOB" in\n'
@@ -911,28 +921,93 @@ def run_plan(step_key: str, commands_b64: str, mode: str = "shadow") -> None:
     )
 
 
-def pytest_collection_finish(session):
-    """Plugin: fail a shard's file command if a test the plan gave it is not
-    among the tests it runs, after every filter. Otherwise a test that the
-    shard's collection lost would run in no shard while every shard passed.
-    A no-op without RUNTIME_SHARD_TESTS.
+def pytest_configure(config):
+    """Plugin: in a shard's pytest command, open a Buildkite log group per
+    file and fail the command if a test the plan gave it does not run. A no-op
+    without RUNTIME_SHARD_TESTS.
     """
-    # Popped, so a pytest that a test itself starts doesn't check against it.
+    # Popped, so a pytest that a test itself starts neither checks nor groups.
     packed = os.environ.pop("RUNTIME_SHARD_TESTS", None)
-    if not packed:
-        return
+    if packed:
+        config.pluginmanager.register(
+            _shard_plugin(unpack(packed)), "runtime_shard_run"
+        )
+
+
+def _shard_plugin(planned: Dict):
+    """The plugin for one shard's command, from what _shard_commands packed:
+    its "label", "prefix", "tests" (node IDs) and the "totals" of its files
+    split across shards. Built here so pytest is imported only under pytest:
+    the plan step runs this file on a bare python3.
+    """
     import pytest
 
-    running = {item.nodeid for item in session.items}
-    missing = []
-    for nodeid in unpack(packed):
-        if nodeid not in running:
-            missing.append(nodeid)
-    if missing:
-        raise pytest.UsageError(
-            f"runtime-shard: {_plural(len(missing), 'planned test')} would not run:"
-            f" {missing[:5]}"
-        )
+    class ShardPlugin:
+        def __init__(self):
+            self.reporter = None
+            self.files: Dict[str, int] = {}  # file from rootdir -> its tests here
+            self.current = None
+            self.expanded = False
+
+        def _say(self, line: str) -> None:
+            # Buildkite reads a group header only at the start of a line.
+            self.reporter.ensure_newline()
+            self.reporter.write_line(line)
+            sys.stdout.flush()
+
+        def pytest_collection_finish(self, session):
+            # After every filter: a test that the shard's collection lost would
+            # otherwise run in no shard while every shard passed.
+            running = {item.nodeid for item in session.items}
+            missing = [n for n in planned["tests"] if n not in running]
+            if missing:
+                raise pytest.UsageError(
+                    f"runtime-shard: {_plural(len(missing), 'planned test')} would "
+                    f"not run: {missing[:5]}"
+                )
+            if not session.config.getoption("collectonly"):
+                # Looked up here: it registers after -p plugins are configured.
+                self.reporter = session.config.pluginmanager.get_plugin(
+                    "terminalreporter"
+                )
+            for item in session.items:
+                file = item.nodeid.split("::")[0]
+                self.files[file] = self.files.get(file, 0) + 1
+
+        @pytest.hookimpl(tryfirst=True)  # before -v names the test
+        def pytest_runtest_logstart(self, nodeid, location):
+            file = nodeid.split("::")[0]
+            if self.reporter is None or file == self.current:
+                return
+            self.current, self.expanded = file, False
+            prefix = planned["prefix"]
+            shown = file[len(prefix) :] if file.startswith(prefix) else file
+            number = list(self.files).index(file) + 1 if file in self.files else 0
+            # Collapsed, so a shard's log is one line per file until opened.
+            title = (
+                f"--- :test_tube: {planned['label']}, file {number}/"
+                f"{len(self.files)}: {shown}"
+            )
+            total = planned["totals"].get(shown)
+            if total:
+                title += f"   ({self.files.get(file, 0)} of {total} tests)"
+            self._say(title)
+
+        @pytest.hookimpl(trylast=True)  # after -v prints FAILED or ERROR
+        def pytest_runtest_logreport(self, report):
+            if self.reporter is not None and report.failed and not self.expanded:
+                self.expanded = True
+                self._say("^^^ +++")  # Buildkite: open this file's group
+
+        @pytest.hookimpl(hookwrapper=True)
+        def pytest_runtestloop(self, session):
+            yield
+            if self.reporter is not None and self.current is not None:
+                # The failures and the summary get their own open group, not
+                # the last file's.
+                self._say(f"+++ :test_tube: {planned['label']}: results")
+
+    return ShardPlugin()
 
 
 if __name__ == "__main__":

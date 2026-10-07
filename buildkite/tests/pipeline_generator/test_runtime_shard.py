@@ -655,7 +655,7 @@ def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
     )
     # 6 files, no timings: 4 shards of 1, 2, 1, 2 files
     first = step["commands"][3].split(";;")[0]
-    assert "\n{ pytest -v -s -m '(not slow_test)' --timeout=900 f0_0.py\n}" in first
+    assert "\npytest -v -s -m '(not slow_test)' --timeout=900 f0_0.py\n" in first
     # No main timings, so equal file counts: worth a look, so a warning.
     assert annotate[5] == "warning" and "running as **4 shards**" in annotate[6]
 
@@ -769,7 +769,12 @@ def _result(*shards):
     return result
 
 
-def test_each_file_of_a_shard_runs_as_its_own_command(tmp_path):
+def _groups(stdout):
+    """The Buildkite log group lines of a job's output."""
+    return [l for l in stdout.splitlines() if l[:4] in ("+++ ", "--- ", "^^^ ")]
+
+
+def test_a_shard_runs_its_files_in_one_pytest_with_a_log_group_each(tmp_path):
     command = "pytest -v pkg -m 'not slow'"
     entry = _collected(
         tmp_path,
@@ -790,24 +795,27 @@ def test_each_file_of_a_shard_runs_as_its_own_command(tmp_path):
 
     first = _run_shard(step, 0, tmp_path / "tests")
     assert first.returncode == 0, first.stdout + first.stderr
-    headers = [line for line in first.stdout.splitlines() if line.startswith("+++")]
-    assert headers == [
-        "+++ :test_tube: Command (1/1), file 1/2: pkg/test_a.py",
-        "+++ :test_tube: Command (1/1), file 2/2: pkg/test_b.py   (1 of 2 tests)",
+    # One pytest process for the command, not one per file.
+    assert first.stdout.count("test session starts") == 1
+    assert _groups(first.stdout) == [
+        "+++ :test_tube: Command (1/1): 2 files, 2 tests",
+        "--- :test_tube: Command (1/1), file 1/2: pkg/test_a.py",
+        "--- :test_tube: Command (1/1), file 2/2: pkg/test_b.py   (1 of 2 tests)",
+        "+++ :test_tube: Command (1/1): results",
     ]
     # The section starts with the exact command, ready to paste.
     lines = first.stdout.splitlines()
-    assert lines[lines.index(headers[1]) + 1] == (
-        "pytest -v -m 'not slow' pkg/test_b.py::test_y"
-    )
-    assert first.stdout.count("1 passed") == 2 and "test_z" not in first.stdout
+    assert lines[1] == "pytest -v -m 'not slow' pkg/test_a.py pkg/test_b.py::test_y"
+    assert "2 passed" in first.stdout and "test_z" not in first.stdout
 
     second = _run_shard(step, 1, tmp_path / "tests")
     assert second.returncode == 0 and "test_b.py::test_z PASSED" in second.stdout
     # A whole file needs no count, however many tests it has.
-    headers = [line for line in second.stdout.splitlines() if line.startswith("+++")]
-    assert headers[1] == "+++ :test_tube: Command (1/1), file 2/2: pkg/test_c.py"
-    assert "2 passed" in second.stdout
+    assert _groups(second.stdout)[1:3] == [
+        "--- :test_tube: Command (1/1), file 1/2: pkg/test_b.py   (1 of 2 tests)",
+        "--- :test_tube: Command (1/1), file 2/2: pkg/test_c.py",
+    ]
+    assert "3 passed" in second.stdout
 
     empty = _run_shard(step, 2, tmp_path / "tests")
     # A shard with none of the command's tests skips it without a header.
@@ -830,6 +838,14 @@ def test_a_failing_file_fails_the_job_after_the_shards_other_files(tmp_path):
     )
     run = _run_shard(step, 0, tmp_path / "tests")
     assert run.returncode == 1 and "test_b.py::test_y PASSED" in run.stdout
+    # The failing file's group opens; the passing file's stays folded.
+    assert _groups(run.stdout) == [
+        "+++ :test_tube: Command (1/1): 2 files, 2 tests",
+        "--- :test_tube: Command (1/1), file 1/2: pkg/test_a.py",
+        "^^^ +++",
+        "--- :test_tube: Command (1/1), file 2/2: pkg/test_b.py",
+        "+++ :test_tube: Command (1/1): results",
+    ]
     # As the step's own failing command would, it stops the job there.
     assert "after" not in run.stdout
 
@@ -858,17 +874,21 @@ def test_a_shard_keeps_the_generators_wrapping_and_a_commands_variables(tmp_path
     step = rs.shard_step({"commands": [header, traced]}, result, [entry], "u")
     case = step["commands"][2]
     assert (
-        f"{{ ci_otel_start 1 {preview} || :\n"
+        f"\nci_otel_start 1 {preview} || :\n"
         "N=3 pytest -v 'test_n.py::test_i[1]' 'test_n.py::test_i[2]'\n"
-        "status=$$?\n(exit $$status)\n} || runtime_shard_status=1"
+        "status=$$?\n(exit $$status)\n"
     ) in case
     step["commands"][2] = case.replace(f"ci_otel_start 1 {preview} || :", ":")
     run = _run_shard(step, 1, tmp_path / "tests")
     assert run.returncode == 0 and "2 passed" in run.stdout
     assert run.stdout.splitlines()[:2] == [
-        "+++ :test_tube: Command (1/1), file 1/1: test_n.py   (2 of 3 tests)",
+        "+++ :test_tube: Command (1/1): 1 file, 2 tests",
         "N=3 pytest -v 'test_n.py::test_i[1]' 'test_n.py::test_i[2]'",
     ]
+    assert (
+        "--- :test_tube: Command (1/1), file 1/1: test_n.py   (2 of 3 tests)"
+        in _groups(run.stdout)
+    )
 
 
 def test_a_command_that_names_test_ids_runs_only_those(tmp_path):
@@ -888,7 +908,7 @@ def test_a_command_that_names_test_ids_runs_only_those(tmp_path):
     run = _run_shard(step, 0, tmp_path / "tests")
     assert run.returncode == 0 and "test_excluded" not in run.stdout
     # All of the file's selected tests: no "(1 of 1 tests)".
-    assert "+++ :test_tube: Command (1/1), file 1/1: test_a.py" in run.stdout
+    assert "--- :test_tube: Command (1/1), file 1/1: test_a.py" in _groups(run.stdout)
 
 
 def test_a_shard_fails_if_a_planned_test_does_not_run(tmp_path):
@@ -907,7 +927,7 @@ def test_a_shard_fails_if_a_planned_test_does_not_run(tmp_path):
     result = _result(["pkg/test_a.py"])
     step = rs.shard_step({"commands": _rendered([command])}, result, [entry], "u")
     run = _run_shard(step, 0, tmp_path / "tests")
-    assert run.returncode == 1
+    assert run.returncode == 4  # pytest's usage error, as the job's exit status
     assert "1 planned test would not run: ['tests/pkg/test_a.py::test_z']" in (
         run.stderr
     )
