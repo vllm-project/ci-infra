@@ -43,6 +43,17 @@ FLEET_WARNINGS = {
     "FailedAttachVolume",
 }
 
+# JobSet's exclusive placement rejects every follower pod of a multi-host slice
+# until the slice's leader pod has a node, and the Job controller retries, so a
+# FailedCreate with one of these messages comes with every start and restart of
+# a multi-host JobSet. Measured 2026-09-30..10-07: followers then start a median
+# 7-10 s after the leader. Not a fleet problem; any other FailedCreate is.
+PLACEMENT_HANDSHAKE = (
+    "follower pod node selector",
+    "leader pod not yet scheduled",
+    "expected 1 leader pod",
+)
+
 # Thresholds for the health checks, as a share of the budgets the launcher
 # enforces - a workload past them is about to be killed by the fleet itself.
 WARN_SHARE, FAIL_SHARE = 0.25, 0.8
@@ -140,9 +151,7 @@ def build_link(r: dict) -> str:
     title = E(
         f"{r['branch']} - {r['message']}" if r.get("message") else r.get("branch", "")
     )
-    return (
-        f'<a href="{E(r["url"])}" title="{title}">{E(r["pipeline"])} #{r["number"]}</a>'
-    )
+    return f'<a href="{E(r["url"])}" title="{title}" target="_blank" rel="noopener">{E(r["pipeline"])} #{r["number"]}</a>'
 
 
 def mean(values: list) -> float | None:
@@ -424,7 +433,11 @@ def group_events(events: list, job_builds: dict, org: str) -> list:
     for g in groups.values():
         g["objects"] = len(g["objects"])
         g["builds"] = sorted(g["builds"].items())
-        g["fleet"] = g["type"] == "Warning" and g["reason"] in FLEET_WARNINGS
+        g["fleet"] = (
+            g["type"] == "Warning"
+            and g["reason"] in FLEET_WARNINGS
+            and not any(m in g["message"] for m in PLACEMENT_HANDSHAKE)
+        )
         out.append(g)
     return sorted(out, key=lambda g: (-g["fleet"], g["type"] != "Warning", -g["last"]))
 
@@ -805,7 +818,7 @@ def render_events(snap: dict) -> str:
 <td>{E(g["reason"])}<div class="sub-row">{E(g["kind"])}{" · Warning" if g["type"] == "Warning" else ""}</div></td>
 <td class="n">{num(g["count"])}{f'<div class="sub-row">{g["objects"]} objects</div>' if g["objects"] > 1 else ""}</td>
 <td class="msg">{E(g["message"][:300])}</td>
-<td class="nowrap">{"<br>".join(f'<a href="{E(url)}">{E(name)}</a>' for name, url in g["builds"][:3])}{f'<div class="sub-row">+{len(g["builds"]) - 3} more</div>' if len(g["builds"]) > 3 else ""}</td></tr>"""
+<td class="nowrap">{"<br>".join(f'<a href="{E(url)}" target="_blank" rel="noopener">{E(name)}</a>' for name, url in g["builds"][:3])}{f'<div class="sub-row">+{len(g["builds"]) - 3} more</div>' if len(g["builds"]) > 3 else ""}</td></tr>"""
                 for g in groups[:60]
             )
             or f'<tr><td colspan="6" class="empty">{empty}</td></tr>'
@@ -835,7 +848,7 @@ scale-ups, preemptions, agent teardown, test failures.</p>
 
 
 def job_link(j: dict) -> str:
-    return f'<a href="{E(j["url"])}">{E(j["label"] or "(unnamed step)")}</a>'
+    return f'<a href="{E(j["url"])}" target="_blank" rel="noopener">{E(j["label"] or "(unnamed step)")}</a>'
 
 
 def render_jobs(snap: dict) -> str:
@@ -887,7 +900,7 @@ def render_jobs(snap: dict) -> str:
         return f'<details class="steps"><summary>{label}</summary><ul>{items}{more}</ul></details>'
 
     def build_cell(g: dict) -> str:
-        return f'<a href="{E(g["url"].split("#")[0])}">{E(g["pipeline"])} #{g["number"]}</a>'
+        return f'<a href="{E(g["url"].split("#")[0])}" target="_blank" rel="noopener">{E(g["pipeline"])} #{g["number"]}</a>'
 
     waiting = [j for j in jobs if j["real"] != "running"]
     running = [j for j in jobs if j["real"] == "running"]
@@ -1162,8 +1175,10 @@ submitted to quota reserved; startup is admitted to the first workload container
         return f"""<div class="card queue{"" if q["resource"] == TPU else " other"}" id="{E(q["name"])}">
   <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
     <span class="sub">{num(q["stats"]["finished"])} finished · avg {num(q["mean_used"])} {u}</span></div>
+  <div class="charts">
   {line_chart(f"{u.capitalize()} in use", ticks, [("used", "in use", q["history"]["used"])], ref=("nominal", q["history"]["nominal"]) if q["resource"] == TPU else None, fmt=fmt, width=520, height=180)}
-  {line_chart("Workloads pending", ticks, [("pending", "pending", q["history"]["pending"])], fmt=fmt, width=520, height=150)}
+  {line_chart("Workloads pending", ticks, [("pending", "pending", q["history"]["pending"])], fmt=fmt, width=520, height=180)}
+  </div>
   {values_table(ticks, [(f"{u.capitalize()} in use", q["history"]["used"]), ("Nominal", q["history"]["nominal"]), ("Pending", q["history"]["pending"])], every, "Values")}
 </div>"""
 

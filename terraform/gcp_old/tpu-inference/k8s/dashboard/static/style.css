@@ -55,8 +55,6 @@ main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 48px; }
   color: var(--muted); margin: 28px 0 10px; }
 .queue { border-left: 3px solid var(--own); }
 .queue.other { border-left-color: var(--line); }
-.queue-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 16px; }
-.queue-grid .card { margin: 0; }
 .errors { margin-top: 10px; }
 .error { color: var(--critical); font-weight: 600; }
 
@@ -157,6 +155,7 @@ td.barcell, th.barcell { width: 24%; vertical-align: middle; }
 .sub-row { color: var(--muted); font-size: 12px; }
 
 /* Charts */
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 .chart { margin: 4px 0 8px; }
 figcaption { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 figcaption .title { font-size: 13px; font-weight: 600; color: var(--ink-2); margin-right: auto; }
@@ -182,7 +181,7 @@ svg { width: 100%; height: auto; display: block; overflow: visible; }
 .reasons li { color: var(--ink-2); } .reasons li b { color: var(--ink); margin-right: 4px; }
 details { margin-top: 10px; } summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
 @media (max-width: 800px) {
+  .charts { grid-template-columns: 1fr; }
   .tiles { grid-template-columns: 1fr 1fr; }
-  .queue-grid { grid-template-columns: 1fr; }
   .custom { margin-left: 0; }
 }

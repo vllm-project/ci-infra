@@ -20,6 +20,11 @@ def nice_max(value: float) -> float:
     return 10 * scale
 
 
+def tick(value: float) -> str:
+    """0.5 stays 0.5: a backlog that averages under one workload still reads."""
+    return f"{value:,.0f}" if value == int(value) else f"{value:,.1f}"
+
+
 def monotone(points: list[tuple[float, float]]) -> str:
     """A cubic path through points that never overshoots them.
 
@@ -107,7 +112,7 @@ def line_chart(
             f'<line class="{"axis" if frac == 0 else "grid"}" x1="{left}" x2="{width - right}" '
             f'y1="{yy:.1f}" y2="{yy:.1f}"/>'
             f'<text class="tick" x="{left - 6}" y="{yy + 3:.1f}" text-anchor="end">'
-            f"{ymax * frac:,.0f}</text>"
+            f"{tick(ymax * frac)}</text>"
         )
     for frac in (0, 0.25, 0.5, 0.75, 1):
         i = round(n * frac)
