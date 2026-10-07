@@ -117,7 +117,7 @@ Managed via Terraform in `terraform/aws/`. Uses the [Buildkite Elastic CI Stack 
 | Queue | Instance Type | Max | Purpose |
 |-------|--------------|-----|---------|
 | `small_cpu_queue_premerge` | r6in.large | 40 | Bootstrap, docs, lightweight tasks |
-| `medium_cpu_queue_premerge` | r6in.4xlarge | 40 | Medium CPU workloads |
+| `medium_cpu_queue_premerge` | r6in.4xlarge | 60 | Medium CPU workloads, PR image builds |
 | `cpu_queue_premerge` | r6in.16xlarge (512GB) | 10 | CUDA kernel compilation |
 | `cpu_queue_premerge_us_east_1` | r6in.16xlarge (512GB) | 20 | CPU builds (warm-cache AMI) |
 | `arm64_cpu_queue_premerge` | r7g.16xlarge | 10 | ARM64 builds |

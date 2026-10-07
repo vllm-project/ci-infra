@@ -31,7 +31,7 @@ locals {
       BuildkiteAgentTokenParameterStorePath = data.aws_ssm_parameter.bk_agent_token_cluster_ci.name
       BuildkiteQueue                       = "medium_cpu_queue_premerge"
       InstanceTypes                        = "r6in.4xlarge"
-      MaxSize                              = 40
+      MaxSize                              = 60 # also runs PR image builds
       ECRAccessPolicy                      = "readonly"
       InstanceOperatingSystem              = "linux"
       OnDemandPercentage                   = 100
