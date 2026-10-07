@@ -307,16 +307,16 @@ def _get_step_plugin(step: Step):
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
     if step.label.startswith(":docker:"):
-        # Escape hatch for instance-sizing experiments: route image builds to
-        # a different queue, e.g. VLLM_CI_IMAGE_BUILD_QUEUE=medium_cpu_queue_premerge
-        override = os.getenv("VLLM_CI_IMAGE_BUILD_QUEUE")
-        if override:
-            return override
         if "arm64" in step.label:
             if branch == "main":
                 return AgentQueue.ARM64_CPU_POSTMERGE
             else:
                 return AgentQueue.ARM64_CPU_PREMERGE
+        # Escape hatch for instance-sizing experiments: route x86 image builds
+        # to a different queue, e.g. VLLM_CI_IMAGE_BUILD_QUEUE=medium_cpu_queue_premerge
+        override = os.getenv("VLLM_CI_IMAGE_BUILD_QUEUE")
+        if override:
+            return override
         if branch == "main":
             return AgentQueue.CPU_POSTMERGE_US_EAST_1
         else:
