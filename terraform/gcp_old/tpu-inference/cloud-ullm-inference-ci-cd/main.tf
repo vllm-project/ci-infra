@@ -16,7 +16,7 @@ module "ci_v6e_1_vllm" {
   accelerator_type                      = "v6e-1"
   reserved                              = true
   purpose                               = "vllm"
-  instance_count                        = 30
+  instance_count                        = 12
   disk_size                             = 1024
   buildkite_queue_name                  = "tpu_v6e_queue"
   project_id                            = var.project_id
@@ -37,7 +37,7 @@ module "ci_v6e_8_vllm" {
   accelerator_type                      = "v6e-8"
   reserved                              = true
   purpose                               = "vllm"
-  instance_count                        = 9
+  instance_count                        = 4
   disk_size                             = 4096
   buildkite_queue_name                  = "tpu_v6e_8_queue"
   project_id                            = var.project_id
@@ -124,9 +124,9 @@ module "ci_v7x_16" {
 # READ_WRITE disk cannot be shared by four hosts, and the multi-host jobs
 # stream weights from GCS instead. Replaces the hand-built ranlihao-v7x-32 slice.
 #
-# instance_count is 0 because the project's tpu7x reservation is fully used
-# and a tpu7x-32 needs 16 chips. The hand-built slice still holds them. Raise
-# to 1 after that slice is deleted.
+# instance_count is 0: the 16 chips a tpu7x-32 would need are part of the
+# kube v7x lane's 72 (k8s/prod.auto.tfvars), which runs the tpu7x-32 benchmark
+# case on its 2x2x4 slices. Raising this takes them out of that lane.
 module "ci_v7x_32" {
   source = "../modules/ci_v7x"
   providers = {
