@@ -39,6 +39,7 @@ manager where the launcher built the podspec.
 | `kueue/generated/` | The YAML that actually gets applied. Committed on purpose — see below. |
 | `kueue/launcher/` | The program every TPU step runs, its Job, and its image build. |
 | `kueue/launcher/pod_defaults.yaml` | What the fleet gives a workload's pods: caches, gcsfuse settings, eviction and retry policy. One definition, inherited by the built-in Job and by every manifest. |
+| `dashboard.tf`, `dashboard/` | The queue dashboard: per topology, the bare-metal queue beside its Kueue queue. A Cloud Run service, its program and its image build. |
 
 Terraform stops at the cluster; `deploy_manifests.py` starts there. The
 Kubernetes and Helm providers need a reachable API server at plan time, which
@@ -278,6 +279,29 @@ a tag always names one set of bytes. The staging directory has to be named: the
 default is a multi-region `us` bucket, which `constraints/gcp.resourceLocations`
 refuses in this org.
 
+### Rebuild the queue dashboard
+
+After any change to `dashboard/app.py` or its Dockerfile, bump `_REVISION`:
+
+```bash
+cd dashboard
+gcloud builds submit --project cloud-ullm-inference-ci-cd --region us-central1 \
+  --config cloudbuild.yaml \
+  --gcs-source-staging-dir gs://cloud-ullm-inference-ci-cd-tf-state/cloudbuild-source \
+  --substitutions _REVISION=2 .
+```
+
+Then set `dashboard_image` in `prod.auto.tfvars` to the new tag and
+`terraform apply`. To try a change first, run it against the live fleet with
+your own credentials - gcloud for Google APIs, the `bk` CLI for Buildkite - with
+the environment `dashboard.tf` sets:
+
+```bash
+PROJECT_ID=... GATEWAY_URL=... KUEUE_METRICS_CLUSTER=tpu-ci-manager \
+  BUILDKITE_ORG=vllm BUILDKITE_CLUSTER_ID=... TOPOLOGIES='[...]' \
+  ./dashboard/app.py --local --port 8080
+```
+
 ### Tear the fleet down
 
 **Empty the cache buckets first.** They are `force_destroy = false`, so a
@@ -389,6 +413,27 @@ accept, including `job-ttl` and `max-in-flight`. Read it there rather than
 guessing — and note the chart pastes our block under keys of its own, so
 anything it derives must be left out of the template or the controller's decoder
 rejects the duplicate.
+
+## The queue dashboard
+
+`terraform output dashboard_url`, behind IAP; `dashboard_viewers` in
+`prod.auto.tfvars` says who gets in. It is the Buildkite queue page for both
+fleets at once. Buildkite cannot show kube by topology, because every kube step
+is on the one `kube` queue until the launcher picks a Kueue queue for it.
+
+Per topology it shows the bare-metal queue and the Kueue queue replacing it:
+agents or chips in use, what is waiting and for how long, which builds hold and
+wait on each, and Kueue's reason for anything pending. Only the head of a
+BestEffortFIFO queue carries a reason; the rest are counted as queued behind
+it. Kube steps Buildkite has not handed over yet - concurrency-limited, or
+waiting for an agent pod - are listed apart, since their topology is not known
+until the launcher runs.
+
+It reads the manager through Connect Gateway as `tpu-ci-dashboard@`, with the
+read-only RBAC in `kueue/templates/dashboard_rbac.yaml.tpl`; that file is
+applied by `deploy_manifests.py` like the rest, so the dashboard shows a Kueue
+error until it is. A source that fails is named at the top of the page, and the
+rest still render.
 
 ## Reading the metrics
 

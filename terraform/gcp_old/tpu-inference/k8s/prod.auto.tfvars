@@ -257,3 +257,28 @@ labels = {
   owner       = "tpu-inference"
 }
 
+
+# The Buildkite cluster both fleets' queues live in: the bare-metal TPU queues
+# and kube.
+buildkite_org        = "vllm"
+buildkite_cluster_id = "0219f117-7dc6-4a04-aee2-1619736fd800"
+
+# Built by dashboard/cloudbuild.yaml; the tag is the build revision there.
+dashboard_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/queue-dashboard:1"
+
+# The token modules/ci_monitoring's BigQuery puller already lists these
+# pipelines' builds with.
+dashboard_buildkite_token_secret_id = "vllm_org_buildkite_rest_api_token"
+
+dashboard_viewers = [
+  "user:mhhua@google.com",
+]
+
+dashboard_topologies = [
+  { label = "v7x, 1 chip (1x1x1)", bare_queue = "tpu_v7x_2_queue", kube_queue = "tpu7x-standard-1t-1x1x1", chips = 1 },
+  { label = "v7x, 4 chips (2x2x1)", bare_queue = "tpu_v7x_8_queue", kube_queue = "tpu7x-standard-4t-2x2x1", chips = 4 },
+  { label = "v7x, 8 chips (2x2x2)", bare_queue = "tpu_v7x_16_queue", kube_queue = "tpu7x-standard-4t-2x2x2", chips = 8 },
+  { label = "v7x, 16 chips (2x2x4)", bare_queue = "tpu_v7x_32_queue", kube_queue = "tpu7x-standard-4t-2x2x4", chips = 16 },
+  { label = "v6e, 1 chip (1x1)", bare_queue = "tpu_v6e_queue", kube_queue = "ct6e-standard-1t-1x1", chips = 1 },
+  { label = "v6e, 8 chips (2x4)", bare_queue = "tpu_v6e_8_queue", kube_queue = "ct6e-standard-8t-2x4", chips = 8 },
+]

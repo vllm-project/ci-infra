@@ -258,6 +258,16 @@ def worker_node_service_account(prefix: str, project: str, location: str) -> str
     return f"{prefix}-wkr-{location}@{project}.iam.gserviceaccount.com"
 
 
+def dashboard_service_account(prefix: str, project: str) -> str:
+    """The identity the queue dashboard reaches the manager as.
+
+    dashboard.tf creates the account under the same derived name, and the RBAC
+    binding names it here. A mismatch fails safe - the dashboard is refused and
+    shows the error - but it is still two derivations to keep in step.
+    """
+    return f"{prefix}-dashboard@{project}.iam.gserviceaccount.com"
+
+
 def render(name: str, **values) -> str:
     text = (TEMPLATES / f"{name}.yaml.tpl").read_text()
     for key, value in values.items():
@@ -955,6 +965,16 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
     write(
         base / "workload" / "30-monitoring.yaml",
         render("monitoring_agent_stack", NAMESPACE=namespace),
+    )
+    # Manager only: the dashboard reports the manager's queues, which admit for
+    # the whole fleet. Under workload/ for the namespace its Role is in.
+    write(
+        base / "workload" / "40-dashboard-rbac.yaml",
+        render(
+            "dashboard_rbac",
+            NAMESPACE=namespace,
+            DASHBOARD_SERVICE_ACCOUNT=dashboard_service_account(prefix, project),
+        ),
     )
     # Everything the fleet runs on the manager lives in this namespace, so
     # setting the class here covers the launcher pods and the agent pods without

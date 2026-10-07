@@ -491,3 +491,64 @@ variable "machine_memory_gb" {
     have to be edited together.
   EOT
 }
+
+variable "buildkite_org" {
+  type        = string
+  description = "Buildkite organization slug the fleet's pipelines belong to. Read by the queue dashboard; see dashboard.tf."
+}
+
+variable "buildkite_cluster_id" {
+  type        = string
+  description = <<-EOT
+    UUID of the Buildkite cluster holding both the bare-metal TPU queues and
+    the kube queue. The dashboard reports jobs from this cluster only, and
+    finds its pipelines by it.
+  EOT
+}
+
+variable "dashboard_image" {
+  type        = string
+  description = <<-EOT
+    Image the queue dashboard runs. Built by hand from dashboard/Dockerfile -
+    the command is in dashboard/cloudbuild.yaml - and bumped here when
+    dashboard/app.py changes.
+  EOT
+}
+
+variable "dashboard_buildkite_token_secret_id" {
+  type        = string
+  description = <<-EOT
+    Secret Manager secret in project_id holding a Buildkite REST API token
+    with read_builds and read_pipelines, which the dashboard lists jobs with.
+    Not created here, for the same reason as agent_token_secret_id.
+  EOT
+}
+
+variable "dashboard_viewers" {
+  type        = list(string)
+  description = <<-EOT
+    IAM principals IAP lets through to the dashboard, as user:, group: or
+    domain: members. Nothing else reaches it: the service accepts only
+    requests IAP has authenticated.
+  EOT
+}
+
+variable "dashboard_topologies" {
+  type = list(object({
+    label      = string
+    bare_queue = string
+    kube_queue = string
+    chips      = number
+  }))
+  description = <<-EOT
+    The dashboard's rows: each bare-metal Buildkite queue beside the Kueue
+    queue that replaces it, in display order. chips is the chips one job of
+    that topology holds, which turns the exporter's busy-agent count into
+    chips so the two fleets share a unit.
+
+    Stated rather than derived because the pairing is not in the names:
+    Buildkite queue names count TensorCores (tpu_v7x_8_queue is a four-chip
+    2x2x1), Kueue names count chips. A queue in neither list still shows,
+    under "Other queues".
+  EOT
+}
