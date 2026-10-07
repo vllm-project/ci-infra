@@ -171,17 +171,6 @@ def select_steps_and_dependencies(
             )
             amd_step_keys.add(mirror_key)
 
-    # A runtime-sharded step's collect and plan keys are generated too; retry
-    # the step itself, which collects and plans afresh.
-    step_keys = set()
-    for key in requested_step_keys:
-        step_key = key
-        for suffix in ("-shard-collect", "-shard-plan"):
-            if key.endswith(suffix) and key.removesuffix(suffix) in steps_by_key:
-                step_key = key.removesuffix(suffix)
-                break
-        step_keys.add(step_key)
-    requested_step_keys = frozenset(step_keys)
     missing = requested_step_keys - steps_by_key.keys()
     if missing:
         raise ValueError("Unknown CI step key(s): " + ", ".join(sorted(missing)))

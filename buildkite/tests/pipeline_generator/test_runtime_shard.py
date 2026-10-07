@@ -1,7 +1,6 @@
-import importlib.metadata
-import json
-import shlex
 import os
+import re
+import shlex
 import subprocess
 import sys
 
@@ -9,7 +8,6 @@ import pytest
 
 import buildkite_step
 import runtime_shard as rs
-from pipeline_generator import select_steps_and_dependencies
 from step import Step
 
 SETUP = ["apt-get update && apt-get install -y curl", "export PYTHONFAULTHANDLER=1"]
@@ -19,27 +17,11 @@ TESTS = [
 ]
 
 
-def _entry(command, files, prefix="tests"):
-    """Inventory for one command: {file: number of tests}, in collection order."""
-    args = shlex.split(command, comments=True)[1:]
-    paths = []
-    for i, arg in enumerate(args):
-        if not arg.startswith("-") and (i == 0 or args[i - 1] not in ("-m", "-k")):
-            paths.append(arg)
-    return {
-        "command": command,
-        "prefix": prefix,
-        "paths": paths,
-        "nodeids": [
-            f"{prefix}/{f}::test_{i}" for f, n in files.items() for i in range(n)
-        ],
-    }
-
-
 def _timings(command, seconds):
+    """The timing endpoint's response: main's median per file (repo-relative)."""
     return {
         "buildNumber": 7,
-        "commit": "abc",
+        "buildNumbers": [7, 6],
         "files": [
             {
                 "command": rs.command_preview(command),
@@ -52,23 +34,28 @@ def _timings(command, seconds):
     }
 
 
-def test_contiguous_keeps_order_and_uses_fewest_runs():
-    assert len(rs.contiguous([6, 5, 3, 2, 2, 2], 10, 6)) == 3  # 6 | 5,3,2 | 2,2
-    assert rs.contiguous([5, 5, 5, 5], 10, 6) == [[0, 1], [2, 3]]
-    assert rs.contiguous([4, 4, 4, 4], 12, 6) == [[0, 1], [2, 3]]  # evened, not 12 + 4
-    over = rs.contiguous([9] * 10, 10, 6)
-    assert len(over) <= 6 and sum(over, []) == list(range(10))
+def _with_tests(timings, file, test_seconds):
+    """Attach per-test medians to one file of a _timings() response."""
+    for entry in timings["files"]:
+        if entry["file"] == f"tests/{file}":
+            entry["tests"] = [
+                {"nodeid": f"tests/{file}::{name}", "observedMs": s * 1000}
+                for name, s in test_seconds.items()
+            ]
+    return timings
 
 
-def test_plan_keeps_a_file_main_timed_at_zero_seconds():
-    inventory = [_entry(TESTS[0], {"model_executor/a.py": 2, "model_executor/b.py": 1})]
-    timings = _timings(TESTS[0], {"model_executor/a.py": 0, "model_executor/b.py": 60})
-    result = rs.plan(inventory, timings)
-    rs.check(result, inventory)  # used to drop a.py: ceil(0 / budget) = 0 parts
-    assert result["shards"][0]["commands"][0]["targets"] == [
-        "model_executor/a.py",
-        "model_executor/b.py",
+def _commands(command, files, selected=()):
+    return [
+        {
+            "command": command,
+            "files": [f"tests/{f}" for f in files],
+            "selected": [f"tests/{f}" for f in selected],
+        }
     ]
+
+
+# Planning
 
 
 def test_split_commands():
@@ -88,296 +75,163 @@ def test_split_commands():
     # torchrun in setup would run in full in every shard.
     torchrun = "VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=2 a.py"
     assert rs.split_commands([torchrun, *TESTS]) is None
-    # Only the shell can expand $: collect would see different tests.
+    # Only the shell can expand $.
     assert rs.split_commands(["PYTHONPATH=$PWD pytest -v a.py"]) is None
 
 
-def test_plan_packs_whole_files_in_order_and_covers_every_test():
-    inventory = [
-        _entry(
-            TESTS[0],
-            {
-                "model_executor/a.py": 3,
-                "model_executor/b.py": 2,
-                "model_executor/c.py": 1,
-            },
-        ),
-        _entry(TESTS[1], {"entrypoints/test_tensorizer_entrypoint.py": 1}),
-    ]
-    timings = _timings(
-        TESTS[0], {"model_executor/a.py": 700, "model_executor/b.py": 600}
+def _tree(root, names):
+    for name in names:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_x(): pass\n")
+
+
+def test_discover_finds_the_files_pytest_would(tmp_path):
+    _tree(
+        tmp_path,
+        [
+            "tests/pkg/test_a.py",
+            "tests/pkg/b_test.py",
+            "tests/pkg/sub/test_c.py",
+            "tests/pkg/conftest.py",
+            "tests/pkg/helpers.py",
+            "tests/pkg/.hidden/test_h.py",
+            "tests/pkg/skip/test_s.py",
+            "tests/pkg/test_glob_skip.py",
+            "tests/other/test_o.py",
+            "tests/one/test_one.py",
+        ],
     )
-    timings["files"] += _timings(
-        TESTS[1], {"entrypoints/test_tensorizer_entrypoint.py": 300}
-    )["files"]
-    result = rs.plan(inventory, timings)
-    rs.check(result, inventory)
-    # a | b + c (unknown, 150 s) + the second command's file
-    assert [s["estimateSeconds"] for s in result["shards"]] == [700, 1050]
-    assert result["shards"][1]["commands"] == [
-        {
-            "index": 0,
-            "targets": ["model_executor/b.py", "model_executor/c.py"],
-            "tests": 3,
-        },
-        {
-            "index": 1,
-            "targets": ["entrypoints/test_tensorizer_entrypoint.py"],
-            "tests": 1,
-        },
-    ]
-    assert result["unknownFiles"] == ["tests/model_executor/c.py"]
-    assert not result["overBudget"] and result["tests"] == 7 and result["files"] == 4
-
-
-def test_plan_splits_only_a_file_bigger_than_a_shard():
-    inventory = [
-        _entry(TESTS[0], {"model_executor/big.py": 4, "model_executor/small.py": 1})
-    ]
-    result = rs.plan(
-        inventory,
-        _timings(
-            TESTS[0], {"model_executor/big.py": 2000, "model_executor/small.py": 10}
-        ),
+    cwd = str(tmp_path / "tests")
+    found = rs.discover(
+        "N=1 pytest -v -s pkg -m 'not slow' -k fast --ignore=pkg/skip "
+        "--ignore-glob '*glob*' --timeout 900 one/test_one.py::test_x",
+        cwd,
+        str(tmp_path),
     )
-    rs.check(result, inventory)
-    assert result["oversizedFiles"] == ["tests/model_executor/big.py"]
-    first, second = (s["commands"][0]["targets"] for s in result["shards"])
-    assert first == ["model_executor/big.py::test_0", "model_executor/big.py::test_1"]
-    assert second == [
-        "model_executor/big.py::test_2",
-        "model_executor/big.py::test_3",
-        "model_executor/small.py",
+    assert found["files"] == [
+        "tests/pkg/b_test.py",
+        "tests/pkg/test_a.py",
+        "tests/pkg/sub/test_c.py",
+        "tests/one/test_one.py",
     ]
+    assert found["selected"] == ["tests/one/test_one.py"]
+    with pytest.raises(ValueError, match="not in the checkout"):
+        rs.discover("pytest -v missing", cwd, str(tmp_path))
+    with pytest.raises(ValueError, match="no test path"):
+        rs.discover("pytest -v -m slow", cwd, str(tmp_path))
 
 
-def _with_tests(timings, command, file, test_seconds):
-    """Attach per-test medians, in test_i order, to one file of a _timings()
-    response. A None entry leaves that test with no timing of its own."""
-    preview = rs.command_preview(command)
-    for entry in timings["files"]:
-        if entry["command"] == preview and entry["file"] == f"tests/{file}":
-            entry["tests"] = [
-                {"nodeid": f"tests/{file}::test_{i}", "observedMs": s * 1000}
-                for i, s in enumerate(test_seconds)
-                if s is not None
-            ]
-    return timings
+def test_plan_packs_the_largest_files_first_into_the_fewest_shards():
+    seconds = {"a.py": 100, "b.py": 600, "c.py": 300, "d.py": 500, "e.py": 200}
+    seconds["f.py"] = 400
+    result = rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))
+    # 2100 s doesn't fit two shards of 1080 s; three, evenly.
+    assert result["shards"] == 3 and result["estimates"] == [700, 700, 700]
+    files = result["commands"][0]["files"]
+    assert {f for f, s in files.items() if s == files["tests/b.py"]} == {
+        "tests/a.py",
+        "tests/b.py",
+    }
+    assert not result["overBudget"] and result["unknownFiles"] == []
 
 
-def test_plan_adds_a_shard_when_the_files_parts_cannot_fit_the_budget():
-    """ceil(18 / 10) = 2 parts, but 2 contiguous parts of these tests are 12 s."""
-    inventory = [_entry(TESTS[0], {"model_executor/big.py": 3})]
-    timings = _with_tests(
-        _timings(TESTS[0], {"model_executor/big.py": 18}),
-        TESTS[0],
-        "model_executor/big.py",
-        [6, 6, 6],
-    )
-    result = rs.plan(inventory, timings, max_shard_seconds=10)
-    rs.check(result, inventory)
-    assert [s["estimateSeconds"] for s in result["shards"]] == [6, 6, 6]
-    assert not result["overBudget"]
-
-
-def test_plan_splits_an_oversized_files_tests_by_time_not_count():
-    inventory = [_entry(TESTS[0], {"model_executor/big.py": 4})]
-    timings = _with_tests(
-        _timings(TESTS[0], {"model_executor/big.py": 200}),
-        TESTS[0],
-        "model_executor/big.py",
-        [170, 10, 10, 10],
-    )
-    result = rs.plan(inventory, timings, max_shard_seconds=100)
-    rs.check(result, inventory)
-    # Equal-count would give test_0,1 | test_2,3; time-based keeps the one
-    # slow test alone instead of pairing it with a fast one.
-    first, second = (s["commands"][0]["targets"] for s in result["shards"])
-    assert first == ["model_executor/big.py::test_0"]
-    assert second == [
-        "model_executor/big.py::test_1",
-        "model_executor/big.py::test_2",
-        "model_executor/big.py::test_3",
-    ]
-    assert [s["estimateSeconds"] for s in result["shards"]] == [170, 30]
-
-
-def test_plan_keeps_a_test_functions_cases_in_one_shard():
-    """Main paid the cases' shared setup once; split apart, each pays it."""
-    file = "model_executor/big.py"
-    inventory = [
-        {
-            "command": TESTS[0],
-            "prefix": "tests",
-            "paths": ["model_executor"],
-            "nodeids": [
-                f"tests/{file}::test_b",
-                f"tests/{file}::test_a[v1]",
-                f"tests/{file}::test_a[v2]",
-                f"tests/{file}::test_c[x]",
-                f"tests/{file}::test_c[y]",
-                f"tests/{file}::test_c[z]",
-            ],
-        }
-    ]
-    timings = _timings(TESTS[0], {file: 200})
-    timings["files"][0]["tests"] = [
-        {"nodeid": f"tests/{file}::{name}", "observedMs": s * 1000}
-        for name, s in [
-            ("test_b", 60),
-            ("test_a[v1]", 30),
-            ("test_a[v2]", 30),
-            ("test_c[x]", 50),
-            ("test_c[y]", 50),
-            ("test_c[z]", 50),
-        ]
-    ]
-    result = rs.plan(inventory, timings, max_shard_seconds=100)
-    rs.check(result, inventory)
-    targets = [s["commands"][0]["targets"] for s in result["shards"]]
-    # test_a's cases stay together; test_c (150 s) is over budget, so cut.
-    assert [f"{file}::test_a[v1]", f"{file}::test_a[v2]"] in targets
-    assert sum(len(t) for t in targets) == 6
-    assert all(s["estimateSeconds"] <= 100 for s in result["shards"])
-
-
-def test_plan_gives_a_test_with_no_timing_the_files_average():
-    inventory = [_entry(TESTS[0], {"model_executor/big.py": 4})]
-    timings = _with_tests(
-        _timings(TESTS[0], {"model_executor/big.py": 2000}),
-        TESTS[0],
-        "model_executor/big.py",
-        [1700, None, 100, 100],  # test_1 has no timing of its own
-    )
-    result = rs.plan(inventory, timings)
-    rs.check(result, inventory)
-    # test_1 gets the file average (2000 / 4 = 500s) and lands with test_2, 3.
-    first, second = (s["commands"][0]["targets"] for s in result["shards"])
-    assert first == ["model_executor/big.py::test_0"]
-    assert second == [
-        "model_executor/big.py::test_1",
-        "model_executor/big.py::test_2",
-        "model_executor/big.py::test_3",
-    ]
-    assert [s["estimateSeconds"] for s in result["shards"]] == [1700, 700]
-
-
-def test_plan_without_per_test_data_still_splits_by_count():
-    """No "tests" on the oversized file: unchanged, today's equal split."""
-    inventory = [_entry(TESTS[0], {"model_executor/big.py": 4})]
-    timings = _timings(TESTS[0], {"model_executor/big.py": 200})
-    result = rs.plan(inventory, timings, max_shard_seconds=100)
-    rs.check(result, inventory)
-    first, second = (s["commands"][0]["targets"] for s in result["shards"])
-    assert first == ["model_executor/big.py::test_0", "model_executor/big.py::test_1"]
-    assert second == ["model_executor/big.py::test_2", "model_executor/big.py::test_3"]
-    assert [s["estimateSeconds"] for s in result["shards"]] == [100, 100]
+def test_plan_of_a_step_that_fits_in_one_job():
+    seconds = {"a.py": 100, "b.py": 200}
+    result = rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))
+    assert result["shards"] == 1 and result["estimates"] == [300]
+    assert "fit in one job" in rs.summary("k", result)
 
 
 def test_plan_without_timings_runs_the_step_as_one_job():
     """With nothing to split by, a split would be a guess that costs GPU jobs:
     the endpoint is down, or main has no timing for any of the step's files."""
-    inventory = [_entry(TESTS[0], {f"model_executor/t{i}.py": 1 for i in range(8)})]
-    other_files = _timings(TESTS[0], {"model_executor/gone.py": 600})
+    commands = _commands(TESTS[0], [f"t{i}.py" for i in range(8)])
+    other_files = _timings(TESTS[0], {"gone.py": 600})
     for timings in (None, other_files, dict(other_files, files=[])):
-        result = rs.plan(inventory, timings)
-        rs.check(result, inventory)
-        assert len(result["shards"]) == 1 and result["timingSource"] is None
-        assert "runs as one job" in rs.annotation("k", result)
+        assert rs.plan(commands, timings) is None
+    assert "runs as one job" in rs.summary("k", None, "main has no timing")
+
+
+def test_plan_counts_an_unknown_file_as_the_steps_median_file():
+    commands = _commands(TESTS[0], ["a.py", "b.py", "c.py", "new.py"])
+    timings = _timings(TESTS[0], {"a.py": 10, "b.py": 20, "c.py": 90})
+    result = rs.plan(commands, timings)
+    assert result["unknownFiles"] == ["tests/new.py"]
+    assert result["unknownFileSeconds"] == 20 and result["estimates"] == [140]
+    small = _timings(TESTS[0], {"a.py": 1, "b.py": 2})
+    assert rs.plan(commands, small)["unknownFileSeconds"] == 5  # the floor
 
 
 def test_plan_finds_main_timings_after_a_pr_edits_the_command():
     """Main's timings carry the command's 80-character preview; a PR that adds
     a flag changes it, and every file would otherwise count as unknown."""
-    files = {f"model_executor/t{i}.py": 1 for i in range(4)}
-    timings = _timings(TESTS[0], {f: 500 for f in files})
+    files = {f"t{i}.py": 500 for i in range(4)}
     edited = TESTS[0].replace("pytest -v -s", "pytest -v -s -x")
-    result = rs.plan([_entry(edited, files)], timings)
-    assert result["unknownFiles"] == [] and len(result["shards"]) == 2
-    assert [s["estimateSeconds"] for s in result["shards"]] == [1000, 1000]
+    result = rs.plan(_commands(edited, files), _timings(TESTS[0], files))
+    assert result["unknownFiles"] == [] and result["estimates"] == [1000, 1000]
 
 
 def test_plan_tells_apart_commands_that_run_the_same_file():
-    files = {"model_executor/a.py": 1}
     one, two = TESTS[0], TESTS[0] + " -k fast"
-    timings = _timings(one, {"model_executor/a.py": 900})
-    timings["files"] += _timings(two, {"model_executor/a.py": 30})["files"]
-    result = rs.plan([_entry(one, files), _entry(two, files)], timings)
-    assert [s["estimateSeconds"] for s in result["shards"]] == [930]
+    timings = _timings(one, {"a.py": 900})
+    timings["files"] += _timings(two, {"a.py": 30})["files"]
+    commands = _commands(one, ["a.py"]) + _commands(two, ["a.py"])
+    assert rs.plan(commands, timings)["estimates"] == [930]
     # Neither preview matches: no telling which time is this command's.
-    edited = TESTS[0].replace("pytest -v -s", "pytest -v -s -x")
-    result = rs.plan([_entry(edited, files), _entry(two, files)], timings)
-    assert result["unknownFiles"] == ["tests/model_executor/a.py"]
+    edited = one.replace("pytest -v -s", "pytest -v -s -x")
+    commands = _commands(edited, ["a.py"]) + _commands(two, ["a.py"])
+    assert rs.plan(commands, timings)["unknownFiles"] == ["tests/a.py"]
 
 
-def test_plan_over_max_number_of_shards_still_assigns_everything():
-    files = {f"model_executor/t{i}.py": 1 for i in range(10)}
-    inventory = [_entry(TESTS[0], files)]
-    result = rs.plan(inventory, _timings(TESTS[0], {f: 1100 for f in files}))
-    rs.check(result, inventory)
-    # 5 pairs: a 6th shard can't lower the largest one below two files
-    assert len(result["shards"]) == 5 and result["overBudget"]
-    assert "still over" in rs.annotation("k", result)
-
-
-def test_plan_counts_a_file_skipped_on_main_at_its_measured_time():
-    command = "pytest -v -s tests"
-    timings = _timings(command, {"ran.py": 600, "rocm_only.py": 0})
-    timings["files"][1]["timingStatus"] = "skip_only"
-    result = rs.plan([_entry(command, {"ran.py": 2, "rocm_only.py": 3})], timings)
-    # It has a timing, so it is not "unknown", and adds no 2.5 min guess.
-    assert result["unknownFiles"] == [] and result["skippedFiles"] == [
-        "tests/rocm_only.py"
-    ]
-    assert result["shards"][0]["estimateSeconds"] == 600
-    assert "Skipped on main" in rs.annotation("k", result)
-    assert "No timing" not in rs.annotation("k", result)
-
-
-def test_annotation_lists_each_shards_files_per_command():
-    small, big = "pytest -v -s small", "pytest -v -s big"
-    inventory = [
-        _entry(small, {"a.py": 1, "b.py": 2}),
-        _entry(big, {"big.py": 4}),
-    ]
-    timings = _timings(small, {"a.py": 60, "b.py": 60})
-    timings["files"] += _timings(big, {"big.py": 2000})["files"]
-    result = rs.plan(inventory, timings)  # [a.py, b.py], [big.py half], [big.py half]
-    text = rs.annotation("k", result, shadow=False, commands=[small, big])
-    assert '<a href="artifact://.runtime-shard/k/plan.json">plan.json</a>' in text
-    assert "| 1 | 3 | 2 files | 2.0 | command 1: 2 files (3 tests) |" in text
-    assert (
-        "| 2 | 2 | 1 file | 16.7 | command 2: 1 file (2 tests; 1 split by test ID) |"
-        in text
+def test_plan_splits_a_file_over_the_budget_by_test_function():
+    timings = _with_tests(
+        _timings(TESTS[0], {"big.py": 2000}),
+        "big.py",
+        {"test_a[1]": 500, "test_a[2]": 500, "test_b": 700, "test_c": 300},
     )
-    # The folded list names each command and its files; split files say how much.
-    files = text[text.index("<details>") :]
-    assert (
-        "**Shard 1** (3 tests)\n\n- `pytest -v -s small`\n  - `a.py`\n  - `b.py`"
-        in files
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assert result["shards"] == 2 and result["estimates"] == [1000, 1000]
+    assert result["oversizedFiles"] == ["tests/big.py"]
+    split = result["commands"][0]["split"]["tests/big.py"]
+    assign = {n.split("::")[1]: p for n, p in split["assign"].items()}
+    # A function's cases share setup that main paid once: they stay together.
+    assert assign["test_a[1]"] == assign["test_a[2]"] != assign["test_b"]
+    assert assign["test_b"] == assign["test_c"]
+    assert sorted(split["shards"].values()) == [0, 1]
+    assert result["commands"][0]["files"] == {}
+
+
+def test_plan_cuts_a_function_over_the_budget_by_case():
+    cases = {f"test_x[{i}]": 700 for i in range(3)}
+    timings = _with_tests(_timings(TESTS[0], {"big.py": 2100}), "big.py", cases)
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assign = result["commands"][0]["split"]["tests/big.py"]["assign"]
+    assert len(set(assign.values())) == 2 and result["shards"] == 2
+
+
+def test_plan_never_splits_a_file_the_command_names_by_test_id():
+    timings = _with_tests(
+        _timings(TESTS[0], {"big.py": 2000}), "big.py", {"test_a": 1000, "test_b": 1000}
     )
-    assert "- `pytest -v -s big`\n  - `big.py`: 2 of 4 tests" in files
-    assert files.endswith("</details>")
+    commands = _commands(TESTS[0], ["big.py", "small.py"], selected=["big.py"])
+    result = rs.plan(commands, timings)
+    assert result["commands"][0]["split"] == {} and result["oversizedFiles"] == []
 
 
-def test_annotation_names_the_timings_as_a_median_of_main_builds():
-    command = "pytest -v -s tests"
-    timings = dict(_timings(command, {"a.py": 60}), buildNumbers=[7, 6, 5])
-    result = rs.plan([_entry(command, {"a.py": 2})], timings)
-    assert result["timingSource"]["buildNumbers"] == [7, 6, 5]
-    assert "median of 3 main builds, the newest 7 (`abc`)" in rs.annotation("k", result)
+def test_plan_over_the_most_shards_still_assigns_every_file():
+    files = {f"t{i}.py": 1000 for i in range(8)}
+    result = rs.plan(_commands(TESTS[0], files), _timings(TESTS[0], files))
+    assert result["shards"] == 6 and result["overBudget"]
+    assert sorted(result["commands"][0]["files"]) == [f"tests/{f}" for f in files]
+    assert ":warning:" in rs.summary("k", result)
 
 
-def test_check_rejects_a_lost_or_repeated_test():
-    inventory = [_entry(TESTS[0], {"model_executor/a.py": 1, "model_executor/b.py": 1})]
-    result = rs.plan(inventory, None)
-    result["shards"][0]["commands"][0]["targets"].pop()
-    with pytest.raises(ValueError):
-        rs.check(result, inventory)
-    result = rs.plan(inventory, None)
-    result["shards"].append(result["shards"][0])
-    with pytest.raises(ValueError):
-        rs.check(result, inventory)
+# The generator
+
+
+ME_FILES = {f"model_executor/test_{i}.py": 400 for i in range(6)}
+ENTRYPOINT = "entrypoints/test_tensorizer_entrypoint.py"
 
 
 def _step(**kwargs):
@@ -398,600 +252,288 @@ def _render(step):
     return group.steps
 
 
-def test_generator_adds_shadow_collect_and_plan_steps(fake_global_config, monkeypatch):
-    fake_global_config["run_all"] = True
-    monkeypatch.setenv("VLLM_CI_BRANCH", "agent/runtime-shard-planner")
-    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "shadow")
-    plain = _render(_step())
-    main, collect, plan = _render(_step(automatic_shard=True))
-    assert main.to_yaml() == plain[0].to_yaml()  # shadow: the step is unchanged
-    assert collect.key == "model-executor-shard-collect" and collect.soft_fail
-    # The build page truncates labels, so the step key comes first.
-    assert collect.label == "model-executor: runtime shard collect"
-    assert plan.label == "model-executor: runtime shard plan"
-    assert collect.depends_on == ["image-build"] and collect.agents == main.agents
-    assert collect.plugins == main.plugins
-    assert collect.artifact_paths == [".runtime-shard/model-executor/*.json"]
-    assert collect.commands[: 1 + len(SETUP)] == ["cd /vllm-workspace/tests", *SETUP]
-    assert (
-        "ci-infra/agent/runtime-shard-planner/buildkite/pipeline_generator/runtime_shard.py"
-        in collect.commands[3]
-    )
-    assert [rs.decode(c.split()[4]) for c in collect.commands[4:]] == TESTS
-    assert plan.depends_on == [collect.key] and plan.allow_dependency_failure
-    assert plan.soft_fail and plan.agents == {"queue": "small_cpu_queue_premerge"}
-    assert plan.commands[1].endswith(" shadow")
-    assert plan.env == {"BUILDKITE_SKIP_CHECKOUT": "true"}  # it never reads the repo
-    assert rs.decode(plan.commands[1].split()[-2]) == TESTS
-    # The endpoint labels a command by the preview the generator echoes before it.
-    assert f"): {rs.command_preview(TESTS[0])}'" in " ".join(main.commands).replace(
-        '"', "'"
-    )
-
-
-def test_generator_ignores_the_flag_on_an_ineligible_step(fake_global_config):
-    fake_global_config["run_all"] = True
-    assert (
-        len(_render(_step(automatic_shard=True, commands=[*TESTS, "echo done"]))) == 1
-    )
-    assert len(_render(_step(automatic_shard=True, num_nodes=2, num_devices=2))) == 1
-    fake_global_config["run_all"] = False  # behind a manual block: block + step only
-    assert len(_render(_step(automatic_shard=True))) == 2
-
-
-@pytest.mark.parametrize(
-    "device, checkout",
-    [
-        ("h200_35gb", "/workdir"),  # docker plugin: the checkout's mount point
-        # A pod has no /workdir; its checkout is where the agent uploads from.
-        ("h100", "$${BUILDKITE_BUILD_CHECKOUT_PATH:-/tmp/fnrec-no-checkout}"),
-        ("l4", "$${BUILDKITE_BUILD_CHECKOUT_PATH:-/tmp/fnrec-no-checkout}"),
-    ],
-)
-def test_collect_runs_in_the_steps_own_job_and_writes_to_its_checkout(
-    fake_global_config, device, checkout
-):
-    fake_global_config["run_all"] = True
-    [plain] = _render(_step(device=device))
-    collect, plan = _render(_step(automatic_shard=True, device=device))
-    assert collect.plugins == plain.plugins and collect.agents == plain.agents
-    out = f"{checkout}/.runtime-shard/model-executor"
-    assert [c.split()[-1] for c in collect.commands[4:]] == [out] * len(TESTS)
-    template = rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])
-    assert template == {"steps": [plain.dict(exclude_none=True)]}
-
-
-def test_uploaded_template_waits_for_pre_commit_on_a_pull_request(
-    fake_global_config,
-):
-    fake_global_config["run_all"] = True
-    fake_global_config["pull_request"] = "123"
-    collect, plan = _render(_step(automatic_shard=True))
-    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[collect, plan])
-    buildkite_step.add_precommit_dependency([group])
-    [template] = rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])["steps"]
-    assert collect.depends_on == ["image-build", "pre-commit"]
-    assert template["depends_on"] == ["image-build", "pre-commit"]
-
-
-def test_collect_writes_node_ids_relative_to_rootdir(tmp_path):
-    (tmp_path / "pytest.ini").write_text("[pytest]\n")
-    tests = tmp_path / "tests"
-    (tests / "pkg").mkdir(parents=True)
-    (tests / "pkg" / "test_a.py").write_text(
-        "import pytest\n@pytest.mark.slow_test\ndef test_slow(): pass\ndef test_x(): pass\n"
-    )
-    command = "pytest -v -s pkg -m 'not slow_test'"
-    out = tmp_path / "out"
-    subprocess.run(
-        [sys.executable, rs.__file__, "collect", "0", rs.encode(command), str(out)],
-        cwd=tests,
-        check=True,
-    )
-    entry = json.loads((out / "inventory-0.json").read_text())
-    assert entry == {
-        "index": 0,
-        "command": command,
-        "exitstatus": 0,
-        "prefix": "tests",
-        "nodeids": ["tests/pkg/test_a.py::test_x"],
-        "paths": ["pkg"],
-    }
-    result = rs.plan([entry], None)
-    assert result["shards"][0]["commands"][0]["targets"] == ["pkg/test_a.py"]
-
-
-def test_collect_leaves_inventory_dirs_deletable_by_any_user(tmp_path):
-    """Root writes these into the agent's checkout; the agent must delete them."""
-    (tmp_path / "test_a.py").write_text("def test_x(): pass\n")
-    out = tmp_path / rs.INVENTORY_DIR / "model-executor"
-    subprocess.run(
-        [sys.executable, rs.__file__, "collect", "0", rs.encode("pytest ."), str(out)],
-        cwd=tmp_path,
-        check=True,
-    )
-    for path in (out.parent, out):
-        assert path.stat().st_mode & 0o777 == 0o777
-
-
-def test_run_plan_annotates_and_never_raises(tmp_path, monkeypatch):
+@pytest.fixture
+def checkout(tmp_path, monkeypatch):
+    """A vLLM checkout with the step's tests, as the generator runs in, and
+    main's timings for them: 6 files at 400 s and one at 100 s. Returns the
+    annotations the generator makes."""
+    _tree(tmp_path / "tests", [*ME_FILES, ENTRYPOINT, "model_executor/helpers.py"])
     monkeypatch.chdir(tmp_path)
-    calls = []
-    monkeypatch.setattr(rs.subprocess, "run", lambda args, check: calls.append(args))
-    monkeypatch.setattr(rs, "fetch_timings", lambda key: None)
-    rs.run_plan("model-executor", rs.encode(TESTS))  # nothing was downloaded
-    assert calls[-1][:5] == [
-        "buildkite-agent",
-        "annotate",
-        "--context",
-        "runtime-shard-model-executor",
-        "--style",
-    ]
-    assert calls[-1][5] == "warning" and "no plan" in calls[-1][6]
-
-    out = tmp_path / ".runtime-shard" / "model-executor"
-    out.mkdir(parents=True)
-    for i, command in enumerate(TESTS):
-        entry = _entry(command, {f"f{i}_{j}.py": 1 for j in range(3)})
-        (out / f"inventory-{i}.json").write_text(json.dumps({**entry, "exitstatus": 0}))
-    rs.run_plan("model-executor", rs.encode(TESTS))
-    # No main timings: one job, worth a look.
-    assert calls[-1][5] == "warning" and "would run as **1 shard**" in calls[-1][6]
-    assert "runs as one job" in calls[-1][6]
-    assert json.loads((out / "plan.json").read_text())["tests"] == 6
+    timings = _timings(TESTS[0], ME_FILES)
+    timings["files"] += _timings(TESTS[1], {ENTRYPOINT: 100})["files"]
+    monkeypatch.setattr(rs, "fetch_timings", lambda key: timings)
+    annotations = []
+    monkeypatch.setattr(rs, "annotate", lambda *args: annotations.append(args))
+    return annotations
 
 
-def test_generator_on_mode_moves_the_step_into_the_plan(
-    fake_global_config, monkeypatch
+def test_generator_runs_an_enrolled_step_as_parallel_shards(
+    fake_global_config, checkout
 ):
     fake_global_config["run_all"] = True
     [plain] = _render(_step())
-    collect, plan = _render(_step(automatic_shard=True))
-    assert collect.key == "model-executor-shard-collect"
-    # The plan step uploads the step's own job; it fails loudly, never softly.
-    assert not plan.soft_fail and plan.allow_dependency_failure
-    template = rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])
-    assert template == {"steps": [plain.dict(exclude_none=True)]}
-    [command] = plan.commands
-    assert command.startswith("curl ") and " plan model-executor " in command
-    assert plan.env["BUILDKITE_SKIP_CHECKOUT"] == "true"
-    # Like every job: a lost agent or an infra hook failure is retried once.
-    assert (
-        plan.retry == collect.retry == buildkite_step.ensure_infra_failure_retry(None)
-    )
+    [step] = _render(_step(automatic_shard=True))
+    # The step's own job, in its own group, with its key, depends_on, agents,
+    # plugins and retries: only parallel.
+    assert step.key == "model-executor" and step.parallelism == 3
+    assert step.label == "Model Executor shard %N/%t"
+    for field in ("depends_on", "agents", "plugins", "retry", "timeout_in_minutes"):
+        assert getattr(step, field) == getattr(plain, field)
+    # Its commands are the step's own, after installing the plugin: the same
+    # log headers and tracing labels, so main's timings keep matching.
+    assert step.commands[2:] == plain.commands
+    assert step.commands[:2] == rs.shard_job_setup()
+    assert step.env["PYTEST_ADDOPTS"] == "-p runtime_shard_plugin"
+    plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
+    assert plan["shards"] == 3
+    me, entrypoint = plan["commands"]
+    assert me["args"] == shlex.split(TESTS[0])[1:] and me["prefix"] == "tests/"
+    assert me["label"] == "Command (3/4)" and entrypoint["label"] == "Command (4/4)"
+    assert sorted(me["files"]) == [f"tests/{f}" for f in ME_FILES]  # no helpers.py
+    assert list(entrypoint["files"]) == [f"tests/{ENTRYPOINT}"]
+    assert checkout == []  # a good plan leaves the build page alone
 
 
-@pytest.mark.parametrize("uploaded_first", [False, True])
-def test_shell_fallback_uploads_the_job_once(
-    fake_global_config, tmp_path, uploaded_first
-):
-    """Run the plan command in a shell whose planner is killed (status 137),
-    before or after its own upload. The status is logged either way; the normal
-    job is uploaded, with a warning, only if the planner hadn't uploaded it."""
-    fake_global_config["run_all"] = True
-    _, plan = _render(_step(automatic_shard=True))
-    log = tmp_path / "log"
-    fakes = {
-        "curl": "exit 0",
-        "python3": "exit 137",
-        "buildkite-agent": f"""echo "$*" >> {log}
-case "$1 $2" in
-  "step get") [ -n "$STEP_EXISTS" ] && echo running || exit 1 ;;
-  "pipeline upload") cat > {tmp_path}/uploaded ;;
-esac""",
-    }
-    for name, body in fakes.items():
-        (tmp_path / name).write_text(f"#!/bin/sh\n{body}\n")
-        (tmp_path / name).chmod(0o755)
-    env = {
-        "PATH": f"{tmp_path}:/usr/bin:/bin",
-        "RUNTIME_SHARD_TEMPLATE": plan.env["RUNTIME_SHARD_TEMPLATE"],
-        **({"STEP_EXISTS": "1"} if uploaded_first else {}),
-    }
-    # Buildkite turns `$$` into `$` when it uploads the pipeline.
-    [command] = [c.replace("$$", "$") for c in plan.commands]
-    run = subprocess.run(
-        ["sh", "-ec", command], env=env, check=True, capture_output=True, text=True
-    )
-    failed = "fetching or running the planner failed with status 137"
-    assert f"runtime-shard: {failed}" in run.stdout
-    calls = log.read_text()
-    if uploaded_first:
-        assert "annotate" not in calls and "pipeline upload" not in calls
-    else:
-        assert "annotate --style warning" in calls and f"{failed}." in calls
-        uploaded = json.loads((tmp_path / "uploaded").read_text())
-        assert uploaded == rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])
-
-
-def test_generator_rollback_switch_and_recording_builds(
-    fake_global_config, monkeypatch
+def test_generator_keeps_the_single_job_without_a_plan(
+    fake_global_config, checkout, monkeypatch
 ):
     fake_global_config["run_all"] = True
-    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "off")
-    assert [s.key for s in _render(_step(automatic_shard=True))] == ["model-executor"]
+    [plain] = _render(_step())
+    monkeypatch.setattr(rs, "fetch_timings", lambda key: None)
+    [step] = _render(_step(automatic_shard=True))
+    assert step.to_yaml() == plain.to_yaml()
+    [(_, text, style)] = checkout
+    assert style == "warning" and "runs as one job" in text
+    # A step whose files are not in the checkout: the same.
+    checkout.clear()
+    commands = [*SETUP, "pytest -v -s missing_dir"]
+    [plain] = _render(_step(commands=commands))
+    [step] = _render(_step(automatic_shard=True, commands=commands))
+    assert step.to_yaml() == plain.to_yaml() and "not in the checkout" in checkout[0][1]
+
+
+def test_generator_shadow_mode_only_annotates(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "shadow")
+    [plain] = _render(_step())
+    [step] = _render(_step(automatic_shard=True))
+    assert step.to_yaml() == plain.to_yaml()
+    [(_, text, style)] = checkout
+    assert style == "info" and "(shadow)" in text and "3 shards" in text
+
+
+def test_generator_ignores_the_flag_where_it_cannot_shard(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    for step in (
+        _step(automatic_shard=True, commands=[*TESTS, "echo done"]),
+        _step(automatic_shard=True, num_nodes=2, num_devices=2),
+    ):
+        assert _render(step)[0].parallelism is None
+    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "off")  # the rollback switch
+    assert _render(_step(automatic_shard=True))[0].parallelism is None
     monkeypatch.delenv("VLLM_CI_RUNTIME_SHARD")
     monkeypatch.setattr(buildkite_step, "fnrec_enabled", lambda: True)
-    assert [s.key for s in _render(_step(automatic_shard=True))] == ["model-executor"]
+    assert _render(_step(automatic_shard=True))[0].parallelism is None
+    assert checkout == []
 
 
-def test_scripts_come_from_the_generators_own_commit(monkeypatch):
-    """Every job of a build fetches the same runtime_shard.py, even if the
-    branch moves while the build runs."""
-
-    class Installed:
-        def read_text(self, name):
-            assert name == "direct_url.json"
-            vcs = {"vcs": "git", "commit_id": "abc123", "requested_revision": "x"}
-            return json.dumps({"url": "https://github.com/x.git", "vcs_info": vcs})
-
-    monkeypatch.setattr(importlib.metadata, "distribution", lambda name: Installed())
-    assert buildkite_step._ci_infra_ref() == "abc123"
-
-    def missing(name):
-        raise importlib.metadata.PackageNotFoundError(name)
-
-    monkeypatch.setattr(importlib.metadata, "distribution", missing)
-    monkeypatch.setenv("VLLM_CI_BRANCH", "my-branch")
-    assert buildkite_step._ci_infra_ref() == "my-branch"
-
-
-def test_retry_keys_of_the_generated_steps_select_the_step(fake_global_config):
-    steps = [_step(automatic_shard=True, depends_on=None)]
-    for key in ("model-executor-shard-collect", "model-executor-shard-plan"):
-        _, selected = select_steps_and_dependencies(steps, frozenset({key}))
-        assert selected == frozenset({"model-executor"})
-
-
-def _inventories(tmp_path):
-    out = tmp_path / ".runtime-shard" / "model-executor"
-    out.mkdir(parents=True)
-    for i, command in enumerate(TESTS):
-        entry = _entry(command, {f"f{i}_{j}.py": 1 for j in range(3)})
-        (out / f"inventory-{i}.json").write_text(json.dumps({**entry, "exitstatus": 0}))
-
-
-def _rendered(commands):
-    """Commands as the generator renders them: a log header before each, and
-    ' turned into "."""
-    rendered = []
-    for i, command in enumerate(commands):
-        preview = rs.command_preview(command)
-        rendered.append(
-            f'echo "+++ :test_tube: Command ({i + 1}/{len(commands)}): {preview}"'
-        )
-        rendered.append(command.replace("'", '"'))
-    return rendered
-
-
-def _run_plan_on(tmp_path, monkeypatch, template=None, timings=...):
-    monkeypatch.chdir(tmp_path)
-    calls = []
-    monkeypatch.setattr(
-        rs.subprocess,
-        "run",
-        lambda args, check, **kw: calls.append((args, kw.get("input"))),
-    )
-    if timings is ...:  # the inventories' 6 files at 400 s: 3 shards of 2
-        timings = _timings(TESTS[0], {f"f0_{j}.py": 400 for j in range(3)})
-        timings["files"] += _timings(TESTS[1], {f"f1_{j}.py": 400 for j in range(3)})[
-            "files"
-        ]
-    monkeypatch.setattr(rs, "fetch_timings", lambda key: timings)
-    template = template or {
-        "label": "ME",
-        "key": "model-executor",
-        "commands": ["cd /t", *_rendered(TESTS)],
-        "env": {"A": "1"},
-    }
-    monkeypatch.setenv("RUNTIME_SHARD_TEMPLATE", rs.encode({"steps": [template]}))
-    monkeypatch.setenv("RUNTIME_SHARD_SCRIPT_URL", "https://x/runtime_shard.py")
-    rs.run_plan("model-executor", rs.encode(TESTS), "on")
-    [upload] = [
-        json.loads(i)["steps"] for a, i in calls if a[1:3] == ["pipeline", "upload"]
-    ]
-    annotations = [a for a, i in calls if a[1:2] == ["annotate"]]
-    return template, upload, annotations[0] if annotations else None
-
-
-def test_run_plan_uploads_the_step_as_parallel_shards(tmp_path, monkeypatch):
-    _inventories(tmp_path)
-    template, [step], annotate = _run_plan_on(tmp_path, monkeypatch)
-    assert step["key"] == "model-executor" and step["parallelism"] == 3
-    assert step["label"] == "ME shard %N/%t"
-    assert step["env"] == {"A": "1", "PYTEST_ADDOPTS": "-p runtime_shard"}
-    # The plugin's install, then setup as is; each pytest command and its
-    # header become one case.
-    assert "https://x/runtime_shard.py" in step["commands"][0]
-    assert "--retry-all-errors" in step["commands"][0]
-    # On the path of any python, not copied into one python's site-packages.
-    assert step["commands"][1] == (
-        'export PYTHONPATH="/tmp/runtime-shard$${PYTHONPATH:+:$$PYTHONPATH}"'
-    )
-    assert step["commands"][2] == "cd /t" and len(step["commands"]) == 5
-    assert all(
-        c.startswith('case "$$BUILDKITE_PARALLEL_JOB" in') for c in step["commands"][3:]
-    )
-    # 6 files at 400 s: 3 shards of 2 files, each command run once per shard
-    first = step["commands"][3].split(";;")[0]
-    assert "\npytest -v -s -m '(not slow_test)' --timeout=900 f0_0.py f0_1.py\n" in (
-        first
-    )
-    # A plan within budget leaves the build page alone.
-    assert annotate is None
-
-
-def test_run_plan_leaves_the_build_page_alone_for_a_good_plan(tmp_path, monkeypatch):
-    _inventories(tmp_path)
-    timings = _timings(TESTS[0], {f"f0_{j}.py": 600 for j in range(3)})
-    timings["files"] += _timings(TESTS[1], {f"f1_{j}.py": 600 for j in range(3)})[
-        "files"
-    ]
-    _, [step], annotate = _run_plan_on(tmp_path, monkeypatch, timings=timings)
-    assert step["parallelism"] > 1 and annotate is None
-
-
-def test_run_plan_shards_a_kubernetes_job_with_its_pod_spec_and_env(
-    fake_global_config, tmp_path, monkeypatch
+def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
+    fake_global_config, checkout
 ):
     fake_global_config["run_all"] = True
-    _, plan = _render(_step(automatic_shard=True, device="l4", env={"A": "1"}))
-    [template] = rs.decode(plan.env["RUNTIME_SHARD_TEMPLATE"])["steps"]
-    assert "kubernetes" in template["plugins"][0]
-    _inventories(tmp_path)
-    _, [step], _ = _run_plan_on(tmp_path, monkeypatch, template)
-    # One Buildkite job per shard, each its own pod from the same pod spec.
-    assert step["parallelism"] == 3 and step["plugins"] == template["plugins"]
-    assert step["retry"] == template["retry"] == buildkite_step.K8S_RETRY
-    assert step["env"] == {**template["env"], "PYTEST_ADDOPTS": "-p runtime_shard"}
-    # After the plugin's install, the setup commands' headers stay; each
-    # pytest command and its header become one case.
-    cases = [c for c in step["commands"] if c.startswith('case "$$BUILDKITE_')]
-    assert (
-        len(cases) == 2
-        and step["commands"][2 : -len(cases)] == template["commands"][:-4]
-    )
+    [plain] = _render(_step(device="l4"))
+    [step] = _render(_step(device="l4", automatic_shard=True))
+    assert "kubernetes" in step.plugins[0] and step.plugins == plain.plugins
+    assert step.retry == plain.retry == buildkite_step.K8S_RETRY
+    assert step.parallelism == 3 and step.commands[2:] == plain.commands
 
 
-def test_run_plan_falls_back_to_the_single_job(tmp_path, monkeypatch):
-    template, [step], annotate = _run_plan_on(
-        tmp_path, monkeypatch
-    )  # nothing collected
-    assert step == template
-    assert annotate[5] == "warning" and "runs as one job" in annotate[6]
-
-
-def test_run_plan_falls_back_if_a_command_is_not_in_the_job(tmp_path, monkeypatch):
-    """A pytest command the shards can't replace would run in full in each."""
-    _inventories(tmp_path)
-    template = {"label": "ME", "key": "model-executor", "commands": ["cd /t"]}
-    template, [step], annotate = _run_plan_on(tmp_path, monkeypatch, template)
-    assert step == template
-    assert "command 1 is missing" in annotate[6]
-
-
-def test_collect_ignores_a_trailing_shell_comment(tmp_path):
-    """vLLM writes `pytest x.py # needs a clean process`; the shell drops it."""
-    (tmp_path / "test_a.py").write_text("def test_x(): pass\n")
-    out = tmp_path / "out"
-    subprocess.run(
-        [
-            sys.executable,
-            rs.__file__,
-            "collect",
-            "0",
-            rs.encode("pytest -v test_a.py # it needs a clean process"),
-            str(out),
-        ],
-        cwd=tmp_path,
-        check=True,
-    )
-    entry = json.loads((out / "inventory-0.json").read_text())
-    assert entry["exitstatus"] == 0 and entry["nodeids"] == ["test_a.py::test_x"]
-
-
-def _collected(tmp_path, command, files):
-    """Collect `command` over these test files, in tmp_path/tests."""
-    (tmp_path / "pytest.ini").write_text("[pytest]\n")
-    tests = tmp_path / "tests"
-    for name, text in files.items():
-        (tests / name).parent.mkdir(parents=True, exist_ok=True)
-        (tests / name).write_text(text)
-    out = tmp_path / "out"
-    subprocess.run(
-        [sys.executable, rs.__file__, "collect", "0", rs.encode(command), str(out)],
-        cwd=tests,
-        check=True,
-    )
-    return json.loads((out / "inventory-0.json").read_text())
-
-
-def _run_shard(step, shard, cwd):
-    """Run a shard job's commands as its agent would: $$ is a literal $. The
-    plugin loads from this checkout, not its install from GitHub."""
-    script = "\n".join(step["commands"][2:]).replace("$$", "$")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
-    env.update(step["env"], PYTHONPATH=os.path.dirname(rs.__file__))
-    env["BUILDKITE_PARALLEL_JOB"] = str(shard)
+def test_shard_job_setup_installs_the_plugin_for_any_python():
+    script = "\n".join(rs.shard_job_setup()).replace("$$", "$")
+    script += '\npython3 -c "import runtime_shard_plugin as p; print(p.__file__)"'
+    env = dict(os.environ, RUNTIME_SHARD_PLUGIN=rs.plugin_source(), PYTHONPATH="/x")
     env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env["PATH"]
+    run = subprocess.run(
+        ["bash", "-ec", script + '\necho "$PYTHONPATH"'],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    path, pythonpath = run.stdout.split()
+    assert path == f"{rs.PLUGIN_DIR}/runtime_shard_plugin.py"
+    assert pythonpath == f"{rs.PLUGIN_DIR}:/x"
+    source = os.path.join(os.path.dirname(rs.__file__), "runtime_shard_plugin.py")
+    with open(path) as installed, open(source) as original:
+        assert installed.read() == original.read()
+
+
+# The plugin, in real pytest runs: each shard runs the step's command as is.
+
+
+def _project(tmp_path, files):
+    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers =\n    slow\n")
+    for name, text in files.items():
+        path = tmp_path / "tests" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+def _run(tmp_path, command, plan, shard):
+    """One shard's run of a command, as its job runs it."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env.update(
+        PYTEST_ADDOPTS="-p runtime_shard_plugin",
+        PYTHONPATH=os.path.dirname(rs.__file__),
+        BUILDKITE_PARALLEL_JOB=str(shard),
+    )
+    if plan is not None:
+        env["RUNTIME_SHARD_PLAN"] = rs.pack(plan)
     return subprocess.run(
-        ["bash", "-ec", script], cwd=cwd, env=env, capture_output=True, text=True
+        [sys.executable, "-m", "pytest", *shlex.split(command)[1:]],
+        cwd=tmp_path / "tests",
+        env=env,
+        capture_output=True,
+        text=True,
     )
 
 
-def _result(*shards):
-    """A plan of one command, from each shard's targets."""
-    result = {"shards": []}
-    for targets in shards:
-        commands = []
-        if targets:
-            commands.append({"index": 0, "targets": targets, "tests": len(targets)})
-        result["shards"].append({"commands": commands})
-    return result
+def _ran(stdout):
+    return re.findall(r"^(\S+::\S+) .*?(?:PASSED|FAILED)", stdout, re.M)
 
 
 def _groups(stdout):
     """The Buildkite log group lines of a job's output."""
-    return [l for l in stdout.splitlines() if l[:4] in ("+++ ", "--- ", "^^^ ")]
+    return [s for s in stdout.splitlines() if s[:4] in ("+++ ", "--- ", "^^^ ")]
 
 
-def test_a_shard_runs_its_files_in_one_pytest_with_a_log_group_each(tmp_path):
-    command = "pytest -v pkg -m 'not slow'"
-    entry = _collected(
-        tmp_path,
-        command,
-        {
-            "pkg/test_a.py": "def test_x(): pass\n",
-            "pkg/test_b.py": "def test_y(): pass\ndef test_z(): pass\n",
-            "pkg/test_c.py": "def test_v(): pass\ndef test_w(): pass\n",
-        },
-    )
-    assert entry["paths"] == ["pkg"]
-    result = _result(
-        ["pkg/test_a.py", "pkg/test_b.py::test_y"],
-        ["pkg/test_b.py::test_z", "pkg/test_c.py"],
-        [],
-    )
-    step = rs.shard_step({"commands": _rendered([command])}, result, [entry], "u")
-
-    first = _run_shard(step, 0, tmp_path / "tests")
-    assert first.returncode == 0, first.stdout + first.stderr
-    # One pytest process for the command, not one per file.
-    assert first.stdout.count("test session starts") == 1
-    assert _groups(first.stdout) == [
-        "+++ :test_tube: Command (1/1): 2 files, 2 tests",
-        "--- :test_tube: Command (1/1), file 1/2: pkg/test_a.py",
-        "--- :test_tube: Command (1/1), file 2/2: pkg/test_b.py   (1 of 2 tests)",
-        "+++ :test_tube: Command (1/1): results",
-    ]
-    # The section starts with the exact command, ready to paste.
-    lines = first.stdout.splitlines()
-    assert lines[1] == "pytest -v -m 'not slow' pkg/test_a.py pkg/test_b.py::test_y"
-    assert "2 passed" in first.stdout and "test_z" not in first.stdout
-
-    second = _run_shard(step, 1, tmp_path / "tests")
-    assert second.returncode == 0 and "test_b.py::test_z PASSED" in second.stdout
-    # A whole file needs no count, however many tests it has.
-    assert _groups(second.stdout)[1:3] == [
-        "--- :test_tube: Command (1/1), file 1/2: pkg/test_b.py   (1 of 2 tests)",
-        "--- :test_tube: Command (1/1), file 2/2: pkg/test_c.py",
-    ]
-    assert "3 passed" in second.stdout
-
-    empty = _run_shard(step, 2, tmp_path / "tests")
-    # A shard with none of the command's tests skips it without a header.
-    assert empty.returncode == 0 and empty.stdout == ""
-
-
-def test_a_failing_file_fails_the_job_after_the_shards_other_files(tmp_path):
-    command = "pytest -v pkg"
-    entry = _collected(
-        tmp_path,
-        command,
-        {
-            "pkg/test_a.py": "def test_x(): assert 0\n",
-            "pkg/test_b.py": "def test_y(): pass\n",
-        },
-    )
-    result = _result(["pkg/test_a.py", "pkg/test_b.py"])
-    step = rs.shard_step(
-        {"commands": [*_rendered([command]), "echo after"]}, result, [entry], "u"
-    )
-    run = _run_shard(step, 0, tmp_path / "tests")
-    assert run.returncode == 1 and "test_b.py::test_y PASSED" in run.stdout
-    # The failing file's group opens; the passing file's stays folded.
-    assert _groups(run.stdout) == [
-        "+++ :test_tube: Command (1/1): 2 files, 2 tests",
-        "--- :test_tube: Command (1/1), file 1/2: pkg/test_a.py",
-        "^^^ +++",
-        "--- :test_tube: Command (1/1), file 2/2: pkg/test_b.py",
-        "+++ :test_tube: Command (1/1): results",
-    ]
-    # As the step's own failing command would, it stops the job there.
-    assert "after" not in run.stdout
-
-
-def test_a_shard_keeps_the_generators_wrapping_and_a_commands_variables(tmp_path):
-    """Tracing labels each file's command by the step command's preview, for
-    main's timings; the command's own NAME=value assignments reach collect and
-    every shard."""
-    command = "N=3 pytest -v test_n.py"
-    entry = _collected(
-        tmp_path,
-        command,
-        {
-            "test_n.py": "import os, pytest\n"
-            "@pytest.mark.parametrize('i', range(int(os.environ.get('N', '1'))))\n"
-            "def test_i(i): pass\n"
-        },
-    )
-    assert len(entry["nodeids"]) == 3 and entry["paths"] == ["test_n.py"]
-    header, _ = _rendered([command])
-    preview = shlex.quote(rs.command_preview(command)).replace("'", '"')
-    traced = f"ci_otel_start 1 {preview} || :\n{command}\nstatus=$$?\n(exit $$status)"
-    result = _result(
-        ["test_n.py::test_i[0]"], ["test_n.py::test_i[1]", "test_n.py::test_i[2]"]
-    )
-    step = rs.shard_step({"commands": [header, traced]}, result, [entry], "u")
-    case = step["commands"][2]
-    assert (
-        f"\nci_otel_start 1 {preview} || :\n"
-        "N=3 pytest -v 'test_n.py::test_i[1]' 'test_n.py::test_i[2]'\n"
-        "status=$$?\n(exit $$status)\n"
-    ) in case
-    step["commands"][2] = case.replace(f"ci_otel_start 1 {preview} || :", ":")
-    run = _run_shard(step, 1, tmp_path / "tests")
-    assert run.returncode == 0 and "2 passed" in run.stdout
-    assert run.stdout.splitlines()[:2] == [
-        "+++ :test_tube: Command (1/1): 1 file, 2 tests",
-        "N=3 pytest -v 'test_n.py::test_i[1]' 'test_n.py::test_i[2]'",
-    ]
-    assert (
-        "--- :test_tube: Command (1/1), file 1/1: test_n.py   (2 of 3 tests)"
-        in _groups(run.stdout)
-    )
-
-
-def test_a_command_that_names_test_ids_runs_only_those(tmp_path):
-    command = "pytest -v test_a.py::test_selected test_b.py"
-    entry = _collected(
-        tmp_path,
-        command,
-        {
-            "test_a.py": "def test_selected(): pass\ndef test_excluded(): assert 0\n",
-            "test_b.py": "def test_y(): pass\n",
-        },
-    )
-    result = rs.plan([entry], None)
-    rs.check(result, [entry])
-    assert result["shards"][0]["commands"][0]["targets"] == [
-        "test_a.py::test_selected",
-        "test_b.py::test_y",
-    ]
-    step = rs.shard_step({"commands": _rendered([command])}, result, [entry], "u")
-    run = _run_shard(step, 0, tmp_path / "tests")
-    assert run.returncode == 0 and "test_excluded" not in run.stdout
-    # All of the file's selected tests: no "(1 of 1 tests)".
-    assert "--- :test_tube: Command (1/1), file 1/2: test_a.py" in _groups(run.stdout)
-
-
-def test_a_shard_fails_if_a_planned_test_does_not_run(tmp_path):
-    """A conftest hook that drops a test only in the shard jobs: without the
-    plugin, the test would run nowhere and every shard would pass."""
-    command = "pytest -v pkg"
-    files = {
-        "pkg/test_a.py": "def test_x(): pass\ndef test_y(): pass\ndef test_z(): pass\n",
-        "conftest.py": "import os\n"
-        "def pytest_collection_modifyitems(items):\n"
-        "    if 'BUILDKITE_PARALLEL_JOB' in os.environ:\n"
-        "        items[:] = [i for i in items if 'test_z' not in i.nodeid]\n",
+def _command_plan(command, label, files):
+    return {
+        "args": shlex.split(command)[1:],
+        "prefix": "tests/",
+        "label": label,
+        "files": files,
+        "split": {},
     }
-    entry = _collected(tmp_path, command, files)
-    assert len(entry["nodeids"]) == 3
-    result = _result(["pkg/test_a.py"])
-    step = rs.shard_step({"commands": _rendered([command])}, result, [entry], "u")
-    run = _run_shard(step, 0, tmp_path / "tests")
-    assert run.returncode == 4  # pytest's usage error, as the job's exit status
-    assert "1 planned test would not run: ['tests/pkg/test_a.py::test_z']" in (
-        run.stderr
+
+
+def test_every_test_runs_in_exactly_one_shard(tmp_path, monkeypatch):
+    def tests(*names):
+        return "".join(f"def {n}(): pass\n" for n in names)
+
+    big = (
+        "import pytest\n"
+        "@pytest.mark.parametrize('i', range(4))\n"
+        "def test_f(i): pass\n" + tests("test_g")
     )
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": tests("test_1", "test_2"),
+            "pkg/test_b.py": tests("test_1", "test_2", "test_3"),
+            "pkg/test_c.py": tests("test_1")
+            + "import pytest\n@pytest.mark.slow\ndef test_slow(): pass\n",
+            "pkg/sub/test_d.py": tests("test_1"),
+            "big/test_big.py": big,
+        },
+    )
+    command = "pytest -v pkg big -m 'not slow'"
+    seconds = {"pkg/test_a.py": 300, "pkg/test_b.py": 400, "pkg/test_c.py": 200}
+    seconds.update({"pkg/sub/test_d.py": 100, "big/test_big.py": 1500})
+    per_test = {f"test_f[{i}]": 300 for i in range(4)}
+    timings = _with_tests(
+        _timings(command, seconds), "big/test_big.py", {**per_test, "test_g": 300}
+    )
+    monkeypatch.setattr(rs, "fetch_timings", lambda key: timings)
+    result, _ = rs.plan_step("k", [command], "/vllm-workspace/tests", str(tmp_path))
+    assert result["commands"][0]["split"]  # big/test_big.py is cut by test
+    plan = {"shards": result["shards"], "commands": result["commands"]}
+    # The PR adds what main never timed: a function and a file.
+    with open(tmp_path / "tests" / "big" / "test_big.py", "a") as f:
+        f.write(tests("test_h"))
+    _project(tmp_path, {"pkg/test_new.py": tests("test_1")})
+
+    everything = _ran(_run(tmp_path, command, None, 0).stdout)
+    assert len(everything) == 14 and not any("slow" in t for t in everything)
+    ran = []
+    for shard in range(plan["shards"]):
+        run = _run(tmp_path, command, plan, shard)
+        assert run.returncode == 0, run.stdout + run.stderr
+        ran += _ran(run.stdout)
+        if shard == 0:  # what the plan doesn't name runs in the first shard
+            assert "not in the plan, so run in shard 1: tests/pkg/test_new.py" in (
+                run.stdout
+            )
+        else:
+            assert "test_new" not in run.stdout
+        # A file's group says when it holds only part of the file.
+        for line in _groups(run.stdout):
+            if "big/test_big.py" in line:
+                assert re.search(r"\(\d of 6 tests\)$", line), line
+    assert sorted(ran) == sorted(everything)  # each test exactly once
+
+
+def test_a_shard_opens_a_log_group_per_file(tmp_path):
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": "def test_1(): pass\ndef test_2(): assert 0\n",
+            "pkg/test_b.py": "def test_1(): pass\n",
+            "other/test_z.py": "def test_1(): pass\n",
+        },
+    )
+    one, two = "pytest -v pkg", "pytest -v other/test_z.py"
+    files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 0}
+    plan = {
+        "shards": 2,
+        "commands": [
+            _command_plan(one, "Command (1/2)", files),
+            _command_plan(two, "Command (2/2)", {"tests/other/test_z.py": 1}),
+        ],
+    }
+    run = _run(tmp_path, one, plan, 0)
+    # A failing test fails the command, after the shard's other files.
+    assert run.returncode == 1 and "test_b.py::test_1 PASSED" in run.stdout
+    assert _groups(run.stdout) == [
+        "--- :test_tube: Command (1/2), file 1/2: pkg/test_a.py",
+        "^^^ +++",  # the failing file's group opens
+        "--- :test_tube: Command (1/2), file 2/2: pkg/test_b.py",
+        "+++ :test_tube: Command (1/2): results",
+    ]
+    # All of a command's tests in other shards: nothing to run is no failure.
+    run = _run(tmp_path, two, plan, 0)
+    assert run.returncode == 0 and "runs 0 of" in run.stdout, run.stdout
+    assert _run(tmp_path, two, plan, 1).returncode == 0
+    # But a command that selects nothing at all still fails, as it would alone.
+    plan["commands"].append(_command_plan("pytest -v pkg -k nothing", "C", files))
+    assert _run(tmp_path, "pytest -v pkg -k nothing", plan, 0).returncode == 5
+
+
+def test_the_plugin_leaves_other_pytest_runs_alone(tmp_path):
+    """A setup command's pytest, and a pytest a test starts, run as written."""
+    nested = (
+        "import subprocess, sys\n"
+        "def test_nested():\n"
+        "    run = subprocess.run([sys.executable, '-m', 'pytest', '-q', 'inner'],\n"
+        "                         capture_output=True, text=True)\n"
+        "    assert run.returncode == 0 and '2 passed' in run.stdout, run.stdout\n"
+    )
+    _project(
+        tmp_path,
+        {
+            "pkg/test_nested.py": nested,
+            "inner/test_inner.py": "def test_1(): pass\ndef test_2(): pass\n",
+        },
+    )
+    command = "pytest -v pkg"
+    files = {"tests/pkg/test_nested.py": 1, "tests/inner/test_inner.py": 0}
+    plan = {"shards": 2, "commands": [_command_plan(command, "Command (1/1)", files)]}
+    run = _run(tmp_path, command, plan, 1)
+    assert run.returncode == 0 and "test_nested PASSED" in run.stdout, run.stdout
+    # Arguments the plan doesn't cover: the whole run, in any shard.
+    run = _run(tmp_path, "pytest -v inner", plan, 1)
+    assert run.returncode == 0 and "2 passed" in run.stdout

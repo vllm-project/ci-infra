@@ -1,7 +1,6 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union, Literal
 from copy import deepcopy
-import json
 import math
 import os
 import re
@@ -188,20 +187,15 @@ def add_precommit_dependency(
     """
     for group_step in buildkite_group_steps:
         for step in group_step.steps:
-            if isinstance(step, BuildkiteCommandStep):
-                _add_step_precommit_dependency(step)
-
-
-def _add_step_precommit_dependency(step: "BuildkiteCommandStep") -> None:
-    if not step.depends_on:
-        return
-    # Don't gate the image build steps themselves on pre-commit.
-    if step.key and "image-build" in step.key:
-        return
-    if not any("image-build" in dep for dep in step.depends_on):
-        return
-    if PRECOMMIT_STEP_KEY not in step.depends_on:
-        step.depends_on.append(PRECOMMIT_STEP_KEY)
+            if not isinstance(step, BuildkiteCommandStep) or not step.depends_on:
+                continue
+            # Don't gate the image build steps themselves on pre-commit.
+            if step.key and "image-build" in step.key:
+                continue
+            if not any("image-build" in dep for dep in step.depends_on):
+                continue
+            if PRECOMMIT_STEP_KEY not in step.depends_on:
+                step.depends_on.append(PRECOMMIT_STEP_KEY)
 
 
 def _get_step_agents(step: Step) -> Dict[str, str]:
@@ -971,26 +965,6 @@ def ensure_infra_failure_retry(
 RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
 
 
-def _ci_infra_ref() -> str:
-    """The ci-infra commit this generator was installed from (pip records it
-    in direct_url.json), so every job of a build fetches the same
-    runtime_shard.py, however the branch moves meanwhile. The branch name if
-    pip recorded no commit, as for a local install.
-    """
-    try:
-        from importlib.metadata import distribution
-
-        info = json.loads(
-            distribution("pipeline-generator").read_text("direct_url.json") or "{}"
-        )
-        commit = info.get("vcs_info", {}).get("commit_id")
-        if commit:
-            return commit
-    except Exception:  # not installed, or no direct_url.json
-        pass
-    return os.getenv("VLLM_CI_BRANCH") or "main"
-
-
 def _runtime_shard_mode(
     step: Step, step_key: str, list_file_diff: List[str]
 ) -> Optional[str]:
@@ -1006,7 +980,7 @@ def _runtime_shard_mode(
             )
         return None
     if fnrec_enabled() or kernrec_enabled():
-        # The recorders count their jobs at generation time; shards come later.
+        # The recorders expect each step to run as one job.
         print(f"automatic_shard ignored on {step_key}: recording build")
         return None
     if (
@@ -1023,99 +997,38 @@ def _runtime_shard_mode(
     return mode
 
 
-def _runtime_shard_steps(
+def _shard_at_generation(
     step: Step, step_key: str, command_step: BuildkiteCommandStep, mode: str
-) -> List[BuildkiteCommandStep]:
-    """The collect and plan steps for an enrolled step (see runtime_shard.py).
-
-    collect: the step's own image, queue and setup commands, then
-    `pytest --collect-only` per command. plan: a CPU step that plans the shards
-    and annotates the build. In "on" mode the plan step also uploads
-    `command_step`, the step's normal job: as parallel shards, or unchanged if
-    anything failed, so sharding never blocks the step's tests. In "shadow"
-    mode the step runs as usual and both new steps soft-fail.
+) -> None:
+    """Plan an enrolled step's shards from the checkout (runtime_shard.py)
+    and, in "on" mode, run its job as one parallel job per shard: the same
+    commands, after installing the plugin that keeps each job's tests. Short
+    of a plan of two or more shards, the job is left as it is, so sharding
+    never blocks the step's tests. "shadow" only annotates the plan.
     """
-    setup, tests = runtime_shard.split_commands(step.commands or [])
-    url = (
-        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
-        f"{_ci_infra_ref()}/buildkite/pipeline_generator/runtime_shard.py"
+    result, text = runtime_shard.plan_step(
+        step_key, step.commands or [], step.working_dir, os.getcwd()
     )
-    script = "/tmp/runtime-shard.$${BUILDKITE_JOB_ID:-local}.py"
-    fetch = f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
-    out_dir = f"{runtime_shard.INVENTORY_DIR}/{step_key}"
-    # /workdir under the docker plugin; a k8s pod's own checkout path otherwise.
-    checkout = _fnrec_checkout_path(step, "nvidia")
-    # ponytail: setup runs as written; no variable injection or recorders here
-    collect_commands = [f"cd {step.working_dir}"] if step.working_dir else []
-    collect_commands += [*setup, fetch]
-    collect_commands += [
-        f"python3 {script} collect {i} {runtime_shard.encode(command)} "
-        f"{checkout}/{out_dir}"
-        for i, command in enumerate(tests)
-    ]
-    collect_key = f"{step_key}-shard-collect"
-    collect = BuildkiteCommandStep(
-        label=f"{step_key}: runtime shard collect",
-        key=collect_key,
-        agents=_get_step_agents(step),
-        commands=collect_commands,
-        depends_on=step.depends_on,
-        env=step.env,
-        plugins=[_get_step_plugin(step)],
-        artifact_paths=[f"{out_dir}/*.json"],
-        retry=ensure_infra_failure_retry(None),
-        soft_fail=True,
-        timeout_in_minutes=_get_timeout_in_minutes(20),
+    print(text)
+    if mode == "shadow":
+        runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
+        return
+    if result is None or result["overBudget"]:
+        runtime_shard.annotate(step_key, text, "warning")
+    if result is None or result["shards"] < 2:
+        return
+    command_step.parallelism = result["shards"]
+    # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
+    command_step.label = f"{command_step.label} shard %N/%t"
+    env = dict(command_step.env or {})
+    env["PYTEST_ADDOPTS"] = (
+        f"{env.get('PYTEST_ADDOPTS', '')} -p {runtime_shard.PLUGIN_MODULE}".strip()
     )
-    queue = (
-        AgentQueue.SMALL_CPU_POSTMERGE
-        if get_global_config()["branch"] == "main"
-        else AgentQueue.SMALL_CPU_PREMERGE
-    )
-    plan_command = (
-        f"python3 {script} plan {step_key} {runtime_shard.encode(tests)} {mode}"
-    )
-    # The plan step reads only artifacts and the fetched planner, never the repo.
-    env = {"BUILDKITE_SKIP_CHECKOUT": "true"}
-    if mode == "on":
-        # If the planner can't be fetched or crashes, log its exit status and
-        # upload the step's normal job, with a warning. Skip the upload if the
-        # planner died after its own: the key is taken, so a second upload
-        # would only fail and turn this step red.
-        failed = "fetching or running the planner failed with status $$status"
-        plan_command = (
-            f"{fetch} && {plan_command} || "
-            f'{{ status=$$?; echo "runtime-shard: {failed}";'
-            f' [ -n "$$(buildkite-agent step get state --step {step_key} 2>/dev/null)" ]'
-            " || (buildkite-agent annotate --style warning --context"
-            f' runtime-shard-{step_key} "**Runtime sharding for {step_key}:** {failed}.'
-            ' The step runs as one job, as it would without sharding.";'
-            ' echo "$$RUNTIME_SHARD_TEMPLATE" | base64 -d'
-            " | buildkite-agent pipeline upload); }"
-        )
-        # The template leaves the pipeline before add_precommit_dependency
-        # runs, so gate it on pre-commit here, as the unsharded step would be.
-        pull_request = get_global_config()["pull_request"]
-        if pull_request and pull_request != "false":
-            _add_step_precommit_dependency(command_step)
-        template = {"steps": [command_step.dict(exclude_none=True)]}
-        env["RUNTIME_SHARD_TEMPLATE"] = runtime_shard.encode(template)
-        env["RUNTIME_SHARD_SCRIPT_URL"] = url
-    plan = BuildkiteCommandStep(
-        label=f"{step_key}: runtime shard plan",
-        key=f"{step_key}-shard-plan",
-        agents={"queue": queue.value},
-        commands=[fetch, plan_command] if mode == "shadow" else [plan_command],
-        env=env,
-        depends_on=[collect_key],
-        allow_dependency_failure=True,
-        # A lost CPU agent must not leave the step with no jobs. A retry after
-        # the shards were uploaded is harmless: the fallback sees the step.
-        retry=ensure_infra_failure_retry(None),
-        soft_fail=mode == "shadow",
-        timeout_in_minutes=_get_timeout_in_minutes(10),
-    )
-    return [collect, plan]
+    plan = {"shards": result["shards"], "commands": result["commands"]}
+    env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
+    env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()
+    command_step.env = env
+    command_step.commands = runtime_shard.shard_job_setup() + command_step.commands
 
 
 def convert_group_step_to_buildkite_step(
@@ -1267,12 +1180,10 @@ def convert_group_step_to_buildkite_step(
                 if include_step
                 else None
             )
-            if include_step and shard_mode != "on":
-                group_steps_list.append(buildkite_step)
             if shard_mode:
-                group_steps_list.extend(
-                    _runtime_shard_steps(step, step_key, buildkite_step, shard_mode)
-                )
+                _shard_at_generation(step, step_key, buildkite_step, shard_mode)
+            if include_step:
+                group_steps_list.append(buildkite_step)
 
             # Create AMD mirror step and its block step if specified/applicable
             if (
