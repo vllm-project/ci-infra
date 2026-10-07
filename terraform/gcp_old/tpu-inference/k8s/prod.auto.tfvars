@@ -216,7 +216,7 @@ worker_clusters = [
       },
       {
         # Eight chips as one slice across two VMs, placed from the named
-        # workload policy in workers.tf. Five slices is all forty chips, as
+        # workload policy in workers.tf. Five slices is forty chips, as many as
         # the single-host pools can take, so the cohort decides how many
         # multi-host tests run at once; pod_defaults.yaml keeps each
         # JobSet's pods in one slice.
@@ -229,13 +229,15 @@ worker_clusters = [
         nominal_quota = 0
       },
       {
+        # Three slices, so a two-slice workload (the Kimi-K3 1P1D) and a
+        # one-slice v7x-32 test can run at the same time.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x4"
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
-        slices        = 2
-        nominal_quota = 32
+        slices        = 3
+        nominal_quota = 48
 
         reclaim_within_cohort = "Any"
       },

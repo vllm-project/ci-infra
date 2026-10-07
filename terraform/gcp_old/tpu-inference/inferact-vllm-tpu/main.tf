@@ -20,7 +20,7 @@ module "ci_v7x_8" {
     google-beta = google-beta.us-central1-c
   }
 
-  slice_count           = 8
+  slice_count           = 12
   hosts_per_slice       = 1
   topology              = null
   buildkite_queue_name  = "tpu_v7x_8_queue"
