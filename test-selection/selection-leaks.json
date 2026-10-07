@@ -1485,6 +1485,34 @@
     "reference_url": "https://github.com/vllm-project/vllm/pull/53020",
     "notes": "PR #53020 added the NVIDIA-Nemotron-Parse-2.0 case to test_nemotron_parse.py; its PR CI (build 92358) left the H200 Extended Generation 1 lane blocked, so the new case never ran. After merge, main daily build 92490 failed deterministically: the model's tokenizer.json is rejected by HF tokenizers with DuplicatePatternError (model repo unchanged since release \u2014 not retry-fixable). Reported by @Sherlock's main-CI audit; recorded by kimi-no-na-wa. Remedy is an upstream tokenizer repair or a test quarantine, not a retry."
    }
+  },
+  {
+   "id": "pr-56997-main-93187-basic-models-tests-extra-initialization",
+   "job_name": ":nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization) Shard %N",
+   "job_key": "basic-models-tests-extra-initialization",
+   "culprit_pr": {
+    "number": 56997,
+    "url": "https://github.com/vllm-project/vllm/pull/56997",
+    "merge_commit": "d1f3d8b87083a95f914c674c477796950e2ba5fe"
+   },
+   "pr_ci": {
+    "ran": false,
+    "state": "blocked",
+    "build_number": 93056,
+    "job_id": "01a11056-6b56-4875-a4ee-84987c89af74",
+    "url": "https://buildkite.com/vllm/ci/builds/93056#01a11056-6b56-4875-a4ee-84987c89af74"
+   },
+   "main_failure": {
+    "build_number": 93187,
+    "job_id": "01a11306-79fc-4fec-b418-ced00c4eb05a",
+    "url": "https://buildkite.com/vllm/ci/builds/93187#01a11306-79fc-4fec-b418-ced00c4eb05a",
+    "signature": "ValueError: No compatible Humming input schema ... on SM90 \u2014 Mistral-Large-3 / Laguna NVFP4 init cases fail at engine start (folded scales rejected)"
+   },
+   "causal_confirmation": {
+    "kind": "code_analysis",
+    "reference_url": "https://github.com/vllm-project/vllm/pull/56997",
+    "notes": "PR #56997 changed Humming/NVFP4 backend priority on SM90; its PR CI blocked all 14 basic-models-tests-extra-initialization shards. Post-merge daily 93187 failed shard 14 five times on NVFP4 init cases. Fixed by #60337; exact shard passed in #93391. Selector trial note (v7 record): the selector's answer for #56997 had basic-models-tests-extra-initialization in would_add \u2014 it would have run the lane. Found by @Sherlock's main-CI audit, recorded by kimi-no-na-wa."
+   }
   }
  ]
 }
