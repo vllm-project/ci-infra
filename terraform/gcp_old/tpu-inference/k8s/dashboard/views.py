@@ -49,24 +49,24 @@ WARN_SHARE, FAIL_SHARE = 0.25, 0.8
 DISPATCH_STALL_SECONDS = 300
 STUCK_POD_SECONDS = 600
 
-# Where a kube job really is, in the order a job passes through. Buildkite shows
-# the first two as waiting and every other as running - from the moment its
-# agent pod starts, however long the workload then waits for chips.
+# Where a kube job is, in the order a job passes through, from its Buildkite
+# state, its agent pod and its Kueue workload. Buildkite alone cannot say: it
+# shows a kube job as running from the moment its agent pod starts.
 JOB_STATES = {
     "held": (
-        "Held by concurrency group",
+        "Concurrency held",
         "Buildkite will not offer it until another job in its group finishes.",
     ),
     "waiting_agent": (
-        "Waiting for agent pod",
+        "Waiting for agent",
         "Offered to the kube queue; agent-stack-k8s has not started its pod.",
     ),
     "agent_pending": (
-        "Agent pod pending",
+        "Agent pending",
         "The manager has not scheduled the agent pod.",
     ),
     "launching": (
-        "Agent up, no workload",
+        "Launching",
         "The launcher is checking out and submitting, or the step runs on the agent pod itself.",
     ),
     "queued": ("Pending in Kueue", "Submitted, waiting for quota."),
@@ -80,7 +80,6 @@ JOB_STATES = {
     ),
     "running": ("Running", "Admitted and every pod up."),
 }
-BUILDKITE_WAITING_STATES = ("held", "waiting_agent")
 
 # History ranges offered as presets; any other range is picked by date.
 PRESETS = {"6h": 6 * 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
@@ -614,22 +613,22 @@ def health_checks(cfg, snap, kq, ev, health, stats24, now) -> list:
     if ev["errors"]:
         add(
             "unknown",
-            "Cluster warnings (1h)",
+            "Cluster problems (1h)",
             "Could not read events from " + ", ".join(ev["errors"]) + ".",
         )
     elif fleet:
         add(
             "warn",
-            "Cluster warnings (1h)",
+            "Cluster problems (1h)",
             "; ".join(
                 f"{g['reason']} ×{g['count']} on {g['cluster']}" for g in fleet[:4]
             )
-            + ". See Cluster events.",
+            + ". See Cluster problems.",
         )
     else:
         add(
             "ok",
-            "Cluster warnings (1h)",
+            "Cluster problems (1h)",
             "No failed creates, failed scale-ups, mount failures or evictions.",
         )
 
@@ -799,26 +798,40 @@ def render_live_queue(q: dict) -> str:
 
 
 def render_events(snap: dict) -> str:
-    if not snap["events"]:
-        body = '<tr><td colspan="6" class="empty">No warnings or notable events in the last hour.</td></tr>'
-    else:
-        body = "".join(
-            f"""<tr><td class="nowrap"><time data-ts="{g["last"]}"></time></td><td class="nowrap">{E(g["cluster"])}</td>
-<td>{'<span class="pill attn">' + E(g["reason"]) + "</span>" if g["fleet"] else E(g["reason"])}<div class="sub-row">{E(g["kind"])}{" · Warning" if g["type"] == "Warning" else ""}</div></td>
+    def table(groups: list, empty: str) -> str:
+        body = (
+            "".join(
+                f"""<tr><td class="nowrap"><time data-ts="{g["last"]}" data-fmt="time"></time></td><td class="nowrap">{E(g["cluster"])}</td>
+<td>{E(g["reason"])}<div class="sub-row">{E(g["kind"])}{" · Warning" if g["type"] == "Warning" else ""}</div></td>
 <td class="n">{num(g["count"])}{f'<div class="sub-row">{g["objects"]} objects</div>' if g["objects"] > 1 else ""}</td>
 <td class="msg">{E(g["message"][:300])}</td>
 <td class="nowrap">{"<br>".join(f'<a href="{E(url)}">{E(name)}</a>' for name, url in g["builds"][:3])}{f'<div class="sub-row">+{len(g["builds"]) - 3} more</div>' if len(g["builds"]) > 3 else ""}</td></tr>"""
-            for g in snap["events"][:60]
+                for g in groups[:60]
+            )
+            or f'<tr><td colspan="6" class="empty">{empty}</td></tr>'
         )
+        return (
+            '<div class="table-wrap"><table class="dense"><thead><tr><th>Last seen</th><th>Cluster</th><th>Reason</th>'
+            f'<th class="n">Count</th><th>Message</th><th>Builds</th></tr></thead><tbody>{body}</tbody></table></div>'
+        )
+
+    # Kubernetes events are Normal or Warning, nothing finer, and most warnings
+    # here are routine: Kueue's Pending backlog, FailedScheduling while a pool
+    # scales up, agent-Job teardown, a test's own failure. Only the fleet's
+    # problems are shown open; the rest stay one click away for debugging.
+    problems = [g for g in snap["events"] if g["fleet"]]
+    other = [g for g in snap["events"] if not g["fleet"]]
     errors = "".join(
         f'<p class="error">Events from {E(c)} failed: {E(e)}</p>'
         for c, e in snap["event_errors"].items()
     )
-    return f"""{errors}<p class="muted lead">Warnings and scale-up, preemption and eviction events from the
-<code>buildkite</code> namespace on every cluster, repeats grouped. Highlighted reasons are the fleet's problems
-rather than a test's; Kueue's <i>Pending</i> warnings are the backlog the queues already show.</p>
-<div class="table-wrap"><table><thead><tr><th>Last seen</th><th>Cluster</th><th>Reason</th><th class="n">Count</th>
-<th>Message</th><th>Builds</th></tr></thead><tbody>{body}</tbody></table></div>"""
+    return f"""{errors}<p class="muted lead">Fleet problems in the <code>buildkite</code> namespace on every cluster,
+repeats grouped: {E(", ".join(sorted(FLEET_WARNINGS)))}.</p>
+{table(problems, "None in the last hour.")}
+<details><summary>Other events ({len(other)} kinds, {sum(g["count"] for g in other):,} events)</summary>
+<p class="muted note">Routine warnings and notable normal events: Kueue's backlog, scheduling while pools scale,
+scale-ups, preemptions, agent teardown, test failures.</p>
+{table(other, "None.")}</details>"""
 
 
 def job_link(j: dict) -> str:
@@ -831,20 +844,14 @@ def render_jobs(snap: dict) -> str:
     for j in jobs:
         counts[j["real"]] += 1
 
-    def chips(keys) -> str:
-        return "".join(
-            f'<div class="state-chip{" zero" if not counts[k] else ""}" title="{E(JOB_STATES[k][1])}">'
-            f"<b>{counts[k]}</b><small>{E(JOB_STATES[k][0])}</small></div>"
-            for k in keys
-        )
-
-    shown_running = [k for k in JOB_STATES if k not in BUILDKITE_WAITING_STATES]
     states = (
-        '<div class="states">'
-        f'<div class="state-group"><span class="group-label">Buildkite shows waiting</span>'
-        f'<div class="state-row">{chips(BUILDKITE_WAITING_STATES)}</div></div>'
-        f'<div class="state-group"><span class="group-label">Buildkite shows running</span>'
-        f'<div class="state-row">{chips(shown_running)}</div></div></div>'
+        '<div class="state-row">'
+        + "".join(
+            f'<div class="state-chip{" zero" if not counts[k] else ""}" title="{E(desc)}">'
+            f"<b>{counts[k]}</b><small>{E(name)}</small></div>"
+            for k, (name, desc) in JOB_STATES.items()
+        )
+        + "</div>"
     )
 
     def groups(selected: list) -> list:
@@ -855,11 +862,10 @@ def render_jobs(snap: dict) -> str:
         for j in selected:
             g = out.setdefault(
                 (j["pipeline"], j["number"], j["real"], j["queue"]),
-                {**j, "steps": [], "oldest": 0.0, "details": set(), "bk_states": set()},
+                {**j, "steps": [], "oldest": 0.0, "details": set()},
             )
             g["steps"].append(j)
             g["oldest"] = max(g["oldest"], j["for"] or 0)
-            g["bk_states"].add(j["state"])
             if j["detail"]:
                 g["details"].add(j["detail"])
         order = list(JOB_STATES)
@@ -888,7 +894,7 @@ def render_jobs(snap: dict) -> str:
     waiting_rows = (
         "".join(
             f'<tr><td class="nowrap">{build_cell(g)}</td><td class="nowrap"><b>{E(JOB_STATES[g["real"]][0])}</b>'
-            f'<div class="sub-row">Buildkite: {E(", ".join(sorted(g["bk_states"])))}</div></td>'
+            "</td>"
             f'<td class="nowrap" title="{E(g["queue_name"])}">{E(g["queue"]) or "-"}</td>'
             f"<td>{steps_cell(g)}</td>"
             f'<td class="n nowrap">{ago(g["oldest"])}</td>'
@@ -906,11 +912,9 @@ def render_jobs(snap: dict) -> str:
         or '<tr><td colspan="4" class="empty">None.</td></tr>'
     )
     return f"""{states}
-<p class="muted lead">Buildkite marks a kube job running as soon as its agent pod starts, so a job waiting hours for
-chips looks the same there as one running tests. Here each job is where it actually is, grouped by build; hover a
-count for what the state means.</p>
+<p class="muted lead">Where each kube job is, grouped by build. Hover a count for what the state means.</p>
 <h3>Not running yet <span class="muted">({len(waiting)} jobs)</span></h3>
-<div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>Actually</th><th>Queue</th><th>Steps</th>
+<div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>State</th><th>Queue</th><th>Steps</th>
 <th class="n">Longest</th><th>Detail</th></tr></thead><tbody>{waiting_rows}</tbody></table></div>
 <details><summary>Running ({len(running)} jobs)</summary>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>Queue</th><th>Steps</th><th class="n">Longest</th></tr></thead>

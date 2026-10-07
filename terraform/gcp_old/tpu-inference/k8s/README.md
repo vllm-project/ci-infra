@@ -432,18 +432,22 @@ agent pod starts.
   infrastructure failures and evictions in the last 24 hours, fleet warnings
   in the last hour, agent pods the manager cannot schedule, and steps no agent
   picked up.
-- **Kube jobs** - every Buildkite kube job where it actually is: held by a
-  concurrency group, waiting for an agent pod, agent pod pending, agent up
-  without a workload yet, pending in Kueue, dispatching, pods starting,
-  running. Buildkite shows the first two as waiting and all the rest as
-  running.
+- **Kube jobs** - where every Buildkite kube job is, grouped by build:
+  concurrency held, waiting for an agent pod, agent pod pending, launching,
+  pending in Kueue, dispatching, pods starting, running. Joined from the
+  job's Buildkite state, its agent pod and its Kueue workload, since Buildkite
+  alone shows a kube job as running once its agent pod starts.
 - **Quota now** - per cohort, chips in use against nominal, free, pending and
   busy; per queue, its nominal, usage, what it borrows or leaves idle, and
   whether it evicts borrowers.
 - **Per queue** - workloads admitted and pending, the builds they belong to,
   Kueue's reason for anything pending. Only the head of a BestEffortFIFO queue
   carries a reason; the rest are counted as queued behind it.
-- **Cluster events** from every cluster's `buildkite` namespace, repeats grouped.
+- **Cluster problems** - events from every cluster's `buildkite` namespace
+  that are the fleet's fault (failed creates, failed scale-ups, mount
+  failures, evictions, OOM kills), repeats grouped. Routine warnings - Kueue's
+  backlog, scheduling while a pool scales, agent teardown, test failures - are
+  collapsed beneath.
 
 **History** (`/history`), for a preset or any range of dates up to 90 days:
 chips admitted against chips busy (TensorCore duty) per cohort, outcomes per
