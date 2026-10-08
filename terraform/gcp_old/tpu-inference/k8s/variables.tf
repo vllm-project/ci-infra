@@ -419,6 +419,21 @@ variable "worker_clusters" {
 
       slices                = optional(number)
       reclaim_within_cohort = optional(string, "Never")
+
+      # Spot capacity beside the reservation, for a single-host shape: a second
+      # node pool, <shape>-spot, in the same zone and drawing on the zone's
+      # Spot quota instead of the reservation. Kueue admits a workload onto it
+      # only once the shape's reserved quota, and what it can borrow from the
+      # cohort, is spent - overflow, not a replacement, since the reservation
+      # is paid for whether it is used or not. See "Spot overflow" in README.md.
+      spot = optional(object({
+        # The Spot pool's ceiling, which the Spot quota bounds rather than any
+        # reservation.
+        max_nodes = number
+        # Chips of the shape's ClusterQueue the Spot flavor holds; the pool's
+        # capacity if unset.
+        nominal_quota = optional(number)
+      }))
     })), [])
   }))
   description = "Worker clusters. location is a region; the cluster pins no zones, because only a TPU node cares which zone it is in and its own node pool pins it there."

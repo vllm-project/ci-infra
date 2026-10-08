@@ -756,16 +756,18 @@ def fetch_node_pools(cfg: Config) -> list:
                 continue
             auto = p.get("autoscaling", {})
             multi_host = bool(p.get("placementPolicy", {}).get("tpuTopology"))
+            spot = bool(p["config"].get("spot"))
             pools.append(
                 {
                     "cluster": name,
                     "name": p["name"],
                     # The Kueue queue it serves: a multi-host pool is one slice,
-                    # named <shape>-<slice>.
-                    "queue": re.sub(r"-\d+$", "", p["name"])
-                    if multi_host
+                    # named <shape>-<slice>, and a Spot pool is <shape>-spot.
+                    "queue": re.sub(r"-(\d+|spot)$", "", p["name"])
+                    if multi_host or spot
                     else p["name"],
                     "multi_host": multi_host,
+                    "spot": spot,
                     "chips_per_node": int(chips[1]),
                     "min_nodes": int(
                         auto.get("minNodeCount") or auto.get("totalMinNodeCount") or 0

@@ -415,6 +415,34 @@ guessing — and note the chart pastes our block under keys of its own, so
 anything it derives must be left out of the template or the controller's decoder
 rejects the duplicate.
 
+## Spot overflow
+
+A single-host shape can have Spot capacity beside its reservation:
+`spot = { max_nodes = N }` on its `tpu_node_pools` entry adds a `<shape>-spot`
+node pool in the same zone, with no reservation and a
+`cloud.google.com/gke-spot` taint, and gives the shape's ClusterQueue a second
+flavor, `<generation>-spot`. Nothing about a step changes: no flag, no queue,
+no label. Kueue tries the reserved flavor first, borrowing from the cohort
+included, and admits onto Spot only when the reservation cannot take the
+workload - overflow, since the reservation is paid for either way. It reaches
+for Spot rather than preempt a running workload to reclaim lent quota.
+
+The Spot flavor is the only thing that names Spot nodes: Kueue adds its
+`cloud.google.com/gke-spot=true` nodeSelector and its toleration to a pod it
+admits on that flavor and to no other, so a workload admitted on the
+reservation can never land on a Spot node, and the reserved flavor and pools
+are unchanged.
+
+A reclaimed Spot node takes its pod with it. The pod is marked
+`DisruptionTarget`, which the pod failure policy ignores, so the Job replaces
+it and the step reruns from the start. If Spot capacity has gone too, the
+replacement cannot schedule, and after `recoveryTimeout` (30 minutes, in
+`kueue/common-config.yaml`) Kueue requeues the workload, which goes back
+through the flavors, reserved first.
+
+Multi-host shapes cannot have Spot: GKE reclaims a slice whole, and Kueue
+admits chips rather than slices.
+
 ## The health dashboard
 
 `terraform output dashboard_url`, behind IAP; `dashboard_viewers` in
