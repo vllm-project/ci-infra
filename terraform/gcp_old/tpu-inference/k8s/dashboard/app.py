@@ -228,7 +228,10 @@ class Bare:
         key = (span["start"], span["end"])
         with self._lock:
             hit = self._cache.get(key)
-            if hit and time.time() - hit[2] < self.cfg.cache_seconds * 10:
+            # A failure is retried after a minute rather than ten: its cause,
+            # a missing grant say, is usually fixed by hand while someone looks.
+            fresh = self.cfg.cache_seconds * (1 if hit and hit[1] else 10)
+            if hit and time.time() - hit[2] < fresh:
                 return hit[0], {"name": "BigQuery", "at": hit[2], "error": hit[1]}
         try:
             rows, error = fleet.fetch_bare(self.cfg, span["start"], span["end"]), ""
