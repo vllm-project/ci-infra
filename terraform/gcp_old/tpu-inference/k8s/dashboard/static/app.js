@@ -71,6 +71,15 @@ if (toggle) {
   });
 }
 
+// Steps: a build's toggle opens or closes the row of its steps under it.
+for (const b of document.querySelectorAll(".steps-toggle")) {
+  b.addEventListener("click", () => {
+    const row = document.getElementById(b.getAttribute("aria-controls"));
+    row.hidden = !row.hidden;
+    b.setAttribute("aria-expanded", String(!row.hidden));
+  });
+}
+
 // Show more: reveal the rows a table keeps back, or hide them again.
 for (const b of document.querySelectorAll(".show-more")) {
   b.addEventListener("click", () => {

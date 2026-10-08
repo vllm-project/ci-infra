@@ -1534,7 +1534,16 @@ def render_jobs(snap: dict) -> str:
             out.values(), key=lambda g: (order.index(g["real"]), -g["oldest"])
         )
 
-    def steps_cell(g: dict) -> str:
+    def steps_toggle(g: dict, sid: str) -> str:
+        n = len(g["steps"])
+        return (
+            f'<button type="button" class="steps-toggle" aria-expanded="false" '
+            f'aria-controls="{sid}">{n} step{"s" if n != 1 else ""}</button>'
+        )
+
+    def steps_row(g: dict, sid: str, span: int) -> str:
+        """The build's steps, in a row of their own under it and across the
+        whole table, so opening them leaves the columns where they were."""
         items = "".join(
             f'<li>{job_link(j)} <span class="muted">{ago(j["for"])}</span></li>'
             for j in g["steps"][:40]
@@ -1544,8 +1553,10 @@ def render_jobs(snap: dict) -> str:
             if len(g["steps"]) > 40
             else ""
         )
-        label = f"{len(g['steps'])} step{'s' if len(g['steps']) != 1 else ''}"
-        return f'<details class="steps"><summary>{label}</summary><ul>{items}{more}</ul></details>'
+        return (
+            f'<tr class="steps-row" id="{sid}" hidden><td colspan="{span}">'
+            f'<ul class="steps-list">{items}{more}</ul></td></tr>'
+        )
 
     def build_cell(g: dict) -> str:
         return f'<a href="{E(g["url"].split("#")[0])}" target="_blank" rel="noopener">{E(g["pipeline"])} #{g["number"]}</a>'
@@ -1553,29 +1564,35 @@ def render_jobs(snap: dict) -> str:
     waiting = [j for j in jobs if j["real"] != "running"]
     running = [j for j in jobs if j["real"] == "running"]
 
-    def waiting_row(g: dict) -> str:
+    # A build's row and its steps' row are one entry, so Show more never
+    # parts them.
+    def waiting_row(g: dict, sid: str) -> str:
         return (
             f'<tr><td class="nowrap">{build_cell(g)}</td><td class="nowrap"><b>{E(JOB_STATES[g["real"]][0])}</b>'
             "</td>"
             f'<td class="nowrap" title="{E(g["queue_name"])}">{E(g["queue"]) or "-"}</td>'
-            f"<td>{steps_cell(g)}</td>"
+            f'<td class="nowrap">{steps_toggle(g, sid)}</td>'
             f'<td class="n nowrap">{ago(g["oldest"])}</td>'
             f'<td class="msg">{"<br>".join(E(d[:200]) for d in sorted(g["details"])[:2])}</td></tr>'
+            + steps_row(g, sid, 6)
+        )
+
+    def running_row(g: dict, sid: str) -> str:
+        return (
+            f'<tr><td class="nowrap">{build_cell(g)}</td><td class="nowrap" title="{E(g["queue_name"])}">{E(g["queue"])}</td>'
+            f'<td class="nowrap">{steps_toggle(g, sid)}</td><td class="n nowrap">{ago(g["oldest"])}</td></tr>'
+            + steps_row(g, sid, 4)
         )
 
     # The first rows, furthest from running first; the rest behind a button.
     waiting_groups = groups(waiting)
     waiting_rows, more_rows, more_button = split_rows(
-        [waiting_row(g) for g in waiting_groups],
+        [waiting_row(g, f"steps-w{i}") for i, g in enumerate(waiting_groups)],
         "waiting-more",
         '<tr><td colspan="6" class="empty">Every kube job is running.</td></tr>',
     )
     running_rows, running_more, running_button = split_rows(
-        [
-            f'<tr><td class="nowrap">{build_cell(g)}</td><td class="nowrap" title="{E(g["queue_name"])}">{E(g["queue"])}</td>'
-            f'<td>{steps_cell(g)}</td><td class="n nowrap">{ago(g["oldest"])}</td></tr>'
-            for g in groups(running)
-        ],
+        [running_row(g, f"steps-r{i}") for i, g in enumerate(groups(running))],
         "running-more",
         '<tr><td colspan="4" class="empty">None.</td></tr>',
     )
