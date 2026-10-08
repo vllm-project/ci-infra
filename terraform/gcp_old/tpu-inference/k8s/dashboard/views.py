@@ -14,7 +14,6 @@ from charts import line_chart, values_table
 from fleet import (
     BK_LIMITED,
     BK_WAITING,
-    DUTY_MODELS,
     GENERATIONS,
     JOB_ID,
     TPU,
@@ -200,16 +199,24 @@ def pool_of(by_hash: dict, key: str) -> dict | None:
     return by_hash.get(parts[2]) if len(parts) >= 4 else None
 
 
-def live_nodes(pools: list, present: dict) -> dict:
-    """Per Kueue queue: TPU nodes up now, and the pools' bounds."""
+def live_nodes(pools: list, present: dict, busy: dict, spot: bool = False) -> dict:
+    """Per Kueue queue: TPU nodes up now, the chips computing on them, and the
+    pools' bounds. The reserved pools, or with spot the Spot pools."""
     by_hash = pool_index(pools)
     per_pool = collections.Counter()
     for key in present:
         p = pool_of(by_hash, key)
         if p:
             per_pool[(p["cluster"], p["name"])] += 1
+    busy_pool = collections.Counter()
+    for key, value in busy.items():
+        p = pool_of(by_hash, key)
+        if p:
+            busy_pool[(p["cluster"], p["name"])] += value
     out: dict = {}
     for p in pools:
+        if p["spot"] != spot:
+            continue
         n = out.setdefault(
             p["queue"],
             {
@@ -220,11 +227,13 @@ def live_nodes(pools: list, present: dict) -> dict:
                 "pools": 0,
                 "pools_up": 0,
                 "multi_host": p["multi_host"],
+                "busy": 0.0,
             },
         )
         up = per_pool[(p["cluster"], p["name"])]
         n["up"] += up
         n["chips"] += up * p["chips_per_node"]
+        n["busy"] += busy_pool[(p["cluster"], p["name"])]
         n["min"] += p["min_nodes"]
         n["max"] += p["max_nodes"]
         n["pools"] += 1
@@ -362,9 +371,18 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             }
         )
     queues = sort_queues(queues)
-    nodes = live_nodes(data.get("pools") or [], health.get("nodes", {}))
+    pools, present, busy = (
+        data.get("pools") or [],
+        health.get("nodes", {}),
+        health.get("busy", {}),
+    )
+    nodes = live_nodes(pools, present, busy)
+    spot_nodes = live_nodes(pools, present, busy, spot=True)
     for q in queues:
         q["nodes"] = nodes.get(q["name"])
+        if q["spot"]:
+            # A copy: q["spot"] is the Kueue source's, which outlives this view.
+            q["spot"] = {**q["spot"], "nodes": spot_nodes.get(q["name"])}
 
     cohorts: dict[str, dict] = {}
     for q in queues:
@@ -380,19 +398,24 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 "used": 0.0,
                 "pending": 0,
                 "pending_amount": 0.0,
+                "spot": None,
             },
         )
         c["queues"].append(q["name"])
         for key in ("nominal", "used", "pending", "pending_amount"):
             c[key] += q[key]
+        if q["spot"]:
+            s = c["spot"] = c["spot"] or {"quota": 0.0, "used": 0.0, "on_nodes": 0.0}
+            s["quota"] += q["spot"]["quota"]
+            s["used"] += q["spot"]["used"]
+            s["on_nodes"] += (q["spot"]["nodes"] or {}).get("chips", 0.0)
     for c in cohorts.values():
         c["free"] = max(0.0, c["nominal"] - c["used"])
-        model = DUTY_MODELS.get(c["family"], "")
-        c["busy"] = health.get("busy", {}).get(model)
         members = [
             q["nodes"] for q in queues if q["cohort"] == c["name"] and q["nodes"]
         ]
         c["on_nodes"] = sum(n["chips"] for n in members) if members else None
+        c["busy"] = sum(n["busy"] for n in members) if members else None
 
     snapshot = {
         "generated_at": now,
@@ -764,6 +787,13 @@ def borrow_cell(q: dict) -> str:
     return '<span class="muted">at nominal</span>'
 
 
+def spot_cell(q: dict) -> str:
+    s = q["spot"]
+    if not s:
+        return '<td class="n muted">-</td>'
+    return f'<td class="n">{num(s["used"])} <span class="muted">of {num(s["quota"])}</span></td>'
+
+
 def quota_bar(q: dict, scale: float) -> str:
     """In use within nominal, borrowed beyond it, and idle nominal, to one scale."""
     if scale <= 0:
@@ -787,22 +817,27 @@ def render_live_summary(snap: dict) -> str:
     for c in snap["cohorts"]:
         if c["resource"] != TPU:
             continue
+        spot = c["spot"]
         rows = "".join(
             f"""<tr><td class="nowrap">{queue_link(q)}</td>
 <td class="n">{num(q["nominal"])}</td><td class="n"><b>{num(q["used"])}</b></td>
 <td>{borrow_cell(q)}</td>
 <td class="n">{num(q["borrowing_limit"]) if q["borrowing_limit"] else "-"}</td>
 <td>{"evicts borrowers" if q["reclaim"] != "Never" else '<span class="muted">never</span>'}</td>
-<td class="n">{num(q["admitted"] + q["dispatching"])}</td>
+{spot_cell(q) if spot else ""}<td class="n">{num(q["admitted"] + q["dispatching"])}</td>
 <td class="n">{num(q["pending"])}{f' <span class="muted">({num(q["pending_amount"])} chips)</span>' if q["pending"] else ""}</td>
 <td class="barcell">{quota_bar(q, c["nominal"])}</td></tr>"""
             for q in (by_name[n] for n in c["queues"])
         )
         busy = (
             f"<b>{num(c['busy'])}</b><small>chips computing, of {num(c['on_nodes'])} on nodes</small>"
-            if c["busy"] is not None
-            # No series for the model: no node of that kind is up.
+            if c["on_nodes"]
             else f"<b>0</b><small>no {E(c['generation'])} TPU nodes up</small>"
+        )
+        spot_tile = (
+            f"""<div class="tile"><span>Spot in use</span><b>{num(spot["used"])}</b><small>of {num(spot["quota"])} Spot quota, {num(spot["on_nodes"])} on nodes</small></div>"""
+            if spot
+            else ""
         )
         out.append(f"""
 <div class="cohort">
@@ -812,9 +847,10 @@ def render_live_summary(snap: dict) -> str:
     <div class="tile"><span>Free</span><b>{num(c["free"])}</b><small>chips no queue is using</small></div>
     <div class="tile"><span>Pending</span><b>{num(c["pending"])}</b><small>workloads, {num(c["pending_amount"])} chips</small></div>
     <div class="tile"><span>Busy now</span>{busy}</div>
+    {spot_tile}
   </div>
   <div class="table-wrap"><table><thead><tr><th>Queue</th><th class="n">Nominal</th><th class="n">In use</th><th>Borrowing</th>
-  <th class="n">May borrow</th><th>Reclaim</th><th class="n">Running</th><th class="n">Pending</th>
+  <th class="n">May borrow</th><th>Reclaim</th>{'<th class="n">Spot in use</th>' if spot else ""}<th class="n">Running</th><th class="n">Pending</th>
   <th class="barcell"><span class="key"><i class="sw own"></i>own</span><span class="key"><i class="sw borrowed"></i>borrowed</span><span class="key"><i class="sw idle"></i>idle</span></th>
   </tr></thead><tbody>{rows}</tbody></table></div>
 </div>""")
@@ -851,6 +887,10 @@ def render_live_queue(q: dict) -> str:
         )
     if q["reclaim"] != "Never":
         pills.append('<span class="pill">evicts borrowers to reclaim</span>')
+    if q["spot"]:
+        pills.append(
+            f'<span class="pill">Spot {num(q["spot"]["used"])} of {num(q["spot"]["quota"])} {u}</span>'
+        )
     return f"""
 <div class="card queue{"" if tpu else " other"}" id="{E(q["name"])}">
   <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
@@ -1087,6 +1127,12 @@ def build_history(
                     "nominal": history("nominal", q["name"], q["resource"]),
                     "pending": history("pending", q["name"]),
                 },
+                "spot": {
+                    "used": history("spot_used", q["name"], q["resource"]),
+                    "quota": history("spot_quota", q["name"], q["resource"]),
+                }
+                if q.get("spot")
+                else None,
                 # Not utilization: against the queue's own nominal, a queue that
                 # lives on borrowed chips reads hundreds of percent.
                 "mean_used": mean(used),
@@ -1109,10 +1155,24 @@ def build_history(
             }
         )
 
-    # Every TPU node that existed in the range, summed by the queue its pool
-    # serves.
+    # Every TPU node that existed in the range, and the chips computing on it,
+    # summed by the queue its pool serves and whether the pool is Spot.
     by_hash = pool_index(pools)
+    empty = len(ticks) * [0.0]
     agg: dict = {}
+
+    def pool_entry(p: dict) -> dict:
+        return agg.setdefault(
+            (p["queue"], p["spot"]),
+            {
+                "nodes": list(empty),
+                "chips": list(empty),
+                "busy": list(empty),
+                "created": 0,
+                "lifetimes": [],
+            },
+        )
+
     for key, points in hist.get("nodes", {}).items():
         p = pool_of(by_hash, key)
         if not p:
@@ -1121,15 +1181,7 @@ def build_history(
         seen = [i for i, v in enumerate(values) if v]
         if not seen:
             continue
-        a = agg.setdefault(
-            p["queue"],
-            {
-                "nodes": [0.0] * len(ticks),
-                "chips": [0.0] * len(ticks),
-                "created": 0,
-                "lifetimes": [],
-            },
-        )
+        a = pool_entry(p)
         # A step's share; a subquery boundary can add one sample.
         values = [None if v is None else min(v, 1.0) for v in values]
         for i, v in enumerate(values):
@@ -1142,32 +1194,38 @@ def build_history(
             # And gone before it ended: a whole lifetime.
             if seen[-1] < len(ticks) - 1:
                 a["lifetimes"].append(sum(v or 0 for v in values) * step)
+    for key, points in hist.get("busy", {}).items():
+        p = pool_of(by_hash, key)
+        if not p:
+            continue
+        a = pool_entry(p)
+        for i, v in enumerate(exact(points, ticks)):
+            if v:
+                a["busy"][i] += v
     pool_bounds: dict = {}
     for p in pools:
         b = pool_bounds.setdefault(
-            p["queue"], {"pools": 0, "max": 0, "multi_host": p["multi_host"]}
+            (p["queue"], p["spot"]),
+            {"pools": 0, "max": 0, "multi_host": p["multi_host"]},
         )
         b["pools"] += 1
         b["max"] += p["max_nodes"]
     hours = step / 3600
-    for q in rows:
-        a, b = agg.get(q["name"]), pool_bounds.get(q["name"])
+
+    def node_summary(key: tuple, used: list) -> dict | None:
+        """A queue's nodes - reserved or Spot - against the usage they serve."""
+        b = pool_bounds.get(key)
         if not b:
-            q["nodes"] = None
-            continue
-        a = a or {
-            "nodes": [0.0] * len(ticks),
-            "chips": [0.0] * len(ticks),
-            "created": 0,
-            "lifetimes": [],
-        }
-        used = [u or 0.0 for u in q["history"]["used"]]
+            return None
+        a = agg.get(key) or pool_entry({"queue": key[0], "spot": key[1]})
+        used = [u or 0.0 for u in used]
         on_hours = sum(a["chips"]) * hours
         held_hours = sum(min(c, u) for c, u in zip(a["chips"], used)) * hours
-        q["nodes"] = {
+        return {
             **b,
             "chips": [round(v, 1) for v in a["chips"]],
             "count": [round(v, 1) for v in a["nodes"]],
+            "busy": [round(v, 1) for v in a["busy"]],
             "created": a["created"],
             "lifetime_p50": statistics.median(a["lifetimes"])
             if a["lifetimes"]
@@ -1178,6 +1236,11 @@ def build_history(
             "idle_chip_hours": max(0.0, on_hours - held_hours),
             "held_share": held_hours / on_hours if on_hours else None,
         }
+
+    for q in rows:
+        q["nodes"] = node_summary((q["name"], False), q["history"]["used"])
+        if q["spot"]:
+            q["spot"]["nodes"] = node_summary((q["name"], True), q["spot"]["used"])
 
     cohorts: dict[str, dict] = {}
     for q in rows:
@@ -1193,13 +1256,34 @@ def build_history(
             },
         )
         c["members"].append(q)
+
+    def total(series: list) -> list:
+        return add_series(*series) if series else [None] * len(ticks)
+
     for c in cohorts.values():
         c["admitted"] = add_series(*(q["history"]["used"] for q in c["members"]))
         c["nominal"] = add_series(*(q["history"]["nominal"] for q in c["members"]))
-        model = DUTY_MODELS.get(c["family"], "")
-        c["busy"] = history("busy", model) if model else [None] * len(ticks)
-        on_nodes = [q["nodes"]["chips"] for q in c["members"] if q["nodes"]]
-        c["on_nodes"] = add_series(*on_nodes) if on_nodes else [None] * len(ticks)
+        node_sets = [q["nodes"] for q in c["members"] if q["nodes"]]
+        c["busy"] = total([n["busy"] for n in node_sets])
+        c["on_nodes"] = total([n["chips"] for n in node_sets])
+        spots = [q["spot"] for q in c["members"] if q["spot"]]
+        spot_nodes = [s["nodes"] for s in spots if s["nodes"]]
+        c["spot"] = (
+            {
+                "admitted": total([s["used"] for s in spots]),
+                "quota": total([s["quota"] for s in spots]),
+                "on_nodes": total([n["chips"] for n in spot_nodes]),
+                "busy": total([n["busy"] for n in spot_nodes]),
+            }
+            if spots
+            else None
+        )
+        if c["spot"]:
+            admitted, quota = mean(c["spot"]["admitted"]), mean(c["spot"]["quota"])
+            c["spot"]["utilization"] = (
+                admitted / quota if admitted is not None and quota else None
+            )
+            c["spot"]["chip_hours"] = (admitted or 0) * seconds / 3600
         on_hours = sum(q["nodes"]["chip_hours"] for q in c["members"] if q["nodes"])
         idle_hours = sum(
             q["nodes"]["idle_chip_hours"] for q in c["members"] if q["nodes"]
@@ -1255,6 +1339,14 @@ def render_history(h: dict, sources: dict, query: str) -> str:
     every = max(1, len(h["ticks"]) // 24)
     ticks = h["ticks"]
 
+    def spot_section(c: dict) -> str:
+        s = c["spot"]
+        if not s:
+            return ""
+        return f"""<h3 style="margin-top:20px">Spot</h3>
+  {line_chart("Spot chips on nodes, admitted and busy", ticks, [("nodes", "on nodes", s["on_nodes"]), ("used", "admitted", s["admitted"]), ("busy", "busy", s["busy"])], ref=("Spot quota", s["quota"]), fmt=fmt, width=1080, height=180)}
+  {values_table(ticks, [("On nodes", s["on_nodes"]), ("Admitted", s["admitted"]), ("Busy", s["busy"]), ("Spot quota", s["quota"])], every, "Values")}"""
+
     cohorts = "".join(
         f"""<div class="card">
   <div class="card-head"><h2>{E(c["generation"])} chips</h2><span class="sub">cohort <code>{E(c["name"])}</code></span></div>
@@ -1263,9 +1355,11 @@ def render_history(h: dict, sources: dict, query: str) -> str:
     <div class="tile"><span>Busy, average</span><b>{pct(c["busy_share"])}</b><small>of nominal, by TensorCore duty</small></div>
     <div class="tile"><span>Node chips held</span><b>{pct(c["held_share"])}</b><small>{num(c["idle_chip_hours"])} chip-hours on nodes idle</small></div>
     <div class="tile"><span>Workloads finished</span><b>{num(c["finished"])}</b><small>{num(c["failed"])} test, {num(c["infra"])} infra failures</small></div>
+    {f'<div class="tile"><span>Spot admitted, average</span><b>{pct(c["spot"]["utilization"])}</b><small>of Spot quota, {num(c["spot"]["chip_hours"])} chip-hours</small></div>' if c["spot"] else ""}
   </div>
   {line_chart("Chips on nodes, admitted and busy", ticks, [("nodes", "on nodes", c["on_nodes"]), ("used", "admitted", c["admitted"]), ("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
   {values_table(ticks, [("On nodes", c["on_nodes"]), ("Admitted", c["admitted"]), ("Busy", c["busy"]), ("Nominal", c["nominal"])], every, "Values")}
+  {spot_section(c)}
 </div>"""
         for c in h["cohorts"]
     )
@@ -1283,17 +1377,31 @@ def render_history(h: dict, sources: dict, query: str) -> str:
 <td class="n">{num(q["stats"]["chip_hours"])}</td></tr>"""
         for q in tpu
     )
-    autoscaled = [q for q in tpu if q.get("nodes")]
+
+    def node_row(q: dict, n: dict, spot: bool) -> str:
+        # Startup is timed per queue, not per pool, so it goes on the reserved row.
+        startup = (
+            '<span class="muted">-</span>'
+            if spot
+            else f"{ago(q['stats']['startup_p50'])} / {ago(q['stats']['startup_p90'])}"
+        )
+        return f"""<tr><td class="nowrap">{queue_link(q)}{" · Spot" if spot else ""}</td>
+<td class="n">{n["pools"]}{" slices" if n["multi_host"] else ""} · max {num(n["max"])}</td>
+<td class="n"><b>{num(n["created"])}</b></td><td class="n">{ago(n["lifetime_p50"])}</td>
+<td class="n">{num(n["peak"])}</td><td class="n">{num(n["node_hours"])}</td>
+<td class="n">{num(n["chip_hours"])}</td><td class="n">{pct(n["held_share"])}</td>
+<td class="n">{num(n["idle_chip_hours"])}</td>
+<td class="n nowrap">{startup}</td></tr>"""
+
     node_rows = (
         "".join(
-            f"""<tr><td class="nowrap">{queue_link(q)}</td>
-<td class="n">{q["nodes"]["pools"]}{" slices" if q["nodes"]["multi_host"] else ""} · max {num(q["nodes"]["max"])}</td>
-<td class="n"><b>{num(q["nodes"]["created"])}</b></td><td class="n">{ago(q["nodes"]["lifetime_p50"])}</td>
-<td class="n">{num(q["nodes"]["peak"])}</td><td class="n">{num(q["nodes"]["node_hours"])}</td>
-<td class="n">{num(q["nodes"]["chip_hours"])}</td><td class="n">{pct(q["nodes"]["held_share"])}</td>
-<td class="n">{num(q["nodes"]["idle_chip_hours"])}</td>
-<td class="n nowrap">{ago(q["stats"]["startup_p50"])} / {ago(q["stats"]["startup_p90"])}</td></tr>"""
-            for q in autoscaled
+            (node_row(q, q["nodes"], False) if q.get("nodes") else "")
+            + (
+                node_row(q, q["spot"]["nodes"], True)
+                if q["spot"] and q["spot"]["nodes"]
+                else ""
+            )
+            for q in tpu
         )
         or '<tr><td colspan="10" class="empty">No node pool data.</td></tr>'
     )
@@ -1331,14 +1439,37 @@ submitted to quota reserved; startup is admitted to the first workload container
 
     def queue_card(q: dict) -> str:
         u = unit(q)
+        s = q["spot"]
+        spot_nodes = (s or {}).get("nodes")
+        spot_chart = (
+            line_chart(
+                "Spot chips on nodes and in use",
+                ticks,
+                ([("nodes", "on nodes", spot_nodes["chips"])] if spot_nodes else [])
+                + [("used", "in use", s["used"])],
+                ref=("Spot quota", s["quota"]),
+                fmt=fmt,
+                width=520,
+                height=180,
+            )
+            if s
+            else ""
+        )
+        spot_values = (
+            ([("Spot on nodes", spot_nodes["chips"])] if spot_nodes else [])
+            + [("Spot in use", s["used"]), ("Spot quota", s["quota"])]
+            if s
+            else []
+        )
         return f"""<div class="card queue{"" if q["resource"] == TPU else " other"}" id="{E(q["name"])}">
   <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
-    <span class="sub">{num(q["stats"]["finished"])} finished · avg {num(q["mean_used"])} {u}</span></div>
+    <span class="sub">{num(q["stats"]["finished"])} finished · avg {num(q["mean_used"])} {u}{f" + {num(mean(s['used']))} Spot" if s else ""}</span></div>
   <div class="charts">
   {line_chart(f"{u.capitalize()} on nodes and in use" if q.get("nodes") else f"{u.capitalize()} in use", ticks, ([("nodes", "on nodes", q["nodes"]["chips"])] if q.get("nodes") else []) + [("used", "in use", q["history"]["used"])], ref=("nominal", q["history"]["nominal"]) if q["resource"] == TPU else None, fmt=fmt, width=520, height=180)}
   {line_chart("Workloads pending", ticks, [("pending", "pending", q["history"]["pending"])], fmt=fmt, width=520, height=180)}
+  {spot_chart}
   </div>
-  {values_table(ticks, ([("On nodes", q["nodes"]["chips"])] if q.get("nodes") else []) + [(f"{u.capitalize()} in use", q["history"]["used"]), ("Nominal", q["history"]["nominal"]), ("Pending", q["history"]["pending"])], every, "Values")}
+  {values_table(ticks, ([("On nodes", q["nodes"]["chips"])] if q.get("nodes") else []) + [(f"{u.capitalize()} in use", q["history"]["used"]), ("Nominal", q["history"]["nominal"]), ("Pending", q["history"]["pending"])] + spot_values, every, "Values")}
 </div>"""
 
     presets = "".join(

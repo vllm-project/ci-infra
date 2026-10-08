@@ -19,10 +19,12 @@ import urllib.request
 TPU = "google.com/tpu"
 
 # Display names and order for the TPU families the fleet's queue names start
-# with, and the `model` label GKE's duty-cycle metric gives each. A family not
-# listed still shows, after these, without a busy line.
+# with. A family not listed still shows, after these.
 GENERATIONS = {"tpu7x": "v7x", "ct6e": "v6e"}
-DUTY_MODELS = {"tpu7x": "tpu7x", "ct6e": "tpu-v6e-slice"}
+
+# The flavor a queue's Spot capacity is metered under: generate_manifests.py
+# names it <generation>-spot (kueue/templates/resource_flavor_spot.yaml.tpl).
+SPOT_SUFFIX = "-spot"
 
 # Buildkite job states, by what they mean for a kube step that has not reached
 # Kueue. "waiting" (dependencies not met) and "blocked" are left out: those jobs
@@ -301,18 +303,36 @@ def queue_resource(cq: dict) -> str:
 
 
 def cq_summary(cq: dict) -> dict:
+    """A ClusterQueue's quota and usage, the reservation apart from Spot.
+
+    Spot quota is a count of chips GCE may not have, never lent or borrowed, so
+    added to nominal it would read as capacity the queue is guaranteed.
+    """
     resource = queue_resource(cq)
     nominal = borrowing = 0.0
+    spot = None
     for group in cq["spec"].get("resourceGroups", []):
         for flavor in group["flavors"]:
+            is_spot = flavor["name"].endswith(SPOT_SUFFIX)
+            if is_spot and spot is None:
+                spot = {"quota": 0.0, "used": 0.0}
             for r in flavor["resources"]:
-                if r["name"] == resource:
+                if r["name"] != resource:
+                    continue
+                if is_spot:
+                    spot["quota"] += quantity(r.get("nominalQuota"))
+                else:
                     nominal += quantity(r.get("nominalQuota"))
                     borrowing += quantity(r.get("borrowingLimit"))
     used = borrowed = 0.0
     for flavor in cq.get("status", {}).get("flavorsUsage", []):
+        is_spot = flavor["name"].endswith(SPOT_SUFFIX)
         for r in flavor["resources"]:
-            if r["name"] == resource:
+            if r["name"] != resource:
+                continue
+            if is_spot and spot is not None:
+                spot["used"] += quantity(r.get("total"))
+            elif not is_spot:
                 used += quantity(r.get("total"))
                 borrowed += quantity(r.get("borrowed"))
     preemption = cq["spec"].get("preemption") or {}
@@ -324,6 +344,8 @@ def cq_summary(cq: dict) -> dict:
         "borrowing_limit": borrowing,
         "used": used,
         "borrowed": borrowed,
+        # None for a queue with no Spot flavor.
+        "spot": spot,
         # Any: this queue takes lent quota back by evicting whoever borrowed it.
         "reclaim": preemption.get("reclaimWithinCohort", "Never"),
         **shape(cq["metadata"]["name"]),
@@ -563,7 +585,9 @@ def prom(cfg: Config, kind: str, params: dict) -> list:
         f"https://monitoring.googleapis.com/v1/projects/{cfg.project}/location/global/"
         f"prometheus/api/v1/{kind}?" + urllib.parse.urlencode(params)
     )
-    return google(url)["data"]["result"]
+    # Managed Prometheus answers a subquery over no series - the Spot queries,
+    # before any queue has a Spot flavor - with null rather than [].
+    return google(url)["data"]["result"] or []
 
 
 def prom_range(
@@ -629,7 +653,7 @@ def current(metric: str, by: str) -> str:
 
 def fetch_health(cfg: Config) -> dict:
     sel = kueue_selector(cfg)
-    duty = f"kubernetes_io:node_accelerator_duty_cycle{{{duty_selector(cfg)}}}"
+    duty = f"kubernetes_io:node_accelerator_duty_cycle{{{node_selector(cfg)}}}"
     queries = {
         # The Buildkite controller: is it polling, and are its creates landing.
         "monitor_up": ("max(buildkite_monitor_monitor_up)", ()),
@@ -653,8 +677,12 @@ def fetch_health(cfg: Config) -> dict:
             f"sum by (cluster_queue, reason) (increase(kueue_evicted_workloads_total{{{sel}}}[24h]))",
             ("cluster_queue", "reason"),
         ),
-        # Chips computing right now: one series per node, no controller to roll.
-        "busy": (f"sum by (model) (last_over_time({duty}[2m])) / 100", ("model",)),
+        # Chips computing right now, per node, for views.py to sum by node pool
+        # as it does node presence: that is what splits Spot from reserved.
+        "busy": (
+            f"sum by (cluster_name, node_name) (last_over_time({duty}[2m])) / 100",
+            ("cluster_name", "node_name"),
+        ),
         "nodes": (node_presence(cfg), ("cluster_name", "node_name")),
     }
     with concurrent.futures.ThreadPoolExecutor(len(queries)) as pool:
@@ -675,7 +703,10 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
     an hour as if it had been there all hour.
     """
     sel = kueue_selector(cfg)
-    duty = f"kubernetes_io:node_accelerator_duty_cycle{{{duty_selector(cfg)}}}"
+    duty = f"kubernetes_io:node_accelerator_duty_cycle{{{node_selector(cfg)}}}"
+    # Spot quota and usage apart from the reservation's; see cq_summary.
+    reserved = f'{sel},flavor!~".*{SPOT_SUFFIX}"'
+    spot = f'{sel},flavor=~".*{SPOT_SUFFIX}"'
     # Fifteen samples a step: enough to average a step fairly, few enough that
     # a week of hourly points answers in a couple of seconds.
     res = max(60, step // 15)
@@ -692,20 +723,29 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
             ("cluster_queue",),
         ),
         "used": (
-            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{sel}}}', per_queue)}){window}))",
+            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{reserved}}}', per_queue)}){window}))",
             ("cluster_queue", "resource"),
         ),
         # The step's largest, so a quota change mid-step shows the quota the
         # usage could reach.
         "nominal": (
-            f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{sel}}}', per_queue)}){window}))",
+            f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{reserved}}}', per_queue)}){window}))",
             ("cluster_queue", "resource"),
         ),
-        # Busy chips: TensorCore duty cycle, percent per chip, summed. Nodes that
-        # do not report it - the disagg multi-host pods' - count as idle.
+        "spot_used": (
+            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{spot}}}', per_queue)}){window}))",
+            ("cluster_queue", "resource"),
+        ),
+        "spot_quota": (
+            f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{spot}}}', per_queue)}){window}))",
+            ("cluster_queue", "resource"),
+        ),
+        # Busy chips per node: TensorCore duty cycle, percent per chip, summed,
+        # for views.py to sum by node pool. Nodes that do not report it - the
+        # disagg multi-host pods' - count as idle.
         "busy": (
-            f"sum_over_time((sum by (model) (last_over_time({duty}[2m])) / 100){window}) {share}",
-            ("model",),
+            f"sum_over_time((sum by (cluster_name, node_name) (last_over_time({duty}[2m])) / 100){window}) {share}",
+            ("cluster_name", "node_name"),
         ),
         # Each TPU node's share of each step, by name, for views.py to sum by
         # node pool: a week is a few thousand node lifetimes and a few hundred
@@ -756,16 +796,18 @@ def fetch_node_pools(cfg: Config) -> list:
                 continue
             auto = p.get("autoscaling", {})
             multi_host = bool(p.get("placementPolicy", {}).get("tpuTopology"))
+            spot = bool(p["config"].get("spot"))
             pools.append(
                 {
                     "cluster": name,
                     "name": p["name"],
                     # The Kueue queue it serves: a multi-host pool is one slice,
-                    # named <shape>-<slice>.
-                    "queue": re.sub(r"-\d+$", "", p["name"])
-                    if multi_host
+                    # named <shape>-<slice>, and a Spot pool is <shape>-spot.
+                    "queue": re.sub(r"-(\d+|spot)$", "", p["name"])
+                    if multi_host or spot
                     else p["name"],
                     "multi_host": multi_host,
+                    "spot": spot,
                     "chips_per_node": int(chips[1]),
                     "min_nodes": int(
                         auto.get("minNodeCount") or auto.get("totalMinNodeCount") or 0

@@ -65,9 +65,44 @@ locals {
                 stated_max_nodes = pool.max_nodes
                 stated_slices    = pool.slices
 
-                family = split("-", pool.machine_type)[0]
+                family   = split("-", pool.machine_type)[0]
+                capacity = "reserved"
               })
         ]]]
+      ]
+    ]) : "${pool.worker}/${pool.name}" => pool
+  }
+
+  # A Spot pool for each shape that asks for one: the same hardware, no
+  # reservation, and a ceiling of its own. Named <shape>-spot, so it cannot
+  # collide with a reserved pool, whose names end in the topology or a slice.
+  spot_tpu_node_pools = {
+    for pool in flatten([
+      for worker_name, worker in local.workers : [
+        for pool in worker.tpu_node_pools : [
+          for dims in [concat([for d in split("x", pool.topology) : parseint(d, 10)], [1, 1])] : [
+            for chips_per_vm in [parseint(trimsuffix(reverse(split("-", pool.machine_type))[0], "t"), 10)] :
+            merge(pool, {
+              shape            = "${pool.machine_type}-${pool.topology}"
+              name             = "${pool.machine_type}-${pool.topology}-spot"
+              worker           = worker_name
+              short_name       = worker.short_name
+              reservation_name = null
+              # Carried, not assumed false, so the precondition in workers.tf
+              # can refuse Spot for a multi-host shape.
+              is_multi_host    = dims[0] * dims[1] * dims[2] > chips_per_vm
+              hosts            = 1
+              min_nodes        = 0
+              max_nodes        = pool.spot.max_nodes
+              slices           = 1
+              stated_min_nodes = null
+              stated_max_nodes = pool.spot.max_nodes
+              stated_slices    = null
+              family           = split("-", pool.machine_type)[0]
+              capacity         = "spot"
+            })
+          ]
+        ] if pool.spot != null
       ]
     ]) : "${pool.worker}/${pool.name}" => pool
   }

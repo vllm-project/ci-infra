@@ -307,6 +307,21 @@ variable "tpu_dispatch_retries" {
   description = "How many times the launcher resubmits a workload whose dispatch stalled (see tpu_dispatch_retry_seconds) before leaving it to tpu_admission_max_seconds."
 }
 
+variable "tpu_spot_wait_seconds" {
+  type        = number
+  description = <<-EOT
+    How long a pod admitted onto Spot may go unscheduled before the launcher
+    resubmits its workload with Spot ruled out, once per step.
+
+    Spot quota is a count, not capacity: Kueue admits onto it whether or not
+    GCE has a Spot VM to give, and a pool that cannot scale up changes nothing
+    Kueue sees. Left alone, the workload holds the admission until
+    waitForPodsReady requeues it, and requeued with its Spot quota free it can
+    be admitted onto Spot again. The resubmission waits for the reservation,
+    as a shape without a Spot pool would.
+  EOT
+}
+
 variable "tpu_runtime_max_seconds" {
   type        = number
   description = <<-EOT
@@ -419,6 +434,21 @@ variable "worker_clusters" {
 
       slices                = optional(number)
       reclaim_within_cohort = optional(string, "Never")
+
+      # Spot capacity beside the reservation, for a single-host shape: a second
+      # node pool, <shape>-spot, in the same zone and drawing on the zone's
+      # Spot quota instead of the reservation. Kueue admits a workload onto it
+      # only once the shape's reserved quota, and what it can borrow from the
+      # cohort, is spent - overflow, not a replacement, since the reservation
+      # is paid for whether it is used or not. See "Spot overflow" in README.md.
+      spot = optional(object({
+        # The Spot pool's ceiling, which the Spot quota bounds rather than any
+        # reservation.
+        max_nodes = number
+        # Chips of the shape's ClusterQueue the Spot flavor holds; the pool's
+        # capacity if unset.
+        nominal_quota = optional(number)
+      }))
     })), [])
   }))
   description = "Worker clusters. location is a region; the cluster pins no zones, because only a TPU node cares which zone it is in and its own node pool pins it there."

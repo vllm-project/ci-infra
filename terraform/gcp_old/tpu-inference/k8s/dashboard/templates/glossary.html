@@ -10,6 +10,10 @@
         the sum of its queues'.</td></tr>
       <tr><th>Borrowing</th><td>Chips a queue uses beyond its nominal, taken from other queues' idle nominal
         in the same cohort. <i>May borrow</i> caps it.</td></tr>
+      <tr><th>Spot</th><td>Overflow for a shape with a Spot pool: Kueue admits onto it only when the
+        reservation, borrowing included, cannot take the workload. Shown apart from nominal - its
+        quota is a count of chips GCE may not have, and it is never lent or borrowed - with its own
+        nodes and busy chips. A reclaimed Spot node reruns its step.</td></tr>
       <tr><th>Idle, lendable</th><td>Nominal a queue is not using, which others may borrow.</td></tr>
       <tr><th>Reclaim</th><td>A queue that <i>evicts borrowers</i> takes lent chips back by preempting the
         workloads using them; those steps rerun. A queue that never reclaims waits for borrowers to

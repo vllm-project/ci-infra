@@ -111,7 +111,7 @@ details.steps ul { margin: 6px 0 0; padding-left: 18px; max-width: 560px; }
 details.steps li { font-size: 12px; margin: 2px 0; }
 
 /* Tiles and stats */
-.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .tile { padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; }
 .tile span { display: block; font-size: 12px; color: var(--ink-2); }
 .tile b { display: block; font-size: 26px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.25; }

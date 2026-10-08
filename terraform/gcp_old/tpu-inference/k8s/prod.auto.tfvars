@@ -115,6 +115,11 @@ tpu_admission_max_seconds = 3600
 tpu_dispatch_retry_seconds = 120
 tpu_dispatch_retries       = 2
 
+# Long enough for a TPU node to come up from zero, short of recoveryTimeout (30
+# minutes, kueue/common-config.yaml), so a replacement pod stuck on Spot is
+# moved before Kueue requeues the workload, possibly onto Spot again.
+tpu_spot_wait_seconds = 900
+
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
 # than the repository. Trailing slash required: without it the prefix would also
@@ -207,6 +212,11 @@ worker_clusters = [
         min_nodes     = 0
         max_nodes     = 72
         nominal_quota = 8
+
+        # Overflow onto Spot once the reservation and what this shape can
+        # borrow are spent. Sized as a placeholder: the project's Spot quota for
+        # tpu7x-standard-1t in us-central1-c is not confirmed yet.
+        spot = { max_nodes = 16 }
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -217,6 +227,9 @@ worker_clusters = [
         min_nodes     = 0
         max_nodes     = 18
         nominal_quota = 32
+
+        # As for 1x1x1; Spot quota for tpu7x-standard-4t not confirmed yet.
+        spot = { max_nodes = 4 }
       },
       {
         # Eight chips as one slice across two VMs, placed from the named
