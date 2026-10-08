@@ -120,10 +120,13 @@ resource "google_cloud_run_v2_service" "dashboard" {
     service_account = google_service_account.dashboard.email
 
     # One instance, so every viewer shares one cache and one refresh, and the
-    # Buildkite calls do not multiply with traffic. Zero when idle.
+    # Buildkite calls do not multiply with traffic. It stays up when idle: from
+    # zero, the first request waits for a cold start, and with a cap of one
+    # Cloud Run can turn it away with 429 "Rate exceeded" instead. The cap is
+    # two so a replacement can start while the old instance still counts.
     scaling {
-      min_instance_count = 0
-      max_instance_count = 1
+      min_instance_count = 1
+      max_instance_count = 2
     }
 
     containers {
