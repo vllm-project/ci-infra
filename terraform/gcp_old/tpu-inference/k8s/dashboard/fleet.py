@@ -32,6 +32,10 @@ BK_LIMITED = {"limited", "limiting"}
 BK_RUNNING = {"running", "canceling", "timing_out"}
 BK_ACTIVE_BUILDS = "state[]=running&state[]=scheduled&state[]=failing&state[]=canceling"
 
+# How many of a queue's pending workloads to read in Kueue's order; the page
+# shows the first few and keeps the rest behind a button.
+NEXT_UP = 50
+
 # Normal events worth showing beside the warnings.
 NOTABLE_NORMAL = ("TriggeredScaleUp", "NotTriggerScaleUp", "Preempted", "Evicted")
 
@@ -67,6 +71,9 @@ class Config:
         self.cluster_id = env("BUILDKITE_CLUSTER_ID")
         self.queue = env("BUILDKITE_QUEUE", "kube")
         self.token = os.environ.get("BUILDKITE_API_TOKEN", "")
+        self.token_secret = os.environ.get("BUILDKITE_TOKEN_SECRET", "")
+        # Cloud Run names the service in K_SERVICE; the default is for a local run.
+        self.service = os.environ.get("K_SERVICE", "tpu-ci-queue-dashboard")
         self.timing_table = env("TIMING_TABLE", "")
         self.queue_budget = int(env("QUEUE_BUDGET_SECONDS", "43200"))
         self.test_budget = int(env("TEST_BUDGET_SECONDS", "28800"))
@@ -241,7 +248,7 @@ def fetch_buildkite(cfg: Config, pipelines: Cached) -> dict:
             for b in batch
         ]
 
-    meta, priorities, job_builds, jobs = {}, {}, {}, []
+    meta, job_builds, jobs = {}, {}, []
     rule = f"queue={cfg.queue}"
     for b in builds:
         kube = [
@@ -259,8 +266,6 @@ def fetch_buildkite(cfg: Config, pipelines: Cached) -> dict:
             "message": (b.get("message") or "").split("\n", 1)[0][:120],
         }
         for j in kube:
-            priority = (j.get("priority") or {}).get("number", 0)
-            priorities[j["id"]] = priority
             job_builds[j["id"].replace("-", "")] = [pipeline, number]
             if j.get("state") in BK_WAITING | BK_LIMITED | BK_RUNNING:
                 jobs.append(
@@ -271,7 +276,6 @@ def fetch_buildkite(cfg: Config, pipelines: Cached) -> dict:
                         "label": j.get("name") or j.get("step_key") or "",
                         "url": j.get("web_url") or b["web_url"],
                         "state": j["state"],
-                        "priority": priority,
                         # A concurrency-held job has no runnable_at until it is
                         # released; scheduled_at is when it joined the line.
                         "runnable_at": parse_time(
@@ -282,7 +286,6 @@ def fetch_buildkite(cfg: Config, pipelines: Cached) -> dict:
                 )
     return {
         "meta": meta,
-        "priorities": priorities,
         "job_builds": job_builds,
         "jobs": jobs,
     }
@@ -447,14 +450,53 @@ def fetch_kueue(cfg: Config) -> dict:
         workloads.append(
             {
                 **state,
+                "name": wl["metadata"]["name"],
+                "created": parse_time(wl["metadata"]["creationTimestamp"]),
+                # The worker MultiKueue placed it on, once one admitted it.
+                "cluster": wl.get("status", {}).get("clusterName"),
                 "queue": queue,
                 "amount": workload_amount(wl, resources.get(queue, TPU)),
+                # The WorkloadPriorityClass the launcher set, and the value Kueue
+                # copied from it: what orders the queue. Buildkite's own job
+                # priority is a different scale and orders nothing here. None
+                # and 0 for a workload that names no class.
                 "priority": wl["spec"].get("priority", 0),
+                "priority_class": (wl["spec"].get("priorityClassRef") or {}).get(
+                    "name"
+                ),
                 "pipeline": labels.get("buildkite.com/pipeline", ""),
                 "number": int(labels.get("buildkite.com/build-number") or 0),
                 "job_id": labels.get("buildkite.com/job-id", ""),
             }
         )
+
+    # Kueue's order for each queue with anything pending: who it considers next,
+    # from its visibility API rather than re-derived here, so the page shows
+    # what Kueue does and not what it should do.
+    visibility = f"{cfg.gateway}/apis/visibility.kueue.x-k8s.io/v1beta2/clusterqueues"
+
+    def order(name: str) -> dict:
+        try:
+            items = google(f"{visibility}/{name}/pendingworkloads?limit={NEXT_UP}")[
+                "items"
+            ]
+        except Exception as e:  # noqa: BLE001 - shown on the page, not raised
+            return {"items": [], "error": f"{type(e).__name__}: {e}"[:200]}
+        return {
+            "items": [
+                {
+                    "workload": i["metadata"]["name"],
+                    "position": i["positionInClusterQueue"],
+                    "priority": i.get("priority", 0),
+                }
+                for i in items
+            ],
+            "error": "",
+        }
+
+    pending = sorted({w["queue"] for w in workloads if w["state"] == "pending"})
+    with concurrent.futures.ThreadPoolExecutor(max(1, len(pending))) as pool:
+        next_up = dict(zip(pending, pool.map(order, pending)))
 
     workers = []
     for m in got["mkcs"]:
@@ -496,6 +538,7 @@ def fetch_kueue(cfg: Config) -> dict:
         "checks": checks,
         "pods": pods,
         "job_builds": job_builds,
+        "next_up": next_up,
     }
 
 
@@ -629,7 +672,7 @@ def current(metric: str, by: str) -> str:
 
 def fetch_health(cfg: Config) -> dict:
     sel = kueue_selector(cfg)
-    duty = f"kubernetes_io:node_accelerator_duty_cycle{{{duty_selector(cfg)}}}"
+    busy_duty = f"kubernetes_io:node_accelerator_duty_cycle{{{node_selector(cfg)}}}"
     queries = {
         # The Buildkite controller: is it polling, and are its creates landing.
         "monitor_up": ("max(buildkite_monitor_monitor_up)", ()),
@@ -653,8 +696,12 @@ def fetch_health(cfg: Config) -> dict:
             f"sum by (cluster_queue, reason) (increase(kueue_evicted_workloads_total{{{sel}}}[24h]))",
             ("cluster_queue", "reason"),
         ),
-        # Chips computing right now: one series per node, no controller to roll.
-        "busy": (f"sum by (model) (last_over_time({duty}[2m])) / 100", ("model",)),
+        # Chips computing right now, per node, for views.py to sum by node pool
+        # as it does node presence: per queue, and per worker on the overview.
+        "busy": (
+            f"sum by (cluster_name, node_name) (last_over_time({busy_duty}[2m])) / 100",
+            ("cluster_name", "node_name"),
+        ),
         "nodes": (node_presence(cfg), ("cluster_name", "node_name")),
     }
     with concurrent.futures.ThreadPoolExecutor(len(queries)) as pool:

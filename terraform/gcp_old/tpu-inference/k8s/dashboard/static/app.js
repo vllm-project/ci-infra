@@ -1,6 +1,5 @@
-// Shared by the live and history pages: local-time labels, chart hover
-// readouts, and the history range picker. The server renders in UTC epoch
-// seconds; only the browser knows the reader's time zone.
+// Shared by the pages: local-time labels and chart hover readouts. The server
+// renders in UTC epoch seconds; only the browser knows the reader's time zone.
 
 const FORMATS = {
   time: {hour: "2-digit", minute: "2-digit"},
@@ -48,22 +47,35 @@ for (const plot of document.querySelectorAll(".plot")) {
   });
 }
 
-// History: dates are local days; the server takes epoch seconds.
-const range = document.getElementById("range");
-if (range) {
-  const day = (ts) => {
-    const d = new Date(ts * 1000);
-    return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, "0"), String(d.getDate()).padStart(2, "0")].join("-");
-  };
-  const from = range.elements.namedItem("from"), to = range.elements.namedItem("to");
-  from.value = day(Number(range.dataset.start));
-  to.value = day(Number(range.dataset.end) - 1);
-  range.addEventListener("submit", (ev) => {
-    ev.preventDefault();
-    const [fy, fm, fd] = from.value.split("-").map(Number);
-    const [ty, tm, td] = to.value.split("-").map(Number);
-    const start = new Date(fy, fm - 1, fd).getTime() / 1000;
-    const end = Math.min(new Date(ty, tm - 1, td + 1).getTime() / 1000, Date.now() / 1000);
-    if (end > start) location.search = "?start=" + Math.floor(start) + "&end=" + Math.floor(end);
+// A link into a collapsed section - a box in the overview's diagram, a source
+// mark in the top bar - opens every <details> around its target before the
+// browser scrolls there.
+function reveal(id) {
+  const target = id && document.getElementById(id);
+  for (let el = target; el; el = el.parentElement) if (el.tagName === "DETAILS") el.open = true;
+}
+document.addEventListener("click", (ev) => {
+  const a = ev.target.closest('a[href^="#"]');
+  if (a) reveal(decodeURIComponent(a.getAttribute("href").slice(1)));
+});
+reveal(decodeURIComponent(location.hash.slice(1)));
+
+// Overview: open or close every component's details at once.
+const toggle = document.getElementById("expand-all");
+if (toggle) {
+  toggle.addEventListener("click", () => {
+    const panels = [...document.querySelectorAll("details.component")];
+    const open = !panels.every((p) => p.open);
+    for (const p of panels) p.open = open;
+    toggle.textContent = open ? "Collapse all" : "Expand all";
+  });
+}
+
+// Show more: reveal the rows a table keeps back, or hide them again.
+for (const b of document.querySelectorAll(".show-more")) {
+  b.addEventListener("click", () => {
+    const rows = document.getElementById(b.dataset.target);
+    rows.hidden = !rows.hidden;
+    b.textContent = rows.hidden ? b.dataset.more : b.dataset.fewer;
   });
 }

@@ -27,6 +27,11 @@ rules:
   - apiGroups: ["kueue.x-k8s.io"]
     resources: ["clusterqueues", "cohorts", "multikueueclusters", "admissionchecks"]
     verbs: ["get", "list"]
+  # Kueue's visibility API: each queue's pending workloads in the order Kueue
+  # will consider them.
+  - apiGroups: ["visibility.kueue.x-k8s.io"]
+    resources: ["clusterqueues/pendingworkloads"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

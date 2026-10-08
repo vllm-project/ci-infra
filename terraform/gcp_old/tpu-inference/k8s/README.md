@@ -423,7 +423,17 @@ kube fleet, where every step is on the one `kube` queue until the launcher picks
 a Kueue queue for it, and where a step shows as running from the moment its
 agent pod starts.
 
-**Live** (`/`), refreshed every minute:
+**Overview** (`/`), from the same snapshot as Live: a diagram of the
+path a step takes - Buildkite, the manager's agent pods, Kueue and MultiKueue,
+then one box per worker with its node pools - with how many steps are at each
+stage now. Dots move along a path while steps are past it. Each box's mark is
+the worst of the Health checks that belong to it, and clicking it opens that
+component's details below the diagram. The glossary and what each data
+source reads, and what to check when one fails, live here. Only what the
+dashboard reads live is drawn, so it cannot go stale the way a diagram in a
+doc does.
+
+**Live** (`/live`), refreshed every minute:
 
 - **Health** - one check per stage from Buildkite to a TPU pod: the Buildkite
   controller polling and creating, Kueue up on every cluster, workers
@@ -440,16 +450,19 @@ agent pod starts.
 - **Quota now** - per cohort, chips in use against nominal, free, pending and
   busy; per queue, its nominal, usage, what it borrows or leaves idle, and
   whether it evicts borrowers.
-- **Per queue** - workloads admitted and pending, the builds they belong to,
-  Kueue's reason for anything pending. Only the head of a BestEffortFIFO queue
-  carries a reason; the rest are counted as queued behind it.
+- **Per queue** - what is running, by build, with the chips it holds; the
+  first five pending in the order Kueue will consider them, the rest a click away, with their priority
+  class, from Kueue's visibility API - the check that priority orders the
+  queue - and the rest counted by build; then Kueue's reason for anything
+  pending. Only the head of a BestEffortFIFO queue carries a reason; the rest
+  are counted as queued behind it.
 - **Cluster problems** - events from every cluster's `buildkite` namespace
   that are the fleet's fault (failed creates, failed scale-ups, mount
   failures, evictions, OOM kills), repeats grouped. Routine warnings - Kueue's
   backlog, scheduling while a pool scales, agent teardown, test failures - are
   collapsed beneath.
 
-**History** (`/history`), for a preset or any range of dates up to 90 days:
+**History** (`/history`), for the last 6 hours, 24 hours, 7 days or 30 days (`/api/history` also takes `?start=&end=` in epoch seconds, up to 90 days):
 chips admitted against chips busy (TensorCore duty) per cohort, outcomes per
 queue and per pipeline from `kube_workload_timing` split into test and
 infrastructure failures, wait, startup and run percentiles, and per-queue usage
