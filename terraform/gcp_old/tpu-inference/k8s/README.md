@@ -500,6 +500,15 @@ held are worked out a day at a time and shown as the mean, median and worst day;
 kube's days are the 24-hour stretches back from the window's end, so its median
 and worst need the 7- or 30-day window.
 
+**Jobs** (`/jobs`, last 24 hours by default) is the per-queue job list Buildkite
+had for each bare-metal queue and cannot give now that every kube step runs on
+its one `kube` queue: what is in flight on each Kueue queue, from the live
+snapshot, then every workload that ended in the range from
+`kube_workload_timing` (`fleet.fetch_jobs`), newest first, with its outcome,
+exit code, wait, startup and run. Filters for queue, outcome and branch and a
+search over step, build and branch sit above it, and a line under them sums up
+what they leave. Each queue card on Live and History links to its queue's jobs.
+
 Every page's terms have a tooltip, drawn from the same table as the glossary.
 
 It reads every cluster through Connect Gateway as `tpu-ci-dashboard@`: the

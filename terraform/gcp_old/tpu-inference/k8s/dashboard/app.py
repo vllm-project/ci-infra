@@ -273,7 +273,12 @@ def parse_span(params: dict, now: float) -> dict:
 
 
 def serve(
-    live: Live, history: History, bare: Windowed, waits: Windowed, port: int
+    live: Live,
+    history: History,
+    bare: Windowed,
+    waits: Windowed,
+    jobs: Windowed,
+    port: int,
 ) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - the stdlib's name
@@ -299,6 +304,21 @@ def serve(
                     minutes,
                     {**sources, "bare": status, "waits": minutes_status},
                     span["preset"],
+                )
+                return self.reply(200, "text/html; charset=utf-8", page.encode())
+            if url.path == "/jobs":
+                if "preset" not in params and "start" not in params:
+                    params = {**params, "preset": ["24h"]}
+                span = parse_span(params, time.time())
+                rows, status = jobs.get(span)
+                snap = live.snapshot()
+                page = views.render_job_history(
+                    rows,
+                    snap,
+                    {**snap["sources"], "jobs": status},
+                    span,
+                    params,
+                    live.cfg.org,
                 )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
             if url.path == "/live":
@@ -362,7 +382,8 @@ def main() -> None:
         live,
         History(cfg, live),
         Windowed(cfg, "BigQuery", fleet.fetch_bare, []),
-        Windowed(cfg, "Kueue by the minute", fleet.fetch_waits, {}),
+        Windowed(cfg, "Metrics", fleet.fetch_waits, {}),
+        Windowed(cfg, "BigQuery", fleet.fetch_jobs, []),
         args.port,
     )
 

@@ -433,3 +433,29 @@ th.n .term:hover .tip, th.n .term:focus .tip { left: auto; right: 0; }
 .table-wrap:has(.term:hover), .table-wrap:has(.term:focus) { overflow: visible; }
 .shapes-head { margin: 22px 0 4px; font-size: 15px; }
 .shape-row { margin-top: 6px; }
+
+/* Jobs: filters in rows above the table, one state label a row. */
+.filters { display: grid; gap: 10px; }
+.filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.filter-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.04em; min-width: 64px; }
+.segmented.wrap { flex-wrap: wrap; }
+.seg-btn small { color: var(--muted); font-size: 11px; margin-left: 3px; }
+.search { display: flex; gap: 6px; margin-left: auto; }
+.search input { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.8); min-width: 220px; }
+.card-head span.more a { color: inherit; }
+.state { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+  background: var(--line-2); color: var(--ink-2); }
+.state::before { margin-right: 4px; }
+.state.passed { background: var(--good-bg); color: #1d6b31; } .state.passed::before { content: "✓"; }
+.state.failed { background: var(--critical-bg); color: #b3261e; } .state.failed::before { content: "✕"; }
+.state.error { background: var(--warning-bg); color: #8a4b00; } .state.error::before { content: "!"; }
+.state.live { background: rgba(0, 122, 255, 0.1); color: #0058b8; } .state.live::before { content: "●"; }
+.jobs-table td { vertical-align: middle; }
+/* Scroll sideways on a phone rather than wrap a step name down the row. */
+table.jobs-table { min-width: 860px; }
+table.jobs-table.ended { min-width: 1080px; }
+.filters .seg-btn { white-space: nowrap; }
+h3.jobs-ended { margin-top: 22px; }
+h3.jobs-ended:first-child { margin-top: 0; }

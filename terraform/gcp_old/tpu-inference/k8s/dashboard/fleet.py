@@ -896,6 +896,28 @@ def fetch_waits(cfg: Config, start: int, end: int) -> dict:
         return {"step": step, **{k: f.result() for k, f in futures.items()}}
 
 
+def fetch_jobs(cfg: Config, start: int, end: int) -> list[dict]:
+    """Every kube workload that ended in [start, end), newest first, from the
+    launcher's timing table: the per-queue job history Buildkite cannot show,
+    since every kube step runs on its one kube queue. A row is written when the
+    workload ends, so what is still in flight comes from the live snapshot."""
+    if not cfg.timing_table:
+        return []
+    ended = "COALESCE(ended_at, finished_at)"
+    sql = f"""
+SELECT queue, chips, pipeline, build_number, job_id, label, branch, outcome,
+  exit_code, requeues, redispatches,
+  UNIX_SECONDS(submitted_at) AS submitted, UNIX_SECONDS(quota_reserved_at) AS reserved,
+  UNIX_SECONDS(admitted_at) AS admitted, UNIX_SECONDS(first_pod_started_at) AS started,
+  UNIX_SECONDS(finished_at) AS finished, UNIX_SECONDS({ended}) AS ended
+FROM `{cfg.timing_table}`
+WHERE {ended} >= TIMESTAMP_SECONDS({start}) AND {ended} < TIMESTAMP_SECONDS({end})
+  AND created_at >= TIMESTAMP_SECONDS({start - 2 * 86400})
+ORDER BY ended DESC
+LIMIT 20000"""
+    return bigquery(cfg, sql)
+
+
 def fetch_bare(cfg: Config, start: int, end: int) -> list[dict]:
     """What the bare-metal TPU queues ran in [start, end), from the step log
     table beside the kube timing table: how much of the work kube has not taken
