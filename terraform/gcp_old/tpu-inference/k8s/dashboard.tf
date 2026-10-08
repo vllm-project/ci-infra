@@ -76,6 +76,16 @@ resource "google_bigquery_table_iam_member" "dashboard_timing" {
   member     = google_service_account.dashboard.member
 }
 
+# Buildkite's step log, for the jobs bare metal still runs while the migration
+# finishes (Compare).
+resource "google_bigquery_table_iam_member" "dashboard_step_log" {
+  project    = var.project_id
+  dataset_id = "ci_efficiency_metrics"
+  table_id   = "step_execution_logs"
+  role       = "roles/bigquery.dataViewer"
+  member     = google_service_account.dashboard.member
+}
+
 resource "google_project_iam_member" "dashboard_bigquery_jobs" {
   project = var.project_id
   role    = "roles/bigquery.jobUser"
@@ -205,6 +215,7 @@ resource "google_cloud_run_v2_service" "dashboard" {
   depends_on = [
     google_secret_manager_secret_iam_member.dashboard_buildkite_token,
     google_bigquery_table_iam_member.dashboard_timing,
+    google_bigquery_table_iam_member.dashboard_step_log,
   ]
 }
 
