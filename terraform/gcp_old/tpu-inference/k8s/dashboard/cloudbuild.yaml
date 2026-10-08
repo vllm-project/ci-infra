@@ -5,12 +5,12 @@
 #   gcloud builds submit --project cloud-ullm-inference-ci-cd --region us-central1 \
 #     --config cloudbuild.yaml \
 #     --gcs-source-staging-dir gs://cloud-ullm-inference-ci-cd-tf-state/cloudbuild-source \
-#     --substitutions _REVISION=7 .
+#     --substitutions _REVISION=8 .
 #
 # The staging directory has to be named: the default is a multi-region `us`
 # bucket, which constraints/gcp.resourceLocations refuses in this org.
 substitutions:
-  _REVISION: "7"
+  _REVISION: "8"
   _IMAGE: us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/queue-dashboard
 
 steps:
