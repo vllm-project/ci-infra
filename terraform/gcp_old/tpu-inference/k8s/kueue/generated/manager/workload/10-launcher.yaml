@@ -110,8 +110,8 @@ data:
         queue: cpu
         chips: 0
         hosts: 1
-        cpu_cores: '6'
-        cpu_memory: 16Gi
+        cpu_cores: '4'
+        cpu_memory: 8Gi
         cpu_disk: 20Gi
         max_runtime_seconds: 28800
       ct6e-standard-1t-1x1:
