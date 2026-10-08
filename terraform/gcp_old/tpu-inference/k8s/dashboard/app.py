@@ -249,6 +249,9 @@ def serve(live: Live, history: History, port: int) -> None:
             if url.path in ("/", "/overview"):
                 page = views.render_overview(live.snapshot())
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
+            if url.path == "/baseline":
+                page = views.render_baseline()
+                return self.reply(200, "text/html; charset=utf-8", page.encode())
             if url.path == "/live":
                 page = views.render_live(live.snapshot())
                 return self.reply(200, "text/html; charset=utf-8", page.encode())

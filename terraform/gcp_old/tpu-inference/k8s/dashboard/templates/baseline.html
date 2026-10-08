@@ -1,0 +1,36 @@
+<!doctype html>
+<!--
+  The baseline page: the bare-metal fleet before the migration, from a static
+  file built out of the pre-migration snapshot (baseline/build_baseline.py).
+  views.py fills the placeholders - a dollar sign and a name - with
+  string.Template, so a literal dollar sign here must be doubled.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TPU CI kube · Baseline</title>
+<link rel="stylesheet" href="static/style.css?v=$assets">
+</head>
+<body>
+<header class="topbar">
+  <div class="inner">
+    <h1>TPU CI kube</h1>
+    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab" href="history">History</a><a class="tab active" href="baseline">Baseline</a></nav>
+    <span class="when">$window · bare metal, before the migration</span>
+  </div>
+</header>
+<main>
+<p class="intro">How busy the bare-metal TPU fleet was in the $days days before the migration: chips held by
+running Buildkite jobs against the chips the fleet's agents had. Built once from the snapshot taken on
+$taken, not read live - the fleet it describes is being torn down. Compare with the kube fleet on
+<a href="history?preset=30d">History</a>.</p>
+$generations
+<div class="section-label">Queues</div>
+<div class="card">$queues</div>
+<div class="section-label">Data</div>
+<div class="card">$data</div>
+</main>
+<script src="static/app.js?v=$assets"></script>
+</body>
+</html>

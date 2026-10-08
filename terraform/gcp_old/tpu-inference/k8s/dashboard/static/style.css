@@ -361,3 +361,4 @@ button:hover { background: rgba(255, 255, 255, 0.95); }
 .diagram .track { fill: rgba(120, 120, 128, 0.16); }
 .bar .seg.idle { opacity: 0.8; }
 .jobs-running { margin-top: 22px; }
+.data-links { margin: 0; padding-left: 18px; display: grid; gap: 6px; }

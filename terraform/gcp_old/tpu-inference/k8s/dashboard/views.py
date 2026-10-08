@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import html
+import json
 import re
 import statistics
 import string
@@ -29,6 +30,10 @@ TEMPLATES = Path(__file__).parent / "templates"
 LIVE_PAGE = string.Template((TEMPLATES / "live.html").read_text())
 HISTORY_PAGE = string.Template((TEMPLATES / "history.html").read_text())
 OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
+BASELINE_PAGE = string.Template((TEMPLATES / "baseline.html").read_text())
+# The bare-metal fleet before the migration, built once from the snapshot by
+# baseline/build_baseline.py; static, since that fleet is being torn down.
+BASELINE_FILE = Path(__file__).parent / "baseline" / "premigration-2026-09.json"
 GLOSSARY = (TEMPLATES / "glossary.html").read_text()
 # In the stylesheet and script URLs, so a browser holding the last version
 # for its five minutes fetches the new one as soon as the page changes.
@@ -2002,6 +2007,88 @@ def render_overview(snap: dict) -> str:
             snap["sources"],
             {**links, "cluster:manager": manager_links},
         ),
+    )
+
+
+# --------------------------------------------------------------------------
+# Baseline
+
+
+def gcs_link(path: str, label: str, root: str) -> str:
+    """A link to part of the snapshot's copy in Cloud Storage."""
+    bucket_path = root.removeprefix("gs://").rstrip("/") + ("/" + path if path else "")
+    kind = "browser/_details" if "." in path.rsplit("/", 1)[-1] else "browser"
+    url = f"https://console.cloud.google.com/storage/{kind}/{bucket_path}"
+    return f'<a href="{E(url)}" target="_blank" rel="noopener">{E(label)} ↗</a>'
+
+
+def render_baseline() -> str:
+    data = json.loads(BASELINE_FILE.read_text())
+    start, step = data["start"], data["step"]
+    n = len(data["generations"][0]["held"])
+    ticks = [start + i * step for i in range(n)]
+    every = max(1, n // 24)
+    # Hour of day on one reference day in Pacific time, for the daily profile.
+    day0 = start - (start - 7 * 3600) % 86400 + 86400
+    hour_ticks = [day0 + h * 3600 for h in range(24)]
+
+    cards = []
+    for g in data["generations"]:
+        cap = g["capacity"]
+        share = g["mean_held"] / cap if cap else None
+        cards.append(f"""<div class="card">
+  <div class="card-head"><h2>{E(g["name"])} chips</h2><span class="sub">bare metal, {num(cap)} chips across the queues' agents</span></div>
+  <div class="tiles">
+    <div class="tile"><span>Held by jobs, average</span><b>{pct(share)}</b><small>{num(g["mean_held"])} of {num(cap)} chips</small></div>
+    <div class="tile"><span>Busiest hour</span><b>{num(g["peak_held"])}</b><small>chips held at once</small></div>
+    <div class="tile"><span>Hours near full</span><b>{num(g["hours_over_80"])}</b><small>at 80% or more; {num(g["hours_under_20"])} at 20% or less, of {num(n)}</small></div>
+    <div class="tile"><span>Jobs</span><b>{num(g["jobs"])}</b><small>{num(g["chip_hours"])} chip-hours</small></div>
+  </div>
+  <div class="charts">
+  {line_chart("Chips held by running jobs, hourly", ticks, [("used", "held", g["held"])], ref=("capacity", [cap] * n), fmt="day", width=520, height=200)}
+  {line_chart("By hour of day (PT), averaged", hour_ticks, [("used", "held", g["by_hour_pt"])], ref=("capacity", [cap] * 24), fmt="time", width=520, height=200)}
+  </div>
+  {values_table(ticks, [("Held", g["held"]), ("Capacity", [cap] * n)], every, "Values")}
+</div>""")
+
+    rows = "".join(
+        f"""<tr><td class="nowrap"><code>{E(q["queue"])}</code></td>
+<td class="n">{num(q["agents"])} <span class="muted">({num(q["agents_active"])} active a day)</span></td>
+<td class="n">{num(q["chips_per_job"])}</td><td class="n">{num(q["capacity"])}</td>
+<td class="n">{num(q["jobs"])}</td><td class="n">{num(q["chip_hours"])}</td><td class="n"><b>{pct(q["busy_share"])}</b></td>
+<td class="n nowrap">{ago((q["wait_p50"] or 0) * 60)} / {ago((q["wait_p90"] or 0) * 60)}</td>
+<td>{E(", ".join(f"{k} {num(v)}" for k, v in q["by_kind"].items()))}</td></tr>"""
+        for q in data["queues"]
+    )
+    queues = f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Queue</th><th class="n">Agents</th>
+<th class="n">Chips a job</th><th class="n">Capacity, chips</th><th class="n">Jobs</th><th class="n">Chip-hours</th>
+<th class="n">Busy</th><th class="n">Wait p50 / p90</th><th>Chip-hours by build kind</th></tr></thead><tbody>{rows}</tbody></table></div>
+<p class="muted note">Capacity is the queue's agents at the snapshot times the chips a job holds, which Buildkite's
+queue names count in TensorCores (two a chip). Busy is chip-hours over capacity for the window; a queue whose
+agents came and went reads lower than its active agents did, and an hour can hold more than the snapshot's agents
+had. Wait is runnable to started.</p>"""
+
+    root = data["snapshot"]["gcs"]
+    data_html = f"""<ul class="data-links">
+  <li>{gcs_link("", "The whole snapshot", root)} - and its {gcs_link("MANIFEST.md", "manifest", root)}</li>
+  <li>{gcs_link("baseline", "Per-queue and per-lane tables", root)}, from the same dumps over 30 days - six of which
+    the dumps do not cover, so their busy shares read about a fifth low</li>
+  <li>{gcs_link("buildkite/org=vllm", "Buildkite build dumps", root)}: every job's queue, agent and times, the source of
+    every number here</li>
+  <li>{gcs_link("buildkite/agents_all_2026-09-29T2115Z.json", "Agents at the snapshot", root)}, for capacity</li>
+  <li>{gcs_link("gcp/monitoring/tpu_duty_cycle", "TensorCore duty cycle, per minute", root)} - not on this page: its
+    series name TPU hosts, which the snapshot does not tie to CI agents</li>
+</ul>
+<p class="muted note">Rebuild with <code>dashboard/baseline/build_baseline.py &lt;snapshot dir&gt;</code>.</p>"""
+
+    return BASELINE_PAGE.substitute(
+        assets=ASSETS,
+        window=E(data["window"]),
+        days=num((data["end"] - data["start"]) / 86400),
+        taken=E(data["snapshot"]["taken"]),
+        generations="".join(cards),
+        queues=queues,
+        data=data_html,
     )
 
 
