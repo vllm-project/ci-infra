@@ -14,7 +14,7 @@ def nice_max(value: float) -> float:
     """A top for the y-axis whose half is also a round number."""
     value = max(value, 1)
     scale = 10 ** math.floor(math.log10(value))
-    for m in (1, 2, 4, 5, 6, 8, 10):
+    for m in (1, 1.2, 1.4, 1.6, 2, 4, 5, 6, 8, 10):
         if value <= m * scale:
             return m * scale
     return 10 * scale
@@ -207,10 +207,11 @@ def stacked_chart(
     fmt: str = "time",
     width: int = 640,
     height: int = 200,
+    classes: list[str] | None = None,
 ) -> str:
     """series is (name, values), stacked bottom to top in order and colored by
     categorical slot (s1, s2, ...), so a band keeps its color whatever the
-    others do. Straight segments, not smoothed: two smoothed edges of one band
+    others do; classes, when given, names each band's slot instead. Straight segments, not smoothed: two smoothed edges of one band
     can cross between points. ref is (name, values), drawn stepped over the
     stack - the quota the bands share."""
     left, right, top, bottom = 40, 64, 12, 24
@@ -228,6 +229,7 @@ def stacked_chart(
     # A caller showing two stacks side by side passes one ymax for both.
     ymax = nice_max(max(peak, ymax or 0))
     n = max(1, n_points - 1)
+    slots = classes or [f"s{k + 1}" for k in range(len(series))]
 
     def x(i: float) -> float:
         return left + plot_w * i / n
@@ -258,7 +260,7 @@ def stacked_chart(
         down = " ".join(
             f"{x(i):.1f},{y(v):.1f}" for i, v in reversed(list(enumerate(low)))
         )
-        parts.append(f'<polygon class="band s{k + 1}" points="{up} {down}"/>')
+        parts.append(f'<polygon class="band {slots[k]}" points="{up} {down}"/>')
     if ref:
         for run in segments(ref[1], x, y):
             d = f"M{run[0][0]:.1f},{run[0][1]:.1f}" + "".join(
@@ -271,7 +273,7 @@ def stacked_chart(
         )
 
     readout = [
-        {"cls": f"s{k + 1}", "name": name, "values": vs}
+        {"cls": slots[k], "name": name, "values": vs}
         for k, (name, vs) in enumerate(series)
     ][::-1]
     readout.append(
@@ -280,7 +282,7 @@ def stacked_chart(
     if ref:
         readout.append({"cls": "ref", "name": ref[0], "values": ref[1]})
     legend = "".join(
-        f'<span class="key"><i class="k s{k + 1}"></i>{E(name)}</span>'
+        f'<span class="key"><i class="k {slots[k]}"></i>{E(name)}</span>'
         for k, (name, _) in enumerate(series)
     ) + (f'<span class="key"><i class="k ref"></i>{E(ref[0])}</span>' if ref else "")
     data = json.dumps({"ticks": ticks, "series": readout})
@@ -292,3 +294,32 @@ def stacked_chart(
         f'{"".join(parts)}<line class="crosshair" x1="0" x2="0" y1="{top}" y2="{top + plot_h}"/>'
         '</svg><div class="tip" hidden></div></div></figure>'
     )
+
+
+def share_bars(
+    rows: list[tuple[str, list[float]]], parts: list[tuple[str, str]]
+) -> str:
+    """One bar per row, its segments the shares of a whole in order: parts is
+    (name, slot class) for each segment, rows is (label, shares). The shares
+    are written out beside each bar, so no reading depends on telling the
+    colors apart."""
+    out = []
+    for label, shares in rows:
+        segs = "".join(
+            f'<i class="seg {cls}" style="width:{100 * v:.2f}%" title="{E(name)}: {100 * v:.1f}%"></i>'
+            for (name, cls), v in zip(parts, shares)
+            if v > 0
+        )
+        vals = " · ".join(
+            f"<b>{100 * v:.{1 if 0 < v < 0.1 else 0}f}%</b> {E(name)}"
+            for (name, _), v in zip(parts, shares)
+        )
+        out.append(
+            f'<div class="share-row"><span class="who">{E(label)}</span>'
+            f'<div class="share-bar">{segs}</div><span class="vals">{vals}</span></div>'
+        )
+    legend = "".join(
+        f'<span class="key"><i class="k {cls}"></i>{E(name)}</span>'
+        for name, cls in parts
+    )
+    return f'<div class="share-bars"><div class="legend">{legend}</div>{"".join(out)}</div>'

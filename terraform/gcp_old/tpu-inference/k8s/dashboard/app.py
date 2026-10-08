@@ -215,16 +215,19 @@ class History:
         return view, sources
 
 
-class Bare:
-    """What the bare-metal queues still run, by range, cached like History: the
-    Compare page's measure of how much work kube has not taken yet."""
+class Windowed:
+    """One upstream read over a window, cached by window like History: the
+    bare-metal step log, and Kueue's queues minute by minute, for Compare."""
 
-    def __init__(self, cfg: fleet.Config) -> None:
+    def __init__(self, cfg: fleet.Config, name: str, fetch, empty) -> None:
         self.cfg = cfg
+        self.name = name
+        self.fetch = fetch
+        self.empty = empty
         self._lock = threading.Lock()
-        self._cache: dict[tuple, tuple[list, str, float]] = {}
+        self._cache: dict[tuple, tuple] = {}
 
-    def get(self, span: dict) -> tuple[list, dict]:
+    def get(self, span: dict) -> tuple:
         key = (span["start"], span["end"])
         with self._lock:
             hit = self._cache.get(key)
@@ -232,18 +235,18 @@ class Bare:
             # a missing grant say, is usually fixed by hand while someone looks.
             fresh = self.cfg.cache_seconds * (1 if hit and hit[1] else 10)
             if hit and time.time() - hit[2] < fresh:
-                return hit[0], {"name": "BigQuery", "at": hit[2], "error": hit[1]}
+                return hit[0], {"name": self.name, "at": hit[2], "error": hit[1]}
         try:
-            rows, error = fleet.fetch_bare(self.cfg, span["start"], span["end"]), ""
+            data, error = self.fetch(self.cfg, span["start"], span["end"]), ""
         except Exception as e:  # noqa: BLE001 - shown on the page, not raised
-            rows, error = [], f"{type(e).__name__}: {e}"[:300]
-            print("Bare-metal step query failed:", file=sys.stderr)
+            data, error = self.empty, f"{type(e).__name__}: {e}"[:300]
+            print(f"{self.name} fetch failed:", file=sys.stderr)
             traceback.print_exception(type(e), e, e.__traceback__)
         with self._lock:
             if len(self._cache) > 16:
                 self._cache.clear()
-            self._cache[key] = (rows, error, time.time())
-        return rows, {"name": "BigQuery", "at": time.time(), "error": error}
+            self._cache[key] = (data, error, time.time())
+        return data, {"name": self.name, "at": time.time(), "error": error}
 
 
 def parse_span(params: dict, now: float) -> dict:
@@ -269,7 +272,9 @@ def parse_span(params: dict, now: float) -> dict:
     }
 
 
-def serve(live: Live, history: History, bare: Bare, port: int) -> None:
+def serve(
+    live: Live, history: History, bare: Windowed, waits: Windowed, port: int
+) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - the stdlib's name
             url = urllib.parse.urlparse(self.path)
@@ -287,8 +292,13 @@ def serve(live: Live, history: History, bare: Bare, port: int) -> None:
                 span = parse_span(params, time.time())
                 view, sources = history.get(span)
                 rows, status = bare.get(span)
+                minutes, minutes_status = waits.get(span)
                 page = views.render_compare(
-                    view, rows, {**sources, "bare": status}, span["preset"]
+                    view,
+                    rows,
+                    minutes,
+                    {**sources, "bare": status, "waits": minutes_status},
+                    span["preset"],
                 )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
             if url.path == "/live":
@@ -348,7 +358,13 @@ def main() -> None:
     fleet.LOCAL = args.local
     cfg = fleet.Config()
     live = Live(cfg)
-    serve(live, History(cfg, live), Bare(cfg), args.port)
+    serve(
+        live,
+        History(cfg, live),
+        Windowed(cfg, "BigQuery", fleet.fetch_bare, []),
+        Windowed(cfg, "Kueue by the minute", fleet.fetch_waits, {}),
+        args.port,
+    )
 
 
 if __name__ == "__main__":

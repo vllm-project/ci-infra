@@ -872,6 +872,30 @@ BARE_QUEUES = {
 }
 
 
+def fetch_waits(cfg: Config, start: int, end: int) -> dict:
+    """Per queue over [start, end), a point a minute where Prometheus allows:
+    pending workloads, admitted TPU chips and nominal TPU quota, for Compare's
+    idle-while-jobs-waited. Not History's steps: an hour full and queueing in
+    its first half and idle in its second would average to idle chips beside
+    waiting jobs."""
+    sel = kueue_selector(cfg)
+    tpu = f'{sel},resource="{TPU}"'
+    per_queue = "cluster_queue, flavor, resource"
+    # Prometheus answers at most 11,000 points a series.
+    step = max(60, -(-(end - start) // 11000 // 60) * 60)
+    queries = {
+        "pending": f"sum by (cluster_queue) ({current(f'kueue_pending_workloads{{{sel}}}', 'cluster_queue, status')})",
+        "used": f"sum by (cluster_queue) ({current(f'kueue_cluster_queue_resource_usage{{{tpu}}}', per_queue)})",
+        "nominal": f"sum by (cluster_queue) ({current(f'kueue_cluster_queue_nominal_quota{{{tpu}}}', per_queue)})",
+    }
+    with concurrent.futures.ThreadPoolExecutor(len(queries)) as pool:
+        futures = {
+            k: pool.submit(prom_range, cfg, q, ("cluster_queue",), start, end, step)
+            for k, q in queries.items()
+        }
+        return {"step": step, **{k: f.result() for k, f in futures.items()}}
+
+
 def fetch_bare(cfg: Config, start: int, end: int) -> list[dict]:
     """What the bare-metal TPU queues ran in [start, end), from the step log
     table beside the kube timing table: how much of the work kube has not taken

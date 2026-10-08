@@ -485,8 +485,20 @@ utilization, chips, work a day and kube's share of the work - what the
 bare-metal queues still run, from `step_execution_logs` - and per shape, steps
 a day and waits on both sides. The bare-metal side is static:
 `dashboard/baseline/build_baseline.py` builds `premigration-2026-09.json` from
-the pre-migration snapshot (2026-09-05 to 09-29). When bare metal's share
+the pre-migration snapshot (2026-09-05 to 09-28). When bare metal's share
 reaches zero the comparison is like for like with no change to the page.
+
+Its headline is *idle while jobs waited*: minute by minute, the idle chips that
+whole waiting jobs would have fit in, smallest first. On bare metal a job ran
+only on its own shape's VMs, so one shape idled while another queued; the
+baseline builder works it out from Buildkite's per-minute counts of connected
+and busy agents and of jobs ready with no agent. On kube it comes from Kueue's
+admitted, nominal and pending series, read a minute apart rather than at
+History's step (`fleet.fetch_waits`), since an hour that queued in its first half
+and idled in its second would otherwise count as both at once. This and chips
+held are worked out a day at a time and shown as the mean, median and worst day;
+kube's days are the 24-hour stretches back from the window's end, so its median
+and worst need the 7- or 30-day window.
 
 Every page's terms have a tooltip, drawn from the same table as the glossary.
 
