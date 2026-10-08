@@ -116,9 +116,18 @@ a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
 .state-chip b { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
 .state-chip small { font-size: 12px; color: var(--ink-2); }
 .state-chip.zero b { color: var(--muted); font-weight: 500; }
-details.steps { margin: 0; } details.steps summary { font-size: 13px; color: var(--ink); }
-details.steps ul { margin: 6px 0 0; padding-left: 18px; max-width: 560px; }
-details.steps li { font-size: 12px; margin: 2px 0; }
+.steps-toggle, .steps-toggle:hover { font: inherit; font-size: 13px; color: var(--ink); background: none;
+  border: 0; border-radius: 0; padding: 0; box-shadow: none; cursor: pointer; }
+.steps-toggle::before { content: "\25B6"; display: inline-block; margin-right: 6px; font-size: 9px;
+  color: var(--ink-2); vertical-align: 1px; }
+.steps-toggle[aria-expanded="true"]::before { content: "\25BC"; }
+tr:has(+ tr.steps-row:not([hidden])) > td { border-bottom-color: transparent; }
+tbody tr.steps-row:hover { background: none; }
+/* contain: the list takes the row's width and never asks for more. */
+.steps-list { contain: inline-size; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 3px 24px; margin: 0 0 4px; padding: 8px 12px; list-style: none; border-radius: 10px;
+  background: var(--line-2); }
+.steps-list li { font-size: 12px; overflow-wrap: anywhere; }
 
 /* Tiles and stats */
 .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
