@@ -362,3 +362,22 @@ button:hover { background: rgba(255, 255, 255, 0.95); }
 .bar .seg.idle { opacity: 0.8; }
 .jobs-running { margin-top: 22px; }
 .data-links { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+
+/* Stacked bands, one per topology: the reference palette's first four
+   categorical slots, which validate as adjacent pairs. Aqua and yellow sit
+   under 3:1 on white, so each stack has a legend and a values table. A 2px
+   gap in the surface color keeps neighboring bands apart. */
+:root { --cat-1: #2a78d6; --cat-2: #eb6834; --cat-3: #1baf7a; --cat-4: #eda100; }
+.band { stroke: #fff; stroke-width: 1; stroke-linejoin: round; }
+.band.s1 { fill: var(--cat-1); } .band.s2 { fill: var(--cat-2); }
+.band.s3 { fill: var(--cat-3); } .band.s4 { fill: var(--cat-4); }
+i.k.s1, i.k.s2, i.k.s3, i.k.s4 { height: 10px; width: 10px; border-radius: 3px; }
+i.k.s1 { background: var(--cat-1); } i.k.s2 { background: var(--cat-2); }
+i.k.s3 { background: var(--cat-3); } i.k.s4 { background: var(--cat-4); }
+
+/* Compare */
+.compare-tile b { font-size: 24px; }
+.compare-tile b .before { display: inline; font-size: inherit; color: var(--muted); font-weight: 500; }
+.compare-note { align-self: center; font-size: 14px; max-width: 460px; }
+th.group { text-align: center; border-bottom: 1px solid var(--line); }
+.range > .muted { font-size: 13px; }

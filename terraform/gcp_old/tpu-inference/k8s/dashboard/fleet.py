@@ -846,6 +846,57 @@ def bigquery(cfg: Config, sql: str) -> list[dict]:
     ]
 
 
+# The bare-metal TPU queues and the chips a job on each holds: Buildkite queue
+# names count TensorCores, two a chip.
+BARE_QUEUES = {
+    "tpu_v7x_2_queue": 1,
+    "tpu_v7x_8_queue": 4,
+    "tpu_v7x_16_queue": 8,
+    "tpu_v7x_32_queue": 16,
+    "tpu_v6e_queue": 1,
+    "tpu_v6e_8_queue": 8,
+}
+
+
+def fetch_bare(cfg: Config, start: int, end: int) -> list[dict]:
+    """What the bare-metal TPU queues ran in [start, end), from the step log
+    table beside the kube timing table: how much of the work kube has not taken
+    yet. The table records a step's queue from 2026-10-01."""
+    if not cfg.timing_table:
+        return []
+    table = cfg.timing_table.rsplit(".", 1)[0] + ".step_execution_logs"
+    queues = ", ".join(f"'{q}'" for q in BARE_QUEUES)
+    chips = (
+        "CASE queue "
+        + " ".join(f"WHEN '{q}' THEN {c}" for q, c in BARE_QUEUES.items())
+        + " END"
+    )
+    lo, hi = f"TIMESTAMP_SECONDS({start})", f"TIMESTAMP_SECONDS({end})"
+
+    def quantile(q: int) -> str:
+        return (
+            "APPROX_QUANTILES(TIMESTAMP_DIFF(started_at, runnable_at, SECOND), 100 IGNORE NULLS)"
+            f"[SAFE_OFFSET({q})]"
+        )
+
+    # One row per job: the table can hold a step more than once.
+    sql = f"""
+WITH jobs AS (
+  SELECT job_id, ANY_VALUE(queue) AS queue, MIN(runnable_at) AS runnable_at,
+    MIN(started_at) AS started_at, MAX(finished_at) AS finished_at
+  FROM `{table}`
+  WHERE queue IN ({queues}) AND started_at < {hi} AND finished_at > {lo}
+    AND created_at >= TIMESTAMP_SECONDS({start - 2 * 86400})
+    AND NOT ENDS_WITH(IFNULL(pipeline_slug, ''), '-kube')
+  GROUP BY job_id)
+SELECT queue, COUNT(*) AS jobs,
+  SUM({chips} * TIMESTAMP_DIFF(LEAST(finished_at, {hi}), GREATEST(started_at, {lo}), SECOND)) / 3600
+    AS chip_hours,
+  {quantile(50)} AS wait_p50, {quantile(90)} AS wait_p90
+FROM jobs GROUP BY queue"""
+    return bigquery(cfg, sql)
+
+
 def fetch_stats(cfg: Config, start: int, end: int) -> dict:
     """Outcomes and phase timings of the workloads that finished in [start, end)."""
     if not cfg.timing_table:

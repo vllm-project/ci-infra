@@ -13,7 +13,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from charts import line_chart, values_table
+from charts import line_chart, stacked_chart, values_table
 from fleet import (
     BK_LIMITED,
     BK_WAITING,
@@ -30,7 +30,7 @@ TEMPLATES = Path(__file__).parent / "templates"
 LIVE_PAGE = string.Template((TEMPLATES / "live.html").read_text())
 HISTORY_PAGE = string.Template((TEMPLATES / "history.html").read_text())
 OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
-BASELINE_PAGE = string.Template((TEMPLATES / "baseline.html").read_text())
+COMPARE_PAGE = string.Template((TEMPLATES / "compare.html").read_text())
 # The bare-metal fleet before the migration, built once from the snapshot by
 # baseline/build_baseline.py; static, since that fleet is being torn down.
 BASELINE_FILE = Path(__file__).parent / "baseline" / "premigration-2026-09.json"
@@ -2022,72 +2022,214 @@ def gcs_link(path: str, label: str, root: str) -> str:
     return f'<a href="{E(url)}" target="_blank" rel="noopener">{E(label)} ↗</a>'
 
 
-def render_baseline() -> str:
-    data = json.loads(BASELINE_FILE.read_text())
-    start, step = data["start"], data["step"]
-    n = len(data["generations"][0]["held"])
-    ticks = [start + i * step for i in range(n)]
-    every = max(1, n // 24)
-    # Hour of day on one reference day in Pacific time, for the daily profile.
-    day0 = start - (start - 7 * 3600) % 86400 + 86400
-    hour_ticks = [day0 + h * 3600 for h in range(24)]
+# Each bare-metal queue beside the kube queue that runs the same steps: the
+# same chips a job, so their waits compare directly.
+SHAPE_PAIRS = [
+    ("tpu_v7x_2_queue", "tpu7x-standard-1t-1x1x1"),
+    ("tpu_v7x_8_queue", "tpu7x-standard-4t-2x2x1"),
+    ("tpu_v7x_16_queue", "tpu7x-standard-4t-2x2x2"),
+    ("tpu_v7x_32_queue", "tpu7x-standard-4t-2x2x4"),
+    ("tpu_v6e_queue", "ct6e-standard-1t-1x1"),
+    ("tpu_v6e_8_queue", "ct6e-standard-8t-2x4"),
+]
+COHORT_OF = {"v7x": "tpu7x", "v6e": "ct6e"}
+# The step log table records a step's queue from this day, so bare metal's
+# share of a window that starts earlier reads low.
+BARE_LOG_FROM = 1790812800  # 2026-10-01 UTC
+
+
+def buckets(ticks: list, series: list, k: int) -> tuple[list, list]:
+    """Every k points averaged into one, for a stack too dense to read hourly."""
+    if k <= 1:
+        return ticks, series
+    return ticks[::k], [
+        (
+            name,
+            [
+                round(mean([v or 0 for v in vs[i : i + k]]) or 0, 1)
+                for i in range(0, len(vs), k)
+            ],
+        )
+        for name, vs in series
+    ]
+
+
+def pacific_hour(ts: float) -> int:
+    return int((ts - 7 * 3600) // 3600) % 24
+
+
+def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> str:
+    base = json.loads(BASELINE_FILE.read_text())
+    span = h["span"]
+    days = (span["end"] - span["start"]) / 86400
+    base_days = (base["end"] - base["start"]) / 86400
+    queues = {q["name"]: q for q in h["queues"]}
+    cohorts = {c["name"]: c for c in h["cohorts"]}
+    base_queues = {q["queue"]: q for q in base["queues"]}
+    bare_now = {r["queue"]: r for r in bare}
+    hour_ticks = [base["start"] + 7 * 3600 + hh * 3600 for hh in range(24)]
+    base_ticks = [
+        base["start"] + i * base["step"]
+        for i in range(len(base["generations"][0]["held"]))
+    ]
+    k_ticks = h["ticks"]
+    fmt = "time" if days <= 2 else "day"
+
+    def tile(label: str, before: str, after: str, note: str) -> str:
+        return (
+            f'<div class="tile compare-tile"><span>{E(label)}</span>'
+            f'<b><span class="before">{before}</span> → {after}</b><small>{note}</small></div>'
+        )
 
     cards = []
-    for g in data["generations"]:
-        cap = g["capacity"]
-        share = g["mean_held"] / cap if cap else None
+    for g in base["generations"]:
+        c = cohorts.get(COHORT_OF[g["name"]])
+        if not c:
+            continue
+        admitted = [v for v in c["admitted"] if v is not None]
+        nominal = [v for v in c["nominal"] if v is not None]
+        k_cap = mean(nominal) or 0
+        k_cap_now = nominal[-1] if nominal else 0
+        k_mean = mean(admitted) or 0
+        # Hour by hour against the quota in force then: it grows as chips move
+        # from bare metal.
+        k_util = mean(
+            [
+                v / cap
+                for v, cap in zip(c["admitted"], c["nominal"])
+                if v is not None and cap
+            ]
+        )
+        b_util = g["mean_held"] / g["capacity"]
+        pairs = [
+            (bq, kq)
+            for bq, kq in SHAPE_PAIRS
+            if base_queues[bq]["generation"] == g["name"]
+        ]
+        members = [queues[kq] for _, kq in pairs if kq in queues]
+        k_steps = sum(q["stats"]["finished"] for q in members) / days
+        b_steps = g["jobs"] / base_days
+        k_work = k_mean * 24
+        bare_work = (
+            sum(float(bare_now[bq]["chip_hours"]) for bq, _ in pairs if bq in bare_now)
+            / days
+        )
+        share = k_work / (k_work + bare_work) if k_work + bare_work else None
+        partial = span["start"] < BARE_LOG_FROM
+
+        # Hour-of-day utilization, each fleet against its own chips.
+        by_hour: dict = collections.defaultdict(list)
+        for t, v, cap in zip(k_ticks, c["admitted"], c["nominal"]):
+            if v is not None and cap:
+                by_hour[pacific_hour(t)].append(100 * v / cap)
+        k_hours = [
+            round(mean(by_hour[hh]), 1) if by_hour[hh] else None for hh in range(24)
+        ]
+        b_hours = [round(100 * v / g["capacity"], 1) for v in g["by_hour_pt"]]
+
+        bare_bands = [
+            (
+                queue_title(queues[kq]).split(" ", 1)[-1] if kq in queues else bq,
+                base_queues[bq]["held"],
+            )
+            for bq, kq in pairs
+        ]
+        b_ticks, bare_bands = buckets(base_ticks, bare_bands, 4)
+        k_bucket = max(1, round(len(k_ticks) / 168))
+        kb_ticks, kube_bands = buckets(k_ticks, c["by_topology"], k_bucket)
+        _, (kube_quota,) = buckets(k_ticks, [("quota", c["nominal"])], k_bucket)
+        # One scale for both stacks, so their heights compare.
+        top = max(g["capacity"], max(nominal, default=0))
         cards.append(f"""<div class="card">
-  <div class="card-head"><h2>{E(g["name"])} chips</h2><span class="sub">bare metal, {num(cap)} chips across the queues' agents</span></div>
+  <div class="card-head"><h2>{E(g["name"])}</h2><span class="sub">bare metal before → kube now</span></div>
   <div class="tiles">
-    <div class="tile"><span>Held by jobs, average</span><b>{pct(share)}</b><small>{num(g["mean_held"])} of {num(cap)} chips</small></div>
-    <div class="tile"><span>Busiest hour</span><b>{num(g["peak_held"])}</b><small>chips held at once</small></div>
-    <div class="tile"><span>Hours near full</span><b>{num(g["hours_over_80"])}</b><small>at 80% or more; {num(g["hours_under_20"])} at 20% or less, of {num(n)}</small></div>
-    <div class="tile"><span>Jobs</span><b>{num(g["jobs"])}</b><small>{num(g["chip_hours"])} chip-hours</small></div>
+    {tile("Utilization", pct(b_util), pct(k_util), "chips in use, of the chips each fleet had")}
+    {tile("Chips", num(g["capacity"]), num(k_cap_now), "bare metal's VMs → kube's quota now" + (f"; {num(k_cap)} on average over the window" if abs(k_cap - k_cap_now) >= 1 else ""))}
+    {tile("Work a day", num(g["mean_held"] * 24), num(k_work), f"chip-hours; steps a day {num(b_steps)} → {num(k_steps)}")}
+    <div class="tile"><span>Kube's share of the work now</span><b>{pct(share)}</b><small>bare metal still ran {num(bare_work)} chip-hours a day{" (counted from 10-01)" if partial else ""}</small></div>
   </div>
   <div class="charts">
-  {line_chart("Chips held by running jobs, hourly", ticks, [("used", "held", g["held"])], ref=("capacity", [cap] * n), fmt="day", width=520, height=200)}
-  {line_chart("By hour of day (PT), averaged", hour_ticks, [("used", "held", g["by_hour_pt"])], ref=("capacity", [cap] * 24), fmt="time", width=520, height=200)}
+  {stacked_chart("Bare metal before: chips held by topology", b_ticks, bare_bands, ref=("VMs", [g["capacity"]] * len(b_ticks)), ymax=top, fmt="day", width=520, height=200)}
+  {stacked_chart("Kube now: admitted chips by topology", kb_ticks, kube_bands, ref=kube_quota, ymax=top, fmt=fmt, width=520, height=200)}
   </div>
-  {values_table(ticks, [("Held", g["held"]), ("Capacity", [cap] * n)], every, "Values")}
+  <div class="charts">
+  {line_chart("Utilization by hour of day (PT), % of each fleet's chips", hour_ticks, [("used", "kube", k_hours), ("nodes", "bare metal", b_hours)], fmt="time", width=520, height=200)}
+  <div class="compare-note muted">The two stacks share a scale. Each band is one shape: on bare metal a shape could
+  only use its own VMs, so a busy shape queued while another's VMs sat idle; on kube the shapes share one quota,
+  so the bands trade chips while the total stays near it.</div>
+  </div>
 </div>""")
 
-    rows = "".join(
-        f"""<tr><td class="nowrap"><code>{E(q["queue"])}</code></td>
-<td class="n">{num(q["agents"])} <span class="muted">({num(q["agents_active"])} active a day)</span></td>
-<td class="n">{num(q["chips_per_job"])}</td><td class="n">{num(q["capacity"])}</td>
-<td class="n">{num(q["jobs"])}</td><td class="n">{num(q["chip_hours"])}</td><td class="n"><b>{pct(q["busy_share"])}</b></td>
-<td class="n nowrap">{ago((q["wait_p50"] or 0) * 60)} / {ago((q["wait_p90"] or 0) * 60)}</td>
-<td>{E(", ".join(f"{k} {num(v)}" for k, v in q["by_kind"].items()))}</td></tr>"""
-        for q in data["queues"]
-    )
-    queues = f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Queue</th><th class="n">Agents</th>
-<th class="n">Chips a job</th><th class="n">Capacity, chips</th><th class="n">Jobs</th><th class="n">Chip-hours</th>
-<th class="n">Busy</th><th class="n">Wait p50 / p90</th><th>Chip-hours by build kind</th></tr></thead><tbody>{rows}</tbody></table></div>
-<p class="muted note">Capacity is the queue's agents at the snapshot times the chips a job holds, which Buildkite's
-queue names count in TensorCores (two a chip). Busy is chip-hours over capacity for the window; a queue whose
-agents came and went reads lower than its active agents did, and an hour can hold more than the snapshot's agents
-had. Wait is runnable to started.</p>"""
+    rows = []
+    for bq, kq in SHAPE_PAIRS:
+        b, q, now = base_queues[bq], queues.get(kq), bare_now.get(bq)
+        if not q:
+            continue
+        st = q["stats"]
+        now_wait = (
+            f"{ago(float(now['wait_p50'] or 0))} / {ago(float(now['wait_p90'] or 0))}"
+            if now
+            else "-"
+        )
+        rows.append(
+            f"""<tr><td class="nowrap">{E(queue_title(q))} <span class="muted">· <code>{E(bq)}</code></span></td>
+<td class="n">{num(b["chips_per_job"])}</td>
+<td class="n">{num(b["jobs"] / base_days)}</td><td class="n nowrap">{ago((b["wait_p50"] or 0) * 60)} / {ago((b["wait_p90"] or 0) * 60)}</td>
+<td class="n">{num(st["finished"] / days)}</td><td class="n nowrap"><b>{ago(st["wait_p50"])} / {ago(st["wait_p90"])}</b></td>
+<td class="n">{num(int(now["jobs"]) / days) if now else "0"}</td><td class="n nowrap">{now_wait}</td></tr>"""
+        )
+    shapes = f"""<div class="table-wrap"><table class="dense"><thead>
+<tr><th rowspan="2">Shape</th><th class="n" rowspan="2">Chips a step</th><th class="group" colspan="2">Bare metal before</th>
+<th class="group" colspan="2">Kube now</th><th class="group" colspan="2">Bare metal now</th></tr>
+<tr><th class="n">Steps a day</th><th class="n">Wait p50 / p90</th><th class="n">Steps a day</th><th class="n">Wait p50 / p90</th>
+<th class="n">Steps a day</th><th class="n">Wait p50 / p90</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>
+<p class="muted note">Bare-metal wait is runnable to started on an agent; kube's is submitted to quota reserved, after
+which a step still starts its pods (Node autoscaling on History). Bare metal now is what its queues still run while
+the migration finishes.</p>"""
 
-    root = data["snapshot"]["gcs"]
+    method = f"""<ul class="data-links">
+  <li><b>Utilization</b> is the chips held by running work as a share of the chips the fleet had: on bare metal the
+    chips of running Buildkite jobs against the queues' VMs ({E(base["window"])}); on kube Kueue's admitted chips
+    against the cohort's quota over the window. Both count a step from when it holds chips to when it lets go.</li>
+  <li><b>Work a day</b> is the chip-hours held each day, and the steps that finished. Higher utilization only counts
+    if the work gets done: while bare metal still runs part of the load, kube's work a day is that much short of
+    the whole, and <i>Kube's share of the work now</i> says how much.</li>
+  <li><b>When the migration is done</b> bare metal's share falls to zero and nothing here needs changing: a window
+    that starts after it compares like for like.</li>
+  <li><b>Not counted</b>: the 8 v7x chips the GKE disaggregated-serving lane had before the migration, whose jobs
+    ran outside the bare-metal queues.</li>
+</ul>"""
+
+    root = base["snapshot"]["gcs"]
     data_html = f"""<ul class="data-links">
-  <li>{gcs_link("", "The whole snapshot", root)} - and its {gcs_link("MANIFEST.md", "manifest", root)}</li>
-  <li>{gcs_link("baseline", "Per-queue and per-lane tables", root)}, from the same dumps over 30 days - six of which
-    the dumps do not cover, so their busy shares read about a fifth low</li>
-  <li>{gcs_link("buildkite/org=vllm", "Buildkite build dumps", root)}: every job's queue, agent and times, the source of
-    every number here</li>
-  <li>{gcs_link("buildkite/agents_all_2026-09-29T2115Z.json", "Agents at the snapshot", root)}, for capacity</li>
-  <li>{gcs_link("gcp/monitoring/tpu_duty_cycle", "TensorCore duty cycle, per minute", root)} - not on this page: its
-    series name TPU hosts, which the snapshot does not tie to CI agents</li>
+  <li>{gcs_link("", "The whole pre-migration snapshot", root)} - and its {gcs_link("MANIFEST.md", "manifest", root)}</li>
+  <li>{gcs_link("buildkite/org=vllm", "Buildkite build dumps", root)}: every bare-metal job's queue, agent and times</li>
+  <li>{gcs_link("gcp/tpu_vms_cloud-ullm-inference-ci-cd.json", "TPU VMs", root)} and
+    {gcs_link("gcp/gce_instances_inferact-vllm-tpu.json", "inferact's TPU instances", root)}, for bare metal's chips</li>
+  <li>{gcs_link("baseline", "The snapshot's own per-queue tables", root)} - over 30 days, six of which the dumps do not
+    cover, so their busy shares read about a fifth low</li>
+  <li>{gcs_link("gcp/monitoring/tpu_duty_cycle", "TensorCore duty cycle, per minute", root)} - not used: its series name
+    TPU hosts, which the snapshot does not tie to CI agents</li>
 </ul>
-<p class="muted note">Rebuild with <code>dashboard/baseline/build_baseline.py &lt;snapshot dir&gt;</code>.</p>"""
+<p class="muted note">The kube side comes from Kueue's metrics and the workload timing table, as on History; bare metal
+now from the step log table. Rebuild the baseline with <code>dashboard/baseline/build_baseline.py &lt;snapshot dir&gt;</code>.</p>"""
 
-    return BASELINE_PAGE.substitute(
+    presets = "".join(
+        f'<a class="seg-btn{" active" if preset == name else ""}" href="?preset={name}">{label}</a>'
+        for name, label in PRESET_LABELS.items()
+        if name != "6h"
+    )
+    return COMPARE_PAGE.substitute(
         assets=ASSETS,
-        window=E(data["window"]),
-        days=num((data["end"] - data["start"]) / 86400),
-        taken=E(data["snapshot"]["taken"]),
+        errors=render_errors(sources),
+        start=span["start"],
+        end=span["end"],
+        baseline_window=E(base["window"]),
+        taken=E(base["snapshot"]["taken"]),
+        presets=presets,
         generations="".join(cards),
-        queues=queues,
+        shapes=shapes,
+        method=method,
         data=data_html,
     )
 
@@ -2259,6 +2401,12 @@ def build_history(
         )
         c["members"].append(q)
     for c in cohorts.values():
+        # Each topology's admitted chips, smallest shape at the bottom, for the
+        # stacked chart that shows the cohort's chips moving between shapes.
+        c["by_topology"] = [
+            (queue_title(q).split(" ", 1)[-1], q["history"]["used"])
+            for q in sorted(c["members"], key=lambda q: q["chips"])
+        ]
         c["admitted"] = add_series(*(q["history"]["used"] for q in c["members"]))
         c["nominal"] = add_series(*(q["history"]["nominal"] for q in c["members"]))
         model = DUTY_MODELS.get(c["family"], "")
@@ -2335,6 +2483,8 @@ def render_history(h: dict, sources: dict, query: str) -> str:
   </div>
   {line_chart("Chips on nodes, admitted and busy", ticks, [("nodes", "on nodes", c["on_nodes"]), ("used", "admitted", c["admitted"]), ("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
   {values_table(ticks, [("On nodes", c["on_nodes"]), ("Admitted", c["admitted"]), ("Busy", c["busy"]), ("Nominal", c["nominal"])], every, "Values")}
+  {stacked_chart("Admitted chips by topology", ticks, c["by_topology"], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=220)}
+  {values_table(ticks, c["by_topology"] + [("Nominal", c["nominal"])], every, "Values by topology")}
 </div>"""
         for c in h["cohorts"]
     )
