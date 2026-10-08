@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import html
+import json
 import re
 import statistics
 import string
@@ -12,7 +13,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from charts import line_chart, values_table
+from charts import line_chart, stacked_chart, values_table
 from fleet import (
     BK_LIMITED,
     BK_WAITING,
@@ -29,7 +30,81 @@ TEMPLATES = Path(__file__).parent / "templates"
 LIVE_PAGE = string.Template((TEMPLATES / "live.html").read_text())
 HISTORY_PAGE = string.Template((TEMPLATES / "history.html").read_text())
 OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
-GLOSSARY = (TEMPLATES / "glossary.html").read_text()
+COMPARE_PAGE = string.Template((TEMPLATES / "compare.html").read_text())
+# The bare-metal fleet before the migration, built once from the snapshot by
+# baseline/build_baseline.py; static, since that fleet is being torn down.
+BASELINE_FILE = Path(__file__).parent / "baseline" / "premigration-2026-09.json"
+# What each term on the pages means: the glossary on the Overview, and the
+# tooltip on a term wherever a page uses it (term()).
+TERMS = {
+    "Queue": "A Kueue ClusterQueue, one per slice shape. v7x 2x2x1 is a 2x2x1 v7x slice: 4 chips. "
+    "Kueue names count chips; Buildkite's tpu_v7x_8_queue counts TensorCores for the same slice.",
+    "Cohort": "The queues of one TPU generation, sharing one pool of chips.",
+    "Nominal": "The chips a queue is guaranteed when it asks for them. A cohort's nominal is the sum "
+    "of its queues'.",
+    "In use": "Chips Kueue has admitted workloads for: quota, counted from admission, whether or not "
+    "the pods have reached their nodes yet.",
+    "Free": "Nominal no queue in the cohort is using.",
+    "Borrowing": "Chips a queue uses beyond its nominal, taken from other queues' idle nominal in the "
+    "same cohort. May borrow caps it.",
+    "May borrow": "The most a queue may borrow on top of its nominal: what its node pools can hold, "
+    "less its nominal.",
+    "Idle, lendable": "Nominal a queue is not using, which others may borrow.",
+    "Reclaim": "A queue that evicts borrowers takes lent chips back by preempting the workloads using "
+    "them; those steps rerun. A queue that never reclaims waits for borrowers to finish.",
+    "Priority": "The Kueue WorkloadPriorityClass a build's workloads run at, highest first: "
+    "oncall-fix, post-merge, pre-merge, integration, then unclassed (no class, scored 0), then low, "
+    "with Kueue's value beside it. It decides who is admitted next, never who stops.",
+    "Next up": "The queue's pending workloads in the order Kueue will consider them: higher priority "
+    "first, then earlier submission. A workload behind the head can start first when the head does "
+    "not fit.",
+    "Admitted": "Kueue granted the quota and a worker cluster accepted the workload; its pods are "
+    "starting or running.",
+    "Dispatching": "Quota reserved on the manager, waiting for a worker to accept.",
+    "Pending": "Not admitted yet. Kueue evaluates only the head of each queue, so only the head has a "
+    "reason; the rest are queued behind it.",
+    "Busy": "TensorCore duty cycle, summed in chips: the compute actually happening. Admitted minus "
+    "busy is chips held without computing - startup, compile, model load.",
+    "Chips on nodes": "TPU chips on the nodes GKE has up, whether or not a workload holds them, as of "
+    "five minutes ago: GKE reports nodes minutes late. Nodes scale up when Kueue admits a workload no "
+    "node can take, and down once a node has held nothing for a while.",
+    "Idle on nodes": "Chips on nodes that no admitted workload holds: scale-down lag, a pool's "
+    "minimum, or a node waiting for the workload it came for.",
+    "Held by workloads": "The share of chip-hours on nodes that an admitted workload held; the rest is "
+    "idle on nodes.",
+    "Nodes created": "Nodes a pool scaled up during the range. Lifetime is appearing to disappearing.",
+    "Utilization": "Mean admitted (or busy) chips over the range, over mean nominal.",
+    "Chips held": "Chips occupied by running work, as a share of the chips the fleet had: on bare metal "
+    "the chips of the VMs a job holds, on kube the chips Kueue admitted. Occupancy, not compute - a "
+    "chip counts while its job sets up, compiles or idles.",
+    "Evicted": "A running workload stopped by the fleet - preempted by a queue reclaiming lent chips, "
+    "or its node gone - which reruns from the start.",
+    "Requeue": "A workload that lost its reservation, usually to preemption, and went back in line.",
+    "Redispatch": "The launcher resubmitting a reservation no worker picked up.",
+    "Test failure": "The test exited non-zero.",
+    "Infra failure": "A workload the fleet ended: never admitted, API unreachable, storage eviction, "
+    "launcher error.",
+    "Wait, startup, run": "Wait is submitted to quota reserved; startup (admitted to running) is "
+    "admitted to the first container running; run is first container to finished.",
+}
+
+
+def term(label: str, *keys: str) -> str:
+    """label with its glossary definition as a tooltip, shown on hover and on
+    focus, and read inline by a screen reader. Several keys for a label that
+    covers several terms."""
+    keys = keys or (label,)
+    tip = (
+        TERMS[keys[0]] if len(keys) == 1 else " ".join(f"{k}: {TERMS[k]}" for k in keys)
+    )
+    return f'<span class="term" tabindex="0">{label}<span class="tip">{E(tip)}</span></span>'
+
+
+GLOSSARY = (
+    '<details class="card glossary"><summary>Glossary</summary><table class="glossary-table"><tbody>'
+    + "".join(f"<tr><th>{E(k)}</th><td>{E(v)}</td></tr>" for k, v in TERMS.items())
+    + "</tbody></table></details>"
+)
 # In the stylesheet and script URLs, so a browser holding the last version
 # for its five minutes fetches the new one as soon as the page changes.
 ASSETS = hashlib.sha256(
@@ -1225,13 +1300,13 @@ def render_live_summary(snap: dict) -> str:
 <div class="cohort">
   <h3>{E(c["generation"] or c["name"])} <span class="muted">· cohort <code>{E(c["name"])}</code></span></h3>
   <div class="tiles">
-    <div class="tile"><span>Chips in use</span><b>{num(c["used"])}</b><small>of {num(c["nominal"])} nominal ({pct(c["used"] / c["nominal"] if c["nominal"] else None)})</small></div>
-    <div class="tile"><span>Free</span><b>{num(c["free"])}</b><small>chips no queue is using</small></div>
-    <div class="tile"><span>Pending</span><b>{num(c["pending"])}</b><small>workloads, {num(c["pending_amount"])} chips</small></div>
-    <div class="tile"><span>Busy now</span>{busy}</div>
+    <div class="tile"><span>{term("Chips in use", "In use")}</span><b>{num(c["used"])}</b><small>of {num(c["nominal"])} nominal ({pct(c["used"] / c["nominal"] if c["nominal"] else None)})</small></div>
+    <div class="tile"><span>{term("Free")}</span><b>{num(c["free"])}</b><small>chips no queue is using</small></div>
+    <div class="tile"><span>{term("Pending")}</span><b>{num(c["pending"])}</b><small>workloads, {num(c["pending_amount"])} chips</small></div>
+    <div class="tile"><span>{term("Busy now", "Busy")}</span>{busy}</div>
   </div>
-  <div class="table-wrap"><table><thead><tr><th>Queue</th><th class="n">Nominal</th><th class="n">In use</th><th>Borrowing</th>
-  <th class="n">May borrow</th><th>Reclaim</th><th class="n">Running</th><th class="n">Pending</th>
+  <div class="table-wrap"><table><thead><tr><th>Queue</th><th class="n">{term("Nominal")}</th><th class="n">{term("In use")}</th><th>{term("Borrowing")}</th>
+  <th class="n">{term("May borrow")}</th><th>{term("Reclaim")}</th><th class="n">{term("Running", "Admitted")}</th><th class="n">{term("Pending")}</th>
   <th class="barcell"><span class="key"><i class="sw own"></i>own</span><span class="key"><i class="sw borrowed"></i>borrowed</span><span class="key"><i class="sw idle"></i>idle</span></th>
   </tr></thead><tbody>{rows}</tbody></table></div>
 </div>""")
@@ -1308,9 +1383,9 @@ def render_next_up(q: dict) -> str:
         if rest
         else ""
     )
-    return f"""<div class="block"><h4>Next up, in Kueue's order</h4>
+    return f"""<div class="block"><h4>{term("Next up", "Next up")}, in Kueue's order</h4>
   <div class="table-wrap"><table class="dense"><thead><tr><th class="n">#</th><th>Step</th><th>Build</th>
-    <th>Priority</th><th class="n">Waiting</th></tr></thead><tbody>{rows}</tbody>{more_rows}</table></div>
+    <th>{term("Priority")}</th><th class="n">Waiting</th></tr></thead><tbody>{rows}</tbody>{more_rows}</table></div>
   {more_button}
   <p class="muted note">{more}Kueue considers higher priority first, then earlier submission. A workload
   behind the head can start first when the head does not fit.</p></div>"""
@@ -1366,7 +1441,7 @@ def render_live_queue(q: dict) -> str:
   </div>
   <div class="pills">{"".join(pills)}</div>
   <div class="block"><h4>Running, by build</h4>
-  <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>Branch</th><th>Source</th><th>Priority</th>
+  <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>Branch</th><th>Source</th><th>{term("Priority")}</th>
     <th class="n">Steps</th><th class="n">{u.capitalize()} held</th><th class="n">Running for</th>
   </tr></thead><tbody>{builds}</tbody>{builds_more}</table></div>{builds_button}</div>
   {render_next_up(q)}
@@ -1583,6 +1658,13 @@ def kueue_line(name: str, value: float | None) -> tuple:
     return ("ok", "Kueue", f"up on {name}")
 
 
+# What a box's caption counts, on hover: Kueue's figures are quota, a worker's
+# are nodes, and the two differ while nodes start or linger.
+CAPTION_TIPS = {
+    "chips in use / quota": "In use: " + TERMS["In use"],
+    "chips on nodes / pool max": "Chips on nodes: " + TERMS["Chips on nodes"],
+}
+
 # The diagram's columns, in viewBox units: x and width of each box.
 COLUMNS = {
     "buildkite": (10, 160),
@@ -1632,8 +1714,10 @@ class Box:
         ]
         top = y + 128
         if self.caption:
+            tip = CAPTION_TIPS.get(self.caption, "")
             out.append(
-                f'<text class="n-cap" x="{x + w - 14}" y="{top:.1f}" text-anchor="end">{E(self.caption)}</text>'
+                f'<text class="n-cap" x="{x + w - 14}" y="{top:.1f}" text-anchor="end">{E(self.caption)}'
+                f"<title>{E(tip)}</title></text>"
             )
             top += 22
         for i, (text, frac, figure) in enumerate(self.lines):
@@ -2006,6 +2090,268 @@ def render_overview(snap: dict) -> str:
 
 
 # --------------------------------------------------------------------------
+# Baseline
+
+
+def gcs_link(path: str, label: str, root: str) -> str:
+    """A link to part of the snapshot's copy in Cloud Storage."""
+    bucket_path = root.removeprefix("gs://").rstrip("/") + ("/" + path if path else "")
+    kind = "browser/_details" if "." in path.rsplit("/", 1)[-1] else "browser"
+    url = f"https://console.cloud.google.com/storage/{kind}/{bucket_path}"
+    return f'<a href="{E(url)}" target="_blank" rel="noopener">{E(label)} ↗</a>'
+
+
+# Each bare-metal queue beside the kube queue that runs the same steps: the
+# same chips a job, so their waits compare directly.
+SHAPE_PAIRS = [
+    ("tpu_v7x_2_queue", "tpu7x-standard-1t-1x1x1"),
+    ("tpu_v7x_8_queue", "tpu7x-standard-4t-2x2x1"),
+    ("tpu_v7x_16_queue", "tpu7x-standard-4t-2x2x2"),
+    ("tpu_v7x_32_queue", "tpu7x-standard-4t-2x2x4"),
+    ("tpu_v6e_queue", "ct6e-standard-1t-1x1"),
+    ("tpu_v6e_8_queue", "ct6e-standard-8t-2x4"),
+]
+COHORT_OF = {"v7x": "tpu7x", "v6e": "ct6e"}
+# The step log table records a step's queue from this day, so bare metal's
+# share of a window that starts earlier reads low.
+BARE_LOG_FROM = 1790812800  # 2026-10-01 UTC
+
+
+def buckets(ticks: list, series: list, k: int) -> tuple[list, list]:
+    """Every k points averaged into one, for a stack too dense to read hourly."""
+    if k <= 1:
+        return ticks, series
+    return ticks[::k], [
+        (
+            name,
+            [
+                round(mean([v or 0 for v in vs[i : i + k]]) or 0, 1)
+                for i in range(0, len(vs), k)
+            ],
+        )
+        for name, vs in series
+    ]
+
+
+def pacific_hour(ts: float) -> int:
+    return int((ts - 7 * 3600) // 3600) % 24
+
+
+def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> str:
+    base = json.loads(BASELINE_FILE.read_text())
+    span = h["span"]
+    days = (span["end"] - span["start"]) / 86400
+    base_days = (base["end"] - base["start"]) / 86400
+    queues = {q["name"]: q for q in h["queues"]}
+    cohorts = {c["name"]: c for c in h["cohorts"]}
+    base_queues = {q["queue"]: q for q in base["queues"]}
+    bare_now = {r["queue"]: r for r in bare}
+    hour_ticks = [base["start"] + 7 * 3600 + hh * 3600 for hh in range(24)]
+    base_ticks = [
+        base["start"] + i * base["step"]
+        for i in range(len(base["generations"][0]["held"]))
+    ]
+    k_ticks = h["ticks"]
+    fmt = "time" if days <= 2 else "day"
+
+    def daily(value: float) -> str:
+        # Averages over days: the decimal is noise once a figure is in the tens.
+        return num(value) if value < 10 else f"{round(value):,}"
+
+    def tile(label: str, before: str, after: str, note: str) -> str:
+        return (
+            f'<div class="tile compare-tile"><span>{label}</span>'
+            f'<b><span class="before">{before}</span> → {after}</b><small>{note}</small></div>'
+        )
+
+    cards = []
+    for g in base["generations"]:
+        c = cohorts.get(COHORT_OF[g["name"]])
+        if not c:
+            continue
+        admitted = [v for v in c["admitted"] if v is not None]
+        nominal = [v for v in c["nominal"] if v is not None]
+        k_cap = mean(nominal) or 0
+        k_cap_now = nominal[-1] if nominal else 0
+        k_mean = mean(admitted) or 0
+        # Hour by hour against the quota in force then: it grows as chips move
+        # from bare metal.
+        k_util = mean(
+            [
+                v / cap
+                for v, cap in zip(c["admitted"], c["nominal"])
+                if v is not None and cap
+            ]
+        )
+        b_util = g["held_share"]
+        pairs = [
+            (bq, kq)
+            for bq, kq in SHAPE_PAIRS
+            if base_queues[bq]["generation"] == g["name"]
+        ]
+        members = [queues[kq] for _, kq in pairs if kq in queues]
+        k_steps = sum(q["stats"]["finished"] for q in members) / days
+        b_steps = g["jobs"] / base_days
+        k_work = k_mean * 24
+        bare_work = (
+            sum(float(bare_now[bq]["chip_hours"]) for bq, _ in pairs if bq in bare_now)
+            / days
+        )
+        share = k_work / (k_work + bare_work) if k_work + bare_work else None
+        partial = span["start"] < BARE_LOG_FROM
+
+        # Hour-of-day utilization, each fleet against its own chips.
+        by_hour: dict = collections.defaultdict(list)
+        for t, v, cap in zip(k_ticks, c["admitted"], c["nominal"]):
+            if v is not None and cap:
+                by_hour[pacific_hour(t)].append(100 * v / cap)
+        k_hours = [
+            round(mean(by_hour[hh]), 1) if by_hour[hh] else None for hh in range(24)
+        ]
+        b_hours = g["by_hour_share_pt"]
+
+        # One row per shape: bare metal's chips held against that shape's own
+        # VMs beside kube's admitted chips against its nominal, on one scale.
+        rows_html = []
+        for bq, kq in pairs:
+            bqd, q = base_queues[bq], queues.get(kq)
+            if not q:
+                continue
+            label = queue_title(q).split(" ", 1)[-1]
+            b_t, ((_, b_held), (_, b_vms)) = buckets(
+                base_ticks, [("held", bqd["held"]), ("VMs", bqd["connected"])], 4
+            )
+            k_used, k_nom = q["history"]["used"], q["history"]["nominal"]
+            scale = max(
+                [v for v in b_vms + k_used + k_nom if v is not None] + [bqd["capacity"]]
+            )
+            rows_html.append(
+                '<div class="charts shape-row">'
+                + line_chart(
+                    f"{label} · bare metal: held of its VMs' chips ({num(bqd['capacity'])} usually)",
+                    b_t,
+                    [("nodes", "held", b_held)],
+                    ref=("VMs", b_vms),
+                    ymax=scale,
+                    fmt="day",
+                    width=520,
+                    height=150,
+                )
+                + line_chart(
+                    f"{label} · kube: admitted against its nominal",
+                    k_ticks,
+                    [("used", "admitted", k_used)],
+                    ref=("nominal", k_nom),
+                    ymax=scale,
+                    fmt=fmt,
+                    width=520,
+                    height=150,
+                )
+                + "</div>"
+            )
+        cards.append(f"""<div class="card">
+  <div class="card-head"><h2>{E(g["name"])}</h2><span class="sub">bare metal before → kube now</span></div>
+  <div class="tiles">
+    {tile(term("Chips held"), pct(b_util), pct(k_util), "on average, of the chips each fleet had")}
+    {tile("Chips", num(g["capacity"]), num(k_cap_now), f"bare metal's VMs ({num(g['mean_connected'])} connected on average) → kube's quota now" + (f" ({num(k_cap)} on average)" if abs(k_cap - k_cap_now) >= 1 else ""))}
+    {tile("Work a day", daily(g["mean_held"] * 24), daily(k_work), f"chip-hours; steps a day {daily(b_steps)} → {daily(k_steps)}")}
+    <div class="tile"><span>Kube's share of the work now</span><b>{pct(share)}</b><small>bare metal still ran {daily(bare_work)} chip-hours a day{" (counted from 10-01)" if partial else ""}</small></div>
+  </div>
+  <h3 class="shapes-head">By shape: bare metal before, kube now</h3>
+  <p class="muted note">Each row is one shape on one scale. On bare metal a shape could use only its own VMs - the
+  line is the chips of the agents connected each hour, so a VM that came or went moves it - and a busy shape sat at
+  its line and queued while another's VMs idled. On kube a shape owns its nominal and borrows
+  the cohort's idle chips above it, so its line can climb past nominal when others are quiet.</p>
+  {"".join(rows_html)}
+  <div class="charts">
+  {line_chart("Chips held by hour of day (PT), % of each fleet's chips", hour_ticks, [("used", "kube", k_hours), ("nodes", "bare metal", b_hours)], fmt="time", width=520, height=200)}
+  <div class="compare-note muted">Each fleet against its own chips, averaged by hour of day: when in the day the
+  chips were held, and how close to full each fleet ran.</div>
+  </div>
+</div>""")
+
+    rows = []
+    for bq, kq in SHAPE_PAIRS:
+        b, q, now = base_queues[bq], queues.get(kq), bare_now.get(bq)
+        if not q:
+            continue
+        st = q["stats"]
+        now_wait = (
+            f"{ago(float(now['wait_p50'] or 0))} / {ago(float(now['wait_p90'] or 0))}"
+            if now
+            else "-"
+        )
+        rows.append(
+            f"""<tr><td class="nowrap">{E(queue_title(q))} <span class="muted">· <code>{E(bq)}</code></span></td>
+<td class="n">{num(b["chips_per_job"])}</td>
+<td class="n">{daily(b["jobs"] / base_days)}</td><td class="n nowrap">{ago((b["wait_p50"] or 0) * 60)} / {ago((b["wait_p90"] or 0) * 60)}</td>
+<td class="n">{daily(st["finished"] / days)}</td><td class="n nowrap"><b>{ago(st["wait_p50"])} / {ago(st["wait_p90"])}</b></td>
+<td class="n">{daily(int(now["jobs"]) / days) if now else "0"}</td><td class="n nowrap">{now_wait}</td></tr>"""
+        )
+    shapes = f"""<div class="table-wrap"><table class="dense"><thead>
+<tr><th rowspan="2">Shape</th><th class="n" rowspan="2">Chips a step</th><th class="group" colspan="2">Bare metal before</th>
+<th class="group" colspan="2">Kube now</th><th class="group" colspan="2">Bare metal now</th></tr>
+<tr><th class="n">Steps a day</th><th class="n">Wait p50 / p90</th><th class="n">Steps a day</th><th class="n">Wait p50 / p90</th>
+<th class="n">Steps a day</th><th class="n">Wait p50 / p90</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>
+<p class="muted note">Bare-metal wait is runnable to started on an agent; kube's is submitted to quota reserved, after
+which a step still starts its pods (Node autoscaling on History). Bare metal now is what its queues still run while
+the migration finishes.</p>"""
+
+    method = f"""<ul class="data-links">
+  <li><b>Chips held</b> is the chips occupied by running work as a share of the chips the fleet had. On bare
+    metal a job holds its whole VM - a <code>tpu_v7x_16_queue</code> job holds that VM's 8 chips, and while the VM
+    has no job all 8 are idle - over the chip-hours of the agents connected through {E(base["window"])}. On kube it is
+    Kueue's admitted chips against the cohort's quota over the window. Both count a chip from when work takes it
+    to when it lets go, whatever the TensorCores do meanwhile: occupancy, not compute.</li>
+  <li><b>Work a day</b> is the chip-hours held each day, and the steps that finished. Holding more chips only counts
+    if the work gets done: while bare metal still runs part of the load, kube's work a day is that much short of
+    the whole, and <i>Kube's share of the work now</i> says how much.</li>
+  <li><b>When the migration is done</b> bare metal's share falls to zero and nothing here needs changing: a window
+    that starts after it compares like for like.</li>
+  <li><b>The baseline</b> is the bare-metal fleet before the migration moved anything: it ends on 2026-09-28, the day
+    the inferact project's VMs joined <code>tpu_v7x_8_queue</code>.</li>
+  <li><b>Not counted</b>: the 8 v7x chips the GKE disaggregated-serving lane had before the migration, whose jobs
+    ran outside the bare-metal queues.</li>
+</ul>"""
+
+    root = base["snapshot"]["gcs"]
+    data_html = f"""<ul class="data-links">
+  <li>{gcs_link("", "The whole pre-migration snapshot", root)} - and its {gcs_link("MANIFEST.md", "manifest", root)}</li>
+  <li>{gcs_link("buildkite/org=vllm", "Buildkite build dumps", root)}: every bare-metal job's queue, agent and times</li>
+  <li>{gcs_link("gcp/tpu_vms_cloud-ullm-inference-ci-cd.json", "TPU VMs", root)} and
+    {gcs_link("gcp/gce_instances_inferact-vllm-tpu.json", "inferact's TPU instances", root)}, for bare metal's chips</li>
+  <li>{gcs_link("baseline", "The snapshot's own per-queue tables", root)} - over 30 days, six of which the dumps do not
+    cover, so their busy shares read about a fifth low</li>
+  <li>{gcs_link("gcp/monitoring/tpu_duty_cycle", "TensorCore duty cycle, per minute", root)} - not used: its series name
+    TPU hosts, which the snapshot does not tie to CI agents</li>
+</ul>
+<p class="muted note">The kube side comes from Kueue's metrics and the workload timing table, as on History; bare metal
+now from the step log table. Rebuild the baseline with <code>dashboard/baseline/build_baseline.py &lt;snapshot dir&gt;</code>.</p>"""
+
+    presets = "".join(
+        f'<a class="seg-btn{" active" if preset == name else ""}" href="?preset={name}">{label}</a>'
+        for name, label in PRESET_LABELS.items()
+        if name != "6h"
+    )
+    return COMPARE_PAGE.substitute(
+        assets=ASSETS,
+        errors=render_errors(sources),
+        start=span["start"],
+        end=span["end"],
+        baseline_window=" – ".join(
+            time.strftime("%b %-d", time.gmtime(base[k])) for k in ("start", "end")
+        )
+        + " UTC",
+        taken=E(base["snapshot"]["taken"]),
+        presets=presets,
+        generations="".join(cards),
+        shapes=shapes,
+        method=method,
+        data=data_html,
+    )
+
+
+# --------------------------------------------------------------------------
 # History
 
 
@@ -2172,6 +2518,12 @@ def build_history(
         )
         c["members"].append(q)
     for c in cohorts.values():
+        # Each topology's admitted chips, smallest shape at the bottom, for the
+        # stacked chart that shows the cohort's chips moving between shapes.
+        c["by_topology"] = [
+            (queue_title(q).split(" ", 1)[-1], q["history"]["used"])
+            for q in sorted(c["members"], key=lambda q: q["chips"])
+        ]
         c["admitted"] = add_series(*(q["history"]["used"] for q in c["members"]))
         c["nominal"] = add_series(*(q["history"]["nominal"] for q in c["members"]))
         model = DUTY_MODELS.get(c["family"], "")
@@ -2241,13 +2593,15 @@ def render_history(h: dict, sources: dict, query: str) -> str:
         f"""<div class="card">
   <div class="card-head"><h2>{E(c["generation"])} chips</h2><span class="sub">cohort <code>{E(c["name"])}</code></span></div>
   <div class="tiles">
-    <div class="tile"><span>Admitted, average</span><b>{pct(c["utilization"])}</b><small>of nominal</small></div>
-    <div class="tile"><span>Busy, average</span><b>{pct(c["busy_share"])}</b><small>of nominal, by TensorCore duty</small></div>
-    <div class="tile"><span>Node chips held</span><b>{pct(c["held_share"])}</b><small>{num(c["idle_chip_hours"])} chip-hours on nodes idle</small></div>
+    <div class="tile"><span>{term("Admitted, average", "Utilization")}</span><b>{pct(c["utilization"])}</b><small>of nominal</small></div>
+    <div class="tile"><span>{term("Busy, average", "Busy")}</span><b>{pct(c["busy_share"])}</b><small>of nominal, by TensorCore duty</small></div>
+    <div class="tile"><span>{term("Node chips held", "Held by workloads")}</span><b>{pct(c["held_share"])}</b><small>{num(c["idle_chip_hours"])} chip-hours on nodes idle</small></div>
     <div class="tile"><span>Workloads finished</span><b>{num(c["finished"])}</b><small>{num(c["failed"])} test, {num(c["infra"])} infra failures</small></div>
   </div>
   {line_chart("Chips on nodes, admitted and busy", ticks, [("nodes", "on nodes", c["on_nodes"]), ("used", "admitted", c["admitted"]), ("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
   {values_table(ticks, [("On nodes", c["on_nodes"]), ("Admitted", c["admitted"]), ("Busy", c["busy"]), ("Nominal", c["nominal"])], every, "Values")}
+  {stacked_chart("Admitted chips by topology", ticks, c["by_topology"], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=220)}
+  {values_table(ticks, c["by_topology"] + [("Nominal", c["nominal"])], every, "Values by topology")}
 </div>"""
         for c in h["cohorts"]
     )
@@ -2276,8 +2630,8 @@ def render_history(h: dict, sources: dict, query: str) -> str:
         or '<tr><td colspan="6" class="empty">No node pool data.</td></tr>'
     )
     autoscaling = f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Topology</th>
-<th class="n">Nodes created</th><th class="n">Node lifetime p50</th><th class="n">Held by workloads</th>
-<th class="n">Idle chip-hours</th><th class="n">Admitted → running p50 / p90</th></tr></thead><tbody>{node_rows}</tbody></table></div>
+<th class="n">{term("Nodes created")}</th><th class="n">{term("Node lifetime p50", "Nodes created")}</th><th class="n">{term("Held by workloads")}</th>
+<th class="n">{term("Idle chip-hours", "Idle on nodes")}</th><th class="n">{term("Admitted → running p50 / p90", "Wait, startup, run")}</th></tr></thead><tbody>{node_rows}</tbody></table></div>
 <p class="muted note">From GKE's per-node metrics: every TPU node that existed in the range, tied to its pool by the
 pool's instance group. <i>Nodes created</i> counts nodes that appeared during the range, each one a node the pool scaled
 up for; <i>lifetime</i> is appearing to disappearing, for nodes that did both. <i>Idle chip-hours</i> are chips on nodes
@@ -2297,14 +2651,14 @@ that no admitted workload held - scale-down lag, a pool's minimum, or a node wai
     outcomes = f"""
 <h3>By queue</h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Queue</th><th class="n">Finished</th><th class="n">Success</th>
-<th class="n">Failures: test / infra</th><th class="n">Evicted / requeued / redispatched</th>
-<th class="n">Wait p50 / p90</th><th class="n">Run p50</th><th class="n">Chip-hours</th></tr></thead>
+<th class="n">{term("Failures: test / infra", "Test failure", "Infra failure")}</th><th class="n">{term("Evicted / requeued / redispatched", "Evicted", "Requeue", "Redispatch")}</th>
+<th class="n">{term("Wait p50 / p90", "Wait, startup, run")}</th><th class="n">{term("Run p50", "Wait, startup, run")}</th><th class="n">Chip-hours</th></tr></thead>
 <tbody>{queue_rows}</tbody></table></div>
 <p class="muted note">Success is over workloads that finished either way; cancelled ones are left out. Wait is
 submitted to quota reserved; how long an admitted workload took to start is under Node autoscaling.</p>
 <h3 style="margin-top:20px">By pipeline</h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Pipeline</th><th class="n">Finished</th><th class="n">Success</th>
-<th class="n">Failures: test / infra</th><th class="n">Chip-hours</th></tr></thead>
+<th class="n">{term("Failures: test / infra", "Test failure", "Infra failure")}</th><th class="n">Chip-hours</th></tr></thead>
 <tbody>{pipeline_rows}</tbody>{pipelines_more}</table></div>
 {pipelines_button}"""
 

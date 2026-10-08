@@ -96,7 +96,7 @@ details.glossary summary { font-size: 13px; font-weight: 600; color: var(--ink-2
 a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
 
 /* Health */
-.checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
+.checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 10px; }
 .check { display: grid; grid-template-columns: 22px 1fr; gap: 2px 10px; padding: 12px 14px;
   border-radius: 10px; background: var(--line-2); }
 .check .icon { grid-row: span 2; width: 22px; height: 22px; border-radius: 50%; display: grid;
@@ -361,3 +361,40 @@ button:hover { background: rgba(255, 255, 255, 0.95); }
 .diagram .track { fill: rgba(120, 120, 128, 0.16); }
 .bar .seg.idle { opacity: 0.8; }
 .jobs-running { margin-top: 22px; }
+.data-links { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+
+/* Stacked bands, one per topology: the reference palette's first four
+   categorical slots, which validate as adjacent pairs. Aqua and yellow sit
+   under 3:1 on white, so each stack has a legend and a values table. A 2px
+   gap in the surface color keeps neighboring bands apart. */
+:root { --cat-1: #2a78d6; --cat-2: #eb6834; --cat-3: #1baf7a; --cat-4: #eda100; }
+.band { stroke: #fff; stroke-width: 1; stroke-linejoin: round; }
+.band.s1 { fill: var(--cat-1); } .band.s2 { fill: var(--cat-2); }
+.band.s3 { fill: var(--cat-3); } .band.s4 { fill: var(--cat-4); }
+i.k.s1, i.k.s2, i.k.s3, i.k.s4 { height: 10px; width: 10px; border-radius: 3px; }
+i.k.s1 { background: var(--cat-1); } i.k.s2 { background: var(--cat-2); }
+i.k.s3 { background: var(--cat-3); } i.k.s4 { background: var(--cat-4); }
+
+/* Compare */
+.compare-tile b { font-size: 24px; }
+.compare-tile b .before { display: inline; font-size: inherit; color: var(--muted); font-weight: 500; }
+.compare-note { align-self: center; font-size: 14px; max-width: 460px; }
+th.group { text-align: center; border-bottom: 1px solid var(--line); }
+.range > .muted { font-size: 13px; }
+
+/* Glossary terms: a dotted underline, the definition in a bubble on hover or
+   focus. The definition is real text, so a screen reader reads it inline. */
+.term { position: relative; border-bottom: 1px dotted var(--muted); cursor: help; outline: none; }
+.tile span.term, th .term { display: inline; font: inherit; color: inherit; }
+.term .tip { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: normal; }
+.term:hover .tip, .term:focus .tip {
+  clip: auto; width: max-content; max-width: 320px; height: auto; overflow: visible; z-index: 30;
+  left: 0; top: calc(100% + 6px); padding: 8px 11px; border-radius: 10px;
+  background: rgba(29, 29, 31, 0.94); color: #fff; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  font-size: 13px; font-weight: 400; line-height: 1.45; letter-spacing: 0; text-transform: none; text-align: left;
+}
+.tile span.term .tip { display: block; font-size: 13px; color: #fff; }
+th.n .term:hover .tip, th.n .term:focus .tip { left: auto; right: 0; }
+.table-wrap:has(.term:hover), .table-wrap:has(.term:focus) { overflow: visible; }
+.shapes-head { margin: 22px 0 4px; font-size: 15px; }
+.shape-row { margin-top: 6px; }

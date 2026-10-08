@@ -1,0 +1,40 @@
+<!doctype html>
+<!--
+  The compare page: the bare-metal fleet before the migration, from a static
+  file built out of the pre-migration snapshot (baseline/build_baseline.py),
+  beside the kube fleet over a recent window, read live. views.py fills the
+  placeholders - a dollar sign and a name - with string.Template, so a literal
+  dollar sign here must be doubled.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TPU CI kube · Compare</title>
+<link rel="stylesheet" href="static/style.css?v=$assets">
+</head>
+<body>
+<header class="topbar">
+  <div class="inner">
+    <h1>TPU CI kube</h1>
+    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab" href="history">History</a><a class="tab active" href="compare">Compare</a></nav>
+    <span class="when">kube <time data-ts="$start" data-fmt="day"></time> – <time data-ts="$end" data-fmt="day"></time> against bare metal $baseline_window</span>
+  </div>
+</header>
+<main>
+$errors
+<div class="card range"><div class="segmented">$presets</div><span class="muted">window for the kube side; the bare-metal baseline is fixed</span></div>
+<p class="intro">The bare-metal fleet before the migration beside the kube fleet now: how full each kept its
+chips, how much work it did, and how long a step waited, per TPU generation and per shape. The bare-metal
+side was built once from the snapshot taken on $taken; the kube side is read live over the window above.</p>
+$generations
+<div class="section-label">Waits by shape</div>
+<div class="card">$shapes</div>
+<div class="section-label">How to read this</div>
+<div class="card">$method</div>
+<div class="section-label">Data</div>
+<div class="card">$data</div>
+</main>
+<script src="static/app.js?v=$assets"></script>
+</body>
+</html>

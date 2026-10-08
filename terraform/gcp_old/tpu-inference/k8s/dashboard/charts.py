@@ -83,6 +83,7 @@ def line_chart(
     *,
     ref: tuple[str, list] | None = None,
     extra: list[tuple[str, list]] | None = None,
+    ymax: float | None = None,
     fmt: str = "time",
     width: int = 640,
     height: int = 200,
@@ -96,7 +97,8 @@ def line_chart(
     values = [v for _, _, vs in series for v in vs if v is not None]
     if ref:
         values += [v for v in ref[1] if v is not None]
-    ymax = nice_max(max(values, default=0))
+    # Charts shown side by side pass one ymax so their heights compare.
+    ymax = nice_max(max(max(values, default=0), ymax or 0))
     n = max(1, len(ticks) - 1)
 
     def x(i: float) -> float:
@@ -192,4 +194,101 @@ def values_table(
         f"<details><summary>{E(what)}</summary>"
         f'<div class="table-wrap"><table class="dense"><thead><tr><th>Time</th>{head}</tr></thead>'
         f"<tbody>{rows}</tbody></table></div></details>"
+    )
+
+
+def stacked_chart(
+    title: str,
+    ticks: list[float],
+    series: list[tuple[str, list]],
+    *,
+    ref: tuple[str, list] | None = None,
+    ymax: float | None = None,
+    fmt: str = "time",
+    width: int = 640,
+    height: int = 200,
+) -> str:
+    """series is (name, values), stacked bottom to top in order and colored by
+    categorical slot (s1, s2, ...), so a band keeps its color whatever the
+    others do. Straight segments, not smoothed: two smoothed edges of one band
+    can cross between points. ref is (name, values), drawn stepped over the
+    stack - the quota the bands share."""
+    left, right, top, bottom = 40, 64, 12, 24
+    plot_w, plot_h = width - left - right, height - top - bottom
+    n_points = len(ticks)
+    totals = [0.0] * n_points
+    edges = []
+    for _, vs in series:
+        low = list(totals)
+        totals = [t + (v or 0) for t, v in zip(totals, vs)]
+        edges.append((low, list(totals)))
+    peak = max(totals, default=0)
+    if ref:
+        peak = max(peak, max((v for v in ref[1] if v is not None), default=0))
+    # A caller showing two stacks side by side passes one ymax for both.
+    ymax = nice_max(max(peak, ymax or 0))
+    n = max(1, n_points - 1)
+
+    def x(i: float) -> float:
+        return left + plot_w * i / n
+
+    def y(v: float) -> float:
+        return top + plot_h * (1 - v / ymax)
+
+    parts = []
+    for frac in (0, 0.5, 1):
+        yy = y(ymax * frac)
+        parts.append(
+            f'<line class="{"axis" if frac == 0 else "grid"}" x1="{left}" x2="{width - right}" '
+            f'y1="{yy:.1f}" y2="{yy:.1f}"/>'
+            f'<text class="tick" x="{left - 6}" y="{yy + 3:.1f}" text-anchor="end">'
+            f"{tick(ymax * frac)}</text>"
+        )
+    for frac in (0, 0.25, 0.5, 0.75, 1):
+        i = round(n * frac)
+        anchor = "start" if frac == 0 else "end" if frac == 1 else "middle"
+        parts.append(
+            f'<text class="tick" x="{x(i):.1f}" y="{height - 6}" text-anchor="{anchor}" '
+            f'data-ts="{ticks[i] if ticks else 0}" data-fmt="{fmt}"></text>'
+        )
+    for k, (low, high) in enumerate(edges):
+        if not any(h > lo for h, lo in zip(high, low)):
+            continue
+        up = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(high))
+        down = " ".join(
+            f"{x(i):.1f},{y(v):.1f}" for i, v in reversed(list(enumerate(low)))
+        )
+        parts.append(f'<polygon class="band s{k + 1}" points="{up} {down}"/>')
+    if ref:
+        for run in segments(ref[1], x, y):
+            d = f"M{run[0][0]:.1f},{run[0][1]:.1f}" + "".join(
+                f"H{px:.1f}V{py:.1f}" for px, py in run[1:]
+            )
+            parts.append(f'<path class="ref" d="{d}"/>')
+            lx, ly = run[-1]
+        parts.append(
+            f'<text class="ref-label" x="{lx + 6:.1f}" y="{ly + 3:.1f}">{E(ref[0])}</text>'
+        )
+
+    readout = [
+        {"cls": f"s{k + 1}", "name": name, "values": vs}
+        for k, (name, vs) in enumerate(series)
+    ][::-1]
+    readout.append(
+        {"cls": "", "name": "total", "values": [round(t, 1) for t in totals]}
+    )
+    if ref:
+        readout.append({"cls": "ref", "name": ref[0], "values": ref[1]})
+    legend = "".join(
+        f'<span class="key"><i class="k s{k + 1}"></i>{E(name)}</span>'
+        for k, (name, _) in enumerate(series)
+    ) + (f'<span class="key"><i class="k ref"></i>{E(ref[0])}</span>' if ref else "")
+    data = json.dumps({"ticks": ticks, "series": readout})
+    return (
+        f'<figure class="chart"><figcaption><span class="title">{E(title)}</span>'
+        f'<span class="legend">{legend}</span></figcaption>'
+        f'<div class="plot" data-chart="{E(data)}" data-geom="{left},{right},{width}">'
+        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{E(title)}">'
+        f'{"".join(parts)}<line class="crosshair" x1="0" x2="0" y1="{top}" y2="{top + plot_h}"/>'
+        '</svg><div class="tip" hidden></div></div></figure>'
     )

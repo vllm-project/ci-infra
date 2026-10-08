@@ -215,6 +215,37 @@ class History:
         return view, sources
 
 
+class Bare:
+    """What the bare-metal queues still run, by range, cached like History: the
+    Compare page's measure of how much work kube has not taken yet."""
+
+    def __init__(self, cfg: fleet.Config) -> None:
+        self.cfg = cfg
+        self._lock = threading.Lock()
+        self._cache: dict[tuple, tuple[list, str, float]] = {}
+
+    def get(self, span: dict) -> tuple[list, dict]:
+        key = (span["start"], span["end"])
+        with self._lock:
+            hit = self._cache.get(key)
+            # A failure is retried after a minute rather than ten: its cause,
+            # a missing grant say, is usually fixed by hand while someone looks.
+            fresh = self.cfg.cache_seconds * (1 if hit and hit[1] else 10)
+            if hit and time.time() - hit[2] < fresh:
+                return hit[0], {"name": "BigQuery", "at": hit[2], "error": hit[1]}
+        try:
+            rows, error = fleet.fetch_bare(self.cfg, span["start"], span["end"]), ""
+        except Exception as e:  # noqa: BLE001 - shown on the page, not raised
+            rows, error = [], f"{type(e).__name__}: {e}"[:300]
+            print("Bare-metal step query failed:", file=sys.stderr)
+            traceback.print_exception(type(e), e, e.__traceback__)
+        with self._lock:
+            if len(self._cache) > 16:
+                self._cache.clear()
+            self._cache[key] = (rows, error, time.time())
+        return rows, {"name": "BigQuery", "at": time.time(), "error": error}
+
+
 def parse_span(params: dict, now: float) -> dict:
     """A preset (?preset=7d) or explicit epoch seconds (?start=..&end=..), the
     latter capped at now and at 90 days, both aligned to the chart step."""
@@ -238,7 +269,7 @@ def parse_span(params: dict, now: float) -> dict:
     }
 
 
-def serve(live: Live, history: History, port: int) -> None:
+def serve(live: Live, history: History, bare: Bare, port: int) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - the stdlib's name
             url = urllib.parse.urlparse(self.path)
@@ -248,6 +279,17 @@ def serve(live: Live, history: History, port: int) -> None:
             # /overview as well, for links made before it became the front page.
             if url.path in ("/", "/overview"):
                 page = views.render_overview(live.snapshot())
+                return self.reply(200, "text/html; charset=utf-8", page.encode())
+            # /baseline as well, for links made before Compare replaced it.
+            if url.path in ("/compare", "/baseline"):
+                if "preset" not in params and "start" not in params:
+                    params = {"preset": ["24h"]}
+                span = parse_span(params, time.time())
+                view, sources = history.get(span)
+                rows, status = bare.get(span)
+                page = views.render_compare(
+                    view, rows, {**sources, "bare": status}, span["preset"]
+                )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
             if url.path == "/live":
                 page = views.render_live(live.snapshot())
@@ -306,7 +348,7 @@ def main() -> None:
     fleet.LOCAL = args.local
     cfg = fleet.Config()
     live = Live(cfg)
-    serve(live, History(cfg, live), args.port)
+    serve(live, History(cfg, live), Bare(cfg), args.port)
 
 
 if __name__ == "__main__":

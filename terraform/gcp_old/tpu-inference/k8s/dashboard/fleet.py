@@ -648,12 +648,22 @@ def node_selector(cfg: Config) -> str:
     return f'{duty_selector(cfg)},node_name=~"gke-tpu-[0-9a-f]{{8}}-[a-z0-9]+"'
 
 
+# GKE's node metrics reach Managed Prometheus minutes after they are sampled:
+# measured 2026-10-08, a node's newest sample was a median 170 s and at most
+# 271 s old. Asked about "now" with a 2-minute lookback, two thirds of the
+# nodes had nothing to show (22 of 71 v7x chips). So the live page reads them
+# as of NODE_LAG seconds ago, with a lookback that spans one sample interval
+# and a late arrival; History's past is complete and only needs the lookback.
+NODE_LAG = 300
+NODE_LOOKBACK = "3m"
+
+
 def node_presence(cfg: Config) -> str:
     """1 per TPU node while it exists. allocatable_cores is reported for every
     node, unlike the duty cycle, which some multi-host nodes never report."""
     return (
         "count by (cluster_name, node_name) (last_over_time("
-        f"kubernetes_io:node_cpu_allocatable_cores{{{node_selector(cfg)}}}[2m]))"
+        f"kubernetes_io:node_cpu_allocatable_cores{{{node_selector(cfg)}}}[{NODE_LOOKBACK}]))"
     )
 
 
@@ -696,17 +706,21 @@ def fetch_health(cfg: Config) -> dict:
             f"sum by (cluster_queue, reason) (increase(kueue_evicted_workloads_total{{{sel}}}[24h]))",
             ("cluster_queue", "reason"),
         ),
-        # Chips computing right now, per node, for views.py to sum by node pool
-        # as it does node presence: per queue, and per worker on the overview.
+        # Chips computing, per node, for views.py to sum by node pool as it
+        # does node presence: per queue, and per worker on the overview.
         "busy": (
-            f"sum by (cluster_name, node_name) (last_over_time({busy_duty}[2m])) / 100",
+            f"sum by (cluster_name, node_name) (last_over_time({busy_duty}[{NODE_LOOKBACK}])) / 100",
             ("cluster_name", "node_name"),
         ),
         "nodes": (node_presence(cfg), ("cluster_name", "node_name")),
     }
+    # The node metrics as of NODE_LAG ago, when every node has reported.
+    lagged = {"busy", "nodes"}
+    at = time.time() - NODE_LAG
     with concurrent.futures.ThreadPoolExecutor(len(queries)) as pool:
         futures = {
-            k: pool.submit(prom_now, cfg, q, by) for k, (q, by) in queries.items()
+            k: pool.submit(prom_now, cfg, q, by, at if k in lagged else None)
+            for k, (q, by) in queries.items()
         }
         return {k: f.result() for k, f in futures.items()}
 
@@ -751,7 +765,7 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
         # Busy chips: TensorCore duty cycle, percent per chip, summed. Nodes that
         # do not report it - the disagg multi-host pods' - count as idle.
         "busy": (
-            f"sum_over_time((sum by (model) (last_over_time({duty}[2m])) / 100){window}) {share}",
+            f"sum_over_time((sum by (model) (last_over_time({duty}[{NODE_LOOKBACK}])) / 100){window}) {share}",
             ("model",),
         ),
         # Each TPU node's share of each step, by name, for views.py to sum by
@@ -844,6 +858,57 @@ def bigquery(cfg: Config, sql: str) -> list[dict]:
         dict(zip(names, (cell["v"] for cell in row["f"])))
         for row in body.get("rows", [])
     ]
+
+
+# The bare-metal TPU queues and the chips a job on each holds: Buildkite queue
+# names count TensorCores, two a chip.
+BARE_QUEUES = {
+    "tpu_v7x_2_queue": 1,
+    "tpu_v7x_8_queue": 4,
+    "tpu_v7x_16_queue": 8,
+    "tpu_v7x_32_queue": 16,
+    "tpu_v6e_queue": 1,
+    "tpu_v6e_8_queue": 8,
+}
+
+
+def fetch_bare(cfg: Config, start: int, end: int) -> list[dict]:
+    """What the bare-metal TPU queues ran in [start, end), from the step log
+    table beside the kube timing table: how much of the work kube has not taken
+    yet. The table records a step's queue from 2026-10-01."""
+    if not cfg.timing_table:
+        return []
+    table = cfg.timing_table.rsplit(".", 1)[0] + ".step_execution_logs"
+    queues = ", ".join(f"'{q}'" for q in BARE_QUEUES)
+    chips = (
+        "CASE queue "
+        + " ".join(f"WHEN '{q}' THEN {c}" for q, c in BARE_QUEUES.items())
+        + " END"
+    )
+    lo, hi = f"TIMESTAMP_SECONDS({start})", f"TIMESTAMP_SECONDS({end})"
+
+    def quantile(q: int) -> str:
+        return (
+            "APPROX_QUANTILES(TIMESTAMP_DIFF(started_at, runnable_at, SECOND), 100 IGNORE NULLS)"
+            f"[SAFE_OFFSET({q})]"
+        )
+
+    # One row per job: the table can hold a step more than once.
+    sql = f"""
+WITH jobs AS (
+  SELECT job_id, ANY_VALUE(queue) AS queue, MIN(runnable_at) AS runnable_at,
+    MIN(started_at) AS started_at, MAX(finished_at) AS finished_at
+  FROM `{table}`
+  WHERE queue IN ({queues}) AND started_at < {hi} AND finished_at > {lo}
+    AND created_at >= TIMESTAMP_SECONDS({start - 2 * 86400})
+    AND NOT ENDS_WITH(IFNULL(pipeline_slug, ''), '-kube')
+  GROUP BY job_id)
+SELECT queue, COUNT(*) AS jobs,
+  SUM({chips} * TIMESTAMP_DIFF(LEAST(finished_at, {hi}), GREATEST(started_at, {lo}), SECOND)) / 3600
+    AS chip_hours,
+  {quantile(50)} AS wait_p50, {quantile(90)} AS wait_p90
+FROM jobs GROUP BY queue"""
+    return bigquery(cfg, sql)
 
 
 def fetch_stats(cfg: Config, start: int, end: int) -> dict:
