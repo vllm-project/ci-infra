@@ -1,20 +1,20 @@
 <!doctype html>
 <!--
-  The history page. views.py fills the placeholders - a dollar sign and a
+  The trends page. views.py fills the placeholders - a dollar sign and a
   name - with string.Template, so a literal dollar sign here must be doubled.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TPU CI kube · History</title>
+<title>TPU CI kube · Trends</title>
 <link rel="stylesheet" href="static/style.css?v=$assets">
 </head>
 <body>
 <header class="topbar">
   <div class="inner">
     <h1>TPU CI kube</h1>
-    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab" href="jobs">Jobs</a><a class="tab active" href="history">History</a><a class="tab" href="compare">Compare</a></nav>
+    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab" href="jobs">Jobs</a><a class="tab active" href="trends">Trends</a><a class="tab" href="migration">Migration</a></nav>
     <span class="when"><time data-ts="$start"></time> – <time data-ts="$end"></time> · one point per $step</span>
   </div>
 </header>

@@ -28,9 +28,9 @@ from fleet import (
 E = html.escape
 TEMPLATES = Path(__file__).parent / "templates"
 LIVE_PAGE = string.Template((TEMPLATES / "live.html").read_text())
-HISTORY_PAGE = string.Template((TEMPLATES / "history.html").read_text())
+TRENDS_PAGE = string.Template((TEMPLATES / "trends.html").read_text())
 OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
-COMPARE_PAGE = string.Template((TEMPLATES / "compare.html").read_text())
+MIGRATION_PAGE = string.Template((TEMPLATES / "migration.html").read_text())
 JOBS_PAGE = string.Template((TEMPLATES / "jobs.html").read_text())
 # The bare-metal fleet before the migration, built once from the snapshot by
 # baseline/build_baseline.py; static, since that fleet is being torn down.
@@ -199,7 +199,7 @@ JOB_STATES = {
     "running": ("Running", "Admitted and every pod up."),
 }
 
-# History ranges offered as presets. /api/history also takes ?start=&end= in
+# Ranges offered as presets. /api/history also takes ?start=&end= in
 # epoch seconds, for a range the presets do not cover.
 PRESETS = {"6h": 6 * 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
 PRESET_LABELS = {"6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
@@ -441,7 +441,7 @@ SOURCES = {
             "Workload outcomes and timings: ci_efficiency_metrics.kube_workload_timing"
         ],
         "needs": ["roles/bigquery.dataViewer on the dataset", "roles/bigquery.jobUser"],
-        "fails": ["Only the 24-hour checks and History's outcomes go blank"],
+        "fails": ["Only the 24-hour checks and the outcomes on Trends go blank"],
     },
 }
 
@@ -1444,7 +1444,7 @@ def render_live_queue(q: dict) -> str:
     return f"""
 <div class="card queue{"" if tpu else " other"}" id="{E(q["name"])}">
   <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
-    <span class="more"><a href="jobs?queue={E(urllib.parse.quote(q["name"]))}">Jobs →</a> · <a href="history#{E(q["name"])}">History →</a></span></div>
+    <span class="more"><a href="jobs?queue={E(urllib.parse.quote(q["name"]))}">Jobs →</a> · <a href="trends#{E(q["name"])}">Trends →</a></span></div>
   <div class="stats">
     <p class="stat"><b>{num(q["pending"])}</b><span>pending · oldest {ago(q["oldest_wait"])}</span></p>
     <p class="stat"><b>{num(q["admitted"])}</b><span>admitted{f" · {q['dispatching']} dispatching" if q["dispatching"] else ""}</span></p>
@@ -2119,7 +2119,7 @@ def render_overview(snap: dict) -> str:
 
 
 # --------------------------------------------------------------------------
-# Baseline
+# Migration
 
 
 def gcs_link(path: str, label: str, root: str) -> str:
@@ -2217,7 +2217,7 @@ def kube_split(h: dict, waits: dict, cohort: str) -> dict | None:
     }
 
 
-def render_compare(
+def render_migration(
     h: dict, bare: list, waits: dict, sources: dict, preset: str | None
 ) -> str:
     base = json.loads(BASELINE_FILE.read_text())
@@ -2518,7 +2518,7 @@ def render_compare(
 <tr><th class="n">Steps a day</th><th class="n">Wait p50 / p90</th><th class="n">Steps a day</th><th class="n">Wait p50 / p90</th>
 <th class="n">Steps a day</th><th class="n">Wait p50 / p90</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>
 <p class="muted note">Bare-metal wait is runnable to started on an agent; kube's is submitted to quota reserved, after
-which a step still starts its pods (Node autoscaling on History). Bare metal now is what its queues still run while
+which a step still starts its pods (Node autoscaling on Trends). Bare metal now is what its queues still run while
 the migration finishes.</p>"""
 
     method = f"""<ul class="data-links">
@@ -2560,7 +2560,7 @@ the migration finishes.</p>"""
   <li>{gcs_link("gcp/monitoring/tpu_duty_cycle", "TensorCore duty cycle, per minute", root)} - not used: its series name
     TPU hosts, which the snapshot does not tie to CI agents</li>
 </ul>
-<p class="muted note">The kube side comes from Kueue's metrics and the workload timing table, as on History; bare metal
+<p class="muted note">The kube side comes from Kueue's metrics and the workload timing table, as on Trends; bare metal
 now from the step log table. Rebuild the baseline with <code>dashboard/baseline/build_baseline.py &lt;snapshot dir&gt;</code>.</p>"""
 
     presets = "".join(
@@ -2568,7 +2568,7 @@ now from the step log table. Rebuild the baseline with <code>dashboard/baseline/
         for name, label in PRESET_LABELS.items()
         if name != "6h"
     )
-    return COMPARE_PAGE.substitute(
+    return MIGRATION_PAGE.substitute(
         assets=ASSETS,
         errors=render_errors(sources),
         start=span["start"],
@@ -2587,7 +2587,7 @@ now from the step log table. Rebuild the baseline with <code>dashboard/baseline/
 
 
 # --------------------------------------------------------------------------
-# History
+# Trends
 
 
 def build_history(
@@ -2818,7 +2818,7 @@ def failures_cell(r: dict) -> str:
     )
 
 
-def render_history(h: dict, sources: dict, query: str) -> str:
+def render_trends(h: dict, sources: dict, query: str) -> str:
     span = h["span"]
     fmt = "time" if span["end"] - span["start"] <= 2 * 86400 else "day"
     every = max(1, len(h["ticks"]) // 24)
@@ -2914,7 +2914,7 @@ submitted to quota reserved; how long an admitted workload took to start is unde
         f'<a class="seg-btn{" active" if span.get("preset") == name else ""}" href="?preset={name}">{label}</a>'
         for name, label in PRESET_LABELS.items()
     )
-    return HISTORY_PAGE.substitute(
+    return TRENDS_PAGE.substitute(
         assets=ASSETS,
         errors=render_errors(sources),
         presets=presets,

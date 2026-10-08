@@ -653,7 +653,7 @@ def node_selector(cfg: Config) -> str:
 # 271 s old. Asked about "now" with a 2-minute lookback, two thirds of the
 # nodes had nothing to show (22 of 71 v7x chips). So the live page reads them
 # as of NODE_LAG seconds ago, with a lookback that spans one sample interval
-# and a late arrival; History's past is complete and only needs the lookback.
+# and a late arrival; a past range is complete and only needs the lookback.
 NODE_LAG = 300
 NODE_LOOKBACK = "3m"
 
@@ -874,8 +874,8 @@ BARE_QUEUES = {
 
 def fetch_waits(cfg: Config, start: int, end: int) -> dict:
     """Per queue over [start, end), a point a minute where Prometheus allows:
-    pending workloads, admitted TPU chips and nominal TPU quota, for Compare's
-    idle-while-jobs-waited. Not History's steps: an hour full and queueing in
+    pending workloads, admitted TPU chips and nominal TPU quota, for Migration's
+    idle-while-jobs-waited. Not Trends' steps: an hour full and queueing in
     its first half and idle in its second would average to idle chips beside
     waiting jobs."""
     sel = kueue_selector(cfg)

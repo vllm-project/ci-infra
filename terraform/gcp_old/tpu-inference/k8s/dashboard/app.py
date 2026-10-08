@@ -290,15 +290,15 @@ def serve(
             if url.path in ("/", "/overview"):
                 page = views.render_overview(live.snapshot())
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
-            # /baseline as well, for links made before Compare replaced it.
-            if url.path in ("/compare", "/baseline"):
+            # Its old names as well, Compare and Baseline, for links made before.
+            if url.path in ("/migration", "/compare", "/baseline"):
                 if "preset" not in params and "start" not in params:
                     params = {"preset": ["24h"]}
                 span = parse_span(params, time.time())
                 view, sources = history.get(span)
                 rows, status = bare.get(span)
                 minutes, minutes_status = waits.get(span)
-                page = views.render_compare(
+                page = views.render_migration(
                     view,
                     rows,
                     minutes,
@@ -327,13 +327,14 @@ def serve(
             if url.path == "/api/live":
                 body = json.dumps(live.snapshot(), indent=1)
                 return self.reply(200, "application/json", body.encode())
-            if url.path in ("/history", "/api/history"):
+            # /history as well, the page's old name.
+            if url.path in ("/trends", "/history", "/api/history"):
                 view, sources = history.get(parse_span(params, time.time()))
                 if url.path == "/api/history":
                     return self.reply(
                         200, "application/json", json.dumps(view, indent=1).encode()
                     )
-                page = views.render_history(
+                page = views.render_trends(
                     view, sources, f"?{url.query}" if url.query else ""
                 )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
