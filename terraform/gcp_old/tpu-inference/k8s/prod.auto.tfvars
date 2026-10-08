@@ -222,6 +222,11 @@ worker_clusters = [
         min_nodes     = 0
         max_nodes     = 128
         nominal_quota = 16
+
+        # Overflow onto Spot once the reservation and what this shape can
+        # borrow are spent. Sized as a placeholder: the project's Spot quota for
+        # tpu7x-standard-1t in us-central1-c is not confirmed yet.
+        spot = { max_nodes = 16 }
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -232,6 +237,9 @@ worker_clusters = [
         min_nodes     = 0
         max_nodes     = 32
         nominal_quota = 64
+
+        # As for 1x1x1; Spot quota for tpu7x-standard-4t not confirmed yet.
+        spot = { max_nodes = 4 }
       },
       {
         # Eight chips as one slice across two VMs, placed from the named

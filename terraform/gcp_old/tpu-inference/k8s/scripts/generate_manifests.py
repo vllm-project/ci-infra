@@ -484,6 +484,26 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
                 "shape's share of the reservation"
             )
 
+        # Spot is overflow beside the reservation, single-host only: GKE reclaims
+        # a multi-host slice whole, and Kueue admits chips, not slices, so a
+        # slice half of which could be Spot is not one it can place.
+        spot = pool.get("spot")
+        spot_quota = spot_capacity = 0
+        if spot:
+            if hosts > 1:
+                raise ValueError(
+                    f"{name}: spot is for single-host shapes; a {topology} slice "
+                    f"spans {hosts} hosts"
+                )
+            spot_capacity = int(spot["max_nodes"]) * chips
+            spot_quota = int(spot.get("nominal_quota") or spot_capacity)
+            if spot_quota % slice_chips or spot_quota > spot_capacity:
+                raise ValueError(
+                    f"{name}: spot.nominal_quota={spot_quota} has to be whole "
+                    f"{slice_chips}-chip slices and at most the {spot_capacity} "
+                    "chips its Spot pool can hold"
+                )
+
         memory_gb = machine_memory_gb.get(machine_type)
         if memory_gb is None:
             raise ValueError(
@@ -514,6 +534,9 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
             "capacity": capacity,
             # And this: what its quota cannot lend. See queues().
             "parked": parked,
+            # The same pair for the shape's Spot pool, 0 when it has none.
+            "spot_quota": spot_quota,
+            "spot_capacity": spot_capacity,
         }
     return out
 
@@ -572,6 +595,7 @@ def queues(
     reclaim: dict[str, str] | None = None,
     capacities: dict[str, int | None] | None = None,
     parked: dict[str, int] | None = None,
+    spot: dict[str, int] | None = None,
 ) -> str:
     """A flavor per machine family, then a queue per shape sharing it.
 
@@ -586,10 +610,18 @@ def queues(
     against those chips would wait for hardware sitting idle in this shape's
     nodes.
     """
-    out = [priority_classes()] + [
-        render("resource_flavor", ACCELERATOR=family)
-        for family in sorted({cohort(name) for name in shapes})
-    ]
+    spot = {name: chips for name, chips in (spot or {}).items() if chips}
+    out = (
+        [priority_classes()]
+        + [
+            render("resource_flavor", ACCELERATOR=family)
+            for family in sorted({cohort(name) for name in shapes})
+        ]
+        + [
+            render("resource_flavor_spot", ACCELERATOR=family)
+            for family in sorted({cohort(name) for name in spot})
+        ]
+    )
     for name, chips in sorted(shapes.items()):
         out.append(
             render(
@@ -605,9 +637,36 @@ def queues(
                 RECLAIM_WITHIN_COHORT=(reclaim or {}).get(name, "Never"),
                 BORROWING_LIMIT=borrowing_limit(chips, (capacities or {}).get(name)),
                 LENDING_LIMIT=lending_limit(chips, (parked or {}).get(name, 0)),
+                FLAVOR_FUNGIBILITY=FLAVOR_FUNGIBILITY if name in spot else "",
+                SPOT_FLAVOR=spot_flavor(cohort(name), spot[name]) if name in spot else "",
             )
         )
     return "".join(out)
+
+
+# Reserved first, Spot only once it is spent. MayStopSearch admits on the
+# reserved flavor whenever it fits, borrowing from the cohort included, so Spot
+# is reached only when the shape could not run on the reservation at all.
+# TryNextFlavor on preemption: if the reservation fits only by preempting - a
+# reclaim of lent quota - take Spot instead of evicting a running workload.
+FLAVOR_FUNGIBILITY = """
+  flavorFungibility:
+    whenCanBorrow: MayStopSearch
+    whenCanPreempt: TryNextFlavor"""
+
+
+def spot_flavor(family: str, chips: int) -> str:
+    """The Spot flavor's entry in a queue's flavor list, after the reserved one.
+
+    No borrowingLimit: the Spot quota is the shape's own, so a shape cannot
+    borrow past what its own Spot pool holds - but it can borrow the Spot quota
+    of another shape in the cohort, which is the point of one cohort.
+    """
+    return f"""
+        - name: {family}-spot
+          resources:
+            - name: google.com/tpu
+              nominalQuota: {chips}"""
 
 
 def borrowing_limit(quota: int, capacity: int | None) -> str:
@@ -753,7 +812,7 @@ def launcher_profiles(
                         for key, value in entry["shape"].items()
                         # Kueue's, not the launcher's: what a shape's queue may
                         # hold says nothing about where one workload runs.
-                        if key not in ("quota", "capacity", "parked")
+                        if key not in ("quota", "capacity", "parked", "spot_quota", "spot_capacity")
                     },
                     "max_runtime_seconds": int(tfvars["tpu_test_max_seconds"]),
                 }
@@ -843,6 +902,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             "quota": 0,
             "capacity": None,
             "parked": 0,
+            "spot_quota": 0,
+            "spot_capacity": 0,
             # What the compute class builds a node against. One size for the
             # lane; a step wanting another states its own manifest.
             **CPU_JOB_SIZE,
@@ -851,10 +912,19 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             # The shape is stored once, not summed: two clusters running it
             # run the same hardware. Only the quota adds up.
             entry = fleet.setdefault(
-                name, {"quota": 0, "capacity": None, "parked": 0, "workers": [], "shape": shape}
+                name,
+                {
+                    "quota": 0,
+                    "capacity": None,
+                    "parked": 0,
+                    "spot_quota": 0,
+                    "workers": [],
+                    "shape": shape,
+                },
             )
             entry["quota"] += shape["quota"]
             entry["parked"] += shape["parked"]
+            entry["spot_quota"] += shape["spot_quota"]
             if shape["capacity"] is not None:
                 entry["capacity"] = (entry["capacity"] or 0) + shape["capacity"]
             entry["workers"].append(cluster_name)
@@ -891,6 +961,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 namespace,
                 checks=False,
                 capacities={name: shape["capacity"] for name, shape in local.items()},
+                spot={name: shape["spot_quota"] for name, shape in local.items()},
             ),
         )
         write(
@@ -1062,6 +1133,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             reclaim=reclaim_policies(tfvars),
             capacities={name: entry["capacity"] for name, entry in fleet.items()},
             parked={name: entry["parked"] for name, entry in fleet.items()},
+            spot={name: entry["spot_quota"] for name, entry in fleet.items()},
         ),
     )
     write(
