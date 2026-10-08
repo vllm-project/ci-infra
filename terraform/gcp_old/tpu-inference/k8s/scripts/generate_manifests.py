@@ -126,11 +126,13 @@ CPU_QUEUE = "cpu"
 CPU_QUEUE_RESOURCE = "cpu"
 CPU_QUEUE_CORES = 100000
 
-# Sized to a unit suite, so several fit a node. Requests equal limits because a
-# worker-cpu node is shared where a TPU host is not.
+# Sized to a unit suite, so several fit a node: vllm-torchtpu's CPU unit tests,
+# the largest chip-less steps, peak near 1.5 cores and 3.6 GiB (10-01..10-07).
+# Requests equal limits because a worker-cpu node is shared where a TPU host is
+# not.
 CPU_JOB_SIZE = {
-    "cpu_cores": "6",
-    "cpu_memory": "16Gi",
+    "cpu_cores": "4",
+    "cpu_memory": "8Gi",
     "cpu_disk": "20Gi",
 }
 

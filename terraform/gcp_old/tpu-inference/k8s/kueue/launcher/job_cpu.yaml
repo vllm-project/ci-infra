@@ -26,6 +26,22 @@ metadata:
 spec:
   parallelism: 1
   completions: 1
+  # pod_defaults.yaml's tpuJobs policy, stated here because the launcher merges
+  # tpuJobs only into a Job that holds chips. Without it a red test or an OOM
+  # kill reruns the whole suite up to six more times before the step fails.
+  # Retries are for pods that never ran the workload: a disruption, or a node
+  # repaired under the pod.
+  backoffLimit: 6
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+      - action: FailJob
+        onExitCodes:
+          containerName: workload
+          operator: NotIn
+          values: [0]
   template:
     spec:
       # No TPU nodeSelector and no toleration: a TPU node is tainted against
