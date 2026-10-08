@@ -648,12 +648,22 @@ def node_selector(cfg: Config) -> str:
     return f'{duty_selector(cfg)},node_name=~"gke-tpu-[0-9a-f]{{8}}-[a-z0-9]+"'
 
 
+# GKE's node metrics reach Managed Prometheus minutes after they are sampled:
+# measured 2026-10-08, a node's newest sample was a median 170 s and at most
+# 271 s old. Asked about "now" with a 2-minute lookback, two thirds of the
+# nodes had nothing to show (22 of 71 v7x chips). So the live page reads them
+# as of NODE_LAG seconds ago, with a lookback that spans one sample interval
+# and a late arrival; History's past is complete and only needs the lookback.
+NODE_LAG = 300
+NODE_LOOKBACK = "3m"
+
+
 def node_presence(cfg: Config) -> str:
     """1 per TPU node while it exists. allocatable_cores is reported for every
     node, unlike the duty cycle, which some multi-host nodes never report."""
     return (
         "count by (cluster_name, node_name) (last_over_time("
-        f"kubernetes_io:node_cpu_allocatable_cores{{{node_selector(cfg)}}}[2m]))"
+        f"kubernetes_io:node_cpu_allocatable_cores{{{node_selector(cfg)}}}[{NODE_LOOKBACK}]))"
     )
 
 
@@ -696,17 +706,21 @@ def fetch_health(cfg: Config) -> dict:
             f"sum by (cluster_queue, reason) (increase(kueue_evicted_workloads_total{{{sel}}}[24h]))",
             ("cluster_queue", "reason"),
         ),
-        # Chips computing right now, per node, for views.py to sum by node pool
-        # as it does node presence: per queue, and per worker on the overview.
+        # Chips computing, per node, for views.py to sum by node pool as it
+        # does node presence: per queue, and per worker on the overview.
         "busy": (
-            f"sum by (cluster_name, node_name) (last_over_time({busy_duty}[2m])) / 100",
+            f"sum by (cluster_name, node_name) (last_over_time({busy_duty}[{NODE_LOOKBACK}])) / 100",
             ("cluster_name", "node_name"),
         ),
         "nodes": (node_presence(cfg), ("cluster_name", "node_name")),
     }
+    # The node metrics as of NODE_LAG ago, when every node has reported.
+    lagged = {"busy", "nodes"}
+    at = time.time() - NODE_LAG
     with concurrent.futures.ThreadPoolExecutor(len(queries)) as pool:
         futures = {
-            k: pool.submit(prom_now, cfg, q, by) for k, (q, by) in queries.items()
+            k: pool.submit(prom_now, cfg, q, by, at if k in lagged else None)
+            for k, (q, by) in queries.items()
         }
         return {k: f.result() for k, f in futures.items()}
 
@@ -751,7 +765,7 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
         # Busy chips: TensorCore duty cycle, percent per chip, summed. Nodes that
         # do not report it - the disagg multi-host pods' - count as idle.
         "busy": (
-            f"sum_over_time((sum by (model) (last_over_time({duty}[2m])) / 100){window}) {share}",
+            f"sum_over_time((sum by (model) (last_over_time({duty}[{NODE_LOOKBACK}])) / 100){window}) {share}",
             ("model",),
         ),
         # Each TPU node's share of each step, by name, for views.py to sum by

@@ -280,7 +280,7 @@ def serve(live: Live, history: History, bare: Bare, port: int) -> None:
             # /baseline as well, for links made before Compare replaced it.
             if url.path in ("/compare", "/baseline"):
                 if "preset" not in params and "start" not in params:
-                    params = {"preset": ["7d"]}
+                    params = {"preset": ["24h"]}
                 span = parse_span(params, time.time())
                 view, sources = history.get(span)
                 rows, status = bare.get(span)

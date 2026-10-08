@@ -381,3 +381,18 @@ i.k.s3 { background: var(--cat-3); } i.k.s4 { background: var(--cat-4); }
 .compare-note { align-self: center; font-size: 14px; max-width: 460px; }
 th.group { text-align: center; border-bottom: 1px solid var(--line); }
 .range > .muted { font-size: 13px; }
+
+/* Glossary terms: a dotted underline, the definition in a bubble on hover or
+   focus. The definition is real text, so a screen reader reads it inline. */
+.term { position: relative; border-bottom: 1px dotted var(--muted); cursor: help; outline: none; }
+.tile span.term, th .term { display: inline; font: inherit; color: inherit; }
+.term .tip { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: normal; }
+.term:hover .tip, .term:focus .tip {
+  clip: auto; width: max-content; max-width: 320px; height: auto; overflow: visible; z-index: 30;
+  left: 0; top: calc(100% + 6px); padding: 8px 11px; border-radius: 10px;
+  background: rgba(29, 29, 31, 0.94); color: #fff; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  font-size: 13px; font-weight: 400; line-height: 1.45; letter-spacing: 0; text-transform: none; text-align: left;
+}
+.tile span.term .tip { display: block; font-size: 13px; color: #fff; }
+th.n .term:hover .tip, th.n .term:focus .tip { left: auto; right: 0; }
+.table-wrap:has(.term:hover), .table-wrap:has(.term:focus) { overflow: visible; }
