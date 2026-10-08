@@ -164,6 +164,16 @@ def main() -> None:
         ]
         for q in QUEUES
     }
+    # And the hour's average, for every share: chip-hours held over chip-hours
+    # the connected agents had, so a VM that was there for a while counts on
+    # both sides and one that was down on neither.
+    connected_mean = {
+        q: [
+            statistics.mean(by_hour[q][i]) * QUEUES[q][1] if by_hour[q].get(i) else 0.0
+            for i in range(hours)
+        ]
+        for q in QUEUES
+    }
 
     days = (END - START).days
     queues = []
@@ -183,14 +193,15 @@ def main() -> None:
                 "capacity": capacity,
                 "jobs": jobs[queue],
                 "chip_hours": round(chip_hours[queue]),
-                "busy_share": chip_hours[queue] / (capacity * hours)
-                if capacity
+                "busy_share": chip_hours[queue] / sum(connected_mean[queue])
+                if sum(connected_mean[queue])
                 else None,
                 "wait_p50": quantile(waits[queue], 0.5),
                 "wait_p90": quantile(waits[queue], 0.9),
                 "by_kind": {k: round(v) for k, v in by_kind[queue].most_common()},
                 "held": [round(v, 2) for v in held[queue]],
                 "connected": connected_chips[queue],
+                "connected_mean": [round(v, 2) for v in connected_mean[queue]],
             }
         )
 
@@ -198,18 +209,30 @@ def main() -> None:
     for generation in ("v7x", "v6e"):
         members = [q for q in queues if q["generation"] == generation]
         series = [round(sum(v), 2) for v in zip(*(q["held"] for q in members))]
+        had = [sum(v) for v in zip(*(q["connected_mean"] for q in members))]
         capacity = sum(q["capacity"] for q in members)
-        # Hour of day in Pacific time, when the schedules are set.
+        # Hour of day in Pacific time, when the schedules are set: chips held
+        # over chips connected, summed over the days at that hour.
         pacific = dt.timezone(dt.timedelta(hours=-7))
         by_hour = collections.defaultdict(list)
-        for i, v in enumerate(series):
-            by_hour[dt.datetime.fromtimestamp(start + i * 3600, pacific).hour].append(v)
+        held_at, had_at = collections.Counter(), collections.Counter()
+        for i, (v, c) in enumerate(zip(series, had)):
+            h = dt.datetime.fromtimestamp(start + i * 3600, pacific).hour
+            by_hour[h].append(v)
+            held_at[h] += v
+            had_at[h] += c
         generations.append(
             {
                 "name": generation,
                 "capacity": capacity,
                 "held": series,
                 "mean_held": statistics.mean(series),
+                "mean_connected": statistics.mean(had),
+                "held_share": sum(series) / sum(had) if sum(had) else None,
+                "by_hour_share_pt": [
+                    round(100 * held_at[h] / had_at[h], 1) if had_at[h] else None
+                    for h in range(24)
+                ],
                 "peak_held": max(series),
                 "chip_hours": round(sum(series)),
                 "jobs": sum(q["jobs"] for q in members),

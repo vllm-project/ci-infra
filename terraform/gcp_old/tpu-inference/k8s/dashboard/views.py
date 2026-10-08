@@ -2179,7 +2179,7 @@ def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> st
                 if v is not None and cap
             ]
         )
-        b_util = g["mean_held"] / g["capacity"]
+        b_util = g["held_share"]
         pairs = [
             (bq, kq)
             for bq, kq in SHAPE_PAIRS
@@ -2204,7 +2204,7 @@ def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> st
         k_hours = [
             round(mean(by_hour[hh]), 1) if by_hour[hh] else None for hh in range(24)
         ]
-        b_hours = [round(100 * v / g["capacity"], 1) for v in g["by_hour_pt"]]
+        b_hours = g["by_hour_share_pt"]
 
         # One row per shape: bare metal's chips held against that shape's own
         # VMs beside kube's admitted chips against its nominal, on one scale.
@@ -2249,7 +2249,7 @@ def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> st
   <div class="card-head"><h2>{E(g["name"])}</h2><span class="sub">bare metal before → kube now</span></div>
   <div class="tiles">
     {tile(term("Chips held"), pct(b_util), pct(k_util), "on average, of the chips each fleet had")}
-    {tile("Chips", num(g["capacity"]), num(k_cap_now), "bare metal's VMs → kube's quota now" + (f"; {num(k_cap)} on average over the window" if abs(k_cap - k_cap_now) >= 1 else ""))}
+    {tile("Chips", num(g["capacity"]), num(k_cap_now), f"bare metal's VMs ({num(g['mean_connected'])} connected on average) → kube's quota now" + (f" ({num(k_cap)} on average)" if abs(k_cap - k_cap_now) >= 1 else ""))}
     {tile("Work a day", num(g["mean_held"] * 24), num(k_work), f"chip-hours; steps a day {num(b_steps)} → {num(k_steps)}")}
     <div class="tile"><span>Kube's share of the work now</span><b>{pct(share)}</b><small>bare metal still ran {num(bare_work)} chip-hours a day{" (counted from 10-01)" if partial else ""}</small></div>
   </div>
@@ -2296,7 +2296,7 @@ the migration finishes.</p>"""
     method = f"""<ul class="data-links">
   <li><b>Chips held</b> is the chips occupied by running work as a share of the chips the fleet had. On bare
     metal a job holds its whole VM - a <code>tpu_v7x_16_queue</code> job holds that VM's 8 chips, and while the VM
-    has no job all 8 are idle - against the chips of the agents connected over {E(base["window"])}. On kube it is
+    has no job all 8 are idle - over the chip-hours of the agents connected through {E(base["window"])}. On kube it is
     Kueue's admitted chips against the cohort's quota over the window. Both count a chip from when work takes it
     to when it lets go, whatever the TensorCores do meanwhile: occupancy, not compute.</li>
   <li><b>Work a day</b> is the chip-hours held each day, and the steps that finished. Holding more chips only counts
