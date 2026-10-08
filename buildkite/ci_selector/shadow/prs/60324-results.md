@@ -232,10 +232,10 @@ none
 none
 </details>
 
-#### CI results (2026-10-07 18:37 UTC)
+#### CI results (2026-10-08 01:39 UTC)
 
 0 passed, 0 failed, 0 pending.
 
 No failures to judge.
 
-<sub>18 changed files · base `c741bfca70` · head `f29f845e9e` · Python record: build 93039 at `1e5d0ea888` · kernel record: table 43b4aaea3e (build 93244), map 43b4aaea3e · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 138 optional steps the selector would also run</sub>
+<sub>18 changed files · base `c741bfca70` · head `d5629a724f` · Python record: build 93039 at `1e5d0ea888` · kernel record: table 43b4aaea3e (build 93244), map 43b4aaea3e · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 138 optional steps the selector would also run</sub>
