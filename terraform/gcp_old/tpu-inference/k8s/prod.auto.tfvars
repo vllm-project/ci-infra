@@ -115,6 +115,11 @@ tpu_admission_max_seconds = 3600
 tpu_dispatch_retry_seconds = 120
 tpu_dispatch_retries       = 2
 
+# Long enough for a TPU node to come up from zero, short of recoveryTimeout (30
+# minutes, kueue/common-config.yaml), so a replacement pod stuck on Spot is
+# moved before Kueue requeues the workload, possibly onto Spot again.
+tpu_spot_wait_seconds = 900
+
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
 # than the repository. Trailing slash required: without it the prefix would also
