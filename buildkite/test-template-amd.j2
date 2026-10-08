@@ -169,10 +169,37 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         agents:
           queue: amd-cpu
 
-      - label: "AMD: :docker: build test image and artifacts"
+      {% if aiter_nightly == "1" %}
+      {# Installs the AITER nightly over the stock ci_base and pushes the result
+         as this build's ci_base-build tag, so every later step uses it. #}
+      - label: "AMD: :crescent_moon: install AITER nightly"
         depends_on: "ensure-ci-base-amd"
         soft_fail: false
         commands:
+          - curl -fsSL -o aiter-nightly-overlay.sh "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch }}/buildkite/scripts/aiter-nightly-overlay.sh"
+          - bash aiter-nightly-overlay.sh
+        key: "aiter-nightly-amd"
+        timeout_in_minutes: 60
+        env:
+          VLLM_CI_BRANCH: "{{ vllm_ci_branch }}"
+{{ amd_infra_retry('        ', true) }}
+        agents:
+          queue: amd-cpu
+      {% endif %}
+
+      {% set ci_base_ready_key = "aiter-nightly-amd" if aiter_nightly == "1" else "ensure-ci-base-amd" %}
+
+      - label: "AMD: :docker: build test image and artifacts"
+        depends_on: "{{ ci_base_ready_key }}"
+        soft_fail: false
+        commands:
+          {% if aiter_nightly == "1" %}
+          {# build-test-image.sh builds on rocm-ci-base-image, the stock ci_base
+             pinned by digest. Point it at the AITER nightly image right before
+             the build reads it, so a re-run of ensure-ci-base-amd cannot set it
+             back. #}
+          - 'buildkite-agent meta-data set rocm-ci-base-image "$$(buildkite-agent meta-data get aiter-nightly-ci-base)"'
+          {% endif %}
           - bash .buildkite/scripts/rocm/build-test-image.sh
           - bash .buildkite/scripts/rocm/smoke-test-image.sh
         key: "image-build-amd"
@@ -185,14 +212,20 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           IMAGE_TAG: "{{ amd_ci_image() | safe }}"
           REMOTE_VLLM: "0"
+          {% if aiter_nightly == "1" %}
+          {# The nightly runs on main. Give it its own branch cache and keep it
+             out of the shared content cache, so it does not overwrite main's. #}
+          ROCM_CACHE_BRANCH_NAME: "aiter-nightly"
+          ROCM_CONTENT_CACHE_EXPORT_MODE: "never"
+          {% endif %}
 {{ amd_infra_retry('        ', true) }}
         agents:
           queue: amd-cpu
 
-      {# Native pods pull ci_base-build-$BUILDKITE_BUILD_ID. Fail before those
-         jobs schedule if that tag is not on Docker Hub. DinD jobs do not wait. #}
+      {# Native pods pull amd_native_base_image(). Fail before those jobs
+         schedule if that tag is not on Docker Hub. DinD jobs do not wait. #}
       - label: "AMD: :docker: verify native ci_base"
-        depends_on: "ensure-ci-base-amd"
+        depends_on: "{{ ci_base_ready_key }}"
         soft_fail: false
         commands:
           - docker manifest inspect "{{ amd_native_base_image() | safe }}"
@@ -203,7 +236,12 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           queue: amd-cpu
 
     {% for step in steps %}
-    {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
+    {# In the AITER nightly, only the GPUs AITER prebuilds kernels for:
+       MI300 (gfx942) and MI355 (gfx950), AITER_ROCM_ARCH in Dockerfile.rocm_base. #}
+    {% set aiter_step = "amdgfx942nightly" in (step.mirror_hardwares or []) or "amdgfx950nightly" in (step.mirror_hardwares or []) %}
+    {% set skip_in_aiter_nightly = aiter_nightly == "1" and not aiter_step %}
+    {% set mirrored = step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
+    {% if mirrored and not skip_in_aiter_nightly %}
 
     {% set ns = namespace(blocked=1) %}
     {% set step_slug = amd_step_slug(step) %}
@@ -236,6 +274,10 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
       {% endif %}
 
       {% set step_gated = (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+      {# A step is normally gated behind an Unblock button when it is optional or
+         the change does not touch its files. A scheduled build of main has no
+         change and nobody to click, so in the AITER nightly nothing is gated. #}
+      {% if aiter_nightly == "1" %}{% set step_gated = false %}{% endif %}
       {% if step_gated %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
         depends_on: image-build-amd

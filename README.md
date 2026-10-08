@@ -89,6 +89,18 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 
 `buildkite/test-template-amd.j2` renders vLLM's [`test-amd.yaml`](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-amd.yaml) into Buildkite YAML using [minijinja-cli](https://github.com/mitsuhiko/minijinja).
 
+#### AITER nightly (AMD CI)
+
+`AITER_NIGHTLY=1`, on a scheduled `amd-ci` build of `main`, tests last night's [AITER](https://github.com/ROCm/aiter) build against vLLM:
+
+1. `aiter-nightly-amd` (`buildkite/scripts/aiter-nightly-overlay.sh`, `select_aiter_nightly_wheel.py`) installs the newest AITER nightly wheel built for the image's ROCm, torch and Python over this build's ci_base, and pushes the result as this build's `rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID`, in place of the stock one.
+2. The test image and every native GPU job run on that image. Test image layers go to an `aiter-nightly` cache branch.
+3. Every `amdproduction` step on MI300 or MI355 (`amdgfx942nightly`, `amdgfx950nightly`) runs, unblocked. MI250 is left out: AITER builds no kernels for it.
+
+The overlay step fails before any GPU job runs, with an error annotation and exit code: `10` no wheel for the image's ROCm/Python, `11` install failed, `12` prebuilt modules do not load. The newest wheel is tested however old it is; the annotation shows its build date.
+
+A retried overlay step reinstalls the wheel its first attempt chose.
+
 ### Bootstrap Scripts
 
 | Script | Pipeline | Generation Method |
@@ -224,6 +236,7 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 | `COV_ENABLED` | Enable pytest coverage collection and Codecov upload |
 | `DOCS_ONLY_DISABLE` | Skip docs-only detection (always run CI) |
 | `AMD_MIRROR_HW` | AMD hardware mirror target (default: `amdproduction`) |
+| `AITER_NIGHTLY` | AMD CI: set to `1` to test the latest AITER nightly wheel on every MI300/MI355 production step (see [AITER nightly](#aiter-nightly-amd-ci)); also disables the docs-only skip |
 | `NOAUTO` | Set to `1` to gate all steps behind manual approval blocks |
 | `PRIORITY` | Set to `HIGH` for high-priority pipeline scheduling |
 
