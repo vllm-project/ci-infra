@@ -188,9 +188,10 @@ worker_clusters = [
     # Four shapes over the 72 v7x chips the bare-metal agents leave free in the
     # reservation (128, of which the agents hold 56). Nominal quota is what a
     # shape can always get back: 32 on 2x2x4 (two slices, the Kimi-K3 1P1D),
-    # and the other 40 on the single-host shapes in proportion to what they
-    # run (10-04..10-07: 2x2x1 averaged 13.4 chips busy, 1x1x1 3.8), so 32 on
-    # 2x2x1 and 8 on 1x1x1. 2x2x2 owns none and borrows.
+    # one slice, 8, on 2x2x2 - owning none, its steps waited on every slice
+    # they borrowed (10-01..10-08: p90 2.2 h) - and the other 32 on the
+    # single-host shapes in proportion to what they run (10-01..10-08: 2x2x1
+    # averaged 14.3 chips in use, 1x1x1 2.8), so 24 on 2x2x1 and 8 on 1x1x1.
     # Every pool can grow to all 72 chips, so a shape can borrow whatever the
     # others leave idle: the cohort accounting decides how many run at once and
     # the node pools only decide what a chip can be shaped into.
@@ -216,7 +217,7 @@ worker_clusters = [
 
         min_nodes     = 0
         max_nodes     = 18
-        nominal_quota = 32
+        nominal_quota = 24
       },
       {
         # Eight chips as one slice across two VMs, placed from the named
@@ -230,7 +231,7 @@ worker_clusters = [
         zone             = "us-central1-c"
 
         slices        = 9
-        nominal_quota = 0
+        nominal_quota = 8
       },
       {
         # Two slices nominal for the Kimi-K3 1P1D, which takes them back from

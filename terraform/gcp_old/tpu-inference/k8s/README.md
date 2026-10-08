@@ -345,14 +345,15 @@ faster before the first line arrives, which covers the built-in Job. The step
 still passes or fails correctly and says when output is missing; the container
 output is in Cloud Logging either way.
 
-**Two of the three v7x shapes have no quota of their own.** All eight chips are
-the nominal quota of `tpu7x-standard-4t-2x2x1`; `tpu7x-standard-1t-1x1x1` and
-`tpu7x-standard-4t-2x2x2` have zero and run entirely on what that queue is not
-using. Eight chips will not divide three ways and still leave each shape a whole
-slice, so this is deliberate — but it means a single-chip step can wait behind a
-four-chip one indefinitely, and `reclaimWithinCohort: Never` will not preempt to
-free it. If a shape is starving, the lever is the split in `prod.auto.tfvars`,
-not the node pools.
+**Every v7x shape has quota of its own, and only 2x2x4 takes it back.** The
+72 chips split 32 to `tpu7x-standard-4t-2x2x4` (two slices), 24 to
+`tpu7x-standard-4t-2x2x1`, 8 to `tpu7x-standard-4t-2x2x2` (one slice) and 8 to
+`tpu7x-standard-1t-1x1x1`; any shape can borrow what the others leave idle.
+Kueue considers a workload that fits a queue's own quota before one that has
+to borrow, so a shape under its nominal gets freed chips first - but only
+2x2x4 has `reclaimWithinCohort: Any` and evicts borrowers to get its slices
+back; the rest wait for borrowers to finish. If a shape is starving, the lever
+is the split in `prod.auto.tfvars`, not the node pools.
 
 **A cold pool's first image pull is slow, and that is not streaming failing.**
 Image streaming is on for every TPU pool, but GKE serves an image it has
