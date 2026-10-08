@@ -307,6 +307,21 @@ variable "tpu_dispatch_retries" {
   description = "How many times the launcher resubmits a workload whose dispatch stalled (see tpu_dispatch_retry_seconds) before leaving it to tpu_admission_max_seconds."
 }
 
+variable "tpu_spot_wait_seconds" {
+  type        = number
+  description = <<-EOT
+    How long a pod admitted onto Spot may go unscheduled before the launcher
+    resubmits its workload with Spot ruled out, once per step.
+
+    Spot quota is a count, not capacity: Kueue admits onto it whether or not
+    GCE has a Spot VM to give, and a pool that cannot scale up changes nothing
+    Kueue sees. Left alone, the workload holds the admission until
+    waitForPodsReady requeues it, and requeued with its Spot quota free it can
+    be admitted onto Spot again. The resubmission waits for the reservation,
+    as a shape without a Spot pool would.
+  EOT
+}
+
 variable "tpu_runtime_max_seconds" {
   type        = number
   description = <<-EOT

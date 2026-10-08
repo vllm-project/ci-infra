@@ -624,15 +624,18 @@ FLAVOR_FUNGIBILITY = """
 def spot_flavor(family: str, chips: int) -> str:
     """The Spot flavor's entry in a queue's flavor list, after the reserved one.
 
-    No borrowingLimit: the Spot quota is the shape's own, so a shape cannot
-    borrow past what its own Spot pool holds - but it can borrow the Spot quota
-    of another shape in the cohort, which is the point of one cohort.
+    borrowingLimit 0: the quota is the chips the shape's own Spot pool can
+    hold. Reserved quota is borrowable because every shape's pool draws on one
+    reservation; Spot pools are capped one by one, so another shape's idle
+    Spot quota stands for nodes of the wrong shape, and borrowing it would
+    admit a workload no node can take.
     """
     return f"""
         - name: {family}-spot
           resources:
             - name: google.com/tpu
-              nominalQuota: {chips}"""
+              nominalQuota: {chips}
+              borrowingLimit: 0"""
 
 
 def borrowing_limit(quota: int, capacity: int | None) -> str:
@@ -741,6 +744,7 @@ def launcher_profiles(
             "admission_max_seconds": int(tfvars["tpu_admission_max_seconds"]),
             "dispatch_retry_seconds": int(tfvars["tpu_dispatch_retry_seconds"]),
             "dispatch_retries": int(tfvars["tpu_dispatch_retries"]),
+            "spot_wait_seconds": int(tfvars["tpu_spot_wait_seconds"]),
             # Where the launcher streams one timing record per workload. The
             # table is modules/ci_monitoring's, beside the Buildkite step
             # table it joins to on job_id; k8s/iam.tf lets the launcher write

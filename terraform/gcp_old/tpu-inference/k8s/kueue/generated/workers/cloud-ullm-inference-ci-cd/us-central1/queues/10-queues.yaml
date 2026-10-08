@@ -193,6 +193,7 @@ spec:
           resources:
             - name: google.com/tpu
               nominalQuota: 16
+              borrowingLimit: 0
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -244,6 +245,7 @@ spec:
           resources:
             - name: google.com/tpu
               nominalQuota: 16
+              borrowingLimit: 0
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue

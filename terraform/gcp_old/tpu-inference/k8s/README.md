@@ -425,7 +425,11 @@ flavor, `<generation>-spot`. Nothing about a step changes: no flag, no queue,
 no label. Kueue tries the reserved flavor first, borrowing from the cohort
 included, and admits onto Spot only when the reservation cannot take the
 workload - overflow, since the reservation is paid for either way. It reaches
-for Spot rather than preempt a running workload to reclaim lent quota.
+for Spot rather than preempt a running workload to reclaim lent quota. A
+shape's Spot quota is the chips its own Spot pool can hold, with
+`borrowingLimit: 0`: reserved quota can be borrowed because every shape's pool
+draws on one reservation, but another shape's Spot pool has nodes of the wrong
+shape.
 
 The Spot flavor is the only thing that names Spot nodes: Kueue adds its
 `cloud.google.com/gke-spot=true` nodeSelector and its toleration to a pod it
@@ -433,12 +437,22 @@ admits on that flavor and to no other, so a workload admitted on the
 reservation can never land on a Spot node, and the reserved flavor and pools
 are unchanged.
 
+Spot quota is a count, not capacity. Kueue admits onto it whether or not GCE
+has a Spot VM to give, and a pool that cannot scale up changes nothing Kueue
+sees. The launcher covers that: when a chip-holding pod admitted onto Spot (it
+carries the flavor's nodeSelector) is still unscheduled after
+`tpu_spot_wait_seconds`, it deletes the workload and submits it again, once,
+with a required node affinity `cloud.google.com/gke-spot NotIn ["true"]` on its
+chip-holding pods. Kueue skips a flavor whose nodeLabels that affinity rules
+out, so the resubmission waits for the reservation as a shape without Spot
+would. The step log says `admitted onto Spot but no Spot node`.
+
 A reclaimed Spot node takes its pod with it. The pod is marked
 `DisruptionTarget`, which the pod failure policy ignores, so the Job replaces
-it and the step reruns from the start. If Spot capacity has gone too, the
-replacement cannot schedule, and after `recoveryTimeout` (30 minutes, in
-`kueue/common-config.yaml`) Kueue requeues the workload, which goes back
-through the flavors, reserved first.
+it and the step reruns from the start. The replacement is pinned to Spot like
+the first, so if Spot capacity has gone too the same fallback moves it - before
+`recoveryTimeout` (30 minutes, in `kueue/common-config.yaml`) would requeue the
+workload with its Spot quota free, where it could be admitted onto Spot again.
 
 Multi-host shapes cannot have Spot: GKE reclaims a slice whole, and Kueue
 admits chips rather than slices.

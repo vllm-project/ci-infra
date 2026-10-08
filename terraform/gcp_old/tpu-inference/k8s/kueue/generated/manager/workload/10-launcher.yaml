@@ -95,6 +95,7 @@ data:
     admission_max_seconds: 3600
     dispatch_retry_seconds: 120
     dispatch_retries: 2
+    spot_wait_seconds: 900
     timing_table: cloud-ullm-inference-ci-cd.ci_efficiency_metrics.kube_workload_timing
     workers:
       tpu-ci-us-central1:
