@@ -481,7 +481,9 @@ agent pod starts.
   alone shows a kube job as running once its agent pod starts.
 - **Quota now** - per cohort, chips in use against nominal, free, pending and
   busy; per queue, its nominal, usage, what it borrows or leaves idle, and
-  whether it evicts borrowers.
+  whether it evicts borrowers. Spot quota, usage, nodes and busy chips are
+  counted apart from the reservation's, on both pages: its quota is not
+  capacity the queue is guaranteed.
 - **Per queue** - workloads admitted and pending, the builds they belong to,
   Kueue's reason for anything pending. Only the head of a BestEffortFIFO queue
   carries a reason; the rest are counted as queued behind it.
