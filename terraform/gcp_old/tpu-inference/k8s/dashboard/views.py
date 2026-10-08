@@ -28,9 +28,10 @@ from fleet import (
 E = html.escape
 TEMPLATES = Path(__file__).parent / "templates"
 LIVE_PAGE = string.Template((TEMPLATES / "live.html").read_text())
-HISTORY_PAGE = string.Template((TEMPLATES / "history.html").read_text())
+TRENDS_PAGE = string.Template((TEMPLATES / "trends.html").read_text())
 OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
-COMPARE_PAGE = string.Template((TEMPLATES / "compare.html").read_text())
+MIGRATION_PAGE = string.Template((TEMPLATES / "migration.html").read_text())
+JOBS_PAGE = string.Template((TEMPLATES / "jobs.html").read_text())
 # The bare-metal fleet before the migration, built once from the snapshot by
 # baseline/build_baseline.py; static, since that fleet is being torn down.
 BASELINE_FILE = Path(__file__).parent / "baseline" / "premigration-2026-09.json"
@@ -198,7 +199,7 @@ JOB_STATES = {
     "running": ("Running", "Admitted and every pod up."),
 }
 
-# History ranges offered as presets. /api/history also takes ?start=&end= in
+# Ranges offered as presets. /api/history also takes ?start=&end= in
 # epoch seconds, for a range the presets do not cover.
 PRESETS = {"6h": 6 * 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
 PRESET_LABELS = {"6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
@@ -440,7 +441,7 @@ SOURCES = {
             "Workload outcomes and timings: ci_efficiency_metrics.kube_workload_timing"
         ],
         "needs": ["roles/bigquery.dataViewer on the dataset", "roles/bigquery.jobUser"],
-        "fails": ["Only the 24-hour checks and History's outcomes go blank"],
+        "fails": ["Only the 24-hour checks and the outcomes on Trends go blank"],
     },
 }
 
@@ -1443,7 +1444,7 @@ def render_live_queue(q: dict) -> str:
     return f"""
 <div class="card queue{"" if tpu else " other"}" id="{E(q["name"])}">
   <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
-    <a class="more" href="history#{E(q["name"])}">History →</a></div>
+    <span class="more"><a href="jobs?queue={E(urllib.parse.quote(q["name"]))}">Jobs →</a> · <a href="trends#{E(q["name"])}">Trends →</a></span></div>
   <div class="stats">
     <p class="stat"><b>{num(q["pending"])}</b><span>pending · oldest {ago(q["oldest_wait"])}</span></p>
     <p class="stat"><b>{num(q["admitted"])}</b><span>admitted{f" · {q['dispatching']} dispatching" if q["dispatching"] else ""}</span></p>
@@ -2043,7 +2044,8 @@ def render_overview(snap: dict) -> str:
             worst(bk_checks),
             "Pipelines send their TPU steps to the kube queue. A step in a concurrency group waits here until its group lets it go.",
             f'<div class="counts">{count(held, "held by a concurrency group")}{count(waiting, "waiting for an agent pod")}</div>'
-            f'{check_items(bk_checks)}<a class="more" href="live#jobs">Kube jobs on Live →</a>',
+            f'{check_items(bk_checks)}<a class="more" href="live#jobs">Kube jobs on Live →</a> · '
+            '<a class="more" href="jobs">Job history by queue →</a>',
             links.get("buildkite", []),
         ),
         component(
@@ -2117,7 +2119,7 @@ def render_overview(snap: dict) -> str:
 
 
 # --------------------------------------------------------------------------
-# Baseline
+# Migration
 
 
 def gcs_link(path: str, label: str, root: str) -> str:
@@ -2215,7 +2217,7 @@ def kube_split(h: dict, waits: dict, cohort: str) -> dict | None:
     }
 
 
-def render_compare(
+def render_migration(
     h: dict, bare: list, waits: dict, sources: dict, preset: str | None
 ) -> str:
     base = json.loads(BASELINE_FILE.read_text())
@@ -2516,7 +2518,7 @@ def render_compare(
 <tr><th class="n">Steps a day</th><th class="n">Wait p50 / p90</th><th class="n">Steps a day</th><th class="n">Wait p50 / p90</th>
 <th class="n">Steps a day</th><th class="n">Wait p50 / p90</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>
 <p class="muted note">Bare-metal wait is runnable to started on an agent; kube's is submitted to quota reserved, after
-which a step still starts its pods (Node autoscaling on History). Bare metal now is what its queues still run while
+which a step still starts its pods (Node autoscaling on Trends). Bare metal now is what its queues still run while
 the migration finishes.</p>"""
 
     method = f"""<ul class="data-links">
@@ -2558,7 +2560,7 @@ the migration finishes.</p>"""
   <li>{gcs_link("gcp/monitoring/tpu_duty_cycle", "TensorCore duty cycle, per minute", root)} - not used: its series name
     TPU hosts, which the snapshot does not tie to CI agents</li>
 </ul>
-<p class="muted note">The kube side comes from Kueue's metrics and the workload timing table, as on History; bare metal
+<p class="muted note">The kube side comes from Kueue's metrics and the workload timing table, as on Trends; bare metal
 now from the step log table. Rebuild the baseline with <code>dashboard/baseline/build_baseline.py &lt;snapshot dir&gt;</code>.</p>"""
 
     presets = "".join(
@@ -2566,7 +2568,7 @@ now from the step log table. Rebuild the baseline with <code>dashboard/baseline/
         for name, label in PRESET_LABELS.items()
         if name != "6h"
     )
-    return COMPARE_PAGE.substitute(
+    return MIGRATION_PAGE.substitute(
         assets=ASSETS,
         errors=render_errors(sources),
         start=span["start"],
@@ -2585,7 +2587,7 @@ now from the step log table. Rebuild the baseline with <code>dashboard/baseline/
 
 
 # --------------------------------------------------------------------------
-# History
+# Trends
 
 
 def build_history(
@@ -2816,7 +2818,7 @@ def failures_cell(r: dict) -> str:
     )
 
 
-def render_history(h: dict, sources: dict, query: str) -> str:
+def render_trends(h: dict, sources: dict, query: str) -> str:
     span = h["span"]
     fmt = "time" if span["end"] - span["start"] <= 2 * 86400 else "day"
     every = max(1, len(h["ticks"]) // 24)
@@ -2899,7 +2901,8 @@ submitted to quota reserved; how long an admitted workload took to start is unde
         u = unit(q)
         return f"""<div class="card queue{"" if q["resource"] == TPU else " other"}" id="{E(q["name"])}">
   <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
-    <span class="sub">{num(q["stats"]["finished"])} finished · avg {num(q["mean_used"])} {u}</span></div>
+    <span class="sub">{num(q["stats"]["finished"])} finished · avg {num(q["mean_used"])} {u}</span>
+    <a class="more" href="jobs?queue={E(urllib.parse.quote(q["name"]))}{f"&amp;preset={span['preset']}" if span.get("preset") in ("6h", "24h", "7d") else ""}">Jobs →</a></div>
   <div class="charts">
   {line_chart(f"{u.capitalize()} on nodes and in use" if q.get("nodes") else f"{u.capitalize()} in use", ticks, ([("nodes", "on nodes", q["nodes"]["chips"])] if q.get("nodes") else []) + [("used", "in use", q["history"]["used"])], ref=("nominal", q["history"]["nominal"]) if q["resource"] == TPU else None, fmt=fmt, width=520, height=180)}
   {line_chart("Workloads pending", ticks, [("pending", "pending", q["history"]["pending"])], fmt=fmt, width=520, height=180)}
@@ -2911,7 +2914,7 @@ submitted to quota reserved; how long an admitted workload took to start is unde
         f'<a class="seg-btn{" active" if span.get("preset") == name else ""}" href="?preset={name}">{label}</a>'
         for name, label in PRESET_LABELS.items()
     )
-    return HISTORY_PAGE.substitute(
+    return TRENDS_PAGE.substitute(
         assets=ASSETS,
         errors=render_errors(sources),
         presets=presets,
@@ -2923,4 +2926,227 @@ submitted to quota reserved; how long an admitted workload took to start is unde
         outcomes=outcomes,
         queues="".join(queue_card(q) for q in h["queues"]),
         query=E(query),
+    )
+
+
+# --------------------------------------------------------------------------
+# Jobs
+
+# Rows the jobs table shows at first, and how many a page holds behind Show more.
+JOBS_FIRST = 50
+JOBS_PER_PAGE = 200
+# Finished outcomes as the launcher records them, as the page names them.
+OUTCOMES = {"succeeded": "passed", "failed": "failed", "error": "error"}
+
+
+def render_job_history(
+    rows: list, snap: dict, sources: dict, span: dict, params: dict, org: str
+) -> str:
+    """Every kube job, a queue at a time if asked: what is in flight from the
+    live snapshot, then what ended in the range from the timing table, newest
+    first - the queue page Buildkite had for each bare-metal queue."""
+
+    def param(key: str) -> str:
+        return (params.get(key) or [""])[0].strip()
+
+    queue, outcome, branch, text = (param(k) for k in ("queue", "outcome", "branch", "q"))
+    preset = span.get("preset") or "24h"
+    limit = int(param("limit")) if param("limit").isdigit() else JOBS_PER_PAGE
+    limit = max(JOBS_PER_PAGE, min(limit, 5000))
+    queues = {q["name"]: q for q in snap["queues"]}
+
+    def title(name: str) -> str:
+        return queue_title(queues[name]) if name in queues else (name or "-")
+
+    def link(**change: str) -> str:
+        current = {"preset": preset, "queue": queue, "outcome": outcome, "branch": branch, "q": text}
+        current.update(change)
+        return "jobs?" + urllib.parse.urlencode({k: v for k, v in current.items() if v})
+
+    def number(value) -> float | None:
+        return float(value) if value not in (None, "") else None
+
+    def matches(pipeline: str, build: object, label: str, branch_name: str | None) -> bool:
+        if branch == "main" and branch_name != "main":
+            return False
+        if branch == "pr" and branch_name in ("main", None):
+            return False
+        haystack = f"{pipeline} #{build} {label} {branch_name or ''}".lower()
+        return not text or text.lower() in haystack
+
+    # In flight: a build's branch comes from the queue it runs on.
+    branches = {
+        (b["pipeline"], b["number"]): b["branch"]
+        for q in snap["queues"]
+        for b in q.get("builds") or []
+    }
+    inflight = [
+        j
+        for j in snap["jobs"]
+        if not outcome
+        and (not queue or j["queue_name"] == queue)
+        and matches(j["pipeline"], j["number"], j["label"], branches.get((j["pipeline"], j["number"])))
+    ]
+    order = list(JOB_STATES)
+    inflight.sort(key=lambda j: (order.index(j["real"]), -(j["for"] or 0)))
+
+    done = [
+        r
+        for r in rows
+        if (not queue or r["queue"] == queue)
+        and (not outcome or OUTCOMES.get(r["outcome"], "error") == outcome)
+        and matches(r["pipeline"], r["build_number"], r["label"], r["branch"])
+    ]
+
+    def step(label: str, url: str) -> str:
+        return job_link({"label": label, "url": url})
+
+    def build(pipeline: str, n: object) -> str:
+        url = f"https://buildkite.com/{org}/{pipeline}/builds/{n}"
+        return f'<a href="{E(url)}" target="_blank" rel="noopener">{E(pipeline)} #{E(str(n))}</a>'
+
+    flying = []
+    for j in inflight:
+        name, desc = JOB_STATES[j["real"]]
+        flying.append(
+            f'<tr><td class="nowrap"><span class="state live" title="{E(desc)}">{E(name)}</span></td>'
+            f'<td class="n nowrap">{ago(j["for"])}</td>'
+            f'<td class="nowrap">{build(j["pipeline"], j["number"])}</td><td>{job_link(j)}</td>'
+            f'<td class="branch">{E(branches.get((j["pipeline"], j["number"]), ""))}</td>'
+            f'<td class="nowrap" title="{E(j["queue_name"])}">{E(title(j["queue_name"])) if j["queue_name"] else "-"}</td></tr>'
+        )
+    out = []
+    for r in done:
+        result = OUTCOMES.get(r["outcome"], "error")
+        exit_code = r["exit_code"] if r["exit_code"] not in (None, "", "0") else ""
+        retried = [
+            f"{r[k]} {k if r[k] != '1' else k[:-1]}"
+            for k in ("requeues", "redispatches")
+            if r.get(k) not in (None, "", "0")
+        ]
+        submitted, reserved, admitted, started, finished = (
+            number(r[k]) for k in ("submitted", "reserved", "admitted", "started", "finished")
+        )
+
+        def between(a: float | None, b: float | None) -> str:
+            return ago(b - a) if a is not None and b is not None else "-"
+
+        job_url = f"https://buildkite.com/{org}/{r['pipeline']}/builds/{r['build_number']}#{r['job_id']}"
+        out.append(
+            f'<tr><td class="nowrap"><span class="state {result}">{result}{f" · exit {E(exit_code)}" if exit_code else ""}</span>'
+            + (f'<br><small class="muted">{E(", ".join(retried))}</small>' if retried else "")
+            + f'</td><td class="nowrap"><time data-ts="{E(r["ended"])}" data-fmt="datetime"></time></td>'
+            f'<td class="nowrap">{build(r["pipeline"], r["build_number"])}</td><td>{step(r["label"], job_url)}</td>'
+            f'<td class="branch">{E(r["branch"] or "")}</td>'
+            f'<td class="nowrap" title="{E(r["queue"])}">{E(title(r["queue"]))}</td>'
+            f'<td class="n nowrap">{between(submitted, reserved)}</td>'
+            f'<td class="n nowrap">{between(admitted, started)}</td>'
+            f'<td class="n nowrap">{between(started, finished)}</td></tr>'
+        )
+
+    # In flight first but brief - Live has the whole of it - so what ended
+    # shows without scrolling.
+    fly_rows, fly_more, fly_button = split_rows(
+        flying, "inflight-more", '<tr><td colspan="6" class="empty">Nothing in flight.</td></tr>'
+    )
+    inflight_table = (
+        f'<h3>In flight <span class="muted">({len(flying):,})</span></h3>'
+        '<div class="table-wrap"><table class="dense jobs-table"><thead><tr><th>State</th>'
+        '<th class="n">For</th><th>Build</th><th>Step</th><th>Branch</th><th>Queue</th></tr></thead>'
+        f"<tbody>{fly_rows}</tbody>{fly_more}</table></div>{fly_button}"
+        if not outcome
+        else ""
+    )
+    shown = out[:limit]
+    hidden, button = show_more(
+        "ended-more", "".join(shown[JOBS_FIRST:]), max(0, len(shown) - JOBS_FIRST)
+    )
+    older = (
+        f'<p class="muted note">{len(shown):,} of {len(out):,} shown · '
+        f'<a href="{E(link(limit=str(limit + JOBS_PER_PAGE)))}">show {min(JOBS_PER_PAGE, len(out) - limit):,} more</a></p>'
+        if len(out) > limit
+        else ""
+    )
+    empty = '<tr><td colspan="9" class="empty">No jobs match.</td></tr>'
+    table = (
+        inflight_table
+        + f'<h3 class="jobs-ended">Ended <span class="muted">({len(out):,})</span></h3>'
+        '<div class="table-wrap"><table class="dense jobs-table ended"><thead><tr><th>State</th><th>Ended</th>'
+        "<th>Build</th><th>Step</th><th>Branch</th><th>Queue</th>"
+        f'<th class="n">{term("Wait", "Wait, startup, run")}</th><th class="n">{term("Startup", "Wait, startup, run")}</th>'
+        f'<th class="n">{term("Ran", "Wait, startup, run")}</th></tr></thead>'
+        f'<tbody>{"".join(shown[:JOBS_FIRST]) or empty}</tbody>{hidden}</table></div>{button}{older}'
+    )
+
+    # What the filters leave, said in one line: how the queue is doing.
+    counts = collections.Counter(OUTCOMES.get(r["outcome"], "error") for r in done)
+    waits = sorted(
+        float(r["reserved"]) - float(r["submitted"]) for r in done if r["reserved"] and r["submitted"]
+    )
+    ran = sorted(
+        float(r["finished"]) - float(r["started"]) for r in done if r["finished"] and r["started"]
+    )
+
+    def q(values: list, p: float) -> str:
+        return ago(values[min(len(values) - 1, int(p * len(values)))]) if values else "-"
+
+    where = f" on {E(title(queue))}" if queue else ""
+    summary = (
+        f"<b>{len(inflight):,}</b> in flight{where} now; <b>{len(done):,}</b> ended in the last "
+        f"{E(PRESET_LABELS.get(preset, preset))}: {counts['passed']:,} passed, "
+        f"<b>{counts['failed']:,}</b> failed, {counts['error']:,} errors. "
+        f"Wait p50 {q(waits, 0.5)}, p90 {q(waits, 0.9)}; ran p50 {q(ran, 0.5)}, p90 {q(ran, 0.9)}."
+    )
+
+    def seg(label: str, href: str, active: bool) -> str:
+        return f'<a class="seg-btn{" active" if active else ""}" href="{E(href)}">{label}</a>'
+
+    in_range = collections.Counter(r["queue"] for r in rows)
+    live_now = collections.Counter(j["queue_name"] for j in snap["jobs"] if j["queue_name"])
+    queue_names = [q["name"] for q in snap["queues"]] + sorted(set(in_range) - set(queues))
+    by_outcome = collections.Counter(
+        OUTCOMES.get(r["outcome"], "error") for r in rows if not queue or r["queue"] == queue
+    )
+    filters = (
+        '<div class="filter-row"><span class="filter-label">Range</span><div class="segmented">'
+        + "".join(seg(PRESET_LABELS[p], link(preset=p, limit=""), preset == p) for p in ("6h", "24h", "7d"))
+        + '</div></div><div class="filter-row"><span class="filter-label">Queue</span><div class="segmented wrap">'
+        + seg("All", link(queue="", limit=""), not queue)
+        + "".join(
+            seg(
+                f"{E(title(n))} <small>{in_range[n] + live_now[n]:,}</small>",
+                link(queue=n, limit=""),
+                queue == n,
+            )
+            for n in queue_names
+            if in_range[n] or live_now[n] or n in queues
+        )
+        + '</div></div><div class="filter-row"><span class="filter-label">Outcome</span><div class="segmented">'
+        + seg("All", link(outcome="", limit=""), not outcome)
+        + "".join(
+            seg(f"{name} <small>{by_outcome[name]:,}</small>", link(outcome=name, limit=""), outcome == name)
+            for name in ("failed", "error", "passed")
+        )
+        + '</div><span class="filter-label">Branch</span><div class="segmented">'
+        + seg("All", link(branch="", limit=""), not branch)
+        + seg("main", link(branch="main", limit=""), branch == "main")
+        + seg("PRs", link(branch="pr", limit=""), branch == "pr")
+        + "</div>"
+        + '<form class="search" method="get" action="jobs">'
+        + "".join(
+            f'<input type="hidden" name="{k}" value="{E(v)}">'
+            for k, v in (("preset", preset), ("queue", queue), ("outcome", outcome), ("branch", branch))
+            if v
+        )
+        + f'<input type="search" name="q" value="{E(text)}" placeholder="Step, build or branch" aria-label="Search jobs">'
+        + '<button type="submit">Search</button></form></div>'
+    )
+    return JOBS_PAGE.substitute(
+        assets=ASSETS,
+        errors=render_errors(sources),
+        generated=snap["generated_at"],
+        start=span["start"],
+        filters=filters,
+        summary=summary,
+        table=table,
     )

@@ -653,7 +653,7 @@ def node_selector(cfg: Config) -> str:
 # 271 s old. Asked about "now" with a 2-minute lookback, two thirds of the
 # nodes had nothing to show (22 of 71 v7x chips). So the live page reads them
 # as of NODE_LAG seconds ago, with a lookback that spans one sample interval
-# and a late arrival; History's past is complete and only needs the lookback.
+# and a late arrival; a past range is complete and only needs the lookback.
 NODE_LAG = 300
 NODE_LOOKBACK = "3m"
 
@@ -874,8 +874,8 @@ BARE_QUEUES = {
 
 def fetch_waits(cfg: Config, start: int, end: int) -> dict:
     """Per queue over [start, end), a point a minute where Prometheus allows:
-    pending workloads, admitted TPU chips and nominal TPU quota, for Compare's
-    idle-while-jobs-waited. Not History's steps: an hour full and queueing in
+    pending workloads, admitted TPU chips and nominal TPU quota, for Migration's
+    idle-while-jobs-waited. Not Trends' steps: an hour full and queueing in
     its first half and idle in its second would average to idle chips beside
     waiting jobs."""
     sel = kueue_selector(cfg)
@@ -894,6 +894,28 @@ def fetch_waits(cfg: Config, start: int, end: int) -> dict:
             for k, q in queries.items()
         }
         return {"step": step, **{k: f.result() for k, f in futures.items()}}
+
+
+def fetch_jobs(cfg: Config, start: int, end: int) -> list[dict]:
+    """Every kube workload that ended in [start, end), newest first, from the
+    launcher's timing table: the per-queue job history Buildkite cannot show,
+    since every kube step runs on its one kube queue. A row is written when the
+    workload ends, so what is still in flight comes from the live snapshot."""
+    if not cfg.timing_table:
+        return []
+    ended = "COALESCE(ended_at, finished_at)"
+    sql = f"""
+SELECT queue, chips, pipeline, build_number, job_id, label, branch, outcome,
+  exit_code, requeues, redispatches,
+  UNIX_SECONDS(submitted_at) AS submitted, UNIX_SECONDS(quota_reserved_at) AS reserved,
+  UNIX_SECONDS(admitted_at) AS admitted, UNIX_SECONDS(first_pod_started_at) AS started,
+  UNIX_SECONDS(finished_at) AS finished, UNIX_SECONDS({ended}) AS ended
+FROM `{cfg.timing_table}`
+WHERE {ended} >= TIMESTAMP_SECONDS({start}) AND {ended} < TIMESTAMP_SECONDS({end})
+  AND created_at >= TIMESTAMP_SECONDS({start - 2 * 86400})
+ORDER BY ended DESC
+LIMIT 20000"""
+    return bigquery(cfg, sql)
 
 
 def fetch_bare(cfg: Config, start: int, end: int) -> list[dict]:

@@ -463,7 +463,7 @@ doc does.
   backlog, scheduling while a pool scales, agent teardown, test failures - are
   collapsed beneath.
 
-**History** (`/history`), for the last 6 hours, 24 hours, 7 days or 30 days (`/api/history` also takes `?start=&end=` in epoch seconds, up to 90 days):
+**Trends** (`/trends`; `/history` still works), for the last 6 hours, 24 hours, 7 days or 30 days (`/api/history` also takes `?start=&end=` in epoch seconds, up to 90 days):
 chips admitted against chips busy (TensorCore duty) per cohort, outcomes per
 queue and per pipeline from `kube_workload_timing` split into test and
 infrastructure failures, wait, startup and run percentiles, and per-queue usage
@@ -476,10 +476,11 @@ inflate it. Node history comes from GKE's per-node metrics, which name a node
 and nothing else; the GKE API's list of node pools ties each name to its pool
 through the pool's instance group, which outlives the nodes it creates.
 
-History's chip utilization cards also stack each topology's admitted chips under
+Trends' chip utilization cards also stack each topology's admitted chips under
 the cohort's quota, so chips moving between shapes show as bands trading height.
 
-**Compare** (`/compare`, last 24 hours by default) puts the bare-metal fleet
+**Migration** (`/migration`, last 24 hours by default; `/compare` and `/baseline`
+still work) puts the bare-metal fleet
 before the migration beside the kube fleet over the window: per generation,
 utilization, chips, work a day and kube's share of the work - what the
 bare-metal queues still run, from `step_execution_logs` - and per shape, steps
@@ -494,11 +495,20 @@ only on its own shape's VMs, so one shape idled while another queued; the
 baseline builder works it out from Buildkite's per-minute counts of connected
 and busy agents and of jobs ready with no agent. On kube it comes from Kueue's
 admitted, nominal and pending series, read a minute apart rather than at
-History's step (`fleet.fetch_waits`), since an hour that queued in its first half
+Trends' step (`fleet.fetch_waits`), since an hour that queued in its first half
 and idled in its second would otherwise count as both at once. This and chips
 held are worked out a day at a time and shown as the mean, median and worst day;
 kube's days are the 24-hour stretches back from the window's end, so its median
 and worst need the 7- or 30-day window.
+
+**Jobs** (`/jobs`, last 24 hours by default) is the per-queue job list Buildkite
+had for each bare-metal queue and cannot give now that every kube step runs on
+its one `kube` queue: what is in flight on each Kueue queue, from the live
+snapshot, then every workload that ended in the range from
+`kube_workload_timing` (`fleet.fetch_jobs`), newest first, with its outcome,
+exit code, wait, startup and run. Filters for queue, outcome and branch and a
+search over step, build and branch sit above it, and a line under them sums up
+what they leave. Each queue card on Live and Trends links to its queue's jobs.
 
 Every page's terms have a tooltip, drawn from the same table as the glossary.
 
