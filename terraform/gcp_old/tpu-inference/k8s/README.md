@@ -476,6 +476,20 @@ inflate it. Node history comes from GKE's per-node metrics, which name a node
 and nothing else; the GKE API's list of node pools ties each name to its pool
 through the pool's instance group, which outlives the nodes it creates.
 
+History's chip utilization cards also stack each topology's admitted chips under
+the cohort's quota, so chips moving between shapes show as bands trading height.
+
+**Compare** (`/compare`, last 24 hours by default) puts the bare-metal fleet
+before the migration beside the kube fleet over the window: per generation,
+utilization, chips, work a day and kube's share of the work - what the
+bare-metal queues still run, from `step_execution_logs` - and per shape, steps
+a day and waits on both sides. The bare-metal side is static:
+`dashboard/baseline/build_baseline.py` builds `premigration-2026-09.json` from
+the pre-migration snapshot (2026-09-05 to 09-29). When bare metal's share
+reaches zero the comparison is like for like with no change to the page.
+
+Every page's terms have a tooltip, drawn from the same table as the glossary.
+
 It reads every cluster through Connect Gateway as `tpu-ci-dashboard@`: the
 manager with `kueue/templates/dashboard_rbac.yaml.tpl`, the workers with
 `dashboard_rbac_worker.yaml.tpl`, events only. Both are applied by
