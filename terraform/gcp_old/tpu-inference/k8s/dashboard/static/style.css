@@ -386,6 +386,32 @@ i.k.s3 { background: var(--cat-3); } i.k.s4 { background: var(--cat-4); }
 
 /* Compare */
 .compare-tile b { font-size: 24px; }
+.tiles.five { grid-template-columns: repeat(5, 1fr); }
+.split-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 28px;
+  align-items: start; margin: 4px 0 8px; }
+table.days td:first-child { white-space: nowrap; }
+table.days td b { font-weight: 600; }
+/* Where the chips went: one bar per fleet, its shares written beside it. */
+.share-bars .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--ink-2);
+  margin: 4px 0 10px; }
+.share-row { display: grid; grid-template-columns: 130px 1fr; gap: 4px 12px; align-items: center;
+  margin-bottom: 12px; }
+.share-row .who { font-size: 13px; font-weight: 600; }
+.share-bar { display: flex; gap: 2px; height: 18px; }
+.share-bar .seg { display: block; height: 100%; min-width: 3px; }
+.share-bar .seg:first-child { border-radius: 4px 0 0 4px; }
+.share-bar .seg:last-child { border-radius: 0 4px 4px 0; }
+.share-row .vals { grid-column: 2; font-size: 12px; color: var(--ink-2); }
+.share-row .vals b { color: var(--ink); font-weight: 600; }
+.seg.s1 { background: var(--cat-1); } .seg.s2 { background: var(--cat-2); }
+.seg.rest, .band.rest, i.k.rest { background: #cfd5de; fill: #cfd5de; }
+i.k.rest { height: 10px; width: 10px; border-radius: 3px; }
+@media (max-width: 900px) {
+  .tiles.five { grid-template-columns: 1fr 1fr; }
+  .split-row { grid-template-columns: 1fr; }
+  .share-row { grid-template-columns: 1fr; }
+  .share-row .vals { grid-column: 1; }
+}
 .compare-tile b .before { display: inline; font-size: inherit; color: var(--muted); font-weight: 500; }
 .compare-note { align-self: center; font-size: 14px; max-width: 460px; }
 th.group { text-align: center; border-bottom: 1px solid var(--line); }

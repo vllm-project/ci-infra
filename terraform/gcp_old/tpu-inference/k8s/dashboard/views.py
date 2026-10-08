@@ -13,7 +13,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from charts import line_chart, stacked_chart, values_table
+from charts import line_chart, share_bars, stacked_chart, values_table
 from fleet import (
     BK_LIMITED,
     BK_WAITING,
@@ -77,6 +77,9 @@ TERMS = {
     "Chips held": "Chips occupied by running work, as a share of the chips the fleet had: on bare metal "
     "the chips of the VMs a job holds, on kube the chips Kueue admitted. Occupancy, not compute - a "
     "chip counts while its job sets up, compiles or idles.",
+    "Idle while jobs waited": "Idle chips that whole waiting jobs would have fit in, smallest first - "
+    "on bare metal, had the chips not belonged to another shape's VMs; on kube, had the quota allowed: "
+    "capacity the fleet had but could not give the work that wanted it.",
     "Evicted": "A running workload stopped by the fleet - preempted by a queue reclaiming lent chips, "
     "or its node gone - which reruns from the start.",
     "Requeue": "A workload that lost its reservation, usually to preemption, and went back in line.",
@@ -234,6 +237,13 @@ def num(value) -> str:
 
 def pct(value: float | None) -> str:
     return "-" if value is None else f"{100 * value:.0f}%"
+
+
+def pct_small(value: float | None) -> str:
+    """A share that can be under one percent, where the decimal is the point."""
+    if value is None:
+        return "-"
+    return f"{100 * value:.1f}%" if value < 0.1 else f"{100 * value:.0f}%"
 
 
 def unit(q: dict) -> str:
@@ -2154,7 +2164,60 @@ def pacific_hour(ts: float) -> int:
     return int((ts - 7 * 3600) // 3600) % 24
 
 
-def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> str:
+def kube_split(h: dict, waits: dict, cohort: str) -> dict | None:
+    """A cohort's chips point by point - a minute, or a few over 30 days -
+    split as build_baseline.py splits bare metal's: admitted, idle quota whole
+    pending workloads would have fit in (smallest first, each at its queue's
+    chips a workload), and the rest of the idle. Days are the 24 hours back
+    from the window's end."""
+    members = {
+        q["name"]: q["chips"]
+        for q in h["queues"]
+        if q["cohort"] == cohort and q["resource"] == TPU
+    }
+    if not waits or not members:
+        return None
+    at = {
+        k: {q: dict(waits[k].get(q, [])) for q in members}
+        for k in ("pending", "used", "nominal")
+    }
+    times = sorted({t for q in members for t in at["nominal"][q]})
+    span, ticks = h["span"], h["ticks"]
+    n_days = round((span["end"] - span["start"]) / 86400)
+    days = collections.defaultdict(collections.Counter)
+    per_tick = [collections.Counter() for _ in ticks]
+    for t in times:
+        nominal = sum(at["nominal"][q].get(t, 0) for q in members)
+        used = min(nominal, sum(at["used"][q].get(t, 0) for q in members))
+        idle = nominal - used
+        left, stranded = idle, 0.0
+        for q in sorted(members, key=members.get):
+            fits = min(at["pending"][q].get(t, 0), left // members[q])
+            stranded += fits * members[q]
+            left -= fits * members[q]
+        d = int((span["end"] - t) // 86400)
+        if d < n_days:
+            days[d].update(nominal=nominal, used=used, stranded=stranded)
+        if ticks and t >= ticks[0]:
+            c = per_tick[min(len(ticks) - 1, int((t - ticks[0]) // span["step"]))]
+            c.update(n=1, used=used, stranded=stranded, idle=idle - stranded)
+    full = [days[d] for d in sorted(days) if days[d]["nominal"]]
+    if not full:
+        return None
+    return {
+        "daily_held": [d["used"] / d["nominal"] for d in full],
+        "daily_stranded": [d["stranded"] / d["nominal"] for d in full],
+        "stranded_chip_hours": sum(d["stranded"] for d in full) * waits["step"] / 3600,
+        **{
+            k: [round(c[k] / c["n"], 1) if c["n"] else None for c in per_tick]
+            for k in ("used", "stranded", "idle")
+        },
+    }
+
+
+def render_compare(
+    h: dict, bare: list, waits: dict, sources: dict, preset: str | None
+) -> str:
     base = json.loads(BASELINE_FILE.read_text())
     span = h["span"]
     days = (span["end"] - span["start"]) / 86400
@@ -2266,14 +2329,156 @@ def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> st
                 )
                 + "</div>"
             )
+        # Idle while jobs waited: bare metal's from the snapshot's minute
+        # counts, kube's from Kueue's, both a day at a time, so the bad days show
+        # beside the mean.
+        ks = kube_split(h, waits, COHORT_OF[g["name"]])
+        b_held_days, b_strand_days = g["daily_held_share"], g["daily_stranded_share"]
+        k_held_days = ks["daily_held"] if ks else []
+        k_strand_days = ks["daily_stranded"] if ks else []
+        b_util, b_strand = mean(b_held_days), mean(b_strand_days)
+        k_util = mean(k_held_days) if ks else k_util
+        k_strand = mean(k_strand_days)
+        spread_ok = len(k_held_days) >= 3
+
+        def spread(values: list, worst) -> list:
+            return (
+                [mean(values), statistics.median(values), worst(values)]
+                if values
+                else [None] * 3
+            )
+
+        day_rows = []
+        for label, b_days, k_days_, worst, show in (
+            (term("Chips held"), b_held_days, k_held_days, min, pct),
+            (
+                term("Idle while jobs waited"),
+                b_strand_days,
+                k_strand_days,
+                max,
+                pct_small,
+            ),
+        ):
+            # A median or worst of one day says nothing, so it is left out.
+            cells = "".join(
+                f'<td class="n nowrap"><span class="muted">{show(b)}</span> → '
+                f"<b>{show(k) if i == 0 or spread_ok else '-'}</b></td>"
+                for i, (b, k) in enumerate(
+                    zip(spread(b_days, worst), spread(k_days_, worst))
+                )
+            )
+            day_rows.append(f"<tr><td>{label}</td>{cells}</tr>")
+        parts = [
+            ("in use", "s1"),
+            ("idle while jobs waited", "s2"),
+            ("other idle", "rest"),
+        ]
+        bars = share_bars(
+            [("bare metal before", [b_util, b_strand, max(0.0, 1 - b_util - b_strand)])]
+            + (
+                [("kube now", [k_util, k_strand, max(0.0, 1 - k_util - k_strand)])]
+                if ks
+                else []
+            ),
+            parts,
+        )
+        b_t, b_split = buckets(
+            base_ticks,
+            [
+                (name, g["hourly"][k])
+                for (name, _), k in zip(parts, ("busy", "stranded", "idle"))
+            ],
+            4,
+        )
+        k_split = (
+            [(name, ks[k]) for (name, _), k in zip(parts, ("used", "stranded", "idle"))]
+            if ks
+            else []
+        )
+        top = max(
+            sum(v or 0 for v in point)
+            for split in (b_split, k_split)
+            if split
+            for point in zip(*(vs for _, vs in split))
+        )
+        classes = [cls for _, cls in parts]
+        idle_charts = (
+            '<div class="charts">'
+            + stacked_chart(
+                "Bare metal: its chips by hour",
+                b_t,
+                b_split,
+                ymax=top,
+                fmt="day",
+                width=520,
+                height=170,
+                classes=classes,
+            )
+            + (
+                stacked_chart(
+                    "Kube: its quota by hour",
+                    k_ticks,
+                    k_split,
+                    ymax=top,
+                    fmt=fmt,
+                    width=520,
+                    height=170,
+                    classes=classes,
+                )
+                if ks
+                else ""
+            )
+            + "</div>"
+        )
+        idle_rows = []
+        for bq, kq in pairs:
+            b = base_queues[bq]
+            label = queue_title(queues[kq]).split(" ", 1)[-1] if kq in queues else bq
+            while_share = (
+                b["idle_while_others_waited"] / b["idle_chip_hours"]
+                if b["idle_chip_hours"]
+                else None
+            )
+            idle_rows.append(
+                f'<tr><td class="nowrap">{E(label)} <span class="muted">· <code>{E(bq)}</code></span></td>'
+                f'<td class="n">{num(b["idle_chip_hours"])}</td>'
+                f'<td class="n nowrap">{num(b["idle_while_others_waited"])} <span class="muted">({pct(while_share)})</span></td>'
+                f'<td class="n">{num(b["waited_chip_hours"])}</td><td class="n">{pct(b["queued_share"])}</td></tr>'
+            )
+        worst_shape = max(
+            pairs, key=lambda p: base_queues[p[0]]["idle_while_others_waited"]
+        )
+        ws = base_queues[worst_shape[0]]
+        ws_label = (
+            queue_title(queues[worst_shape[1]]).split(" ", 1)[-1]
+            if worst_shape[1] in queues
+            else worst_shape[0]
+        )
+
         cards.append(f"""<div class="card">
   <div class="card-head"><h2>{E(g["name"])}</h2><span class="sub">bare metal before → kube now</span></div>
-  <div class="tiles">
-    {tile(term("Chips held"), pct(b_util), pct(k_util), "on average, of the chips each fleet had")}
+  <div class="tiles five">
+    {tile(term("Chips held"), pct(b_util), pct(k_util), "of the chips each fleet had, the mean of its days")}
+    {tile(term("Idle while jobs waited"), pct_small(b_strand), pct_small(k_strand), f"of the chips, the mean of the days; bare metal's came to {num(g['stranded_chip_hours'])} chip-hours")}
     {tile("Chips", num(g["capacity"]), num(k_cap_now), f"bare metal's VMs ({num(g['mean_connected'])} connected on average) → kube's quota now" + (f" ({num(k_cap)} on average)" if abs(k_cap - k_cap_now) >= 1 else ""))}
     {tile("Work a day", daily(g["mean_held"] * 24), daily(k_work), f"chip-hours; steps a day {daily(b_steps)} → {daily(k_steps)}")}
     <div class="tile"><span>Kube's share of the work now</span><b>{pct(share)}</b><small>bare metal still ran {daily(bare_work)} chip-hours a day{" (counted from 10-01)" if partial else ""}</small></div>
   </div>
+  <h3 class="shapes-head">{term("Idle while jobs waited")}: chips the work could not reach</h3>
+  <p class="muted note">A bare-metal job could run only on its own shape's VMs, so one shape's chips sat idle
+  while jobs queued for another. The {E(ws_label)} VMs were idle for {num(ws["idle_chip_hours"])} chip-hours,
+  {num(ws["idle_while_others_waited"])} of them while other shapes had jobs waiting. On kube a waiting
+  workload borrows whatever quota the cohort has idle.</p>
+  <div class="split-row">
+  <div class="table-wrap"><table class="dense days"><thead><tr><th>A day at a time</th><th class="n">Mean of days</th>
+  <th class="n">Median day</th><th class="n">Worst day</th></tr></thead><tbody>{"".join(day_rows)}</tbody></table>
+  <p class="muted note">Bare metal's {len(b_held_days)} days → kube's {len(k_held_days)}{"" if spread_ok else ": a 24-hour window is one day, so kube has no median or worst day"}.</p></div>
+  {bars}
+  </div>
+  {idle_charts}
+  <div class="table-wrap"><table class="dense"><thead><tr><th>Bare metal before, by shape</th><th class="n">Idle chip-hours</th>
+  <th class="n">While another shape had jobs waiting</th><th class="n">Its own jobs waited, chip-hours</th>
+  <th class="n">Time with jobs waiting</th></tr></thead><tbody>{"".join(idle_rows)}</tbody></table></div>
   <h3 class="shapes-head">By shape: bare metal before, kube now</h3>
   <p class="muted note">Each row is one shape on one scale. On bare metal a shape could use only its own VMs - the
   line is the chips of the agents connected each hour, so a VM that came or went moves it - and a busy shape sat at
@@ -2320,6 +2525,15 @@ the migration finishes.</p>"""
     has no job all 8 are idle - over the chip-hours of the agents connected through {E(base["window"])}. On kube it is
     Kueue's admitted chips against the cohort's quota over the window. Both count a chip from when work takes it
     to when it lets go, whatever the TensorCores do meanwhile: occupancy, not compute.</li>
+  <li><b>Idle while jobs waited</b> is, minute by minute, the idle chips that whole waiting jobs would have fit
+    in, smallest jobs first, so a few chips too few for the job waiting do not count. On bare metal: Buildkite's
+    per-minute counts of connected and busy agents, and of jobs ready to run with no agent, as if any idle chip
+    could take any job. On kube: Kueue's admitted chips against nominal and its pending workloads, each at its
+    queue's chips a workload; what is left there is borrowing limits and admission lag. A job held back by a
+    dependency or a concurrency group is not waiting for chips, and counts on neither side.</li>
+  <li><b>A day at a time</b>: Chips held and Idle while jobs waited are worked out for each day and then
+    averaged, with the median and the worst day beside the mean. Bare metal's days are UTC days; kube's are the
+    24-hour stretches back from the window's end, so a 24-hour window is one day.</li>
   <li><b>Work a day</b> is the chip-hours held each day, and the steps that finished. Holding more chips only counts
     if the work gets done: while bare metal still runs part of the load, kube's work a day is that much short of
     the whole, and <i>Kube's share of the work now</i> says how much.</li>
@@ -2335,6 +2549,8 @@ the migration finishes.</p>"""
     data_html = f"""<ul class="data-links">
   <li>{gcs_link("", "The whole pre-migration snapshot", root)} - and its {gcs_link("MANIFEST.md", "manifest", root)}</li>
   <li>{gcs_link("buildkite/org=vllm", "Buildkite build dumps", root)}: every bare-metal job's queue, agent and times</li>
+  <li>{gcs_link("gcp/monitoring/buildkite_exporter/org=vllm", "Buildkite's per-minute counts", root)}: agents
+    connected and busy, and jobs waiting for an agent, per queue</li>
   <li>{gcs_link("gcp/tpu_vms_cloud-ullm-inference-ci-cd.json", "TPU VMs", root)} and
     {gcs_link("gcp/gce_instances_inferact-vllm-tpu.json", "inferact's TPU instances", root)}, for bare metal's chips</li>
   <li>{gcs_link("baseline", "The snapshot's own per-queue tables", root)} - over 30 days, six of which the dumps do not
