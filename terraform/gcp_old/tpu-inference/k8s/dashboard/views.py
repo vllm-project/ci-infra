@@ -2220,11 +2220,15 @@ def success_rate(r: dict) -> str:
     return pct(r["succeeded"] / decided) if decided else "-"
 
 
-def infra_cell(r: dict) -> str:
-    if not r["infra"]:
-        return '<td class="n">0</td>'
+def failures_cell(r: dict) -> str:
+    """Test failures / infrastructure failures, with what the latter were."""
+    infra = f"<b>{num(r['infra'])}</b>" if r["infra"] else "0"
     detail = ", ".join(f"{k} {v}" for k, v in r["infra_outcomes"])
-    return f'<td class="n"><b>{num(r["infra"])}</b><div class="sub-row">{E(detail)}</div></td>'
+    return (
+        f'<td class="n nowrap">{num(r["failed"])} / {infra}'
+        + (f'<div class="sub-row">{E(detail)}</div>' if detail else "")
+        + "</td>"
+    )
 
 
 def render_history(h: dict, sources: dict, query: str) -> str:
@@ -2252,11 +2256,9 @@ def render_history(h: dict, sources: dict, query: str) -> str:
     queue_rows = "".join(
         f"""<tr><td class="nowrap">{queue_link(q)}</td>
 <td class="n">{num(q["stats"]["finished"])}</td><td class="n">{success_rate(q["stats"])}</td>
-<td class="n">{num(q["stats"]["failed"])}</td>{infra_cell(q["stats"])}
-<td class="n">{num(q["stats"]["evictions"])}</td>
-<td class="n nowrap">{num(q["stats"]["requeues"])} / {num(q["stats"]["redispatches"])}</td>
+{failures_cell(q["stats"])}
+<td class="n nowrap">{num(q["stats"]["evictions"])} / {num(q["stats"]["requeues"])} / {num(q["stats"]["redispatches"])}</td>
 <td class="n nowrap">{ago(q["stats"]["wait_p50"])} / {ago(q["stats"]["wait_p90"])}</td>
-<td class="n nowrap">{ago(q["stats"]["startup_p50"])} / {ago(q["stats"]["startup_p90"])}</td>
 <td class="n">{ago(q["stats"]["run_p50"])}</td>
 <td class="n">{num(q["stats"]["chip_hours"])}</td></tr>"""
         for q in tpu
@@ -2265,47 +2267,44 @@ def render_history(h: dict, sources: dict, query: str) -> str:
     node_rows = (
         "".join(
             f"""<tr><td class="nowrap">{queue_link(q)}</td>
-<td class="n">{q["nodes"]["pools"]}{" slices" if q["nodes"]["multi_host"] else ""} · max {num(q["nodes"]["max"])}</td>
 <td class="n"><b>{num(q["nodes"]["created"])}</b></td><td class="n">{ago(q["nodes"]["lifetime_p50"])}</td>
-<td class="n">{num(q["nodes"]["peak"])}</td><td class="n">{num(q["nodes"]["node_hours"])}</td>
-<td class="n">{num(q["nodes"]["chip_hours"])}</td><td class="n">{pct(q["nodes"]["held_share"])}</td>
+<td class="n">{pct(q["nodes"]["held_share"])}</td>
 <td class="n">{num(q["nodes"]["idle_chip_hours"])}</td>
 <td class="n nowrap">{ago(q["stats"]["startup_p50"])} / {ago(q["stats"]["startup_p90"])}</td></tr>"""
             for q in autoscaled
         )
-        or '<tr><td colspan="10" class="empty">No node pool data.</td></tr>'
+        or '<tr><td colspan="6" class="empty">No node pool data.</td></tr>'
     )
-    autoscaling = f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Topology</th><th class="n">Pools</th>
-<th class="n">Nodes created</th><th class="n">Node lifetime p50</th><th class="n">Peak nodes</th><th class="n">Node-hours</th>
-<th class="n">Chip-hours on nodes</th><th class="n">Held by workloads</th><th class="n">Idle chip-hours</th>
-<th class="n">Admitted → running p50 / p90</th></tr></thead><tbody>{node_rows}</tbody></table></div>
+    autoscaling = f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Topology</th>
+<th class="n">Nodes created</th><th class="n">Node lifetime p50</th><th class="n">Held by workloads</th>
+<th class="n">Idle chip-hours</th><th class="n">Admitted → running p50 / p90</th></tr></thead><tbody>{node_rows}</tbody></table></div>
 <p class="muted note">From GKE's per-node metrics: every TPU node that existed in the range, tied to its pool by the
 pool's instance group. <i>Nodes created</i> counts nodes that appeared during the range, each one a node the pool scaled
 up for; <i>lifetime</i> is appearing to disappearing, for nodes that did both. <i>Idle chip-hours</i> are chips on nodes
 that no admitted workload held - scale-down lag, a pool's minimum, or a node waiting for the workload it came for.
+<i>Held by workloads</i> is the share of chip-hours on nodes that an admitted workload held.
 <i>Admitted → running</i> includes the wait for a node when the pool had to scale up.</p>"""
 
     pipeline_rows, pipelines_more, pipelines_button = split_rows(
         [
             f"""<tr><td>{E(p["pipeline"])}</td><td class="n">{num(p["finished"])}</td><td class="n">{success_rate(p)}</td>
-<td class="n">{num(p["failed"])}</td>{infra_cell(p)}<td class="n">{num(p["chip_hours"])}</td></tr>"""
+{failures_cell(p)}<td class="n">{num(p["chip_hours"])}</td></tr>"""
             for p in h["pipelines"][:20]
         ],
         "pipelines-more",
-        '<tr><td colspan="6" class="empty">No finished workloads.</td></tr>',
+        '<tr><td colspan="5" class="empty">No finished workloads.</td></tr>',
     )
     outcomes = f"""
 <h3>By queue</h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Queue</th><th class="n">Finished</th><th class="n">Success</th>
-<th class="n">Test failures</th><th class="n">Infra failures</th><th class="n">Evictions</th>
-<th class="n">Requeues / redispatches</th><th class="n">Wait p50 / p90</th><th class="n">Startup p50 / p90</th>
-<th class="n">Run p50</th><th class="n">Chip-hours</th></tr></thead>
+<th class="n">Failures: test / infra</th><th class="n">Evicted / requeued / redispatched</th>
+<th class="n">Wait p50 / p90</th><th class="n">Run p50</th><th class="n">Chip-hours</th></tr></thead>
 <tbody>{queue_rows}</tbody></table></div>
 <p class="muted note">Success is over workloads that finished either way; cancelled ones are left out. Wait is
-submitted to quota reserved; startup is admitted to the first workload container running.</p>
+submitted to quota reserved; how long an admitted workload took to start is under Node autoscaling.</p>
 <h3 style="margin-top:20px">By pipeline</h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Pipeline</th><th class="n">Finished</th><th class="n">Success</th>
-<th class="n">Test failures</th><th class="n">Infra failures</th><th class="n">Chip-hours</th></tr></thead>
+<th class="n">Failures: test / infra</th><th class="n">Chip-hours</th></tr></thead>
 <tbody>{pipeline_rows}</tbody>{pipelines_more}</table></div>
 {pipelines_button}"""
 
