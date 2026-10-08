@@ -14,6 +14,10 @@
       <tr><th>Reclaim</th><td>A queue that <i>evicts borrowers</i> takes lent chips back by preempting the
         workloads using them; those steps rerun. A queue that never reclaims waits for borrowers to
         finish.</td></tr>
+      <tr><th>Priority</th><td>The Kueue WorkloadPriorityClass a build's workloads run at, highest
+        first: oncall-fix, post-merge, pre-merge, integration, then <i>unclassed</i> (no class,
+        scored 0), then low, with Kueue's value beside it. It decides who is admitted next,
+        never who stops.</td></tr>
       <tr><th>Admitted</th><td>Kueue granted the quota and a worker cluster accepted the workload; its pods
         are starting or running.</td></tr>
       <tr><th>Dispatching</th><td>Quota reserved on the manager, waiting for a worker to accept.</td></tr>

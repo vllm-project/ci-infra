@@ -179,6 +179,11 @@ resource "google_cloud_run_v2_service" "dashboard" {
         name  = "TEST_BUDGET_SECONDS"
         value = tostring(var.tpu_test_max_seconds)
       }
+      # The secret's name, not its value, for the page's link to it.
+      env {
+        name  = "BUILDKITE_TOKEN_SECRET"
+        value = data.google_secret_manager_secret.dashboard_buildkite_token.secret_id
+      }
       env {
         name = "BUILDKITE_API_TOKEN"
         value_source {

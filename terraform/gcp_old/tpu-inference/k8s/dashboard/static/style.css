@@ -1,9 +1,14 @@
-/* Shared by the live and history pages. */
+/* Shared by every page: the glass style. */
 :root {
   color-scheme: light;
-  --bg: #f6f7f9; --card: #ffffff; --ink: #101828; --ink-2: #475467; --muted: #98a2b3;
-  --line: #eaecf0; --line-2: #f2f4f7; --hover: #f9fafb;
-  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  /* Glass: translucent white surfaces over a soft color field, Apple's grays. */
+  --bg: transparent; --card: rgba(255, 255, 255, 0.72); --ink: #1d1d1f; --ink-2: #48484a;
+  --muted: #86868b; --line: rgba(60, 60, 67, 0.14); --line-2: rgba(60, 60, 67, 0.08);
+  --hover: rgba(255, 255, 255, 0.5); --accent: #007aff;
+  --glass: rgba(255, 255, 255, 0.62); --glass-edge: rgba(255, 255, 255, 0.75);
+  --glass-shadow: 0 10px 30px rgba(25, 40, 90, 0.10), 0 1px 2px rgba(25, 40, 90, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  --shadow: var(--glass-shadow);
   /* Data colors: the reference palette's first three categorical slots, which
      validate as a set, and the lightest step of slot 1's ramp for quota nobody
      is using. Busy (slot 3) is under 3:1 on white, so every chart has its
@@ -12,8 +17,18 @@
   --borrowed-bg: #fdf0ea; --idle-bg: #edf4fd;
   /* Status colors are reserved for health and always ship with an icon and a
      label, never color alone. */
-  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
-  --good-bg: #ecf8ec; --warning-bg: #fff7e6; --critical-bg: #fbeaea; --info-bg: #f2f4f7;
+  --good: #28a745; --warning: #ff9f0a; --critical: #ff3b30;
+  --good-bg: rgba(52, 199, 89, 0.14); --warning-bg: rgba(255, 159, 10, 0.16);
+  --critical-bg: rgba(255, 59, 48, 0.12); --info-bg: rgba(120, 120, 128, 0.12);
+}
+html {
+  background:
+    radial-gradient(1100px 700px at 8% -10%, #bcd6ff 0%, transparent 60%),
+    radial-gradient(900px 600px at 100% 0%, #dccbff 0%, transparent 55%),
+    radial-gradient(1000px 800px at 60% 110%, #c3efe0 0%, transparent 60%),
+    #eef1f6;
+  background-attachment: fixed;
+  min-height: 100%;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink);
@@ -34,7 +49,6 @@ p { margin: 0; }
 .topbar .inner { max-width: 1200px; margin: 0 auto; padding: 10px 24px; display: flex;
   align-items: center; gap: 16px; flex-wrap: wrap; }
 .topbar .when { color: var(--ink-2); font-size: 13px; }
-.sources { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
 .nav { max-width: 1200px; margin: 0 auto; padding: 0 24px 10px; display: flex; gap: 6px; flex-wrap: wrap; }
 .nav:empty { display: none; }
 
@@ -60,10 +74,6 @@ main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 48px; }
 
 /* History range */
 .range { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 14px 20px; }
-.custom { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-left: auto; }
-.custom label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); }
-input[type="date"] { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--line);
-  border-radius: 7px; color: var(--ink); background: var(--card); }
 button { font: inherit; font-size: 13px; font-weight: 500; padding: 5px 14px; border-radius: 7px;
   border: 1px solid var(--own); background: var(--own); color: #fff; cursor: pointer; }
 
@@ -183,5 +193,171 @@ details { margin-top: 10px; } summary { cursor: pointer; color: var(--ink-2); fo
 @media (max-width: 800px) {
   .charts { grid-template-columns: 1fr; }
   .tiles { grid-template-columns: 1fr 1fr; }
-  .custom { margin-left: 0; }
 }
+
+/* A queue card's sections: running, next up, why pending. */
+.block { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.block h4 { margin-bottom: 8px; }
+
+/* Anchors land below the sticky top bar. */
+[id] { scroll-margin-top: 110px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* Overview: the diagram, then each component's details. */
+.overview main { font-size: 15px; }
+.intro { color: var(--ink-2); margin: 6px 0 16px; max-width: 900px; }
+.diagram-wrap { overflow-x: auto; }
+.diagram { min-width: 980px; }
+.diagram .box { fill: var(--card); stroke: var(--line); stroke-width: 1.5; transition: stroke 0.15s; }
+.diagram .node { cursor: pointer; }
+.diagram .node:hover .box, .diagram .node:focus .box { stroke: var(--own); stroke-width: 2; }
+.diagram .node.warn .box { stroke: var(--warning); stroke-width: 2; }
+.diagram .node.fail .box { stroke: var(--critical); stroke-width: 2.5; }
+.diagram .n-title { font-size: 17px; font-weight: 600; fill: var(--ink); }
+.diagram .n-sub { font-size: 13px; fill: var(--ink-2); }
+.diagram .n-big { font-size: 30px; font-weight: 600; fill: var(--ink); letter-spacing: -0.02em; }
+.diagram .n-big.zero { fill: var(--muted); font-weight: 500; }
+.diagram .n-label, .diagram .n-line { font-size: 13.5px; fill: var(--ink-2); }
+.diagram .badge circle { fill: var(--muted); }
+.diagram .badge.ok circle { fill: var(--good); } .diagram .badge.fail circle { fill: var(--critical); }
+.diagram .badge.warn circle { fill: var(--warning); }
+.diagram .badge text { font-size: 12px; font-weight: 700; fill: #fff; }
+.diagram .badge.warn text { fill: var(--ink); }
+.diagram .track { fill: var(--line-2); } .diagram .fill { fill: var(--own); }
+.diagram .edge { fill: none; stroke: var(--muted); stroke-width: 2; }
+.diagram .edge.idle { stroke-dasharray: 4 6; stroke: var(--line); }
+.diagram .arrowhead { fill: var(--muted); }
+.diagram .dot { fill: var(--own); }
+.diagram .boundary { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 7 6; }
+.diagram .boundary-label { font-size: 14px; font-weight: 600; fill: var(--ink-2); }
+.diagram .edge-label { font-size: 13px; fill: var(--ink-2); }
+@media (prefers-reduced-motion: reduce) { .diagram .dot { display: none; } }
+
+.components-head { display: flex; align-items: center; justify-content: space-between; }
+.toggle { background: var(--card); color: var(--ink); border-color: var(--line); font-size: 14px; }
+.components { display: grid; gap: 10px; }
+details.component { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow); }
+details.component > summary { display: grid; grid-template-columns: 14px auto 1fr auto; align-items: center;
+  gap: 4px 12px; padding: 14px 18px; cursor: pointer; list-style: none; }
+details.component > summary::-webkit-details-marker { display: none; }
+details.component > summary::before { content: "▸"; color: var(--ink-2); font-size: 18px; line-height: 1; grid-row: span 2; }
+details.component[open] > summary::before { content: "▾"; }
+details.component > summary .status-chip { justify-self: end; }
+.c-title { font-size: 17px; font-weight: 600; }
+.c-sub { color: var(--ink-2); font-size: 14px; }
+.c-role { grid-column: 2 / -1; color: var(--ink-2); font-size: 14px; }
+.c-body { padding: 0 18px 18px 44px; display: flex; flex-direction: column; gap: 12px; }
+.counts { display: flex; gap: 10px 26px; flex-wrap: wrap; }
+.count b { display: block; font-size: 28px; font-weight: 600; line-height: 1.15; letter-spacing: -0.02em; }
+.count span { font-size: 14px; color: var(--ink-2); }
+.count.zero b { color: var(--muted); font-weight: 500; }
+.cohort-line { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: center; font-size: 14px; max-width: 560px; }
+.cohort-line b { font-size: 15px; }
+.cohort-line .bar { grid-column: 1 / -1; height: 10px; background: var(--line-2); border-radius: 5px; overflow: hidden; }
+.cohort-line .bar .seg { border-radius: 5px; }
+.cohort-line .queued { grid-column: 1 / -1; color: var(--ink-2); }
+.overview .more { font-size: 14px; color: var(--ink-2); }
+.overview table th { font-size: 13px; }
+.overview table td { font-size: 14px; }
+.overview details.glossary { margin-bottom: 14px; }
+
+/* Health inside a box: icon and label, never color alone. */
+.status-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 4px;
+  border-radius: 999px; font-size: 14px; font-weight: 600; background: var(--info-bg); color: var(--ink-2); }
+.status-chip .icon, .hc .icon { width: 20px; height: 20px; border-radius: 50%; display: grid;
+  place-items: center; font-size: 11px; font-weight: 700; color: #fff; background: var(--muted); }
+.status-chip.ok { background: var(--good-bg); color: #08700a; } .status-chip.ok .icon { background: var(--good); }
+.status-chip.warn { background: var(--warning-bg); color: #8a5a00; } .status-chip.warn .icon { background: var(--warning); color: var(--ink); }
+.status-chip.fail { background: var(--critical-bg); color: #a12626; } .status-chip.fail .icon { background: var(--critical); }
+.hc { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.hc li { display: grid; grid-template-columns: 20px 1fr; gap: 10px; align-items: start; font-size: 14px; color: var(--ink-2); }
+.hc li b { color: var(--ink); font-weight: 600; }
+.hc .ok .icon { background: var(--good); } .hc .fail .icon { background: var(--critical); }
+.hc .warn .icon { background: var(--warning); color: var(--ink); }
+
+}
+b.err { color: #a12626; font-weight: 600; }
+.diagram .n-cap { font-size: 13px; fill: var(--muted); }
+
+/* Data sources: one entry per source, its facts in three short lists. */
+.sources-list { display: grid; gap: 12px; margin-top: 12px; }
+.source { border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+.source.fail { border-color: var(--critical); background: var(--critical-bg); }
+.source-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 14px; }
+.source-cols { display: grid; grid-template-columns: 1.1fr 1.2fr 1fr; gap: 6px 24px; margin-top: 10px; }
+.source-cols h4 { font-size: 13px; margin: 0 0 4px; }
+.source-cols ul { margin: 0; padding-left: 18px; }
+.source-cols li { font-size: 14px; margin: 2px 0; }
+.err-line { margin-top: 8px; font-size: 14px; }
+.source:target { outline: 2px solid var(--own); outline-offset: 2px; }
+@media (max-width: 800px) { .source-cols { grid-template-columns: 1fr; } }
+.source-links { font-size: 14px; margin: 6px 0 0; }
+.show-more { margin-top: 10px; }
+
+/* Glass materials: these come last and refine the rules above. */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  letter-spacing: -0.005em;
+}
+h1, h2, .tile b, .stat b, .count b,
+.diagram .n-big, .diagram .n-title {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* The bar floats: a glass capsule over the page. */
+.topbar { top: 10px; margin: 10px auto 0; max-width: 1180px; border-radius: 22px;
+  background: rgba(255, 255, 255, 0.55); border: 1px solid var(--glass-edge);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%); }
+.topbar .inner { padding: 8px 14px 8px 20px; }
+.topbar h1 { font-size: 17px; font-weight: 600; }
+main { padding-top: 22px; }
+
+/* Capsule tabs and segmented controls. */
+.tabs, .segmented { background: rgba(120, 120, 128, 0.12); border-radius: 999px; padding: 3px; }
+.tab, .seg-btn { border-radius: 999px; padding: 5px 14px; color: var(--ink-2); font-weight: 500; }
+.tab.active, .seg-btn.active { background: rgba(255, 255, 255, 0.9); color: var(--ink);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), inset 0 1px 0 #fff; }
+.tab:hover, .seg-btn:hover { text-decoration: none; color: var(--ink); }
+
+/* Glass surfaces. */
+.card, details.component, .stage {
+  background: var(--glass); border: 1px solid var(--glass-edge); border-radius: 22px;
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(20px) saturate(170%); -webkit-backdrop-filter: blur(20px) saturate(170%); }
+.tile, .panel, .source, .state-chip {
+  background: rgba(255, 255, 255, 0.55); border: 1px solid var(--glass-edge); border-radius: 16px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9); }
+.check { border-radius: 16px; }
+.section-label { text-transform: none; letter-spacing: -0.01em; font-size: 20px;
+  font-weight: 700; color: var(--ink); margin-top: 28px; }
+.tile b, .stat b, .count b { font-weight: 600; }
+
+/* Tables read as grouped lists. */
+th { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 600;
+  color: var(--muted); border-bottom: 1px solid var(--line); }
+td { border-bottom-color: var(--line-2); }
+tbody tr:hover td { background: rgba(255, 255, 255, 0.45); }
+
+/* Capsule chips and buttons. */
+.pill { border-radius: 999px; background: rgba(120, 120, 128, 0.12); }
+.status-chip { border-radius: 999px; }
+button, .toggle { border-radius: 999px; background: rgba(255, 255, 255, 0.7);
+  color: var(--accent); border: 1px solid var(--glass-edge); font-weight: 600; padding: 7px 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), inset 0 1px 0 #fff; }
+button:hover { background: rgba(255, 255, 255, 0.95); }
+
+/* The overview's diagram: frosted boxes on the glass card. */
+.diagram .box { fill: rgba(255, 255, 255, 0.78); stroke: rgba(255, 255, 255, 0.95);
+  stroke-width: 1.5; rx: 16px; filter: drop-shadow(0 4px 10px rgba(25, 40, 90, 0.10)); }
+.diagram .node:hover .box { stroke: var(--accent); }
+.diagram .node.warn .box { stroke: var(--warning); }
+.diagram .node.fail .box { stroke: var(--critical); }
+.diagram .boundary { stroke: rgba(60, 60, 67, 0.3); }
+.diagram .track { fill: rgba(120, 120, 128, 0.16); }
+.bar .seg.idle { opacity: 0.8; }
+.jobs-running { margin-top: 22px; }

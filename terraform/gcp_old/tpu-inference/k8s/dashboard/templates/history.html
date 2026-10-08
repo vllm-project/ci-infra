@@ -8,28 +8,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TPU CI kube · History</title>
-<link rel="stylesheet" href="static/style.css">
+<link rel="stylesheet" href="static/style.css?v=$assets">
 </head>
 <body>
 <header class="topbar">
   <div class="inner">
     <h1>TPU CI kube</h1>
-    <nav class="tabs"><a class="tab" href="./">Live</a><a class="tab active" href="history">History</a></nav>
+    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab active" href="history">History</a></nav>
     <span class="when"><time data-ts="$start"></time> – <time data-ts="$end"></time> · one point per $step</span>
-    <div class="sources">$sources</div>
   </div>
 </header>
 <main>
 $errors
-<form class="card range" id="range" data-start="$start" data-end="$end">
-  <div class="segmented">$presets</div>
-  <div class="custom">
-    <label>From <input type="date" name="from" required></label>
-    <label>To <input type="date" name="to" required></label>
-    <button type="submit">Apply</button>
-  </div>
-</form>
-$glossary
+<div class="card range"><div class="segmented">$presets</div></div>
 
 <div class="section-label">Chip utilization</div>
 $cohorts
@@ -45,6 +36,6 @@ $queues
 
 <p class="muted footer">Data as JSON at <a href="api/history$query">api/history$query</a>.</p>
 </main>
-<script src="static/app.js"></script>
+<script src="static/app.js?v=$assets"></script>
 </body>
 </html>

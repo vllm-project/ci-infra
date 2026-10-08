@@ -1,0 +1,39 @@
+<!doctype html>
+<!--
+  The overview page: how a step moves through the fleet, drawn from the live
+  snapshot. views.py fills the placeholders - a dollar sign and a name - with
+  string.Template, so a literal dollar sign here must be doubled.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="60">
+<title>TPU CI kube · Overview</title>
+<link rel="stylesheet" href="static/style.css?v=$assets">
+</head>
+<body class="overview">
+<header class="topbar">
+  <div class="inner">
+    <h1>TPU CI kube</h1>
+    <nav class="tabs"><a class="tab active" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab" href="history">History</a></nav>
+    <span class="when">Updated <time data-ts="$generated" data-fmt="time"></time> · reloads every minute</span>
+  </div>
+</header>
+<main>
+$errors
+<p class="intro">How a TPU step runs on the kube fleet, left to right, with how many steps are at each
+stage now. Dots move along a path while steps are past it; a still, dashed path has none. Each box's
+mark is the worst of its checks from Live's <a href="live#health">Health</a> section. Click a box for its
+details.</p>
+$glossary
+<div class="card">$diagram</div>
+<div class="components-head"><div class="section-label">Components</div>
+  <button type="button" class="toggle" id="expand-all">Expand all</button></div>
+<div class="components">$components</div>
+$source_table
+<p class="muted footer">Data as JSON at <a href="api/live">api/live</a>, under <code>fleet</code>.</p>
+</main>
+<script src="static/app.js?v=$assets"></script>
+</body>
+</html>

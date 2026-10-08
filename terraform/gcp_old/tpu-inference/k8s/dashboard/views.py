@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import collections
+import hashlib
 import html
 import re
 import statistics
 import string
 import time
+import urllib.parse
 from pathlib import Path
 
 from charts import line_chart, values_table
@@ -26,7 +28,15 @@ E = html.escape
 TEMPLATES = Path(__file__).parent / "templates"
 LIVE_PAGE = string.Template((TEMPLATES / "live.html").read_text())
 HISTORY_PAGE = string.Template((TEMPLATES / "history.html").read_text())
+OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
 GLOSSARY = (TEMPLATES / "glossary.html").read_text()
+# In the stylesheet and script URLs, so a browser holding the last version
+# for its five minutes fetches the new one as soon as the page changes.
+ASSETS = hashlib.sha256(
+    b"".join(
+        p.read_bytes() for p in sorted((Path(__file__).parent / "static").iterdir())
+    )
+).hexdigest()[:10]
 
 # kube_workload_timing outcomes that are the test's or Buildkite's doing. Any
 # other outcome is the fleet ending a workload.
@@ -55,6 +65,22 @@ PLACEMENT_HANDSHAKE = (
     "leader pod not yet scheduled",
     "expected 1 leader pod",
 )
+
+# A node that has just booted can be handed a pod before it is fully up, and
+# the kubelet retries with backoff until it is: the gcsfuse CSI driver not yet
+# registered, the GKE metadata server not yet answering the gcsfuse sidecar,
+# the node not yet authorized for the pod's PVC, or the service-account token's
+# ConfigMap watch not yet synced. Measured 2026-10-08 on us-east5: cleared
+# within 2 s to 2 min, and the pods started on the new-node path. Routine while
+# it repeats a handful of times per pod; a mount that keeps failing repeats
+# every couple of minutes and stays a fleet problem.
+NODE_BOOT = (
+    "driver name gcsfuse.csi.storage.gke.io not found in the list of registered CSI drivers",
+    "failed to setup metadata service",
+    "no relationship found between node",
+    "failed to sync configmap cache: timed out waiting for the condition",
+)
+NODE_BOOT_REPEATS = 10
 
 # Thresholds for the health checks, as a share of the budgets the launcher
 # enforces - a workload past them is about to be killed by the fleet itself.
@@ -94,7 +120,8 @@ JOB_STATES = {
     "running": ("Running", "Admitted and every pod up."),
 }
 
-# History ranges offered as presets; any other range is picked by date.
+# History ranges offered as presets. /api/history also takes ?start=&end= in
+# epoch seconds, for a range the presets do not cover.
 PRESETS = {"6h": 6 * 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
 PRESET_LABELS = {"6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
 STEPS = (300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400)
@@ -150,6 +177,8 @@ def queue_link(q: dict, page: str = "") -> str:
 
 
 def build_link(r: dict) -> str:
+    if not r.get("pipeline"):
+        return '<span class="muted">no build</span>'
     title = E(
         f"{r['branch']} - {r['message']}" if r.get("message") else r.get("branch", "")
     )
@@ -200,14 +229,20 @@ def pool_of(by_hash: dict, key: str) -> dict | None:
     return by_hash.get(parts[2]) if len(parts) >= 4 else None
 
 
-def live_nodes(pools: list, present: dict) -> dict:
-    """Per Kueue queue: TPU nodes up now, and the pools' bounds."""
+def live_nodes(pools: list, present: dict, busy: dict) -> dict:
+    """Per Kueue queue: TPU nodes up now, the chips computing on them, and the
+    pools' bounds."""
     by_hash = pool_index(pools)
     per_pool = collections.Counter()
     for key in present:
         p = pool_of(by_hash, key)
         if p:
             per_pool[(p["cluster"], p["name"])] += 1
+    busy_pool = collections.Counter()
+    for key, value in busy.items():
+        p = pool_of(by_hash, key)
+        if p:
+            busy_pool[(p["cluster"], p["name"])] += value
     out: dict = {}
     for p in pools:
         n = out.setdefault(
@@ -220,11 +255,13 @@ def live_nodes(pools: list, present: dict) -> dict:
                 "pools": 0,
                 "pools_up": 0,
                 "multi_host": p["multi_host"],
+                "busy": 0.0,
             },
         )
         up = per_pool[(p["cluster"], p["name"])]
         n["up"] += up
         n["chips"] += up * p["chips_per_node"]
+        n["busy"] += busy_pool[(p["cluster"], p["name"])]
         n["min"] += p["min_nodes"]
         n["max"] += p["max_nodes"]
         n["pools"] += 1
@@ -245,16 +282,155 @@ def sort_queues(queues: list[dict]) -> list[dict]:
     )
 
 
-def render_sources(sources: dict) -> str:
-    out = []
+# What each data source is, for the Overview's Data sources section: what it
+# reads, through what, the grant it needs, and where to look when it fails.
+SOURCES = {
+    "Kueue": {
+        "through": "Connect Gateway to the manager, as the dashboard's service account",
+        "reads": [
+            "ClusterQueues and LocalQueues",
+            "Workloads",
+            "MultiKueue clusters and admission checks",
+            "Jobs and JobSets",
+            "Agent pods",
+            "Each queue's pending order (visibility API)",
+        ],
+        "needs": [
+            "roles/gkehub.gatewayReader",
+            "tpu-ci-dashboard ClusterRole and Role - "
+            "kueue/generated/manager/workload/40-dashboard-rbac.yaml, applied by hand",
+        ],
+        "fails": [
+            "403 from the gateway: the IAM grant",
+            "403 naming a resource: the RBAC file is not applied",
+        ],
+    },
+    "Buildkite": {
+        "through": "the Buildkite REST API",
+        "reads": [
+            "Running and scheduled builds of this cluster's pipelines",
+            "Their kube jobs",
+        ],
+        "needs": [
+            "The REST token in Secret Manager named by dashboard_buildkite_token_secret_id, "
+            "shared with the Buildkite-to-BigQuery puller",
+        ],
+        "fails": [
+            "401: the token expired or was revoked - add a secret version, roll the service"
+        ],
+    },
+    "Events": {
+        "through": "Connect Gateway to each cluster",
+        "reads": ["Events in the buildkite namespace of every cluster"],
+        "needs": [
+            "tpu-ci-dashboard Role on each worker, under its generated workload directory"
+        ],
+        "fails": [
+            "A cluster that cannot be read is named on Live; the rest still show"
+        ],
+    },
+    "Metrics": {
+        "through": "the Managed Prometheus query API",
+        "reads": [
+            "Kueue: quota, usage, pending, evictions",
+            "agent-stack-k8s: polling and job creates",
+            "Nodes: presence and TensorCore duty cycle",
+        ],
+        "needs": ["roles/monitoring.viewer"],
+        "fails": [
+            "The error names the query",
+            "A cluster missing from Kueue up: its PodMonitoring "
+            "(system/30-monitoring.yaml) is not applied",
+        ],
+    },
+    "GKE": {
+        "through": "the GKE API, hourly",
+        "reads": ["Every cluster's node pools: shape, bounds, instance groups"],
+        "needs": ["roles/container.clusterViewer on the project"],
+        "fails": ["Node counts and the node autoscaling table go blank"],
+    },
+    "BigQuery": {
+        "through": "BigQuery",
+        "reads": [
+            "Workload outcomes and timings: ci_efficiency_metrics.kube_workload_timing"
+        ],
+        "needs": ["roles/bigquery.dataViewer on the dataset", "roles/bigquery.jobUser"],
+        "fails": ["Only the 24-hour checks and History's outcomes go blank"],
+    },
+}
+
+
+# Which of fleet_links' entries open each source.
+SOURCE_LINKS = {
+    "Kueue": ["cluster:manager"],
+    "Buildkite": ["buildkite", "secret"],
+    "Events": ["events"],
+    "Metrics": ["metrics"],
+    "GKE": ["gke"],
+    "BigQuery": ["bigquery"],
+}
+
+
+def out_links(items: list) -> str:
+    """Links that leave the dashboard, in a new tab."""
+    return " · ".join(
+        f'<a href="{E(url)}" target="_blank" rel="noopener">{E(label)} ↗</a>'
+        for label, url in items
+    )
+
+
+def source_id(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower())
+
+
+def render_source_table(sources: dict, links: dict) -> str:
+    """The Overview's Data sources section, one entry per source."""
+
+    def items(values: list) -> str:
+        return "<ul>" + "".join(f"<li>{E(v)}</li>" for v in values) + "</ul>"
+
+    seen, entries = set(), []
     for s in sources.values():
+        if s["name"] in seen:
+            continue
+        seen.add(s["name"])
+        info = SOURCES.get(s["name"], {})
+        opens = [
+            item
+            for key in SOURCE_LINKS.get(s["name"], [])
+            for item in links.get(key, [])
+        ]
         state = "fail" if s["error"] else "ok"
-        title = E(s["error"]) if s["error"] else "ok"
-        label = s["name"] + (" failed" if s["error"] else "")
-        out.append(
-            f'<span class="pill {state}" title="{title}"><span class="dot"></span>{E(label)}</span>'
+        last = (
+            f'<time data-ts="{s["at"]}" data-fmt="time"></time>'
+            if s.get("at")
+            else "never"
         )
-    return "".join(out)
+        error = (
+            f'<p class="err-line"><b class="err">{E(s["error"])}</b></p>'
+            if s["error"]
+            else ""
+        )
+        entries.append(
+            f"""<div class="source {state}" id="source-{source_id(s["name"])}">
+  <div class="source-head"><span class="pill {state}"><span class="dot"></span>{E(s["name"])}{" failed" if s["error"] else ""}</span>
+    <span class="muted">through {E(info.get("through", ""))} · last read {last}</span></div>
+  {f'<p class="source-links">{out_links(opens)}</p>' if opens else ""}
+  {error}<div class="source-cols">
+    <div><h4>Reads</h4>{items(info.get("reads", []))}</div>
+    <div><h4>Needs</h4>{items(info.get("needs", []))}</div>
+    <div><h4>If it fails</h4>{items(info.get("fails", []))}</div>
+  </div>
+</div>"""
+        )
+    return f"""<div class="section-label" id="sources">Data sources</div>
+<div class="card">
+  <p class="muted">Whether the dashboard could read each source on its last try - not whether the
+  fleet is healthy, which Health on Live says. A source that fails keeps its last good data on
+  every page, under a banner at the top. The full error is in {out_links(links.get("logs", []))};
+  grants are in {out_links(links.get("iam", []))}.</p>
+  <div class="sources-list">{"".join(entries)}</div>
+</div>"""
 
 
 def render_errors(sources: dict) -> str:
@@ -265,7 +441,7 @@ def render_errors(sources: dict) -> str:
             if s.get("at")
             else ""
         )
-        + "</p>"
+        + f' · <a href="./#source-{source_id(s["name"])}">what it reads and how to fix it</a></p>'
         for s in sources.values()
         if s["error"]
     )
@@ -288,7 +464,6 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
     }
     bk = data.get("buildkite") or {
         "meta": {},
-        "priorities": {},
         "job_builds": {},
         "jobs": [],
     }
@@ -308,10 +483,57 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             "source": meta.get("source", ""),
             "message": meta.get("message", ""),
             "priority": None,
+            "priority_class": None,
             "pending": 0,
             "running": 0,
             "held": 0.0,
             "oldest_wait": None,
+            "running_since": None,
+        }
+
+    by_name = {w["name"]: w for w in kq["workloads"]}
+    bk_jobs = {j["id"]: j for j in bk["jobs"]}
+
+    def next_up(q: dict, wls: list) -> dict | None:
+        """The first of a queue's pending workloads in Kueue's order, and what
+        priorities the rest carry."""
+        order = (kq.get("next_up") or {}).get(q["name"])
+        if order is None:
+            return None
+        rows = []
+        for item in order["items"]:
+            w = by_name.get(item["workload"])
+            rows.append(
+                {
+                    "position": item["position"] + 1,
+                    "priority": item["priority"],
+                    "priority_class": w["priority_class"] if w else None,
+                    "build": build_row(w["pipeline"], w["number"]) if w else None,
+                    "job": bk_jobs.get(w["job_id"].replace("-", "")) if w else None,
+                    "workload": item["workload"],
+                    "waiting": now - w["created"] if w and w["created"] else None,
+                }
+            )
+        listed = {r["workload"] for r in rows}
+        rest = collections.Counter(
+            (w["pipeline"], w["number"], w["priority"], w["priority_class"])
+            for w in wls
+            if w["state"] == "pending" and w["name"] not in listed
+        )
+        return {
+            "rows": rows,
+            "rest": [
+                {
+                    "build": build_row(pipeline, number),
+                    "priority": value,
+                    "priority_class": name,
+                    "count": count,
+                }
+                for (pipeline, number, value, name), count in sorted(
+                    rest.items(), key=lambda kv: (-kv[0][2], -kv[1])
+                )
+            ],
+            "error": order["error"],
         }
 
     queues = []
@@ -323,22 +545,26 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             row = rows.setdefault(
                 (w["pipeline"], w["number"]), build_row(w["pipeline"], w["number"])
             )
-            prio = bk["priorities"].get(w["job_id"], w["priority"])
-            row["priority"] = max(
-                prio, row["priority"] if row["priority"] is not None else prio
-            )
+            # A step can name its own class, so a build shows its highest.
+            if row["priority"] is None or w["priority"] > row["priority"]:
+                row["priority"] = w["priority"]
+                row["priority_class"] = w["priority_class"]
             if w["state"] == "pending":
                 row["pending"] += 1
                 row["oldest_wait"] = max(row["oldest_wait"] or 0, now - w["since"])
-                # "3 more needed" differs per workload; the cause does not.
-                reason = (
-                    re.sub(r", \d+ more needed", "", w["reason"])
-                    or "queued behind the head of the queue"
-                )
+                reason = pending_reason(w["reason"])
                 reasons[reason] = reasons.get(reason, 0) + 1
             else:
                 row["running"] += 1
                 row["held"] += w["amount"]
+                if w["since"]:
+                    row["running_since"] = min(
+                        row["running_since"] or w["since"], w["since"]
+                    )
+        for row in rows.values():
+            row["running_for"] = (
+                now - row["running_since"] if row["running_since"] else None
+            )
         pending = [w for w in wls if w["state"] == "pending"]
         queues.append(
             {
@@ -351,18 +577,18 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 "pending_amount": sum(w["amount"] for w in pending),
                 "oldest_wait": max((now - w["since"] for w in pending), default=None),
                 "reasons": sorted(reasons.items(), key=lambda kv: -kv[1]),
+                "next_up": next_up(q, wls) if pending else None,
+                # Pending is the next-up list's; this is what holds the chips.
                 "builds": sorted(
-                    rows.values(),
-                    key=lambda r: (
-                        -(r["pending"] > 0),
-                        -(r["priority"] or 0),
-                        -(r["oldest_wait"] or 0),
-                    ),
+                    (r for r in rows.values() if r["running"]),
+                    key=lambda r: (-r["held"], -(r["priority"] or 0)),
                 ),
             }
         )
     queues = sort_queues(queues)
-    nodes = live_nodes(data.get("pools") or [], health.get("nodes", {}))
+    nodes = live_nodes(
+        data.get("pools") or [], health.get("nodes", {}), health.get("busy", {})
+    )
     for q in queues:
         q["nodes"] = nodes.get(q["name"])
 
@@ -387,12 +613,11 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             c[key] += q[key]
     for c in cohorts.values():
         c["free"] = max(0.0, c["nominal"] - c["used"])
-        model = DUTY_MODELS.get(c["family"], "")
-        c["busy"] = health.get("busy", {}).get(model)
         members = [
             q["nodes"] for q in queues if q["cohort"] == c["name"] and q["nodes"]
         ]
         c["on_nodes"] = sum(n["chips"] for n in members) if members else None
+        c["busy"] = sum(n["busy"] for n in members) if members else None
 
     snapshot = {
         "generated_at": now,
@@ -406,7 +631,195 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
         ),
     }
     snapshot["checks"] = health_checks(cfg, snapshot, kq, ev, health, stats24, now)
+    snapshot["fleet"] = fleet_map(cfg, kq, health, data.get("pools") or [], snapshot)
     return snapshot
+
+
+def console(path: str, project: str, **params: str) -> str:
+    query = urllib.parse.urlencode({"project": project, **params})
+    return f"https://console.cloud.google.com/{path}?{query}"
+
+
+def fleet_links(cfg: Config) -> dict:
+    """Where each component and data source lives, for the Overview's links:
+    id -> [(label, url)]. Every cluster is taken to be in the dashboard's project."""
+    p = cfg.project
+    links: dict = {
+        "buildkite": [
+            (
+                "Cluster queues in Buildkite",
+                f"https://buildkite.com/organizations/{cfg.org}/clusters/{cfg.cluster_id}/queues",
+            )
+        ],
+        "metrics": [("Metrics Explorer", console("monitoring/metrics-explorer", p))],
+        "gke": [("Clusters in GKE", console("kubernetes/list/overview", p))],
+        "iam": [("IAM", console("iam-admin/iam", p))],
+        "events": [
+            (
+                "Events in Logs Explorer",
+                console(
+                    "logs/query;query="
+                    + urllib.parse.quote(
+                        f'logName="projects/{p}/logs/events"\n'
+                        f'resource.labels.namespace_name="{cfg.namespace}"',
+                        safe="",
+                    ),
+                    p,
+                ),
+            )
+        ],
+        "logs": [
+            (
+                "This service's logs",
+                console(
+                    "logs/query;query="
+                    + urllib.parse.quote(
+                        'resource.type="cloud_run_revision"\n'
+                        f'resource.labels.service_name="{cfg.service}"',
+                        safe="",
+                    ),
+                    p,
+                ),
+            )
+        ],
+    }
+    if cfg.token_secret:
+        links["secret"] = [
+            (
+                "Token in Secret Manager",
+                console(
+                    f"security/secret-manager/secret/{cfg.token_secret}/versions", p
+                ),
+            )
+        ]
+    if cfg.timing_table.count(".") == 2:
+        bq_project, dataset, table = cfg.timing_table.split(".")
+        links["bigquery"] = [
+            (
+                f"{table} in BigQuery",
+                # ws is the console's own path syntax; its ! must stay literal.
+                console("bigquery", bq_project)
+                + f"&ws=!1m5!1m4!4m3!1s{bq_project}!2s{dataset}!3s{table}",
+            )
+        ]
+    for c in cfg.clusters:
+        where = cluster_location(c)
+        base = f"kubernetes/clusters/details/{where}/{c['name']}"
+        links[f"cluster:{c['name']}"] = [
+            (f"{c['name']} in GKE", console(f"{base}/details", p)),
+            ("Node pools", console(f"{base}/nodes", p)),
+        ]
+    return links
+
+
+def cluster_location(c: dict) -> str:
+    m = re.search(r"/locations/([^/]+)/gkeMemberships/", c.get("gateway", ""))
+    return m[1] if m else ""
+
+
+def fleet_map(cfg: Config, kq: dict, health: dict, pools: list, snap: dict) -> dict:
+    """What the overview draws: the manager, each worker with its node pools,
+    and how many steps are at each stage."""
+    kueue_up = health.get("kueue_up", {})
+    links = {w["name"]: w for w in kq["workers"]}
+    names = [c["name"] for c in cfg.clusters]
+    manager = next(
+        (n for n in names if n not in links),
+        cfg.metrics_cluster,
+    )
+    titles = {q["name"]: queue_title(q) for q in snap["queues"]}
+    order = {q["name"]: i for i, q in enumerate(snap["queues"])}
+    tpu_queues = {q["name"] for q in snap["queues"] if q["resource"] == TPU}
+
+    # Nodes up and chips computing per pool, then per (cluster, queue).
+    by_hash = pool_index(pools)
+    up, busy = collections.Counter(), collections.Counter()
+    for key in health.get("nodes", {}):
+        p = pool_of(by_hash, key)
+        if p:
+            up[(p["cluster"], p["name"])] += 1
+    for key, value in health.get("busy", {}).items():
+        p = pool_of(by_hash, key)
+        if p:
+            busy[(p["cluster"], p["name"])] += value
+    shapes: dict = {}
+    for p in pools:
+        row = shapes.setdefault(
+            (p["cluster"], p["queue"]),
+            {
+                "queue": p["queue"],
+                "title": titles.get(p["queue"], p["queue"]),
+                "multi_host": p["multi_host"],
+                "pools": 0,
+                "pools_up": 0,
+                "up": 0,
+                "max": 0,
+                "chips": 0.0,
+                "max_chips": 0,
+                "busy": 0.0,
+            },
+        )
+        n = up[(p["cluster"], p["name"])]
+        row["pools"] += 1
+        row["pools_up"] += bool(n)
+        row["up"] += n
+        row["max"] += p["max_nodes"]
+        row["chips"] += n * p["chips_per_node"]
+        row["max_chips"] += p["max_nodes"] * p["chips_per_node"]
+        row["busy"] += busy[(p["cluster"], p["name"])]
+
+    steps = collections.Counter(j["real"] for j in snap["jobs"])
+    on_cluster = collections.defaultdict(collections.Counter)
+    for j in snap["jobs"]:
+        if j.get("cluster"):
+            on_cluster[j["cluster"]][j["real"]] += 1
+    held = collections.Counter()
+    for w in kq["workloads"]:
+        if w["cluster"] and w["state"] != "pending" and w["queue"] in tpu_queues:
+            held[w["cluster"]] += w["amount"]
+    problems = collections.Counter(g["cluster"] for g in snap["events"] if g["fleet"])
+
+    workers = []
+    for c in cfg.clusters:
+        if c["name"] == manager:
+            continue
+        name = c["name"]
+        link = links.get(name)
+        rows = sorted(
+            (r for (cl, _), r in shapes.items() if cl == name),
+            key=lambda r: order.get(r["queue"], len(order)),
+        )
+        workers.append(
+            {
+                "name": name,
+                "location": cluster_location(c),
+                "kueue_up": kueue_up.get(name),
+                "connected": link["active"] if link else None,
+                "link_message": link["message"] if link else "",
+                "starting": on_cluster[name]["starting"],
+                "running": on_cluster[name]["running"],
+                "held": held[name],
+                "problems": problems[name],
+                "shapes": rows,
+            }
+        )
+    return {
+        "manager": {
+            "name": manager,
+            "location": cluster_location(
+                next((c for c in cfg.clusters if c["name"] == manager), {})
+            ),
+            "kueue_up": kueue_up.get(manager),
+        },
+        "workers": workers,
+        "queue": cfg.queue,
+        "links": fleet_links(cfg),
+        "steps": dict(steps),
+        # Finished agent pods linger until agent-stack-k8s collects them.
+        "agent_pods": sum(
+            1 for p in kq["pods"] if p["phase"] not in ("Succeeded", "Failed")
+        ),
+    }
 
 
 def kube_jobs(
@@ -449,6 +862,7 @@ def kube_jobs(
                 "real": state,
                 "queue": queue_title(q) if q else (w["queue"] if w else ""),
                 "queue_name": w["queue"] if w else "",
+                "cluster": w["cluster"] if w else None,
                 "for": now - since if since else None,
                 "detail": detail,
             }
@@ -495,6 +909,10 @@ def group_events(events: list, job_builds: dict, org: str) -> list:
             g["type"] == "Warning"
             and g["reason"] in FLEET_WARNINGS
             and not any(m in g["message"] for m in PLACEMENT_HANDSHAKE)
+            and not (
+                any(m in g["message"] for m in NODE_BOOT)
+                and g["count"] <= NODE_BOOT_REPEATS * max(1, g["objects"])
+            )
         )
         out.append(g)
     return sorted(out, key=lambda g: (-g["fleet"], g["type"] != "Warning", -g["last"]))
@@ -800,8 +1218,7 @@ def render_live_summary(snap: dict) -> str:
         )
         busy = (
             f"<b>{num(c['busy'])}</b><small>chips computing, of {num(c['on_nodes'])} on nodes</small>"
-            if c["busy"] is not None
-            # No series for the model: no node of that kind is up.
+            if c["on_nodes"]
             else f"<b>0</b><small>no {E(c['generation'])} TPU nodes up</small>"
         )
         out.append(f"""
@@ -821,19 +1238,106 @@ def render_live_summary(snap: dict) -> str:
     return "".join(out)
 
 
-def render_live_queue(q: dict) -> str:
-    builds = (
-        "".join(
-            "<tr>"
-            f'<td>{build_link(r)}</td><td class="branch">{E(r["branch"])}</td><td>{E(r["source"])}</td>'
-            f'<td class="n">{num(r["priority"])}</td>'
-            f'<td class="n">{num(r["pending"]) if r["pending"] else ""}</td>'
-            f'<td class="n">{num(r["running"]) if r["running"] else ""}</td>'
-            f'<td class="n">{num(r["held"]) if r["held"] else ""}</td>'
-            f'<td class="n">{ago(r["oldest_wait"])}</td></tr>'
-            for r in q["builds"]
+def pending_reason(message: str) -> str:
+    """Kueue's reason for a pending workload, in fewer words.
+
+    Only the head of a queue has one. "Couldn't assign flavors to pod set X:
+    insufficient unused quota ... in flavor F" repeats per pod set and carries a
+    per-workload "N more needed", so the same cause would read as several.
+    """
+    if not message:
+        return "queued behind the head of the queue"
+    short = re.findall(r"insufficient unused quota for \S+ in flavor ([\w-]+)", message)
+    leftover = re.sub(
+        r"couldn't assign flavors to pod set [\w-]+: insufficient unused quota for "
+        r"\S+ in flavor [\w-]+(, \d+ more needed)?;?\s*",
+        "",
+        message,
+    )
+    if short and not leftover.strip():
+        return f"not enough unused {', '.join(sorted(set(short)))} quota, borrowing included"
+    return re.sub(r", \d+ more needed", "", message)
+
+
+def show_more(target: str, rows: str, n: int) -> tuple:
+    """A hidden tbody of the rows a table keeps back, and the button that shows
+    them; both empty when there are none."""
+    if not n:
+        return "", ""
+    return (
+        f'<tbody id="{E(target)}" hidden>{rows}</tbody>',
+        f'<button type="button" class="show-more" data-target="{E(target)}" '
+        f'data-more="Show {n} more" data-fewer="Show fewer">Show {n} more</button>',
+    )
+
+
+def split_rows(rows: list, target: str, empty: str) -> tuple:
+    """A long table's first FIRST_ROWS rows, a hidden tbody with the rest, and
+    the button that shows them."""
+    shown = "".join(rows[:FIRST_ROWS]) or empty
+    hidden, button = show_more(
+        target, "".join(rows[FIRST_ROWS:]), max(0, len(rows) - FIRST_ROWS)
+    )
+    return shown, hidden, button
+
+
+def render_next_up(q: dict) -> str:
+    n = q.get("next_up")
+    if not n:
+        return ""
+    if n["error"] and not n["rows"]:
+        return f'<p class="muted note">Kueue\'s order unavailable: {E(n["error"])}</p>'
+
+    def row(r: dict) -> str:
+        return f"""<tr><td class="n">{r["position"]}</td>
+<td>{job_link(r["job"]) if r["job"] else f'<span class="muted">{E(r["workload"])}</span>'}</td>
+<td class="nowrap">{build_link(r["build"]) if r["build"] and r["build"]["number"] else ""}</td>
+<td class="nowrap">{priority_cell(r)}</td><td class="n">{ago(r["waiting"])}</td></tr>"""
+
+    rows, more_rows, more_button = split_rows(
+        [row(r) for r in n["rows"]], f"next-{q['name']}", ""
+    )
+    rest = sum(r["count"] for r in n["rest"])
+    more = (
+        f"+{rest} more pending: "
+        + "; ".join(
+            f"{r['count']} from {build_link(r['build'])} at {priority_cell(r)}"
+            for r in n["rest"]
         )
-        or '<tr><td colspan="8" class="empty">No workloads.</td></tr>'
+        + ". "
+        if rest
+        else ""
+    )
+    return f"""<div class="block"><h4>Next up, in Kueue's order</h4>
+  <div class="table-wrap"><table class="dense"><thead><tr><th class="n">#</th><th>Step</th><th>Build</th>
+    <th>Priority</th><th class="n">Waiting</th></tr></thead><tbody>{rows}</tbody>{more_rows}</table></div>
+  {more_button}
+  <p class="muted note">{more}Kueue considers higher priority first, then earlier submission. A workload
+  behind the head can start first when the head does not fit.</p></div>"""
+
+
+def priority_cell(r: dict) -> str:
+    value = f' <span class="muted">({num(r["priority"])})</span>'
+    if r["priority_class"]:
+        return f"{E(r['priority_class'])}{value}"
+    return (
+        f'<span class="muted" title="No WorkloadPriorityClass">unclassed</span>{value}'
+    )
+
+
+def render_live_queue(q: dict) -> str:
+    builds, builds_more, builds_button = split_rows(
+        [
+            "<tr>"
+            f'<td class="nowrap">{build_link(r)}</td><td class="branch">{E(r["branch"])}</td><td>{E(r["source"])}</td>'
+            f'<td class="nowrap">{priority_cell(r)}</td>'
+            f'<td class="n">{num(r["running"])}</td>'
+            f'<td class="n">{num(r["held"])}</td>'
+            f'<td class="n">{ago(r["running_for"])}</td></tr>'
+            for r in q["builds"]
+        ],
+        f"run-{q['name']}",
+        '<tr><td colspan="7" class="empty">Nothing running.</td></tr>',
     )
     reasons = "".join(f"<li><b>{n}</b> {E(msg)}</li>" for msg, n in q["reasons"])
     u = unit(q)
@@ -861,29 +1365,33 @@ def render_live_queue(q: dict) -> str:
     <p class="stat"><b>{num(q["used"])}</b><span>{u} in use of {num(q["nominal"])} nominal</span></p>
   </div>
   <div class="pills">{"".join(pills)}</div>
-  {f'<div class="reasons"><h4>Why workloads are pending</h4><ul>{reasons}</ul></div>' if reasons else ""}
-  <div class="table-wrap"><table><thead><tr><th>Build</th><th>Branch</th><th>Source</th><th class="n">Priority</th>
-    <th class="n">Pending</th><th class="n">Running</th><th class="n">{u.capitalize()} held</th><th class="n">Oldest wait</th>
-  </tr></thead><tbody>{builds}</tbody></table></div>
+  <div class="block"><h4>Running, by build</h4>
+  <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>Branch</th><th>Source</th><th>Priority</th>
+    <th class="n">Steps</th><th class="n">{u.capitalize()} held</th><th class="n">Running for</th>
+  </tr></thead><tbody>{builds}</tbody>{builds_more}</table></div>{builds_button}</div>
+  {render_next_up(q)}
+  {f'<div class="reasons block"><h4>Why workloads are pending</h4><ul>{reasons}</ul></div>' if reasons else ""}
 </div>"""
 
 
 def render_events(snap: dict) -> str:
-    def table(groups: list, empty: str) -> str:
-        body = (
-            "".join(
+    def table(groups: list, empty: str, target: str) -> str:
+        body, hidden, button = split_rows(
+            [
                 f"""<tr><td class="nowrap"><time data-ts="{g["last"]}" data-fmt="time"></time></td><td class="nowrap">{E(g["cluster"])}</td>
 <td>{E(g["reason"])}<div class="sub-row">{E(g["kind"])}{" · Warning" if g["type"] == "Warning" else ""}</div></td>
 <td class="n">{num(g["count"])}{f'<div class="sub-row">{g["objects"]} objects</div>' if g["objects"] > 1 else ""}</td>
 <td class="msg">{E(g["message"][:300])}</td>
 <td class="nowrap">{"<br>".join(f'<a href="{E(url)}" target="_blank" rel="noopener">{E(name)}</a>' for name, url in g["builds"][:3])}{f'<div class="sub-row">+{len(g["builds"]) - 3} more</div>' if len(g["builds"]) > 3 else ""}</td></tr>"""
                 for g in groups[:60]
-            )
-            or f'<tr><td colspan="6" class="empty">{empty}</td></tr>'
+            ],
+            target,
+            f'<tr><td colspan="6" class="empty">{empty}</td></tr>',
         )
         return (
             '<div class="table-wrap"><table class="dense"><thead><tr><th>Last seen</th><th>Cluster</th><th>Reason</th>'
-            f'<th class="n">Count</th><th>Message</th><th>Builds</th></tr></thead><tbody>{body}</tbody></table></div>'
+            f'<th class="n">Count</th><th>Message</th><th>Builds</th></tr></thead><tbody>{body}</tbody>{hidden}</table></div>'
+            f"{button}"
         )
 
     # Kubernetes events are Normal or Warning, nothing finer, and most warnings
@@ -898,15 +1406,22 @@ def render_events(snap: dict) -> str:
     )
     return f"""{errors}<p class="muted lead">Fleet problems in the <code>buildkite</code> namespace on every cluster,
 repeats grouped: {E(", ".join(sorted(FLEET_WARNINGS)))}.</p>
-{table(problems, "None in the last hour.")}
+{table(problems, "None in the last hour.", "problems-more")}
 <details><summary>Other events ({len(other)} kinds, {sum(g["count"] for g in other):,} events)</summary>
 <p class="muted note">Routine warnings and notable normal events: Kueue's backlog, scheduling while pools scale,
-scale-ups, preemptions, agent teardown, test failures.</p>
-{table(other, "None.")}</details>"""
+mounts retried while a new node finishes booting, scale-ups, preemptions, agent teardown, test failures.</p>
+{table(other, "None.", "other-events-more")}</details>"""
 
 
 def job_link(j: dict) -> str:
-    return f'<a href="{E(j["url"])}" target="_blank" rel="noopener">{E(j["label"] or "(unnamed step)")}</a>'
+    # Every step here is a kube step, so a leading :kubernetes: says nothing.
+    label = re.sub(r"^(?::[\w+-]+:\s*)+", "", j["label"] or "") or "(unnamed step)"
+    return f'<a href="{E(j["url"])}" target="_blank" rel="noopener">{E(label)}</a>'
+
+
+# Rows a long table shows before its Show more button: Not running yet, and
+# each queue's Next up.
+FIRST_ROWS = 5
 
 
 def render_jobs(snap: dict) -> str:
@@ -962,34 +1477,42 @@ def render_jobs(snap: dict) -> str:
 
     waiting = [j for j in jobs if j["real"] != "running"]
     running = [j for j in jobs if j["real"] == "running"]
-    waiting_rows = (
-        "".join(
+
+    def waiting_row(g: dict) -> str:
+        return (
             f'<tr><td class="nowrap">{build_cell(g)}</td><td class="nowrap"><b>{E(JOB_STATES[g["real"]][0])}</b>'
             "</td>"
             f'<td class="nowrap" title="{E(g["queue_name"])}">{E(g["queue"]) or "-"}</td>'
             f"<td>{steps_cell(g)}</td>"
             f'<td class="n nowrap">{ago(g["oldest"])}</td>'
             f'<td class="msg">{"<br>".join(E(d[:200]) for d in sorted(g["details"])[:2])}</td></tr>'
-            for g in groups(waiting)
         )
-        or '<tr><td colspan="6" class="empty">Every kube job is running.</td></tr>'
+
+    # The first rows, furthest from running first; the rest behind a button.
+    waiting_groups = groups(waiting)
+    waiting_rows, more_rows, more_button = split_rows(
+        [waiting_row(g) for g in waiting_groups],
+        "waiting-more",
+        '<tr><td colspan="6" class="empty">Every kube job is running.</td></tr>',
     )
-    running_rows = (
-        "".join(
+    running_rows, running_more, running_button = split_rows(
+        [
             f'<tr><td class="nowrap">{build_cell(g)}</td><td class="nowrap" title="{E(g["queue_name"])}">{E(g["queue"])}</td>'
             f'<td>{steps_cell(g)}</td><td class="n nowrap">{ago(g["oldest"])}</td></tr>'
             for g in groups(running)
-        )
-        or '<tr><td colspan="4" class="empty">None.</td></tr>'
+        ],
+        "running-more",
+        '<tr><td colspan="4" class="empty">None.</td></tr>',
     )
     return f"""{states}
 <p class="muted lead">Where each kube job is, grouped by build. Hover a count for what the state means.</p>
 <h3>Not running yet <span class="muted">({len(waiting)} jobs)</span></h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>State</th><th>Queue</th><th>Steps</th>
-<th class="n">Longest</th><th>Detail</th></tr></thead><tbody>{waiting_rows}</tbody></table></div>
-<details><summary>Running ({len(running)} jobs)</summary>
+<th class="n">Longest</th><th>Detail</th></tr></thead><tbody>{waiting_rows}</tbody>{more_rows}</table></div>
+{more_button}
+<h3 class="jobs-running">Running <span class="muted">({len(running)} jobs)</span></h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>Queue</th><th>Steps</th><th class="n">Longest</th></tr></thead>
-<tbody>{running_rows}</tbody></table></div></details>"""
+<tbody>{running_rows}</tbody>{running_more}</table></div>{running_button}"""
 
 
 def render_live(snap: dict) -> str:
@@ -1006,24 +1529,479 @@ def render_live(snap: dict) -> str:
         f'<span class="detail">{E(c["detail"])}</span></div>'
         for c in snap["checks"]
     )
-    cpu_line = "; ".join(
-        f"<code>{E(q['name'])}</code> {num(q['used'])} {unit(q)} in use, "
-        f"{num(q['admitted'] + q['dispatching'])} running, {num(q['pending'])} pending"
-        for q in other
-    )
     return LIVE_PAGE.substitute(
+        assets=ASSETS,
         generated=snap["generated_at"],
-        sources=render_sources(snap["sources"]),
         nav=nav,
         errors=render_errors(snap["sources"]),
-        glossary=GLOSSARY,
         checks=checks,
         summary=render_live_summary(snap),
-        cpu_line=cpu_line or "none",
         queues="".join(render_live_queue(q) for q in tpu),
         events=render_events(snap),
         jobs=render_jobs(snap),
         other="".join(render_live_queue(q) for q in other),
+    )
+
+
+# --------------------------------------------------------------------------
+# Overview
+
+RANK = {"ok": 0, "info": 1, "unknown": 2, "warn": 3, "fail": 4}
+
+
+def worst(items: list) -> str:
+    return max((i[0] for i in items), key=RANK.get, default="unknown")
+
+
+def status_chip(status: str) -> str:
+    icon, label = ICONS[status]
+    return f'<span class="status-chip {status}"><span class="icon" aria-hidden="true">{icon}</span>{label}</span>'
+
+
+def check_items(items: list) -> str:
+    """Health lines inside a component: (status, title, detail)."""
+    return (
+        '<ul class="hc">'
+        + "".join(
+            f'<li class="{st}"><span class="icon" aria-hidden="true">{ICONS[st][0]}</span>'
+            f'<span><b>{E(title)}</b><span class="sr-only"> {ICONS[st][1]}</span> - {E(detail)}</span></li>'
+            for st, title, detail in items
+        )
+        + "</ul>"
+    )
+
+
+def count(n: float, label: str) -> str:
+    return f'<div class="count{"" if n else " zero"}"><b>{num(n)}</b><span>{E(label)}</span></div>'
+
+
+def kueue_line(name: str, value: float | None) -> tuple:
+    if value is None:
+        return ("unknown", "Kueue", f"no scrape data from {name}")
+    if value < 1:
+        return ("fail", "Kueue", f"not scraped as up on {name}")
+    return ("ok", "Kueue", f"up on {name}")
+
+
+# The diagram's columns, in viewBox units: x and width of each box.
+COLUMNS = {
+    "buildkite": (10, 160),
+    "agent": (225, 165),
+    "kueue": (445, 195),
+    "multikueue": (695, 150),
+    "worker": (905, 265),
+}
+# Where a box's bars sit, as fractions of its width: after the longest label
+# the box shows, before its right-hand figure.
+BARS = {"kueue": (0.26, 0.40), "worker": (0.36, 0.26)}
+DIAGRAM_WIDTH = 1180
+
+
+def bar(x: float, y: float, w: float, frac: float) -> str:
+    frac = max(0.0, min(1.0, frac))
+    return (
+        f'<rect class="track" x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="8" rx="4"/>'
+        f'<rect class="fill" x="{x:.1f}" y="{y:.1f}" width="{w * frac:.1f}" height="8" rx="4"/>'
+    )
+
+
+class Box:
+    """One component in the diagram: a box that links to its details."""
+
+    def __init__(self, key, column, title, sub, big, label, lines, status, caption=""):
+        self.key, self.status, self.caption = key, status, caption
+        self.x, self.w = COLUMNS[column]
+        self.bar = BARS.get(column, (0.4, 0.3))
+        self.title, self.sub, self.big, self.label = title, sub, big, label
+        # Each line: (text, bar fraction or None, right-hand figure).
+        self.lines = lines
+        self.h = 112 + 24 * len(lines) + (22 if caption else 0)
+        self.y = 0.0
+
+    def svg(self) -> str:
+        x, y, w = self.x, self.y, self.w
+        icon, word = ICONS[self.status]
+        out = [
+            f'<rect class="box" x="{x}" y="{y:.1f}" width="{w}" height="{self.h}" rx="14"/>',
+            f'<text class="n-title" x="{x + 16}" y="{y + 27:.1f}">{E(self.title)}</text>',
+            f'<text class="n-sub" x="{x + 16}" y="{y + 46:.1f}">{E(self.sub)}</text>',
+            f'<g class="badge {self.status}"><circle cx="{x + w - 22}" cy="{y + 23:.1f}" r="11"/>'
+            f'<text x="{x + w - 22}" y="{y + 27.5:.1f}" text-anchor="middle">{icon}</text></g>',
+            f'<text class="n-big{"" if self.big else " zero"}" x="{x + 16}" y="{y + 82:.1f}">{num(self.big)}</text>',
+            f'<text class="n-label" x="{x + 16}" y="{y + 101:.1f}">{E(self.label)}</text>',
+        ]
+        top = y + 128
+        if self.caption:
+            out.append(
+                f'<text class="n-cap" x="{x + w - 14}" y="{top:.1f}" text-anchor="end">{E(self.caption)}</text>'
+            )
+            top += 22
+        for i, (text, frac, figure) in enumerate(self.lines):
+            ly = top + 24 * i
+            out.append(
+                f'<text class="n-line" x="{x + 16}" y="{ly:.1f}">{E(text)}</text>'
+            )
+            if frac is not None:
+                out.append(bar(x + w * self.bar[0], ly - 9, w * self.bar[1], frac))
+            if figure:
+                out.append(
+                    f'<text class="n-line" x="{x + w - 14}" y="{ly:.1f}" text-anchor="end">{E(figure)}</text>'
+                )
+        return (
+            f'<a href="#c-{self.key}" class="node {self.status}">'
+            f"<title>{E(self.title)}: {word}. Open its details.</title>{''.join(out)}</a>"
+        )
+
+    @property
+    def mid(self) -> float:
+        return self.y + self.h / 2
+
+
+def edge(key: str, d: str, n: int, length: float, label: str = "") -> str:
+    """A path with dots moving along it while n steps are past it: more steps,
+    more dots, as many as its length leaves room for. Same speed on every path."""
+    dots = 0 if n <= 0 else max(1, min(1 + n // 8, int(length // 55)))
+    seconds = round(max(1.2, length / 60), 2)
+    moving = "".join(
+        f'<circle class="dot" r="4.5"><animateMotion dur="{seconds}s" repeatCount="indefinite" '
+        f'begin="-{seconds * i / dots:.2f}s"><mpath href="#e-{key}"/></animateMotion></circle>'
+        for i in range(dots)
+    )
+    title = f"<title>{E(label)}</title>" if label else ""
+    return (
+        f'<path id="e-{key}" class="edge {"active" if dots else "idle"}" d="{d}" '
+        f'marker-end="url(#arrow)">{title}</path>{moving}'
+    )
+
+
+def render_overview(snap: dict) -> str:
+    f = snap["fleet"]
+    steps = f["steps"]
+    checks = {c["title"]: c for c in snap["checks"]}
+
+    def from_checks(*titles: str) -> list:
+        return [
+            (checks[t]["status"], t, checks[t]["detail"]) for t in titles if t in checks
+        ]
+
+    held, waiting = steps.get("held", 0), steps.get("waiting_agent", 0)
+    queued, dispatching = steps.get("queued", 0), steps.get("dispatching", 0)
+    on_workers = steps.get("starting", 0) + steps.get("running", 0)
+    m = f["manager"]
+    tpu_cohorts = [c for c in snap["cohorts"] if c["resource"] == TPU]
+    connected = sum(1 for w in f["workers"] if w["connected"])
+
+    bk_checks = from_checks("Steps waiting for an agent")
+    agent_checks = from_checks("Buildkite controller", "Agent pods")
+    kueue_checks = [kueue_line(m["name"], m["kueue_up"])] + from_checks("Queue waits")
+    mk_checks = from_checks("Worker connections", "Dispatch")
+
+    def worker_checks(w: dict) -> list:
+        items = [kueue_line(w["name"], w["kueue_up"])]
+        if w["connected"] is None:
+            items.append(
+                ("unknown", "Manager link", "not listed as a MultiKueue cluster")
+            )
+        elif w["connected"]:
+            items.append(("ok", "Manager link", "connected"))
+        else:
+            items.append(("fail", "Manager link", w["link_message"] or "not active"))
+        items.append(
+            (
+                "warn",
+                "Cluster problems",
+                f"{w['problems']} kind{'s' if w['problems'] != 1 else ''} of fleet event in the last hour",
+            )
+            if w["problems"]
+            else ("ok", "Cluster problems", "none in the last hour")
+        )
+        return items
+
+    def shape_line(r: dict) -> tuple:
+        return (
+            r["title"],
+            r["chips"] / r["max_chips"] if r["max_chips"] else 0,
+            f"{num(r['chips'])}/{num(r['max_chips'])}",
+        )
+
+    boxes = {
+        "buildkite": Box(
+            "buildkite",
+            "buildkite",
+            "Buildkite",
+            f"queue={f['queue']}",
+            held + waiting,
+            "waiting to start",
+            [
+                (f"{num(held)} held", None, ""),
+                (f"{num(waiting)} need an agent", None, ""),
+            ],
+            worst(bk_checks),
+        ),
+        "agent": Box(
+            "agent",
+            "agent",
+            "Agent pods",
+            "agent-stack-k8s",
+            f["agent_pods"],
+            "launchers running",
+            [
+                (f"{num(steps.get('agent_pending', 0))} not scheduled", None, ""),
+                (f"{num(steps.get('launching', 0))} submitting", None, ""),
+            ],
+            worst(agent_checks),
+        ),
+        "kueue": Box(
+            "kueue",
+            "kueue",
+            "Kueue",
+            "quota, per shape",
+            queued,
+            "waiting for quota",
+            [
+                (
+                    c["generation"] or c["name"],
+                    c["used"] / c["nominal"] if c["nominal"] else 0,
+                    f"{num(c['used'])}/{num(c['nominal'])}",
+                )
+                for c in tpu_cohorts
+            ],
+            worst(kueue_checks),
+            caption="chips in use / quota",
+        ),
+        "multikueue": Box(
+            "multikueue",
+            "multikueue",
+            "MultiKueue",
+            "to a worker",
+            dispatching,
+            "handing over",
+            [(f"{connected}/{len(f['workers'])} workers up", None, "")],
+            worst(mk_checks),
+        ),
+    }
+    workers = [
+        Box(
+            f"w-{w['name']}",
+            "worker",
+            w["name"],
+            w["location"],
+            w["running"],
+            f"running · {num(w['starting'])} starting",
+            [shape_line(r) for r in w["shapes"]],
+            worst(worker_checks(w)),
+            caption="chips on nodes / pool max",
+        )
+        for w in f["workers"]
+    ]
+
+    # Vertical layout: the workers stack on the right; the main row sits at
+    # their middle, inside the manager's boundary.
+    top, gap = 52, 18
+    y = top
+    for b in workers:
+        b.y = y
+        y += b.h + gap
+    workers_bottom = y - gap if workers else top
+    main_h = max(b.h for b in boxes.values())
+    mid = max((top + workers_bottom) / 2, top + main_h / 2 + 20)
+    for b in boxes.values():
+        b.y = mid - b.h / 2
+    lo = mid - main_h / 2 - 36
+    hi = mid + main_h / 2 + 16
+    back_y = max(workers_bottom, hi) + 40
+    height = back_y + 30
+
+    bk, ag, ku, mk = (boxes[k] for k in ("buildkite", "agent", "kueue", "multikueue"))
+    edges = [
+        edge(
+            "bk",
+            f"M{bk.x + bk.w} {mid:.1f} L{ag.x - 4} {mid:.1f}",
+            f["agent_pods"],
+            ag.x - bk.x - bk.w,
+            "agent-stack-k8s starts an agent pod per step",
+        ),
+        edge(
+            "ag",
+            f"M{ag.x + ag.w} {mid:.1f} L{ku.x - 4} {mid:.1f}",
+            queued + dispatching + on_workers,
+            ku.x - ag.x - ag.w,
+            "the launcher submits a Job or JobSet to the shape's queue",
+        ),
+        edge(
+            "ku",
+            f"M{ku.x + ku.w} {mid:.1f} L{mk.x - 4} {mid:.1f}",
+            dispatching + on_workers,
+            mk.x - ku.x - ku.w,
+            "Kueue admits it when quota is free",
+        ),
+    ]
+    for i, w in enumerate(workers):
+        n = f["workers"][i]["running"] + f["workers"][i]["starting"]
+        x0, x1 = mk.x + mk.w, w.x - 4
+        edges.append(
+            edge(
+                f"w{i}",
+                f"M{x0} {mid:.1f} C{x0 + 40} {mid:.1f} {x1 - 40} {w.mid:.1f} {x1} {w.mid:.1f}",
+                n,
+                (x1 - x0) + abs(w.mid - mid),
+                f"MultiKueue creates the workload on {f['workers'][i]['name']}",
+            )
+        )
+    wx = COLUMNS["worker"][0] + COLUMNS["worker"][1] / 2
+    bx = bk.x + bk.w / 2
+    edges.append(
+        edge(
+            "back",
+            f"M{wx} {workers_bottom:.1f} L{wx} {back_y:.1f} L{bx} {back_y:.1f} L{bx} {bk.y + bk.h + 4:.1f}",
+            on_workers,
+            (back_y - workers_bottom) + (wx - bx) + (back_y - bk.y - bk.h),
+            "pod output goes back to the step log",
+        )
+    )
+
+    diagram = f"""<div class="diagram-wrap"><svg class="diagram" viewBox="0 0 {DIAGRAM_WIDTH} {height:.0f}" role="img"
+  aria-label="Buildkite, then the manager's agent pods, Kueue and MultiKueue, then {len(workers)} worker clusters; details for each follow below.">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0 0L10 5L0 10z" class="arrowhead"/></marker></defs>
+  <rect class="boundary" x="{ag.x - 13}" y="{lo:.1f}" width="{mk.x + mk.w + 26 - ag.x}" height="{hi - lo:.1f}" rx="18"/>
+  <text class="boundary-label" x="{ag.x + 3}" y="{lo + 22:.1f}">Manager · {E(m["name"])}{f" · {E(m['location'])}" if m["location"] else ""}</text>
+  <text class="boundary-label" x="{COLUMNS["worker"][0]}" y="{top - 14}">Workers</text>
+  {"".join(edges)}
+  {"".join(b.svg() for b in boxes.values())}
+  {"".join(b.svg() for b in workers)}
+  <text class="edge-label" x="{(wx + bx) / 2:.0f}" y="{back_y - 9:.1f}" text-anchor="middle">pod output back to the step log, through Connect Gateway</text>
+</svg></div>"""
+
+    # Details, one per component, collapsed until a box or the toggle opens them.
+    links = f["links"]
+    manager_links = links.get(f"cluster:{m['name']}", [])[:1]
+
+    def component(
+        key: str, title: str, sub: str, status: str, role: str, body: str, opens=()
+    ) -> str:
+        return f"""<details class="component" id="c-{key}">
+  <summary><span class="c-title">{E(title)}</span><span class="c-sub">{E(sub)}</span>{status_chip(status)}
+  <span class="c-role">{role}</span></summary>
+  <div class="c-body">{f'<p class="source-links">{out_links(opens)}</p>' if opens else ""}{body}</div>
+</details>"""
+
+    cohort_rows = "".join(
+        f"""<div class="cohort-line"><b>{E(c["generation"] or c["name"])}</b>
+  <span>{num(c["used"])} of {num(c["nominal"])} chips in use</span>
+  <div class="bar" role="img" aria-label="{num(c["used"])} of {
+            num(c["nominal"])
+        } chips"><span class="seg own" style="width:{
+            min(100, 100 * c["used"] / c["nominal"])
+            if c["nominal"]
+            else 0:.1f}%"></span></div>
+  <span class="queued">{
+            " · ".join(
+                f"{E(queue_title(q).split(' ', 1)[-1])} {num(q['pending'])} waiting"
+                for q in snap["queues"]
+                if q["cohort"] == c["name"] and q["pending"]
+            )
+            or "nothing waiting"
+        }</span></div>"""
+        for c in tpu_cohorts
+    )
+
+    def pools_table(w: dict) -> str:
+        rows = (
+            "".join(
+                f"""<tr><td class="nowrap"><a href="live#{E(r["queue"])}">{E(r["title"])}</a></td>
+<td class="n">{f"{r['pools_up']} of {r['pools']} slices" if r["multi_host"] else f"{num(r['up'])} of {num(r['max'])}"}</td>
+<td class="n">{num(r["chips"])}</td><td class="n">{num(r["max_chips"])}</td><td class="n">{num(r["busy"])}</td></tr>"""
+                for r in w["shapes"]
+            )
+            or '<tr><td colspan="5" class="empty">No TPU node pools.</td></tr>'
+        )
+        return f"""<div class="table-wrap"><table><thead><tr><th>Shape</th><th class="n">Nodes up</th>
+  <th class="n">Chips on nodes</th><th class="n">Pool max, chips</th><th class="n">Busy</th></tr></thead><tbody>{rows}</tbody></table></div>
+  <p class="muted">Kueue's quota counts chips too: compare a shape's chips on nodes with what Kueue
+  admitted for it on Live.</p>"""
+
+    across = from_checks(
+        "Long-running workloads", "Infrastructure failures (24h)", "Evictions (24h)"
+    )
+    components = [
+        component(
+            "buildkite",
+            "Buildkite",
+            f"queue={f['queue']}",
+            worst(bk_checks),
+            "Pipelines send their TPU steps to the kube queue. A step in a concurrency group waits here until its group lets it go.",
+            f'<div class="counts">{count(held, "held by a concurrency group")}{count(waiting, "waiting for an agent pod")}</div>'
+            f'{check_items(bk_checks)}<a class="more" href="live#jobs">Kube jobs on Live →</a>',
+            links.get("buildkite", []),
+        ),
+        component(
+            "agent",
+            "Agent pods",
+            "agent-stack-k8s, on the manager",
+            worst(agent_checks),
+            "agent-stack-k8s polls the queue and starts one pod per step. The pod runs the launcher, which picks the queue from the step's TPU shape, submits a Job or JobSet, and streams its output back.",
+            f'<div class="counts">{count(f["agent_pods"], "agent pods")}{count(steps.get("agent_pending", 0), "not scheduled yet")}'
+            f"{count(steps.get('launching', 0), 'submitting')}</div>{check_items(agent_checks)}",
+            manager_links,
+        ),
+        component(
+            "kueue",
+            "Kueue",
+            f"on {m['name']}",
+            worst(kueue_checks),
+            "Admits a workload once its shape's quota is free. The queues of one TPU generation share a cohort and borrow each other's idle chips.",
+            f'<div class="counts">{count(queued, "waiting for quota")}</div>{cohort_rows}'
+            f'{check_items(kueue_checks)}<a class="more" href="live#quota">Quota on Live →</a>',
+            manager_links,
+        ),
+        component(
+            "multikueue",
+            "MultiKueue",
+            f"on {m['name']}",
+            worst(mk_checks),
+            "Hands each admitted workload to a worker that can run it, and watches it there.",
+            f'<div class="counts">{count(dispatching, "being handed over")}{count(connected, f"of {len(f["workers"])} workers connected")}</div>'
+            f"{check_items(mk_checks)}",
+            manager_links,
+        ),
+    ]
+    for w in f["workers"]:
+        items = worker_checks(w)
+        components.append(
+            component(
+                f"w-{w['name']}",
+                w["name"],
+                f"worker · {w['location']}",
+                worst(items),
+                "Runs the TPU pods. Each shape has its own node pool, scaled up when a workload is admitted and down once it has stood idle; a multi-host shape has one pool per slice.",
+                f'<div class="counts">{count(w["starting"], "pods starting")}{count(w["running"], "running")}{count(w["held"], "chips held")}</div>'
+                f'{pools_table(w)}{check_items(items)}<a class="more" href="live#problems">Cluster problems on Live →</a>',
+                links.get(f"cluster:{w['name']}", []),
+            )
+        )
+    components.append(
+        component(
+            "across",
+            "Across workers",
+            "every worker",
+            worst(across),
+            "Workloads that run too long, end for the fleet's reasons, or are evicted.",
+            check_items(across),
+        )
+    )
+
+    return OVERVIEW_PAGE.substitute(
+        assets=ASSETS,
+        generated=snap["generated_at"],
+        errors=render_errors(snap["sources"]),
+        diagram=diagram,
+        components="".join(components),
+        glossary=GLOSSARY,
+        source_table=render_source_table(
+            snap["sources"],
+            {**links, "cluster:manager": manager_links},
+        ),
     )
 
 
@@ -1307,13 +2285,14 @@ up for; <i>lifetime</i> is appearing to disappearing, for nodes that did both. <
 that no admitted workload held - scale-down lag, a pool's minimum, or a node waiting for the workload it came for.
 <i>Admitted → running</i> includes the wait for a node when the pool had to scale up.</p>"""
 
-    pipeline_rows = (
-        "".join(
+    pipeline_rows, pipelines_more, pipelines_button = split_rows(
+        [
             f"""<tr><td>{E(p["pipeline"])}</td><td class="n">{num(p["finished"])}</td><td class="n">{success_rate(p)}</td>
 <td class="n">{num(p["failed"])}</td>{infra_cell(p)}<td class="n">{num(p["chip_hours"])}</td></tr>"""
             for p in h["pipelines"][:20]
-        )
-        or '<tr><td colspan="6" class="empty">No finished workloads.</td></tr>'
+        ],
+        "pipelines-more",
+        '<tr><td colspan="6" class="empty">No finished workloads.</td></tr>',
     )
     outcomes = f"""
 <h3>By queue</h3>
@@ -1327,7 +2306,8 @@ submitted to quota reserved; startup is admitted to the first workload container
 <h3 style="margin-top:20px">By pipeline</h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Pipeline</th><th class="n">Finished</th><th class="n">Success</th>
 <th class="n">Test failures</th><th class="n">Infra failures</th><th class="n">Chip-hours</th></tr></thead>
-<tbody>{pipeline_rows}</tbody></table></div>"""
+<tbody>{pipeline_rows}</tbody>{pipelines_more}</table></div>
+{pipelines_button}"""
 
     def queue_card(q: dict) -> str:
         u = unit(q)
@@ -1346,9 +2326,8 @@ submitted to quota reserved; startup is admitted to the first workload container
         for name, label in PRESET_LABELS.items()
     )
     return HISTORY_PAGE.substitute(
-        sources=render_sources(sources),
+        assets=ASSETS,
         errors=render_errors(sources),
-        glossary=GLOSSARY,
         presets=presets,
         start=span["start"],
         end=span["end"],

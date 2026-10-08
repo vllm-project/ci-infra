@@ -9,38 +9,33 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="60">
 <title>TPU CI kube · Live</title>
-<link rel="stylesheet" href="static/style.css">
+<link rel="stylesheet" href="static/style.css?v=$assets">
 </head>
 <body>
 <header class="topbar">
   <div class="inner">
     <h1>TPU CI kube</h1>
-    <nav class="tabs"><a class="tab active" href="./">Live</a><a class="tab" href="history">History</a></nav>
+    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab active" href="live">Live</a><a class="tab" href="history">History</a></nav>
     <span class="when">Updated <time data-ts="$generated" data-fmt="time"></time> · reloads every minute</span>
-    <div class="sources">$sources</div>
   </div>
   <nav class="nav">$nav</nav>
 </header>
 <main>
 $errors
-$glossary
 
-<div class="section-label">Health</div>
+<div class="section-label" id="health">Health</div>
 <div class="card"><div class="checks">$checks</div></div>
 
-<div class="section-label">Kube jobs</div>
+<div class="section-label" id="jobs">Kube jobs</div>
 <div class="card">$jobs</div>
 
-<div class="section-label">Quota now</div>
-<div class="card">
-  $summary
-  <p class="muted note">Non-TPU: $cpu_line.</p>
-</div>
+<div class="section-label" id="quota">Quota now</div>
+<div class="card">$summary</div>
 
 <div class="section-label">TPU queues</div>
 $queues
 
-<div class="section-label">Cluster problems, last hour</div>
+<div class="section-label" id="problems">Cluster problems, last hour</div>
 <div class="card">$events</div>
 
 <div class="section-label">Non-TPU queues</div>
@@ -48,6 +43,6 @@ $other
 
 <p class="muted footer">Data as JSON at <a href="api/live">api/live</a>.</p>
 </main>
-<script src="static/app.js"></script>
+<script src="static/app.js?v=$assets"></script>
 </body>
 </html>

@@ -32,8 +32,10 @@ import argparse
 import concurrent.futures
 import json
 import os
+import sys
 import threading
 import time
+import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -69,6 +71,9 @@ class Source:
                 self.data, self.at, self.error = self.fetch(), time.time(), ""
             except Exception as e:  # noqa: BLE001 - shown on the page, not raised
                 self.error = f"{type(e).__name__}: {e}"[:300]
+                # The page has one line; the log has the whole story.
+                print(f"{self.name} fetch failed:", file=sys.stderr)
+                traceback.print_exc()
 
     def status(self) -> dict:
         return {"name": self.name, "at": self.at, "error": self.error}
@@ -187,6 +192,8 @@ class History:
                 results[k], error = future.result(), ""
             except Exception as e:  # noqa: BLE001 - shown on the page, not raised
                 results[k], error = {}, f"{type(e).__name__}: {e}"[:300]
+                print(f"{calls[k][0]} history fetch failed:", file=sys.stderr)
+                traceback.print_exception(type(e), e, e.__traceback__)
             sources[k] = {"name": calls[k][0], "at": time.time(), "error": error}
         view = views.build_history(
             self.cfg,
@@ -238,7 +245,11 @@ def serve(live: Live, history: History, port: int) -> None:
             params = urllib.parse.parse_qs(url.query)
             if url.path == "/healthz":
                 return self.reply(200, "text/plain", b"ok")
-            if url.path == "/":
+            # /overview as well, for links made before it became the front page.
+            if url.path in ("/", "/overview"):
+                page = views.render_overview(live.snapshot())
+                return self.reply(200, "text/html; charset=utf-8", page.encode())
+            if url.path == "/live":
                 page = views.render_live(live.snapshot())
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
             if url.path == "/api/live":
