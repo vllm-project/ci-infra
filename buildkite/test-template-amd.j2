@@ -176,12 +176,9 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         depends_on: "ensure-ci-base-amd"
         soft_fail: false
         commands:
-          - curl -fsSL -o aiter-nightly-overlay.sh "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch }}/buildkite/scripts/aiter-nightly-overlay.sh"
-          - bash aiter-nightly-overlay.sh
+          - bash .buildkite/scripts/rocm/aiter-nightly-overlay.sh
         key: "aiter-nightly-amd"
         timeout_in_minutes: 60
-        env:
-          VLLM_CI_BRANCH: "{{ vllm_ci_branch }}"
 {{ amd_infra_retry('        ', true) }}
         agents:
           queue: amd-cpu

@@ -93,11 +93,11 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 
 `AITER_NIGHTLY=1`, on a scheduled `amd-ci` build of `main`, tests last night's [AITER](https://github.com/ROCm/aiter) build against vLLM:
 
-1. `aiter-nightly-amd` (`buildkite/scripts/aiter-nightly-overlay.sh`, `select_aiter_nightly_wheel.py`) installs the newest AITER nightly wheel built for the image's ROCm, torch and Python over this build's ci_base, and pushes the result as this build's `rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID`, in place of the stock one.
+1. `aiter-nightly-amd` (vLLM's [`.buildkite/scripts/rocm/aiter-nightly-overlay.sh`](https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/rocm/aiter-nightly-overlay.sh)) installs the newest AITER nightly wheel built for the image's ROCm, torch and Python over this build's ci_base, and pushes the result as this build's `rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID`, in place of the stock one.
 2. The test image and every native GPU job run on that image. Test image layers go to an `aiter-nightly` cache branch.
 3. Every `amdproduction` step on MI300 or MI355 (`amdgfx942nightly`, `amdgfx950nightly`) runs, unblocked. MI250 is left out: AITER builds no kernels for it.
 
-The overlay step fails before any GPU job runs, with an error annotation and exit code: `10` no wheel for the image's ROCm/Python, `11` install failed, `12` prebuilt modules do not load. The newest wheel is tested however old it is; the annotation shows its build date.
+The overlay step fails before any GPU job runs, with an error annotation and exit code: `10` no wheel for the image's ROCm/torch/Python, `11` install failed. The newest wheel is tested however old it is; the annotation shows its build date.
 
 A retried overlay step reinstalls the wheel its first attempt chose.
 

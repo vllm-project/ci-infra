@@ -88,9 +88,10 @@ def test_nightly_installs_aiter_between_ci_base_and_test_image():
     steps = _render(aiter_nightly="1")
     overlay = steps["aiter-nightly-amd"]
     assert overlay["depends_on"] == "ensure-ci-base-amd"
-    assert overlay["env"]["VLLM_CI_BRANCH"] == "my-branch"
-    overlay_url = "/ci-infra/my-branch/buildkite/scripts/aiter-nightly-overlay.sh"
-    assert overlay_url in overlay["commands"][0]
+    # The overlay script lives in the vLLM checkout the job runs in.
+    assert overlay["commands"] == [
+        "bash .buildkite/scripts/rocm/aiter-nightly-overlay.sh"
+    ]
 
     build = steps["image-build-amd"]
     assert build["depends_on"] == "aiter-nightly-amd"
