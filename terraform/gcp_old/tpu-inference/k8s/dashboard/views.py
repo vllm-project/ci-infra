@@ -74,6 +74,9 @@ TERMS = {
     "idle on nodes.",
     "Nodes created": "Nodes a pool scaled up during the range. Lifetime is appearing to disappearing.",
     "Utilization": "Mean admitted (or busy) chips over the range, over mean nominal.",
+    "Chips held": "Chips occupied by running work, as a share of the chips the fleet had: on bare metal "
+    "the chips of the VMs a job holds, on kube the chips Kueue admitted. Occupancy, not compute - a "
+    "chip counts while its job sets up, compiles or idles.",
     "Evicted": "A running workload stopped by the fleet - preempted by a queue reclaiming lent chips, "
     "or its node gone - which reruns from the start.",
     "Requeue": "A workload that lost its reservation, usually to preemption, and went back in line.",
@@ -2203,36 +2206,63 @@ def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> st
         ]
         b_hours = [round(100 * v / g["capacity"], 1) for v in g["by_hour_pt"]]
 
-        bare_bands = [
-            (
-                queue_title(queues[kq]).split(" ", 1)[-1] if kq in queues else bq,
-                base_queues[bq]["held"],
+        # One row per shape: bare metal's chips held against that shape's own
+        # VMs beside kube's admitted chips against its nominal, on one scale.
+        rows_html = []
+        for bq, kq in pairs:
+            bqd, q = base_queues[bq], queues.get(kq)
+            if not q:
+                continue
+            label = queue_title(q).split(" ", 1)[-1]
+            b_t, ((_, b_held), (_, b_vms)) = buckets(
+                base_ticks, [("held", bqd["held"]), ("VMs", bqd["connected"])], 4
             )
-            for bq, kq in pairs
-        ]
-        b_ticks, bare_bands = buckets(base_ticks, bare_bands, 4)
-        k_bucket = max(1, round(len(k_ticks) / 168))
-        kb_ticks, kube_bands = buckets(k_ticks, c["by_topology"], k_bucket)
-        _, (kube_quota,) = buckets(k_ticks, [("quota", c["nominal"])], k_bucket)
-        # One scale for both stacks, so their heights compare.
-        top = max(g["capacity"], max(nominal, default=0))
+            k_used, k_nom = q["history"]["used"], q["history"]["nominal"]
+            scale = max(
+                [v for v in b_vms + k_used + k_nom if v is not None] + [bqd["capacity"]]
+            )
+            rows_html.append(
+                '<div class="charts shape-row">'
+                + line_chart(
+                    f"{label} · bare metal: held of its VMs' chips ({num(bqd['capacity'])} usually)",
+                    b_t,
+                    [("nodes", "held", b_held)],
+                    ref=("VMs", b_vms),
+                    ymax=scale,
+                    fmt="day",
+                    width=520,
+                    height=150,
+                )
+                + line_chart(
+                    f"{label} · kube: admitted against its nominal, borrowing above it",
+                    k_ticks,
+                    [("used", "admitted", k_used)],
+                    ref=("nominal", k_nom),
+                    ymax=scale,
+                    fmt=fmt,
+                    width=520,
+                    height=150,
+                )
+                + "</div>"
+            )
         cards.append(f"""<div class="card">
   <div class="card-head"><h2>{E(g["name"])}</h2><span class="sub">bare metal before → kube now</span></div>
   <div class="tiles">
-    {tile(term("Utilization"), pct(b_util), pct(k_util), "chips in use, of the chips each fleet had")}
+    {tile(term("Chips held"), pct(b_util), pct(k_util), "on average, of the chips each fleet had")}
     {tile("Chips", num(g["capacity"]), num(k_cap_now), "bare metal's VMs → kube's quota now" + (f"; {num(k_cap)} on average over the window" if abs(k_cap - k_cap_now) >= 1 else ""))}
     {tile("Work a day", num(g["mean_held"] * 24), num(k_work), f"chip-hours; steps a day {num(b_steps)} → {num(k_steps)}")}
     <div class="tile"><span>Kube's share of the work now</span><b>{pct(share)}</b><small>bare metal still ran {num(bare_work)} chip-hours a day{" (counted from 10-01)" if partial else ""}</small></div>
   </div>
+  <h3 class="shapes-head">By shape: bare metal before, kube now</h3>
+  <p class="muted note">Each row is one shape on one scale. On bare metal a shape could use only its own VMs - the
+  line is the chips of the agents connected each hour, so a VM that came or went moves it - and a busy shape sat at
+  its line and queued while another's VMs idled. On kube a shape owns its nominal and borrows
+  the cohort's idle chips above it, so its line can climb past nominal when others are quiet.</p>
+  {"".join(rows_html)}
   <div class="charts">
-  {stacked_chart("Bare metal before: chips held by topology", b_ticks, bare_bands, ref=("VMs", [g["capacity"]] * len(b_ticks)), ymax=top, fmt="day", width=520, height=200)}
-  {stacked_chart("Kube now: admitted chips by topology", kb_ticks, kube_bands, ref=kube_quota, ymax=top, fmt=fmt, width=520, height=200)}
-  </div>
-  <div class="charts">
-  {line_chart("Utilization by hour of day (PT), % of each fleet's chips", hour_ticks, [("used", "kube", k_hours), ("nodes", "bare metal", b_hours)], fmt="time", width=520, height=200)}
-  <div class="compare-note muted">The two stacks share a scale. Each band is one shape: on bare metal a shape could
-  only use its own VMs, so a busy shape queued while another's VMs sat idle; on kube the shapes share one quota,
-  so the bands trade chips while the total stays near it.</div>
+  {line_chart("Chips held by hour of day (PT), % of each fleet's chips", hour_ticks, [("used", "kube", k_hours), ("nodes", "bare metal", b_hours)], fmt="time", width=520, height=200)}
+  <div class="compare-note muted">Each fleet against its own chips, averaged by hour of day: when in the day the
+  chips were held, and how close to full each fleet ran.</div>
   </div>
 </div>""")
 
@@ -2264,14 +2294,18 @@ which a step still starts its pods (Node autoscaling on History). Bare metal now
 the migration finishes.</p>"""
 
     method = f"""<ul class="data-links">
-  <li><b>Utilization</b> is the chips held by running work as a share of the chips the fleet had: on bare metal the
-    chips of running Buildkite jobs against the queues' VMs ({E(base["window"])}); on kube Kueue's admitted chips
-    against the cohort's quota over the window. Both count a step from when it holds chips to when it lets go.</li>
-  <li><b>Work a day</b> is the chip-hours held each day, and the steps that finished. Higher utilization only counts
+  <li><b>Chips held</b> is the chips occupied by running work as a share of the chips the fleet had. On bare
+    metal a job holds its whole VM - a <code>tpu_v7x_16_queue</code> job holds that VM's 8 chips, and while the VM
+    has no job all 8 are idle - against the chips of the agents connected over {E(base["window"])}. On kube it is
+    Kueue's admitted chips against the cohort's quota over the window. Both count a chip from when work takes it
+    to when it lets go, whatever the TensorCores do meanwhile: occupancy, not compute.</li>
+  <li><b>Work a day</b> is the chip-hours held each day, and the steps that finished. Holding more chips only counts
     if the work gets done: while bare metal still runs part of the load, kube's work a day is that much short of
     the whole, and <i>Kube's share of the work now</i> says how much.</li>
   <li><b>When the migration is done</b> bare metal's share falls to zero and nothing here needs changing: a window
     that starts after it compares like for like.</li>
+  <li><b>The baseline</b> is the bare-metal fleet before the migration moved anything: it ends on 2026-09-28, the day
+    the inferact project's VMs joined <code>tpu_v7x_8_queue</code>.</li>
   <li><b>Not counted</b>: the 8 v7x chips the GKE disaggregated-serving lane had before the migration, whose jobs
     ran outside the bare-metal queues.</li>
 </ul>"""

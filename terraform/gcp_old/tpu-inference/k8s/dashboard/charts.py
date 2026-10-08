@@ -83,6 +83,7 @@ def line_chart(
     *,
     ref: tuple[str, list] | None = None,
     extra: list[tuple[str, list]] | None = None,
+    ymax: float | None = None,
     fmt: str = "time",
     width: int = 640,
     height: int = 200,
@@ -96,7 +97,8 @@ def line_chart(
     values = [v for _, _, vs in series for v in vs if v is not None]
     if ref:
         values += [v for v in ref[1] if v is not None]
-    ymax = nice_max(max(values, default=0))
+    # Charts shown side by side pass one ymax so their heights compare.
+    ymax = nice_max(max(max(values, default=0), ymax or 0))
     n = max(1, len(ticks) - 1)
 
     def x(i: float) -> float:

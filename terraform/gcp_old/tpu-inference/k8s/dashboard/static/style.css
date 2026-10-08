@@ -396,3 +396,5 @@ th.group { text-align: center; border-bottom: 1px solid var(--line); }
 .tile span.term .tip { display: block; font-size: 13px; color: #fff; }
 th.n .term:hover .tip, th.n .term:focus .tip { left: auto; right: 0; }
 .table-wrap:has(.term:hover), .table-wrap:has(.term:focus) { overflow: visible; }
+.shapes-head { margin: 22px 0 4px; font-size: 15px; }
+.shape-row { margin-top: 6px; }

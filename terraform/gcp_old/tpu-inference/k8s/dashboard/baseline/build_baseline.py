@@ -8,13 +8,21 @@ JSON file the dashboard serves as a static page.
     ./build_baseline.py ~/premigration-snapshot-2026-09-29
 
 Reads buildkite/org=vllm/pipeline=*/builds_page_*.json.gz (every job's queue,
-agent and times), and for capacity the TPU VMs the queues ran on
-(gcp/tpu_vms_*.json and gcp/gce_instances_inferact-vllm-tpu.json), falling back
-to buildkite/agents_all_*.json for a queue whose VM is not named as CI's. The dumps page back to 2026-09-04 22:00 UTC and hold only stray builds
-before it, so the window is the 24 whole days from 2026-09-05. Over the 30-day
-window of baseline/bare_lanes_2026-08-30_to_09-29.md the per-queue totals match
-it exactly; that table's busy shares divide by six days the dumps do not
-cover, so they read about a fifth low.
+agent and times) and, for capacity, Buildkite's per-minute connected-agent
+counts (gcp/monitoring/buildkite_exporter/org=vllm/TotalAgentCount).
+
+The window is 2026-09-05 to 2026-09-28 UTC. It starts where the dumps do: the
+TPU CI moved from the tpu_commons org to vllm on 2026-09-04, and the vllm
+dumps hold only stray builds before it. It ends the day the inferact project's
+tpu7x-8 VMs ran their first jobs on tpu_v7x_8_queue, before which that queue
+was 18 VMs in the CI project - so the baseline is the fleet as it ran before
+any of the migration's moves. Capacity is each queue's median connected agents
+over the window, times the chips a job holds.
+
+baseline/bare_lanes_2026-08-30_to_09-29.md in the snapshot was computed from
+the same dumps; over its 30-day window the per-queue totals match it exactly,
+but its busy shares divide by six days the dumps do not cover, so they read
+about a fifth low.
 """
 
 from __future__ import annotations
@@ -40,7 +48,7 @@ QUEUES = {
     "tpu_v6e_8_queue": ("v6e", 8),
 }
 START = dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc)
-END = dt.datetime(2026, 9, 29, tzinfo=dt.timezone.utc)
+END = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
 GCS = "gs://mhhua-tt-dev/premigration-snapshot-2026-09-29/"
 OUT = Path(__file__).with_name("premigration-2026-09.json")
 
@@ -123,45 +131,44 @@ def main() -> None:
                     day = dt.datetime.fromtimestamp(lo, dt.timezone.utc).date()
                     agents_by_day[(queue, day)].add(agent)
 
-    # Capacity from the VMs, not the agents: a VM still starting at the
-    # snapshot had no agent yet (one inferact tpu7x-8 did).
-    vm_queue = {
-        "tpu7x-2": "tpu_v7x_2_queue",
-        "tpu7x-8": "tpu_v7x_8_queue",
-        "tpu7x-16": "tpu_v7x_16_queue",
-        "v6e-1": "tpu_v6e_queue",
-        "v6e-8": "tpu_v6e_8_queue",
-    }
-    vms = collections.Counter()
-    for vm in json.load(open(snap / "gcp/tpu_vms_cloud-ullm-inference-ci-cd.json")):
-        name = vm["name"].rsplit("/", 1)[-1]
-        if "-ci-" in name and vm.get("acceleratorType") in vm_queue:
-            vms[vm_queue[vm["acceleratorType"]]] += 1
-    # The inferact project's tpu7x-8 CI VMs are GCE TPU instances, one per VM.
-    inferact = {
-        i["name"].rsplit("-w-", 1)[0]
-        for i in json.load(open(snap / "gcp/gce_instances_inferact-vllm-tpu.json"))
-        if i["name"].startswith("tpu7x-8-ci-")
-    }
-    vms["tpu_v7x_8_queue"] += len(inferact)
-
-    agents = collections.Counter()
-    for path in glob.glob(str(snap / "buildkite/agents_all_*.json")):
-        for agent in json.load(open(path)):
-            queue = next(
-                (
-                    m.split("=", 1)[1]
-                    for m in agent.get("meta_data") or []
-                    if m.startswith("queue=")
-                ),
-                None,
+    # Capacity from the agents connected over the window: the fleet as it ran,
+    # not as the snapshot day found it.
+    connected = collections.defaultdict(list)
+    by_hour = collections.defaultdict(lambda: collections.defaultdict(list))
+    for path in sorted(
+        glob.glob(
+            str(
+                snap
+                / "gcp/monitoring/buildkite_exporter/org=vllm/TotalAgentCount/2026-*.json.gz"
             )
-            agents[queue] += 1
+        )
+    ):
+        for series in json.load(gzip.open(path)):
+            if series["queue"] not in QUEUES:
+                continue
+            for t, v in series["points"]:
+                ts = when(t)
+                if start <= ts < end:
+                    connected[series["queue"]].append(v)
+                    by_hour[series["queue"]][int((ts - start) // 3600)].append(v)
+    agents = {
+        q: round(statistics.median(connected[q])) if connected[q] else 0 for q in QUEUES
+    }
+    # Hour by hour too, at the hour's most: a VM that served a queue for a
+    # while - a second tpu7x-32 on 2026-09-07 - raises that queue's line rather
+    # than its held chips crossing a flat one.
+    connected_chips = {
+        q: [
+            round(max(by_hour[q][i]) * QUEUES[q][1], 1) if by_hour[q].get(i) else None
+            for i in range(hours)
+        ]
+        for q in QUEUES
+    }
 
     days = (END - START).days
     queues = []
     for queue, (generation, chips) in QUEUES.items():
-        capacity = max(vms[queue], agents[queue]) * chips
+        capacity = agents[queue] * chips
         active = [
             len(agents_by_day.get((queue, (START + dt.timedelta(d)).date()), ()))
             for d in range(days)
@@ -172,7 +179,6 @@ def main() -> None:
                 "generation": generation,
                 "chips_per_job": chips,
                 "agents": agents[queue],
-                "vms": max(vms[queue], agents[queue]),
                 "agents_active": round(statistics.mean(active), 1),
                 "capacity": capacity,
                 "jobs": jobs[queue],
@@ -184,6 +190,7 @@ def main() -> None:
                 "wait_p90": quantile(waits[queue], 0.9),
                 "by_kind": {k: round(v) for k, v in by_kind[queue].most_common()},
                 "held": [round(v, 2) for v in held[queue]],
+                "connected": connected_chips[queue],
             }
         )
 
