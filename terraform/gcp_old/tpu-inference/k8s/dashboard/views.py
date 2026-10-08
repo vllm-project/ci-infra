@@ -13,7 +13,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from charts import line_chart, share_bars, stacked_chart, values_table
+from charts import gap_chart, line_chart, share_bars, stacked_chart, values_table
 from fleet import (
     BK_LIMITED,
     BK_WAITING,
@@ -2818,11 +2818,40 @@ def failures_cell(r: dict) -> str:
     )
 
 
+def node_gaps(h: dict, c: dict) -> dict:
+    """Chip-hours admitted with no node up for them yet, and on nodes with
+    nothing admitted for them: between the cohort's two lines, and summed shape
+    by shape, where an idle node of one shape and a workload waiting on another
+    do not cancel."""
+    hours = h["span"]["step"] / 3600
+
+    def gaps(admitted: list, on_nodes: list) -> tuple[float, float]:
+        pairs = [(u or 0, o or 0) for u, o in zip(admitted, on_nodes)]
+        return (
+            sum(max(0, u - o) for u, o in pairs) * hours,
+            sum(max(0, o - u) for u, o in pairs) * hours,
+        )
+
+    wait, idle = gaps(c["admitted"], c["on_nodes"])
+    shapes = [
+        gaps(q["history"]["used"], q["nodes"]["chips"])
+        for q in h["queues"]
+        if q["cohort"] == c["name"] and q.get("nodes")
+    ]
+    return {
+        "wait": wait,
+        "idle": idle,
+        "shape_wait": sum(w for w, _ in shapes),
+        "shape_idle": sum(i for _, i in shapes),
+    }
+
+
 def render_trends(h: dict, sources: dict, query: str) -> str:
     span = h["span"]
     fmt = "time" if span["end"] - span["start"] <= 2 * 86400 else "day"
     every = max(1, len(h["ticks"]) // 24)
     ticks = h["ticks"]
+    gaps = {c["name"]: node_gaps(h, c) for c in h["cohorts"]}
 
     cohorts = "".join(
         f"""<div class="card">
@@ -2833,7 +2862,11 @@ def render_trends(h: dict, sources: dict, query: str) -> str:
     <div class="tile"><span>{term("Node chips held", "Held by workloads")}</span><b>{pct(c["held_share"])}</b><small>{num(c["idle_chip_hours"])} chip-hours on nodes idle</small></div>
     <div class="tile"><span>Workloads finished</span><b>{num(c["finished"])}</b><small>{num(c["failed"])} test, {num(c["infra"])} infra failures</small></div>
   </div>
-  {line_chart("Chips on nodes, admitted and busy", ticks, [("nodes", "on nodes", c["on_nodes"]), ("used", "admitted", c["admitted"]), ("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
+  {gap_chart(f"Chips admitted and on nodes: {gaps[c['name']]['wait']:,.0f} chip-hours waiting for nodes, {gaps[c['name']]['idle']:,.0f} idle on nodes", ticks, ("used", "admitted", c["admitted"]), ("nodes", "on nodes", c["on_nodes"]), ("waiting for nodes", "idle on nodes"), series=[("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
+  <p class="muted note">Blue is chips Kueue admitted before a node was up to take them - the scale-up wait; orange
+  is chips on nodes with nothing admitted for them - a pool's minimum, or a node not yet scaled down. Shape by
+  shape it is {gaps[c["name"]]["shape_wait"]:,.0f} chip-hours waiting and {gaps[c["name"]]["shape_idle"]:,.0f} idle: more than between the
+  lines, where an idle node of one shape and a workload waiting on another cancel.</p>
   {values_table(ticks, [("On nodes", c["on_nodes"]), ("Admitted", c["admitted"]), ("Busy", c["busy"]), ("Nominal", c["nominal"])], every, "Values")}
   {stacked_chart("Admitted chips by topology", ticks, c["by_topology"], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=220)}
   {values_table(ticks, c["by_topology"] + [("Nominal", c["nominal"])], every, "Values by topology")}

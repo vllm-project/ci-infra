@@ -459,3 +459,8 @@ table.jobs-table.ended { min-width: 1080px; }
 .filters .seg-btn { white-space: nowrap; }
 h3.jobs-ended { margin-top: 22px; }
 h3.jobs-ended:first-child { margin-top: 0; }
+
+/* Between admitted and on nodes: each gap in the color of the line on top. */
+.gap { stroke: none; opacity: 0.22; } .gap.used { fill: var(--own); } .gap.nodes { fill: var(--nodes); }
+i.k.gapk { height: 10px; width: 10px; border-radius: 3px; opacity: 0.4; }
+i.k.gapk.used { background: var(--own); } i.k.gapk.nodes { background: var(--nodes); }
