@@ -2154,6 +2154,10 @@ def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> st
     k_ticks = h["ticks"]
     fmt = "time" if days <= 2 else "day"
 
+    def daily(value: float) -> str:
+        # Averages over days: the decimal is noise once a figure is in the tens.
+        return num(value) if value < 10 else f"{round(value):,}"
+
     def tile(label: str, before: str, after: str, note: str) -> str:
         return (
             f'<div class="tile compare-tile"><span>{label}</span>'
@@ -2234,7 +2238,7 @@ def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> st
                     height=150,
                 )
                 + line_chart(
-                    f"{label} · kube: admitted against its nominal, borrowing above it",
+                    f"{label} · kube: admitted against its nominal",
                     k_ticks,
                     [("used", "admitted", k_used)],
                     ref=("nominal", k_nom),
@@ -2250,8 +2254,8 @@ def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> st
   <div class="tiles">
     {tile(term("Chips held"), pct(b_util), pct(k_util), "on average, of the chips each fleet had")}
     {tile("Chips", num(g["capacity"]), num(k_cap_now), f"bare metal's VMs ({num(g['mean_connected'])} connected on average) → kube's quota now" + (f" ({num(k_cap)} on average)" if abs(k_cap - k_cap_now) >= 1 else ""))}
-    {tile("Work a day", num(g["mean_held"] * 24), num(k_work), f"chip-hours; steps a day {num(b_steps)} → {num(k_steps)}")}
-    <div class="tile"><span>Kube's share of the work now</span><b>{pct(share)}</b><small>bare metal still ran {num(bare_work)} chip-hours a day{" (counted from 10-01)" if partial else ""}</small></div>
+    {tile("Work a day", daily(g["mean_held"] * 24), daily(k_work), f"chip-hours; steps a day {daily(b_steps)} → {daily(k_steps)}")}
+    <div class="tile"><span>Kube's share of the work now</span><b>{pct(share)}</b><small>bare metal still ran {daily(bare_work)} chip-hours a day{" (counted from 10-01)" if partial else ""}</small></div>
   </div>
   <h3 class="shapes-head">By shape: bare metal before, kube now</h3>
   <p class="muted note">Each row is one shape on one scale. On bare metal a shape could use only its own VMs - the
@@ -2280,9 +2284,9 @@ def render_compare(h: dict, bare: list, sources: dict, preset: str | None) -> st
         rows.append(
             f"""<tr><td class="nowrap">{E(queue_title(q))} <span class="muted">· <code>{E(bq)}</code></span></td>
 <td class="n">{num(b["chips_per_job"])}</td>
-<td class="n">{num(b["jobs"] / base_days)}</td><td class="n nowrap">{ago((b["wait_p50"] or 0) * 60)} / {ago((b["wait_p90"] or 0) * 60)}</td>
-<td class="n">{num(st["finished"] / days)}</td><td class="n nowrap"><b>{ago(st["wait_p50"])} / {ago(st["wait_p90"])}</b></td>
-<td class="n">{num(int(now["jobs"]) / days) if now else "0"}</td><td class="n nowrap">{now_wait}</td></tr>"""
+<td class="n">{daily(b["jobs"] / base_days)}</td><td class="n nowrap">{ago((b["wait_p50"] or 0) * 60)} / {ago((b["wait_p90"] or 0) * 60)}</td>
+<td class="n">{daily(st["finished"] / days)}</td><td class="n nowrap"><b>{ago(st["wait_p50"])} / {ago(st["wait_p90"])}</b></td>
+<td class="n">{daily(int(now["jobs"]) / days) if now else "0"}</td><td class="n nowrap">{now_wait}</td></tr>"""
         )
     shapes = f"""<div class="table-wrap"><table class="dense"><thead>
 <tr><th rowspan="2">Shape</th><th class="n" rowspan="2">Chips a step</th><th class="group" colspan="2">Bare metal before</th>
@@ -2334,7 +2338,10 @@ now from the step log table. Rebuild the baseline with <code>dashboard/baseline/
         errors=render_errors(sources),
         start=span["start"],
         end=span["end"],
-        baseline_window=E(base["window"]),
+        baseline_window=" – ".join(
+            time.strftime("%b %-d", time.gmtime(base[k])) for k in ("start", "end")
+        )
+        + " UTC",
         taken=E(base["snapshot"]["taken"]),
         presets=presets,
         generations="".join(cards),

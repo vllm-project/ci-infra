@@ -96,7 +96,7 @@ details.glossary summary { font-size: 13px; font-weight: 600; color: var(--ink-2
 a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
 
 /* Health */
-.checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
+.checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 10px; }
 .check { display: grid; grid-template-columns: 22px 1fr; gap: 2px 10px; padding: 12px 14px;
   border-radius: 10px; background: var(--line-2); }
 .check .icon { grid-row: span 2; width: 22px; height: 22px; border-radius: 50%; display: grid;
