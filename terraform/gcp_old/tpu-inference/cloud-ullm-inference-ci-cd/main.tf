@@ -72,9 +72,9 @@ module "ci_v7x_2" {
   service_account_email = google_service_account.ci_agent_tpu.email
 }
 
-# Twelve more tpu7x-8 agents serve the same queue from inferact-vllm-tpu (see
-# that env), so this fleet runs six and the other 48 chips of the reservation
-# are free for other work.
+# instance_count is 0: the twelve tpu7x-8 agents in inferact-vllm-tpu (see that
+# env) serve this queue, and this fleet's 24 chips are part of the kube v7x
+# lane (k8s/prod.auto.tfvars), which takes the bulk of the PR builds.
 module "ci_v7x_8" {
   source = "../modules/ci_v7x"
   providers = {
@@ -83,7 +83,7 @@ module "ci_v7x_8" {
 
   accelerator_type                      = "tpu7x-8"
   reserved                              = true
-  instance_count                        = 6
+  instance_count                        = 0
   buildkite_queue_name                  = "tpu_v7x_8_queue"
   disk_size                             = 4096
   project_id                            = var.project_id
@@ -127,7 +127,7 @@ module "ci_v7x_16" {
 # stream weights from GCS instead. Replaces the hand-built ranlihao-v7x-32 slice.
 #
 # instance_count is 0: the 16 chips a tpu7x-32 would need are part of the
-# kube v7x lane's 72 (k8s/prod.auto.tfvars), which runs the tpu7x-32 benchmark
+# kube v7x lane's 104 (k8s/prod.auto.tfvars), which runs the tpu7x-32 benchmark
 # case on its 2x2x4 slices. Raising this takes them out of that lane.
 module "ci_v7x_32" {
   source = "../modules/ci_v7x"
