@@ -33,6 +33,7 @@ locals {
   ci_agent_project_roles = {
     cpu = [
       "roles/artifactregistry.reader",
+      "roles/bigquery.jobUser",
       "roles/logging.logWriter",
       "roles/monitoring.metricWriter",
     ]
@@ -174,4 +175,11 @@ resource "google_bigquery_dataset_iam_member" "ci_agent_tpu" {
   dataset_id = data.google_bigquery_dataset.benchmark.dataset_id
   role       = "roles/bigquery.dataEditor"
   member     = local.ci_agent_members["tpu"]
+}
+
+resource "google_bigquery_dataset_iam_member" "ci_agent_cpu" {
+  project    = data.google_bigquery_dataset.benchmark.project
+  dataset_id = data.google_bigquery_dataset.benchmark.dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = local.ci_agent_members["cpu"]
 }
