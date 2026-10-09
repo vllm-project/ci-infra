@@ -4,10 +4,10 @@
 # registries, buckets, BigQuery and Spanner are made to vllm-ci, so the hosts
 # run as it.
 #
-# Only single hosts run here: tpu7x-8 slices and tpu7x-2s, the bare-metal
-# fleet's single-host queues once the cicd reservation went to the kube v7x
-# lane. Multi-host queues stay on the Cloud TPU API in
-# cloud-ullm-inference-ci-cd, where the scripts' multi-host path already works.
+# Every bare-metal queue runs here now that the cicd reservation is all in the
+# kube v7x lane: tpu7x-8 slices, tpu7x-2s and a tpu7x-16. The multi-host
+# scripts find the tpu7x-16's second host through the agent's environment
+# hook (modules/ci_v7x_gce) rather than the Cloud TPU API.
 # The reservation is deleted on 2027-01-22, so these agents need another home
 # by then.
 locals {
@@ -69,11 +69,10 @@ module "ci_v7x_2" {
   vllm_torchtpu_ssh_checkout = true
 }
 
-# One tpu7x-16 (two tpu7x-standard-4t hosts in one ICI domain) to prove the
-# multi-host path on Compute Engine before the cicd fleet's last tpu7x-16
-# moves to the kube v7x lane. Its 8 chips come from the reservation's free
-# capacity, outside the 48 this fleet runs on, and it joins a test queue so
-# that only builds pinned to it land there until it has passed.
+# One tpu7x-16 (two tpu7x-standard-4t hosts in one ICI domain) for the
+# multi-host steps of builds that stay on bare metal, now that the cicd
+# reservation is all in the kube v7x lane. Its 8 chips come from the
+# reservation's free capacity, outside the 48 the single hosts run on.
 module "ci_v7x_16" {
   source = "../modules/ci_v7x_gce"
   providers = {
@@ -83,7 +82,7 @@ module "ci_v7x_16" {
   slice_count                           = 1
   hosts_per_slice                       = 2
   topology                              = "2x2x2"
-  buildkite_queue_name                  = "tpu_v7x_16_inferact_test_queue"
+  buildkite_queue_name                  = "tpu_v7x_16_queue"
   project_id                            = var.project_id
   project_short_name                    = var.project_short_name
   service_account_email                 = local.service_account_email
