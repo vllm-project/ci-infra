@@ -98,6 +98,14 @@ config:
             value: "-v --depth 1 --filter=blob:none"
           - name: BUILDKITE_GIT_FETCH_FLAGS
             value: "-v --prune --depth 1 --filter=blob:none"
+          # Agent v4 checks by default that the commit is on the build's branch,
+          # deepening the shallow clone above to find out, and blocks the step
+          # when it is not. A PR force-pushed since its build started fails it
+          # on every retry, and a fork's branch is not in this repository to
+          # check against. The bare agents never checked; neither does this
+          # fleet.
+          - name: BUILDKITE_GIT_COMMIT_VERIFICATION
+            value: "off"
         envFrom:
           - secretRef:
               name: git-ssh-credentials

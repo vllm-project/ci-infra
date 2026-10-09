@@ -68,9 +68,9 @@ machine_memory_gb = {
   "tpu7x-standard-4t" = 960
 }
 
-kueue_version       = "0.19.6"
+kueue_version       = "0.20.1"
 jobset_version      = "0.12.0"
-agent_stack_version = "0.49.0"
+agent_stack_version = "0.51.0"
 
 # A queue of its own, so this fleet and the bare-metal one run side by side and
 # a pipeline moves over one step at a time.
