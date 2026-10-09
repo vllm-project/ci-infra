@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -31,6 +32,7 @@ from pathlib import Path
 
 import yaml
 from generate_manifests import (
+    CONTROLLERS,
     DEFAULT_OUT,
     LAUNCHER_DEFAULT_JOB,
     LAUNCHER_DEFAULT_CPU_JOB,
@@ -56,6 +58,13 @@ from generate_manifests import (
 # same release by hand behaves the same way; ours is its own.
 FIELD_MANAGER = "tpu-ci"
 UPSTREAM_FIELD_MANAGER = "kubectl"
+# The controllers' replicas, priority and anti-affinity are a second overlay of
+# the same Deployments, and the manager's Kueue Deployment already carries the
+# auth-plugin overlay as FIELD_MANAGER. Applied under that name too, either
+# overlay would strip the other's fields; under its own, each owns its fields.
+CONTROLLER_FIELD_MANAGER = "tpu-ci-controllers"
+# Deployments whose replica count the controller overlay sets.
+FLEET_SCALED = frozenset(deployment for _, deployment, _ in CONTROLLERS)
 
 UPSTREAM_MANIFESTS = {
     "kueue": "https://github.com/kubernetes-sigs/kueue/releases/download/v{version}/manifests.yaml",
@@ -143,12 +152,21 @@ class Step:
         return True
 
 
-def release_without(url: str, drop: tuple[tuple[str, str], ...]) -> str:
-    """An upstream release with named objects left out.
+REPLICAS_LINE = re.compile(r"^  replicas: \d+\n", re.MULTILINE)
 
-    Split and rejoined as text rather than round-tripped through a YAML dumper:
+
+def release_edited(url: str, drop: tuple[tuple[str, str], ...]) -> str:
+    """An upstream release with named objects left out, and with no replica
+    count on the Deployments the controller overlay scales.
+
+    Split and edited as text rather than round-tripped through a YAML dumper:
     the CRDs run to a megabyte of schema each, and re-emitting them would make a
     deploy depend on the serializer rather than on what upstream published.
+
+    The replica count goes because upstream's apply would otherwise take the
+    field back on every deploy and scale the controller to one until the
+    overlay's apply raised it again. With the line gone the upstream field
+    manager stops owning the field, and the overlay's value stands.
 
     A name matching nothing is an error, so an upstream rename stops the deploy
     instead of quietly reinstating an object a later step is meant to own.
@@ -165,6 +183,13 @@ def release_without(url: str, drop: tuple[tuple[str, str], ...]) -> str:
         if ident in drop:
             seen.add(ident)
             continue
+        if ident[0] == "Deployment" and ident[1] in FLEET_SCALED:
+            doc, found = REPLICAS_LINE.subn("", doc, count=1)
+            if not found:
+                raise SystemExit(
+                    f"{url}: Deployment {ident[1]} has no top-level replicas line "
+                    "to leave to the controller overlay; check the release layout."
+                )
         kept.append(doc)
 
     if missing := set(drop) - seen:
@@ -194,12 +219,10 @@ class Apply(Step):
         # An upstream release is one file; ours are directories.
         if isinstance(self.source, Path):
             yield ["-R", "-f", str(self.source)]
-        elif not self.without:
-            yield ["-f", self.source]
         else:
             with tempfile.TemporaryDirectory() as tmp:
                 out = Path(tmp) / "release.yaml"
-                out.write_text(release_without(self.source, self.without))
+                out.write_text(release_edited(self.source, self.without))
                 yield ["-f", str(out)]
 
 
@@ -347,6 +370,8 @@ def plan(cluster: dict, index: dict) -> list[Step]:
         # on upstream's default configuration - no MultiKueue, quota checks
         # blocking on undeclared resources - is as short as possible.
         Apply("fleet configuration", base / "system"),
+        # Before the rollouts Settle waits for, which it changes.
+        Apply("controller availability", base / "controllers", CONTROLLER_FIELD_MANAGER),
 
         Settle(),
 

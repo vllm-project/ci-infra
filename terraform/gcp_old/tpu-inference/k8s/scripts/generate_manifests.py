@@ -148,6 +148,17 @@ TIMING_TABLE = "kube_workload_timing"
 METRICS_SCRAPER_NAME = "kueue-metrics-scraper"
 METRICS_SCRAPER_NAMESPACE = "gmp-public"
 
+# The upstream controllers every cluster runs, by namespace and Deployment, with
+# the labels their pods carry. controller_availability.yaml.tpl gives each a
+# second replica and a priority kube-dns cannot preempt; deploy_manifests.py
+# leaves their replica count out of the release so the two do not fight over it.
+CONTROLLERS = (
+    ("kueue-system", "kueue-controller-manager",
+     {"app.kubernetes.io/name": "kueue", "control-plane": "controller-manager"}),
+    ("jobset-system", "jobset-controller-manager",
+     {"app.kubernetes.io/name": "jobset", "control-plane": "controller-manager"}),
+)
+
 # The launcher's program, and the ConfigMap deploy_manifests.py builds out of
 # it. Not rendered into the generated tree: a program indented into YAML is not
 # a diff anyone reads. Named here because launcher.yaml.tpl mounts it.
@@ -820,6 +831,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
 
         base = out_dir / worker_dir
         write(base / "system" / "10-kueue-config.yaml", kueue_config("worker"))
+        write(base / "controllers" / "00-controllers.yaml", controller_availability())
         # Under system/, alongside the rest of what a worker has to hold before
         # it can run anything. Nothing in this repo names the class; the roles
         # that do arrive later, as workloads MultiKueue dispatches here, and a
@@ -907,6 +919,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
 
     base = out_dir / manager_dir
     write(base / "system" / "10-kueue-config.yaml", kueue_config("manager"))
+    write(base / "controllers" / "00-controllers.yaml", controller_availability())
     # Manager only. A worker's TPU pods do call buildkite-agent, but with the
     # per-job access token the launcher forwards, not with this one - see the
     # template.
@@ -1038,7 +1051,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
     )
 
     # Under charts/ rather than beside the manifests, because it is not one.
-    # deploy_manifests.py applies system/, queues/ and workload/; this is an
+    # deploy_manifests.py applies system/, controllers/, queues/ and workload/; this is an
     # input to a helm render, and applying it would be an error.
     write(
         base / "charts" / "agent-stack-k8s.yaml",
@@ -1087,6 +1100,26 @@ def monitoring_kueue() -> str:
         SCRAPER_NAME=METRICS_SCRAPER_NAME,
         SCRAPER_NAMESPACE=METRICS_SCRAPER_NAMESPACE,
     )
+
+
+def controller_availability() -> str:
+    """Replicas, priority and a disruption budget for the upstream controllers.
+
+    The same on every cluster: the manager's Kueue serves the webhook the
+    launcher's job goes through, and a worker's serves the copy MultiKueue
+    creates there.
+    """
+    docs = []
+    for namespace, deployment, labels in CONTROLLERS:
+        selector = "\n".join(f"{key}: {value}" for key, value in sorted(labels.items()))
+        docs.append(render(
+            "controller_availability",
+            NAMESPACE=namespace,
+            DEPLOYMENT=deployment,
+            SELECTOR=indent(selector, 6),
+            POD_SELECTOR=indent(selector, 20),
+        ))
+    return "".join(docs)
 
 
 def kueue_config(role: str) -> str:
