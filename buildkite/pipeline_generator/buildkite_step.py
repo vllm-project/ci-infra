@@ -95,9 +95,11 @@ def _otel_setup_command() -> str:
         "ci_otel_start() { :; }; ci_otel_finish() { :; }; "
         'ci_otel_run() { shift 2; env "$$@"; return $$?; }; '
         'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
-        # `|| :` keeps the assignment itself successful under `sh -e` when the
-        # checkout has no .git; the missing-helper path below stays fail-open.
-        "$$(git rev-parse --show-toplevel 2>/dev/null || :)/"
+        # Native AMD pods run from /vllm-workspace, which has no .git; their
+        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The fallback keeps the
+        # assignment successful under `sh -e`; a missing helper stays fail-open.
+        "$$(git rev-parse --show-toplevel 2>/dev/null || "
+        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-}")/'
         '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
         'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
