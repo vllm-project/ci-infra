@@ -345,6 +345,19 @@ faster before the first line arrives, which covers the built-in Job. The step
 still passes or fails correctly and says when output is missing; the container
 output is in Cloud Logging either way.
 
+**The Kueue and JobSet controllers run two replicas at kube-dns's priority.**
+Upstream ships one replica with no priority class, and GKE scales kube-dns with
+the cluster: every TPU node that joins can add a kube-dns pod, which lands on a
+system node and preempts whatever has a lower priority. That was the
+controllers, several times a day, and each time their webhooks had no endpoint
+until the pod came back. `controllers/` gives each a second replica (leader
+election picks one to reconcile; both serve the webhook), `system-cluster-critical`
+with the ResourceQuota GKE requires for it outside `kube-system`, a preference
+for separate nodes, and a disruption budget. It is applied under its own field
+manager, because the manager's Kueue Deployment already carries the auth-plugin
+overlay, and the deploy leaves upstream's `replicas: 1` out of the release so
+the two applies do not trade the replica count back and forth.
+
 **Every v7x shape has quota of its own, and the multi-host shapes take it
 back.** The 128 chips split 64 to `tpu7x-standard-4t-2x2x1`, 32 to
 `tpu7x-standard-4t-2x2x4` (two slices), 16 to `tpu7x-standard-4t-2x2x2` (two
