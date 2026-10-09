@@ -2883,9 +2883,11 @@ def render_trends(h: dict, sources: dict, query: str) -> str:
     <div class="tile"><span>{term("Node chips held", "Held by workloads")}</span><b>{pct(c["held_share"])}</b><small>{num(c["idle_chip_hours"])} chip-hours on nodes idle</small></div>
     <div class="tile"><span>Workloads finished</span><b>{num(c["finished"])}</b><small>{num(c["failed"])} test, {num(c["infra"])} infra failures</small></div>
   </div>
-  {gap_chart(f"Chips admitted and on nodes: {gaps[c['name']]['wait']:,.0f} chip-hours waiting for nodes, {gaps[c['name']]['idle']:,.0f} idle on nodes", ticks, ("used", "admitted", c["admitted"]), ("nodes", "on nodes", c["on_nodes"]), ("waiting for nodes", "idle on nodes"), series=[("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
-  <p class="muted note">Blue is chips Kueue admitted before a node was up to take them - the scale-up wait; orange
-  is chips on nodes with nothing admitted for them - a pool's minimum, or a node not yet scaled down. Shape by
+  {gap_chart("Chips admitted and on nodes", ticks, ("used", "admitted", c["admitted"]), ("nodes", "on nodes", c["on_nodes"]), ("waiting for nodes", "idle on nodes"), series=[("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
+  <p class="muted note">Over the range, <b>{gaps[c["name"]]["wait"]:,.0f}</b> chip-hours waited for nodes and
+  <b>{gaps[c["name"]]["idle"]:,.0f}</b> sat idle on nodes. Blue is chips Kueue admitted before a node was up to take
+  them - the scale-up wait; orange is chips on nodes with nothing admitted for them - a pool's minimum, or a node
+  not yet scaled down. Shape by
   shape it is {gaps[c["name"]]["shape_wait"]:,.0f} chip-hours waiting and {gaps[c["name"]]["shape_idle"]:,.0f} idle: more than between the
   lines, where an idle node of one shape and a workload waiting on another cancel.</p>
   {values_table(ticks, [("On nodes", c["on_nodes"]), ("Admitted", c["admitted"]), ("Busy", c["busy"]), ("Nominal", c["nominal"])], every, "Values")}
