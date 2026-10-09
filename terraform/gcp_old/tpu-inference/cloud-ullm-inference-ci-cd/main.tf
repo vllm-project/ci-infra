@@ -7,6 +7,10 @@ locals {
   buildkite_analytics_token_secret_name = "projects/${var.project_id}/secrets/vllm_buildkite_analytics_token"
 }
 
+# Six v6e-1 and two v6e-8 for the tpu-inference PRs the kube ramp leaves on
+# bare: a replay of 10-07..10-09 at 50% put them at a p90 wait of 22 and 15
+# minutes. The rest of the reservation is the kube v6e lane
+# (k8s/prod.auto.tfvars).
 module "ci_v6e_1_vllm" {
   source = "../modules/ci_v6e"
   providers = {
@@ -16,7 +20,7 @@ module "ci_v6e_1_vllm" {
   accelerator_type                      = "v6e-1"
   reserved                              = true
   purpose                               = "vllm"
-  instance_count                        = 12
+  instance_count                        = 6
   disk_size                             = 1024
   buildkite_queue_name                  = "tpu_v6e_queue"
   project_id                            = var.project_id
@@ -37,7 +41,7 @@ module "ci_v6e_8_vllm" {
   accelerator_type                      = "v6e-8"
   reserved                              = true
   purpose                               = "vllm"
-  instance_count                        = 4
+  instance_count                        = 2
   disk_size                             = 4096
   buildkite_queue_name                  = "tpu_v6e_8_queue"
   project_id                            = var.project_id
