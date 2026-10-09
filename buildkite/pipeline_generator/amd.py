@@ -143,9 +143,8 @@ AMD_DEVICE_CONFIGS = {
     DeviceType.AMD_MI325_2.value: AmdDeviceConfig(AgentQueue.AMD_MI325_2, 2),
     DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4),
     DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8),
-    DeviceType.AMD_MI355_DPX.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI355_DPX, 1, uses_dra=True
-    ),
+    # TODO: mi355_dpx pods are killed at ~30 min; route to mi355_1 until fixed.
+    DeviceType.AMD_MI355_DPX.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1),
     DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1),
     DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2),
     DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4),
