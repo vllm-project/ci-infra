@@ -236,8 +236,12 @@ worker_clusters = [
         nominal_quota = 8
       },
       {
-        # Two slices nominal for the Kimi-K3 1P1D, which takes them back from
-        # borrowers when it starts. Four slice pools, so 2x2x4 can borrow up to
+        # Two slices nominal for the Kimi-K3 pairs. They take them back only
+        # from lower-priority borrowers: a nightly pair, unclassed like the
+        # steps borrowing its chips, waits for them to finish instead of
+        # evicting them, and Kueue admits a queue's own work within its
+        # nominal quota ahead of another queue's borrowing, so the slices go
+        # to it as they free up. Four slice pools, so 2x2x4 can borrow up to
         # two more slices (64 chips) for v7x-32 tests and bring-ups when the
         # cohort is idle.
         machine_type     = "tpu7x-standard-4t"
@@ -248,7 +252,7 @@ worker_clusters = [
         slices        = 4
         nominal_quota = 32
 
-        reclaim_within_cohort = "Any"
+        reclaim_within_cohort = "LowerPriority"
       },
     ]
   },
