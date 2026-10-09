@@ -33,6 +33,7 @@ locals {
   ci_agent_project_roles = {
     cpu = [
       "roles/artifactregistry.reader",
+      # Failed-step records (vllm-torchtpu record_ci_failure.py).
       "roles/bigquery.jobUser",
       "roles/logging.logWriter",
       "roles/monitoring.metricWriter",
@@ -75,6 +76,15 @@ locals {
     "vllm-bm-bk-storage"                     = { role = "roles/storage.objectCreator", fleets = ["tpu"] }
     "vllm-cb-storage2"                       = { role = "roles/storage.objectViewer", fleets = ["tpu"] }
   }
+
+  # Tables in llm_benchmark_analytics the agents write to. Granted per table so
+  # a job can't create or drop other tables in the dataset.
+  ci_agent_bq_tables = {
+    # Benchmark results (upload_results.py, tpu-inference report_bigquery.py).
+    "benchmark_runs" = ["tpu"]
+    # Failed-step records (vllm-torchtpu record_ci_failure.py).
+    "ci_failures" = ["cpu", "tpu"]
+  }
 }
 
 data "google_secret_manager_secret" "ci_agent" {
@@ -98,10 +108,17 @@ data "google_storage_bucket" "ci_agent" {
   name = each.key
 }
 
-# Benchmark results (upload_results.py, tpu-inference report_bigquery.py).
 data "google_bigquery_dataset" "benchmark" {
   project    = var.project_id
   dataset_id = "llm_benchmark_analytics"
+}
+
+data "google_bigquery_table" "ci_agent" {
+  for_each = local.ci_agent_bq_tables
+
+  project    = data.google_bigquery_dataset.benchmark.project
+  dataset_id = data.google_bigquery_dataset.benchmark.dataset_id
+  table_id   = each.key
 }
 
 resource "google_project_iam_member" "ci_agent" {
@@ -169,17 +186,16 @@ resource "google_storage_bucket_iam_member" "ci_agent_bucket_viewer" {
   member = local.ci_agent_members[each.value.fleet]
 }
 
-# Only jobs on the TPU queues upload benchmark results.
-resource "google_bigquery_dataset_iam_member" "ci_agent_tpu" {
-  project    = data.google_bigquery_dataset.benchmark.project
-  dataset_id = data.google_bigquery_dataset.benchmark.dataset_id
-  role       = "roles/bigquery.dataEditor"
-  member     = local.ci_agent_members["tpu"]
-}
+resource "google_bigquery_table_iam_member" "ci_agent" {
+  for_each = merge([
+    for table, fleets in local.ci_agent_bq_tables : {
+      for fleet in fleets : "${table}/${fleet}" => { table = table, fleet = fleet }
+    }
+  ]...)
 
-resource "google_bigquery_dataset_iam_member" "ci_agent_cpu" {
-  project    = data.google_bigquery_dataset.benchmark.project
-  dataset_id = data.google_bigquery_dataset.benchmark.dataset_id
+  project    = data.google_bigquery_table.ci_agent[each.value.table].project
+  dataset_id = data.google_bigquery_table.ci_agent[each.value.table].dataset_id
+  table_id   = data.google_bigquery_table.ci_agent[each.value.table].table_id
   role       = "roles/bigquery.dataEditor"
-  member     = local.ci_agent_members["cpu"]
+  member     = local.ci_agent_members[each.value.fleet]
 }
