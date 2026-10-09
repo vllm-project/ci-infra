@@ -91,8 +91,8 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkey
         ("mi300_4", AgentQueue.AMD_MI300_4, True, "4"),
         ("mi325_1", AgentQueue.AMD_MI325_1, False, "1"),
         ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
-        ("mi355_dpx", AgentQueue.AMD_MI355_1, False, "1"),
-        ("mi355_dpx", AgentQueue.AMD_MI355_1, True, "1"),
+        ("mi355_dpx", AgentQueue.AMD_MI355_DPX, False, "1"),
+        ("mi355_dpx", AgentQueue.AMD_MI355_DPX, True, "1"),
     ],
 )
 def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_count):
@@ -133,8 +133,13 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
         assert container["image"] == amd.AMD_NATIVE_BASE_IMAGE
-        assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
-        assert container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
+        if device == "mi355_dpx":
+            assert "resources" not in container
+        else:
+            assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
+            assert (
+                container["resources"]["requests"]["amd.com/gpu"] == expected_gpu_count
+            )
         assert command_step.env["AMD_CI_RUNTIME"] == "native"
         assert "DOCKER_IMAGE_NAME" not in command_step.env
         container_env = {entry["name"]: entry for entry in container["env"]}
@@ -227,7 +232,7 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     "device,queue",
     [
         ("mi325_1", AgentQueue.AMD_MI325_1),
-        ("mi355_dpx", AgentQueue.AMD_MI355_1),
+        ("mi355_dpx", AgentQueue.AMD_MI355_DPX),
     ],
 )
 def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
@@ -312,7 +317,7 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
     "device,queue",
     [
         ("mi325_1", AgentQueue.AMD_MI325_1),
-        ("mi355_dpx", AgentQueue.AMD_MI355_1),
+        ("mi355_dpx", AgentQueue.AMD_MI355_DPX),
     ],
 )
 def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device, queue):
@@ -348,10 +353,13 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device,
     assert amd_command_step.plugins is not None
     pod_patch = amd_command_step.plugins[0]["kubernetes"]["podSpecPatch"]
     container = pod_patch["containers"][0]
-    assert container["resources"] == {
-        "limits": {"amd.com/gpu": "1"},
-        "requests": {"amd.com/gpu": "1"},
-    }
+    if device == "mi355_dpx":
+        assert "resources" not in container
+    else:
+        assert container["resources"] == {
+            "limits": {"amd.com/gpu": "1"},
+            "requests": {"amd.com/gpu": "1"},
+        }
 
 
 @pytest.mark.parametrize("device", ["mi300_4", "mi355_dpx"])
@@ -375,10 +383,13 @@ def test_native_amd_no_gpu_preserves_allocation_contract(device):
     container = command_step.plugins[0]["kubernetes"]["podSpecPatch"]["containers"][0]
     container_env = {entry["name"]: entry for entry in container["env"]}
     assert container_env["VLLM_CI_EXPECTED_GPU_COUNT"]["value"] == "0"
-    assert container["resources"] == {
-        "limits": {"amd.com/gpu": "0"},
-        "requests": {"amd.com/gpu": "0"},
-    }
+    if device == "mi355_dpx":
+        assert "resources" not in container
+    else:
+        assert container["resources"] == {
+            "limits": {"amd.com/gpu": "0"},
+            "requests": {"amd.com/gpu": "0"},
+        }
 
 
 def test_untagged_mirror_defaults_to_dind(
@@ -671,7 +682,9 @@ def test_amd_mirror_label_override(fake_global_config, amd_label, expected_amd_l
         (2, 2),  # explicit override -> independent AMD shard count
     ],
 )
-def test_amd_mirror_parallelism_override(fake_global_config, amd_parallelism, expected):
+def test_amd_mirror_parallelism_override(
+    fake_global_config, amd_parallelism, expected
+):
     """NVIDIA sharding must not multiply AMD mirrors: mirror.amd.parallelism
     overrides the inherited parent parallelism when set."""
     amd_config = {
@@ -706,7 +719,9 @@ def test_amd_mirror_parallelism_override(fake_global_config, amd_parallelism, ex
         for s in nvidia_group.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
-    amd_group = next(g for g in group_steps if g.group == "Hardware-AMD Tests")
+    amd_group = next(
+        g for g in group_steps if g.group == "Hardware-AMD Tests"
+    )
     amd_step = next(
         s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
