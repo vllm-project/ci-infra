@@ -13,7 +13,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from charts import line_chart, share_bars, stacked_chart, values_table
+from charts import gap_chart, line_chart, share_bars, stacked_chart, values_table
 from fleet import (
     BK_LIMITED,
     BK_WAITING,
@@ -51,8 +51,10 @@ TERMS = {
     "May borrow": "The most a queue may borrow on top of its nominal: what its node pools can hold, "
     "less its nominal.",
     "Idle, lendable": "Nominal a queue is not using, which others may borrow.",
-    "Reclaim": "A queue that evicts borrowers takes lent chips back by preempting the workloads using "
-    "them; those steps rerun. A queue that never reclaims waits for borrowers to finish.",
+    "Reclaim": "A queue that reclaims takes lent chips back by preempting the workloads borrowing them; "
+    "those steps rerun. Any borrower: whoever borrowed. Lower-priority borrowers: only those of lower "
+    "priority than the workload waiting - an equal or higher one finishes first. A queue that never "
+    "reclaims waits for borrowers to finish.",
     "Priority": "The Kueue WorkloadPriorityClass a build's workloads run at, highest first: "
     "oncall-fix, post-merge, pre-merge, integration, then unclassed (no class, scored 0), then low, "
     "with Kueue's value beside it. It decides who is admitted next, never who stops.",
@@ -1296,7 +1298,7 @@ def render_live_summary(snap: dict) -> str:
 <td class="n">{num(q["nominal"])}</td><td class="n"><b>{num(q["used"])}</b></td>
 <td>{borrow_cell(q)}</td>
 <td class="n">{num(q["borrowing_limit"]) if q["borrowing_limit"] else "-"}</td>
-<td>{"evicts borrowers" if q["reclaim"] != "Never" else '<span class="muted">never</span>'}</td>
+<td>{E(RECLAIM.get(q["reclaim"], q["reclaim"])) if q["reclaim"] != "Never" else '<span class="muted">never</span>'}</td>
 <td class="n">{num(q["admitted"] + q["dispatching"])}</td>
 <td class="n">{num(q["pending"])}{f' <span class="muted">({num(q["pending_amount"])} chips)</span>' if q["pending"] else ""}</td>
 <td class="barcell">{quota_bar(q, c["nominal"])}</td></tr>"""
@@ -1411,6 +1413,26 @@ def priority_cell(r: dict) -> str:
     )
 
 
+# Kueue's preemption policies, as the page says them.
+RECLAIM = {"Any": "evicts any borrower", "LowerPriority": "evicts lower-priority borrowers"}
+WITHIN_QUEUE = {
+    "LowerPriority": "preempts lower priority in its queue",
+    "LowerOrNewerEqualPriority": "preempts lower or newer equal priority in its queue",
+}
+
+
+def preemption_notes(q: dict) -> list[str]:
+    """What a queue preempts, one note a policy that is not Never."""
+    notes = []
+    if q.get("reclaim", "Never") != "Never":
+        notes.append(f"{RECLAIM.get(q['reclaim'], q['reclaim'])} to reclaim")
+    if q.get("within_queue", "Never") != "Never":
+        notes.append(WITHIN_QUEUE.get(q["within_queue"], q["within_queue"]))
+    if q.get("borrow_preempt", "Never") != "Never":
+        notes.append("preempts lower priority to borrow")
+    return notes
+
+
 def render_live_queue(q: dict) -> str:
     builds, builds_more, builds_button = split_rows(
         [
@@ -1439,8 +1461,7 @@ def render_live_queue(q: dict) -> str:
         pills.append(
             f'<span class="pill">may borrow {num(q["borrowing_limit"])}</span>'
         )
-    if q["reclaim"] != "Never":
-        pills.append('<span class="pill">evicts borrowers to reclaim</span>')
+    pills += [f'<span class="pill">{E(text)}</span>' for text in preemption_notes(q)]
     return f"""
 <div class="card queue{"" if tpu else " other"}" id="{E(q["name"])}">
   <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
@@ -2818,11 +2839,40 @@ def failures_cell(r: dict) -> str:
     )
 
 
+def node_gaps(h: dict, c: dict) -> dict:
+    """Chip-hours admitted with no node up for them yet, and on nodes with
+    nothing admitted for them: between the cohort's two lines, and summed shape
+    by shape, where an idle node of one shape and a workload waiting on another
+    do not cancel."""
+    hours = h["span"]["step"] / 3600
+
+    def gaps(admitted: list, on_nodes: list) -> tuple[float, float]:
+        pairs = [(u or 0, o or 0) for u, o in zip(admitted, on_nodes)]
+        return (
+            sum(max(0, u - o) for u, o in pairs) * hours,
+            sum(max(0, o - u) for u, o in pairs) * hours,
+        )
+
+    wait, idle = gaps(c["admitted"], c["on_nodes"])
+    shapes = [
+        gaps(q["history"]["used"], q["nodes"]["chips"])
+        for q in h["queues"]
+        if q["cohort"] == c["name"] and q.get("nodes")
+    ]
+    return {
+        "wait": wait,
+        "idle": idle,
+        "shape_wait": sum(w for w, _ in shapes),
+        "shape_idle": sum(i for _, i in shapes),
+    }
+
+
 def render_trends(h: dict, sources: dict, query: str) -> str:
     span = h["span"]
     fmt = "time" if span["end"] - span["start"] <= 2 * 86400 else "day"
     every = max(1, len(h["ticks"]) // 24)
     ticks = h["ticks"]
+    gaps = {c["name"]: node_gaps(h, c) for c in h["cohorts"]}
 
     cohorts = "".join(
         f"""<div class="card">
@@ -2833,7 +2883,13 @@ def render_trends(h: dict, sources: dict, query: str) -> str:
     <div class="tile"><span>{term("Node chips held", "Held by workloads")}</span><b>{pct(c["held_share"])}</b><small>{num(c["idle_chip_hours"])} chip-hours on nodes idle</small></div>
     <div class="tile"><span>Workloads finished</span><b>{num(c["finished"])}</b><small>{num(c["failed"])} test, {num(c["infra"])} infra failures</small></div>
   </div>
-  {line_chart("Chips on nodes, admitted and busy", ticks, [("nodes", "on nodes", c["on_nodes"]), ("used", "admitted", c["admitted"]), ("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
+  {gap_chart("Chips admitted and on nodes", ticks, ("used", "admitted", c["admitted"]), ("nodes", "on nodes", c["on_nodes"]), ("waiting for nodes", "idle on nodes"), series=[("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
+  <p class="muted note">Over the range, <b>{gaps[c["name"]]["wait"]:,.0f}</b> chip-hours waited for nodes and
+  <b>{gaps[c["name"]]["idle"]:,.0f}</b> sat idle on nodes. Blue is chips Kueue admitted before a node was up to take
+  them - the scale-up wait; orange is chips on nodes with nothing admitted for them - a pool's minimum, or a node
+  not yet scaled down. Shape by
+  shape it is {gaps[c["name"]]["shape_wait"]:,.0f} chip-hours waiting and {gaps[c["name"]]["shape_idle"]:,.0f} idle: more than between the
+  lines, where an idle node of one shape and a workload waiting on another cancel.</p>
   {values_table(ticks, [("On nodes", c["on_nodes"]), ("Admitted", c["admitted"]), ("Busy", c["busy"]), ("Nominal", c["nominal"])], every, "Values")}
   {stacked_chart("Admitted chips by topology", ticks, c["by_topology"], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=220)}
   {values_table(ticks, c["by_topology"] + [("Nominal", c["nominal"])], every, "Values by topology")}

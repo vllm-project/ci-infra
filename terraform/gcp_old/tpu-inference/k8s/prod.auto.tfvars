@@ -270,7 +270,7 @@ buildkite_org        = "vllm"
 buildkite_cluster_id = "0219f117-7dc6-4a04-aee2-1619736fd800"
 
 # Built by dashboard/cloudbuild.yaml; the tag is the build revision there.
-dashboard_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/queue-dashboard:9"
+dashboard_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/queue-dashboard:10"
 
 # The token modules/ci_monitoring's BigQuery puller already lists these
 # pipelines' builds with.

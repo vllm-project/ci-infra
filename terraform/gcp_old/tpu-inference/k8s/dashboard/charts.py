@@ -323,3 +323,125 @@ def share_bars(
         for name, cls in parts
     )
     return f'<div class="share-bars"><div class="legend">{legend}</div>{"".join(out)}</div>'
+
+
+def gap_chart(
+    title: str,
+    ticks: list[float],
+    a: tuple[str, str, list],
+    b: tuple[str, str, list],
+    gaps: tuple[str, str],
+    *,
+    series: list[tuple[str, str, list]] = (),
+    ref: tuple[str, list] | None = None,
+    fmt: str = "time",
+    width: int = 640,
+    height: int = 200,
+) -> str:
+    """Two lines, a and b - (css class, name, values) - with the space between
+    them filled in a's color where a is above and b's where b is above, named
+    by gaps (a above, b above). series are further lines, ref a stepped one.
+    Straight segments throughout, so a fill meets its lines exactly; where the
+    lines cross inside a step the fill is split at the crossing."""
+    left, right, top, bottom = 40, 64, 12, 24
+    plot_w, plot_h = width - left - right, height - top - bottom
+    lines = [a, b, *series]
+    values = [v for _, _, vs in lines for v in vs if v is not None]
+    if ref:
+        values += [v for v in ref[1] if v is not None]
+    ymax = nice_max(max(values, default=0))
+    n = max(1, len(ticks) - 1)
+
+    def x(i: float) -> float:
+        return left + plot_w * i / n
+
+    def y(v: float) -> float:
+        return top + plot_h * (1 - v / ymax)
+
+    parts = []
+    for frac in (0, 0.5, 1):
+        yy = y(ymax * frac)
+        parts.append(
+            f'<line class="{"axis" if frac == 0 else "grid"}" x1="{left}" x2="{width - right}" '
+            f'y1="{yy:.1f}" y2="{yy:.1f}"/>'
+            f'<text class="tick" x="{left - 6}" y="{yy + 3:.1f}" text-anchor="end">'
+            f"{tick(ymax * frac)}</text>"
+        )
+    for frac in (0, 0.25, 0.5, 0.75, 1):
+        i = round(n * frac)
+        anchor = "start" if frac == 0 else "end" if frac == 1 else "middle"
+        parts.append(
+            f'<text class="tick" x="{x(i):.1f}" y="{height - 6}" text-anchor="{anchor}" '
+            f'data-ts="{ticks[i] if ticks else 0}" data-fmt="{fmt}"></text>'
+        )
+
+    def poly(points: list) -> str:
+        return "M" + "L".join(f"{px:.1f},{py:.1f}" for px, py in points) + "Z"
+
+    fills = {a[0]: [], b[0]: []}
+    av, bv = a[2], b[2]
+    for i in range(len(ticks) - 1):
+        a0, a1, b0, b1 = av[i], av[i + 1], bv[i], bv[i + 1]
+        if None in (a0, a1, b0, b1):
+            continue
+        d0, d1 = a0 - b0, a1 - b1
+        x0, x1 = x(i), x(i + 1)
+        if d0 * d1 >= 0:
+            if d0 or d1:
+                cls = a[0] if d0 + d1 > 0 else b[0]
+                fills[cls].append(poly([(x0, y(a0)), (x1, y(a1)), (x1, y(b1)), (x0, y(b0))]))
+            continue
+        t = d0 / (d0 - d1)
+        xc, yc = x0 + t * (x1 - x0), y(a0 + t * (a1 - a0))
+        fills[a[0] if d0 > 0 else b[0]].append(poly([(x0, y(a0)), (xc, yc), (x0, y(b0))]))
+        fills[a[0] if d1 > 0 else b[0]].append(poly([(xc, yc), (x1, y(a1)), (x1, y(b1))]))
+    for cls, shapes in fills.items():
+        if shapes:
+            parts.append(f'<path class="gap {cls}" d="{"".join(shapes)}"/>')
+
+    if ref:
+        runs = segments(ref[1], x, y)
+        for run in runs:
+            d = f"M{run[0][0]:.1f},{run[0][1]:.1f}" + "".join(
+                f"H{px:.1f}V{py:.1f}" for px, py in run[1:]
+            )
+            parts.append(f'<path class="ref" d="{d}"/>')
+        if runs:
+            lx, ly = runs[-1][-1]
+            parts.append(
+                f'<text class="ref-label" x="{lx + 6:.1f}" y="{ly + 3:.1f}">{E(ref[0])}</text>'
+            )
+    for cls, _, vs in lines:
+        for run in segments(vs, x, y):
+            d = "M" + "L".join(f"{px:.1f},{py:.1f}" for px, py in run)
+            parts.append(f'<path class="line {cls}" d="{d}"/>')
+
+    def diff(p: list, q: list) -> list:
+        return [
+            round(max(0.0, u - v), 1) if u is not None and v is not None else None
+            for u, v in zip(p, q)
+        ]
+
+    readout = [{"cls": c, "name": nm, "values": vs} for c, nm, vs in lines]
+    readout += [
+        {"cls": f"gapk {a[0]}", "name": gaps[0], "values": diff(av, bv)},
+        {"cls": f"gapk {b[0]}", "name": gaps[1], "values": diff(bv, av)},
+    ]
+    if ref:
+        readout.append({"cls": "ref", "name": ref[0], "values": ref[1]})
+    keys = [(c, nm) for c, nm, _ in lines] + [
+        (f"gapk {a[0]}", gaps[0]),
+        (f"gapk {b[0]}", gaps[1]),
+    ] + ([("ref", ref[0])] if ref else [])
+    legend = "".join(
+        f'<span class="key"><i class="k {c}"></i>{E(nm)}</span>' for c, nm in keys
+    )
+    data = json.dumps({"ticks": ticks, "series": readout})
+    return (
+        f'<figure class="chart"><figcaption><span class="title">{E(title)}</span>'
+        f'<span class="legend">{legend}</span></figcaption>'
+        f'<div class="plot" data-chart="{E(data)}" data-geom="{left},{right},{width}">'
+        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{E(title)}">'
+        f'{"".join(parts)}<line class="crosshair" x1="0" x2="0" y1="{top}" y2="{top + plot_h}"/>'
+        '</svg><div class="tip" hidden></div></div></figure>'
+    )

@@ -178,6 +178,8 @@ td.barcell, th.barcell { width: 24%; vertical-align: middle; }
 .chart { margin: 4px 0 8px; }
 figcaption { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 figcaption .title { font-size: 13px; font-weight: 600; color: var(--ink-2); margin-right: auto; }
+/* Line and square swatches centred alike, so the keys sit on one line. */
+figcaption .legend { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; row-gap: 4px; }
 .plot { position: relative; }
 svg { width: 100%; height: auto; display: block; overflow: visible; }
 .grid { stroke: var(--line-2); stroke-width: 1; } .axis { stroke: var(--line); stroke-width: 1; }
@@ -459,3 +461,8 @@ table.jobs-table.ended { min-width: 1080px; }
 .filters .seg-btn { white-space: nowrap; }
 h3.jobs-ended { margin-top: 22px; }
 h3.jobs-ended:first-child { margin-top: 0; }
+
+/* Between admitted and on nodes: each gap in the color of the line on top. */
+.gap { stroke: none; opacity: 0.22; } .gap.used { fill: var(--own); } .gap.nodes { fill: var(--nodes); }
+i.k.gapk { height: 10px; width: 10px; border-radius: 3px; opacity: 0.4; }
+i.k.gapk.used { background: var(--own); } i.k.gapk.nodes { background: var(--nodes); }

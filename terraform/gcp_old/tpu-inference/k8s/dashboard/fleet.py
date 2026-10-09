@@ -327,8 +327,14 @@ def cq_summary(cq: dict) -> dict:
         "borrowing_limit": borrowing,
         "used": used,
         "borrowed": borrowed,
-        # Any: this queue takes lent quota back by evicting whoever borrowed it.
+        # How the queue preempts, in Kueue's words: taking lent quota back from
+        # borrowers (Never, LowerPriority, Any), within its own queue (Never,
+        # LowerPriority, LowerOrNewerEqualPriority), and in order to borrow.
         "reclaim": preemption.get("reclaimWithinCohort", "Never"),
+        "within_queue": preemption.get("withinClusterQueue", "Never"),
+        "borrow_preempt": (preemption.get("borrowWithinCohort") or {}).get(
+            "policy", "Never"
+        ),
         **shape(cq["metadata"]["name"]),
     }
 
