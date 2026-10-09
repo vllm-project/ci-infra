@@ -234,6 +234,14 @@ worker_clusters = [
 
         slices        = 16
         nominal_quota = 16
+
+        # Takes its two slices back from any borrower. Waiting for borrowers
+        # to finish does not work for a slice: four chips have to free on the
+        # same pair of hosts while single-host steps take each chip as it
+        # frees, and 10-07..10-09 2x2x2 spent 42% of its waiting time with its
+        # own quota lent out. The borrowers are mostly short 2x2x1 steps, and
+        # an evicted step reruns from the start in a fresh pod.
+        reclaim_within_cohort = "Any"
       },
       {
         # Two slices nominal for the Kimi-K3 pairs. They take them back only
