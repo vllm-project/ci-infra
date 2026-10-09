@@ -1,8 +1,7 @@
 # This project, outside the google.com org, gets v7x only through Compute
 # Engine: the Cloud TPU API that ci_v7x uses offers it no tpu7x types. The
 # agents join the same queues as the cicd fleet. The CI grants on our
-# registries, buckets, BigQuery and Spanner are made to vllm-ci, so the hosts
-# run as it.
+# registries, buckets and BigQuery are made to vllm-ci, so the hosts run as it.
 #
 # Every bare-metal queue runs here now that the cicd reservation is all in the
 # kube v7x lane: tpu7x-8 slices, tpu7x-2s and a tpu7x-16. The multi-host

@@ -14,6 +14,13 @@ locals {
 
   launcher_principal = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/tpu-launcher]"
 
+  # The workloads' tpu-workload account, once per worker project: a pod
+  # authenticates in the Workload Identity pool of the cluster it runs on.
+  workload_principals = {
+    for project in distinct([for w in var.worker_clusters : w.project]) :
+    project => "serviceAccount:${project}.svc.id.goog[${var.namespace}/tpu-workload]"
+  }
+
   # Keyed by project/location rather than by list index, which would renumber -
   # and so rebuild - every cluster after one that was removed.
   #
