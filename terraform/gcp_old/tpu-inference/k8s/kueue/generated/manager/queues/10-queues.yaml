@@ -391,7 +391,7 @@ metadata:
 spec:
   cohortName: tpu7x
   preemption:
-    reclaimWithinCohort: Any
+    reclaimWithinCohort: LowerPriority
     withinClusterQueue: Never
   namespaceSelector:
     matchLabels:
