@@ -5,7 +5,18 @@ variable "slice_count" {
 
 variable "hosts_per_slice" {
   type        = number
-  description = "tpu7x-standard-4t hosts (4 chips each) per slice: 1 for a tpu7x-8 slice, 2 for tpu7x-16."
+  description = "Hosts per slice: 1 for a single-host slice, 2 for a tpu7x-16."
+}
+
+variable "chips_per_host" {
+  type        = number
+  description = "4 for tpu7x-standard-4t hosts (tpu7x-8 per host), 1 for tpu7x-standard-1t (tpu7x-2), which only comes as a single host."
+  default     = 4
+
+  validation {
+    condition     = contains([1, 4], var.chips_per_host) && (var.chips_per_host == 4 || var.hosts_per_slice == 1)
+    error_message = "chips_per_host must be 4, or 1 with hosts_per_slice = 1."
+  }
 }
 
 variable "topology" {

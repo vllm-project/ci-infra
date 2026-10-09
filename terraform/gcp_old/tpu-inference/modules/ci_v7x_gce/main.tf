@@ -1,4 +1,4 @@
-# TPU v7x CI Module on Compute Engine (tpu7x-standard-4t)
+# TPU v7x CI Module on Compute Engine (tpu7x-standard-4t or -1t hosts)
 #
 # For projects that get v7x through Compute Engine rather than the Cloud TPU
 # API that ci_v7x uses. The hosts are ordinary instances, so what the TPU API
@@ -18,9 +18,9 @@ locals {
 
   # Same scheme as ci_v7x, so a Buildkite agent maps onto its slice. The shape
   # is spelled like a Cloud TPU accelerator type, which counts TensorCores:
-  # 8 per tpu7x-standard-4t host.
+  # two per chip.
   slice_names = toset([for i in range(var.slice_count) :
-    "tpu7x-${var.hosts_per_slice * 8}-ci-${i}-${var.project_short_name}-${local.zone}"
+    "tpu7x-${var.hosts_per_slice * var.chips_per_host * 2}-ci-${i}-${var.project_short_name}-${local.zone}"
   ])
 
   # base_instance_name below numbers a slice's hosts -w-001, -w-002, ...
@@ -51,7 +51,7 @@ resource "google_compute_instance_template" "slice" {
   provider     = google-beta
   for_each     = local.slice_names
   name_prefix  = "${each.key}-"
-  machine_type = "tpu7x-standard-4t"
+  machine_type = "tpu7x-standard-${var.chips_per_host}t"
 
   labels = {
     vm_name = each.key
