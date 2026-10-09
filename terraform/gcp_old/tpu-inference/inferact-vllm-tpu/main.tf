@@ -32,7 +32,7 @@ module "ci_v7x_8" {
   reservation_name      = local.reservation_name
   subnetwork            = google_compute_subnetwork.ci.id
   # The hosts read these at boot. Their vllm-ci account's access is granted
-  # in cloud-ullm-inference-ci-cd/secrets.tf, next to the secrets.
+  # in cloud-ullm-inference-ci-cd/agent_service_accounts.tf.
   buildkite_token_secret_name           = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
   buildkite_analytics_token_secret_name = "projects/${var.secret_project_id}/secrets/vllm_buildkite_analytics_token"
   huggingface_token_secret_name         = "projects/${var.secret_project_id}/secrets/vllm_buildkite_hf_token"

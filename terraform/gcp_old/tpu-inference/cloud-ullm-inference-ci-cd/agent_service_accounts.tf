@@ -8,6 +8,11 @@
 # without touching the other's VMs: a TPU VM's service account only changes by
 # recreating the VM.
 #
+# inferact-vllm-tpu's agents run as that project's vllm-ci account (see that
+# env), listed here as the "inferact" fleet. Its grants on resources in this
+# project and in cloud-tpu-inference-test are made here; its roles in
+# inferact-vllm-tpu itself are not managed in this repo.
+#
 # Each resource is looked up with a data source first, so a plan fails early
 # if one is missing or renamed instead of granting on a name that doesn't exist.
 
@@ -25,8 +30,9 @@ resource "google_service_account" "ci_agent_tpu" {
 
 locals {
   ci_agent_members = {
-    cpu = "serviceAccount:${google_service_account.ci_agent_cpu.email}"
-    tpu = "serviceAccount:${google_service_account.ci_agent_tpu.email}"
+    cpu      = "serviceAccount:${google_service_account.ci_agent_cpu.email}"
+    tpu      = "serviceAccount:${google_service_account.ci_agent_tpu.email}"
+    inferact = "serviceAccount:vllm-ci@inferact-vllm-tpu.iam.gserviceaccount.com"
   }
 
   # Project-wide roles that are read-only or write-only telemetry.
@@ -46,6 +52,10 @@ locals {
       "roles/monitoring.metricWriter",
       # Multi-host jobs find their peers with `gcloud compute tpus tpu-vm describe`.
       "roles/tpu.viewer",
+    ]
+    inferact = [
+      # Benchmark result uploads and failed-step records.
+      "roles/bigquery.jobUser",
     ]
   }
 
@@ -68,6 +78,13 @@ locals {
     "vllm-torchtpu-ci" = ["cpu", "tpu"]
   }
 
+  # Repositories the inferact fleet pulls CI images from. The cpu and tpu fleets
+  # read every repository here through their project-wide role.
+  ci_agent_repo_readers = {
+    "tpu-inference-ci" = ["inferact"]
+    "vllm-torchtpu-ci" = ["inferact"]
+  }
+
   # Bucket-scoped object roles. Only jobs on the TPU queues use these buckets.
   ci_agent_bucket_roles = {
     "tpu-commons-ci"                         = { role = "roles/storage.objectUser", fleets = ["tpu"] }
@@ -77,13 +94,24 @@ locals {
     "vllm-cb-storage2"                       = { role = "roles/storage.objectViewer", fleets = ["tpu"] }
   }
 
+  # The inferact fleet's roles on the same buckets, which differ from the tpu
+  # fleet's: ullm-ci-cache takes new objects but no overwrites or deletes, and
+  # tpu-commons-ci takes writes only under xprof/ (ci_agent_inferact_xprof).
+  ci_agent_inferact_bucket_roles = {
+    "tpu-commons-ci"                         = ["roles/storage.bucketViewer", "roles/storage.objectViewer"]
+    "tpu-inference-hf-llm-model-checkpoints" = ["roles/storage.bucketViewer", "roles/storage.objectViewer"]
+    "ullm-ci-cache"                          = ["roles/storage.objectCreator", "roles/storage.objectViewer"]
+    "vllm-bm-bk-storage"                     = ["roles/storage.objectCreator"]
+    "vllm-cb-storage2"                       = ["roles/storage.objectViewer"]
+  }
+
   # Tables in llm_benchmark_analytics the agents write to. Granted per table so
   # a job can't create or drop other tables in the dataset.
   ci_agent_bq_tables = {
     # Benchmark results (upload_results.py, tpu-inference report_bigquery.py).
-    "benchmark_runs" = ["tpu"]
+    "benchmark_runs" = ["tpu", "inferact"]
     # Failed-step records (vllm-torchtpu record_ci_failure.py).
-    "ci_failures" = ["cpu", "tpu"]
+    "ci_failures" = ["cpu", "tpu", "inferact"]
   }
 }
 
@@ -119,6 +147,14 @@ data "google_bigquery_table" "ci_agent" {
   project    = data.google_bigquery_dataset.benchmark.project
   dataset_id = data.google_bigquery_dataset.benchmark.dataset_id
   table_id   = each.key
+}
+
+# Benchmark run records (vllm-torchtpu upload_results.py, tpu-inference
+# report_result.sh).
+data "google_spanner_database" "benchmark_runs" {
+  project  = "cloud-tpu-inference-test"
+  instance = "vllm-bm-inst"
+  name     = "vllm-bm-bk-runs"
 }
 
 resource "google_project_iam_member" "ci_agent" {
@@ -159,6 +195,20 @@ resource "google_artifact_registry_repository_iam_member" "ci_agent_writer" {
   member     = local.ci_agent_members[each.value.fleet]
 }
 
+resource "google_artifact_registry_repository_iam_member" "ci_agent_reader" {
+  for_each = merge([
+    for repo, fleets in local.ci_agent_repo_readers : {
+      for fleet in fleets : "${repo}/${fleet}" => { repo = repo, fleet = fleet }
+    }
+  ]...)
+
+  project    = data.google_artifact_registry_repository.ci_agent[each.value.repo].project
+  location   = data.google_artifact_registry_repository.ci_agent[each.value.repo].location
+  repository = data.google_artifact_registry_repository.ci_agent[each.value.repo].repository_id
+  role       = "roles/artifactregistry.reader"
+  member     = local.ci_agent_members[each.value.fleet]
+}
+
 resource "google_storage_bucket_iam_member" "ci_agent" {
   for_each = merge([
     for bucket, grant in local.ci_agent_bucket_roles : {
@@ -186,6 +236,31 @@ resource "google_storage_bucket_iam_member" "ci_agent_bucket_viewer" {
   member = local.ci_agent_members[each.value.fleet]
 }
 
+resource "google_storage_bucket_iam_member" "ci_agent_inferact" {
+  for_each = merge([
+    for bucket, roles in local.ci_agent_inferact_bucket_roles : {
+      for role in roles : "${bucket}/${role}" => { bucket = bucket, role = role }
+    }
+  ]...)
+
+  bucket = data.google_storage_bucket.ci_agent[each.value.bucket].name
+  role   = each.value.role
+  member = local.ci_agent_members["inferact"]
+}
+
+# Profiles from the DeepSeek xprof benchmark scripts (tpu-inference
+# scripts/multihost/benchmarks, vllm-torchtpu benchmarking configs).
+resource "google_storage_bucket_iam_member" "ci_agent_inferact_xprof" {
+  bucket = data.google_storage_bucket.ci_agent["tpu-commons-ci"].name
+  role   = "roles/storage.objectUser"
+  member = local.ci_agent_members["inferact"]
+
+  condition {
+    title      = "xprof-writes"
+    expression = "resource.name.startsWith(\"projects/_/buckets/tpu-commons-ci/objects/xprof/\")"
+  }
+}
+
 resource "google_bigquery_table_iam_member" "ci_agent" {
   for_each = merge([
     for table, fleets in local.ci_agent_bq_tables : {
@@ -198,4 +273,12 @@ resource "google_bigquery_table_iam_member" "ci_agent" {
   table_id   = data.google_bigquery_table.ci_agent[each.value.table].table_id
   role       = "roles/bigquery.dataEditor"
   member     = local.ci_agent_members[each.value.fleet]
+}
+
+resource "google_spanner_database_iam_member" "ci_agent_inferact" {
+  project  = data.google_spanner_database.benchmark_runs.project
+  instance = data.google_spanner_database.benchmark_runs.instance
+  database = data.google_spanner_database.benchmark_runs.name
+  role     = "roles/spanner.databaseUser"
+  member   = local.ci_agent_members["inferact"]
 }
