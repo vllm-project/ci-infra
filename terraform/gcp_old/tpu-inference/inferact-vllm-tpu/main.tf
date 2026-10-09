@@ -68,3 +68,30 @@ module "ci_v7x_2" {
 
   vllm_torchtpu_ssh_checkout = true
 }
+
+# One tpu7x-16 (two tpu7x-standard-4t hosts in one ICI domain) to prove the
+# multi-host path on Compute Engine before the cicd fleet's last tpu7x-16
+# moves to the kube v7x lane. Its 8 chips come from the reservation's free
+# capacity, outside the 48 this fleet runs on, and it joins a test queue so
+# that only builds pinned to it land there until it has passed.
+module "ci_v7x_16" {
+  source = "../modules/ci_v7x_gce"
+  providers = {
+    google-beta = google-beta.us-central1-c
+  }
+
+  slice_count                           = 1
+  hosts_per_slice                       = 2
+  topology                              = "2x2x2"
+  buildkite_queue_name                  = "tpu_v7x_16_inferact_test_queue"
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  service_account_email                 = local.service_account_email
+  reservation_name                      = local.reservation_name
+  subnetwork                            = google_compute_subnetwork.ci.id
+  buildkite_token_secret_name           = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
+  buildkite_analytics_token_secret_name = "projects/${var.secret_project_id}/secrets/vllm_buildkite_analytics_token"
+  huggingface_token_secret_name         = "projects/${var.secret_project_id}/secrets/vllm_buildkite_hf_token"
+
+  vllm_torchtpu_ssh_checkout = true
+}
