@@ -51,8 +51,10 @@ TERMS = {
     "May borrow": "The most a queue may borrow on top of its nominal: what its node pools can hold, "
     "less its nominal.",
     "Idle, lendable": "Nominal a queue is not using, which others may borrow.",
-    "Reclaim": "A queue that evicts borrowers takes lent chips back by preempting the workloads using "
-    "them; those steps rerun. A queue that never reclaims waits for borrowers to finish.",
+    "Reclaim": "A queue that reclaims takes lent chips back by preempting the workloads borrowing them; "
+    "those steps rerun. Any borrower: whoever borrowed. Lower-priority borrowers: only those of lower "
+    "priority than the workload waiting - an equal or higher one finishes first. A queue that never "
+    "reclaims waits for borrowers to finish.",
     "Priority": "The Kueue WorkloadPriorityClass a build's workloads run at, highest first: "
     "oncall-fix, post-merge, pre-merge, integration, then unclassed (no class, scored 0), then low, "
     "with Kueue's value beside it. It decides who is admitted next, never who stops.",
@@ -1296,7 +1298,7 @@ def render_live_summary(snap: dict) -> str:
 <td class="n">{num(q["nominal"])}</td><td class="n"><b>{num(q["used"])}</b></td>
 <td>{borrow_cell(q)}</td>
 <td class="n">{num(q["borrowing_limit"]) if q["borrowing_limit"] else "-"}</td>
-<td>{"evicts borrowers" if q["reclaim"] != "Never" else '<span class="muted">never</span>'}</td>
+<td>{E(RECLAIM.get(q["reclaim"], q["reclaim"])) if q["reclaim"] != "Never" else '<span class="muted">never</span>'}</td>
 <td class="n">{num(q["admitted"] + q["dispatching"])}</td>
 <td class="n">{num(q["pending"])}{f' <span class="muted">({num(q["pending_amount"])} chips)</span>' if q["pending"] else ""}</td>
 <td class="barcell">{quota_bar(q, c["nominal"])}</td></tr>"""
@@ -1411,6 +1413,26 @@ def priority_cell(r: dict) -> str:
     )
 
 
+# Kueue's preemption policies, as the page says them.
+RECLAIM = {"Any": "evicts any borrower", "LowerPriority": "evicts lower-priority borrowers"}
+WITHIN_QUEUE = {
+    "LowerPriority": "preempts lower priority in its queue",
+    "LowerOrNewerEqualPriority": "preempts lower or newer equal priority in its queue",
+}
+
+
+def preemption_notes(q: dict) -> list[str]:
+    """What a queue preempts, one note a policy that is not Never."""
+    notes = []
+    if q.get("reclaim", "Never") != "Never":
+        notes.append(f"{RECLAIM.get(q['reclaim'], q['reclaim'])} to reclaim")
+    if q.get("within_queue", "Never") != "Never":
+        notes.append(WITHIN_QUEUE.get(q["within_queue"], q["within_queue"]))
+    if q.get("borrow_preempt", "Never") != "Never":
+        notes.append("preempts lower priority to borrow")
+    return notes
+
+
 def render_live_queue(q: dict) -> str:
     builds, builds_more, builds_button = split_rows(
         [
@@ -1439,8 +1461,7 @@ def render_live_queue(q: dict) -> str:
         pills.append(
             f'<span class="pill">may borrow {num(q["borrowing_limit"])}</span>'
         )
-    if q["reclaim"] != "Never":
-        pills.append('<span class="pill">evicts borrowers to reclaim</span>')
+    pills += [f'<span class="pill">{E(text)}</span>' for text in preemption_notes(q)]
     return f"""
 <div class="card queue{"" if tpu else " other"}" id="{E(q["name"])}">
   <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
