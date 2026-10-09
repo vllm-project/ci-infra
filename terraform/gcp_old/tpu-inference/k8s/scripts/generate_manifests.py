@@ -148,6 +148,10 @@ TIMING_TABLE = "kube_workload_timing"
 METRICS_SCRAPER_NAME = "kueue-metrics-scraper"
 METRICS_SCRAPER_NAMESPACE = "gmp-public"
 
+# The agent-stack-k8s chart's release name, which the chart also uses as its
+# Deployment's name. deploy_manifests.py renders the chart under it.
+AGENT_STACK_RELEASE = "agent-stack-k8s"
+
 # The upstream controllers every cluster runs, by namespace and Deployment, with
 # the labels their pods carry. controller_availability.yaml.tpl gives each a
 # second replica and a priority kube-dns cannot preempt; deploy_manifests.py
@@ -1051,7 +1055,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
     )
 
     # Under charts/ rather than beside the manifests, because it is not one.
-    # deploy_manifests.py applies system/, controllers/, queues/ and workload/; this is an
+    # deploy_manifests.py applies system/, controllers/, queues/, workload/ and
+    # chart-overlay/; this is an
     # input to a helm render, and applying it would be an error.
     write(
         base / "charts" / "agent-stack-k8s.yaml",
@@ -1070,6 +1075,17 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 + int(tfvars["tpu_runtime_max_seconds"])
                 + 7200
             ),
+        ),
+    )
+
+    # Applied after the chart, which creates the Deployment it amends; under its
+    # own directory because the chart step runs after workload/.
+    write(
+        base / "chart-overlay" / "agent-stack-k8s.yaml",
+        render(
+            "agent_stack_availability",
+            NAMESPACE=namespace,
+            DEPLOYMENT=AGENT_STACK_RELEASE,
         ),
     )
 

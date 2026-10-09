@@ -32,6 +32,7 @@ from pathlib import Path
 
 import yaml
 from generate_manifests import (
+    AGENT_STACK_RELEASE,
     CONTROLLERS,
     DEFAULT_OUT,
     LAUNCHER_DEFAULT_JOB,
@@ -58,10 +59,11 @@ from generate_manifests import (
 # same release by hand behaves the same way; ours is its own.
 FIELD_MANAGER = "tpu-ci"
 UPSTREAM_FIELD_MANAGER = "kubectl"
-# The controllers' replicas, priority and anti-affinity are a second overlay of
-# the same Deployments, and the manager's Kueue Deployment already carries the
-# auth-plugin overlay as FIELD_MANAGER. Applied under that name too, either
-# overlay would strip the other's fields; under its own, each owns its fields.
+# The controllers' replicas, priority and anti-affinity, and the Buildkite
+# controller's priority, amend Deployments FIELD_MANAGER already applies: the
+# manager's Kueue Deployment carries the auth-plugin overlay, and the
+# agent-stack chart is applied whole. Applied under that name too, each apply
+# would strip the other's fields; under its own, each owns its fields.
 CONTROLLER_FIELD_MANAGER = "tpu-ci-controllers"
 # Deployments whose replica count the controller overlay sets.
 FLEET_SCALED = frozenset(deployment for _, deployment, _ in CONTROLLERS)
@@ -415,12 +417,16 @@ def plan(cluster: dict, index: dict) -> list[Step]:
     if values.is_file():
         steps.append(Chart(
             "Buildkite controller",
-            release="agent-stack-k8s",
+            release=AGENT_STACK_RELEASE,
             chart=AGENT_STACK_CHART,
             version=index["agent_stack_version"],
             namespace=index["namespace"],
             values=values,
         ))
+        # After the chart, whose Deployment it amends: on a fresh cluster there
+        # is nothing for a partial object to amend before then.
+        steps.append(Apply("Buildkite controller availability", base / "chart-overlay",
+                           CONTROLLER_FIELD_MANAGER))
 
     return steps
 
