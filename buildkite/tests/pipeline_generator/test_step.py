@@ -639,17 +639,30 @@ def test_otel_does_not_change_errexit_behavior(fake_global_config, tmp_path):
     assert not output.exists()
 
 
-def test_otel_trace_is_disabled_for_amd_mirror(fake_global_config):
+@pytest.mark.parametrize("dind, traced", [(False, True), (True, False)])
+def test_otel_trace_covers_native_amd_mirrors_only(fake_global_config, dind, traced):
     fake_global_config["branch"] = "main"
-    step = Step(label="AMD mirror", commands=["pytest tests"])
-
-    commands = buildkite_step._prepare_commands(
-        step,
-        variables_to_inject={},
-        setup_profile="amd",
+    step = Step(
+        label="AMD mirror",
+        group="Mirrors",
+        commands=["pytest tests"],
+        device="h200_18gb",
+        mirror={"amd": {"device": "mi300_1", "dind": dind}},
     )
 
-    assert not any("ci_otel" in command for command in commands)
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {step.group: [step]}
+    )
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+
+    amd_step = next(
+        s
+        for s in amd_group.steps
+        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+    assert ("ci_otel" in amd_step.model_dump_json()) is traced
 
 
 def test_otel_trace_is_disabled_for_pull_requests(fake_global_config):
