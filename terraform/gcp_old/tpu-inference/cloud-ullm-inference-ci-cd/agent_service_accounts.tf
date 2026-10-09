@@ -149,14 +149,6 @@ data "google_bigquery_table" "ci_agent" {
   table_id   = each.key
 }
 
-# Benchmark run records (vllm-torchtpu upload_results.py, tpu-inference
-# report_result.sh).
-data "google_spanner_database" "benchmark_runs" {
-  project  = "cloud-tpu-inference-test"
-  instance = "vllm-bm-inst"
-  name     = "vllm-bm-bk-runs"
-}
-
 resource "google_project_iam_member" "ci_agent" {
   for_each = merge([
     for fleet, roles in local.ci_agent_project_roles : {
@@ -273,12 +265,4 @@ resource "google_bigquery_table_iam_member" "ci_agent" {
   table_id   = data.google_bigquery_table.ci_agent[each.value.table].table_id
   role       = "roles/bigquery.dataEditor"
   member     = local.ci_agent_members[each.value.fleet]
-}
-
-resource "google_spanner_database_iam_member" "ci_agent_inferact" {
-  project  = data.google_spanner_database.benchmark_runs.project
-  instance = data.google_spanner_database.benchmark_runs.instance
-  database = data.google_spanner_database.benchmark_runs.name
-  role     = "roles/spanner.databaseUser"
-  member   = local.ci_agent_members["inferact"]
 }
