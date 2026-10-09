@@ -35,14 +35,30 @@ def pytest_configure(config):
     if not packed:
         return
     plan = json.loads(zlib.decompress(base64.b64decode(packed)))
-    args = list(config.invocation_params.args)
+    args = _without_plugins(config.invocation_params.args)
     for command in plan["commands"]:
-        if command["args"] == args:
+        if _without_plugins(command["args"]) == args:
             shard = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
             config.pluginmanager.register(
                 ShardPlugin(command, shard, plan["shards"]), "runtime_shard_job"
             )
             return
+
+
+def _without_plugins(args):
+    """A command's args less its `-p` plugins.
+
+    A wrapper may load its own plugin: vLLM's CI OTel shim runs
+    `pytest -p ci_otel <args>`. That is still the planned command.
+    """
+    kept, args = [], list(args)
+    while args:
+        arg = args.pop(0)
+        if arg == "-p":
+            args[:1] = []
+        elif not arg.startswith("-p"):
+            kept.append(arg)
+    return kept
 
 
 class ShardPlugin:

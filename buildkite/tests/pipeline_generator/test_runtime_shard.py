@@ -383,7 +383,7 @@ def _project(tmp_path, files):
         path.write_text(text)
 
 
-def _run(tmp_path, command, plan, shard):
+def _run(tmp_path, command, plan, shard, wrapper_args=()):
     """One shard's run of a command, as its job runs it."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
     env.update(
@@ -394,7 +394,7 @@ def _run(tmp_path, command, plan, shard):
     if plan is not None:
         env["RUNTIME_SHARD_PLAN"] = rs.pack(plan)
     return subprocess.run(
-        [sys.executable, "-m", "pytest", *shlex.split(command)[1:]],
+        [sys.executable, "-m", "pytest", *wrapper_args, *shlex.split(command)[1:]],
         cwd=tmp_path / "tests",
         env=env,
         capture_output=True,
@@ -511,6 +511,26 @@ def test_a_shard_opens_a_log_group_per_file(tmp_path):
     # But a command that selects nothing at all still fails, as it would alone.
     plan["commands"].append(_command_plan("pytest -v pkg -k nothing", "C", files))
     assert _run(tmp_path, "pytest -v pkg -k nothing", plan, 0).returncode == 5
+
+
+def test_a_wrapper_loading_its_own_plugin_still_shards(tmp_path):
+    # vLLM's CI OTel shim runs `pytest -p ci_otel <the step's args>`.
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": "def test_1(): pass\n",
+            "pkg/test_b.py": "def test_1(): pass\n",
+        },
+    )
+    command = "pytest -v pkg"
+    files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
+    plan = {"shards": 2, "commands": [_command_plan(command, "Command (1/1)", files)]}
+    for wrapper in (("-p", "no:cacheprovider"), ("-pno:cacheprovider",)):
+        ran = [
+            _ran(_run(tmp_path, command, plan, shard, wrapper).stdout)
+            for shard in (0, 1)
+        ]
+        assert ran == [["pkg/test_a.py::test_1"], ["pkg/test_b.py::test_1"]]
 
 
 def test_the_plugin_leaves_other_pytest_runs_alone(tmp_path):
