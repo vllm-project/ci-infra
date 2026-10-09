@@ -139,11 +139,13 @@ worker_clusters = [
     rapid_cache_zones = ["us-east5-a"]
 
     # Reservation cloudtpu-20260828173000-731402396 in us-east5-a: 128 v6e
-    # chips, 44 held by the bare-metal agents (twelve v6e-1, four v6e-8), 84
-    # here. nominal_quota splits the 84 by what each shape runs (10-04..10-07:
-    # 2x4 averaged 7.1 chips busy, 1x1 2.0), so 64 on 2x4 (eight slots) and
-    # 20 on 1x1; each pool can grow to all 84, so a shape borrowing the
-    # cohort's idle quota can still boot the nodes for it.
+    # chips, 22 held by the bare-metal agents (six v6e-1, two v6e-8, for the
+    # tpu-inference PRs the ramp leaves on bare), 106 here. nominal_quota
+    # splits the 106 by what each shape runs (10-07..10-09: 2x4 averaged 7.3
+    # chips busy and peaked at twelve slots, 1x1 averaged 1.7 with a p99 of
+    # 20), so 80 on 2x4 (ten slots) and 26 on 1x1; each pool can grow to all
+    # 106, so a shape borrowing the cohort's idle quota can still boot the
+    # nodes for it.
     # min_nodes is the part that really does partition the reservation, since
     # those chips stay with one shape once booted, so it is kept small.
     tpu_node_pools = [
@@ -154,8 +156,8 @@ worker_clusters = [
         zone             = "us-east5-a"
 
         min_nodes     = 2
-        max_nodes     = 84
-        nominal_quota = 20
+        max_nodes     = 106
+        nominal_quota = 26
       },
       {
         machine_type     = "ct6e-standard-8t"
@@ -166,10 +168,10 @@ worker_clusters = [
         # No floor: eight chips is too much of what is free to leave parked, so
         # this shape boots a node per job.
         min_nodes = 0
-        # Eight slots guaranteed, and room for two more by borrowing whatever
+        # Ten slots guaranteed, and room for three more by borrowing whatever
         # the single-chip queue is not using.
-        max_nodes     = 10
-        nominal_quota = 64
+        max_nodes     = 13
+        nominal_quota = 80
       },
     ]
   },
@@ -185,16 +187,16 @@ worker_clusters = [
     # The zone all three v7x pools sit in.
     rapid_cache_zones = ["us-central1-c"]
 
-    # Four shapes over the 120 v7x chips the bare-metal agents leave free in the
-    # reservation (128, of which one tpu7x-16 slice holds 8). Nominal quota is
+    # Four shapes over all 128 v7x chips of the reservation. Nominal quota is
     # what a shape can always get back: 32 on 2x2x4 (two slices, the Kimi-K3
-    # pairs), one slice, 8, on 2x2x2 - owning none, its steps waited on every
-    # slice they borrowed (10-01..10-08: p90 2.2 h) - and the other 80 on the
+    # pairs), two slices, 16, on 2x2x2 - an 8-chip step waits for a whole slice
+    # while single-host steps take chips as they free, and two or more wanted a
+    # slice at once 19% of the time (10-06..10-09) - and the other 80 on the
     # single-host shapes, 64 on 2x2x1 and 16 on 1x1x1. 2x2x1 holds the most
     # because post-merge, PR and perf steps queue there (10-01..10-08 it averaged
     # 14.3 chips in use against 1x1x1's 2.8, and on 10-08 evening every pending
     # v7x workload was a 2x2x1).
-    # Every pool can grow to all 120 chips, so a shape can borrow whatever the
+    # Every pool can grow to all 128 chips, so a shape can borrow whatever the
     # others leave idle: the cohort accounting decides how many run at once and
     # the node pools only decide what a chip can be shaped into.
     #
@@ -208,7 +210,7 @@ worker_clusters = [
         zone             = "us-central1-c"
 
         min_nodes     = 0
-        max_nodes     = 120
+        max_nodes     = 128
         nominal_quota = 16
       },
       {
@@ -218,12 +220,12 @@ worker_clusters = [
         zone             = "us-central1-c"
 
         min_nodes     = 0
-        max_nodes     = 30
+        max_nodes     = 32
         nominal_quota = 64
       },
       {
         # Eight chips as one slice across two VMs, placed from the named
-        # workload policy in workers.tf. Fifteen slices is all 120 chips, as
+        # workload policy in workers.tf. Sixteen slices is all 128 chips, as
         # many as the single-host pools can take, so the cohort decides how
         # many multi-host tests run at once; pod_defaults.yaml keeps each
         # JobSet's pods in one slice.
@@ -232,8 +234,16 @@ worker_clusters = [
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
-        slices        = 15
-        nominal_quota = 8
+        slices        = 16
+        nominal_quota = 16
+
+        # Takes its two slices back from any borrower. Waiting for borrowers
+        # to finish does not work for a slice: four chips have to free on the
+        # same pair of hosts while single-host steps take each chip as it
+        # frees, and 10-07..10-09 2x2x2 spent 42% of its waiting time with its
+        # own quota lent out. The borrowers are mostly short 2x2x1 steps, and
+        # an evicted step reruns from the start in a fresh pod.
+        reclaim_within_cohort = "Any"
       },
       {
         # Two slices nominal for the Kimi-K3 pairs. They take them back only

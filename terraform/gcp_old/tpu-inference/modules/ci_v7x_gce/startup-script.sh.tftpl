@@ -44,9 +44,10 @@ apt-get install -y buildkite-agent
 # leaves operator access on 22 as it is.
 mkdir -p /var/lib/buildkite-agent/.ssh
 
-# The CI account's only ssh traffic is to hosts in its own slice.
+# Every host this account reaches over ssh is in its own slice, except GitHub,
+# where the agent checks out over ssh on 22 (vllm_torchtpu_ssh_checkout).
 cat <<EOF > /var/lib/buildkite-agent/.ssh/config
-Host *
+Host * !github.com
   Port 2222
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null

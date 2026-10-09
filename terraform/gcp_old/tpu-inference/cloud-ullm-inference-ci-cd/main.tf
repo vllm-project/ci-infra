@@ -7,6 +7,10 @@ locals {
   buildkite_analytics_token_secret_name = "projects/${var.project_id}/secrets/vllm_buildkite_analytics_token"
 }
 
+# Six v6e-1 and two v6e-8 for the tpu-inference PRs the kube ramp leaves on
+# bare: a replay of 10-07..10-09 at 50% put them at a p90 wait of 22 and 15
+# minutes. The rest of the reservation is the kube v6e lane
+# (k8s/prod.auto.tfvars).
 module "ci_v6e_1_vllm" {
   source = "../modules/ci_v6e"
   providers = {
@@ -16,7 +20,7 @@ module "ci_v6e_1_vllm" {
   accelerator_type                      = "v6e-1"
   reserved                              = true
   purpose                               = "vllm"
-  instance_count                        = 12
+  instance_count                        = 6
   disk_size                             = 1024
   buildkite_queue_name                  = "tpu_v6e_queue"
   project_id                            = var.project_id
@@ -37,7 +41,7 @@ module "ci_v6e_8_vllm" {
   accelerator_type                      = "v6e-8"
   reserved                              = true
   purpose                               = "vllm"
-  instance_count                        = 4
+  instance_count                        = 2
   disk_size                             = 4096
   buildkite_queue_name                  = "tpu_v6e_8_queue"
   project_id                            = var.project_id
@@ -100,8 +104,8 @@ module "ci_v7x_8" {
   service_account_email = google_service_account.ci_agent_tpu.email
 }
 
-# One slice for the bare-metal steps that still need a v7x-16 (PR builds on bare
-# metal run three); the reservation's other eight chips run kube's queues.
+# instance_count is 0: inferact-vllm-tpu's tpu7x-16 (see that env) serves this
+# queue, and these 8 chips are part of the kube v7x lane (k8s/prod.auto.tfvars).
 module "ci_v7x_16" {
   source = "../modules/ci_v7x"
   providers = {
@@ -110,7 +114,7 @@ module "ci_v7x_16" {
 
   accelerator_type                      = "tpu7x-16"
   reserved                              = true
-  instance_count                        = 1
+  instance_count                        = 0
   buildkite_queue_name                  = "tpu_v7x_16_queue"
   project_id                            = var.project_id
   project_short_name                    = var.project_short_name
@@ -130,7 +134,7 @@ module "ci_v7x_16" {
 # stream weights from GCS instead. Replaces the hand-built ranlihao-v7x-32 slice.
 #
 # instance_count is 0: the 16 chips a tpu7x-32 would need are part of the
-# kube v7x lane's 120 (k8s/prod.auto.tfvars), which runs the tpu7x-32 benchmark
+# kube v7x lane's 128 (k8s/prod.auto.tfvars), which runs the tpu7x-32 benchmark
 # case on its 2x2x4 slices. Raising this takes them out of that lane.
 module "ci_v7x_32" {
   source = "../modules/ci_v7x"

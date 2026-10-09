@@ -345,15 +345,18 @@ faster before the first line arrives, which covers the built-in Job. The step
 still passes or fails correctly and says when output is missing; the container
 output is in Cloud Logging either way.
 
-**Every v7x shape has quota of its own, and only 2x2x4 takes it back.** The
-72 chips split 32 to `tpu7x-standard-4t-2x2x4` (two slices), 24 to
-`tpu7x-standard-4t-2x2x1`, 8 to `tpu7x-standard-4t-2x2x2` (one slice) and 8 to
-`tpu7x-standard-1t-1x1x1`; any shape can borrow what the others leave idle.
-Kueue considers a workload that fits a queue's own quota before one that has
-to borrow, so a shape under its nominal gets freed chips first - but only
-2x2x4 has `reclaimWithinCohort: Any` and evicts borrowers to get its slices
-back; the rest wait for borrowers to finish. If a shape is starving, the lever
-is the split in `prod.auto.tfvars`, not the node pools.
+**Every v7x shape has quota of its own, and the multi-host shapes take it
+back.** The 128 chips split 64 to `tpu7x-standard-4t-2x2x1`, 32 to
+`tpu7x-standard-4t-2x2x4` (two slices), 16 to `tpu7x-standard-4t-2x2x2` (two
+slices) and 16 to `tpu7x-standard-1t-1x1x1`; any shape can borrow what the
+others leave idle. Kueue considers a workload that fits a queue's own quota
+before one that has to borrow, so a shape under its nominal gets freed chips
+first. 2x2x2 also evicts any borrower to get its slices back
+(`reclaimWithinCohort: Any`) and 2x2x4 evicts lower-priority ones
+(`LowerPriority`); the single-host shapes wait for borrowers to finish. A
+reclaimed slice still waits for the evicted nodes to scale down, about ten
+minutes, before its own nodes boot. If a shape is starving, the lever is the
+split in `prod.auto.tfvars`, not the node pools.
 
 **A cold pool's first image pull is slow, and that is not streaming failing.**
 Image streaming is on for every TPU pool, but GKE serves an image it has
