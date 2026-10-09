@@ -358,6 +358,13 @@ manager, because the manager's Kueue Deployment already carries the auth-plugin
 overlay, and the deploy leaves upstream's `replicas: 1` out of the release so
 the two applies do not trade the replica count back and forth.
 
+The Buildkite controller gets the same class (`chart-overlay/`, applied after
+the chart) but stays at one replica: it has no leader election, and two
+controllers sharing an ID can each reserve the same job. Its pod is marked
+`safe-to-evict: "false"`, because the cluster autoscaler emptying its node was
+what restarted it, and job pickup stops until it is back. Running jobs do not
+depend on it.
+
 **Every v7x shape has quota of its own, and the multi-host shapes take it
 back.** The 128 chips split 64 to `tpu7x-standard-4t-2x2x1`, 32 to
 `tpu7x-standard-4t-2x2x4` (two slices), 16 to `tpu7x-standard-4t-2x2x2` (two

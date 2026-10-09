@@ -12,6 +12,14 @@
 # environment variable on it. Ours holds exactly one.
 agentStackSecret: ${AGENT_TOKEN_SECRET_NAME}
 
+# The controller's own pod. Its one replica is what picks up new jobs, so the
+# cluster autoscaler moving it to empty a node stops pickup until it is back,
+# and that was most of its restarts. This keeps it off the autoscaler's list;
+# GKE node upgrades still drain it. Its priority class is an overlay, in
+# agent_stack_availability.yaml.tpl.
+annotations:
+  cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+
 config:
   # One queue for the whole fleet. A queue does not encode a TPU shape: every
   # TPU step goes through the launcher, so adding a shape is a regenerated
