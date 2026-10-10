@@ -2988,9 +2988,12 @@ submitted to quota reserved; how long an admitted workload took to start is unde
 # --------------------------------------------------------------------------
 # Jobs
 
-# Rows the jobs table shows at first, and how many a page holds behind Show more.
+# Rows the jobs table shows at first, and how many a page holds behind Show
+# more; the same for builds, when ended jobs are grouped by build.
 JOBS_FIRST = 50
 JOBS_PER_PAGE = 200
+BUILDS_FIRST = 25
+BUILDS_PER_PAGE = 100
 # Finished outcomes as the launcher records them, as the page names them.
 OUTCOMES = {"succeeded": "passed", "failed": "failed", "error": "error"}
 
@@ -2998,36 +3001,58 @@ OUTCOMES = {"succeeded": "passed", "failed": "failed", "error": "error"}
 def render_job_history(
     rows: list, snap: dict, sources: dict, span: dict, params: dict, org: str
 ) -> str:
-    """Every kube job, a queue at a time if asked: what is in flight from the
-    live snapshot, then what ended in the range from the timing table, newest
-    first - the queue page Buildkite had for each bare-metal queue."""
+    """Every kube job, for any queues asked: what is in flight from the live
+    snapshot, then what ended in the range from the timing table, newest first
+    and grouped by build unless asked for job by job - the queue page Buildkite
+    had for each bare-metal queue."""
 
     def param(key: str) -> str:
         return (params.get(key) or [""])[0].strip()
 
-    queue, outcome, branch, text = (param(k) for k in ("queue", "outcome", "branch", "q"))
+    # Queues come as ?queue=a&queue=b or ?queue=a,b; a card's link sends one.
+    chosen = {
+        name.strip()
+        for value in params.get("queue") or []
+        for name in value.split(",")
+        if name.strip()
+    }
+    outcome, branch, text, pipeline = (
+        param(k) for k in ("outcome", "branch", "q", "pipeline")
+    )
+    view = "job" if param("view") == "job" else "build"
     preset = span.get("preset") or "24h"
-    limit = int(param("limit")) if param("limit").isdigit() else JOBS_PER_PAGE
-    limit = max(JOBS_PER_PAGE, min(limit, 5000))
+    per_page = JOBS_PER_PAGE if view == "job" else BUILDS_PER_PAGE
+    limit = int(param("limit")) if param("limit").isdigit() else per_page
+    limit = max(per_page, min(limit, 5000))
     queues = {q["name"]: q for q in snap["queues"]}
 
     def title(name: str) -> str:
         return queue_title(queues[name]) if name in queues else (name or "-")
 
-    def link(**change: str) -> str:
-        current = {"preset": preset, "queue": queue, "outcome": outcome, "branch": branch, "q": text}
+    def link(**change) -> str:
+        current = {
+            "preset": preset,
+            "queue": ",".join(sorted(chosen)),
+            "outcome": outcome,
+            "branch": branch,
+            "pipeline": pipeline,
+            "view": "" if view == "build" else view,
+            "q": text,
+        }
         current.update(change)
         return "jobs?" + urllib.parse.urlencode({k: v for k, v in current.items() if v})
 
     def number(value) -> float | None:
         return float(value) if value not in (None, "") else None
 
-    def matches(pipeline: str, build: object, label: str, branch_name: str | None) -> bool:
+    def matches(pipe: str, build: object, label: str, branch_name: str | None) -> bool:
+        if pipeline and pipe != pipeline:
+            return False
         if branch == "main" and branch_name != "main":
             return False
         if branch == "pr" and branch_name in ("main", None):
             return False
-        haystack = f"{pipeline} #{build} {label} {branch_name or ''}".lower()
+        haystack = f"{pipe} #{build} {label} {branch_name or ''}".lower()
         return not text or text.lower() in haystack
 
     # In flight: a build's branch comes from the queue it runs on.
@@ -3040,7 +3065,7 @@ def render_job_history(
         j
         for j in snap["jobs"]
         if not outcome
-        and (not queue or j["queue_name"] == queue)
+        and (not chosen or j["queue_name"] in chosen)
         and matches(j["pipeline"], j["number"], j["label"], branches.get((j["pipeline"], j["number"])))
     ]
     order = list(JOB_STATES)
@@ -3049,30 +3074,19 @@ def render_job_history(
     done = [
         r
         for r in rows
-        if (not queue or r["queue"] == queue)
+        if (not chosen or r["queue"] in chosen)
         and (not outcome or OUTCOMES.get(r["outcome"], "error") == outcome)
         and matches(r["pipeline"], r["build_number"], r["label"], r["branch"])
     ]
 
-    def step(label: str, url: str) -> str:
-        return job_link({"label": label, "url": url})
+    def build_link(pipe: str, n: object) -> str:
+        url = f"https://buildkite.com/{org}/{pipe}/builds/{n}"
+        return f'<a href="{E(url)}" target="_blank" rel="noopener">{E(pipe)} #{E(str(n))}</a>'
 
-    def build(pipeline: str, n: object) -> str:
-        url = f"https://buildkite.com/{org}/{pipeline}/builds/{n}"
-        return f'<a href="{E(url)}" target="_blank" rel="noopener">{E(pipeline)} #{E(str(n))}</a>'
+    def between(a: float | None, b: float | None) -> str:
+        return ago(b - a) if a is not None and b is not None else "-"
 
-    flying = []
-    for j in inflight:
-        name, desc = JOB_STATES[j["real"]]
-        flying.append(
-            f'<tr><td class="nowrap"><span class="state live" title="{E(desc)}">{E(name)}</span></td>'
-            f'<td class="n nowrap">{ago(j["for"])}</td>'
-            f'<td class="nowrap">{build(j["pipeline"], j["number"])}</td><td>{job_link(j)}</td>'
-            f'<td class="branch">{E(branches.get((j["pipeline"], j["number"]), ""))}</td>'
-            f'<td class="nowrap" title="{E(j["queue_name"])}">{E(title(j["queue_name"])) if j["queue_name"] else "-"}</td></tr>'
-        )
-    out = []
-    for r in done:
+    def state(r: dict) -> str:
         result = OUTCOMES.get(r["outcome"], "error")
         exit_code = r["exit_code"] if r["exit_code"] not in (None, "", "0") else ""
         retried = [
@@ -3080,26 +3094,40 @@ def render_job_history(
             for k in ("requeues", "redispatches")
             if r.get(k) not in (None, "", "0")
         ]
+        return (
+            f'<span class="state {result}">{result}{f" · exit {E(exit_code)}" if exit_code else ""}</span>'
+            + (f'<br><small class="muted">{E(", ".join(retried))}</small>' if retried else "")
+        )
+
+    def timings(r: dict) -> str:
         submitted, reserved, admitted, started, finished = (
             number(r[k]) for k in ("submitted", "reserved", "admitted", "started", "finished")
         )
-
-        def between(a: float | None, b: float | None) -> str:
-            return ago(b - a) if a is not None and b is not None else "-"
-
-        job_url = f"https://buildkite.com/{org}/{r['pipeline']}/builds/{r['build_number']}#{r['job_id']}"
-        out.append(
-            f'<tr><td class="nowrap"><span class="state {result}">{result}{f" · exit {E(exit_code)}" if exit_code else ""}</span>'
-            + (f'<br><small class="muted">{E(", ".join(retried))}</small>' if retried else "")
-            + f'</td><td class="nowrap"><time data-ts="{E(r["ended"])}" data-fmt="datetime"></time></td>'
-            f'<td class="nowrap">{build(r["pipeline"], r["build_number"])}</td><td>{step(r["label"], job_url)}</td>'
-            f'<td class="branch">{E(r["branch"] or "")}</td>'
-            f'<td class="nowrap" title="{E(r["queue"])}">{E(title(r["queue"]))}</td>'
+        return (
             f'<td class="n nowrap">{between(submitted, reserved)}</td>'
             f'<td class="n nowrap">{between(admitted, started)}</td>'
-            f'<td class="n nowrap">{between(started, finished)}</td></tr>'
+            f'<td class="n nowrap">{between(started, finished)}</td>'
         )
 
+    def step_cell(r: dict) -> str:
+        url = f"https://buildkite.com/{org}/{r['pipeline']}/builds/{r['build_number']}#{r['job_id']}"
+        return job_link({"label": r["label"], "url": url})
+
+    durations = (
+        f'<th class="n">{term("Wait", "Wait, startup, run")}</th><th class="n">{term("Startup", "Wait, startup, run")}</th>'
+        f'<th class="n">{term("Ran", "Wait, startup, run")}</th>'
+    )
+
+    flying = []
+    for j in inflight:
+        name, desc = JOB_STATES[j["real"]]
+        flying.append(
+            f'<tr><td class="nowrap"><span class="state live" title="{E(desc)}">{E(name)}</span></td>'
+            f'<td class="n nowrap">{ago(j["for"])}</td>'
+            f'<td class="nowrap">{build_link(j["pipeline"], j["number"])}</td><td>{job_link(j)}</td>'
+            f'<td class="branch">{E(branches.get((j["pipeline"], j["number"]), ""))}</td>'
+            f'<td class="nowrap" title="{E(j["queue_name"])}">{E(title(j["queue_name"])) if j["queue_name"] else "-"}</td></tr>'
+        )
     # In flight first but brief - Live has the whole of it - so what ended
     # shows without scrolling.
     fly_rows, fly_more, fly_button = split_rows(
@@ -3113,28 +3141,101 @@ def render_job_history(
         if not outcome
         else ""
     )
-    shown = out[:limit]
-    hidden, button = show_more(
-        "ended-more", "".join(shown[JOBS_FIRST:]), max(0, len(shown) - JOBS_FIRST)
-    )
+
+    # Ended, a build a row: its steps open in a row under it.
+    grouped: dict = {}
+    for r in done:
+        b = grouped.setdefault(
+            (r["pipeline"], r["build_number"]),
+            {"pipeline": r["pipeline"], "number": r["build_number"], "branch": r["branch"],
+             "steps": [], "queues": set(), "counts": collections.Counter(), "ended": 0.0, "wait": 0.0},
+        )
+        b["steps"].append(r)
+        b["queues"].add(r["queue"])
+        b["counts"][OUTCOMES.get(r["outcome"], "error")] += 1
+        b["ended"] = max(b["ended"], number(r["ended"]) or 0.0)
+        if r["reserved"] and r["submitted"]:
+            b["wait"] = max(b["wait"], float(r["reserved"]) - float(r["submitted"]))
+    builds = sorted(grouped.values(), key=lambda b: -b["ended"])
+
+    def build_row(i: int, b: dict) -> str:
+        bad = {"failed": 0, "error": 1, "passed": 2}
+        steps = sorted(
+            b["steps"],
+            key=lambda r: (bad.get(OUTCOMES.get(r["outcome"], "error"), 1), -(number(r["ended"]) or 0)),
+        )
+        shown_steps = steps[:60]
+        rest = (
+            f'<p class="muted note">and {len(steps) - 60} more - '
+            f'<a href="{E(link(view="job", q=f"{b["pipeline"]} #{b["number"]}", limit=""))}">all of them by job</a></p>'
+            if len(steps) > 60
+            else ""
+        )
+        inner = "".join(
+            f'<tr><td class="nowrap">{state(r)}</td><td>{step_cell(r)}</td>'
+            f'<td class="nowrap" title="{E(r["queue"])}">{E(title(r["queue"]))}</td>'
+            f'<td class="nowrap"><time data-ts="{E(r["ended"])}" data-fmt="datetime"></time></td>{timings(r)}</tr>'
+            for r in shown_steps
+        )
+        sid = f"build-{i}"
+        n = len(steps)
+        counts = "".join(
+            f' <span class="state {k}">{b["counts"][k]:,}</span>'
+            for k in ("passed", "failed", "error")
+            if b["counts"][k]
+        )
+        used = ", ".join(
+            title(q) for q in sorted(b["queues"], key=lambda q: (queues[q]["chips"] if q in queues else 0, q))
+        )
+        return (
+            f'<tr><td class="nowrap">{build_link(b["pipeline"], b["number"])}</td>'
+            f'<td class="branch">{E(b["branch"] or "")}</td>'
+            f'<td class="nowrap"><button type="button" class="steps-toggle" aria-expanded="false" '
+            f'aria-controls="{sid}">{n} step{"s" if n != 1 else ""}</button>{counts}</td>'
+            f"<td>{E(used)}</td>"
+            f'<td class="nowrap"><time data-ts="{b["ended"]:.0f}" data-fmt="datetime"></time></td>'
+            f'<td class="n nowrap">{ago(b["wait"])}</td></tr>'
+            f'<tr class="steps-row" id="{sid}" hidden><td colspan="6"><div class="inner-wrap">'
+            '<table class="dense jobs-inner"><thead><tr><th>State</th><th>Step</th><th>Queue</th><th>Ended</th>'
+            f"{durations}</tr></thead><tbody>{inner}</tbody></table>{rest}</div></td></tr>"
+        )
+
+    if view == "build":
+        out = [build_row(i, b) for i, b in enumerate(builds[:limit])]
+        first, total, noun = BUILDS_FIRST, len(builds), "builds"
+        head = (
+            "<th>Build</th><th>Branch</th><th>Steps</th><th>Queues</th><th>Last ended</th>"
+            f'<th class="n">Longest {term("wait", "Wait, startup, run")}</th>'
+        )
+        cls, cols = "jobs-table builds", 6
+    else:
+        out = [
+            f'<tr><td class="nowrap">{state(r)}</td>'
+            f'<td class="nowrap"><time data-ts="{E(r["ended"])}" data-fmt="datetime"></time></td>'
+            f'<td class="nowrap">{build_link(r["pipeline"], r["build_number"])}</td><td>{step_cell(r)}</td>'
+            f'<td class="branch">{E(r["branch"] or "")}</td>'
+            f'<td class="nowrap" title="{E(r["queue"])}">{E(title(r["queue"]))}</td>{timings(r)}</tr>'
+            for r in done[:limit]
+        ]
+        first, total, noun = JOBS_FIRST, len(done), "jobs"
+        head = "<th>State</th><th>Ended</th><th>Build</th><th>Step</th><th>Branch</th><th>Queue</th>" + durations
+        cls, cols = "jobs-table ended", 9
+    hidden, button = show_more("ended-more", "".join(out[first:]), max(0, len(out) - first))
     older = (
-        f'<p class="muted note">{len(shown):,} of {len(out):,} shown · '
-        f'<a href="{E(link(limit=str(limit + JOBS_PER_PAGE)))}">show {min(JOBS_PER_PAGE, len(out) - limit):,} more</a></p>'
-        if len(out) > limit
+        f'<p class="muted note">{len(out):,} of {total:,} {noun} shown · '
+        f'<a href="{E(link(limit=str(limit + per_page)))}">show {min(per_page, total - limit):,} more</a></p>'
+        if total > limit
         else ""
     )
-    empty = '<tr><td colspan="9" class="empty">No jobs match.</td></tr>'
+    empty = f'<tr><td colspan="{cols}" class="empty">No jobs match.</td></tr>'
     table = (
         inflight_table
-        + f'<h3 class="jobs-ended">Ended <span class="muted">({len(out):,})</span></h3>'
-        '<div class="table-wrap"><table class="dense jobs-table ended"><thead><tr><th>State</th><th>Ended</th>'
-        "<th>Build</th><th>Step</th><th>Branch</th><th>Queue</th>"
-        f'<th class="n">{term("Wait", "Wait, startup, run")}</th><th class="n">{term("Startup", "Wait, startup, run")}</th>'
-        f'<th class="n">{term("Ran", "Wait, startup, run")}</th></tr></thead>'
-        f'<tbody>{"".join(shown[:JOBS_FIRST]) or empty}</tbody>{hidden}</table></div>{button}{older}'
+        + f'<h3 class="jobs-ended">Ended <span class="muted">({len(done):,} jobs in {len(builds):,} builds)</span></h3>'
+        f'<div class="table-wrap"><table class="dense {cls}"><thead><tr>{head}</tr></thead>'
+        f'<tbody>{"".join(out[:first]) or empty}</tbody>{hidden}</table></div>{button}{older}'
     )
 
-    # What the filters leave, said in one line: how the queue is doing.
+    # What the filters leave, said in one line: how those queues are doing.
     counts = collections.Counter(OUTCOMES.get(r["outcome"], "error") for r in done)
     waits = sorted(
         float(r["reserved"]) - float(r["submitted"]) for r in done if r["reserved"] and r["submitted"]
@@ -3146,10 +3247,11 @@ def render_job_history(
     def q(values: list, p: float) -> str:
         return ago(values[min(len(values) - 1, int(p * len(values)))]) if values else "-"
 
-    where = f" on {E(title(queue))}" if queue else ""
+    names = [title(n) for n in sorted(chosen)]
+    where = f" on {E(' and '.join(names))}" if names else ""
     summary = (
         f"<b>{len(inflight):,}</b> in flight{where} now; <b>{len(done):,}</b> ended in the last "
-        f"{E(PRESET_LABELS.get(preset, preset))}: {counts['passed']:,} passed, "
+        f"{E(PRESET_LABELS.get(preset, preset))}, in {len(builds):,} builds: {counts['passed']:,} passed, "
         f"<b>{counts['failed']:,}</b> failed, {counts['error']:,} errors. "
         f"Wait p50 {q(waits, 0.5)}, p90 {q(waits, 0.9)}; ran p50 {q(ran, 0.5)}, p90 {q(ran, 0.9)}."
     )
@@ -3161,23 +3263,31 @@ def render_job_history(
     live_now = collections.Counter(j["queue_name"] for j in snap["jobs"] if j["queue_name"])
     queue_names = [q["name"] for q in snap["queues"]] + sorted(set(in_range) - set(queues))
     by_outcome = collections.Counter(
-        OUTCOMES.get(r["outcome"], "error") for r in rows if not queue or r["queue"] == queue
+        OUTCOMES.get(r["outcome"], "error") for r in rows if not chosen or r["queue"] in chosen
     )
+    by_pipeline = collections.Counter(r["pipeline"] for r in rows)
+    pipelines = sorted(by_pipeline, key=lambda k: -by_pipeline[k])
+    if pipeline and pipeline not in by_pipeline:
+        pipelines.append(pipeline)
     filters = (
         '<div class="filter-row"><span class="filter-label">Range</span><div class="segmented">'
         + "".join(seg(PRESET_LABELS[p], link(preset=p, limit=""), preset == p) for p in ("6h", "24h", "7d"))
+        + '</div><span class="filter-label">View</span><div class="segmented">'
+        + seg("By build", link(view="", limit=""), view == "build")
+        + seg("By job", link(view="job", limit=""), view == "job")
         + '</div></div><div class="filter-row"><span class="filter-label">Queue</span><div class="segmented wrap">'
-        + seg("All", link(queue="", limit=""), not queue)
+        + seg("All", link(queue="", limit=""), not chosen)
         + "".join(
             seg(
                 f"{E(title(n))} <small>{in_range[n] + live_now[n]:,}</small>",
-                link(queue=n, limit=""),
-                queue == n,
+                link(queue=",".join(sorted(chosen ^ {n})), limit=""),
+                n in chosen,
             )
             for n in queue_names
             if in_range[n] or live_now[n] or n in queues
         )
-        + '</div></div><div class="filter-row"><span class="filter-label">Outcome</span><div class="segmented">'
+        + '</div><span class="muted hint">click a queue to add or remove it</span></div>'
+        + '<div class="filter-row"><span class="filter-label">Outcome</span><div class="segmented">'
         + seg("All", link(outcome="", limit=""), not outcome)
         + "".join(
             seg(f"{name} <small>{by_outcome[name]:,}</small>", link(outcome=name, limit=""), outcome == name)
@@ -3191,9 +3301,21 @@ def render_job_history(
         + '<form class="search" method="get" action="jobs">'
         + "".join(
             f'<input type="hidden" name="{k}" value="{E(v)}">'
-            for k, v in (("preset", preset), ("queue", queue), ("outcome", outcome), ("branch", branch))
+            for k, v in (
+                ("preset", preset),
+                ("queue", ",".join(sorted(chosen))),
+                ("outcome", outcome),
+                ("branch", branch),
+                ("view", "" if view == "build" else view),
+            )
             if v
         )
+        + '<select name="pipeline" data-autosubmit aria-label="Pipeline"><option value="">All pipelines</option>'
+        + "".join(
+            f'<option value="{E(name)}"{" selected" if name == pipeline else ""}>{E(name)} ({by_pipeline[name]:,})</option>'
+            for name in pipelines
+        )
+        + "</select>"
         + f'<input type="search" name="q" value="{E(text)}" placeholder="Step, build or branch" aria-label="Search jobs">'
         + '<button type="submit">Search</button></form></div>'
     )

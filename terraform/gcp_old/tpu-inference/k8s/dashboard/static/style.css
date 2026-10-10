@@ -466,3 +466,14 @@ h3.jobs-ended:first-child { margin-top: 0; }
 .gap { stroke: none; opacity: 0.22; } .gap.used { fill: var(--own); } .gap.nodes { fill: var(--nodes); }
 i.k.gapk { height: 10px; width: 10px; border-radius: 3px; opacity: 0.4; }
 i.k.gapk.used { background: var(--own); } i.k.gapk.nodes { background: var(--nodes); }
+
+/* Jobs by build: the build's steps in a table of their own under its row,
+   contained so opening it never widens the columns above. */
+table.jobs-table.builds { min-width: 900px; }
+.jobs-table.builds .state { margin-left: 6px; }
+.steps-row .inner-wrap { contain: inline-size; overflow-x: auto; padding: 4px 0 8px 18px; }
+table.jobs-inner { min-width: 900px; background: var(--line-2); border-radius: 10px; }
+table.jobs-inner th, table.jobs-inner td { border-bottom-color: rgba(255, 255, 255, 0.6); }
+.filters .hint { font-size: 12px; }
+.search select { font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.8); max-width: 260px; }
