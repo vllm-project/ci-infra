@@ -162,6 +162,11 @@ NODE_BOOT = (
     "failed to sync configmap cache: timed out waiting for the condition",
 )
 NODE_BOOT_REPEATS = 10
+# Left out of a health check's log lines: the placement handshake, a booting
+# node's mount retries, and its kubelet not yet holding the ConfigMaps and
+# Secrets a DaemonSet mounts ("object ... not registered"), which clears as the
+# node comes up. All come with every node and slice start.
+LOG_ROUTINE = PLACEMENT_HANDSHAKE + NODE_BOOT + ("not registered",)
 
 # Thresholds for the health checks, as a share of the budgets the launcher
 # enforces - a workload past them is about to be killed by the fleet itself.
@@ -436,6 +441,17 @@ SOURCES = {
         "reads": ["Every cluster's node pools: shape, bounds, instance groups"],
         "needs": ["roles/container.clusterViewer on the project"],
         "fails": ["Node counts and the node autoscaling table go blank"],
+    },
+    "Logging": {
+        "through": "Cloud Logging, through the _Default bucket's _AllLogs view",
+        "reads": [
+            "The Buildkite controller's warnings and errors",
+            "Kueue's errors on every cluster, the standby replicas' left out",
+            "Warning events on the manager's agent pods and the workers' nodes",
+            "The dashboard's own record of each health check's changes",
+        ],
+        "needs": ["roles/logging.viewAccessor on the _AllLogs view"],
+        "fails": ["Only each health check's History & logs goes blank"],
     },
     "BigQuery": {
         "through": "BigQuery",
@@ -719,6 +735,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
         ),
     }
     snapshot["checks"] = health_checks(cfg, snapshot, kq, ev, health, stats24, now)
+    snapshot["logs"] = data.get("logs") or {}
     snapshot["fleet"] = fleet_map(cfg, kq, health, data.get("pools") or [], snapshot)
     return snapshot
 
@@ -1639,6 +1656,114 @@ def render_jobs(snap: dict) -> str:
 <tbody>{running_rows}</tbody>{running_more}</table></div>{running_button}"""
 
 
+# The component logs behind each health check, by fetch_logs' keys, and the
+# words a line must have to belong to it: Kueue's errors cover three checks,
+# and each takes its own.
+CHECK_LOGS = {
+    "Buildkite controller": [("controller", ())],
+    "Steps waiting for an agent": [("controller", ())],
+    "Kueue controllers": [("kueue", ())],
+    "Worker connections": [("kueue", ("remote", "multikueue", "kubeconfig", "rpc error"))],
+    "Dispatch": [("kueue", ("clustername", "dispatch", "admission check", "multikueue"))],
+    "Agent pods": [("agent_events", ())],
+    "Cluster problems (1h)": [("cluster_events", ())],
+}
+HISTORY_HOURS = 24
+
+
+def logs_link(project: str, filter_: str, label: str) -> str:
+    url = (
+        "https://console.cloud.google.com/logs/query;query="
+        + urllib.parse.quote(filter_, safe="")
+        + f";duration=P7D?project={project}"
+    )
+    return f'<a href="{E(url)}" target="_blank" rel="noopener">{E(label)} ↗</a>'
+
+
+def check_history(c: dict, logs: dict, now: float) -> str:
+    """Under a health check: its status over the last day as the dashboard
+    recorded it, its latest changes, and the warnings and errors in the logs
+    of the component it watches, alike ones counted as one."""
+    if not logs:
+        return ""
+    project = logs.get("project", "")
+    start = now - HISTORY_HOURS * 3600
+    changes = sorted(
+        (e for e in logs.get("health") or [] if e.get("title") == c["title"]),
+        key=lambda e: e["t"],
+    )
+    before = [e for e in changes if e["t"] <= start]
+    state = before[-1]["status"] if before else None
+    t, segs = start, []
+    for e in [e for e in changes if e["t"] > start] + [{"t": now, "status": None}]:
+        if e["t"] > t:
+            segs.append((state, t, e["t"]))
+        state, t = e["status"], e["t"]
+    strip = "".join(
+        f'<i class="seg {st or "none"}" style="width:{100 * (b - a) / (now - start):.2f}%" '
+        f'title="{E(ICONS[st][1] if st else "not recorded")} for {ago(b - a)}"></i>'
+        for st, a, b in segs
+        if b > a
+    )
+    recent = "".join(
+        f'<li><time data-ts="{e["t"]:.0f}" data-fmt="datetime"></time> '
+        f'<b>{E(ICONS.get(e.get("previous") or "", ("", "start"))[1])} → {E(ICONS[e["status"]][1])}</b> '
+        f'<span class="muted">{E(e.get("detail", ""))}</span></li>'
+        for e in reversed(changes[-5:])
+    )
+    sources = CHECK_LOGS.get(c["title"], [])
+    keys = [key for key, _ in sources]
+    groups: dict = {}
+    for key, words in sources:
+        for e in logs.get(key) or []:
+            if words and not any(w in e["text"].lower() for w in words):
+                continue
+            g = groups.setdefault(e["key"], {**e, "count": 0, "first": e["t"], "clusters": set()})
+            g["count"] += 1
+            g["first"] = min(g["first"], e["t"])
+            g["clusters"].add(e["cluster"])
+            if e["t"] > g["t"]:
+                g.update(t=e["t"], text=e["text"])
+    worst_first = sorted(groups.values(), key=lambda g: -g["t"])[:6]
+    errors = "".join(
+        f'<li class="{"lvl-error" if g["level"] == "error" else "lvl-warning"}">'
+        f'<time data-ts="{g["t"]:.0f}" data-fmt="datetime"></time> '
+        f'<span class="msg">{E(g["text"][:240])}</span> '
+        f'<span class="muted">×{g["count"]}{" since " if g["count"] > 1 else ""}'
+        + (f'<time data-ts="{g["first"]:.0f}" data-fmt="time"></time>' if g["count"] > 1 else "")
+        + f" · {E(', '.join(sorted(x for x in g['clusters'] if x)))}</span></li>"
+        for g in worst_first
+    )
+    filters = logs.get("filters") or {}
+    title_filter = (
+        f'{filters.get("health", "")} AND jsonPayload.health_check.title="{c["title"]}"'
+    )
+    links = " · ".join(
+        [logs_link(project, filters[k], "Component logs") for k in keys if k in filters][:1]
+        + [logs_link(project, title_filter, "This check's record")]
+    )
+    return (
+        '<details class="check-more"><summary>History &amp; logs</summary>'
+        f'<div class="hist-label muted">Last {HISTORY_HOURS} hours</div><div class="hist-strip">{strip}</div>'
+        + (
+            f'<ul class="hist-changes">{recent}</ul>'
+            if recent
+            else '<p class="muted">No change recorded yet; the dashboard records each one as it happens.</p>'
+        )
+        + (
+            f'<div class="hist-label muted">In the logs, last day</div><ul class="hist-errors">{errors}</ul>'
+            if keys
+            else ""
+        )
+        + (
+            '<p class="muted">Nothing in the last day.</p>'
+            if keys and not errors
+            else ""
+        )
+        + f'<p class="hist-links">{links}</p></details>'
+    )
+
+
 def render_live(snap: dict) -> str:
     tpu = [q for q in snap["queues"] if q["resource"] == TPU]
     other = [q for q in snap["queues"] if q["resource"] != TPU]
@@ -1647,10 +1772,11 @@ def render_live(snap: dict) -> str:
         f" · {num(q['pending'])} pending</a>"
         for q in tpu
     )
+    logs = snap.get("logs") or {}
     checks = "".join(
         f'<div class="check {c["status"]}"><span class="icon" aria-hidden="true">{ICONS[c["status"]][0]}</span>'
         f'<span class="title">{E(c["title"])}<span class="state">{ICONS[c["status"]][1]}</span></span>'
-        f'<span class="detail">{E(c["detail"])}</span></div>'
+        f'<span class="detail">{E(c["detail"])}</span>{check_history(c, logs, snap["generated_at"])}</div>'
         for c in snap["checks"]
     )
     return LIVE_PAGE.substitute(

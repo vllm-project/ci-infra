@@ -79,6 +79,16 @@ class Source:
         return {"name": self.name, "at": self.at, "error": self.error}
 
 
+# Cloud Logging severity for a health check's status.
+HEALTH_SEVERITY = {
+    "ok": "INFO",
+    "info": "INFO",
+    "unknown": "WARNING",
+    "warn": "WARNING",
+    "fail": "ERROR",
+}
+
+
 class Live:
     def __init__(self, cfg: fleet.Config) -> None:
         self.cfg = cfg
@@ -100,6 +110,13 @@ class Live:
             "health": Source("Metrics", lambda: fleet.fetch_health(cfg), ttl),
             # Node pools change when Terraform does; an hour is soon enough.
             "pools": Source("GKE", lambda: fleet.fetch_node_pools(cfg), 3600),
+            # What each health check stands on, in the components' own logs,
+            # and the checks' past; a few queries, so every two minutes.
+            "logs": Source(
+                "Logging",
+                lambda: fleet.fetch_logs(cfg, views.FLEET_WARNINGS, views.LOG_ROUTINE),
+                120,
+            ),
             # The health checks' 24-hour failure counts; BigQuery need not be
             # asked every minute.
             "stats24": Source(
@@ -114,6 +131,28 @@ class Live:
         self._snapshot: dict | None = None
         self._at = 0.0
         self._refreshing = False
+        self._statuses: dict[str, str] = {}
+
+    def _record(self, checks: list) -> None:
+        """Each check's change of status as one structured line on stdout,
+        which Cloud Run keeps in Cloud Logging: what every check said and
+        when, for the page to show after the fact."""
+        for c in checks:
+            before = self._statuses.get(c["title"])
+            if before == c["status"]:
+                continue
+            self._statuses[c["title"]] = c["status"]
+            line = {
+                "severity": HEALTH_SEVERITY.get(c["status"], "WARNING"),
+                "message": f"health check {c['title']}: {before or 'start'} -> {c['status']}",
+                "health_check": {
+                    "title": c["title"],
+                    "status": c["status"],
+                    "previous": before,
+                    "detail": c["detail"],
+                },
+            }
+            print(json.dumps(line), flush=True)
 
     def _refresh(self) -> None:
         try:
@@ -126,6 +165,7 @@ class Live:
             )
             with self._lock:
                 self._snapshot, self._at = snapshot, time.time()
+            self._record(snapshot["checks"])
         finally:
             with self._lock:
                 self._refreshing = False
@@ -379,6 +419,17 @@ def main() -> None:
     fleet.LOCAL = args.local
     cfg = fleet.Config()
     live = Live(cfg)
+    def tick() -> None:
+        # The checks are evaluated whether or not anyone is looking, so their
+        # history has no gaps; every half cache period keeps them a period old.
+        while True:
+            try:
+                live.snapshot()
+            except Exception:  # noqa: BLE001 - the next tick tries again
+                traceback.print_exc()
+            time.sleep(cfg.cache_seconds / 2)
+
+    threading.Thread(target=tick, daemon=True).start()
     serve(
         live,
         History(cfg, live),

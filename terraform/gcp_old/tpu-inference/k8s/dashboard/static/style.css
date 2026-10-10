@@ -482,3 +482,24 @@ table.jobs-inner th, table.jobs-inner td { border-bottom-color: rgba(255, 255, 2
   border: 1px solid var(--line); background: rgba(255, 255, 255, 0.8); max-width: 260px; }
 /* A step name wraps to a second line rather than widen its table. */
 .jobs-table td.step, .jobs-inner td.step { min-width: 200px; }
+
+/* A health check's History & logs: its status over the day, its changes, and
+   the component's warnings and errors. */
+.check .check-more { grid-column: 2; margin-top: 4px; font-size: 12px; }
+/* An opened check grows alone; the others in its row keep their height. */
+.checks { align-items: start; } .check { align-content: start; }
+.check .check-more summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
+.hist-label { margin: 8px 0 3px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.hist-strip { display: flex; gap: 1px; height: 10px; border-radius: 5px; overflow: hidden;
+  background: var(--line-2); }
+.hist-strip .seg { display: block; height: 100%; min-width: 1px; }
+.hist-strip .seg.ok { background: var(--good); } .hist-strip .seg.warn { background: var(--warning); }
+.hist-strip .seg.fail { background: var(--critical); }
+.hist-strip .seg.info, .hist-strip .seg.unknown { background: var(--muted); }
+.hist-strip .seg.none { background: transparent; }
+.hist-changes, .hist-errors { list-style: none; margin: 6px 0 0; padding: 0; }
+.hist-changes li, .hist-errors li { margin: 3px 0; line-height: 1.4; overflow-wrap: anywhere; }
+.hist-errors li { padding-left: 10px; border-left: 3px solid var(--warning); }
+.hist-errors li.lvl-error { border-left-color: var(--critical); }
+.hist-errors .msg { color: var(--ink); }
+.hist-links { margin: 8px 0 0; }

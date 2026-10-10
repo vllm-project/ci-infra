@@ -86,6 +86,18 @@ resource "google_bigquery_table_iam_member" "dashboard_step_log" {
   member     = google_service_account.dashboard.member
 }
 
+# The logs behind each health check - the Buildkite controller's, Kueue's,
+# Kubernetes events - and the dashboard's own record of the checks, read
+# through the _Default bucket's _AllLogs view rather than the whole project.
+resource "google_logging_log_view_iam_member" "dashboard_logs" {
+  parent   = "projects/${var.project_id}"
+  location = "global"
+  bucket   = "_Default"
+  name     = "_AllLogs"
+  role     = "roles/logging.viewAccessor"
+  member   = google_service_account.dashboard.member
+}
+
 resource "google_project_iam_member" "dashboard_bigquery_jobs" {
   project = var.project_id
   role    = "roles/bigquery.jobUser"

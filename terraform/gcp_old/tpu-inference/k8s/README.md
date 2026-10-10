@@ -534,6 +534,16 @@ with the failures first, or job by job. Filters for queues (any number), outcome
 branch and pipeline and a search over step, build and branch sit above it, and a
 line under them sums up what they leave. Each queue card on Live and Trends links to its queue's jobs.
 
+Each health check on Live opens to **History & logs**: its status over the
+last day, its latest changes, and the warnings and errors in the logs of the
+component it watches - the Buildkite controller's, Kueue's, Kubernetes warning
+events - with alike lines counted as one, and links to the same in Logs
+Explorer. The history is the dashboard's own: it evaluates the checks every
+half minute whether or not anyone is looking, and writes each change of status
+as a structured line (`jsonPayload.health_check`) that Cloud Run keeps in
+Cloud Logging. It reads logs through the `_Default` bucket's `_AllLogs` view
+(`roles/logging.viewAccessor` there, in `dashboard.tf`).
+
 Every page's terms have a tooltip, drawn from the same table as the glossary.
 
 It reads every cluster through Connect Gateway as `tpu-ci-dashboard@`: the
