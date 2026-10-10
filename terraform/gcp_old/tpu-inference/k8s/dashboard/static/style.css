@@ -456,8 +456,8 @@ th.n .term:hover .tip, th.n .term:focus .tip { left: auto; right: 0; }
 .state.live { background: rgba(0, 122, 255, 0.1); color: #0058b8; } .state.live::before { content: "●"; }
 .jobs-table td { vertical-align: middle; }
 /* Scroll sideways on a phone rather than wrap a step name down the row. */
-table.jobs-table { min-width: 860px; }
-table.jobs-table.ended { min-width: 1080px; }
+table.jobs-table { min-width: 640px; }
+table.jobs-table.ended { min-width: 760px; }
 .filters .seg-btn { white-space: nowrap; }
 h3.jobs-ended { margin-top: 22px; }
 h3.jobs-ended:first-child { margin-top: 0; }
@@ -469,11 +469,13 @@ i.k.gapk.used { background: var(--own); } i.k.gapk.nodes { background: var(--nod
 
 /* Jobs by build: the build's steps in a table of their own under its row,
    contained so opening it never widens the columns above. */
-table.jobs-table.builds { min-width: 900px; }
+table.jobs-table.builds { min-width: 640px; }
 .jobs-table.builds .state { margin-left: 6px; }
 .steps-row .inner-wrap { contain: inline-size; overflow-x: auto; padding: 4px 0 8px 18px; }
-table.jobs-inner { min-width: 900px; background: var(--line-2); border-radius: 10px; }
+table.jobs-inner { min-width: 720px; background: var(--line-2); border-radius: 10px; }
 table.jobs-inner th, table.jobs-inner td { border-bottom-color: rgba(255, 255, 255, 0.6); }
 .filters .hint { font-size: 12px; }
 .search select { font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 999px;
   border: 1px solid var(--line); background: rgba(255, 255, 255, 0.8); max-width: 260px; }
+/* A step name wraps to a second line rather than widen its table. */
+.jobs-table td.step, .jobs-inner td.step { min-width: 200px; }

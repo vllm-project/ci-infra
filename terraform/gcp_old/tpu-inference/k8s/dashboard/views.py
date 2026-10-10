@@ -3124,7 +3124,7 @@ def render_job_history(
         flying.append(
             f'<tr><td class="nowrap"><span class="state live" title="{E(desc)}">{E(name)}</span></td>'
             f'<td class="n nowrap">{ago(j["for"])}</td>'
-            f'<td class="nowrap">{build_link(j["pipeline"], j["number"])}</td><td>{job_link(j)}</td>'
+            f'<td class="nowrap">{build_link(j["pipeline"], j["number"])}</td><td class="step">{job_link(j)}</td>'
             f'<td class="branch">{E(branches.get((j["pipeline"], j["number"]), ""))}</td>'
             f'<td class="nowrap" title="{E(j["queue_name"])}">{E(title(j["queue_name"])) if j["queue_name"] else "-"}</td></tr>'
         )
@@ -3172,7 +3172,7 @@ def render_job_history(
             else ""
         )
         inner = "".join(
-            f'<tr><td class="nowrap">{state(r)}</td><td>{step_cell(r)}</td>'
+            f'<tr><td class="nowrap">{state(r)}</td><td class="step">{step_cell(r)}</td>'
             f'<td class="nowrap" title="{E(r["queue"])}">{E(title(r["queue"]))}</td>'
             f'<td class="nowrap"><time data-ts="{E(r["ended"])}" data-fmt="datetime"></time></td>{timings(r)}</tr>'
             for r in shown_steps
@@ -3184,15 +3184,15 @@ def render_job_history(
             for k in ("passed", "failed", "error")
             if b["counts"][k]
         )
-        used = ", ".join(
-            title(q) for q in sorted(b["queues"], key=lambda q: (queues[q]["chips"] if q in queues else 0, q))
+        used = "<br>".join(
+            E(title(q)) for q in sorted(b["queues"], key=lambda q: (queues[q]["chips"] if q in queues else 0, q))
         )
         return (
             f'<tr><td class="nowrap">{build_link(b["pipeline"], b["number"])}</td>'
             f'<td class="branch">{E(b["branch"] or "")}</td>'
             f'<td class="nowrap"><button type="button" class="steps-toggle" aria-expanded="false" '
             f'aria-controls="{sid}">{n} step{"s" if n != 1 else ""}</button>{counts}</td>'
-            f"<td>{E(used)}</td>"
+            f'<td class="nowrap">{used}</td>'
             f'<td class="nowrap"><time data-ts="{b["ended"]:.0f}" data-fmt="datetime"></time></td>'
             f'<td class="n nowrap">{ago(b["wait"])}</td></tr>'
             f'<tr class="steps-row" id="{sid}" hidden><td colspan="6"><div class="inner-wrap">'
@@ -3212,7 +3212,7 @@ def render_job_history(
         out = [
             f'<tr><td class="nowrap">{state(r)}</td>'
             f'<td class="nowrap"><time data-ts="{E(r["ended"])}" data-fmt="datetime"></time></td>'
-            f'<td class="nowrap">{build_link(r["pipeline"], r["build_number"])}</td><td>{step_cell(r)}</td>'
+            f'<td class="nowrap">{build_link(r["pipeline"], r["build_number"])}</td><td class="step">{step_cell(r)}</td>'
             f'<td class="branch">{E(r["branch"] or "")}</td>'
             f'<td class="nowrap" title="{E(r["queue"])}">{E(title(r["queue"]))}</td>{timings(r)}</tr>'
             for r in done[:limit]
