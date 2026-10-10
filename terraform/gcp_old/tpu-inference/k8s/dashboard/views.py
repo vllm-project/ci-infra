@@ -2990,9 +2990,9 @@ submitted to quota reserved; how long an admitted workload took to start is unde
 
 # Rows the jobs table shows at first, and how many a page holds behind Show
 # more; the same for builds, when ended jobs are grouped by build.
-JOBS_FIRST = 50
+JOBS_FIRST = 20
 JOBS_PER_PAGE = 200
-BUILDS_FIRST = 25
+BUILDS_FIRST = 10
 BUILDS_PER_PAGE = 100
 # Finished outcomes as the launcher records them, as the page names them.
 OUTCOMES = {"succeeded": "passed", "failed": "failed", "error": "error"}
