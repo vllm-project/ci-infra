@@ -639,6 +639,32 @@ def test_otel_does_not_change_errexit_behavior(fake_global_config, tmp_path):
     assert not output.exists()
 
 
+def test_otel_setup_finds_helpers_in_checkout_outside_git(tmp_path):
+    # Native AMD pods run from /vllm-workspace, which is not a git checkout.
+    checkout = tmp_path / "checkout"
+    helper_dir = checkout / ".buildkite" / "scripts" / "ci-otel"
+    helper_dir.mkdir(parents=True)
+    (helper_dir / "ci_otel.sh").write_text("echo helper-loaded >&2\n")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "CI_INFRA_OTEL_DIR"}
+    env["BUILDKITE_BUILD_CHECKOUT_PATH"] = str(checkout)
+    env["GIT_CEILING_DIRECTORIES"] = str(tmp_path)
+    script = buildkite_step._otel_setup_command().replace("$$", "$")
+
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", script],
+        cwd=workspace,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "helper-loaded" in result.stderr
+
+
 @pytest.mark.parametrize("dind, traced", [(False, True), (True, False)])
 def test_otel_trace_covers_native_amd_mirrors_only(fake_global_config, dind, traced):
     fake_global_config["branch"] = "main"
