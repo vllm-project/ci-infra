@@ -529,9 +529,10 @@ had for each bare-metal queue and cannot give now that every kube step runs on
 its one `kube` queue: what is in flight on each Kueue queue, from the live
 snapshot, then every workload that ended in the range from
 `kube_workload_timing` (`fleet.fetch_jobs`), newest first, with its outcome,
-exit code, wait, startup and run. Filters for queue, outcome and branch and a
-search over step, build and branch sit above it, and a line under them sums up
-what they leave. Each queue card on Live and Trends links to its queue's jobs.
+exit code, wait, startup and run - a build a row, its steps opening beneath it
+with the failures first, or job by job. Filters for queues (any number), outcome,
+branch and pipeline and a search over step, build and branch sit above it, and a
+line under them sums up what they leave. Each queue card on Live and Trends links to its queue's jobs.
 
 Every page's terms have a tooltip, drawn from the same table as the glossary.
 

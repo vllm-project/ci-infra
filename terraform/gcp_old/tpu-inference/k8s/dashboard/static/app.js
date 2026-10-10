@@ -71,6 +71,11 @@ if (toggle) {
   });
 }
 
+// A filter's drop-down applies as soon as it changes, like the links beside it.
+for (const s of document.querySelectorAll("select[data-autosubmit]")) {
+  s.addEventListener("change", () => s.form.submit());
+}
+
 // Steps: a build's toggle opens or closes the row of its steps under it.
 for (const b of document.querySelectorAll(".steps-toggle")) {
   b.addEventListener("click", () => {
