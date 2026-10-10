@@ -423,7 +423,10 @@ th.group { text-align: center; border-bottom: 1px solid var(--line); }
    focus. The definition is real text, so a screen reader reads it inline. */
 .term { position: relative; border-bottom: 1px dotted var(--muted); cursor: help; outline: none; }
 .tile span.term, th .term { display: inline; font: inherit; color: inherit; }
-.term .tip { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: normal; }
+/* No padding or border while hidden: a clipped tip at the end of a table's last header would
+   still hang past its edge and make the table scroll sideways. */
+.term .tip { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: normal;
+  padding: 0; border: 0; }
 .term:hover .tip, .term:focus .tip {
   clip: auto; width: max-content; max-width: 320px; height: auto; overflow: visible; z-index: 30;
   left: 0; top: calc(100% + 6px); padding: 8px 11px; border-radius: 10px;
