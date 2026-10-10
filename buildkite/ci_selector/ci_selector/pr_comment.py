@@ -192,11 +192,13 @@ def select_for_pr(
     if d.coverage_note:
         py = f"Python record: not used ({d.coverage_note})"
     else:
-        py = f"Python record: build {table.build or '?'} at `{table.commit[:10]}`"
+        py = f"Python record: {_published(table)}"
     if d.kernel_note:
         kern = f"kernel record: not used ({d.kernel_note})"
     else:
-        kern = f"kernel record: {d.kernel_pair}"
+        kern = f"kernel record: {_published(kernels.table)}"
+        if not kernels.matched:
+            kern += ", its symbol map from a different commit"
     records = [py, kern]
     outcome = None
     if results:
@@ -230,6 +232,14 @@ def select_for_pr(
         records=records,
         results=outcome,
     )
+
+
+def _published(table) -> str:
+    """Which record answered, named by the day it was published. The build
+    number stays: the nightly and the daily build can both publish one day."""
+    day = table.recorded_at[:10]
+    build = f"build {table.build or '?'}"
+    return f"{day} ({build})" if day else build
 
 
 def pr_range(repo: Path, pr: int, data: dict, remote: str):
@@ -489,17 +499,18 @@ def render(s: PrSelection) -> str:
         row("AMD mirrors", t_mir, s_mir, k_mir, a_mir),
         "",
     ]
-    unused = [r for r in s.records if ": not used" in r]
-    if unused:
-        # In the footer alone this went unnoticed for two days: every comment
-        # of the shadow trial's first day came from the code map without the
-        # Python record (a table version the code no longer read).
+    # Up here, not in the footer: there, a missing Python record went
+    # unnoticed for two days of the shadow trial (a table version the code no
+    # longer read), and which day's records answered was just as hard to find.
+    if any(": not used" in r for r in s.records):
         lines += [
             "> [!WARNING]",
-            "> Records missing, so this answer is narrower evidence than usual: "
-            + "; ".join(unused),
+            "> Records missing, so this answer is narrower evidence than usual:",
+            *(f"> - {r}" for r in s.records),
             "",
         ]
+    elif s.records:
+        lines += [" · ".join(s.records), ""]
     if s.run_all:
         lines += [f"Why: {s.run_all}", ""]
     if s.docs_only:
@@ -527,7 +538,7 @@ def render(s: PrSelection) -> str:
         "",
         *(_render_results(s.results) if s.results else []),
         f"<sub>{s.files} changed files · base `{s.base[:10]}` · head `{s.head[:10]}` · "
-        f"{' · '.join(s.records)} · not counted: {s.plumbing} build steps, "
+        f"not counted: {s.plumbing} build steps, "
         f"{s.never_emitted} A100 steps the generator no longer emits, "
         f"{s.optional_selected} optional steps the selector would also run</sub>",
     ]

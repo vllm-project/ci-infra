@@ -68,7 +68,13 @@ def _table(tmp_path: Path, rows: dict[str, dict], commit="abc", version=TABLE_VE
         tmp_path / "kernel_table.json.gz",
         {
             "version": version,
-            "source": {"org": "vllm", "pipeline": "ci", "build": 7, "commit": commit},
+            "source": {
+                "org": "vllm",
+                "pipeline": "ci",
+                "build": 7,
+                "commit": commit,
+                "recorded_at": "2026-10-01T02:20:50Z",
+            },
             "names": names,
             "rows": blobs,
             "stats": {},
@@ -202,6 +208,7 @@ def test_table_reads_rows_and_health(tmp_path):
         )
     )
     assert t.available and len(t) == 4 and t.commit == "c0ffee" and t.build == 7
+    assert t.recorded_at == "2026-10-01T02:20:50Z"
     assert t.row("ok").kernels == {"kA", "kB"} and t.row("ok").usable
     assert not t.row("failed").usable
     assert not t.row("partial").usable
