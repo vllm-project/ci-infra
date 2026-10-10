@@ -878,6 +878,133 @@ BARE_QUEUES = {
 }
 
 
+# --------------------------------------------------------------------------
+# Logs
+
+
+def log_view(cfg: Config) -> str:
+    """Read through the _Default bucket's _AllLogs view, which the dashboard is
+    granted on, rather than the project."""
+    return f"projects/{cfg.project}/locations/global/buckets/_Default/views/_AllLogs"
+
+
+def log_filters(cfg: Config, fleet_reasons=(), routine=()) -> dict[str, str]:
+    """The Cloud Logging filter behind each health check: the component's own
+    warnings and errors, and the dashboard's record of the checks.
+    fleet_reasons are the event reasons Cluster problems counts; routine, the
+    messages among them it leaves out."""
+    workers = " OR ".join(
+        f'"{c["name"]}"' for c in cfg.clusters if c["name"] != cfg.metrics_cluster
+    )
+    clusters = " OR ".join(f'"{c["name"]}"' for c in cfg.clusters)
+    events = f'logName="projects/{cfg.project}/logs/events" AND jsonPayload.type="Warning"'
+    reasons = " OR ".join(f'"{r}"' for r in sorted(fleet_reasons)) or '""'
+    quiet = "".join(f' AND NOT jsonPayload.message:"{m}"' for m in routine)
+    return {
+        # agent-stack-k8s logs text, its level a word in the line.
+        "controller": (
+            f'resource.type="k8s_container" AND resource.labels.cluster_name="{cfg.metrics_cluster}" '
+            'AND resource.labels.namespace_name="buildkite" AND resource.labels.container_name="controller" '
+            'AND (textPayload:" ERR " OR textPayload:" WRN ")'
+        ),
+        # A standby Kueue replica logs its cache missing queues it does not
+        # serve; only the leader's errors say anything.
+        "kueue": (
+            f'resource.type="k8s_container" AND resource.labels.cluster_name=({clusters}) '
+            'AND resource.labels.namespace_name="kueue-system" AND severity>=ERROR '
+            'AND NOT jsonPayload."replica-role"="follower"'
+        ),
+        # An agent pod the manager could not schedule or create.
+        "agent_events": (
+            f'{events} AND resource.labels.cluster_name="{cfg.metrics_cluster}" '
+            'AND jsonPayload.involvedObject.namespace="buildkite" '
+            'AND jsonPayload.reason=("FailedScheduling" OR "FailedCreate" OR "FailedMount")'
+        ),
+        "cluster_events": (
+            f"{events} AND resource.labels.cluster_name=({workers}) "
+            f"AND jsonPayload.reason=({reasons}){quiet}"
+        ),
+        "health": (
+            f'resource.type="cloud_run_revision" AND resource.labels.service_name="{cfg.service}" '
+            "AND jsonPayload.health_check.title:*"
+        ),
+    }
+
+
+def read_logs(cfg: Config, filter_: str, hours: float, limit: int) -> list[dict]:
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours * 3600))
+    body = {
+        "resourceNames": [log_view(cfg)],
+        "filter": f'({filter_}) AND timestamp>="{since}"',
+        "orderBy": "timestamp desc",
+        "pageSize": limit,
+    }
+    return google("https://logging.googleapis.com/v2/entries:list", body).get("entries", [])
+
+
+def log_time(value: str) -> float:
+    # Cloud Logging gives nanoseconds; fromisoformat takes six digits at most.
+    head, _, frac = value.rstrip("Z").partition(".")
+    return dt.datetime.fromisoformat(f"{head}.{(frac + '000000')[:6]}+00:00").timestamp()
+
+
+CONTROLLER_LINE = re.compile(r" (ERR|WRN) \S+ (.*?)(?: component=.*?)?(?: error=\"(.*)\")?$")
+VOLATILE = [
+    (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "…"),
+    (re.compile(r"\b[0-9a-f]{16,}\b"), "…"),
+    (re.compile(r"-[a-z0-9]{5}(?=\b|$)"), "-…"),
+    (re.compile(r"\b\d{4,}\b"), "N"),
+]
+
+
+def log_entry(entry: dict) -> dict:
+    """A log entry as a health check shows it: when, where, how bad, what -
+    and a key with the IDs taken out, so a hundred alike count as one line."""
+    labels = entry.get("resource", {}).get("labels", {})
+    payload = entry.get("jsonPayload") or {}
+    out = {"t": log_time(entry["timestamp"]), "cluster": labels.get("cluster_name", "")}
+    if "health_check" in payload:
+        return {**out, **payload["health_check"]}
+    if "reason" in payload and "involvedObject" in payload:
+        obj = payload["involvedObject"]
+        text = f"{payload['reason']}: {payload.get('message', '')}"
+        out.update(level="warning", text=text, object=f"{obj.get('kind', '')}/{obj.get('name', '')}")
+    elif payload:
+        text = payload.get("msg") or payload.get("message") or ""
+        if payload.get("error"):
+            text += f": {payload['error']}"
+        out.update(level=payload.get("level", "error"), text=text)
+    else:
+        line = entry.get("textPayload", "")
+        m = CONTROLLER_LINE.search(line)
+        if m:
+            text = m.group(2) + (f": {m.group(3)}" if m.group(3) else "")
+            out.update(level="error" if m.group(1) == "ERR" else "warning", text=text)
+        else:
+            out.update(level="warning", text=line[:300])
+    key = out["text"]
+    for pattern, sub in VOLATILE:
+        key = pattern.sub(sub, key)
+    out["key"] = key[:240]
+    return out
+
+
+def fetch_logs(cfg: Config, fleet_reasons=(), routine=()) -> dict:
+    """The last day of each component's warnings and errors, and the last week
+    of the dashboard's own record of its checks."""
+    filters = log_filters(cfg, fleet_reasons, routine)
+    spans = {k: (168, 1000) if k == "health" else (24, 300) for k in filters}
+    with concurrent.futures.ThreadPoolExecutor(len(filters)) as pool:
+        futures = {
+            k: pool.submit(read_logs, cfg, f, *spans[k]) for k, f in filters.items()
+        }
+        return {
+            "project": cfg.project,
+            "filters": filters,
+            **{k: [log_entry(e) for e in f.result()] for k, f in futures.items()},
+        }
+
+
 def fetch_waits(cfg: Config, start: int, end: int) -> dict:
     """Per queue over [start, end), a point a minute where Prometheus allows:
     pending workloads, admitted TPU chips and nominal TPU quota, for Migration's
