@@ -37,9 +37,10 @@ set -eo pipefail
 # retry re-runs the job. Use only for provider/infra failures.
 #
 # Every retry that fires also records "<class>,<attempts>,<outcome>" under the
-# build meta-data key infra-retry:<job id>. Recording must never fail the job.
+# build meta-data key infra-retry:<job id>. Recording must never fail or stall
+# the job: the agent retries the write for minutes when its API is unreachable.
 mark_retry() {
-  buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}" "image-pull,$1,$2" || true
+  timeout 10 buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}" "image-pull,$1,$2" || true
 }
 
 # retry_or_fail <description> <command> [args...]
@@ -155,6 +156,9 @@ if [[ -n "$IMAGE" ]]; then
 fi
 
 # ── CDI device injection + shallow git clones ─────────────────────────────────
+# The CDI script pipes into `grep -q`, which exits at the first match; under
+# pipefail the writer's SIGPIPE would read as a missing device.
+set +o pipefail
 source /usr/local/libexec/buildkite-gpu-cdi-env.sh
 export BUILDKITE_GIT_CLONE_FLAGS="-v --depth=1 --filter=blob:none"
 export BUILDKITE_GIT_FETCH_FLAGS="-v --prune --depth=1"

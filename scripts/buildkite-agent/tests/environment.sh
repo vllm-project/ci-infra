@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Exercise the real environment hook with every external command stubbed
-# (aws, docker, nvidia-smi, flock, sleep, buildkite-agent), so it needs no AWS
-# credentials, GPU or agent. Needs bash 4+ and GNU grep like the hook itself:
+# Exercise the real environment hook with every external command stubbed (aws,
+# docker, nvidia-smi, nvidia-ctk, flock, sleep, buildkite-agent), so it needs no
+# AWS credentials, GPU or agent. Needs bash 4+ and GNU grep like the hook itself:
 # run it on an agent host or in a Linux container, not under macOS bash 3.2.
 set -euo pipefail
 (( BASH_VERSINFO[0] >= 4 )) || { echo "SKIP: needs bash 4+" >&2; exit 0; }
 
-src=$(cd "$(dirname "$0")/.." && pwd)/environment
+dir=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp" "/tmp/docker-pull-locks/test_image_$$"*' EXIT
 mkdir "$tmp/bin"
-# The hook ends by sourcing a host-only script; run everything before it.
-sed '/buildkite-gpu-cdi-env.sh/,$d' "$src" >"$tmp/environment"
+# Source the repo's CDI script instead of the installed one.
+sed "s#/usr/local/libexec/#$dir/#" "$dir/environment" >"$tmp/environment"
 
 # A stub fails its first $FAIL_<NAME> calls, then succeeds. Calls are logged to
 # $tmp/<name>.log and sleeps to $tmp/sleep.log.
@@ -23,11 +23,14 @@ stub docker "[[ \$1 == login ]] && { cat >/dev/null; exit 0; }; N=pull FAIL=\${F
 stub sleep "echo \$1 >>$tmp/sleep.log"
 # WAITER=1 loses the non-blocking lock; WAITER_DONE=<file> is created when the blocking wait ends.
 stub flock "[[ \$1 == -n ]] && { [[ -z \${WAITER:-} ]]; exit; }; [[ -z \${WAITER_DONE:-} ]] || touch \$WAITER_DONE; exit 0"
+# Lists our device first, then enough lines to fill the pipe, so `grep -q` exits
+# early and the writer dies of SIGPIPE like the real one can.
+stub nvidia-ctk "echo nvidia.com/gpu=MIG-abc; exec seq 1000000"
 stub buildkite-agent "echo \"\$4\" >>$tmp/marks.log; [[ -z \${MARK_FAILS:-} ]]"
 
 # run <name> <expected-status> <expected-mark|-> <expected-sleeps|-> [VAR=val...]
 run() {
-    local name=$1 want=$2 mark=$3 sleeps=$4 status=0
+    local name=$1 want=$2 mark=$3 sleeps=$4 status=0 got_mark got_sleeps
     shift 4
     rm -f "$tmp"/*.log
     rm -f "/tmp/docker-pull-locks/test_image_$$"*
@@ -35,10 +38,10 @@ run() {
         BUILDKITE_PLUGIN_DOCKER_IMAGE="test/image:$$" \
         bash "$tmp/environment" >/dev/null 2>"$tmp/stderr" || status=$?
     [[ "$status" -eq "$want" ]] || { echo "FAIL $name: expected status $want, got $status"; cat "$tmp/stderr"; exit 1; }
-    [[ "$mark" == - ]] || [[ "$(cat "$tmp/marks.log" 2>/dev/null || true)" == "$mark" ]] ||
-        { echo "FAIL $name: mark was '$(cat "$tmp/marks.log" 2>/dev/null)', want '$mark'"; exit 1; }
-    [[ "$sleeps" == - ]] || [[ "$(cat "$tmp/sleep.log" 2>/dev/null | tr '\n' ' ')" == "$sleeps" ]] ||
-        { echo "FAIL $name: sleeps '$(cat "$tmp/sleep.log" 2>/dev/null | tr '\n' ' ')', want '$sleeps'"; exit 1; }
+    got_mark=$(cat "$tmp/marks.log" 2>/dev/null || true)
+    got_sleeps=$(tr '\n' ' ' 2>/dev/null <"$tmp/sleep.log" || true)
+    [[ "$mark" == - || "$got_mark" == "$mark" ]] || { echo "FAIL $name: mark was '$got_mark', want '$mark'"; exit 1; }
+    [[ "$sleeps" == - || "$got_sleeps" == "$sleeps" ]] || { echo "FAIL $name: sleeps '$got_sleeps', want '$sleeps'"; exit 1; }
     printf 'PASS %s\n' "$name"
 }
 calls() { cat "$tmp/$1.log" 2>/dev/null | wc -l | tr -d ' '; }

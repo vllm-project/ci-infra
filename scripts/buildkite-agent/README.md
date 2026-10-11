@@ -81,7 +81,8 @@ sudo systemctl enable --now buildkite-agent
   never let it fall through to the default exit 1. Each retry that fires also
   writes the build meta-data key `infra-retry:<job id>` (`github-token` from
   `pre-checkout`, `image-pull` from `environment`; value
-  `<class>,<attempts>,<recovered|exhausted>`); a failed write never fails the job.
+  `<class>,<attempts>,<recovered|exhausted>`); the write is capped at 10 s and
+  never fails the job.
   Hooks are re-read at every job start, but merging a template change here does
   not update running hosts — re-install the hook on each affected agent with
   the Quick install commands above.
