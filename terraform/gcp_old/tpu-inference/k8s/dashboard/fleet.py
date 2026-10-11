@@ -1029,6 +1029,28 @@ def fetch_waits(cfg: Config, start: int, end: int) -> dict:
         return {"step": step, **{k: f.result() for k, f in futures.items()}}
 
 
+def fetch_wait_series(cfg: Config, start: int, end: int) -> dict:
+    """Each kube queue's median and p90 wait - submitted to quota reserved, as
+    History's tables count it - of the workloads submitted in each stretch of
+    [start, end): an hour for a day, four hours for a week, twelve beyond. A
+    workload enters the table when it ends, so the last stretches miss what is
+    still running."""
+    if not cfg.timing_table:
+        return {}
+    seconds = end - start
+    bucket = 3600 if seconds <= 2 * 86400 else 4 * 3600 if seconds <= 8 * 86400 else 12 * 3600
+    wait = "TIMESTAMP_DIFF(quota_reserved_at, submitted_at, SECOND)"
+    rows = bigquery(cfg, f"""
+SELECT queue, DIV(UNIX_SECONDS(submitted_at) - {start}, {bucket}) AS bucket,
+  APPROX_QUANTILES({wait}, 100)[OFFSET(50)] AS p50,
+  APPROX_QUANTILES({wait}, 100)[OFFSET(90)] AS p90, COUNT(*) AS n
+FROM `{cfg.timing_table}`
+WHERE submitted_at >= TIMESTAMP_SECONDS({start}) AND submitted_at < TIMESTAMP_SECONDS({end})
+  AND quota_reserved_at IS NOT NULL
+GROUP BY queue, bucket""")
+    return {"start": start, "bucket": bucket, "count": -(-seconds // bucket), "rows": rows}
+
+
 def fetch_jobs(cfg: Config, start: int, end: int) -> list[dict]:
     """Every kube workload that ended in [start, end), newest first, from the
     launcher's timing table: the per-queue job history Buildkite cannot show,

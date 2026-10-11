@@ -2414,7 +2414,7 @@ def failures_section(generation: str) -> str:
 
 
 def render_migration(
-    h: dict, bare: list, waits: dict, sources: dict, preset: str | None
+    h: dict, bare: list, waits: dict, queue_times: dict, sources: dict, preset: str | None
 ) -> str:
     base = json.loads(BASELINE_FILE.read_text())
     span = h["span"]
@@ -2527,6 +2527,63 @@ def render_migration(
                 )
                 + "</div>"
             )
+        # Queue time, a shape at a time: the median and p90 wait of the jobs that
+        # began waiting in each stretch, bare metal's beside kube's on one
+        # scale - full chips mean little if work queues for hours to fill them.
+        k_waits: dict = collections.defaultdict(dict)
+        for r in (queue_times or {}).get("rows") or []:
+            k_waits[r["queue"]][int(r["bucket"])] = (
+                float(r["p50"]) / 60,
+                float(r["p90"]) / 60,
+            )
+        kw_ticks = (
+            [queue_times["start"] + i * queue_times["bucket"] for i in range(queue_times["count"])]
+            if queue_times
+            else []
+        )
+        wait_html = []
+        for bq, kq in pairs:
+            q, wb = queues.get(kq), base_queues[bq].get("wait_buckets")
+            if not q or not wb:
+                continue
+            label = queue_title(q).split(" ", 1)[-1]
+            bw_ticks = [base["start"] + i * wb["step"] for i in range(len(wb["p90"]))]
+            k50 = [k_waits[kq].get(i, (None, None))[0] for i in range(len(kw_ticks))]
+            k90 = [k_waits[kq].get(i, (None, None))[1] for i in range(len(kw_ticks))]
+            top = max([v for v in wb["p90"] + k90 if v is not None] + [1.0])
+            # Hours once a row's waits pass two of them: minutes would read 1,400.
+            unit, per = ("hours", 60) if top > 120 else ("minutes", 1)
+
+            def scaled(values: list, per: int = per) -> list:
+                return [round(v / per, 1) if v is not None else None for v in values]
+
+            wait_html.append(
+                '<div class="charts shape-row">'
+                + line_chart(
+                    f"{label} · bare metal: queue wait, {unit}",
+                    bw_ticks,
+                    [("nodes", "p90", scaled(wb["p90"])), ("nodes p50", "median", scaled(wb["p50"]))],
+                    ymax=top / per,
+                    fmt="day",
+                    width=520,
+                    height=150,
+                )
+                + (
+                    line_chart(
+                        f"{label} · kube: queue wait, {unit}",
+                        kw_ticks,
+                        [("used", "p90", scaled(k90)), ("used p50", "median", scaled(k50))],
+                        ymax=top / per,
+                        fmt=fmt,
+                        width=520,
+                        height=150,
+                    )
+                    if kw_ticks
+                    else ""
+                )
+                + "</div>"
+            )
+
         # Idle while jobs waited: bare metal's from the snapshot's minute
         # counts, kube's from Kueue's, both a day at a time, so the bad days show
         # beside the mean.
@@ -2701,6 +2758,13 @@ def render_migration(
   <div class="compare-note muted">Each fleet against its own chips, averaged by hour of day: when in the day the
   chips were held, and how close to full each fleet ran.</div>
   </div>
+  <h3 class="shapes-head">Queue time by shape: bare metal before, kube now</h3>
+  <p class="muted note">Chips held is half the story: a fleet of one chip with a queue that never empties is 100% held.
+  Each row is one shape on one scale - the p90 and the median wait of the jobs that began waiting in each stretch,
+  four hours on bare metal. Bare metal's wait is runnable to an agent starting the job; kube's is submitted to quota
+  reserved, after which its pods still start (Node autoscaling on Trends). Kube's last stretches miss the jobs
+  still running.</p>
+  {"".join(wait_html)}
 </div>""")
 
     rows = []

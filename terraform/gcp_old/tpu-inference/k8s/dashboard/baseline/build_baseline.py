@@ -157,6 +157,29 @@ def gke_held(start: float, end: float, hours: int) -> dict:
     return out, rates
 
 
+# Stretches the queue time is summarized over: four hours, coarse enough that
+# each holds a few waits and the median and p90 mean something.
+WAIT_BUCKET = 4 * 3600
+
+
+def wait_buckets(waits: list, start: float, end: float) -> dict:
+    """The median and p90 wait, in minutes, of the jobs that became runnable in
+    each WAIT_BUCKET of the window; None for one with no job."""
+    n = int((end - start) // WAIT_BUCKET)
+    by = collections.defaultdict(list)
+    for t, minutes in waits:
+        i = int((t - start) // WAIT_BUCKET)
+        if 0 <= i < n:
+            by[i].append(minutes)
+    out = {"step": WAIT_BUCKET, "p50": [], "p90": [], "n": []}
+    for i in range(n):
+        q50, q90 = quantile(by[i], 0.5), quantile(by[i], 0.9)
+        out["p50"].append(round(q50, 1) if q50 is not None else None)
+        out["p90"].append(round(q90, 1) if q90 is not None else None)
+        out["n"].append(len(by[i]))
+    return out
+
+
 def quantile(values: list, q: float) -> float | None:
     if not values:
         return None
@@ -174,6 +197,8 @@ def main() -> None:
     jobs = collections.Counter()
     by_kind = collections.defaultdict(collections.Counter)
     waits = collections.defaultdict(list)
+    # Each wait by when it began, for the queue time over the window.
+    wait_at = collections.defaultdict(list)
     agents_by_day = collections.defaultdict(set)
     seen = set()
     for path in glob.glob(
@@ -216,6 +241,8 @@ def main() -> None:
                 runnable = when(job.get("runnable_at"))
                 if runnable and s >= start:
                     waits[queue].append((s - runnable) / 60)
+                    if runnable >= start:
+                        wait_at[queue].append((runnable, (s - runnable) / 60))
                 agent = (job.get("agent") or {}).get("name")
                 if agent:
                     day = dt.datetime.fromtimestamp(lo, dt.timezone.utc).date()
@@ -335,6 +362,7 @@ def main() -> None:
                 else None,
                 "wait_p50": quantile(waits[queue], 0.5),
                 "wait_p90": quantile(waits[queue], 0.9),
+                "wait_buckets": wait_buckets(wait_at[queue], start, end),
                 "by_kind": {k: round(v) for k, v in by_kind[queue].most_common()},
                 "held": [round(v, 2) for v in held[queue]],
                 "connected": connected_chips[queue],

@@ -506,3 +506,6 @@ table.jobs-inner th, table.jobs-inner td { border-bottom-color: rgba(255, 255, 2
 .hist-errors .msg { color: var(--ink); }
 .hist-links { margin: 8px 0 0; }
 table.days tr.total td { border-top: 1px solid var(--line); }
+/* A median line beside its p90: the same hue, dashed and thinner. */
+.line.p50 { stroke-width: 1.5; stroke-dasharray: 4 3; } .area.p50 { display: none; }
+i.k.p50 { opacity: 0.55; }
