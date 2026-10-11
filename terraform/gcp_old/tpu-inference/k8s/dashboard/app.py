@@ -318,6 +318,7 @@ def serve(
     bare: Windowed,
     waits: Windowed,
     jobs: Windowed,
+    wait_series: Windowed,
     port: int,
 ) -> None:
     class Handler(BaseHTTPRequestHandler):
@@ -338,11 +339,18 @@ def serve(
                 view, sources = history.get(span)
                 rows, status = bare.get(span)
                 minutes, minutes_status = waits.get(span)
+                queue_times, queue_times_status = wait_series.get(span)
                 page = views.render_migration(
                     view,
                     rows,
                     minutes,
-                    {**sources, "bare": status, "waits": minutes_status},
+                    queue_times,
+                    {
+                        **sources,
+                        "bare": status,
+                        "waits": minutes_status,
+                        "wait_series": queue_times_status,
+                    },
                     span["preset"],
                 )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
@@ -436,6 +444,7 @@ def main() -> None:
         Windowed(cfg, "BigQuery", fleet.fetch_bare, []),
         Windowed(cfg, "Metrics", fleet.fetch_waits, {}),
         Windowed(cfg, "BigQuery", fleet.fetch_jobs, []),
+        Windowed(cfg, "BigQuery", fleet.fetch_wait_series, {}),
         args.port,
     )
 

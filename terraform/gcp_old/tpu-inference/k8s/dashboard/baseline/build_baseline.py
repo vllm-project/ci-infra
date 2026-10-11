@@ -47,6 +47,17 @@ QUEUES = {
     "tpu_v6e_queue": ("v6e", 1),
     "tpu_v6e_8_queue": ("v6e", 8),
 }
+# The chips each generation's fleet had before the migration. v7x: its whole
+# reservation, the bare-metal VMs and 8 chips that were a disaggregated-serving
+# GKE cluster until it was removed on 2026-09-11 for the Kueue workers -
+# migration work, not the fleet before - held every hour at that cluster's own
+# rate over its 30 days before. v6e: its 102 bare-metal chips; the
+# reservation's other 26 stood unused until kube's v6e worker took them, and
+# are left out. The page measures the fleet against these chips, so a VM down
+# for a rebalance counts as chips the fleet had and did not use.
+RESERVATION = {"v7x": 128, "v6e": 102}
+PRE_MIGRATION_GKE = {"v7x": ("tpu-v7x-cluster-c", 30)}
+GKE_CLUSTERS: dict = {}
 START = dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc)
 END = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
 GCS = "gs://mhhua-tt-dev/premigration-snapshot-2026-09-29/"
@@ -84,6 +95,94 @@ def per_minute(snap: Path, metric: str, start: float, end: float) -> dict:
     return out
 
 
+def gke_held(start: float, end: float, hours: int) -> dict:
+    """Each generation's GKE chips held, an hour at a time, from GKE's system
+    metrics in Managed Prometheus - run with the dashboard's environment: the
+    TPU chips running containers requested. For PRE_MIGRATION_GKE, a constant -
+    the cluster's chip-hours held over its last days, a share of its chips; for
+    GKE_CLUSTERS, the hours as they ran, an hour without pods holding nothing."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import fleet
+
+    fleet.LOCAL = True
+    cfg = fleet.Config()
+
+    def request(names: str) -> str:
+        return (
+            f'kubernetes_io:container_accelerator_request{{project_id="{cfg.project}",'
+            f'resource_name="{fleet.TPU}",cluster_name=~"{names}"}}'
+        )
+
+    out, rates = {}, {}
+    for generation, (name, days) in PRE_MIGRATION_GKE.items():
+        chips = fleet.prom_range(
+            cfg,
+            f'count(kubernetes_io:node_accelerator_duty_cycle{{cluster_name="{name}"}})',
+            (),
+            int(start) - 120 * 86400,
+            int(end),
+            3600,
+        )
+        points = next(iter(chips.values()), [])
+        last, size = points[-1][0], max(v for _, v in points)
+        step = 900
+        held = fleet.prom_range(
+            cfg,
+            f"sum(last_over_time({request(name)}[2m]))",
+            (),
+            int(last) - days * 86400,
+            int(last),
+            step,
+        )
+        chip_hours = sum(v for _, v in next(iter(held.values()), [])) * step / 3600
+        rate = chip_hours / (size * days * 24)
+        rates[generation] = {"cluster": name, "days": days, "share": round(rate, 4)}
+        out[generation] = [round(rate * size, 2)] * hours
+    if not GKE_CLUSTERS:
+        return out, rates
+    step = 300
+    names = "|".join(n for clusters in GKE_CLUSTERS.values() for n in clusters)
+    series = fleet.prom_range(
+        cfg,
+        f"sum by (cluster_name) (last_over_time({request(names)}[2m]))",
+        ("cluster_name",),
+        int(start),
+        int(end) - step,
+        step,
+    )
+    for generation, clusters in GKE_CLUSTERS.items():
+        per_hour = [0.0] * hours
+        for name in clusters:
+            for t, v in series.get(name, []):
+                if start <= t < end:
+                    per_hour[int((t - start) // 3600)] += v * step / 3600
+        out[generation] = [round(v, 2) for v in per_hour]
+    return out, rates
+
+
+# Stretches the queue time is summarized over: four hours, coarse enough that
+# each holds a few waits and the median and p90 mean something.
+WAIT_BUCKET = 4 * 3600
+
+
+def wait_buckets(waits: list, start: float, end: float) -> dict:
+    """The median and p90 wait, in minutes, of the jobs that became runnable in
+    each WAIT_BUCKET of the window; None for one with no job."""
+    n = int((end - start) // WAIT_BUCKET)
+    by = collections.defaultdict(list)
+    for t, minutes in waits:
+        i = int((t - start) // WAIT_BUCKET)
+        if 0 <= i < n:
+            by[i].append(minutes)
+    out = {"step": WAIT_BUCKET, "p50": [], "p90": [], "n": []}
+    for i in range(n):
+        q50, q90 = quantile(by[i], 0.5), quantile(by[i], 0.9)
+        out["p50"].append(round(q50, 1) if q50 is not None else None)
+        out["p90"].append(round(q90, 1) if q90 is not None else None)
+        out["n"].append(len(by[i]))
+    return out
+
+
 def quantile(values: list, q: float) -> float | None:
     if not values:
         return None
@@ -101,6 +200,8 @@ def main() -> None:
     jobs = collections.Counter()
     by_kind = collections.defaultdict(collections.Counter)
     waits = collections.defaultdict(list)
+    # Each wait by when it began, for the queue time over the window.
+    wait_at = collections.defaultdict(list)
     agents_by_day = collections.defaultdict(set)
     seen = set()
     for path in glob.glob(
@@ -143,6 +244,8 @@ def main() -> None:
                 runnable = when(job.get("runnable_at"))
                 if runnable and s >= start:
                     waits[queue].append((s - runnable) / 60)
+                    if runnable >= start:
+                        wait_at[queue].append((runnable, (s - runnable) / 60))
                 agent = (job.get("agent") or {}).get("name")
                 if agent:
                     day = dt.datetime.fromtimestamp(lo, dt.timezone.utc).date()
@@ -229,9 +332,7 @@ def main() -> None:
             "stranded_share": sum(d["stranded"] for d in days_) / conn_all,
             "stranded_chip_hours": round(sum(d["stranded"] for d in days_) / 60),
             "waiting_chip_hours": round(sum(d["waiting"] for d in days_) / 60),
-            "daily_stranded_share": [
-                round(d["stranded"] / d["conn"], 4) for d in days_
-            ],
+            "daily_stranded_minutes": [d["stranded"] for d in days_],
             "hourly": {
                 k: [
                     round(v[i] / counted[i], 1) if counted[i] else None
@@ -264,6 +365,7 @@ def main() -> None:
                 else None,
                 "wait_p50": quantile(waits[queue], 0.5),
                 "wait_p90": quantile(waits[queue], 0.9),
+                "wait_buckets": wait_buckets(wait_at[queue], start, end),
                 "by_kind": {k: round(v) for k, v in by_kind[queue].most_common()},
                 "held": [round(v, 2) for v in held[queue]],
                 "connected": connected_chips[queue],
@@ -277,41 +379,77 @@ def main() -> None:
             }
         )
 
+    gke, gke_rates = gke_held(start, end, hours)
     generations = []
     for generation in ("v7x", "v6e"):
         members = [q for q in queues if q["generation"] == generation]
         series = [round(sum(v), 2) for v in zip(*(q["held"] for q in members))]
         had = [sum(v) for v in zip(*(q["connected_mean"] for q in members))]
         capacity = sum(q["capacity"] for q in members)
+        reserved = RESERVATION[generation]
+        # Capped at the reservation's GKE share, which the VMs left over.
+        lane = [min(v, reserved - capacity) for v in gke.get(generation, [0.0] * hours)]
+        # Held is bare metal's jobs and the GKE side's admitted chips; every
+        # share is of the reservation, an hour of it being `reserved` chips.
+        in_use = [s + g for s, g in zip(series, lane)]
+        down = [max(0.0, capacity - c) for c in had]
+        shares = split[generation]
+        daily_stranded = shares.pop("daily_stranded_minutes")
+        hourly = shares["hourly"]
+        hourly["busy"] = [
+            round((b or 0) + g, 1) if b is not None else None
+            for b, g in zip(hourly["busy"], lane)
+        ]
+        hourly["down"] = [round(d, 1) for d in down]
+        hourly["idle"] = [
+            round(max(0.0, reserved - (b or 0) - (st or 0) - d), 1)
+            for b, st, d in zip(hourly["busy"], hourly["stranded"], down)
+        ]
+        shares["stranded_share"] = shares["stranded_chip_hours"] / (reserved * hours)
+        shares["daily_stranded_share"] = [
+            round(m / 60 / (reserved * 24), 4) for m in daily_stranded
+        ]
         # Hour of day in Pacific time, when the schedules are set: chips held
         # over chips connected, summed over the days at that hour.
         pacific = dt.timezone(dt.timedelta(hours=-7))
         by_hour = collections.defaultdict(list)
         held_at, had_at = collections.Counter(), collections.Counter()
-        for i, (v, c) in enumerate(zip(series, had)):
+        for i, v in enumerate(in_use):
             h = dt.datetime.fromtimestamp(start + i * 3600, pacific).hour
             by_hour[h].append(v)
             held_at[h] += v
-            had_at[h] += c
+            had_at[h] += reserved
         generations.append(
             {
                 "name": generation,
                 "capacity": capacity,
+                "reservation": reserved,
+                "gke_chips": reserved - capacity,
+                "gke_mean_held": statistics.mean(lane),
+                "gke_pre_migration": gke_rates.get(generation),
                 "held": series,
-                "mean_held": statistics.mean(series),
+                "mean_held": statistics.mean(in_use),
                 "mean_connected": statistics.mean(had),
-                "held_share": sum(series) / sum(had) if sum(had) else None,
+                "held_share": sum(in_use) / (reserved * hours),
+                "down_share": sum(down) / (reserved * hours),
                 # Day by day too, for how far the bad days fell below the mean.
                 "daily_held_share": [
-                    round(sum(series[d : d + 24]) / sum(had[d : d + 24]), 4)
-                    for d in range(0, len(series), 24)
-                    if sum(had[d : d + 24])
+                    round(sum(in_use[d : d + 24]) / (reserved * 24), 4)
+                    for d in range(0, hours, 24)
                 ],
-                **split[generation],
+                "daily_down_share": [
+                    round(sum(down[d : d + 24]) / (reserved * 24), 4)
+                    for d in range(0, hours, 24)
+                ],
+                **shares,
                 "by_hour_share_pt": [
                     round(100 * held_at[h] / had_at[h], 1) if had_at[h] else None
                     for h in range(24)
                 ],
+                # The wait for an agent across the generation's queues, for the
+                # page's headline beside its shapes'.
+                "wait_p50": quantile([w for q in QUEUES if QUEUES[q][0] == generation for w in waits[q]], 0.5),
+                "wait_p90": quantile([w for q in QUEUES if QUEUES[q][0] == generation for w in waits[q]], 0.9),
                 "peak_held": max(series),
                 "chip_hours": round(sum(series)),
                 "jobs": sum(q["jobs"] for q in members),
@@ -346,8 +484,9 @@ def main() -> None:
         )
     for g in generations:
         print(
-            f"  {g['name']}: held {g['held_share']:.1%} (exporter busy {g['busy_share']:.1%}), "
-            f"idle while jobs waited {g['stranded_share']:.1%} = {g['stranded_chip_hours']} chip-h"
+            f"  {g['name']}: held {g['held_share']:.1%} of {g['reservation']} reserved chips "
+            f"(GKE side {g['gke_mean_held']:.1f} of {g['gke_chips']}), "
+            f"VMs down {g['down_share']:.1%}, idle while jobs waited {g['stranded_share']:.1%}"
         )
 
 

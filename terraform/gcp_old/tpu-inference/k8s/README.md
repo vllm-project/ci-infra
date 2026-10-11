@@ -534,6 +534,14 @@ with the failures first, or job by job. Filters for queues (any number), outcome
 branch and pipeline and a search over step, build and branch sit above it, and a
 line under them sums up what they leave. Each queue card on Live and Trends links to its queue's jobs.
 
+Migration also counts *infrastructure failures*: failed jobs whose log ends in
+the fleet's fault - a full disk, a TPU that would not start, a bus error, a kill
+for memory, an agent that died, a missing CI image - a day, by cause, bare
+metal before beside kube. The cause is only in the log, so
+`dashboard/baseline/failures.py` fetches each failed TPU job's log with `bk
+api`, sorts it, and writes `failures.json`; the kube side is a snapshot of its
+window, refreshed by rerunning the script (`TIMING_TABLE` set for `bq`).
+
 Each health check on Live opens to **History & logs**: its status over the
 last day, its latest changes, and the warnings and errors in the logs of the
 component it watches - the Buildkite controller's, Kueue's, Kubernetes warning
