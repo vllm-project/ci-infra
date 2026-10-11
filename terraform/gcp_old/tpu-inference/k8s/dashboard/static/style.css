@@ -407,6 +407,8 @@ table.days td b { font-weight: 600; }
 .share-row .vals b { color: var(--ink); font-weight: 600; }
 .seg.s1 { background: var(--cat-1); } .seg.s2 { background: var(--cat-2); }
 .seg.rest, .band.rest, i.k.rest { background: #cfd5de; fill: #cfd5de; }
+.seg.down, .band.down, i.k.down { background: #8f98a6; fill: #8f98a6; }
+i.k.down { height: 10px; width: 10px; border-radius: 3px; }
 i.k.rest { height: 10px; width: 10px; border-radius: 3px; }
 @media (max-width: 900px) {
   .tiles.five { grid-template-columns: 1fr 1fr; }
@@ -503,3 +505,4 @@ table.jobs-inner th, table.jobs-inner td { border-bottom-color: rgba(255, 255, 2
 .hist-errors li.lvl-error { border-left-color: var(--critical); }
 .hist-errors .msg { color: var(--ink); }
 .hist-links { margin: 8px 0 0; }
+table.days tr.total td { border-top: 1px solid var(--line); }

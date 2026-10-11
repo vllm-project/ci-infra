@@ -47,6 +47,11 @@ QUEUES = {
     "tpu_v6e_queue": ("v6e", 1),
     "tpu_v6e_8_queue": ("v6e", 8),
 }
+# Each generation's whole reservation and the Kueue cohort of its GKE side: the
+# chips GKE already had beside the bare-metal VMs (v7x's disaggregated-serving
+# lane, v6e's first kube pool). The page measures the fleet against all of it,
+# so a VM down for a rebalance counts as chips the fleet had and did not use.
+RESERVATION = {"v7x": (128, "tpu7x"), "v6e": (128, "ct6e")}
 START = dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc)
 END = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
 GCS = "gs://mhhua-tt-dev/premigration-snapshot-2026-09-29/"
@@ -81,6 +86,43 @@ def per_minute(snap: Path, metric: str, start: float, end: float) -> dict:
                     ts = when(t)
                     if start <= ts < end:
                         out[series["queue"]][int(ts)] = v
+    return out
+
+
+def gke_held(start: float, end: float, hours: int) -> dict:
+    """Each generation's GKE chips Kueue admitted, an hour at a time, from
+    Managed Prometheus - run with the dashboard's environment (KUEUE_METRICS_CLUSTER
+    and the rest) - and how many hours before its metrics begin, 2026-09-17,
+    were filled with the measured mean."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import fleet
+
+    fleet.LOCAL = True
+    cfg = fleet.Config()
+    usage = fleet.current(
+        f'kueue_cluster_queue_resource_usage{{{fleet.kueue_selector(cfg)},resource="{fleet.TPU}"}}',
+        "cluster_queue, flavor, resource",
+    )
+    series = fleet.prom_range(
+        cfg, f"sum by (cluster_queue) ({usage})", ("cluster_queue",), int(start), int(end), 300
+    )
+    out = {}
+    for generation, (_, cohort) in RESERVATION.items():
+        at = collections.Counter()
+        for queue, points in series.items():
+            if queue.startswith(cohort):
+                for t, v in points:
+                    at[t] += v
+        per_hour = collections.defaultdict(list)
+        for t, v in at.items():
+            if start <= t < end:
+                per_hour[int((t - start) // 3600)].append(v)
+        measured = {i: statistics.mean(v) for i, v in per_hour.items()}
+        fill = statistics.mean(measured.values()) if measured else 0.0
+        out[generation] = (
+            [round(measured.get(i, fill), 2) for i in range(hours)],
+            sum(1 for i in range(hours) if i not in measured),
+        )
     return out
 
 
@@ -229,9 +271,7 @@ def main() -> None:
             "stranded_share": sum(d["stranded"] for d in days_) / conn_all,
             "stranded_chip_hours": round(sum(d["stranded"] for d in days_) / 60),
             "waiting_chip_hours": round(sum(d["waiting"] for d in days_) / 60),
-            "daily_stranded_share": [
-                round(d["stranded"] / d["conn"], 4) for d in days_
-            ],
+            "daily_stranded_minutes": [d["stranded"] for d in days_],
             "hourly": {
                 k: [
                     round(v[i] / counted[i], 1) if counted[i] else None
@@ -277,37 +317,68 @@ def main() -> None:
             }
         )
 
+    gke = gke_held(start, end, hours)
     generations = []
     for generation in ("v7x", "v6e"):
         members = [q for q in queues if q["generation"] == generation]
         series = [round(sum(v), 2) for v in zip(*(q["held"] for q in members))]
         had = [sum(v) for v in zip(*(q["connected_mean"] for q in members))]
         capacity = sum(q["capacity"] for q in members)
+        reserved, _ = RESERVATION[generation]
+        lane, filled = gke[generation]
+        # Held is bare metal's jobs and the GKE side's admitted chips; every
+        # share is of the reservation, an hour of it being `reserved` chips.
+        in_use = [s + g for s, g in zip(series, lane)]
+        down = [max(0.0, capacity - c) for c in had]
+        shares = split[generation]
+        daily_stranded = shares.pop("daily_stranded_minutes")
+        hourly = shares["hourly"]
+        hourly["busy"] = [
+            round((b or 0) + g, 1) if b is not None else None
+            for b, g in zip(hourly["busy"], lane)
+        ]
+        hourly["down"] = [round(d, 1) for d in down]
+        hourly["idle"] = [
+            round(max(0.0, reserved - (b or 0) - (st or 0) - d), 1)
+            for b, st, d in zip(hourly["busy"], hourly["stranded"], down)
+        ]
+        shares["stranded_share"] = shares["stranded_chip_hours"] / (reserved * hours)
+        shares["daily_stranded_share"] = [
+            round(m / 60 / (reserved * 24), 4) for m in daily_stranded
+        ]
         # Hour of day in Pacific time, when the schedules are set: chips held
         # over chips connected, summed over the days at that hour.
         pacific = dt.timezone(dt.timedelta(hours=-7))
         by_hour = collections.defaultdict(list)
         held_at, had_at = collections.Counter(), collections.Counter()
-        for i, (v, c) in enumerate(zip(series, had)):
+        for i, v in enumerate(in_use):
             h = dt.datetime.fromtimestamp(start + i * 3600, pacific).hour
             by_hour[h].append(v)
             held_at[h] += v
-            had_at[h] += c
+            had_at[h] += reserved
         generations.append(
             {
                 "name": generation,
                 "capacity": capacity,
+                "reservation": reserved,
+                "gke_chips": reserved - capacity,
+                "gke_mean_held": statistics.mean(lane),
+                "gke_filled_hours": filled,
                 "held": series,
-                "mean_held": statistics.mean(series),
+                "mean_held": statistics.mean(in_use),
                 "mean_connected": statistics.mean(had),
-                "held_share": sum(series) / sum(had) if sum(had) else None,
+                "held_share": sum(in_use) / (reserved * hours),
+                "down_share": sum(down) / (reserved * hours),
                 # Day by day too, for how far the bad days fell below the mean.
                 "daily_held_share": [
-                    round(sum(series[d : d + 24]) / sum(had[d : d + 24]), 4)
-                    for d in range(0, len(series), 24)
-                    if sum(had[d : d + 24])
+                    round(sum(in_use[d : d + 24]) / (reserved * 24), 4)
+                    for d in range(0, hours, 24)
                 ],
-                **split[generation],
+                "daily_down_share": [
+                    round(sum(down[d : d + 24]) / (reserved * 24), 4)
+                    for d in range(0, hours, 24)
+                ],
+                **shares,
                 "by_hour_share_pt": [
                     round(100 * held_at[h] / had_at[h], 1) if had_at[h] else None
                     for h in range(24)
@@ -346,8 +417,9 @@ def main() -> None:
         )
     for g in generations:
         print(
-            f"  {g['name']}: held {g['held_share']:.1%} (exporter busy {g['busy_share']:.1%}), "
-            f"idle while jobs waited {g['stranded_share']:.1%} = {g['stranded_chip_hours']} chip-h"
+            f"  {g['name']}: held {g['held_share']:.1%} of {g['reservation']} reserved chips "
+            f"(GKE side {g['gke_mean_held']:.1f} of {g['gke_chips']}, {g['gke_filled_hours']} h filled), "
+            f"VMs down {g['down_share']:.1%}, idle while jobs waited {g['stranded_share']:.1%}"
         )
 
 

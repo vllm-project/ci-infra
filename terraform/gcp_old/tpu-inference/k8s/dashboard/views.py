@@ -35,6 +35,8 @@ JOBS_PAGE = string.Template((TEMPLATES / "jobs.html").read_text())
 # The bare-metal fleet before the migration, built once from the snapshot by
 # baseline/build_baseline.py; static, since that fleet is being torn down.
 BASELINE_FILE = Path(__file__).parent / "baseline" / "premigration-2026-09.json"
+# The infrastructure-failure comparison, built by baseline/failures.py.
+FAILURES_FILE = BASELINE_FILE.with_name("failures.json")
 # What each term on the pages means: the glossary on the Overview, and the
 # tooltip on a term wherever a page uses it (term()).
 TERMS = {
@@ -2364,6 +2366,53 @@ def kube_split(h: dict, waits: dict, cohort: str) -> dict | None:
     }
 
 
+def failures_section(generation: str) -> str:
+    """Jobs the fleet failed rather than the test, a day, by cause: bare metal
+    before beside kube over the snapshot's window."""
+    if not FAILURES_FILE.exists():
+        return ""
+    f = json.loads(FAILURES_FILE.read_text())
+    bare = f["bare"]["by_generation"].get(generation)
+    kube = f["kube"]["by_generation"].get(generation)
+    if not bare or not kube:
+        return ""
+
+    def a_day(side: dict, key: str) -> float:
+        return side["causes"].get(key, {}).get("n", 0) / side["days"]
+
+    def infra(side: dict, field: str) -> float:
+        return sum(
+            v[field] for k, v in side["causes"].items() if k not in ("test", "cancelled")
+        )
+
+    rows = "".join(
+        f'<tr><td>{E(label)}</td><td class="n"><span class="muted">{a_day(bare, key):.1f}</span></td>'
+        f'<td class="n"><b>{a_day(kube, key):.1f}</b></td></tr>'
+        for key, label in f["causes"].items()
+        if bare["causes"].get(key) or kube["causes"].get(key)
+    )
+
+    # Per job as well as per day: the fleets ran different numbers of jobs.
+    def per_k(side: dict) -> str:
+        return f"{1000 * infra(side, 'n') / side['jobs']:.1f}" if side.get("jobs") else "-"
+
+    def share(side: dict) -> str:
+        return pct_small(infra(side, "chip_hours") / side["chip_hours"]) if side["chip_hours"] else "-"
+
+    return f"""<h3 class="shapes-head">Infrastructure failures: jobs the fleet failed, not the test</h3>
+  <p class="muted note">A job that died of a full disk, a TPU that would not start or an agent that went away ends
+  with an ordinary exit code, so the cause is read from its log. Bare metal over {E(f["bare"]["window"])}; kube over
+  {E(f["kube"]["window"])}, a snapshot.</p>
+  <div class="table-wrap"><table class="dense days"><thead><tr><th>Cause</th><th class="n">Bare metal before, a day</th>
+  <th class="n">Kube, a day</th></tr></thead><tbody>{rows}
+  <tr class="total"><td><b>All infrastructure failures</b></td><td class="n"><span class="muted">{infra(bare, "n") / bare["days"]:.1f}</span></td>
+  <td class="n"><b>{infra(kube, "n") / kube["days"]:.1f}</b></td></tr>
+  <tr><td>Per 1,000 jobs</td><td class="n"><span class="muted">{per_k(bare)}</span></td><td class="n"><b>{per_k(kube)}</b></td></tr>
+  <tr><td>Their share of the chip time</td><td class="n"><span class="muted">{share(bare)}</span></td><td class="n"><b>{share(kube)}</b></td></tr>
+  <tr><td class="muted">Test failures, a day</td><td class="n muted">{a_day(bare, "test"):.1f}</td><td class="n muted">{a_day(kube, "test"):.1f}</td></tr>
+  </tbody></table></div>"""
+
+
 def render_migration(
     h: dict, bare: list, waits: dict, sources: dict, preset: str | None
 ) -> str:
@@ -2520,12 +2569,21 @@ def render_migration(
         parts = [
             ("in use", "s1"),
             ("idle while jobs waited", "s2"),
+            ("VMs down", "down"),
             ("other idle", "rest"),
         ]
+        # A bare-metal VM down - rebalanced, repaired - is reserved chips the
+        # fleet had and could not use; kube's quota has no such thing.
+        b_down = mean(g.get("daily_down_share") or []) or 0.0
         bars = share_bars(
-            [("bare metal before", [b_util, b_strand, max(0.0, 1 - b_util - b_strand)])]
+            [
+                (
+                    "bare metal before",
+                    [b_util, b_strand, b_down, max(0.0, 1 - b_util - b_strand - b_down)],
+                )
+            ]
             + (
-                [("kube now", [k_util, k_strand, max(0.0, 1 - k_util - k_strand)])]
+                [("kube now", [k_util, k_strand, 0.0, max(0.0, 1 - k_util - k_strand)])]
                 if ks
                 else []
             ),
@@ -2534,13 +2592,16 @@ def render_migration(
         b_t, b_split = buckets(
             base_ticks,
             [
-                (name, g["hourly"][k])
-                for (name, _), k in zip(parts, ("busy", "stranded", "idle"))
+                (name, g["hourly"].get(k) or [0.0] * len(base_ticks))
+                for (name, _), k in zip(parts, ("busy", "stranded", "down", "idle"))
             ],
             4,
         )
         k_split = (
-            [(name, ks[k]) for (name, _), k in zip(parts, ("used", "stranded", "idle"))]
+            [
+                (name, ks[k] if k else [0.0] * len(k_ticks))
+                for (name, _), k in zip(parts, ("used", "stranded", None, "idle"))
+            ]
             if ks
             else []
         )
@@ -2609,7 +2670,7 @@ def render_migration(
   <div class="tiles five">
     {tile(term("Chips held"), pct(b_util), pct(k_util), "of the chips each fleet had, the mean of its days")}
     {tile(term("Idle while jobs waited"), pct_small(b_strand), pct_small(k_strand), f"of the chips, the mean of the days; bare metal's came to {num(g['stranded_chip_hours'])} chip-hours")}
-    {tile("Chips", num(g["capacity"]), num(k_cap_now), f"bare metal's VMs ({num(g['mean_connected'])} connected on average) → kube's quota now" + (f" ({num(k_cap)} on average)" if abs(k_cap - k_cap_now) >= 1 else ""))}
+    {tile("Chips", num(g.get("reservation", g["capacity"])), num(k_cap_now), f"the reservation: bare metal's {num(g['capacity'])} on VMs ({num(g['mean_connected'])} connected on average) and GKE's {num(g.get('gke_chips', 0))} → kube's quota now" + (f" ({num(k_cap)} on average)" if abs(k_cap - k_cap_now) >= 1 else ""))}
     {tile("Work a day", daily(g["mean_held"] * 24), daily(k_work), f"chip-hours; steps a day {daily(b_steps)} → {daily(k_steps)}")}
     <div class="tile"><span>Kube's share of the work now</span><b>{pct(share)}</b><small>bare metal still ran {daily(bare_work)} chip-hours a day{" (counted from 10-01)" if partial else ""}</small></div>
   </div>
@@ -2628,6 +2689,7 @@ def render_migration(
   <div class="table-wrap"><table class="dense"><thead><tr><th>Bare metal before, by shape</th><th class="n">Idle chip-hours</th>
   <th class="n">While another shape had jobs waiting</th><th class="n">Its own jobs waited, chip-hours</th>
   <th class="n">Time with jobs waiting</th></tr></thead><tbody>{"".join(idle_rows)}</tbody></table></div>
+  {failures_section(g["name"])}
   <h3 class="shapes-head">By shape: bare metal before, kube now</h3>
   <p class="muted note">Each row is one shape on one scale. On bare metal a shape could use only its own VMs - the
   line is the chips of the agents connected each hour, so a VM that came or went moves it - and a busy shape sat at
@@ -2671,8 +2733,9 @@ the migration finishes.</p>"""
     method = f"""<ul class="data-links">
   <li><b>Chips held</b> is the chips occupied by running work as a share of the chips the fleet had. On bare
     metal a job holds its whole VM - a <code>tpu_v7x_16_queue</code> job holds that VM's 8 chips, and while the VM
-    has no job all 8 are idle - over the chip-hours of the agents connected through {E(base["window"])}. On kube it is
-    Kueue's admitted chips against the cohort's quota over the window. Both count a chip from when work takes it
+    has no job all 8 are idle - plus the chips Kueue admitted on the GKE side, over the whole reservation's chip-hours
+    through {E(base["window"])}: a VM down for a rebalance or a repair counts as chips the fleet had and did not use.
+    On kube it is Kueue's admitted chips against the cohort's quota over the window. Both count a chip from when work takes it
     to when it lets go, whatever the TensorCores do meanwhile: occupancy, not compute.</li>
   <li><b>Idle while jobs waited</b> is, minute by minute, the idle chips that whole waiting jobs would have fit
     in, smallest jobs first, so a few chips too few for the job waiting do not count. On bare metal: Buildkite's
@@ -2690,8 +2753,13 @@ the migration finishes.</p>"""
     that starts after it compares like for like.</li>
   <li><b>The baseline</b> is the bare-metal fleet before the migration moved anything: it ends on 2026-09-28, the day
     the inferact project's VMs joined <code>tpu_v7x_8_queue</code>.</li>
-  <li><b>Not counted</b>: the 8 v7x chips the GKE disaggregated-serving lane had before the migration, whose jobs
-    ran outside the bare-metal queues.</li>
+  <li><b>The GKE side</b> of the reservation before the migration - v7x's 8-chip disaggregated-serving lane, v6e's
+    first 26-chip kube pool - is part of the fleet before: its chips in the reservation, Kueue's admitted chips as
+    held. Kueue's metrics begin on 2026-09-17; for the days before, its average from then is used.</li>
+  <li><b>Infrastructure failures</b> are failed jobs whose log ends in the fleet's fault - a full disk, a TPU that
+    would not start, a bus error, a kill for memory, an agent that died, a missing CI image, the Docker daemon, a
+    download - sorted from each failed job's log by <code>dashboard/baseline/failures.py</code>. A job cancelled
+    with its build is neither. The kube side is a snapshot of its own window; rerun the script to refresh it.</li>
 </ul>"""
 
     root = base["snapshot"]["gcs"]
