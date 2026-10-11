@@ -47,17 +47,16 @@ QUEUES = {
     "tpu_v6e_queue": ("v6e", 1),
     "tpu_v6e_8_queue": ("v6e", 8),
 }
-# Each generation's whole reservation, and the GKE clusters in the CI project
-# that held its chips beside the bare-metal VMs over the window: v7x's
-# disaggregated-serving cluster until it was removed on 2026-09-11, then the
-# Kueue worker; v6e's Kueue worker from 2026-09-11, before which those chips
-# stood unused. The page measures the fleet against the whole reservation, so a
-# VM down for a rebalance counts as chips the fleet had and did not use.
+# Each generation's whole reservation. Beside v7x's bare-metal VMs, its other 8
+# chips were a disaggregated-serving GKE cluster until it was removed on
+# 2026-09-11 for the Kueue workers - migration work, not the fleet before - so
+# the baseline holds those 8 chips at that cluster's own rate over the 30 days
+# before its removal, every hour. v6e's GKE chips are measured as they ran.
+# The page measures the fleet against the whole reservation, so a VM down for
+# a rebalance counts as chips the fleet had and did not use.
 RESERVATION = {"v7x": 128, "v6e": 128}
-GKE_CLUSTERS = {
-    "v7x": ("tpu-v7x-cluster-c", "tpu-ci-us-central1"),
-    "v6e": ("tpu-ci-us-east5",),
-}
+PRE_MIGRATION_GKE = {"v7x": ("tpu-v7x-cluster-c", 30)}
+GKE_CLUSTERS = {"v6e": ("tpu-ci-us-east5",)}
 START = dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc)
 END = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
 GCS = "gs://mhhua-tt-dev/premigration-snapshot-2026-09-29/"
@@ -96,32 +95,58 @@ def per_minute(snap: Path, metric: str, start: float, end: float) -> dict:
 
 
 def gke_held(start: float, end: float, hours: int) -> dict:
-    """Each generation's GKE chips held, an hour at a time: the TPU chips its
-    clusters' running containers requested, from GKE's system metrics in
-    Managed Prometheus - run with the dashboard's environment. Kueue's own
-    metrics begin only on 2026-09-17 and the disaggregated-serving cluster had
-    no Kueue, so every cluster is read the same way. An hour without pods holds
-    nothing; a cluster scaled to zero still had its reserved chips."""
+    """Each generation's GKE chips held, an hour at a time, from GKE's system
+    metrics in Managed Prometheus - run with the dashboard's environment: the
+    TPU chips running containers requested. For PRE_MIGRATION_GKE, a constant -
+    the cluster's chip-hours held over its last days, a share of its chips; for
+    GKE_CLUSTERS, the hours as they ran, an hour without pods holding nothing."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     import fleet
 
     fleet.LOCAL = True
     cfg = fleet.Config()
-    names = "|".join(n for clusters in GKE_CLUSTERS.values() for n in clusters)
-    request = (
-        f'kubernetes_io:container_accelerator_request{{project_id="{cfg.project}",'
-        f'resource_name="{fleet.TPU}",cluster_name=~"{names}"}}'
-    )
+
+    def request(names: str) -> str:
+        return (
+            f'kubernetes_io:container_accelerator_request{{project_id="{cfg.project}",'
+            f'resource_name="{fleet.TPU}",cluster_name=~"{names}"}}'
+        )
+
+    out, rates = {}, {}
+    for generation, (name, days) in PRE_MIGRATION_GKE.items():
+        chips = fleet.prom_range(
+            cfg,
+            f'count(kubernetes_io:node_accelerator_duty_cycle{{cluster_name="{name}"}})',
+            (),
+            int(start) - 120 * 86400,
+            int(end),
+            3600,
+        )
+        points = next(iter(chips.values()), [])
+        last, size = points[-1][0], max(v for _, v in points)
+        step = 900
+        held = fleet.prom_range(
+            cfg,
+            f"sum(last_over_time({request(name)}[2m]))",
+            (),
+            int(last) - days * 86400,
+            int(last),
+            step,
+        )
+        chip_hours = sum(v for _, v in next(iter(held.values()), [])) * step / 3600
+        rate = chip_hours / (size * days * 24)
+        rates[generation] = {"cluster": name, "days": days, "share": round(rate, 4)}
+        out[generation] = [round(rate * size, 2)] * hours
     step = 300
+    names = "|".join(n for clusters in GKE_CLUSTERS.values() for n in clusters)
     series = fleet.prom_range(
         cfg,
-        f"sum by (cluster_name) (last_over_time({request}[2m]))",
+        f"sum by (cluster_name) (last_over_time({request(names)}[2m]))",
         ("cluster_name",),
         int(start),
         int(end) - step,
         step,
     )
-    out = {}
     for generation, clusters in GKE_CLUSTERS.items():
         per_hour = [0.0] * hours
         for name in clusters:
@@ -129,7 +154,7 @@ def gke_held(start: float, end: float, hours: int) -> dict:
                 if start <= t < end:
                     per_hour[int((t - start) // 3600)] += v * step / 3600
         out[generation] = [round(v, 2) for v in per_hour]
-    return out
+    return out, rates
 
 
 def quantile(values: list, q: float) -> float | None:
@@ -323,7 +348,7 @@ def main() -> None:
             }
         )
 
-    gke = gke_held(start, end, hours)
+    gke, gke_rates = gke_held(start, end, hours)
     generations = []
     for generation in ("v7x", "v6e"):
         members = [q for q in queues if q["generation"] == generation]
@@ -370,6 +395,7 @@ def main() -> None:
                 "reservation": reserved,
                 "gke_chips": reserved - capacity,
                 "gke_mean_held": statistics.mean(lane),
+                "gke_pre_migration": gke_rates.get(generation),
                 "held": series,
                 "mean_held": statistics.mean(in_use),
                 "mean_connected": statistics.mean(had),
