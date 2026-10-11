@@ -475,6 +475,14 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
                 f"{name}: nominal_quota={quota} has to be whole {slice_chips}-chip "
                 f"slices and at most the {capacity} chips its pools can hold"
             )
+        # Chips the pool's floor keeps booted, which no other shape can use.
+        parked = 0 if hosts > 1 else int(pool.get("min_nodes") or 0) * chips
+        if parked > quota:
+            raise ValueError(
+                f"{name}: min_nodes parks {parked} chips, more than its "
+                f"nominal_quota={quota}; the rest would come out of another "
+                "shape's share of the reservation"
+            )
 
         memory_gb = machine_memory_gb.get(machine_type)
         if memory_gb is None:
@@ -504,6 +512,8 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
             "quota": quota,
             # Kueue's too: the most chips its pools can hold. See queues().
             "capacity": capacity,
+            # And this: what its quota cannot lend. See queues().
+            "parked": parked,
         }
     return out
 
@@ -561,6 +571,7 @@ def queues(
     checks: bool,
     reclaim: dict[str, str] | None = None,
     capacities: dict[str, int | None] | None = None,
+    parked: dict[str, int] | None = None,
 ) -> str:
     """A flavor per machine family, then a queue per shape sharing it.
 
@@ -569,6 +580,11 @@ def queues(
     than any one shape's pools, and Kueue counts chips, not nodes or slices: a
     workload admitted past the pools' size holds quota while its pods wait for
     hardware that cannot exist, where it should wait in the queue instead.
+
+    For the same reason a queue whose pools keep a floor of booted nodes lends
+    only its quota less the chips that floor parks: another shape admitted
+    against those chips would wait for hardware sitting idle in this shape's
+    nodes.
     """
     out = [priority_classes()] + [
         render("resource_flavor", ACCELERATOR=family)
@@ -588,6 +604,7 @@ def queues(
                 ADMISSION_CHECKS=dispatch_check(name, checks),
                 RECLAIM_WITHIN_COHORT=(reclaim or {}).get(name, "Never"),
                 BORROWING_LIMIT=borrowing_limit(chips, (capacities or {}).get(name)),
+                LENDING_LIMIT=lending_limit(chips, (parked or {}).get(name, 0)),
             )
         )
     return "".join(out)
@@ -598,6 +615,13 @@ def borrowing_limit(quota: int, capacity: int | None) -> str:
     if capacity is None:
         return ""
     return f"\n              borrowingLimit: {capacity - quota}"
+
+
+def lending_limit(quota: int, parked: int) -> str:
+    """The lendingLimit line a queue's quota carries, or nothing."""
+    if not parked:
+        return ""
+    return f"\n              lendingLimit: {quota - parked}"
 
 
 def fleet_secret_docs(tfvars: dict, namespace: str) -> str:
@@ -729,7 +753,7 @@ def launcher_profiles(
                         for key, value in entry["shape"].items()
                         # Kueue's, not the launcher's: what a shape's queue may
                         # hold says nothing about where one workload runs.
-                        if key not in ("quota", "capacity")
+                        if key not in ("quota", "capacity", "parked")
                     },
                     "max_runtime_seconds": int(tfvars["tpu_test_max_seconds"]),
                 }
@@ -818,6 +842,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             "hosts": 1,
             "quota": 0,
             "capacity": None,
+            "parked": 0,
             # What the compute class builds a node against. One size for the
             # lane; a step wanting another states its own manifest.
             **CPU_JOB_SIZE,
@@ -826,9 +851,10 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             # The shape is stored once, not summed: two clusters running it
             # run the same hardware. Only the quota adds up.
             entry = fleet.setdefault(
-                name, {"quota": 0, "capacity": None, "workers": [], "shape": shape}
+                name, {"quota": 0, "capacity": None, "parked": 0, "workers": [], "shape": shape}
             )
             entry["quota"] += shape["quota"]
+            entry["parked"] += shape["parked"]
             if shape["capacity"] is not None:
                 entry["capacity"] = (entry["capacity"] or 0) + shape["capacity"]
             entry["workers"].append(cluster_name)
@@ -1027,6 +1053,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             checks=True,
             reclaim=reclaim_policies(tfvars),
             capacities={name: entry["capacity"] for name, entry in fleet.items()},
+            parked={name: entry["parked"] for name, entry in fleet.items()},
         ),
     )
     write(

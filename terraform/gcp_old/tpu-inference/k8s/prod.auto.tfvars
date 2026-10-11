@@ -146,8 +146,14 @@ worker_clusters = [
     # 20), so 80 on 2x4 (ten slots) and 26 on 1x1; each pool can grow to all
     # 106, so a shape borrowing the cohort's idle quota can still boot the
     # nodes for it.
-    # min_nodes is the part that really does partition the reservation, since
-    # those chips stay with one shape once booted, so it is kept small.
+    # min_nodes does partition the reservation: those chips stay with one
+    # shape once booted, so that shape's queue does not lend them. The floors
+    # are there for start time. The reservation is paid for whether a node
+    # exists or not, v6e has the headroom (10-09 18:00 to 10-11 13:20 PT kube
+    # admitted 5% of these 106 chips), and a job on a booted node starts in
+    # 6-8 s (p50) against 190-215 s when it boots one. GKE boots nodes only
+    # for pending pods, so a floor fills from the first bursts and is kept
+    # from then on.
     tpu_node_pools = [
       {
         machine_type     = "ct6e-standard-1t"
@@ -155,7 +161,10 @@ worker_clusters = [
         reservation_name = "cloudtpu-20260828173000-731402396"
         zone             = "us-east5-a"
 
-        min_nodes     = 2
+        # Eight warm. Busy nodes 10-07..10-11: p90 4, p99 20. A replay puts
+        # the share of jobs that find a booted node at 81% with eight, from
+        # 57% with two.
+        min_nodes     = 8
         max_nodes     = 106
         nominal_quota = 26
       },
@@ -165,9 +174,10 @@ worker_clusters = [
         reservation_name = "cloudtpu-20260828173000-731402396"
         zone             = "us-east5-a"
 
-        # No floor: eight chips is too much of what is free to leave parked, so
-        # this shape boots a node per job.
-        min_nodes = 0
+        # Four warm (32 chips). Busy slots 10-07..10-11: p90 2, p99 10. A
+        # replay puts the share of jobs that find a booted node at 84% with
+        # four, from 67% with none.
+        min_nodes = 4
         # Ten slots guaranteed, and room for three more by borrowing whatever
         # the single-chip queue is not using.
         max_nodes     = 13
@@ -246,14 +256,16 @@ worker_clusters = [
         reclaim_within_cohort = "Any"
       },
       {
-        # Two slices nominal for the Kimi-K3 pairs. They take them back only
-        # from lower-priority borrowers: a nightly pair, unclassed like the
-        # steps borrowing its chips, waits for them to finish instead of
-        # evicting them, and Kueue admits a queue's own work within its
-        # nominal quota ahead of another queue's borrowing, so the slices go
-        # to it as they free up. Four slice pools, so 2x2x4 can borrow up to
-        # two more slices (64 chips) for v7x-32 tests and bring-ups when the
-        # cohort is idle.
+        # Two slices nominal for the Kimi-K3 pairs, taken back from any
+        # borrower, as 2x2x2 does. A pair needs all 32 chips at once, and
+        # waiting for borrowers does not get them: they return the chips four
+        # at a time to a backlog of 2x2x1 steps that takes each as it frees.
+        # On 10-11, with reclaim limited to lower-priority borrowers, the
+        # nightly pair (unclassed, below the pre-merge steps borrowing its
+        # chips) waited 2.2 h. An evicted step reruns from the start in a
+        # fresh pod. Four slice pools, so 2x2x4 can borrow up to two more
+        # slices (64 chips) for v7x-32 tests and bring-ups when the cohort is
+        # idle.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x4"
         reservation_name = "cloudtpu-20251114223000-2002888989"
@@ -262,7 +274,7 @@ worker_clusters = [
         slices        = 4
         nominal_quota = 32
 
-        reclaim_within_cohort = "LowerPriority"
+        reclaim_within_cohort = "Any"
       },
     ]
   },
