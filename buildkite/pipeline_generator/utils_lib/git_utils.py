@@ -78,35 +78,33 @@ def _record_infra_retry(attempts: int, outcome: str) -> None:
 
 
 def _is_transient(error: requests.RequestException) -> bool:
-    return isinstance(error, requests.ConnectionError) or (
-        isinstance(error, requests.HTTPError) and error.response.status_code >= 500
-    )
+    # A timeout is a connection failure too: a read timeout is not a
+    # ConnectionError subclass, but it is no answer from GitHub, unlike a 4xx.
+    if isinstance(error, requests.HTTPError):
+        return error.response.status_code >= 500
+    return isinstance(error, (requests.ConnectionError, requests.Timeout))
 
 
 def get_pr_labels(pull_request: str, repo_name: str) -> List[str]:
     if not pull_request or pull_request == "false":
         return []
     request_url = f"https://api.github.com/repos/{repo_name}/pulls/{pull_request}"
-    attempt = 0
-    outcome = "failed"
-    try:
-        while True:
-            attempt += 1
-            try:
-                response = requests.get(request_url)
-                response.raise_for_status()
-                outcome = "success"
-                break
-            except requests.RequestException as error:
-                if not _is_transient(error) or attempt == LABEL_FETCH_ATTEMPTS:
-                    raise
-                delay = 2**attempt
-                print(
-                    f"get_pr_labels failed (attempt {attempt}/{LABEL_FETCH_ATTEMPTS}); "
-                    f"retrying in {delay}s: {error}"
-                )
-                time.sleep(delay)
-    finally:
-        if attempt > 1:
-            _record_infra_retry(attempt, outcome)
+    for attempt in range(1, LABEL_FETCH_ATTEMPTS + 1):
+        try:
+            response = requests.get(request_url, timeout=30)
+            response.raise_for_status()
+            break
+        except requests.RequestException as error:
+            if not _is_transient(error) or attempt == LABEL_FETCH_ATTEMPTS:
+                if attempt > 1:
+                    _record_infra_retry(attempt, "failed")
+                raise
+            delay = 2**attempt
+            print(
+                f"get_pr_labels failed (attempt {attempt}/{LABEL_FETCH_ATTEMPTS}); "
+                f"retrying in {delay}s: {error}"
+            )
+            time.sleep(delay)
+    if attempt > 1:
+        _record_infra_retry(attempt, "success")
     return [label["name"] for label in response.json()["labels"]]

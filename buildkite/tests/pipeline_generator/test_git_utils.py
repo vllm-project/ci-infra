@@ -74,3 +74,14 @@ def test_get_pr_labels_ignores_missing_buildkite_agent(buildkite_job):
         git_utils.time, "sleep"
     ):
         assert git_utils.get_pr_labels("1", "o/r") == ["a"]
+
+
+def test_get_pr_labels_retries_read_timeout(buildkite_job):
+    responses = [requests.ReadTimeout(), _response(200, ["a"])]
+    with patch.object(
+        git_utils.requests, "get", side_effect=responses
+    ) as get, patch.object(git_utils.time, "sleep"):
+        assert git_utils.get_pr_labels("1", "o/r") == ["a"]
+
+    assert get.call_args.kwargs["timeout"] == 30
+    assert buildkite_job.call_args.args[0][-1] == "bootstrap-labels,2,success"
