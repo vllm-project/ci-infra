@@ -13,6 +13,8 @@ function /usr/bin/buildkite-agent() {
 }
 # The deployed hook uses GNU base64; also run these tests on macOS.
 function base64() { command base64 | tr -d '\n'; }
+# timeout(1) can't run the shell-function stub above; drop the time limit.
+function timeout() { shift; "$@"; }
 
 check() (
     name=$1 branch=$2 commit=$3 pr=$4 refspec=$5 expected=$6
