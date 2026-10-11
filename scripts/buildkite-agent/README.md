@@ -75,9 +75,13 @@ sudo systemctl enable --now buildkite-agent
   blip, `docker pull` failure, `nvidia-smi` hiccup. The agent preserves a
   hook's exit code as the job's exit status, and the generated pipeline steps
   automatically retry `exit_status: 255` (alongside `exit_status: -1`,
-  agent-lost), so one network blip can't kill a whole build. Keep every
-  provider call behind an explicit `exit 255` guard;
-  never let it fall through to the default exit 1.
+  agent-lost), so one network blip can't kill a whole build. Every provider
+  call retries in place first (5 attempts, sleeping 2/4/8/16 s, then exit 255),
+  written inline in each hook. Keep every provider call behind that loop;
+  never let it fall through to the default exit 1. Each retry that fires also
+  writes the build meta-data key `infra-retry:<job id>` (`github-token` from
+  `pre-checkout`, `image-pull` from `environment`; value
+  `<class>,<attempts>,<recovered|exhausted>`); a failed write never fails the job.
   Hooks are re-read at every job start, but merging a template change here does
   not update running hosts — re-install the hook on each affected agent with
   the Quick install commands above.
@@ -109,4 +113,7 @@ Run the hook regression checks with:
 
 ```bash
 bash scripts/buildkite-agent/tests/pre-checkout.sh
+bash scripts/buildkite-agent/tests/environment.sh   # bash 4+ and GNU grep (agent host or Linux)
 ```
+
+Both stub every external command, so they need no AWS credentials or GPU.
