@@ -24,18 +24,42 @@
 #   - exit 1   = genuine misconfiguration (wrong spawn count, stale CDI spec).
 #                The job fails immediately.
 #   - exit 255 = provider/infrastructure failure (AWS CLI / ECR, registry,
-#                docker pull, nvidia-smi driver hiccup). The agent preserves a
-#                hook's exit code as the job's exit status, and the generated
-#                pipeline steps auto-retry exit_status 255 (like agent-lost
-#                -1) — so one network blip doesn't kill the whole build.
+#                docker pull, nvidia-smi driver hiccup) that survived every
+#                in-hook retry. The agent preserves a hook's exit code as the
+#                job's exit status, and the generated pipeline steps auto-retry
+#                exit_status 255 (like agent-lost -1) — so one network blip
+#                doesn't kill the whole build.
 
-set -e
+set -eo pipefail
 
-# retry_exit: fail the job with 255 so the generated steps' automatic
-# exit_status 255 retry re-runs it. Use only for provider/infra failures.
-retry_exit() {
-  echo "ERROR: $1 (provider/infrastructure failure — exiting 255 to trigger the infra retry)" >&2
-  exit 255
+# Provider calls retry in place before giving up: 5 attempts, sleeping 2/4/8/16 s
+# between them, then exit 255 so the generated steps' automatic exit_status 255
+# retry re-runs the job. Use only for provider/infra failures.
+#
+# Every retry that fires also records "<class>,<attempts>,<outcome>" under the
+# build meta-data key infra-retry:<job id>. Recording must never fail the job.
+mark_retry() {
+  buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}" "image-pull,$1,$2" || true
+}
+
+# retry_or_fail <description> <command> [args...]
+retry_or_fail() {
+  local description=$1 attempt delay=2
+  shift
+  for (( attempt = 1; ; attempt++ )); do
+    if "$@"; then
+      (( attempt == 1 )) || mark_retry "$attempt" recovered
+      return 0
+    fi
+    if (( attempt >= 5 )); then
+      echo "ERROR: $description failed after $attempt attempts (provider/infrastructure failure — exiting 255 to trigger the infra retry)" >&2
+      mark_retry "$attempt" exhausted
+      exit 255
+    fi
+    echo "WARNING: $description failed (attempt $attempt/5); retrying in ${delay}s" >&2
+    sleep "$delay"
+    delay=$(( delay * 2 ))
+  done
 }
 
 # Number of MIG slices per GPU (7 for 1g.18gb, 4 for 1g.35gb).
@@ -53,12 +77,17 @@ export BUILDKITE_ANALYTICS_TOKEN="<analytics-token>"   # optional
 export HF_HOME=/mnt/vllm-ci
 
 # ── ECR login ─────────────────────────────────────────────────────────────────
-aws ecr-public get-login-password --region us-east-1 \
-  | docker login --username AWS --password-stdin public.ecr.aws \
-  || retry_exit "ECR public login failed"
-aws ecr get-login-password --region us-west-2 \
-  | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-west-2.amazonaws.com \
-  || retry_exit "ECR pull-through-cache login failed"
+# --cli-connect-timeout bounds one hung connect (the CLI default is 60 s).
+ecr_public_login() {
+  aws --cli-connect-timeout 10 ecr-public get-login-password --region us-east-1 \
+    | docker login --username AWS --password-stdin public.ecr.aws
+}
+ecr_cache_login() {
+  aws --cli-connect-timeout 10 ecr get-login-password --region us-west-2 \
+    | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-west-2.amazonaws.com
+}
+retry_or_fail "ECR public login" ecr_public_login
+retry_or_fail "ECR pull-through-cache login" ecr_cache_login
 
 # ── Pin this agent to one MIG slice ───────────────────────────────────────────
 # Agent names look like "<host>-<N>"; N selects the MIG device.
@@ -68,8 +97,9 @@ if [[ -z "$AGENT_NUMBER" ]]; then
   exit 1
 fi
 
-nvidia_smi_list=$(nvidia-smi -L) \
-  || retry_exit "nvidia-smi -L failed (driver/GPU hiccup)"
+# Assigns $nvidia_smi_list in the current shell so retry_or_fail can re-run it.
+list_gpus() { nvidia_smi_list=$(nvidia-smi -L); }
+retry_or_fail "nvidia-smi -L" list_gpus
 mapfile -t UUIDS < <(grep -oP 'UUID: \KMIG-[^\)]+' <<< "$nvidia_smi_list")
 if (( AGENT_NUMBER < 1 || AGENT_NUMBER > ${#UUIDS[@]} )); then
   echo "ERROR: Agent number $AGENT_NUMBER exceeds available MIG devices (${#UUIDS[@]})"
@@ -105,15 +135,20 @@ if [[ -n "$IMAGE" ]]; then
     echo "Image $IMAGE already pulled (done marker exists), skipping pull."
   else
     exec 9>"$LOCK_FILE"
-    if flock -n 9; then
-      echo "Pulling image $IMAGE (this agent won the lock)..."
-      docker pull "$IMAGE" || retry_exit "docker pull $IMAGE failed"
-      touch "$DONE_FILE"
-      echo "Image pull complete."
-    else
+    if ! flock -n 9; then
       echo "Waiting for another agent to finish pulling $IMAGE..."
       flock 9
+    fi
+    # We hold the lock: we won it, or the winner released it. The winner's pull
+    # succeeded only if it left the done marker; otherwise pull it ourselves.
+    # Retries hold the lock so the other agents wait instead of stampeding.
+    if [[ -f "$DONE_FILE" ]]; then
       echo "Image $IMAGE is now available."
+    else
+      echo "Pulling image $IMAGE..."
+      retry_or_fail "docker pull $IMAGE" docker pull "$IMAGE"
+      touch "$DONE_FILE"
+      echo "Image pull complete."
     fi
     exec 9>&-
   fi
