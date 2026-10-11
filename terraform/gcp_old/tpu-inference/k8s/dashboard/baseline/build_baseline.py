@@ -47,16 +47,17 @@ QUEUES = {
     "tpu_v6e_queue": ("v6e", 1),
     "tpu_v6e_8_queue": ("v6e", 8),
 }
-# Each generation's whole reservation. Beside v7x's bare-metal VMs, its other 8
-# chips were a disaggregated-serving GKE cluster until it was removed on
-# 2026-09-11 for the Kueue workers - migration work, not the fleet before - so
-# the baseline holds those 8 chips at that cluster's own rate over the 30 days
-# before its removal, every hour. v6e's GKE chips are measured as they ran.
-# The page measures the fleet against the whole reservation, so a VM down for
-# a rebalance counts as chips the fleet had and did not use.
-RESERVATION = {"v7x": 128, "v6e": 128}
+# The chips each generation's fleet had before the migration. v7x: its whole
+# reservation, the bare-metal VMs and 8 chips that were a disaggregated-serving
+# GKE cluster until it was removed on 2026-09-11 for the Kueue workers -
+# migration work, not the fleet before - held every hour at that cluster's own
+# rate over its 30 days before. v6e: its 102 bare-metal chips; the
+# reservation's other 26 stood unused until kube's v6e worker took them, and
+# are left out. The page measures the fleet against these chips, so a VM down
+# for a rebalance counts as chips the fleet had and did not use.
+RESERVATION = {"v7x": 128, "v6e": 102}
 PRE_MIGRATION_GKE = {"v7x": ("tpu-v7x-cluster-c", 30)}
-GKE_CLUSTERS = {"v6e": ("tpu-ci-us-east5",)}
+GKE_CLUSTERS: dict = {}
 START = dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc)
 END = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
 GCS = "gs://mhhua-tt-dev/premigration-snapshot-2026-09-29/"
@@ -137,6 +138,8 @@ def gke_held(start: float, end: float, hours: int) -> dict:
         rate = chip_hours / (size * days * 24)
         rates[generation] = {"cluster": name, "days": days, "share": round(rate, 4)}
         out[generation] = [round(rate * size, 2)] * hours
+    if not GKE_CLUSTERS:
+        return out, rates
     step = 300
     names = "|".join(n for clusters in GKE_CLUSTERS.values() for n in clusters)
     series = fleet.prom_range(
@@ -385,7 +388,7 @@ def main() -> None:
         capacity = sum(q["capacity"] for q in members)
         reserved = RESERVATION[generation]
         # Capped at the reservation's GKE share, which the VMs left over.
-        lane = [min(v, reserved - capacity) for v in gke[generation]]
+        lane = [min(v, reserved - capacity) for v in gke.get(generation, [0.0] * hours)]
         # Held is bare metal's jobs and the GKE side's admitted chips; every
         # share is of the reservation, an hour of it being `reserved` chips.
         in_use = [s + g for s, g in zip(series, lane)]
@@ -443,6 +446,10 @@ def main() -> None:
                     round(100 * held_at[h] / had_at[h], 1) if had_at[h] else None
                     for h in range(24)
                 ],
+                # The wait for an agent across the generation's queues, for the
+                # page's headline beside its shapes'.
+                "wait_p50": quantile([w for q in QUEUES if QUEUES[q][0] == generation for w in waits[q]], 0.5),
+                "wait_p90": quantile([w for q in QUEUES if QUEUES[q][0] == generation for w in waits[q]], 0.9),
                 "peak_held": max(series),
                 "chip_hours": round(sum(series)),
                 "jobs": sum(q["jobs"] for q in members),

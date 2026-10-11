@@ -509,3 +509,10 @@ table.days tr.total td { border-top: 1px solid var(--line); }
 /* A median line beside its p90: the same hue, dashed and thinner. */
 .line.p50 { stroke-width: 1.5; stroke-dasharray: 4 3; } .area.p50 { display: none; }
 i.k.p50 { opacity: 0.55; }
+
+/* Migration: a generation's line under its tiles, and a block a shape. */
+.gen-line { margin: 2px 0 6px; font-size: 13px; color: var(--ink-2); }
+.shape-block { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 12px; }
+.shape-block h4 { margin: 0 0 4px; font-size: 15px; }
+.shape-block h4 .muted { font-weight: 400; font-size: 13px; }
+.shape-facts { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 0 0 6px; font-size: 13px; }

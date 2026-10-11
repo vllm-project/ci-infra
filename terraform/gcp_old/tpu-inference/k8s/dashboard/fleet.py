@@ -1048,7 +1048,21 @@ FROM `{cfg.timing_table}`
 WHERE submitted_at >= TIMESTAMP_SECONDS({start}) AND submitted_at < TIMESTAMP_SECONDS({end})
   AND quota_reserved_at IS NOT NULL
 GROUP BY queue, bucket""")
-    return {"start": start, "bucket": bucket, "count": -(-seconds // bucket), "rows": rows}
+    # And each cohort's across the window, for the page's headline.
+    overall = bigquery(cfg, f"""
+SELECT SPLIT(queue, '-')[OFFSET(0)] AS prefix,
+  APPROX_QUANTILES({wait}, 100)[OFFSET(50)] AS p50, APPROX_QUANTILES({wait}, 100)[OFFSET(90)] AS p90
+FROM `{cfg.timing_table}`
+WHERE submitted_at >= TIMESTAMP_SECONDS({start}) AND submitted_at < TIMESTAMP_SECONDS({end})
+  AND quota_reserved_at IS NOT NULL
+GROUP BY prefix""")
+    return {
+        "start": start,
+        "bucket": bucket,
+        "count": -(-seconds // bucket),
+        "rows": rows,
+        "overall": {r["prefix"]: {"p50": float(r["p50"]), "p90": float(r["p90"])} for r in overall},
+    }
 
 
 def fetch_jobs(cfg: Config, start: int, end: int) -> list[dict]:
