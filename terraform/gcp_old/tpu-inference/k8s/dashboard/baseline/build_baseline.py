@@ -47,11 +47,17 @@ QUEUES = {
     "tpu_v6e_queue": ("v6e", 1),
     "tpu_v6e_8_queue": ("v6e", 8),
 }
-# Each generation's whole reservation and the Kueue cohort of its GKE side: the
-# chips GKE already had beside the bare-metal VMs (v7x's disaggregated-serving
-# lane, v6e's first kube pool). The page measures the fleet against all of it,
-# so a VM down for a rebalance counts as chips the fleet had and did not use.
-RESERVATION = {"v7x": (128, "tpu7x"), "v6e": (128, "ct6e")}
+# Each generation's whole reservation, and the GKE clusters in the CI project
+# that held its chips beside the bare-metal VMs over the window: v7x's
+# disaggregated-serving cluster until it was removed on 2026-09-11, then the
+# Kueue worker; v6e's Kueue worker from 2026-09-11, before which those chips
+# stood unused. The page measures the fleet against the whole reservation, so a
+# VM down for a rebalance counts as chips the fleet had and did not use.
+RESERVATION = {"v7x": 128, "v6e": 128}
+GKE_CLUSTERS = {
+    "v7x": ("tpu-v7x-cluster-c", "tpu-ci-us-central1"),
+    "v6e": ("tpu-ci-us-east5",),
+}
 START = dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc)
 END = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
 GCS = "gs://mhhua-tt-dev/premigration-snapshot-2026-09-29/"
@@ -90,39 +96,39 @@ def per_minute(snap: Path, metric: str, start: float, end: float) -> dict:
 
 
 def gke_held(start: float, end: float, hours: int) -> dict:
-    """Each generation's GKE chips Kueue admitted, an hour at a time, from
-    Managed Prometheus - run with the dashboard's environment (KUEUE_METRICS_CLUSTER
-    and the rest) - and how many hours before its metrics begin, 2026-09-17,
-    were filled with the measured mean."""
+    """Each generation's GKE chips held, an hour at a time: the TPU chips its
+    clusters' running containers requested, from GKE's system metrics in
+    Managed Prometheus - run with the dashboard's environment. Kueue's own
+    metrics begin only on 2026-09-17 and the disaggregated-serving cluster had
+    no Kueue, so every cluster is read the same way. An hour without pods holds
+    nothing; a cluster scaled to zero still had its reserved chips."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     import fleet
 
     fleet.LOCAL = True
     cfg = fleet.Config()
-    usage = fleet.current(
-        f'kueue_cluster_queue_resource_usage{{{fleet.kueue_selector(cfg)},resource="{fleet.TPU}"}}',
-        "cluster_queue, flavor, resource",
+    names = "|".join(n for clusters in GKE_CLUSTERS.values() for n in clusters)
+    request = (
+        f'kubernetes_io:container_accelerator_request{{project_id="{cfg.project}",'
+        f'resource_name="{fleet.TPU}",cluster_name=~"{names}"}}'
     )
+    step = 300
     series = fleet.prom_range(
-        cfg, f"sum by (cluster_queue) ({usage})", ("cluster_queue",), int(start), int(end), 300
+        cfg,
+        f"sum by (cluster_name) (last_over_time({request}[2m]))",
+        ("cluster_name",),
+        int(start),
+        int(end) - step,
+        step,
     )
     out = {}
-    for generation, (_, cohort) in RESERVATION.items():
-        at = collections.Counter()
-        for queue, points in series.items():
-            if queue.startswith(cohort):
-                for t, v in points:
-                    at[t] += v
-        per_hour = collections.defaultdict(list)
-        for t, v in at.items():
-            if start <= t < end:
-                per_hour[int((t - start) // 3600)].append(v)
-        measured = {i: statistics.mean(v) for i, v in per_hour.items()}
-        fill = statistics.mean(measured.values()) if measured else 0.0
-        out[generation] = (
-            [round(measured.get(i, fill), 2) for i in range(hours)],
-            sum(1 for i in range(hours) if i not in measured),
-        )
+    for generation, clusters in GKE_CLUSTERS.items():
+        per_hour = [0.0] * hours
+        for name in clusters:
+            for t, v in series.get(name, []):
+                if start <= t < end:
+                    per_hour[int((t - start) // 3600)] += v * step / 3600
+        out[generation] = [round(v, 2) for v in per_hour]
     return out
 
 
@@ -324,8 +330,9 @@ def main() -> None:
         series = [round(sum(v), 2) for v in zip(*(q["held"] for q in members))]
         had = [sum(v) for v in zip(*(q["connected_mean"] for q in members))]
         capacity = sum(q["capacity"] for q in members)
-        reserved, _ = RESERVATION[generation]
-        lane, filled = gke[generation]
+        reserved = RESERVATION[generation]
+        # Capped at the reservation's GKE share, which the VMs left over.
+        lane = [min(v, reserved - capacity) for v in gke[generation]]
         # Held is bare metal's jobs and the GKE side's admitted chips; every
         # share is of the reservation, an hour of it being `reserved` chips.
         in_use = [s + g for s, g in zip(series, lane)]
@@ -363,7 +370,6 @@ def main() -> None:
                 "reservation": reserved,
                 "gke_chips": reserved - capacity,
                 "gke_mean_held": statistics.mean(lane),
-                "gke_filled_hours": filled,
                 "held": series,
                 "mean_held": statistics.mean(in_use),
                 "mean_connected": statistics.mean(had),
@@ -418,7 +424,7 @@ def main() -> None:
     for g in generations:
         print(
             f"  {g['name']}: held {g['held_share']:.1%} of {g['reservation']} reserved chips "
-            f"(GKE side {g['gke_mean_held']:.1f} of {g['gke_chips']}, {g['gke_filled_hours']} h filled), "
+            f"(GKE side {g['gke_mean_held']:.1f} of {g['gke_chips']}), "
             f"VMs down {g['down_share']:.1%}, idle while jobs waited {g['stranded_share']:.1%}"
         )
 

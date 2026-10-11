@@ -2753,9 +2753,10 @@ the migration finishes.</p>"""
     that starts after it compares like for like.</li>
   <li><b>The baseline</b> is the bare-metal fleet before the migration moved anything: it ends on 2026-09-28, the day
     the inferact project's VMs joined <code>tpu_v7x_8_queue</code>.</li>
-  <li><b>The GKE side</b> of the reservation before the migration - v7x's 8-chip disaggregated-serving lane, v6e's
-    first 26-chip kube pool - is part of the fleet before: its chips in the reservation, Kueue's admitted chips as
-    held. Kueue's metrics begin on 2026-09-17; for the days before, its average from then is used.</li>
+  <li><b>The GKE side</b> of the reservation is part of the fleet before: v7x's 8 chips and v6e's 26, held as the
+    TPU chips its running pods requested (GKE's container metrics). For v7x that is the disaggregated-serving
+    cluster until it was removed on 2026-09-11 - scaled to zero most of the time - then the Kueue worker; v6e's
+    chips stood unused until its Kueue worker came up the same day.</li>
   <li><b>Infrastructure failures</b> are failed jobs whose log ends in the fleet's fault - a full disk, a TPU that
     would not start, a bus error, a kill for memory, an agent that died, a missing CI image, the Docker daemon, a
     download - sorted from each failed job's log by <code>dashboard/baseline/failures.py</code>. A job cancelled
