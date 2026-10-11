@@ -168,6 +168,9 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         "limit": 1,
     }
     assert {"exit_status": 134, "limit": 1} in command_step.retry["automatic"]
+    assert all(
+        r.get("signal_reason") != "cancel" for r in command_step.retry["automatic"]
+    )
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")

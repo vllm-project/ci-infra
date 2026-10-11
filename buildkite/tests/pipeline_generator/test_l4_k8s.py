@@ -109,6 +109,13 @@ def test_l4_step_without_num_devices_defaults_to_one_gpu():
     assert container["resources"]["requests"]["cpu"] == "10"
 
 
+def test_k8s_retry_counts_timeouts_separately_ahead_of_agent_lost():
+    assert buildkite_step.K8S_RETRY["automatic"][:2] == [
+        {"exit_status": -1, "signal_reason": "cancel", "limit": 1},
+        {"exit_status": -1, "limit": 1},
+    ]
+
+
 def test_l4_step_keeps_explicit_retry():
     explicit_retry = {"automatic": [{"exit_status": 5, "limit": 3}]}
     command_step = _render_command_step(
@@ -117,7 +124,7 @@ def test_l4_step_keeps_explicit_retry():
 
     assert command_step.agents == {"queue": AgentQueue.L4_K8S}
     # K8S_RETRY is not applied; the explicit retry only gets the repo-wide
-    # exit-status -1/255 retry that main adds to every step.
+    # exit-status -1/255/128 retry that main adds to every step.
     assert command_step.retry == buildkite_step.ensure_infra_failure_retry(
         explicit_retry
     )
@@ -145,12 +152,14 @@ def test_non_l4_steps_keep_existing_routing(device, num_devices, queue):
     command_step = _render_command_step(step)
 
     assert command_step.agents == {"queue": queue}
-    # Every step gets the repo-wide exit-status -1/255 retry; non-l4 steps get
+    # Every step gets the repo-wide exit-status -1/255/128 retry; non-l4 steps get
     # nothing beyond it (in particular not K8S_RETRY).
     assert command_step.retry == {
         "automatic": [
+            buildkite_step.TIMEOUT_RETRY,
             buildkite_step.EXIT_STATUS_NEGATIVE_ONE_RETRY,
             buildkite_step.EXIT_STATUS_255_RETRY,
+            buildkite_step.EXIT_STATUS_128_RETRY,
         ]
     }
     if device in ("h100", "a100"):

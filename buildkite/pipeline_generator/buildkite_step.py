@@ -41,16 +41,22 @@ PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
+# A job that hits its timeout also reports exit status -1. It gets its own rule
+# ahead of the general -1 rule so timeout retries are counted separately.
+TIMEOUT_RETRY = {"exit_status": -1, "signal_reason": "cancel", "limit": 1}
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 # The self-hosted GPU agent hooks exit 255 on provider/infrastructure failures
 # (ECR login, secret-store fetch, docker pull). The agent preserves a hook's
 # exit code as the job's exit status, so retry 255 like agent-lost.
 EXIT_STATUS_255_RETRY = {"exit_status": 255, "limit": 1}
+# Checkout failures happen before the test starts, so a retry can't mask one.
+EXIT_STATUS_128_RETRY = {"exit_status": 128, "limit": 1}
 
 # Pod-level failures on EKS surface as agent stops / lost pods rather than
 # clean non-zero exits, which exit-code-only retries would miss.
 K8S_RETRY = {
     "automatic": [
+        TIMEOUT_RETRY,
         EXIT_STATUS_NEGATIVE_ONE_RETRY,
         {"exit_status": 1, "limit": 1},
         {"exit_status": 128, "limit": 1},
@@ -931,7 +937,7 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
 def ensure_infra_failure_retry(
     retry: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Add one-time retries for agent-lost (-1) and provider hook (255) failures."""
+    """Add one-time retries for agent-lost/timeout (-1), provider hook (255) and checkout (128) failures."""
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -958,7 +964,12 @@ def ensure_infra_failure_retry(
             existing_statuses.add(exit_status)
     infra_conditions = [
         dict(condition)
-        for condition in (EXIT_STATUS_NEGATIVE_ONE_RETRY, EXIT_STATUS_255_RETRY)
+        for condition in (
+            TIMEOUT_RETRY,
+            EXIT_STATUS_NEGATIVE_ONE_RETRY,
+            EXIT_STATUS_255_RETRY,
+            EXIT_STATUS_128_RETRY,
+        )
         if condition["exit_status"] not in existing_statuses
     ]
     retry_policy["automatic"] = [*infra_conditions, *automatic_conditions]
