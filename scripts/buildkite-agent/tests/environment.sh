@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Exercise the real environment hook with every external command stubbed
+# (aws, docker, nvidia-smi, flock, sleep, buildkite-agent), so it needs no AWS
+# credentials, GPU or agent. Needs bash 4+ and GNU grep like the hook itself:
+# run it on an agent host or in a Linux container, not under macOS bash 3.2.
+set -euo pipefail
+(( BASH_VERSINFO[0] >= 4 )) || { echo "SKIP: needs bash 4+" >&2; exit 0; }
+
+src=$(cd "$(dirname "$0")/.." && pwd)/environment
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp" "/tmp/docker-pull-locks/test_image_$$"*' EXIT
+mkdir "$tmp/bin"
+# The hook ends by sourcing a host-only script; run everything before it.
+sed '/buildkite-gpu-cdi-env.sh/,$d' "$src" >"$tmp/environment"
+
+# A stub fails its first $FAIL_<NAME> calls, then succeeds. Calls are logged to
+# $tmp/<name>.log and sleeps to $tmp/sleep.log.
+stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" >"$tmp/bin/$1"; chmod +x "$tmp/bin/$1"; }
+counted='n=$(cat "$T/$N.log" 2>/dev/null | wc -l); echo "$*" >>"$T/$N.log"; (( n >= FAIL )) || exit 1'
+stub aws "N=aws FAIL=\${FAIL_AWS:-0} T=$tmp; $counted"   # empty stdout: only pipefail sees it fail
+stub nvidia-smi "N=smi FAIL=\${FAIL_SMI:-0} T=$tmp; $counted; echo '  MIG 1g.18gb Device 0: (UUID: MIG-abc)'"
+stub docker "[[ \$1 == login ]] && { cat >/dev/null; exit 0; }; N=pull FAIL=\${FAIL_PULL:-0} T=$tmp; $counted"
+stub sleep "echo \$1 >>$tmp/sleep.log"
+# WAITER=1 loses the non-blocking lock; WAITER_DONE=<file> is created when the blocking wait ends.
+stub flock "[[ \$1 == -n ]] && { [[ -z \${WAITER:-} ]]; exit; }; [[ -z \${WAITER_DONE:-} ]] || touch \$WAITER_DONE; exit 0"
+stub buildkite-agent "echo \"\$4\" >>$tmp/marks.log; [[ -z \${MARK_FAILS:-} ]]"
+
+# run <name> <expected-status> <expected-mark|-> <expected-sleeps|-> [VAR=val...]
+run() {
+    local name=$1 want=$2 mark=$3 sleeps=$4 status=0
+    shift 4
+    rm -f "$tmp"/*.log
+    rm -f "/tmp/docker-pull-locks/test_image_$$"*
+    env "$@" PATH="$tmp/bin:$PATH" BUILDKITE_AGENT_NAME=host-1 BUILDKITE_JOB_ID=job-1 \
+        BUILDKITE_PLUGIN_DOCKER_IMAGE="test/image:$$" \
+        bash "$tmp/environment" >/dev/null 2>"$tmp/stderr" || status=$?
+    [[ "$status" -eq "$want" ]] || { echo "FAIL $name: expected status $want, got $status"; cat "$tmp/stderr"; exit 1; }
+    [[ "$mark" == - ]] || [[ "$(cat "$tmp/marks.log" 2>/dev/null || true)" == "$mark" ]] ||
+        { echo "FAIL $name: mark was '$(cat "$tmp/marks.log" 2>/dev/null)', want '$mark'"; exit 1; }
+    [[ "$sleeps" == - ]] || [[ "$(cat "$tmp/sleep.log" 2>/dev/null | tr '\n' ' ')" == "$sleeps" ]] ||
+        { echo "FAIL $name: sleeps '$(cat "$tmp/sleep.log" 2>/dev/null | tr '\n' ' ')', want '$sleeps'"; exit 1; }
+    printf 'PASS %s\n' "$name"
+}
+calls() { cat "$tmp/$1.log" 2>/dev/null | wc -l | tr -d ' '; }
+
+run all-pass 0 '' ''
+run login-blip 0 'image-pull,3,recovered' '2 4 ' FAIL_AWS=2
+grep -q 'failed (attempt 1/5); retrying in 2s' "$tmp/stderr" || { echo "FAIL log line"; exit 1; }
+run login-down 255 'image-pull,5,exhausted' '2 4 8 16 ' FAIL_AWS=99
+[[ $(calls aws) -eq 5 ]] || { echo "FAIL login-down: aws called $(calls aws) times"; exit 1; }
+grep -q -- '--cli-connect-timeout 10' "$tmp/aws.log" || { echo "FAIL aws timeout flag"; exit 1; }
+run nvidia-smi-blip 0 'image-pull,2,recovered' '2 ' FAIL_SMI=1
+run nvidia-smi-down 255 'image-pull,5,exhausted' '2 4 8 16 ' FAIL_SMI=99
+run pull-blip 0 'image-pull,2,recovered' '2 ' FAIL_PULL=1
+run pull-down 255 'image-pull,5,exhausted' '2 4 8 16 ' FAIL_PULL=99
+run mark-write-fails-blip 0 - '2 ' FAIL_PULL=1 MARK_FAILS=1
+run mark-write-fails-down 255 - '2 4 8 16 ' FAIL_PULL=99 MARK_FAILS=1
+
+# Waiter: the winner's pull failed (no done marker), so the waiter pulls itself.
+run waiter-pulls 0 '' '' WAITER=1
+[[ $(calls pull) -eq 1 ]] || { echo "FAIL waiter-pulls: pull called $(calls pull) times"; exit 1; }
+run waiter-retries 0 'image-pull,3,recovered' '2 4 ' WAITER=1 FAIL_PULL=2
+run waiter-down 255 'image-pull,5,exhausted' '2 4 8 16 ' WAITER=1 FAIL_PULL=99
+# Waiter: the winner's pull succeeded (done marker appears), so no pull.
+run waiter-sees-done 0 '' '' WAITER=1 WAITER_DONE="/tmp/docker-pull-locks/test_image_$$.lock.done"
+[[ $(calls pull) -eq 0 ]] || { echo "FAIL waiter-sees-done: pulled"; exit 1; }
