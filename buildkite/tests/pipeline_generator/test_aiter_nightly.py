@@ -316,9 +316,7 @@ def _generator(fake_global_config, monkeypatch, tmp_path, steps):
 
 
 def test_generate_uploads_the_nightly(fake_global_config, monkeypatch, tmp_path):
-    generator, annotations = _generator(
-        fake_global_config, monkeypatch, tmp_path, _steps()
-    )
+    generator, _ = _generator(fake_global_config, monkeypatch, tmp_path, _steps())
     generator.generate()
 
     uploaded = yaml.safe_load((tmp_path / "pipeline.yaml").read_text())
@@ -335,7 +333,6 @@ def test_generate_uploads_the_nightly(fake_global_config, monkeypatch, tmp_path)
     for job in jobs.values():
         for dependency in job.get("depends_on") or []:
             assert dependency in jobs, (job["key"], dependency)
-    assert any("AITER nightly" in text for text, _ in annotations)
 
 
 def test_generate_fails_on_a_dropped_dependency(
