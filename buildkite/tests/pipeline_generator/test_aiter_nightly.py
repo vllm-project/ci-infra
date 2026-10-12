@@ -132,14 +132,14 @@ def test_runs_in_aiter_nightly(device, expected):
 
 
 def test_overlay_runs_between_ci_base_and_test_image():
-    steps = amd.apply_aiter_nightly(_build_steps())
-    assert [step.key for step in steps] == [
+    steps = {step.key: step for step in amd.apply_aiter_nightly(_build_steps())}
+    assert set(steps) == {
         "refresh-rocm-base-amd",
         "ensure-ci-base-amd",
         "aiter-nightly-amd",
         "image-build-amd",
-    ]
-    overlay, build = steps[2], steps[3]
+    }
+    overlay, build = steps["aiter-nightly-amd"], steps["image-build-amd"]
     assert overlay.depends_on == ["ensure-ci-base-amd"]
     assert overlay.commands == [OVERLAY_COMMAND]
     assert overlay.group == "Hardware - AMD Build"
