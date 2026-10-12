@@ -1513,6 +1513,34 @@
     "reference_url": "https://github.com/vllm-project/vllm/pull/56997",
     "notes": "PR #56997 changed Humming/NVFP4 backend priority on SM90; its PR CI blocked all 14 basic-models-tests-extra-initialization shards. Post-merge daily 93187 failed shard 14 five times on NVFP4 init cases. Fixed by #60337; exact shard passed in #93391. Selector trial note (v7 record): the selector's answer for #56997 had basic-models-tests-extra-initialization in would_add \u2014 it would have run the lane. Found by @Sherlock's main-CI audit, recorded by kimi-no-na-wa."
    }
+  },
+  {
+   "id": "pr-57169-main-93915-arm-cpu-test-shard-2",
+   "job_name": "Arm CPU Test Shard %N",
+   "job_key": "arm-cpu-test",
+   "culprit_pr": {
+    "number": 57169,
+    "url": "https://github.com/vllm-project/vllm/pull/57169",
+    "merge_commit": "02e55d2af38adab51ec5ffb985063d355b20805b"
+   },
+   "pr_ci": {
+    "ran": false,
+    "state": "blocked",
+    "build_number": 93879,
+    "job_id": "01a1218a-7931-4db4-9263-9f868ce84dca",
+    "url": "https://buildkite.com/vllm/ci/builds/93879#01a1218a-7931-4db4-9263-9f868ce84dca"
+   },
+   "main_failure": {
+    "build_number": 93915,
+    "job_id": "01a12339-1833-4d9f-a9ea-f371f7b0318b",
+    "url": "https://buildkite.com/vllm/ci/builds/93915#01a12339-1833-4d9f-a9ea-f371f7b0318b",
+    "signature": "CPU fallback signature mismatch \u2014 Arm CPU Test Shard 2 failed on first post-merge main (alert #3810), six consecutive failures"
+   },
+   "causal_confirmation": {
+    "kind": "code_analysis",
+    "reference_url": "https://github.com/vllm-project/vllm/pull/57169",
+    "notes": "PR #57169 (GLM-5.3-Flash generic packed KV layout) merged with all Arm CPU Test shards blocked in PR build 93879; first post-merge main 93915 failed Shard 2 with a CPU fallback signature mismatch and it has failed six consecutive times. Found by @Sherlock's main-CI audit during host-outage catch-up; recorded by kimi-no-na-wa."
+   }
   }
  ]
 }
