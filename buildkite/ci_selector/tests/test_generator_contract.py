@@ -313,9 +313,9 @@ def test_our_replica_behaves_like_the_generators_own_rule():
     Upstream needs a few things we have to supply: its global config, a step
     type, and its AMD-device test, which we substitute with our own
     `family_of_device`. So this checks the branch structure and its order, not
-    those substituted parts, which have their own guards. The three branches we
-    deliberately do not model (NOAUTO, only_step_keys, nightly) are pinned off
-    here rather than left to chance.
+    those substituted parts, which have their own guards. The branches we
+    deliberately do not model (AITER nightly, NOAUTO, only_step_keys, nightly)
+    are pinned off here rather than left to chance.
 
     Still an exec of the generator's source rather than a direct call, because
     the substitutions are the point: calling `_step_should_run` itself would
@@ -336,7 +336,12 @@ def test_our_replica_behaves_like_the_generators_own_rule():
     )
     from ci_selector.validate.generator_replica import step_should_run
 
-    config = {"only_step_keys": None, "nightly": "0", "run_all": False}
+    config = {
+        "aiter_nightly": "0",
+        "only_step_keys": None,
+        "nightly": "0",
+        "run_all": False,
+    }
     namespace = {
         "os": os,
         "List": List,

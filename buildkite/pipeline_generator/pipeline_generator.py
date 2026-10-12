@@ -7,9 +7,9 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 import yaml
 
 from amd import (
-    aiter_nightly_dind_steps,
     apply_aiter_nightly,
     is_amd_device,
+    is_amd_gpu_device,
     normalize_amd_depends_on,
     runs_in_aiter_nightly,
 )
@@ -34,7 +34,6 @@ from constants import AgentQueue
 from recorder_switches import fnrec_enabled
 import selector_gate
 from global_config import get_global_config, init_global_config
-from constants import DeviceType
 from step import Step, group_steps, read_steps_from_job_dir
 import unblock_jobs
 
@@ -110,17 +109,10 @@ class PipelineGenerator:
                 _annotate_best_effort(str(error), style="error")
                 raise
             # The steps are dropped further downstream (see runs_in_aiter_nightly).
-            message = (
-                "AITER nightly: only native AMD jobs on gfx942/gfx950 "
-                "(MI300, MI325, MI355) run."
+            _annotate_best_effort(
+                "AITER nightly: only the AMD build steps and the AMD GPU jobs "
+                "on gfx942/gfx950 (MI300, MI325, MI355) run."
             )
-            dropped_dind = aiter_nightly_dind_steps(steps)
-            if dropped_dind:
-                message += (
-                    " Dropped DinD jobs, which would test the stock AITER: "
-                    + ", ".join(dropped_dind)
-                )
-            _annotate_best_effort(message, style="warning" if dropped_dind else None)
 
         record = _selector_decision(steps)
         scheduled = None
@@ -141,6 +133,8 @@ class PipelineGenerator:
                 torch_nightly=torch_nightly,
                 aiter_nightly=aiter_nightly,
             )
+            if aiter_nightly:
+                check_aiter_nightly_dependencies(steps)
         except ValueError as error:
             if not (record and record["applied"]):
                 # Surface the reason on the build page, not only in the bootstrap log.
@@ -382,9 +376,7 @@ def select_steps_and_dependencies(
         dependencies_by_key[step.key] = step.depends_on or []
         if is_amd_device(step.device):
             amd_step_keys.add(step.key)
-        if step.device == DeviceType.AMD_CPU.value or runs_in_aiter_nightly(
-            step.device, step.dind
-        ):
+        if runs_in_aiter_nightly(step.device):
             aiter_nightly_keys.add(step.key)
 
         # AMD mirrors are uploaded as generated `amd-<key>` steps, so retry
@@ -399,9 +391,7 @@ def select_steps_and_dependencies(
                 amd_mirror.get("depends_on")
             )
             amd_step_keys.add(mirror_key)
-            if runs_in_aiter_nightly(
-                amd_mirror.get("device"), amd_mirror.get("dind", True)
-            ):
+            if runs_in_aiter_nightly(amd_mirror.get("device")):
                 aiter_nightly_keys.add(mirror_key)
 
     missing = requested_step_keys - steps_by_key.keys()
@@ -419,8 +409,9 @@ def select_steps_and_dependencies(
         excluded_keys = requested_step_keys - aiter_nightly_keys
         if excluded_keys:
             raise ValueError(
-                "CI step key(s) requested, but AITER nightly runs only native AMD "
-                "jobs on gfx942/gfx950: " + ", ".join(sorted(excluded_keys))
+                "CI step key(s) requested, but AITER nightly runs only the AMD "
+                "build steps and AMD GPU jobs on gfx942/gfx950: "
+                + ", ".join(sorted(excluded_keys))
             )
 
     selected_step_keys = set(requested_step_keys)
@@ -442,6 +433,41 @@ def select_steps_and_dependencies(
         if step.key in selected_step_keys or f"amd-{step.key}" in selected_step_keys
     ]
     return selected, frozenset(selected_step_keys)
+
+
+def check_aiter_nightly_dependencies(steps: List[Step]) -> None:
+    """Fail if a step the AITER nightly keeps depends on one it drops.
+
+    The uploaded pipeline would name a step that is not in it.
+    """
+    kept = {}
+    dropped = set()
+    for step in steps:
+        key = step.key or _generate_step_key(step.label)
+        if runs_in_aiter_nightly(step.device):
+            depends_on = step.depends_on or []
+            if is_amd_gpu_device(step.device):
+                depends_on = normalize_amd_depends_on(depends_on)
+            kept[key] = depends_on
+        else:
+            dropped.add(key)
+        mirror = (step.mirror or {}).get("amd")
+        if mirror:
+            if runs_in_aiter_nightly(mirror.get("device")):
+                kept[f"amd-{key}"] = normalize_amd_depends_on(mirror.get("depends_on"))
+            else:
+                dropped.add(f"amd-{key}")
+    broken = sorted(
+        f"{key} -> {dependency}"
+        for key, depends_on in kept.items()
+        for dependency in depends_on
+        if dependency in dropped and dependency not in kept
+    )
+    if broken:
+        raise ValueError(
+            "AITER nightly keeps step(s) that depend on steps it drops: "
+            + ", ".join(broken)
+        )
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:
