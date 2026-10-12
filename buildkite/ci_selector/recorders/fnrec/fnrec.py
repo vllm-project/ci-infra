@@ -30,9 +30,9 @@ artifact has to be diagnosable afterwards. A process that recorded nothing
 must still say so, and why: silence is the one outcome we cannot read.
 """
 
+import itertools
 import os
 import sys
-import threading
 
 _OUT = os.environ.get("FNREC_OUT")
 _ROOT_ENV = os.environ.get("FNREC_ROOT")
@@ -58,9 +58,8 @@ _MAX_ROOT_TRIES = 1000
 _root = None
 _root_tries = 0
 _seen = set()
-_lock = threading.Lock()
-_fh = None
-_fh_pid = None
+_fd = -1
+_fd_pid = None
 _nonce = os.urandom(4).hex()
 _host = ""
 _tool_id = None
@@ -72,6 +71,7 @@ _tests_logged = False
 _packages = set()
 _libcalls = set()
 _line_files = {}
+_lf_next = itertools.count()
 _stats = {"root": 0, "other": 0, "lines": 0, "errors": 0, "last_error": ""}
 _ended = False
 
@@ -155,24 +155,59 @@ def _package_of(filename):
 
 
 def _out():
-    """Line-buffered handle for this process, created with a header.
+    """Append-only descriptor for this process, created with a header.
 
     Written as each function is first seen, not batched. With DISABLE that is
     one write per function. Batching lost the teardown functions, which run
     just before a process is killed, and they read as never executed.
 
-    Buffered, not raw: a raw write can land partially and corrupt the record
-    under the disk-full conditions that make the counters worth having.
+    Raw and O_APPEND, not buffered. A buffered write takes a lock inside the
+    interpreter, which a thread killed at finalization never gives back, and
+    every write after that waits for the life of the process. One append per
+    record needs no lock, and the kernel keeps concurrent appends apart. A
+    partial write is the price, so `_write` counts one when it sees it.
+
+    Opened from the main thread before any other exists, by `_begin` and by
+    the fork hook, so the check below is about pid reuse, not about racing.
     """
-    global _fh, _fh_pid
+    global _fd, _fd_pid
     pid = os.getpid()
-    if _fh is None or _fh_pid != pid:
+    if _fd < 0 or _fd_pid != pid:
         name = f"fn.{_host}.{_nonce}.{pid}.txt"
-        _fh = open(os.path.join(_OUT, name), "a", buffering=1)
-        _fh_pid = pid
-        _fh.write(_header(pid))
+        path = os.path.join(_OUT, name)
+        _fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o666)
+        _fd_pid = pid
+        _write(_fd, _header(pid))
         _arm_exit_hooks(pid)
-    return _fh
+    return _fd
+
+
+def _write(fd, text):
+    """One append per call, so no two records can interleave. True if the
+    record landed whole.
+
+    Counts rather than raises: losing a write loses that record, and a thin
+    record has to be visibly thin.
+    """
+    try:
+        data = text.encode("utf-8", "replace")
+        n = os.write(fd, data)
+        if n != len(data):
+            # Disk full, mostly. The rest may land behind another thread's
+            # record, so say so rather than leave a torn line looking whole.
+            _stats["errors"] += 1
+            _stats["last_error"] = f"short write {n}/{len(data)}"
+            os.write(fd, data[n:])
+            return False
+        return True
+    except Exception as exc:
+        _stats["errors"] += 1
+        _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
+        return False
+
+
+def _emit(text):
+    return _write(_out(), text)
 
 
 def _arm_exit_hooks(pid):
@@ -267,14 +302,10 @@ def _end():
     fork is vLLM's default. Nothing survives SIGKILL, which is the point.
     """
     global _ended
-    if _ended or _fh is None:
+    if _ended or _fd < 0:
         return
     _ended = True
-    try:
-        _fh.write(_stat_line("#end"))
-        _fh.flush()
-    except Exception:
-        pass
+    _write(_fd, _stat_line("#end"))
 
 
 def _on_py_start(code, instruction_offset):
@@ -310,31 +341,21 @@ def _on_py_start(code, instruction_offset):
         _stats["errors"] += 1
         _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
     key = f"{filename}\t{code.co_qualname}\t{code.co_firstlineno}"
-    with _lock:
-        if _tests_root is not None and not _tests_logged:
-            _log_tests_root()
-        if not _root_logged:
-            # The header goes out before the root is known, so record the
-            # value in force. A record is unreadable without it.
-            _root_logged = True
-            try:
-                _out().write(f"#root\t{_root}\tt={_now()}\n")
-            except Exception:
-                pass
-        if key not in _seen:
-            _seen.add(key)
-            _stats["root"] += 1
-            try:
-                fh = _out()
-                fh.write(key + "\n")
-                if _stats["root"] % _STAT_EVERY == 0:
-                    fh.write(_stat_line("#stat"))
-            except Exception as exc:
-                # Losing the write loses the function: DISABLE is already
-                # promised and it will not report again. Count it so a thin
-                # record is visibly thin.
-                _stats["errors"] += 1
-                _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
+    if _tests_root is not None and not _tests_logged:
+        _log_tests_root()
+    if not _root_logged:
+        # The header goes out before the root is known, so record the
+        # value in force. A record is unreadable without it.
+        _root_logged = True
+        _emit(f"#root\t{_root}\tt={_now()}\n")
+    if key not in _seen:
+        # Unsynchronised on purpose: two threads meeting the same function
+        # repeat one line, and a lock is what a killed thread carries off.
+        _seen.add(key)
+        _stats["root"] += 1
+        _emit(key + "\n")
+        if _stats["root"] % _STAT_EVERY == 0:
+            _emit(_stat_line("#stat"))
     return sys.monitoring.DISABLE
 
 
@@ -342,32 +363,32 @@ def _on_line(code, line):
     """One `#ln` per line of vllm or tests code this process ran. Enabled
     only on code objects `_on_py_start` accepted."""
     filename = code.co_filename
-    with _lock:
-        try:
-            fh = _out()
-            idx = _line_files.get(filename)
-            if idx is None:
-                idx = _line_files[filename] = len(_line_files)
-                fh.write(f"#lf\t{idx}\t{filename}\n")
-            fh.write(f"#ln\t{idx}\t{line}\n")
-            _stats["lines"] += 1
-        except Exception as exc:
-            # Lost like a function is: the event is DISABLEd either way.
-            _stats["errors"] += 1
-            _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
+    idx = _line_files.get(filename)
+    if idx is None:
+        # next() and setdefault() are each one uninterruptible call, so two
+        # threads meeting a new file agree on its number; the map's size
+        # would not, since both could read it alike. The first #ln ships in
+        # the same append as its #lf, because a repeated #lf says the same
+        # thing twice while an #ln ahead of its #lf says nothing at all.
+        number = next(_lf_next)
+        idx = _line_files.setdefault(filename, number)
+        wrote = _emit(f"#lf\t{idx}\t{filename}\n#ln\t{idx}\t{line}\n")
+    else:
+        wrote = _emit(f"#ln\t{idx}\t{line}\n")
+    if wrote:
+        # Only on success: the reader calls the row lost when `lines=` runs
+        # ahead of the `#ln` records it finds.
+        _stats["lines"] += 1
     return sys.monitoring.DISABLE
 
 
 def _log_tests_root():
     """Once per process, before its first tests/ line, so the reader can map
     those lines. Two fields: an older reader skips it as malformed rather
-    than reading it as a function. Called under the lock."""
+    than reading it as a function."""
     global _tests_logged
     _tests_logged = True
-    try:
-        _out().write(f"#tests\t{_tests_root}\n")
-    except Exception:
-        pass
+    _emit(f"#tests\t{_tests_root}\n")
 
 
 def _note_package(filename):
@@ -376,15 +397,8 @@ def _note_package(filename):
     pkg = _package_of(filename)
     if pkg is None or pkg in _packages:
         return pkg
-    with _lock:
-        if pkg in _packages:
-            return pkg
-        _packages.add(pkg)
-        try:
-            _out().write(f"#pkg\t{pkg}\n")
-        except Exception as exc:
-            _stats["errors"] += 1
-            _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
+    _packages.add(pkg)
+    _emit(f"#pkg\t{pkg}\n")
     return pkg
 
 
@@ -412,14 +426,9 @@ def _note_libcall(lib, code, frame):
             return None
         f = f.f_back
     name = f"{_module_of(rel)}.{code.co_qualname}"
-    with _lock:
-        if (pkg, name) not in _libcalls:
-            _libcalls.add((pkg, name))
-            try:
-                _out().write(f"#lib\t{pkg}\t{name}\n")
-            except Exception as exc:
-                _stats["errors"] += 1
-                _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
+    if (pkg, name) not in _libcalls:
+        _libcalls.add((pkg, name))
+        _emit(f"#lib\t{pkg}\t{name}\n")
     return sys.monitoring.DISABLE
 
 
@@ -454,26 +463,30 @@ def _module_of(rel):
 
 
 def _after_in_child():
-    """Give the child its own identity, lock, and events.
+    """Give the child its own identity and events.
 
-    Three inherited things break a forked child: the parent's file handle
-    would interleave writes, a lock held by another thread at fork time stays
-    held forever and deadlocks, and DISABLE state survives fork so without
-    restart_events the child records nothing the parent already saw and reads
-    as an empty worker.
+    Two inherited things break a forked child: the parent's descriptor would
+    put the child's records in the parent's file, and DISABLE state survives
+    fork, so without restart_events the child records nothing the parent
+    already saw and reads as an empty worker.
     """
-    global _fh, _fh_pid, _seen, _lock, _nonce, _origin, _stats, _ended, _hooks_pid
+    global _fd, _fd_pid, _seen, _nonce, _origin, _stats, _ended, _hooks_pid
     global _root_logged, _root_tries, _tests_logged, _packages, _libcalls
-    global _line_files
-    _fh, _fh_pid, _hooks_pid = None, None, None
+    global _line_files, _lf_next
+    if _fd >= 0:
+        try:
+            os.close(_fd)
+        except OSError:
+            pass
+    _fd, _fd_pid, _hooks_pid = -1, None, None
     _line_files = {}
+    _lf_next = itertools.count()
     _root_logged = False
     _tests_logged = False
     _root_tries = 0
     _packages = set()
     _libcalls = set()
     _seen = set()
-    _lock = threading.Lock()
     _nonce = os.urandom(4).hex()
     _origin = f"fork:{os.getppid()}"
     _stats = {"root": 0, "other": 0, "lines": 0, "errors": 0, "last_error": ""}
