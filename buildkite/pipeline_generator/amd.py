@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 from constants import AgentQueue, DeviceType
+from step import Step
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
@@ -35,6 +36,12 @@ AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
 AMD_ROCM_BASE_DOCKERFILE = "docker/Dockerfile.rocm_base"
 AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES = 9 * 60
 AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES = 15
+AMD_CI_BASE_STEP_KEY = "ensure-ci-base-amd"
+AITER_NIGHTLY_STEP_KEY = "aiter-nightly-amd"
+AITER_NIGHTLY_TIMEOUT_MINUTES = 20
+# AITER prebuilds kernels only for these (AITER_ROCM_ARCH in vLLM's
+# docker/Dockerfile.rocm_base), so the AITER nightly runs only on them.
+AITER_GPU_ARCHS = frozenset({"gfx942", "gfx950"})
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
     {
         "ensure-ci-base-amd",
@@ -128,29 +135,30 @@ def get_rocm_base_refresh_env() -> Dict[str, str]:
 class AmdDeviceConfig:
     queue: AgentQueue
     default_gpu_count: int
+    arch: str
     uses_dra: bool = False
 
 
 AMD_DEVICE_CONFIGS = {
-    DeviceType.AMD_MI250_1.value: AmdDeviceConfig(AgentQueue.AMD_MI250_1, 1),
-    DeviceType.AMD_MI250_2.value: AmdDeviceConfig(AgentQueue.AMD_MI250_2, 2),
-    DeviceType.AMD_MI250_4.value: AmdDeviceConfig(AgentQueue.AMD_MI250_4, 4),
-    DeviceType.AMD_MI250_8.value: AmdDeviceConfig(AgentQueue.AMD_MI250_8, 8),
-    DeviceType.AMD_MI300_1.value: AmdDeviceConfig(AgentQueue.AMD_MI300_1, 1),
-    DeviceType.AMD_MI300_2.value: AmdDeviceConfig(AgentQueue.AMD_MI300_2, 2),
-    DeviceType.AMD_MI300_4.value: AmdDeviceConfig(AgentQueue.AMD_MI300_4, 4),
-    DeviceType.AMD_MI300_8.value: AmdDeviceConfig(AgentQueue.AMD_MI300_8, 8),
-    DeviceType.AMD_MI325_1.value: AmdDeviceConfig(AgentQueue.AMD_MI325_1, 1),
-    DeviceType.AMD_MI325_2.value: AmdDeviceConfig(AgentQueue.AMD_MI325_2, 2),
-    DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4),
-    DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8),
+    DeviceType.AMD_MI250_1.value: AmdDeviceConfig(AgentQueue.AMD_MI250_1, 1, "gfx90a"),
+    DeviceType.AMD_MI250_2.value: AmdDeviceConfig(AgentQueue.AMD_MI250_2, 2, "gfx90a"),
+    DeviceType.AMD_MI250_4.value: AmdDeviceConfig(AgentQueue.AMD_MI250_4, 4, "gfx90a"),
+    DeviceType.AMD_MI250_8.value: AmdDeviceConfig(AgentQueue.AMD_MI250_8, 8, "gfx90a"),
+    DeviceType.AMD_MI300_1.value: AmdDeviceConfig(AgentQueue.AMD_MI300_1, 1, "gfx942"),
+    DeviceType.AMD_MI300_2.value: AmdDeviceConfig(AgentQueue.AMD_MI300_2, 2, "gfx942"),
+    DeviceType.AMD_MI300_4.value: AmdDeviceConfig(AgentQueue.AMD_MI300_4, 4, "gfx942"),
+    DeviceType.AMD_MI300_8.value: AmdDeviceConfig(AgentQueue.AMD_MI300_8, 8, "gfx942"),
+    DeviceType.AMD_MI325_1.value: AmdDeviceConfig(AgentQueue.AMD_MI325_1, 1, "gfx942"),
+    DeviceType.AMD_MI325_2.value: AmdDeviceConfig(AgentQueue.AMD_MI325_2, 2, "gfx942"),
+    DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4, "gfx942"),
+    DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8, "gfx942"),
     DeviceType.AMD_MI355_DPX.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI355_DPX, 1, uses_dra=True
+        AgentQueue.AMD_MI355_DPX, 1, "gfx950", uses_dra=True
     ),
-    DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1),
-    DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2),
-    DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4),
-    DeviceType.AMD_MI355_8.value: AmdDeviceConfig(AgentQueue.AMD_MI355_8, 8),
+    DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1, "gfx950"),
+    DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2, "gfx950"),
+    DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4, "gfx950"),
+    DeviceType.AMD_MI355_8.value: AmdDeviceConfig(AgentQueue.AMD_MI355_8, 8, "gfx950"),
 }
 
 
@@ -189,6 +197,110 @@ def is_amd_device(device: Optional[str]) -> bool:
 
 def valid_amd_gpu_devices() -> List[str]:
     return list(AMD_DEVICE_CONFIGS)
+
+
+def _is_aiter_gpu_device(device: Optional[str]) -> bool:
+    config = get_amd_device_config(device)
+    return config is not None and config.arch in AITER_GPU_ARCHS
+
+
+def runs_in_aiter_nightly(device: Optional[str], dind: bool) -> bool:
+    """True for an AMD GPU job that runs in the AITER nightly.
+
+    Native jobs only: they run on this build's ci_base-build tag, which the
+    overlay replaces. DinD jobs start from the stable ci_base, so they would
+    test the stock AITER.
+    """
+    return _is_aiter_gpu_device(device) and not dind
+
+
+def aiter_nightly_dind_steps(steps: List[Step]) -> List[str]:
+    """The DinD jobs on an AITER GPU, which the AITER nightly drops."""
+    dropped = []
+    for step in steps:
+        name = step.key or step.label
+        if _is_aiter_gpu_device(step.device) and step.dind:
+            dropped.append(name)
+        mirror = (step.mirror or {}).get("amd")
+        if mirror and _is_aiter_gpu_device(mirror.get("device")):
+            if mirror.get("dind", True):
+                dropped.append(f"amd-{name}")
+    return dropped
+
+
+def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
+    """Build the AMD test image on the AITER nightly, as test-template-amd.j2 does.
+
+    Adds the overlay step after ensure-ci-base-amd. It installs the nightly
+    wheel over this build's ci_base and pushes the result as this build's
+    ci_base-build tag, so native jobs use it as they are. image-build-amd
+    then waits for it and builds on its image.
+    """
+    by_key = {step.key: step for step in steps if step.key}
+    missing = [
+        key for key in (AMD_CI_BASE_STEP_KEY, AMD_ARTIFACT_STEP) if key not in by_key
+    ]
+    if missing:
+        raise ValueError(
+            "AITER nightly requires the AMD build step(s): " + ", ".join(missing)
+        )
+    if AITER_NIGHTLY_STEP_KEY in by_key:
+        raise ValueError(f"Duplicate CI step key: {AITER_NIGHTLY_STEP_KEY}")
+
+    ci_base = by_key[AMD_CI_BASE_STEP_KEY]
+    overlay = Step(
+        label="AMD: :crescent_moon: install AITER nightly",
+        group=ci_base.group,
+        key=AITER_NIGHTLY_STEP_KEY,
+        depends_on=[AMD_CI_BASE_STEP_KEY],
+        device=DeviceType.AMD_CPU.value,
+        no_plugin=True,
+        commands=["bash .buildkite/scripts/rocm/aiter-nightly-overlay.sh"],
+        timeout_in_minutes=AITER_NIGHTLY_TIMEOUT_MINUTES,
+        # Not exit 10 (no wheel) or 11 (the wheel does not install): those are
+        # AITER failures, and a retry would only fail the same way.
+        retry={
+            "automatic": [
+                {"exit_status": 1, "limit": 1},  # Transient Docker/BuildKit failure
+                {"exit_status": 2, "limit": 1},  # Registry handoff failed
+                {"exit_status": -10, "limit": 1},  # Agent was lost
+            ]
+        },
+    )
+
+    image_build = by_key[AMD_ARTIFACT_STEP]
+    depends_on = [AITER_NIGHTLY_STEP_KEY] + [
+        key for key in image_build.depends_on or [] if key != AMD_CI_BASE_STEP_KEY
+    ]
+    # build-test-image.sh builds on rocm-ci-base-image, the stock ci_base
+    # pinned by digest. Point it at the overlay's image right before the build
+    # reads it, so a re-run of ensure-ci-base-amd cannot set it back. $$ defers
+    # the substitution from pipeline upload to the job.
+    commands = [
+        "buildkite-agent meta-data set rocm-ci-base-image "
+        '"$$(buildkite-agent meta-data get aiter-nightly-ci-base)"',
+        *(image_build.commands or []),
+    ]
+    # The nightly runs on main. Give it its own branch cache and keep it out of
+    # the shared content cache, so it does not overwrite main's.
+    env = {
+        **(image_build.env or {}),
+        "ROCM_CACHE_BRANCH_NAME": "aiter-nightly",
+        "ROCM_CONTENT_CACHE_EXPORT_MODE": "never",
+    }
+    image_build = image_build.model_copy(
+        update={"depends_on": depends_on, "commands": commands, "env": env}
+    )
+
+    result = []
+    for step in steps:
+        if step.key == AMD_ARTIFACT_STEP:
+            result.append(image_build)
+            continue
+        result.append(step)
+        if step.key == AMD_CI_BASE_STEP_KEY:
+            result.append(overlay)
+    return result
 
 
 def get_amd_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
