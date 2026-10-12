@@ -39,8 +39,7 @@ AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES = 15
 AMD_CI_BASE_STEP_KEY = "ensure-ci-base-amd"
 AITER_NIGHTLY_STEP_KEY = "aiter-nightly-amd"
 AITER_NIGHTLY_TIMEOUT_MINUTES = 20
-# vLLM builds AITER only for these (AITER_ROCM_ARCH in vLLM's
-# docker/Dockerfile.rocm_base), so the AITER nightly runs only on them.
+# vLLM builds AITER only for these (AITER_ROCM_ARCH in docker/Dockerfile.rocm_base).
 AITER_GPU_ARCHS = frozenset({"gfx942", "gfx950"})
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
     {
@@ -243,22 +242,18 @@ def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
     )
 
     image_build = by_key[AMD_ARTIFACT_STEP]
-    # Wait for the overlay, which itself waits for ensure-ci-base-amd; keep any
-    # other dependency.
+    # The overlay replaces ensure-ci-base-amd; other dependencies stay.
     depends_on = [AITER_NIGHTLY_STEP_KEY] + [
         key for key in image_build.depends_on or [] if key != AMD_CI_BASE_STEP_KEY
     ]
-    # build-test-image.sh builds on rocm-ci-base-image, the stock ci_base
-    # pinned by digest. Point it at the overlay's image right before the build
-    # reads it, so a re-run of ensure-ci-base-amd cannot set it back. $$ defers
-    # the substitution from pipeline upload to the job.
+    # Point build-test-image.sh at the overlay's image, here so a re-run of
+    # ensure-ci-base-amd cannot undo it. $$ leaves the $(...) to the job.
     commands = [
         "buildkite-agent meta-data set rocm-ci-base-image "
         '"$$(buildkite-agent meta-data get aiter-nightly-ci-base)"',
         *(image_build.commands or []),
     ]
-    # The nightly runs on main. Give it its own branch cache and keep it out of
-    # the shared content cache, so it does not overwrite main's.
+    # Its own cache branch, and no shared content cache export: main's stays intact.
     env = {
         **(image_build.env or {}),
         "ROCM_CACHE_BRANCH_NAME": "aiter-nightly",
