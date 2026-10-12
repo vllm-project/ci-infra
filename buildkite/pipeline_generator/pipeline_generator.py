@@ -4,7 +4,13 @@ from typing import FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import is_amd_device, normalize_amd_depends_on
+from amd import (
+    aiter_nightly_dind_steps,
+    apply_aiter_nightly,
+    is_amd_device,
+    normalize_amd_depends_on,
+    runs_in_aiter_nightly,
+)
 from buildkite_step import (
     COLLECT_GROUP,
     BuildkiteGroupStep,
@@ -18,6 +24,7 @@ from buildkite_step import (
 )
 from recorder_switches import fnrec_enabled
 from global_config import get_global_config, init_global_config
+from constants import DeviceType
 from step import Step, group_steps, read_steps_from_job_dir
 
 
@@ -83,9 +90,33 @@ class PipelineGenerator:
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+
+        aiter_nightly = global_config["aiter_nightly"] == "1"
+        if aiter_nightly:
+            try:
+                steps = apply_aiter_nightly(steps)
+            except ValueError as error:
+                _annotate_best_effort(str(error), style="error")
+                raise
+            # The steps are dropped further downstream (see runs_in_aiter_nightly).
+            message = (
+                "AITER nightly: only native AMD jobs on gfx942/gfx950 "
+                "(MI300, MI325, MI355) run."
+            )
+            dropped_dind = aiter_nightly_dind_steps(steps)
+            if dropped_dind:
+                message += (
+                    " Dropped DinD jobs, which would test the stock AITER: "
+                    + ", ".join(dropped_dind)
+                )
+            _annotate_best_effort(message, style="warning" if dropped_dind else None)
+
         try:
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+                steps,
+                global_config["only_step_keys"],
+                torch_nightly=torch_nightly,
+                aiter_nightly=aiter_nightly,
             )
         except ValueError as error:
             # Surface the reason on the build page, not only in the bootstrap log.
@@ -138,6 +169,7 @@ def select_steps_and_dependencies(
     steps: List[Step],
     requested_step_keys: Optional[FrozenSet[str]],
     torch_nightly: bool = False,
+    aiter_nightly: bool = False,
 ) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
     if requested_step_keys is None:
         return steps, None
@@ -145,6 +177,7 @@ def select_steps_and_dependencies(
     steps_by_key = {}
     dependencies_by_key = {}
     amd_step_keys = set()
+    aiter_nightly_keys = set()
     for step in steps:
         # Steps without an explicit key are uploaded with a label-derived key
         # (see convert_group_step_to_buildkite_step), so retry builds reference
@@ -157,6 +190,10 @@ def select_steps_and_dependencies(
         dependencies_by_key[step.key] = step.depends_on or []
         if is_amd_device(step.device):
             amd_step_keys.add(step.key)
+        if step.device == DeviceType.AMD_CPU.value or runs_in_aiter_nightly(
+            step.device, step.dind
+        ):
+            aiter_nightly_keys.add(step.key)
 
         # AMD mirrors are uploaded as generated `amd-<key>` steps, so retry
         # builds reference them by that key too.
@@ -170,6 +207,10 @@ def select_steps_and_dependencies(
                 amd_mirror.get("depends_on")
             )
             amd_step_keys.add(mirror_key)
+            if runs_in_aiter_nightly(
+                amd_mirror.get("device"), amd_mirror.get("dind", True)
+            ):
+                aiter_nightly_keys.add(mirror_key)
 
     missing = requested_step_keys - steps_by_key.keys()
     if missing:
@@ -181,6 +222,13 @@ def select_steps_and_dependencies(
             raise ValueError(
                 "AMD CI step key(s) requested, but AMD steps are excluded from "
                 "torch-nightly runs: " + ", ".join(sorted(requested_amd_keys))
+            )
+    if aiter_nightly:
+        excluded_keys = requested_step_keys - aiter_nightly_keys
+        if excluded_keys:
+            raise ValueError(
+                "CI step key(s) requested, but AITER nightly runs only native AMD "
+                "jobs on gfx942/gfx950: " + ", ".join(sorted(excluded_keys))
             )
 
     selected_step_keys = set(requested_step_keys)
