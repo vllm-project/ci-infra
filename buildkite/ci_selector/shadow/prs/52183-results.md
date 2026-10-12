@@ -1,5 +1,5 @@
 <!-- ci-selector-shadow -->
-### CI selector (shadow): no narrower answer, every step runs: 194 test steps (270 jobs) instead of 194 (270 jobs)
+### CI selector (shadow): no narrower answer, every step runs: 195 test steps (271 jobs) instead of 195 (271 jobs)
 
 Shadow mode: this changes nothing about what CI runs. It shows what the evidence-based selector would pick for this PR, next to today's rules. [How it works](https://github.com/vllm-project/ci-infra/tree/main/buildkite/ci_selector).
 
@@ -7,14 +7,14 @@ Shadow mode: this changes nothing about what CI runs. It shows what the evidence
 
 | steps (jobs) | Today's rules | Selector | Would skip | Would add |
 |---|---|---|---|---|
-| NVIDIA, CPU and others | 194 (270) | 194 (270) | 0 (0) | 0 (0) |
-| AMD mirrors | 162 (226) | 162 (226) | 0 (0) | 0 (0) |
+| NVIDIA, CPU and others | 195 (271) | 195 (271) | 0 (0) | 0 (0) |
+| AMD mirrors | 163 (227) | 163 (227) | 0 (0) | 0 (0) |
 
 Why: fail-open: CMakeLists.txt is a docker-image build input (docker/Dockerfile COPY); the CI image is rebuilt from it; running everything
 
 Today's rules run everything for this diff.
 
-<details><summary>Selector would run (194)</summary>
+<details><summary>Selector would run (195)</summary>
 
 - `amd-fp8-moe-kernels-mi355`
 - `amd-kernels-mi355`
@@ -63,11 +63,11 @@ Today's rules run everything for this diff.
 - `distributed-model-tests-2-gpus` ×3
 - `distributed-mooncakeconnector-pd-accuracy-4-gpus`
 - `distributed-nixlconnector-pd-accuracy-4-gpus`
-- `distributed-tests-8xh100`
 - `distributed-torchrun-examples-4-gpus`
 - `distributed-torchrun-shutdown-tests-2-gpus`
 - `docker-build-metadata`
 - `dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus`
+- `dsv41-mono-decode-numerics-amd`
 - `e2e-core-1-gpu`
 - `e2e-core-large-memory`
 - `e2e-scheduling-1-gpu`
@@ -97,7 +97,6 @@ Today's rules run everything for this diff.
 - `fusion-e2e-tp2-ar-rms-config-sweep-h100`
 - `fusion-e2e-tp2-ar-rms-dynamo-partition-amd`
 - `fusion-e2e-tp2-ar-rms-inductor-partition-amd`
-- `fusion-e2e-tp2-asynctp-config-sweep-h100`
 - `fusion-e2e-tp2-b200`
 - `fusion-e2e-tp2-quick-h100`
 - `gemm-rs-ar-2xb200`
@@ -119,6 +118,7 @@ Today's rules run everything for this diff.
 - `kernels-helion-test` ×5
 - `kernels-mamba-test`
 - `kernels-mhc-test-b200`
+- `kernels-minimax-m3-attention-b200`
 - `kernels-minimax-reduce-rms-test-2-gpus`
 - `kernels-moe-test` ×5
 - `kernels-quantization-test` ×6
@@ -171,6 +171,7 @@ Today's rules run everything for this diff.
 - `quantized-fusions`
 - `quantized-models-test`
 - `quantized-moe-test-b200`
+- `qwen4-exp-sp-tests-4-gpus`
 - `qwen4-exp-unit-tests`
 - `qwen4-exp-unit-tests-cpu`
 - `ray-dependency-compatibility-check`
@@ -232,10 +233,10 @@ none
 none
 </details>
 
-#### CI results (2026-10-07 16:38 UTC)
+#### CI results (2026-10-12 21:08 UTC)
 
 0 passed, 0 failed, 0 pending.
 
 No failures to judge.
 
-<sub>17 changed files · base `71f9a74920` · head `062c787579` · Python record: build 93039 at `1e5d0ea888` · kernel record: table 43b4aaea3e (build 93244), map 43b4aaea3e · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 138 optional steps the selector would also run</sub>
+<sub>16 changed files · base `abad32a718` · head `1332dfbbd3` · Python record: build 93039 at `1e5d0ea888` · kernel record: table 74f4404f58 (build 94125), map 74f4404f58 · not counted: 11 build steps, 5 A100 steps the generator no longer emits, 139 optional steps the selector would also run</sub>
