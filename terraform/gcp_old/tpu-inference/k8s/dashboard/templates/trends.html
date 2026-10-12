@@ -22,17 +22,12 @@
 $errors
 <div class="card range"><div class="segmented">$presets</div></div>
 
-<div class="section-label">Chip utilization</div>
+<div class="section-label">By generation</div>
 $cohorts
+$others
 
-<div class="section-label">Node autoscaling</div>
-<div class="card">$autoscaling</div>
-
-<div class="section-label">Outcomes</div>
-<div class="card">$outcomes</div>
-
-<div class="section-label">Queues</div>
-$queues
+<div class="section-label">Outcomes by pipeline</div>
+<div class="card">$pipelines</div>
 
 <p class="muted footer">Data as JSON at <a href="api/history$query">api/history$query</a>.</p>
 </main>

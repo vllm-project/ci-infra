@@ -377,13 +377,18 @@ def serve(
                 return self.reply(200, "application/json", body.encode())
             # /history as well, the page's old name.
             if url.path in ("/trends", "/history", "/api/history"):
-                view, sources = history.get(parse_span(params, time.time()))
+                span = parse_span(params, time.time())
+                view, sources = history.get(span)
                 if url.path == "/api/history":
                     return self.reply(
                         200, "application/json", json.dumps(view, indent=1).encode()
                     )
+                queue_times, queue_times_status = wait_series.get(span)
                 page = views.render_trends(
-                    view, sources, f"?{url.query}" if url.query else ""
+                    view,
+                    {**sources, "wait_series": queue_times_status},
+                    f"?{url.query}" if url.query else "",
+                    queue_times,
                 )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
             if url.path.startswith("/static/"):
