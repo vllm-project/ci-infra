@@ -1541,6 +1541,34 @@
     "reference_url": "https://github.com/vllm-project/vllm/pull/57169",
     "notes": "PR #57169 (GLM-5.3-Flash generic packed KV layout) merged with all Arm CPU Test shards blocked in PR build 93879; first post-merge main 93915 failed Shard 2 with a CPU fallback signature mismatch and it has failed six consecutive times. Found by @Sherlock's main-CI audit during host-outage catch-up; recorded by kimi-no-na-wa."
    }
+  },
+  {
+   "id": "pr-56997-main-93187-humming-qwen3-fp8",
+   "job_name": ":nvidia: (H100/B200) LM Eval Humming * TEMPORARY (4 lanes: b200-act, b200-default, h100-act, h100-default)",
+   "job_key": "lm-eval-humming-b200-act",
+   "culprit_pr": {
+    "number": 56997,
+    "url": "https://github.com/vllm-project/vllm/pull/56997",
+    "merge_commit": "d1f3d8b87083a95f914c674c477796950e2ba5fe"
+   },
+   "pr_ci": {
+    "ran": false,
+    "state": "blocked",
+    "build_number": 93056,
+    "job_id": "01a11056-6a4d-4753-9dc0-e5e4b2539230",
+    "url": "https://buildkite.com/vllm/ci/builds/93056#01a11056-6a4d-4753-9dc0-e5e4b2539230"
+   },
+   "main_failure": {
+    "build_number": 93187,
+    "job_id": "01a11306-79e2-4253-b055-e0d879927649",
+    "url": "https://buildkite.com/vllm/ci/builds/93187#01a11306-79e2-4253-b055-e0d879927649",
+    "signature": "AssertionError: assert scale.size(0) == (num_experts or 1) \u2014 Humming Qwen3 FP8 load assertion; failed in 4 Humming eval lanes from daily 93187 through 94125 (last pass 93069)"
+   },
+   "causal_confirmation": {
+    "kind": "code_analysis",
+    "reference_url": "https://github.com/vllm-project/vllm/pull/56997",
+    "notes": "Same culprit PR as pr-56997-main-93187-basic-models-tests-extra-initialization; distinct failure family. PR #56997's generic Humming staging change made a gated per-expert scale look like a single-stack scale. PR CI 93056 omitted all TEMPORARY Humming lanes (blocked). Traced by @Sherlock across full-CI runs #93187\u2013#94125. Selector trial: lane is marked TEMPORARY/optional, so note the optional-lane policy interaction."
+   }
   }
  ]
 }
