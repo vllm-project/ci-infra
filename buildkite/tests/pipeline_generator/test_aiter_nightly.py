@@ -10,7 +10,7 @@ import buildkite_step
 import global_config
 import pipeline_generator
 from pipeline_generator import (
-    check_aiter_nightly_dependencies,
+    check_dependencies_exist,
     select_steps_and_dependencies,
 )
 from step import Step, group_steps
@@ -294,7 +294,7 @@ def _converted(fake_global_config, steps):
 def test_nightly_rejects_a_kept_job_depending_on_a_dropped_one(fake_global_config):
     steps = _steps() + [_mirrored("needs-cuda", "mi300_1", depends_on=["cuda-only"])]
     with pytest.raises(ValueError, match="amd-needs-cuda -> cuda-only"):
-        check_aiter_nightly_dependencies(_converted(fake_global_config, steps))
+        check_dependencies_exist(_converted(fake_global_config, steps))
 
 
 def _generator(fake_global_config, monkeypatch, tmp_path, steps):

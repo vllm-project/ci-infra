@@ -167,7 +167,7 @@ class PipelineGenerator:
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
         if aiter_nightly:
             try:
-                check_aiter_nightly_dependencies(buildkite_group_steps)
+                check_dependencies_exist(buildkite_group_steps)
             except ValueError as error:
                 _annotate_best_effort(str(error), style="error")
                 raise
@@ -438,8 +438,8 @@ def select_steps_and_dependencies(
     return selected, frozenset(selected_step_keys)
 
 
-def check_aiter_nightly_dependencies(groups: List[BuildkiteGroupStep]) -> None:
-    """Fail rather than upload a depends_on on a step the AITER nightly dropped."""
+def check_dependencies_exist(groups: List[BuildkiteGroupStep]) -> None:
+    """Fail rather than upload a depends_on on a step not in the pipeline."""
     jobs = [job for group in groups for job in group.steps]
     keys = {job.key for job in jobs}
     broken = sorted(
@@ -454,8 +454,7 @@ def check_aiter_nightly_dependencies(groups: List[BuildkiteGroupStep]) -> None:
     )
     if broken:
         raise ValueError(
-            "AITER nightly keeps step(s) that depend on steps it drops: "
-            + ", ".join(broken)
+            "Step(s) depend on steps not in the pipeline: " + ", ".join(broken)
         )
 
 
