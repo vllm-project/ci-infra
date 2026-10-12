@@ -199,12 +199,7 @@ def valid_amd_gpu_devices() -> List[str]:
 
 
 def runs_in_aiter_nightly(device: Optional[str]) -> bool:
-    """True for a step the AITER nightly keeps: the AMD CPU build lane, and
-    GPU jobs on an AITER arch.
-
-    Native and DinD jobs alike test the nightly: both run on images built from
-    the overlay's ci_base.
-    """
+    """AMD build steps, and GPU jobs (native or DinD) on an AITER arch."""
     if _device_value(device) == DeviceType.AMD_CPU.value:
         return True
     config = get_amd_device_config(device)
@@ -212,12 +207,9 @@ def runs_in_aiter_nightly(device: Optional[str]) -> bool:
 
 
 def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
-    """Build the AMD test image on the AITER nightly.
+    """Insert the AITER nightly overlay before image-build-amd.
 
-    Adds the overlay step after ensure-ci-base-amd. It installs the nightly
-    wheel over this build's ci_base and pushes the result as this build's
-    ci_base-build tag, so native jobs use it as they are. image-build-amd
-    then waits for it and builds on its image.
+    It replaces this build's ci_base-build tag, so native jobs need no change.
     """
     by_key = {step.key: step for step in steps if step.key}
     missing = [
