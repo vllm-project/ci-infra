@@ -24,6 +24,7 @@ from amd import (
     is_amd_gpu_device,
     rocm_build_layout,
     rocm_ci_repo,
+    runs_in_aiter_nightly,
 )
 from step import Step
 from utils_lib.docker_utils import (
@@ -1137,6 +1138,9 @@ def convert_group_step_to_buildkite_step(
     # ROCm has its own pinned torch and gains nothing from validating against
     # a CUDA torch-nightly build, so the AMD lane is excluded entirely there.
     include_amd = global_config["torch_nightly"] != "1"
+    # The AITER nightly runs the AMD lane only, and in it only the native GPU
+    # jobs AITER builds kernels for (see runs_in_aiter_nightly).
+    aiter_nightly = global_config["aiter_nightly"] == "1"
 
     amd_hardware_steps = []
 
@@ -1151,10 +1155,13 @@ def convert_group_step_to_buildkite_step(
             include_step = (
                 step.device != DeviceType.A100
                 and (include_amd or not is_amd_device(step.device))
+                and (not aiter_nightly or is_amd_device(step.device))
                 and (only_step_keys is None or step_key in only_step_keys)
             )
             if is_amd_gpu_device(step.device):
                 if not include_amd:
+                    continue
+                if aiter_nightly and not runs_in_aiter_nightly(step.device, step.dind):
                     continue
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
@@ -1313,6 +1320,13 @@ def convert_group_step_to_buildkite_step(
                 and step.mirror
                 and step.mirror.get("amd")
                 and (only_step_keys is None or f"amd-{step_key}" in only_step_keys)
+                and (
+                    not aiter_nightly
+                    or runs_in_aiter_nightly(
+                        step.mirror["amd"].get("device"),
+                        step.mirror["amd"].get("dind", True),
+                    )
+                )
             ):
                 amd = step.mirror["amd"]
                 amd_no_plugin = amd.get("no_plugin", False)
@@ -1459,6 +1473,10 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     ):
         return True
     if global_config["nightly"] == "1":
+        return True
+    # A scheduled build of main has no change to select by and nobody to
+    # unblock steps, so in the AITER nightly every step runs.
+    if global_config["aiter_nightly"] == "1":
         return True
     if step.optional:
         return False
