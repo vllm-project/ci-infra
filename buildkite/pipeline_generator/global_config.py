@@ -25,6 +25,7 @@ class GlobalConfig(TypedDict):
     run_all_exclude_patterns: Optional[List[str]] = None
     nightly: Optional[str] = "0"
     torch_nightly: Optional[str] = "0"
+    aiter_nightly: Optional[str] = "0"
     run_all: bool = False
     docs_only_disable: Optional[str] = "0"
     merge_base_commit: Optional[str] = None
@@ -54,6 +55,16 @@ def init_global_config(pipeline_config_path: str):
             raise ValueError(
                 f"Invalid branch name: {branch}. Contains disallowed characters."
             )
+    torch_nightly = os.getenv("TORCH_NIGHTLY", "0")
+    aiter_nightly = os.getenv("AITER_NIGHTLY", "0")
+    if torch_nightly == "1" and aiter_nightly == "1":
+        # Torch nightly drops the AMD lane; AITER nightly keeps only that lane.
+        raise ValueError("TORCH_NIGHTLY and AITER_NIGHTLY cannot both be set.")
+    # The AITER nightly tests main as-is; a docs-only head commit must not skip it.
+    docs_only_disable = (
+        "1" if aiter_nightly == "1" else os.getenv("DOCS_ONLY_DISABLE", "0")
+    )
+
     pull_request = os.getenv("BUILDKITE_PULL_REQUEST")
     merge_base_commit = get_merge_base_commit()
     list_file_diff = get_list_file_diff(branch, merge_base_commit)
@@ -68,11 +79,12 @@ def init_global_config(pipeline_config_path: str):
         branch=branch,
         commit=os.getenv("BUILDKITE_COMMIT"),
         pull_request=pull_request,
-        docs_only_disable=os.getenv("DOCS_ONLY_DISABLE", "0"),
+        docs_only_disable=docs_only_disable,
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
-        torch_nightly=os.getenv("TORCH_NIGHTLY", "0"),
+        torch_nightly=torch_nightly,
+        aiter_nightly=aiter_nightly,
         run_all=_should_run_all(
             pr_labels,
             list_file_diff,

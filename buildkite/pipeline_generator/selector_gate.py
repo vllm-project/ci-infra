@@ -70,6 +70,8 @@ def skip_reason(
         return "release branch build"
     if global_config.get("nightly") == "1":
         return "nightly build (runs every step)"
+    if global_config.get("aiter_nightly") == "1":
+        return "AITER nightly build (runs every AMD step)"
     if global_config.get("run_all"):
         return "run-all build (label or run_all_patterns)"
     if global_config.get("only_step_keys") is not None:
