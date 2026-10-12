@@ -42,7 +42,7 @@ AITER_NIGHTLY_TIMEOUT_MINUTES = 20
 AITER_GPU_ARCHS = frozenset({"gfx942", "gfx950"})
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
     {
-        "ensure-ci-base-amd",
+        AMD_CI_BASE_STEP_KEY,
         AMD_ROCM_BASE_REFRESH_STEP_KEY,
     }
 )
