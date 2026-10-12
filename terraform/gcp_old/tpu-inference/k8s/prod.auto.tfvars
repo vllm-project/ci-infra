@@ -247,13 +247,15 @@ worker_clusters = [
         slices        = 16
         nominal_quota = 16
 
-        # Takes its two slices back from any borrower. Waiting for borrowers
-        # to finish does not work for a slice: four chips have to free on the
-        # same pair of hosts while single-host steps take each chip as it
-        # frees, and 10-07..10-09 2x2x2 spent 42% of its waiting time with its
-        # own quota lent out. The borrowers are mostly short 2x2x1 steps, and
-        # an evicted step reruns from the start in a fresh pod.
-        reclaim_within_cohort = "Any"
+        # Takes its two slices back from lower-priority borrowers. Waiting for
+        # borrowers to finish does not work for a slice: its chips have to free
+        # together while single-host steps take each chip as it frees. So the
+        # PR presubmits that make up most of this queue (priority 50) evict
+        # nightly borrowers rather than wait for them, but not other PR steps,
+        # which would rerun from the start; and a nightly multi-host step here
+        # waits instead of evicting anyone, which also keeps it from taking
+        # the two slices ahead of a presubmit.
+        reclaim_within_cohort = "LowerPriority"
       },
       {
         # Two slices nominal for the Kimi-K3 pairs, taken back only from
