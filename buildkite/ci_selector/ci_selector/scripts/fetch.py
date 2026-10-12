@@ -222,11 +222,31 @@ def group_artifacts(arts):
     return out, foreign
 
 
-def unpack(blob, dest):
+def _target(dest, name, compress):
+    """Where a recorder file lands: gzipped when `compress`, for the process
+    records only (the bulk of it since lines are recorded)."""
+    if compress and name.startswith("fn.") and name.endswith(".txt"):
+        return os.path.join(dest, name + ".gz"), True
+    return os.path.join(dest, name), False
+
+
+def _write(target, data, gz):
+    if gz:
+        with gzip.open(target, "wb", compresslevel=3) as out:
+            out.write(data)
+    else:
+        with open(target, "wb") as out:
+            out.write(data)
+
+
+def unpack(blob, dest, compress=False):
     """Extract the recorder's files out of a job tarball into `dest`.
 
     By basename, not by the archived path: the layout is flat anyway, and it
     makes path traversal impossible without needing a tarfile filter.
+
+    `compress` writes the process records gzipped. Line records made a
+    nightly's unpacked recordings outgrow the collect agent's disk.
     """
     os.makedirs(dest, exist_ok=True)
     written = duplicates = 0
@@ -240,17 +260,16 @@ def unpack(blob, dest):
             name = os.path.basename(member.name)
             if not name or name in (".", ".."):
                 continue
-            target = os.path.join(dest, name)
+            target, gz = _target(dest, name, compress)
             if os.path.exists(target):
                 duplicates += 1
                 continue
-            with open(target, "wb") as out:
-                out.write(src.read())
+            _write(target, src.read(), gz)
             written += 1
     return written, duplicates
 
 
-def place_raw(path, blob, dest):
+def place_raw(path, blob, dest, compress=False):
     """One loose artifact into the flat job directory, by basename.
 
     Same reason as `unpack`: the name comes from an uploader we do not control,
@@ -260,11 +279,10 @@ def place_raw(path, blob, dest):
     if not name or name in (".", ".."):
         return 0, 0
     os.makedirs(dest, exist_ok=True)
-    target = os.path.join(dest, name)
+    target, gz = _target(dest, name, compress)
     if os.path.exists(target):
         return 0, 1
-    with open(target, "wb") as out:
-        out.write(blob)
+    _write(target, blob, gz)
     return 1, 0
 
 
