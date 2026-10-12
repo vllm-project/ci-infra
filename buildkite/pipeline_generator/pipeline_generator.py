@@ -96,11 +96,6 @@ class PipelineGenerator:
             except ValueError as error:
                 _annotate_best_effort(str(error), style="error")
                 raise
-            # The steps are dropped further downstream (see runs_in_aiter_nightly).
-            _annotate_best_effort(
-                "AITER nightly: only the AMD build steps and the AMD GPU jobs "
-                "on gfx942/gfx950 (MI300, MI325, MI355) run."
-            )
 
         try:
             steps, selected_step_keys = select_steps_and_dependencies(
