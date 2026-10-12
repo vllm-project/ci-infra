@@ -183,6 +183,7 @@ spec:
               # once, not a promise that a slice of the right shape is free.
               nominalQuota: 26
               borrowingLimit: 80
+              lendingLimit: 18
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -232,6 +233,7 @@ spec:
               # once, not a promise that a slice of the right shape is free.
               nominalQuota: 80
               borrowingLimit: 24
+              lendingLimit: 48
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -356,7 +358,7 @@ metadata:
 spec:
   cohortName: tpu7x
   preemption:
-    reclaimWithinCohort: Any
+    reclaimWithinCohort: LowerPriority
     withinClusterQueue: Never
   namespaceSelector:
     matchLabels:
