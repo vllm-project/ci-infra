@@ -247,10 +247,7 @@ def select_steps_and_dependencies(
 
 
 def check_aiter_nightly_dependencies(groups: List[BuildkiteGroupStep]) -> None:
-    """Fail if a generated step depends on one the AITER nightly dropped.
-
-    The uploaded pipeline would name a step that is not in it.
-    """
+    """Fail rather than upload a depends_on on a step the AITER nightly dropped."""
     jobs = [job for group in groups for job in group.steps]
     keys = {job.key for job in jobs}
     broken = sorted(
