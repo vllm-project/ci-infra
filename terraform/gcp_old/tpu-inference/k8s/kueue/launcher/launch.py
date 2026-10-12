@@ -1548,12 +1548,16 @@ def worker_kubectl(env, *args, timeout=60):
     again next turn". A read that hangs past its timeout is the same case, so
     it comes back as a failed call too. Raised, it would end the launcher,
     which deletes a workload that is running fine.
+
+    The workload's log is whatever bytes it wrote, and one sequence that is not
+    UTF-8 would otherwise raise out of the decode; replaced, it shows as U+FFFD
+    in the step log instead.
     """
     try:
         return subprocess.run(
             ["kubectl", "-n", NAMESPACE, *args],
-            env=env, capture_output=True, text=True, check=False,
-            timeout=timeout,
+            env=env, capture_output=True, text=True, errors="replace",
+            check=False, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(args, 1, "", f"timed out after {timeout}s")
