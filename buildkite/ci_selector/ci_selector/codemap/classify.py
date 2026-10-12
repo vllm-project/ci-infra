@@ -30,6 +30,7 @@ import dataclasses
 import posixpath
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -57,6 +58,8 @@ from . import (
     test_helpers,
 )
 from .claim import (
+    EXTRA_WORLD_FILES,
+    LINT_ONLY_PYPROJECT_TABLES,
     Claim,
     classify_world,
     docs_only,
@@ -1364,6 +1367,9 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
     image = _classify_image_input(state, path)
     if image is not None:
         return image
+    lint = _classify_pyproject_lint(state, path, ctx)
+    if lint is not None:
+        return lint
     claim = classify_world(path, configs)
     if claim:
         # The world claim escalates every pipeline on its own, so this adds
@@ -2191,6 +2197,73 @@ def _lint_only_files(state: RepoState) -> frozenset[str]:
         return frozenset()
     _LINT_ONLY[state.repo] = frozenset(found)
     return _LINT_ONLY[state.repo]
+
+
+def _classify_pyproject_lint(
+    state: RepoState, path: str, ctx: DiffContext | None
+) -> Claim | None:
+    """A world file whose diff touches only lint configuration.
+
+    The world rule runs everything on any change to pyproject.toml, since its
+    build, dependency, packaging and pytest tables reach every test. Its lint
+    tables reach none while no step runs those tools. vllm#59459 added one
+    docs path to `[tool.typos.files]` and ran 190 steps; today's rules ran 0.
+
+    Both sides are parsed and compared as trees, so reformatting or a comment
+    is no change at all. Anything else is left to the world rule: a change
+    outside LINT_ONLY_PYPROJECT_TABLES, a side that does not parse, an added
+    or deleted file, or a step whose commands run one of the tools.
+    """
+    if path not in EXTRA_WORLD_FILES or not path.endswith(".toml"):
+        return None
+    if ctx is None or ctx.status.get(path) != "M":
+        return None
+    old, new = _toml_at(state, path, ctx.base), _toml_at(state, path, ctx.head)
+    if old is None or new is None:
+        return None
+    changed = _toml_changes(old, new)
+    if any(key[:2] not in LINT_ONLY_PYPROJECT_TABLES for key in changed):
+        return None
+    tools = sorted({key[1] for key in changed})
+    commands = "\n".join(
+        c for p in state.pipelines for s in p.steps for c in s.commands or ()
+    )
+    if any(re.search(rf"(?<![\w-]){re.escape(t)}(?![\w-])", commands) for t in tools):
+        return None
+    what = (
+        f"only {', '.join(f'[tool.{t}]' for t in tools)}, lint configuration no "
+        "Buildkite step runs"
+        if tools
+        else "nothing once parsed"
+    )
+    return Claim("no-code", f"{path} changes {what}; nothing to run")
+
+
+def _toml_at(state: RepoState, path: str, ref: str) -> dict | None:
+    proc = subprocess.run(
+        ["git", "-C", str(state.repo), "show", f"{ref}:{path}"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        return tomllib.loads(proc.stdout)
+    except tomllib.TOMLDecodeError:
+        return None
+
+
+def _toml_changes(old, new, key: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
+    """Keys whose value differs, down to the first non-table on either side."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        out: set[tuple[str, ...]] = set()
+        for k in old.keys() | new.keys():
+            if k in old and k in new:
+                out |= _toml_changes(old[k], new[k], (*key, k))
+            else:
+                out.add((*key, k))
+        return out
+    return set() if old == new else {key}
 
 
 def _classify_lint_only(state: RepoState, path: str) -> Claim | None:

@@ -32,16 +32,14 @@ variable "buildkite_queue_name" {
   description = "The buildkite queue tag for these agents"
 }
 
-variable "buildkite_token_value" {
+variable "buildkite_token_secret_name" {
   type        = string
-  description = "Agent token used to connect to Buildkite."
-  sensitive   = true
+  description = "Secret Manager secret holding the Buildkite agent token, as projects/<project>/secrets/<name>. The VM reads its latest version at boot, so its service account needs secretAccessor on it."
 }
 
-variable "huggingface_token_value" {
+variable "huggingface_token_secret_name" {
   type        = string
-  description = "Hugging Face token for vLLM model serving usage."
-  sensitive   = true
+  description = "Secret Manager secret holding the Hugging Face token, as projects/<project>/secrets/<name>. The VM reads its latest version at boot, so its service account needs secretAccessor on it."
 }
 
 variable "resource_suffix" {
@@ -68,4 +66,21 @@ variable "github_app_secret_name" {
   type        = string
   description = "The Buildkite secret name for the GitHub App PEM key."
   default     = "GITHUB_CI_BOT_PEM"
+}
+
+variable "vllm_torchtpu_ssh_checkout" {
+  type        = bool
+  description = <<-DESC
+    Check vllm-torchtpu out over SSH with its read-only deploy key instead of
+    over HTTPS with the CI bot's GitHub App token. A pre-checkout hook reads the
+    key per job from the Buildkite secret VLLM_TORCHTPU_DEPLOY_KEY, whose access
+    policy limits it to the pipelines that need it. Pushes still go over HTTPS.
+  DESC
+  default     = false
+}
+
+variable "service_account_email" {
+  type        = string
+  default     = null
+  description = "Service account the agent VMs run as. Null keeps the project's default compute service account."
 }

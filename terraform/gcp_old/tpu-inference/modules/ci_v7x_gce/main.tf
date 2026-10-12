@@ -1,4 +1,4 @@
-# TPU v7x CI Module on Compute Engine (tpu7x-standard-4t)
+# TPU v7x CI Module on Compute Engine (tpu7x-standard-4t or -1t hosts)
 #
 # For projects that get v7x through Compute Engine rather than the Cloud TPU
 # API that ci_v7x uses. The hosts are ordinary instances, so what the TPU API
@@ -18,9 +18,9 @@ locals {
 
   # Same scheme as ci_v7x, so a Buildkite agent maps onto its slice. The shape
   # is spelled like a Cloud TPU accelerator type, which counts TensorCores:
-  # 8 per tpu7x-standard-4t host.
+  # two per chip.
   slice_names = toset([for i in range(var.slice_count) :
-    "tpu7x-${var.hosts_per_slice * 8}-ci-${i}-${var.project_short_name}-${local.zone}"
+    "tpu7x-${var.hosts_per_slice * var.chips_per_host * 2}-ci-${i}-${var.project_short_name}-${local.zone}"
   ])
 
   # base_instance_name below numbers a slice's hosts -w-001, -w-002, ...
@@ -51,7 +51,7 @@ resource "google_compute_instance_template" "slice" {
   provider     = google-beta
   for_each     = local.slice_names
   name_prefix  = "${each.key}-"
-  machine_type = "tpu7x-standard-4t"
+  machine_type = "tpu7x-standard-${var.chips_per_host}t"
 
   labels = {
     vm_name = each.key
@@ -72,18 +72,20 @@ resource "google_compute_instance_template" "slice" {
 
   metadata = {
     "startup-script" = templatefile("${path.module}/startup-script.sh.tftpl", {
-      buildkite_token_value           = var.buildkite_token_value
-      huggingface_token_value         = var.huggingface_token_value
-      buildkite_analytics_token_value = var.buildkite_analytics_token_value
-      buildkite_queue_name            = var.buildkite_queue_name
-      github_app_secret_name          = var.github_app_secret_name
-      is_multi_host                   = local.is_multi_host
-      host_name                       = each.key
-      head_host                       = local.slice_hosts[each.key][0]
-      worker_hosts                    = join(" ", slice(local.slice_hosts[each.key], 1, var.hosts_per_slice))
-      private_key_pem                 = local.is_multi_host ? tls_private_key.internal_ssh_key[each.key].private_key_pem : ""
-      public_key_openssh              = local.is_multi_host ? tls_private_key.internal_ssh_key[each.key].public_key_openssh : ""
-      keep_agent_connected            = file("${path.module}/../shared/keep-agent-connected.sh")
+      buildkite_token_secret_name           = var.buildkite_token_secret_name
+      huggingface_token_secret_name         = var.huggingface_token_secret_name
+      buildkite_analytics_token_secret_name = var.buildkite_analytics_token_secret_name
+      read_secret_function                  = file("${path.module}/../shared/read-secret.sh")
+      buildkite_queue_name                  = var.buildkite_queue_name
+      github_app_secret_name                = var.github_app_secret_name
+      is_multi_host                         = local.is_multi_host
+      host_name                             = each.key
+      head_host                             = local.slice_hosts[each.key][0]
+      worker_hosts                          = join(" ", slice(local.slice_hosts[each.key], 1, var.hosts_per_slice))
+      private_key_pem                       = local.is_multi_host ? tls_private_key.internal_ssh_key[each.key].private_key_pem : ""
+      public_key_openssh                    = local.is_multi_host ? tls_private_key.internal_ssh_key[each.key].public_key_openssh : ""
+      keep_agent_connected                  = file("${path.module}/../shared/keep-agent-connected.sh")
+      git_setup                             = chomp(var.vllm_torchtpu_ssh_checkout ? file("${path.module}/../shared/git-ssh-checkout-setup.sh") : file("${path.module}/../shared/git-https-setup.sh"))
     })
   }
 

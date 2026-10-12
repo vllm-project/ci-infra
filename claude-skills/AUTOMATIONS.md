@@ -144,7 +144,9 @@ These files guide an agent but do not install timers or send scheduled alerts:
 - [`pytorch-bump-triage.md`](pytorch-bump-triage.md): distinguish PyTorch or
   Triton bump regressions from failures already present on main.
 - [`release-branch-cut.md`](release-branch-cut.md): cut a vLLM release branch,
-  tag RCs, cherry-pick milestone PRs, and launch all validation builds.
+  tag RCs, cherry-pick milestone PRs, launch all validation builds, and smoke
+  test the release images on B200/H200 with the scripts in
+  [`release-smoke/`](release-smoke/).
 - [`vllm-main-ci-triage/`](vllm-main-ci-triage/): diagnose hard main-CI
   failures, prepare narrow fixes, audit exact pull-request job coverage, and
   record confirmed test-selection leaks.

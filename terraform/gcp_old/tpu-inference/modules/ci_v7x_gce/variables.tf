@@ -5,7 +5,18 @@ variable "slice_count" {
 
 variable "hosts_per_slice" {
   type        = number
-  description = "tpu7x-standard-4t hosts (4 chips each) per slice: 1 for a tpu7x-8 slice, 2 for tpu7x-16."
+  description = "Hosts per slice: 1 for a single-host slice, 2 for a tpu7x-16."
+}
+
+variable "chips_per_host" {
+  type        = number
+  description = "4 for tpu7x-standard-4t hosts (tpu7x-8 per host), 1 for tpu7x-standard-1t (tpu7x-2), which only comes as a single host."
+  default     = 4
+
+  validation {
+    condition     = contains([1, 4], var.chips_per_host) && (var.chips_per_host == 4 || var.hosts_per_slice == 1)
+    error_message = "chips_per_host must be 4, or 1 with hosts_per_slice = 1."
+  }
 }
 
 variable "topology" {
@@ -49,23 +60,34 @@ variable "subnetwork" {
   description = "Subnetwork for the hosts. They get no external IP, so it needs Cloud NAT and Private Google Access."
 }
 
-variable "buildkite_token_value" {
+variable "buildkite_token_secret_name" {
   type        = string
-  description = "Agent token used to connect to Buildkite."
+  description = "Secret Manager secret holding the Buildkite agent token, as projects/<project>/secrets/<name>. The VM reads its latest version at boot, so its service account needs secretAccessor on it."
 }
 
-variable "huggingface_token_value" {
+variable "huggingface_token_secret_name" {
   type        = string
-  description = "Hugging Face token for vLLM model serving usage."
+  description = "Secret Manager secret holding the Hugging Face token, as projects/<project>/secrets/<name>. The VM reads its latest version at boot, so its service account needs secretAccessor on it."
 }
 
-variable "buildkite_analytics_token_value" {
+variable "buildkite_analytics_token_secret_name" {
   type        = string
-  description = "Analytics token used to push test data to Buildkite."
+  description = "Secret Manager secret holding the Buildkite Test Engine token, as projects/<project>/secrets/<name>. The VM reads its latest version at boot, so its service account needs secretAccessor on it."
 }
 
 variable "github_app_secret_name" {
   type        = string
   description = "The Buildkite secret name for the GitHub App PEM key."
   default     = "GITHUB_CI_BOT_PEM"
+}
+
+variable "vllm_torchtpu_ssh_checkout" {
+  type        = bool
+  description = <<-DESC
+    Check vllm-torchtpu out over SSH with its read-only deploy key instead of
+    over HTTPS with the CI bot's GitHub App token. A pre-checkout hook reads the
+    key per job from the Buildkite secret VLLM_TORCHTPU_DEPLOY_KEY, whose access
+    policy limits it to the pipelines that need it. Pushes still go over HTTPS.
+  DESC
+  default     = false
 }

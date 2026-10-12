@@ -15,6 +15,10 @@ if [[ -z "${TORCH_NIGHTLY:-}" ]]; then
     TORCH_NIGHTLY=0
 fi
 
+if [[ -z "${AITER_NIGHTLY:-}" ]]; then
+    AITER_NIGHTLY=0
+fi
+
 if [[ -z "${VLLM_CI_BRANCH:-}" ]]; then
     VLLM_CI_BRANCH="main"
 fi
@@ -25,6 +29,11 @@ fi
 
 if [[ -z "${DOCS_ONLY_DISABLE:-}" ]]; then
     DOCS_ONLY_DISABLE=0
+fi
+
+# The AITER nightly tests main as-is; a docs-only head commit must not skip it.
+if [[ "${AITER_NIGHTLY}" == "1" ]]; then
+    DOCS_ONLY_DISABLE=1
 fi
 
 if [[ -z "${COV_ENABLED:-}" ]]; then
@@ -160,6 +169,7 @@ upload_pipeline() {
     echo "Run all: $RUN_ALL"
     echo "Nightly: $NIGHTLY"
     echo "Torch Nightly: $TORCH_NIGHTLY"
+    echo "AITER Nightly: $AITER_NIGHTLY"
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
     FAIL_FAST=$(fail_fast)
@@ -173,6 +183,7 @@ upload_pipeline() {
             -D run_all="$RUN_ALL" \
             -D nightly="$NIGHTLY" \
             -D torch_nightly="$TORCH_NIGHTLY" \
+            -D aiter_nightly="$AITER_NIGHTLY" \
             -D mirror_hw="$AMD_MIRROR_HW" \
             -D fail_fast="$FAIL_FAST" \
             -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \

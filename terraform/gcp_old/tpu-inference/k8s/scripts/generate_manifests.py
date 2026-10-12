@@ -99,6 +99,7 @@ WORKER_COMPUTE_CLASS = "worker-cpu"
 # "default" is the gap rather than a class; `low` covers nightlies and
 # autotuning. Only the order of the numbers matters to Kueue.
 WORKLOAD_PRIORITIES = {
+    "oncall-fix": (120, "A pull request labelled oncall-fix: ahead of everything"),
     "post-merge": (100, "Tests of what is already on main"),
     "pre-merge": (50, "Tests gating a pull request"),
     "integration": (30, "The integration suite"),
@@ -125,11 +126,13 @@ CPU_QUEUE = "cpu"
 CPU_QUEUE_RESOURCE = "cpu"
 CPU_QUEUE_CORES = 100000
 
-# Sized to a unit suite, so several fit a node. Requests equal limits because a
-# worker-cpu node is shared where a TPU host is not.
+# Sized to a unit suite, so several fit a node: vllm-torchtpu's CPU unit tests,
+# the largest chip-less steps, peak near 1.5 cores and 3.6 GiB (10-01..10-07).
+# Requests equal limits because a worker-cpu node is shared where a TPU host is
+# not.
 CPU_JOB_SIZE = {
-    "cpu_cores": "6",
-    "cpu_memory": "16Gi",
+    "cpu_cores": "4",
+    "cpu_memory": "8Gi",
     "cpu_disk": "20Gi",
 }
 
@@ -144,6 +147,21 @@ TIMING_TABLE = "kube_workload_timing"
 # See monitoring_kueue.yaml.tpl.
 METRICS_SCRAPER_NAME = "kueue-metrics-scraper"
 METRICS_SCRAPER_NAMESPACE = "gmp-public"
+
+# The agent-stack-k8s chart's release name, which the chart also uses as its
+# Deployment's name. deploy_manifests.py renders the chart under it.
+AGENT_STACK_RELEASE = "agent-stack-k8s"
+
+# The upstream controllers every cluster runs, by namespace and Deployment, with
+# the labels their pods carry. controller_availability.yaml.tpl gives each a
+# second replica and a priority kube-dns cannot preempt; deploy_manifests.py
+# leaves their replica count out of the release so the two do not fight over it.
+CONTROLLERS = (
+    ("kueue-system", "kueue-controller-manager",
+     {"app.kubernetes.io/name": "kueue", "control-plane": "controller-manager"}),
+    ("jobset-system", "jobset-controller-manager",
+     {"app.kubernetes.io/name": "jobset", "control-plane": "controller-manager"}),
+)
 
 # The launcher's program, and the ConfigMap deploy_manifests.py builds out of
 # it. Not rendered into the generated tree: a program indented into YAML is not
@@ -255,6 +273,16 @@ def worker_node_service_account(prefix: str, project: str, location: str) -> str
     locals.tf.
     """
     return f"{prefix}-wkr-{location}@{project}.iam.gserviceaccount.com"
+
+
+def dashboard_service_account(prefix: str, project: str) -> str:
+    """The identity the queue dashboard reaches the manager as.
+
+    dashboard.tf creates the account under the same derived name, and the RBAC
+    binding names it here. A mismatch fails safe - the dashboard is refused and
+    shows the error - but it is still two derivations to keep in step.
+    """
+    return f"{prefix}-dashboard@{project}.iam.gserviceaccount.com"
 
 
 def render(name: str, **values) -> str:
@@ -447,6 +475,14 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
                 f"{name}: nominal_quota={quota} has to be whole {slice_chips}-chip "
                 f"slices and at most the {capacity} chips its pools can hold"
             )
+        # Chips the pool's floor keeps booted, which no other shape can use.
+        parked = 0 if hosts > 1 else int(pool.get("min_nodes") or 0) * chips
+        if parked > quota:
+            raise ValueError(
+                f"{name}: min_nodes parks {parked} chips, more than its "
+                f"nominal_quota={quota}; the rest would come out of another "
+                "shape's share of the reservation"
+            )
 
         memory_gb = machine_memory_gb.get(machine_type)
         if memory_gb is None:
@@ -474,6 +510,10 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
             # The one number here that is a policy rather than a fact, and the
             # only one Kueue reads: this shape's share of the reservation.
             "quota": quota,
+            # Kueue's too: the most chips its pools can hold. See queues().
+            "capacity": capacity,
+            # And this: what its quota cannot lend. See queues().
+            "parked": parked,
         }
     return out
 
@@ -530,8 +570,22 @@ def queues(
     namespace: str,
     checks: bool,
     reclaim: dict[str, str] | None = None,
+    capacities: dict[str, int | None] | None = None,
+    parked: dict[str, int] | None = None,
 ) -> str:
-    """A flavor per machine family, then a queue per shape sharing it."""
+    """A flavor per machine family, then a queue per shape sharing it.
+
+    A TPU queue also gets a borrowing limit, so its nominal quota plus what it
+    borrows is at most what its node pools can hold. The cohort can be larger
+    than any one shape's pools, and Kueue counts chips, not nodes or slices: a
+    workload admitted past the pools' size holds quota while its pods wait for
+    hardware that cannot exist, where it should wait in the queue instead.
+
+    For the same reason a queue whose pools keep a floor of booted nodes lends
+    only its quota less the chips that floor parks: another shape admitted
+    against those chips would wait for hardware sitting idle in this shape's
+    nodes.
+    """
     out = [priority_classes()] + [
         render("resource_flavor", ACCELERATOR=family)
         for family in sorted({cohort(name) for name in shapes})
@@ -549,9 +603,25 @@ def queues(
                 NOMINAL_QUOTA=CPU_QUEUE_CORES if name == CPU_QUEUE else chips,
                 ADMISSION_CHECKS=dispatch_check(name, checks),
                 RECLAIM_WITHIN_COHORT=(reclaim or {}).get(name, "Never"),
+                BORROWING_LIMIT=borrowing_limit(chips, (capacities or {}).get(name)),
+                LENDING_LIMIT=lending_limit(chips, (parked or {}).get(name, 0)),
             )
         )
     return "".join(out)
+
+
+def borrowing_limit(quota: int, capacity: int | None) -> str:
+    """The borrowingLimit line a queue's quota carries, or nothing."""
+    if capacity is None:
+        return ""
+    return f"\n              borrowingLimit: {capacity - quota}"
+
+
+def lending_limit(quota: int, parked: int) -> str:
+    """The lendingLimit line a queue's quota carries, or nothing."""
+    if not parked:
+        return ""
+    return f"\n              lendingLimit: {quota - parked}"
 
 
 def fleet_secret_docs(tfvars: dict, namespace: str) -> str:
@@ -683,7 +753,7 @@ def launcher_profiles(
                         for key, value in entry["shape"].items()
                         # Kueue's, not the launcher's: what a shape's queue may
                         # hold says nothing about where one workload runs.
-                        if key != "quota"
+                        if key not in ("quota", "capacity", "parked")
                     },
                     "max_runtime_seconds": int(tfvars["tpu_test_max_seconds"]),
                 }
@@ -771,6 +841,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             "chips": 0,
             "hosts": 1,
             "quota": 0,
+            "capacity": None,
+            "parked": 0,
             # What the compute class builds a node against. One size for the
             # lane; a step wanting another states its own manifest.
             **CPU_JOB_SIZE,
@@ -778,12 +850,18 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         for name, shape in local.items():
             # The shape is stored once, not summed: two clusters running it
             # run the same hardware. Only the quota adds up.
-            entry = fleet.setdefault(name, {"quota": 0, "workers": [], "shape": shape})
+            entry = fleet.setdefault(
+                name, {"quota": 0, "capacity": None, "parked": 0, "workers": [], "shape": shape}
+            )
             entry["quota"] += shape["quota"]
+            entry["parked"] += shape["parked"]
+            if shape["capacity"] is not None:
+                entry["capacity"] = (entry["capacity"] or 0) + shape["capacity"]
             entry["workers"].append(cluster_name)
 
         base = out_dir / worker_dir
         write(base / "system" / "10-kueue-config.yaml", kueue_config("worker"))
+        write(base / "controllers" / "00-controllers.yaml", controller_availability())
         # Under system/, alongside the rest of what a worker has to hold before
         # it can run anything. Nothing in this repo names the class; the roles
         # that do arrive later, as workloads MultiKueue dispatches here, and a
@@ -812,6 +890,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 {name: shape["quota"] for name, shape in local.items()},
                 namespace,
                 checks=False,
+                capacities={name: shape["capacity"] for name, shape in local.items()},
             ),
         )
         write(
@@ -855,11 +934,30 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             base / "workload" / "20-launcher-rbac.yaml",
             render("launcher_rbac_worker", NAMESPACE=namespace, PROJECT_ID=project),
         )
+        # Events only: a TPU pod's scheduling and failure events are recorded
+        # where it runs. The dashboard's account is the manager project's.
+        write(
+            base / "workload" / "40-dashboard-rbac.yaml",
+            render(
+                "dashboard_rbac_worker",
+                NAMESPACE=namespace,
+                DASHBOARD_SERVICE_ACCOUNT=dashboard_service_account(prefix, project),
+            ),
+        )
 
     worker_names = sorted(c["name"] for c in clusters if c["role"] == "worker")
 
     base = out_dir / manager_dir
     write(base / "system" / "10-kueue-config.yaml", kueue_config("manager"))
+    # The manager's Kueue runs on the class's nodes, which only pods naming the
+    # class can use. On a general system node, the kube-dns or konnectivity-agent
+    # replicas GKE adds as the fleet grows outrank the Managed Prometheus
+    # collector (gmp-critical, below system-cluster-critical), preempt it when
+    # the node is full, and nothing scrapes Kueue until a collector fits again.
+    write(
+        base / "controllers" / "00-controllers.yaml",
+        controller_availability({"kueue-system": MANAGER_COMPUTE_CLASS}),
+    )
     # Manager only. A worker's TPU pods do call buildkite-agent, but with the
     # per-job access token the launcher forwards, not with this one - see the
     # template.
@@ -931,11 +1029,22 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         base / "workload" / "30-monitoring.yaml",
         render("monitoring_agent_stack", NAMESPACE=namespace),
     )
+    # The dashboard reads queues, workloads and the rest here, where admission
+    # for the whole fleet happens; workers grant it events only, above. Under
+    # workload/ for the namespace its Role is in.
+    write(
+        base / "workload" / "40-dashboard-rbac.yaml",
+        render(
+            "dashboard_rbac",
+            NAMESPACE=namespace,
+            DASHBOARD_SERVICE_ACCOUNT=dashboard_service_account(prefix, project),
+        ),
+    )
     # Everything the fleet runs on the manager lives in this namespace, so
     # setting the class here covers the launcher pods and the agent pods without
-    # either of their templates having to name a node. The controllers in
-    # kueue-system and jobset-system are upstream's and stay on plain
-    # auto-provisioning, which falls back across families of its own accord.
+    # either of their templates having to name a node. The JobSet controller is
+    # upstream's and stays on plain auto-provisioning, which falls back across
+    # families of its own accord; Kueue's names the class in its own overlay.
     write(
         base / "queues" / "00-namespace.yaml",
         render(
@@ -951,6 +1060,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             namespace,
             checks=True,
             reclaim=reclaim_policies(tfvars),
+            capacities={name: entry["capacity"] for name, entry in fleet.items()},
+            parked={name: entry["parked"] for name, entry in fleet.items()},
         ),
     )
     write(
@@ -979,7 +1090,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
     )
 
     # Under charts/ rather than beside the manifests, because it is not one.
-    # deploy_manifests.py applies system/, queues/ and workload/; this is an
+    # deploy_manifests.py applies system/, controllers/, queues/, workload/ and
+    # chart-overlay/; this is an
     # input to a helm render, and applying it would be an error.
     write(
         base / "charts" / "agent-stack-k8s.yaml",
@@ -998,6 +1110,17 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 + int(tfvars["tpu_runtime_max_seconds"])
                 + 7200
             ),
+        ),
+    )
+
+    # Applied after the chart, which creates the Deployment it amends; under its
+    # own directory because the chart step runs after workload/.
+    write(
+        base / "chart-overlay" / "agent-stack-k8s.yaml",
+        render(
+            "agent_stack_availability",
+            NAMESPACE=namespace,
+            DEPLOYMENT=AGENT_STACK_RELEASE,
         ),
     )
 
@@ -1028,6 +1151,43 @@ def monitoring_kueue() -> str:
         SCRAPER_NAME=METRICS_SCRAPER_NAME,
         SCRAPER_NAMESPACE=METRICS_SCRAPER_NAMESPACE,
     )
+
+
+def controller_availability(classes: dict[str, str] | None = None) -> str:
+    """Replicas, priority and a disruption budget for the upstream controllers,
+    and for a namespace in classes, the compute class its controller runs in.
+
+    The same on every cluster: the manager's Kueue serves the webhook the
+    launcher's job goes through, and a worker's serves the copy MultiKueue
+    creates there.
+    """
+    docs = []
+    for namespace, deployment, labels in CONTROLLERS:
+        selector = "\n".join(f"{key}: {value}" for key, value in sorted(labels.items()))
+        name = (classes or {}).get(namespace)
+        # GKE adds the toleration itself to a pod that names a class; it is
+        # spelled out so the pod schedules even if that webhook is not there.
+        placement = (
+            f"""
+nodeSelector:
+  cloud.google.com/compute-class: {name}
+tolerations:
+  - key: cloud.google.com/compute-class
+    operator: Equal
+    value: {name}
+    effect: NoSchedule"""
+            if name
+            else ""
+        )
+        docs.append(render(
+            "controller_availability",
+            NAMESPACE=namespace,
+            DEPLOYMENT=deployment,
+            SELECTOR=indent(selector, 6),
+            POD_SELECTOR=indent(selector, 20),
+            PLACEMENT=("\n" + indent(placement.strip("\n"), 6)) if placement else "",
+        ))
+    return "".join(docs)
 
 
 def kueue_config(role: str) -> str:

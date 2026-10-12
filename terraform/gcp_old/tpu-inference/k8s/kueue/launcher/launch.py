@@ -77,6 +77,11 @@ QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 PRIORITY_LABEL = "kueue.x-k8s.io/priority-class"
 PRIORITY_ENV = "WORKLOAD_PRIORITY"
 
+# Where a build's bootstrap.sh records the class for every workload of the
+# build, beside the JOB_PRIORITY it ranks bare-metal jobs by. A step's own
+# WORKLOAD_PRIORITY wins.
+PRIORITY_META_DATA = "WORKLOAD_PRIORITY"
+
 # GKE's name, not ours: the gcsfuse sidecar looks for an emptyDir called this
 # and uses it as its file cache.
 FUSE_CACHE_VOLUME = "gke-gcsfuse-cache"
@@ -166,6 +171,12 @@ API_GRACE_SECONDS = 600
 # new one under the same name. Deleting a Job or JobSet takes its Workload with
 # it through garbage collection, which is seconds on a healthy manager.
 RESUBMIT_WAIT_SECONDS = 120
+
+# How long a resubmission waits for a worker that was offered the old object to
+# drop its pods. MultiKueue deletes the remote copy as soon as the manager's
+# Workload goes, and the pods then get their termination grace period, so this
+# is a minute or two.
+REMOTE_GONE_WAIT_SECONDS = 300
 
 # Deadline for the signal handler's delete, which races the pod's termination
 # grace period (SIGKILL 30s after SIGTERM) rather than the step timeout: a
@@ -355,25 +366,55 @@ def never_dispatched(workload):
             and not (admitted and admitted.get("status") == "True"))
 
 
-def resubmit(kind, name, doc):
+def resubmit(kind, name, doc, before_create=None):
     """Delete the object and create it again under the same name.
 
-    The new object, or None if the old one did not go in time. Waits for it to
-    go because the name is reused: applying over an object still being deleted
-    updates the doomed one rather than making a fresh one Kueue will queue.
+    The new object, or None if the old one did not go in time or before_create
+    returned false. Waits for it to go because the name is reused: applying over
+    an object still being deleted updates the doomed one rather than making a
+    fresh one Kueue will queue.
     """
     delete_workload(kind, name)
     deadline = time.monotonic() + RESUBMIT_WAIT_SECONDS
     while kubectl_json("get", kind, name) is not None:
         if time.monotonic() > deadline:
+            log(f"{kind}/{name} was not deleted within {RESUBMIT_WAIT_SECONDS}s")
             return None
         time.sleep(POLL_SECONDS)
+    if before_create is not None and not before_create():
+        return None
     subprocess.run(
         ["kubectl", "-n", NAMESPACE, "apply", "-f", "-"],
         input=json.dumps(doc), text=True, check=True,
         timeout=CLI_TIMEOUT_SECONDS,
     )
     return kubectl_json("get", kind, name)
+
+
+def remote_copy_gone(clusters, job_id, registry):
+    """Whether every worker the workload was offered has dropped its pods.
+
+    A worker can admit the remote copy while the manager fails to record that
+    it did, so the copy may be running when the launcher gives up on the
+    submission. A resubmission reuses the name, and while a remote Job of that
+    name exists MultiKueue copies its status onto the new object instead of
+    creating a fresh one. Pods are the only thing the launcher may read on a
+    worker; MultiKueue deletes the remote Job in the background, so the Job is
+    gone before its last pod is.
+    """
+    deadline = time.monotonic() + REMOTE_GONE_WAIT_SECONDS
+    for cluster in sorted(clusters):
+        env = worker_env(cluster, registry)
+        if env is None:
+            log(f"cannot check {cluster} for the old copy, so not resubmitting")
+            return False
+        while worker_pods(env, job_id) != []:
+            if time.monotonic() > deadline:
+                log(f"{cluster} still had pods for this step "
+                    f"{REMOTE_GONE_WAIT_SECONDS}s after the old copy was deleted")
+                return False
+            time.sleep(POLL_SECONDS)
+    return True
 
 
 def load_registry():
@@ -834,18 +875,47 @@ def render(path, image, name, shape):
     return coerce_ints(doc)
 
 
+def build_priority():
+    """The class the build's bootstrap recorded, or "" if it recorded none or
+    it could not be read. Best effort: a run without one is ordered at 0, not
+    refused."""
+    try:
+        proc = subprocess.run(
+            [AGENT_CLI, "meta-data", "get", PRIORITY_META_DATA, "--default", ""],
+            capture_output=True, text=True, timeout=CLI_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"warning: could not read {PRIORITY_META_DATA} meta-data: {exc}")
+        return ""
+    if proc.returncode != 0:
+        log(f"warning: could not read {PRIORITY_META_DATA} meta-data: "
+            f"{proc.stderr.strip()[:200]}")
+        return ""
+    return proc.stdout.strip()
+
+
 def resolve_priority(registry):
     """Which WorkloadPriorityClass this run is worth, or None for the default.
 
-    Unlabelled scores 0, which the ladder leaves empty, so a step that says
-    nothing needs no class. A name no class answers to is not a demotion but a
-    refusal - Kueue will not create the Workload - so it is checked here, where
-    the valid names are known, rather than failing inside admission.
+    The step's WORKLOAD_PRIORITY if it names one, otherwise the class the
+    build's bootstrap recorded. Unlabelled scores 0, which the ladder leaves
+    empty, so a build that says nothing needs no class. A name no class
+    answers to is not a demotion but a refusal - Kueue will not create the
+    Workload - so the step's is checked here, where the valid names are known,
+    rather than failing inside admission. The build's is dropped instead: one
+    bad meta-data value should not fail every step of the build.
     """
     known = registry.get("priorities") or []
     asked = os.environ.get(PRIORITY_ENV, "").strip()
     if not asked:
-        return None
+        recorded = build_priority()
+        if recorded and recorded not in known:
+            log(f"warning: the build's {PRIORITY_META_DATA} {recorded!r} is not "
+                "a priority the fleet defines; submitting unclassed")
+            return None
+        if recorded:
+            log(f"priority class {recorded} (from the build's {PRIORITY_META_DATA})")
+        return recorded or None
     if asked not in known:
         raise SystemExit(
             f"{PRIORITY_ENV}={asked!r} is not a priority the fleet defines. "
@@ -1063,6 +1133,19 @@ def inherit_defaults(doc, profile):
             continue
         for key, value in (defaults.get("tpuJobs") or {}).items():
             job.setdefault(key, copy.deepcopy(value))
+
+    # On the replicatedJob, not the JobSet, so that only the multi-host roles
+    # holding chips get it; see multiHostJobs in pod_defaults.yaml.
+    if doc["kind"] == "JobSet" and int(profile["hosts"]) > 1:
+        multi_host = (defaults.get("multiHostJobs") or {}).get("annotations") or {}
+        for rj in doc["spec"].get("replicatedJobs", []):
+            if not pod_chips(rj["template"]["spec"]["template"]["spec"]):
+                continue
+            on_job = rj["template"].setdefault("metadata", {}).setdefault(
+                "annotations", {})
+            for key, value in multi_host.items():
+                if key not in annotations:
+                    on_job.setdefault(key, value)
 
 
 def size_host_volumes(doc, profile):
@@ -1328,10 +1411,8 @@ def startup_note(env, items):
         name = cs.get("name") or ""
         if "gcsfuse" not in name:
             continue
-        tail = subprocess.run(
-            ["kubectl", "-n", NAMESPACE, "logs", pod["metadata"]["name"],
-             "-c", name, "--tail=3"],
-            env=env, capture_output=True, text=True, check=False, timeout=60,
+        tail = worker_kubectl(
+            env, "logs", pod["metadata"]["name"], "-c", name, "--tail=3",
         )
         last = " / ".join(l.strip() for l in tail.stdout.splitlines() if l.strip())
         if last:
@@ -1383,6 +1464,23 @@ def workload_exit_code(items):
     code = codes.pop()
     # Beyond a byte the shell truncates, and 0 would report a failure as a pass.
     return code if 0 < code < 256 else None
+
+
+def storage_eviction(items):
+    """The kubelet's message if it evicted a pod for its disk use, else None.
+
+    The eviction carries DisruptionTarget, which the pod failure policy ignores
+    so that losing a node does not fail the run. But the replacement pod writes
+    the same files and is evicted again, so the Job reruns the step until its
+    deadline. The message names the container and how much it wrote.
+    """
+    for pod in items or []:
+        status = pod.get("status", {})
+        message = status.get("message") or ""
+        if (status.get("reason") == "Evicted"
+                and ("ephemeral" in message or "EmptyDir volume" in message)):
+            return f"{pod['metadata']['name']}: {message.strip()}"
+    return None
 
 
 def describe_admission(workload):
@@ -1443,6 +1541,28 @@ def worker_env(cluster_name, registry):
     return env
 
 
+def worker_kubectl(env, *args, timeout=60):
+    """One read from the worker through Connect Gateway, never raising.
+
+    Every caller is inside the watch loop and treats a failed read as "ask
+    again next turn". A read that hangs past its timeout is the same case, so
+    it comes back as a failed call too. Raised, it would end the launcher,
+    which deletes a workload that is running fine.
+
+    The workload's log is whatever bytes it wrote, and one sequence that is not
+    UTF-8 would otherwise raise out of the decode; replaced, it shows as U+FFFD
+    in the step log instead.
+    """
+    try:
+        return subprocess.run(
+            ["kubectl", "-n", NAMESPACE, *args],
+            env=env, capture_output=True, text=True, errors="replace",
+            check=False, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 1, "", f"timed out after {timeout}s")
+
+
 def worker_pods(env, job_id):
     """This workload's pods on the worker, or None if they could not be read.
 
@@ -1452,10 +1572,8 @@ def worker_pods(env, job_id):
     None rather than an empty list, because "no pods yet" and "could not ask"
     read differently in a step log.
     """
-    proc = subprocess.run(
-        ["kubectl", "-n", NAMESPACE, "get", "pods",
-         "-l", f"buildkite.com/job-id={job_id}", "-o", "json"],
-        env=env, capture_output=True, text=True, check=False, timeout=60,
+    proc = worker_kubectl(
+        env, "get", "pods", "-l", f"buildkite.com/job-id={job_id}", "-o", "json",
     )
     if proc.returncode != 0:
         return None
@@ -1523,14 +1641,15 @@ class LogCollector:
         # whose timestamps advance independently, and one cursor per pod cannot
         # represent that - a chatty sidecar drags the cursor forward and the
         # workload's own lines are discarded as already seen.
-        cmd = ["kubectl", "-n", NAMESPACE, "logs", pod["name"],
-               "--container", WORKLOAD_CONTAINER, "--timestamps=true"]
+        args = ["logs", pod["name"], "--container", WORKLOAD_CONTAINER,
+                "--timestamps=true"]
         since = self.cursor.get(pod["name"])
         if since:
-            cmd += ["--since-time", since]
-        proc = subprocess.run(cmd, env=self.env, capture_output=True,
-                              text=True, check=False, timeout=120)
+            args += ["--since-time", since]
+        proc = worker_kubectl(self.env, *args, timeout=120)
         # A pod that is Pending, or already deleted, is normal - not an error.
+        # Nor is a timed-out read: the cursor has not moved, so the next poll
+        # asks for the same lines.
         return proc.stdout if proc.returncode == 0 else ""
 
     def sweep(self):
@@ -1873,7 +1992,8 @@ def main():
         # Since when the current submission has been reserved without MultiKueue
         # placing it or naming a worker; see never_dispatched().
         undispatched = None
-        dispatch_seen = False
+        # Workers the current submission has been offered to.
+        offered = set()
         admitted = False
         running = False
         last_startup = None
@@ -1936,10 +2056,15 @@ def main():
             # the failure. A fresh object gets a fresh reconcile. Never after
             # admission, where losing the reservation is preemption and Kueue
             # requeues it itself.
+            #
+            # Two ways in. Either no worker was ever named, or one was and the
+            # nomination went without an admission: the worker admitted the
+            # copy, the manager's attempt to record that was rejected, and
+            # every retry fails the same way because the nomination it must
+            # match is gone.
             status = (workload or {}).get("status", {})
-            if cluster or status.get("nominatedClusterNames"):
-                dispatch_seen = True
-            if not admitted and not dispatch_seen and never_dispatched(workload):
+            offered.update(status.get("nominatedClusterNames") or [])
+            if not admitted and never_dispatched(workload):
                 if undispatched is None:
                     undispatched = time.monotonic()
             else:
@@ -1948,19 +2073,34 @@ def main():
                     and time.monotonic() - undispatched > redispatch_after
                     and timing["redispatches"] < redispatch_max):
                 timing["redispatches"] += 1
+                if offered:
+                    why = (f"its offer to {', '.join(sorted(offered))} was "
+                           "withdrawn without an admission")
+                else:
+                    why = "not dispatched to any worker"
                 log(f"quota reserved {time.monotonic() - undispatched:.0f}s ago "
-                    "but not dispatched to any worker - resubmitting (attempt "
+                    f"but {why} - resubmitting (attempt "
                     f"{timing['redispatches']}/{redispatch_max})")
-                created = with_grace(resubmit, kind, name, doc)
+                # "Not dispatched" is the manager's view, not the workers'. A
+                # worker can create the remote copy within seconds while the
+                # manager never records it, and the nomination can come and go
+                # between two polls, so with no offer seen every worker is
+                # checked. A resubmission that skips this reuses the name while
+                # the old copy's pods are still terminating: two Ray heads under
+                # one slice-0-0 DNS name, and the hosts split between them.
+                may_hold = set(offered) or set(registry.get("workers") or {})
+                created = with_grace(
+                    resubmit, kind, name, doc,
+                    lambda: remote_copy_gone(may_hold, job_id, registry))
                 if created is None:
-                    log(f"{kind}/{name} was not deleted within "
-                        f"{RESUBMIT_WAIT_SECONDS}s, so it cannot be resubmitted")
+                    log(f"{kind}/{name} cannot be resubmitted")
                     stop_announcing()
                     delete_workload(kind, name)
                     return finish("not_admitted", 1)
                 uid = created["metadata"]["uid"]
                 reserved = None
                 undispatched = None
+                offered = set()
                 last_note = None
                 continue
 
@@ -1990,6 +2130,19 @@ def main():
             # One read of the workload's pods, for the readers below.
             items = worker_pods(genv, job_id) if genv else None
             note_pod_starts(timing, items)
+
+            evicted = storage_eviction(items)
+            if evicted:
+                timing["finished_at"] = utc_now()
+                if collector:
+                    collector.sweep()
+                print("^^^ +++", flush=True)
+                log(f"pod evicted for its disk use: {evicted}"[:600])
+                log("failing now rather than rerunning it: the rerun writes the "
+                    "same files and is evicted again. Point whatever wrote them "
+                    "at /cache/jax or /dev/shm.")
+                delete_workload(kind, name)
+                return finish("evicted_storage", 1)
 
             # A failed read is not a started pod: leave it to the next turn.
             if admitted and items is not None and not running:

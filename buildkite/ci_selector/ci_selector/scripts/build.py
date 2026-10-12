@@ -28,6 +28,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from ..coverage.table import compress_ranges
 from ..coverage.joblog import (
     PLUGIN_MARKER,
     PYTEST_SOURCE,
@@ -270,6 +271,9 @@ def merge_build(
             expected[key] = max(expected.get(key, 0), job["parallel_total"])
 
     accumulated: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    lines_seen: dict[str, dict[str, set[int]]] = defaultdict(lambda: defaultdict(set))
+    # A step whose every process recorded lines and lost none of them.
+    lines_whole: dict[str, bool] = {}
     stamps: dict[str, Stamp] = {}
     keyed_flag: dict[str, bool] = {}
 
@@ -370,6 +374,11 @@ def merge_build(
                 stamp.libcalls[lib] = sorted(set(stamp.libcalls.get(lib, ())) | names)
             for path, names in process.functions.items():
                 accumulated[key][path] |= names
+            for path, numbers in process.lines.items():
+                lines_seen[key][path] |= numbers
+            lines_whole[key] = lines_whole.get(key, True) and (
+                process.records_lines and not process.lost_line_records
+            )
 
         if verbose:
             print(f"  {key}: {len(accumulated[key])} files")
@@ -409,13 +418,25 @@ def merge_build(
         stamp.n_files = len(functions)
         stamp.n_functions = sum(len(v) for v in functions.values())
         stamp.n_import_time = sum(len(v) for v in import_time.values())
-        stamp.digest = digest_of(functions, stamp, import_time)
+        # Lines only for files the row keeps: a line in a dropped file is one
+        # no diff can name.
+        lines = {
+            p: frozenset(n)
+            for p, n in lines_seen.get(key, {}).items()
+            if p in functions
+        }
+        stamp.lines_recorded = bool(lines) and lines_whole.get(key, False)
+        if not stamp.lines_recorded:
+            lines = {}
+        stamp.n_lines = sum(len(v) for v in lines.values())
+        stamp.digest = digest_of(functions, stamp, import_time, lines=lines)
         rows[key] = Row(
             key=key,
             keyed=keyed_flag[key],
             functions=functions,
             stamp=stamp,
             import_time=import_time,
+            lines=lines,
         )
     print(census.summary())
     if census.delivery:
@@ -520,6 +541,17 @@ def union_rows(left: Row, right: Row) -> Row:
         import_time[path] = import_time.get(path, frozenset()) | names
 
     a, b = left.stamp, right.stamp
+    # Line numbers mean something only at the commit they were recorded at,
+    # so two builds' lines combine only when both are whole and at one commit.
+    lines_recorded = (
+        a.lines_recorded and b.lines_recorded and set(a.commits) == set(b.commits)
+    )
+    lines: dict[str, frozenset[int]] = {}
+    if lines_recorded:
+        for path in left.lines.keys() | right.lines.keys():
+            lines[path] = left.lines.get(path, frozenset()) | right.lines.get(
+                path, frozenset()
+            )
     stamp = Stamp(
         jobs=sorted(set(a.jobs) | set(b.jobs)),
         builds=sorted(set(a.builds) | set(b.builds)),
@@ -558,17 +590,20 @@ def union_rows(left: Row, right: Row) -> Row:
         build_env=_union_env(a.build_env, b.build_env),
         packages=sorted(set(a.packages) | set(b.packages)),
         libcalls=_union_libcalls(a.libcalls, b.libcalls),
+        lines_recorded=lines_recorded,
     )
     stamp.n_files = len(functions)
     stamp.n_functions = sum(len(v) for v in functions.values())
     stamp.n_import_time = sum(len(v) for v in import_time.values())
-    stamp.digest = digest_of(functions, stamp, import_time)
+    stamp.n_lines = sum(len(v) for v in lines.values())
+    stamp.digest = digest_of(functions, stamp, import_time, lines=lines)
     return Row(
         key=left.key,
         keyed=left.keyed or right.keyed,
         functions=functions,
         stamp=stamp,
         import_time=import_time,
+        lines=lines,
     )
 
 
@@ -630,6 +665,7 @@ def write_table(rows: dict[str, Row], out: Path) -> None:
                 "import_time": {
                     p: sorted(n) for p, n in sorted(row.import_time.items())
                 },
+                "lines": {p: compress_ranges(n) for p, n in sorted(row.lines.items())},
             }
             for key, row in sorted(rows.items())
         },

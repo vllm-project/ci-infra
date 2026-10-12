@@ -39,6 +39,7 @@ manager where the launcher built the podspec.
 | `kueue/generated/` | The YAML that actually gets applied. Committed on purpose — see below. |
 | `kueue/launcher/` | The program every TPU step runs, its Job, and its image build. |
 | `kueue/launcher/pod_defaults.yaml` | What the fleet gives a workload's pods: caches, gcsfuse settings, eviction and retry policy. One definition, inherited by the built-in Job and by every manifest. |
+| `dashboard.tf`, `dashboard/` | The fleet's health dashboard: a Cloud Run service, its program (`app.py` serves, `fleet.py` reads, `views.py` and `charts.py` render), templates, static files and image build. |
 
 Terraform stops at the cluster; `deploy_manifests.py` starts there. The
 Kubernetes and Helm providers need a reachable API server at plan time, which
@@ -123,9 +124,10 @@ metadata:
 With that annotation the launcher merges in `pod_defaults.yaml` — the cache
 volumes and their mounts, the gcsfuse sidecar settings, the TPU toleration, the
 service account, `restartPolicy`, the two env names every workload wants, the
-TTL, and the retry rules that let a pod survive its node being repaired. The
-memory request comes from the shape's profile, since it is a fraction of the
-host the pod landed on.
+TTL, and the retry rules that let a pod survive its node being repaired. A
+JobSet's multi-host roles also get JobSet's exclusive placement, one slice per
+Job. The memory request comes from the shape's profile, since it is a fraction
+of the host the pod landed on.
 
 The merge is additive: anything the manifest sets itself is left alone, so a
 role can add a volume or override a default it needs to differ on. Inherited
@@ -277,6 +279,30 @@ a tag always names one set of bytes. The staging directory has to be named: the
 default is a multi-region `us` bucket, which `constraints/gcp.resourceLocations`
 refuses in this org.
 
+### Rebuild the dashboard
+
+After any change under `dashboard/`, bump `_REVISION`:
+
+```bash
+cd dashboard
+gcloud builds submit --project cloud-ullm-inference-ci-cd --region us-central1 \
+  --config cloudbuild.yaml \
+  --gcs-source-staging-dir gs://cloud-ullm-inference-ci-cd-tf-state/cloudbuild-source \
+  --substitutions _REVISION=2 .
+```
+
+Then set `dashboard_image` in `prod.auto.tfvars` to the new tag and
+`terraform apply`. To try a change first, run it against the live fleet with
+your own credentials - gcloud for Google APIs, the `bk` CLI for Buildkite - with
+the environment `dashboard.tf` sets:
+
+```bash
+PROJECT_ID=... GATEWAY_URL=... CLUSTERS='[{"name": ..., "gateway": ...}, ...]' \
+  KUEUE_METRICS_CLUSTER=tpu-ci-manager BUILDKITE_ORG=vllm BUILDKITE_CLUSTER_ID=... \
+  TIMING_TABLE=cloud-ullm-inference-ci-cd.ci_efficiency_metrics.kube_workload_timing \
+  ./dashboard/app.py --local --port 8080
+```
+
 ### Tear the fleet down
 
 **Empty the cache buckets first.** They are `force_destroy = false`, so a
@@ -319,14 +345,38 @@ faster before the first line arrives, which covers the built-in Job. The step
 still passes or fails correctly and says when output is missing; the container
 output is in Cloud Logging either way.
 
-**Two of the three v7x shapes have no quota of their own.** All eight chips are
-the nominal quota of `tpu7x-standard-4t-2x2x1`; `tpu7x-standard-1t-1x1x1` and
-`tpu7x-standard-4t-2x2x2` have zero and run entirely on what that queue is not
-using. Eight chips will not divide three ways and still leave each shape a whole
-slice, so this is deliberate — but it means a single-chip step can wait behind a
-four-chip one indefinitely, and `reclaimWithinCohort: Never` will not preempt to
-free it. If a shape is starving, the lever is the split in `prod.auto.tfvars`,
-not the node pools.
+**The Kueue and JobSet controllers run two replicas at kube-dns's priority.**
+Upstream ships one replica with no priority class, and GKE scales kube-dns with
+the cluster: every TPU node that joins can add a kube-dns pod, which lands on a
+system node and preempts whatever has a lower priority. That was the
+controllers, several times a day, and each time their webhooks had no endpoint
+until the pod came back. `controllers/` gives each a second replica (leader
+election picks one to reconcile; both serve the webhook), `system-cluster-critical`
+with the ResourceQuota GKE requires for it outside `kube-system`, a preference
+for separate nodes, and a disruption budget. It is applied under its own field
+manager, because the manager's Kueue Deployment already carries the auth-plugin
+overlay, and the deploy leaves upstream's `replicas: 1` out of the release so
+the two applies do not trade the replica count back and forth.
+
+The Buildkite controller gets the same class (`chart-overlay/`, applied after
+the chart) but stays at one replica: it has no leader election, and two
+controllers sharing an ID can each reserve the same job. Its pod is marked
+`safe-to-evict: "false"`, because the cluster autoscaler emptying its node was
+what restarted it, and job pickup stops until it is back. Running jobs do not
+depend on it.
+
+**Every v7x shape has quota of its own, and the multi-host shapes take it
+back.** The 128 chips split 64 to `tpu7x-standard-4t-2x2x1`, 32 to
+`tpu7x-standard-4t-2x2x4` (two slices), 16 to `tpu7x-standard-4t-2x2x2` (two
+slices) and 16 to `tpu7x-standard-1t-1x1x1`; any shape can borrow what the
+others leave idle. Kueue considers a workload that fits a queue's own quota
+before one that has to borrow, so a shape under its nominal gets freed chips
+first. 2x2x2 also evicts any borrower to get its slices back
+(`reclaimWithinCohort: Any`) and 2x2x4 evicts lower-priority ones
+(`LowerPriority`); the single-host shapes wait for borrowers to finish. A
+reclaimed slice still waits for the evicted nodes to scale down, about ten
+minutes, before its own nodes boot. If a shape is starving, the lever is the
+split in `prod.auto.tfvars`, not the node pools.
 
 **A cold pool's first image pull is slow, and that is not streaming failing.**
 Image streaming is on for every TPU pool, but GKE serves an image it has
@@ -350,11 +400,26 @@ assuming a fault.
 MultiKueue sometimes reconciles a fresh reservation once, creates no copy on
 any worker and never comes back to it: the chips are reserved, nothing runs,
 and the step shows `waiting for admission` until `tpu_admission_max_seconds`.
-The launcher deletes and recreates such a workload after
-`tpu_dispatch_retry_seconds` with no worker named, up to `tpu_dispatch_retries`
-times, and logs `resubmitting`. A workload waiting on a worker for a slice to be
-rebuilt names that worker (`dispatching to ...`) and is left alone. The timing
-table counts resubmissions in `redispatches`.
+It can also name a worker, have the worker admit the copy, and then fail to
+record that on the manager: the webhook rejects `clusterName` because the
+nomination it must match is already gone, so the step shows `dispatching to
+...` followed by `waiting for admission` and the manager's controller log
+repeats `must be one of the nominatedClusterNames`. In either state the
+launcher deletes and recreates the workload after `tpu_dispatch_retry_seconds`
+with no worker named, up to `tpu_dispatch_retries` times, and logs
+`resubmitting`. In the second it first waits for that worker to drop the old
+copy's pods, since MultiKueue would otherwise adopt the old remote Job for the
+new object. A workload waiting on a worker for a slice to be rebuilt keeps that
+worker named and is left alone. The timing table counts resubmissions in
+`redispatches`.
+
+**A pod evicted for its disk use fails the step.** The pod failure policy
+ignores `DisruptionTarget` so a lost node reruns the pod rather than failing the
+run, and a kubelet eviction carries that condition too. For an eviction over
+ephemeral storage or an `emptyDir` limit the rerun writes the same files and is
+evicted again, until the step's deadline. The launcher fails the step on the
+first such eviction, prints the kubelet's message, which names the container and
+how much it used, and records the outcome `evicted_storage`.
 
 **us-central1 holds both the manager and a worker.** They are separate clusters
 with separate control-plane CIDRs, but they share the region's Cloud Router and
@@ -373,6 +438,132 @@ accept, including `job-ttl` and `max-in-flight`. Read it there rather than
 guessing — and note the chart pastes our block under keys of its own, so
 anything it derives must be left out of the template or the controller's decoder
 rejects the duplicate.
+
+## The health dashboard
+
+`terraform output dashboard_url`, behind IAP; `dashboard_viewers` in
+`prod.auto.tfvars` says who gets in. It is the page Buildkite cannot give the
+kube fleet, where every step is on the one `kube` queue until the launcher picks
+a Kueue queue for it, and where a step shows as running from the moment its
+agent pod starts.
+
+**Overview** (`/`), from the same snapshot as Live: a diagram of the
+path a step takes - Buildkite, the manager's agent pods, Kueue and MultiKueue,
+then one box per worker with its node pools - with how many steps are at each
+stage now. Dots move along a path while steps are past it. Each box's mark is
+the worst of the Health checks that belong to it, and clicking it opens that
+component's details below the diagram. The glossary and what each data
+source reads, and what to check when one fails, live here. Only what the
+dashboard reads live is drawn, so it cannot go stale the way a diagram in a
+doc does.
+
+**Live** (`/live`), refreshed every minute:
+
+- **Health** - one check per stage from Buildkite to a TPU pod: the Buildkite
+  controller polling and creating, Kueue up on every cluster, workers
+  connected, dispatches not stalled, the oldest pending workload against
+  `tpu_queue_max_seconds`, admitted workloads near `tpu_test_max_seconds`,
+  infrastructure failures and evictions in the last 24 hours, fleet warnings
+  in the last hour, agent pods the manager cannot schedule, and steps no agent
+  picked up.
+- **Kube jobs** - where every Buildkite kube job is, grouped by build:
+  concurrency held, waiting for an agent pod, agent pod pending, launching,
+  pending in Kueue, dispatching, pods starting, running. Joined from the
+  job's Buildkite state, its agent pod and its Kueue workload, since Buildkite
+  alone shows a kube job as running once its agent pod starts.
+- **Quota now** - per cohort, chips in use against nominal, free, pending and
+  busy; per queue, its nominal, usage, what it borrows or leaves idle, and
+  whether it evicts borrowers.
+- **Per queue** - what is running, by build, with the chips it holds; the
+  first five pending in the order Kueue will consider them, the rest a click away, with their priority
+  class, from Kueue's visibility API - the check that priority orders the
+  queue - and the rest counted by build; then Kueue's reason for anything
+  pending. Only the head of a BestEffortFIFO queue carries a reason; the rest
+  are counted as queued behind it.
+- **Cluster problems** - events from every cluster's `buildkite` namespace
+  that are the fleet's fault (failed creates, failed scale-ups, mount
+  failures, evictions, OOM kills), repeats grouped. Routine warnings - Kueue's
+  backlog, scheduling while a pool scales, agent teardown, test failures - are
+  collapsed beneath.
+
+**Trends** (`/trends`; `/history` still works), for the last 6 hours, 24 hours, 7 days or 30 days (`/api/history` also takes `?start=&end=` in epoch seconds, up to 90 days):
+a card per generation, then outcomes per pipeline. A generation's card has the
+cohort's admitted, busy (TensorCore duty), queue wait p90 and finished
+workloads; chips admitted against chips on nodes, with the gap between them
+shaded as waiting for nodes or idle on nodes; and each topology's admitted chips
+stacked under the cohort's quota, so chips moving between shapes show as bands
+trading height. Below that, a block per shape: its outcomes from
+`kube_workload_timing` split into test and infrastructure failures, evictions,
+wait and run percentiles; its nodes - created, lifetime, the share of chip-hours
+on nodes that workloads held, idle chip-hours and admitted → running, which
+includes the wait for a scale-up; and two charts, chips on nodes and in use
+against its nominal, and its queue wait over time (`fleet.fetch_wait_series`,
+the same series Migration draws). The CPU queue gets a card of its own. Each
+chart point is the step's average, taken over the fleet-wide
+value at each minute - collapsed to the newest Kueue controller pod and summed
+over nodes first, so a controller roll or a node that came and went does not
+inflate it. Node history comes from GKE's per-node metrics, which name a node
+and nothing else; the GKE API's list of node pools ties each name to its pool
+through the pool's instance group, which outlives the nodes it creates.
+
+**Migration** (`/migration`, last 24 hours by default; `/compare` and `/baseline`
+still work) puts the bare-metal fleet
+before the migration beside the kube fleet over the window: per generation,
+utilization, chips, work a day and kube's share of the work - what the
+bare-metal queues still run, from `step_execution_logs` - and per shape, steps
+a day and waits on both sides. The bare-metal side is static:
+`dashboard/baseline/build_baseline.py` builds `premigration-2026-09.json` from
+the pre-migration snapshot (2026-09-05 to 09-28). When bare metal's share
+reaches zero the comparison is like for like with no change to the page.
+
+Its headline is *idle while jobs waited*: minute by minute, the idle chips that
+whole waiting jobs would have fit in, smallest first. On bare metal a job ran
+only on its own shape's VMs, so one shape idled while another queued; the
+baseline builder works it out from Buildkite's per-minute counts of connected
+and busy agents and of jobs ready with no agent. On kube it comes from Kueue's
+admitted, nominal and pending series, read a minute apart rather than at
+Trends' step (`fleet.fetch_waits`), since an hour that queued in its first half
+and idled in its second would otherwise count as both at once. This and chips
+held are worked out a day at a time and shown as the mean, median and worst day;
+kube's days are the 24-hour stretches back from the window's end, so its median
+and worst need the 7- or 30-day window.
+
+**Jobs** (`/jobs`, last 24 hours by default) is the per-queue job list Buildkite
+had for each bare-metal queue and cannot give now that every kube step runs on
+its one `kube` queue: what is in flight on each Kueue queue, from the live
+snapshot, then every workload that ended in the range from
+`kube_workload_timing` (`fleet.fetch_jobs`), newest first, with its outcome,
+exit code, wait, startup and run - a build a row, its steps opening beneath it
+with the failures first, or job by job. Filters for queues (any number), outcome,
+branch and pipeline and a search over step, build and branch sit above it, and a
+line under them sums up what they leave. Each queue card on Live and each shape block on Trends links to its queue's jobs.
+
+Migration also counts *infrastructure failures*: failed jobs whose log ends in
+the fleet's fault - a full disk, a TPU that would not start, a bus error, a kill
+for memory, an agent that died, a missing CI image - a day, by cause, bare
+metal before beside kube. The cause is only in the log, so
+`dashboard/baseline/failures.py` fetches each failed TPU job's log with `bk
+api`, sorts it, and writes `failures.json`; the kube side is a snapshot of its
+window, refreshed by rerunning the script (`TIMING_TABLE` set for `bq`).
+
+Each health check on Live opens to **History & logs**: its status over the
+last day, its latest changes, and the warnings and errors in the logs of the
+component it watches - the Buildkite controller's, Kueue's, Kubernetes warning
+events - with alike lines counted as one, and links to the same in Logs
+Explorer. The history is the dashboard's own: it evaluates the checks every
+half minute whether or not anyone is looking, and writes each change of status
+as a structured line (`jsonPayload.health_check`) that Cloud Run keeps in
+Cloud Logging. It reads logs through the `_Default` bucket's `_AllLogs` view
+(`roles/logging.viewAccessor` there, in `dashboard.tf`).
+
+Every page's terms have a tooltip, drawn from the same table as the glossary.
+
+It reads every cluster through Connect Gateway as `tpu-ci-dashboard@`: the
+manager with `kueue/templates/dashboard_rbac.yaml.tpl`, the workers with
+`dashboard_rbac_worker.yaml.tpl`, events only. Both are applied by
+`deploy_manifests.py` like the rest, so the page reports those reads as failed
+until they are. A source that fails is named at the top of the page, and the
+rest still render.
 
 ## Reading the metrics
 

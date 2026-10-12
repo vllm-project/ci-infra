@@ -33,6 +33,15 @@ NO_CODE_PREFIXES = ("docs/", ".github/", "LICENSE")
 NO_CODE_SUFFIXES = (".md",)
 NO_CODE_EXACT = ("mkdocs.yaml",)
 EXTRA_WORLD_FILES = ("pyproject.toml",)
+# pyproject.toml tables that configure a linter or type checker and nothing a
+# test reads. A diff confined to these narrows the world rule to nothing.
+# Coverage stays out: pytest-cov reads it while the tests run.
+# Update when: vLLM's pyproject gains another lint tool's table.
+# Guard: tests/test_classify.py checks each is in the pinned pyproject and that
+# no step's commands run the tool.
+LINT_ONLY_PYPROJECT_TABLES = frozenset(
+    {("tool", "ruff"), ("tool", "mypy"), ("tool", "typos"), ("tool", "ty")}
+)
 
 # Every rule name a Claim may carry. A set and not a comment because the record
 # routes on these, so a rename that quietly stopped matching would change what

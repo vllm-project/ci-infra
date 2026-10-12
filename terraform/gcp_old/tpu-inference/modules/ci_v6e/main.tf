@@ -38,6 +38,14 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
     vm_name = local.node_names[count.index]
   }
 
+  dynamic "service_account" {
+    for_each = var.service_account_email == null ? [] : [1]
+    content {
+      email = var.service_account_email
+      scope = ["https://www.googleapis.com/auth/cloud-platform"]
+    }
+  }
+
   dynamic "scheduling_config" {
     for_each = var.reserved ? [1] : []
     content {
@@ -131,26 +139,22 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       chmod +x /etc/buildkite-agent/git-credential-github-app
       chown -R buildkite-agent:buildkite-agent /etc/buildkite-agent/
 
-      # Configure Git system-wide (/etc/gitconfig) and globally to use the credential helper and redirect SSH to HTTPS
-      git config --system credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-      git config --system --add url."https://github.com/".insteadOf "git@github.com:"
-      git config --system --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-      sudo -H -u buildkite-agent git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-      sudo -H -u buildkite-agent git config --global --add url."https://github.com/".insteadOf "git@github.com:"
-      sudo -H -u buildkite-agent git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-      HOME=/root git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-      HOME=/root git config --global --add url."https://github.com/".insteadOf "git@github.com:"
-      HOME=/root git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+      ${chomp(var.vllm_torchtpu_ssh_checkout ? file("${path.module}/../shared/git-ssh-checkout-setup.sh") : file("${path.module}/../shared/git-https-setup.sh"))}
       # ==========================================
 
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
       sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
+      ${file("${path.module}/../shared/read-secret.sh")}
+      BUILDKITE_AGENT_TOKEN=$(read_secret "${var.buildkite_token_secret_name}") || exit 1
+      HF_TOKEN=$(read_secret "${var.huggingface_token_secret_name}") || exit 1
+      BUILDKITE_ANALYTICS_TOKEN=$(read_secret "${var.buildkite_analytics_token_secret_name}") || exit 1
+
       # This script re-runs on every boot, so match the whole line rather than
       # the pristine "xxx" placeholder, which is gone after the first boot.
-      sudo sed -i -E 's|^token=.*|token="${var.buildkite_token_value}"|' /etc/buildkite-agent/buildkite-agent.cfg
-      
+      sudo sed -i -E "s|^token=.*|token=\"$BUILDKITE_AGENT_TOKEN\"|" /etc/buildkite-agent/buildkite-agent.cfg
+
       HOST_NAME_VAL="${local.node_names[count.index]}"
       # Set the system-wide environment variable, avoid using the default HOSTNAME because it's too vague to be useful. For example, t1v-n-01667781-w-0
       echo "HOST_NAME=$HOST_NAME_VAL" | sudo tee -a /etc/environment
@@ -159,8 +163,8 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       # tee echoes to stdout, which the startup script sends to the serial
       # console, where anyone with compute.instances.getSerialPortOutput can
       # read it. Secrets go to the file only.
-      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment > /dev/null
-      echo 'BUILDKITE_ANALYTICS_TOKEN=${var.buildkite_analytics_token_value}' | sudo tee -a /etc/environment > /dev/null
+      echo "HF_TOKEN=$HF_TOKEN" | sudo tee -a /etc/environment > /dev/null
+      echo "BUILDKITE_ANALYTICS_TOKEN=$BUILDKITE_ANALYTICS_TOKEN" | sudo tee -a /etc/environment > /dev/null
       echo 'TPU_VERSION=tpu6e' | sudo tee -a /etc/environment
 
       # Also provide HF_TOKEN and BUILDKITE_ANALYTICS_TOKEN through the agent's
@@ -172,7 +176,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       sudo chown root:buildkite-agent /etc/buildkite-agent/hooks/environment
       sudo chmod 750 /etc/buildkite-agent/hooks/environment
       printf '#!/bin/bash\nexport HF_TOKEN=%q\nexport BUILDKITE_ANALYTICS_TOKEN=%q\n' \
-        '${var.huggingface_token_value}' '${var.buildkite_analytics_token_value}' \
+        "$HF_TOKEN" "$BUILDKITE_ANALYTICS_TOKEN" \
         | sudo tee /etc/buildkite-agent/hooks/environment > /dev/null
 
       sudo mkdir -p /mnt/disks/persist
@@ -233,7 +237,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       # Create the persistent directory first
       sudo mkdir -p /mnt/disks/persist/tpu_jax_cache
       sudo chmod 777 /mnt/disks/persist/tpu_jax_cache
-      
+
       # Forcefully intercept old CI jobs writing to /tmp and redirect them to the persistent disk
       sudo rm -rf /tmp/tpu_jax_cache
       sudo ln -s /mnt/disks/persist/tpu_jax_cache /tmp/tpu_jax_cache
@@ -251,7 +255,7 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       # Inject ultra-strict limit policy for syslog and kern.log (50M, 1 backup)
       echo "Configuring strict logrotate for syslog and kern.log..."
       sudo sed -i '1i/var/log/syslog\n/var/log/kern.log\n{\n  size 50M\n  rotate 1\n  missingok\n  notifempty\n  compress\n  delaycompress\n  postrotate\n    /usr/lib/rsyslog/rsyslog-rotate\n  endscript\n}\n' /etc/logrotate.d/rsyslog
-      
+
       # Force rotate once
       sudo logrotate -f /etc/logrotate.conf
 

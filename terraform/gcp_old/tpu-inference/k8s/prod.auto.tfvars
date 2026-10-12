@@ -11,15 +11,15 @@ namespace = "buildkite"
 agent_token_secret_id = "vllm_buildkite_agent_token"
 
 # Credentials any pipeline may ask for by name, keyed by the environment
-# variable a workload reads them from. None is created here: each belongs to
-# another project, and is shared with the bare-metal lane so that the two lanes
-# fetch a gated model under one account and report into one suite.
+# variable a workload reads them from. None is created here: each is created
+# with gcloud in this project and shared with the bare-metal lane, so that the
+# two lanes fetch a gated model under one account and report into one suite.
 env_secrets = {
   # A gated model cannot be fetched without it, and the fleet's model cache is
   # shared, so the first step to want one pays for every later one.
   HF_TOKEN = {
-    project = "cloud-tpu-inference-test"
-    secret  = "bm-agent-hf-token"
+    project = "cloud-ullm-inference-ci-cd"
+    secret  = "vllm_buildkite_hf_token"
   }
   # Test Engine. The collector runs inside the workload rather than in the
   # agent, so the token has to reach the pod; without it a suite still passes
@@ -27,7 +27,7 @@ env_secrets = {
   # The vllm org's, as the ci-cd bare-metal hosts use: a token names its org
   # and suite, and the tpu-commons one reports into an org being retired.
   BUILDKITE_ANALYTICS_TOKEN = {
-    project = "cloud-tpu-inference-test"
+    project = "cloud-ullm-inference-ci-cd"
     secret  = "vllm_buildkite_analytics_token"
   }
 }
@@ -68,9 +68,9 @@ machine_memory_gb = {
   "tpu7x-standard-4t" = 960
 }
 
-kueue_version       = "0.19.6"
+kueue_version       = "0.20.1"
 jobset_version      = "0.12.0"
-agent_stack_version = "0.49.0"
+agent_stack_version = "0.51.0"
 
 # A queue of its own, so this fleet and the bare-metal one run side by side and
 # a pipeline moves over one step at a time.
@@ -108,9 +108,11 @@ tpu_queue_max_seconds = 43200
 # two-host slice is built in their place.
 tpu_admission_max_seconds = 3600
 
-# Five minutes reserved with no worker named, against a normal dispatch of a few
-# seconds, is a dropped dispatch rather than a slow one; see variables.tf.
-tpu_dispatch_retry_seconds = 300
+# Two minutes reserved with no worker named, against a normal dispatch of a few
+# seconds, is a dropped dispatch rather than a slow one; see variables.tf. The
+# stall is permanent within a second of starting, and the resubmission waits for
+# any copy a worker already holds to go, so waiting longer only holds the chips.
+tpu_dispatch_retry_seconds = 120
 tpu_dispatch_retries       = 2
 
 # Every CI image this fleet runs is built into the manager project's Artifact
@@ -137,11 +139,21 @@ worker_clusters = [
     rapid_cache_zones = ["us-east5-a"]
 
     # Reservation cloudtpu-20260828173000-731402396 in us-east5-a: 128 v6e
-    # chips, 102 in use, 26 free. nominal_quota splits those 26 between the
-    # shapes so neither starves the other; max_nodes sums to more, so a shape
-    # borrowing the cohort's idle quota can still boot the nodes for it.
-    # min_nodes is the part that really does partition the reservation, since
-    # those chips stay with one shape once booted, so it is kept small.
+    # chips, 22 held by the bare-metal agents (six v6e-1, two v6e-8, for the
+    # tpu-inference PRs the ramp leaves on bare), 106 here. nominal_quota
+    # splits the 106 by what each shape runs (10-07..10-09: 2x4 averaged 7.3
+    # chips busy and peaked at twelve slots, 1x1 averaged 1.7 with a p99 of
+    # 20), so 80 on 2x4 (ten slots) and 26 on 1x1; each pool can grow to all
+    # 106, so a shape borrowing the cohort's idle quota can still boot the
+    # nodes for it.
+    # min_nodes does partition the reservation: those chips stay with one
+    # shape once booted, so that shape's queue does not lend them. The floors
+    # are there for start time. The reservation is paid for whether a node
+    # exists or not, v6e has the headroom (10-09 18:00 to 10-11 13:20 PT kube
+    # admitted 5% of these 106 chips), and a job on a booted node starts in
+    # 6-8 s (p50) against 190-215 s when it boots one. GKE boots nodes only
+    # for pending pods, so a floor fills from the first bursts and is kept
+    # from then on.
     tpu_node_pools = [
       {
         machine_type     = "ct6e-standard-1t"
@@ -149,9 +161,12 @@ worker_clusters = [
         reservation_name = "cloudtpu-20260828173000-731402396"
         zone             = "us-east5-a"
 
-        min_nodes     = 2
-        max_nodes     = 26
-        nominal_quota = 18
+        # Eight warm. Busy nodes 10-07..10-11: p90 4, p99 20. A replay puts
+        # the share of jobs that find a booted node at 81% with eight, from
+        # 57% with two.
+        min_nodes     = 8
+        max_nodes     = 106
+        nominal_quota = 26
       },
       {
         machine_type     = "ct6e-standard-8t"
@@ -159,13 +174,14 @@ worker_clusters = [
         reservation_name = "cloudtpu-20260828173000-731402396"
         zone             = "us-east5-a"
 
-        # No floor: eight chips is too much of what is free to leave parked, so
-        # this shape boots a node per job.
-        min_nodes = 0
-        # One slice guaranteed, and room for two more by borrowing whatever the
-        # single-chip queue is not using.
-        max_nodes     = 3
-        nominal_quota = 8
+        # Four warm (32 chips). Busy slots 10-07..10-11: p90 2, p99 10. A
+        # replay puts the share of jobs that find a booted node at 84% with
+        # four, from 67% with none.
+        min_nodes = 4
+        # Ten slots guaranteed, and room for three more by borrowing whatever
+        # the single-chip queue is not using.
+        max_nodes     = 13
+        nominal_quota = 80
       },
     ]
   },
@@ -181,13 +197,18 @@ worker_clusters = [
     # The zone all three v7x pools sit in.
     rapid_cache_zones = ["us-central1-c"]
 
-    # Three shapes over the v7x reservation's free chips, which is every shape
-    # the tests ask for. The quota is not split between them: the chips will not
-    # divide three ways and still leave each a whole slice, so all of it is
-    # nominal on 2x2x1 and the other two run on what that one is
-    # not using. Every pool's max_nodes is the full eight chips, so the cohort
-    # accounting decides how many run at once and the node pools only decide
-    # what a chip can be shaped into.
+    # Four shapes over all 128 v7x chips of the reservation. Nominal quota is
+    # what a shape can always get back: 32 on 2x2x4 (two slices, the Kimi-K3
+    # pairs), two slices, 16, on 2x2x2 - an 8-chip step waits for a whole slice
+    # while single-host steps take chips as they free, and two or more wanted a
+    # slice at once 19% of the time (10-06..10-09) - and the other 80 on the
+    # single-host shapes, 64 on 2x2x1 and 16 on 1x1x1. 2x2x1 holds the most
+    # because post-merge, PR and perf steps queue there (10-01..10-08 it averaged
+    # 14.3 chips in use against 1x1x1's 2.8, and on 10-08 evening every pending
+    # v7x workload was a 2x2x1).
+    # Every pool can grow to all 128 chips, so a shape can borrow whatever the
+    # others leave idle: the cohort accounting decides how many run at once and
+    # the node pools only decide what a chip can be shaped into.
     #
     # min_nodes is 0 throughout: the reservation has no slack, so a floor is
     # chips held out of it permanently rather than a warm node.
@@ -199,8 +220,8 @@ worker_clusters = [
         zone             = "us-central1-c"
 
         min_nodes     = 0
-        max_nodes     = 40
-        nominal_quota = 0
+        max_nodes     = 128
+        nominal_quota = 16
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -209,30 +230,53 @@ worker_clusters = [
         zone             = "us-central1-c"
 
         min_nodes     = 0
-        max_nodes     = 10
-        nominal_quota = 8
+        max_nodes     = 32
+        nominal_quota = 64
       },
       {
-        # Eight chips as one slice across two VMs: the multi-host shape, placed
-        # from the named workload policy in workers.tf. It takes the whole
-        # cohort, which means it waits for every other v7x workload to finish.
+        # Eight chips as one slice across two VMs, placed from the named
+        # workload policy in workers.tf. Sixteen slices is all 128 chips, as
+        # many as the single-host pools can take, so the cohort decides how
+        # many multi-host tests run at once; pod_defaults.yaml keeps each
+        # JobSet's pods in one slice.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x2"
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
-        nominal_quota = 0
+        slices        = 16
+        nominal_quota = 16
+
+        # Takes its two slices back from lower-priority borrowers. Waiting for
+        # borrowers to finish does not work for a slice: its chips have to free
+        # together while single-host steps take each chip as it frees. So the
+        # PR presubmits that make up most of this queue (priority 50) evict
+        # nightly borrowers rather than wait for them, but not other PR steps,
+        # which would rerun from the start; and a nightly multi-host step here
+        # waits instead of evicting anyone, which also keeps it from taking
+        # the two slices ahead of a presubmit.
+        reclaim_within_cohort = "LowerPriority"
       },
       {
+        # Two slices nominal for the Kimi-K3 pairs, taken back only from
+        # lower-priority borrowers. The pairs are nightlies (unclassed) and the
+        # steps borrowing their chips overnight are mostly pre-merge PR steps,
+        # so the pair waits for them rather than evicting them: an evicted step
+        # reruns from the start, and a pull request outranks a nightly. When
+        # the cohort is full the wait can run to an hour or two, since freed
+        # chips go four at a time to the 2x2x1 backlog; the nightly still
+        # finishes before the working day. Four slice pools, so 2x2x4 can
+        # borrow up to two more slices (64 chips) for v7x-32 tests and
+        # bring-ups when the cohort is idle.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x4"
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
-        slices        = 2
+        slices        = 4
         nominal_quota = 32
 
-        reclaim_within_cohort = "Any"
+        reclaim_within_cohort = "LowerPriority"
       },
     ]
   },
@@ -244,3 +288,22 @@ labels = {
   owner       = "tpu-inference"
 }
 
+
+# The Buildkite cluster the kube queue is in, beside the bare-metal TPU queues.
+buildkite_org        = "vllm"
+buildkite_cluster_id = "0219f117-7dc6-4a04-aee2-1619736fd800"
+
+# Built by dashboard/cloudbuild.yaml; the tag is the build revision there.
+dashboard_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/queue-dashboard:14"
+
+# The token modules/ci_monitoring's BigQuery puller already lists these
+# pipelines' builds with.
+dashboard_buildkite_token_secret_id = "vllm_org_buildkite_rest_api_token"
+
+dashboard_viewers = [
+  "user:mhhua@google.com",
+  # The tpu-inference team, whose pipelines run on this fleet beside
+  # vllm-torchtpu's. Already admins of cloud-tpu-inference-test, where the
+  # tpu-inference CI lives.
+  "group:cloud-tpu-inference@twosync.google.com",
+]

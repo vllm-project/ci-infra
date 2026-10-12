@@ -122,3 +122,52 @@ resource "google_bigquery_table_iam_member" "launcher_timing" {
   role       = "roles/bigquery.dataEditor"
   member     = local.launcher_principal
 }
+
+# The CI resources workloads share with the bare-metal agents, whose grants are
+# in cloud-ullm-inference-ci-cd/agent_service_accounts.tf. Benchmark results go
+# to BigQuery (vllm-torchtpu upload_results.py, tpu-inference
+# report_bigquery.py), and jobs read model checkpoints and write results and
+# profiles to these buckets.
+locals {
+  workload_ci_bucket_roles = {
+    "tpu-commons-ci"                         = ["roles/storage.bucketViewer", "roles/storage.objectUser"]
+    "tpu-inference-hf-llm-model-checkpoints" = ["roles/storage.bucketViewer", "roles/storage.objectViewer"]
+    "vllm-bm-bk-storage"                     = ["roles/storage.objectCreator"]
+    "vllm-cb-storage2"                       = ["roles/storage.objectViewer"]
+  }
+
+  workload_ci_bucket_grants = merge([
+    for project, member in local.workload_principals : merge([
+      for bucket, roles in local.workload_ci_bucket_roles : {
+        for role in roles : "${project}/${bucket}/${role}" => { bucket = bucket, role = role, member = member }
+      }
+    ]...)
+  ]...)
+}
+
+resource "google_project_iam_member" "workload_bigquery_jobs" {
+  for_each = local.workload_principals
+
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = each.value
+}
+
+# On the table rather than the dataset, as for the launcher above.
+resource "google_bigquery_table_iam_member" "workload_benchmark_runs" {
+  for_each = local.workload_principals
+
+  project    = var.project_id
+  dataset_id = "llm_benchmark_analytics"
+  table_id   = "benchmark_runs"
+  role       = "roles/bigquery.dataEditor"
+  member     = each.value
+}
+
+resource "google_storage_bucket_iam_member" "workload_ci" {
+  for_each = local.workload_ci_bucket_grants
+
+  bucket = each.value.bucket
+  role   = each.value.role
+  member = each.value.member
+}

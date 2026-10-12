@@ -70,12 +70,28 @@ MIN_ROWS_FOR_BREADTH = 20
 # not know, which is the only thing stopping an older table from reading
 # healthier than it was recorded: a missing field takes its default, and every
 # default here is the healthy value.
-TABLE_VERSION = 7
+TABLE_VERSION = 8
 
 # Fingerprint of `Stamp`'s fields, so remembering to bump the version above is a
 # mechanism and not a discipline. A test recomputes it and fails when the two
 # disagree. Change both together, in the same commit that changes the stamp.
-STAMP_SHAPE = "9d3fc3a03453ab23"
+STAMP_SHAPE = "6939ef6f6d4654dd"
+
+# Older table versions `load` still reads, each with the Stamp fields its rows
+# lack. Safe only when every missing field's default means "no data" to the
+# code that reads it, never the healthy value. A v6 row has no libcalls, and
+# libraries.py reads a library missing from libcalls as never watched and keeps
+# the step. #697's bump to 7 left the selector with no usable table for two
+# days: nothing read v6, and no v7 existed until a nightly's collect finished.
+# Update when: bumping TABLE_VERSION. Add the old version only if all its
+# missing fields default to "no data"; otherwise leave it out.
+# Guard: test_model_and_build pins each entry to the shape that version had.
+READABLE_OLDER: dict[int, frozenset[str]] = {
+    # No lines: `lines_recorded` defaults to False, so every function is read
+    # at function grain, as before.
+    7: frozenset({"lines_recorded", "n_lines"}),
+    6: frozenset({"libcalls", "lines_recorded", "n_lines"}),
+}
 
 MIRROR_NOTE = (
     "A mirror owns its own row and never inherits its parent's. Keyless mirrors "
@@ -108,6 +124,13 @@ class ProcessRecord:
     # `#lib` lines. Every library the recorder watched is a key, called or
     # not; an older recorder watched none.
     libcalls: dict[str, set[str]] = field(default_factory=dict)
+    # Repo path -> the line numbers that ran, from `#ln` lines. Only a process
+    # whose header says it records lines has any, and only one that lost none
+    # of them (the `lines=` counter against the `#ln` count) can vouch for a
+    # line it does not list.
+    lines: dict[str, set[int]] = field(default_factory=dict)
+    records_lines: bool = False
+    lost_line_records: bool = False
 
     @property
     def lost_lines(self) -> bool:
@@ -126,6 +149,10 @@ def read_process(path: Path) -> ProcessRecord | None:
     header_root = effective_root = tests_root = None
     packages: set[str] = set()
     libcalls: dict[str, set[str]] = {}
+    line_files: dict[str, str] = {}
+    raw_lines: list[tuple[str, int]] = []
+    records_lines = False
+    line_counter = None
     job = py = retry = None
     counter = None
     clean_exit = False
@@ -146,6 +173,7 @@ def read_process(path: Path) -> ProcessRecord | None:
                 identity = header_identity(meta)
                 for lib in filter(None, meta.get("libs", "").split(",")):
                     libcalls.setdefault(lib, set())
+                records_lines = meta.get("lines") == "1"
             elif tag == "#root":
                 effective_root = parts[1] if len(parts) > 1 and parts[1] else None
             elif tag == "#tests":
@@ -158,10 +186,23 @@ def read_process(path: Path) -> ProcessRecord | None:
                     libcalls.setdefault(parts[1], set()).add(parts[2])
                 else:
                     malformed += 1
+            elif tag == "#lf":
+                if len(parts) == 3 and parts[1] and parts[2]:
+                    line_files[parts[1]] = parts[2]
+                else:
+                    malformed += 1
+            elif tag == "#ln":
+                filename = line_files.get(parts[1]) if len(parts) == 3 else None
+                if filename is not None and parts[2].isdigit():
+                    raw_lines.append((filename, int(parts[2])))
+                else:
+                    malformed += 1
             elif tag in ("#stat", "#end"):
                 meta = _kv(parts[1:])
                 if "root" in meta:
                     counter = int(meta["root"] or 0)
+                if (meta.get("lines") or "").isdigit():
+                    line_counter = int(meta["lines"])
                 # Accumulate. Assigning let a trailing `errors=0` erase every
                 # `#error` line counted before it.
                 errors += int(meta.get("errors", 0) or 0)
@@ -197,6 +238,12 @@ def read_process(path: Path) -> ProcessRecord | None:
                 break
         else:
             outside += 1
+    lines: dict[str, set[int]] = defaultdict(set)
+    for filename, number in raw_lines:
+        for base, scope in roots:
+            if filename.startswith(base):
+                lines[scope + filename[len(base) :]].add(number)
+                break
 
     return ProcessRecord(
         file=path.name,
@@ -214,6 +261,9 @@ def read_process(path: Path) -> ProcessRecord | None:
         malformed=malformed,
         packages=frozenset(packages),
         libcalls=libcalls,
+        lines=dict(lines),
+        records_lines=records_lines,
+        lost_line_records=line_counter is not None and len(raw_lines) < line_counter,
     )
 
 
@@ -443,6 +493,11 @@ class Stamp:
     # outside it, sorted. A library that is a key was watched; one that is not
     # was not, so the row's silence about it proves nothing.
     libcalls: dict[str, list[str]] = field(default_factory=dict)
+    # Every contributing process recorded the lines it ran, lost none, and all
+    # at one commit, so a line the row does not list is a line the step never
+    # ran. False reads every function at function grain.
+    lines_recorded: bool = False
+    n_lines: int = 0
     digest: str = ""
 
     @property
@@ -494,6 +549,15 @@ class Row:
     # recording commit. Stored rather than derived at load, because deriving it
     # needs the repo at that commit and `load` has no git.
     import_time: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Repo path -> the line numbers that ran, at the recording commit.
+    lines: dict[str, frozenset[int]] = field(default_factory=dict)
+
+    def ran_any_line(self, path: str, lines: frozenset[int]) -> bool | None:
+        """Whether the step ran any of `lines` in `path`, or None when the row
+        cannot say: no line record, or none for that file."""
+        if not self.stamp.lines_recorded or path not in self.lines:
+            return None
+        return not self.lines[path].isdisjoint(lines)
 
     def contains(self, path: str, name: str) -> bool:
         """Entered this frame at all, import included. What the drop side reads
@@ -519,11 +583,15 @@ def digest_of(
     functions: dict[str, frozenset[str]],
     stamp: Stamp | None = None,
     import_time: dict[str, frozenset[str]] | None = None,
+    omit: frozenset[str] = frozenset(),
+    lines: dict[str, frozenset[int]] | None = None,
 ) -> str:
     """Sign the functions AND the stamp that judges them. Signing only the
     functions left every field droppability turns on unsigned, so deleting a
     health counter from a stored row still verified clean. The stamp's own
-    digest is excluded, being written into the thing it signs."""
+    digest is excluded, being written into the thing it signs. `omit` names
+    fields an older table version did not have, so its rows verify as
+    written."""
     h = hashlib.sha256()
     for path in sorted(functions):
         h.update(path.encode())
@@ -544,7 +612,17 @@ def digest_of(
                 h.update(name.encode())
                 h.update(b"\0")
             h.update(b"\1")
+    # Lines decide drops as surely as names do, so they are signed the same.
+    if lines:
+        h.update(b"\3")
+        for path in sorted(lines):
+            h.update(path.encode())
+            h.update(b"\0")
+            h.update(",".join(map(str, sorted(lines[path]))).encode())
+            h.update(b"\1")
     if stamp is not None:
-        fields = {k: v for k, v in asdict(stamp).items() if k != "digest"}
+        fields = {
+            k: v for k, v in asdict(stamp).items() if k != "digest" and k not in omit
+        }
         h.update(json.dumps(fields, sort_keys=True, default=str).encode())
     return h.hexdigest()

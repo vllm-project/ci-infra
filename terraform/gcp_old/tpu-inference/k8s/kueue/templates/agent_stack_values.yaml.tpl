@@ -12,6 +12,14 @@
 # environment variable on it. Ours holds exactly one.
 agentStackSecret: ${AGENT_TOKEN_SECRET_NAME}
 
+# The controller's own pod. Its one replica is what picks up new jobs, so the
+# cluster autoscaler moving it to empty a node stops pickup until it is back,
+# and that was most of its restarts. This keeps it off the autoscaler's list;
+# GKE node upgrades still drain it. Its priority class is an overlay, in
+# agent_stack_availability.yaml.tpl.
+annotations:
+  cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+
 config:
   # One queue for the whole fleet. A queue does not encode a TPU shape: every
   # TPU step goes through the launcher, so adding a shape is a regenerated
@@ -93,6 +101,14 @@ config:
             value: "-v --depth 1 --filter=blob:none"
           - name: BUILDKITE_GIT_FETCH_FLAGS
             value: "-v --prune --depth 1 --filter=blob:none"
+          # Agent v4 checks by default that the commit is on the build's branch,
+          # deepening the shallow clone above to find out, and blocks the step
+          # when it is not. A PR force-pushed since its build started fails it
+          # on every retry, and a fork's branch is not in this repository to
+          # check against. The bare agents never checked; neither does this
+          # fleet.
+          - name: BUILDKITE_GIT_COMMIT_VERIFICATION
+            value: "off"
         envFrom:
           - secretRef:
               name: ${GIT_CREDENTIALS_SECRET_NAME}

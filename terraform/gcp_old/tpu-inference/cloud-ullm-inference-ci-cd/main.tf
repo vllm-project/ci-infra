@@ -1,36 +1,35 @@
-data "google_secret_manager_secret_version" "buildkite_agent_token_vllm" {
-  secret  = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
-  version = "latest"
+# Secrets the agent VMs read at boot through modules/shared/read-secret.sh.
+# They are created, filled and shared with the VMs' service accounts outside
+# Terraform, with gcloud, so no token is in instance metadata or state.
+locals {
+  buildkite_token_secret_name           = "projects/${var.project_id}/secrets/vllm_buildkite_agent_token"
+  huggingface_token_secret_name         = "projects/${var.project_id}/secrets/vllm_buildkite_hf_token"
+  buildkite_analytics_token_secret_name = "projects/${var.project_id}/secrets/vllm_buildkite_analytics_token"
 }
 
-data "google_secret_manager_secret_version" "buildkite_analytics_token_vllm" {
-  secret  = "projects/${var.secret_project_id}/secrets/vllm_buildkite_analytics_token"
-  version = "latest"
-}
-
-data "google_secret_manager_secret_version" "huggingface_token" {
-  secret  = "projects/${var.secret_project_id}/secrets/tpu_commons_buildkite_hf_token"
-  version = "latest"
-}
-
-
+# Six v6e-1 and two v6e-8 for the tpu-inference PRs the kube ramp leaves on
+# bare: a replay of 10-07..10-09 at 50% put them at a p90 wait of 22 and 15
+# minutes. The rest of the reservation is the kube v6e lane
+# (k8s/prod.auto.tfvars).
 module "ci_v6e_1_vllm" {
   source = "../modules/ci_v6e"
   providers = {
     google-beta = google-beta.us-east5-a
   }
 
-  accelerator_type                = "v6e-1"
-  reserved                        = true
-  purpose                         = "vllm"
-  instance_count                  = 30
-  disk_size                       = 1024
-  buildkite_queue_name            = "tpu_v6e_queue"
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "v6e-1"
+  reserved                              = true
+  purpose                               = "vllm"
+  instance_count                        = 6
+  disk_size                             = 1024
+  buildkite_queue_name                  = "tpu_v6e_queue"
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
 module "ci_v6e_8_vllm" {
@@ -39,75 +38,94 @@ module "ci_v6e_8_vllm" {
     google-beta = google-beta.us-east5-a
   }
 
-  accelerator_type                = "v6e-8"
-  reserved                        = true
-  purpose                         = "vllm"
-  instance_count                  = 9
-  disk_size                       = 4096
-  buildkite_queue_name            = "tpu_v6e_8_queue"
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "v6e-8"
+  reserved                              = true
+  purpose                               = "vllm"
+  instance_count                        = 2
+  disk_size                             = 4096
+  buildkite_queue_name                  = "tpu_v6e_8_queue"
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
 
+# instance_count is 0: inferact-vllm-tpu's sixteen tpu7x-2 hosts (see that env)
+# serve this queue, and these 16 chips are part of the kube v7x lane
+# (k8s/prod.auto.tfvars).
 module "ci_v7x_2" {
   source = "../modules/ci_v7x"
   providers = {
     google-beta = google-beta.us-central1-c
   }
 
-  accelerator_type                = "tpu7x-2"
-  reserved                        = true
-  instance_count                  = 16
-  buildkite_queue_name            = "tpu_v7x_2_queue"
-  disk_size                       = 2048
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "tpu7x-2"
+  reserved                              = true
+  instance_count                        = 0
+  buildkite_queue_name                  = "tpu_v7x_2_queue"
+  disk_size                             = 2048
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
+
+  vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
-# Eight more tpu7x-8 agents serve the same queue from inferact-vllm-tpu (see
-# that env), so this fleet runs ten and the other 32 chips of the reservation
-# are free for other work.
+# instance_count is 0: the eight tpu7x-8 agents in inferact-vllm-tpu (see that
+# env) serve this queue, and this fleet's 24 chips are part of the kube v7x
+# lane (k8s/prod.auto.tfvars), which takes the bulk of the PR builds.
 module "ci_v7x_8" {
   source = "../modules/ci_v7x"
   providers = {
     google-beta = google-beta.us-central1-c
   }
 
-  accelerator_type                = "tpu7x-8"
-  reserved                        = true
-  instance_count                  = 10
-  buildkite_queue_name            = "tpu_v7x_8_queue"
-  disk_size                       = 4096
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "tpu7x-8"
+  reserved                              = true
+  instance_count                        = 0
+  buildkite_queue_name                  = "tpu_v7x_8_queue"
+  disk_size                             = 4096
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
+
+  vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
+# instance_count is 0: inferact-vllm-tpu's tpu7x-16 (see that env) serves this
+# queue, and these 8 chips are part of the kube v7x lane (k8s/prod.auto.tfvars).
 module "ci_v7x_16" {
   source = "../modules/ci_v7x"
   providers = {
     google-beta = google-beta.us-central1-c
   }
 
-  accelerator_type                = "tpu7x-16"
-  reserved                        = true
-  instance_count                  = 2
-  buildkite_queue_name            = "tpu_v7x_16_queue"
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "tpu7x-16"
+  reserved                              = true
+  instance_count                        = 0
+  buildkite_queue_name                  = "tpu_v7x_16_queue"
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
   # disk_size defaults to 0, disable attached disk
+
+  vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
 # 4 hosts x 4 chips (2x2x4). Same multi-host shape as tpu7x-16: the agent runs
@@ -115,24 +133,28 @@ module "ci_v7x_16" {
 # READ_WRITE disk cannot be shared by four hosts, and the multi-host jobs
 # stream weights from GCS instead. Replaces the hand-built ranlihao-v7x-32 slice.
 #
-# instance_count is 0 because the project's tpu7x reservation is fully used
-# and a tpu7x-32 needs 16 chips. The hand-built slice still holds them. Raise
-# to 1 after that slice is deleted (or 4 tpu7x-8 nodes are released).
+# instance_count is 0: the 16 chips a tpu7x-32 would need are part of the
+# kube v7x lane's 128 (k8s/prod.auto.tfvars), which runs the tpu7x-32 benchmark
+# case on its 2x2x4 slices. Raising this takes them out of that lane.
 module "ci_v7x_32" {
   source = "../modules/ci_v7x"
   providers = {
     google-beta = google-beta.us-central1-c
   }
 
-  accelerator_type                = "tpu7x-32"
-  reserved                        = true
-  instance_count                  = 0
-  buildkite_queue_name            = "tpu_v7x_32_queue"
-  project_id                      = var.project_id
-  project_short_name              = var.project_short_name
-  buildkite_token_value           = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  buildkite_analytics_token_value = data.google_secret_manager_secret_version.buildkite_analytics_token_vllm.secret_data
-  huggingface_token_value         = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  accelerator_type                      = "tpu7x-32"
+  reserved                              = true
+  instance_count                        = 0
+  buildkite_queue_name                  = "tpu_v7x_32_queue"
+  project_id                            = var.project_id
+  project_short_name                    = var.project_short_name
+  buildkite_token_secret_name           = local.buildkite_token_secret_name
+  buildkite_analytics_token_secret_name = local.buildkite_analytics_token_secret_name
+  huggingface_token_secret_name         = local.huggingface_token_secret_name
+
+  vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_tpu.email
 }
 
 # purpose puts these on the self-describing naming scheme,
@@ -143,11 +165,15 @@ module "ci_cpu_vllm_zone_b" {
   providers = {
     google-beta = google-beta.us-central1-b
   }
-  purpose                 = "vllm"
-  project_id              = var.project_id
-  instance_count          = 8
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  purpose                       = "vllm"
+  project_id                    = var.project_id
+  instance_count                = 8
+  buildkite_token_secret_name   = local.buildkite_token_secret_name
+  huggingface_token_secret_name = local.huggingface_token_secret_name
+
+  vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_cpu.email
 }
 
 module "ci_cpu_64_core_vllm_zone_b" {
@@ -163,8 +189,12 @@ module "ci_cpu_64_core_vllm_zone_b" {
   disk_type            = "pd-balanced"
   buildkite_queue_name = "cpu_64_core"
 
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  buildkite_token_secret_name   = local.buildkite_token_secret_name
+  huggingface_token_secret_name = local.huggingface_token_secret_name
+
+  vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_cpu.email
 }
 
 module "ci_cpu_64_core_vllm_zone_f" {
@@ -180,8 +210,12 @@ module "ci_cpu_64_core_vllm_zone_f" {
   disk_type            = "pd-balanced"
   buildkite_queue_name = "cpu_64_core"
 
-  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_vllm.secret_data
-  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+  buildkite_token_secret_name   = local.buildkite_token_secret_name
+  huggingface_token_secret_name = local.huggingface_token_secret_name
+
+  vllm_torchtpu_ssh_checkout = true
+
+  service_account_email = google_service_account.ci_agent_cpu.email
 }
 
 module "ci_monitoring" {
@@ -224,7 +258,7 @@ module "ci_monitoring" {
   ]
 
   buildkite_token_secret_ids = {
-    "vllm" = "projects/${var.secret_project_id}/secrets/vllm_buildkite_agent_token"
+    "vllm" = local.buildkite_token_secret_name
   }
 
   bq_puller_orgs = {

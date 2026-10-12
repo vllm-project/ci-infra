@@ -1,0 +1,10 @@
+# Configure Git system-wide (/etc/gitconfig) and globally to use the credential helper and redirect SSH to HTTPS
+git config --system credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
+git config --system --add url."https://github.com/".insteadOf "git@github.com:"
+git config --system --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+sudo -H -u buildkite-agent git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
+sudo -H -u buildkite-agent git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+sudo -H -u buildkite-agent git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+HOME=/root git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
+HOME=/root git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+HOME=/root git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"

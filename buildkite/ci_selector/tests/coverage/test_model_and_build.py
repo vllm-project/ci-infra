@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from ci_selector.coverage.model import (
+    READABLE_OLDER,
     STAMP_SHAPE,
     TABLE_VERSION,
     Row,
@@ -545,7 +546,9 @@ class TestUnionCoversEveryStampField:
     the counts and the digest from whatever it was handed.
     """
 
-    RECOMPUTED = frozenset({"n_files", "n_functions", "n_import_time", "digest"})
+    RECOMPUTED = frozenset(
+        {"n_files", "n_functions", "n_import_time", "n_lines", "digest"}
+    )
 
     def test_union_rows_carries_every_field(self):
         source = inspect.getsource(union_rows)
@@ -571,9 +574,11 @@ class TestStampShapeIsPinned:
     """
 
     @staticmethod
-    def shape() -> str:
+    def shape(skip: frozenset[str] = frozenset()) -> str:
         parts = []
         for f in dataclasses.fields(Stamp):
+            if f.name in skip:
+                continue
             if f.default is not dataclasses.MISSING:
                 default = repr(f.default)
             elif f.default_factory is not dataclasses.MISSING:
@@ -594,6 +599,54 @@ class TestStampShapeIsPinned:
             "  - bump TABLE_VERSION in ci_selector/coverage/model.py "
             f"(now {TABLE_VERSION})\n"
             f"  - set STAMP_SHAPE beside it to {actual!r}\n"
+        )
+
+    def test_a_readable_older_version_lacks_only_the_fields_it_lists(self):
+        """Without its listed fields, the stamp must hash to the shape pinned
+        when that version was current, so a field added since is never read
+        from an older row as its default by accident."""
+        pinned = {6: "d2817305f3714d26", 7: "9d3fc3a03453ab23"}
+        for version, missing in READABLE_OLDER.items():
+            assert self.shape(missing) == pinned[version], version
+
+    @pytest.mark.parametrize("version", sorted(READABLE_OLDER))
+    def test_an_older_table_loads_and_its_rows_verify(self, tmp_path, version):
+        """An older table is the current one minus the fields its version
+        lacked, signed without them, and it reads those fields as no data."""
+        import gzip
+        import json
+
+        from ci_selector.coverage.model import Stamp, digest_of
+        from ci_selector.coverage.table import load
+
+        missing = READABLE_OLDER[version]
+        stamp = Stamp(n_files=1, n_functions=1, clean_exits=1, jobs=1)
+        functions = {"vllm/a.py": frozenset({"f"})}
+        fields = dataclasses.asdict(stamp)
+        for name in missing:
+            fields.pop(name)
+        fields["digest"] = digest_of(functions, stamp, {}, missing)
+        blob = {"stamp": fields, "functions": {"vllm/a.py": ["f"]}, "import_time": {}}
+        path = tmp_path / "t.json.gz"
+        path.write_bytes(
+            gzip.compress(
+                json.dumps({"version": version, "rows": {"s": blob}}).encode()
+            )
+        )
+        table = load(path)
+        row = table.row("s")
+        assert table.available and row.stamp.libcalls == {} or "libcalls" not in missing
+        assert (
+            not row.stamp.lines_recorded and row.ran_any_line("vllm/a.py", {1}) is None
+        )
+        fields[sorted(missing)[0]] = dataclasses.asdict(Stamp())[sorted(missing)[0]]
+        path.write_bytes(
+            gzip.compress(
+                json.dumps({"version": version, "rows": {"s": blob}}).encode()
+            )
+        )
+        assert not load(path).row("s"), (
+            "an older row carrying a newer field is rejected"
         )
 
     def test_the_shape_is_not_vacuous(self):

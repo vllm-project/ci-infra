@@ -18,6 +18,7 @@ locals {
   node_names = [for i in range(var.instance_count) :
     var.purpose == "" ? "vllm-ci-cpu-${i}" : "vllm-ci-cpu-${var.purpose}-${local.zone}-${i}"
   ]
+
 }
 
 resource "google_compute_instance" "buildkite-agent-instance" {
@@ -39,13 +40,15 @@ resource "google_compute_instance" "buildkite-agent-instance" {
   }
 
   service_account {
+    email  = var.service_account_email
     scopes = ["cloud-platform"]
   }
 
-  can_ip_forward      = false
-  deletion_protection = false
-  enable_display      = false
-  machine_type        = "e2-standard-2"
+  can_ip_forward            = false
+  deletion_protection       = false
+  enable_display            = false
+  allow_stopping_for_update = true
+  machine_type              = "e2-standard-2"
 
   network_interface {
     access_config {
@@ -134,36 +137,31 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       chmod +x /etc/buildkite-agent/git-credential-github-app
       chown -R buildkite-agent:buildkite-agent /etc/buildkite-agent/
 
-      # Configure Git system-wide (/etc/gitconfig) and globally to use the credential helper and redirect SSH to HTTPS
-      git config --system credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-      git config --system --add url."https://github.com/".insteadOf "git@github.com:"
-      git config --system --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-      sudo -H -u buildkite-agent git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-      sudo -H -u buildkite-agent git config --global --add url."https://github.com/".insteadOf "git@github.com:"
-      sudo -H -u buildkite-agent git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-      HOME=/root git config --global credential.https://github.com.helper "/etc/buildkite-agent/git-credential-github-app"
-      HOME=/root git config --global --add url."https://github.com/".insteadOf "git@github.com:"
-      HOME=/root git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+      ${chomp(var.vllm_torchtpu_ssh_checkout ? file("${path.module}/../shared/git-ssh-checkout-setup.sh") : file("${path.module}/../shared/git-https-setup.sh"))}
       # ==========================================
 
       sudo usermod -a -G docker buildkite-agent
       sudo -u buildkite-agent gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
       sudo -u buildkite-agent gcloud auth configure-docker us-docker.pkg.dev --quiet
 
+      ${file("${path.module}/../shared/read-secret.sh")}
+      BUILDKITE_AGENT_TOKEN=$(read_secret "${var.buildkite_token_secret_name}") || exit 1
+      HF_TOKEN=$(read_secret "${var.huggingface_token_secret_name}") || exit 1
+
       # This script re-runs on every boot, so match the whole line rather than
       # the pristine package default, which is gone after the first boot. The
       # name below needs no such treatment: it is the instance name, which is
       # ForceNew, so a rename recreates the VM and this sed always runs against
       # a freshly installed cfg.
-      sudo sed -i -E 's|^token=.*|token="${var.buildkite_token_value}"|' /etc/buildkite-agent/buildkite-agent.cfg
+      sudo sed -i -E "s|^token=.*|token=\"$BUILDKITE_AGENT_TOKEN\"|" /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i 's/name="%hostname-%spawn"/name="${local.node_names[count.index]}"/' /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i '/^tags=/d' /etc/buildkite-agent/buildkite-agent.cfg
-      echo 'tags="queue=cpu"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+      echo 'tags="${var.agent_tags}"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
       sudo sed -i '/^HF_TOKEN=/d' /etc/environment
       # tee echoes to stdout, which the startup script sends to the serial
       # console, where anyone with compute.instances.getSerialPortOutput can
       # read it. Secrets go to the file only.
-      echo 'HF_TOKEN=${var.huggingface_token_value}' | sudo tee -a /etc/environment > /dev/null
+      echo "HF_TOKEN=$HF_TOKEN" | sudo tee -a /etc/environment > /dev/null
 
       ${file("${path.module}/../shared/keep-agent-connected.sh")}
 

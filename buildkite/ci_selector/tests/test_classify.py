@@ -751,6 +751,78 @@ def test_world_ignores_the_run_all_patterns_in_the_config():
     )
 
 
+def _pyproject_claim(state, monkeypatch, old, new, status="M"):
+    from ci_selector.codemap import classify
+    from ci_selector.codemap.state import DiffContext
+
+    trees = {"b": old, "h": new}
+    monkeypatch.setattr(classify, "_toml_at", lambda st, p, ref: trees[ref])
+    ctx = DiffContext("b", "h", {"pyproject.toml": status})
+    return classify._classify_pyproject_lint(state, "pyproject.toml", ctx)
+
+
+def test_a_pyproject_change_to_lint_tables_runs_nothing(state, monkeypatch):
+    """vllm#59459 added a docs path to the spell checker's excludes and ran
+    every step, on a diff today's rules gave zero."""
+    base = {
+        "project": {"dependencies": ["torch"]},
+        "tool": {"typos": {"files": {"extend-exclude": ["a.md"]}}},
+    }
+    head = {
+        "project": {"dependencies": ["torch"]},
+        "tool": {"typos": {"files": {"extend-exclude": ["a.md", "b.md"]}}},
+    }
+    claim = _pyproject_claim(state, monkeypatch, base, head)
+    assert claim.rule == "no-code" and not claim.step_ids and not claim.run_all
+    assert "[tool.typos]" in claim.detail
+    # reformatting alone parses to the same tree
+    assert _pyproject_claim(state, monkeypatch, base, base).rule == "no-code"
+
+
+def test_any_other_pyproject_change_still_runs_everything(state, monkeypatch):
+    lint = {"tool": {"ruff": {"line-length": 88}}}
+    for head in (
+        {"tool": {"ruff": {"line-length": 88}}, "project": {"dependencies": ["x"]}},
+        {"tool": {"ruff": {"line-length": 88}, "pytest": {"ini_options": {}}}},
+        {"tool": {"ruff": {"line-length": 88}, "coverage": {"run": {}}}},
+        {"tool": "not a table"},
+    ):
+        assert _pyproject_claim(state, monkeypatch, lint, head) is None, head
+    # an unparsable side, or a file added rather than modified
+    assert _pyproject_claim(state, monkeypatch, lint, None) is None
+    assert _pyproject_claim(state, monkeypatch, None, lint, status="A") is None
+
+
+def test_lint_only_pyproject_tables_are_real_and_unrun(state, vllm_repo):
+    """Each listed table exists in the pinned pyproject, so the entry is not
+    dead, and no step runs its tool, so its config cannot reach a job."""
+    import tomllib
+
+    from ci_selector.codemap.claim import LINT_ONLY_PYPROJECT_TABLES
+
+    tree = tomllib.loads((vllm_repo / "pyproject.toml").read_text())
+    missing = [t for t in LINT_ONLY_PYPROJECT_TABLES if t[1] not in tree["tool"]]
+    assert not missing, drift_message(
+        f"pyproject.toml no longer has {sorted(missing)}",
+        "nothing; the entry is dead",
+        "drop it from LINT_ONLY_PYPROJECT_TABLES in codemap/claim.py",
+    )
+    commands = "\n".join(
+        c for p in state.pipelines for s in p.steps for c in s.commands or ()
+    )
+    run = [
+        t[1]
+        for t in LINT_ONLY_PYPROJECT_TABLES
+        if re.search(rf"(?<![\w-]){re.escape(t[1])}(?![\w-])", commands)
+    ]
+    assert not run, drift_message(
+        f"a CI step now runs {run}",
+        "a change to that tool's pyproject table falls back to running everything",
+        "route those tables to the steps that run the tool, or drop them from "
+        "LINT_ONLY_PYPROJECT_TABLES",
+    )
+
+
 def test_rename_contributes_both_sides():
     files = [DiffFile("R", "vllm/new_name.py", old_path="vllm/old_name.py")]
     assert changed_paths(files) == ["vllm/new_name.py", "vllm/old_name.py"]

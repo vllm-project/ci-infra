@@ -1,0 +1,518 @@
+/* Shared by every page: the glass style. */
+:root {
+  color-scheme: light;
+  /* Glass: translucent white surfaces over a soft color field, Apple's grays. */
+  --bg: transparent; --card: rgba(255, 255, 255, 0.72); --ink: #1d1d1f; --ink-2: #48484a;
+  --muted: #86868b; --line: rgba(60, 60, 67, 0.14); --line-2: rgba(60, 60, 67, 0.08);
+  --hover: rgba(255, 255, 255, 0.5); --accent: #007aff;
+  --glass: rgba(255, 255, 255, 0.62); --glass-edge: rgba(255, 255, 255, 0.75);
+  --glass-shadow: 0 10px 30px rgba(25, 40, 90, 0.10), 0 1px 2px rgba(25, 40, 90, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  --shadow: var(--glass-shadow);
+  /* Data colors: the reference palette's first three categorical slots, which
+     validate as a set, and the lightest step of slot 1's ramp for quota nobody
+     is using. Busy (slot 3) is under 3:1 on white, so every chart has its
+     values in a table below it. */
+  --own: #2a78d6; --borrowed: #eb6834; --busy: #1baf7a; --idle: #cde2fb; --nodes: #eb6834;
+  --borrowed-bg: #fdf0ea; --idle-bg: #edf4fd;
+  /* Status colors are reserved for health and always ship with an icon and a
+     label, never color alone. */
+  --good: #28a745; --warning: #ff9f0a; --critical: #ff3b30;
+  --good-bg: rgba(52, 199, 89, 0.14); --warning-bg: rgba(255, 159, 10, 0.16);
+  --critical-bg: rgba(255, 59, 48, 0.12); --info-bg: rgba(120, 120, 128, 0.12);
+}
+html {
+  background:
+    radial-gradient(1100px 700px at 8% -10%, #bcd6ff 0%, transparent 60%),
+    radial-gradient(900px 600px at 100% 0%, #dccbff 0%, transparent 55%),
+    radial-gradient(1000px 800px at 60% 110%, #c3efe0 0%, transparent 60%),
+    #eef1f6;
+  background-attachment: fixed;
+  min-height: 100%;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+a { color: inherit; text-decoration-color: var(--muted); text-underline-offset: 2px; }
+code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-2); }
+h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 16px; margin: 0; letter-spacing: -0.01em; }
+h3 { font-size: 14px; margin: 0 0 8px; }
+h4 { font-size: 13px; margin: 0 0 4px; color: var(--ink-2); }
+p { margin: 0; }
+.muted { color: var(--muted); }
+.lead { margin-bottom: 10px; } .note { margin-top: 10px; } .footer { margin-top: 28px; }
+
+/* Top bar */
+.topbar { position: sticky; top: 0; z-index: 5; background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+.topbar .inner { max-width: 1200px; margin: 0 auto; padding: 10px 24px; display: flex;
+  align-items: center; gap: 16px; flex-wrap: wrap; }
+.topbar .when { color: var(--ink-2); font-size: 13px; }
+.nav { max-width: 1200px; margin: 0 auto; padding: 0 24px 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+.nav:empty { display: none; }
+
+/* Segmented controls: page tabs and history range presets. */
+.tabs, .segmented { display: inline-flex; gap: 2px; padding: 3px; background: var(--line-2); border-radius: 9px; }
+.tab, .seg-btn { padding: 4px 12px; border-radius: 7px; text-decoration: none; color: var(--ink-2);
+  font-size: 13px; font-weight: 500; }
+.tab:hover, .seg-btn:hover { color: var(--ink); }
+.tab.active, .seg-btn.active { background: var(--card); color: var(--ink); box-shadow: var(--shadow); }
+
+main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 48px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow); padding: 20px; margin: 0 0 16px; }
+.card-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.card-head .sub { color: var(--muted); font-size: 13px; }
+.card-head .more { margin-left: auto; font-size: 13px; color: var(--ink-2); }
+.section-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); margin: 28px 0 10px; }
+.queue { border-left: 3px solid var(--own); }
+.queue.other { border-left-color: var(--line); }
+.errors { margin-top: 10px; }
+.error { color: var(--critical); font-weight: 600; }
+
+/* History range */
+.range { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 14px 20px; }
+button { font: inherit; font-size: 13px; font-weight: 500; padding: 5px 14px; border-radius: 7px;
+  border: 1px solid var(--own); background: var(--own); color: #fff; cursor: pointer; }
+
+/* Glossary */
+details.glossary { padding: 14px 20px; }
+details.glossary summary { font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.glossary-table { max-width: 820px; margin-top: 10px; }
+.glossary-table th { width: 150px; text-transform: none; letter-spacing: 0; font-size: 13px;
+  color: var(--ink); white-space: normal; }
+.glossary-table td { color: var(--ink-2); }
+
+/* Pills */
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px;
+  font-size: 12px; line-height: 20px; background: var(--info-bg); color: var(--ink-2); white-space: nowrap; }
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.pill.ok .dot { background: var(--good); } .pill.fail .dot { background: var(--critical); }
+.pill.borrowed { background: var(--borrowed-bg); color: #9a3a12; }
+.pill.idle { background: var(--idle-bg); color: #1c5cab; }
+.pill.attn { background: var(--warning-bg); color: #8a5a00; }
+a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
+
+/* Health */
+.checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 10px; }
+.check { display: grid; grid-template-columns: 22px 1fr; gap: 2px 10px; padding: 12px 14px;
+  border-radius: 10px; background: var(--line-2); }
+.check .icon { grid-row: span 2; width: 22px; height: 22px; border-radius: 50%; display: grid;
+  place-items: center; font-size: 12px; font-weight: 700; color: #fff; background: var(--muted); }
+.check.ok { background: var(--good-bg); } .check.ok .icon { background: var(--good); }
+.check.warn { background: var(--warning-bg); } .check.warn .icon { background: var(--warning); color: var(--ink); }
+.check.fail { background: var(--critical-bg); } .check.fail .icon { background: var(--critical); }
+.check .title { font-weight: 600; }
+.check .title .state { font-weight: 500; color: var(--ink-2); margin-left: 6px; font-size: 12px; }
+.check .detail { color: var(--ink-2); font-size: 13px; }
+
+/* Kube job states */
+.state-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px;
+  margin-bottom: 14px; }
+.state-chip { display: flex; flex-direction: column; padding: 8px 12px;
+  border: 1px solid var(--line); border-radius: 10px; cursor: help; }
+.state-chip b { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
+.state-chip small { font-size: 12px; color: var(--ink-2); }
+.state-chip.zero b { color: var(--muted); font-weight: 500; }
+.steps-toggle, .steps-toggle:hover { font: inherit; font-size: 13px; color: var(--ink); background: none;
+  border: 0; border-radius: 0; padding: 0; box-shadow: none; cursor: pointer; }
+.steps-toggle::before { content: "\25B6"; display: inline-block; margin-right: 6px; font-size: 9px;
+  color: var(--ink-2); vertical-align: 1px; }
+.steps-toggle[aria-expanded="true"]::before { content: "\25BC"; }
+tr:has(+ tr.steps-row:not([hidden])) > td { border-bottom-color: transparent; }
+tbody tr.steps-row:hover { background: none; }
+/* contain: the list takes the row's width and never asks for more. */
+.steps-list { contain: inline-size; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 3px 24px; margin: 0 0 4px; padding: 8px 12px; list-style: none; border-radius: 10px;
+  background: var(--line-2); }
+.steps-list li { font-size: 12px; overflow-wrap: anywhere; }
+
+/* Tiles and stats */
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+.tile { padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; }
+.tile span { display: block; font-size: 12px; color: var(--ink-2); }
+.tile b { display: block; font-size: 26px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.25; }
+.tile small { color: var(--muted); font-size: 12px; }
+.cohort + .cohort { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.stats { display: flex; gap: 28px; flex-wrap: wrap; margin-bottom: 8px; }
+.stat b { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+.stat span { color: var(--ink-2); margin-left: 4px; }
+.pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.pills:empty { display: none; }
+
+/* Quota bar: in use within nominal, borrowed beyond it, idle nominal. */
+.bar { display: flex; gap: 2px; height: 12px; min-width: 140px; }
+.seg { display: block; height: 100%; }
+.seg:last-child { border-radius: 0 4px 4px 0; }
+.seg.own { background: var(--own); } .seg.borrowed { background: var(--borrowed); }
+.seg.idle { background: var(--idle); }
+.key { display: inline-flex; align-items: center; gap: 5px; margin-left: 12px; font-weight: 400;
+  color: var(--ink-2); font-size: 12px; }
+i.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+i.sw.own { background: var(--own); } i.sw.borrowed { background: var(--borrowed); }
+i.sw.idle { background: var(--idle); }
+i.k { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
+i.k.used, i.k.pending { background: var(--own); } i.k.busy { background: var(--busy); }
+i.k.ref { background: var(--muted); } i.k.nodes { background: var(--nodes); }
+
+/* Tables */
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted); border-bottom-color: var(--line); white-space: nowrap; }
+tbody tr:hover { background: var(--hover); }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+td.branch { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td.msg { color: var(--ink-2); max-width: 520px; }
+td.empty { color: var(--muted); }
+td.nowrap { white-space: nowrap; }
+td.barcell, th.barcell { width: 24%; vertical-align: middle; }
+.dense th, .dense td { padding: 6px 8px; font-size: 13px; }
+.sub-row { color: var(--muted); font-size: 12px; }
+
+/* Charts */
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.chart { margin: 4px 0 8px; }
+figcaption { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+figcaption .title { font-size: 13px; font-weight: 600; color: var(--ink-2); margin-right: auto; }
+/* Line and square swatches centred alike, so the keys sit on one line. */
+figcaption .legend { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; row-gap: 4px; }
+.plot { position: relative; }
+svg { width: 100%; height: auto; display: block; overflow: visible; }
+.grid { stroke: var(--line-2); stroke-width: 1; } .axis { stroke: var(--line); stroke-width: 1; }
+.tick { font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.line { fill: none; stroke: var(--own); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.line.busy { stroke: var(--busy); } .line.nodes { stroke: var(--nodes); }
+.area { stroke: none; fill: var(--own); opacity: 0.10; }
+.area.busy { fill: var(--busy); } .area.nodes { fill: var(--nodes); }
+.ref { fill: none; stroke: var(--muted); stroke-width: 1.25; }
+.ref-label { font-size: 10px; fill: var(--muted); }
+.dot { fill: var(--own); stroke: var(--card); stroke-width: 2; } .dot.busy { fill: var(--busy); } .dot.nodes { fill: var(--nodes); }
+.crosshair { stroke: var(--muted); stroke-width: 1; visibility: hidden; }
+.tip { position: absolute; top: 0; pointer-events: none; background: var(--card);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 12px;
+  box-shadow: 0 4px 12px rgba(16, 24, 40, 0.10); white-space: nowrap; z-index: 2; }
+.tip .row { display: flex; align-items: center; gap: 6px; } .tip b { min-width: 2.5em; }
+.tip .when { color: var(--muted); margin-bottom: 2px; }
+
+.reasons { margin: 4px 0 8px; } .reasons ul { margin: 4px 0 0; padding-left: 18px; }
+.reasons li { color: var(--ink-2); } .reasons li b { color: var(--ink); margin-right: 4px; }
+details { margin-top: 10px; } summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
+@media (max-width: 800px) {
+  .charts { grid-template-columns: 1fr; }
+  .tiles { grid-template-columns: 1fr 1fr; }
+}
+
+/* A queue card's sections: running, next up, why pending. */
+.block { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.block h4 { margin-bottom: 8px; }
+
+/* Anchors land below the sticky top bar. */
+[id] { scroll-margin-top: 110px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* Overview: the diagram, then each component's details. */
+.overview main { font-size: 15px; }
+.intro { color: var(--ink-2); margin: 6px 0 16px; max-width: 900px; }
+.diagram-wrap { overflow-x: auto; }
+.diagram { min-width: 980px; }
+.diagram .box { fill: var(--card); stroke: var(--line); stroke-width: 1.5; transition: stroke 0.15s; }
+.diagram .node { cursor: pointer; }
+.diagram .node:hover .box, .diagram .node:focus .box { stroke: var(--own); stroke-width: 2; }
+.diagram .node.warn .box { stroke: var(--warning); stroke-width: 2; }
+.diagram .node.fail .box { stroke: var(--critical); stroke-width: 2.5; }
+.diagram .n-title { font-size: 17px; font-weight: 600; fill: var(--ink); }
+.diagram .n-sub { font-size: 13px; fill: var(--ink-2); }
+.diagram .n-big { font-size: 30px; font-weight: 600; fill: var(--ink); letter-spacing: -0.02em; }
+.diagram .n-big.zero { fill: var(--muted); font-weight: 500; }
+.diagram .n-label, .diagram .n-line { font-size: 13.5px; fill: var(--ink-2); }
+.diagram .badge circle { fill: var(--muted); }
+.diagram .badge.ok circle { fill: var(--good); } .diagram .badge.fail circle { fill: var(--critical); }
+.diagram .badge.warn circle { fill: var(--warning); }
+.diagram .badge text { font-size: 12px; font-weight: 700; fill: #fff; }
+.diagram .badge.warn text { fill: var(--ink); }
+.diagram .track { fill: var(--line-2); } .diagram .fill { fill: var(--own); }
+.diagram .edge { fill: none; stroke: var(--muted); stroke-width: 2; }
+.diagram .edge.idle { stroke-dasharray: 4 6; stroke: var(--line); }
+.diagram .arrowhead { fill: var(--muted); }
+.diagram .dot { fill: var(--own); }
+.diagram .boundary { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 7 6; }
+.diagram .boundary-label { font-size: 14px; font-weight: 600; fill: var(--ink-2); }
+.diagram .edge-label { font-size: 13px; fill: var(--ink-2); }
+@media (prefers-reduced-motion: reduce) { .diagram .dot { display: none; } }
+
+.components-head { display: flex; align-items: center; justify-content: space-between; }
+.toggle { background: var(--card); color: var(--ink); border-color: var(--line); font-size: 14px; }
+.components { display: grid; gap: 10px; }
+details.component { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow); }
+details.component > summary { display: grid; grid-template-columns: 14px auto 1fr auto; align-items: center;
+  gap: 4px 12px; padding: 14px 18px; cursor: pointer; list-style: none; }
+details.component > summary::-webkit-details-marker { display: none; }
+details.component > summary::before { content: "▸"; color: var(--ink-2); font-size: 18px; line-height: 1; grid-row: span 2; }
+details.component[open] > summary::before { content: "▾"; }
+details.component > summary .status-chip { justify-self: end; }
+.c-title { font-size: 17px; font-weight: 600; }
+.c-sub { color: var(--ink-2); font-size: 14px; }
+.c-role { grid-column: 2 / -1; color: var(--ink-2); font-size: 14px; }
+.c-body { padding: 0 18px 18px 44px; display: flex; flex-direction: column; gap: 12px; }
+.counts { display: flex; gap: 10px 26px; flex-wrap: wrap; }
+.count b { display: block; font-size: 28px; font-weight: 600; line-height: 1.15; letter-spacing: -0.02em; }
+.count span { font-size: 14px; color: var(--ink-2); }
+.count.zero b { color: var(--muted); font-weight: 500; }
+.cohort-line { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: center; font-size: 14px; max-width: 560px; }
+.cohort-line b { font-size: 15px; }
+.cohort-line .bar { grid-column: 1 / -1; height: 10px; background: var(--line-2); border-radius: 5px; overflow: hidden; }
+.cohort-line .bar .seg { border-radius: 5px; }
+.cohort-line .queued { grid-column: 1 / -1; color: var(--ink-2); }
+.overview .more { font-size: 14px; color: var(--ink-2); }
+.overview table th { font-size: 13px; }
+.overview table td { font-size: 14px; }
+.overview details.glossary { margin-bottom: 14px; }
+
+/* Health inside a box: icon and label, never color alone. */
+.status-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 4px;
+  border-radius: 999px; font-size: 14px; font-weight: 600; background: var(--info-bg); color: var(--ink-2); }
+.status-chip .icon, .hc .icon { width: 20px; height: 20px; border-radius: 50%; display: grid;
+  place-items: center; font-size: 11px; font-weight: 700; color: #fff; background: var(--muted); }
+.status-chip.ok { background: var(--good-bg); color: #08700a; } .status-chip.ok .icon { background: var(--good); }
+.status-chip.warn { background: var(--warning-bg); color: #8a5a00; } .status-chip.warn .icon { background: var(--warning); color: var(--ink); }
+.status-chip.fail { background: var(--critical-bg); color: #a12626; } .status-chip.fail .icon { background: var(--critical); }
+.hc { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.hc li { display: grid; grid-template-columns: 20px 1fr; gap: 10px; align-items: start; font-size: 14px; color: var(--ink-2); }
+.hc li b { color: var(--ink); font-weight: 600; }
+.hc .ok .icon { background: var(--good); } .hc .fail .icon { background: var(--critical); }
+.hc .warn .icon { background: var(--warning); color: var(--ink); }
+
+}
+b.err { color: #a12626; font-weight: 600; }
+.diagram .n-cap { font-size: 13px; fill: var(--muted); }
+
+/* Data sources: one entry per source, its facts in three short lists. */
+.sources-list { display: grid; gap: 12px; margin-top: 12px; }
+.source { border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+.source.fail { border-color: var(--critical); background: var(--critical-bg); }
+.source-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 14px; }
+.source-cols { display: grid; grid-template-columns: 1.1fr 1.2fr 1fr; gap: 6px 24px; margin-top: 10px; }
+.source-cols h4 { font-size: 13px; margin: 0 0 4px; }
+.source-cols ul { margin: 0; padding-left: 18px; }
+.source-cols li { font-size: 14px; margin: 2px 0; }
+.err-line { margin-top: 8px; font-size: 14px; }
+.source:target { outline: 2px solid var(--own); outline-offset: 2px; }
+@media (max-width: 800px) { .source-cols { grid-template-columns: 1fr; } }
+.source-links { font-size: 14px; margin: 6px 0 0; }
+.show-more { margin-top: 10px; }
+
+/* Glass materials: these come last and refine the rules above. */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  letter-spacing: -0.005em;
+}
+h1, h2, .tile b, .stat b, .count b,
+.diagram .n-big, .diagram .n-title {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* The bar floats: a glass capsule over the page. */
+.topbar { top: 10px; margin: 10px auto 0; max-width: 1180px; border-radius: 22px;
+  background: rgba(255, 255, 255, 0.55); border: 1px solid var(--glass-edge);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%); }
+.topbar .inner { padding: 8px 14px 8px 20px; }
+.topbar h1 { font-size: 17px; font-weight: 600; }
+main { padding-top: 22px; }
+
+/* Capsule tabs and segmented controls. */
+.tabs, .segmented { background: rgba(120, 120, 128, 0.12); border-radius: 999px; padding: 3px; }
+.tab, .seg-btn { border-radius: 999px; padding: 5px 14px; color: var(--ink-2); font-weight: 500; }
+.tab.active, .seg-btn.active { background: rgba(255, 255, 255, 0.9); color: var(--ink);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), inset 0 1px 0 #fff; }
+.tab:hover, .seg-btn:hover { text-decoration: none; color: var(--ink); }
+
+/* Glass surfaces. */
+.card, details.component, .stage {
+  background: var(--glass); border: 1px solid var(--glass-edge); border-radius: 22px;
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(20px) saturate(170%); -webkit-backdrop-filter: blur(20px) saturate(170%); }
+.tile, .panel, .source, .state-chip {
+  background: rgba(255, 255, 255, 0.55); border: 1px solid var(--glass-edge); border-radius: 16px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9); }
+.check { border-radius: 16px; }
+.section-label { text-transform: none; letter-spacing: -0.01em; font-size: 20px;
+  font-weight: 700; color: var(--ink); margin-top: 28px; }
+.tile b, .stat b, .count b { font-weight: 600; }
+
+/* Tables read as grouped lists. */
+th { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 600;
+  color: var(--muted); border-bottom: 1px solid var(--line); }
+td { border-bottom-color: var(--line-2); }
+tbody tr:hover td { background: rgba(255, 255, 255, 0.45); }
+
+/* Capsule chips and buttons. */
+.pill { border-radius: 999px; background: rgba(120, 120, 128, 0.12); }
+.status-chip { border-radius: 999px; }
+button, .toggle { border-radius: 999px; background: rgba(255, 255, 255, 0.7);
+  color: var(--accent); border: 1px solid var(--glass-edge); font-weight: 600; padding: 7px 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), inset 0 1px 0 #fff; }
+button:hover { background: rgba(255, 255, 255, 0.95); }
+
+/* The overview's diagram: frosted boxes on the glass card. */
+.diagram .box { fill: rgba(255, 255, 255, 0.78); stroke: rgba(255, 255, 255, 0.95);
+  stroke-width: 1.5; rx: 16px; filter: drop-shadow(0 4px 10px rgba(25, 40, 90, 0.10)); }
+.diagram .node:hover .box { stroke: var(--accent); }
+.diagram .node.warn .box { stroke: var(--warning); }
+.diagram .node.fail .box { stroke: var(--critical); }
+.diagram .boundary { stroke: rgba(60, 60, 67, 0.3); }
+.diagram .track { fill: rgba(120, 120, 128, 0.16); }
+.bar .seg.idle { opacity: 0.8; }
+.jobs-running { margin-top: 22px; }
+.data-links { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+
+/* Stacked bands, one per topology: the reference palette's first four
+   categorical slots, which validate as adjacent pairs. Aqua and yellow sit
+   under 3:1 on white, so each stack has a legend and a values table. A 2px
+   gap in the surface color keeps neighboring bands apart. */
+:root { --cat-1: #2a78d6; --cat-2: #eb6834; --cat-3: #1baf7a; --cat-4: #eda100; }
+.band { stroke: #fff; stroke-width: 1; stroke-linejoin: round; }
+.band.s1 { fill: var(--cat-1); } .band.s2 { fill: var(--cat-2); }
+.band.s3 { fill: var(--cat-3); } .band.s4 { fill: var(--cat-4); }
+i.k.s1, i.k.s2, i.k.s3, i.k.s4 { height: 10px; width: 10px; border-radius: 3px; }
+i.k.s1 { background: var(--cat-1); } i.k.s2 { background: var(--cat-2); }
+i.k.s3 { background: var(--cat-3); } i.k.s4 { background: var(--cat-4); }
+
+/* Compare */
+.compare-tile b { font-size: 24px; }
+.tiles.five { grid-template-columns: repeat(5, 1fr); }
+.split-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 28px;
+  align-items: start; margin: 4px 0 8px; }
+table.days td:first-child { white-space: nowrap; }
+table.days td b { font-weight: 600; }
+/* Where the chips went: one bar per fleet, its shares written beside it. */
+.share-bars .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--ink-2);
+  margin: 4px 0 10px; }
+.share-row { display: grid; grid-template-columns: 130px 1fr; gap: 4px 12px; align-items: center;
+  margin-bottom: 12px; }
+.share-row .who { font-size: 13px; font-weight: 600; }
+.share-bar { display: flex; gap: 2px; height: 18px; }
+.share-bar .seg { display: block; height: 100%; min-width: 3px; }
+.share-bar .seg:first-child { border-radius: 4px 0 0 4px; }
+.share-bar .seg:last-child { border-radius: 0 4px 4px 0; }
+.share-row .vals { grid-column: 2; font-size: 12px; color: var(--ink-2); }
+.share-row .vals b { color: var(--ink); font-weight: 600; }
+.seg.s1 { background: var(--cat-1); } .seg.s2 { background: var(--cat-2); }
+.seg.rest, .band.rest, i.k.rest { background: #cfd5de; fill: #cfd5de; }
+.seg.down, .band.down, i.k.down { background: #8f98a6; fill: #8f98a6; }
+i.k.down { height: 10px; width: 10px; border-radius: 3px; }
+i.k.rest { height: 10px; width: 10px; border-radius: 3px; }
+@media (max-width: 900px) {
+  .tiles.five { grid-template-columns: 1fr 1fr; }
+  .split-row { grid-template-columns: 1fr; }
+  .share-row { grid-template-columns: 1fr; }
+  .share-row .vals { grid-column: 1; }
+}
+.compare-tile b .before { display: inline; font-size: inherit; color: var(--muted); font-weight: 500; }
+.compare-note { align-self: center; font-size: 14px; max-width: 460px; }
+th.group { text-align: center; border-bottom: 1px solid var(--line); }
+.range > .muted { font-size: 13px; }
+
+/* Glossary terms: a dotted underline, the definition in a bubble on hover or
+   focus. The definition is real text, so a screen reader reads it inline. */
+.term { position: relative; border-bottom: 1px dotted var(--muted); cursor: help; outline: none; }
+.tile span.term, th .term { display: inline; font: inherit; color: inherit; }
+/* No padding or border while hidden: a clipped tip at the end of a table's last header would
+   still hang past its edge and make the table scroll sideways. */
+.term .tip { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: normal;
+  padding: 0; border: 0; }
+.term:hover .tip, .term:focus .tip {
+  clip: auto; width: max-content; max-width: 320px; height: auto; overflow: visible; z-index: 30;
+  left: 0; top: calc(100% + 6px); padding: 8px 11px; border-radius: 10px;
+  background: rgba(29, 29, 31, 0.94); color: #fff; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  font-size: 13px; font-weight: 400; line-height: 1.45; letter-spacing: 0; text-transform: none; text-align: left;
+}
+.tile span.term .tip { display: block; font-size: 13px; color: #fff; }
+th.n .term:hover .tip, th.n .term:focus .tip { left: auto; right: 0; }
+.table-wrap:has(.term:hover), .table-wrap:has(.term:focus) { overflow: visible; }
+.shapes-head { margin: 22px 0 4px; font-size: 15px; }
+.shape-row { margin-top: 6px; }
+
+/* Jobs: filters in rows above the table, one state label a row. */
+.filters { display: grid; gap: 10px; }
+.filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.filter-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.04em; min-width: 64px; }
+.segmented.wrap { flex-wrap: wrap; }
+.seg-btn small { color: var(--muted); font-size: 11px; margin-left: 3px; }
+.search { display: flex; gap: 6px; margin-left: auto; }
+.search input { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.8); min-width: 220px; }
+.card-head span.more a { color: inherit; }
+.state { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+  background: var(--line-2); color: var(--ink-2); }
+.state::before { margin-right: 4px; }
+.state.passed { background: var(--good-bg); color: #1d6b31; } .state.passed::before { content: "✓"; }
+.state.failed { background: var(--critical-bg); color: #b3261e; } .state.failed::before { content: "✕"; }
+.state.error { background: var(--warning-bg); color: #8a4b00; } .state.error::before { content: "!"; }
+.state.live { background: rgba(0, 122, 255, 0.1); color: #0058b8; } .state.live::before { content: "●"; }
+.jobs-table td { vertical-align: middle; }
+/* Scroll sideways on a phone rather than wrap a step name down the row. */
+table.jobs-table { min-width: 640px; }
+table.jobs-table.ended { min-width: 760px; }
+.filters .seg-btn { white-space: nowrap; }
+h3.jobs-ended { margin-top: 22px; }
+h3.jobs-ended:first-child { margin-top: 0; }
+
+/* Between admitted and on nodes: each gap in the color of the line on top. */
+.gap { stroke: none; opacity: 0.22; } .gap.used { fill: var(--own); } .gap.nodes { fill: var(--nodes); }
+i.k.gapk { height: 10px; width: 10px; border-radius: 3px; opacity: 0.4; }
+i.k.gapk.used { background: var(--own); } i.k.gapk.nodes { background: var(--nodes); }
+
+/* Jobs by build: the build's steps in a table of their own under its row,
+   contained so opening it never widens the columns above. */
+table.jobs-table.builds { min-width: 640px; }
+.jobs-table.builds .state { margin-left: 6px; }
+.steps-row .inner-wrap { contain: inline-size; overflow-x: auto; padding: 4px 0 8px 18px; }
+table.jobs-inner { min-width: 720px; background: var(--line-2); border-radius: 10px; }
+table.jobs-inner th, table.jobs-inner td { border-bottom-color: rgba(255, 255, 255, 0.6); }
+.filters .hint { font-size: 12px; }
+.search select { font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.8); max-width: 260px; }
+/* A step name wraps to a second line rather than widen its table. */
+.jobs-table td.step, .jobs-inner td.step { min-width: 200px; }
+
+/* A health check's History & logs: its status over the day, its changes, and
+   the component's warnings and errors. */
+.check .check-more { grid-column: 2; margin-top: 4px; font-size: 12px; }
+/* An opened check grows alone; the others in its row keep their height. */
+.checks { align-items: start; } .check { align-content: start; }
+.check .check-more summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
+.hist-label { margin: 8px 0 3px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.hist-strip { display: flex; gap: 1px; height: 10px; border-radius: 5px; overflow: hidden;
+  background: var(--line-2); }
+.hist-strip .seg { display: block; height: 100%; min-width: 1px; }
+.hist-strip .seg.ok { background: var(--good); } .hist-strip .seg.warn { background: var(--warning); }
+.hist-strip .seg.fail { background: var(--critical); }
+.hist-strip .seg.info, .hist-strip .seg.unknown { background: var(--muted); }
+.hist-strip .seg.none { background: transparent; }
+.hist-changes, .hist-errors { list-style: none; margin: 6px 0 0; padding: 0; }
+.hist-changes li, .hist-errors li { margin: 3px 0; line-height: 1.4; overflow-wrap: anywhere; }
+.hist-errors li { padding-left: 10px; border-left: 3px solid var(--warning); }
+.hist-errors li.lvl-error { border-left-color: var(--critical); }
+.hist-errors .msg { color: var(--ink); }
+.hist-links { margin: 8px 0 0; }
+table.days tr.total td { border-top: 1px solid var(--line); }
+/* A median line beside its p90: the same hue, dashed and thinner. */
+.line.p50 { stroke-width: 1.5; stroke-dasharray: 4 3; } .area.p50 { display: none; }
+i.k.p50 { opacity: 0.55; }
+
+/* Migration: a generation's line under its tiles, and a block a shape. */
+.gen-line { margin: 2px 0 6px; font-size: 13px; color: var(--ink-2); }
+.shape-block { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 12px; }
+.shape-block h4 { margin: 0 0 4px; font-size: 15px; }
+.shape-block h4 .muted { font-weight: 400; font-size: 13px; }
+.shape-facts { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 0 0 6px; font-size: 13px; }

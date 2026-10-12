@@ -11,6 +11,17 @@
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: WorkloadPriorityClass
 metadata:
+  name: oncall-fix
+value: 120
+description: "A pull request labelled oncall-fix: ahead of everything"
+---
+# What a workload's place in the queue is worth, mirroring the rungs
+# bootstrap.sh applies on bare metal. A workload naming no class scores 0.
+#
+# Ordering only - nothing running is ever taken away; see queue_group.yaml.tpl.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
   name: post-merge
 value: 100
 description: "Tests of what is already on main"
@@ -88,10 +99,12 @@ metadata:
 # nominalQuota is chips this shape can always have and no other shape can hold
 # the reservation against it, while whatever it is not using is lent out.
 #
-# Both preemption policies stay Never: eviction returns the accounting at once
-# but not the hardware, since eight chips freed across eight single-chip nodes
-# still have to scale down before an 8-chip node can boot, and the jobs killed
-# to get there have to run again. Priority decides who goes next, not who stops.
+# reclaimWithinCohort is Never unless prod.auto.tfvars sets it: eviction returns
+# the accounting at once but not the hardware, since eight chips freed across
+# eight single-chip nodes still have to scale down before an 8-chip node can
+# boot, and the jobs killed to get there have to run again. The multi-host
+# shapes reclaim anyway, since without it they wait for a whole slice to free.
+# withinClusterQueue stays Never: priority decides who goes next, not who stops.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
@@ -134,10 +147,12 @@ spec:
 # nominalQuota is chips this shape can always have and no other shape can hold
 # the reservation against it, while whatever it is not using is lent out.
 #
-# Both preemption policies stay Never: eviction returns the accounting at once
-# but not the hardware, since eight chips freed across eight single-chip nodes
-# still have to scale down before an 8-chip node can boot, and the jobs killed
-# to get there have to run again. Priority decides who goes next, not who stops.
+# reclaimWithinCohort is Never unless prod.auto.tfvars sets it: eviction returns
+# the accounting at once but not the hardware, since eight chips freed across
+# eight single-chip nodes still have to scale down before an 8-chip node can
+# boot, and the jobs killed to get there have to run again. The multi-host
+# shapes reclaim anyway, since without it they wait for a whole slice to free.
+# withinClusterQueue stays Never: priority decides who goes next, not who stops.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
@@ -166,7 +181,9 @@ spec:
             - name: google.com/tpu
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
-              nominalQuota: 18
+              nominalQuota: 26
+              borrowingLimit: 80
+              lendingLimit: 18
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -180,10 +197,12 @@ spec:
 # nominalQuota is chips this shape can always have and no other shape can hold
 # the reservation against it, while whatever it is not using is lent out.
 #
-# Both preemption policies stay Never: eviction returns the accounting at once
-# but not the hardware, since eight chips freed across eight single-chip nodes
-# still have to scale down before an 8-chip node can boot, and the jobs killed
-# to get there have to run again. Priority decides who goes next, not who stops.
+# reclaimWithinCohort is Never unless prod.auto.tfvars sets it: eviction returns
+# the accounting at once but not the hardware, since eight chips freed across
+# eight single-chip nodes still have to scale down before an 8-chip node can
+# boot, and the jobs killed to get there have to run again. The multi-host
+# shapes reclaim anyway, since without it they wait for a whole slice to free.
+# withinClusterQueue stays Never: priority decides who goes next, not who stops.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
@@ -212,7 +231,9 @@ spec:
             - name: google.com/tpu
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
-              nominalQuota: 8
+              nominalQuota: 80
+              borrowingLimit: 24
+              lendingLimit: 48
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -226,10 +247,12 @@ spec:
 # nominalQuota is chips this shape can always have and no other shape can hold
 # the reservation against it, while whatever it is not using is lent out.
 #
-# Both preemption policies stay Never: eviction returns the accounting at once
-# but not the hardware, since eight chips freed across eight single-chip nodes
-# still have to scale down before an 8-chip node can boot, and the jobs killed
-# to get there have to run again. Priority decides who goes next, not who stops.
+# reclaimWithinCohort is Never unless prod.auto.tfvars sets it: eviction returns
+# the accounting at once but not the hardware, since eight chips freed across
+# eight single-chip nodes still have to scale down before an 8-chip node can
+# boot, and the jobs killed to get there have to run again. The multi-host
+# shapes reclaim anyway, since without it they wait for a whole slice to free.
+# withinClusterQueue stays Never: priority decides who goes next, not who stops.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
@@ -258,7 +281,8 @@ spec:
             - name: google.com/tpu
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
-              nominalQuota: 0
+              nominalQuota: 16
+              borrowingLimit: 112
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -272,10 +296,12 @@ spec:
 # nominalQuota is chips this shape can always have and no other shape can hold
 # the reservation against it, while whatever it is not using is lent out.
 #
-# Both preemption policies stay Never: eviction returns the accounting at once
-# but not the hardware, since eight chips freed across eight single-chip nodes
-# still have to scale down before an 8-chip node can boot, and the jobs killed
-# to get there have to run again. Priority decides who goes next, not who stops.
+# reclaimWithinCohort is Never unless prod.auto.tfvars sets it: eviction returns
+# the accounting at once but not the hardware, since eight chips freed across
+# eight single-chip nodes still have to scale down before an 8-chip node can
+# boot, and the jobs killed to get there have to run again. The multi-host
+# shapes reclaim anyway, since without it they wait for a whole slice to free.
+# withinClusterQueue stays Never: priority decides who goes next, not who stops.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
@@ -304,7 +330,8 @@ spec:
             - name: google.com/tpu
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
-              nominalQuota: 8
+              nominalQuota: 64
+              borrowingLimit: 64
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -318,10 +345,12 @@ spec:
 # nominalQuota is chips this shape can always have and no other shape can hold
 # the reservation against it, while whatever it is not using is lent out.
 #
-# Both preemption policies stay Never: eviction returns the accounting at once
-# but not the hardware, since eight chips freed across eight single-chip nodes
-# still have to scale down before an 8-chip node can boot, and the jobs killed
-# to get there have to run again. Priority decides who goes next, not who stops.
+# reclaimWithinCohort is Never unless prod.auto.tfvars sets it: eviction returns
+# the accounting at once but not the hardware, since eight chips freed across
+# eight single-chip nodes still have to scale down before an 8-chip node can
+# boot, and the jobs killed to get there have to run again. The multi-host
+# shapes reclaim anyway, since without it they wait for a whole slice to free.
+# withinClusterQueue stays Never: priority decides who goes next, not who stops.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
@@ -329,7 +358,7 @@ metadata:
 spec:
   cohortName: tpu7x
   preemption:
-    reclaimWithinCohort: Never
+    reclaimWithinCohort: LowerPriority
     withinClusterQueue: Never
   namespaceSelector:
     matchLabels:
@@ -350,7 +379,8 @@ spec:
             - name: google.com/tpu
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
-              nominalQuota: 0
+              nominalQuota: 16
+              borrowingLimit: 112
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -364,10 +394,12 @@ spec:
 # nominalQuota is chips this shape can always have and no other shape can hold
 # the reservation against it, while whatever it is not using is lent out.
 #
-# Both preemption policies stay Never: eviction returns the accounting at once
-# but not the hardware, since eight chips freed across eight single-chip nodes
-# still have to scale down before an 8-chip node can boot, and the jobs killed
-# to get there have to run again. Priority decides who goes next, not who stops.
+# reclaimWithinCohort is Never unless prod.auto.tfvars sets it: eviction returns
+# the accounting at once but not the hardware, since eight chips freed across
+# eight single-chip nodes still have to scale down before an 8-chip node can
+# boot, and the jobs killed to get there have to run again. The multi-host
+# shapes reclaim anyway, since without it they wait for a whole slice to free.
+# withinClusterQueue stays Never: priority decides who goes next, not who stops.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
@@ -375,7 +407,7 @@ metadata:
 spec:
   cohortName: tpu7x
   preemption:
-    reclaimWithinCohort: Any
+    reclaimWithinCohort: LowerPriority
     withinClusterQueue: Never
   namespaceSelector:
     matchLabels:
@@ -397,6 +429,7 @@ spec:
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
               nominalQuota: 32
+              borrowingLimit: 32
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue

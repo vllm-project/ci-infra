@@ -1,0 +1,149 @@
+{
+ "causes": {
+  "disk_full": "Disk full",
+  "tpu": "TPU failed to start",
+  "bus": "Bus error (shared memory)",
+  "oom": "Killed for memory",
+  "agent_lost": "Agent lost",
+  "image": "CI image missing",
+  "docker": "Docker daemon",
+  "network": "Download or network"
+ },
+ "bare": {
+  "window": "2026-09-05 to 2026-09-28",
+  "by_generation": {
+   "v6e": {
+    "days": 23,
+    "chip_hours": 5091,
+    "jobs": 13176,
+    "causes": {
+     "test": {
+      "n": 416,
+      "chip_hours": 123.8
+     },
+     "agent_lost": {
+      "n": 13,
+      "chip_hours": 25.0
+     },
+     "image": {
+      "n": 48,
+      "chip_hours": 0.2
+     },
+     "cancelled": {
+      "n": 8,
+      "chip_hours": 0.2
+     },
+     "tpu": {
+      "n": 1,
+      "chip_hours": 0.6
+     },
+     "oom": {
+      "n": 3,
+      "chip_hours": 0.8
+     }
+    }
+   },
+   "v7x": {
+    "days": 23,
+    "chip_hours": 40408,
+    "jobs": 38941,
+    "causes": {
+     "tpu": {
+      "n": 140,
+      "chip_hours": 159.9
+     },
+     "test": {
+      "n": 2847,
+      "chip_hours": 2871.5
+     },
+     "agent_lost": {
+      "n": 54,
+      "chip_hours": 84.9
+     },
+     "oom": {
+      "n": 41,
+      "chip_hours": 27.9
+     },
+     "cancelled": {
+      "n": 61,
+      "chip_hours": 14.8
+     },
+     "bus": {
+      "n": 125,
+      "chip_hours": 1.8
+     },
+     "network": {
+      "n": 15,
+      "chip_hours": 29.9
+     },
+     "docker": {
+      "n": 4,
+      "chip_hours": 0.9
+     },
+     "image": {
+      "n": 20,
+      "chip_hours": 0.1
+     },
+     "disk_full": {
+      "n": 476,
+      "chip_hours": 97.4
+     }
+    }
+   }
+  }
+ },
+ "kube": {
+  "window": "2026-10-04 to 2026-10-11",
+  "by_generation": {
+   "none": {
+    "days": 7,
+    "chip_hours": 0,
+    "jobs": 0,
+    "causes": {
+     "cancelled": {
+      "n": 77,
+      "chip_hours": 0.0
+     },
+     "test": {
+      "n": 192,
+      "chip_hours": 0.0
+     },
+     "oom": {
+      "n": 1,
+      "chip_hours": 0.0
+     }
+    }
+   },
+   "v6e": {
+    "days": 7,
+    "chip_hours": 1370,
+    "jobs": 2865,
+    "causes": {
+     "test": {
+      "n": 100,
+      "chip_hours": 32.6
+     }
+    }
+   },
+   "v7x": {
+    "days": 7,
+    "chip_hours": 7164,
+    "jobs": 5480,
+    "causes": {
+     "test": {
+      "n": 207,
+      "chip_hours": 348.6
+     },
+     "network": {
+      "n": 4,
+      "chip_hours": 7.2
+     },
+     "tpu": {
+      "n": 14,
+      "chip_hours": 11.1
+     }
+    }
+   }
+  }
+ }
+}

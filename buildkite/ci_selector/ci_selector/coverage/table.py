@@ -40,6 +40,7 @@ from .model import (
     ADD_MAX_SHARE_ENV,
     MAX_ADD_ROW_SHARE,
     MIN_ROWS_FOR_BREADTH,
+    READABLE_OLDER,
     TABLE_VERSION,
     Row,
     Stamp,
@@ -341,13 +342,21 @@ def _interpreter_mismatch(stamp: Stamp) -> str:
     return ""
 
 
-def _verify(key: str, blob: dict) -> tuple[Row | None, str]:
-    """A row is usable only if its content still matches the stamp that built it."""
+def _verify(
+    key: str, blob: dict, missing: frozenset[str] = frozenset()
+) -> tuple[Row | None, str]:
+    """A row is usable only if its content still matches the stamp that built
+    it. `missing` names the Stamp fields an older table version lacks."""
     try:
+        if missing & set(blob["stamp"]):
+            return None, f"older row carries {sorted(missing & set(blob['stamp']))}"
         stamp = Stamp(**blob["stamp"])
         functions = {p: frozenset(n) for p, n in blob["functions"].items()}
         import_time = {p: frozenset(n) for p, n in blob["import_time"].items()}
-    except (KeyError, TypeError) as exc:
+        lines = {
+            p: frozenset(expand_ranges(r)) for p, r in blob.get("lines", {}).items()
+        }
+    except (KeyError, TypeError, ValueError) as exc:
         return None, f"unreadable row: {exc}"
 
     if len(functions) != stamp.n_files:
@@ -365,12 +374,16 @@ def _verify(key: str, blob: dict) -> tuple[Row | None, str]:
         for path, names in import_time.items()
     ):
         return None, "import-time names absent from the row's functions"
+    if sum(len(v) for v in lines.values()) != stamp.n_lines:
+        return None, f"line count != stamp {stamp.n_lines}"
+    if not lines.keys() <= functions.keys():
+        return None, "lines for a file the row never entered"
     # Not `if stamp.digest and ...`: an empty digest used to skip the check and
     # admit the row, which is the exact hole signing was built to close. Every
     # writer sets one unconditionally, so leniency here protects nothing.
     if not stamp.digest:
         return None, "unsigned row"
-    if digest_of(functions, stamp, import_time) != stamp.digest:
+    if digest_of(functions, stamp, import_time, missing, lines) != stamp.digest:
         return None, "digest mismatch"
     return Row(
         key=key,
@@ -378,7 +391,29 @@ def _verify(key: str, blob: dict) -> tuple[Row | None, str]:
         functions=functions,
         stamp=stamp,
         import_time=import_time,
+        lines=lines,
     ), ""
+
+
+def compress_ranges(lines) -> list[list[int]]:
+    """Sorted line numbers as [first, last] runs: executed lines cluster, and
+    a table of bare numbers is several times the size."""
+    out: list[list[int]] = []
+    for n in sorted(lines):
+        if out and n == out[-1][1] + 1:
+            out[-1][1] = n
+        else:
+            out.append([n, n])
+    return out
+
+
+def expand_ranges(ranges) -> list[int]:
+    out: list[int] = []
+    for first, last in ranges:
+        if not (isinstance(first, int) and isinstance(last, int)) or last < first:
+            raise ValueError(f"bad line range {first}..{last}")
+        out.extend(range(first, last + 1))
+    return out
 
 
 def load(path: Path) -> Table:
@@ -398,7 +433,8 @@ def load(path: Path) -> Table:
     # value, so an older table would read healthier than it was recorded.
     # Refusing is the only reading that fails safe.
     version = payload.get("version")
-    if version != TABLE_VERSION:
+    missing = READABLE_OLDER.get(version, frozenset())
+    if version != TABLE_VERSION and version not in READABLE_OLDER:
         return Table(
             None,
             unavailable=f"{path} is table version {version!r}, expected "
@@ -415,7 +451,7 @@ def load(path: Path) -> Table:
     rows: dict[str, Row] = {}
     rejected: dict[str, str] = {}
     for key, blob in blobs.items():
-        row, why = _verify(key, blob)
+        row, why = _verify(key, blob, missing)
         if row is None:
             rejected[key] = why
         else:

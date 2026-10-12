@@ -292,12 +292,13 @@ variable "tpu_dispatch_retry_seconds" {
     How long a workload may hold a reservation without MultiKueue placing it or
     naming a worker before the launcher resubmits it.
 
-    The one stuck state inside tpu_admission_max_seconds that has a fix: the
+    The stuck states inside tpu_admission_max_seconds that have a fix: the
     multikueue controller reconciles a fresh reservation once, creates no remote
-    copy, and never looks again, so the chips sit reserved and idle until the
-    hour runs out. Normal dispatch names a worker within seconds, and a
-    workload waiting on a slice rebuild names its worker, so only the stall
-    reaches this.
+    copy, and never looks again; or it names a worker, the worker admits the
+    copy, and recording that on the manager is rejected because the nomination
+    is gone. Either way the chips sit reserved until the hour runs out. Normal
+    dispatch names a worker within seconds, and a workload waiting on a slice
+    rebuild keeps its worker named, so only the stalls reach this.
   EOT
 }
 
@@ -488,5 +489,45 @@ variable "machine_memory_gb" {
     volumes and its memory request from it. Here rather than in that script so
     that it sits beside the pools that name these machine types, since the two
     have to be edited together.
+  EOT
+}
+
+variable "buildkite_org" {
+  type        = string
+  description = "Buildkite organization slug the fleet's pipelines belong to. Read by the queue dashboard; see dashboard.tf."
+}
+
+variable "buildkite_cluster_id" {
+  type        = string
+  description = <<-EOT
+    UUID of the Buildkite cluster the kube queue is in. The dashboard finds
+    the pipelines whose kube steps it reports by it.
+  EOT
+}
+
+variable "dashboard_image" {
+  type        = string
+  description = <<-EOT
+    Image the queue dashboard runs. Built by hand from dashboard/Dockerfile -
+    the command is in dashboard/cloudbuild.yaml - and bumped here when
+    dashboard/app.py changes.
+  EOT
+}
+
+variable "dashboard_buildkite_token_secret_id" {
+  type        = string
+  description = <<-EOT
+    Secret Manager secret in project_id holding a Buildkite REST API token
+    with read_builds and read_pipelines, which the dashboard lists jobs with.
+    Not created here, for the same reason as agent_token_secret_id.
+  EOT
+}
+
+variable "dashboard_viewers" {
+  type        = list(string)
+  description = <<-EOT
+    IAM principals IAP lets through to the dashboard, as user:, group: or
+    domain: members. Nothing else reaches it: the service accepts only
+    requests IAP has authenticated.
   EOT
 }

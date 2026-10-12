@@ -1,0 +1,31 @@
+<!doctype html>
+<!--
+  The jobs page: every kube job on each queue, in flight and finished - the
+  per-queue view Buildkite cannot give, as every kube step runs on its one kube
+  queue. views.py fills the placeholders - a dollar sign and a name - with
+  string.Template, so a literal dollar sign here must be doubled.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TPU CI kube · Jobs</title>
+<link rel="stylesheet" href="static/style.css?v=$assets">
+</head>
+<body>
+<header class="topbar">
+  <div class="inner">
+    <h1>TPU CI kube</h1>
+    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab active" href="jobs">Jobs</a><a class="tab" href="trends">Trends</a><a class="tab" href="migration">Migration</a></nav>
+    <span class="when">In flight as of <time data-ts="$generated" data-fmt="time"></time> · finished since <time data-ts="$start" data-fmt="datetime"></time></span>
+  </div>
+</header>
+<main>
+$errors
+<div class="card filters">$filters</div>
+<p class="intro">$summary</p>
+<div class="card">$table</div>
+</main>
+<script src="static/app.js?v=$assets"></script>
+</body>
+</html>
