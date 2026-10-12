@@ -167,8 +167,8 @@ def _out():
     record needs no lock, and the kernel keeps concurrent appends apart. A
     partial write is the price, so `_write` counts one when it sees it.
 
-    Opened from the main thread before any other exists, by `_begin` and by
-    the fork hook, so the check below is about pid reuse, not about racing.
+    Opened by `_begin` and by the fork hook. The pid check is for a fork that
+    bypassed `register_at_fork`.
     """
     global _fd, _fd_pid
     pid = os.getpid()
@@ -193,11 +193,10 @@ def _write(fd, text):
         data = text.encode("utf-8", "replace")
         n = os.write(fd, data)
         if n != len(data):
-            # Disk full, mostly. The rest may land behind another thread's
-            # record, so say so rather than leave a torn line looking whole.
+            # Disk full, mostly. The rest is dropped: written later, it could
+            # land inside another thread's record. Counted, like any loss.
             _stats["errors"] += 1
             _stats["last_error"] = f"short write {n}/{len(data)}"
-            os.write(fd, data[n:])
             return False
         return True
     except Exception as exc:
