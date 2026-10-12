@@ -1303,7 +1303,6 @@ def convert_group_step_to_buildkite_step(
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
-    # A scheduled nightly has no diff to select by and nobody to unblock steps.
     if global_config["aiter_nightly"] == "1":
         return True
     if os.getenv("NOAUTO") == "1":
