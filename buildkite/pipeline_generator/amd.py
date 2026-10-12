@@ -42,7 +42,7 @@ AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES = 15
 AMD_CI_BASE_STEP_KEY = "ensure-ci-base-amd"
 AITER_NIGHTLY_STEP_KEY = "aiter-nightly-amd"
 AITER_NIGHTLY_TIMEOUT_MINUTES = 20
-# AITER prebuilds kernels only for these (AITER_ROCM_ARCH in vLLM's
+# vLLM builds AITER only for these (AITER_ROCM_ARCH in vLLM's
 # docker/Dockerfile.rocm_base), so the AITER nightly runs only on them.
 AITER_GPU_ARCHS = frozenset({"gfx942", "gfx950"})
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
@@ -239,33 +239,17 @@ def valid_amd_gpu_devices() -> List[str]:
     return list(AMD_DEVICE_CONFIGS)
 
 
-def _is_aiter_gpu_device(device: Optional[str]) -> bool:
+def runs_in_aiter_nightly(device: Optional[str]) -> bool:
+    """True for a step the AITER nightly keeps: the AMD CPU build lane, and
+    GPU jobs on an AITER arch.
+
+    Native and DinD jobs alike test the nightly: both run on images built from
+    the overlay's ci_base.
+    """
+    if _device_value(device) == DeviceType.AMD_CPU.value:
+        return True
     config = get_amd_device_config(device)
     return config is not None and config.arch in AITER_GPU_ARCHS
-
-
-def runs_in_aiter_nightly(device: Optional[str], dind: bool) -> bool:
-    """True for an AMD GPU job that runs in the AITER nightly.
-
-    Native jobs only: they run on this build's ci_base-build tag, which the
-    overlay replaces. DinD jobs start from the stable ci_base, so they would
-    test the stock AITER.
-    """
-    return _is_aiter_gpu_device(device) and not dind
-
-
-def aiter_nightly_dind_steps(steps: List[Step]) -> List[str]:
-    """The DinD jobs on an AITER GPU, which the AITER nightly drops."""
-    dropped = []
-    for step in steps:
-        name = step.key or step.label
-        if _is_aiter_gpu_device(step.device) and step.dind:
-            dropped.append(name)
-        mirror = (step.mirror or {}).get("amd")
-        if mirror and _is_aiter_gpu_device(mirror.get("device")):
-            if mirror.get("dind", True):
-                dropped.append(f"amd-{name}")
-    return dropped
 
 
 def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
