@@ -253,7 +253,7 @@ def runs_in_aiter_nightly(device: Optional[str]) -> bool:
 
 
 def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
-    """Build the AMD test image on the AITER nightly, as test-template-amd.j2 does.
+    """Build the AMD test image on the AITER nightly.
 
     Adds the overlay step after ensure-ci-base-amd. It installs the nightly
     wheel over this build's ci_base and pushes the result as this build's
@@ -281,8 +281,6 @@ def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
         no_plugin=True,
         commands=["bash .buildkite/scripts/rocm/aiter-nightly-overlay.sh"],
         timeout_in_minutes=AITER_NIGHTLY_TIMEOUT_MINUTES,
-        # Not exit 10 (no wheel) or 11 (the wheel does not install): those are
-        # AITER failures, and a retry would only fail the same way.
         retry={
             "automatic": [
                 {"exit_status": 1, "limit": 1},  # Transient Docker/BuildKit failure
@@ -293,6 +291,8 @@ def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
     )
 
     image_build = by_key[AMD_ARTIFACT_STEP]
+    # Wait for the overlay, which itself waits for ensure-ci-base-amd; keep any
+    # other dependency.
     depends_on = [AITER_NIGHTLY_STEP_KEY] + [
         key for key in image_build.depends_on or [] if key != AMD_CI_BASE_STEP_KEY
     ]
