@@ -106,7 +106,7 @@ With `build.sh`, a failed selection or install fails `image-build-amd` (retried 
 
 A retried overlay step reinstalls the wheel its first attempt chose.
 
-The pipeline generator does the same on the `ci` pipeline with `AITER_NIGHTLY=1`, choosing by GPU instead of tag: native jobs on gfx942 (MI300, MI325) and gfx950 (MI355). See the [pipeline generator README](buildkite/pipeline_generator/README.md#environment-variables).
+The pipeline generator does the same when `AITER_NIGHTLY=1` is set on a build it generates, such as `ci`. It chooses jobs by GPU instead of by tag: the AMD build steps and the GPU jobs on gfx942 (MI300, MI325) and gfx950 (MI355). Every other step, CUDA included, is dropped. See the [pipeline generator README](buildkite/pipeline_generator/README.md#environment-variables).
 
 ### Bootstrap Scripts
 
@@ -243,7 +243,7 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 | `COV_ENABLED` | Enable pytest coverage collection and Codecov upload |
 | `DOCS_ONLY_DISABLE` | Skip docs-only detection (always run CI) |
 | `AMD_MIRROR_HW` | AMD hardware mirror target (default: `amdproduction`) |
-| `AITER_NIGHTLY` | Set to `1` to test the latest AITER nightly wheel on every MI300/MI325/MI355 step, AMD jobs only (see [AITER nightly](#aiter-nightly-amd-ci)); also disables the docs-only skip |
+| `AITER_NIGHTLY` | Set to `1` to test the latest AITER nightly wheel (see [AITER nightly](#aiter-nightly-amd-ci)). AMD CI: every `amdproduction` step tagged `amdgfx942nightly`/`amdgfx950nightly` (MI300, MI355). Pipeline generator: only the AMD build steps and the MI300/MI325/MI355 jobs. Both disable the docs-only skip |
 | `AITER_SPEC` | AMD CI, with vLLM's `build.sh`: optional pip spec that pins the AITER wheel the test image installs (default with `AITER_NIGHTLY=1`: the newest matching nightly) |
 | `NOAUTO` | Set to `1` to gate all steps behind manual approval blocks |
 | `PRIORITY` | Set to `HIGH` for high-priority pipeline scheduling |
