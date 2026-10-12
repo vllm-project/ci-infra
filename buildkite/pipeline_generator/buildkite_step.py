@@ -1138,8 +1138,7 @@ def convert_group_step_to_buildkite_step(
     # ROCm has its own pinned torch and gains nothing from validating against
     # a CUDA torch-nightly build, so the AMD lane is excluded entirely there.
     include_amd = global_config["torch_nightly"] != "1"
-    # The AITER nightly runs the AMD lane only, and in it only the GPU jobs on
-    # an AITER arch (see runs_in_aiter_nightly).
+    # The AITER nightly runs only the AMD lane, on AITER archs.
     aiter_nightly = global_config["aiter_nightly"] == "1"
 
     amd_hardware_steps = []
@@ -1453,8 +1452,7 @@ def convert_group_step_to_buildkite_step(
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
-    # A scheduled build of main has no change to select by and nobody to
-    # unblock steps, so in the AITER nightly every step runs.
+    # A scheduled nightly has no diff to select by and nobody to unblock steps.
     if global_config["aiter_nightly"] == "1":
         return True
     if os.getenv("NOAUTO") == "1":
