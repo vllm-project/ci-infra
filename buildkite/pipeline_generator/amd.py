@@ -211,18 +211,20 @@ def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
 
     It replaces this build's ci_base-build tag, so native jobs need no change.
     """
-    by_key = {step.key: step for step in steps if step.key}
+    steps_by_key = {step.key: step for step in steps if step.key}
     missing = [
-        key for key in (AMD_CI_BASE_STEP_KEY, AMD_ARTIFACT_STEP) if key not in by_key
+        key
+        for key in (AMD_CI_BASE_STEP_KEY, AMD_ARTIFACT_STEP)
+        if key not in steps_by_key
     ]
     if missing:
         raise ValueError(
             "AITER nightly requires the AMD build step(s): " + ", ".join(missing)
         )
-    if AITER_NIGHTLY_STEP_KEY in by_key:
+    if AITER_NIGHTLY_STEP_KEY in steps_by_key:
         raise ValueError(f"Duplicate CI step key: {AITER_NIGHTLY_STEP_KEY}")
 
-    ci_base = by_key[AMD_CI_BASE_STEP_KEY]
+    ci_base = steps_by_key[AMD_CI_BASE_STEP_KEY]
     overlay = Step(
         label="AMD: :crescent_moon: install AITER nightly",
         group=ci_base.group,
@@ -241,7 +243,7 @@ def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
         },
     )
 
-    image_build = by_key[AMD_ARTIFACT_STEP]
+    image_build = steps_by_key[AMD_ARTIFACT_STEP]
     # The overlay replaces ensure-ci-base-amd; other dependencies stay.
     depends_on = [AITER_NIGHTLY_STEP_KEY] + [
         key for key in image_build.depends_on or [] if key != AMD_CI_BASE_STEP_KEY
