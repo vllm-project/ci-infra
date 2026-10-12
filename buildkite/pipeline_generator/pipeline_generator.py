@@ -9,7 +9,6 @@ import yaml
 from amd import (
     apply_aiter_nightly,
     is_amd_device,
-    is_amd_gpu_device,
     normalize_amd_depends_on,
     runs_in_aiter_nightly,
 )
@@ -133,8 +132,6 @@ class PipelineGenerator:
                 torch_nightly=torch_nightly,
                 aiter_nightly=aiter_nightly,
             )
-            if aiter_nightly:
-                check_aiter_nightly_dependencies(steps)
         except ValueError as error:
             if not (record and record["applied"]):
                 # Surface the reason on the build page, not only in the bootstrap log.
@@ -168,6 +165,12 @@ class PipelineGenerator:
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
+        if aiter_nightly:
+            try:
+                check_aiter_nightly_dependencies(buildkite_group_steps)
+            except ValueError as error:
+                _annotate_best_effort(str(error), style="error")
+                raise
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
         group_of_step = {
             step.key: group_step.group
@@ -435,33 +438,22 @@ def select_steps_and_dependencies(
     return selected, frozenset(selected_step_keys)
 
 
-def check_aiter_nightly_dependencies(steps: List[Step]) -> None:
-    """Fail if a step the AITER nightly keeps depends on one it drops.
+def check_aiter_nightly_dependencies(groups: List[BuildkiteGroupStep]) -> None:
+    """Fail if a generated step depends on one the AITER nightly dropped.
 
     The uploaded pipeline would name a step that is not in it.
     """
-    kept = {}
-    dropped = set()
-    for step in steps:
-        key = step.key or _generate_step_key(step.label)
-        if runs_in_aiter_nightly(step.device):
-            depends_on = step.depends_on or []
-            if is_amd_gpu_device(step.device):
-                depends_on = normalize_amd_depends_on(depends_on)
-            kept[key] = depends_on
-        else:
-            dropped.add(key)
-        mirror = (step.mirror or {}).get("amd")
-        if mirror:
-            if runs_in_aiter_nightly(mirror.get("device")):
-                kept[f"amd-{key}"] = normalize_amd_depends_on(mirror.get("depends_on"))
-            else:
-                dropped.add(f"amd-{key}")
+    jobs = [job for group in groups for job in group.steps]
+    keys = {job.key for job in jobs}
     broken = sorted(
-        f"{key} -> {dependency}"
-        for key, depends_on in kept.items()
-        for dependency in depends_on
-        if dependency in dropped and dependency not in kept
+        f"{job.key} -> {dependency}"
+        for job in jobs
+        for dependency in (
+            [job.depends_on]
+            if isinstance(job.depends_on, str)
+            else job.depends_on or []
+        )
+        if dependency not in keys
     )
     if broken:
         raise ValueError(
