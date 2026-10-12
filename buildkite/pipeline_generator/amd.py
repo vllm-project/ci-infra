@@ -206,9 +206,11 @@ def runs_in_aiter_nightly(device: Optional[str]) -> bool:
 
 
 def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
-    """Insert the AITER nightly overlay before image-build-amd.
+    """Insert the AITER nightly overlay after ensure-ci-base-amd, and build
+    image-build-amd on its image.
 
-    It replaces this build's ci_base-build tag, so native jobs need no change.
+    The overlay replaces this build's ci_base-build tag, so native jobs need no
+    change.
     """
     steps_by_key = {step.key: step for step in steps if step.key}
     missing = [
