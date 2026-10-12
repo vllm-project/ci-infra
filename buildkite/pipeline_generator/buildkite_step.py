@@ -1043,8 +1043,8 @@ def convert_group_step_to_buildkite_step(
     # ROCm has its own pinned torch and gains nothing from validating against
     # a CUDA torch-nightly build, so the AMD lane is excluded entirely there.
     include_amd = global_config["torch_nightly"] != "1"
-    # The AITER nightly runs the AMD lane only, and in it only the native GPU
-    # jobs AITER builds kernels for (see runs_in_aiter_nightly).
+    # The AITER nightly runs the AMD lane only, and in it only the GPU jobs on
+    # an AITER arch (see runs_in_aiter_nightly).
     aiter_nightly = global_config["aiter_nightly"] == "1"
 
     amd_hardware_steps = []
@@ -1060,13 +1060,13 @@ def convert_group_step_to_buildkite_step(
             include_step = (
                 step.device != DeviceType.A100
                 and (include_amd or not is_amd_device(step.device))
-                and (not aiter_nightly or is_amd_device(step.device))
+                and (not aiter_nightly or runs_in_aiter_nightly(step.device))
                 and (only_step_keys is None or step_key in only_step_keys)
             )
             if is_amd_gpu_device(step.device):
                 if not include_amd:
                     continue
-                if aiter_nightly and not runs_in_aiter_nightly(step.device, step.dind):
+                if aiter_nightly and not runs_in_aiter_nightly(step.device):
                     continue
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
@@ -1200,10 +1200,7 @@ def convert_group_step_to_buildkite_step(
                 and (only_step_keys is None or f"amd-{step_key}" in only_step_keys)
                 and (
                     not aiter_nightly
-                    or runs_in_aiter_nightly(
-                        step.mirror["amd"].get("device"),
-                        step.mirror["amd"].get("dind", True),
-                    )
+                    or runs_in_aiter_nightly(step.mirror["amd"].get("device"))
                 )
             ):
                 amd = step.mirror["amd"]
@@ -1306,9 +1303,13 @@ def convert_group_step_to_buildkite_step(
 
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+    global_config = get_global_config()
+    # A scheduled build of main has no change to select by and nobody to
+    # unblock steps, so in the AITER nightly every step runs.
+    if global_config["aiter_nightly"] == "1":
+        return True
     if os.getenv("NOAUTO") == "1":
         return False
-    global_config = get_global_config()
     if global_config["only_step_keys"] is not None:
         return step.key in global_config["only_step_keys"]
     if step.key and (
@@ -1316,10 +1317,6 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     ):
         return True
     if global_config["nightly"] == "1":
-        return True
-    # A scheduled build of main has no change to select by and nobody to
-    # unblock steps, so in the AITER nightly every step runs.
-    if global_config["aiter_nightly"] == "1":
         return True
     if step.optional:
         return False

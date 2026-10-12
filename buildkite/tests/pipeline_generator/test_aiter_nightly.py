@@ -3,10 +3,15 @@ from contextlib import ExitStack
 from unittest.mock import mock_open, patch
 
 import pytest
+import yaml
 
 import amd
 import buildkite_step
-from pipeline_generator import select_steps_and_dependencies
+import pipeline_generator
+from pipeline_generator import (
+    check_aiter_nightly_dependencies,
+    select_steps_and_dependencies,
+)
 from step import Step, group_steps
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
@@ -76,7 +81,8 @@ def _steps():
         _mirrored("mi325", "mi325_2"),
         _mirrored("mi355", "mi355_dpx"),
         _mirrored("mi250", "mi250_1"),  # AITER builds no kernels for gfx90a
-        _mirrored("dind", "mi355_1", dind=True),  # tests the stable ci_base
+        # Built on the overlay's ci_base too (ci-base-image.txt in the artifact).
+        _mirrored("dind", "mi355_1", dind=True),
         _mirrored("optional", "mi300_1", optional=True),
         Step(
             label="Direct MI355",
@@ -108,20 +114,21 @@ def _render(fake_global_config, aiter_nightly):
 
 
 @pytest.mark.parametrize(
-    "device, dind, expected",
+    "device, expected",
     [
-        ("mi300_1", False, True),
-        ("mi325_8", False, True),  # gfx942, like MI300
-        ("mi355_4", False, True),
-        ("mi355_dpx", False, True),
-        ("mi250_1", False, False),
-        ("mi355_1", True, False),
-        ("amd_cpu", False, False),
-        ("h100", False, False),
+        ("amd_cpu", True),  # the build lane
+        ("mi300_1", True),
+        ("mi325_8", True),  # gfx942, like MI300
+        ("mi355_4", True),
+        ("mi355_dpx", True),
+        ("mi250_1", False),
+        ("amd_zen5_cpu", False),
+        ("h100", False),
+        (None, False),
     ],
 )
-def test_runs_in_aiter_nightly(device, dind, expected):
-    assert amd.runs_in_aiter_nightly(device, dind) is expected
+def test_runs_in_aiter_nightly(device, expected):
+    assert amd.runs_in_aiter_nightly(device) is expected
 
 
 def test_overlay_runs_between_ci_base_and_test_image():
@@ -179,7 +186,7 @@ def test_overlay_step_retries_only_transient_failures(fake_global_config):
     assert not overlay.plugins
 
 
-def test_nightly_runs_only_native_aiter_gpu_jobs_unblocked(fake_global_config):
+def test_nightly_runs_only_aiter_gpu_jobs_unblocked(fake_global_config):
     jobs = _render(fake_global_config, "1")
     assert set(jobs) == {
         "refresh-rocm-base-amd",
@@ -190,6 +197,7 @@ def test_nightly_runs_only_native_aiter_gpu_jobs_unblocked(fake_global_config):
         "amd-mi325",
         "amd-mi355",
         "amd-optional",
+        "amd-dind",
         "direct-mi355",
     }
     # The overlay replaces this build's ci_base-build tag, so native jobs use
@@ -208,8 +216,10 @@ def test_flag_off_renders_the_stock_pipeline(fake_global_config):
     assert "block-amd-direct-mi355" in jobs
 
 
-def test_dind_jobs_on_aiter_gpus_are_reported():
-    assert amd.aiter_nightly_dind_steps(_steps()) == ["amd-dind"]
+def test_nightly_is_not_gated_by_noauto(fake_global_config, monkeypatch):
+    monkeypatch.setenv("NOAUTO", "1")
+    jobs = _render(fake_global_config, "1")
+    assert not [key for key in jobs if key.startswith("block-")]
 
 
 def test_retry_build_pulls_in_the_overlay():
@@ -226,7 +236,7 @@ def test_retry_build_pulls_in_the_overlay():
     }
 
 
-@pytest.mark.parametrize("key", ["cuda-only", "amd-mi250", "amd-dind"])
+@pytest.mark.parametrize("key", ["cuda-only", "amd-mi250", "direct-mi250"])
 def test_retry_build_rejects_jobs_the_nightly_drops(key):
     steps = amd.apply_aiter_nightly(_steps())
     with pytest.raises(ValueError, match=key):
@@ -275,3 +285,72 @@ def test_nightly_never_skips_docs_only_changes():
 def test_nightly_cannot_combine_with_torch_nightly():
     with pytest.raises(ValueError, match="TORCH_NIGHTLY and AITER_NIGHTLY"):
         _init_global_config({"AITER_NIGHTLY": "1", "TORCH_NIGHTLY": "1"})
+
+
+def test_nightly_rejects_a_kept_job_depending_on_a_dropped_one():
+    steps = amd.apply_aiter_nightly(_steps())
+    steps.append(_mirrored("needs-cuda", "mi300_1", depends_on=["cuda-only"]))
+    with pytest.raises(ValueError, match="amd-needs-cuda -> cuda-only"):
+        check_aiter_nightly_dependencies(steps)
+
+
+def test_nightly_dependencies_of_the_real_shape_are_fine():
+    check_aiter_nightly_dependencies(amd.apply_aiter_nightly(_steps()))
+
+
+def test_generate_uploads_the_nightly(fake_global_config, monkeypatch, tmp_path):
+    fake_global_config.update(aiter_nightly="1", job_dirs=["job_dir"])
+    monkeypatch.setattr(
+        pipeline_generator, "get_global_config", lambda: fake_global_config
+    )
+    monkeypatch.setattr(
+        pipeline_generator, "read_steps_from_job_dir", lambda _: _steps()
+    )
+    annotations = []
+    monkeypatch.setattr(
+        pipeline_generator,
+        "_annotate_best_effort",
+        lambda *a, **k: annotations.append(a),
+    )
+    generator = object.__new__(pipeline_generator.PipelineGenerator)
+    generator.output_file_path = str(tmp_path / "pipeline.yaml")
+    generator.generate()
+
+    uploaded = yaml.safe_load((tmp_path / "pipeline.yaml").read_text())
+    jobs = {job["key"]: job for group in uploaded["steps"] for job in group["steps"]}
+    assert "cuda-only" not in jobs and "amd-mi250" not in jobs
+    assert jobs["aiter-nightly-amd"]["depends_on"] == ["ensure-ci-base-amd"]
+    assert jobs["image-build-amd"]["depends_on"] == ["aiter-nightly-amd"]
+    # $$ survives to the upload, so Buildkite leaves the $(...) to the job.
+    assert any(
+        '"$$(buildkite-agent meta-data get aiter-nightly-ci-base)"' in command
+        for command in jobs["image-build-amd"]["commands"]
+    )
+    # Every depends_on names a step in the uploaded pipeline.
+    for job in jobs.values():
+        for dependency in job.get("depends_on") or []:
+            assert dependency in jobs, (job["key"], dependency)
+    assert any("AITER nightly" in annotation[0] for annotation in annotations)
+
+
+def test_generate_fails_on_a_dropped_dependency(
+    fake_global_config, monkeypatch, tmp_path
+):
+    fake_global_config.update(aiter_nightly="1", job_dirs=["job_dir"])
+    steps = _steps() + [_mirrored("needs-cuda", "mi300_1", depends_on=["cuda-only"])]
+    monkeypatch.setattr(
+        pipeline_generator, "get_global_config", lambda: fake_global_config
+    )
+    monkeypatch.setattr(pipeline_generator, "read_steps_from_job_dir", lambda _: steps)
+    annotations = []
+    monkeypatch.setattr(
+        pipeline_generator,
+        "_annotate_best_effort",
+        lambda *a, **k: annotations.append(k),
+    )
+    generator = object.__new__(pipeline_generator.PipelineGenerator)
+    generator.output_file_path = str(tmp_path / "pipeline.yaml")
+    with pytest.raises(ValueError, match="needs-cuda"):
+        generator.generate()
+    assert {"style": "error"} in annotations
+    assert not (tmp_path / "pipeline.yaml").exists()
