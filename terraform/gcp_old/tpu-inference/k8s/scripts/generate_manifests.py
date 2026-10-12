@@ -949,7 +949,15 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
 
     base = out_dir / manager_dir
     write(base / "system" / "10-kueue-config.yaml", kueue_config("manager"))
-    write(base / "controllers" / "00-controllers.yaml", controller_availability())
+    # The manager's Kueue runs on the class's nodes, which only pods naming the
+    # class can use. On a general system node, the kube-dns or konnectivity-agent
+    # replicas GKE adds as the fleet grows outrank the Managed Prometheus
+    # collector (gmp-critical, below system-cluster-critical), preempt it when
+    # the node is full, and nothing scrapes Kueue until a collector fits again.
+    write(
+        base / "controllers" / "00-controllers.yaml",
+        controller_availability({"kueue-system": MANAGER_COMPUTE_CLASS}),
+    )
     # Manager only. A worker's TPU pods do call buildkite-agent, but with the
     # per-job access token the launcher forwards, not with this one - see the
     # template.
@@ -1034,9 +1042,9 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
     )
     # Everything the fleet runs on the manager lives in this namespace, so
     # setting the class here covers the launcher pods and the agent pods without
-    # either of their templates having to name a node. The controllers in
-    # kueue-system and jobset-system are upstream's and stay on plain
-    # auto-provisioning, which falls back across families of its own accord.
+    # either of their templates having to name a node. The JobSet controller is
+    # upstream's and stays on plain auto-provisioning, which falls back across
+    # families of its own accord; Kueue's names the class in its own overlay.
     write(
         base / "queues" / "00-namespace.yaml",
         render(
@@ -1145,8 +1153,9 @@ def monitoring_kueue() -> str:
     )
 
 
-def controller_availability() -> str:
-    """Replicas, priority and a disruption budget for the upstream controllers.
+def controller_availability(classes: dict[str, str] | None = None) -> str:
+    """Replicas, priority and a disruption budget for the upstream controllers,
+    and for a namespace in classes, the compute class its controller runs in.
 
     The same on every cluster: the manager's Kueue serves the webhook the
     launcher's job goes through, and a worker's serves the copy MultiKueue
@@ -1155,12 +1164,28 @@ def controller_availability() -> str:
     docs = []
     for namespace, deployment, labels in CONTROLLERS:
         selector = "\n".join(f"{key}: {value}" for key, value in sorted(labels.items()))
+        name = (classes or {}).get(namespace)
+        # GKE adds the toleration itself to a pod that names a class; it is
+        # spelled out so the pod schedules even if that webhook is not there.
+        placement = (
+            f"""
+nodeSelector:
+  cloud.google.com/compute-class: {name}
+tolerations:
+  - key: cloud.google.com/compute-class
+    operator: Equal
+    value: {name}
+    effect: NoSchedule"""
+            if name
+            else ""
+        )
         docs.append(render(
             "controller_availability",
             NAMESPACE=namespace,
             DEPLOYMENT=deployment,
             SELECTOR=indent(selector, 6),
             POD_SELECTOR=indent(selector, 20),
+            PLACEMENT=("\n" + indent(placement.strip("\n"), 6)) if placement else "",
         ))
     return "".join(docs)
 
