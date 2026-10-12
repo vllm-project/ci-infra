@@ -6,6 +6,8 @@ import pytest
 from buildkite.pipeline_generator.global_config import (
     ONLY_STEP_KEYS_ENV_VAR,
     _parse_only_step_keys,
+    _parse_picker_options,
+    _parse_spawn_step_keys,
     _validate_pipeline_config,
     init_global_config,
 )
@@ -143,6 +145,30 @@ def test_init_global_config_reads_only_step_keys(
         init_global_config("dummy_path")
 
     assert global_config.config["only_step_keys"] == frozenset({"selected-step"})
+
+
+def test_parse_spawn_step_keys_reads_a_multi_select():
+    # Buildkite stores a multi-select's values newline-separated.
+    assert _parse_spawn_step_keys("kernels\namd-kernels\n") == frozenset(
+        {"kernels", "amd-kernels"}
+    )
+
+
+@pytest.mark.parametrize(
+    "value, message",
+    [("", "names no step keys"), ("ok\nbad;key", "contains an invalid step key")],
+)
+def test_parse_spawn_step_keys_rejects_invalid_values(value, message):
+    with pytest.raises(ValueError, match=message):
+        _parse_spawn_step_keys(value)
+
+
+@pytest.mark.parametrize(
+    "value", ["[1]", '[{"label": "Kernels"}]', '[{"label": "K", "value": "a b"}]']
+)
+def test_parse_picker_options_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="must be a JSON array of picker options"):
+        _parse_picker_options(value)
 
 
 def test_validate_pipeline_config_valid_repo():

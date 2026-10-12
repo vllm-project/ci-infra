@@ -1,6 +1,6 @@
 import os
 import subprocess
-from typing import FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 import yaml
 
@@ -8,9 +8,11 @@ from amd import is_amd_device, normalize_amd_depends_on
 from buildkite_step import (
     COLLECT_GROUP,
     BuildkiteGroupStep,
+    PickerOption,
     _generate_step_key,
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
+    create_test_picker_steps,
     fnrec_collect_group,
     kernrec_collect_group,
     kernrec_enabled,
@@ -44,14 +46,19 @@ class PipelineGenerator:
         docs_only_disable: bool = False,
     ):
         init_global_config(pipeline_config_path)
+        self.pipeline_config_path = pipeline_config_path
         self.output_file_path = output_file_path
 
     def generate(self):
         global_config = get_global_config()
+        # Set when the test picker's spawn step runs this generator to upload
+        # the steps checked in the picker, into a build that already has the rest.
+        spawn_step_keys = global_config["spawn_step_keys"]
 
         # Skip if changes are doc-only (unless RUN_ALL is set)
         if (
-            global_config["docs_only_disable"] == "0"
+            spawn_step_keys is None
+            and global_config["docs_only_disable"] == "0"
             and not global_config["run_all"]
             and global_config["only_step_keys"] is None
         ):
@@ -84,9 +91,19 @@ class PipelineGenerator:
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
         try:
-            steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
-            )
+            if spawn_step_keys is not None:
+                picker_options = [
+                    PickerOption(**option) for option in global_config["picker_options"]
+                ]
+                steps, selected_step_keys = select_spawned_steps(
+                    steps,
+                    spawn_step_keys,
+                    frozenset(option.value for option in picker_options),
+                )
+            else:
+                steps, selected_step_keys = select_steps_and_dependencies(
+                    steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+                )
         except ValueError as error:
             # Surface the reason on the build page, not only in the bootstrap log.
             _annotate_best_effort(str(error), style="error")
@@ -94,16 +111,19 @@ class PipelineGenerator:
         global_config["only_step_keys"] = selected_step_keys
         grouped_steps = group_steps(steps)
 
-        buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
+        unselected: List[PickerOption] = []
+        buildkite_group_steps = convert_group_step_to_buildkite_step(
+            grouped_steps, unselected
+        )
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
 
         # A recording build ends by collecting every job's recordings.
         # Both recorders share one group, so they don't make two groups
-        # with the same name.
+        # with the same name. Steps spawned from the picker are not collected.
         collect = []
-        if kernrec_enabled():
+        if spawn_step_keys is None and kernrec_enabled():
             collect += kernrec_collect_group(buildkite_group_steps).steps
-        if fnrec_enabled():
+        if spawn_step_keys is None and fnrec_enabled():
             collect += fnrec_collect_group(buildkite_group_steps).steps
         if collect:
             buildkite_group_steps.append(
@@ -115,14 +135,30 @@ class PipelineGenerator:
         # Place it first so it shows up right after the bootstrap step.
         if global_config["pull_request"] and global_config["pull_request"] != "false":
             add_precommit_dependency(buildkite_group_steps)
-            buildkite_group_steps.insert(
-                0,
-                create_precommit_group_step(
-                    global_config["github_repo_name"], global_config["commit"]
-                ),
-            )
+            if spawn_step_keys is None:
+                buildkite_group_steps.insert(
+                    0,
+                    create_precommit_group_step(
+                        global_config["github_repo_name"], global_config["commit"]
+                    ),
+                )
 
+        picker_round = global_config["picker_round"]
+        if spawn_step_keys is not None:
+            # What this picker offered and nothing uploaded, offered again.
+            unselected = [
+                option
+                for option in picker_options
+                if option.value not in selected_step_keys
+            ]
+            picker_round += 1
         buildkite_steps_dict = {"steps": []}
+        if unselected:
+            buildkite_steps_dict["steps"].extend(
+                create_test_picker_steps(
+                    unselected, self.pipeline_config_path, picker_round
+                )
+            )
         for buildkite_group_step in buildkite_group_steps:
             buildkite_steps_dict["steps"].append(
                 buildkite_group_step.dict(exclude_none=True)
@@ -134,15 +170,10 @@ class PipelineGenerator:
         return
 
 
-def select_steps_and_dependencies(
+def _index_steps(
     steps: List[Step],
-    requested_step_keys: Optional[FrozenSet[str]],
-    torch_nightly: bool = False,
-) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
-    if requested_step_keys is None:
-        return steps, None
-
-    steps_by_key = {}
+) -> Tuple[Dict[str, List[str]], FrozenSet[str]]:
+    """The dependencies of every uploadable step key, and the AMD ones."""
     dependencies_by_key = {}
     amd_step_keys = set()
     for step in steps:
@@ -151,9 +182,8 @@ def select_steps_and_dependencies(
         # them by that generated key.
         if not step.key:
             step.key = _generate_step_key(step.label)
-        if step.key in steps_by_key:
+        if step.key in dependencies_by_key:
             raise ValueError(f"Duplicate CI step key: {step.key}")
-        steps_by_key[step.key] = step
         dependencies_by_key[step.key] = step.depends_on or []
         if is_amd_device(step.device):
             amd_step_keys.add(step.key)
@@ -163,15 +193,51 @@ def select_steps_and_dependencies(
         amd_mirror = (step.mirror or {}).get("amd")
         if amd_mirror:
             mirror_key = f"amd-{step.key}"
-            if mirror_key in steps_by_key:
+            if mirror_key in dependencies_by_key:
                 raise ValueError(f"Duplicate CI step key: {mirror_key}")
-            steps_by_key[mirror_key] = step
             dependencies_by_key[mirror_key] = normalize_amd_depends_on(
                 amd_mirror.get("depends_on")
             )
             amd_step_keys.add(mirror_key)
+    return dependencies_by_key, frozenset(amd_step_keys)
 
-    missing = requested_step_keys - steps_by_key.keys()
+
+def _with_dependencies(
+    step_keys: Iterable[str], dependencies_by_key: Dict[str, List[str]]
+) -> FrozenSet[str]:
+    selected_step_keys = set(step_keys)
+    pending = list(step_keys)
+    while pending:
+        step_key = pending.pop()
+        for dependency in dependencies_by_key[step_key]:
+            if dependency not in dependencies_by_key:
+                raise ValueError(
+                    f"CI step {step_key} depends on unknown step {dependency}."
+                )
+            if dependency not in selected_step_keys:
+                selected_step_keys.add(dependency)
+                pending.append(dependency)
+    return frozenset(selected_step_keys)
+
+
+def _steps_for_keys(steps: List[Step], step_keys: FrozenSet[str]) -> List[Step]:
+    return [
+        step
+        for step in steps
+        if step.key in step_keys or f"amd-{step.key}" in step_keys
+    ]
+
+
+def select_steps_and_dependencies(
+    steps: List[Step],
+    requested_step_keys: Optional[FrozenSet[str]],
+    torch_nightly: bool = False,
+) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
+    if requested_step_keys is None:
+        return steps, None
+
+    dependencies_by_key, amd_step_keys = _index_steps(steps)
+    missing = requested_step_keys - dependencies_by_key.keys()
     if missing:
         raise ValueError("Unknown CI step key(s): " + ", ".join(sorted(missing)))
 
@@ -183,25 +249,33 @@ def select_steps_and_dependencies(
                 "torch-nightly runs: " + ", ".join(sorted(requested_amd_keys))
             )
 
-    selected_step_keys = set(requested_step_keys)
-    pending = list(requested_step_keys)
-    while pending:
-        step_key = pending.pop()
-        for dependency in dependencies_by_key[step_key]:
-            if dependency not in steps_by_key:
-                raise ValueError(
-                    f"CI step {step_key} depends on unknown step {dependency}."
-                )
-            if dependency not in selected_step_keys:
-                selected_step_keys.add(dependency)
-                pending.append(dependency)
+    selected_step_keys = _with_dependencies(requested_step_keys, dependencies_by_key)
+    return _steps_for_keys(steps, selected_step_keys), selected_step_keys
 
-    selected = [
-        step
-        for step in steps
-        if step.key in selected_step_keys or f"amd-{step.key}" in selected_step_keys
-    ]
-    return selected, frozenset(selected_step_keys)
+
+def select_spawned_steps(
+    steps: List[Step],
+    spawn_step_keys: FrozenSet[str],
+    picker_step_keys: FrozenSet[str],
+) -> Tuple[List[Step], FrozenSet[str]]:
+    """The steps checked in the test picker, with the dependencies the build
+    does not have yet: those the picker offered too. The build already has
+    every step the picker did not offer, so uploading one again would clash
+    on its key."""
+    not_offered = spawn_step_keys - picker_step_keys
+    if not_offered:
+        raise ValueError(
+            "CI step key(s) not offered by the test picker: "
+            + ", ".join(sorted(not_offered))
+        )
+    dependencies_by_key, _ = _index_steps(steps)
+    missing = picker_step_keys - dependencies_by_key.keys()
+    if missing:
+        raise ValueError("Unknown CI step key(s): " + ", ".join(sorted(missing)))
+    selected_step_keys = (
+        _with_dependencies(spawn_step_keys, dependencies_by_key) & picker_step_keys
+    )
+    return _steps_for_keys(steps, selected_step_keys), selected_step_keys
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:

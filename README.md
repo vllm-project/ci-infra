@@ -82,7 +82,7 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 - **Plugin generation**: Docker plugin for EC2-based queues, Kubernetes pod specs for H100/H200/A100
 - **AMD mirroring**: Steps can define `mirror.amd` to automatically create parallel AMD test runs
 - **Source file dependencies**: Steps can specify which source files they depend on for intelligent test filtering
-- **Block steps**: Optional tests are gated behind manual approval blocks
+- **Test picker**: Steps the change does not select are left out of the build and listed in one "Run more tests" input step; checking some and submitting uploads them (and offers the rest again)
 - **Variable injection**: Automatically injects registry URLs, cache tags, and image references into step commands
 
 #### Jinja2 Template (AMD CI)
@@ -237,7 +237,7 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 | `DOCS_ONLY_DISABLE` | Skip docs-only detection (always run CI) |
 | `AMD_MIRROR_HW` | AMD hardware mirror target (default: `amdproduction`) |
 | `AITER_NIGHTLY` | AMD CI: set to `1` to test the latest AITER nightly wheel on every MI300/MI355 production step (see [AITER nightly](#aiter-nightly-amd-ci)); also disables the docs-only skip |
-| `NOAUTO` | Set to `1` to gate all steps behind manual approval blocks |
+| `NOAUTO` | Set to `1` to select no steps automatically: every step is offered in the test picker |
 | `PRIORITY` | Set to `HIGH` for high-priority pipeline scheduling |
 
 ### Pre-commit Hooks

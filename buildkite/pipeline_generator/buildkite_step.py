@@ -1,6 +1,7 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union, Literal
+from typing import Dict, List, Optional, Any, Literal
 from copy import deepcopy
+import json
 import math
 import os
 import re
@@ -27,7 +28,12 @@ from utils_lib.docker_utils import (
     get_ecr_cache_registry,
     get_torch_nightly_image,
 )
-from global_config import get_global_config
+from global_config import (
+    PICKER_OPTIONS_ENV_VAR,
+    PICKER_ROUND_ENV_VAR,
+    SPAWN_STEP_KEYS_ENV_VAR,
+    get_global_config,
+)
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
@@ -262,18 +268,97 @@ class BuildkiteCommandStep(BaseModel):
         }
 
 
-class BuildkiteBlockStep(BaseModel):
-    block: str
-    depends_on: Optional[Union[str, List[str]]] = None
-    key: str
-
-    def to_yaml(self):
-        return {"block": self.block, "depends_on": self.depends_on, "key": self.key}
-
-
 class BuildkiteGroupStep(BaseModel):
     group: str
-    steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
+    steps: List[BuildkiteCommandStep]
+
+
+# Steps the change does not select are left out of the build and offered in a
+# test picker instead, one checkbox each. Its spawn step uploads the ones that
+# get checked, and a new picker for the rest, since an input step is submitted
+# only once. Each picker's keys carry its round, as keys and meta-data are
+# per build.
+TEST_PICKER_INPUT_KEY = "select-tests"
+TEST_PICKER_FIELD_KEY = "selected-tests"
+TEST_PICKER_SPAWN_KEY = "spawn-selected-tests"
+
+
+class PickerOption(BaseModel):
+    label: str
+    value: str
+
+
+def _picker_label(label: str) -> str:
+    # Drop the parallel job placeholders ("Kernels Shard %N"), which Buildkite
+    # fills in only on a job.
+    return re.sub(r"( Shard)? %N(/%t)?", "", label)
+
+
+def _picker_key(key: str, picker_round: int) -> str:
+    return key if picker_round == 1 else f"{key}-{picker_round}"
+
+
+def create_test_picker_steps(
+    options: List[PickerOption], pipeline_config_path: str, picker_round: int = 1
+) -> List[Dict[str, Any]]:
+    """An input step listing the unselected steps, and a step that uploads the
+    checked ones by running this generator again (see SPAWN_STEP_KEYS_ENV_VAR).
+    """
+    options = sorted(
+        (
+            PickerOption(label=_picker_label(option.label), value=option.value)
+            for option in options
+        ),
+        key=lambda option: option.label.lower(),
+    )
+    input_key = _picker_key(TEST_PICKER_INPUT_KEY, picker_round)
+    field_key = _picker_key(TEST_PICKER_FIELD_KEY, picker_round)
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    generator = (
+        "git+https://github.com/vllm-project/ci-infra.git"
+        f"@{branch}#subdirectory=buildkite/pipeline_generator"
+    )
+    output = ".buildkite/pipeline-selected.yaml"
+    picker = {
+        "input": ":point_right: Run more tests",
+        "key": input_key,
+        "prompt": (
+            "These tests were not selected for this change. "
+            "Check the ones to run, then submit."
+        ),
+        "fields": [
+            {
+                "select": "Tests",
+                "key": field_key,
+                "multiple": True,
+                "required": True,
+                "options": [option.model_dump() for option in options],
+            }
+        ],
+    }
+    spawn = BuildkiteCommandStep(
+        label=":rocket: Run selected tests",
+        key=_picker_key(TEST_PICKER_SPAWN_KEY, picker_round),
+        depends_on=[input_key],
+        agents={"queue": AgentQueue.SMALL_CPU_PREMERGE.value},
+        env={
+            PICKER_OPTIONS_ENV_VAR: json.dumps(
+                [option.model_dump() for option in options]
+            ),
+            PICKER_ROUND_ENV_VAR: str(picker_round),
+        },
+        commands=[
+            f'pip install "{generator}"',
+            f'{SPAWN_STEP_KEYS_ENV_VAR}="$$(buildkite-agent meta-data get '
+            f'{field_key})" '
+            "/var/lib/buildkite-agent/.local/bin/pipeline-generator "
+            f"--pipeline_config_path {shlex.quote(pipeline_config_path)} "
+            f"--output_file_path {output}",
+            f"buildkite-agent pipeline upload {output}",
+        ],
+        retry=ensure_infra_failure_retry(None),
+    )
+    return [picker, spawn.model_dump(exclude_none=True)]
 
 
 # Devices routed to agent-stack-k8s. Shared with the fnrec checkout decision
@@ -687,25 +772,11 @@ def _collect_step(
     label: str,
     count_armed: bool = False,
 ) -> "BuildkiteCommandStep":
-    blocked = {
-        s.key[len("block-") :]
-        for g in groups
-        for s in g.steps
-        if isinstance(s, BuildkiteBlockStep)
-    }
-    runnable = [
-        s
-        for g in groups
-        for s in g.steps
-        if isinstance(s, BuildkiteCommandStep) and s.key not in blocked
-    ]
+    runnable = [s for g in groups for s in g.steps]
     # Only the steps that record, and what they wait for: the image build
     # uploads the kernel symbol map. Waiting on every step held the kernel
     # collect of nightly vllm/ci #90897 behind 34 AMD jobs, none of which
-    # records a kernel. Steps behind a block step are left out, because a
-    # dependency that never starts would hold this step forever. A cancelled
-    # one ends it waiting_failed, allow_dependency_failure or not, and it
-    # cannot be retried; the collect scripts can fold the build from another.
+    # records a kernel.
     armed = [s for s in runnable if _carries(s, recorder)]
     runnable_keys = {s.key for s in runnable}
     depends_on = [s.key for s in armed]
@@ -884,39 +955,6 @@ def _prepare_commands(
     return final_commands
 
 
-def _create_block_step(
-    *,
-    block: str,
-    key: str,
-    command_step: BuildkiteCommandStep,
-    depends_on: Optional[Union[str, List[str]]] = None,
-    append_to_command_depends_on: bool = True,
-) -> BuildkiteBlockStep:
-    if isinstance(depends_on, list):
-        block_depends_on = list(depends_on)
-    else:
-        block_depends_on = depends_on
-    block_step = BuildkiteBlockStep(
-        block=block,
-        depends_on=block_depends_on,
-        key=key,
-    )
-    command_depends_on = list(command_step.depends_on or [])
-    if not append_to_command_depends_on:
-        command_depends_on = [
-            block_step.key,
-            *[
-                dependency
-                for dependency in command_depends_on
-                if dependency != block_step.key
-            ],
-        ]
-    elif block_step.key not in command_depends_on:
-        command_depends_on.append(block_step.key)
-    command_step.depends_on = command_depends_on
-    return block_step
-
-
 def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
     normalized = source_file.rstrip("/")
     if not normalized:
@@ -1033,7 +1071,12 @@ def _shard_at_generation(
 
 def convert_group_step_to_buildkite_step(
     group_steps: Dict[str, List[Step]],
+    unselected: Optional[List[PickerOption]] = None,
 ) -> List[BuildkiteGroupStep]:
+    """Steps the change does not select are left out of the result and, when
+    `unselected` is given, appended to it for the test picker."""
+    if unselected is None:
+        unselected = []
     buildkite_group_steps = []
     variables_to_inject = _get_variables_to_inject()
     print(variables_to_inject)
@@ -1089,15 +1132,12 @@ def convert_group_step_to_buildkite_step(
                     agent_tags=step.agent_tags,
                     extra_artifact_paths=_fnrec_artifact_paths(step, "amd"),
                 )
-                if not _step_should_run(step, list_file_diff):
-                    block_step = _create_block_step(
-                        block=f"Run {amd_step.label}",
-                        key=f"block-amd-{step_key}",
-                        command_step=amd_step,
-                        depends_on=amd_step.depends_on,
+                if _step_should_run(step, list_file_diff):
+                    amd_hardware_steps.append(amd_step)
+                else:
+                    unselected.append(
+                        PickerOption(label=amd_step.label, value=step_key)
                     )
-                    amd_hardware_steps.append(block_step)
-                amd_hardware_steps.append(amd_step)
                 continue
 
             # command step
@@ -1155,14 +1195,8 @@ def convert_group_step_to_buildkite_step(
                 )
 
             if include_step and not _step_should_run(step, list_file_diff):
-                block_step = _create_block_step(
-                    block=f"Run {step.label}",
-                    key=f"block-{step_key}",
-                    command_step=buildkite_step,
-                    depends_on=[],
-                    append_to_command_depends_on=False,
-                )
-                group_steps_list.append(block_step)
+                include_step = False
+                unselected.append(PickerOption(label=step.label, value=step_key))
 
             # add plugin
             if not step.no_plugin and not (
@@ -1185,7 +1219,7 @@ def convert_group_step_to_buildkite_step(
             if include_step:
                 group_steps_list.append(buildkite_step)
 
-            # Create AMD mirror step and its block step if specified/applicable
+            # Create AMD mirror step if specified/applicable
             if (
                 include_amd
                 and step.mirror
@@ -1253,29 +1287,21 @@ def convert_group_step_to_buildkite_step(
                     display_label=amd.get("label"),
                     extra_artifact_paths=_fnrec_artifact_paths(amd_command_step, "amd"),
                 )
-                if not _amd_mirror_should_run(
+                if _amd_mirror_should_run(
                     _step_should_run(
                         _get_amd_mirror_effective_step(step, amd),
                         list_file_diff,
                     ),
                     list_file_diff,
                 ):
-                    # Block step depends on the shared AMD image build.
-                    mirror_build_dep = (
-                        amd_step.depends_on[0]
-                        if amd_step.depends_on
-                        else "image-build-amd"
+                    amd_hardware_steps.append(amd_step)
+                else:
+                    unselected.append(
+                        PickerOption(
+                            label=amd.get("label") or f"AMD: {step.label}",
+                            value=amd_step.key,
+                        )
                     )
-                    amd_block_step = _create_block_step(
-                        block=f"Run {amd_step.label}"
-                        if amd.get("label")
-                        else f"Run AMD: {step.label}",
-                        key=f"block-amd-{step_key}",
-                        command_step=amd_step,
-                        depends_on=[mirror_build_dep],
-                    )
-                    amd_hardware_steps.append(amd_block_step)
-                amd_hardware_steps.append(amd_step)
 
         if group_steps_list:
             buildkite_group_steps.append(
