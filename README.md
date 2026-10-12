@@ -238,7 +238,7 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 | `COV_ENABLED` | Enable pytest coverage collection and Codecov upload |
 | `DOCS_ONLY_DISABLE` | Skip docs-only detection (always run CI) |
 | `AMD_MIRROR_HW` | AMD hardware mirror target (default: `amdproduction`) |
-| `AITER_NIGHTLY` | Set to `1` to test the latest AITER nightly wheel (see [AITER nightly](#aiter-nightly-amd-ci)). AMD CI: every `amdproduction` step tagged `amdgfx942nightly`/`amdgfx950nightly` (MI300, MI355). Pipeline generator: only the AMD build steps and the MI300/MI325/MI355 jobs. Both disable the docs-only skip |
+| `AITER_NIGHTLY` | Set to `1` to test the latest AITER nightly wheel (see [AITER nightly](#aiter-nightly-amd-ci)); also disables the docs-only skip |
 | `NOAUTO` | Set to `1` to gate all steps behind manual approval blocks |
 | `PRIORITY` | Set to `HIGH` for high-priority pipeline scheduling |
 
