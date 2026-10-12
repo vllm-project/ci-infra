@@ -223,8 +223,6 @@ def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
         raise ValueError(
             "AITER nightly requires the AMD build step(s): " + ", ".join(missing)
         )
-    if AITER_NIGHTLY_STEP_KEY in steps_by_key:
-        raise ValueError(f"Duplicate CI step key: {AITER_NIGHTLY_STEP_KEY}")
 
     ci_base = steps_by_key[AMD_CI_BASE_STEP_KEY]
     overlay = Step(
@@ -267,15 +265,9 @@ def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
         update={"depends_on": depends_on, "commands": commands, "env": env}
     )
 
-    result = []
-    for step in steps:
-        if step.key == AMD_ARTIFACT_STEP:
-            result.append(image_build)
-            continue
-        result.append(step)
-        if step.key == AMD_CI_BASE_STEP_KEY:
-            result.append(overlay)
-    return result
+    return [
+        image_build if step.key == AMD_ARTIFACT_STEP else step for step in steps
+    ] + [overlay]
 
 
 def get_amd_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
