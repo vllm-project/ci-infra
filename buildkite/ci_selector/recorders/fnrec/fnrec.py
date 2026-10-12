@@ -207,7 +207,14 @@ def _write(fd, text):
 
 
 def _emit(text):
-    return _write(_out(), text)
+    # Opening can fail too, and a callback that raises fails vLLM's own code.
+    try:
+        fd = _out()
+    except Exception as exc:
+        _stats["errors"] += 1
+        _stats["last_error"] = repr(exc)[:200].replace("\t", " ")
+        return False
+    return _write(fd, text)
 
 
 def _arm_exit_hooks(pid):
@@ -365,14 +372,15 @@ def _on_line(code, line):
     filename = code.co_filename
     idx = _line_files.get(filename)
     if idx is None:
-        # next() and setdefault() are each one uninterruptible call, so two
-        # threads meeting a new file agree on its number; the map's size
-        # would not, since both could read it alike. The first #ln ships in
-        # the same append as its #lf, because a repeated #lf says the same
-        # thing twice while an #ln ahead of its #lf says nothing at all.
+        # A number is published only once its #lf has landed, because an #ln
+        # ahead of its #lf says nothing at all. next() is one uninterruptible
+        # call, so two threads meeting a new file each write their own number
+        # and setdefault() keeps one; a second #lf for the same file is a
+        # mapping the reader takes like any other.
         number = next(_lf_next)
-        idx = _line_files.setdefault(filename, number)
-        wrote = _emit(f"#lf\t{idx}\t{filename}\n#ln\t{idx}\t{line}\n")
+        wrote = _emit(f"#lf\t{number}\t{filename}\n#ln\t{number}\t{line}\n")
+        if wrote:
+            _line_files.setdefault(filename, number)
     else:
         wrote = _emit(f"#ln\t{idx}\t{line}\n")
     if wrote:
