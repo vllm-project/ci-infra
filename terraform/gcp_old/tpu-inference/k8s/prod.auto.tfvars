@@ -256,16 +256,16 @@ worker_clusters = [
         reclaim_within_cohort = "Any"
       },
       {
-        # Two slices nominal for the Kimi-K3 pairs, taken back from any
-        # borrower, as 2x2x2 does. A pair needs all 32 chips at once, and
-        # waiting for borrowers does not get them: they return the chips four
-        # at a time to a backlog of 2x2x1 steps that takes each as it frees.
-        # On 10-11, with reclaim limited to lower-priority borrowers, the
-        # nightly pair (unclassed, below the pre-merge steps borrowing its
-        # chips) waited 2.2 h. An evicted step reruns from the start in a
-        # fresh pod. Four slice pools, so 2x2x4 can borrow up to two more
-        # slices (64 chips) for v7x-32 tests and bring-ups when the cohort is
-        # idle.
+        # Two slices nominal for the Kimi-K3 pairs, taken back only from
+        # lower-priority borrowers. The pairs are nightlies (unclassed) and the
+        # steps borrowing their chips overnight are mostly pre-merge PR steps,
+        # so the pair waits for them rather than evicting them: an evicted step
+        # reruns from the start, and a pull request outranks a nightly. When
+        # the cohort is full the wait can run to an hour or two, since freed
+        # chips go four at a time to the 2x2x1 backlog; the nightly still
+        # finishes before the working day. Four slice pools, so 2x2x4 can
+        # borrow up to two more slices (64 chips) for v7x-32 tests and
+        # bring-ups when the cohort is idle.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x4"
         reservation_name = "cloudtpu-20251114223000-2002888989"
@@ -274,7 +274,7 @@ worker_clusters = [
         slices        = 4
         nominal_quota = 32
 
-        reclaim_within_cohort = "Any"
+        reclaim_within_cohort = "LowerPriority"
       },
     ]
   },
