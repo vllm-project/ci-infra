@@ -487,20 +487,24 @@ doc does.
   collapsed beneath.
 
 **Trends** (`/trends`; `/history` still works), for the last 6 hours, 24 hours, 7 days or 30 days (`/api/history` also takes `?start=&end=` in epoch seconds, up to 90 days):
-chips admitted against chips busy (TensorCore duty) per cohort, outcomes per
-queue and per pipeline from `kube_workload_timing` split into test and
-infrastructure failures, wait, startup and run percentiles, and per-queue usage
-and backlog. **Node autoscaling** compares topologies: nodes created, node
-lifetime, peak nodes, chip-hours on nodes and the share workloads held, and
-admitted → running, which includes the wait for a scale-up. Each chart point is the step's average, taken over the fleet-wide
+a card per generation, then outcomes per pipeline. A generation's card has the
+cohort's admitted, busy (TensorCore duty), queue wait p90 and finished
+workloads; chips admitted against chips on nodes, with the gap between them
+shaded as waiting for nodes or idle on nodes; and each topology's admitted chips
+stacked under the cohort's quota, so chips moving between shapes show as bands
+trading height. Below that, a block per shape: its outcomes from
+`kube_workload_timing` split into test and infrastructure failures, evictions,
+wait and run percentiles; its nodes - created, lifetime, the share of chip-hours
+on nodes that workloads held, idle chip-hours and admitted → running, which
+includes the wait for a scale-up; and two charts, chips on nodes and in use
+against its nominal, and its queue wait over time (`fleet.fetch_wait_series`,
+the same series Migration draws). The CPU queue gets a card of its own. Each
+chart point is the step's average, taken over the fleet-wide
 value at each minute - collapsed to the newest Kueue controller pod and summed
 over nodes first, so a controller roll or a node that came and went does not
 inflate it. Node history comes from GKE's per-node metrics, which name a node
 and nothing else; the GKE API's list of node pools ties each name to its pool
 through the pool's instance group, which outlives the nodes it creates.
-
-Trends' chip utilization cards also stack each topology's admitted chips under
-the cohort's quota, so chips moving between shapes show as bands trading height.
 
 **Migration** (`/migration`, last 24 hours by default; `/compare` and `/baseline`
 still work) puts the bare-metal fleet
@@ -532,7 +536,7 @@ snapshot, then every workload that ended in the range from
 exit code, wait, startup and run - a build a row, its steps opening beneath it
 with the failures first, or job by job. Filters for queues (any number), outcome,
 branch and pipeline and a search over step, build and branch sit above it, and a
-line under them sums up what they leave. Each queue card on Live and Trends links to its queue's jobs.
+line under them sums up what they leave. Each queue card on Live and each shape block on Trends links to its queue's jobs.
 
 Migration also counts *infrastructure failures*: failed jobs whose log ends in
 the fleet's fault - a full disk, a TPU that would not start, a bus error, a kill

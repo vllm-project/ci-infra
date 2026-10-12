@@ -3004,6 +3004,7 @@ def build_history(
         c["chip_hours"] = (admitted or 0) * seconds / 3600
         c["peak"] = max((v for v in c["admitted"] if v is not None), default=None)
         c["finished"] = sum(q["stats"]["finished"] for q in c["members"])
+        c["succeeded"] = sum(q["stats"]["succeeded"] for q in c["members"])
         c["infra"] = sum(q["stats"]["infra"] for q in c["members"])
         c["failed"] = sum(q["stats"]["failed"] for q in c["members"])
         del c["members"]
@@ -3067,68 +3068,144 @@ def node_gaps(h: dict, c: dict) -> dict:
     }
 
 
-def render_trends(h: dict, sources: dict, query: str) -> str:
+def render_trends(h: dict, sources: dict, query: str, queue_times: dict | None = None) -> str:
     span = h["span"]
     fmt = "time" if span["end"] - span["start"] <= 2 * 86400 else "day"
     every = max(1, len(h["ticks"]) // 24)
     ticks = h["ticks"]
     gaps = {c["name"]: node_gaps(h, c) for c in h["cohorts"]}
+    preset = f"&amp;preset={span['preset']}" if span.get("preset") in ("6h", "24h", "7d") else ""
 
-    cohorts = "".join(
-        f"""<div class="card">
+    # Each queue's median and p90 wait, in minutes, in each stretch of the range.
+    waits: dict = collections.defaultdict(dict)
+    for r in (queue_times or {}).get("rows") or []:
+        waits[r["queue"]][int(r["bucket"])] = (float(r["p50"]) / 60, float(r["p90"]) / 60)
+    w_ticks = (
+        [queue_times["start"] + i * queue_times["bucket"] for i in range(queue_times["count"])]
+        if queue_times
+        else []
+    )
+    overall = (queue_times or {}).get("overall") or {}
+
+    def shape_head(q: dict) -> str:
+        """A queue's size, name, average use and link to its jobs."""
+        u = unit(q)
+        size = f'{num(q["chips"])} chip{"s" if q["chips"] != 1 else ""} a step · ' if q["resource"] == TPU else ""
+        used = f'avg {num(q["mean_used"])} {u} in use' + (
+            f' · {num(q["stats"]["chip_hours"])} chip-hours' if q["resource"] == TPU else ""
+        )
+        return (
+            f'{size}<code>{E(q["name"])}</code> · {used} · '
+            f'<a href="jobs?queue={E(urllib.parse.quote(q["name"]))}{preset}">Jobs →</a>'
+        )
+
+    def shape_body(q: dict) -> str:
+        """A queue's outcomes, nodes, chips and queue wait over the range."""
+        u, st, n = unit(q), q["stats"], q.get("nodes")
+        detail = ", ".join(f"{k} {v}" for k, v in st["infra_outcomes"])
+        outcomes = [
+            f"Finished <b>{num(st['finished'])}</b>, <b>{success_rate(st)}</b> passed",
+            f'{term("Failures test / infra", "Test failure", "Infra failure")} <b>{num(st["failed"])} / {num(st["infra"])}</b>'
+            + (f' <span class="muted">({E(detail)})</span>' if detail else ""),
+            f'{term("Evicted / requeued / redispatched", "Evicted", "Requeue", "Redispatch")} '
+            f"<b>{num(st['evictions'])} / {num(st['requeues'])} / {num(st['redispatches'])}</b>",
+            f'{term("Wait p50 / p90", "Wait, startup, run")} <b>{ago(st["wait_p50"])} / {ago(st["wait_p90"])}</b>',
+            f"Run p50 <b>{ago(st['run_p50'])}</b>",
+        ]
+        nodes = (
+            [
+                f'{term("Nodes created")} <b>{num(n["created"])}</b>, lifetime p50 <b>{ago(n["lifetime_p50"])}</b>',
+                f'{term("Held by workloads")} <b>{pct(n["held_share"])}</b>',
+                f'{term("Idle on nodes")} <b>{num(n["idle_chip_hours"])}</b> chip-hours',
+            ]
+            if n
+            else []
+        ) + [
+            f'{term("Admitted → running", "Wait, startup, run")} p50 / p90 '
+            f"<b>{ago(st['startup_p50'])} / {ago(st['startup_p90'])}</b>"
+        ]
+        w = waits.get(q["name"], {})
+        p50 = [w.get(i, (None, None))[0] for i in range(len(w_ticks))]
+        p90 = [w.get(i, (None, None))[1] for i in range(len(w_ticks))]
+        # Hours once a queue's waits pass two of them: minutes would read 1,400.
+        per = 60 if max([v for v in p90 if v is not None] + [0]) > 120 else 1
+        w_unit = "hours" if per == 60 else "minutes"
+
+        def scaled(values: list) -> list:
+            return [round(v / per, 1) if v is not None else None for v in values]
+
+        chips = line_chart(
+            f"{u.capitalize()} on nodes and in use" if n else f"{u.capitalize()} in use",
+            ticks,
+            ([("nodes", "on nodes", n["chips"])] if n else []) + [("used", "in use", q["history"]["used"])],
+            ref=("nominal", q["history"]["nominal"]) if q["resource"] == TPU else None,
+            fmt=fmt,
+            width=520,
+            height=180,
+        )
+        wait = (
+            line_chart(
+                f"Queue wait, {w_unit}",
+                w_ticks,
+                [("used", "p90", scaled(p90)), ("used p50", "median", scaled(p50))],
+                fmt=fmt,
+                width=520,
+                height=180,
+            )
+            if w_ticks
+            else ""
+        )
+        return f"""<p class="shape-facts">{"".join(f"<span>{x}</span>" for x in outcomes)}</p>
+  <p class="shape-facts">{"".join(f"<span>{x}</span>" for x in nodes)}</p>
+  <div class="charts shape-row">{chips}{wait}</div>
+  {values_table(ticks, ([("On nodes", n["chips"])] if n else []) + [(f"{u.capitalize()} in use", q["history"]["used"]), ("Nominal", q["history"]["nominal"])], every, "Values")}
+  {values_table(w_ticks, [(f"Wait p50, {w_unit}", scaled(p50)), (f"Wait p90, {w_unit}", scaled(p90))], max(1, len(w_ticks) // 24), "Wait values") if w_ticks else ""}"""
+
+    def shape_block(q: dict) -> str:
+        return f"""<div class="shape-block" id="{E(q["name"])}">
+  <h4>{E(queue_title(q))} <span class="muted">· {shape_head(q)}</span></h4>
+  {shape_body(q)}
+</div>"""
+
+    shapes_note = """<p class="muted note">Per shape: outcomes over the range, its nodes, then chips on nodes and
+  in use against its nominal, and the queue wait - submitted to quota reserved - as the median and p90 of the workloads
+  submitted in each stretch. Success leaves out cancelled workloads. Nodes come from GKE's per-node metrics: nodes
+  created counts scale-ups during the range, idle chip-hours are chips on nodes that no admitted workload held, and
+  admitted → running includes the wait for a scale-up. A workload is recorded when it ends, so the last stretches of
+  the wait chart miss what is still running.</p>"""
+
+    def cohort_card(c: dict) -> str:
+        g, w = gaps[c["name"]], overall.get(c["name"])
+        return f"""<div class="card">
   <div class="card-head"><h2>{E(c["generation"])} chips</h2><span class="sub">cohort <code>{E(c["name"])}</code></span></div>
   <div class="tiles">
     <div class="tile"><span>{term("Admitted, average", "Utilization")}</span><b>{pct(c["utilization"])}</b><small>of nominal</small></div>
     <div class="tile"><span>{term("Busy, average", "Busy")}</span><b>{pct(c["busy_share"])}</b><small>of nominal, by TensorCore duty</small></div>
-    <div class="tile"><span>{term("Node chips held", "Held by workloads")}</span><b>{pct(c["held_share"])}</b><small>{num(c["idle_chip_hours"])} chip-hours on nodes idle</small></div>
-    <div class="tile"><span>Workloads finished</span><b>{num(c["finished"])}</b><small>{num(c["failed"])} test, {num(c["infra"])} infra failures</small></div>
+    <div class="tile"><span>{term("Queue wait, p90", "Wait, startup, run")}</span><b>{ago(w["p90"]) if w else "-"}</b><small>median {ago(w["p50"]) if w else "-"}</small></div>
+    <div class="tile"><span>Workloads finished</span><b>{num(c["finished"])}</b><small>{success_rate(c)} passed; {num(c["failed"])} test, {num(c["infra"])} infra failures</small></div>
   </div>
   {gap_chart("Chips admitted and on nodes", ticks, ("used", "admitted", c["admitted"]), ("nodes", "on nodes", c["on_nodes"]), ("waiting for nodes", "idle on nodes"), series=[("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
-  <p class="muted note">Over the range, <b>{gaps[c["name"]]["wait"]:,.0f}</b> chip-hours waited for nodes and
-  <b>{gaps[c["name"]]["idle"]:,.0f}</b> sat idle on nodes. Blue is chips Kueue admitted before a node was up to take
+  <p class="muted note">Over the range, <b>{g["wait"]:,.0f}</b> chip-hours waited for nodes and
+  <b>{g["idle"]:,.0f}</b> sat idle on nodes. Blue is chips Kueue admitted before a node was up to take
   them - the scale-up wait; orange is chips on nodes with nothing admitted for them - a pool's minimum, or a node
-  not yet scaled down. Shape by
-  shape it is {gaps[c["name"]]["shape_wait"]:,.0f} chip-hours waiting and {gaps[c["name"]]["shape_idle"]:,.0f} idle: more than between the
-  lines, where an idle node of one shape and a workload waiting on another cancel.</p>
+  not yet scaled down. Shape by shape it is {g["shape_wait"]:,.0f} chip-hours waiting and {g["shape_idle"]:,.0f}
+  idle: more than between the lines, where an idle node of one shape and a workload waiting on another cancel.</p>
   {values_table(ticks, [("On nodes", c["on_nodes"]), ("Admitted", c["admitted"]), ("Busy", c["busy"]), ("Nominal", c["nominal"])], every, "Values")}
   {stacked_chart("Admitted chips by topology", ticks, c["by_topology"], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=220)}
   {values_table(ticks, c["by_topology"] + [("Nominal", c["nominal"])], every, "Values by topology")}
+  <h3 class="shapes-head">By shape</h3>
+  {shapes_note}
+  {"".join(shape_block(q) for q in h["queues"] if q["cohort"] == c["name"] and q["resource"] == TPU)}
 </div>"""
-        for c in h["cohorts"]
-    )
 
-    tpu = [q for q in h["queues"] if q["resource"] == TPU]
-    queue_rows = "".join(
-        f"""<tr><td class="nowrap">{queue_link(q)}</td>
-<td class="n">{num(q["stats"]["finished"])}</td><td class="n">{success_rate(q["stats"])}</td>
-{failures_cell(q["stats"])}
-<td class="n nowrap">{num(q["stats"]["evictions"])} / {num(q["stats"]["requeues"])} / {num(q["stats"]["redispatches"])}</td>
-<td class="n nowrap">{ago(q["stats"]["wait_p50"])} / {ago(q["stats"]["wait_p90"])}</td>
-<td class="n">{ago(q["stats"]["run_p50"])}</td>
-<td class="n">{num(q["stats"]["chip_hours"])}</td></tr>"""
-        for q in tpu
+    other = [q for q in h["queues"] if q["resource"] != TPU]
+    others = "".join(
+        f"""<div class="card" id="{E(q["name"])}">
+  <div class="card-head"><h2>CPU</h2><span class="sub">{shape_head(q)}</span></div>
+  {shape_body(q)}
+</div>"""
+        for q in other
     )
-    autoscaled = [q for q in tpu if q.get("nodes")]
-    node_rows = (
-        "".join(
-            f"""<tr><td class="nowrap">{queue_link(q)}</td>
-<td class="n"><b>{num(q["nodes"]["created"])}</b></td><td class="n">{ago(q["nodes"]["lifetime_p50"])}</td>
-<td class="n">{pct(q["nodes"]["held_share"])}</td>
-<td class="n">{num(q["nodes"]["idle_chip_hours"])}</td>
-<td class="n nowrap">{ago(q["stats"]["startup_p50"])} / {ago(q["stats"]["startup_p90"])}</td></tr>"""
-            for q in autoscaled
-        )
-        or '<tr><td colspan="6" class="empty">No node pool data.</td></tr>'
-    )
-    autoscaling = f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Topology</th>
-<th class="n">{term("Nodes created")}</th><th class="n">{term("Node lifetime p50", "Nodes created")}</th><th class="n">{term("Held by workloads")}</th>
-<th class="n">{term("Idle chip-hours", "Idle on nodes")}</th><th class="n">{term("Admitted → running p50 / p90", "Wait, startup, run")}</th></tr></thead><tbody>{node_rows}</tbody></table></div>
-<p class="muted note">From GKE's per-node metrics: every TPU node that existed in the range, tied to its pool by the
-pool's instance group. <i>Nodes created</i> counts nodes that appeared during the range, each one a node the pool scaled
-up for; <i>lifetime</i> is appearing to disappearing, for nodes that did both. <i>Idle chip-hours</i> are chips on nodes
-that no admitted workload held - scale-down lag, a pool's minimum, or a node waiting for the workload it came for.
-<i>Held by workloads</i> is the share of chip-hours on nodes that an admitted workload held.
-<i>Admitted → running</i> includes the wait for a node when the pool had to scale up.</p>"""
 
     pipeline_rows, pipelines_more, pipelines_button = split_rows(
         [
@@ -3139,32 +3216,11 @@ that no admitted workload held - scale-down lag, a pool's minimum, or a node wai
         "pipelines-more",
         '<tr><td colspan="5" class="empty">No finished workloads.</td></tr>',
     )
-    outcomes = f"""
-<h3>By queue</h3>
-<div class="table-wrap"><table class="dense"><thead><tr><th>Queue</th><th class="n">Finished</th><th class="n">Success</th>
-<th class="n">{term("Failures: test / infra", "Test failure", "Infra failure")}</th><th class="n">{term("Evicted / requeued / redispatched", "Evicted", "Requeue", "Redispatch")}</th>
-<th class="n">{term("Wait p50 / p90", "Wait, startup, run")}</th><th class="n">{term("Run p50", "Wait, startup, run")}</th><th class="n">Chip-hours</th></tr></thead>
-<tbody>{queue_rows}</tbody></table></div>
-<p class="muted note">Success is over workloads that finished either way; cancelled ones are left out. Wait is
-submitted to quota reserved; how long an admitted workload took to start is under Node autoscaling.</p>
-<h3 style="margin-top:20px">By pipeline</h3>
-<div class="table-wrap"><table class="dense"><thead><tr><th>Pipeline</th><th class="n">Finished</th><th class="n">Success</th>
+    pipelines = f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Pipeline</th><th class="n">Finished</th><th class="n">Success</th>
 <th class="n">{term("Failures: test / infra", "Test failure", "Infra failure")}</th><th class="n">Chip-hours</th></tr></thead>
 <tbody>{pipeline_rows}</tbody>{pipelines_more}</table></div>
-{pipelines_button}"""
-
-    def queue_card(q: dict) -> str:
-        u = unit(q)
-        return f"""<div class="card queue{"" if q["resource"] == TPU else " other"}" id="{E(q["name"])}">
-  <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
-    <span class="sub">{num(q["stats"]["finished"])} finished · avg {num(q["mean_used"])} {u}</span>
-    <a class="more" href="jobs?queue={E(urllib.parse.quote(q["name"]))}{f"&amp;preset={span['preset']}" if span.get("preset") in ("6h", "24h", "7d") else ""}">Jobs →</a></div>
-  <div class="charts">
-  {line_chart(f"{u.capitalize()} on nodes and in use" if q.get("nodes") else f"{u.capitalize()} in use", ticks, ([("nodes", "on nodes", q["nodes"]["chips"])] if q.get("nodes") else []) + [("used", "in use", q["history"]["used"])], ref=("nominal", q["history"]["nominal"]) if q["resource"] == TPU else None, fmt=fmt, width=520, height=180)}
-  {line_chart("Workloads pending", ticks, [("pending", "pending", q["history"]["pending"])], fmt=fmt, width=520, height=180)}
-  </div>
-  {values_table(ticks, ([("On nodes", q["nodes"]["chips"])] if q.get("nodes") else []) + [(f"{u.capitalize()} in use", q["history"]["used"]), ("Nominal", q["history"]["nominal"]), ("Pending", q["history"]["pending"])], every, "Values")}
-</div>"""
+{pipelines_button}
+<p class="muted note">Success is over workloads that finished either way; cancelled ones are left out.</p>"""
 
     presets = "".join(
         f'<a class="seg-btn{" active" if span.get("preset") == name else ""}" href="?preset={name}">{label}</a>'
@@ -3177,10 +3233,9 @@ submitted to quota reserved; how long an admitted workload took to start is unde
         start=span["start"],
         end=span["end"],
         step=ago(span["step"]),
-        cohorts=cohorts,
-        autoscaling=autoscaling,
-        outcomes=outcomes,
-        queues="".join(queue_card(q) for q in h["queues"]),
+        cohorts="".join(cohort_card(c) for c in h["cohorts"]),
+        others=others,
+        pipelines=pipelines,
         query=E(query),
     )
 
