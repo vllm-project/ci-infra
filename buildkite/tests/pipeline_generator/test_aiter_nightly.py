@@ -287,15 +287,20 @@ def test_nightly_cannot_combine_with_torch_nightly():
         _init_global_config({"AITER_NIGHTLY": "1", "TORCH_NIGHTLY": "1"})
 
 
-def test_nightly_rejects_a_kept_job_depending_on_a_dropped_one():
-    steps = amd.apply_aiter_nightly(_steps())
-    steps.append(_mirrored("needs-cuda", "mi300_1", depends_on=["cuda-only"]))
+def _converted(fake_global_config, steps):
+    fake_global_config["aiter_nightly"] = "1"
+    steps = amd.apply_aiter_nightly(steps)
+    return buildkite_step.convert_group_step_to_buildkite_step(group_steps(steps))
+
+
+def test_nightly_rejects_a_kept_job_depending_on_a_dropped_one(fake_global_config):
+    steps = _steps() + [_mirrored("needs-cuda", "mi300_1", depends_on=["cuda-only"])]
     with pytest.raises(ValueError, match="amd-needs-cuda -> cuda-only"):
-        check_aiter_nightly_dependencies(steps)
+        check_aiter_nightly_dependencies(_converted(fake_global_config, steps))
 
 
-def test_nightly_dependencies_of_the_real_shape_are_fine():
-    check_aiter_nightly_dependencies(amd.apply_aiter_nightly(_steps()))
+def test_nightly_dependencies_of_the_real_shape_are_fine(fake_global_config):
+    check_aiter_nightly_dependencies(_converted(fake_global_config, _steps()))
 
 
 def test_generate_uploads_the_nightly(fake_global_config, monkeypatch, tmp_path):
