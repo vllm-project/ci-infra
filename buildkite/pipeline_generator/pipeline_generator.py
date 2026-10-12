@@ -116,6 +116,14 @@ class PipelineGenerator:
             grouped_steps, unselected
         )
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
+        if spawn_step_keys is not None:
+            # One group per pick, rather than a second group of each name.
+            buildkite_group_steps = [
+                BuildkiteGroupStep(
+                    group=f":point_right: Picked tests ({global_config['picker_round']})",
+                    steps=[s for g in buildkite_group_steps for s in g.steps],
+                )
+            ]
 
         # A recording build ends by collecting every job's recordings.
         # Both recorders share one group, so they don't make two groups
