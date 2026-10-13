@@ -983,10 +983,6 @@ def _runtime_shard_mode(
                 f"automatic_shard ignored on {step_key}: {RUNTIME_SHARD_ENV_VAR}={mode} is not on, shadow or off"
             )
         return None
-    if fnrec_enabled() or kernrec_enabled():
-        # The recorders expect each step to run as one job.
-        print(f"automatic_shard ignored on {step_key}: recording build")
-        return None
     if (
         runtime_shard.split_commands(step.commands or []) is None
         or step.no_plugin
