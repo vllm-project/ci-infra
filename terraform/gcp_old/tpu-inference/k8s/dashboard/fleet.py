@@ -103,7 +103,10 @@ class Token:
                     text=True,
                     check=True,
                 )
-                self._value, self._expiry = out.stdout.strip(), time.time() + 1800
+                # gcloud hands back its own cached token without saying when it
+                # expires, which can be in minutes, so ask again often: the call
+                # is cheap, and a token held past its expiry is a 401 per read.
+                self._value, self._expiry = out.stdout.strip(), time.time() + 300
             else:
                 req = urllib.request.Request(
                     "http://metadata.google.internal/computeMetadata/v1/instance/"
@@ -320,6 +323,8 @@ def cq_summary(cq: dict) -> dict:
     is guaranteed."""
     resource = queue_resource(cq)
     nominal = borrowing = spot_quota = 0.0
+    # What it may lend, when it is capped below its nominal; None lends all.
+    lending = None
     for group in cq["spec"].get("resourceGroups", []):
         for flavor in group["flavors"]:
             for r in flavor["resources"]:
@@ -330,6 +335,8 @@ def cq_summary(cq: dict) -> dict:
                 else:
                     nominal += quantity(r.get("nominalQuota"))
                     borrowing += quantity(r.get("borrowingLimit"))
+                    if r.get("lendingLimit") is not None:
+                        lending = (lending or 0.0) + quantity(r.get("lendingLimit"))
     used = borrowed = spot_used = 0.0
     for flavor in cq.get("status", {}).get("flavorsUsage", []):
         for r in flavor["resources"]:
@@ -349,6 +356,7 @@ def cq_summary(cq: dict) -> dict:
         "borrowing_limit": borrowing,
         "used": used,
         "borrowed": borrowed,
+        "lending_limit": lending,
         "spot_quota": spot_quota,
         "spot_used": spot_used,
         # How the queue preempts, in Kueue's words: taking lent quota back from
@@ -486,6 +494,12 @@ def fetch_kueue(cfg: Config) -> dict:
                 "cluster": wl.get("status", {}).get("clusterName"),
                 "queue": queue,
                 "amount": workload_amount(wl, resources.get(queue, TPU)),
+                # Admitted onto a Spot flavor: its pods wait for a Spot node.
+                "spot": any(
+                    is_spot(f)
+                    for a in admission.get("podSetAssignments", [])
+                    for f in (a.get("flavors") or {}).values()
+                ),
                 # The WorkloadPriorityClass the launcher set, and the value Kueue
                 # copied from it: what orders the queue. Buildkite's own job
                 # priority is a different scale and orders nothing here. None
@@ -797,11 +811,27 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
             f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{sel},{RESERVED_FLAVOR}}}', per_queue)}){window}))",
             ("cluster_queue", "resource"),
         ),
+        "spot_nominal": (
+            f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{sel},{SPOT_FLAVOR}}}', per_queue)}){window}))",
+            ("cluster_queue", "resource"),
+        ),
+        # Evictions in each step, by queue: preemption to reclaim lent quota, a
+        # node gone, a pod that never became ready.
+        "evicted": (
+            f"sum by (cluster_queue) (increase(kueue_evicted_workloads_total{{{sel}}}[{step}s]))",
+            ("cluster_queue",),
+        ),
         # Busy chips: TensorCore duty cycle, percent per chip, summed. Nodes that
         # do not report it - the disagg multi-host pods' - count as idle.
         "busy": (
             f"sum_over_time((sum by (model) (last_over_time({duty}[{NODE_LOOKBACK}])) / 100){window}) {share}",
             ("model",),
+        ),
+        # Busy chips per node, for views.py to sum by node pool as it does
+        # presence: the model label cannot tell a Spot node from a reserved one.
+        "busy_nodes": (
+            f"sum_over_time((sum by (cluster_name, node_name) (last_over_time({duty}[{NODE_LOOKBACK}])) / 100){window}) {share}",
+            ("cluster_name", "node_name"),
         ),
         # Each TPU node's share of each step, by name, for views.py to sum by
         # node pool: a week is a few thousand node lifetimes and a few hundred
