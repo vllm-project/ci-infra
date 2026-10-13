@@ -322,6 +322,20 @@ variable "tpu_spot_wait_seconds" {
   EOT
 }
 
+variable "tpu_spot_failed_scale_up_seconds" {
+  type        = number
+  description = <<-EOT
+    How long a pod admitted onto Spot may stay unscheduled after the cluster
+    autoscaler reports a failed scale-up for it (a FailedScaleUp event, "GCE
+    out of resources") before the launcher resubmits its workload with Spot
+    ruled out, as tpu_spot_wait_seconds does with no such report.
+
+    Not at once: the autoscaler sends the event to every pod a batch of new
+    nodes was for when any node in the batch fails, and the pool keeps
+    retrying, so many of those pods still get a node.
+  EOT
+}
+
 variable "tpu_spot_after_seconds" {
   type        = number
   description = <<-EOT
@@ -336,7 +350,7 @@ variable "tpu_spot_after_seconds" {
 
 variable "tpu_spot_max_priority" {
   type        = number
-  description = "The highest WorkloadPriorityClass value that may use Spot; unclassed scores 0. Steps above it - integration, pre-merge, post-merge, oncall-fix - wait for reserved chips, and take them first as they free up."
+  description = "The highest WorkloadPriorityClass value that may use Spot; unclassed scores 0. Steps above it wait for reserved chips, and take them first as they free up."
 }
 
 variable "tpu_runtime_max_seconds" {

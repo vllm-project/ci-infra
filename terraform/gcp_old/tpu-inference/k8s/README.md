@@ -462,9 +462,9 @@ reservation can never land on a Spot node, and the reserved flavor and pools
 are unchanged.
 
 Which steps reach Spot is the launcher's choice, by priority and by wait. A
-step above `tpu_spot_max_priority` (0: integration, pre-merge, post-merge,
-oncall-fix) never uses Spot; it waits for reserved chips and, outranking the
-rest, takes them first as they free up. A step at or below it (unclassed, low)
+step above `tpu_spot_max_priority` (50: post-merge, oncall-fix) never uses
+Spot; it waits for reserved chips and, outranking the rest, takes them first as
+they free up. A step at or below it (pre-merge, integration, unclassed, low)
 is submitted with Spot ruled out too, and only once it has waited
 `tpu_spot_after_seconds` (10 minutes) for reserved chips is it resubmitted with
 Spot allowed - the step log says `waited Ns for reserved chips - resubmitting so
@@ -483,6 +483,15 @@ with a required node affinity `cloud.google.com/gke-spot NotIn ["true"]` on its
 chip-holding pods. Kueue skips a flavor whose nodeLabels that affinity rules
 out, so the resubmission waits for the reservation as a shape without Spot
 would. The step log says `admitted onto Spot but no Spot node`.
+
+The cluster autoscaler's `FailedScaleUp` event on the pod ("GCE out of
+resources") moves that sooner: the launcher reads the pending pod's events every
+30 seconds and resubmits the same way `tpu_spot_failed_scale_up_seconds` (5
+minutes) after the first one, if the pod still has no node. Not at once,
+because the event goes to every pod a batch of new nodes was for when any node
+in the batch fails, and the pool keeps retrying: on 10-13 all 9 Spot pods that
+had one got a node, 6 of them within 5 minutes. The step log says `no Spot node
+added for <pod> yet` when the event arrives.
 
 A reclaimed Spot node takes its pod with it. The pod is marked
 `DisruptionTarget`, which the pod failure policy ignores, and the Job would

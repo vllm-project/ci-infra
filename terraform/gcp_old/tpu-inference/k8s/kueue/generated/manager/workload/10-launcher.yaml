@@ -102,8 +102,9 @@ data:
     dispatch_retry_seconds: 120
     dispatch_retries: 2
     spot_wait_seconds: 900
+    spot_failed_scale_up_seconds: 300
     spot_after_seconds: 600
-    spot_max_priority: 0
+    spot_max_priority: 50
     spot_queues:
     - tpu7x-standard-1t-1x1x1
     - tpu7x-standard-4t-2x2x1
