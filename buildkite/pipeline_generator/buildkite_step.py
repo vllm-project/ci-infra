@@ -339,19 +339,11 @@ def get_agent_queue(step: Step):
     if step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
         return AgentQueue.AMD_CPU
     if step.label.startswith(":docker:"):
+        # TEMPORARY prewarm branch: always build images on the postmerge queues
+        # (read-write sccache) so a PR build fills the cache main will use.
         if "arm64" in step.label:
-            if branch == "main":
-                return AgentQueue.ARM64_CPU_POSTMERGE
-            else:
-                return AgentQueue.ARM64_CPU_PREMERGE
-        if branch == "main":
-            return AgentQueue.CPU_POSTMERGE_US_EAST_1
-        # On the us-east-1 warm-cache AMI the CUDA image reuses local layers
-        # instead of pulling them cold (~16 min -> ~6 min on a cache hit).
-        # The other PR images are cheap enough to stay on the medium queue.
-        if step.key == CUDA_IMAGE_BUILD_STEP_KEY:
-            return AgentQueue.CPU_PREMERGE_US_EAST_1
-        return AgentQueue.MEDIUM_CPU_PREMERGE
+            return AgentQueue.ARM64_CPU_POSTMERGE
+        return AgentQueue.CPU_POSTMERGE_US_EAST_1
     elif step.label == "Documentation Build":
         return AgentQueue.SMALL_CPU_PREMERGE
     elif step.device == DeviceType.CPU_SMALL:
