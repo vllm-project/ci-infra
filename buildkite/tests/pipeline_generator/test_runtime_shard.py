@@ -335,10 +335,21 @@ def test_generator_ignores_the_flag_where_it_cannot_shard(
         assert _render(step)[0].parallelism is None
     monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "off")  # the rollback switch
     assert _render(_step(automatic_shard=True))[0].parallelism is None
-    monkeypatch.delenv("VLLM_CI_RUNTIME_SHARD")
-    monkeypatch.setattr(buildkite_step, "fnrec_enabled", lambda: True)
-    assert _render(_step(automatic_shard=True))[0].parallelism is None
     assert checkout == []
+
+
+def test_generator_shards_on_a_recording_build_too(
+    fake_global_config, checkout, monkeypatch
+):
+    """Nightly recording builds shard like PRs. The table builder unions a
+    step's shards into one row and checks every shard reported, so an
+    unsharded step only ran long (or timed out) for nothing."""
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(buildkite_step, "fnrec_enabled", lambda: True)
+    monkeypatch.setattr(buildkite_step, "kernrec_enabled", lambda: True)
+    [step] = _render(_step(automatic_shard=True))
+    assert step.parallelism == 3
+    assert step.commands[:2] == rs.shard_job_setup()
 
 
 def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
