@@ -319,6 +319,7 @@ def serve(
     waits: Windowed,
     jobs: Windowed,
     wait_series: Windowed,
+    steps: Windowed,
     port: int,
 ) -> None:
     class Handler(BaseHTTPRequestHandler):
@@ -368,6 +369,13 @@ def serve(
                     params,
                     live.cfg.org,
                 )
+                return self.reply(200, "text/html; charset=utf-8", page.encode())
+            if url.path == "/steps":
+                if "preset" not in params and "start" not in params:
+                    params = {**params, "preset": ["7d"]}
+                span = parse_span(params, time.time())
+                data, status = steps.get(span)
+                page = views.render_steps(data, {"steps": status}, span, params)
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
             if url.path == "/live":
                 page = views.render_live(live.snapshot())
@@ -457,6 +465,7 @@ def main() -> None:
         Windowed(cfg, "Metrics", fleet.fetch_waits, {}),
         Windowed(cfg, "BigQuery", fleet.fetch_jobs, []),
         Windowed(cfg, "BigQuery", fleet.fetch_wait_series, {}),
+        Windowed(cfg, "BigQuery", fleet.fetch_steps, {"builds": [], "steps": []}),
         args.port,
     )
 

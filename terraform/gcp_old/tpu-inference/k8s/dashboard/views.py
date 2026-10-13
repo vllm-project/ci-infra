@@ -32,6 +32,7 @@ OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
 MIGRATION_PAGE = string.Template((TEMPLATES / "migration.html").read_text())
 JOBS_PAGE = string.Template((TEMPLATES / "jobs.html").read_text())
 CAPACITY_PAGE = string.Template((TEMPLATES / "capacity.html").read_text())
+STEPS_PAGE = string.Template((TEMPLATES / "steps.html").read_text())
 # The bare-metal fleet before the migration, built once from the snapshot by
 # baseline/build_baseline.py; static, since that fleet is being torn down.
 BASELINE_FILE = Path(__file__).parent / "baseline" / "premigration-2026-09.json"
@@ -98,6 +99,25 @@ TERMS = {
     "launcher error.",
     "Wait, startup, run": "Wait is submitted to quota reserved; startup (admitted to running) is "
     "admitted to the first container running; run is first container to finished.",
+    "Clean build": "A build in which every job passed, or passed when retried. Only clean builds count "
+    "toward wall clock and what finishes last: a failed or cancelled build stops early.",
+    "Wall clock": "A build's creation to its last step finishing, leaving out E2E_SUMMARY, which waits "
+    "for the others, and steps under 2 minutes - gates and notifications.",
+    "Last step": "The step that finished last in a clean build, so the one that set its wall clock. A "
+    "step's time in a build runs from its first job starting to its last finishing.",
+    "Ahead of the next": "How long after the next step the last step finished: the most that splitting "
+    "or speeding up the last step can save before that next step finishes last instead.",
+    "Jobs a build": "How many jobs one build runs of the step - shards or a matrix - and its shortest and "
+    "longest job's run time, medians across builds. A wide spread means shards worth rebalancing.",
+    "Starts": "From the build's creation to the step's first job starting: mostly its dependencies. A kube "
+    "step starts with its agent pod and waits for Kueue inside the job, so its Ran includes that wait.",
+    "Ran": "Buildkite's start to finish of a job. On kube that includes Kueue's wait, pod startup and the "
+    "launcher's work around the test.",
+    "Kube phases": "A kube job's Ran, each part's median: the launcher's work before and after the pod "
+    "(checkout and submission, then logs and artifacts), waiting for Kueue from the first submission to "
+    "the last admission (a requeued job's earlier attempts included), pod startup, and the test itself.",
+    "Chip-hours": "Chips held times hours, admission to finish, for every workload of the job - evicted "
+    "ones too.",
 }
 
 
@@ -3561,6 +3581,24 @@ def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None
 
 # Rows the jobs table shows at first, and how many a page holds behind Show
 # more; the same for builds, when ended jobs are grouped by build.
+# The Pipelines tab's pages: one job at a time, and each step across builds.
+PIPELINE_PAGES = {
+    "jobs": ("Jobs", "every kube job, in flight and ended"),
+    "steps": ("Steps", "each step across a pipeline's builds"),
+}
+
+
+def subtabs(active: str) -> str:
+    return (
+        '<nav class="subtabs">'
+        + "".join(
+            f'<a class="subtab{" active" if key == active else ""}" href="{key}">{name}<small>{E(desc)}</small></a>'
+            for key, (name, desc) in PIPELINE_PAGES.items()
+        )
+        + "</nav>"
+    )
+
+
 JOBS_FIRST = 20
 JOBS_PER_PAGE = 200
 BUILDS_FIRST = 10
@@ -3893,9 +3931,405 @@ def render_job_history(
     return JOBS_PAGE.substitute(
         assets=ASSETS,
         errors=render_errors(sources),
+        subtabs=subtabs("jobs"),
         generated=snap["generated_at"],
         start=span["start"],
         filters=filters,
         summary=summary,
         table=table,
+    )
+
+
+# The step log's kinds of build, as the Steps page names them.
+BUILD_KINDS = {"pr": "PRs", "main": "main", "nightly": "nightly"}
+# The pipeline the Steps page opens on: the main CI, not whichever ran most -
+# a dev pipeline's one-step builds can outnumber it.
+STEPS_PIPELINE = "vllm-torchtpu-ci"
+# Shards worth rebalancing: the longest job runs this much longer than the
+# shortest, and at least a fifth longer. A lone job worth splitting: it
+# finishes this far ahead of the next step.
+SPREAD_SECONDS = 300
+LEAD_SECONDS = 300
+# A lone job shorter than this is not worth splitting.
+SPLIT_SECONDS = 1200
+# A step that starts this far into its build is waiting on something.
+LATE_START_SECONDS = 900
+POLES_FIRST = 6
+STEPS_FIRST = 20
+STEP_SORTS = {
+    "last": "Finishes last",
+    "slowest": "Slowest job",
+    "chips": "Chip-hours",
+    "failures": "Failures",
+}
+# A typical job's time from its build's creation, in order: key, color, label.
+# The launcher's work comes either side of the pod, in one color.
+STEP_PHASES = (
+    ("start", "start", "before it starts"),
+    ("setup", "launcher", "launcher before the pod"),
+    ("wait", "wait", "waiting for Kueue"),
+    ("startup", "startup", "pod startup"),
+    ("test", "test", "test"),
+    ("teardown", "launcher", "launcher after: logs, artifacts"),
+)
+STEP_PHASE_KEYS = {
+    "start": "before it starts",
+    "launcher": "launcher, before and after the pod",
+    "wait": "waiting for Kueue",
+    "startup": "pod startup",
+    "test": "test",
+}
+
+
+def quantile(values: list, p: float) -> float | None:
+    values = sorted(values)
+    return values[min(len(values) - 1, int(p * len(values)))] if values else None
+
+
+def step_name(label: str) -> str:
+    # Emoji shortcodes Buildkite draws as icons; as text they crowd the name.
+    return re.sub(r"^(?::[\w+-]+:\s*)+", "", label or "") or "(unnamed step)"
+
+
+def render_steps(data: dict, sources: dict, span: dict, params: dict) -> str:
+    """Which steps decide how long a pipeline's builds take, and what those
+    steps spend it on, over the builds created in the range: what Jobs shows
+    one job at a time, summed up by step."""
+
+    def param(key: str) -> str:
+        return (params.get(key) or [""])[0].strip()
+
+    def number(value) -> float | None:
+        return float(value) if value not in (None, "") else None
+
+    builds = []
+    for b in data.get("builds") or []:
+        created, finished, after = (
+            number(b[k]) for k in ("created", "pole_finished", "next_finished")
+        )
+        builds.append(
+            {
+                **b,
+                "created": created,
+                "clean": b["clean"] == "true" and finished is not None,
+                "wall": finished - created if finished is not None else None,
+                "lead": finished - after if finished is not None and after is not None else None,
+                "retries": int(b["retries"] or 0),
+            }
+        )
+
+    # Each choice falls back to what the range has most of, so a link from a
+    # pipeline with no nightlies to one with them still shows something.
+    def choose(key: str, counts: collections.Counter, preferred: str) -> str:
+        if counts[param(key)]:
+            return param(key)
+        if counts[preferred] or not counts:
+            return preferred
+        return counts.most_common(1)[0][0]
+
+    by_pipeline = collections.Counter(b["pipeline"] for b in builds)
+    pipeline = choose("pipeline", by_pipeline, STEPS_PIPELINE)
+    ours = [b for b in builds if b["pipeline"] == pipeline]
+    by_kind = collections.Counter(b["kind"] for b in ours)
+    kind = choose("kind", by_kind, "pr")
+    ours = [b for b in ours if b["kind"] == kind]
+    clean = [b for b in ours if b["clean"]]
+    sort = param("sort") if param("sort") in STEP_SORTS else "last"
+    preset = span.get("preset") or "7d"
+
+    fields = (
+        "jobs", "builds", "failed", "retried", "ran_p50", "ran_p90", "start_p50", "setup_p50",
+        "wait_p50", "startup_p50", "test_p50", "test_p90", "teardown_p50", "chip_hours", "shards",
+        "shortest_p50", "longest_p50",
+    )
+    steps = [
+        {**{k: number(r.get(k)) for k in fields}, "step": r["step"], "exits": r["exits"] or ""}
+        for r in data.get("steps") or []
+        if (r["pipeline"], r["kind"]) == (pipeline, kind)
+    ]
+    by_step = {r["step"]: r for r in steps}
+    last = collections.defaultdict(list)
+    for b in clean:
+        last[b["pole"]].append(b)
+
+    def link(**change) -> str:
+        current = {"preset": preset, "pipeline": pipeline, "kind": kind, "sort": sort}
+        current.update(change)
+        if current["sort"] == "last":
+            current["sort"] = ""
+        return "steps?" + urllib.parse.urlencode({k: v for k, v in current.items() if v})
+
+    def jobs_link(step: str) -> str:
+        """The step's jobs one by one, on Jobs."""
+        name = E(step_name(step))
+        query = {
+            "preset": preset if preset in ("6h", "24h", "7d") else "7d",
+            "pipeline": pipeline,
+            "branch": {"pr": "pr", "main": "main"}.get(kind, ""),
+            "view": "job",
+            "q": step_name(step),
+        }
+        href = "jobs?" + urllib.parse.urlencode({k: v for k, v in query.items() if v})
+        return f'<a href="{E(href)}" title="This step\'s jobs on Jobs">{name}</a>'
+
+    def minutes(seconds: float | None) -> str:
+        return ago(seconds) if seconds is not None else "-"
+
+    def phases(r: dict) -> dict:
+        """A typical job's time, in STEP_PHASES order: each phase's median, so
+        they add up to its median Ran only roughly. A job that never went
+        through Kueue - an image build, say - is one phase."""
+        if r.get("test_p50") is None:
+            return {"start": r.get("start_p50") or 0, "test": r.get("ran_p50") or 0}
+        return {key: max(0.0, r.get(f"{key}_p50") or 0) for key, _, _ in STEP_PHASES}
+
+    def timeline(r: dict, scale: float) -> str:
+        p = phases(r)
+        # A step longer than the first rows' longest is drawn to the full width.
+        fit = min(1.0, scale / (sum(p.values()) or 1))
+        shown = [(key, cls, label) for key, cls, label in STEP_PHASES if p.get(key, 0) >= 30]
+        segs = "".join(
+            f'<span class="seg ph-{cls}" style="width:{100 * fit * p[key] / scale:.2f}%" '
+            f'title="{E(label)}: {minutes(p[key])}"></span>'
+            for key, cls, label in shown
+        )
+        text = " · ".join(f"{label} <b>{minutes(p[key])}</b>" for key, _, label in shown)
+        return (
+            f'<div class="bar step-bar" role="img" aria-label="{E(step_name(r["step"]))}: {E(re.sub("<[^>]+>", "", text))}">{segs}</div>'
+            f'<small class="muted">{text}</small>'
+        )
+
+    def jobs_cell(r: dict) -> str:
+        n = int(r.get("shards") or 1)
+        if n <= 1:
+            return f'1 <small class="muted">· {minutes(r.get("longest_p50") or r.get("ran_p50"))}</small>'
+        return (
+            f'{n} <small class="muted">· {minutes(r.get("shortest_p50"))}–{minutes(r.get("longest_p50"))}</small>'
+        )
+
+    def advice(r: dict, lead: float | None, follower: str) -> list[str]:
+        notes = []
+        n = int(r.get("shards") or 1)
+        shortest, longest = r.get("shortest_p50") or 0, r.get("longest_p50") or 0
+        spread = longest - shortest
+        if lead is not None and longest and lead > longest:
+            # It finished after the next step by more than it runs, so its
+            # run is not what held the build: a late start or a retry was.
+            notes.append(
+                f"Runs {minutes(longest)} but finished {minutes(lead)} after the next step: "
+                "it started late or was retried"
+            )
+        elif n > 1 and spread >= SPREAD_SECONDS and spread >= 0.2 * longest:
+            notes.append(f"Rebalance: its {n} jobs run {minutes(shortest)} to {minutes(longest)}")
+        elif n == 1 and lead is not None and lead >= LEAD_SECONDS and longest >= SPLIT_SECONDS:
+            notes.append(f"Split: one job, {minutes(lead)} ahead of the next step")
+        if lead is not None and lead < LEAD_SECONDS and follower:
+            notes.append(f"Close behind it: {E(step_name(follower))} - split both to gain")
+        if (r.get("start_p50") or 0) >= LATE_START_SECONDS:
+            notes.append(f"Starts {minutes(r.get('start_p50'))} into the build: what does it wait for?")
+        if r.get("jobs") and (r.get("retried") or 0) / r["jobs"] >= 0.05:
+            n_retried = int(r["retried"])
+            notes.append(f"{n_retried} {'retry' if n_retried == 1 else 'retries'} in the range")
+        return notes
+
+    walls = [b["wall"] for b in clean]
+    poles = sorted(last.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+
+    # Tiles: how long, what sets it, what splitting it buys, what retries cost.
+    tiles = ""
+    if clean:
+        top, top_builds = poles[0]
+        top_leads = [b["lead"] for b in top_builds if b["lead"] is not None]
+        top_next = collections.Counter(b["next"] for b in top_builds if b["next"]).most_common(1)
+        retried = [b["wall"] for b in clean if b["retries"]]
+        straight = [b["wall"] for b in clean if not b["retries"]]
+        tiles = (
+            '<div class="tiles">'
+            f'<div class="tile"><span>{term("Wall clock")}, median</span><b>{minutes(quantile(walls, 0.5))}</b>'
+            f"<small>p90 {minutes(quantile(walls, 0.9))} · {len(clean):,} {term('clean builds', 'Clean build')}</small></div>"
+            f'<div class="tile"><span>{term("Finishes last", "Last step")} most often</span>'
+            f'<b class="name">{E(step_name(top))}</b>'
+            f"<small>in {len(top_builds):,} of {len(clean):,} clean builds ({pct(len(top_builds) / len(clean))})</small></div>"
+            f'<div class="tile"><span>Splitting it saves at most</span><b>{minutes(quantile(top_leads, 0.5))}</b>'
+            f"<small>median, before {E(step_name(top_next[0][0])) if top_next else 'the next step'} finishes last instead</small></div>"
+            f'<div class="tile"><span>Needed a retry</span><b>{len(retried):,}</b>'
+            + (
+                f"<small>clean builds; wall clock median {minutes(quantile(retried, 0.5))} against "
+                f"{minutes(quantile(straight, 0.5))} without</small>"
+                if retried
+                else "<small>clean builds</small>"
+            )
+            + "</div>"
+            "</div>"
+        )
+
+    # Wall clock over the range, by when the build was created.
+    seconds = span["end"] - span["start"]
+    bucket = 7200 if seconds <= 2 * 86400 else 86400
+    count = max(1, -(-seconds // bucket))
+    ticks = [span["start"] + i * bucket for i in range(count)]
+    grouped = collections.defaultdict(list)
+    for b in clean:
+        grouped[min(count - 1, int((b["created"] - span["start"]) // bucket))].append(b["wall"])
+    p50 = [quantile(grouped[i], 0.5) for i in range(count)]
+    p90 = [quantile(grouped[i], 0.9) for i in range(count)]
+    per = 3600 if max([v for v in p90 if v is not None] + [0]) > 3 * 3600 else 60
+
+    def scaled(values: list) -> list:
+        return [None if v is None else round(v / per, 1) for v in values]
+
+    chart = (
+        line_chart(
+            f"Wall clock of clean builds, {'hours' if per == 3600 else 'minutes'}, by when they were created",
+            ticks,
+            [("used", "p90", scaled(p90)), ("used p50", "median", scaled(p50))],
+            extra=[("clean builds", [len(grouped[i]) for i in range(count)])],
+            fmt="time" if bucket < 86400 else "day",
+            width=1000,
+            height=220,
+        )
+        if clean
+        else '<p class="empty">No clean builds in the range.</p>'
+    )
+
+    # What finishes last, and what it spends its time on.
+    # One scale for the bars, so they compare: the longest of the rows shown
+    # before Show more.
+    scale = max(
+        [sum(phases(by_step[name]).values()) for name, _ in poles[:POLES_FIRST] if name in by_step]
+        + [1]
+    )
+    pole_rows = []
+    for name, bs in poles:
+        r = by_step.get(name) or {"step": name}
+        leads = [b["lead"] for b in bs if b["lead"] is not None]
+        follower = collections.Counter(b["next"] for b in bs if b["next"]).most_common(1)
+        follower = follower[0][0] if follower else ""
+        lead = quantile(leads, 0.5)
+        notes = advice(r, lead, follower)
+        pole_rows.append(
+            f'<tr><td class="step">{jobs_link(name)}'
+            + (f'<div class="advice">{"<br>".join(notes)}</div>' if notes else "")
+            + "</td>"
+            f'<td class="n nowrap"><b>{len(bs):,}</b> <small class="muted">{pct(len(bs) / len(clean))}</small></td>'
+            f'<td class="n nowrap">{minutes(quantile([b["wall"] for b in bs], 0.5))}</td>'
+            f'<td class="follower"><b>{minutes(lead)}</b>'
+            + (f'<br><small class="muted">{E(step_name(follower))}</small>' if follower else "")
+            + f'</td><td class="nowrap">{jobs_cell(r)}</td>'
+            f'<td class="timeline">{timeline(r, scale) if name in by_step else "-"}</td></tr>'
+        )
+    shown = "".join(pole_rows[:POLES_FIRST]) or '<tr><td colspan="6" class="empty">No clean builds in the range.</td></tr>'
+    hidden, button = show_more("poles-more", "".join(pole_rows[POLES_FIRST:]), max(0, len(pole_rows) - POLES_FIRST))
+    legend = "".join(
+        f'<span class="key"><i class="sw ph-{key}"></i>{E(label)}</span>'
+        for key, label in STEP_PHASE_KEYS.items()
+    )
+    poles_html = (
+        '<p class="muted lead">The step that finished last in each clean build, so the one that set its wall '
+        "clock. Splitting it, or making it faster, saves at most its lead over the next step; past that, the "
+        "next step finishes last.</p>"
+        f'<p class="bar-legend">A typical job, from the build\'s creation: {legend}</p>'
+        '<div class="table-wrap"><table class="dense poles"><thead><tr>'
+        f'<th>Step</th><th class="n">{term("Last in", "Last step")}</th><th class="n">{term("Wall clock")}</th>'
+        f'<th>{term("Ahead of the next")}</th><th>{term("Jobs a build")}</th><th class="timeline">Where a job\'s time goes</th>'
+        f"</tr></thead><tbody>{shown}</tbody>{hidden}</table></div>{button}"
+    )
+
+    # Every step, in the order asked for.
+    keys = {
+        "slowest": lambda r: -(r["longest_p50"] or r["ran_p50"] or 0),
+        "last": lambda r: -len(last.get(r["step"], ())),
+        "chips": lambda r: -(r["chip_hours"] or 0),
+        "failures": lambda r: -((r["failed"] or 0) / (r["jobs"] or 1)),
+    }
+    steps.sort(key=lambda r: (keys[sort](r), r["step"]))
+    step_rows = []
+    for r in steps:
+        failed = int(r["failed"] or 0)
+        fail = (
+            f'{failed:,} <small class="muted">{pct(failed / r["jobs"])}</small>'
+            + (f'<br><small class="muted">exit {E(r["exits"])}</small>' if r["exits"] else "")
+            if failed
+            else '<span class="muted">0</span>'
+        )
+        launcher = (
+            (r["setup_p50"] or 0) + (r["teardown_p50"] or 0)
+            if r["setup_p50"] is not None or r["teardown_p50"] is not None
+            else None
+        )
+        kube_cells = (
+            f'<td class="n nowrap">{minutes(launcher)} · {minutes(r["wait_p50"])} · '
+            f'{minutes(r["startup_p50"])} · <b>{minutes(r["test_p50"])}</b></td>'
+        )
+        n_last = len(last.get(r["step"], ()))
+        step_rows.append(
+            f'<tr><td class="step">{jobs_link(r["step"])}</td>'
+            f'<td class="n">{int(r["builds"] or 0):,}</td><td class="nowrap">{jobs_cell(r)}</td>'
+            f'<td class="n nowrap">{minutes(r["ran_p50"])} <small class="muted">· {minutes(r["ran_p90"])}</small></td>'
+            f'<td class="n nowrap">{minutes(r["start_p50"])}</td>{kube_cells}'
+            f'<td class="n">{num(r["chip_hours"]) if r["chip_hours"] else "-"}</td>'
+            f'<td class="n nowrap">{fail}</td>'
+            f'<td class="n">{int(r["retried"] or 0) or "-"}</td>'
+            f'<td class="n">{n_last or "-"}</td></tr>'
+        )
+    cols = 10
+    shown = "".join(step_rows[:STEPS_FIRST]) or f'<tr><td colspan="{cols}" class="empty">No steps in the range.</td></tr>'
+    hidden, button = show_more("steps-more", "".join(step_rows[STEPS_FIRST:]), max(0, len(step_rows) - STEPS_FIRST))
+
+    def seg(label: str, href: str, active: bool) -> str:
+        return f'<a class="seg-btn{" active" if active else ""}" href="{E(href)}">{label}</a>'
+
+    steps_html = (
+        '<div class="filter-row"><span class="filter-label">Sort by</span><div class="segmented">'
+        + "".join(seg(label, link(sort=key), sort == key) for key, label in STEP_SORTS.items())
+        + "</div></div>"
+        '<div class="table-wrap"><table class="dense steps"><thead><tr><th>Step</th>'
+        f'<th class="n">Builds</th><th>{term("Jobs a build")}</th>'
+        f'<th class="n">{term("Ran")} <small>p50 · p90</small></th><th class="n">{term("Starts")}</th>'
+        + f'<th class="n">{term("Launcher · Kueue · startup · test", "Kube phases")}</th>'
+        + f'<th class="n">{term("Chip-hours")}</th><th class="n">Failed</th><th class="n">Retried</th>'
+        f'<th class="n">{term("Last in", "Last step")}</th></tr></thead>'
+        f"<tbody>{shown}</tbody>{hidden}</table></div>{button}"
+    )
+
+    filters = (
+        '<div class="filter-row"><span class="filter-label">Range</span><div class="segmented">'
+        + "".join(seg(PRESET_LABELS[p], link(preset=p), preset == p) for p in ("24h", "7d", "30d"))
+        + '</div><span class="filter-label">Builds</span><div class="segmented">'
+        + "".join(
+            seg(f"{label} <small>{by_kind[key]:,}</small>", link(kind=key), kind == key)
+            for key, label in BUILD_KINDS.items()
+            if by_kind[key]
+        )
+        + '</div><form class="search" method="get" action="steps">'
+        + "".join(
+            f'<input type="hidden" name="{k}" value="{E(v)}">'
+            for k, v in (("preset", preset), ("sort", "" if sort == "last" else sort))
+            if v
+        )
+        + '<select name="pipeline" data-autosubmit aria-label="Pipeline">'
+        + "".join(
+            f'<option value="{E(name)}"{" selected" if name == pipeline else ""}>{E(name)} ({n:,})</option>'
+            for name, n in by_pipeline.most_common()
+        )
+        + "</select></form></div>"
+    )
+    summary = (
+        f"<b>{len(ours):,}</b> {'PR' if kind == 'pr' else E(kind)} builds of {E(pipeline)} on kube "
+        f"created in the last {E(PRESET_LABELS.get(preset, preset))}, "
+        f"<b>{len(clean):,}</b> of them clean: every job passed, or passed when retried. The rest "
+        "failed or were cancelled, so their wall clock says nothing about how long a build takes."
+    )
+    return STEPS_PAGE.substitute(
+        assets=ASSETS,
+        errors=render_errors(sources),
+        subtabs=subtabs("steps"),
+        start=span["start"],
+        end=span["end"],
+        filters=filters,
+        summary=summary,
+        tiles=tiles,
+        chart=chart,
+        poles=poles_html,
+        steps=steps_html,
     )

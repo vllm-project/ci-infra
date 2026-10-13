@@ -1189,6 +1189,134 @@ FROM jobs GROUP BY queue"""
     return bigquery(cfg, sql)
 
 
+# Steps that wait for the rest of their build rather than doing work, so they
+# always finish last and say nothing about which step held the build up.
+WATCHER_STEPS = ("E2E_SUMMARY",)
+# Shorter steps are gates, notifications and uploads, never a build's long pole.
+MIN_STEP_SECONDS = 120
+
+
+def fetch_steps(cfg: Config, start: int, end: int) -> dict:
+    """The kube builds created in [start, end) and their steps, from the step
+    log beside the kube timing table: per build, the step that finished last
+    and the one before it; per step, its time, shards, failures and
+    chip-hours, with the kube phases of the jobs that ran on kube."""
+    if not cfg.timing_table:
+        return {"builds": [], "steps": []}
+    table = cfg.timing_table.rsplit(".", 1)[0] + ".step_execution_logs"
+    watchers = ", ".join(f"'{s}'" for s in WATCHER_STEPS)
+    # One row per job: the table can hold a job more than once. A build's kind
+    # is a property of the build, so every job of it agrees. A kube build is
+    # one with any job on kube, as a build's TPU steps all run on one fleet.
+    jobs = f"""
+WITH job_rows AS (
+  SELECT pipeline_slug AS pipeline, build_number AS build, step_name AS step, job_id,
+    ANY_VALUE(CASE WHEN build_source = 'schedule' THEN 'nightly'
+      WHEN branch = 'main' THEN 'main' ELSE 'pr' END) AS kind,
+    MIN(build_created_at) AS created, ANY_VALUE(queue) AS queue,
+    MIN(started_at) AS started, MAX(finished_at) AS finished,
+    ANY_VALUE(state HAVING MAX finished_at) AS state,
+    LOGICAL_OR(IFNULL(retried, FALSE)) AS retried,
+    LOGICAL_OR(IFNULL(soft_failed, FALSE)) AS soft_failed,
+    ANY_VALUE(exit_status HAVING MAX finished_at) AS exit_status
+  FROM `{table}`
+  WHERE created_at >= TIMESTAMP_SECONDS({start - 86400})
+    AND build_created_at >= TIMESTAMP_SECONDS({start}) AND build_created_at < TIMESTAMP_SECONDS({end})
+    AND started_at IS NOT NULL AND finished_at IS NOT NULL
+  GROUP BY pipeline, build, step, job_id),
+jobs AS (
+  SELECT * FROM job_rows
+  QUALIFY LOGICAL_OR(queue = 'kube') OVER (PARTITION BY pipeline, build))"""
+    # A build is clean when every job it did not retry passed; only those say
+    # how long a build takes. A step's time in a build runs from its first job
+    # starting to its last finishing.
+    builds = f"""{jobs},
+per_step AS (
+  SELECT pipeline, build, step, MIN(started) AS started, MAX(finished) AS finished
+  FROM jobs
+  WHERE step NOT IN ({watchers}) AND TIMESTAMP_DIFF(finished, started, SECOND) >= {MIN_STEP_SECONDS}
+  GROUP BY pipeline, build, step),
+ranked AS (
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY pipeline, build ORDER BY finished DESC) AS place
+  FROM per_step),
+builds AS (
+  SELECT pipeline, build, ANY_VALUE(kind) AS kind, MIN(created) AS created, COUNT(*) AS jobs,
+    COUNTIF(retried) AS retries,
+    COUNTIF(state != 'passed' AND NOT retried AND NOT soft_failed) AS unfinished
+  FROM jobs GROUP BY pipeline, build)
+SELECT b.pipeline, b.build, b.kind, UNIX_SECONDS(b.created) AS created, b.jobs, b.retries,
+  b.unfinished = 0 AS clean, p.step AS pole, UNIX_SECONDS(p.started) AS pole_started,
+  UNIX_SECONDS(p.finished) AS pole_finished, n.step AS next, UNIX_SECONDS(n.finished) AS next_finished
+FROM builds b
+LEFT JOIN ranked p ON p.pipeline = b.pipeline AND p.build = b.build AND p.place = 1
+LEFT JOIN ranked n ON n.pipeline = b.pipeline AND n.build = b.build AND n.place = 2"""
+    # The timing table has a row per workload, and a job more than one when it
+    # was requeued or resubmitted. A kube job's run splits into the launcher's
+    # setup up to its first submission, the wait to its last admission (earlier
+    # attempts included), its last workload's startup and test, and the
+    # launcher's teardown - logs and artifacts - after. Its chip-hours are
+    # every workload's.
+    last = "HAVING MAX COALESCE(ended_at, finished_at)"
+
+    def quantile(expr: str, q: int) -> str:
+        return f"APPROX_QUANTILES({expr}, 100 IGNORE NULLS)[SAFE_OFFSET({q})]"
+
+    def passed(expr: str) -> str:
+        return f"IF(state = 'passed', {expr}, NULL)"
+
+    steps = f"""{jobs},
+timing AS (
+  SELECT job_id, MIN(submitted_at) AS submitted,
+    ANY_VALUE(admitted_at {last}) AS admitted,
+    ANY_VALUE(first_pod_started_at {last}) AS pod_started,
+    ANY_VALUE(finished_at {last}) AS pod_finished,
+    SUM(chips * TIMESTAMP_DIFF(IFNULL(finished_at, ended_at), admitted_at, SECOND)) AS chip_s
+  FROM `{cfg.timing_table}`
+  WHERE created_at >= TIMESTAMP_SECONDS({start - 86400}) AND job_id IS NOT NULL
+  GROUP BY job_id),
+j AS (
+  SELECT jobs.*, TIMESTAMP_DIFF(finished, started, SECOND) AS ran_s,
+    TIMESTAMP_DIFF(started, created, SECOND) AS start_s,
+    TIMESTAMP_DIFF(timing.submitted, started, SECOND) AS setup_s,
+    TIMESTAMP_DIFF(timing.admitted, timing.submitted, SECOND) AS wait_s,
+    TIMESTAMP_DIFF(timing.pod_started, timing.admitted, SECOND) AS startup_s,
+    TIMESTAMP_DIFF(timing.pod_finished, timing.pod_started, SECOND) AS test_s,
+    TIMESTAMP_DIFF(finished, timing.pod_finished, SECOND) AS teardown_s,
+    timing.chip_s
+  FROM jobs LEFT JOIN timing USING (job_id)),
+shards AS (
+  SELECT pipeline, kind, step, COUNT(*) AS n, MIN(ran_s) AS shortest, MAX(ran_s) AS longest
+  FROM j WHERE state = 'passed' GROUP BY pipeline, kind, step, build),
+spread AS (
+  SELECT pipeline, kind, step, APPROX_TOP_COUNT(n, 1)[OFFSET(0)].value AS shards,
+    {quantile("shortest", 50)} AS shortest_p50, {quantile("longest", 50)} AS longest_p50
+  FROM shards GROUP BY pipeline, kind, step),
+exits AS (
+  SELECT pipeline, kind, step, STRING_AGG(CONCAT(code, ' ×', CAST(n AS STRING)), ', ' ORDER BY n DESC LIMIT 3) AS exits
+  FROM (
+    SELECT pipeline, kind, step, IFNULL(CAST(exit_status AS STRING), 'none') AS code, COUNT(*) AS n
+    FROM j WHERE state = 'failed' AND NOT soft_failed GROUP BY pipeline, kind, step, code)
+  GROUP BY pipeline, kind, step)
+SELECT pipeline, kind, step, COUNT(*) AS jobs, COUNT(DISTINCT build) AS builds,
+  COUNTIF(state = 'failed' AND NOT soft_failed) AS failed, COUNTIF(retried) AS retried,
+  ANY_VALUE(queue) AS queue,
+  {quantile(passed("ran_s"), 50)} AS ran_p50, {quantile(passed("ran_s"), 90)} AS ran_p90,
+  {quantile(passed("start_s"), 50)} AS start_p50,
+  {quantile(passed("setup_s"), 50)} AS setup_p50, {quantile(passed("wait_s"), 50)} AS wait_p50,
+  {quantile(passed("startup_s"), 50)} AS startup_p50, {quantile(passed("test_s"), 50)} AS test_p50,
+  {quantile(passed("test_s"), 90)} AS test_p90, {quantile(passed("teardown_s"), 50)} AS teardown_p50,
+  SUM(chip_s) / 3600 AS chip_hours,
+  ANY_VALUE(spread.shards) AS shards, ANY_VALUE(spread.shortest_p50) AS shortest_p50,
+  ANY_VALUE(spread.longest_p50) AS longest_p50, ANY_VALUE(exits.exits) AS exits
+FROM j
+LEFT JOIN spread USING (pipeline, kind, step)
+LEFT JOIN exits USING (pipeline, kind, step)
+GROUP BY pipeline, kind, step"""
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        a, b = pool.submit(bigquery, cfg, builds), pool.submit(bigquery, cfg, steps)
+        return {"builds": a.result(), "steps": b.result()}
+
+
 def fetch_stats(cfg: Config, start: int, end: int) -> dict:
     """Outcomes and phase timings of the workloads that finished in [start, end)."""
     if not cfg.timing_table:

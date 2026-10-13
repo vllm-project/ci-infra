@@ -16,12 +16,13 @@
 <header class="topbar">
   <div class="inner">
     <h1>TPU CI kube</h1>
-    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab active" href="jobs">Jobs</a><a class="tab" href="capacity">Capacity</a><a class="tab" href="migration">Migration</a></nav>
+    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab active" href="jobs">Pipelines</a><a class="tab" href="capacity">Capacity</a><a class="tab" href="migration">Migration</a></nav>
     <span class="when">In flight as of <time data-ts="$generated" data-fmt="time"></time> · finished since <time data-ts="$start" data-fmt="datetime"></time></span>
   </div>
 </header>
 <main>
 $errors
+$subtabs
 <div class="card filters">$filters</div>
 <p class="intro">$summary</p>
 <div class="card">$table</div>

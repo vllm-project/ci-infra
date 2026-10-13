@@ -1,0 +1,38 @@
+<!doctype html>
+<!--
+  The steps page: each step of a pipeline's builds over the range - which
+  steps decide how long a build takes and what they spend it on. views.py
+  fills the placeholders - a dollar sign and a name - with string.Template, so
+  a literal dollar sign here must be doubled.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TPU CI kube · Steps</title>
+<link rel="stylesheet" href="static/style.css?v=$assets">
+</head>
+<body>
+<header class="topbar">
+  <div class="inner">
+    <h1>TPU CI kube</h1>
+    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab active" href="jobs">Pipelines</a><a class="tab" href="capacity">Capacity</a><a class="tab" href="migration">Migration</a></nav>
+    <span class="when">Builds created <time data-ts="$start" data-fmt="datetime"></time> – <time data-ts="$end" data-fmt="datetime"></time></span>
+  </div>
+</header>
+<main>
+$errors
+$subtabs
+<div class="card filters">$filters</div>
+<p class="intro">$summary</p>
+$tiles
+<div class="section-label">Wall clock</div>
+<div class="card">$chart</div>
+<div class="section-label">What finishes last</div>
+<div class="card">$poles</div>
+<div class="section-label">Every step</div>
+<div class="card">$steps</div>
+</main>
+<script src="static/app.js?v=$assets"></script>
+</body>
+</html>
