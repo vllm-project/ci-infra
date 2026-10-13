@@ -2,6 +2,21 @@ project_id  = "cloud-ullm-inference-ci-cd"
 name_prefix = "tpu-ci"
 network     = "projects/cloud-ullm-inference-ci-cd/global/networks/default"
 
+# Saturday and Sunday 15:00-23:00 UTC (08:00-16:00 PDT, 07:00-15:00 PST): the
+# fleet's quietest hours. On 10-10 and 10-11 at most 34 of the 128 v7x chips
+# and none of the v6e chips were running in them; in the same hours on 10-12,
+# the first weekday with every PR on kube, 12-132 were, and 40-130 run every
+# night, weekends included, for the nightlies.
+#
+# The start and end are the first occurrence, a Saturday already past: the
+# date only anchors the series, and what repeats is their time of day and the
+# 8 hours between them.
+maintenance_window = {
+  start_time = "2026-10-10T15:00:00Z"
+  end_time   = "2026-10-10T23:00:00Z"
+  recurrence = "FREQ=WEEKLY;BYDAY=SA,SU"
+}
+
 # Read by both terraform and scripts/generate_manifests.py; see variables.tf for
 # why there is only the one.
 namespace = "buildkite"
