@@ -1123,7 +1123,7 @@ def convert_group_step_to_buildkite_step(
             include_step = (
                 step.device != DeviceType.A100
                 and (include_amd or not is_amd_device(step.device))
-                and (not aiter_nightly or runs_in_aiter_nightly(step.device))
+                and (runs_in_aiter_nightly(step.device) or not aiter_nightly)
                 and (only_step_keys is None or step_key in only_step_keys)
             )
             if is_amd_gpu_device(step.device):
@@ -1265,8 +1265,8 @@ def convert_group_step_to_buildkite_step(
                 and step.mirror.get("amd")
                 and (only_step_keys is None or f"amd-{step_key}" in only_step_keys)
                 and (
-                    not aiter_nightly
-                    or runs_in_aiter_nightly(step.mirror["amd"].get("device"))
+                    runs_in_aiter_nightly(step.mirror["amd"].get("device"))
+                    or not aiter_nightly
                 )
             ):
                 amd = step.mirror["amd"]

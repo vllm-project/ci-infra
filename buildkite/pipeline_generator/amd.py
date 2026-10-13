@@ -199,7 +199,7 @@ def valid_amd_gpu_devices() -> List[str]:
 
 
 def runs_in_aiter_nightly(device: Optional[str]) -> bool:
-    """AMD build steps, and GPU jobs (native or DinD) on an AITER arch."""
+    """AMD build steps, and GPU jobs on an AITER arch."""
     if _device_value(device) == DeviceType.AMD_CPU.value:
         return True
     config = get_amd_device_config(device)

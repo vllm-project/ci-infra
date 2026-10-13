@@ -101,7 +101,7 @@ The generator relies on several environment variables, typically provided by Bui
 * `AITER_NIGHTLY`: Set to "1" to test the latest [AITER](https://github.com/ROCm/aiter) nightly wheel. Intended for a scheduled build of `main`. Adds `aiter-nightly-amd` (vLLM's `.buildkite/scripts/rocm/aiter-nightly-overlay.sh`) after `ensure-ci-base-amd` to install the wheel over this build's ci_base, and builds `image-build-amd` on the result. Only AMD steps run: the AMD CPU build steps, and the GPU jobs on the archs vLLM builds AITER for, gfx942 (MI300, MI325) and gfx950 (MI355). Every other step, MI250 included, is dropped; generation fails if a kept step depends on a dropped one. Nothing is gated behind a block step, even with `NOAUTO=1`, and docs-only changes do not skip the build. Cannot be combined with `TORCH_NIGHTLY`.
 * `RUN_ALL`: Set to "1" to force run all steps.
 * `SKIP_TIMEOUT`: Set to "1" at pipeline generation time to omit all configured step timeouts.
-* `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes. Forced to "1" when `AITER_NIGHTLY=1`.
+* `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.
 * `VLLM_USE_PRECOMPILED`: Set to "1" to force use of precompiled wheels.
 * `VLLM_CI_KERNREC`: Set to "1" to load the kernel-launch recorder (`buildkite/ci_selector/recorders/kernrec`) into every CUDA process of every GPU step and upload its `.kernrec/**` output as job artifacts. Off by default; meant for nightly and post-merge builds that feed the test selector.
 * `VLLM_CI_FNREC`: Set to "1" to load the Python function recorder (`buildkite/ci_selector/recorders/fnrec`) into every Python process of every step, writing to its own `.fnrec/<job-id>`. Off by default; independent of `VLLM_CI_KERNREC`, same audience.
@@ -109,8 +109,9 @@ The generator relies on several environment variables, typically provided by Bui
     set, the generator emits those steps and their transitive dependencies,
     ignoring normal source-file selection. Generated AMD mirror keys such as
     `amd-multi-modal-processor` are accepted and select only the mirror plus
-    its AMD dependencies. Unknown keys fail generation, and so, with
-    `AITER_NIGHTLY=1`, do keys of steps the AITER nightly drops.
+    its AMD dependencies. Unknown keys fail generation. With
+    `AITER_NIGHTLY=1`, so does a key for a step the AITER nightly does not
+    run, such as a CUDA or MI250 job.
 
 Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
 `buildkite-analytics-token-secret` Secret's `token` key when it is available.
