@@ -381,11 +381,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
     cache_from_tag, cache_to_tag = get_ecr_cache_registry()
     registries = global_config["registries"]
     repositories = global_config["repositories"]
-    repo = (
-        repositories["main"]
-        if global_config["branch"] == "main"
-        else repositories["premerge"]
-    )
+    repo = repositories["main"]  # TEMPORARY prewarm branch
 
     # Build target ($IMAGE_TAG) must match what the test steps pull (get_image()).
     # get_image() already switches to the dedicated -torch-nightly tag when
