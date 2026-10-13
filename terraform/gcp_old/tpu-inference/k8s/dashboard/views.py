@@ -1180,6 +1180,13 @@ def group_events(events: list, job_builds: dict, org: str) -> list:
     return sorted(out, key=lambda g: (-g["fleet"], g["type"] != "Warning", -g["last"]))
 
 
+# Manager and workers agree: the check's name, and the reserved-chip gap that
+# has to last ten minutes to count - a 2x2x1 slice, so one stray workload is
+# enough and a dispatch in flight is not.
+AGREE_TITLE = "Manager and workers agree"
+AGREE_CHIPS = 4
+
+
 def health_checks(cfg, snap, kq, ev, health, stats24, now) -> list:
     """The on-call's view: one row per stage from Buildkite to a TPU pod."""
     checks = []
@@ -1264,6 +1271,40 @@ def health_checks(cfg, snap, kq, ev, health, stats24, now) -> list:
             "ok",
             "Dispatch",
             f"{len(dispatching)} dispatching, none stalled; {redispatches} redispatches in 24 hours.",
+        )
+
+    # The manager's and the workers' Kueue each count reserved chips; apart,
+    # the manager admits against chips the workers do not have, or holds back
+    # chips they do.
+    mine, theirs = health.get("reserved_manager", {}), health.get("reserved_workers", {})
+    apart = {
+        f: g for f, g in (health.get("reserved_gap") or {}).items() if g >= AGREE_CHIPS
+    }
+    if not mine:
+        add("unknown", AGREE_TITLE, "No Kueue usage metrics from the manager.")
+    elif apart:
+        add(
+            "warn",
+            AGREE_TITLE,
+            "; ".join(
+                f"{f}: the manager counts {mine.get(f, 0):.0f} reserved chips, the workers "
+                f"{theirs.get(f, 0):.0f}, at least {g:.0f} apart for 10 minutes"
+                for f, g in sorted(apart.items())
+            )
+            + ". The manager admits against its own count, so steps can wait on a worker "
+            "with no room, or behind chips that are free.",
+        )
+    else:
+        add(
+            "ok",
+            AGREE_TITLE,
+            "Reserved chips agree: "
+            + ", ".join(
+                f"{f} {mine[f]:.0f} on the manager, {theirs.get(f, 0):.0f} on the workers"
+                for f in sorted(mine)
+                if mine[f] or theirs.get(f)
+            )
+            + ".",
         )
 
     # Queue waits against the launcher's queue budget.
@@ -2230,7 +2271,7 @@ def render_overview(snap: dict) -> str:
     bk_checks = from_checks("Steps waiting for an agent")
     agent_checks = from_checks("Buildkite controller", "Agent pods")
     kueue_checks = [kueue_line(m["name"], m["kueue_up"])] + from_checks("Queue waits")
-    mk_checks = from_checks("Worker connections", "Dispatch")
+    mk_checks = from_checks("Worker connections", "Dispatch", AGREE_TITLE)
 
     def worker_checks(w: dict) -> list:
         items = [kueue_line(w["name"], w["kueue_up"])]

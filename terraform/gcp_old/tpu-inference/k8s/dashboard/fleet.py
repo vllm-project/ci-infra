@@ -794,6 +794,25 @@ def current(metric: str, by: str) -> str:
     return f"max by ({by}) (last_over_time({metric}[2m]))"
 
 
+def reserved_agreement(cfg: Config) -> dict:
+    """fetch_health's queries for the manager's and the workers' reserved
+    chips per generation, and the gap between them that has lasted."""
+    usage = f'kueue_cluster_queue_resource_usage{{{{{{sel}},resource="{TPU}",{RESERVED_FLAVOR}}}}}'
+    manager = (
+        f"sum by (flavor) ("
+        f"{current(usage.format(sel=kueue_selector(cfg)), 'cluster_queue, flavor, resource')})"
+    )
+    workers = (
+        f"sum by (flavor) ("
+        f"{current(usage.format(sel=worker_kueue_selector(cfg)), 'cluster, cluster_queue, flavor, resource')})"
+    )
+    return {
+        "reserved_manager": (manager, ("flavor",)),
+        "reserved_workers": (workers, ("flavor",)),
+        "reserved_gap": (f"min_over_time((abs({workers} - {manager}))[10m:1m])", ("flavor",)),
+    }
+
+
 def fetch_health(cfg: Config) -> dict:
     sel = kueue_selector(cfg)
     busy_duty = f"kubernetes_io:node_accelerator_duty_cycle{{{node_selector(cfg)}}}"
@@ -827,6 +846,11 @@ def fetch_health(cfg: Config) -> dict:
             ("cluster_name", "node_name"),
         ),
         "nodes": (node_presence(cfg), ("cluster_name", "node_name")),
+        # Reserved chips per generation as the manager's Kueue counts them and
+        # as the workers' do: each admits a workload and picks its flavor on
+        # its own, so the two can part. The gap is the smallest over ten
+        # minutes, since every dispatch opens a short one.
+        **reserved_agreement(cfg),
     }
     # The node metrics as of NODE_LAG ago, when every node has reported.
     lagged = {"busy", "nodes"}
