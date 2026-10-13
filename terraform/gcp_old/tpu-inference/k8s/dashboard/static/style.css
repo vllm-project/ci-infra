@@ -92,6 +92,7 @@ details.glossary summary { font-size: 13px; font-weight: 600; color: var(--ink-2
 .pill.ok .dot { background: var(--good); } .pill.fail .dot { background: var(--critical); }
 .pill.borrowed { background: var(--borrowed-bg); color: #9a3a12; }
 .pill.idle { background: var(--idle-bg); color: #1c5cab; }
+.pill.spot { background: #fdf5e1; color: #7a5200; }
 .pill.attn { background: var(--warning-bg); color: #8a5a00; }
 a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
 
@@ -156,6 +157,7 @@ i.sw.idle { background: var(--idle); }
 i.k { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
 i.k.used, i.k.pending { background: var(--own); } i.k.busy { background: var(--busy); }
 i.k.ref { background: var(--muted); } i.k.nodes { background: var(--nodes); }
+i.k.spot { background: var(--cat-4); }
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
@@ -188,6 +190,7 @@ svg { width: 100%; height: auto; display: block; overflow: visible; }
 .line.busy { stroke: var(--busy); } .line.nodes { stroke: var(--nodes); }
 .area { stroke: none; fill: var(--own); opacity: 0.10; }
 .area.busy { fill: var(--busy); } .area.nodes { fill: var(--nodes); }
+.line.spot { stroke: var(--cat-4); } .area.spot { fill: var(--cat-4); }
 .ref { fill: none; stroke: var(--muted); stroke-width: 1.25; }
 .ref-label { font-size: 10px; fill: var(--muted); }
 .dot { fill: var(--own); stroke: var(--card); stroke-width: 2; } .dot.busy { fill: var(--busy); } .dot.nodes { fill: var(--nodes); }

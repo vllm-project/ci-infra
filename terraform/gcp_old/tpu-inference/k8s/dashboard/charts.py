@@ -262,15 +262,17 @@ def stacked_chart(
         )
         parts.append(f'<polygon class="band {slots[k]}" points="{up} {down}"/>')
     if ref:
-        for run in segments(ref[1], x, y):
+        runs = segments(ref[1], x, y)
+        for run in runs:
             d = f"M{run[0][0]:.1f},{run[0][1]:.1f}" + "".join(
                 f"H{px:.1f}V{py:.1f}" for px, py in run[1:]
             )
             parts.append(f'<path class="ref" d="{d}"/>')
-            lx, ly = run[-1]
-        parts.append(
-            f'<text class="ref-label" x="{lx + 6:.1f}" y="{ly + 3:.1f}">{E(ref[0])}</text>'
-        )
+        if runs:
+            lx, ly = runs[-1][-1]
+            parts.append(
+                f'<text class="ref-label" x="{lx + 6:.1f}" y="{ly + 3:.1f}">{E(ref[0])}</text>'
+            )
 
     readout = [
         {"cls": slots[k], "name": name, "values": vs}

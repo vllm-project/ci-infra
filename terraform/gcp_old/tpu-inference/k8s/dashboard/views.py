@@ -78,6 +78,10 @@ TERMS = {
     "Held by workloads": "The share of chip-hours on nodes that an admitted workload held; the rest is "
     "idle on nodes.",
     "Nodes created": "Nodes a pool scaled up during the range. Lifetime is appearing to disappearing.",
+    "Spot": "Chips on Spot VMs beside the reservation, for a single-host shape: Kueue admits onto them "
+    "only once the reservation and what the shape may borrow are spent. GCE can take a Spot VM back at "
+    "30 seconds' notice, and the step reruns. Spot quota is a count GCE may not be able to fill, so it "
+    "is not part of nominal, usage or borrowing anywhere on these pages.",
     "Utilization": "Mean admitted (or busy) chips over the range, over mean nominal.",
     "Chips held": "Chips occupied by running work, as a share of the chips the fleet had: on bare metal "
     "the chips of the VMs a job holds, on kube the chips Kueue admitted. Occupancy, not compute - a "
@@ -697,6 +701,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
     )
     for q in queues:
         q["nodes"] = nodes.get(q["name"])
+        q["spot_nodes"] = nodes.get(f"{q['name']}-spot")
 
     cohorts: dict[str, dict] = {}
     for q in queues:
@@ -855,7 +860,9 @@ def fleet_map(cfg: Config, kq: dict, health: dict, pools: list, snap: dict) -> d
             (p["cluster"], p["queue"]),
             {
                 "queue": p["queue"],
-                "title": titles.get(p["queue"], p["queue"]),
+                "title": f"{titles.get(p['shape'], p['shape'])} Spot"
+                if p.get("spot")
+                else titles.get(p["queue"], p["queue"]),
                 "multi_host": p["multi_host"],
                 "pools": 0,
                 "pools_up": 0,
@@ -1479,6 +1486,12 @@ def render_live_queue(q: dict) -> str:
     if q["borrowing_limit"] and tpu:
         pills.append(
             f'<span class="pill">may borrow {num(q["borrowing_limit"])}</span>'
+        )
+    if q.get("spot_quota"):
+        up = (q.get("spot_nodes") or {}).get("up", 0)
+        pills.append(
+            f'<span class="pill spot">{term("Spot", "Spot")} {num(q["spot_used"])} of {num(q["spot_quota"])} {u}'
+            f" · {num(up)} node{'s' if up != 1 else ''} up</span>"
         )
     pills += [f'<span class="pill">{E(text)}</span>' for text in preemption_notes(q)]
     return f"""
@@ -2866,6 +2879,9 @@ def build_history(
                     "used": used,
                     "nominal": history("nominal", q["name"], q["resource"]),
                     "pending": history("pending", q["name"]),
+                    "spot_used": history("spot_used", q["name"], q["resource"])
+                    if q.get("spot_quota")
+                    else None,
                 },
                 # Not utilization: against the queue's own nominal, a queue that
                 # lives on borrowed chips reads hundreds of percent.
@@ -2931,6 +2947,12 @@ def build_history(
         b["max"] += p["max_nodes"]
     hours = step / 3600
     for q in rows:
+        spot = agg.get(f"{q['name']}-spot")
+        q["spot_nodes"] = (
+            {"chips": [round(v, 1) for v in spot["chips"]], "created": spot["created"]}
+            if spot
+            else None
+        )
         a, b = agg.get(q["name"]), pool_bounds.get(q["name"])
         if not b:
             q["nodes"] = None
@@ -3102,6 +3124,8 @@ def render_trends(h: dict, sources: dict, query: str, queue_times: dict | None =
     def shape_body(q: dict) -> str:
         """A queue's outcomes, nodes, chips and queue wait over the range."""
         u, st, n = unit(q), q["stats"], q.get("nodes")
+        spot = q["history"].get("spot_used")
+        sn = q.get("spot_nodes")
         detail = ", ".join(f"{k} {v}" for k, v in st["infra_outcomes"])
         outcomes = [
             f"Finished <b>{num(st['finished'])}</b>, <b>{success_rate(st)}</b> passed",
@@ -3112,6 +3136,12 @@ def render_trends(h: dict, sources: dict, query: str, queue_times: dict | None =
             f'{term("Wait p50 / p90", "Wait, startup, run")} <b>{ago(st["wait_p50"])} / {ago(st["wait_p90"])}</b>',
             f"Run p50 <b>{ago(st['run_p50'])}</b>",
         ]
+        if spot:
+            outcomes.append(
+                f'{term("Spot")} <b>{num(mean(spot) or 0)}</b> chips admitted on average, peak '
+                f'<b>{num(max((v for v in spot if v is not None), default=0))}</b> of {num(q["spot_quota"])}'
+                + (f'; {num(sn["created"])} Spot nodes created' if sn else "")
+            )
         nodes = (
             [
                 f'{term("Nodes created")} <b>{num(n["created"])}</b>, lifetime p50 <b>{ago(n["lifetime_p50"])}</b>',
@@ -3137,7 +3167,9 @@ def render_trends(h: dict, sources: dict, query: str, queue_times: dict | None =
         chips = line_chart(
             f"{u.capitalize()} on nodes and in use" if n else f"{u.capitalize()} in use",
             ticks,
-            ([("nodes", "on nodes", n["chips"])] if n else []) + [("used", "in use", q["history"]["used"])],
+            ([("nodes", "on nodes", n["chips"])] if n else [])
+            + [("used", "in use", q["history"]["used"])]
+            + ([("spot", "on Spot", spot)] if spot else []),
             ref=("nominal", q["history"]["nominal"]) if q["resource"] == TPU else None,
             fmt=fmt,
             width=520,
@@ -3158,7 +3190,7 @@ def render_trends(h: dict, sources: dict, query: str, queue_times: dict | None =
         return f"""<p class="shape-facts">{"".join(f"<span>{x}</span>" for x in outcomes)}</p>
   <p class="shape-facts">{"".join(f"<span>{x}</span>" for x in nodes)}</p>
   <div class="charts shape-row">{chips}{wait}</div>
-  {values_table(ticks, ([("On nodes", n["chips"])] if n else []) + [(f"{u.capitalize()} in use", q["history"]["used"]), ("Nominal", q["history"]["nominal"])], every, "Values")}
+  {values_table(ticks, ([("On nodes", n["chips"])] if n else []) + [(f"{u.capitalize()} in use", q["history"]["used"]), ("Nominal", q["history"]["nominal"])] + ([("On Spot", spot)] if spot else []), every, "Values")}
   {values_table(w_ticks, [(f"Wait p50, {w_unit}", scaled(p50)), (f"Wait p90, {w_unit}", scaled(p90))], max(1, len(w_ticks) // 24), "Wait values") if w_ticks else ""}"""
 
     def shape_block(q: dict) -> str:
