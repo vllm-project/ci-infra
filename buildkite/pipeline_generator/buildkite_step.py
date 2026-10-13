@@ -95,9 +95,11 @@ def _otel_setup_command() -> str:
         "ci_otel_start() { :; }; ci_otel_finish() { :; }; "
         'ci_otel_run() { shift 2; env "$$@"; return $$?; }; '
         'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
-        # `|| :` keeps the assignment itself successful under `sh -e` when the
-        # checkout has no .git; the missing-helper path below stays fail-open.
-        "$$(git rev-parse --show-toplevel 2>/dev/null || :)/"
+        # Native AMD pods run from /vllm-workspace, which has no .git; their
+        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The fallback keeps the
+        # assignment successful under `sh -e`; a missing helper stays fail-open.
+        "$$(git rev-parse --show-toplevel 2>/dev/null || "
+        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-}")/'
         '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
         'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
@@ -813,10 +815,12 @@ def _prepare_commands(
     commands = (
         _fnrec_setup_commands(step, setup_profile) if fnrec_armed else []
     ) + _get_setup_commands(step, setup_profile)
-    # AMD mirrors use a separate runtime and do not expose the agent binary
-    # needed to mint the short-lived upload credential. Native agent tracing
-    # still covers those jobs; command/test spans are injected elsewhere.
-    trace_commands = step.otel_tracing_enabled() and setup_profile != "amd"
+    # Legacy AMD dind forwards no BUILDKITE_* into its container, so it cannot
+    # mint the short-lived upload credential. Native AMD pods keep the job's
+    # environment, which is all ci_otel.py needs to request it over HTTPS.
+    trace_commands = step.otel_tracing_enabled() and (
+        setup_profile != "amd" or not step.dind
+    )
     if trace_commands:
         commands.append(_otel_setup_command())
 
@@ -1207,6 +1211,7 @@ def convert_group_step_to_buildkite_step(
                             "commands": custom_commands,
                             "working_dir": amd.get("working_dir", step.working_dir),
                             "no_plugin": amd_no_plugin,
+                            "dind": amd.get("dind", True),
                         }
                     )
                     amd_commands_str = " && ".join(
@@ -1218,7 +1223,10 @@ def convert_group_step_to_buildkite_step(
                     )
                 else:
                     amd_command_step = step.model_copy(
-                        update={"no_plugin": amd_no_plugin}
+                        update={
+                            "no_plugin": amd_no_plugin,
+                            "dind": amd.get("dind", True),
+                        }
                     )
                     amd_commands_str = " && ".join(
                         _prepare_commands(
