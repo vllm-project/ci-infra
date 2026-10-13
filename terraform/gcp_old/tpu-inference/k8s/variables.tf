@@ -486,8 +486,8 @@ variable "worker_clusters" {
       reclaim_within_cohort = optional(string, "Never")
 
       # Spot capacity beside the reservation, for a single-host shape: a second
-      # node pool, <shape>-spot, in the same zone and drawing on the zone's
-      # Spot quota instead of the reservation. Kueue admits a workload onto it
+      # node pool, <shape>-spot, drawing on the region's Spot quota instead of
+      # the reservation. Kueue admits a workload onto it
       # only once the shape's reserved quota, and what it can borrow from the
       # cohort, is spent - overflow, not a replacement, since the reservation
       # is paid for whether it is used or not. See "Spot overflow" in README.md.
@@ -498,6 +498,11 @@ variable "worker_clusters" {
         # Chips of the shape's ClusterQueue the Spot flavor holds; the pool's
         # capacity if unset.
         nominal_quota = optional(number)
+        # Zones the Spot pool may scale up in; the shape's zone if unset. No
+        # reservation ties Spot to that zone, and GCE runs out of Spot VMs one
+        # zone at a time. max_nodes applies in each zone; the flavor's quota
+        # is what bounds the total.
+        zones = optional(list(string))
       }))
     })), [])
   }))
