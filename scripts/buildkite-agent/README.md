@@ -79,7 +79,7 @@ sudo systemctl enable --now buildkite-agent
   call retries in place first (5 attempts, sleeping 2/4/8/16 s, then exit 255),
   written inline in each hook. Keep every provider call behind that loop;
   never let it fall through to the default exit 1. Each retry that fires also
-  writes the build meta-data key `infra-retry:<job id>` (`github-token` from
+  writes the build meta-data key `infra-retry:<job id>:<class>` (`github-token` from
   `pre-checkout`, `image-pull` from `environment`; value
   `<class>,<attempts>,<recovered|exhausted>`); the write is capped at 10 s and
   never fails the job.

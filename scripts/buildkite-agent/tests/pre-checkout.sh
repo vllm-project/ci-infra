@@ -64,7 +64,7 @@ marks=$(mktemp)
     source "$hook" 2>/dev/null
 ) || status=$?
 [[ "${status:-0}" -eq 255 ]] || { echo "FAIL secret-store-down: expected 255, got ${status:-0}"; exit 1; }
-[[ "$(<"$marks")" == 'infra-retry:job-1=github-token,5,exhausted' ]] ||
+[[ "$(<"$marks")" == 'infra-retry:job-1:github-token=github-token,5,exhausted' ]] ||
     { echo "FAIL secret-store-down: mark was '$(<"$marks")'"; exit 1; }
 printf 'PASS %s\n' secret-store-down
 
@@ -96,7 +96,7 @@ printf 'PASS %s\n' secret-store-down
     unset BUILDKITE_PULL_REQUEST BUILDKITE_REFSPEC GIT_CONFIG_COUNT
     source "$hook" 2>/dev/null
     [[ "$GIT_CONFIG_COUNT" == 1 && "$(<"$failures")" == 0 ]]
-    [[ "$(<"$marks")" == 'infra-retry:job-1=github-token,3,recovered' ]]
+    [[ "$(<"$marks")" == 'infra-retry:job-1:github-token=github-token,3,recovered' ]]
 ) || { echo "FAIL secret-store-transient"; exit 1; }
 printf 'PASS %s\n' secret-store-transient
 rm -f "$marks"

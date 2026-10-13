@@ -26,7 +26,7 @@ stub flock "[[ \$1 == -n ]] && { [[ -z \${WAITER:-} ]]; exit; }; [[ -z \${WAITER
 # Lists our device first, then enough lines to fill the pipe, so `grep -q` exits
 # early and the writer dies of SIGPIPE like the real one can.
 stub nvidia-ctk "echo nvidia.com/gpu=MIG-abc; exec seq 1000000"
-stub buildkite-agent "echo \"\$4\" >>$tmp/marks.log; [[ -z \${MARK_FAILS:-} ]]"
+stub buildkite-agent "echo \"\$3=\$4\" >>$tmp/marks.log; [[ -z \${MARK_FAILS:-} ]]"
 
 # run <name> <expected-status> <expected-mark|-> <expected-sleeps|-> [VAR=val...]
 run() {
@@ -47,23 +47,23 @@ run() {
 calls() { cat "$tmp/$1.log" 2>/dev/null | wc -l | tr -d ' '; }
 
 run all-pass 0 '' ''
-run login-blip 0 'image-pull,3,recovered' '2 4 ' FAIL_AWS=2
+run login-blip 0 'infra-retry:job-1:image-pull=image-pull,3,recovered' '2 4 ' FAIL_AWS=2
 grep -q 'failed (attempt 1/5); retrying in 2s' "$tmp/stderr" || { echo "FAIL log line"; exit 1; }
-run login-down 255 'image-pull,5,exhausted' '2 4 8 16 ' FAIL_AWS=99
+run login-down 255 'infra-retry:job-1:image-pull=image-pull,5,exhausted' '2 4 8 16 ' FAIL_AWS=99
 [[ $(calls aws) -eq 5 ]] || { echo "FAIL login-down: aws called $(calls aws) times"; exit 1; }
 grep -q -- '--cli-connect-timeout 10' "$tmp/aws.log" || { echo "FAIL aws timeout flag"; exit 1; }
-run nvidia-smi-blip 0 'image-pull,2,recovered' '2 ' FAIL_SMI=1
-run nvidia-smi-down 255 'image-pull,5,exhausted' '2 4 8 16 ' FAIL_SMI=99
-run pull-blip 0 'image-pull,2,recovered' '2 ' FAIL_PULL=1
-run pull-down 255 'image-pull,5,exhausted' '2 4 8 16 ' FAIL_PULL=99
+run nvidia-smi-blip 0 'infra-retry:job-1:image-pull=image-pull,2,recovered' '2 ' FAIL_SMI=1
+run nvidia-smi-down 255 'infra-retry:job-1:image-pull=image-pull,5,exhausted' '2 4 8 16 ' FAIL_SMI=99
+run pull-blip 0 'infra-retry:job-1:image-pull=image-pull,2,recovered' '2 ' FAIL_PULL=1
+run pull-down 255 'infra-retry:job-1:image-pull=image-pull,5,exhausted' '2 4 8 16 ' FAIL_PULL=99
 run mark-write-fails-blip 0 - '2 ' FAIL_PULL=1 MARK_FAILS=1
 run mark-write-fails-down 255 - '2 4 8 16 ' FAIL_PULL=99 MARK_FAILS=1
 
 # Waiter: the winner's pull failed (no done marker), so the waiter pulls itself.
 run waiter-pulls 0 '' '' WAITER=1
 [[ $(calls pull) -eq 1 ]] || { echo "FAIL waiter-pulls: pull called $(calls pull) times"; exit 1; }
-run waiter-retries 0 'image-pull,3,recovered' '2 4 ' WAITER=1 FAIL_PULL=2
-run waiter-down 255 'image-pull,5,exhausted' '2 4 8 16 ' WAITER=1 FAIL_PULL=99
+run waiter-retries 0 'infra-retry:job-1:image-pull=image-pull,3,recovered' '2 4 ' WAITER=1 FAIL_PULL=2
+run waiter-down 255 'infra-retry:job-1:image-pull=image-pull,5,exhausted' '2 4 8 16 ' WAITER=1 FAIL_PULL=99
 # Waiter: the winner's pull succeeded (done marker appears), so no pull.
 run waiter-sees-done 0 '' '' WAITER=1 WAITER_DONE="/tmp/docker-pull-locks/test_image_$$.lock.done"
 [[ $(calls pull) -eq 0 ]] || { echo "FAIL waiter-sees-done: pulled"; exit 1; }
