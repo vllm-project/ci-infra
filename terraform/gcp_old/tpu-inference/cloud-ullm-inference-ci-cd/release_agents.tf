@@ -82,7 +82,7 @@ module "ci_release_tpu_inference" {
 module "ci_release_vllm_torchtpu" {
   source = "../modules/ci_release"
   providers = {
-    google-beta = google-beta.us-central1-b
+    google-beta = google-beta.us-central1-f
   }
 
   project_id                  = var.project_id
