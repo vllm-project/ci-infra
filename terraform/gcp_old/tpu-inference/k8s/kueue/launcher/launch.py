@@ -385,6 +385,35 @@ def spot_unschedulable(items):
     return False
 
 
+# DisruptionTarget reasons that mean the node went away under the pod: the
+# kubelet's during a Spot reclaim's shutdown, the taint manager's or pod GC's
+# when the node went NotReady or vanished before the kubelet could say so.
+NODE_LOST_REASONS = {"TerminationByKubelet", "DeletionByTaintManager",
+                     "DeletionByPodGC"}
+
+
+def spot_reclaimed(items):
+    """The name of a chip-holding pod that lost its Spot node, else None.
+
+    A kubelet eviction carries TerminationByKubelet too, but with the pod's
+    reason Evicted: that pod outgrew its node rather than losing it. A pod
+    that had already succeeded lost nothing.
+    """
+    for pod in items or []:
+        spec = pod.get("spec", {})
+        status = pod.get("status", {})
+        if ((spec.get("nodeSelector") or {}).get(SPOT_LABEL) != "true"
+                or not pod_chips(spec)
+                or status.get("reason") == "Evicted"
+                or status.get("phase") == "Succeeded"):
+            continue
+        for c in status.get("conditions") or []:
+            if (c.get("type") == "DisruptionTarget" and c.get("status") == "True"
+                    and c.get("reason") in NODE_LOST_REASONS):
+                return pod["metadata"]["name"]
+    return None
+
+
 def spot_eligible(doc, registry, queue):
     """Whether this run may ever use Spot: its queue has a Spot flavor and its
     priority class is at or below the registry's Spot line. Unclassed scores 0.
@@ -2069,6 +2098,9 @@ def main():
         spot_waiting = None
         spot_excluded = False
         spot_allowed = False
+        # Since when the current submission has waited for reserved chips: the
+        # start, or the reclaim that sent it back to the queue.
+        spot_offer_from = started
         job_id = labels.get("buildkite.com/job-id")
 
         while True:
@@ -2180,10 +2212,10 @@ def main():
             # from Spot. Nothing was reserved, so no worker holds a copy.
             if (spot_doc is not None and not spot_allowed and not spot_excluded
                     and reserved is None and not admitted
-                    and time.monotonic() - started > spot_after):
+                    and time.monotonic() - spot_offer_from > spot_after):
                 spot_allowed = True
-                log(f"waited {time.monotonic() - started:.0f}s for reserved "
-                    "chips - resubmitting so it may run on Spot")
+                log(f"waited {time.monotonic() - spot_offer_from:.0f}s for "
+                    "reserved chips - resubmitting so it may run on Spot")
                 doc = spot_doc
                 created = with_grace(resubmit, kind, name, doc)
                 if created is None:
@@ -2235,25 +2267,71 @@ def main():
                 delete_workload(kind, name)
                 return finish("evicted_storage", 1)
 
+            # Under MultiKueue the local object is a shadow of one that ran on a
+            # worker, so its own status may never be filled in. The Workload's
+            # Finished condition is authoritative.
+            finished = condition(workload, "Finished")
+            wl_done = bool(finished and finished.get("status") == "True")
+            wl_failed = bool(wl_done and "Failed" in finished.get("reason", ""))
+            wl_succeeded = wl_done and not wl_failed
+
+            if doc["kind"] == "Job":
+                status = obj.get("status", {})
+                done = status.get("succeeded", 0) >= 1 or wl_succeeded
+                failed_cond = condition(obj, "Failed")
+                # The condition, not status.failed: that counts failed pods, so
+                # it reaches 1 on the first one and the Job is allowed six.
+                # Kubernetes sets Failed once the Job is done retrying, which is
+                # the question here. The JobSet branch below already reads only
+                # its condition.
+                failed = ((failed_cond and failed_cond.get("status") == "True")
+                          or wl_failed)
+            else:
+                completed = condition(obj, "Completed")
+                done = bool(completed and completed.get("status") == "True") or wl_succeeded
+                failed_cond = condition(obj, "Failed")
+                failed = bool(failed_cond and failed_cond.get("status") == "True") or wl_failed
+
             # Spot quota is a count, not capacity: Kueue admits onto it with no
             # Spot VM to be had, and the pool failing to scale up changes
             # nothing Kueue sees. Waited out, waitForPodsReady requeues the
             # workload with its Spot quota free, and it can be admitted onto
             # Spot again. Resubmitted once with Spot ruled out, it waits for the
-            # reservation instead. After a reclaim as well as at first
-            # admission: the replacement pod is pinned to Spot like the first.
+            # reservation instead.
             if items is not None:
                 if not spot_excluded and spot_unschedulable(items):
                     if spot_waiting is None:
                         spot_waiting = time.monotonic()
                 else:
                     spot_waiting = None
-            if (spot_waiting is not None
+            # A reclaimed Spot node takes its pod with it, and the Job's
+            # replacement would be pinned to Spot like the first - where nodes go
+            # in waves: on 10-13 one lasted 3 minutes at the median on 1x1x1 and
+            # 14 on 2x2x1, and 17 of the 41 steps reclaimed once were reclaimed
+            # again. Back to the queue instead, as at submission: reserved chips
+            # first, Spot again only after another spot_after of waiting for
+            # them. Not once the run is over: pod GC marks a done run's pods the
+            # same way when their node goes.
+            reclaimed = (spot_reclaimed(items)
+                         if items is not None and not spot_excluded
+                         and not (done or failed) else None)
+            fallback = None
+            if reclaimed:
+                fallback = (f"Spot node reclaimed under {reclaimed} - back to "
+                            "the queue, reserved chips first")
+                if spot_doc is not None:
+                    doc = copy.deepcopy(spot_doc)
+                spot_allowed = False
+                spot_offer_from = time.monotonic()
+            elif (spot_waiting is not None
                     and time.monotonic() - spot_waiting > spot_wait):
+                fallback = (f"admitted onto Spot but no Spot node for "
+                            f"{time.monotonic() - spot_waiting:.0f}s - "
+                            "resubmitting to wait for the reserved capacity "
+                            "instead")
                 spot_excluded = True
-                log(f"admitted onto Spot but no Spot node for "
-                    f"{time.monotonic() - spot_waiting:.0f}s - resubmitting "
-                    "to wait for the reserved capacity instead")
+            if fallback:
+                log(fallback)
                 exclude_spot(doc)
                 # The worker that admitted the copy holds its pods; the same
                 # wait as a redispatch, for the same reason.
@@ -2292,31 +2370,6 @@ def main():
 
             if collector:
                 collector.poll(items)
-
-            # Under MultiKueue the local object is a shadow of one that ran on a
-            # worker, so its own status may never be filled in. The Workload's
-            # Finished condition is authoritative.
-            finished = condition(workload, "Finished")
-            wl_done = bool(finished and finished.get("status") == "True")
-            wl_failed = bool(wl_done and "Failed" in finished.get("reason", ""))
-            wl_succeeded = wl_done and not wl_failed
-
-            if doc["kind"] == "Job":
-                status = obj.get("status", {})
-                done = status.get("succeeded", 0) >= 1 or wl_succeeded
-                failed_cond = condition(obj, "Failed")
-                # The condition, not status.failed: that counts failed pods, so
-                # it reaches 1 on the first one and the Job is allowed six.
-                # Kubernetes sets Failed once the Job is done retrying, which is
-                # the question here. The JobSet branch below already reads only
-                # its condition.
-                failed = ((failed_cond and failed_cond.get("status") == "True")
-                          or wl_failed)
-            else:
-                completed = condition(obj, "Completed")
-                done = bool(completed and completed.get("status") == "True") or wl_succeeded
-                failed_cond = condition(obj, "Failed")
-                failed = bool(failed_cond and failed_cond.get("status") == "True") or wl_failed
 
             if done or failed:
                 timing["finished_at"] = (condition_time(workload, "Finished")

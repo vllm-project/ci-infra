@@ -485,11 +485,17 @@ out, so the resubmission waits for the reservation as a shape without Spot
 would. The step log says `admitted onto Spot but no Spot node`.
 
 A reclaimed Spot node takes its pod with it. The pod is marked
-`DisruptionTarget`, which the pod failure policy ignores, so the Job replaces
-it and the step reruns from the start. The replacement is pinned to Spot like
-the first, so if Spot capacity has gone too the same fallback moves it - before
-`recoveryTimeout` (30 minutes, in `kueue/common-config.yaml`) would requeue the
-workload with its Spot quota free, where it could be admitted onto Spot again.
+`DisruptionTarget`, which the pod failure policy ignores, and the Job would
+replace it pinned to Spot like the first. Spot nodes go in waves - on 10-13 one
+lasted 3 minutes at the median on 1x1x1 and 14 on 2x2x1, and 17 of the 41 steps
+reclaimed once were reclaimed again - so the launcher sends the step back to the
+queue instead, as at submission: resubmitted with Spot ruled out, it reruns from
+the start on reserved chips, and is offered Spot again only after another
+`tpu_spot_after_seconds` of waiting for them. The step log says `Spot node
+reclaimed under <pod> - back to the queue`. A step that found no Spot node is
+different: the stockout fallback keeps it off Spot for good.
+`recoveryTimeout` (30 minutes, in `kueue/common-config.yaml`) remains behind
+both, requeuing a workload whose replacement pod cannot start.
 
 Multi-host shapes cannot have Spot: GKE reclaims a slice whole, and Kueue
 admits chips rather than slices.
