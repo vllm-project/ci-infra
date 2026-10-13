@@ -32,8 +32,8 @@ def test_get_pr_labels_retries_5xx_then_succeeds(buildkite_job, capsys):
     assert "failed (attempt 1/5); retrying in 2s" in capsys.readouterr().out
     buildkite_job.assert_called_once()
     assert buildkite_job.call_args.args[0][-2:] == [
-        "infra-retry:job-1",
-        "bootstrap-labels,3,success",
+        "infra-retry:job-1:bootstrap-labels",
+        "bootstrap-labels,3,recovered",
     ]
 
 
@@ -46,7 +46,7 @@ def test_get_pr_labels_gives_up_after_five_attempts(buildkite_job):
 
     assert get.call_count == 5
     assert [c.args[0] for c in sleep.call_args_list] == [2, 4, 8, 16]
-    assert buildkite_job.call_args.args[0][-1] == "bootstrap-labels,5,failed"
+    assert buildkite_job.call_args.args[0][-1] == "bootstrap-labels,5,exhausted"
 
 
 def test_get_pr_labels_does_not_retry_4xx(buildkite_job):
@@ -84,4 +84,4 @@ def test_get_pr_labels_retries_read_timeout(buildkite_job):
         assert git_utils.get_pr_labels("1", "o/r") == ["a"]
 
     assert get.call_args.kwargs["timeout"] == 30
-    assert buildkite_job.call_args.args[0][-1] == "bootstrap-labels,2,success"
+    assert buildkite_job.call_args.args[0][-1] == "bootstrap-labels,2,recovered"

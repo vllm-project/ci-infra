@@ -67,7 +67,7 @@ def _record_infra_retry(attempts: int, outcome: str) -> None:
                 "buildkite-agent",
                 "meta-data",
                 "set",
-                f"infra-retry:{job_id}",
+                f"infra-retry:{job_id}:bootstrap-labels",
                 f"bootstrap-labels,{attempts},{outcome}",
             ],
             check=False,
@@ -97,7 +97,7 @@ def get_pr_labels(pull_request: str, repo_name: str) -> List[str]:
         except requests.RequestException as error:
             if not _is_transient(error) or attempt == LABEL_FETCH_ATTEMPTS:
                 if attempt > 1:
-                    _record_infra_retry(attempt, "failed")
+                    _record_infra_retry(attempt, "exhausted")
                 raise
             delay = 2**attempt
             print(
@@ -106,5 +106,5 @@ def get_pr_labels(pull_request: str, repo_name: str) -> List[str]:
             )
             time.sleep(delay)
     if attempt > 1:
-        _record_infra_retry(attempt, "success")
+        _record_infra_retry(attempt, "recovered")
     return [label["name"] for label in response.json()["labels"]]
