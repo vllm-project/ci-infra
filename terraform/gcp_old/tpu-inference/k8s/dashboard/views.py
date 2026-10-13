@@ -46,8 +46,8 @@ TERMS = {
     "Cohort": "The queues of one TPU generation, sharing one pool of chips.",
     "Nominal": "The chips a queue is guaranteed when it asks for them. A cohort's nominal is the sum "
     "of its queues'.",
-    "In use": "Chips Kueue has admitted workloads for: quota, counted from admission, whether or not "
-    "the pods have reached their nodes yet.",
+    "In use": "Chips of quota Kueue holds for workloads: from the moment it reserves them, while the "
+    "workload is handed to a worker, whether or not the pods have reached their nodes yet.",
     "Free": "Nominal no queue in the cohort is using.",
     "Borrowing": "Chips a queue uses beyond its nominal, taken from other queues' idle nominal in the "
     "same cohort. May borrow caps it.",
@@ -777,6 +777,10 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             c[key] += q[key]
     for c in cohorts.values():
         c["free"] = max(0.0, c["nominal"] - c["used"])
+    for q in queues:
+        if q["cohort"] in cohorts:
+            q["cohort_free"] = cohorts[q["cohort"]]["free"]
+    for c in cohorts.values():
         members = [
             q["nodes"] for q in queues if q["cohort"] == c["name"] and q["nodes"]
         ]
@@ -1475,11 +1479,32 @@ ICONS = {
 }
 
 
+def idle_pill(q: dict) -> str:
+    """A queue's unused nominal, or as much of it as other queues in its
+    cohort must be borrowing: the cohort's free chips are all its queues'
+    unused nominal less what is borrowed, and Kueue does not say whose they
+    borrow, so what this queue leaves unused beyond the cohort's free chips is
+    lent out. Whether it gets them back depends on its reclaim policy."""
+    free = q.get("cohort_free")
+    if free is None or free >= q["idle"]:
+        return f'<span class="pill idle">{num(q["idle"])} idle, lendable</span>'
+    lent = q["idle"] - free
+    back = (
+        "It does not reclaim, so its own steps wait until those borrowers finish."
+        if q.get("reclaim", "Never") == "Never"
+        else "It takes them back by preempting lower-priority borrowers when its own steps need them."
+    )
+    return (
+        f'<span class="pill idle" title="{E(f"Chips of its nominal it is not using, borrowed by other queues in its cohort. {back}")}">'
+        f'{num(lent)} lent to other queues{f" · {num(free)} free" if free else ""}</span>'
+    )
+
+
 def borrow_cell(q: dict) -> str:
     if q["borrowed"]:
         return f'<span class="pill borrowed">borrowing {num(q["borrowed"])}</span>'
     if q["idle"]:
-        return f'<span class="pill idle">{num(q["idle"])} idle, lendable</span>'
+        return idle_pill(q)
     if not q["nominal"]:
         return '<span class="muted">no nominal</span>'
     return '<span class="muted">at nominal</span>'
@@ -1739,7 +1764,7 @@ def render_live_queue(q: dict, now: float) -> str:
             f'<span class="pill borrowed">borrowing {num(q["borrowed"])} {u}</span>'
         )
     elif q["idle"] and tpu:
-        pills.append(f'<span class="pill idle">{num(q["idle"])} idle, lendable</span>')
+        pills.append(idle_pill(q))
     if q["borrowing_limit"] and tpu:
         pills.append(
             f'<span class="pill">may borrow {num(q["borrowing_limit"])}</span>'

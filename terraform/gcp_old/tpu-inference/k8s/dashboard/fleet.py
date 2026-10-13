@@ -375,7 +375,12 @@ def cq_summary(cq: dict) -> dict:
                     if r.get("lendingLimit") is not None:
                         lending = (lending or 0.0) + quantity(r.get("lendingLimit"))
     used = borrowed = spot_used = 0.0
-    for flavor in cq.get("status", {}).get("flavorsUsage", []):
+    # The quota held - what Kueue admits against - not flavorsUsage, which
+    # counts admitted workloads only: on the manager a workload holds its quota
+    # from reservation while MultiKueue hands it to a worker, and leaving those
+    # out showed chips free that Kueue would not give anyone.
+    status = cq.get("status", {})
+    for flavor in status.get("flavorsReservation") or status.get("flavorsUsage") or []:
         for r in flavor["resources"]:
             if r["name"] != resource:
                 continue
@@ -797,7 +802,9 @@ def current(metric: str, by: str) -> str:
 def reserved_agreement(cfg: Config) -> dict:
     """fetch_health's queries for the manager's and the workers' reserved
     chips per generation, and the gap between them that has lasted."""
-    usage = f'kueue_cluster_queue_resource_usage{{{{{{sel}},resource="{TPU}",{RESERVED_FLAVOR}}}}}'
+    # The quota held, which on the manager includes workloads still being
+    # handed to a worker: one held there that no worker admits is a gap too.
+    usage = f'kueue_cluster_queue_resource_reservation{{{{{{sel}},resource="{TPU}",{RESERVED_FLAVOR}}}}}'
     manager = (
         f"sum by (flavor) ("
         f"{current(usage.format(sel=kueue_selector(cfg)), 'cluster_queue, flavor, resource')})"
