@@ -245,6 +245,50 @@ multi-host entry takes `slices` instead: GKE sizes each multi-host pool at
 exactly one slice and rejects any other size, so `slices` is how many slice
 pools the shape gets.
 
+### When the 2x2x4 queue is booked for a day
+
+2x2x4's 32 nominal chips are lent to the other v7x queues whenever it is idle,
+and on a weekday those queues use them: on 10-12 they held more than 96 chips a
+third of the time. A day of back-to-back Kimi-K3 pairs stops the lending, so the
+rest of v7x runs in 96 chips. A replay of 10-12's workloads, waits in minutes:
+
+| 2x2x4 | vllm-torchtpu PR p50 / p90 | vllm-torchtpu main p50 / p90 | tpu-inference PR p90 |
+|---|---|---|---|
+| idle | 1 / 12 | 0 / 7 | 33 |
+| one pair, 50% busy | 2 / 27 | 2 / 11 | 57 |
+| one pair, 80% busy | 4 / 35 | 4 / 12 | 65 |
+| one pair, 100% busy | 6 / 51 | 4 / 15 | 75 |
+
+tpu-inference is unclassed, so on kube it waits behind every vllm-torchtpu PR
+and main workload. If the waits grow well past these, move tpu-inference's PR
+builds to the bare-metal agents, which sit mostly idle (10-27% busy on 10-12):
+
+- Add `CI_FLEET: "bare"` to a top-level `env:` in the tpu-inference-ci
+  pipeline's Steps editor. It applies from the next build, open PRs included,
+  without a rebase. The nightly schedules set `CI_FLEET=kube` on the build,
+  which outranks a pipeline-level value, so they stay on kube; post-merge builds
+  on main stay too, because the upload step exports `CI_FLEET=kube` for them.
+  Delete the line to go back.
+- Not `KUBE_PERCENT` in tpu-inference's `.buildkite/kube_rollout.conf`: a build
+  reads that file from its own commit, so a PR follows it only once rebased.
+
+In the replay at 80% busy this takes vllm-torchtpu PR p90 from 35 to 32
+minutes, and tpu-inference PRs wait p90 10 minutes on bare. tpu-inference's
+post-merge builds still wait p90 about 50 minutes on kube; deleting the upload
+step's main-branch block moves them to bare as well, where their two-host steps
+share the one v7x-16 slice (p90 31 minutes).
+
+Keep vllm-torchtpu on kube. Bare can take about half of its PRs; all of them
+leave bare waits at p90 2.5-3.5 hours.
+
+A second pair at the same time (64 chips) borrows the other two slices, and
+1x1x1 and 2x2x1 reclaim `Never`, so they cannot take those chips back before the
+pair finishes: vllm-torchtpu PR p90 goes past 1.5 hours even with tpu-inference
+on bare. To rule that out for the day, set the 2x2x4 entry's `slices` to 2 in
+`prod.auto.tfvars`, which takes its borrowing limit to 0. That is a
+`terraform apply` (it removes two slice pools) and a deploy, and `slices = 4`
+again afterwards.
+
 ### Rotate the Buildkite agent token
 
 Add a new version to `vllm_buildkite_agent_token` in Secret Manager, then:
