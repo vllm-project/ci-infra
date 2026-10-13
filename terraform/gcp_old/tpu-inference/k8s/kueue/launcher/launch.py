@@ -69,10 +69,10 @@ TOPOLOGY_KEY = "cloud.google.com/gke-tpu-topology"
 # GKE's label on a Spot node, and the nodeSelector Kueue writes into a pod it
 # admits on a Spot flavor (resource_flavor_spot.yaml.tpl).
 SPOT_LABEL = "cloud.google.com/gke-spot"
-# GKE's label on a node that consumes a specific reservation, which the
+# GKE's label for how a node was provisioned, standard or spot, which the
 # reserved flavor of a generation with Spot names as its nodeLabels; see
 # require_spot().
-RESERVATION_LABEL = "cloud.google.com/reservation-name"
+PROVISIONING_LABEL = "cloud.google.com/gke-provisioning"
 TPU_RESOURCE = "google.com/tpu"
 
 # Kueue reads this on the top-level object for both Job and JobSet, never on
@@ -484,9 +484,9 @@ def pin_spot(doc, rules):
     only the keys that flavor's nodeLabels define, and drops the rest
     (flavorassigner.go). The Spot flavor defines cloud.google.com/gke-spot; the
     reserved flavor of a generation with Spot defines
-    cloud.google.com/reservation-name (resource_flavor.yaml.tpl). So a rule on
-    gke-spot alone can rule the Spot flavor out but never the reserved one;
-    pinning to Spot takes a rule on reservation-name too.
+    cloud.google.com/gke-provisioning=standard (resource_flavor.yaml.tpl). So a
+    rule on gke-spot alone can rule the Spot flavor out but never the reserved
+    one; pinning to Spot takes a rule on gke-provisioning too.
 
     Set in every term, since terms are alternatives, and replacing any earlier
     pin rather than adding to it, which would rule out both.
@@ -504,7 +504,7 @@ def pin_spot(doc, rules):
         for term in terms:
             term["matchExpressions"] = [
                 e for e in term.get("matchExpressions", [])
-                if e.get("key") not in keys | {RESERVATION_LABEL}
+                if e.get("key") not in keys | {PROVISIONING_LABEL}
             ] + [dict(r) for r in rules]
 
 
@@ -520,12 +520,12 @@ def require_spot(doc):
     flavor, and a worker with reserved room put a workload on reserved that the
     manager had booked on Spot. The manager's Spot quota then filled with
     workloads on reserved nodes and its view of the reservation fell short of
-    the worker's. DoesNotExist on reservation-name is what rules the reserved
-    flavor out; In on gke-spot is what the pod's node then has to carry.
+    the worker's. gke-provisioning In spot is what rules the reserved flavor
+    out, gke-spot In true what keeps the pod on a Spot node either way.
     """
     pin_spot(doc, [
         {"key": SPOT_LABEL, "operator": "In", "values": ["true"]},
-        {"key": RESERVATION_LABEL, "operator": "DoesNotExist"},
+        {"key": PROVISIONING_LABEL, "operator": "In", "values": ["spot"]},
     ])
 
 

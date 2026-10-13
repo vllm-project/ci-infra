@@ -7,10 +7,10 @@
 # whatever the numbers said. Placement is the workload's anyway: it carries the
 # TPU nodeSelectors itself.
 #
-# A generation with Spot names its reservation, which every one of its reserved
-# nodes carries and no Spot node does: the key the launcher pins a workload to
-# Spot with, since Kueue ignores affinity on keys a flavor does not define
-# (reserved_flavor_labels in generate_manifests.py).
+# A generation with Spot names how its reserved nodes are provisioned,
+# gke-provisioning=standard, where a Spot node says spot: the key the launcher
+# pins a workload to Spot with, since Kueue ignores affinity on keys a flavor
+# does not define (reserved_flavor_labels in generate_manifests.py).
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
