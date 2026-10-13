@@ -284,12 +284,9 @@ def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
     )
 
     image_build = steps_by_key[AMD_ARTIFACT_STEP]
-    # The overlay replaces ensure-ci-base-amd; other dependencies stay.
-    depends_on = [AITER_NIGHTLY_STEP_KEY] + [
-        key for key in image_build.depends_on or [] if key != AMD_CI_BASE_STEP_KEY
-    ]
-    # Point build-test-image.sh at the overlay's image, here so a re-run of
-    # ensure-ci-base-amd cannot undo it. $$ leaves the $(...) to the job.
+    depends_on = [*(image_build.depends_on or []), AITER_NIGHTLY_STEP_KEY]
+    # build-test-image.sh builds on rocm-ci-base-image (stock ci_base). Point it at
+    # the overlay's image here, so a re-run of ensure-ci-base-amd cannot set it back.
     commands = [
         "buildkite-agent meta-data set rocm-ci-base-image "
         '"$$(buildkite-agent meta-data get aiter-nightly-ci-base)"',

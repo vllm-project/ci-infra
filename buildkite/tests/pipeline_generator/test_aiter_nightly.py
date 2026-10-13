@@ -144,9 +144,8 @@ def test_overlay_runs_between_ci_base_and_test_image():
     assert overlay.commands == [OVERLAY_COMMAND]
     assert overlay.group == "Hardware - AMD Build"
 
-    assert build.depends_on == ["aiter-nightly-amd"]
-    # Point the ci_base handoff at the nightly image, then build as usual. $$
-    # defers the substitution from pipeline upload to the job.
+    assert build.depends_on == ["ensure-ci-base-amd", "aiter-nightly-amd"]
+    # Point the ci_base handoff at the nightly image, then build as usual.
     assert build.commands == [
         "buildkite-agent meta-data set rocm-ci-base-image "
         '"$$(buildkite-agent meta-data get aiter-nightly-ci-base)"',
@@ -323,8 +322,11 @@ def test_generate_uploads_the_nightly(fake_global_config, monkeypatch, tmp_path)
     jobs = {job["key"]: job for group in uploaded["steps"] for job in group["steps"]}
     assert "cuda-only" not in jobs and "amd-mi250" not in jobs
     assert jobs["aiter-nightly-amd"]["depends_on"] == ["ensure-ci-base-amd"]
-    assert jobs["image-build-amd"]["depends_on"] == ["aiter-nightly-amd"]
-    # $$ survives to the upload, so Buildkite leaves the $(...) to the job.
+    assert jobs["image-build-amd"]["depends_on"] == [
+        "ensure-ci-base-amd",
+        "aiter-nightly-amd",
+    ]
+    # $$ must survive to the upload so the job, not Buildkite, runs the $(...).
     assert any(
         '"$$(buildkite-agent meta-data get aiter-nightly-ci-base)"' in command
         for command in jobs["image-build-amd"]["commands"]
