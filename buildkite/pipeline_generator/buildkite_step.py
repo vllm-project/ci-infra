@@ -310,15 +310,11 @@ def _get_step_plugin(step: Step):
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
     if step.label.startswith(":docker:"):
+        # TEMPORARY prewarm branch: always build images on the postmerge queues
+        # (read-write sccache) so a PR build fills the cache main will use.
         if "arm64" in step.label:
-            if branch == "main":
-                return AgentQueue.ARM64_CPU_POSTMERGE
-            else:
-                return AgentQueue.ARM64_CPU_PREMERGE
-        if branch == "main":
-            return AgentQueue.CPU_POSTMERGE_US_EAST_1
-        else:
-            return AgentQueue.MEDIUM_CPU_PREMERGE
+            return AgentQueue.ARM64_CPU_POSTMERGE
+        return AgentQueue.CPU_POSTMERGE_US_EAST_1
     elif step.label == "Documentation Build":
         return AgentQueue.SMALL_CPU_PREMERGE
     elif step.device == DeviceType.CPU_SMALL:
