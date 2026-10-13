@@ -481,6 +481,21 @@ def test_a_mirror_without_a_plan_keeps_the_inherited_parallelism(
     assert _render_mirror(step).parallelism == 2
 
 
+def test_a_mirror_without_timings_runs_as_one_job(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    plain = _render_mirror(_mirror_step(automatic_shard=False))
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
+    checkout.clear()
+    job = _render_mirror(_mirror_step())
+    assert job.to_yaml() == plain.to_yaml()
+    assert any(
+        key == "amd-model-executor" and style == "warning" and "runs as one job" in text
+        for key, text, style in checkout
+    )
+
+
 def test_a_mirror_is_planned_when_its_own_step_runs(fake_global_config, checkout):
     # The mirror's effective step decides, not the CUDA step's source deps.
     fake_global_config["list_file_diff"] = ["vllm/model_executor/a.py"]
