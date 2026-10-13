@@ -39,9 +39,11 @@
 {%- endfor -%}
 {%- endmacro %}
 
-{# Native in-pod ROCm CI: per-job container-0 image via kubernetes podSpecPatch. #}
+{# Native in-pod ROCm CI: per-job container-0 image via kubernetes podSpecPatch.
+   amd_build_steps (vLLM's hardware_tests/amd.yaml) is set iff the checkout has
+   .buildkite/scripts/rocm/build.sh; ci_repo is bootstrap's trust decision. #}
 {% macro amd_native_base_image() -%}
-rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID
+{% if amd_build_steps %}{{ ci_repo }}:build-$BUILDKITE_BUILD_ID{% else %}rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID{% endif %}
 {%- endmacro %}
 
 {% macro amd_ci_image() -%}
@@ -88,8 +90,11 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                     volumeMounts:
                       - name: devshm
                         mountPath: /dev/shm
+                      {# The per-build image holds /vllm-workspace; an emptyDir would hide it. #}
+                      {% if not amd_build_steps %}
                       - name: vllm-workspace
                         mountPath: /vllm-workspace
+                      {% endif %}
                     env:
                       - name: AMD_CI_RUNTIME
                         value: native
@@ -123,13 +128,47 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                     emptyDir:
                       medium: Memory
                       sizeLimit: 16Gi
+                  {% if not amd_build_steps %}
                   - name: vllm-workspace
                     emptyDir: {}
+                  {% endif %}
 {%- endmacro %}
 
   - group: "AMD Tests"
     depends_on: ~
     steps:
+      {% if amd_build_steps %}
+      {% for s in amd_build_steps %}
+      {% set ns = namespace(run=not s.source_file_dependencies or run_all == "1" or nightly == "1") %}
+      {% for dep in s.source_file_dependencies or [] %}{% for file in list_file_diff %}
+      {% if file and file[:dep|length] == dep %}{% set ns.run = true %}{% endif %}
+      {% endfor %}{% endfor %}
+      {% if ns.run %}
+      - label: {{ s.label | tojson }}
+        key: {{ s.key | tojson }}
+        depends_on: {{ s.depends_on | tojson }}
+        commands: {{ s.commands | tojson }}
+        timeout_in_minutes: {{ s.timeout_in_minutes }}
+        {% if s.soft_fail %}
+        soft_fail: {{ s.soft_fail | tojson }}
+        {% endif %}
+        {% if s.concurrency_group %}
+        concurrency: {{ s.concurrency or 1 }}
+        concurrency_group: {{ s.concurrency_group | tojson }}
+        {% endif %}
+        {% if s.retry %}
+        retry: {{ s.retry | tojson }}
+        {% endif %}
+        env:
+          ROCM_CI_REPO: {{ ci_repo | tojson }}
+          {% for key, value in (s.env or {}) | items %}
+          {{ key }}: {{ value | tojson }}
+          {% endfor %}
+        agents:
+          queue: amd-cpu
+      {% endif %}
+      {% endfor %}
+      {% else %}
       - label: "AMD: :docker: refresh ROCm base"
         depends_on: ~
         soft_fail: false
@@ -231,6 +270,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
 {{ amd_infra_retry('        ', true) }}
         agents:
           queue: amd-cpu
+      {% endif %}
 
     {% for step in steps %}
     {# In the AITER nightly, only the GPUs AITER prebuilds kernels for:
@@ -282,7 +322,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
       {% endif %}
 
       - label: "{{ step.agent_pool }}: {{ step.label }}"
-        {% if step.dind == false %}
+        {% if step.dind == false and not amd_build_steps %}
         depends_on:
           - {{ "block-" ~ step_slug if step_gated else "image-build-amd" }}
           - verify-native-ci-base-amd
@@ -321,7 +361,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           NUM_NODES: "{{ step.num_nodes or 1 }}"
           # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
           {% if step.dind == false %}
-          # Native: podSpecPatch uses the ci_base alias owned by this build.
+          # Native: podSpecPatch uses the image owned by this build.
           VLLM_CI_BASE_IMAGE: "{{ amd_native_base_image() | safe }}"
           AMD_CI_RUNTIME: "native"
           NATIVE_CI: "true"
