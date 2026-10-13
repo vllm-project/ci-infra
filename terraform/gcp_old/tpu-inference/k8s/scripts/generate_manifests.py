@@ -588,6 +588,47 @@ def priority_classes() -> str:
     )
 
 
+def pool_reservations(workers: list[dict]) -> dict[str, str | None]:
+    """The reservation each shape's reserved pools consume, across the given
+    workers: None for a shape on none, or on several."""
+    seen: dict[str, set] = {}
+    for worker in workers:
+        for pool in worker.get("tpu_node_pools", []):
+            name = f"{pool['machine_type']}-{pool['topology']}"
+            seen.setdefault(name, set()).add(pool.get("reservation_name"))
+    return {name: names.pop() if len(names) == 1 else None for name, names in seen.items()}
+
+
+def reserved_flavor_labels(
+    shapes: dict[str, int], spot: dict[str, int], reservations: dict[str, str | None]
+) -> dict[str, str]:
+    """The nodeLabels block of each reserved flavor that has a Spot flavor
+    beside it: the reservation every one of its pools consumes.
+
+    Kueue matches a pod's node affinity against a flavor using only the keys
+    that flavor defines, so the launcher can pin a workload to Spot only with a
+    rule on a key the reserved flavor defines and Spot nodes lack. GKE labels
+    every node of a pool that consumes a specific reservation with its name,
+    and puts it in the pool's node template, so a reserved pool scaled to zero
+    still matches the nodeSelector Kueue writes from it. One reservation per
+    generation, or the label could name only part of it.
+    """
+    out = {}
+    for family in sorted({cohort(name) for name in spot}):
+        names = {reservations.get(name) for name in shapes if cohort(name) == family}
+        if len(names) != 1 or None in names:
+            raise ValueError(
+                f"{family}: Spot needs every reserved {family} pool on one "
+                f"reservation, so its flavor can name it; got {sorted(map(str, names))} "
+                "(None: a pool on no reservation, or a shape on several)"
+            )
+        out[family] = (
+            "\nspec:\n  nodeLabels:\n"
+            f"    cloud.google.com/reservation-name: {names.pop()}"
+        )
+    return out
+
+
 def queues(
     shapes: dict[str, int],
     namespace: str,
@@ -596,6 +637,7 @@ def queues(
     capacities: dict[str, int | None] | None = None,
     parked: dict[str, int] | None = None,
     spot: dict[str, int] | None = None,
+    reservations: dict[str, str | None] | None = None,
 ) -> str:
     """A flavor per machine family, then a queue per shape sharing it.
 
@@ -611,10 +653,11 @@ def queues(
     nodes.
     """
     spot = {name: chips for name, chips in (spot or {}).items() if chips}
+    labels = reserved_flavor_labels(shapes, spot, reservations or {})
     out = (
         [priority_classes()]
         + [
-            render("resource_flavor", ACCELERATOR=family)
+            render("resource_flavor", ACCELERATOR=family, NODE_LABELS=labels.get(family, ""))
             for family in sorted({cohort(name) for name in shapes})
         ]
         + [
@@ -976,6 +1019,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 checks=False,
                 capacities={name: shape["capacity"] for name, shape in local.items()},
                 spot={name: shape["spot_quota"] for name, shape in local.items()},
+                reservations=pool_reservations([worker]),
             ),
         )
         write(
@@ -1148,6 +1192,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             capacities={name: entry["capacity"] for name, entry in fleet.items()},
             parked={name: entry["parked"] for name, entry in fleet.items()},
             spot={name: entry["spot_quota"] for name, entry in fleet.items()},
+            reservations=pool_reservations(workers),
         ),
     )
     write(

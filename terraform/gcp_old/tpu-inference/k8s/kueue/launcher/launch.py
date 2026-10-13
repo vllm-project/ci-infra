@@ -69,6 +69,10 @@ TOPOLOGY_KEY = "cloud.google.com/gke-tpu-topology"
 # GKE's label on a Spot node, and the nodeSelector Kueue writes into a pod it
 # admits on a Spot flavor (resource_flavor_spot.yaml.tpl).
 SPOT_LABEL = "cloud.google.com/gke-spot"
+# GKE's label on a node that consumes a specific reservation, which the
+# reserved flavor of a generation with Spot names as its nodeLabels; see
+# require_spot().
+RESERVATION_LABEL = "cloud.google.com/reservation-name"
 TPU_RESOURCE = "google.com/tpu"
 
 # Kueue reads this on the top-level object for both Job and JobSet, never on
@@ -373,16 +377,33 @@ def never_dispatched(workload):
             and not (admitted and admitted.get("status") == "True"))
 
 
+def pinned_to_spot(spec):
+    """Whether every term of a pod's required node affinity asks for a Spot
+    node, as require_spot() writes it."""
+    terms = (((spec.get("affinity") or {}).get("nodeAffinity") or {})
+             .get("requiredDuringSchedulingIgnoredDuringExecution") or {}).get(
+                 "nodeSelectorTerms") or []
+    return bool(terms) and all(
+        any(e.get("key") == SPOT_LABEL and e.get("operator") == "In"
+            and "true" in (e.get("values") or [])
+            for e in t.get("matchExpressions", []))
+        for t in terms)
+
+
 def spot_unschedulable(items):
     """The name of a chip-holding pod admitted onto Spot that is waiting for a
     node, else None.
 
     The pod's own nodeSelector says which flavor the worker admitted it on:
     Kueue writes the Spot flavor's into it and the reserved flavor has none.
+    A pod pinned to Spot by its affinity counts too, whichever flavor it got:
+    admitted on reserved it has no Spot toleration and can never schedule, so
+    it needs the same way back as a stockout.
     """
     for pod in items or []:
         spec = pod.get("spec", {})
-        if ((spec.get("nodeSelector") or {}).get(SPOT_LABEL) == "true"
+        if (((spec.get("nodeSelector") or {}).get(SPOT_LABEL) == "true"
+                or pinned_to_spot(spec))
                 and pod_chips(spec)
                 and pod.get("status", {}).get("phase") == "Pending"
                 and not spec.get("nodeName")):
@@ -455,15 +476,22 @@ def spot_eligible(doc, registry, queue):
     return value <= int(registry.get("spot_max_priority", 0))
 
 
-def exclude_spot(doc):
-    """Rule Spot out for every chip-holding pod, so Kueue skips its flavor.
+def pin_spot(doc, rules):
+    """Pin every chip-holding pod to one side of Spot, so Kueue has exactly one
+    flavor to choose, on the manager and on the worker alike.
 
-    Kueue matches a pod's required node affinity against each flavor's
-    nodeLabels: NotIn rules out the Spot flavor, and the reserved flavor has no
-    labels for it to rule out. Added to every term, since terms are
-    alternatives.
+    Kueue matches a pod's required node affinity against each flavor using
+    only the keys that flavor's nodeLabels define, and drops the rest
+    (flavorassigner.go). The Spot flavor defines cloud.google.com/gke-spot; the
+    reserved flavor of a generation with Spot defines
+    cloud.google.com/reservation-name (resource_flavor.yaml.tpl). So a rule on
+    gke-spot alone can rule the Spot flavor out but never the reserved one;
+    pinning to Spot takes a rule on reservation-name too.
+
+    Set in every term, since terms are alternatives, and replacing any earlier
+    pin rather than adding to it, which would rule out both.
     """
-    rule = {"key": SPOT_LABEL, "operator": "NotIn", "values": ["true"]}
+    keys = {r["key"] for r in rules}
     for spec in pod_specs(doc):
         if not pod_chips(spec):
             continue
@@ -474,7 +502,31 @@ def exclude_spot(doc):
         if not terms:
             terms.append({})
         for term in terms:
-            term.setdefault("matchExpressions", []).append(dict(rule))
+            term["matchExpressions"] = [
+                e for e in term.get("matchExpressions", [])
+                if e.get("key") not in keys | {RESERVATION_LABEL}
+            ] + [dict(r) for r in rules]
+
+
+def exclude_spot(doc):
+    """Rule Spot out, so the workload waits for reserved chips."""
+    pin_spot(doc, [{"key": SPOT_LABEL, "operator": "NotIn", "values": ["true"]}])
+
+
+def require_spot(doc):
+    """Rule the reservation out, so the workload runs on Spot or not at all.
+
+    Not both allowed: under MultiKueue the manager and the worker each choose a
+    flavor, and a worker with reserved room put a workload on reserved that the
+    manager had booked on Spot. The manager's Spot quota then filled with
+    workloads on reserved nodes and its view of the reservation fell short of
+    the worker's. DoesNotExist on reservation-name is what rules the reserved
+    flavor out; In on gke-spot is what the pod's node then has to carry.
+    """
+    pin_spot(doc, [
+        {"key": SPOT_LABEL, "operator": "In", "values": ["true"]},
+        {"key": RESERVATION_LABEL, "operator": "DoesNotExist"},
+    ])
 
 
 def resubmit(kind, name, doc, before_create=None):
@@ -2240,16 +2292,17 @@ def main():
                 continue
 
             # A run that may use Spot, still waiting for quota after spot_after:
-            # resubmitted without the rule, so Kueue may admit it onto Spot when
-            # the reservation is still full. Once, and not after falling back
-            # from Spot. Nothing was reserved, so no worker holds a copy.
+            # resubmitted pinned to Spot; see require_spot(). Once, and not after
+            # falling back from Spot. Nothing was reserved, so no worker holds a
+            # copy.
             if (spot_doc is not None and not spot_allowed and not spot_excluded
                     and reserved is None and not admitted
                     and time.monotonic() - spot_offer_from > spot_after):
                 spot_allowed = True
                 log(f"waited {time.monotonic() - spot_offer_from:.0f}s for "
-                    "reserved chips - resubmitting so it may run on Spot")
-                doc = spot_doc
+                    "reserved chips - resubmitting to run on Spot")
+                doc = copy.deepcopy(spot_doc)
+                require_spot(doc)
                 created = with_grace(resubmit, kind, name, doc)
                 if created is None:
                     log(f"{kind}/{name} cannot be resubmitted")
