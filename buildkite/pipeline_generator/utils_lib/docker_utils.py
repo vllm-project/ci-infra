@@ -12,10 +12,9 @@ def get_image(cpu: bool = False, arm64: bool = False) -> str:
     registries = global_config["registries"]
     repositories = global_config["repositories"]
     image = None
-    if branch == "main":
-        image = f"{registries}/{repositories['main']}:{commit}"
-    else:
-        image = f"{registries}/{repositories['premerge']}:{commit}"
+    # TEMPORARY prewarm branch: always use the postmerge repo so the image
+    # build doesn't skip on an existing premerge image.
+    image = f"{registries}/{repositories['main']}:{commit}"
     # In the full torch-nightly run, every step must use the nightly image. Use
     # the dedicated -torch-nightly tag so it never collides with the shared
     # postmerge tag (no overwrite / race with the regular postmerge image).
