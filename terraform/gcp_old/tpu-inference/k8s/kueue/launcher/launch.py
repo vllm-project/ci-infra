@@ -385,6 +385,18 @@ def spot_unschedulable(items):
     return False
 
 
+def spot_eligible(doc, registry):
+    """Whether this run may ever use Spot: its priority class at or below the
+    registry's Spot line. Unclassed scores 0. A registry that predates the
+    values lets only unclassed and low through."""
+    cls = doc.get("metadata", {}).get("labels", {}).get(PRIORITY_LABEL)
+    values = registry.get("priority_values")
+    if not values:
+        return cls in (None, "low")
+    value = values.get(cls, 0) if cls else 0
+    return value <= int(registry.get("spot_max_priority", 0))
+
+
 def exclude_spot(doc):
     """Rule Spot out for every chip-holding pod, so Kueue skips its flavor.
 
@@ -1896,6 +1908,14 @@ def main():
     finalise(doc, profile, registry, name, labels, owner_reference(),
              shlex.join(command) if command else None, manifest)
     kind = SUPPORTED_KINDS[doc["kind"]]
+    # Every run starts with Spot ruled out, so an overflow the reservation
+    # clears within minutes never lands on Spot, where it would hold quota while
+    # GCE has no VM to give and leave reserved chips idle as they free up. A run
+    # at or below the Spot priority line keeps a copy without the rule, which
+    # the watch below submits once it has waited spot_after_seconds for
+    # reserved chips.
+    spot_doc = copy.deepcopy(doc) if spot_eligible(doc, registry) else None
+    exclude_spot(doc)
     # The cpu profile's one host when no pod holds chips.
     hosts = chip_hosts(doc) or int(profile["hosts"])
 
@@ -2029,6 +2049,7 @@ def main():
         redispatch_after = int(registry.get("dispatch_retry_seconds", 300))
         redispatch_max = int(registry.get("dispatch_retries", 2))
         spot_wait = int(registry.get("spot_wait_seconds", 900))
+        spot_after = int(registry.get("spot_after_seconds", 600))
         started = time.monotonic()
         reserved = None
         # Since when the current submission has been reserved without MultiKueue
@@ -2045,6 +2066,7 @@ def main():
         # spot_unschedulable().
         spot_waiting = None
         spot_excluded = False
+        spot_allowed = False
         job_id = labels.get("buildkite.com/job-id")
 
         while True:
@@ -2147,6 +2169,27 @@ def main():
                 reserved = None
                 undispatched = None
                 offered = set()
+                last_note = None
+                continue
+
+            # A run that may use Spot, still waiting for quota after spot_after:
+            # resubmitted without the rule, so Kueue may admit it onto Spot when
+            # the reservation is still full. Once, and not after falling back
+            # from Spot. Nothing was reserved, so no worker holds a copy.
+            if (spot_doc is not None and not spot_allowed and not spot_excluded
+                    and reserved is None and not admitted
+                    and time.monotonic() - started > spot_after):
+                spot_allowed = True
+                log(f"waited {time.monotonic() - started:.0f}s for reserved "
+                    "chips - resubmitting so it may run on Spot")
+                doc = spot_doc
+                created = with_grace(resubmit, kind, name, doc)
+                if created is None:
+                    log(f"{kind}/{name} cannot be resubmitted")
+                    stop_announcing()
+                    delete_workload(kind, name)
+                    return finish("not_admitted", 1)
+                uid = created["metadata"]["uid"]
                 last_note = None
                 continue
 

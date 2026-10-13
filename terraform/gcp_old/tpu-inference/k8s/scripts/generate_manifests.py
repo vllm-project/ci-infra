@@ -780,12 +780,18 @@ def launcher_profiles(
             # Checked in the launcher, where the valid names are known: Kueue
             # refuses to create a Workload naming a class it cannot find.
             "priorities": sorted(WORKLOAD_PRIORITIES),
+            # And their values, for the Spot line below.
+            "priority_values": {
+                name: value for name, (value, _) in sorted(WORKLOAD_PRIORITIES.items())
+            },
             "queue_max_seconds": int(tfvars["tpu_queue_max_seconds"]),
             "runtime_max_seconds": int(tfvars["tpu_runtime_max_seconds"]),
             "admission_max_seconds": int(tfvars["tpu_admission_max_seconds"]),
             "dispatch_retry_seconds": int(tfvars["tpu_dispatch_retry_seconds"]),
             "dispatch_retries": int(tfvars["tpu_dispatch_retries"]),
             "spot_wait_seconds": int(tfvars["tpu_spot_wait_seconds"]),
+            "spot_after_seconds": int(tfvars["tpu_spot_after_seconds"]),
+            "spot_max_priority": int(tfvars["tpu_spot_max_priority"]),
             # Where the launcher streams one timing record per workload. The
             # table is modules/ci_monitoring's, beside the Buildkite step
             # table it joins to on job_id; k8s/iam.tf lets the launcher write

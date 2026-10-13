@@ -461,6 +461,19 @@ admits on that flavor and to no other, so a workload admitted on the
 reservation can never land on a Spot node, and the reserved flavor and pools
 are unchanged.
 
+Which steps reach Spot is the launcher's choice, by priority and by wait. A
+step above `tpu_spot_max_priority` (0: integration, pre-merge, post-merge,
+oncall-fix) never uses Spot; it waits for reserved chips and, outranking the
+rest, takes them first as they free up. A step at or below it (unclassed, low)
+is submitted with Spot ruled out too, and only once it has waited
+`tpu_spot_after_seconds` (10 minutes) for reserved chips is it resubmitted with
+Spot allowed - the step log says `waited Ns for reserved chips - resubmitting so
+it may run on Spot`. Kueue sends a workload to Spot the moment the reservation
+is full, so without the wait a small overflow that the reservation would clear
+in minutes landed on Spot, held Spot quota through a stockout, and left
+reserved chips idle as they freed up: on 10-13, 27 chip-hours idle while steps
+waited in under two hours, against 32 chip-hours Spot delivered.
+
 Spot quota is a count, not capacity. Kueue admits onto it whether or not GCE
 has a Spot VM to give, and a pool that cannot scale up changes nothing Kueue
 sees. The launcher covers that: when a chip-holding pod admitted onto Spot (it

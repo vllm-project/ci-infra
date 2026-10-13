@@ -322,6 +322,23 @@ variable "tpu_spot_wait_seconds" {
   EOT
 }
 
+variable "tpu_spot_after_seconds" {
+  type        = number
+  description = <<-EOT
+    How long a step at or below tpu_spot_max_priority waits for reserved chips
+    before the launcher resubmits it with Spot allowed. Every step starts with
+    Spot ruled out: Kueue sends a workload to Spot the moment the reservation
+    is full, so a small overflow the reservation clears within minutes landed
+    on Spot, held its quota through a stockout, and left reserved chips idle
+    as they freed up. Twice the reservation's p90 scale-up.
+  EOT
+}
+
+variable "tpu_spot_max_priority" {
+  type        = number
+  description = "The highest WorkloadPriorityClass value that may use Spot; unclassed scores 0. Steps above it - integration, pre-merge, post-merge, oncall-fix - wait for reserved chips, and take them first as they free up."
+}
+
 variable "tpu_runtime_max_seconds" {
   type        = number
   description = <<-EOT
