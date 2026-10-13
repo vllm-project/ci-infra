@@ -466,13 +466,24 @@ step above `tpu_spot_max_priority` (50: post-merge, oncall-fix) never uses
 Spot; it waits for reserved chips and, outranking the rest, takes them first as
 they free up. A step at or below it (pre-merge, integration, unclassed, low)
 is submitted with Spot ruled out too, and only once it has waited
-`tpu_spot_after_seconds` (10 minutes) for reserved chips is it resubmitted with
-Spot allowed - the step log says `waited Ns for reserved chips - resubmitting so
-it may run on Spot`. Kueue sends a workload to Spot the moment the reservation
-is full, so without the wait a small overflow that the reservation would clear
-in minutes landed on Spot, held Spot quota through a stockout, and left
-reserved chips idle as they freed up: on 10-13, 27 chip-hours idle while steps
-waited in under two hours, against 32 chip-hours Spot delivered.
+`tpu_spot_after_seconds` (10 minutes) for reserved chips is it resubmitted
+pinned to Spot (`cloud.google.com/gke-spot In ["true"]`) - the step log says
+`waited Ns for reserved chips - resubmitting to run on Spot`. Kueue sends a
+workload to Spot the moment the reservation is full, so without the wait a
+small overflow that the reservation would clear in minutes landed on Spot, held
+Spot quota through a stockout, and left reserved chips idle as they freed up:
+on 10-13, 27 chip-hours idle while steps waited in under two hours, against 32
+chip-hours Spot delivered.
+
+Pinned to Spot rather than allowed both, because under MultiKueue the manager
+and the worker each pick a flavor. With both allowed, a workload the manager
+booked on Spot could land on the worker's reservation, and the manager's Spot
+quota filled with workloads running on reserved nodes, leaving no room for
+other overflow: on 10-13 at 21:00 it had booked 60 of 64 2x2x1 and 31 of 32
+1x1x1 Spot chips, against 36 and 12 actually on Spot nodes. The cost is that a
+pinned step cannot take a reserved chip that frees up while it waits for Spot
+quota or a Spot node; the fallback below still moves it back when it is
+admitted onto Spot and gets no node.
 
 Spot quota is a count, not capacity. Kueue admits onto it whether or not GCE
 has a Spot VM to give, and a pool that cannot scale up changes nothing Kueue
