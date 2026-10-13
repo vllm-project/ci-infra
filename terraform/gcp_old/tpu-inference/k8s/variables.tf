@@ -63,6 +63,25 @@ variable "release_channel" {
   default = "REGULAR"
 }
 
+variable "maintenance_window" {
+  type = object({
+    start_time = string
+    end_time   = string
+    recurrence = string
+  })
+  description = <<-EOT
+    When GKE may upgrade every cluster's control plane and nodes: the first
+    occurrence as RFC 3339 times, repeated by an RFC 5545 RRULE. A node upgrade
+    drains each node in turn, and a drained TPU node takes a running step's pod
+    with it - the Job replaces the pod and the step reruns from the start.
+    Without a window GKE upgrades at any hour; on 10-13 it drained the reserved
+    2x2x1 pool at midday and evicted five running steps in half an hour.
+
+    GKE requires at least 48 hours of window in any 32 days, in pieces of at
+    least 4 hours.
+  EOT
+}
+
 variable "enable_private_endpoint" {
   type        = bool
   description = "Whether the control plane is reachable only from inside the VPC. False while the cluster is administered from laptops and from Buildkite agents that live outside it."

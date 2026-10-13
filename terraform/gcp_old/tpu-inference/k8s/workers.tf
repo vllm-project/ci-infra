@@ -37,6 +37,14 @@ resource "google_container_cluster" "worker" {
     channel = var.release_channel
   }
 
+  maintenance_policy {
+    recurring_window {
+      start_time = var.maintenance_window.start_time
+      end_time   = var.maintenance_window.end_time
+      recurrence = var.maintenance_window.recurrence
+    }
+  }
+
   private_cluster_config {
     enable_private_nodes    = true
     enable_private_endpoint = false

@@ -41,6 +41,14 @@ resource "google_container_cluster" "manager" {
     channel = var.release_channel
   }
 
+  maintenance_policy {
+    recurring_window {
+      start_time = var.maintenance_window.start_time
+      end_time   = var.maintenance_window.end_time
+      recurrence = var.maintenance_window.recurrence
+    }
+  }
+
   fleet {
     project = var.project_id
   }
