@@ -413,9 +413,9 @@ def get_amd_k8s_plugin(
     }
     # DPX controllers allocate partitions through DRA resourceClaims. Adding
     # amd.com/gpu would request a second allocation alongside that partition.
-    if not uses_dra:
-        # An explicit zero overrides the typed controller PodSpec's inherited
-        # GPU request for no_gpu jobs; omitting it would retain that request.
+    # Quantity 0 still invokes the AMD device plugin and fails admission on
+    # nodes with allocatable GPUs of 0. Omit the resource for CPU-only jobs.
+    if not uses_dra and gpu_count > 0:
         gpu_resource = str(gpu_count)
         plugin["kubernetes"]["podSpecPatch"]["containers"][0]["resources"] = {
             "limits": {"amd.com/gpu": gpu_resource},
