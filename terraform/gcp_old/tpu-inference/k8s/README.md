@@ -484,6 +484,15 @@ chip-holding pods. Kueue skips a flavor whose nodeLabels that affinity rules
 out, so the resubmission waits for the reservation as a shape without Spot
 would. The step log says `admitted onto Spot but no Spot node`.
 
+The cluster autoscaler's `FailedScaleUp` event on the pod ("GCE out of
+resources") moves that sooner: the launcher reads the pending pod's events every
+30 seconds and resubmits the same way `tpu_spot_failed_scale_up_seconds` (5
+minutes) after the first one, if the pod still has no node. Not at once,
+because the event goes to every pod a batch of new nodes was for when any node
+in the batch fails, and the pool keeps retrying: on 10-13 all 9 Spot pods that
+had one got a node, 6 of them within 5 minutes. The step log says `no Spot node
+added for <pod> yet` when the event arrives.
+
 A reclaimed Spot node takes its pod with it. The pod is marked
 `DisruptionTarget`, which the pod failure policy ignores, and the Job would
 replace it pinned to Spot like the first. Spot nodes go in waves - on 10-13 one

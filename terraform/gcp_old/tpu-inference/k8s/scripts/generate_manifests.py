@@ -790,6 +790,7 @@ def launcher_profiles(
             "dispatch_retry_seconds": int(tfvars["tpu_dispatch_retry_seconds"]),
             "dispatch_retries": int(tfvars["tpu_dispatch_retries"]),
             "spot_wait_seconds": int(tfvars["tpu_spot_wait_seconds"]),
+            "spot_failed_scale_up_seconds": int(tfvars["tpu_spot_failed_scale_up_seconds"]),
             "spot_after_seconds": int(tfvars["tpu_spot_after_seconds"]),
             "spot_max_priority": int(tfvars["tpu_spot_max_priority"]),
             # The queues with a Spot flavor: a run in any other has no Spot to

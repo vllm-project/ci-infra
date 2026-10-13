@@ -152,6 +152,10 @@ POLL_SECONDS = 5
 # node can be created, run and removed between two ordinary polls, leaving
 # nothing to read.
 FIRST_LOG_POLL_SECONDS = 2
+# How often a pod waiting for a Spot node has its events read. The autoscaler
+# gives up on a scale-up minutes after starting it, so a slower read loses
+# nothing and saves a Connect Gateway round trip per turn.
+SPOT_EVENTS_POLL_SECONDS = 30
 
 # Worker credentials are kept out of the default kubeconfig; see worker_env().
 WORKER_KUBECONFIG = "/tmp/worker.kubeconfig"
@@ -370,7 +374,8 @@ def never_dispatched(workload):
 
 
 def spot_unschedulable(items):
-    """Whether a chip-holding pod admitted onto Spot is waiting for a node.
+    """The name of a chip-holding pod admitted onto Spot that is waiting for a
+    node, else None.
 
     The pod's own nodeSelector says which flavor the worker admitted it on:
     Kueue writes the Spot flavor's into it and the reserved flavor has none.
@@ -381,8 +386,30 @@ def spot_unschedulable(items):
                 and pod_chips(spec)
                 and pod.get("status", {}).get("phase") == "Pending"
                 and not spec.get("nodeName")):
-            return True
-    return False
+            return pod["metadata"]["name"]
+    return None
+
+
+def spot_scale_up_failed(env, pod):
+    """The cluster autoscaler's FailedScaleUp message on this pod, else None.
+
+    The autoscaler sends it to every pod a batch of new nodes was for when any
+    node in the batch fails, so it does not mean this pod gets no node: on
+    10-13 all 9 Spot pods that had one got a node, 6 of them within 5 minutes.
+    """
+    proc = worker_kubectl(
+        env, "get", "events", "--field-selector",
+        f"involvedObject.name={pod},reason=FailedScaleUp", "-o", "json",
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        events = json.loads(proc.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return None
+    if not events:
+        return None
+    return events[0].get("message") or "FailedScaleUp"
 
 
 # DisruptionTarget reasons that mean the node went away under the pod: the
@@ -2080,6 +2107,7 @@ def main():
         redispatch_after = int(registry.get("dispatch_retry_seconds", 300))
         redispatch_max = int(registry.get("dispatch_retries", 2))
         spot_wait = int(registry.get("spot_wait_seconds", 900))
+        spot_failed_wait = int(registry.get("spot_failed_scale_up_seconds", 300))
         spot_after = int(registry.get("spot_after_seconds", 600))
         started = time.monotonic()
         reserved = None
@@ -2096,6 +2124,11 @@ def main():
         # Since when a pod admitted onto Spot has been waiting for a node; see
         # spot_unschedulable().
         spot_waiting = None
+        # The pod waiting, when its events were last read, and since when and
+        # why the autoscaler has failed to add a node for it.
+        spot_pod = None
+        spot_events_read = None
+        spot_failed = None
         spot_excluded = False
         spot_allowed = False
         # Since when the current submission has waited for reserved chips: the
@@ -2297,13 +2330,29 @@ def main():
             # nothing Kueue sees. Waited out, waitForPodsReady requeues the
             # workload with its Spot quota free, and it can be admitted onto
             # Spot again. Resubmitted once with Spot ruled out, it waits for the
-            # reservation instead.
+            # reservation instead. The autoscaler failing to add a node for the
+            # pod is the earlier sign, but only a sign; see
+            # spot_scale_up_failed().
             if items is not None:
-                if not spot_excluded and spot_unschedulable(items):
+                pending = None if spot_excluded else spot_unschedulable(items)
+                if pending:
                     if spot_waiting is None:
                         spot_waiting = time.monotonic()
+                    if pending != spot_pod:
+                        spot_pod, spot_events_read, spot_failed = pending, None, None
+                    if spot_failed is None and (
+                            spot_events_read is None
+                            or time.monotonic() - spot_events_read
+                            >= SPOT_EVENTS_POLL_SECONDS):
+                        spot_events_read = time.monotonic()
+                        why = spot_scale_up_failed(genv, pending)
+                        if why:
+                            spot_failed = (time.monotonic(), why)
+                            log(f"no Spot node added for {pending} yet: {why} - "
+                                f"waiting up to {spot_failed_wait}s more")
                 else:
                     spot_waiting = None
+                    spot_pod, spot_events_read, spot_failed = None, None, None
             # A reclaimed Spot node takes its pod with it, and the Job's
             # replacement would be pinned to Spot like the first - where nodes go
             # in waves: on 10-13 one lasted 3 minutes at the median on 1x1x1 and
@@ -2323,6 +2372,14 @@ def main():
                     doc = copy.deepcopy(spot_doc)
                 spot_allowed = False
                 spot_offer_from = time.monotonic()
+            elif (spot_failed is not None
+                    and time.monotonic() - spot_failed[0] > spot_failed_wait):
+                fallback = (f"admitted onto Spot but no Spot node "
+                            f"{time.monotonic() - spot_failed[0]:.0f}s after "
+                            f"the autoscaler failed to add one ({spot_failed[1]})"
+                            " - resubmitting to wait for the reserved capacity "
+                            "instead")
+                spot_excluded = True
             elif (spot_waiting is not None
                     and time.monotonic() - spot_waiting > spot_wait):
                 fallback = (f"admitted onto Spot but no Spot node for "
@@ -2357,6 +2414,7 @@ def main():
                 genv = None
                 collector = None
                 spot_waiting = None
+                spot_pod, spot_events_read, spot_failed = None, None, None
                 continue
 
             # A failed read is not a started pod: leave it to the next turn.
