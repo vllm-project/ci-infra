@@ -14,7 +14,7 @@ def get_image(cpu: bool = False, arm64: bool = False) -> str:
     image = None
     # TEMPORARY prewarm branch: always use the postmerge repo so the image
     # build doesn't skip on an existing premerge image.
-    image = f"{registries}/{repositories['main']}:{commit}"
+    image = f"{registries}/{repositories['main']}:{commit}-prewarm"
     # In the full torch-nightly run, every step must use the nightly image. Use
     # the dedicated -torch-nightly tag so it never collides with the shared
     # postmerge tag (no overwrite / race with the regular postmerge image).
