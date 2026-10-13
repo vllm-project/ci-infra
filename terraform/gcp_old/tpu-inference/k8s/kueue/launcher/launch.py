@@ -455,15 +455,17 @@ def spot_eligible(doc, registry, queue):
     return value <= int(registry.get("spot_max_priority", 0))
 
 
-def exclude_spot(doc):
-    """Rule Spot out for every chip-holding pod, so Kueue skips its flavor.
+def pin_spot(doc, operator):
+    """Pin every chip-holding pod to one side of Spot, so Kueue has one flavor
+    to choose.
 
     Kueue matches a pod's required node affinity against each flavor's
-    nodeLabels: NotIn rules out the Spot flavor, and the reserved flavor has no
-    labels for it to rule out. Added to every term, since terms are
-    alternatives.
+    nodeLabels. The reserved flavor has no Spot label, so NotIn rules out only
+    the Spot flavor and In rules out only the reserved one. Set in every term,
+    since terms are alternatives, and replacing any earlier pin rather than
+    adding to it, which would rule out both.
     """
-    rule = {"key": SPOT_LABEL, "operator": "NotIn", "values": ["true"]}
+    rule = {"key": SPOT_LABEL, "operator": operator, "values": ["true"]}
     for spec in pod_specs(doc):
         if not pod_chips(spec):
             continue
@@ -474,7 +476,27 @@ def exclude_spot(doc):
         if not terms:
             terms.append({})
         for term in terms:
-            term.setdefault("matchExpressions", []).append(dict(rule))
+            term["matchExpressions"] = [
+                e for e in term.get("matchExpressions", [])
+                if e.get("key") != SPOT_LABEL
+            ] + [dict(rule)]
+
+
+def exclude_spot(doc):
+    """Rule Spot out, so the workload waits for reserved chips."""
+    pin_spot(doc, "NotIn")
+
+
+def require_spot(doc):
+    """Rule the reservation out, so the workload runs on Spot or not at all.
+
+    Not both allowed: under MultiKueue the manager and the worker each choose a
+    flavor, and a worker with reserved room put a workload on reserved that the
+    manager had booked on Spot. The manager's Spot quota then filled with
+    workloads on reserved nodes and held back every other Spot overflow; see
+    "Spot overflow" in README.md.
+    """
+    pin_spot(doc, "In")
 
 
 def resubmit(kind, name, doc, before_create=None):
@@ -1970,8 +1992,8 @@ def main():
     # clears within minutes never lands on Spot, where it would hold quota while
     # GCE has no VM to give and leave reserved chips idle as they free up. A run
     # at or below the Spot priority line keeps a copy without the rule, which
-    # the watch below submits once it has waited spot_after_seconds for
-    # reserved chips.
+    # the watch below submits pinned to Spot once it has waited
+    # spot_after_seconds for reserved chips.
     spot_doc = copy.deepcopy(doc) if spot_eligible(doc, registry, profile["queue"]) else None
     exclude_spot(doc)
     # The cpu profile's one host when no pod holds chips.
@@ -2240,16 +2262,17 @@ def main():
                 continue
 
             # A run that may use Spot, still waiting for quota after spot_after:
-            # resubmitted without the rule, so Kueue may admit it onto Spot when
-            # the reservation is still full. Once, and not after falling back
-            # from Spot. Nothing was reserved, so no worker holds a copy.
+            # resubmitted pinned to Spot; see require_spot(). Once, and not after
+            # falling back from Spot. Nothing was reserved, so no worker holds a
+            # copy.
             if (spot_doc is not None and not spot_allowed and not spot_excluded
                     and reserved is None and not admitted
                     and time.monotonic() - spot_offer_from > spot_after):
                 spot_allowed = True
                 log(f"waited {time.monotonic() - spot_offer_from:.0f}s for "
-                    "reserved chips - resubmitting so it may run on Spot")
-                doc = spot_doc
+                    "reserved chips - resubmitting to run on Spot")
+                doc = copy.deepcopy(spot_doc)
+                require_spot(doc)
                 created = with_grace(resubmit, kind, name, doc)
                 if created is None:
                     log(f"{kind}/{name} cannot be resubmitted")
