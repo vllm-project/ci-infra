@@ -385,10 +385,12 @@ def spot_unschedulable(items):
     return False
 
 
-def spot_eligible(doc, registry):
-    """Whether this run may ever use Spot: its priority class at or below the
-    registry's Spot line. Unclassed scores 0. A registry that predates the
-    values lets only unclassed and low through."""
+def spot_eligible(doc, registry, queue):
+    """Whether this run may ever use Spot: its queue has a Spot flavor and its
+    priority class is at or below the registry's Spot line. Unclassed scores 0.
+    A registry that predates the values lets only unclassed and low through."""
+    if queue not in (registry.get("spot_queues") or []):
+        return False
     cls = doc.get("metadata", {}).get("labels", {}).get(PRIORITY_LABEL)
     values = registry.get("priority_values")
     if not values:
@@ -1914,7 +1916,7 @@ def main():
     # at or below the Spot priority line keeps a copy without the rule, which
     # the watch below submits once it has waited spot_after_seconds for
     # reserved chips.
-    spot_doc = copy.deepcopy(doc) if spot_eligible(doc, registry) else None
+    spot_doc = copy.deepcopy(doc) if spot_eligible(doc, registry, profile["queue"]) else None
     exclude_spot(doc)
     # The cpu profile's one host when no pod holds chips.
     hosts = chip_hosts(doc) or int(profile["hosts"])

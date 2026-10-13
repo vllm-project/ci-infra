@@ -792,6 +792,9 @@ def launcher_profiles(
             "spot_wait_seconds": int(tfvars["tpu_spot_wait_seconds"]),
             "spot_after_seconds": int(tfvars["tpu_spot_after_seconds"]),
             "spot_max_priority": int(tfvars["tpu_spot_max_priority"]),
+            # The queues with a Spot flavor: a run in any other has no Spot to
+            # wait for, and resubmitting it would only cost its place in line.
+            "spot_queues": sorted(name for name, entry in fleet.items() if entry["spot_quota"]),
             # Where the launcher streams one timing record per workload. The
             # table is modules/ci_monitoring's, beside the Buildkite step
             # table it joins to on job_id; k8s/iam.tf lets the launcher write
