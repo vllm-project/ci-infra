@@ -229,9 +229,10 @@ worker_clusters = [
         nominal_quota = 16
 
         # Overflow onto Spot once the reservation and what this shape can
-        # borrow are spent. Sized as a placeholder: the project's Spot quota for
-        # tpu7x-standard-1t in us-central1-c is not confirmed yet.
-        spot = { max_nodes = 16 }
+        # borrow are spent. The project has 256 Spot v7x chips in us-central1;
+        # this and 2x2x1's pool take 96 of them, so a Spot stockout strands
+        # fewer steps on Spot until the launcher falls back.
+        spot = { max_nodes = 32 }
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -243,8 +244,8 @@ worker_clusters = [
         max_nodes     = 32
         nominal_quota = 64
 
-        # As for 1x1x1; Spot quota for tpu7x-standard-4t not confirmed yet.
-        spot = { max_nodes = 4 }
+        # As for 1x1x1: 64 Spot chips, sixteen slices.
+        spot = { max_nodes = 16 }
       },
       {
         # Eight chips as one slice across two VMs, placed from the named
