@@ -1,9 +1,11 @@
 ---
-# What the health dashboard may read on a worker: events in the fleet's
-# namespace, and nothing else. A TPU pod's scheduling failures, scale-ups,
-# failed creates and failure-policy kills are recorded here, where the pod runs,
-# not on the manager. Everything else the dashboard reports comes from the
-# manager; see dashboard_rbac.yaml.tpl.
+# What the health dashboard may read on a worker: events and pods in the
+# fleet's namespace, and nothing else. A TPU pod's scheduling failures,
+# scale-ups, failed creates and failure-policy kills are recorded here, where
+# the pod runs, not on the manager. So is the flavor the pod really got: the
+# worker's Kueue admits a workload again and picks its own, which is what puts
+# a pod on a Spot node or not. Everything else the dashboard reports comes from
+# the manager; see dashboard_rbac.yaml.tpl.
 #
 # The subject is the dashboard's Google service account, which reaches this
 # cluster through Connect Gateway.
@@ -14,7 +16,7 @@ metadata:
   namespace: ${NAMESPACE}
 rules:
   - apiGroups: [""]
-    resources: ["events"]
+    resources: ["events", "pods"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

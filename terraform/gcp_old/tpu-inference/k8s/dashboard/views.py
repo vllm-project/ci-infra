@@ -79,10 +79,11 @@ TERMS = {
     "Held by workloads": "The share of chip-hours on nodes that an admitted workload held; the rest is "
     "idle on nodes.",
     "Nodes created": "Nodes a pool scaled up during the range. Lifetime is appearing to disappearing.",
-    "Spot": "Chips on Spot VMs beside the reservation, for a single-host shape: Kueue admits onto them "
-    "only once the reservation and what the shape may borrow are spent. GCE can take a Spot VM back at "
-    "30 seconds' notice, and the step reruns. Spot quota is a count GCE may not be able to fill, so it "
-    "is not part of nominal, usage or borrowing anywhere on these pages.",
+    "Spot": "Chips on Spot VMs beside the reservation, for a single-host shape. The launcher moves a step "
+    "there, pinned to Spot, once it has waited for reserved chips (10 minutes, tpu_spot_after_seconds) "
+    "at pre-merge priority or below; higher priorities wait for reserved chips. A Spot step with no node "
+    "goes back to wait for reserved, and one whose VM GCE takes back reruns. Spot quota is a count GCE "
+    "may not fill, so it is not part of nominal, usage or borrowing anywhere on these pages.",
     "Utilization": "Mean admitted (or busy) chips over the range, over mean nominal.",
     "Chips held": "Chips occupied by running work, as a share of the chips the fleet had: on bare metal "
     "the chips of the VMs a job holds, on kube the chips Kueue admitted. Occupancy, not compute - a "
@@ -93,6 +94,9 @@ TERMS = {
     "Evicted": "A running workload stopped by the fleet - preempted by a queue reclaiming lent chips, "
     "or its node gone - which reruns from the start.",
     "Requeue": "A workload that lost its reservation, usually to preemption, and went back in line.",
+    "Preempted": "Why a step went back in line, last 24 h. Reclaimed: the lending queue took its borrowed "
+    "chips back. Preempted: a higher priority in its queue took them. Spot node lost: GCE took the VM back. "
+    "No Spot node: none came, so it waits for reserved chips. Not ready: its pods did not start in time.",
     "Redispatch": "The launcher resubmitting a reservation no worker picked up.",
     "Test failure": "The test exited non-zero.",
     "Infra failure": "A workload the fleet ended: never admitted, API unreachable, storage eviction, "
@@ -413,15 +417,18 @@ SOURCES = {
             "Jobs and JobSets",
             "Agent pods",
             "Each queue's pending order (visibility API)",
+            "Each worker's TPU pods: which run on Spot nodes, which wait for one",
         ],
         "needs": [
             "roles/gkehub.gatewayReader",
             "tpu-ci-dashboard ClusterRole and Role - "
             "kueue/generated/manager/workload/40-dashboard-rbac.yaml, applied by hand",
+            "tpu-ci-dashboard Role on each worker, under its generated workload directory",
         ],
         "fails": [
             "403 from the gateway: the IAM grant",
             "403 naming a resource: the RBAC file is not applied",
+            "pods on a worker: its Role is not applied; the Spot figures leave its jobs out",
         ],
     },
     "Buildkite": {
@@ -708,14 +715,14 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 now - row["running_since"] if row["running_since"] else None
             )
         pending = [w for w in wls if w["state"] == "pending"]
-        on_spot = [w for w in wls if w["state"] != "pending" and w.get("spot")]
         queues.append(
             {
                 **q,
-                # Spot quota admitted splits into chips whose pods are up on a
-                # Spot node and chips still waiting for one - a stockout.
-                "spot_running": sum(w["amount"] for w in on_spot if w.get("pods_ready")),
-                "spot_waiting": sum(w["amount"] for w in on_spot if not w.get("pods_ready")),
+                # Chips on Spot nodes, and chips admitted onto Spot still
+                # waiting for one - a stockout - by where the worker put the
+                # pods: the manager's own flavor choice can differ.
+                "spot_running": sum(w.get("spot_chips") or 0 for w in wls),
+                "spot_waiting": sum(w.get("spot_waiting_chips") or 0 for w in wls),
                 "within_nominal": min(q["used"], q["nominal"]),
                 "idle": max(0.0, q["nominal"] - q["used"]),
                 "admitted": sum(1 for w in wls if w["state"] == "admitted"),
@@ -776,6 +783,40 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
         c["on_nodes"] = sum(n["chips"] for n in members) if members else None
         c["busy"] = sum(n["busy"] for n in members) if members else None
 
+    # A worker whose pods could not be read leaves its jobs out of the Spot
+    # figures; said beside the Kueue source, whose grant covers it.
+    sources = {
+        **sources,
+        **{
+            f"placement:{c}": {"name": "Kueue", "at": 0, "error": f"pods on {c}: {e}"}
+            for c, e in (kq.get("placement_errors") or {}).items()
+        },
+    }
+    jobs = kube_jobs(
+        bk["jobs"], kq["workloads"], kq["pods"], {q["name"]: q for q in queues}, now
+    )
+    preemptions = preemptions_by_job(
+        data.get("preemptions") or [], kq, {j["id"]: j for j in jobs}, queues
+    )
+    for j in jobs:
+        j["preemptions"] = preemptions.get(j["id"], [])
+    for q in queues:
+        for r in (q.get("next_up") or {}).get("rows", []):
+            r["preemptions"] = preemptions.get(r["job"]["id"], []) if r["job"] else []
+    # Each queue's last hour of them, by the queue that lost the chips.
+    job_queue = {w["job_id"].replace("-", ""): w["queue"] for w in kq["workloads"] if w["job_id"]}
+    hour = collections.Counter()
+    for events in preemptions.values():
+        for e in events:
+            if now - e["t"] <= 3600:
+                queue = e["queue"] or job_queue.get(e["job"], "")
+                hour[(queue, e["cause"], e.get("by_title") or "")] += 1
+    for q in queues:
+        q["preempted_hour"] = [
+            {"cause": cause, "by": by, "count": n}
+            for (queue, cause, by), n in hour.items()
+            if queue == q["name"]
+        ]
     snapshot = {
         "generated_at": now,
         "sources": sources,
@@ -783,9 +824,8 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
         "cohorts": list(cohorts.values()),
         "queues": queues,
         "events": group_events(ev["events"], job_builds, cfg.org),
-        "jobs": kube_jobs(
-            bk["jobs"], kq["workloads"], kq["pods"], {q["name"]: q for q in queues}, now
-        ),
+        "jobs": jobs,
+        "preemptions": preemptions,
     }
     snapshot["checks"] = health_checks(cfg, snapshot, kq, ev, health, stats24, now)
     snapshot["logs"] = data.get("logs") or {}
@@ -988,6 +1028,59 @@ def fleet_map(cfg: Config, kq: dict, health: dict, pools: list, snap: dict) -> d
     }
 
 
+# Each kind of preemption: its name in a count, its pill, the sentence its
+# tooltip says, and its class - Spot's own color for the two Spot causes.
+# Kueue's pills name the queue that took the chips, so a reclaim of lent
+# reserved chips never reads as a Spot VM taken back.
+PREEMPTION_CAUSES = {
+    "reclaim": ("reclaimed", "reclaimed by {queue}", "borrowed chips reclaimed by {by}", "preempt"),
+    "priority": ("preempted", "preempted in {queue}", "preempted by a higher priority in {by}", "preempt"),
+    "fair_share": ("preempted", "preempted by {queue}", "preempted for fair sharing by {by}", "preempt"),
+    "spot_reclaim": ("Spot node lost", "Spot node lost", "Spot node reclaimed by GCE", "spot"),
+    "spot_no_node": (
+        "no Spot node",
+        "no Spot node",
+        "admitted onto Spot, no node came - back to wait for reserved chips",
+        "spot",
+    ),
+    "pods_ready": ("not ready", "not ready", "pods not ready in time, requeued", "preempt"),
+    "evicted": ("evicted", "evicted", "evicted by Kueue", "preempt"),
+}
+
+
+def preemptions_by_job(rows: list, kq: dict, jobs: dict, queues: list) -> dict:
+    """fetch_preemptions' rows by Buildkite job, for the jobs still in flight,
+    each with who took the chips: the queue, and the build and step when that
+    job is in flight too."""
+    titles = {q["name"]: queue_title(q) for q in queues}
+    out = collections.defaultdict(list)
+    for r in rows:
+        if r["job"] not in jobs:
+            continue
+        by = titles.get(r["by_queue"], r["by_queue"])
+        taker = jobs.get((kq.get("job_uids") or {}).get(r["by_job_uid"], ""))
+        if taker:
+            by += f": {taker['pipeline']} #{taker['number']} {step_name(taker['label'])}"
+        out[r["job"]].append({**r, "by_title": titles.get(r["by_queue"], r["by_queue"]), "by": by})
+    return dict(out)
+
+
+def preempt_pills(events: list, now: float) -> str:
+    """A pill per kind of preemption a job had, how many times, and each one's
+    when and why on hover."""
+    grouped: dict = {}
+    for e in events:
+        _, label, sentence, cls = PREEMPTION_CAUSES.get(e["cause"], PREEMPTION_CAUSES["evicted"])
+        label = label.format(queue=e.get("by_title") or "another queue")
+        g = grouped.setdefault((label, cls), [])
+        g.append(f"{ago(now - e['t'])} ago: {sentence.format(by=e.get('by') or 'another queue')}")
+    return "".join(
+        f' <span class="pill {cls}" title="{E(chr(10).join(lines))}">{E(label)}'
+        f'{f" ×{len(lines)}" if len(lines) > 1 else ""}</span>'
+        for (label, cls), lines in grouped.items()
+    )
+
+
 def kube_jobs(
     bk_jobs: list, workloads: list, pods: list, queues: dict, now: float
 ) -> list:
@@ -1030,6 +1123,8 @@ def kube_jobs(
                 "queue_name": w["queue"] if w else "",
                 "cluster": w["cluster"] if w else None,
                 "spot": bool(w and w.get("spot")),
+                # A pod admitted onto Spot by the worker with no Spot node yet.
+                "spot_waiting": bool(w and w.get("spot_waiting_chips")),
                 "for": now - since if since else None,
                 "detail": detail,
             }
@@ -1484,7 +1579,7 @@ def split_rows(rows: list, target: str, empty: str) -> tuple:
     return shown, hidden, button
 
 
-def render_next_up(q: dict) -> str:
+def render_next_up(q: dict, now: float) -> str:
     n = q.get("next_up")
     if not n:
         return ""
@@ -1493,7 +1588,7 @@ def render_next_up(q: dict) -> str:
 
     def row(r: dict) -> str:
         return f"""<tr><td class="n">{r["position"]}</td>
-<td>{job_link(r["job"]) if r["job"] else f'<span class="muted">{E(r["workload"])}</span>'}</td>
+<td>{job_link(r["job"]) if r["job"] else f'<span class="muted">{E(r["workload"])}</span>'}{preempt_pills(r.get("preemptions") or [], now)}</td>
 <td class="nowrap">{build_link(r["build"]) if r["build"] and r["build"]["number"] else ""}</td>
 <td class="nowrap">{priority_cell(r)}</td><td class="n">{ago(r["waiting"])}</td></tr>"""
 
@@ -1550,7 +1645,29 @@ def preemption_notes(q: dict) -> list[str]:
     return notes
 
 
-def render_live_queue(q: dict) -> str:
+def preempted_line(q: dict) -> str:
+    """The queue's last hour of steps sent back in line, by cause, and for
+    Kueue's by whom."""
+    hour = q.get("preempted_hour") or []
+    if not hour:
+        return ""
+    causes: dict = {}
+    for r in hour:
+        label = PREEMPTION_CAUSES.get(r["cause"], PREEMPTION_CAUSES["evicted"])[0]
+        c = causes.setdefault(label, collections.Counter())
+        c[r["by"]] += r["count"]
+    parts = []
+    for label, by in sorted(causes.items(), key=lambda kv: -sum(kv[1].values())):
+        who = ", ".join(f"{E(b)} {n}" for b, n in by.most_common() if b)
+        parts.append(f"{E(label)} <b>{sum(by.values())}</b>" + (f" (by {who})" if who else ""))
+    return (
+        f'<p class="muted note">{term("Sent back in line", "Preempted")} in the last hour: '
+        + " · ".join(parts)
+        + "</p>"
+    )
+
+
+def render_live_queue(q: dict, now: float) -> str:
     builds, builds_more, builds_button = split_rows(
         [
             "<tr>"
@@ -1619,7 +1736,8 @@ def render_live_queue(q: dict) -> str:
   <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>Branch</th><th>Source</th><th>{term("Priority")}</th>
     <th class="n">Steps</th><th class="n">{u.capitalize()} held</th><th class="n">Running for</th>
   </tr></thead><tbody>{builds}</tbody>{builds_more}</table></div>{builds_button}</div>
-  {render_next_up(q)}
+  {render_next_up(q, now)}
+  {preempted_line(q)}
   {f'<div class="reasons block"><h4>Why workloads are pending</h4><ul>{reasons}</ul></div>' if reasons else ""}
 </div>"""
 
@@ -1714,10 +1832,12 @@ def render_jobs(snap: dict) -> str:
         each step's workload is admitted onto reserved chips or Spot on its own."""
         n = len(g["steps"])
         spot = sum(1 for j in g["steps"] if j.get("spot"))
+        sent_back = sum(1 for j in g["steps"] if j.get("preemptions"))
         return (
             f'<button type="button" class="steps-toggle" aria-expanded="false" '
             f'aria-controls="{sid}">{n} step{"s" if n != 1 else ""}</button>'
             + (f' <span class="spot-num">· {spot} on Spot</span>' if spot else "")
+            + (f' <span class="muted">· {sent_back} {term("sent back", "Preempted")}</span>' if sent_back else "")
         )
 
     def steps_row(g: dict, sid: str, span: int) -> str:
@@ -1726,6 +1846,7 @@ def render_jobs(snap: dict) -> str:
         items = "".join(
             f'<li>{job_link(j)} <span class="muted">{ago(j["for"])}</span>'
             + (' <span class="pill spot">on Spot</span>' if j.get("spot") else "")
+            + preempt_pills(j.get("preemptions") or [], snap["generated_at"])
             + "</li>"
             for j in g["steps"][:40]
         )
@@ -1922,10 +2043,10 @@ def render_live(snap: dict) -> str:
         errors=render_errors(snap["sources"]),
         checks=checks,
         summary=render_live_summary(snap),
-        queues="".join(render_live_queue(q) for q in tpu),
+        queues="".join(render_live_queue(q, snap["generated_at"]) for q in tpu),
         events=render_events(snap),
         jobs=render_jobs(snap),
-        other="".join(render_live_queue(q) for q in other),
+        other="".join(render_live_queue(q, snap["generated_at"]) for q in other),
     )
 
 
@@ -2098,7 +2219,7 @@ def render_overview(snap: dict) -> str:
     spot_waiting = collections.Counter(
         cohort_of.get(j["queue_name"])
         for j in snap["jobs"]
-        if j["real"] == "starting" and j.get("spot")
+        if j.get("spot_waiting")
     )
     spot_used, has_spot = collections.Counter(), set()
     for q in snap["queues"]:
@@ -2270,7 +2391,7 @@ def render_overview(snap: dict) -> str:
             f"M{ku.x + ku.w} {mid:.1f} L{mk.x - 4} {mid:.1f}",
             dispatching + on_workers,
             mk.x - ku.x - ku.w,
-            "Kueue admits it: own chips, then borrowed, then Spot",
+            "Kueue admits it: own chips, then borrowed; a waiting step may move to Spot",
         ),
     ]
     for i, w in enumerate(workers):
@@ -2389,9 +2510,9 @@ def render_overview(snap: dict) -> str:
             f"on {m['name']}",
             worst(kueue_checks),
             "Admits a workload once its shape's quota is free, highest priority first. The queues of one TPU generation "
-            "share a cohort and borrow each other's idle chips. A v7x 1x1x1 or 2x2x1 step that finds neither its own "
-            "chips nor any to borrow goes onto Spot; if no Spot node comes within 15 minutes, the launcher resubmits it "
-            "for reserved chips only.",
+            "share a cohort and borrow each other's idle chips. A v7x 1x1x1 or 2x2x1 step at pre-merge priority or "
+            "below that has waited 10 minutes for reserved chips is resubmitted to run on Spot; if no Spot node comes, "
+            "the launcher puts it back in line for reserved chips.",
             f'<div class="counts">{count(queued, "waiting for quota")}</div>{cohort_rows}'
             f'{check_items(kueue_checks)}<a class="more" href="live#quota">Quota on Live →</a>',
             manager_links,
@@ -2920,8 +3041,9 @@ def render_migration(
     metal a job holds its whole VM - a <code>tpu_v7x_16_queue</code> job holds that VM's 8 chips, and while the VM
     has no job all 8 are idle - plus the chips Kueue admitted on the GKE side, over the whole reservation's chip-hours
     through {E(base["window"])}: a VM down for a rebalance or a repair counts as chips the fleet had and did not use.
-    On kube it is Kueue's admitted chips against the cohort's quota over the window. Both count a chip from when work takes it
-    to when it lets go, whatever the TensorCores do meanwhile: occupancy, not compute.</li>
+    On kube it is Kueue's admitted chips against the cohort's quota over the window - the reservation's chips only:
+    Spot chips, beyond the reservation since 2026-10-13, are left out here and shown on Capacity. Both count a chip
+    from when work takes it to when it lets go, whatever the TensorCores do meanwhile: occupancy, not compute.</li>
   <li><b>Idle while jobs waited</b> is, minute by minute, the idle chips that whole waiting jobs would have fit
     in, smallest jobs first, so a few chips too few for the job waiting do not count. On bare metal: Buildkite's
     per-minute counts of connected and busy agents, and of jobs ready to run with no agent, as if any idle chip
@@ -3731,7 +3853,8 @@ def render_job_history(
     for j in inflight:
         name, desc = JOB_STATES[j["real"]]
         flying.append(
-            f'<tr><td class="nowrap"><span class="state live" title="{E(desc)}">{E(name)}</span></td>'
+            f'<tr><td class="nowrap"><span class="state live" title="{E(desc)}">{E(name)}</span>'
+            f'{preempt_pills(j.get("preemptions") or [], snap["generated_at"])}</td>'
             f'<td class="n nowrap">{ago(j["for"])}</td>'
             f'<td class="nowrap">{build_link(j["pipeline"], j["number"])}</td><td class="step">{job_link(j)}</td>'
             f'<td class="branch">{E(branches.get((j["pipeline"], j["number"]), ""))}</td>'

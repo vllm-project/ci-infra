@@ -316,6 +316,43 @@ def is_spot(flavor: str) -> bool:
     return flavor.endswith("-spot")
 
 
+# The node selector Kueue writes into a pod it admits on a Spot flavor
+# (resource_flavor_spot.yaml.tpl); a reserved flavor writes none.
+SPOT_LABEL = "cloud.google.com/gke-spot"
+
+
+def placement(pods: list) -> dict:
+    """Per Buildkite job, the TPU chips of its pods on a worker: on a Spot node,
+    on a reserved node, and admitted onto Spot with no node yet.
+
+    The worker's Kueue admits a workload again after the manager's and picks
+    its own flavor, and that choice is the one the pods follow; the manager's
+    can say Spot for pods on reserved nodes or the other way round. A
+    multi-pod job can land on both.
+    """
+    out: dict = {}
+    for pod in pods:
+        meta, spec, status = pod["metadata"], pod.get("spec", {}), pod.get("status", {})
+        if meta.get("deletionTimestamp") or status.get("phase") in ("Succeeded", "Failed"):
+            continue
+        chips = sum(
+            quantity((c.get("resources", {}).get("requests") or {}).get(TPU))
+            for c in spec.get("containers", [])
+        )
+        job = (meta.get("labels") or {}).get("buildkite.com/job-id", "").replace("-", "")
+        if not chips or not job:
+            continue
+        spot = (spec.get("nodeSelector") or {}).get(SPOT_LABEL) == "true"
+        key = ("spot" if spot else "reserved") if spec.get("nodeName") else (
+            "spot_waiting" if spot else "reserved_waiting"
+        )
+        row = out.setdefault(
+            job, {"spot": 0.0, "reserved": 0.0, "spot_waiting": 0.0, "reserved_waiting": 0.0}
+        )
+        row[key] += chips
+    return out
+
+
 def cq_summary(cq: dict) -> dict:
     """A ClusterQueue's quota and usage. Nominal, borrowing and usage are the
     reserved flavor's: a Spot flavor's quota is chips GCE may not have, never
@@ -452,8 +489,25 @@ def fetch_kueue(cfg: Config) -> dict:
         # The agent pods agent-stack-k8s creates, one per kube step.
         "pods": f"{cfg.gateway}/api/v1/namespaces/{ns}/pods?labelSelector=buildkite.com%2Fjob-uuid",
     }
-    with concurrent.futures.ThreadPoolExecutor(len(urls)) as pool:
+    # Where the pods are, from each worker: an unreachable worker costs the
+    # Spot figures for its jobs, not the page.
+    workers = {
+        c["name"]: f"{c['gateway']}/api/v1/namespaces/{ns}/pods?labelSelector=buildkite.com%2Fjob-id"
+        for c in cfg.clusters
+        if c["name"] != cfg.metrics_cluster
+    }
+
+    def worker_pods(url: str) -> tuple[list, str]:
+        try:
+            return google(url)["items"], ""
+        except Exception as e:  # noqa: BLE001 - shown on the page, not raised
+            return [], f"{type(e).__name__}: {e}"[:200]
+
+    with concurrent.futures.ThreadPoolExecutor(len(urls) + len(workers)) as pool:
+        placed = dict(zip(workers, pool.map(worker_pods, workers.values())))
         got = dict(zip(urls, pool.map(lambda u: google(u)["items"], urls.values())))
+    places = placement([pod for items, _ in placed.values() for pod in items])
+    placement_errors = {name: error for name, (_, error) in placed.items() if error}
 
     queues = [cq_summary(cq) for cq in got["cqs"]]
     resources = {q["name"]: q["resource"] for q in queues}
@@ -461,6 +515,12 @@ def fetch_kueue(cfg: Config) -> dict:
     owners = {
         (kind, o["metadata"]["name"]): o["metadata"].get("labels", {})
         for kind, key in (("Job", "jobs"), ("JobSet", "jobsets"))
+        for o in got[key]
+    }
+    # The Job or JobSet behind each uid, for the job a preemption names.
+    job_uids = {
+        o["metadata"]["uid"]: (o["metadata"].get("labels") or {}).get("buildkite.com/job-id", "").replace("-", "")
+        for key in ("jobs", "jobsets")
         for o in got[key]
     }
     job_builds = {
@@ -485,6 +545,7 @@ def fetch_kueue(cfg: Config) -> dict:
         labels = {}
         for ref in wl["metadata"].get("ownerReferences", []):
             labels = owners.get((ref["kind"], ref["name"]), labels)
+        place = places.get(labels.get("buildkite.com/job-id", "").replace("-", ""), {})
         workloads.append(
             {
                 **state,
@@ -494,12 +555,11 @@ def fetch_kueue(cfg: Config) -> dict:
                 "cluster": wl.get("status", {}).get("clusterName"),
                 "queue": queue,
                 "amount": workload_amount(wl, resources.get(queue, TPU)),
-                # Admitted onto a Spot flavor: its pods wait for a Spot node.
-                "spot": any(
-                    is_spot(f)
-                    for a in admission.get("podSetAssignments", [])
-                    for f in (a.get("flavors") or {}).values()
-                ),
+                # Its pods' chips on the worker: on Spot nodes, and admitted
+                # onto Spot with no node yet (see placement()).
+                "spot_chips": place.get("spot", 0.0),
+                "spot_waiting_chips": place.get("spot_waiting", 0.0),
+                "spot": bool(place.get("spot") or place.get("spot_waiting")),
                 # The WorkloadPriorityClass the launcher set, and the value Kueue
                 # copied from it: what orders the queue. Buildkite's own job
                 # priority is a different scale and orders nothing here. None
@@ -583,6 +643,8 @@ def fetch_kueue(cfg: Config) -> dict:
         "pods": pods,
         "job_builds": job_builds,
         "next_up": next_up,
+        "placement_errors": placement_errors,
+        "job_uids": job_uids,
     }
 
 
@@ -678,6 +740,13 @@ def prom_now(cfg: Config, query: str, by: tuple, at: float | None = None) -> dic
 
 def kueue_selector(cfg: Config) -> str:
     return f'cluster="{cfg.metrics_cluster}"'
+
+
+def worker_kueue_selector(cfg: Config) -> str:
+    """The workers' Kueue series. Each worker admits a workload again and picks
+    its own flavor, which is where the pods go, so Spot usage is theirs."""
+    names = "|".join(c["name"] for c in cfg.clusters if c["name"] != cfg.metrics_cluster)
+    return f'cluster=~"{names}"'
 
 
 def duty_selector(cfg: Config) -> str:
@@ -801,8 +870,10 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
             f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{sel},{RESERVED_FLAVOR}}}', per_queue)}){window}))",
             ("cluster_queue", "resource"),
         ),
+        # Admitted onto Spot by the workers, whose choice the pods follow;
+        # summed over workers, each collapsed to one controller pod.
         "spot_used": (
-            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{sel},{SPOT_FLAVOR}}}', per_queue)}){window}))",
+            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{worker_kueue_selector(cfg)},{SPOT_FLAVOR}}}', 'cluster, ' + per_queue)}){window}))",
             ("cluster_queue", "resource"),
         ),
         # The step's largest, so a quota change mid-step shows the quota the
@@ -1066,6 +1137,94 @@ def fetch_logs(cfg: Config, fleet_reasons=(), routine=()) -> dict:
             "filters": filters,
             **{k: [log_entry(e) for e in f.result()] for k, f in futures.items()},
         }
+
+
+# What took a running or admitted step's chips, from two records: Kueue's
+# events on the manager's workloads, and the launcher's lines (launch.py) when a
+# Spot node went away under a step or never came. Fetched for the whole fleet
+# in one query each, not per job.
+PREEMPTION_HOURS = 24
+SPOT_RECLAIMED = "Spot node reclaimed under"
+SPOT_NO_NODE = "admitted onto Spot but no Spot node"
+# Kueue's Preempted message names why; its words, and what the page calls each.
+KUEUE_PREEMPTION = (
+    ("reclamation within the cohort", "reclaim"),
+    ("prioritization in the ClusterQueue", "priority"),
+    ("fair sharing within the cohort", "fair_share"),
+)
+PREEMPTION_PATHS = re.compile(r"preemptor path: [^;]*?([\w-]+); preemptee path: [^;]*?([\w-]+);")
+PREEMPTOR_JOB = re.compile(r"JobUID: ([0-9a-f-]{36})")
+
+
+def fetch_preemptions(cfg: Config) -> list[dict]:
+    """The last PREEMPTION_HOURS of preemptions and Spot fallbacks, one row
+    each, with the Buildkite job it hit: Kueue preempting a workload to give
+    its chips back to a queue that lent them (or to a higher priority in the
+    same queue), naming the queue and job that took them; a Spot node
+    reclaimed under a step; a step admitted onto Spot that never got a node;
+    a workload whose pods were not ready in time."""
+    events = (
+        f'logName="projects/{cfg.project}/logs/events" '
+        f'AND resource.labels.cluster_name="{cfg.metrics_cluster}" '
+        'AND jsonPayload.involvedObject.kind="Workload" '
+        'AND jsonPayload.reason=("Preempted" OR "Evicted")'
+    )
+    lines = (
+        f'resource.type="k8s_container" AND resource.labels.cluster_name="{cfg.metrics_cluster}" '
+        f'AND resource.labels.namespace_name="{cfg.namespace}" '
+        f'AND (textPayload:"{SPOT_RECLAIMED}" OR textPayload:"{SPOT_NO_NODE}")'
+    )
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        a = pool.submit(read_logs, cfg, events, PREEMPTION_HOURS, 1000)
+        b = pool.submit(read_logs, cfg, lines, PREEMPTION_HOURS, 1000)
+        event_entries, line_entries = a.result(), b.result()
+    out, seen = [], set()
+
+    def add(row: dict) -> None:
+        # The event exporter can write one event more than once.
+        key = (row["job"], row["cause"], int(row["t"]))
+        if row["job"] and key not in seen:
+            seen.add(key)
+            out.append(row)
+
+    for e in event_entries:
+        payload = e.get("jsonPayload") or {}
+        message = payload.get("message") or ""
+        row = {
+            "t": log_time(e["timestamp"]),
+            "job": job_hex(payload.get("involvedObject", {}).get("name", "")),
+            "queue": "",
+            "by_queue": "",
+            "by_job_uid": "",
+        }
+        if payload.get("reason") == "Preempted":
+            cause = next((c for words, c in KUEUE_PREEMPTION if words in message), "preempted")
+            paths = PREEMPTION_PATHS.search(message)
+            by = PREEMPTOR_JOB.search(message)
+            row.update(
+                cause=cause,
+                by_queue=paths.group(1) if paths else "",
+                queue=paths.group(2) if paths else "",
+                by_job_uid=by.group(1) if by else "",
+            )
+        elif message.startswith("Preempted"):
+            continue  # its Preempted event says the same, with more
+        else:
+            row["cause"] = "pods_ready" if "PodsReady" in message else "evicted"
+        add(row)
+    for e in line_entries:
+        text = e.get("textPayload") or ""
+        add(
+            {
+                "t": log_time(e["timestamp"]),
+                "job": job_hex(e.get("resource", {}).get("labels", {}).get("pod_name", "")),
+                "cause": "spot_reclaim" if SPOT_RECLAIMED in text else "spot_no_node",
+                "queue": "",
+                "by_queue": "",
+                "by_job_uid": "",
+            }
+        )
+    return sorted(out, key=lambda r: r["t"])
 
 
 def fetch_waits(cfg: Config, start: int, end: int) -> dict:

@@ -117,6 +117,11 @@ class Live:
                 lambda: fleet.fetch_logs(cfg, views.FLEET_WARNINGS, views.LOG_ROUTINE),
                 120,
             ),
+            # Preemptions and Spot fallbacks of the last day, for the jobs in
+            # flight: two queries for the whole fleet, every two minutes.
+            "preemptions": Source(
+                "Logging", lambda: fleet.fetch_preemptions(cfg), 120
+            ),
             # The health checks' 24-hour failure counts; BigQuery need not be
             # asked every minute.
             "stats24": Source(

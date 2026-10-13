@@ -616,3 +616,7 @@ table.poles td.timeline, table.poles th.timeline { min-width: 260px; width: 38%;
 table.poles .advice { margin-top: 4px; font-size: 12px; color: #8a5a00; }
 table.poles td.step, table.steps td.step { min-width: 220px; }
 table.poles td.follower { min-width: 140px; max-width: 220px; }
+/* A step Kueue sent back in line: the borrowed color, as reclaim takes back
+   what was borrowed. Spot's own causes wear .pill.spot. Small beside a name. */
+.pill.preempt { background: var(--borrowed-bg); color: #9a3a12; }
+.steps-list .pill, td .pill.preempt, td .pill.spot { font-size: 11px; padding: 0 7px; cursor: help; }
