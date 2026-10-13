@@ -37,10 +37,12 @@ set -eo pipefail
 # retry re-runs the job. Use only for provider/infra failures.
 #
 # Every retry that fires also records "<class>,<attempts>,<outcome>" under the
-# build meta-data key infra-retry:<job id>. Recording must never fail or stall
-# the job: the agent retries the write for minutes when its API is unreachable.
+# build meta-data key infra-retry:<job id>:<class>, one key per class so a
+# retry in another hook never overwrites it. Recording must never fail or
+# stall the job: the agent retries the write for minutes when its API is
+# unreachable.
 mark_retry() {
-  timeout 10 buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}" "image-pull,$1,$2" || true
+  timeout 10 buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}:image-pull" "image-pull,$1,$2" || true
 }
 
 # retry_or_fail <description> <command> [args...]
