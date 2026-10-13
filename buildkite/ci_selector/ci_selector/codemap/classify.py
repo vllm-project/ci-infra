@@ -227,7 +227,10 @@ def _classify_rust(state: RepoState, path: str) -> Claim:
         f"{len(image_steps)} hardware-image steps",
         step_ids=gate_steps | image_steps,
     )
-    if bucket in ("cdylib", "root"):
+    # vllm#59744 removed the bridge; classifying a file that no longer exists
+    # finds no claim and fails open, which ran every step on each root or
+    # cdylib change. With no bridge there is no Python consumer to borrow from.
+    if bucket in ("cdylib", "root") and (state.repo / RUST_PYO3_BRIDGE_FILE).is_file():
         bridge = _classify(state, RUST_PYO3_BRIDGE_FILE, None)
         claim.step_ids |= bridge.step_ids
         claim.test_files |= bridge.test_files

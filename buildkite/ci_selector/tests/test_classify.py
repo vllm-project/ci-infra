@@ -3116,6 +3116,38 @@ def test_rust_cdylib_file_carries_the_pyo3_bridge(state):
     assert set(sel.selected) >= set(bridge.selected)
 
 
+def test_rust_root_change_without_the_pyo3_bridge_does_not_fail_open(
+    state, tmp_path, monkeypatch
+):
+    """vllm#59744 removed vllm/tool_parsers/rust_tool_parser.py. At such a
+    base nothing claims the bridge, so borrowing its claim failed open and
+    every root-crate change ran the whole pipeline. The suite's pin still has
+    the file, so the test removes it from a copy of the state and makes the
+    bridge unclaimed, as it is after #59744."""
+    import dataclasses
+
+    import ci_selector.codemap.classify as classify
+    from ci_selector.handwritten import RUST_PYO3_BRIDGE_FILE
+
+    real = classify._classify
+
+    def gone(st, path, ctx):
+        if path == RUST_PYO3_BRIDGE_FILE:
+            return classify.Claim(
+                "fail-open", f"{path} is unclaimed by any rule; running everything",
+                run_all={"vllm_ci"},
+            )
+        return real(st, path, ctx)
+
+    monkeypatch.setattr(classify, "_classify", gone)
+    no_bridge = dataclasses.replace(state, repo=tmp_path)
+    binary = set(select(no_bridge, ["rust/src/server/src/lib.rs"]).selected)
+    for path in ("rust/Cargo.lock", "rust/src/parser/src/lib.rs"):
+        sel = select(no_bridge, [path])
+        assert not sel.run_all, (path, sel.run_all)
+        assert set(sel.selected) >= binary
+
+
 def test_rust_workspace_root_is_union_of_both_routes(state):
     """Cargo.lock can change both artifacts, so it takes at least everything
     either bucket takes."""

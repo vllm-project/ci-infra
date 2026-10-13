@@ -158,7 +158,9 @@ def test_pyo3_bridge_file_is_the_only_import_site(vllm_repo):
         for p in (vllm_repo / "vllm").rglob("*.py")
         if "_rust_tool_parser" in p.read_text()
     )
-    assert importers == [RUST_PYO3_BRIDGE_FILE], drift_message(
+    # An empty list is fine: vllm#59744 removed the bridge, and the rust rule
+    # skips it when the file is absent.
+    assert importers in ([], [RUST_PYO3_BRIDGE_FILE]), drift_message(
         f"vllm/ files naming _rust_tool_parser: {importers}.",
         "The rust rule routes cdylib changes through the single import site; "
         "an unlisted second site means its tests never run on parser changes.",
