@@ -115,6 +115,13 @@ tpu_admission_max_seconds = 3600
 tpu_dispatch_retry_seconds = 120
 tpu_dispatch_retries       = 2
 
+# Long enough for a TPU node to come up from zero, short of recoveryTimeout (30
+# minutes, kueue/common-config.yaml), so a replacement pod stuck on Spot is
+# moved before Kueue requeues the workload, possibly onto Spot again.
+tpu_spot_wait_seconds  = 900
+tpu_spot_after_seconds = 600
+tpu_spot_max_priority  = 0
+
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
 # than the repository. Trailing slash required: without it the prefix would also
@@ -222,6 +229,12 @@ worker_clusters = [
         min_nodes     = 0
         max_nodes     = 128
         nominal_quota = 16
+
+        # Overflow onto Spot once the reservation and what this shape can
+        # borrow are spent. The project has 256 Spot v7x chips in us-central1;
+        # this and 2x2x1's pool take 96 of them, so a Spot stockout strands
+        # fewer steps on Spot until the launcher falls back.
+        spot = { max_nodes = 32 }
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -232,6 +245,9 @@ worker_clusters = [
         min_nodes     = 0
         max_nodes     = 32
         nominal_quota = 64
+
+        # As for 1x1x1: 64 Spot chips, sixteen slices.
+        spot = { max_nodes = 16 }
       },
       {
         # Eight chips as one slice across two VMs, placed from the named
@@ -294,7 +310,7 @@ buildkite_org        = "vllm"
 buildkite_cluster_id = "0219f117-7dc6-4a04-aee2-1619736fd800"
 
 # Built by dashboard/cloudbuild.yaml; the tag is the build revision there.
-dashboard_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/queue-dashboard:14"
+dashboard_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/queue-dashboard:17"
 
 # The token modules/ci_monitoring's BigQuery puller already lists these
 # pipelines' builds with.

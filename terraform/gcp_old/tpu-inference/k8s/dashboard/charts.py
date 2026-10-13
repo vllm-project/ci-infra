@@ -76,12 +76,76 @@ def segments(values: list, x, y) -> list[list[tuple[float, float]]]:
     return runs
 
 
+def stepped(ref: tuple[str, list], x, y, cls: str = "ref") -> list[str]:
+    """A reference line - (name, values) - drawn in steps, since quota changes
+    in steps, and labelled where it ends."""
+    parts = []
+    runs = segments(ref[1], x, y)
+    for run in runs:
+        d = f"M{run[0][0]:.1f},{run[0][1]:.1f}" + "".join(
+            f"H{px:.1f}V{py:.1f}" for px, py in run[1:]
+        )
+        parts.append(f'<path class="{cls}" d="{d}"/>')
+    if runs:
+        lx, ly = runs[-1][-1]
+        parts.append(
+            f'<text class="ref-label" x="{lx + 6:.1f}" y="{ly + 3:.1f}">{E(ref[0])}</text>'
+        )
+    return parts
+
+
+def plus(p: list, q: list) -> list:
+    return [None if u is None or v is None else round(u + v, 1) for u, v in zip(p, q)]
+
+
+def band(low: list, high: list, x, y, cls: str) -> str:
+    """The space between two series, step by step, in straight segments."""
+    shapes = []
+    for i in range(len(low) - 1):
+        l0, l1, h0, h1 = low[i], low[i + 1], high[i], high[i + 1]
+        if None in (l0, l1, h0, h1) or (h0 <= l0 and h1 <= l1):
+            continue
+        shapes.append(
+            f"M{x(i):.1f},{y(l0):.1f}L{x(i + 1):.1f},{y(l1):.1f}"
+            f"L{x(i + 1):.1f},{y(h1):.1f}L{x(i):.1f},{y(h0):.1f}Z"
+        )
+    return f'<path class="band {cls}" d="{"".join(shapes)}"/>' if shapes else ""
+
+
+def spot_layer(spot: tuple[list, list, list], x, y) -> tuple[list, list, list]:
+    """Spot chips stacked on a base line - spot is (base, admitted onto Spot,
+    chips on Spot nodes): the chips on Spot nodes, then those admitted onto Spot
+    with no node to run on, which is a Spot stockout. Returns SVG parts, hover
+    readout rows and legend keys."""
+    base, admitted, on_nodes = spot
+    held = [None if a is None else min(a, o or 0.0) for a, o in zip(admitted, on_nodes)]
+    waiting = [None if a is None else round(a - h, 1) for a, h in zip(admitted, held)]
+    middle, total = plus(base, held), plus(base, admitted)
+    parts = [band(base, middle, x, y, "spot-on"), band(middle, total, x, y, "spot-wait")]
+    for run in segments(total, x, y):
+        d = "M" + "L".join(f"{px:.1f},{py:.1f}" for px, py in run)
+        parts.append(f'<path class="line spot" d="{d}"/>')
+    readout = [
+        {"cls": "spot", "name": "admitted + Spot", "values": total},
+        {"cls": "spotk spot-on", "name": "on Spot nodes", "values": held},
+        {"cls": "spotk spot-wait", "name": "waiting for a Spot node", "values": waiting},
+    ]
+    keys = [
+        ("spot", "admitted + Spot"),
+        ("spotk spot-on", "on Spot nodes"),
+        ("spotk spot-wait", "waiting for a Spot node"),
+    ]
+    return parts, readout, keys
+
+
 def line_chart(
     title: str,
     ticks: list[float],
     series: list[tuple[str, str, list]],
     *,
     ref: tuple[str, list] | None = None,
+    spot: tuple[list, list, list] | None = None,
+    spot_ref: tuple[str, list] | None = None,
     extra: list[tuple[str, list]] | None = None,
     ymax: float | None = None,
     fmt: str = "time",
@@ -90,13 +154,19 @@ def line_chart(
 ) -> str:
     """series is (css class, name, values); the first gets a faint area under
     it. ref is (name, values), drawn stepped, since quota changes in steps.
-    extra rows appear only in the hover readout. fmt is how static/app.js
-    labels the time axis: "time" or "day"."""
+    spot stacks Spot chips on a base line (see spot_layer), and spot_ref is the
+    quota with Spot's added; with them the lines are drawn straight, so the
+    Spot bands meet them. extra rows appear only in the hover readout. fmt is
+    how static/app.js labels the time axis: "time" or "day"."""
     left, right, top, bottom = 40, 64, 12, 24
     plot_w, plot_h = width - left - right, height - top - bottom
     values = [v for _, _, vs in series for v in vs if v is not None]
     if ref:
         values += [v for v in ref[1] if v is not None]
+    if spot:
+        values += [v for v in plus(spot[0], spot[1]) if v is not None]
+    if spot_ref:
+        values += [v for v in spot_ref[1] if v is not None]
     # Charts shown side by side pass one ymax so their heights compare.
     ymax = nice_max(max(max(values, default=0), ymax or 0))
     n = max(1, len(ticks) - 1)
@@ -124,21 +194,19 @@ def line_chart(
             f'data-ts="{ticks[i] if ticks else 0}" data-fmt="{fmt}"></text>'
         )
     if ref:
-        runs = segments(ref[1], x, y)
-        for run in runs:
-            d = f"M{run[0][0]:.1f},{run[0][1]:.1f}" + "".join(
-                f"H{px:.1f}V{py:.1f}" for px, py in run[1:]
-            )
-            parts.append(f'<path class="ref" d="{d}"/>')
-        if runs:
-            lx, ly = runs[-1][-1]
-            parts.append(
-                f'<text class="ref-label" x="{lx + 6:.1f}" y="{ly + 3:.1f}">{E(ref[0])}</text>'
-            )
+        parts += stepped(ref, x, y)
+    if spot_ref:
+        parts += stepped(spot_ref, x, y, "ref spot")
+    spot_parts, spot_readout, spot_keys = spot_layer(spot, x, y) if spot else ([], [], [])
+    parts += spot_parts
     for k, (cls, _, vs) in enumerate(series):
         runs = segments(vs, x, y)
         for run in runs:
-            path = monotone(run)
+            path = (
+                "M" + "L".join(f"{px:.1f},{py:.1f}" for px, py in run)
+                if spot
+                else monotone(run)
+            )
             if k == 0 and len(run) > 1:
                 base = y(0)
                 parts.append(
@@ -153,10 +221,18 @@ def line_chart(
             )
 
     readout = [{"cls": c, "name": nm, "values": vs} for c, nm, vs in series]
+    readout += spot_readout
     if ref:
         readout.append({"cls": "ref", "name": ref[0], "values": ref[1]})
+    if spot_ref:
+        readout.append({"cls": "ref spot", "name": spot_ref[0], "values": spot_ref[1]})
     readout += [{"cls": "", "name": nm, "values": vs} for nm, vs in extra or []]
-    keys = [(c, nm) for c, nm, _ in series] + ([("ref", ref[0])] if ref else [])
+    keys = (
+        [(c, nm) for c, nm, _ in series]
+        + spot_keys
+        + ([("ref", ref[0])] if ref else [])
+        + ([("ref spot", spot_ref[0])] if spot_ref else [])
+    )
     legend = (
         "".join(
             f'<span class="key"><i class="k {c}"></i>{E(nm)}</span>' for c, nm in keys
@@ -203,6 +279,7 @@ def stacked_chart(
     series: list[tuple[str, list]],
     *,
     ref: tuple[str, list] | None = None,
+    spot_ref: tuple[str, list] | None = None,
     ymax: float | None = None,
     fmt: str = "time",
     width: int = 640,
@@ -224,8 +301,9 @@ def stacked_chart(
         totals = [t + (v or 0) for t, v in zip(totals, vs)]
         edges.append((low, list(totals)))
     peak = max(totals, default=0)
-    if ref:
-        peak = max(peak, max((v for v in ref[1] if v is not None), default=0))
+    for r in (ref, spot_ref):
+        if r:
+            peak = max(peak, max((v for v in r[1] if v is not None), default=0))
     # A caller showing two stacks side by side passes one ymax for both.
     ymax = nice_max(max(peak, ymax or 0))
     n = max(1, n_points - 1)
@@ -262,15 +340,9 @@ def stacked_chart(
         )
         parts.append(f'<polygon class="band {slots[k]}" points="{up} {down}"/>')
     if ref:
-        for run in segments(ref[1], x, y):
-            d = f"M{run[0][0]:.1f},{run[0][1]:.1f}" + "".join(
-                f"H{px:.1f}V{py:.1f}" for px, py in run[1:]
-            )
-            parts.append(f'<path class="ref" d="{d}"/>')
-            lx, ly = run[-1]
-        parts.append(
-            f'<text class="ref-label" x="{lx + 6:.1f}" y="{ly + 3:.1f}">{E(ref[0])}</text>'
-        )
+        parts += stepped(ref, x, y)
+    if spot_ref:
+        parts += stepped(spot_ref, x, y, "ref spot")
 
     readout = [
         {"cls": slots[k], "name": name, "values": vs}
@@ -281,10 +353,20 @@ def stacked_chart(
     )
     if ref:
         readout.append({"cls": "ref", "name": ref[0], "values": ref[1]})
-    legend = "".join(
-        f'<span class="key"><i class="k {slots[k]}"></i>{E(name)}</span>'
-        for k, (name, _) in enumerate(series)
-    ) + (f'<span class="key"><i class="k ref"></i>{E(ref[0])}</span>' if ref else "")
+    if spot_ref:
+        readout.append({"cls": "ref spot", "name": spot_ref[0], "values": spot_ref[1]})
+    legend = (
+        "".join(
+            f'<span class="key"><i class="k {slots[k]}"></i>{E(name)}</span>'
+            for k, (name, _) in enumerate(series)
+        )
+        + (f'<span class="key"><i class="k ref"></i>{E(ref[0])}</span>' if ref else "")
+        + (
+            f'<span class="key"><i class="k ref spot"></i>{E(spot_ref[0])}</span>'
+            if spot_ref
+            else ""
+        )
+    )
     data = json.dumps({"ticks": ticks, "series": readout})
     return (
         f'<figure class="chart"><figcaption><span class="title">{E(title)}</span>'
@@ -334,6 +416,8 @@ def gap_chart(
     *,
     series: list[tuple[str, str, list]] = (),
     ref: tuple[str, list] | None = None,
+    spot: tuple[list, list] | None = None,
+    spot_ref: tuple[str, list] | None = None,
     fmt: str = "time",
     width: int = 640,
     height: int = 200,
@@ -341,14 +425,19 @@ def gap_chart(
     """Two lines, a and b - (css class, name, values) - with the space between
     them filled in a's color where a is above and b's where b is above, named
     by gaps (a above, b above). series are further lines, ref a stepped one.
-    Straight segments throughout, so a fill meets its lines exactly; where the
-    lines cross inside a step the fill is split at the crossing."""
+    spot is (admitted onto Spot, chips on Spot nodes), stacked on a (see
+    spot_layer), and spot_ref the quota with Spot's added. Straight segments
+    throughout, so a fill meets its lines exactly; where the lines cross inside
+    a step the fill is split at the crossing."""
     left, right, top, bottom = 40, 64, 12, 24
     plot_w, plot_h = width - left - right, height - top - bottom
     lines = [a, b, *series]
     values = [v for _, _, vs in lines for v in vs if v is not None]
-    if ref:
-        values += [v for v in ref[1] if v is not None]
+    for r in (ref, spot_ref):
+        if r:
+            values += [v for v in r[1] if v is not None]
+    if spot:
+        values += [v for v in plus(a[2], spot[0]) if v is not None]
     ymax = nice_max(max(values, default=0))
     n = max(1, len(ticks) - 1)
 
@@ -400,17 +489,13 @@ def gap_chart(
             parts.append(f'<path class="gap {cls}" d="{"".join(shapes)}"/>')
 
     if ref:
-        runs = segments(ref[1], x, y)
-        for run in runs:
-            d = f"M{run[0][0]:.1f},{run[0][1]:.1f}" + "".join(
-                f"H{px:.1f}V{py:.1f}" for px, py in run[1:]
-            )
-            parts.append(f'<path class="ref" d="{d}"/>')
-        if runs:
-            lx, ly = runs[-1][-1]
-            parts.append(
-                f'<text class="ref-label" x="{lx + 6:.1f}" y="{ly + 3:.1f}">{E(ref[0])}</text>'
-            )
+        parts += stepped(ref, x, y)
+    if spot_ref:
+        parts += stepped(spot_ref, x, y, "ref spot")
+    spot_parts, spot_readout, spot_keys = (
+        spot_layer((a[2], spot[0], spot[1]), x, y) if spot else ([], [], [])
+    )
+    parts += spot_parts
     for cls, _, vs in lines:
         for run in segments(vs, x, y):
             d = "M" + "L".join(f"{px:.1f},{py:.1f}" for px, py in run)
@@ -427,12 +512,18 @@ def gap_chart(
         {"cls": f"gapk {a[0]}", "name": gaps[0], "values": diff(av, bv)},
         {"cls": f"gapk {b[0]}", "name": gaps[1], "values": diff(bv, av)},
     ]
+    readout += spot_readout
     if ref:
         readout.append({"cls": "ref", "name": ref[0], "values": ref[1]})
-    keys = [(c, nm) for c, nm, _ in lines] + [
-        (f"gapk {a[0]}", gaps[0]),
-        (f"gapk {b[0]}", gaps[1]),
-    ] + ([("ref", ref[0])] if ref else [])
+    if spot_ref:
+        readout.append({"cls": "ref spot", "name": spot_ref[0], "values": spot_ref[1]})
+    keys = (
+        [(c, nm) for c, nm, _ in lines]
+        + [(f"gapk {a[0]}", gaps[0]), (f"gapk {b[0]}", gaps[1])]
+        + spot_keys
+        + ([("ref", ref[0])] if ref else [])
+        + ([("ref spot", spot_ref[0])] if spot_ref else [])
+    )
     legend = "".join(
         f'<span class="key"><i class="k {c}"></i>{E(nm)}</span>' for c, nm in keys
     )

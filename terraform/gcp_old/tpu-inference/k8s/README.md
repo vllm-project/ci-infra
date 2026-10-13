@@ -439,6 +439,61 @@ guessing — and note the chart pastes our block under keys of its own, so
 anything it derives must be left out of the template or the controller's decoder
 rejects the duplicate.
 
+## Spot overflow
+
+A single-host shape can have Spot capacity beside its reservation:
+`spot = { max_nodes = N }` on its `tpu_node_pools` entry adds a `<shape>-spot`
+node pool in the same zone, with no reservation and a
+`cloud.google.com/gke-spot` taint, and gives the shape's ClusterQueue a second
+flavor, `<generation>-spot`. Nothing about a step changes: no flag, no queue,
+no label. Kueue tries the reserved flavor first, borrowing from the cohort
+included, and admits onto Spot only when the reservation cannot take the
+workload - overflow, since the reservation is paid for either way. It reaches
+for Spot rather than preempt a running workload to reclaim lent quota. A
+shape's Spot quota is the chips its own Spot pool can hold, with
+`borrowingLimit: 0`: reserved quota can be borrowed because every shape's pool
+draws on one reservation, but another shape's Spot pool has nodes of the wrong
+shape.
+
+The Spot flavor is the only thing that names Spot nodes: Kueue adds its
+`cloud.google.com/gke-spot=true` nodeSelector and its toleration to a pod it
+admits on that flavor and to no other, so a workload admitted on the
+reservation can never land on a Spot node, and the reserved flavor and pools
+are unchanged.
+
+Which steps reach Spot is the launcher's choice, by priority and by wait. A
+step above `tpu_spot_max_priority` (0: integration, pre-merge, post-merge,
+oncall-fix) never uses Spot; it waits for reserved chips and, outranking the
+rest, takes them first as they free up. A step at or below it (unclassed, low)
+is submitted with Spot ruled out too, and only once it has waited
+`tpu_spot_after_seconds` (10 minutes) for reserved chips is it resubmitted with
+Spot allowed - the step log says `waited Ns for reserved chips - resubmitting so
+it may run on Spot`. Kueue sends a workload to Spot the moment the reservation
+is full, so without the wait a small overflow that the reservation would clear
+in minutes landed on Spot, held Spot quota through a stockout, and left
+reserved chips idle as they freed up: on 10-13, 27 chip-hours idle while steps
+waited in under two hours, against 32 chip-hours Spot delivered.
+
+Spot quota is a count, not capacity. Kueue admits onto it whether or not GCE
+has a Spot VM to give, and a pool that cannot scale up changes nothing Kueue
+sees. The launcher covers that: when a chip-holding pod admitted onto Spot (it
+carries the flavor's nodeSelector) is still unscheduled after
+`tpu_spot_wait_seconds`, it deletes the workload and submits it again, once,
+with a required node affinity `cloud.google.com/gke-spot NotIn ["true"]` on its
+chip-holding pods. Kueue skips a flavor whose nodeLabels that affinity rules
+out, so the resubmission waits for the reservation as a shape without Spot
+would. The step log says `admitted onto Spot but no Spot node`.
+
+A reclaimed Spot node takes its pod with it. The pod is marked
+`DisruptionTarget`, which the pod failure policy ignores, so the Job replaces
+it and the step reruns from the start. The replacement is pinned to Spot like
+the first, so if Spot capacity has gone too the same fallback moves it - before
+`recoveryTimeout` (30 minutes, in `kueue/common-config.yaml`) would requeue the
+workload with its Spot quota free, where it could be admitted onto Spot again.
+
+Multi-host shapes cannot have Spot: GKE reclaims a slice whole, and Kueue
+admits chips rather than slices.
+
 ## The health dashboard
 
 `terraform output dashboard_url`, behind IAP; `dashboard_viewers` in
@@ -447,7 +502,14 @@ kube fleet, where every step is on the one `kube` queue until the launcher picks
 a Kueue queue for it, and where a step shows as running from the moment its
 agent pod starts.
 
-**Overview** (`/`), from the same snapshot as Live: a diagram of the
+**Overview** (`/`), from the same snapshot as Live. It opens with one line
+saying whether anything is wrong and how full each generation is, then only
+the checks that warn or fail, then where the steps are - in Buildkite, an agent
+pod starting, waiting for quota, handing to a worker, waiting for a node (how
+many on Spot), running - with the oldest at each and a stage marked once its
+oldest is past its limit, then a row per queue: running, waiting for a node,
+waiting for quota, chips held (own, borrowed, and Spot running and waiting for
+a node) and nodes up. Below that, a diagram of the
 path a step takes - Buildkite, the manager's agent pods, Kueue and MultiKueue,
 then one box per worker with its node pools - with how many steps are at each
 stage now. Dots move along a path while steps are past it. Each box's mark is
@@ -457,7 +519,7 @@ source reads, and what to check when one fails, live here. Only what the
 dashboard reads live is drawn, so it cannot go stale the way a diagram in a
 doc does.
 
-**Live** (`/live`), refreshed every minute:
+**Live** (`/live`), reloaded every minute - but not while a section, a build's steps or the rows behind Show more are open, since a reload would close them:
 
 - **Health** - one check per stage from Buildkite to a TPU pod: the Buildkite
   controller polling and creating, Kueue up on every cluster, workers
@@ -486,25 +548,28 @@ doc does.
   backlog, scheduling while a pool scales, agent teardown, test failures - are
   collapsed beneath.
 
-**Trends** (`/trends`; `/history` still works), for the last 6 hours, 24 hours, 7 days or 30 days (`/api/history` also takes `?start=&end=` in epoch seconds, up to 90 days):
-a card per generation, then outcomes per pipeline. A generation's card has the
-cohort's admitted, busy (TensorCore duty), queue wait p90 and finished
-workloads; chips admitted against chips on nodes, with the gap between them
-shaded as waiting for nodes or idle on nodes; and each topology's admitted chips
-stacked under the cohort's quota, so chips moving between shapes show as bands
-trading height. Below that, a block per shape: its outcomes from
-`kube_workload_timing` split into test and infrastructure failures, evictions,
-wait and run percentiles; its nodes - created, lifetime, the share of chip-hours
-on nodes that workloads held, idle chip-hours and admitted → running, which
-includes the wait for a scale-up; and two charts, chips on nodes and in use
-against its nominal, and its queue wait over time (`fleet.fetch_wait_series`,
-the same series Migration draws). The CPU queue gets a card of its own. Each
-chart point is the step's average, taken over the fleet-wide
-value at each minute - collapsed to the newest Kueue controller pod and summed
-over nodes first, so a controller roll or a node that came and went does not
-inflate it. Node history comes from GKE's per-node metrics, which name a node
-and nothing else; the GKE API's list of node pools ties each name to its pool
-through the pool's instance group, which outlives the nodes it creates.
+**Capacity** (`/capacity`; `/trends` and `/history` redirect here), for the last 6 hours, 24 hours, 7 days or 30 days (`/api/history` also takes `?start=&end=` in epoch seconds, up to 90 days):
+is capacity right, and where does chip-time go. A card per generation:
+tiles for the reserved chips and the peak asked of them, the share of the
+reservation used and busy computing, the queue wait, and what Spot delivered;
+supply and demand - each shape's admitted chips stacked under the nominal, each
+Spot shape's chips running on Spot nodes above them, and hatched, the chips of
+steps still waiting for quota, so demand the reservation could not meet shows
+above the line; where the reserved chips went - busy computing, held but not
+computing, admitted before a node was up, idle on a node, or quota unused; and
+chips admitted with no node to run on, a scale-up on the reservation or a
+stockout on Spot. Then a table of shapes and, open below it, a block per shape
+with its rules, waits, cold start and evictions, its chips admitted against on
+nodes with its Spot stacked on top, and its queue wait over time
+(`fleet.fetch_wait_series`, the series Migration draws). Spot's quota appears
+nowhere: it is a count GCE has never come near filling. Each chart point is the
+step's average, taken over the fleet-wide value at each minute - collapsed to
+the newest Kueue controller pod and summed over nodes first, so a controller
+roll or a node that came and went does not inflate it. Node history comes from
+GKE's per-node metrics, which name a node and nothing else; the GKE API's list
+of node pools ties each name to its pool through the pool's instance group,
+which outlives the nodes it creates. TensorCore busy is read per node too, so
+a Spot node's compute is not counted as the reservation's.
 
 **Migration** (`/migration`, last 24 hours by default; `/compare` and `/baseline`
 still work) puts the bare-metal fleet
@@ -522,7 +587,7 @@ only on its own shape's VMs, so one shape idled while another queued; the
 baseline builder works it out from Buildkite's per-minute counts of connected
 and busy agents and of jobs ready with no agent. On kube it comes from Kueue's
 admitted, nominal and pending series, read a minute apart rather than at
-Trends' step (`fleet.fetch_waits`), since an hour that queued in its first half
+Capacity's step (`fleet.fetch_waits`), since an hour that queued in its first half
 and idled in its second would otherwise count as both at once. This and chips
 held are worked out a day at a time and shown as the mean, median and worst day;
 kube's days are the 24-hour stretches back from the window's end, so its median
@@ -536,7 +601,7 @@ snapshot, then every workload that ended in the range from
 exit code, wait, startup and run - a build a row, its steps opening beneath it
 with the failures first, or job by job. Filters for queues (any number), outcome,
 branch and pipeline and a search over step, build and branch sit above it, and a
-line under them sums up what they leave. Each queue card on Live and each shape block on Trends links to its queue's jobs.
+line under them sums up what they leave. Each queue card on Live and each shape block on Capacity links to its queue's jobs.
 
 Migration also counts *infrastructure failures*: failed jobs whose log ends in
 the fleet's fault - a full disk, a TPU that would not start, a bus error, a kill

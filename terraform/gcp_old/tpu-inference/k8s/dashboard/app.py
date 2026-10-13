@@ -375,22 +375,29 @@ def serve(
             if url.path == "/api/live":
                 body = json.dumps(live.snapshot(), indent=1)
                 return self.reply(200, "application/json", body.encode())
-            # /history as well, the page's old name.
-            if url.path in ("/trends", "/history", "/api/history"):
+            if url.path == "/capacity":
                 span = parse_span(params, time.time())
                 view, sources = history.get(span)
-                if url.path == "/api/history":
-                    return self.reply(
-                        200, "application/json", json.dumps(view, indent=1).encode()
-                    )
                 queue_times, queue_times_status = wait_series.get(span)
-                page = views.render_trends(
+                page = views.render_capacity(
                     view,
                     {**sources, "wait_series": queue_times_status},
                     f"?{url.query}" if url.query else "",
                     queue_times,
                 )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
+            # Capacity replaced Trends; /trends and /history, its old names, go there.
+            if url.path in ("/trends", "/history"):
+                self.send_response(302)
+                self.send_header("Location", "capacity" + (f"?{url.query}" if url.query else ""))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
+            if url.path == "/api/history":
+                view, sources = history.get(parse_span(params, time.time()))
+                return self.reply(
+                    200, "application/json", json.dumps(view, indent=1).encode()
+                )
             if url.path.startswith("/static/"):
                 path = (STATIC / url.path.removeprefix("/static/")).resolve()
                 if (

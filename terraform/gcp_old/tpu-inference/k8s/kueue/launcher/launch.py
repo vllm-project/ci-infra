@@ -66,6 +66,9 @@ POD_DEFAULTS = os.environ.get(
 
 ACCELERATOR_KEY = "cloud.google.com/gke-tpu-accelerator"
 TOPOLOGY_KEY = "cloud.google.com/gke-tpu-topology"
+# GKE's label on a Spot node, and the nodeSelector Kueue writes into a pod it
+# admits on a Spot flavor (resource_flavor_spot.yaml.tpl).
+SPOT_LABEL = "cloud.google.com/gke-spot"
 TPU_RESOURCE = "google.com/tpu"
 
 # Kueue reads this on the top-level object for both Job and JobSet, never on
@@ -364,6 +367,58 @@ def never_dispatched(workload):
     return (quota_reserved(workload) and not status.get("clusterName")
             and not status.get("nominatedClusterNames")
             and not (admitted and admitted.get("status") == "True"))
+
+
+def spot_unschedulable(items):
+    """Whether a chip-holding pod admitted onto Spot is waiting for a node.
+
+    The pod's own nodeSelector says which flavor the worker admitted it on:
+    Kueue writes the Spot flavor's into it and the reserved flavor has none.
+    """
+    for pod in items or []:
+        spec = pod.get("spec", {})
+        if ((spec.get("nodeSelector") or {}).get(SPOT_LABEL) == "true"
+                and pod_chips(spec)
+                and pod.get("status", {}).get("phase") == "Pending"
+                and not spec.get("nodeName")):
+            return True
+    return False
+
+
+def spot_eligible(doc, registry, queue):
+    """Whether this run may ever use Spot: its queue has a Spot flavor and its
+    priority class is at or below the registry's Spot line. Unclassed scores 0.
+    A registry that predates the values lets only unclassed and low through."""
+    if queue not in (registry.get("spot_queues") or []):
+        return False
+    cls = doc.get("metadata", {}).get("labels", {}).get(PRIORITY_LABEL)
+    values = registry.get("priority_values")
+    if not values:
+        return cls in (None, "low")
+    value = values.get(cls, 0) if cls else 0
+    return value <= int(registry.get("spot_max_priority", 0))
+
+
+def exclude_spot(doc):
+    """Rule Spot out for every chip-holding pod, so Kueue skips its flavor.
+
+    Kueue matches a pod's required node affinity against each flavor's
+    nodeLabels: NotIn rules out the Spot flavor, and the reserved flavor has no
+    labels for it to rule out. Added to every term, since terms are
+    alternatives.
+    """
+    rule = {"key": SPOT_LABEL, "operator": "NotIn", "values": ["true"]}
+    for spec in pod_specs(doc):
+        if not pod_chips(spec):
+            continue
+        terms = (spec.setdefault("affinity", {})
+                 .setdefault("nodeAffinity", {})
+                 .setdefault("requiredDuringSchedulingIgnoredDuringExecution", {})
+                 .setdefault("nodeSelectorTerms", []))
+        if not terms:
+            terms.append({})
+        for term in terms:
+            term.setdefault("matchExpressions", []).append(dict(rule))
 
 
 def resubmit(kind, name, doc, before_create=None):
@@ -1855,6 +1910,14 @@ def main():
     finalise(doc, profile, registry, name, labels, owner_reference(),
              shlex.join(command) if command else None, manifest)
     kind = SUPPORTED_KINDS[doc["kind"]]
+    # Every run starts with Spot ruled out, so an overflow the reservation
+    # clears within minutes never lands on Spot, where it would hold quota while
+    # GCE has no VM to give and leave reserved chips idle as they free up. A run
+    # at or below the Spot priority line keeps a copy without the rule, which
+    # the watch below submits once it has waited spot_after_seconds for
+    # reserved chips.
+    spot_doc = copy.deepcopy(doc) if spot_eligible(doc, registry, profile["queue"]) else None
+    exclude_spot(doc)
     # The cpu profile's one host when no pod holds chips.
     hosts = chip_hosts(doc) or int(profile["hosts"])
 
@@ -1987,6 +2050,8 @@ def main():
         # of the registry that names them still runs.
         redispatch_after = int(registry.get("dispatch_retry_seconds", 300))
         redispatch_max = int(registry.get("dispatch_retries", 2))
+        spot_wait = int(registry.get("spot_wait_seconds", 900))
+        spot_after = int(registry.get("spot_after_seconds", 600))
         started = time.monotonic()
         reserved = None
         # Since when the current submission has been reserved without MultiKueue
@@ -1999,6 +2064,11 @@ def main():
         last_startup = None
         last_note = None
         genv = None
+        # Since when a pod admitted onto Spot has been waiting for a node; see
+        # spot_unschedulable().
+        spot_waiting = None
+        spot_excluded = False
+        spot_allowed = False
         job_id = labels.get("buildkite.com/job-id")
 
         while True:
@@ -2104,6 +2174,27 @@ def main():
                 last_note = None
                 continue
 
+            # A run that may use Spot, still waiting for quota after spot_after:
+            # resubmitted without the rule, so Kueue may admit it onto Spot when
+            # the reservation is still full. Once, and not after falling back
+            # from Spot. Nothing was reserved, so no worker holds a copy.
+            if (spot_doc is not None and not spot_allowed and not spot_excluded
+                    and reserved is None and not admitted
+                    and time.monotonic() - started > spot_after):
+                spot_allowed = True
+                log(f"waited {time.monotonic() - started:.0f}s for reserved "
+                    "chips - resubmitting so it may run on Spot")
+                doc = spot_doc
+                created = with_grace(resubmit, kind, name, doc)
+                if created is None:
+                    log(f"{kind}/{name} cannot be resubmitted")
+                    stop_announcing()
+                    delete_workload(kind, name)
+                    return finish("not_admitted", 1)
+                uid = created["metadata"]["uid"]
+                last_note = None
+                continue
+
             if not admitted and time.monotonic() - since > limit:
                 # Time spent unable to reach the manager counts against this on
                 # purpose: the budget is carved so the run still fits inside the
@@ -2143,6 +2234,52 @@ def main():
                     "at /cache/jax or /dev/shm.")
                 delete_workload(kind, name)
                 return finish("evicted_storage", 1)
+
+            # Spot quota is a count, not capacity: Kueue admits onto it with no
+            # Spot VM to be had, and the pool failing to scale up changes
+            # nothing Kueue sees. Waited out, waitForPodsReady requeues the
+            # workload with its Spot quota free, and it can be admitted onto
+            # Spot again. Resubmitted once with Spot ruled out, it waits for the
+            # reservation instead. After a reclaim as well as at first
+            # admission: the replacement pod is pinned to Spot like the first.
+            if items is not None:
+                if not spot_excluded and spot_unschedulable(items):
+                    if spot_waiting is None:
+                        spot_waiting = time.monotonic()
+                else:
+                    spot_waiting = None
+            if (spot_waiting is not None
+                    and time.monotonic() - spot_waiting > spot_wait):
+                spot_excluded = True
+                log(f"admitted onto Spot but no Spot node for "
+                    f"{time.monotonic() - spot_waiting:.0f}s - resubmitting "
+                    "to wait for the reserved capacity instead")
+                exclude_spot(doc)
+                # The worker that admitted the copy holds its pods; the same
+                # wait as a redispatch, for the same reason.
+                may_hold = set(offered) | {timing["cluster"]}
+                created = with_grace(
+                    resubmit, kind, name, doc,
+                    lambda: remote_copy_gone(may_hold, job_id, registry))
+                if created is None:
+                    log(f"{kind}/{name} cannot be resubmitted")
+                    stop_announcing()
+                    delete_workload(kind, name)
+                    return finish("not_admitted", 1)
+                uid = created["metadata"]["uid"]
+                reserved = None
+                undispatched = None
+                offered = set()
+                admitted = False
+                running = False
+                last_startup = None
+                last_note = None
+                # It may be admitted on another worker, which needs its own
+                # credentials and log reader.
+                genv = None
+                collector = None
+                spot_waiting = None
+                continue
 
             # A failed read is not a started pod: leave it to the next turn.
             if admitted and items is not None and not running:

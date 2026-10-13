@@ -57,7 +57,17 @@ data:
         # A batch/v1 Job cannot span hosts.
         - jobset.x-k8s.io/jobset
     waitForPodsReady:
-      # Inert without `enable: true`. Turning it on adds readiness-timeout eviction
-      # and requeue accounting, which changes how preemption behaves.
+      # On because it is present: the v1beta2 configuration has no `enable`, and
+      # Kueue treats the block as enabled whenever it is set. A workload whose pods
+      # are not all ready this long after admission is evicted and requeued.
       blockAdmission: false
       timeout: 10800s
+      # The same, for a workload that was running and lost a pod: how long its
+      # replacement may stay unready before the workload is requeued. Unset it
+      # defaults to timeout, three hours. Shorter for Spot: a reclaimed Spot node
+      # takes its pod with it, and if Spot capacity has gone the replacement waits
+      # for a node that is not coming, holding the quota. Requeued, the workload
+      # goes back through its queue's flavors, reserved first. Thirty minutes
+      # outlasts the pod failure policy's backoff over a node repair (about ten)
+      # and a multi-host restart rebuilding its slice (p90 about nine).
+      recoveryTimeout: 1800s

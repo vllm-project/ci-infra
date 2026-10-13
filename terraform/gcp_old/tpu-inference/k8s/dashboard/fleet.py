@@ -103,7 +103,10 @@ class Token:
                     text=True,
                     check=True,
                 )
-                self._value, self._expiry = out.stdout.strip(), time.time() + 1800
+                # gcloud hands back its own cached token without saying when it
+                # expires, which can be in minutes, so ask again often: the call
+                # is cheap, and a token held past its expiry is a 401 per read.
+                self._value, self._expiry = out.stdout.strip(), time.time() + 300
             else:
                 req = urllib.request.Request(
                     "http://metadata.google.internal/computeMetadata/v1/instance/"
@@ -303,19 +306,45 @@ def queue_resource(cq: dict) -> str:
     return TPU if TPU in covered else (covered[0] if covered else "")
 
 
+# A Spot ResourceFlavor is named <generation>-spot (generate_manifests.py). As a
+# PromQL matcher: the reserved flavors' series, and the Spot ones'.
+RESERVED_FLAVOR = 'flavor!~".*-spot"'
+SPOT_FLAVOR = 'flavor=~".*-spot"'
+
+
+def is_spot(flavor: str) -> bool:
+    return flavor.endswith("-spot")
+
+
 def cq_summary(cq: dict) -> dict:
+    """A ClusterQueue's quota and usage. Nominal, borrowing and usage are the
+    reserved flavor's: a Spot flavor's quota is chips GCE may not have, never
+    lent or borrowed, so it is counted apart rather than as capacity the queue
+    is guaranteed."""
     resource = queue_resource(cq)
-    nominal = borrowing = 0.0
+    nominal = borrowing = spot_quota = 0.0
+    # What it may lend, when it is capped below its nominal; None lends all.
+    lending = None
     for group in cq["spec"].get("resourceGroups", []):
         for flavor in group["flavors"]:
             for r in flavor["resources"]:
-                if r["name"] == resource:
+                if r["name"] != resource:
+                    continue
+                if is_spot(flavor["name"]):
+                    spot_quota += quantity(r.get("nominalQuota"))
+                else:
                     nominal += quantity(r.get("nominalQuota"))
                     borrowing += quantity(r.get("borrowingLimit"))
-    used = borrowed = 0.0
+                    if r.get("lendingLimit") is not None:
+                        lending = (lending or 0.0) + quantity(r.get("lendingLimit"))
+    used = borrowed = spot_used = 0.0
     for flavor in cq.get("status", {}).get("flavorsUsage", []):
         for r in flavor["resources"]:
-            if r["name"] == resource:
+            if r["name"] != resource:
+                continue
+            if is_spot(flavor["name"]):
+                spot_used += quantity(r.get("total"))
+            else:
                 used += quantity(r.get("total"))
                 borrowed += quantity(r.get("borrowed"))
     preemption = cq["spec"].get("preemption") or {}
@@ -327,6 +356,9 @@ def cq_summary(cq: dict) -> dict:
         "borrowing_limit": borrowing,
         "used": used,
         "borrowed": borrowed,
+        "lending_limit": lending,
+        "spot_quota": spot_quota,
+        "spot_used": spot_used,
         # How the queue preempts, in Kueue's words: taking lent quota back from
         # borrowers (Never, LowerPriority, Any), within its own queue (Never,
         # LowerPriority, LowerOrNewerEqualPriority), and in order to borrow.
@@ -462,6 +494,12 @@ def fetch_kueue(cfg: Config) -> dict:
                 "cluster": wl.get("status", {}).get("clusterName"),
                 "queue": queue,
                 "amount": workload_amount(wl, resources.get(queue, TPU)),
+                # Admitted onto a Spot flavor: its pods wait for a Spot node.
+                "spot": any(
+                    is_spot(f)
+                    for a in admission.get("podSetAssignments", [])
+                    for f in (a.get("flavors") or {}).values()
+                ),
                 # The WorkloadPriorityClass the launcher set, and the value Kueue
                 # copied from it: what orders the queue. Buildkite's own job
                 # priority is a different scale and orders nothing here. None
@@ -612,7 +650,8 @@ def prom(cfg: Config, kind: str, params: dict) -> list:
         f"https://monitoring.googleapis.com/v1/projects/{cfg.project}/location/global/"
         f"prometheus/api/v1/{kind}?" + urllib.parse.urlencode(params)
     )
-    return google(url)["data"]["result"]
+    # A query no series matches answers null rather than an empty list.
+    return google(url)["data"]["result"] or []
 
 
 def prom_range(
@@ -759,20 +798,40 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
             ("cluster_queue",),
         ),
         "used": (
-            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{sel}}}', per_queue)}){window}))",
+            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{sel},{RESERVED_FLAVOR}}}', per_queue)}){window}))",
+            ("cluster_queue", "resource"),
+        ),
+        "spot_used": (
+            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{sel},{SPOT_FLAVOR}}}', per_queue)}){window}))",
             ("cluster_queue", "resource"),
         ),
         # The step's largest, so a quota change mid-step shows the quota the
         # usage could reach.
         "nominal": (
-            f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{sel}}}', per_queue)}){window}))",
+            f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{sel},{RESERVED_FLAVOR}}}', per_queue)}){window}))",
             ("cluster_queue", "resource"),
+        ),
+        "spot_nominal": (
+            f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{sel},{SPOT_FLAVOR}}}', per_queue)}){window}))",
+            ("cluster_queue", "resource"),
+        ),
+        # Evictions in each step, by queue: preemption to reclaim lent quota, a
+        # node gone, a pod that never became ready.
+        "evicted": (
+            f"sum by (cluster_queue) (increase(kueue_evicted_workloads_total{{{sel}}}[{step}s]))",
+            ("cluster_queue",),
         ),
         # Busy chips: TensorCore duty cycle, percent per chip, summed. Nodes that
         # do not report it - the disagg multi-host pods' - count as idle.
         "busy": (
             f"sum_over_time((sum by (model) (last_over_time({duty}[{NODE_LOOKBACK}])) / 100){window}) {share}",
             ("model",),
+        ),
+        # Busy chips per node, for views.py to sum by node pool as it does
+        # presence: the model label cannot tell a Spot node from a reserved one.
+        "busy_nodes": (
+            f"sum_over_time((sum by (cluster_name, node_name) (last_over_time({duty}[{NODE_LOOKBACK}])) / 100){window}) {share}",
+            ("cluster_name", "node_name"),
         ),
         # Each TPU node's share of each step, by name, for views.py to sum by
         # node pool: a week is a few thousand node lifetimes and a few hundred
@@ -823,16 +882,20 @@ def fetch_node_pools(cfg: Config) -> list:
                 continue
             auto = p.get("autoscaling", {})
             multi_host = bool(p.get("placementPolicy", {}).get("tpuTopology"))
+            spot = bool(p["config"].get("spot"))
+            # The Kueue queue it serves: a multi-host pool is one slice, named
+            # <shape>-<slice>. A Spot pool, <shape>-spot, keeps its own name, so
+            # its nodes are never counted as the shape's reserved ones.
+            queue = re.sub(r"-\d+$", "", p["name"]) if multi_host else p["name"]
             pools.append(
                 {
                     "cluster": name,
                     "name": p["name"],
-                    # The Kueue queue it serves: a multi-host pool is one slice,
-                    # named <shape>-<slice>.
-                    "queue": re.sub(r"-\d+$", "", p["name"])
-                    if multi_host
-                    else p["name"],
+                    "queue": queue,
+                    # The shape a Spot pool overflows from; its own otherwise.
+                    "shape": re.sub(r"-spot$", "", queue),
                     "multi_host": multi_host,
+                    "spot": spot,
                     "chips_per_node": int(chips[1]),
                     "min_nodes": int(
                         auto.get("minNodeCount") or auto.get("totalMinNodeCount") or 0
@@ -1012,7 +1075,7 @@ def fetch_waits(cfg: Config, start: int, end: int) -> dict:
     its first half and idle in its second would average to idle chips beside
     waiting jobs."""
     sel = kueue_selector(cfg)
-    tpu = f'{sel},resource="{TPU}"'
+    tpu = f'{sel},resource="{TPU}",{RESERVED_FLAVOR}'
     per_queue = "cluster_queue, flavor, resource"
     # Prometheus answers at most 11,000 points a series.
     step = max(60, -(-(end - start) // 11000 // 60) * 60)

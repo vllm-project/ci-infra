@@ -90,11 +90,23 @@ data:
     - oncall-fix
     - post-merge
     - pre-merge
+    priority_values:
+      integration: 30
+      low: -100
+      oncall-fix: 120
+      post-merge: 100
+      pre-merge: 50
     queue_max_seconds: 43200
     runtime_max_seconds: 43200
     admission_max_seconds: 3600
     dispatch_retry_seconds: 120
     dispatch_retries: 2
+    spot_wait_seconds: 900
+    spot_after_seconds: 600
+    spot_max_priority: 0
+    spot_queues:
+    - tpu7x-standard-1t-1x1x1
+    - tpu7x-standard-4t-2x2x1
     timing_table: cloud-ullm-inference-ci-cd.ci_efficiency_metrics.kube_workload_timing
     workers:
       tpu-ci-us-central1:
