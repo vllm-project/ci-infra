@@ -1546,12 +1546,14 @@ def render_live_queue(q: dict) -> str:
             f'<span class="pill spot">{num(q["spot_waiting"])} Spot chips waiting for a node</span>'
         )
     pills += [f'<span class="pill">{E(text)}</span>' for text in preemption_notes(q)]
-    spot = (q.get("spot_running") or 0) + (q.get("spot_waiting") or 0)
+    # Spot chips count as held only once a step runs on a Spot node; those
+    # admitted with no node yet hold nothing, and the pill above says so.
+    spot = q.get("spot_running") or 0
     held = (
         f'<p class="stat"><b>{num(q["used"] + spot)}</b><span>{u} held · {num(q["used"])} reserved'
         + (f" ({num(q['borrowed'])} borrowed)" if q["borrowed"] else "")
         + f" of {num(q['nominal'])} nominal"
-        + (f' + <span class="spot-num">{num(spot)} on Spot</span>' if spot else "")
+        + (f' + <span class="spot-num">{num(spot)} running on Spot</span>' if spot else "")
         + "</span></p>"
         if tpu
         else f'<p class="stat"><b>{num(q["used"])}</b><span>{u} in use of {num(q["nominal"])} nominal</span></p>'
