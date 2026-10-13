@@ -863,6 +863,11 @@ def fleet_map(cfg: Config, kq: dict, health: dict, pools: list, snap: dict) -> d
                 "title": f"{titles.get(p['shape'], p['shape'])} Spot"
                 if p.get("spot")
                 else titles.get(p["queue"], p["queue"]),
+                # The diagram's row label, which has to end before the bar:
+                # within a worker the topology alone names a Spot pool.
+                "label": f"{titles.get(p['shape'], p['shape']).split(' ', 1)[-1]} Spot"
+                if p.get("spot")
+                else titles.get(p["queue"], p["queue"]),
                 "multi_host": p["multi_host"],
                 "pools": 0,
                 "pools_up": 0,
@@ -1993,7 +1998,7 @@ def render_overview(snap: dict) -> str:
 
     def shape_line(r: dict) -> tuple:
         return (
-            r["title"],
+            r["label"],
             r["chips"] / r["max_chips"] if r["max_chips"] else 0,
             f"{num(r['chips'])}/{num(r['max_chips'])}",
         )
