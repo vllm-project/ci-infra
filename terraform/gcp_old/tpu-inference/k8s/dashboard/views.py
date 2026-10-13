@@ -597,6 +597,8 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             "pending": 0,
             "running": 0,
             "spot": 0,
+            "waiting": 0,
+            "spot_waiting": 0,
             "held": 0.0,
             "oldest_wait": None,
             "running_since": None,
@@ -665,7 +667,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 row["oldest_wait"] = max(row["oldest_wait"] or 0, now - w["since"])
                 reason = pending_reason(w["reason"])
                 reasons[reason] = reasons.get(reason, 0) + 1
-            else:
+            elif w.get("pods_ready"):
                 row["running"] += 1
                 row["held"] += w["amount"]
                 row["spot"] += 1 if w.get("spot") else 0
@@ -673,6 +675,14 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                     row["running_since"] = min(
                         row["running_since"] or w["since"], w["since"]
                     )
+            else:
+                # Admitted or being handed over, but no pod up yet: a node
+                # scaling up, or a Spot stockout. Reserved quota is held all the
+                # same; Spot chips with no node hold nothing.
+                row["waiting"] += 1
+                row["spot_waiting"] += 1 if w.get("spot") else 0
+                if not w.get("spot"):
+                    row["held"] += w["amount"]
         for row in rows.values():
             row["running_for"] = (
                 now - row["running_since"] if row["running_since"] else None
@@ -706,7 +716,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 "next_up": next_up(q, wls) if pending else None,
                 # Pending is the next-up list's; this is what holds the chips.
                 "builds": sorted(
-                    (r for r in rows.values() if r["running"]),
+                    (r for r in rows.values() if r["running"] or r["waiting"]),
                     key=lambda r: (-r["held"], -(r["priority"] or 0)),
                 ),
             }
@@ -1526,7 +1536,15 @@ def render_live_queue(q: dict) -> str:
             "<tr>"
             f'<td class="nowrap">{build_link(r)}</td><td class="branch">{E(r["branch"])}</td><td>{E(r["source"])}</td>'
             f'<td class="nowrap">{priority_cell(r)}</td>'
-            f'<td class="n">{num(r["running"])}{f""" <span class="spot-num">({r["spot"]} on Spot)</span>""" if r.get("spot") else ""}</td>'
+            f'<td class="n">{num(r["running"])}{f""" <span class="spot-num">({r["spot"]} on Spot)</span>""" if r.get("spot") else ""}'
+            + (
+                f'<div class="sub-row">{num(r["waiting"])} waiting for a node'
+                + (f' <span class="spot-num">({r["spot_waiting"]} on Spot)</span>' if r.get("spot_waiting") else "")
+                + "</div>"
+                if r.get("waiting")
+                else ""
+            )
+            + "</td>"
             f'<td class="n">{num(r["held"])}</td>'
             f'<td class="n">{ago(r["running_for"])}</td></tr>'
             for r in q["builds"]
@@ -1577,7 +1595,7 @@ def render_live_queue(q: dict) -> str:
     {held}
   </div>
   <div class="pills">{"".join(pills)}</div>
-  <div class="block"><h4>Running, by build</h4>
+  <div class="block"><h4>Running or waiting for a node, by build</h4>
   <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>Branch</th><th>Source</th><th>{term("Priority")}</th>
     <th class="n">Steps</th><th class="n">{u.capitalize()} held</th><th class="n">Running for</th>
   </tr></thead><tbody>{builds}</tbody>{builds_more}</table></div>{builds_button}</div>
