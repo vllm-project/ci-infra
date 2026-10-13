@@ -163,6 +163,22 @@ def test_plan_counts_an_unknown_file_as_the_steps_median_file():
     assert rs.plan(commands, small)["unknownFileSeconds"] == 5  # the floor
 
 
+def test_plan_counts_an_untimed_file_under_a_filter_at_the_floor():
+    """`-m hybrid_model` over a directory: main timed the files the marker
+    selects tests in, and the others most likely have none to run."""
+    command = "pytest -v -s models -m hybrid_model -k 'not granite'"
+    files = ["hybrid.py", "mamba.py", "gemma.py", "phimoe.py"]
+    timed = {"hybrid.py": 900, "mamba.py": 900}
+    result = rs.plan(_commands(command, files), _timings(command, timed))
+    assert result["unknownFiles"] == []
+    assert result["filteredUnknownFiles"] == ["tests/gemma.py", "tests/phimoe.py"]
+    assert result["shards"] == 2 and sorted(result["estimates"]) == [905, 905]
+    assert "under a -m/-k filter, counted as 5 s each" in rs.summary("k", result)
+    # Only excluding tests ("not slow_test", above) keeps most files running.
+    assert not rs._picks_tests("pytest x -m '(not slow_test)' -k 'not granite'")
+    assert rs._picks_tests("pytest x -mcore_model") and rs._picks_tests("pytest -k=a x")
+
+
 def test_plan_finds_main_timings_after_a_pr_edits_the_command():
     """Main's timings carry the command's 80-character preview; a PR that adds
     a flag changes it, and every file would otherwise count as unknown."""

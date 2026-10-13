@@ -43,8 +43,13 @@ TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
 MAX_SHARD_SECONDS = 1080
 MAX_NUMBER_OF_SHARDS = 6
 # A file main has no timing for (new in the PR, say) counts as the step's
-# median file, and at least this.
+# median file, and at least this. Under a command that picks tests by a
+# marker or keyword (`-m hybrid_model` over a directory of other models), it
+# counts as this alone: main timed every file the filter picks tests in, so
+# one it never timed most likely has none. A filter that excludes ("not
+# slow_test") still runs most files, so a new file there counts as usual.
 MIN_UNKNOWN_FILE_SECONDS = 5
+_FILTER_OPTIONS = ("-m", "-k")
 # Where the image keeps the checkout; a step's working_dir lives under it.
 CONTAINER_WORKSPACE = "/vllm-workspace"
 PLAN_ENV = "RUNTIME_SHARD_PLAN"
@@ -153,6 +158,22 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
         ):
             return None
     return commands[:first], tests
+
+
+def _picks_tests(command: str) -> bool:
+    """Whether a pytest command keeps only the tests a -m or -k expression
+    names, rather than dropping the ones it excludes."""
+    args = shlex.split(command, comments=True)
+    for position, arg in enumerate(args):
+        if arg in _FILTER_OPTIONS and position + 1 < len(args):
+            expression = args[position + 1]
+        elif arg[:2] in _FILTER_OPTIONS and len(arg) > 2:
+            expression = arg[2:].lstrip("=")
+        else:
+            continue
+        if not re.search(r"\bnot\b", expression):
+            return True
+    return False
 
 
 def pack(value) -> str:
@@ -325,10 +346,16 @@ def plan(
     # One unit per file, or per part of a file over the budget.
     units = []  # (command index, file, part or None, seconds)
     assigns: Dict[Tuple[int, str], Dict[str, int]] = {}
-    unknown_files, oversized = [], []
+    unknown_files, filtered_unknown_files, oversized = [], [], []
+    filtered = [_picks_tests(entry["command"]) for entry in commands]
     for (index, file), key in keys.items():
-        seconds = unknown_seconds if key is None else file_seconds[key]
-        if key is None:
+        if key is not None:
+            seconds = file_seconds[key]
+        elif filtered[index]:
+            seconds = MIN_UNKNOWN_FILE_SECONDS
+            filtered_unknown_files.append(file)
+        else:
+            seconds = unknown_seconds
             unknown_files.append(file)
         tests = file_tests.get(key) if key is not None else None
         selected = file in commands[index]["selected"]
@@ -384,6 +411,7 @@ def plan(
         "files": len(keys),
         "unknownFiles": unknown_files,
         "unknownFileSeconds": round(unknown_seconds, 1),
+        "filteredUnknownFiles": filtered_unknown_files,
         "oversizedFiles": oversized,
         "overBudget": max(loads) > max_shard_seconds,
         "timingSource": {
@@ -417,6 +445,13 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
         text += (
             f" No timing, counted as {result['unknownFileSeconds']:.0f} s each: "
             + ", ".join(f"`{f}`" for f in result["unknownFiles"])
+            + "."
+        )
+    if result.get("filteredUnknownFiles"):
+        text += (
+            f" No timing under a -m/-k filter, counted as "
+            f"{MIN_UNKNOWN_FILE_SECONDS} s each: "
+            + ", ".join(f"`{f}`" for f in result["filteredUnknownFiles"])
             + "."
         )
     if result["oversizedFiles"]:
