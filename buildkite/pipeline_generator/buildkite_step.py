@@ -1021,9 +1021,12 @@ def _shard_at_generation(
     # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
     command_step.label = f"{command_step.label} shard %N/%t"
     env = dict(command_step.env or {})
+    # pytest-shard, installed in the image for fixed shards, would print its
+    # own "Running N items in this shard" over this plan's selection.
     env["PYTEST_ADDOPTS"] = (
-        f"{env.get('PYTEST_ADDOPTS', '')} -p {runtime_shard.PLUGIN_MODULE}".strip()
-    )
+        f"{env.get('PYTEST_ADDOPTS', '')} -p no:pytest-shard"
+        f" -p {runtime_shard.PLUGIN_MODULE}"
+    ).strip()
     plan = {"shards": result["shards"], "commands": result["commands"]}
     env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
     env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()

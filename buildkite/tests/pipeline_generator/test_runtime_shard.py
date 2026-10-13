@@ -299,7 +299,7 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     # log headers and tracing labels, so main's timings keep matching.
     assert step.commands[2:] == plain.commands
     assert step.commands[:2] == rs.shard_job_setup()
-    assert step.env["PYTEST_ADDOPTS"] == "-p runtime_shard_plugin"
+    assert step.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
     me, entrypoint = plan["commands"]
@@ -500,7 +500,13 @@ def test_every_test_runs_in_exactly_one_shard(tmp_path, monkeypatch):
         # A file's group says when it holds only part of the file.
         for line in _groups(run.stdout):
             if "big/test_big.py" in line:
-                assert re.search(r"\(\d of 6 tests\)$", line), line
+                assert re.search(
+                    r"\(\d of 6 tests, split by test; the rest run in other shards\)$",
+                    line,
+                ), line
+        # And says where the command's other tests run.
+        summary = re.search(r"^runtime-shard: shard .*$", run.stdout, re.M).group(0)
+        assert "; the rest run in shard " in summary, summary
     assert sorted(ran) == sorted(everything)  # each test exactly once
 
 
@@ -533,7 +539,11 @@ def test_a_shard_opens_a_log_group_per_file(tmp_path):
     ]
     # All of a command's tests in other shards: nothing to run is no failure.
     run = _run(tmp_path, two, plan, 0)
-    assert run.returncode == 0 and "runs 0 of" in run.stdout, run.stdout
+    assert run.returncode == 0, run.stdout
+    assert (
+        "runtime-shard: shard 1/2 runs none of this command's tests; "
+        "they run in shard 2 (1 test)"
+    ) in run.stdout
     assert _run(tmp_path, two, plan, 1).returncode == 0
     # But a command that selects nothing at all still fails, as it would alone.
     plan["commands"].append(_command_plan("pytest -v pkg -k nothing", "C", files))

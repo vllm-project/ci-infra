@@ -8,9 +8,11 @@ pytestmark = pytest.mark.usefixtures("fake_global_config")
 
 
 def _render_command_step(step):
-    group_step = buildkite_step.convert_group_step_to_buildkite_step({
-        step.group: [step],
-    })[0]
+    group_step = buildkite_step.convert_group_step_to_buildkite_step(
+        {
+            step.group: [step],
+        }
+    )[0]
     return next(
         s
         for s in group_step.steps
