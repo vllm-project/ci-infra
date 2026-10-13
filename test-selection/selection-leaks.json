@@ -1569,6 +1569,34 @@
     "reference_url": "https://github.com/vllm-project/vllm/pull/57169",
     "notes": "PR #57169 (GLM-5.3-Flash generic packed KV layout) merged with all Arm CPU Test shards blocked in PR build 93879; first post-merge main 93915 failed Shard 2 with a CPU fallback signature mismatch and it has failed six consecutive times. Found by @Sherlock's main-CI audit during host-outage catch-up; recorded by kimi-no-na-wa."
    }
+  },
+  {
+   "id": "pr-61134-main-94362-e2e-core-1-gpu",
+   "job_name": ":nvidia: (H200 MIG 18GB) E2E Core",
+   "job_key": "e2e-core-1-gpu",
+   "culprit_pr": {
+    "number": 61134,
+    "url": "https://github.com/vllm-project/vllm/pull/61134",
+    "merge_commit": "f47792af7fba76eb8e8f6a564b35cfad316d39f2"
+   },
+   "pr_ci": {
+    "ran": false,
+    "state": "blocked",
+    "build_number": 94334,
+    "job_id": "01a13253-8a75-43b2-98df-f5dca21d4b9d",
+    "url": "https://buildkite.com/vllm/ci/builds/94334#01a13253-8a75-43b2-98df-f5dca21d4b9d"
+   },
+   "main_failure": {
+    "build_number": 94362,
+    "job_id": "01a1333b-d247-49be-b767-84df48ec72c7",
+    "url": "https://buildkite.com/vllm/ci/builds/94362#01a1333b-d247-49be-b767-84df48ec72c7",
+    "signature": "test_mamba_prefix_cache_mrv1 / _async \u2014 RuntimeError: Test subprocess failed (ValueError inside)"
+   },
+   "causal_confirmation": {
+    "kind": "code_analysis",
+    "reference_url": "https://github.com/vllm-project/vllm/pull/61134",
+    "notes": "PR #61134 (dtype-aware dummy weight init) merged with E2E Core blocked in PR build 94334; first post-merge main 94362 failed e2e-core-1-gpu on mamba prefix-cache MRV1 tests. Selector trial: v7's answer for #61134 had e2e-core-1-gpu in would_add \u2014 it would have run the lane pre-merge. Found by @Sherlock's audit; recorded by kimi-no-na-wa."
+   }
   }
  ]
 }
