@@ -689,6 +689,15 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 "within_nominal": min(q["used"], q["nominal"]),
                 "idle": max(0.0, q["nominal"] - q["used"]),
                 "admitted": sum(1 for w in wls if w["state"] == "admitted"),
+                # Admitted splits into steps whose pods are up and steps still
+                # waiting for a node - a scale-up, or a Spot stockout - which
+                # hold quota but run nothing.
+                "running_steps": sum(
+                    1 for w in wls if w["state"] == "admitted" and w.get("pods_ready")
+                ),
+                "starting_steps": sum(
+                    1 for w in wls if w["state"] == "admitted" and not w.get("pods_ready")
+                ),
                 "dispatching": sum(1 for w in wls if w["state"] == "dispatching"),
                 "pending": len(pending),
                 "pending_amount": sum(w["amount"] for w in pending),
@@ -1368,7 +1377,7 @@ def render_live_summary(snap: dict) -> str:
 <td class="n">{num(q["borrowing_limit"]) if q["borrowing_limit"] else "-"}</td>
 {f'<td>{spot_text(q, cell=True) if q.get("spot_quota") else "-"}</td>' if has_spot else ""}
 <td>{E(RECLAIM_FROM.get(q["reclaim"], q["reclaim"])) if q["reclaim"] != "Never" else '<span class="muted">nobody</span>'}</td>
-<td class="n">{num(q["admitted"] + q["dispatching"])}</td>
+<td class="n">{num(q["running_steps"])}{f'<div class="sub-row">{num(q["starting_steps"] + q["dispatching"])} waiting for a node</div>' if q["starting_steps"] + q["dispatching"] else ""}</td>
 <td class="n">{num(q["pending"])}{f'<div class="sub-row">{num(q["pending_amount"])} chips</div>' if q["pending"] else ""}</td>
 <td class="barcell">{quota_bar(q, scale)}</td></tr>"""
             for q in members
@@ -1395,7 +1404,7 @@ def render_live_summary(snap: dict) -> str:
   </div>
   <p class="bar-legend"><span class="key"><i class="sw own"></i>own</span><span class="key"><i class="sw borrowed"></i>borrowed</span>{'<span class="key"><i class="sw spot"></i>Spot running</span><span class="key"><i class="sw spot-wait"></i>Spot waiting for a node</span>' if has_spot else ""}<span class="key"><i class="sw idle"></i>idle, lendable</span></p>
   <div class="table-wrap"><table class="quota"><thead><tr><th>Queue</th><th class="n">{term("Nominal")}</th><th class="n">{term("In use, reserved", "In use")}</th><th>{term("Borrowing")}</th>
-  <th class="n">{term("May borrow")}</th>{f'<th>{term("Spot, chips", "Spot")}</th>' if has_spot else ""}<th>{term("Reclaims from", "Reclaim")}</th><th class="n">{term("Running", "Admitted")}</th><th class="n">{term("Pending")}</th>
+  <th class="n">{term("May borrow")}</th>{f'<th>{term("Spot, chips", "Spot")}</th>' if has_spot else ""}<th>{term("Reclaims from", "Reclaim")}</th><th class="n">{term("Running, steps", "Admitted")}</th><th class="n">{term("Pending")}</th>
   <th class="barcell"></th>
   </tr></thead><tbody>{rows}</tbody></table></div>
 </div>""")
@@ -1564,7 +1573,7 @@ def render_live_queue(q: dict) -> str:
     <span class="more"><a href="jobs?queue={E(urllib.parse.quote(q["name"]))}">Jobs →</a> · <a href="capacity#{E(q["name"])}">Capacity →</a></span></div>
   <div class="stats">
     <p class="stat"><b>{num(q["pending"])}</b><span>pending · oldest {ago(q["oldest_wait"])}</span></p>
-    <p class="stat"><b>{num(q["admitted"])}</b><span>admitted{f" · {q['dispatching']} dispatching" if q["dispatching"] else ""}</span></p>
+    <p class="stat"><b>{num(q["running_steps"])}</b><span>running{f" · {num(q['starting_steps'])} waiting for a node" if q["starting_steps"] else ""}{f" · {q['dispatching']} handing over" if q["dispatching"] else ""}</span></p>
     {held}
   </div>
   <div class="pills">{"".join(pills)}</div>
