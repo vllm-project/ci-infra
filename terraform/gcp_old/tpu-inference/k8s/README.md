@@ -462,9 +462,9 @@ reservation can never land on a Spot node, and the reserved flavor and pools
 are unchanged.
 
 Which steps reach Spot is the launcher's choice, by priority and by wait. A
-step above `tpu_spot_max_priority` (0: integration, pre-merge, post-merge,
-oncall-fix) never uses Spot; it waits for reserved chips and, outranking the
-rest, takes them first as they free up. A step at or below it (unclassed, low)
+step above `tpu_spot_max_priority` (50: post-merge, oncall-fix) never uses
+Spot; it waits for reserved chips and, outranking the rest, takes them first as
+they free up. A step at or below it (pre-merge, integration, unclassed, low)
 is submitted with Spot ruled out too, and only once it has waited
 `tpu_spot_after_seconds` (10 minutes) for reserved chips is it resubmitted with
 Spot allowed - the step log says `waited Ns for reserved chips - resubmitting so

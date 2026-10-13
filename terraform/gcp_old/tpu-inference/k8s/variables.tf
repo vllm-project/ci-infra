@@ -336,7 +336,7 @@ variable "tpu_spot_after_seconds" {
 
 variable "tpu_spot_max_priority" {
   type        = number
-  description = "The highest WorkloadPriorityClass value that may use Spot; unclassed scores 0. Steps above it - integration, pre-merge, post-merge, oncall-fix - wait for reserved chips, and take them first as they free up."
+  description = "The highest WorkloadPriorityClass value that may use Spot; unclassed scores 0. Steps above it wait for reserved chips, and take them first as they free up."
 }
 
 variable "tpu_runtime_max_seconds" {

@@ -120,7 +120,11 @@ tpu_dispatch_retries       = 2
 # moved before Kueue requeues the workload, possibly onto Spot again.
 tpu_spot_wait_seconds  = 900
 tpu_spot_after_seconds = 600
-tpu_spot_max_priority  = 0
+# Pre-merge (50) and integration (30) steps may use Spot after the wait, so
+# Spot also absorbs the PR load that fills the reservation in working hours,
+# when no scheduled runs are queued. Post-merge (100) and oncall-fix (120)
+# wait for reserved chips.
+tpu_spot_max_priority  = 50
 
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
