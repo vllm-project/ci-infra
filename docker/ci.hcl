@@ -119,14 +119,9 @@ variable "CACHE_TO" {
 
 function "get_cache_from" {
   params = []
+  # TEMPORARY prewarm branch: only main's layer cache, so the csrc stage
+  # recompiles and fills the read-write sccache.
   result = compact([
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${BUILDKITE_COMMIT},mode=max" : "",
-    PARENT_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${PARENT_COMMIT},mode=max" : "",
-    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${VLLM_MERGE_BASE_COMMIT},mode=max" : "",
-    VLLM_CACHE_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${VLLM_CACHE_MERGE_BASE_COMMIT},mode=max" : "",
-    CACHE_FROM != "" ? "type=registry,ref=${CACHE_FROM},mode=max" : "",
-    CACHE_FROM_BASE != "" ? "type=registry,ref=${CACHE_FROM_BASE},mode=max" : "",
-    CACHE_FROM_BASE == "" && CACHE_FROM_BASE_BRANCH != "" ? "type=registry,ref=${CACHE_FROM_BASE_BRANCH},mode=max" : "",
     CACHE_FROM_MAIN != "" ? "type=registry,ref=${CACHE_FROM_MAIN},mode=max" : "",
   ])
 }
