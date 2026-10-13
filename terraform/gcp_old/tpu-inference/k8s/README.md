@@ -458,17 +458,32 @@ shape.
 The Spot flavor is the only thing that names Spot nodes: Kueue adds its
 `cloud.google.com/gke-spot=true` nodeSelector and its toleration to a pod it
 admits on that flavor and to no other, so a workload admitted on the
-reservation can never land on a Spot node, and the reserved flavor and pools
-are unchanged.
+reservation can never land on a Spot node. The reserved flavor of a generation
+with Spot names `cloud.google.com/gke-provisioning: standard`, which GKE puts on
+every reserved node (a Spot node says `spot`) and in each pool's node template,
+so a pool at zero still scales up for the nodeSelector Kueue writes from it.
 
 Which steps reach Spot is the launcher's choice, by priority and by wait. A
 step above `tpu_spot_max_priority` (50: post-merge, oncall-fix) never uses
 Spot; it waits for reserved chips and, outranking the rest, takes them first as
 they free up. A step at or below it (pre-merge, integration, unclassed, low)
 is submitted with Spot ruled out too, and only once it has waited
-`tpu_spot_after_seconds` (10 minutes) for reserved chips is it resubmitted with
-Spot allowed - the step log says `waited Ns for reserved chips - resubmitting so
-it may run on Spot`. Kueue sends a workload to Spot the moment the reservation
+`tpu_spot_after_seconds` (10 minutes) for reserved chips is it resubmitted
+pinned to Spot - the step log says `waited Ns for reserved chips - resubmitting
+to run on Spot`.
+
+Every submission names exactly one flavor, because under MultiKueue the manager
+and the worker each choose one: allowed both, a worker with reserved room put
+workloads on reserved that the manager had booked on Spot, and the two sides'
+accounting parted - by 42 chips on 10-13, enough that a post-merge JobSet the
+manager admitted could not fit on the worker, which does not preempt. Kueue
+matches a pod's node affinity against a flavor using only the keys that flavor
+defines (`flavorassigner.go`), so the pins are `gke-spot NotIn ["true"]` for
+reserved (only the Spot flavor defines `gke-spot`) and `gke-spot In ["true"]`
+plus `gke-provisioning In ["spot"]` for Spot (only the reserved flavor defines
+`gke-provisioning`). A rule on `gke-spot` alone cannot rule the reserved flavor
+out: #795 tried, and stranded pods admitted on reserved with a Spot-only
+affinity and no Spot toleration (#796). Kueue sends a workload to Spot the moment the reservation
 is full, so without the wait a small overflow that the reservation would clear
 in minutes landed on Spot, held Spot quota through a stockout, and left
 reserved chips idle as they freed up: on 10-13, 27 chip-hours idle while steps

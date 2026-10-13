@@ -588,6 +588,23 @@ def priority_classes() -> str:
     )
 
 
+def reserved_flavor_labels(spot: dict[str, int]) -> dict[str, str]:
+    """The nodeLabels block of each reserved flavor that has a Spot flavor
+    beside it.
+
+    Kueue matches a pod's node affinity against a flavor using only the keys
+    that flavor defines, so the launcher can pin a workload to Spot only with a
+    rule on a key the reserved flavor defines. GKE labels every node with how
+    it was provisioned - standard for the reserved pools, spot for the Spot
+    ones - and puts the label in each pool's node template, so a reserved pool
+    scaled to zero still matches the nodeSelector Kueue writes from it.
+    """
+    return {
+        family: "\nspec:\n  nodeLabels:\n    cloud.google.com/gke-provisioning: standard"
+        for family in sorted({cohort(name) for name in spot})
+    }
+
+
 def queues(
     shapes: dict[str, int],
     namespace: str,
@@ -611,10 +628,11 @@ def queues(
     nodes.
     """
     spot = {name: chips for name, chips in (spot or {}).items() if chips}
+    labels = reserved_flavor_labels(spot)
     out = (
         [priority_classes()]
         + [
-            render("resource_flavor", ACCELERATOR=family)
+            render("resource_flavor", ACCELERATOR=family, NODE_LABELS=labels.get(family, ""))
             for family in sorted({cohort(name) for name in shapes})
         ]
         + [
