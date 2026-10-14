@@ -593,3 +593,30 @@ table.quota .pill { white-space: nowrap; }
 .bar-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 14px; margin: 4px 0 2px;
   font-size: 12px; color: var(--ink-2); }
 .bar-legend .key { display: inline-flex; align-items: center; gap: 5px; }
+/* A tab's sub-pages: underlined, so they read as under the top bar's tabs. */
+.subtabs { display: flex; gap: 22px; border-bottom: 1px solid var(--line); margin: 2px 0 16px; }
+.subtab { padding: 6px 2px 9px; margin-bottom: -1px; border-bottom: 2px solid transparent;
+  color: var(--ink-2); font-weight: 600; text-decoration: none; }
+.subtab:hover { color: var(--ink); }
+.subtab.active { color: var(--ink); border-bottom-color: var(--accent); }
+.subtab small { margin-left: 8px; color: var(--muted); font-weight: 400; font-size: 12px; }
+/* Steps: a step's name in a tile, and a typical job's time from its build's
+   creation - slots 3, 2, 1 in that order, which validate as adjacent pairs,
+   between two grays. */
+.tile b.name { font-size: 15px; line-height: 1.35; padding: 6px 0 4px; }
+.seg.ph-start, i.sw.ph-start { background: #cfd5de; }
+.seg.ph-wait, i.sw.ph-wait { background: var(--cat-3); }
+.seg.ph-startup, i.sw.ph-startup { background: var(--cat-2); }
+.seg.ph-test, i.sw.ph-test { background: var(--cat-1); }
+.seg.ph-launcher, i.sw.ph-launcher { background: #8f98a6; }
+.step-bar { margin: 4px 0 3px; }
+.step-bar .seg { min-width: 2px; }
+.step-bar .seg:first-child { border-radius: 4px 0 0 4px; }
+table.poles td.timeline, table.poles th.timeline { min-width: 260px; width: 38%; }
+table.poles .advice { margin-top: 4px; font-size: 12px; color: #8a5a00; }
+table.poles td.step, table.steps td.step { min-width: 220px; }
+table.poles td.follower { min-width: 140px; max-width: 220px; }
+/* A step Kueue sent back in line: the borrowed color, as reclaim takes back
+   what was borrowed. Spot's own causes wear .pill.spot. Small beside a name. */
+.pill.preempt { background: var(--borrowed-bg); color: #9a3a12; }
+.steps-list .pill, td .pill.preempt, td .pill.spot { font-size: 11px; padding: 0 7px; cursor: help; }
