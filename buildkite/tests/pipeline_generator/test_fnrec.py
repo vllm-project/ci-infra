@@ -145,8 +145,18 @@ def test_present_when_enabled(monkeypatch):
         ({"num_nodes": 2, "no_plugin": True}, "nvidia"),
         # A hardware runner starts its own container without the recorder's
         # env, so arming it only made the collect step wait for it.
-        ({"commands": ["bash .buildkite/scripts/hardware_ci/run-hpu-test.sh"]}, "nvidia"),
-        ({"commands": ['bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "pytest x"']}, "nvidia"),
+        (
+            {"commands": ["bash .buildkite/scripts/hardware_ci/run-hpu-test.sh"]},
+            "nvidia",
+        ),
+        (
+            {
+                "commands": [
+                    'bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "pytest x"'
+                ]
+            },
+            "nvidia",
+        ),
     ],
 )
 def test_steps_that_must_not_be_armed(monkeypatch, step_kwargs, profile):

@@ -682,9 +682,7 @@ def test_amd_mirror_label_override(fake_global_config, amd_label, expected_amd_l
         (2, 2),  # explicit override -> independent AMD shard count
     ],
 )
-def test_amd_mirror_parallelism_override(
-    fake_global_config, amd_parallelism, expected
-):
+def test_amd_mirror_parallelism_override(fake_global_config, amd_parallelism, expected):
     """NVIDIA sharding must not multiply AMD mirrors: mirror.amd.parallelism
     overrides the inherited parent parallelism when set."""
     amd_config = {
@@ -719,9 +717,7 @@ def test_amd_mirror_parallelism_override(
         for s in nvidia_group.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
-    amd_group = next(
-        g for g in group_steps if g.group == "Hardware-AMD Tests"
-    )
+    amd_group = next(g for g in group_steps if g.group == "Hardware-AMD Tests")
     amd_step = next(
         s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )

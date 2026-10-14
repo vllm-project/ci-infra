@@ -126,9 +126,7 @@ def test_selected_steps_support_label_generated_keys():
         (None, "multimodal-processor"),
     ],
 )
-def test_selected_steps_support_amd_mirror_keys(
-    fake_global_config, key, generated_key
-):
+def test_selected_steps_support_amd_mirror_keys(fake_global_config, key, generated_key):
     steps = [
         Step(label="AMD image", key="image-build-amd", commands=["build"]),
         Step(
@@ -151,9 +149,7 @@ def test_selected_steps_support_amd_mirror_keys(
         steps, frozenset({f"amd-{generated_key}"})
     )
     fake_global_config["only_step_keys"] = selected_keys
-    groups = buildkite_step.convert_group_step_to_buildkite_step(
-        group_steps(selected)
-    )
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(selected))
     generated_keys = [job.key for group in groups for job in group.steps]
 
     assert [step.key for step in selected] == [
@@ -684,9 +680,7 @@ def test_otel_trace_covers_native_amd_mirrors_only(fake_global_config, dind, tra
     )
 
     amd_step = next(
-        s
-        for s in amd_group.steps
-        if isinstance(s, buildkite_step.BuildkiteCommandStep)
+        s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
     assert ("ci_otel" in amd_step.model_dump_json()) is traced
 

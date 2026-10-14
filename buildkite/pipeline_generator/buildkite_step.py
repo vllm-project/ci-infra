@@ -1021,14 +1021,34 @@ def _shard_at_generation(
     # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
     command_step.label = f"{command_step.label} shard %N/%t"
     env = dict(command_step.env or {})
+    # pytest-shard, installed in the image for fixed shards, would print its
+    # own "Running N items in this shard" over this plan's selection.
     env["PYTEST_ADDOPTS"] = (
-        f"{env.get('PYTEST_ADDOPTS', '')} -p {runtime_shard.PLUGIN_MODULE}".strip()
-    )
+        f"{env.get('PYTEST_ADDOPTS', '')} -p no:pytest-shard"
+        f" -p {runtime_shard.PLUGIN_MODULE}"
+    ).strip()
     plan = {"shards": result["shards"], "commands": result["commands"]}
     env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
     env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()
     command_step.env = env
-    command_step.commands = runtime_shard.shard_job_setup() + command_step.commands
+    commands = list(command_step.commands)
+    count = len(step.commands or [])
+    for planned in result["commands"]:
+        # The job's line for a step command follows its "Command (i/n)" header.
+        header = f"+++ :test_tube: Command ({planned['position'] + 1}/{count}):"
+        at = next(
+            (
+                i
+                for i, c in enumerate(commands)
+                if c.startswith("echo ") and header in c
+            ),
+            None,
+        )
+        if at is not None and at + 1 < len(commands):
+            commands[at + 1] = runtime_shard.guard(
+                commands[at + 1], planned, result["shards"]
+            )
+    command_step.commands = runtime_shard.shard_job_setup() + commands
 
 
 def convert_group_step_to_buildkite_step(

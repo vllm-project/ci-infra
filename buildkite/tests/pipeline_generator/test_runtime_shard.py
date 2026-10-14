@@ -296,10 +296,15 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     for field in ("depends_on", "agents", "plugins", "retry", "timeout_in_minutes"):
         assert getattr(step, field) == getattr(plain, field)
     # Its commands are the step's own, after installing the plugin: the same
-    # log headers and tracing labels, so main's timings keep matching.
-    assert step.commands[2:] == plain.commands
+    # log headers and tracing labels, so main's timings keep matching. A test
+    # command runs only in the shards that have its tests.
     assert step.commands[:2] == rs.shard_job_setup()
-    assert step.env["PYTEST_ADDOPTS"] == "-p runtime_shard_plugin"
+    jobs = step.commands[2:]
+    assert len(jobs) == len(plain.commands)
+    guarded = [job for job, own in zip(jobs, plain.commands) if job != own]
+    assert len(guarded) == 1 and TESTS[1] in guarded[0]  # the one-file command
+    assert guarded[0].startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
+    assert step.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
     me, entrypoint = plan["commands"]
@@ -308,6 +313,32 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     assert sorted(me["files"]) == [f"tests/{f}" for f in ME_FILES]  # no helpers.py
     assert list(entrypoint["files"]) == [f"tests/{ENTRYPOINT}"]
     assert checkout == []  # a good plan leaves the build page alone
+
+
+def test_a_command_runs_only_in_the_shards_with_its_tests():
+    planned = {
+        "files": {"tests/a.py": 2},
+        "split": {"tests/b.py": {"shards": {"0": 2, "1": 0}}},
+    }
+    script = rs.guard("echo RAN", planned, 3).replace("$$", "$")
+    ran = {}
+    for job in range(3):
+        env = dict(os.environ, BUILDKITE_PARALLEL_JOB=str(job))
+        out = subprocess.run(
+            ["sh", "-ec", script], env=env, capture_output=True, text=True
+        )
+        assert out.returncode == 0, out.stderr
+        ran[job] = out.stdout.strip()
+    assert ran[0] == ran[2] == "RAN"
+    assert ran[1] == (
+        "runtime-shard: this shard has no tests of this command; they run in shard 1, 3"
+    )
+    # A command every shard has a part of runs as it is.
+    everywhere = {
+        "files": {"tests/a.py": 0, "tests/c.py": 1, "tests/d.py": 2},
+        "split": {},
+    }
+    assert rs.guard("echo RAN", everywhere, 3) == "echo RAN"
 
 
 def test_generator_keeps_the_single_job_without_a_plan(
@@ -376,7 +407,10 @@ def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     [step] = _render(_step(device="l4", automatic_shard=True))
     assert "kubernetes" in step.plugins[0] and step.plugins == plain.plugins
     assert step.retry == plain.retry == buildkite_step.K8S_RETRY
-    assert step.parallelism == 3 and step.commands[2:] == plain.commands
+    assert step.parallelism == 3 and len(step.commands[2:]) == len(plain.commands)
+    # The same commands, the one-file command run only by the shard with it.
+    changed = [new for new, old in zip(step.commands[2:], plain.commands) if new != old]
+    assert len(changed) == 1 and changed[0].startswith("case ")
 
 
 def test_shard_job_setup_installs_the_plugin_for_any_python():
@@ -500,7 +534,13 @@ def test_every_test_runs_in_exactly_one_shard(tmp_path, monkeypatch):
         # A file's group says when it holds only part of the file.
         for line in _groups(run.stdout):
             if "big/test_big.py" in line:
-                assert re.search(r"\(\d of 6 tests\)$", line), line
+                assert re.search(
+                    r"\(\d of 6 tests, split by test; the rest run in other shards\)$",
+                    line,
+                ), line
+        # And says where the command's other tests run.
+        summary = re.search(r"^runtime-shard: shard .*$", run.stdout, re.M).group(0)
+        assert "; the rest run in shard " in summary, summary
     assert sorted(ran) == sorted(everything)  # each test exactly once
 
 
@@ -533,7 +573,11 @@ def test_a_shard_opens_a_log_group_per_file(tmp_path):
     ]
     # All of a command's tests in other shards: nothing to run is no failure.
     run = _run(tmp_path, two, plan, 0)
-    assert run.returncode == 0 and "runs 0 of" in run.stdout, run.stdout
+    assert run.returncode == 0, run.stdout
+    assert (
+        "runtime-shard: shard 1/2 runs none of this command's tests; "
+        "they run in shard 2 (1 test)"
+    ) in run.stdout
     assert _run(tmp_path, two, plan, 1).returncode == 0
     # But a command that selects nothing at all still fails, as it would alone.
     plan["commands"].append(_command_plan("pytest -v pkg -k nothing", "C", files))

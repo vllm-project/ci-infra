@@ -11,11 +11,7 @@ nebius_h200_plugin_template = {
             "containers": [
                 {
                     "image": "",
-                    "resources": {
-                        "limits": {
-                            "nvidia.com/gpu": 8
-                        }
-                    },
+                    "resources": {"limits": {"nvidia.com/gpu": 8}},
                     "volumeMounts": [
                         {"name": "devshm", "mountPath": "/dev/shm"},
                         {"name": "hf-cache", "mountPath": "/root/.cache/huggingface"},
@@ -188,17 +184,12 @@ h100_rh_plugin_template = {
     "kubernetes": {
         "podSpec": {
             "serviceAccountName": "buildkite-anyuid",
-            "securityContext": {
-                "fsGroup": 0
-            },
+            "securityContext": {"fsGroup": 0},
             "containers": [
                 {
                     "image": "",
                     "resources": {"limits": {"nvidia.com/gpu": ""}},
-                    "securityContext": {
-                        "runAsUser": 0,
-                        "runAsGroup": 0
-                    },
+                    "securityContext": {"runAsUser": 0, "runAsGroup": 0},
                     "volumeMounts": [
                         {"name": "devshm", "mountPath": "/dev/shm"},
                         {"name": "ci-cache", "mountPath": "/ci-cache"},
@@ -225,7 +216,10 @@ h100_rh_plugin_template = {
                 {"name": "devshm", "emptyDir": {"medium": "Memory"}},
                 {
                     "name": "ci-cache",
-                    "hostPath": {"path": "/var/mnt/ci-cache", "type": "DirectoryOrCreate"},
+                    "hostPath": {
+                        "path": "/var/mnt/ci-cache",
+                        "type": "DirectoryOrCreate",
+                    },
                 },
             ],
         }
@@ -234,9 +228,9 @@ h100_rh_plugin_template = {
 
 
 # Per-GPU sizing constants (g6.12xlarge = 48 vCPU / 192 GiB / 4 GPUs).
-L4_CPU_PER_GPU = 10          # requests only; no cpu limit (jobs are GPU-bound)
-L4_MEM_PER_GPU = "40Gi"      # requests only; scheduling honesty, not a cap
-L4_SHM_PER_GPU = "24Gi"      # 4-GPU job -> 96Gi = today's effective node RAM/2
+L4_CPU_PER_GPU = 10  # requests only; no cpu limit (jobs are GPU-bound)
+L4_MEM_PER_GPU = "40Gi"  # requests only; scheduling honesty, not a cap
+L4_SHM_PER_GPU = "24Gi"  # 4-GPU job -> 96Gi = today's effective node RAM/2
 
 l4_plugin_template = {
     "kubernetes": {
@@ -250,10 +244,13 @@ l4_plugin_template = {
         "podSpec": {
             "priorityClassName": "ci",
             "serviceAccountName": "buildkite-gpu-jobs",
-            "tolerations": [{
-                "key": "nvidia.com/gpu", "operator": "Exists",
-                "effect": "NoSchedule",
-            }],
+            "tolerations": [
+                {
+                    "key": "nvidia.com/gpu",
+                    "operator": "Exists",
+                    "effect": "NoSchedule",
+                }
+            ],
             "nodeSelector": {"vllm.ci/gpu-pool": "l4x4"},
             "containers": [
                 {
@@ -271,19 +268,34 @@ l4_plugin_template = {
                         {"name": "NCCL_CUMEM_HOST_ENABLE", "value": "0"},
                         {"name": "HF_HOME", "value": "/fsx/hf_cache"},
                         {"name": "HF_HUB_ENABLE_HF_TRANSFER", "value": "1"},
-                        {"name": "HF_TOKEN", "valueFrom": {"secretKeyRef": {
-                            "name": "hf-token-secret", "key": "token"}}},
-                        {"name": "BUILDKITE_ANALYTICS_TOKEN", "valueFrom": {"secretKeyRef": {
-                            "name": "buildkite-analytics-token", "key": "token",
-                            "optional": True}}},
+                        {
+                            "name": "HF_TOKEN",
+                            "valueFrom": {
+                                "secretKeyRef": {
+                                    "name": "hf-token-secret",
+                                    "key": "token",
+                                }
+                            },
+                        },
+                        {
+                            "name": "BUILDKITE_ANALYTICS_TOKEN",
+                            "valueFrom": {
+                                "secretKeyRef": {
+                                    "name": "buildkite-analytics-token",
+                                    "key": "token",
+                                    "optional": True,
+                                }
+                            },
+                        },
                     ],
                 }
             ],
             "volumes": [
-                {"name": "devshm",
-                 "emptyDir": {"medium": "Memory", "sizeLimit": ""}},
-                {"name": "hf-cache",
-                 "hostPath": {"path": "/fsx/hf_cache", "type": "DirectoryOrCreate"}},
+                {"name": "devshm", "emptyDir": {"medium": "Memory", "sizeLimit": ""}},
+                {
+                    "name": "hf-cache",
+                    "hostPath": {"path": "/fsx/hf_cache", "type": "DirectoryOrCreate"},
+                },
             ],
         },
     }
@@ -304,7 +316,10 @@ def get_k8s_plugin(step: Step, image: str):
         plugin = copy.deepcopy(l4_plugin_template)
 
     if step.device in (DeviceType.H100, DeviceType.B200_K8S):
-        image = image.replace("public.ecr.aws", "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache")
+        image = image.replace(
+            "public.ecr.aws",
+            "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache",
+        )
     plugin["kubernetes"]["podSpec"]["containers"][0]["image"] = image
     plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"][
         "nvidia.com/gpu"
