@@ -8,7 +8,8 @@ command the plan covers, it:
   - skips collecting the files planned for other shards,
   - keeps this job's tests: its files, and its part of each file split by
     test. A collected file the plan doesn't name (one the generator could
-    not see) runs in the first shard, so no test can drop out of every shard,
+    not see) runs in the first shard that runs the command, so no test can
+    drop out of every shard,
   - opens a Buildkite log group per file, opens the group of a file that
     fails, and puts the failures and summary in their own open group,
   - turns "no tests ran" into success when every test went to other shards.
@@ -67,6 +68,7 @@ class ShardPlugin:
         self.split = command["split"]  # file -> {"shards", "assign"}
         self.prefix = command["prefix"]
         self.label = command["label"]
+        self.fallback = command.get("fallback", 0)
         self.shard = shard
         self.shards = shards
         self.reporter = None
@@ -107,7 +109,7 @@ class ShardPlugin:
             return self.files[file]
         if file not in self.unplanned:
             self.unplanned.append(file)
-        return 0
+        return self.fallback
 
     @pytest.hookimpl(trylast=True)  # after -m, -k and conftest hooks
     def pytest_collection_modifyitems(self, session, config, items):
@@ -135,9 +137,9 @@ class ShardPlugin:
         if self.reporter is None:
             return
         self._say(self._where())
-        if self.unplanned and self.shard == 0:
+        if self.unplanned and self.shard == self.fallback:
             self._say(
-                "runtime-shard: not in the plan, so run in shard 1: "
+                f"runtime-shard: not in the plan, so run in shard {self.fallback + 1}: "
                 + ", ".join(self.unplanned)
             )
 

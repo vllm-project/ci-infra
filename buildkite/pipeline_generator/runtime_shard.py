@@ -506,9 +506,39 @@ def plan_step(
                 planned["args"] = words[1:]
                 planned["prefix"] = prefix
                 planned["label"] = f"Command ({position + 1}/{len(commands)})"
+                planned["position"] = position
+                # A test the plan doesn't name runs in the first shard that
+                # runs the command at all.
+                planned["fallback"] = owners(planned)[0]
     except Exception as error:  # never block the step on its sharding
         result, reason = None, str(error)
     return result, summary(step_key, result, reason)
+
+
+def owners(planned: Dict) -> List[int]:
+    """The shards that run any of a planned command's tests."""
+    shards = set(planned["files"].values())
+    for split in planned["split"].values():
+        shards.update(split["shards"].values())
+    return sorted(shards)
+
+
+def guard(command: str, planned: Dict, shards: int) -> str:
+    """A job's command, run only by the shards that have its tests. The others
+    say where they run instead of starting pytest to deselect everything."""
+    runs = owners(planned)
+    if len(runs) == shards:
+        return command
+    where = ", ".join(str(shard + 1) for shard in runs)
+    return (
+        f'case "$${{BUILDKITE_PARALLEL_JOB:-0}}" in\n'
+        f"{'|'.join(str(shard) for shard in runs)})\n"
+        f"{command}\n"
+        ";;\n"
+        f'*) echo "runtime-shard: this shard has no tests of this command;'
+        f' they run in shard {where}" ;;\n'
+        "esac"
+    )
 
 
 def plugin_source() -> str:
