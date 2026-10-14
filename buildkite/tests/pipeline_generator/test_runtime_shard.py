@@ -433,12 +433,18 @@ def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
     assert job.key == "amd-model-executor" and job.parallelism == 3
     assert job.label == "AMD: Model Executor (mi325_1) shard %N/%t"
     assert job.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
-    assert rs.unpack(job.env["RUNTIME_SHARD_PLAN"])["shards"] == 3
+    plan = rs.unpack(job.env["RUNTIME_SHARD_PLAN"])
+    assert plan["shards"] == 3
     assert "RUNTIME_SHARD_PLUGIN" in job.env
-    # The shard setup goes in front of the mirror's own commands.
-    commands = job.env["VLLM_TEST_COMMANDS"]
-    assert commands.startswith(" && ".join(rs.shard_job_setup()) + " && ")
-    assert commands.endswith(plain.env["VLLM_TEST_COMMANDS"])
+    # The shard setup goes in front of the mirror's own commands, and, as on
+    # CUDA, the one-file command runs only in the shard that has its tests.
+    guarded = rs.guard(TESTS[1], plan["commands"][1], 3)
+    assert guarded.startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
+    mirror = plain.env["VLLM_TEST_COMMANDS"]
+    assert mirror.count(f"&& {TESTS[1]}") == 1
+    assert job.env["VLLM_TEST_COMMANDS"] == " && ".join(
+        rs.shard_job_setup() + [mirror.replace(f"&& {TESTS[1]}", f"&& {guarded}")]
+    )
     # The CUDA step is planned separately, on its own queue.
     assert checkout.calls == [
         ("model-executor", AgentQueue.H200_35GB),

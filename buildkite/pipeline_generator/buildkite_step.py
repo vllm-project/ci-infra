@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union, Literal
+from typing import Dict, List, Optional, Any, Tuple, Union, Literal
 from copy import deepcopy
 import math
 import os
@@ -1011,19 +1011,24 @@ def _runtime_shard_mode(
     return mode
 
 
-def _plan_shards(
+def _shard_at_generation(
+    step: Step,
     step_key: str,
-    commands: List[str],
-    working_dir: Optional[str],
     queue: AgentQueue,
+    commands: List[str],
+    env: Optional[Dict[str, str]],
     mode: str,
-) -> Optional[Dict]:
-    """Plan an enrolled step's shards from the checkout (runtime_shard.py).
-    Returns the plan to run as parallel jobs, or None to leave the job as it
-    is: "shadow" mode, or short of a plan of two or more shards, so sharding
-    never blocks the step's tests."""
+) -> Optional[Tuple[int, List[str], Dict[str, str]]]:
+    """Plan an enrolled step's shards from the checkout (runtime_shard.py)
+    and, in "on" mode, turn its job's prepared commands and env into one
+    parallel job per shard: the same commands, after installing the plugin
+    that keeps each job's tests. Returns (shards, commands, env), or None to
+    leave the job as it is: short of a plan of two or more shards, so
+    sharding never blocks the step's tests. "shadow" only annotates the plan.
+    The NVIDIA job and a native AMD mirror's both go through here.
+    """
     result, text = runtime_shard.plan_step(
-        step_key, commands, working_dir, os.getcwd(), queue
+        step_key, step.commands or [], step.working_dir, os.getcwd(), queue
     )
     print(text)
     if mode == "shadow":
@@ -1033,12 +1038,9 @@ def _plan_shards(
         runtime_shard.annotate(step_key, text, "warning")
     if result is None or result["shards"] < 2:
         return None
-    return result
-
-
-def _shard_env(env: Optional[Dict[str, str]], result: Dict) -> Dict[str, str]:
-    """A shard job's env: the plugin loaded into its pytest, and the plan."""
     env = dict(env or {})
+    # pytest-shard, installed in the image for fixed shards, would print its
+    # own "Running N items in this shard" over this plan's selection.
     env["PYTEST_ADDOPTS"] = (
         f"{env.get('PYTEST_ADDOPTS', '')} -p no:pytest-shard"
         f" -p {runtime_shard.PLUGIN_MODULE}"
@@ -1046,29 +1048,7 @@ def _shard_env(env: Optional[Dict[str, str]], result: Dict) -> Dict[str, str]:
     plan = {"shards": result["shards"], "commands": result["commands"]}
     env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
     env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()
-    return env
-
-
-def _shard_at_generation(
-    step: Step, step_key: str, command_step: BuildkiteCommandStep, mode: str
-) -> None:
-    """In "on" mode, run an enrolled step's job as one parallel job per shard:
-    the same commands, after installing the plugin that keeps each job's
-    tests."""
-    result = _plan_shards(
-        step_key,
-        step.commands or [],
-        step.working_dir,
-        get_agent_queue(step),
-        mode,
-    )
-    if result is None:
-        return
-    command_step.parallelism = result["shards"]
-    # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
-    command_step.label = f"{command_step.label} shard %N/%t"
-    command_step.env = _shard_env(command_step.env, result)
-    commands = list(command_step.commands)
+    commands = list(commands)
     count = len(step.commands or [])
     for planned in result["commands"]:
         # The job's line for a step command follows its "Command (i/n)" header.
@@ -1085,7 +1065,7 @@ def _shard_at_generation(
             commands[at + 1] = runtime_shard.guard(
                 commands[at + 1], planned, result["shards"]
             )
-    command_step.commands = runtime_shard.shard_job_setup() + commands
+    return result["shards"], runtime_shard.shard_job_setup() + commands, env
 
 
 def convert_group_step_to_buildkite_step(
@@ -1237,8 +1217,26 @@ def convert_group_step_to_buildkite_step(
                 if include_step
                 else None
             )
-            if shard_mode:
-                _shard_at_generation(step, step_key, buildkite_step, shard_mode)
+            sharded = (
+                _shard_at_generation(
+                    step,
+                    step_key,
+                    get_agent_queue(step),
+                    buildkite_step.commands,
+                    buildkite_step.env,
+                    shard_mode,
+                )
+                if shard_mode
+                else None
+            )
+            if sharded:
+                (
+                    buildkite_step.parallelism,
+                    buildkite_step.commands,
+                    buildkite_step.env,
+                ) = sharded
+                # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
+                buildkite_step.label = f"{buildkite_step.label} shard %N/%t"
             if include_step:
                 group_steps_list.append(buildkite_step)
 
@@ -1267,12 +1265,10 @@ def convert_group_step_to_buildkite_step(
                             "dind": amd.get("dind", True),
                         }
                     )
-                    amd_commands_str = " && ".join(
-                        _prepare_commands(
-                            amd_command_step,
-                            variables_to_inject,
-                            setup_profile="amd",
-                        )
+                    amd_commands = _prepare_commands(
+                        amd_command_step,
+                        variables_to_inject,
+                        setup_profile="amd",
                     )
                 else:
                     amd_command_step = step.model_copy(
@@ -1281,12 +1277,10 @@ def convert_group_step_to_buildkite_step(
                             "dind": amd.get("dind", True),
                         }
                     )
-                    amd_commands_str = " && ".join(
-                        _prepare_commands(
-                            amd_command_step,
-                            variables_to_inject,
-                            setup_profile="amd",
-                        )
+                    amd_commands = _prepare_commands(
+                        amd_command_step,
+                        variables_to_inject,
+                        setup_profile="amd",
                     )
 
                 extra_env = dict(step.env or {})
@@ -1306,33 +1300,31 @@ def convert_group_step_to_buildkite_step(
                     if "parallelism" not in amd
                     else None
                 )
-                amd_shard = (
-                    _plan_shards(
+                amd_sharded = (
+                    _shard_at_generation(
+                        amd_command_step,
                         amd_key,
-                        amd_command_step.commands or [],
-                        amd_command_step.working_dir,
                         get_amd_agent_queue(amd["device"]),
+                        amd_commands,
+                        extra_env,
                         amd_shard_mode,
                     )
                     if amd_shard_mode
                     else None
                 )
-                if amd_shard:
-                    amd_parallelism = amd_shard["shards"]
+                if amd_sharded:
+                    amd_parallelism, amd_commands, extra_env = amd_sharded
+                    # Buildkite fills in %N (from 1) and %t (the shard count).
                     amd_label = (
                         f"{amd_label or get_amd_label(step.label, amd['device'])}"
                         " shard %N/%t"
-                    )
-                    extra_env = _shard_env(extra_env, amd_shard)
-                    amd_commands_str = " && ".join(
-                        runtime_shard.shard_job_setup() + [amd_commands_str]
                     )
                 amd_step = _create_amd_step(
                     label=step.label,
                     key=f"amd-{step_key}",
                     device=amd["device"],
                     num_devices=amd_num_devices,
-                    commands_str=amd_commands_str,
+                    commands_str=" && ".join(amd_commands),
                     depends_on=amd.get("depends_on"),
                     extra_env=extra_env,
                     dind=amd.get("dind", True),
