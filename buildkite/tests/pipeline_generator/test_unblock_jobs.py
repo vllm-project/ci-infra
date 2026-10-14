@@ -276,3 +276,26 @@ def test_amd_steps_are_listed_under_their_nvidia_group(tmp_path, monkeypatch):
     assert {
         e["group"] for e in saved["steps"] if e["step"]["key"].startswith("amd-")
     } == {buildkite_step.AMD_GROUP}
+
+
+def test_long_groups_are_split_into_short_checkbox_lists():
+    """Buildkite shows a select of 7 or more options as a dropdown."""
+    entries = [_entry(f"k{i}", group="Kernels") for i in range(13)]
+
+    fields = unblock_jobs._group_fields(entries, 1)
+
+    assert [(name, len(chunk)) for _, name, chunk in fields] == [
+        ("Kernels (1/3)", 6),
+        ("Kernels (2/3)", 6),
+        ("Kernels (3/3)", 1),
+    ]
+    assert len({key for key, _, _ in fields}) == 3
+
+
+def test_option_labels_drop_emoji_codes_and_job_placeholders():
+    label = unblock_jobs._option_label
+    assert label(":nvidia: (H200) Basic Correctness Models %N") == (
+        "(H200) Basic Correctness Models"
+    )
+    assert label(":amd: (MI300) V1 Attention Shard %N") == "(MI300) V1 Attention"
+    assert label(":docker: Build arm64 image") == "Build arm64 image"

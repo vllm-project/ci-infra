@@ -29,6 +29,9 @@ FIELD_KEY = "more-jobs"
 # Newline-separated keys of the deferred jobs uploaded so far, across rounds.
 UPLOADED_META_KEY = "more-jobs-uploaded"
 GROUP = ":heavy_plus_sign: Run more jobs"
+# Buildkite shows a select of 7 or more options as a dropdown, multiple or
+# not, so longer groups are split into lists of at most this many.
+MAX_CHECKBOXES = 6
 
 
 def _round_key(prefix: str, round_number: int) -> str:
@@ -40,14 +43,24 @@ def _group_fields(
 ) -> List[Tuple[str, str, List[Dict[str, Any]]]]:
     """(field key, list name, entries) for each checkbox list, in order.
 
-    An entry is listed under its "list" if it has one, else its group.
+    An entry is listed under its "list" if it has one, else its group. A
+    group longer than MAX_CHECKBOXES becomes "<group> (1/3)", "(2/3)", ...
     """
     by_group: Dict[str, List[Dict[str, Any]]] = {}
     for entry in entries:
         by_group.setdefault(entry.get("list", entry["group"]), []).append(entry)
+    lists = []
+    for group, group_entries in by_group.items():
+        chunks = [
+            group_entries[i : i + MAX_CHECKBOXES]
+            for i in range(0, len(group_entries), MAX_CHECKBOXES)
+        ]
+        for i, chunk in enumerate(chunks, 1):
+            name = f"{group} ({i}/{len(chunks)})" if len(chunks) > 1 else group
+            lists.append((name, chunk))
     fields = []
     used: Set[str] = set()
-    for group, group_entries in by_group.items():
+    for group, group_entries in lists:
         slug = re.sub(r"[^a-z0-9]+", "-", group.lower()).strip("-") or "jobs"
         key = f"{_round_key(FIELD_KEY, round_number)}-group-{slug}"
         suffix = 2
@@ -57,6 +70,15 @@ def _group_fields(
         used.add(key)
         fields.append((key, group, group_entries))
     return fields
+
+
+def _option_label(label: str) -> str:
+    """The step label as plain text: the input dialog shows emoji codes like
+    `:nvidia:` and parallel job placeholders like `%N` as they are."""
+    label = re.sub(r":[a-z0-9_+-]+:", "", label)
+    # "... Shard %N" or "... %N": the step, not one of its parallel jobs.
+    label = re.sub(r"(?:\b[Ss]hard\s+)?%N(?:\s*/\s*%t)?", "", label)
+    return " ".join(label.split()) or label
 
 
 def more_jobs_group(
@@ -93,7 +115,10 @@ def more_jobs_group(
                 "multiple": True,
                 "required": False,
                 "options": [
-                    {"label": e["step"]["label"], "value": e["step"]["key"]}
+                    {
+                        "label": _option_label(e["step"]["label"]),
+                        "value": e["step"]["key"],
+                    }
                     for e in group_entries
                 ],
             }
