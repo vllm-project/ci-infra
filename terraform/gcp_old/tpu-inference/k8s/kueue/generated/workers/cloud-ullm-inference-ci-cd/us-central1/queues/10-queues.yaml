@@ -209,7 +209,7 @@ spec:
         - name: tpu7x-spot
           resources:
             - name: google.com/tpu
-              nominalQuota: 32
+              nominalQuota: 64
               borrowingLimit: 0
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
@@ -236,9 +236,6 @@ metadata:
   name: tpu7x-standard-4t-2x2x1
 spec:
   cohortName: tpu7x
-  flavorFungibility:
-    whenCanBorrow: MayStopSearch
-    whenCanPreempt: TryNextFlavor
   preemption:
     reclaimWithinCohort: Never
     withinClusterQueue: Never
@@ -260,11 +257,6 @@ spec:
               # once, not a promise that a slice of the right shape is free.
               nominalQuota: 64
               borrowingLimit: 64
-        - name: tpu7x-spot
-          resources:
-            - name: google.com/tpu
-              nominalQuota: 64
-              borrowingLimit: 0
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue

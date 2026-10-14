@@ -107,7 +107,6 @@ data:
     spot_max_priority: 50
     spot_queues:
     - tpu7x-standard-1t-1x1x1
-    - tpu7x-standard-4t-2x2x1
     timing_table: cloud-ullm-inference-ci-cd.ci_efficiency_metrics.kube_workload_timing
     workers:
       tpu-ci-us-central1:
