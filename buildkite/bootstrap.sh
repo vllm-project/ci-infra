@@ -56,6 +56,9 @@ main() {
         fi
     fi
     if [[ -z "${UV_BIN}" ]]; then
+        # The pinned tarball is built for one architecture.
+        [[ "${UV_TARBALL}" == "uv-$(uname -m)-"* ]] ||
+            fail "${UV_TARBALL} cannot run on this $(uname -m) agent. Put uv ${UV_VERSION} on PATH or set VLLM_CI_UV_BIN."
         UV_DL="${WORK_DIR}/uv/${UV_TARBALL}"
         mkdir -p "${WORK_DIR}/uv"
         uv_downloaded=0
@@ -95,7 +98,9 @@ main() {
             break
         fi
         rm -rf "${CI_INFRA_DIR}"
-        sleep $((attempt * 3))
+        if (( attempt < 3 )); then
+            sleep $((attempt * 3))
+        fi
     done
     if [[ ! -d "${CI_INFRA_DIR}/.git" ]]; then
         msg="Could not fetch ${CI_INFRA_REPO} at ${CI_INFRA_REF}."
@@ -127,8 +132,12 @@ main() {
     [[ -f "${PIPELINE_CONFIG_PATH}" ]] ||
         fail "${PIPELINE_CONFIG_PATH} not found. Merge upstream main into this branch."
     # The generator shells out to git, which refuses a checkout it does not own.
-    git config --global --add safe.directory "${VLLM_CHECKOUT}" ||
-        fail "Could not mark ${VLLM_CHECKOUT} as a git safe.directory."
+    # Checked first, or a long-lived agent's ~/.gitconfig grows every build.
+    safe_dirs="$(git config --global --get-all safe.directory || true)"
+    if ! grep -qxF -- "${VLLM_CHECKOUT}" <<<"${safe_dirs}"; then
+        git config --global --add safe.directory "${VLLM_CHECKOUT}" ||
+            fail "Could not mark ${VLLM_CHECKOUT} as a git safe.directory."
+    fi
 
     DOCS_ONLY_MARKER="$(dirname "${OUTPUT_PIPELINE_PATH}")/.docs_only"
     # A committed one would skip CI on every build.

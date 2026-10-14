@@ -12,8 +12,8 @@ import pytest
 BUILDKITE = Path(__file__).resolve().parents[1]
 REPO = BUILDKITE.parent
 
-# Both are piped to bash with nothing on disk, so neither can source a shared
-# copy. bootstrap.sh is what the rest are checked against.
+# Each is fetched alone, without the rest of this repo, so neither can source a
+# shared copy. bootstrap.sh is what the rest are checked against.
 SOURCE = BUILDKITE / "bootstrap.sh"
 COPIES = [BUILDKITE / "ci_selector" / "recorders" / "fnrec" / "collect.sh"]
 PIN_HOLDERS = [SOURCE] + COPIES
@@ -130,10 +130,20 @@ def test_the_pinned_python_is_the_one_the_packages_require():
         text = (BUILDKITE / name).read_text()
         match = re.search(r'requires-python = ">=([\d.]+)"', text)
         assert match, f"buildkite/{name} does not declare requires-python"
-        assert match.group(1) == declared, (
+        # The floor names a minor version, the pin a patch release of it.
+        assert declared.split(".")[:2] == match.group(1).split(".")[:2], (
             f"buildkite/{name} requires Python {match.group(1)}, but "
             f"buildkite/.python-version installs {declared}"
         )
+
+
+def test_the_python_pin_names_a_patch_release():
+    """A bare minor version lets uv take whichever patch it finds first."""
+    declared = (BUILDKITE / ".python-version").read_text().strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", declared), (
+        f"buildkite/.python-version is {declared!r}, which lets uv pick any "
+        "patch release. Name one, e.g. 3.12.14."
+    )
 
 
 @pytest.mark.parametrize("path", PIN_HOLDERS + WORKFLOWS, ids=lambda p: p.name)

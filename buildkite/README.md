@@ -20,9 +20,11 @@ uv run pytest tests               # the generator's tests
 
 Changing a dependency means editing that package's `pyproject.toml`, running `uv lock` here, and committing both.
 
+`.python-version` names a patch release, which a uv older than that release cannot download. Use the uv `bootstrap.sh` pins, or newer.
+
 ## Pinning uv itself
 
-Two scripts install uv: `bootstrap.sh` at the start of a build, and `ci_selector/recorders/fnrec/collect.sh` at the end of a recording one. They are separate Buildkite jobs on separate agents, and each is piped to bash with nothing on disk, so neither can share the other's. Both carry the version, the tarball and its checksum, and `tests/test_uv_pin.py` holds them equal. That test also checks that both GitHub workflows set up the same version, that the constants are the ones actually downloaded and checked, and that nothing names a second Python beside `.python-version`.
+Two scripts install uv: `bootstrap.sh` at the start of a build, and `ci_selector/recorders/fnrec/collect.sh` at the end of a recording one. They are separate Buildkite jobs on separate agents, and each is fetched as a single file without the rest of this repo, so neither can share the other's. Both carry the version, the tarball and its checksum, and `tests/test_uv_pin.py` holds them equal. That test also checks that both GitHub workflows set up the same version, that the constants are the ones actually downloaded and checked, and that nothing names a second Python beside `.python-version`.
 
 A uv already on the agent's `PATH` is used only if it reports the pinned version, so nothing is downloaded on a machine that already has the right one, and an agent cannot quietly decide the version for us. `VLLM_CI_UV_BIN` names a uv to run instead, for a rerun by hand or a test, and is taken at its word.
 

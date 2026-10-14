@@ -94,6 +94,9 @@ else
   fi
 fi
 if [[ -z "${UV_BIN}" ]]; then
+  # The pinned tarball is built for one architecture.
+  [[ "${UV_TARBALL}" == "uv-$(uname -m)-"* ]] \
+    || { echo "${UV_TARBALL} cannot run on this $(uname -m) agent. Put uv ${UV_VERSION} on PATH or set VLLM_CI_UV_BIN" >&2; exit 1; }
   mkdir -p "${WORK}/uv"
   downloaded=0
   for base in \
@@ -118,9 +121,9 @@ echo "Using uv at ${UV_BIN}"
 "${UV_BIN}" --version \
   || { echo "uv at ${UV_BIN} will not run" >&2; exit 1; }
 
-# --locked so the lockfile picks the versions, --python so the interpreter
-# matches .python-version.
-fold() { "${UV_BIN}" run --quiet --locked --no-dev --python 3.12 --project "${BUILDER}" "$@"; }
+# --locked so the lockfile picks the versions. No --python: uv reads the
+# workspace's .python-version, and naming one here would override it.
+fold() { "${UV_BIN}" run --quiet --locked --no-dev --project "${BUILDER}" "$@"; }
 
 echo "--- :table_tennis_paddle_and_ball: Building the coverage table"
 # The count the generator armed, so the fold can refuse a build that lost most
