@@ -1143,7 +1143,104 @@ def _env_change_misses_build(state: RepoState, path: str, ctx: DiffContext | Non
     return not (touched & read)
 
 
+def _git_out(repo: Path, *args: str) -> str | None:
+    r = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False
+    )
+    return r.stdout if r.returncode == 0 else None
+
+
+def _same_python_ast(repo: Path, base: str, head: str, path: str) -> bool:
+    """True when a modified .py file parses to the same AST at both ends, so
+    only comments, blank lines or formatting changed. Docstrings are in the
+    AST, so a docstring edit is still a change."""
+    before = _git_out(repo, "show", f"{base}:{path}")
+    after = _git_out(repo, "show", f"{head}:{path}")
+    if before is None or after is None:
+        return False
+    try:
+        return ast.dump(ast.parse(before)) == ast.dump(ast.parse(after))
+    except (SyntaxError, ValueError):
+        return False
+
+
+def _git_grep(repo: Path, *args: str) -> str | None:
+    """git grep output; "" for no match (exit 1); None if git failed."""
+    r = subprocess.run(
+        ["git", "-C", str(repo), "grep", *args], capture_output=True, text=True, check=False
+    )
+    if r.returncode == 0:
+        return r.stdout
+    return "" if r.returncode == 1 else None
+
+
+def _names_module(grep_line: str, head: str, dotted: str, path: str) -> bool:
+    """Whether one `git grep -n` hit at head is a real use of the module.
+    Not a use: docs and links (they name old trees), a `!path` exclusion in a
+    step's dependencies, and the dotted name as a prefix of a longer one
+    (`vllm.scripts.autotune` is a logger name; a plain module has no
+    submodules). Anything else, an import, an entry point, a quoted loader
+    string or a path in a command, is a use."""
+    rest = grep_line.removeprefix(f"{head}:")
+    file, _, text = rest.partition(":")
+    _, _, text = text.partition(":")  # drop the line number
+    if file.startswith("docs/") or "://" in text:
+        return False
+    if path in text.replace(f"!{path}", ""):
+        return True
+    return any(
+        not text[m.end() :].startswith(".")
+        for m in re.finditer(rf"(?<![\w.]){re.escape(dotted)}\b", text)
+    )
+
+
+def _deleted_and_unreferenced(repo: Path, head: str, path: str) -> bool:
+    """True when a deleted .py module is imported or named by nothing at head:
+    no dotted-name or path mention anywhere in the tree, and no relative import
+    from its own package. A `!path` exclusion in a step's dependency list is
+    not a use. Package __init__ files keep the normal rules, and so does
+    anything git could not answer."""
+    if path.endswith("__init__.py"):
+        return False
+    dotted = path.removesuffix(".py").replace("/", ".")
+    out = _git_grep(repo, "-n", "-w", "-F", "-e", dotted, "-e", path, head, "--")
+    if out is None or any(_names_module(line, head, dotted, path) for line in out.splitlines()):
+        return False
+    pkg, stem = posixpath.split(path.removesuffix(".py"))
+    rel = _git_grep(
+        repo, "-n", "-E",
+        rf"from \.+{re.escape(stem)}\b|from \.+ import .*\b{re.escape(stem)}\b",
+        head, "--", f"{pkg}/" if pkg else ".",
+    )
+    return rel == ""
+
+
+def _quiet_python_change(state: RepoState, path: str, ctx: DiffContext | None) -> Claim | None:
+    """A Python change no test can observe selects nothing: a deleted module
+    nothing at head imports or names, or an edit that leaves the AST as it
+    was. Without both ends of a real diff, the normal rules apply."""
+    if ctx is None or not path.endswith(".py"):
+        return None
+    status = ctx.status.get(path)
+    if status == "D" and _deleted_and_unreferenced(state.repo, ctx.head, path):
+        return Claim(
+            "inert",
+            f"{path} is deleted and nothing at head imports or names it; "
+            "nothing can run it",
+        )
+    if status == "M" and _same_python_ast(state.repo, ctx.base, ctx.head, path):
+        return Claim(
+            "inert",
+            f"{path} changes only comments or formatting (same AST at both "
+            "ends); nothing runs differently",
+        )
+    return None
+
+
 def _classify(state: RepoState, path: str, ctx: DiffContext | None) -> Claim:
+    quiet = _quiet_python_change(state, path, ctx)
+    if quiet is not None:
+        return quiet
     narrowed = _narrowed_native_state(state, path, ctx)
     if narrowed is not None:
         state = narrowed
