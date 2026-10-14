@@ -29,6 +29,13 @@ UV_COMMAND = re.compile(
     r'(?:\$\{UV_BIN\}"|^\s*(?:run:\s*)?uv)\s+(?:sync|run)\b[^\n]*', re.MULTILINE
 )
 
+# uv's spellings of a Python request, besides UV_PYTHON. `-p` counts only inside a
+# uv command and only with a Python-like value, since mkdir and pytest use it too.
+LONG_PYTHON_FLAG = re.compile(r"--python(?:=|\s+)[\"']?([^\s\"']+)")
+SHORT_PYTHON_FLAG = re.compile(
+    r"(?<!\S)-p(?:=|\s+)[\"']?((?:\d|c?python|pypy)[^\s\"']*)"
+)
+
 
 def _shell_pin(path):
     text = path.read_text()
@@ -158,11 +165,20 @@ def test_every_uv_command_takes_the_lockfile_as_given(path):
     assert not bare, f"{path.relative_to(REPO)} runs uv without --locked: {bare}"
 
 
-@pytest.mark.parametrize("path", PIN_HOLDERS, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", PIN_HOLDERS + WORKFLOWS, ids=lambda p: p.name)
 def test_no_script_names_a_python_of_its_own(path):
-    """`uv --python X` is a second Python pin, out of reach of the above."""
+    """`--python X`, `-p X` and UV_PYTHON each pin a second Python."""
     declared = (BUILDKITE / ".python-version").read_text().strip()
-    named = set(re.findall(r"--python\s+([\d.]+)", path.read_text()))
+    # Comments may mention them. Joined so a flag on a continuation line counts.
+    text = re.sub(r"^\s*#.*$", "", path.read_text(), flags=re.MULTILINE)
+    text = re.sub(r"\\\n\s*", " ", text)
+    assert not re.search(r"\bUV_PYTHON\b", text), (
+        f"{path.relative_to(REPO)} sets UV_PYTHON, which overrides "
+        "buildkite/.python-version"
+    )
+    named = set(LONG_PYTHON_FLAG.findall(text))
+    for command in UV_COMMAND.finditer(text):
+        named |= set(SHORT_PYTHON_FLAG.findall(command.group(0)))
     assert named <= {declared}, (
         f"{path.relative_to(REPO)} asks uv for Python {sorted(named)}, but "
         f"buildkite/.python-version installs {declared}"

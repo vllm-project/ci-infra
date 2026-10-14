@@ -11,7 +11,7 @@ The tools that generate and select vLLM's CI, as one uv workspace.
 
 ## The environment
 
-`pyproject.toml` here is the workspace root, `uv.lock` holds every version, and `.python-version` holds the interpreter. Nothing is resolved at build time: a build installs what the lockfile says, so the versions under test are the versions that generate the pipeline.
+`pyproject.toml` here is the workspace root, `uv.lock` holds every dependency's version, and `.python-version` holds the interpreter. A build installs what the lockfile says instead of resolving, so the versions under test are the versions that generate the pipeline. The exception is the build backends (setuptools for the generator, hatchling for ci_selector), which `uv.lock` does not record: uv fetches their latest version when it builds the two packages.
 
 ```bash
 uv sync --locked --all-packages   # both packages, with test dependencies
