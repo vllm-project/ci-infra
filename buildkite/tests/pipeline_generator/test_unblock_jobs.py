@@ -102,13 +102,17 @@ def test_more_jobs_group_lists_every_entry():
     input_step, upload_step = group["steps"]
     assert input_step["key"] == "run-more-jobs"
     assert input_step["depends_on"] == []
-    (field,) = input_step["fields"]
-    assert field["key"] == "more-jobs"
-    assert field["multiple"] is True
-    assert field["options"] == [
-        {"label": "Kernels / A", "value": "a"},
-        {"label": "Models / B", "value": "b"},
+    text, kernels, models = input_step["fields"]
+    assert text["key"] == "more-jobs"
+    assert text["required"] is False
+    # One checkbox list per group: a multiple select renders as checkboxes.
+    assert [(f["select"], f["key"]) for f in (kernels, models)] == [
+        ("Kernels", "more-jobs-group-kernels"),
+        ("Models", "more-jobs-group-models"),
     ]
+    assert all(f["multiple"] and not f["required"] for f in (kernels, models))
+    assert kernels["options"] == [{"label": "A", "value": "a"}]
+    assert models["options"] == [{"label": "B", "value": "b"}]
     assert upload_step["depends_on"] == ["run-more-jobs"]
     assert upload_step["agents"] == {"queue": "small_cpu_queue_premerge"}
     (command,) = upload_step["commands"]
@@ -120,7 +124,10 @@ def test_later_rounds_get_their_own_keys():
     group = unblock_jobs.more_jobs_group([_entry("a")], 3, "d", "job", "q")
     input_step, upload_step = group["steps"]
     assert input_step["key"] == "run-more-jobs-3"
-    assert input_step["fields"][0]["key"] == "more-jobs-3"
+    assert [f["key"] for f in input_step["fields"]] == [
+        "more-jobs-3",
+        "more-jobs-3-group-g",
+    ]
     assert upload_step["key"] == "upload-more-jobs-3"
     assert upload_step["depends_on"] == ["run-more-jobs-3"]
 
@@ -150,6 +157,16 @@ class FakeAgent:
         return subprocess.CompletedProcess(command, returncode, stdout=stdout)
 
 
+def test_group_field_keys_stay_unique():
+    fields = unblock_jobs._group_fields(
+        [_entry("a", group="Hardware AMD"), _entry("b", group="Hardware-AMD")], 1
+    )
+    assert [key for key, _, _ in fields] == [
+        "more-jobs-group-hardware-amd",
+        "more-jobs-group-hardware-amd-2",
+    ]
+
+
 def test_main_uploads_picks_then_offers_the_rest(tmp_path, monkeypatch):
     entries = [
         _entry("image", group="Build"),
@@ -160,7 +177,7 @@ def test_main_uploads_picks_then_offers_the_rest(tmp_path, monkeypatch):
     (tmp_path / unblock_jobs.DEFERRED_FILE).write_text(
         json.dumps({"source_job": "job-1", "queue": "q", "steps": entries})
     )
-    agent = FakeAgent({"more-jobs": "a"})
+    agent = FakeAgent({"more-jobs-group-g": "a"})
     monkeypatch.setattr(unblock_jobs.subprocess, "run", agent.run)
 
     unblock_jobs.main(["unblock_jobs.py", "1", str(tmp_path)])
@@ -171,19 +188,39 @@ def test_main_uploads_picks_then_offers_the_rest(tmp_path, monkeypatch):
         ("g", ["a"]),
         (unblock_jobs.GROUP, ["run-more-jobs-2", "upload-more-jobs-2"]),
     ]
-    options = upload["steps"][-1]["steps"][0]["fields"][0]["options"]
-    assert [o["value"] for o in options] == ["b", "c"]
+    fields = upload["steps"][-1]["steps"][0]["fields"]
+    assert [o["value"] for f in fields[1:] for o in f["options"]] == ["b", "c"]
     assert agent.meta_data[unblock_jobs.UPLOADED_META_KEY] == "a\nimage"
 
     # Round two: "image" is in the build already, so it is not uploaded again,
-    # and with nothing left there is no third input step.
-    agent.meta_data["more-jobs-2"] = "b\nc"
+    # and with nothing left there is no third input step. The text field
+    # and the checkboxes add up.
+    agent.meta_data["more-jobs-2"] = "b"
+    agent.meta_data["more-jobs-2-group-g"] = "c"
     unblock_jobs.main(["unblock_jobs.py", "2", str(tmp_path)])
 
     upload = agent.uploads[-1]
     assert [(g["group"], [s["key"] for s in g["steps"]]) for g in upload["steps"]] == [
         ("g", ["b", "c"]),
     ]
+
+
+def test_submitting_nothing_offers_the_same_jobs_again(tmp_path, monkeypatch):
+    (tmp_path / unblock_jobs.DEFERRED_FILE).write_text(
+        json.dumps({"source_job": "job-1", "queue": "q", "steps": [_entry("a")]})
+    )
+    agent = FakeAgent({})
+    monkeypatch.setattr(unblock_jobs.subprocess, "run", agent.run)
+
+    unblock_jobs.main(["unblock_jobs.py", "1", str(tmp_path)])
+
+    (upload,) = agent.uploads
+    (group,) = upload["steps"]
+    assert [s["key"] for s in group["steps"]] == [
+        "run-more-jobs-2",
+        "upload-more-jobs-2",
+    ]
+    assert unblock_jobs.UPLOADED_META_KEY not in agent.meta_data
 
 
 def test_write_deferred_steps_saves_what_the_input_step_offers(tmp_path, monkeypatch):
@@ -203,5 +240,39 @@ def test_write_deferred_steps_saves_what_the_input_step_offers(tmp_path, monkeyp
     assert (artifact_dir / unblock_jobs.SCRIPT_FILE).read_text() == open(
         unblock_jobs.__file__
     ).read()
-    options = group["steps"][0]["fields"][0]["options"]
-    assert options == [{"label": "g / Later", "value": "later"}]
+    options = group["steps"][0]["fields"][1]["options"]
+    assert options == [{"label": "Later", "value": "later"}]
+
+
+def test_amd_steps_are_listed_under_their_nvidia_group(tmp_path, monkeypatch):
+    """One AMD list would hold a few hundred checkboxes."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BUILDKITE_JOB_ID", raising=False)
+    groups = [
+        BuildkiteGroupStep(
+            group=buildkite_step.AMD_GROUP,
+            steps=[
+                _command("amd-kern", deferred=True),
+                _command("amd-direct", deferred=True),
+            ],
+        ),
+        BuildkiteGroupStep(group="Kernels", steps=[_command("lora", deferred=True)]),
+    ]
+
+    group = write_deferred_steps(
+        groups, ".buildkite", {"kern": "Kernels", "lora": "LoRA"}
+    )
+
+    fields = group["steps"][0]["fields"][1:]
+    assert [(f["select"], [o["value"] for o in f["options"]]) for f in fields] == [
+        ("Kernels", ["lora"]),
+        ("AMD - Kernels", ["amd-kern"]),
+        ("AMD - Other", ["amd-direct"]),
+    ]
+    saved = json.loads(
+        (tmp_path / ".buildkite" / "deferred" / "deferred_steps.json").read_text()
+    )
+    # Uploaded into the AMD group all the same.
+    assert {
+        e["group"] for e in saved["steps"] if e["step"]["key"].startswith("amd-")
+    } == {buildkite_step.AMD_GROUP}

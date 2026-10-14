@@ -201,7 +201,7 @@ Note: not every build has every job — the pipeline definition may vary across 
 
 ### 5c. Run the job
 
-Unblock the input step and pass the job key in its field. The field key is `more-jobs` for `run-more-jobs` and `more-jobs-<n>` for `run-more-jobs-<n>`:
+Unblock the input step and pass the job key in its **Job keys** text field. That field's key is `more-jobs` for `run-more-jobs` and `more-jobs-<n>` for `run-more-jobs-<n>` (the per-group checkbox lists are for people in the UI):
 
 ```
 unblock_job(org_slug: "vllm", pipeline_slug: "ci", build_number: "<number>", job_id: "<input_step_id>", fields: {"more-jobs": "kernels-b200"})

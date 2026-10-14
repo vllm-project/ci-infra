@@ -38,6 +38,7 @@ import runtime_shard
 # build also depend on this so pre-commit and image build can run in parallel.
 PRECOMMIT_STEP_KEY = "pre-commit"
 PRECOMMIT_GROUP = "GitHub pre-commit check"
+AMD_GROUP = "Hardware-AMD Tests"
 PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
@@ -1255,7 +1256,7 @@ def convert_group_step_to_buildkite_step(
     # If AMD hardware steps exist, make them a group step.
     if amd_hardware_steps:
         buildkite_group_steps.append(
-            BuildkiteGroupStep(group="Hardware-AMD Tests", steps=amd_hardware_steps)
+            BuildkiteGroupStep(group=AMD_GROUP, steps=amd_hardware_steps)
         )
 
     return buildkite_group_steps

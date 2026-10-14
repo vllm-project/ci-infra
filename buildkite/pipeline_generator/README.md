@@ -70,17 +70,19 @@ repositories:
 A step runs when its `source_file_dependencies` match the change (or on
 nightly / `RUN_ALL` builds); optional steps never run on their own. Every
 other step is left out of the uploaded pipeline. One input step, **Run more
-jobs**, near the top of the build lists them all: pick any and submit, and a
-job behind it uploads the picked steps together with the not-yet-uploaded
-steps they depend on. It then adds a new **Run more jobs** input step for the
+jobs**, near the top of the build lists them all as checkboxes, one list per
+group (AMD steps under "AMD - <group of their NVIDIA step>"): tick any and
+submit, and a job behind it uploads the ticked steps together with the
+not-yet-uploaded steps they depend on. It then adds a new **Run more jobs** input step for the
 rest, so more can be picked later.
 
 The left-out steps are written to `<output dir>/deferred/deferred_steps.json`,
 next to a copy of `unblock_jobs.py`, and uploaded as artifacts of the
 bootstrap job; the upload job runs that copy, so it uploads exactly what was
-generated. To pick through the API, unblock the input step with
-`{"fields": {"more-jobs": "<key>\n<key>"}}` (later rounds use
-`more-jobs-2`, `more-jobs-3`, ...).
+generated. The input step also has an optional **Job keys** text field
+(`more-jobs`; later rounds use `more-jobs-2`, `more-jobs-3`, ...) that takes
+step keys one per line, so to pick through the API, unblock the input step
+with `{"fields": {"more-jobs": "<key>\n<key>"}}`.
 
 ## Environment Variables
 

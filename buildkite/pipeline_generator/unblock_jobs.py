@@ -3,7 +3,7 @@
 The generator leaves the jobs it did not select out of the uploaded pipeline
 and writes them to DEFERRED_FILE instead, next to a copy of this script, both
 uploaded as artifacts of the bootstrap job. The pipeline gets one input step
-listing them, and a job behind it that runs this script: it uploads the jobs
+listing them as checkboxes, one list per group, and a job behind it that runs this script: it uploads the jobs
 picked in the input, with the deferred jobs they depend on, and a new input
 step for whatever is left, so more can be picked later.
 
@@ -12,6 +12,7 @@ Runs on a plain CPU agent, so it uses the standard library only.
 
 import json
 import os
+import re
 import subprocess
 import sys
 from typing import Any, Dict, List, Set, Tuple
@@ -22,6 +23,8 @@ SCRIPT_FILE = "unblock_jobs.py"
 
 INPUT_KEY = "run-more-jobs"
 UPLOAD_KEY = "upload-more-jobs"
+# The free-text field of the first round; later rounds add "-<round>". The
+# group checkbox lists add "-group-<group>" to that.
 FIELD_KEY = "more-jobs"
 # Newline-separated keys of the deferred jobs uploaded so far, across rounds.
 UPLOADED_META_KEY = "more-jobs-uploaded"
@@ -30,6 +33,30 @@ GROUP = ":heavy_plus_sign: Run more jobs"
 
 def _round_key(prefix: str, round_number: int) -> str:
     return prefix if round_number == 1 else f"{prefix}-{round_number}"
+
+
+def _group_fields(
+    entries: List[Dict[str, Any]], round_number: int
+) -> List[Tuple[str, str, List[Dict[str, Any]]]]:
+    """(field key, list name, entries) for each checkbox list, in order.
+
+    An entry is listed under its "list" if it has one, else its group.
+    """
+    by_group: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in entries:
+        by_group.setdefault(entry.get("list", entry["group"]), []).append(entry)
+    fields = []
+    used: Set[str] = set()
+    for group, group_entries in by_group.items():
+        slug = re.sub(r"[^a-z0-9]+", "-", group.lower()).strip("-") or "jobs"
+        key = f"{_round_key(FIELD_KEY, round_number)}-group-{slug}"
+        suffix = 2
+        while key in used:
+            key = f"{_round_key(FIELD_KEY, round_number)}-group-{slug}-{suffix}"
+            suffix += 1
+        used.add(key)
+        fields.append((key, group, group_entries))
+    return fields
 
 
 def more_jobs_group(
@@ -41,16 +68,36 @@ def more_jobs_group(
 ) -> Dict[str, Any]:
     """The input step listing `entries`, and the job that uploads the picks.
 
-    Each entry is {"group": ..., "step": <Buildkite command step>}.
+    Each entry is {"group": ..., "step": <Buildkite command step>}, and
+    optionally "list", the checkbox list to show it in. A select
+    with `multiple` shows its options as checkboxes; one per group keeps each
+    list short enough to read, under the group's name.
     """
     input_key = _round_key(INPUT_KEY, round_number)
-    options = [
+    fields: List[Dict[str, Any]] = [
         {
-            "label": f"{entry['group']} / {entry['step']['label']}",
-            "value": entry["step"]["key"],
+            "text": "Job keys",
+            "key": _round_key(FIELD_KEY, round_number),
+            "required": False,
+            "hint": (
+                "Optional: step keys to run, one per line, on top of anything "
+                "ticked below."
+            ),
         }
-        for entry in entries
     ]
+    for key, group, group_entries in _group_fields(entries, round_number):
+        fields.append(
+            {
+                "select": group,
+                "key": key,
+                "multiple": True,
+                "required": False,
+                "options": [
+                    {"label": e["step"]["label"], "value": e["step"]["key"]}
+                    for e in group_entries
+                ],
+            }
+        )
     download = (
         f"buildkite-agent artifact download '{artifact_dir}/*' . --step {source_job}"
     )
@@ -64,18 +111,10 @@ def more_jobs_group(
                 "depends_on": [],
                 "prompt": (
                     "The jobs CI selected for this change already run. "
-                    "Pick any others to run too; the jobs they depend on come "
+                    "Tick any others to run too; the jobs they depend on come "
                     "with them."
                 ),
-                "fields": [
-                    {
-                        "select": "Jobs",
-                        "key": _round_key(FIELD_KEY, round_number),
-                        "multiple": True,
-                        "required": True,
-                        "options": options,
-                    }
-                ],
+                "fields": fields,
             },
             {
                 "label": ":rocket: Upload the picked jobs",
@@ -142,8 +181,13 @@ def main(argv: List[str]) -> None:
 
     uploaded = set(_meta_data_get(UPLOADED_META_KEY).split())
     entries = [e for e in deferred["steps"] if e["step"]["key"] not in uploaded]
-    # A multiple select stores its values newline-separated.
-    picked = set(_meta_data_get(_round_key(FIELD_KEY, round_number)).split())
+    # A multiple select stores its values newline-separated; the text field
+    # takes keys one per line, or separated by spaces or commas.
+    picked = set(
+        _meta_data_get(_round_key(FIELD_KEY, round_number)).replace(",", " ").split()
+    )
+    for key, _, _ in _group_fields(entries, round_number):
+        picked.update(_meta_data_get(key).split())
     selected, remaining = pick(entries, picked)
 
     groups = _grouped(selected)
@@ -160,8 +204,11 @@ def main(argv: List[str]) -> None:
     pipeline_path = os.path.join(artifact_dir, f"more-jobs-{round_number}.json")
     with open(pipeline_path, "w") as f:
         json.dump({"steps": groups}, f)
-    print("Uploading: " + ", ".join(e["step"]["key"] for e in selected))
+    # Nothing picked still uploads a fresh input step, so the list stays open.
+    print("Uploading: " + (", ".join(e["step"]["key"] for e in selected) or "nothing"))
     subprocess.run(["buildkite-agent", "pipeline", "upload", pipeline_path], check=True)
+    if not selected:
+        return
     # Recorded only once the upload went through, so a retry of a failed
     # upload starts from the same list.
     subprocess.run(
