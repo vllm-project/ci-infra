@@ -254,9 +254,10 @@ worker_clusters = [
 
         # Overflow onto Spot once the reservation and what this shape can
         # borrow are spent. The project has 256 Spot v7x chips in us-central1;
-        # this and 2x2x1's pool take 96 of them, so a Spot stockout strands
-        # fewer steps on Spot until the launcher falls back.
-        spot = { max_nodes = 32 }
+        # this is the only Spot pool and takes 64 of them. On 10-13 it ran 294
+        # Spot starts against 19 stockout fallbacks, and its 32-chip quota was
+        # full in the evening peak.
+        spot = { max_nodes = 64 }
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -268,8 +269,11 @@ worker_clusters = [
         max_nodes     = 32
         nominal_quota = 64
 
-        # As for 1x1x1: 64 Spot chips, sixteen slices.
-        spot = { max_nodes = 16 }
+        # No Spot: 2x2x1 Spot VMs were stocked out on most busy evenings, and
+        # each step offered Spot then waited 10-15 minutes for a node that
+        # never came before falling back. On 10-13 that was 262 steps against
+        # 173 Spot starts, and a replay put total queue time 27% higher with
+        # it than without.
       },
       {
         # Eight chips as one slice across two VMs, placed from the named
