@@ -95,6 +95,10 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                       - name: vllm-workspace
                         mountPath: /vllm-workspace
                       {% endif %}
+                      {% if step.rdma %}
+                      - name: infiniband
+                        mountPath: /dev/infiniband
+                      {% endif %}
                     env:
                       - name: AMD_CI_RUNTIME
                         value: native
@@ -131,6 +135,11 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                   {% if not amd_build_steps %}
                   - name: vllm-workspace
                     emptyDir: {}
+                  {% endif %}
+                  {% if step.rdma %}
+                  - name: infiniband
+                    hostPath:
+                      path: /dev/infiniband
                   {% endif %}
 {%- endmacro %}
 
@@ -299,13 +308,12 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
             {% endif %}
           {% endfor %}
         {% endfor %}
-        {% if step.dind == false %}
-          {% for file in list_file_diff %}
-            {% if file == ".buildkite/scripts/hardware_ci/run-amd-test.sh" %}
-              {% set ns.blocked = 0 %}
-            {% endif %}
-          {% endfor %}
-        {% endif %}
+        {# run-amd-test.sh changes always unblock steps that call it #}
+        {% for file in list_file_diff %}
+          {% if file == ".buildkite/scripts/hardware_ci/run-amd-test.sh" %}
+            {% set ns.blocked = 0 %}
+          {% endif %}
+        {% endfor %}
       {% else %}
         {% set ns.blocked = 0 %}
       {% endif %}
@@ -322,28 +330,30 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
       {% endif %}
 
       - label: "{{ step.agent_pool }}: {{ step.label }}"
-        {% if step.dind == false and not amd_build_steps %}
+        {% if step_gated and not amd_build_steps and step.dind == false %}
         depends_on:
-          - {{ "block-" ~ step_slug if step_gated else "image-build-amd" }}
+          - block-{{ step_slug }}
           - verify-native-ci-base-amd
         {% elif step_gated %}
         depends_on: block-{{ step_slug }}
+        {% elif not amd_build_steps %}
+        depends_on:
+          - image-build-amd
+          - verify-native-ci-base-amd
         {% else %}
         depends_on: image-build-amd
         {% endif %}
         timeout_in_minutes: {{ step_timeout_in_minutes }}
         agents:
           queue: amd_{{ step.agent_pool }}
-          {% if step.dind == false and step.agent_tags %}
+          {% if step.agent_tags %}
             {% for key, value in step.agent_tags | items %}
               {% if key != "queue" and key and value %}
           {{ key }}: "{{ value }}"
               {% endif %}
             {% endfor %}
           {% endif %}
-        {% if step.dind == false %}
 {{ amd_native_k8s_plugin(step) }}
-        {% endif %}
         {% if step.no_plugin %}
         command: {{ (step.command or (step.commands | join(' && '))) | safe }}
         {% if step.env %}
@@ -359,13 +369,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         env:
           BUILDKITE_ARTIFACT_UPLOAD_SKIP_SYMLINKS: "true"
           NUM_NODES: "{{ step.num_nodes or 1 }}"
-          # Agent hooks read DOCKER_IMAGE_NAME before run-amd-test.py starts.
-          {% if step.dind == false %}
-          # Native: podSpecPatch uses the image owned by this build.
           VLLM_CI_BASE_IMAGE: "{{ amd_native_base_image() | safe }}"
-          AMD_CI_RUNTIME: "native"
-          NATIVE_CI: "true"
-          VLLM_CI_DOCKER_DISABLED: "1"
           VLLM_CI_ARTIFACT_STEP: "image-build-amd"
           VLLM_CI_ARTIFACT_CHECKSUM_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz.sha256"
           VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE: "1"
@@ -375,13 +379,6 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           HF_HUB_DOWNLOAD_TIMEOUT: "300"
           HF_HUB_ETAG_TIMEOUT: "60"
           PYTORCH_ROCM_ARCH: ""
-          {% else %}
-          # DinD: hook warm-up uses stable ci_base; docker run uses fallback image if needed.
-          DOCKER_BUILDKIT: "1"
-          DOCKER_IMAGE_NAME: "rocm/vllm-dev:ci_base"
-          VLLM_CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
-          VLLM_CI_FALLBACK_IMAGE: "{{ amd_ci_image() | safe }}"
-          {% endif %}
           VLLM_CI_USE_ARTIFACTS: "1"
           VLLM_CI_ARTIFACT_GLOB: "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
           VLLM_CI_RESULTS_ROOT: "/home/buildkite-agent/huggingface/amd-ci-results"
