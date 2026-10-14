@@ -129,6 +129,17 @@ BUILDKITE_DENY = frozenset({
 DEFAULTS_ANNOTATION = "tpu-ci.google.com/defaults"
 DEFAULTS_STANDARD = "standard"
 
+# What a manifest on the standard defaults sets to go without the fleet's
+# caches. An empty value is the same as none set, for a manifest whose step
+# chooses. See inherit_defaults().
+CACHES_ANNOTATION = "tpu-ci.google.com/caches"
+CACHES_NONE = "none"
+
+# GKE's names, not ours: the gcsfuse CSI driver, and the prefix of the pod
+# annotations that configure the sidecar GKE injects for it.
+GCSFUSE_DRIVER = "gcsfuse.csi.storage.gke.io"
+GCSFUSE_ANNOTATION_PREFIX = "gke-gcsfuse/"
+
 # The `event` of the one JSON line emit_timing() prints per workload, so the
 # record can be found in the step log and in Cloud Logging when the BigQuery
 # insert did not land.
@@ -1211,6 +1222,10 @@ def inherit_defaults(doc, profile):
     The sidecar annotations come with the caches: without gke-gcsfuse/volumes
     GKE injects no sidecar and the claims silently never mount.
 
+    A manifest that sets tpu-ci.google.com/caches: none gets neither the caches
+    nor, unless it mounts a gcsfuse volume of its own, the sidecar annotations;
+    see `caches` in pod_defaults.yaml. Everything else applies as usual.
+
     Additive throughout. Anything the manifest already sets - a volume, a mount
     path, an annotation, an env name, a field of the pod or Job spec - is left
     alone, so a role can add its own or override one it needs to differ on.
@@ -1225,6 +1240,19 @@ def inherit_defaults(doc, profile):
     defaults = pod_defaults()
     every = defaults["everyPod"]["annotations"]
     tpu = defaults["tpuPods"]
+    caches = set()
+    if annotations.get(CACHES_ANNOTATION) == CACHES_NONE:
+        caches = set(tpu.get("caches") or [])
+        if not caches:
+            # A deploy applies this program and pod_defaults.yaml as two
+            # ConfigMaps in turn, so a launcher starting between the two can
+            # read a pod_defaults.yaml older than itself.
+            raise SystemExit(
+                f"{POD_DEFAULTS} names no tpuPods.caches, so {CACHES_ANNOTATION}: "
+                f"{CACHES_NONE} cannot be honoured and the pods would mount the "
+                "caches anyway. Regenerate and redeploy the manifests; if a "
+                "deploy is in flight, retry the step."
+            )
 
     for key, value in (defaults.get("workload") or {}).items():
         doc["spec"].setdefault(key, value)
@@ -1255,7 +1283,14 @@ def inherit_defaults(doc, profile):
         if not pod_chips(spec):
             continue
 
+        # Read before the caches are added: a pod without them still needs the
+        # sidecar for a gcsfuse volume of its own.
+        own_gcsfuse = any((v.get("csi") or {}).get("driver") == GCSFUSE_DRIVER
+                          for v in spec.get("volumes") or [])
         for key, value in tpu["annotations"].items():
+            if (caches and not own_gcsfuse
+                    and key.startswith(GCSFUSE_ANNOTATION_PREFIX)):
+                continue
             on_pod.setdefault(key, value)
         for key, value in tpu["spec"].items():
             spec.setdefault(key, copy.deepcopy(value))
@@ -1263,7 +1298,7 @@ def inherit_defaults(doc, profile):
         have = {v.get("name") for v in spec.setdefault("volumes", [])}
         spec["volumes"].extend(
             copy.deepcopy(v) for v in tpu["volumes"]
-            if v.get("name") not in have
+            if v.get("name") not in have and v.get("name") not in caches
         )
 
         for container in spec.get("containers", []):
@@ -1276,7 +1311,7 @@ def inherit_defaults(doc, profile):
             # applied after the mount it sits in rather than under it.
             container["volumeMounts"][:0] = [
                 copy.deepcopy(m) for m in tpu["volumeMounts"]
-                if m.get("mountPath") not in at
+                if m.get("mountPath") not in at and m.get("name") not in caches
             ]
             named = {e.get("name")
                      for e in container.setdefault("env", [])}
@@ -1397,6 +1432,22 @@ def validate(doc, registry, where):
         raise SystemExit(
             f"{where}: sets {PRIORITY_LABEL}. Remove it - a step says what a "
             f"run is worth in {PRIORITY_ENV}."
+        )
+
+    # inherit_defaults() acts on the one value it knows, so a misspelt value or
+    # one without the standard defaults would leave the caches mounted.
+    annotations = doc.get("metadata", {}).get("annotations") or {}
+    caches = annotations.get(CACHES_ANNOTATION)
+    if caches and caches != CACHES_NONE:
+        raise SystemExit(
+            f"{where}: {CACHES_ANNOTATION} is {caches!r}. The one value is "
+            f"{CACHES_NONE!r}; leave it unset or empty to keep the caches."
+        )
+    if caches == CACHES_NONE and annotations.get(DEFAULTS_ANNOTATION) != DEFAULTS_STANDARD:
+        raise SystemExit(
+            f"{where}: sets {CACHES_ANNOTATION}: {CACHES_NONE} without "
+            f"{DEFAULTS_ANNOTATION}: {DEFAULTS_STANDARD}. Only the standard "
+            "defaults add the caches, so there is nothing for it to leave out."
         )
 
     # The launcher's own account can create JobSets, so a workload running as

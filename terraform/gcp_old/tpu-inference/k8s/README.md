@@ -138,6 +138,31 @@ Only roles that hold chips get the caches and retry rules — they are sized fro
 a TPU host's memory and about TPU nodes being repaired, and a CPU-only role runs
 on neither. Such a role states what it needs itself.
 
+A workload that reads its data once per run can go without the caches:
+
+```yaml
+metadata:
+  annotations:
+    tpu-ci.google.com/defaults: standard
+    tpu-ci.google.com/caches: none
+```
+
+Its pods then get no cache claim, no `gke-gcsfuse-cache` volume and no mounts
+for them; everything else in `pod_defaults.yaml` still applies, the memory
+request included. The gcsfuse file cache is a memory-backed volume on the pod,
+so it holds host memory for the whole run, and a run that reads each file once
+never reads it back: a 1.5 TB checkpoint streamed at boot keeps 61-67 GiB of
+every host's memory in it. The gcsfuse sidecar settings are left out too,
+unless a pod mounts a gcsfuse volume of its own, which needs the sidecar; give
+that volume no `fileCacheCapacity` and it has no file cache either. Without the
+compilation cache, every run compiles from scratch into the container's own
+disk.
+
+An empty value is the same as leaving the annotation unset. That is for a
+manifest shared by steps that want different answers: it writes
+`tpu-ci.google.com/caches: "${SOME_VARIABLE}"`, and each step exports the
+variable empty or as `none`. Any other value is refused.
+
 What stays in the manifest is `nodeSelector` and the `google.com/tpu` count:
 together with the chip count they are how the queue is chosen, so there would be
 nothing left to resolve if the fleet supplied them. Its deadline stays too.
