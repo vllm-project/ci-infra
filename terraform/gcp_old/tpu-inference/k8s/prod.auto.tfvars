@@ -285,15 +285,16 @@ worker_clusters = [
         slices        = 16
         nominal_quota = 16
 
-        # Takes its two slices back from lower-priority borrowers. Waiting for
-        # borrowers to finish does not work for a slice: its chips have to free
-        # together while single-host steps take each chip as it frees. So the
-        # PR presubmits that make up most of this queue (priority 50) evict
-        # nightly borrowers rather than wait for them, but not other PR steps,
-        # which would rerun from the start; and a nightly multi-host step here
-        # waits instead of evicting anyone, which also keeps it from taking
-        # the two slices ahead of a presubmit.
-        reclaim_within_cohort = "LowerPriority"
+        # Waits for borrowers to finish instead of evicting them. Within its
+        # own quota this queue is admitted ahead of any borrower once eight
+        # chips are free, which in working hours is soon enough; evicting
+        # threw away the borrowers' runs instead - in a replay of 10-12 to
+        # 10-14, 153 evictions and 224 chip-hours of runs, mostly unclassed
+        # tpu-inference steps on 1x1x1, against a total queue time 7% lower
+        # without them. The cost is at night, when the nightlies keep the
+        # cohort full: a slice waited p90 60 minutes instead of 45 in that
+        # replay.
+        reclaim_within_cohort = "Never"
       },
       {
         # Two slices nominal for the Kimi-K3 pairs, taken back only from
