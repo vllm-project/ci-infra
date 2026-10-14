@@ -365,17 +365,16 @@ controllers sharing an ID can each reserve the same job. Its pod is marked
 what restarted it, and job pickup stops until it is back. Running jobs do not
 depend on it.
 
-**Every v7x shape has quota of its own, and the multi-host shapes take it
-back.** The 128 chips split 64 to `tpu7x-standard-4t-2x2x1`, 32 to
-`tpu7x-standard-4t-2x2x4` (two slices), 16 to `tpu7x-standard-4t-2x2x2` (two
-slices) and 16 to `tpu7x-standard-1t-1x1x1`; any shape can borrow what the
-others leave idle. Kueue considers a workload that fits a queue's own quota
-before one that has to borrow, so a shape under its nominal gets freed chips
-first. 2x2x2 also evicts any borrower to get its slices back
-(`reclaimWithinCohort: Any`) and 2x2x4 evicts lower-priority ones
-(`LowerPriority`); the single-host shapes wait for borrowers to finish. A
-reclaimed slice still waits for the evicted nodes to scale down, about ten
-minutes, before its own nodes boot. If a shape is starving, the lever is the
+**Every v7x shape has quota of its own, and 2x2x4 takes it back.** The 128
+chips split 64 to `tpu7x-standard-4t-2x2x1`, 32 to `tpu7x-standard-4t-2x2x4`
+(two slices), 16 to `tpu7x-standard-4t-2x2x2` (two slices) and 16 to
+`tpu7x-standard-1t-1x1x1`; any shape can borrow what the others leave idle.
+Kueue considers a workload that fits a queue's own quota before one that has to
+borrow, so a shape under its nominal gets freed chips first. 2x2x4 also evicts
+lower-priority borrowers to get its slices back (`reclaimWithinCohort:
+LowerPriority`); the other shapes, 2x2x2 included, wait for borrowers to finish
+rather than throw their runs away. A reclaimed slice still waits for the
+evicted nodes to scale down, about ten minutes, before its own nodes boot. If a shape is starving, the lever is the
 split in `prod.auto.tfvars`, not the node pools.
 
 **A cold pool's first image pull is slow, and that is not streaming failing.**
