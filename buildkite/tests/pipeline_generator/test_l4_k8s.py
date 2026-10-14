@@ -4,7 +4,7 @@ import buildkite_step
 from constants import AgentQueue
 from step import Step
 
-pytestmark = pytest.mark.usefixtures("fake_global_config")
+pytestmark = pytest.mark.usefixtures("every_step_runs")
 
 
 def _render_command_step(step):

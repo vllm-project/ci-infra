@@ -8,7 +8,7 @@ from amd import is_amd_device
 from constants import AgentQueue
 from step import Step
 
-pytestmark = pytest.mark.usefixtures("fake_global_config")
+pytestmark = pytest.mark.usefixtures("every_step_runs")
 
 
 def test_amd_template_retries_gpu_hang_abort():
@@ -110,13 +110,11 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     )
 
     group_step = _render_single_step(step)
-    block_step, command_step = group_step.steps
+    (command_step,) = group_step.steps
 
     assert group_step.group == "Hardware-AMD Tests"
-    assert block_step.block == f"Run AMD: AMD direct test ({device})"
-    assert block_step.depends_on == ["image-build-amd"]
     assert command_step.label == f"AMD: AMD direct test ({device})"
-    assert command_step.depends_on == ["image-build-amd", block_step.key]
+    assert command_step.depends_on == ["image-build-amd"]
     assert command_step.agents == {"queue": queue}
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
@@ -216,7 +214,7 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     )
 
     group_step = _render_single_step(step)
-    _, command_step = group_step.steps
+    (command_step,) = group_step.steps
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
@@ -290,6 +288,7 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
 
 @pytest.mark.parametrize("optional", [False, True])
 def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
+    fake_global_config["nightly"] = "0"
     fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
     step = Step(
         label="ROCm base mirrored test",
@@ -300,17 +299,14 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
         mirror={"amd": {"device": "mi300_1"}},
     )
 
+    unselected = []
     group_steps = buildkite_step.convert_group_step_to_buildkite_step(
-        {step.group: [step]}
-    )
-    default_group = next(group for group in group_steps if group.group == "Mirrors")
-    amd_group = next(
-        group for group in group_steps if group.group == "Hardware-AMD Tests"
+        {step.group: [step]}, unselected
     )
 
-    assert isinstance(default_group.steps[0], buildkite_step.BuildkiteBlockStep)
-    assert len(amd_group.steps) == 1
-    assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteCommandStep)
+    assert [group.group for group in group_steps] == ["Hardware-AMD Tests"]
+    assert [s.key for s in group_steps[0].steps] == ["amd-rocm-base-mirrored-test"]
+    assert [option.value for option in unselected] == ["rocm-base-mirrored-test"]
 
 
 @pytest.mark.parametrize(
@@ -321,6 +317,7 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
     ],
 )
 def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device, queue):
+    fake_global_config["nightly"] = "0"
     fake_global_config["list_file_diff"] = [
         ".buildkite/scripts/hardware_ci/run-amd-test.sh"
     ]
@@ -333,19 +330,17 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device,
         mirror={"amd": {"device": device, "dind": False}},
     )
 
+    unselected = []
     group_steps = buildkite_step.convert_group_step_to_buildkite_step(
         {
             step.group: [step],
-        }
-    )
-    default_group = next(group for group in group_steps if group.group == "Mirrors")
-    amd_group = next(
-        group for group in group_steps if group.group == "Hardware-AMD Tests"
+        },
+        unselected,
     )
 
-    assert isinstance(default_group.steps[0], buildkite_step.BuildkiteBlockStep)
-    assert len(amd_group.steps) == 1
-    amd_command_step = amd_group.steps[0]
+    assert [group.group for group in group_steps] == ["Hardware-AMD Tests"]
+    assert [option.value for option in unselected] == ["native-mirrored-test"]
+    (amd_command_step,) = group_steps[0].steps
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
     assert amd_command_step.key == "amd-native-mirrored-test"
     assert amd_command_step.agents == {"queue": queue}
@@ -416,8 +411,7 @@ def test_untagged_mirror_defaults_to_dind(
         group for group in group_steps if group.group == "Hardware-AMD Tests"
     )
 
-    assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteBlockStep)
-    amd_command_step = amd_group.steps[1]
+    amd_command_step = amd_group.steps[0]
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
     assert amd_command_step.plugins is None
     assert amd_command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE

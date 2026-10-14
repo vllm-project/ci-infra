@@ -9,6 +9,13 @@ from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_p
 
 
 ONLY_STEP_KEYS_ENV_VAR = "VLLM_CI_ONLY_STEP_KEYS"
+# Set by the test picker's spawn step (see create_test_picker_steps): the keys
+# checked in the picker, newline-separated as Buildkite stores a multi-select,
+# the JSON list of {"label", "value"} options the picker offered, and which
+# picker of the build it was.
+SPAWN_STEP_KEYS_ENV_VAR = "VLLM_CI_SPAWN_STEP_KEYS"
+PICKER_OPTIONS_ENV_VAR = "VLLM_CI_PICKER_OPTIONS"
+PICKER_ROUND_ENV_VAR = "VLLM_CI_PICKER_ROUND"
 STEP_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -30,6 +37,9 @@ class GlobalConfig(TypedDict):
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
     only_step_keys: Optional[FrozenSet[str]] = None
+    spawn_step_keys: Optional[FrozenSet[str]] = None
+    picker_options: Optional[List[Dict[str, str]]] = None
+    picker_round: int = 1
 
 
 config = None
@@ -83,7 +93,15 @@ def init_global_config(pipeline_config_path: str):
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
         only_step_keys=_parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR)),
+        spawn_step_keys=_parse_spawn_step_keys(os.getenv(SPAWN_STEP_KEYS_ENV_VAR)),
+        picker_options=_parse_picker_options(os.getenv(PICKER_OPTIONS_ENV_VAR)),
+        picker_round=int(os.getenv(PICKER_ROUND_ENV_VAR) or 1),
     )
+    if (config["spawn_step_keys"] is None) != (config["picker_options"] is None):
+        raise ValueError(
+            f"{SPAWN_STEP_KEYS_ENV_VAR} and {PICKER_OPTIONS_ENV_VAR} "
+            "must be set together."
+        )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
         config["nightly"] = "1"
@@ -118,6 +136,36 @@ def _parse_only_step_keys(value: Optional[str]) -> Optional[FrozenSet[str]]:
     if len(set(parsed)) != len(parsed):
         raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} contains duplicate step keys.")
     return frozenset(parsed)
+
+
+def _parse_spawn_step_keys(value: Optional[str]) -> Optional[FrozenSet[str]]:
+    if value is None:
+        return None
+    keys = value.split()
+    if not keys:
+        raise ValueError(f"{SPAWN_STEP_KEYS_ENV_VAR} names no step keys.")
+    if any(not STEP_KEY_PATTERN.fullmatch(key) for key in keys):
+        raise ValueError(f"{SPAWN_STEP_KEYS_ENV_VAR} contains an invalid step key.")
+    return frozenset(keys)
+
+
+def _parse_picker_options(value: Optional[str]) -> Optional[List[Dict[str, str]]]:
+    if value is None:
+        return None
+    message = f"{PICKER_OPTIONS_ENV_VAR} must be a JSON array of picker options."
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(message) from error
+    if not isinstance(parsed, list) or any(
+        not isinstance(option, dict)
+        or not isinstance(option.get("label"), str)
+        or not isinstance(option.get("value"), str)
+        or not STEP_KEY_PATTERN.fullmatch(option["value"])
+        for option in parsed
+    ):
+        raise ValueError(message)
+    return parsed
 
 
 def _validate_pipeline_config(pipeline_config: Dict):

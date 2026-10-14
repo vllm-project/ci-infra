@@ -45,3 +45,11 @@ def fake_global_config(monkeypatch):
         lambda: "torch-nightly-image",
     )
     return config
+
+
+@pytest.fixture
+def every_step_runs(fake_global_config):
+    """Select every step, for tests about how a step renders: a step the
+    change does not select is left out of the pipeline."""
+    fake_global_config["nightly"] = "1"
+    return fake_global_config

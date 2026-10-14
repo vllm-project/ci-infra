@@ -86,6 +86,14 @@ The generator relies on several environment variables, typically provided by Bui
     ignoring normal source-file selection. Generated AMD mirror keys such as
     `amd-multi-modal-processor` are accepted and select only the mirror plus
     its AMD dependencies. Unknown keys fail generation.
+* `VLLM_CI_SPAWN_STEP_KEYS`, `VLLM_CI_PICKER_OPTIONS`, `VLLM_CI_PICKER_ROUND`:
+    Set by the test picker's "Run selected tests" step, not by hand. Steps the
+    change does not select are not uploaded; they are listed in a "Run more
+    tests" input step instead. That step re-runs the generator with the keys
+    checked in the picker (newline-separated), the options it offered, and
+    which picker of the build it was. The generator then uploads the checked
+    steps, plus any dependencies the build does not have yet, and a new picker
+    for what is left.
 
 Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
 `buildkite-analytics-token-secret` Secret's `token` key when it is available.

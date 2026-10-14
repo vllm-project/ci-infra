@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shlex
@@ -8,10 +9,10 @@ from pathlib import Path
 import pytest
 
 import buildkite_step
-from pipeline_generator import select_steps_and_dependencies
+from pipeline_generator import select_spawned_steps, select_steps_and_dependencies
 from step import Step, group_steps, read_steps_from_job_dir
 
-pytestmark = pytest.mark.usefixtures("fake_global_config")
+pytestmark = pytest.mark.usefixtures("every_step_runs")
 
 TEST_JOB_DIR = Path(__file__).resolve().parent / "test_files" / "test_jobs"
 
@@ -161,11 +162,11 @@ def test_selected_steps_support_amd_mirror_keys(fake_global_config, key, generat
     assert generated_keys == ["image-build-amd", f"amd-{generated_key}"]
 
 
-def test_an_optional_step_named_by_the_selector_runs_unblocked(fake_global_config):
+def test_an_optional_step_named_by_the_selector_runs(fake_global_config):
     """The selector treats optional steps as ordinary ones and names them in
     VLLM_CI_ONLY_STEP_KEYS when the evidence reaches them. That relies on this:
-    a named step runs, optional or not. Blocked, it would be selected and still
-    never run."""
+    a named step runs, optional or not. Left out, it would be selected and
+    still never run."""
     steps = [
         Step(
             label="Nightly eval", key="nightly-eval", commands=["eval"], optional=True
@@ -173,13 +174,14 @@ def test_an_optional_step_named_by_the_selector_runs_unblocked(fake_global_confi
         Step(label="Other", key="other", commands=["other"]),
     ]
     fake_global_config["only_step_keys"] = frozenset({"nightly-eval"})
-    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(steps))
+    unselected = []
+    groups = buildkite_step.convert_group_step_to_buildkite_step(
+        group_steps(steps), unselected
+    )
     emitted = [job for group in groups for job in group.steps]
 
     assert [job.key for job in emitted] == ["nightly-eval"]
-    assert not any(
-        isinstance(job, buildkite_step.BuildkiteBlockStep) for job in emitted
-    )
+    assert unselected == []
 
 
 def test_a100_steps_are_not_emitted_but_amd_mirrors_are():
@@ -197,6 +199,122 @@ def test_a100_steps_are_not_emitted_but_amd_mirrors_are():
 
     assert "a100-test" not in generated_keys
     assert "amd-a100-test" in generated_keys
+
+
+def test_unselected_steps_are_offered_in_the_picker_instead(fake_global_config):
+    """A step the change does not select is left out of the build, so it does
+    not clutter the build page, and is offered in the test picker instead."""
+    fake_global_config["nightly"] = "0"
+    fake_global_config["list_file_diff"] = ["vllm/selected.py"]
+    steps = [
+        Step(
+            label="Selected",
+            key="selected",
+            commands=["a"],
+            source_file_dependencies=["vllm/selected.py"],
+        ),
+        Step(
+            label="Unselected",
+            key="unselected",
+            commands=["b"],
+            source_file_dependencies=["vllm/other.py"],
+            mirror={"amd": {"device": "mi300_1"}},
+        ),
+    ]
+    unselected = []
+    groups = buildkite_step.convert_group_step_to_buildkite_step(
+        group_steps(steps), unselected
+    )
+
+    assert [job.key for group in groups for job in group.steps] == ["selected"]
+    assert [(o.label, o.value) for o in unselected] == [
+        ("Unselected", "unselected"),
+        ("AMD: Unselected", "amd-unselected"),
+    ]
+
+
+def test_test_picker_uploads_the_checked_steps(monkeypatch):
+    monkeypatch.setenv("VLLM_CI_BRANCH", "my-branch")
+    options = [
+        buildkite_step.PickerOption(label="Kernels Shard %N", value="kernels"),
+        buildkite_step.PickerOption(label="AMD: Kernels", value="amd-kernels"),
+    ]
+
+    picker, spawn = buildkite_step.create_test_picker_steps(
+        options, ".buildkite/ci_config.yaml"
+    )
+
+    (field,) = picker["fields"]
+    assert picker["key"] == buildkite_step.TEST_PICKER_INPUT_KEY
+    assert field["multiple"] is True
+    assert field["options"] == [
+        {"label": "AMD: Kernels", "value": "amd-kernels"},
+        {"label": "Kernels", "value": "kernels"},
+    ]
+    assert spawn["depends_on"] == [buildkite_step.TEST_PICKER_INPUT_KEY]
+    assert json.loads(spawn["env"]["VLLM_CI_PICKER_OPTIONS"]) == field["options"]
+    assert spawn["env"]["VLLM_CI_PICKER_ROUND"] == "1"
+    commands = "\n".join(spawn["commands"])
+    assert "ci-infra.git@my-branch#subdirectory=buildkite/pipeline_generator" in (
+        commands
+    )
+    # $$ survives `buildkite-agent pipeline upload` interpolation as one $.
+    assert (
+        'VLLM_CI_SPAWN_STEP_KEYS="$$(buildkite-agent meta-data get '
+        f'{field["key"]})"' in commands
+    )
+    assert "--pipeline_config_path .buildkite/ci_config.yaml" in commands
+    assert spawn["commands"][-1].startswith("buildkite-agent pipeline upload ")
+
+
+def test_a_later_test_picker_uses_keys_of_its_own():
+    """An input step is submitted once, so the spawn step uploads a new picker
+    for what is left. Step keys and meta-data are per build, so the new one
+    must not reuse the first picker's."""
+    options = [buildkite_step.PickerOption(label="Kernels", value="kernels")]
+
+    picker, spawn = buildkite_step.create_test_picker_steps(
+        options, ".buildkite/ci_config.yaml", picker_round=2
+    )
+
+    assert picker["key"] == "select-tests-2"
+    assert picker["fields"][0]["key"] == "selected-tests-2"
+    assert spawn["key"] == "spawn-selected-tests-2"
+    assert spawn["depends_on"] == ["select-tests-2"]
+    assert "meta-data get selected-tests-2" in spawn["commands"][1]
+    assert spawn["env"]["VLLM_CI_PICKER_ROUND"] == "2"
+
+
+def test_spawned_steps_bring_only_dependencies_the_build_lacks():
+    """The build already has every step the picker did not offer; uploading
+    one again would fail on its duplicate key."""
+    steps = [
+        Step(label="Image", key="image-build", commands=["build"]),
+        Step(label="Extra image", key="extra-image", commands=["build"]),
+        Step(
+            label="Test",
+            key="test",
+            depends_on=["image-build", "extra-image"],
+            commands=["test"],
+        ),
+        Step(label="Other", key="other", commands=["other"]),
+    ]
+
+    selected, selected_keys = select_spawned_steps(
+        steps,
+        spawn_step_keys=frozenset({"test"}),
+        picker_step_keys=frozenset({"extra-image", "test", "other"}),
+    )
+
+    assert selected_keys == frozenset({"test", "extra-image"})
+    assert [step.key for step in selected] == ["extra-image", "test"]
+
+
+def test_spawn_rejects_a_step_the_picker_did_not_offer():
+    steps = [Step(label="Test", key="test", commands=["test"])]
+
+    with pytest.raises(ValueError, match="not offered by the test picker: test"):
+        select_spawned_steps(steps, frozenset({"test"}), frozenset())
 
 
 def test_selected_steps_reject_duplicate_generated_key():
@@ -281,7 +399,6 @@ def test_every_generated_job_has_a_unique_key():
     assert all(keys)
     assert len(keys) == len(set(keys))
     assert "test-a" in keys
-    assert "block-test-a" in keys
 
 
 def test_explicit_step_key_is_preserved():
