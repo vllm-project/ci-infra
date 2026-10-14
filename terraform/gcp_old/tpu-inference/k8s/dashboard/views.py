@@ -231,7 +231,11 @@ JOB_STATES = {
     ),
     "starting": (
         "Pods starting",
-        "Admitted; its pods are being scheduled, pulled or started.",
+        "Admitted; no pod running yet - waiting for a node, or being pulled or started.",
+    ),
+    "partly": (
+        "Partly running",
+        "Admitted; some of its pods run while the rest wait for a node or start - a slice still coming up.",
     ),
     "running": ("Running", "Admitted and every pod up."),
 }
@@ -625,6 +629,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             "running": 0,
             "spot": 0,
             "waiting": 0,
+            "partly": 0,
             "spot_waiting": 0,
             "held": 0.0,
             "oldest_wait": None,
@@ -703,10 +708,15 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                         row["running_since"] or w["since"], w["since"]
                     )
             else:
-                # Admitted or being handed over, but no pod up yet: a node
-                # scaling up, or a Spot stockout. Reserved quota is held all the
-                # same; Spot chips with no node hold nothing.
-                row["waiting"] += 1
+                # Admitted or being handed over, not every pod up. Partly
+                # running when some are - a multi-pod step whose other slice
+                # is still coming up - else waiting for a node: a scale-up, or
+                # a Spot stockout. Reserved quota is held all the same; Spot
+                # chips with no node hold nothing.
+                if w.get("pods_running"):
+                    row["partly"] += 1
+                else:
+                    row["waiting"] += 1
                 row["spot_waiting"] += 1 if w.get("spot") else 0
                 if not w.get("spot"):
                     row["held"] += w["amount"]
@@ -732,8 +742,15 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 "running_steps": sum(
                     1 for w in wls if w["state"] == "admitted" and w.get("pods_ready")
                 ),
+                "partly_steps": sum(
+                    1
+                    for w in wls
+                    if w["state"] == "admitted" and not w.get("pods_ready") and w.get("pods_running")
+                ),
                 "starting_steps": sum(
-                    1 for w in wls if w["state"] == "admitted" and not w.get("pods_ready")
+                    1
+                    for w in wls
+                    if w["state"] == "admitted" and not w.get("pods_ready") and not w.get("pods_running")
                 ),
                 "dispatching": sum(1 for w in wls if w["state"] == "dispatching"),
                 "pending": len(pending),
@@ -743,7 +760,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 "next_up": next_up(q, wls) if pending else None,
                 # Pending is the next-up list's; this is what holds the chips.
                 "builds": sorted(
-                    (r for r in rows.values() if r["running"] or r["waiting"]),
+                    (r for r in rows.values() if r["running"] or r["waiting"] or r["partly"]),
                     key=lambda r: (-r["held"], -(r["priority"] or 0)),
                 ),
             }
@@ -982,7 +999,7 @@ def fleet_map(cfg: Config, kq: dict, health: dict, pools: list, snap: dict) -> d
     on_cluster = collections.defaultdict(collections.Counter)
     for j in snap["jobs"]:
         if j.get("cluster"):
-            on_cluster[j["cluster"]][j["real"]] += 1
+            on_cluster[j["cluster"]]["running" if j["real"] == "partly" else j["real"]] += 1
     held = collections.Counter()
     for w in kq["workloads"]:
         if w["cluster"] and w["state"] != "pending" and w["queue"] in tpu_queues:
@@ -1114,10 +1131,17 @@ def kube_jobs(
         elif w["state"] == "dispatching":
             state, since = "dispatching", w["since"]
         else:
-            state, since = (
-                ("running" if w.get("pods_ready") else "starting"),
-                w["since"],
+            state = (
+                "running" if w.get("pods_ready")
+                else "partly" if w.get("pods_running")
+                else "starting"
             )
+            since = w["since"]
+            total, up, placed = (w.get(k) or 0 for k in ("pods_total", "pods_running", "pods_on_node"))
+            if state != "running" and total:
+                detail = f"{up} of {total} pods running" + (
+                    f", {total - placed} waiting for a node" if total > placed else ", the rest starting"
+                )
         q = queues.get(w["queue"]) if w else None
         out.append(
             {
@@ -1568,7 +1592,7 @@ def render_live_summary(snap: dict) -> str:
 <td class="n">{num(q["borrowing_limit"]) if q["borrowing_limit"] else "-"}</td>
 {f'<td>{spot_text(q, cell=True) if q.get("spot_quota") else "-"}</td>' if has_spot else ""}
 <td>{E(RECLAIM_FROM.get(q["reclaim"], q["reclaim"])) if q["reclaim"] != "Never" else '<span class="muted">nobody</span>'}</td>
-<td class="n">{num(q["running_steps"])}{f'<div class="sub-row">{num(q["starting_steps"] + q["dispatching"])} waiting for a node</div>' if q["starting_steps"] + q["dispatching"] else ""}</td>
+<td class="n">{num(q["running_steps"])}{f'<div class="sub-row">{num(q["partly_steps"])} partly running</div>' if q.get("partly_steps") else ""}{f'<div class="sub-row">{num(q["starting_steps"] + q["dispatching"])} waiting for a node</div>' if q["starting_steps"] + q["dispatching"] else ""}</td>
 <td class="n">{num(q["pending"])}{f'<div class="sub-row">{num(q["pending_amount"])} chips</div>' if q["pending"] else ""}</td>
 <td class="barcell">{quota_bar(q, scale)}</td></tr>"""
             for q in members
@@ -1747,6 +1771,7 @@ def render_live_queue(q: dict, now: float) -> str:
                 if r.get("waiting")
                 else ""
             )
+            + (f'<div class="sub-row">{num(r["partly"])} partly running</div>' if r.get("partly") else "")
             + "</td>"
             f'<td class="n">{num(r["held"])}</td>'
             f'<td class="n">{ago(r["running_for"])}</td></tr>'
@@ -1794,7 +1819,7 @@ def render_live_queue(q: dict, now: float) -> str:
     <span class="more"><a href="jobs?queue={E(urllib.parse.quote(q["name"]))}">Jobs →</a> · <a href="capacity#{E(q["name"])}">Capacity →</a></span></div>
   <div class="stats">
     <p class="stat"><b>{num(q["pending"])}</b><span>pending · oldest {ago(q["oldest_wait"])}</span></p>
-    <p class="stat"><b>{num(q["running_steps"])}</b><span>running{f" · {num(q['starting_steps'])} waiting for a node" if q["starting_steps"] else ""}{f" · {q['dispatching']} handing over" if q["dispatching"] else ""}</span></p>
+    <p class="stat"><b>{num(q["running_steps"])}</b><span>running{f" · {num(q['partly_steps'])} partly running" if q.get("partly_steps") else ""}{f" · {num(q['starting_steps'])} waiting for a node" if q["starting_steps"] else ""}{f" · {q['dispatching']} handing over" if q["dispatching"] else ""}</span></p>
     {held}
   </div>
   <div class="pills">{"".join(pills)}</div>
@@ -1966,7 +1991,7 @@ def render_jobs(snap: dict) -> str:
     )
     return f"""{states}
 <p class="muted lead">Where each kube job is, grouped by build. Hover a count for what the state means.</p>
-<h3>Not running yet <span class="muted">({len(waiting)} jobs)</span></h3>
+<h3>Not all running yet <span class="muted">({len(waiting)} jobs)</span></h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>State</th><th>Queue</th><th>Steps</th>
 <th class="n">Longest</th><th>Detail</th></tr></thead><tbody>{waiting_rows}</tbody>{more_rows}</table></div>
 {more_button}
@@ -2273,7 +2298,7 @@ def render_overview(snap: dict) -> str:
 
     held, waiting = steps.get("held", 0), steps.get("waiting_agent", 0)
     queued, dispatching = steps.get("queued", 0), steps.get("dispatching", 0)
-    on_workers = steps.get("starting", 0) + steps.get("running", 0)
+    on_workers = steps.get("starting", 0) + steps.get("partly", 0) + steps.get("running", 0)
     m = f["manager"]
     tpu_cohorts = [c for c in snap["cohorts"] if c["resource"] == TPU]
     connected = sum(1 for w in f["workers"] if w["connected"])

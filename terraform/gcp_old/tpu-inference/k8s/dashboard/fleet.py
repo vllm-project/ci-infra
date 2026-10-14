@@ -322,8 +322,10 @@ SPOT_LABEL = "cloud.google.com/gke-spot"
 
 
 def placement(pods: list) -> dict:
-    """Per Buildkite job, the TPU chips of its pods on a worker: on a Spot node,
-    on a reserved node, and admitted onto Spot with no node yet.
+    """Per Buildkite job, its pods on a worker: how many there are, on a node
+    and running - every pod, the chip-less ones included, since Kueue calls a
+    workload ready only once all are - and the TPU chips of them on a Spot
+    node, on a reserved node, and admitted onto Spot with no node yet.
 
     The worker's Kueue admits a workload again after the manager's and picks
     its own flavor, and that choice is the one the pods follow; the manager's
@@ -335,19 +337,26 @@ def placement(pods: list) -> dict:
         meta, spec, status = pod["metadata"], pod.get("spec", {}), pod.get("status", {})
         if meta.get("deletionTimestamp") or status.get("phase") in ("Succeeded", "Failed"):
             continue
+        job = (meta.get("labels") or {}).get("buildkite.com/job-id", "").replace("-", "")
+        if not job:
+            continue
+        row = out.setdefault(
+            job,
+            {"spot": 0.0, "reserved": 0.0, "spot_waiting": 0.0, "reserved_waiting": 0.0,
+             "pods": 0, "pods_on_node": 0, "pods_running": 0},
+        )
+        row["pods"] += 1
+        row["pods_on_node"] += 1 if spec.get("nodeName") else 0
+        row["pods_running"] += 1 if status.get("phase") == "Running" else 0
         chips = sum(
             quantity((c.get("resources", {}).get("requests") or {}).get(TPU))
             for c in spec.get("containers", [])
         )
-        job = (meta.get("labels") or {}).get("buildkite.com/job-id", "").replace("-", "")
-        if not chips or not job:
+        if not chips:
             continue
         spot = (spec.get("nodeSelector") or {}).get(SPOT_LABEL) == "true"
         key = ("spot" if spot else "reserved") if spec.get("nodeName") else (
             "spot_waiting" if spot else "reserved_waiting"
-        )
-        row = out.setdefault(
-            job, {"spot": 0.0, "reserved": 0.0, "spot_waiting": 0.0, "reserved_waiting": 0.0}
         )
         row[key] += chips
     return out
@@ -565,6 +574,11 @@ def fetch_kueue(cfg: Config) -> dict:
                 "spot_chips": place.get("spot", 0.0),
                 "spot_waiting_chips": place.get("spot_waiting", 0.0),
                 "spot": bool(place.get("spot") or place.get("spot_waiting")),
+                # Its pods on the worker, for a step part of which runs while
+                # the rest waits for a node.
+                "pods_total": place.get("pods", 0),
+                "pods_on_node": place.get("pods_on_node", 0),
+                "pods_running": place.get("pods_running", 0),
                 # The WorkloadPriorityClass the launcher set, and the value Kueue
                 # copied from it: what orders the queue. Buildkite's own job
                 # priority is a different scale and orders nothing here. None
