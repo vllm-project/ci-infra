@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union, Literal
+from typing import Dict, List, Optional, Any, Tuple, Union, Literal
 from copy import deepcopy
 import math
 import os
@@ -14,6 +14,7 @@ from amd import (
     build_amd_step_options,
     ensure_amd_stack_error_retry,
     get_amd_agent_queue,
+    get_amd_label,
     get_amd_setup_commands,
     get_amd_timeout_in_minutes,
     get_rocm_base_refresh_env,
@@ -970,11 +971,24 @@ RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
 
 
 def _runtime_shard_mode(
-    step: Step, step_key: str, list_file_diff: List[str]
+    step: Step,
+    step_key: str,
+    list_file_diff: List[str],
+    amd: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """How to run a step with `automatic_shard: true`: "on" (as shards),
-    "shadow" (one job, plus an annotation of the plan), or None (as usual)."""
-    if not step.automatic_shard or not _step_should_run(step, list_file_diff):
+    "shadow" (one job, plus an annotation of the plan), or None (as usual).
+    For an AMD mirror, `step` is the mirror's effective step and `amd` its
+    block, whose own `automatic_shard` must be set too."""
+    if not step.automatic_shard or (amd and not amd.get("automatic_shard")):
+        return None
+    if amd:
+        should_run = _amd_mirror_should_run(
+            _step_should_run(step, list_file_diff), list_file_diff
+        )
+    else:
+        should_run = _step_should_run(step, list_file_diff)
+    if not should_run:
         return None
     mode = os.getenv(RUNTIME_SHARD_ENV_VAR) or "on"
     if mode not in ("on", "shadow"):
@@ -986,41 +1000,45 @@ def _runtime_shard_mode(
     if (
         runtime_shard.split_commands(step.commands or []) is None
         or step.no_plugin
-        or is_amd_device(step.device)
+        or (is_amd_device(step.device) and step.dind)
         or (step.num_nodes and step.num_nodes >= 2)
     ):
         print(
-            f"automatic_shard ignored on {step_key}: only single-node NVIDIA steps "
-            "whose test commands are all plain pytest can be sharded"
+            f"automatic_shard ignored on {step_key}: only single-node, non-dind "
+            "steps whose test commands are all plain pytest can be sharded"
         )
         return None
     return mode
 
 
 def _shard_at_generation(
-    step: Step, step_key: str, command_step: BuildkiteCommandStep, mode: str
-) -> None:
+    step: Step,
+    step_key: str,
+    queue: AgentQueue,
+    commands: List[str],
+    env: Optional[Dict[str, str]],
+    mode: str,
+) -> Optional[Tuple[int, List[str], Dict[str, str]]]:
     """Plan an enrolled step's shards from the checkout (runtime_shard.py)
-    and, in "on" mode, run its job as one parallel job per shard: the same
-    commands, after installing the plugin that keeps each job's tests. Short
-    of a plan of two or more shards, the job is left as it is, so sharding
-    never blocks the step's tests. "shadow" only annotates the plan.
+    and, in "on" mode, turn its job's prepared commands and env into one
+    parallel job per shard: the same commands, after installing the plugin
+    that keeps each job's tests. Returns (shards, commands, env), or None to
+    leave the job as it is: short of a plan of two or more shards, so
+    sharding never blocks the step's tests. "shadow" only annotates the plan.
+    The NVIDIA job and a native AMD mirror's both go through here.
     """
     result, text = runtime_shard.plan_step(
-        step_key, step.commands or [], step.working_dir, os.getcwd()
+        step_key, step.commands or [], step.working_dir, os.getcwd(), queue
     )
     print(text)
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
-        return
+        return None
     if result is None or result["overBudget"]:
         runtime_shard.annotate(step_key, text, "warning")
     if result is None or result["shards"] < 2:
-        return
-    command_step.parallelism = result["shards"]
-    # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
-    command_step.label = f"{command_step.label} shard %N/%t"
-    env = dict(command_step.env or {})
+        return None
+    env = dict(env or {})
     # pytest-shard, installed in the image for fixed shards, would print its
     # own "Running N items in this shard" over this plan's selection.
     env["PYTEST_ADDOPTS"] = (
@@ -1030,8 +1048,7 @@ def _shard_at_generation(
     plan = {"shards": result["shards"], "commands": result["commands"]}
     env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
     env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()
-    command_step.env = env
-    commands = list(command_step.commands)
+    commands = list(commands)
     count = len(step.commands or [])
     for planned in result["commands"]:
         # The job's line for a step command follows its "Command (i/n)" header.
@@ -1048,7 +1065,7 @@ def _shard_at_generation(
             commands[at + 1] = runtime_shard.guard(
                 commands[at + 1], planned, result["shards"]
             )
-    command_step.commands = runtime_shard.shard_job_setup() + commands
+    return result["shards"], runtime_shard.shard_job_setup() + commands, env
 
 
 def convert_group_step_to_buildkite_step(
@@ -1200,8 +1217,26 @@ def convert_group_step_to_buildkite_step(
                 if include_step
                 else None
             )
-            if shard_mode:
-                _shard_at_generation(step, step_key, buildkite_step, shard_mode)
+            sharded = (
+                _shard_at_generation(
+                    step,
+                    step_key,
+                    get_agent_queue(step),
+                    buildkite_step.commands,
+                    buildkite_step.env,
+                    shard_mode,
+                )
+                if shard_mode
+                else None
+            )
+            if sharded:
+                (
+                    buildkite_step.parallelism,
+                    buildkite_step.commands,
+                    buildkite_step.env,
+                ) = sharded
+                # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
+                buildkite_step.label = f"{buildkite_step.label} shard %N/%t"
             if include_step:
                 group_steps_list.append(buildkite_step)
 
@@ -1230,12 +1265,10 @@ def convert_group_step_to_buildkite_step(
                             "dind": amd.get("dind", True),
                         }
                     )
-                    amd_commands_str = " && ".join(
-                        _prepare_commands(
-                            amd_command_step,
-                            variables_to_inject,
-                            setup_profile="amd",
-                        )
+                    amd_commands = _prepare_commands(
+                        amd_command_step,
+                        variables_to_inject,
+                        setup_profile="amd",
                     )
                 else:
                     amd_command_step = step.model_copy(
@@ -1244,22 +1277,54 @@ def convert_group_step_to_buildkite_step(
                             "dind": amd.get("dind", True),
                         }
                     )
-                    amd_commands_str = " && ".join(
-                        _prepare_commands(
-                            amd_command_step,
-                            variables_to_inject,
-                            setup_profile="amd",
-                        )
+                    amd_commands = _prepare_commands(
+                        amd_command_step,
+                        variables_to_inject,
+                        setup_profile="amd",
                     )
 
                 extra_env = dict(step.env or {})
                 extra_env.update(amd.get("env", {}))
+                # A native mirror that opted in plans its own shards, from its
+                # own commands and timings; an explicit parallelism wins.
+                amd_parallelism = amd.get("parallelism", step.parallelism)
+                amd_label = amd.get("label")
+                amd_key = f"amd-{step_key}"
+                amd_shard_mode = (
+                    _runtime_shard_mode(
+                        _get_amd_mirror_effective_step(amd_command_step, amd),
+                        amd_key,
+                        list_file_diff,
+                        amd,
+                    )
+                    if "parallelism" not in amd
+                    else None
+                )
+                amd_sharded = (
+                    _shard_at_generation(
+                        amd_command_step,
+                        amd_key,
+                        get_amd_agent_queue(amd["device"]),
+                        amd_commands,
+                        extra_env,
+                        amd_shard_mode,
+                    )
+                    if amd_shard_mode
+                    else None
+                )
+                if amd_sharded:
+                    amd_parallelism, amd_commands, extra_env = amd_sharded
+                    # Buildkite fills in %N (from 1) and %t (the shard count).
+                    amd_label = (
+                        f"{amd_label or get_amd_label(step.label, amd['device'])}"
+                        " shard %N/%t"
+                    )
                 amd_step = _create_amd_step(
                     label=step.label,
                     key=f"amd-{step_key}",
                     device=amd["device"],
                     num_devices=amd_num_devices,
-                    commands_str=amd_commands_str,
+                    commands_str=" && ".join(amd_commands),
                     depends_on=amd.get("depends_on"),
                     extra_env=extra_env,
                     dind=amd.get("dind", True),
@@ -1267,14 +1332,14 @@ def convert_group_step_to_buildkite_step(
                     no_gpu=amd_no_gpu,
                     num_nodes=amd.get("num_nodes", step.num_nodes),
                     soft_fail=amd.get("soft_fail", step.soft_fail or False),
-                    parallelism=amd.get("parallelism", step.parallelism),
+                    parallelism=amd_parallelism,
                     concurrency=amd.get("concurrency", step.concurrency),
                     concurrency_group=amd.get(
                         "concurrency_group", step.concurrency_group
                     ),
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
-                    display_label=amd.get("label"),
+                    display_label=amd_label,
                     extra_artifact_paths=_fnrec_artifact_paths(amd_command_step, "amd"),
                 )
                 if not _amd_mirror_should_run(

@@ -37,6 +37,8 @@ import urllib.request
 import zlib
 from typing import Dict, List, Optional, Tuple
 
+from constants import AgentQueue
+
 TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
 # Test time per shard; setup is not counted. Planned below the 20-minute limit
 # so run-to-run noise rarely pushes a real shard over it.
@@ -260,10 +262,15 @@ def discover(command: str, cwd: str, root: str) -> Dict:
     return {"files": files, "selected": selected}
 
 
-def fetch_timings(step_key: str) -> Optional[Dict]:
-    """Main's per-file medians for the step, with per-test medians for the
-    files over one shard's budget; None if the endpoint has none or is down."""
-    query = {"stepKey": step_key, "testsOverMs": MAX_SHARD_SECONDS * 1000}
+def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
+    """Main's per-file medians for the step on `queue`, with per-test medians
+    for the files over one shard's budget; None if the endpoint has none or is
+    down."""
+    query = {
+        "stepKey": step_key,
+        "queue": queue.value,
+        "testsOverMs": MAX_SHARD_SECONDS * 1000,
+    }
     url = TIMINGS_URL + "?" + urllib.parse.urlencode(query)
     try:
         with urllib.request.urlopen(url, timeout=15) as response:
@@ -466,7 +473,11 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
 
 
 def plan_step(
-    step_key: str, commands: List[str], working_dir: Optional[str], root: str
+    step_key: str,
+    commands: List[str],
+    working_dir: Optional[str],
+    root: str,
+    queue: AgentQueue,
 ) -> Tuple[Optional[Dict], str]:
     """Plan an enrolled step from the checkout at `root`.
 
@@ -475,6 +486,7 @@ def plan_step(
         commands: The step's commands, as its YAML writes them.
         working_dir: The step's working_dir in the image.
         root: The vLLM checkout the generator runs in.
+        queue: The queue the step runs on, to pick its timings.
 
     Returns:
         (the plan for runtime_shard_plugin.py, or None to run the step as one
@@ -494,7 +506,7 @@ def plan_step(
         discovered = [{"command": c, **discover(c, cwd, root)} for c in tests]
         if not any(entry["files"] for entry in discovered):
             raise ValueError("no test files found")
-        result = plan(discovered, fetch_timings(step_key))
+        result = plan(discovered, fetch_timings(step_key, queue))
         if result is None:
             reason = "main has no timing for the step's files"
         else:
