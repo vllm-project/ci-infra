@@ -164,7 +164,7 @@ def test_selected_steps_support_amd_mirror_keys(fake_global_config, key, generat
 def test_an_optional_step_named_by_the_selector_runs_unblocked(fake_global_config):
     """The selector treats optional steps as ordinary ones and names them in
     VLLM_CI_ONLY_STEP_KEYS when the evidence reaches them. That relies on this:
-    a named step runs, optional or not. Blocked, it would be selected and still
+    a named step runs, optional or not. Deferred, it would be selected and still
     never run."""
     steps = [
         Step(
@@ -177,9 +177,7 @@ def test_an_optional_step_named_by_the_selector_runs_unblocked(fake_global_confi
     emitted = [job for group in groups for job in group.steps]
 
     assert [job.key for job in emitted] == ["nightly-eval"]
-    assert not any(
-        isinstance(job, buildkite_step.BuildkiteBlockStep) for job in emitted
-    )
+    assert not any(job.deferred for job in emitted)
 
 
 def test_a100_steps_are_not_emitted_but_amd_mirrors_are():
@@ -281,7 +279,6 @@ def test_every_generated_job_has_a_unique_key():
     assert all(keys)
     assert len(keys) == len(set(keys))
     assert "test-a" in keys
-    assert "block-test-a" in keys
 
 
 def test_explicit_step_key_is_preserved():

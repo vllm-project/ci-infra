@@ -175,7 +175,7 @@ Rank the commits by suspicion level. The most suspicious commit is the one whose
 
 ## Step 5: Unblock the failing job on suspect commit builds
 
-Each per-commit CI build on vLLM has most jobs behind block steps (manual gates). To test whether a suspect commit introduced the regression, find the **existing** CI build for that commit and unblock the failing job on it.
+Each per-commit CI build on vLLM runs only the jobs CI selected for it; the rest are offered in a single "Run more jobs" input step. To test whether a suspect commit introduced the regression, find the **existing** CI build for that commit and run the failing job on it.
 
 **NEVER create a new build.** Every commit merged to main already has a CI build triggered by webhook. Find that existing build and unblock the specific job you need to test.
 
@@ -185,25 +185,31 @@ Each per-commit CI build on vLLM has most jobs behind block steps (manual gates)
 list_builds(org_slug: "vllm", pipeline_slug: "ci", commit: "<full_sha>")
 ```
 
-### 5b. Find the block step for the failing job
+### 5b. Find the "Run more jobs" input step
 
-Get all blocked jobs from the build:
+Jobs CI did not select for a commit are not in its build. They are listed in one input step, "Run more jobs" (step_key `run-more-jobs`), instead. Get the build's blocked jobs:
 
 ```
 get_build(org_slug: "vllm", pipeline_slug: "ci", build_number: "<number>", job_state: "blocked", detail_level: "full")
 ```
 
-Search for the block step (type: "manual", name: "") whose `step_key` matches the pattern `block-<job-name-kebab-case>`. For example, "Kernels (B200)" has step_key `block-kernels-b200`.
+Find the input step whose `step_key` is `run-more-jobs`. If someone has already used it, the newest round is `run-more-jobs-<n>`, the one with the highest `<n>` that is still blocked. The failing job's key is its kebab-case name. For example, "Kernels (B200)" has key `kernels-b200`.
 
-Note: not every build has every job — the pipeline definition may vary across commits. If the job doesn't exist in a build, skip it and try the next suspect.
+If the failing job is already in the build, because CI selected it or someone picked it earlier, just retry or read that job instead.
 
-### 5c. Unblock the job
+Note: not every build has every job — the pipeline definition may vary across commits. Older builds, from before this input step, have one block step per job instead, with step_key `block-<job-key>`; unblock that block step with no fields. If the job doesn't exist in a build, skip it and try the next suspect.
+
+### 5c. Run the job
+
+Unblock the input step and pass the job key in its field. The field key is `more-jobs` for `run-more-jobs` and `more-jobs-<n>` for `run-more-jobs-<n>`:
 
 ```
-unblock_job(org_slug: "vllm", pipeline_slug: "ci", build_number: "<number>", job_id: "<block_step_id>")
+unblock_job(org_slug: "vllm", pipeline_slug: "ci", build_number: "<number>", job_id: "<input_step_id>", fields: {"more-jobs": "kernels-b200"})
 ```
 
-This triggers the blocked job to run. Wait for it to complete, then check if it passed or failed.
+To pick several jobs at once, separate their keys with newlines.
+
+An "Upload the picked jobs" job then adds the job, and anything it needs, to the build. Wait for it to complete, then check if it passed or failed.
 
 ### 5d. Confirm by running the commit right before
 
