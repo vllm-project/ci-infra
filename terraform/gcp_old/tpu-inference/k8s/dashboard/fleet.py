@@ -1521,6 +1521,106 @@ GROUP BY pipeline, kind, step"""
         return {"builds": a.result(), "steps": b.result()}
 
 
+# kube_workload_timing outcomes that are the test's or Buildkite's doing. Any
+# other outcome is the fleet ending a workload.
+TEST_OUTCOMES = ("succeeded", "failed", "cancelled")
+
+
+def fetch_period(cfg: Config, start: int, end: int) -> dict:
+    """Each TPU generation over [start, end), for the Review page:
+    from the timing table, the workloads that ended in it - their
+    wait and startup percentiles, which cannot be put together from the
+    per-queue ones, failures and retries, and the wait day by day - and from
+    Kueue's metrics, its evictions by reason."""
+    out: dict = {"generations": {}, "daily": {}, "evictions": {}}
+    sel = kueue_selector(cfg)
+    evictions = prom_now(
+        cfg,
+        f"sum by (cluster_queue, reason) (increase(kueue_evicted_workloads_total{{{sel}}}[{end - start}s]))",
+        ("cluster_queue", "reason"),
+        end,
+    )
+    for key, n in evictions.items():
+        queue, reason = key.split("|")
+        gen = out["evictions"].setdefault(queue.split("-")[0], {})
+        gen[reason] = gen.get(reason, 0.0) + n
+    if not cfg.timing_table:
+        return out
+    where = (
+        f"ended_at >= TIMESTAMP_SECONDS({start}) AND ended_at < TIMESTAMP_SECONDS({end}) "
+        f"AND submitted_at >= TIMESTAMP_SECONDS({start - 2 * 86400})"
+    )
+    generation = "SPLIT(queue, '-')[OFFSET(0)]"
+    tests = ", ".join(f"'{o}'" for o in TEST_OUTCOMES)
+    wait = "TIMESTAMP_DIFF(quota_reserved_at, submitted_at, SECOND)"
+    startup = "TIMESTAMP_DIFF(first_pod_started_at, admitted_at, SECOND)"
+
+    def quantiles(expr: str, name: str) -> str:
+        q = f"APPROX_QUANTILES({expr}, 100 IGNORE NULLS)"
+        return f"{q}[SAFE_OFFSET(50)] AS {name}_p50, {q}[SAFE_OFFSET(90)] AS {name}_p90"
+
+    totals = f"""
+SELECT {generation} AS generation, COUNT(*) AS finished,
+  COUNTIF(outcome = 'failed') AS failed, COUNTIF(outcome NOT IN ({tests})) AS infra,
+  SUM(IFNULL(requeues, 0)) AS requeues, SUM(IFNULL(redispatches, 0)) AS redispatches,
+  {quantiles(wait, "wait")}, {quantiles(startup, "startup")}
+FROM `{cfg.timing_table}` WHERE {where} GROUP BY generation"""
+    daily = f"""
+SELECT {generation} AS generation, DIV(UNIX_SECONDS(ended_at) - {start}, 86400) AS day,
+  COUNT(*) AS n, {quantiles(wait, "wait")}
+FROM `{cfg.timing_table}` WHERE {where} GROUP BY generation, day"""
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        a, b = pool.submit(bigquery, cfg, totals), pool.submit(bigquery, cfg, daily)
+        rows, days = a.result(), b.result()
+    for r in rows:
+        out["generations"][r["generation"]] = {
+            k: (float(v) if v not in (None, "") else None) for k, v in r.items() if k != "generation"
+        }
+    for r in days:
+        out["daily"].setdefault(r["generation"], {})[int(r["day"])] = {
+            k: (float(r[k]) if r[k] not in (None, "") else None) for k in ("n", "wait_p50", "wait_p90")
+        }
+    return out
+
+
+# The repository and directory whose merged changes Review lists beside a
+# period: the fleet's configuration, launcher and dashboard.
+CHANGES_REPO = "vllm-project/ci-infra"
+CHANGES_PATH = "terraform/gcp_old/tpu-inference/k8s"
+
+
+def fetch_changes(cfg: Config, start: int, end: int) -> list[dict]:
+    """Commits to the fleet's directory on main in [start, end), newest first,
+    from GitHub's public API - no token; the caller caches, well inside the
+    unauthenticated hourly limit."""
+
+    def iso(t: int) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+    query = urllib.parse.urlencode(
+        {"path": CHANGES_PATH, "since": iso(start), "until": iso(end), "per_page": 100}
+    )
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{CHANGES_REPO}/commits?{query}",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "tpu-ci-dashboard"},
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        commits = json.load(response)
+    out = []
+    for c in commits:
+        title = c["commit"]["message"].splitlines()[0]
+        pr = re.search(r"\(#(\d+)\)$", title)
+        out.append(
+            {
+                "title": re.sub(r"\s*\(#\d+\)$", "", title),
+                "pr": int(pr.group(1)) if pr else None,
+                "at": log_time(c["commit"]["committer"]["date"]),
+                "url": f"https://github.com/{CHANGES_REPO}/pull/{pr.group(1)}" if pr else c["html_url"],
+            }
+        )
+    return out
+
+
 def fetch_stats(cfg: Config, start: int, end: int) -> dict:
     """Outcomes and phase timings of the workloads that finished in [start, end)."""
     if not cfg.timing_table:

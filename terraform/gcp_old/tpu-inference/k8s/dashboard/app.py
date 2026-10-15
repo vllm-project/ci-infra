@@ -197,8 +197,8 @@ class Live:
 
 
 class History:
-    """History views by range, cached: a range ending now for a minute, a range
-    wholly in the past for an hour."""
+    """History views by range, cached: a range ending in the last fifteen
+    minutes for a minute, one ending before that for an hour."""
 
     def __init__(self, cfg: fleet.Config, live: Live) -> None:
         self.cfg = cfg
@@ -248,11 +248,11 @@ class History:
             results["stats"],
             span,
         )
-        ttl = (
-            self.cfg.cache_seconds
-            if time.time() - span["end"] < 2 * span["step"]
-            else 3600
-        )
+        # A range's end is a step boundary in the past; once the node metrics
+        # behind it have arrived (NODE_LAG, five minutes) and a margin, what it
+        # shows is final - a range ending at the last whole hour, as Capacity's
+        # periods do, need not be read again every minute.
+        ttl = self.cfg.cache_seconds if time.time() - span["end"] < 900 else 3600
         with self._lock:
             if len(self._cache) > 16:
                 self._cache.clear()
@@ -294,6 +294,19 @@ class Windowed:
         return data, {"name": self.name, "at": time.time(), "error": error}
 
 
+def compare_windows(compare: str, now: float) -> dict:
+    """The two periods Review compares: the one ending at the last whole
+    hour, and the one of the same length before it - so a week is set
+    against the same weekdays a week earlier."""
+    length = views.PRESETS[compare]
+    end = int(now) - int(now) % 3600
+    step = views.choose_step(length)
+    return {
+        "current": {"start": end - length, "end": end, "step": step, "preset": None},
+        "previous": {"start": end - 2 * length, "end": end - length, "step": step, "preset": None},
+    }
+
+
 def parse_span(params: dict, now: float) -> dict:
     """A preset (?preset=7d) or explicit epoch seconds (?start=..&end=..), the
     latter capped at now and at 90 days, both aligned to the chart step."""
@@ -325,6 +338,8 @@ def serve(
     jobs: Windowed,
     wait_series: Windowed,
     steps: Windowed,
+    period: Windowed,
+    changes: Windowed,
     port: int,
 ) -> None:
     class Handler(BaseHTTPRequestHandler):
@@ -399,6 +414,38 @@ def serve(
                     queue_times,
                 )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
+            if url.path == "/review":
+                compare = (params.get("compare") or ["7d"])[0]
+                if compare not in views.COMPARE_PERIODS:
+                    compare = "7d"
+                windows = compare_windows(compare, time.time())
+                # Both periods' reads at once; each source caches by window,
+                # so a period another page already read costs nothing here.
+                sources_by = {"history": history, "waits": waits, "period": period, "steps": steps}
+                with concurrent.futures.ThreadPoolExecutor(10) as pool:
+                    compared = {
+                        name: {k: pool.submit(src.get, w) for k, src in sources_by.items()}
+                        for name, w in windows.items()
+                    }
+                    changed = pool.submit(changes.get, windows["current"])
+                pop = {name: {k: f.result() for k, f in fs.items()} for name, fs in compared.items()}
+                changes_data, changes_status = changed.result()
+                statuses = {"changes": changes_status}
+                for name, parts in pop.items():
+                    for k, (_, status) in parts.items():
+                        if k == "history":
+                            statuses.update({f"{name}-history-{s}": v for s, v in status.items()})
+                        else:
+                            statuses[f"{name}-{k}"] = status
+                page = views.render_review(
+                    compare,
+                    windows,
+                    {name: {k: v[0] for k, v in parts.items()} for name, parts in pop.items()},
+                    changes_data,
+                    params,
+                    statuses,
+                )
+                return self.reply(200, "text/html; charset=utf-8", page.encode())
             # Capacity replaced Trends; /trends and /history, its old names, go there.
             if url.path in ("/trends", "/history"):
                 self.send_response(302)
@@ -471,6 +518,8 @@ def main() -> None:
         Windowed(cfg, "BigQuery", fleet.fetch_jobs, []),
         Windowed(cfg, "BigQuery", fleet.fetch_wait_series, {}),
         Windowed(cfg, "BigQuery", fleet.fetch_steps, {"builds": [], "steps": []}),
+        Windowed(cfg, "BigQuery", fleet.fetch_period, {"generations": {}, "daily": {}, "evictions": {}}),
+        Windowed(cfg, "GitHub", fleet.fetch_changes, []),
         args.port,
     )
 

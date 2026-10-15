@@ -15,6 +15,7 @@ from pathlib import Path
 
 from charts import gap_chart, line_chart, share_bars, stacked_chart, values_table
 from fleet import (
+    TEST_OUTCOMES as FLEET_TEST_OUTCOMES,
     BK_LIMITED,
     BK_WAITING,
     DUTY_MODELS,
@@ -32,6 +33,7 @@ OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
 MIGRATION_PAGE = string.Template((TEMPLATES / "migration.html").read_text())
 JOBS_PAGE = string.Template((TEMPLATES / "jobs.html").read_text())
 CAPACITY_PAGE = string.Template((TEMPLATES / "capacity.html").read_text())
+REVIEW_PAGE = string.Template((TEMPLATES / "review.html").read_text())
 STEPS_PAGE = string.Template((TEMPLATES / "steps.html").read_text())
 # The bare-metal fleet before the migration, built once from the snapshot by
 # baseline/build_baseline.py; static, since that fleet is being torn down.
@@ -151,7 +153,7 @@ ASSETS = hashlib.sha256(
 
 # kube_workload_timing outcomes that are the test's or Buildkite's doing. Any
 # other outcome is the fleet ending a workload.
-TEST_OUTCOMES = {"succeeded", "failed", "cancelled"}
+TEST_OUTCOMES = set(FLEET_TEST_OUTCOMES)
 
 # Event reasons that mean something is wrong with the fleet rather than with a
 # test. Kueue's own "Pending" warnings are the backlog and are already reported
@@ -490,6 +492,12 @@ SOURCES = {
         "needs": ["roles/logging.viewAccessor on the _AllLogs view"],
         "fails": ["Only each health check's History & logs goes blank"],
     },
+    "GitHub": {
+        "through": "GitHub's public REST API, no token",
+        "reads": ["Commits to terraform/gcp_old/tpu-inference/k8s on main, for Review's What changed"],
+        "needs": ["Nothing; unauthenticated, within GitHub's hourly limit per address"],
+        "fails": ["Only What changed goes blank; it tries again after a minute"],
+    },
     "BigQuery": {
         "through": "BigQuery",
         "reads": [
@@ -575,6 +583,9 @@ def render_source_table(sources: dict, links: dict) -> str:
 
 
 def render_errors(sources: dict) -> str:
+    # Once each: a page that reads one source for two windows gets its error
+    # from both.
+    failed = {(s["name"], s["error"]): s for s in sources.values() if s["error"]}
     errors = "".join(
         f'<p class="error">{E(s["name"])} failed: {E(s["error"])}'
         + (
@@ -583,8 +594,7 @@ def render_errors(sources: dict) -> str:
             else ""
         )
         + f' · <a href="./#source-{source_id(s["name"])}">what it reads and how to fix it</a></p>'
-        for s in sources.values()
-        if s["error"]
+        for s in failed.values()
     )
     return f'<div class="card errors">{errors}</div>' if errors else ""
 
@@ -3489,6 +3499,264 @@ def failures_cell(r: dict) -> str:
 
 def chip_hours(values: list | None, step: int) -> float:
     return sum(v for v in values or [] if v is not None) * step / 3600
+
+
+# Review's periods: the lengths offered, by the preset each reuses, and what
+# the page calls one.
+COMPARE_PERIODS = {"24h": "day", "7d": "week", "30d": "30 days"}
+# Each row: label, the figure's key, how it reads (pct, dur, count), which way
+# is better ("up", "down", or None for a figure that is neither), and the
+# glossary entry that explains it.
+PERIOD_ROWS = (
+    ("Chips held", "held", "pct", "up", "Chips held"),
+    ("TensorCores busy", "busy", "pct", "up", "Busy"),
+    ("Idle while jobs waited", "stranded", "pct", "down", "Idle while jobs waited"),
+    ("Queue wait, median", "wait_p50", "dur", "down", "Wait, startup, run"),
+    ("Queue wait, p90", "wait_p90", "dur", "down", "Wait, startup, run"),
+    ("Startup, median", "startup_p50", "dur", "down", "Wait, startup, run"),
+    ("Startup, p90", "startup_p90", "dur", "down", "Wait, startup, run"),
+    ("Workloads finished", "finished", "count", None, None),
+    ("Chip-hours admitted", "chip_hours", "count", None, None),
+    ("Test failures", "test_failures", "pct", "down", "Test failure"),
+    ("Infra failures", "infra", "count", "down", "Infra failure"),
+    ("Requeues", "requeues", "count", "down", "Requeue"),
+    ("Redispatches", "redispatches", "count", "down", "Redispatch"),
+    ("Preempted by Kueue", "preempted", "count", "down", "Evicted"),
+    ("Pods not ready in time", "not_ready", "count", "down", None),
+    ("Spot chip-hours on nodes", "spot_delivered", "count", None, "Spot"),
+    ("Spot chip-hours waiting for a node", "spot_waiting", "count", "down", "Spot"),
+)
+PERIOD_CHANGES_FIRST = 12
+PERIOD_PIPELINES = 4
+
+
+def period_figures(w: dict, days: int) -> dict:
+    """Per generation, one period's figures, from the views and reads every
+    other part of the dashboard makes for a range: the history view, the
+    per-minute waits Migration splits, the timing table's period summary and
+    the step log."""
+    h, waits, period = w.get("history") or {}, w.get("waits") or {}, w.get("period") or {}
+    out = {}
+    if not h.get("cohorts"):
+        return out
+    hours = h["span"]["step"] / 3600
+    for c in h["cohorts"]:
+        name = c["name"]
+        split = kube_split(h, waits, name) if waits else None
+        g = (period.get("generations") or {}).get(name) or {}
+        evicted = (period.get("evictions") or {}).get(name) or {}
+        admitted, on_nodes = c.get("spot_admitted"), c.get("spot_on_nodes") or []
+        spot = [(a, o or 0.0) for a, o in zip(admitted or [], on_nodes) if a is not None]
+        finished = g.get("finished")
+        daily = (period.get("daily") or {}).get(name) or {}
+        out[name] = {
+            "generation": c["generation"],
+            # Days count back from the period's end; the charts read forward.
+            "held": mean(split["daily_held"]) if split else None,
+            "stranded": mean(split["daily_stranded"]) if split else None,
+            "busy": c.get("busy_share"),
+            "wait_p50": g.get("wait_p50"),
+            "wait_p90": g.get("wait_p90"),
+            "startup_p50": g.get("startup_p50"),
+            "startup_p90": g.get("startup_p90"),
+            "finished": finished,
+            "chip_hours": c.get("chip_hours"),
+            "test_failures": g["failed"] / finished if finished else None,
+            "infra": g.get("infra"),
+            "requeues": g.get("requeues"),
+            "redispatches": g.get("redispatches"),
+            "preempted": evicted.get("Preempted", 0.0) if period else None,
+            "not_ready": evicted.get("PodsReadyTimeout", 0.0) if period else None,
+            "spot_delivered": sum(min(a, o) for a, o in spot) * hours if admitted else None,
+            "spot_waiting": sum(max(0.0, a - o) for a, o in spot) * hours if admitted else None,
+            "nominal": mean(c.get("nominal") or []),
+            "daily_held": list(reversed(split["daily_held"]))[-days:] if split else [],
+            "daily_wait": [(daily.get(d) or {}).get("wait_p90") for d in range(days)],
+        }
+    return out
+
+
+def period_delta(now, before, kind: str, better: str | None) -> str:
+    """The change between two periods' figures: an arrow, the amount in the
+    figure's own terms, and a class saying whether it is for the better."""
+    if now is None or before is None:
+        return '<span class="delta flat">-</span>'
+    d = now - before
+    if kind == "pct":
+        text, flat = f"{d * 100:+.1f} pts", abs(d) < 0.005
+    elif kind == "dur":
+        text, flat = ("+" if d >= 0 else "−") + ago(abs(d)), abs(d) < max(30, 0.05 * abs(before))
+    else:
+        rel = f" ({d / before:+.0%})" if before else ""
+        text = ("+" if d >= 0 else "−") + num(abs(d)) + rel
+        flat = abs(d) < 0.5 or (before and abs(d) / before < 0.03)
+    if flat:
+        return f'<span class="delta flat">= {E(text)}</span>'
+    arrow = "▲" if d > 0 else "▼"
+    cls = "neutral" if better is None else ("good" if (d > 0) == (better == "up") else "bad")
+    return f'<span class="delta {cls}">{arrow} {E(text)}</span>'
+
+
+def period_value(v, kind: str) -> str:
+    if v is None:
+        return '<span class="muted">-</span>'
+    if kind == "pct":
+        return f"{v * 100:.1f}%"
+    if kind == "dur":
+        return ago(v)
+    return num(v)
+
+
+def render_review(
+    compare: str, windows: dict, data: dict, changes: list, params: dict, sources: dict
+) -> str:
+    """The Review page: each generation's health figures for the period ending
+    at the last whole hour against the period before it, day by day where the
+    period is days long, PR build wall clock, and the fleet's merged changes
+    in the period - for a weekly look back, as Migration looks back at bare
+    metal."""
+    name = COMPARE_PERIODS[compare]
+    cur, prev = windows["current"], windows["previous"]
+    days = PRESETS[compare] // 86400
+    now_f = period_figures(data.get("current") or {}, days)
+    before_f = period_figures(data.get("previous") or {}, days)
+
+    def link(value: str) -> str:
+        kept = {k: v[0] for k, v in params.items() if k != "compare" and v}
+        return "review?" + urllib.parse.urlencode({**kept, "compare": value})
+
+    selector = "".join(
+        f'<a class="seg-btn{" active" if key == compare else ""}" href="{E(link(key))}">{E(label.capitalize())}</a>'
+        for key, label in COMPARE_PERIODS.items()
+    )
+    # The period itself is in the top bar; this names the one it is set against.
+    when = (
+        f'The {E(name)} before: <time data-ts="{prev["start"]}" data-fmt="datetime"></time> – '
+        f'<time data-ts="{prev["end"]}" data-fmt="datetime"></time>'
+    )
+
+    cards = []
+    ticks = [cur["start"] + i * 86400 for i in range(days)]
+    for gen, f in now_f.items():
+        b = before_f.get(gen, {})
+        rows = "".join(
+            f'<tr><td>{term(label, key_) if key_ else E(label)}</td>'
+            f'<td class="n">{period_value(f.get(key), kind)}</td>'
+            f'<td class="n muted">{period_value(b.get(key), kind)}</td>'
+            f'<td class="n nowrap">{period_delta(f.get(key), b.get(key), kind, better)}</td></tr>'
+            for label, key, kind, better, key_ in PERIOD_ROWS
+            if f.get(key) is not None or b.get(key) is not None
+        )
+        notes = []
+        if f.get("nominal") and b.get("nominal") and abs(f["nominal"] - b["nominal"]) >= 1:
+            notes.append(
+                f"Nominal changed, {num(b['nominal'])} → {num(f['nominal'])} chips on average: "
+                "compare the percentages, not the totals."
+            )
+        if f.get("spot_delivered") is not None and b.get("spot_delivered") is None:
+            notes.append("No Spot in the previous period.")
+        charts = ""
+        if days >= 7:
+
+            def pad(values: list) -> list:
+                return (list(values) + [None] * days)[:days]
+
+            held = line_chart(
+                "Chips held by day, % of nominal",
+                ticks,
+                [
+                    ("used", f"last {name}", pad([None if v is None else round(v * 100, 1) for v in f["daily_held"]])),
+                    ("used p50", f"the {name} before", pad([None if v is None else round(v * 100, 1) for v in b.get("daily_held", [])])),
+                ],
+                ymax=100,
+                fmt="day",
+                width=520,
+                height=170,
+            )
+            wait = line_chart(
+                "Queue wait p90 by day, minutes",
+                ticks,
+                [
+                    ("used", f"last {name}", pad([None if v is None else round(v / 60, 1) for v in f["daily_wait"]])),
+                    ("used p50", f"the {name} before", pad([None if v is None else round(v / 60, 1) for v in b.get("daily_wait", [])])),
+                ],
+                fmt="day",
+                width=520,
+                height=170,
+            )
+            charts = f'<div class="pop-charts">{held}{wait}</div>'
+        else:
+            charts = '<p class="muted note">The day-by-day charts need a week or 30 days.</p>'
+        cards.append(
+            f'<div class="card pop"><div class="card-head"><h2>{E(f["generation"])}</h2>'
+            f'<span class="sub">{" ".join(E(n) for n in notes)}</span></div>'
+            f'<div class="pop-grid"><div class="table-wrap"><table class="dense pop-table"><thead><tr>'
+            f'<th></th><th class="n">Last {E(name)}</th><th class="n">The {E(name)} before</th><th class="n">Change</th>'
+            f"</tr></thead><tbody>{rows}</tbody></table></div>{charts}</div></div>"
+        )
+
+    # PR build wall clock for the pipelines with the most clean PR builds.
+    def walls(w: dict) -> dict:
+        out = collections.defaultdict(list)
+        for b in (w.get("steps") or {}).get("builds") or []:
+            if b.get("kind") == "pr" and b.get("clean") == "true" and b.get("pole_finished"):
+                out[b["pipeline"]].append(float(b["pole_finished"]) - float(b["created"]))
+        return out
+
+    now_w, before_w = walls(data.get("current") or {}), walls(data.get("previous") or {})
+    top = sorted((p for p in now_w if len(now_w[p]) >= 10), key=lambda p: -len(now_w[p]))[:PERIOD_PIPELINES]
+    build_rows = "".join(
+        f'<tr><td>{E(p)}</td><td class="n">{len(now_w[p]):,}</td><td class="n muted">{len(before_w.get(p, [])):,}</td>'
+        f'<td class="n">{period_value(quantile(now_w[p], 0.5), "dur")}</td>'
+        f'<td class="n muted">{period_value(quantile(before_w.get(p, []), 0.5), "dur")}</td>'
+        f'<td class="n nowrap">{period_delta(quantile(now_w[p], 0.5), quantile(before_w.get(p, []), 0.5), "dur", "down")}</td>'
+        f'<td class="n">{period_value(quantile(now_w[p], 0.9), "dur")}</td>'
+        f'<td class="n muted">{period_value(quantile(before_w.get(p, []), 0.9), "dur")}</td>'
+        f'<td class="n nowrap">{period_delta(quantile(now_w[p], 0.9), quantile(before_w.get(p, []), 0.9), "dur", "down")}</td></tr>'
+        for p in top
+    )
+    builds = (
+        '<div class="card"><div class="card-head"><h2>PR build wall clock</h2>'
+        f'<span class="sub">clean kube PR builds - see <a href="steps?preset={"7d" if compare != "30d" else "30d"}">Pipelines → Steps</a></span></div>'
+        '<div class="table-wrap"><table class="dense pop-table"><thead><tr><th>Pipeline</th>'
+        f'<th class="n">Builds, last {E(name)}</th><th class="n">before</th>'
+        '<th class="n">Median</th><th class="n">before</th><th class="n">Change</th>'
+        '<th class="n">p90</th><th class="n">before</th><th class="n">Change</th>'
+        f"</tr></thead><tbody>{build_rows}</tbody></table></div></div>"
+        if build_rows
+        else ""
+    )
+
+    items = [
+        f'<li><a href="{E(c["url"])}" target="_blank" rel="noopener">{"#" + str(c["pr"]) if c["pr"] else "commit"}</a> '
+        f'{E(c["title"])} <span class="muted"><time data-ts="{c["at"]:.0f}" data-fmt="datetime"></time></span></li>'
+        for c in changes or []
+    ]
+    more = (
+        f'<details><summary>{len(items) - PERIOD_CHANGES_FIRST} more</summary>'
+        f'<ul class="changes">{"".join(items[PERIOD_CHANGES_FIRST:])}</ul></details>'
+        if len(items) > PERIOD_CHANGES_FIRST
+        else ""
+    )
+    changed = (
+        '<div class="card"><div class="card-head"><h2>What changed</h2>'
+        f'<span class="sub">{len(items)} changes to the fleet (ci-infra tpu-inference/k8s) merged in the last {E(name)}</span></div>'
+        f'<ul class="changes">{"".join(items[:PERIOD_CHANGES_FIRST]) or "<li class=muted>None.</li>"}</ul>{more}</div>'
+    )
+    body = (
+        f'<div class="card range"><div class="segmented">{selector}</div><span class="muted note pop-when">{when}</span></div>'
+        + "".join(cards)
+        + builds
+        + changed
+    )
+    return REVIEW_PAGE.substitute(
+        assets=ASSETS,
+        errors=render_errors(sources),
+        period=E(name),
+        start=cur["start"],
+        end=cur["end"],
+        body=body,
+    )
 
 
 def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None = None) -> str:
