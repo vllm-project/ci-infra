@@ -620,3 +620,15 @@ table.poles td.follower { min-width: 140px; max-width: 220px; }
    what was borrowed. Spot's own causes wear .pill.spot. Small beside a name. */
 .pill.preempt { background: var(--borrowed-bg); color: #9a3a12; }
 .steps-list .pill, td .pill.preempt, td .pill.spot { font-size: 11px; padding: 0 7px; cursor: help; }
+/* Period over period: a generation's figures beside its day-by-day charts.
+   A change carries an arrow and its amount; the color says better or worse,
+   never alone - and a figure that is neither better nor worse stays ink. */
+.pop-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.pop-charts { display: grid; gap: 12px; }
+.pop-when { margin-left: 12px; }
+table.pop-table td:first-child { white-space: nowrap; }
+.delta { font-size: 13px; font-variant-numeric: tabular-nums; }
+.delta.good { color: #1d6b31; } .delta.bad { color: #b3261e; }
+.delta.neutral { color: var(--ink-2); } .delta.flat { color: var(--muted); }
+ul.changes { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; }
+@media (max-width: 1000px) { .pop-grid { grid-template-columns: 1fr; } }
