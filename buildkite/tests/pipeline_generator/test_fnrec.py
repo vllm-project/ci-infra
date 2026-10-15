@@ -145,8 +145,18 @@ def test_present_when_enabled(monkeypatch):
         ({"num_nodes": 2, "no_plugin": True}, "nvidia"),
         # A hardware runner starts its own container without the recorder's
         # env, so arming it only made the collect step wait for it.
-        ({"commands": ["bash .buildkite/scripts/hardware_ci/run-hpu-test.sh"]}, "nvidia"),
-        ({"commands": ['bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "pytest x"']}, "nvidia"),
+        (
+            {"commands": ["bash .buildkite/scripts/hardware_ci/run-hpu-test.sh"]},
+            "nvidia",
+        ),
+        (
+            {
+                "commands": [
+                    'bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "pytest x"'
+                ]
+            },
+            "nvidia",
+        ),
     ],
 )
 def test_steps_that_must_not_be_armed(monkeypatch, step_kwargs, profile):
@@ -596,3 +606,21 @@ def test_the_amd_runner_still_records(monkeypatch):
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
     step = _step(commands=["bash .buildkite/scripts/hardware_ci/run-amd-test.sh"])
     assert buildkite_step._fnrec_applies(step, "nvidia")
+
+
+def test_the_python_fold_runs_on_a_large_agent(monkeypatch, fake_global_config):
+    """The Python fold holds every job's recordings at once and outgrew the
+    16 GB small queue (nightly #94688). The kernel fold still fits there."""
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    groups = _rendered_groups(_step(key="a", group="g1"))
+    for branch, big, small in (
+        ("main", "cpu_queue_postmerge", "small_cpu_queue_postmerge"),
+        ("my-branch", "cpu_queue_premerge", "small_cpu_queue_premerge"),
+    ):
+        fake_global_config["branch"] = branch
+        (fn,) = buildkite_step.fnrec_collect_group(groups).steps
+        (kern,) = buildkite_step.kernrec_collect_group(groups).steps
+        assert fn.agents == {"queue": big}, branch
+        assert kern.agents == {"queue": small}, branch

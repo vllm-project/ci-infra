@@ -37,14 +37,21 @@ import urllib.request
 import zlib
 from typing import Dict, List, Optional, Tuple
 
+from constants import AgentQueue
+
 TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
 # Test time per shard; setup is not counted. Planned below the 20-minute limit
 # so run-to-run noise rarely pushes a real shard over it.
 MAX_SHARD_SECONDS = 1080
 MAX_NUMBER_OF_SHARDS = 6
 # A file main has no timing for (new in the PR, say) counts as the step's
-# median file, and at least this.
+# median file, and at least this. Under a command that picks tests by a
+# marker or keyword (`-m hybrid_model` over a directory of other models), it
+# counts as this alone: main timed every file the filter picks tests in, so
+# one it never timed most likely has none. A filter that excludes ("not
+# slow_test") still runs most files, so a new file there counts as usual.
 MIN_UNKNOWN_FILE_SECONDS = 5
+_FILTER_OPTIONS = ("-m", "-k")
 # Where the image keeps the checkout; a step's working_dir lives under it.
 CONTAINER_WORKSPACE = "/vllm-workspace"
 PLAN_ENV = "RUNTIME_SHARD_PLAN"
@@ -155,6 +162,22 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
     return commands[:first], tests
 
 
+def _picks_tests(command: str) -> bool:
+    """Whether a pytest command keeps only the tests a -m or -k expression
+    names, rather than dropping the ones it excludes."""
+    args = shlex.split(command, comments=True)
+    for position, arg in enumerate(args):
+        if arg in _FILTER_OPTIONS and position + 1 < len(args):
+            expression = args[position + 1]
+        elif arg[:2] in _FILTER_OPTIONS and len(arg) > 2:
+            expression = arg[2:].lstrip("=")
+        else:
+            continue
+        if not re.search(r"\bnot\b", expression):
+            return True
+    return False
+
+
 def pack(value) -> str:
     return base64.b64encode(zlib.compress(json.dumps(value).encode())).decode()
 
@@ -239,10 +262,15 @@ def discover(command: str, cwd: str, root: str) -> Dict:
     return {"files": files, "selected": selected}
 
 
-def fetch_timings(step_key: str) -> Optional[Dict]:
-    """Main's per-file medians for the step, with per-test medians for the
-    files over one shard's budget; None if the endpoint has none or is down."""
-    query = {"stepKey": step_key, "testsOverMs": MAX_SHARD_SECONDS * 1000}
+def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
+    """Main's per-file medians for the step on `queue`, with per-test medians
+    for the files over one shard's budget; None if the endpoint has none or is
+    down."""
+    query = {
+        "stepKey": step_key,
+        "queue": queue.value,
+        "testsOverMs": MAX_SHARD_SECONDS * 1000,
+    }
     url = TIMINGS_URL + "?" + urllib.parse.urlencode(query)
     try:
         with urllib.request.urlopen(url, timeout=15) as response:
@@ -325,10 +353,16 @@ def plan(
     # One unit per file, or per part of a file over the budget.
     units = []  # (command index, file, part or None, seconds)
     assigns: Dict[Tuple[int, str], Dict[str, int]] = {}
-    unknown_files, oversized = [], []
+    unknown_files, filtered_unknown_files, oversized = [], [], []
+    filtered = [_picks_tests(entry["command"]) for entry in commands]
     for (index, file), key in keys.items():
-        seconds = unknown_seconds if key is None else file_seconds[key]
-        if key is None:
+        if key is not None:
+            seconds = file_seconds[key]
+        elif filtered[index]:
+            seconds = MIN_UNKNOWN_FILE_SECONDS
+            filtered_unknown_files.append(file)
+        else:
+            seconds = unknown_seconds
             unknown_files.append(file)
         tests = file_tests.get(key) if key is not None else None
         selected = file in commands[index]["selected"]
@@ -384,6 +418,7 @@ def plan(
         "files": len(keys),
         "unknownFiles": unknown_files,
         "unknownFileSeconds": round(unknown_seconds, 1),
+        "filteredUnknownFiles": filtered_unknown_files,
         "oversizedFiles": oversized,
         "overBudget": max(loads) > max_shard_seconds,
         "timingSource": {
@@ -419,6 +454,13 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             + ", ".join(f"`{f}`" for f in result["unknownFiles"])
             + "."
         )
+    if result.get("filteredUnknownFiles"):
+        text += (
+            f" No timing under a -m/-k filter, counted as "
+            f"{MIN_UNKNOWN_FILE_SECONDS} s each: "
+            + ", ".join(f"`{f}`" for f in result["filteredUnknownFiles"])
+            + "."
+        )
     if result["oversizedFiles"]:
         files = ", ".join(f"`{f}`" for f in result["oversizedFiles"])
         text += f" Split by test: {files}."
@@ -431,7 +473,11 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
 
 
 def plan_step(
-    step_key: str, commands: List[str], working_dir: Optional[str], root: str
+    step_key: str,
+    commands: List[str],
+    working_dir: Optional[str],
+    root: str,
+    queue: AgentQueue,
 ) -> Tuple[Optional[Dict], str]:
     """Plan an enrolled step from the checkout at `root`.
 
@@ -440,6 +486,7 @@ def plan_step(
         commands: The step's commands, as its YAML writes them.
         working_dir: The step's working_dir in the image.
         root: The vLLM checkout the generator runs in.
+        queue: The queue the step runs on, to pick its timings.
 
     Returns:
         (the plan for runtime_shard_plugin.py, or None to run the step as one
@@ -459,7 +506,7 @@ def plan_step(
         discovered = [{"command": c, **discover(c, cwd, root)} for c in tests]
         if not any(entry["files"] for entry in discovered):
             raise ValueError("no test files found")
-        result = plan(discovered, fetch_timings(step_key))
+        result = plan(discovered, fetch_timings(step_key, queue))
         if result is None:
             reason = "main has no timing for the step's files"
         else:
@@ -471,9 +518,39 @@ def plan_step(
                 planned["args"] = words[1:]
                 planned["prefix"] = prefix
                 planned["label"] = f"Command ({position + 1}/{len(commands)})"
+                planned["position"] = position
+                # A test the plan doesn't name runs in the first shard that
+                # runs the command at all.
+                planned["fallback"] = owners(planned)[0]
     except Exception as error:  # never block the step on its sharding
         result, reason = None, str(error)
     return result, summary(step_key, result, reason)
+
+
+def owners(planned: Dict) -> List[int]:
+    """The shards that run any of a planned command's tests."""
+    shards = set(planned["files"].values())
+    for split in planned["split"].values():
+        shards.update(split["shards"].values())
+    return sorted(shards)
+
+
+def guard(command: str, planned: Dict, shards: int) -> str:
+    """A job's command, run only by the shards that have its tests. The others
+    say where they run instead of starting pytest to deselect everything."""
+    runs = owners(planned)
+    if len(runs) == shards:
+        return command
+    where = ", ".join(str(shard + 1) for shard in runs)
+    return (
+        f'case "$${{BUILDKITE_PARALLEL_JOB:-0}}" in\n'
+        f"{'|'.join(str(shard) for shard in runs)})\n"
+        f"{command}\n"
+        ";;\n"
+        f'*) echo "runtime-shard: this shard has no tests of this command;'
+        f' they run in shard {where}" ;;\n'
+        "esac"
+    )
 
 
 def plugin_source() -> str:

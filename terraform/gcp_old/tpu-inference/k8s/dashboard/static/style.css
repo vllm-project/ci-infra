@@ -49,6 +49,9 @@ p { margin: 0; }
 .topbar .inner { max-width: 1200px; margin: 0 auto; padding: 10px 24px; display: flex;
   align-items: center; gap: 16px; flex-wrap: wrap; }
 .topbar .when { color: var(--ink-2); font-size: 13px; }
+.topbar .refresh button, .topbar .refresh button:hover { font: inherit; color: var(--accent); background: none;
+  border: 0; box-shadow: none; padding: 0; cursor: pointer; }
+.topbar .refresh button:hover { text-decoration: underline; }
 .nav { max-width: 1200px; margin: 0 auto; padding: 0 24px 10px; display: flex; gap: 6px; flex-wrap: wrap; }
 .nav:empty { display: none; }
 
@@ -92,6 +95,7 @@ details.glossary summary { font-size: 13px; font-weight: 600; color: var(--ink-2
 .pill.ok .dot { background: var(--good); } .pill.fail .dot { background: var(--critical); }
 .pill.borrowed { background: var(--borrowed-bg); color: #9a3a12; }
 .pill.idle { background: var(--idle-bg); color: #1c5cab; }
+.pill.spot { background: #fdf5e1; color: #7a5200; }
 .pill.attn { background: var(--warning-bg); color: #8a5a00; }
 a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
 
@@ -116,6 +120,7 @@ a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
 .state-chip b { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
 .state-chip small { font-size: 12px; color: var(--ink-2); }
 .state-chip.zero b { color: var(--muted); font-weight: 500; }
+.state-chip small.sub { font-size: 11px; color: var(--muted); }
 .steps-toggle, .steps-toggle:hover { font: inherit; font-size: 13px; color: var(--ink); background: none;
   border: 0; border-radius: 0; padding: 0; box-shadow: none; cursor: pointer; }
 .steps-toggle::before { content: "\25B6"; display: inline-block; margin-right: 6px; font-size: 9px;
@@ -156,6 +161,7 @@ i.sw.idle { background: var(--idle); }
 i.k { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
 i.k.used, i.k.pending { background: var(--own); } i.k.busy { background: var(--busy); }
 i.k.ref { background: var(--muted); } i.k.nodes { background: var(--nodes); }
+i.k.spot { background: var(--cat-4); }
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
@@ -188,6 +194,7 @@ svg { width: 100%; height: auto; display: block; overflow: visible; }
 .line.busy { stroke: var(--busy); } .line.nodes { stroke: var(--nodes); }
 .area { stroke: none; fill: var(--own); opacity: 0.10; }
 .area.busy { fill: var(--busy); } .area.nodes { fill: var(--nodes); }
+.line.spot { stroke: var(--cat-4); } .area.spot { fill: var(--cat-4); }
 .ref { fill: none; stroke: var(--muted); stroke-width: 1.25; }
 .ref-label { font-size: 10px; fill: var(--muted); }
 .dot { fill: var(--own); stroke: var(--card); stroke-width: 2; } .dot.busy { fill: var(--busy); } .dot.nodes { fill: var(--nodes); }
@@ -438,6 +445,10 @@ th.group { text-align: center; border-bottom: 1px solid var(--line); }
 .tile span.term .tip { display: block; font-size: 13px; color: #fff; }
 th.n .term:hover .tip, th.n .term:focus .tip { left: auto; right: 0; }
 .table-wrap:has(.term:hover), .table-wrap:has(.term:focus) { overflow: visible; }
+/* A glass card is a stacking context of its own (backdrop-filter), so a
+   tooltip inside it cannot rise above the card after it whatever its z-index;
+   the card holding the term being read rises instead - under the top bar. */
+:is(.card, details.component, .stage, .tile):has(.term:hover, .term:focus) { position: relative; z-index: 4; }
 .shapes-head { margin: 22px 0 4px; font-size: 15px; }
 .shape-row { margin-top: 6px; }
 
@@ -516,3 +527,113 @@ i.k.p50 { opacity: 0.55; }
 .shape-block h4 { margin: 0 0 4px; font-size: 15px; }
 .shape-block h4 .muted { font-weight: 400; font-size: 13px; }
 .shape-facts { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 0 0 6px; font-size: 13px; }
+
+/* Spot: amber, stacked on the reservation. Chips on Spot nodes are solid; chips
+   admitted onto Spot with no node to run on - a stockout - are hatched. A
+   shape's Spot band in a stack is its own color, lighter. */
+.band.spot-on { fill: var(--cat-4); opacity: 0.45; }
+.band.spot-wait { fill: url(#hatch-spot); }
+.ref.spot { stroke: var(--cat-4); stroke-dasharray: 5 3; }
+i.k.spot-on, i.k.spot-wait, i.k.spotband, i.k.demand, i.k.busyb, i.k.heldb, i.k.nonode, i.k.idleb {
+  height: 10px; width: 10px; border-radius: 3px; }
+i.k.spot-on { background: var(--cat-4); opacity: 0.45; }
+i.k.spot-wait { background: repeating-linear-gradient(45deg, var(--cat-4) 0 2px, #fdf5e1 2px 5px); }
+i.k.ref.spot { background: var(--cat-4); }
+.band.spotband { opacity: 0.4; } i.k.spotband { opacity: 0.4; }
+/* Steps waiting for quota, in chips: demand the fleet did not meet. */
+.band.demand { fill: url(#hatch-demand); }
+i.k.demand { background: repeating-linear-gradient(45deg, #9aa3b2 0 2px, #eef1f5 2px 5px); }
+/* Where the reserved chips went. */
+.band.busyb, .seg.busyb, i.k.busyb { fill: var(--busy); background: var(--busy); }
+.band.heldb, .seg.heldb, i.k.heldb { fill: var(--own); background: var(--own); opacity: 0.55; }
+.band.nonode, .seg.nonode, i.k.nonode { fill: #9cc3f0; background: #9cc3f0; }
+.band.idleb, .seg.idleb, i.k.idleb { fill: var(--nodes); background: var(--nodes); opacity: 0.5; }
+.spot-num { color: #a36d00; }
+.tile b .spot-num { display: inline; font-size: 0.7em; font-weight: 600; color: #a36d00; }
+table.shapes td { vertical-align: top; }
+
+.seg.spot, i.sw.spot { background: var(--cat-4); }
+/* A row a link points at: clear of the sticky top bar, and marked. */
+tr[id], .card[id], .cohort, .section-label[id] { scroll-margin-top: 96px; }
+tr:target > td { background: #fdf5e1; }
+
+.borrow-num { color: #9a3a12; }
+/* An opened section's title stands clear of what it opened. */
+details:not(.component)[open] > summary { margin-bottom: 10px; }
+
+/* Live's top: the verdict, then the stages a step goes through. */
+.verdict { font-size: 15px; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.verdict .v-ok { color: var(--good); font-weight: 600; } .verdict .v-warn { color: #8a5a00; font-weight: 600; }
+.verdict .v-bad { color: var(--critical); font-weight: 600; }
+.flow { display: flex; align-items: stretch; gap: 6px; flex-wrap: wrap; }
+.flow .arrow { align-self: center; color: var(--muted); font-style: normal; }
+.flow .stage { flex: 1 1 140px; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px;
+  border-radius: 12px; background: rgba(255, 255, 255, 0.7); border: 1px solid var(--glass-edge);
+  color: var(--ink); text-decoration: none; }
+.flow .stage:hover { text-decoration: none; background: rgba(255, 255, 255, 0.95); }
+.flow .stage b { font-size: 26px; font-weight: 600; line-height: 1.2; }
+.flow .stage span { font-size: 13px; font-weight: 600; }
+.flow .stage small { font-size: 12px; color: var(--ink-2); }
+.flow .stage.zero b { color: var(--muted); }
+.flow .stage.stuck { border-color: #f0c36a; background: var(--warning-bg); }
+td.attn { color: #8a5a00; font-weight: 600; }
+.seg.spot-wait, i.sw.spot-wait { background: repeating-linear-gradient(45deg, var(--cat-4) 0 2px, #fdf5e1 2px 5px); }
+
+/* Live's queue table: each cell a short stack of lines, so the table fits
+   without scrolling sideways. */
+.qtable td { vertical-align: top; }
+.qtable .lines { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.qtable .lines .pill { align-self: flex-start; }
+.qtable td.rules { color: var(--ink-2); }
+.qtable .attn { color: #8a5a00; }
+.diagram .n-line.stuck { fill: #a36d00; font-weight: 600; }
+/* A Spot cell in Live's quota table: running, then waiting, a line each. */
+.spot-cell { display: flex; flex-direction: column; color: #a36d00; white-space: nowrap; font-size: 13px; }
+/* Live's quota table fits its card: headers wrap, the bar has a set width and
+   its legend sits above the table. */
+table.quota th { white-space: normal; vertical-align: bottom; }
+table.quota td { vertical-align: top; }
+table.quota td.barcell, table.quota th.barcell { width: 150px; min-width: 110px; vertical-align: top; padding-top: 12px; }
+table.quota .pill { white-space: nowrap; }
+.bar-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 14px; margin: 4px 0 2px;
+  font-size: 12px; color: var(--ink-2); }
+.bar-legend .key { display: inline-flex; align-items: center; gap: 5px; }
+/* A tab's sub-pages: underlined, so they read as under the top bar's tabs. */
+.subtabs { display: flex; gap: 22px; border-bottom: 1px solid var(--line); margin: 2px 0 16px; }
+.subtab { padding: 6px 2px 9px; margin-bottom: -1px; border-bottom: 2px solid transparent;
+  color: var(--ink-2); font-weight: 600; text-decoration: none; }
+.subtab:hover { color: var(--ink); }
+.subtab.active { color: var(--ink); border-bottom-color: var(--accent); }
+.subtab small { margin-left: 8px; color: var(--muted); font-weight: 400; font-size: 12px; }
+/* Steps: a step's name in a tile, and a typical job's time from its build's
+   creation - slots 3, 2, 1 in that order, which validate as adjacent pairs,
+   between two grays. */
+.tile b.name { font-size: 15px; line-height: 1.35; padding: 6px 0 4px; }
+.seg.ph-start, i.sw.ph-start { background: #cfd5de; }
+.seg.ph-wait, i.sw.ph-wait { background: var(--cat-3); }
+.seg.ph-startup, i.sw.ph-startup { background: var(--cat-2); }
+.seg.ph-test, i.sw.ph-test { background: var(--cat-1); }
+.seg.ph-launcher, i.sw.ph-launcher { background: #8f98a6; }
+.step-bar { margin: 4px 0 3px; }
+.step-bar .seg { min-width: 2px; }
+.step-bar .seg:first-child { border-radius: 4px 0 0 4px; }
+table.poles td.timeline, table.poles th.timeline { min-width: 260px; width: 38%; }
+table.poles .advice { margin-top: 4px; font-size: 12px; color: #8a5a00; }
+table.poles td.step, table.steps td.step { min-width: 220px; }
+table.poles td.follower { min-width: 140px; max-width: 220px; }
+/* A step Kueue sent back in line: the borrowed color, as reclaim takes back
+   what was borrowed. Spot's own causes wear .pill.spot. Small beside a name. */
+.pill.preempt { background: var(--borrowed-bg); color: #9a3a12; }
+.steps-list .pill, td .pill.preempt, td .pill.spot { font-size: 11px; padding: 0 7px; cursor: help; }
+/* Period over period: a generation's figures beside its day-by-day charts.
+   A change carries an arrow and its amount; the color says better or worse,
+   never alone - and a figure that is neither better nor worse stays ink. */
+.pop-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.pop-charts { display: grid; gap: 12px; }
+.pop-when { margin-left: 12px; }
+table.pop-table td:first-child { white-space: nowrap; }
+.delta { font-size: 13px; font-variant-numeric: tabular-nums; }
+.delta.good { color: #1d6b31; } .delta.bad { color: #b3261e; }
+.delta.neutral { color: var(--ink-2); } .delta.flat { color: var(--muted); }
+ul.changes { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; }
+@media (max-width: 1000px) { .pop-grid { grid-template-columns: 1fr; } }

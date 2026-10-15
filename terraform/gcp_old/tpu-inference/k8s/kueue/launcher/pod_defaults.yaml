@@ -68,6 +68,17 @@ tpuPods:
     - name: hf-cache
       mountPath: /cache/hf/hub
 
+  # The volumes above that are the caches, all gcsfuse. A workload that sets
+  # `tpu-ci.google.com/caches: none` gets none of them and none of their mounts,
+  # and no gke-gcsfuse/ annotations unless it mounts a gcsfuse volume of its
+  # own. That is for a run that reads its data once: the file cache is a
+  # memory-backed volume, so it holds host memory for the whole run and gives
+  # nothing back.
+  caches:
+    - gke-gcsfuse-cache
+    - jax-cache
+    - hf-cache
+
   # Merged into the pod spec.
   spec:
     restartPolicy: Never

@@ -1,35 +1,127 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+import fcntl
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+VLLM_REMOTE = "https://github.com/vllm-project/vllm"
+PIN_FILE = Path(__file__).resolve().parents[1] / "VLLM_PIN"
 
-def _vllm_repo() -> Path:
-    """The vLLM checkout to analyse.
+# A clone this suite owns, so reading it cannot disturb anyone's own checkout.
+CLONE = Path(
+    os.environ.get("CI_SELECTOR_VLLM_CLONE")
+    or Path.home() / ".cache" / "vllm-ci-selector" / "vllm"
+)
 
-    Required, with no fallback. This suite lives in ci-infra and reads a tree in
-    another repository, so there is nothing sensible to guess: walking up from
-    here lands on the ci-infra root, which is not vLLM.
+
+def _git(repo: Path, *args: str) -> str:
+    out = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    )
+    return out.stdout.strip()
+
+
+def _commit(repo: Path, ref: str) -> str | None:
+    out = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"{ref}^{{commit}}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip() or None
+
+
+@contextlib.contextmanager
+def _lock(path: Path):
+    """One clone, shared by every run on this machine, so only one of them may
+    be moving it at a time."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _clone_at(ref: str) -> tuple[Path, str]:
+    """A vLLM checkout at `ref`, cloned once and kept.
+
+    Blobless and with full history, the same way the workflow clones it: the
+    suite builds worktrees and asks for merge bases, so a shallow one will not
+    do.
+    """
+    with _lock(CLONE.parent / ".vllm-clone.lock"):
+        if not (CLONE / ".git").is_dir():
+            print(
+                f"cloning vLLM into {CLONE}, once, this takes a few minutes",
+                file=sys.stderr,
+                flush=True,
+            )
+            CLONE.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                ["git", "clone", "--filter=blob:none", "--", VLLM_REMOTE, str(CLONE)],
+                check=True,
+            )
+        want = _commit(CLONE, ref)
+        if want is None:
+            subprocess.run(
+                ["git", "-C", str(CLONE), "fetch", "--filter=blob:none", "origin", ref],
+                check=True,
+            )
+            want = _commit(CLONE, "FETCH_HEAD")
+        if want is None:
+            raise RuntimeError(f"{ref} is not a commit in {VLLM_REMOTE}")
+        if _git(CLONE, "rev-parse", "HEAD") != want:
+            _git(CLONE, "checkout", "--detach", "--force", want)
+    return CLONE, want
+
+
+def _vllm_repo() -> tuple[Path, str, str]:
+    """The vLLM checkout to analyse, and where it came from.
+
+    The pin by default, in a clone of our own, so a result does not depend on
+    what anyone's checkout happens to be sitting at. VLLM_REPO reads a checkout
+    as it is instead, which is how drift against a newer vLLM gets found, and
+    VLLM_REF moves our clone somewhere else.
     """
     raw = os.environ.get("VLLM_REPO")
-    if not raw:
-        raise RuntimeError(
-            "VLLM_REPO is not set. It must point at a vLLM checkout, for "
-            "example `VLLM_REPO=/path/to/vllm pytest tests -q`. The pinned "
-            "commit this suite is known green against is in VLLM_PIN."
-        )
-    repo = Path(raw).expanduser().resolve()
-    if not (repo / ".buildkite").is_dir():
-        raise RuntimeError(
-            f"VLLM_REPO={repo} does not look like a vLLM checkout: no "
-            ".buildkite/ directory."
-        )
-    return repo
+    if raw:
+        repo = Path(raw).expanduser().resolve()
+        if not (repo / ".buildkite").is_dir():
+            raise RuntimeError(
+                f"VLLM_REPO={repo} does not look like a vLLM checkout: no "
+                ".buildkite/ directory."
+            )
+        return repo, _git(repo, "rev-parse", "HEAD"), "VLLM_REPO"
+    ref = os.environ.get("VLLM_REF")
+    repo, head = _clone_at(ref or PIN_FILE.read_text().strip())
+    return repo, head, "VLLM_REF" if ref else "VLLM_PIN"
 
 
-REPO = _vllm_repo()
+REPO, HEAD, SOURCE = _vllm_repo()
+# Some tests read the variable rather than this module, so they have to agree.
+os.environ["VLLM_REPO"] = str(REPO)
+
+
+def pytest_report_header(config):
+    pin = PIN_FILE.read_text().strip()
+    line = f"vllm: {REPO} at {HEAD[:12]} (from {SOURCE})"
+    if HEAD != pin:
+        line += f", not VLLM_PIN {pin[:12]}: a failure may be drift, not this code"
+    return line
 
 
 @pytest.fixture(autouse=True, scope="session")

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from charts import gap_chart, line_chart, share_bars, stacked_chart, values_table
 from fleet import (
+    TEST_OUTCOMES as FLEET_TEST_OUTCOMES,
     BK_LIMITED,
     BK_WAITING,
     DUTY_MODELS,
@@ -28,10 +29,12 @@ from fleet import (
 E = html.escape
 TEMPLATES = Path(__file__).parent / "templates"
 LIVE_PAGE = string.Template((TEMPLATES / "live.html").read_text())
-TRENDS_PAGE = string.Template((TEMPLATES / "trends.html").read_text())
 OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
 MIGRATION_PAGE = string.Template((TEMPLATES / "migration.html").read_text())
 JOBS_PAGE = string.Template((TEMPLATES / "jobs.html").read_text())
+CAPACITY_PAGE = string.Template((TEMPLATES / "capacity.html").read_text())
+REVIEW_PAGE = string.Template((TEMPLATES / "review.html").read_text())
+STEPS_PAGE = string.Template((TEMPLATES / "steps.html").read_text())
 # The bare-metal fleet before the migration, built once from the snapshot by
 # baseline/build_baseline.py; static, since that fleet is being torn down.
 BASELINE_FILE = Path(__file__).parent / "baseline" / "premigration-2026-09.json"
@@ -45,8 +48,8 @@ TERMS = {
     "Cohort": "The queues of one TPU generation, sharing one pool of chips.",
     "Nominal": "The chips a queue is guaranteed when it asks for them. A cohort's nominal is the sum "
     "of its queues'.",
-    "In use": "Chips Kueue has admitted workloads for: quota, counted from admission, whether or not "
-    "the pods have reached their nodes yet.",
+    "In use": "Chips of quota Kueue holds for workloads: from the moment it reserves them, while the "
+    "workload is handed to a worker, whether or not the pods have reached their nodes yet.",
     "Free": "Nominal no queue in the cohort is using.",
     "Borrowing": "Chips a queue uses beyond its nominal, taken from other queues' idle nominal in the "
     "same cohort. May borrow caps it.",
@@ -78,6 +81,11 @@ TERMS = {
     "Held by workloads": "The share of chip-hours on nodes that an admitted workload held; the rest is "
     "idle on nodes.",
     "Nodes created": "Nodes a pool scaled up during the range. Lifetime is appearing to disappearing.",
+    "Spot": "Chips on Spot VMs beside the reservation, for a single-host shape. The launcher moves a step "
+    "there, pinned to Spot, once it has waited for reserved chips (10 minutes, tpu_spot_after_seconds) "
+    "at pre-merge priority or below; higher priorities wait for reserved chips. A Spot step with no node "
+    "goes back to wait for reserved, and one whose VM GCE takes back reruns. Spot quota is a count GCE "
+    "may not fill, so it is not part of nominal, usage or borrowing anywhere on these pages.",
     "Utilization": "Mean admitted (or busy) chips over the range, over mean nominal.",
     "Chips held": "Chips occupied by running work, as a share of the chips the fleet had: on bare metal "
     "the chips of the VMs a job holds, on kube the chips Kueue admitted. Occupancy, not compute - a "
@@ -88,12 +96,34 @@ TERMS = {
     "Evicted": "A running workload stopped by the fleet - preempted by a queue reclaiming lent chips, "
     "or its node gone - which reruns from the start.",
     "Requeue": "A workload that lost its reservation, usually to preemption, and went back in line.",
+    "Preempted": "Why a step went back in line, last 24 h. Reclaimed: the lending queue took its borrowed "
+    "chips back. Preempted: a higher priority in its queue took them. Spot node lost: GCE took the VM back. "
+    "No Spot node: none came, so it waits for reserved chips. Not ready: its pods did not start in time.",
     "Redispatch": "The launcher resubmitting a reservation no worker picked up.",
     "Test failure": "The test exited non-zero.",
     "Infra failure": "A workload the fleet ended: never admitted, API unreachable, storage eviction, "
     "launcher error.",
     "Wait, startup, run": "Wait is submitted to quota reserved; startup (admitted to running) is "
     "admitted to the first container running; run is first container to finished.",
+    "Clean build": "A build in which every job passed, or passed when retried. Only clean builds count "
+    "toward wall clock and what finishes last: a failed or cancelled build stops early.",
+    "Wall clock": "A build's creation to its last step finishing, leaving out E2E_SUMMARY, which waits "
+    "for the others, and steps under 2 minutes - gates and notifications.",
+    "Last step": "The step that finished last in a clean build, so the one that set its wall clock. A "
+    "step's time in a build runs from its first job starting to its last finishing.",
+    "Ahead of the next": "How long after the next step the last step finished: the most that splitting "
+    "or speeding up the last step can save before that next step finishes last instead.",
+    "Jobs a build": "How many jobs one build runs of the step - shards or a matrix - and its shortest and "
+    "longest job's run time, medians across builds. A wide spread means shards worth rebalancing.",
+    "Starts": "From the build's creation to the step's first job starting: mostly its dependencies. A kube "
+    "step starts with its agent pod and waits for Kueue inside the job, so its Ran includes that wait.",
+    "Ran": "Buildkite's start to finish of a job. On kube that includes Kueue's wait, pod startup and the "
+    "launcher's work around the test.",
+    "Kube phases": "A kube job's Ran, each part's median: the launcher's work before and after the pod "
+    "(checkout and submission, then logs and artifacts), waiting for Kueue from the first submission to "
+    "the last admission (a requeued job's earlier attempts included), pod startup, and the test itself.",
+    "Chip-hours": "Chips held times hours, admission to finish, for every workload of the job - evicted "
+    "ones too.",
 }
 
 
@@ -123,7 +153,7 @@ ASSETS = hashlib.sha256(
 
 # kube_workload_timing outcomes that are the test's or Buildkite's doing. Any
 # other outcome is the fleet ending a workload.
-TEST_OUTCOMES = {"succeeded", "failed", "cancelled"}
+TEST_OUTCOMES = set(FLEET_TEST_OUTCOMES)
 
 # Event reasons that mean something is wrong with the fleet rather than with a
 # test. Kueue's own "Pending" warnings are the backlog and are already reported
@@ -203,7 +233,11 @@ JOB_STATES = {
     ),
     "starting": (
         "Pods starting",
-        "Admitted; its pods are being scheduled, pulled or started.",
+        "Admitted; no pod running yet - waiting for a node, or being pulled or started.",
+    ),
+    "partly": (
+        "Partly running",
+        "Admitted; some of its pods run while the rest wait for a node or start - a slice still coming up.",
     ),
     "running": ("Running", "Admitted and every pod up."),
 }
@@ -389,15 +423,18 @@ SOURCES = {
             "Jobs and JobSets",
             "Agent pods",
             "Each queue's pending order (visibility API)",
+            "Each worker's TPU pods: which run on Spot nodes, which wait for one",
         ],
         "needs": [
             "roles/gkehub.gatewayReader",
             "tpu-ci-dashboard ClusterRole and Role - "
             "kueue/generated/manager/workload/40-dashboard-rbac.yaml, applied by hand",
+            "tpu-ci-dashboard Role on each worker, under its generated workload directory",
         ],
         "fails": [
             "403 from the gateway: the IAM grant",
             "403 naming a resource: the RBAC file is not applied",
+            "pods on a worker: its Role is not applied; the Spot figures leave its jobs out",
         ],
     },
     "Buildkite": {
@@ -455,13 +492,19 @@ SOURCES = {
         "needs": ["roles/logging.viewAccessor on the _AllLogs view"],
         "fails": ["Only each health check's History & logs goes blank"],
     },
+    "GitHub": {
+        "through": "GitHub's public REST API, no token",
+        "reads": ["Commits to terraform/gcp_old/tpu-inference/k8s on main, for Review's What changed"],
+        "needs": ["Nothing; unauthenticated, within GitHub's hourly limit per address"],
+        "fails": ["Only What changed goes blank; it tries again after a minute"],
+    },
     "BigQuery": {
         "through": "BigQuery",
         "reads": [
             "Workload outcomes and timings: ci_efficiency_metrics.kube_workload_timing"
         ],
         "needs": ["roles/bigquery.dataViewer on the dataset", "roles/bigquery.jobUser"],
-        "fails": ["Only the 24-hour checks and the outcomes on Trends go blank"],
+        "fails": ["Only the 24-hour checks and the outcomes on Capacity go blank"],
     },
 }
 
@@ -540,6 +583,9 @@ def render_source_table(sources: dict, links: dict) -> str:
 
 
 def render_errors(sources: dict) -> str:
+    # Once each: a page that reads one source for two windows gets its error
+    # from both.
+    failed = {(s["name"], s["error"]): s for s in sources.values() if s["error"]}
     errors = "".join(
         f'<p class="error">{E(s["name"])} failed: {E(s["error"])}'
         + (
@@ -548,8 +594,7 @@ def render_errors(sources: dict) -> str:
             else ""
         )
         + f' · <a href="./#source-{source_id(s["name"])}">what it reads and how to fix it</a></p>'
-        for s in sources.values()
-        if s["error"]
+        for s in failed.values()
     )
     return f'<div class="card errors">{errors}</div>' if errors else ""
 
@@ -592,6 +637,10 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             "priority_class": None,
             "pending": 0,
             "running": 0,
+            "spot": 0,
+            "waiting": 0,
+            "partly": 0,
+            "spot_waiting": 0,
             "held": 0.0,
             "oldest_wait": None,
             "running_since": None,
@@ -660,13 +709,27 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 row["oldest_wait"] = max(row["oldest_wait"] or 0, now - w["since"])
                 reason = pending_reason(w["reason"])
                 reasons[reason] = reasons.get(reason, 0) + 1
-            else:
+            elif pods_all_up(w):
                 row["running"] += 1
                 row["held"] += w["amount"]
+                row["spot"] += 1 if w.get("spot") else 0
                 if w["since"]:
                     row["running_since"] = min(
                         row["running_since"] or w["since"], w["since"]
                     )
+            else:
+                # Admitted or being handed over, not every pod up. Partly
+                # running when some are - a multi-pod step whose other slice
+                # is still coming up - else waiting for a node: a scale-up, or
+                # a Spot stockout. Reserved quota is held all the same; Spot
+                # chips with no node hold nothing.
+                if pods_up(w):
+                    row["partly"] += 1
+                else:
+                    row["waiting"] += 1
+                row["spot_waiting"] += 1 if w.get("spot") else 0
+                if not w.get("spot"):
+                    row["held"] += w["amount"]
         for row in rows.values():
             row["running_for"] = (
                 now - row["running_since"] if row["running_since"] else None
@@ -675,9 +738,30 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
         queues.append(
             {
                 **q,
+                # Chips on Spot nodes, and chips admitted onto Spot still
+                # waiting for one - a stockout - by where the worker put the
+                # pods: the manager's own flavor choice can differ.
+                "spot_running": sum(w.get("spot_chips") or 0 for w in wls),
+                "spot_waiting": sum(w.get("spot_waiting_chips") or 0 for w in wls),
                 "within_nominal": min(q["used"], q["nominal"]),
                 "idle": max(0.0, q["nominal"] - q["used"]),
                 "admitted": sum(1 for w in wls if w["state"] == "admitted"),
+                # Admitted splits into steps whose pods are up and steps still
+                # waiting for a node - a scale-up, or a Spot stockout - which
+                # hold quota but run nothing.
+                "running_steps": sum(
+                    1 for w in wls if w["state"] == "admitted" and pods_all_up(w)
+                ),
+                "partly_steps": sum(
+                    1
+                    for w in wls
+                    if w["state"] == "admitted" and not pods_all_up(w) and pods_up(w)
+                ),
+                "starting_steps": sum(
+                    1
+                    for w in wls
+                    if w["state"] == "admitted" and not pods_all_up(w) and not pods_up(w)
+                ),
                 "dispatching": sum(1 for w in wls if w["state"] == "dispatching"),
                 "pending": len(pending),
                 "pending_amount": sum(w["amount"] for w in pending),
@@ -686,7 +770,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 "next_up": next_up(q, wls) if pending else None,
                 # Pending is the next-up list's; this is what holds the chips.
                 "builds": sorted(
-                    (r for r in rows.values() if r["running"]),
+                    (r for r in rows.values() if r["running"] or r["waiting"] or r["partly"]),
                     key=lambda r: (-r["held"], -(r["priority"] or 0)),
                 ),
             }
@@ -697,6 +781,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
     )
     for q in queues:
         q["nodes"] = nodes.get(q["name"])
+        q["spot_nodes"] = nodes.get(f"{q['name']}-spot")
 
     cohorts: dict[str, dict] = {}
     for q in queues:
@@ -719,12 +804,64 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             c[key] += q[key]
     for c in cohorts.values():
         c["free"] = max(0.0, c["nominal"] - c["used"])
+    for q in queues:
+        if q["cohort"] in cohorts:
+            q["cohort_free"] = cohorts[q["cohort"]]["free"]
+    for c in cohorts.values():
         members = [
             q["nodes"] for q in queues if q["cohort"] == c["name"] and q["nodes"]
         ]
         c["on_nodes"] = sum(n["chips"] for n in members) if members else None
         c["busy"] = sum(n["busy"] for n in members) if members else None
 
+    # A worker whose pods could not be read leaves its jobs out of the Spot
+    # figures; said beside the Kueue source, whose grant covers it.
+    sources = {
+        **sources,
+        **{
+            f"placement:{c}": {"name": "Kueue", "at": 0, "error": f"pods on {c}: {e}"}
+            for c, e in (kq.get("placement_errors") or {}).items()
+        },
+    }
+    jobs = kube_jobs(
+        bk["jobs"], kq["workloads"], kq["pods"], {q["name"]: q for q in queues}, now
+    )
+    preemptions = preemptions_by_job(
+        data.get("preemptions") or [], kq, {j["id"]: j for j in jobs}, queues
+    )
+    for j in jobs:
+        j["preemptions"] = preemptions.get(j["id"], [])
+    # Each queue card's builds with their steps on that queue, so a build that
+    # runs many steps at once says which are on this shape.
+    order = list(JOB_STATES)
+    on_queue = collections.defaultdict(list)
+    for j in jobs:
+        if j["queue_name"] and j["real"] in ("dispatching", "starting", "partly", "running"):
+            on_queue[(j["queue_name"], j["pipeline"], j["number"])].append(j)
+    for q in queues:
+        for b in q.get("builds") or []:
+            steps = on_queue.get((q["name"], b["pipeline"], b["number"]), [])
+            b["steps"] = [
+                {k: j.get(k) for k in ("label", "url", "real", "for", "spot", "detail", "preemptions")}
+                for j in sorted(steps, key=lambda j: (-order.index(j["real"]), -(j["for"] or 0)))
+            ]
+    for q in queues:
+        for r in (q.get("next_up") or {}).get("rows", []):
+            r["preemptions"] = preemptions.get(r["job"]["id"], []) if r["job"] else []
+    # Each queue's last hour of them, by the queue that lost the chips.
+    job_queue = {w["job_id"].replace("-", ""): w["queue"] for w in kq["workloads"] if w["job_id"]}
+    hour = collections.Counter()
+    for events in preemptions.values():
+        for e in events:
+            if now - e["t"] <= 3600:
+                queue = e["queue"] or job_queue.get(e["job"], "")
+                hour[(queue, e["cause"], e.get("by_title") or "")] += 1
+    for q in queues:
+        q["preempted_hour"] = [
+            {"cause": cause, "by": by, "count": n}
+            for (queue, cause, by), n in hour.items()
+            if queue == q["name"]
+        ]
     snapshot = {
         "generated_at": now,
         "sources": sources,
@@ -732,9 +869,8 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
         "cohorts": list(cohorts.values()),
         "queues": queues,
         "events": group_events(ev["events"], job_builds, cfg.org),
-        "jobs": kube_jobs(
-            bk["jobs"], kq["workloads"], kq["pods"], {q["name"]: q for q in queues}, now
-        ),
+        "jobs": jobs,
+        "preemptions": preemptions,
     }
     snapshot["checks"] = health_checks(cfg, snapshot, kq, ev, health, stats24, now)
     snapshot["logs"] = data.get("logs") or {}
@@ -855,8 +991,16 @@ def fleet_map(cfg: Config, kq: dict, health: dict, pools: list, snap: dict) -> d
             (p["cluster"], p["queue"]),
             {
                 "queue": p["queue"],
-                "title": titles.get(p["queue"], p["queue"]),
+                "title": f"{titles.get(p['shape'], p['shape'])} Spot"
+                if p.get("spot")
+                else titles.get(p["queue"], p["queue"]),
+                # The diagram's row label, which has to end before the bar:
+                # within a worker the topology alone names a Spot pool.
+                "label": f"{titles.get(p['shape'], p['shape']).split(' ', 1)[-1]} Spot"
+                if p.get("spot")
+                else titles.get(p["queue"], p["queue"]),
                 "multi_host": p["multi_host"],
+                "spot": bool(p.get("spot")),
                 "pools": 0,
                 "pools_up": 0,
                 "up": 0,
@@ -879,7 +1023,7 @@ def fleet_map(cfg: Config, kq: dict, health: dict, pools: list, snap: dict) -> d
     on_cluster = collections.defaultdict(collections.Counter)
     for j in snap["jobs"]:
         if j.get("cluster"):
-            on_cluster[j["cluster"]][j["real"]] += 1
+            on_cluster[j["cluster"]]["running" if j["real"] == "partly" else j["real"]] += 1
     held = collections.Counter()
     for w in kq["workloads"]:
         if w["cluster"] and w["state"] != "pending" and w["queue"] in tpu_queues:
@@ -929,6 +1073,71 @@ def fleet_map(cfg: Config, kq: dict, health: dict, pools: list, snap: dict) -> d
     }
 
 
+# Each kind of preemption: its name in a count, its pill, the sentence its
+# tooltip says, and its class - Spot's own color for the two Spot causes.
+# Kueue's pills name the queue that took the chips, so a reclaim of lent
+# reserved chips never reads as a Spot VM taken back.
+PREEMPTION_CAUSES = {
+    "reclaim": ("reclaimed", "reclaimed by {queue}", "borrowed chips reclaimed by {by}", "preempt"),
+    "priority": ("preempted", "preempted in {queue}", "preempted by a higher priority in {by}", "preempt"),
+    "fair_share": ("preempted", "preempted by {queue}", "preempted for fair sharing by {by}", "preempt"),
+    "spot_reclaim": ("Spot node lost", "Spot node lost", "Spot node reclaimed by GCE", "spot"),
+    "spot_no_node": (
+        "no Spot node",
+        "no Spot node",
+        "admitted onto Spot, no node came - back to wait for reserved chips",
+        "spot",
+    ),
+    "pods_ready": ("not ready", "not ready", "pods not ready in time, requeued", "preempt"),
+    "evicted": ("evicted", "evicted", "evicted by Kueue", "preempt"),
+}
+
+
+def preemptions_by_job(rows: list, kq: dict, jobs: dict, queues: list) -> dict:
+    """fetch_preemptions' rows by Buildkite job, for the jobs still in flight,
+    each with who took the chips: the queue, and the build and step when that
+    job is in flight too."""
+    titles = {q["name"]: queue_title(q) for q in queues}
+    out = collections.defaultdict(list)
+    for r in rows:
+        if r["job"] not in jobs:
+            continue
+        by = titles.get(r["by_queue"], r["by_queue"])
+        taker = jobs.get((kq.get("job_uids") or {}).get(r["by_job_uid"], ""))
+        if taker:
+            by += f": {taker['pipeline']} #{taker['number']} {step_name(taker['label'])}"
+        out[r["job"]].append({**r, "by_title": titles.get(r["by_queue"], r["by_queue"]), "by": by})
+    return dict(out)
+
+
+def preempt_pills(events: list, now: float) -> str:
+    """A pill per kind of preemption a job had, how many times, and each one's
+    when and why on hover."""
+    grouped: dict = {}
+    for e in events:
+        _, label, sentence, cls = PREEMPTION_CAUSES.get(e["cause"], PREEMPTION_CAUSES["evicted"])
+        label = label.format(queue=e.get("by_title") or "another queue")
+        g = grouped.setdefault((label, cls), [])
+        g.append(f"{ago(now - e['t'])} ago: {sentence.format(by=e.get('by') or 'another queue')}")
+    return "".join(
+        f' <span class="pill {cls}" title="{E(chr(10).join(lines))}">{E(label)}'
+        f'{f" ×{len(lines)}" if len(lines) > 1 else ""}</span>'
+        for (label, cls), lines in grouped.items()
+    )
+
+
+def pods_up(w: dict) -> int:
+    """A workload's pods on the worker that run or have finished."""
+    return (w.get("pods_running") or 0) + (w.get("pods_done") or 0)
+
+
+def pods_all_up(w: dict) -> bool:
+    """Every pod of an admitted workload up: Kueue's PodsReady, or what the
+    worker's pods say when the manager's condition has not caught up - every
+    pod running or done."""
+    return bool(w.get("pods_ready") or (w.get("pods_total") and pods_up(w) == w["pods_total"]))
+
+
 def kube_jobs(
     bk_jobs: list, workloads: list, pods: list, queues: dict, now: float
 ) -> list:
@@ -958,10 +1167,18 @@ def kube_jobs(
         elif w["state"] == "dispatching":
             state, since = "dispatching", w["since"]
         else:
-            state, since = (
-                ("running" if w.get("pods_ready") else "starting"),
-                w["since"],
+            state = "running" if pods_all_up(w) else "partly" if pods_up(w) else "starting"
+            since = w["since"]
+            total, up, done, placed = (
+                w.get(k) or 0 for k in ("pods_total", "pods_running", "pods_done", "pods_on_node")
             )
+            if state != "running" and total:
+                waiting = total - done - placed
+                detail = (
+                    f"{up} of {total} pods running"
+                    + (f", {done} done" if done else "")
+                    + (f", {waiting} waiting for a node" if waiting else ", the rest starting")
+                )
         q = queues.get(w["queue"]) if w else None
         out.append(
             {
@@ -970,6 +1187,9 @@ def kube_jobs(
                 "queue": queue_title(q) if q else (w["queue"] if w else ""),
                 "queue_name": w["queue"] if w else "",
                 "cluster": w["cluster"] if w else None,
+                "spot": bool(w and w.get("spot")),
+                # A pod admitted onto Spot by the worker with no Spot node yet.
+                "spot_waiting": bool(w and w.get("spot_waiting_chips")),
                 "for": now - since if since else None,
                 "detail": detail,
             }
@@ -1023,6 +1243,13 @@ def group_events(events: list, job_builds: dict, org: str) -> list:
         )
         out.append(g)
     return sorted(out, key=lambda g: (-g["fleet"], g["type"] != "Warning", -g["last"]))
+
+
+# Manager and workers agree: the check's name, and the reserved-chip gap that
+# has to last ten minutes to count - a 2x2x1 slice, so one stray workload is
+# enough and a dispatch in flight is not.
+AGREE_TITLE = "Manager and workers agree"
+AGREE_CHIPS = 4
 
 
 def health_checks(cfg, snap, kq, ev, health, stats24, now) -> list:
@@ -1109,6 +1336,40 @@ def health_checks(cfg, snap, kq, ev, health, stats24, now) -> list:
             "ok",
             "Dispatch",
             f"{len(dispatching)} dispatching, none stalled; {redispatches} redispatches in 24 hours.",
+        )
+
+    # The manager's and the workers' Kueue each count reserved chips; apart,
+    # the manager admits against chips the workers do not have, or holds back
+    # chips they do.
+    mine, theirs = health.get("reserved_manager", {}), health.get("reserved_workers", {})
+    apart = {
+        f: g for f, g in (health.get("reserved_gap") or {}).items() if g >= AGREE_CHIPS
+    }
+    if not mine:
+        add("unknown", AGREE_TITLE, "No Kueue usage metrics from the manager.")
+    elif apart:
+        add(
+            "warn",
+            AGREE_TITLE,
+            "; ".join(
+                f"{f}: the manager counts {mine.get(f, 0):.0f} reserved chips, the workers "
+                f"{theirs.get(f, 0):.0f}, at least {g:.0f} apart for 10 minutes"
+                for f, g in sorted(apart.items())
+            )
+            + ". The manager admits against its own count, so steps can wait on a worker "
+            "with no room, or behind chips that are free.",
+        )
+    else:
+        add(
+            "ok",
+            AGREE_TITLE,
+            "Reserved chips agree: "
+            + ", ".join(
+                f"{f} {mine[f]:.0f} on the manager, {theirs.get(f, 0):.0f} on the workers"
+                for f in sorted(mine)
+                if mine[f] or theirs.get(f)
+            )
+            + ".",
         )
 
     # Queue waits against the launcher's queue budget.
@@ -1279,23 +1540,66 @@ ICONS = {
 }
 
 
+def idle_pill(q: dict) -> str:
+    """A queue's unused nominal, or as much of it as other queues in its
+    cohort must be borrowing: the cohort's free chips are all its queues'
+    unused nominal less what is borrowed, and Kueue does not say whose they
+    borrow, so what this queue leaves unused beyond the cohort's free chips is
+    lent out. Whether it gets them back depends on its reclaim policy."""
+    free = q.get("cohort_free")
+    if free is None or free >= q["idle"]:
+        return f'<span class="pill idle">{num(q["idle"])} idle, lendable</span>'
+    lent = q["idle"] - free
+    back = (
+        "It does not reclaim, so its own steps wait until those borrowers finish."
+        if q.get("reclaim", "Never") == "Never"
+        else "It takes them back by preempting lower-priority borrowers when its own steps need them."
+    )
+    return (
+        f'<span class="pill idle" title="{E(f"Chips of its nominal it is not using, borrowed by other queues in its cohort. {back}")}">'
+        f'{num(lent)} lent to other queues{f" · {num(free)} free" if free else ""}</span>'
+    )
+
+
 def borrow_cell(q: dict) -> str:
     if q["borrowed"]:
         return f'<span class="pill borrowed">borrowing {num(q["borrowed"])}</span>'
     if q["idle"]:
-        return f'<span class="pill idle">{num(q["idle"])} idle, lendable</span>'
+        return idle_pill(q)
     if not q["nominal"]:
         return '<span class="muted">no nominal</span>'
     return '<span class="muted">at nominal</span>'
 
 
+def spot_text(q: dict, cell: bool = False) -> str:
+    """A queue's Spot as it is, in chips: running on Spot nodes, and admitted
+    onto Spot still waiting for a node. Not its Spot quota, a count GCE has never
+    come near filling. cell is the two-line form for a table column headed
+    "Spot, chips"."""
+    running, waiting = q.get("spot_running") or 0, q.get("spot_waiting") or 0
+    if cell:
+        return (
+            f'<div class="spot-cell"><span>{num(running)} running</span>'
+            + (f"<span><b>{num(waiting)}</b> waiting for a node</span>" if waiting else "")
+            + "</div>"
+        )
+    return (
+        f'<span class="spot-num">Spot: {num(running)} chips running'
+        + (f" · <b>{num(waiting)}</b> chips waiting for a node" if waiting else "")
+        + "</span>"
+    )
+
+
 def quota_bar(q: dict, scale: float) -> str:
-    """In use within nominal, borrowed beyond it, and idle nominal, to one scale."""
+    """In use within nominal, borrowed beyond it, Spot running and Spot waiting
+    for a node, and idle nominal, to one scale."""
     if scale <= 0:
         return ""
     parts = [
         ("own", q["within_nominal"], "in use within nominal"),
         ("borrowed", q["borrowed"], "borrowed from the cohort"),
+        ("spot", q.get("spot_running") or 0, "running on Spot"),
+        ("spot-wait", q.get("spot_waiting") or 0, "admitted onto Spot, waiting for a node"),
         ("idle", q["idle"], "idle nominal, lendable"),
     ]
     segs = "".join(
@@ -1312,16 +1616,28 @@ def render_live_summary(snap: dict) -> str:
     for c in snap["cohorts"]:
         if c["resource"] != TPU:
             continue
+        members = [by_name[n] for n in c["queues"]]
+        has_spot = any(q.get("spot_quota") for q in members)
+        spot_running = sum(q.get("spot_running") or 0 for q in members)
+        spot_waiting = sum(q.get("spot_waiting") or 0 for q in members)
+        # Bars to one scale: the cohort's nominal, with what is on Spot beyond it.
+        scale = c["nominal"] + spot_running + spot_waiting
         rows = "".join(
             f"""<tr><td class="nowrap">{queue_link(q)}</td>
 <td class="n">{num(q["nominal"])}</td><td class="n"><b>{num(q["used"])}</b></td>
 <td>{borrow_cell(q)}</td>
 <td class="n">{num(q["borrowing_limit"]) if q["borrowing_limit"] else "-"}</td>
-<td>{E(RECLAIM.get(q["reclaim"], q["reclaim"])) if q["reclaim"] != "Never" else '<span class="muted">never</span>'}</td>
-<td class="n">{num(q["admitted"] + q["dispatching"])}</td>
-<td class="n">{num(q["pending"])}{f' <span class="muted">({num(q["pending_amount"])} chips)</span>' if q["pending"] else ""}</td>
-<td class="barcell">{quota_bar(q, c["nominal"])}</td></tr>"""
-            for q in (by_name[n] for n in c["queues"])
+{f'<td>{spot_text(q, cell=True) if q.get("spot_quota") else "-"}</td>' if has_spot else ""}
+<td>{E(RECLAIM_FROM.get(q["reclaim"], q["reclaim"])) if q["reclaim"] != "Never" else '<span class="muted">nobody</span>'}</td>
+<td class="n">{num(q["running_steps"])}{f'<div class="sub-row">{num(q["partly_steps"])} partly running</div>' if q.get("partly_steps") else ""}{f'<div class="sub-row">{num(q["starting_steps"] + q["dispatching"])} waiting for a node</div>' if q["starting_steps"] + q["dispatching"] else ""}</td>
+<td class="n">{num(q["pending"])}{f'<div class="sub-row">{num(q["pending_amount"])} chips</div>' if q["pending"] else ""}</td>
+<td class="barcell">{quota_bar(q, scale)}</td></tr>"""
+            for q in members
+        )
+        spot_tile = (
+            f"""<div class="tile"><span>{term("Spot")}</span><b class="spot-num">{num(spot_running)}</b><small>chips running on Spot nodes{f"; {num(spot_waiting)} more admitted, waiting for a Spot node" if spot_waiting else ""}</small></div>"""
+            if has_spot
+            else ""
         )
         busy = (
             f"<b>{num(c['busy'])}</b><small>chips computing, of {num(c['on_nodes'])} on nodes</small>"
@@ -1331,15 +1647,17 @@ def render_live_summary(snap: dict) -> str:
         out.append(f"""
 <div class="cohort">
   <h3>{E(c["generation"] or c["name"])} <span class="muted">· cohort <code>{E(c["name"])}</code></span></h3>
-  <div class="tiles">
+  <div class="tiles{" five" if has_spot else ""}">
     <div class="tile"><span>{term("Chips in use", "In use")}</span><b>{num(c["used"])}</b><small>of {num(c["nominal"])} nominal ({pct(c["used"] / c["nominal"] if c["nominal"] else None)})</small></div>
     <div class="tile"><span>{term("Free")}</span><b>{num(c["free"])}</b><small>chips no queue is using</small></div>
     <div class="tile"><span>{term("Pending")}</span><b>{num(c["pending"])}</b><small>workloads, {num(c["pending_amount"])} chips</small></div>
     <div class="tile"><span>{term("Busy now", "Busy")}</span>{busy}</div>
+    {spot_tile}
   </div>
-  <div class="table-wrap"><table><thead><tr><th>Queue</th><th class="n">{term("Nominal")}</th><th class="n">{term("In use")}</th><th>{term("Borrowing")}</th>
-  <th class="n">{term("May borrow")}</th><th>{term("Reclaim")}</th><th class="n">{term("Running", "Admitted")}</th><th class="n">{term("Pending")}</th>
-  <th class="barcell"><span class="key"><i class="sw own"></i>own</span><span class="key"><i class="sw borrowed"></i>borrowed</span><span class="key"><i class="sw idle"></i>idle</span></th>
+  <p class="bar-legend"><span class="key"><i class="sw own"></i>own</span><span class="key"><i class="sw borrowed"></i>borrowed</span>{'<span class="key"><i class="sw spot"></i>Spot running</span><span class="key"><i class="sw spot-wait"></i>Spot waiting for a node</span>' if has_spot else ""}<span class="key"><i class="sw idle"></i>idle, lendable</span></p>
+  <div class="table-wrap"><table class="quota"><thead><tr><th>Queue</th><th class="n">{term("Nominal")}</th><th class="n">{term("In use, reserved", "In use")}</th><th>{term("Borrowing")}</th>
+  <th class="n">{term("May borrow")}</th>{f'<th>{term("Spot, chips", "Spot")}</th>' if has_spot else ""}<th>{term("Reclaims from", "Reclaim")}</th><th class="n">{term("Running, steps", "Admitted")}</th><th class="n">{term("Pending")}</th>
+  <th class="barcell"></th>
   </tr></thead><tbody>{rows}</tbody></table></div>
 </div>""")
     return "".join(out)
@@ -1388,7 +1706,7 @@ def split_rows(rows: list, target: str, empty: str) -> tuple:
     return shown, hidden, button
 
 
-def render_next_up(q: dict) -> str:
+def render_next_up(q: dict, now: float) -> str:
     n = q.get("next_up")
     if not n:
         return ""
@@ -1397,7 +1715,7 @@ def render_next_up(q: dict) -> str:
 
     def row(r: dict) -> str:
         return f"""<tr><td class="n">{r["position"]}</td>
-<td>{job_link(r["job"]) if r["job"] else f'<span class="muted">{E(r["workload"])}</span>'}</td>
+<td>{job_link(r["job"]) if r["job"] else f'<span class="muted">{E(r["workload"])}</span>'}{preempt_pills(r.get("preemptions") or [], now)}</td>
 <td class="nowrap">{build_link(r["build"]) if r["build"] and r["build"]["number"] else ""}</td>
 <td class="nowrap">{priority_cell(r)}</td><td class="n">{ago(r["waiting"])}</td></tr>"""
 
@@ -1434,6 +1752,8 @@ def priority_cell(r: dict) -> str:
 
 # Kueue's preemption policies, as the page says them.
 RECLAIM = {"Any": "evicts any borrower", "LowerPriority": "evicts lower-priority borrowers"}
+# The same, as the quota table's column says it: whom the queue reclaims from.
+RECLAIM_FROM = {"Any": "any borrower", "LowerPriority": "lower priority"}
 WITHIN_QUEUE = {
     "LowerPriority": "preempts lower priority in its queue",
     "LowerOrNewerEqualPriority": "preempts lower or newer equal priority in its queue",
@@ -1452,16 +1772,80 @@ def preemption_notes(q: dict) -> list[str]:
     return notes
 
 
-def render_live_queue(q: dict) -> str:
+def preempted_line(q: dict) -> str:
+    """The queue's last hour of steps sent back in line, by cause, and for
+    Kueue's by whom."""
+    hour = q.get("preempted_hour") or []
+    if not hour:
+        return ""
+    causes: dict = {}
+    for r in hour:
+        label = PREEMPTION_CAUSES.get(r["cause"], PREEMPTION_CAUSES["evicted"])[0]
+        c = causes.setdefault(label, collections.Counter())
+        c[r["by"]] += r["count"]
+    parts = []
+    for label, by in sorted(causes.items(), key=lambda kv: -sum(kv[1].values())):
+        who = ", ".join(f"{E(b)} {n}" for b, n in by.most_common() if b)
+        parts.append(f"{E(label)} <b>{sum(by.values())}</b>" + (f" (by {who})" if who else ""))
+    return (
+        f'<p class="muted note">{term("Sent back in line", "Preempted")} in the last hour: '
+        + " · ".join(parts)
+        + "</p>"
+    )
+
+
+def queue_steps_row(r: dict, sid: str, now: float) -> str:
+    """A queue card build's steps on that queue, in a row of their own under
+    it: each one's state, how long, and a link to it in the build."""
+    items = "".join(
+        f'<li><span class="muted">{E(JOB_STATES[j["real"]][0])}</span> {job_link(j)} '
+        f'<span class="muted">{ago(j["for"])}</span>'
+        + (' <span class="pill spot">on Spot</span>' if j.get("spot") else "")
+        + preempt_pills(j.get("preemptions") or [], now)
+        + (f' <span class="muted">· {E(j["detail"][:120])}</span>' if j.get("detail") and j["real"] != "running" else "")
+        + "</li>"
+        for j in r["steps"][:40]
+    )
+    more = f'<li class="muted">and {len(r["steps"]) - 40} more</li>' if len(r["steps"]) > 40 else ""
+    return (
+        f'<tr class="steps-row" id="{E(sid)}" hidden><td colspan="7">'
+        f'<ul class="steps-list">{items}{more}</ul></td></tr>'
+    )
+
+
+def render_live_queue(q: dict, now: float) -> str:
+    def sid_of(i: int) -> str:
+        return f"qs-{q['name']}-{i}"
+
+    def count_cell(r: dict, sid: str) -> str:
+        """Its running steps on this queue, opening the list of them."""
+        n = f'{num(r["running"])}{f""" <span class="spot-num">({r["spot"]} on Spot)</span>""" if r.get("spot") else ""}'
+        if not r.get("steps"):
+            return n
+        return (
+            f'<button type="button" class="steps-toggle" aria-expanded="false" aria-controls="{E(sid)}" '
+            f'title="This build\'s steps on {E(queue_title(q))}">{n}</button>'
+        )
+
     builds, builds_more, builds_button = split_rows(
         [
             "<tr>"
             f'<td class="nowrap">{build_link(r)}</td><td class="branch">{E(r["branch"])}</td><td>{E(r["source"])}</td>'
             f'<td class="nowrap">{priority_cell(r)}</td>'
-            f'<td class="n">{num(r["running"])}</td>'
+            f'<td class="n">{count_cell(r, sid_of(i))}'
+            + (
+                f'<div class="sub-row">{num(r["waiting"])} waiting for a node'
+                + (f' <span class="spot-num">({r["spot_waiting"]} on Spot)</span>' if r.get("spot_waiting") else "")
+                + "</div>"
+                if r.get("waiting")
+                else ""
+            )
+            + (f'<div class="sub-row">{num(r["partly"])} partly running</div>' if r.get("partly") else "")
+            + "</td>"
             f'<td class="n">{num(r["held"])}</td>'
             f'<td class="n">{ago(r["running_for"])}</td></tr>'
-            for r in q["builds"]
+            + (queue_steps_row(r, sid_of(i), now) if r.get("steps") else "")
+            for i, r in enumerate(q["builds"])
         ],
         f"run-{q['name']}",
         '<tr><td colspan="7" class="empty">Nothing running.</td></tr>',
@@ -1475,27 +1859,46 @@ def render_live_queue(q: dict) -> str:
             f'<span class="pill borrowed">borrowing {num(q["borrowed"])} {u}</span>'
         )
     elif q["idle"] and tpu:
-        pills.append(f'<span class="pill idle">{num(q["idle"])} idle, lendable</span>')
+        pills.append(idle_pill(q))
     if q["borrowing_limit"] and tpu:
         pills.append(
             f'<span class="pill">may borrow {num(q["borrowing_limit"])}</span>'
         )
+    # The chips figure below counts Spot in; only the part with no node to run
+    # on, a Spot stockout, gets a pill of its own.
+    if q.get("spot_waiting"):
+        pills.append(
+            f'<span class="pill spot">{num(q["spot_waiting"])} Spot chips waiting for a node</span>'
+        )
     pills += [f'<span class="pill">{E(text)}</span>' for text in preemption_notes(q)]
+    # Spot chips count as held only once a step runs on a Spot node; those
+    # admitted with no node yet hold nothing, and the pill above says so.
+    spot = q.get("spot_running") or 0
+    held = (
+        f'<p class="stat"><b>{num(q["used"] + spot)}</b><span>{u} held · {num(q["used"])} reserved'
+        + (f" ({num(q['borrowed'])} borrowed)" if q["borrowed"] else "")
+        + f" of {num(q['nominal'])} nominal"
+        + (f' + <span class="spot-num">{num(spot)} running on Spot</span>' if spot else "")
+        + "</span></p>"
+        if tpu
+        else f'<p class="stat"><b>{num(q["used"])}</b><span>{u} in use of {num(q["nominal"])} nominal</span></p>'
+    )
     return f"""
 <div class="card queue{"" if tpu else " other"}" id="{E(q["name"])}">
   <div class="card-head"><h2 title="{E(q["name"])}">{E(queue_title(q))}</h2>
-    <span class="more"><a href="jobs?queue={E(urllib.parse.quote(q["name"]))}">Jobs →</a> · <a href="trends#{E(q["name"])}">Trends →</a></span></div>
+    <span class="more"><a href="jobs?queue={E(urllib.parse.quote(q["name"]))}">Jobs →</a> · <a href="capacity#{E(q["name"])}">Capacity →</a></span></div>
   <div class="stats">
     <p class="stat"><b>{num(q["pending"])}</b><span>pending · oldest {ago(q["oldest_wait"])}</span></p>
-    <p class="stat"><b>{num(q["admitted"])}</b><span>admitted{f" · {q['dispatching']} dispatching" if q["dispatching"] else ""}</span></p>
-    <p class="stat"><b>{num(q["used"])}</b><span>{u} in use of {num(q["nominal"])} nominal</span></p>
+    <p class="stat"><b>{num(q["running_steps"])}</b><span>running{f" · {num(q['partly_steps'])} partly running" if q.get("partly_steps") else ""}{f" · {num(q['starting_steps'])} waiting for a node" if q["starting_steps"] else ""}{f" · {q['dispatching']} handing over" if q["dispatching"] else ""}</span></p>
+    {held}
   </div>
   <div class="pills">{"".join(pills)}</div>
-  <div class="block"><h4>Running, by build</h4>
+  <div class="block"><h4>Running or waiting for a node, by build</h4>
   <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>Branch</th><th>Source</th><th>{term("Priority")}</th>
     <th class="n">Steps</th><th class="n">{u.capitalize()} held</th><th class="n">Running for</th>
   </tr></thead><tbody>{builds}</tbody>{builds_more}</table></div>{builds_button}</div>
-  {render_next_up(q)}
+  {render_next_up(q, now)}
+  {preempted_line(q)}
   {f'<div class="reasons block"><h4>Why workloads are pending</h4><ul>{reasons}</ul></div>' if reasons else ""}
 </div>"""
 
@@ -1550,21 +1953,43 @@ def job_link(j: dict) -> str:
 FIRST_ROWS = 5
 
 
+# The summary of where every kube job is: JOB_STATES grouped into the four
+# stages a step passes through. The tables below keep each job's own state.
+JOB_STAGES = (
+    (
+        "Before Kueue",
+        ("held", "waiting_agent", "agent_pending", "launching"),
+        "Buildkite has the step: held by its concurrency group, waiting for or starting its agent pod, "
+        "or the launcher checking out and submitting.",
+    ),
+    ("Waiting for quota", ("queued",), "Submitted to Kueue, waiting for its shape's quota."),
+    (
+        "Starting",
+        ("dispatching", "starting", "partly"),
+        "Quota reserved: being handed to a worker, waiting for a node, or its pods starting - some may "
+        "already run.",
+    ),
+    ("Running", ("running",), "Admitted and every pod up."),
+)
+
+
 def render_jobs(snap: dict) -> str:
     jobs = snap["jobs"]
     counts = {k: 0 for k in JOB_STATES}
     for j in jobs:
         counts[j["real"]] += 1
 
-    states = (
-        '<div class="state-row">'
-        + "".join(
-            f'<div class="state-chip{" zero" if not counts[k] else ""}" title="{E(desc)}">'
-            f"<b>{counts[k]}</b><small>{E(name)}</small></div>"
-            for k, (name, desc) in JOB_STATES.items()
+    def stage(name: str, keys: tuple, desc: str) -> str:
+        total = sum(counts[k] for k in keys)
+        # Which of its states the count is made of, when it is more than one.
+        parts = [f"{counts[k]} {JOB_STATES[k][0].lower()}" for k in keys if counts[k]]
+        sub = f'<small class="sub">{E(" · ".join(parts))}</small>' if len(keys) > 1 and parts else ""
+        return (
+            f'<div class="state-chip{" zero" if not total else ""}" title="{E(desc)}">'
+            f"<b>{total}</b><small>{E(name)}</small>{sub}</div>"
         )
-        + "</div>"
-    )
+
+    states = '<div class="state-row">' + "".join(stage(*s) for s in JOB_STAGES) + "</div>"
 
     def groups(selected: list) -> list:
         """One row per build, state and queue: a build's steps usually move
@@ -1586,17 +2011,26 @@ def render_jobs(snap: dict) -> str:
         )
 
     def steps_toggle(g: dict, sid: str) -> str:
+        """The build's steps in this state, and how many of them are on Spot:
+        each step's workload is admitted onto reserved chips or Spot on its own."""
         n = len(g["steps"])
+        spot = sum(1 for j in g["steps"] if j.get("spot"))
+        sent_back = sum(1 for j in g["steps"] if j.get("preemptions"))
         return (
             f'<button type="button" class="steps-toggle" aria-expanded="false" '
             f'aria-controls="{sid}">{n} step{"s" if n != 1 else ""}</button>'
+            + (f' <span class="spot-num">· {spot} on Spot</span>' if spot else "")
+            + (f' <span class="muted">· {sent_back} {term("sent back", "Preempted")}</span>' if sent_back else "")
         )
 
     def steps_row(g: dict, sid: str, span: int) -> str:
         """The build's steps, in a row of their own under it and across the
         whole table, so opening them leaves the columns where they were."""
         items = "".join(
-            f'<li>{job_link(j)} <span class="muted">{ago(j["for"])}</span></li>'
+            f'<li>{job_link(j)} <span class="muted">{ago(j["for"])}</span>'
+            + (' <span class="pill spot">on Spot</span>' if j.get("spot") else "")
+            + preempt_pills(j.get("preemptions") or [], snap["generated_at"])
+            + "</li>"
             for j in g["steps"][:40]
         )
         more = (
@@ -1648,8 +2082,8 @@ def render_jobs(snap: dict) -> str:
         '<tr><td colspan="4" class="empty">None.</td></tr>',
     )
     return f"""{states}
-<p class="muted lead">Where each kube job is, grouped by build. Hover a count for what the state means.</p>
-<h3>Not running yet <span class="muted">({len(waiting)} jobs)</span></h3>
+<p class="muted lead">Where each kube job is, grouped by build. Hover a count for what the stage means.</p>
+<h3>Not all running yet <span class="muted">({len(waiting)} jobs)</span></h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>State</th><th>Queue</th><th>Steps</th>
 <th class="n">Longest</th><th>Detail</th></tr></thead><tbody>{waiting_rows}</tbody>{more_rows}</table></div>
 {more_button}
@@ -1766,6 +2200,10 @@ def check_history(c: dict, logs: dict, now: float) -> str:
     )
 
 
+
+
+
+
 def render_live(snap: dict) -> str:
     tpu = [q for q in snap["queues"] if q["resource"] == TPU]
     other = [q for q in snap["queues"] if q["resource"] != TPU]
@@ -1788,10 +2226,10 @@ def render_live(snap: dict) -> str:
         errors=render_errors(snap["sources"]),
         checks=checks,
         summary=render_live_summary(snap),
-        queues="".join(render_live_queue(q) for q in tpu),
+        queues="".join(render_live_queue(q, snap["generated_at"]) for q in tpu),
         events=render_events(snap),
         jobs=render_jobs(snap),
-        other="".join(render_live_queue(q) for q in other),
+        other="".join(render_live_queue(q, snap["generated_at"]) for q in other),
     )
 
 
@@ -1852,7 +2290,7 @@ COLUMNS = {
 }
 # Where a box's bars sit, as fractions of its width: after the longest label
 # the box shows, before its right-hand figure.
-BARS = {"kueue": (0.26, 0.40), "worker": (0.36, 0.26)}
+BARS = {"kueue": (0.40, 0.28), "worker": (0.36, 0.26)}
 DIAGRAM_WIDTH = 1180
 
 
@@ -1897,16 +2335,19 @@ class Box:
                 f"<title>{E(tip)}</title></text>"
             )
             top += 22
-        for i, (text, frac, figure) in enumerate(self.lines):
+        for i, line in enumerate(self.lines):
+            # A fourth element, when present, is a class for the line's text.
+            text, frac, figure = line[:3]
+            cls = line[3] if len(line) > 3 else ""
             ly = top + 24 * i
             out.append(
-                f'<text class="n-line" x="{x + 16}" y="{ly:.1f}">{E(text)}</text>'
+                f'<text class="n-line {cls}" x="{x + 16}" y="{ly:.1f}">{E(text)}</text>'
             )
             if frac is not None:
                 out.append(bar(x + w * self.bar[0], ly - 9, w * self.bar[1], frac))
             if figure:
                 out.append(
-                    f'<text class="n-line" x="{x + w - 14}" y="{ly:.1f}" text-anchor="end">{E(figure)}</text>'
+                    f'<text class="n-line {cls}" x="{x + w - 14}" y="{ly:.1f}" text-anchor="end">{E(figure)}</text>'
                 )
         return (
             f'<a href="#c-{self.key}" class="node {self.status}">'
@@ -1935,6 +2376,8 @@ def edge(key: str, d: str, n: int, length: float, label: str = "") -> str:
     )
 
 
+
+
 def render_overview(snap: dict) -> str:
     f = snap["fleet"]
     steps = f["steps"]
@@ -1947,15 +2390,30 @@ def render_overview(snap: dict) -> str:
 
     held, waiting = steps.get("held", 0), steps.get("waiting_agent", 0)
     queued, dispatching = steps.get("queued", 0), steps.get("dispatching", 0)
-    on_workers = steps.get("starting", 0) + steps.get("running", 0)
+    on_workers = steps.get("starting", 0) + steps.get("partly", 0) + steps.get("running", 0)
     m = f["manager"]
     tpu_cohorts = [c for c in snap["cohorts"] if c["resource"] == TPU]
     connected = sum(1 for w in f["workers"] if w["connected"])
+    # Spot chips running on Spot nodes, not Spot quota admitted: during a
+    # stockout most of what Kueue admits onto Spot has no node.
+    # Steps admitted onto Spot quota but with no node, by generation: during a
+    # stockout this, not waiting for quota, is where its backlog is.
+    cohort_of = {q["name"]: q["cohort"] for q in snap["queues"]}
+    spot_waiting = collections.Counter(
+        cohort_of.get(j["queue_name"])
+        for j in snap["jobs"]
+        if j.get("spot_waiting")
+    )
+    spot_used, has_spot = collections.Counter(), set()
+    for q in snap["queues"]:
+        spot_used[q["cohort"]] += q.get("spot_running") or 0
+        if q.get("spot_quota"):
+            has_spot.add(q["cohort"])
 
     bk_checks = from_checks("Steps waiting for an agent")
     agent_checks = from_checks("Buildkite controller", "Agent pods")
     kueue_checks = [kueue_line(m["name"], m["kueue_up"])] + from_checks("Queue waits")
-    mk_checks = from_checks("Worker connections", "Dispatch")
+    mk_checks = from_checks("Worker connections", "Dispatch", AGREE_TITLE)
 
     def worker_checks(w: dict) -> list:
         items = [kueue_line(w["name"], w["kueue_up"])]
@@ -1979,8 +2437,10 @@ def render_overview(snap: dict) -> str:
         return items
 
     def shape_line(r: dict) -> tuple:
+        if r.get("spot"):
+            return (r["label"], None, f"{num(r['chips'])}")
         return (
-            r["title"],
+            r["label"],
             r["chips"] / r["max_chips"] if r["max_chips"] else 0,
             f"{num(r['chips'])}/{num(r['max_chips'])}",
         )
@@ -2020,12 +2480,32 @@ def render_overview(snap: dict) -> str:
             queued,
             "waiting for quota",
             [
-                (
-                    c["generation"] or c["name"],
-                    c["used"] / c["nominal"] if c["nominal"] else 0,
-                    f"{num(c['used'])}/{num(c['nominal'])}",
-                )
+                line
                 for c in tpu_cohorts
+                for line in [
+                    (
+                        c["generation"] or c["name"],
+                        c["used"] / c["nominal"] if c["nominal"] else 0,
+                        f"{num(c['used'])}/{num(c['nominal'])}",
+                    )
+                ]
+                + (
+                    [(f"{c['generation']} Spot", None, f"{num(spot_used[c['name']])} running")]
+                    if c["name"] in has_spot
+                    else []
+                )
+                + (
+                    [
+                        (
+                            "no Spot node",
+                            None,
+                            f"{num(spot_waiting[c['name']])} step{'s' if spot_waiting[c['name']] != 1 else ''}",
+                            "stuck",
+                        )
+                    ]
+                    if spot_waiting[c["name"]]
+                    else []
+                )
             ],
             worst(kueue_checks),
             caption="chips in use / quota",
@@ -2094,7 +2574,7 @@ def render_overview(snap: dict) -> str:
             f"M{ku.x + ku.w} {mid:.1f} L{mk.x - 4} {mid:.1f}",
             dispatching + on_workers,
             mk.x - ku.x - ku.w,
-            "Kueue admits it when quota is free",
+            "Kueue admits it: own chips, then borrowed; a waiting step may move to Spot",
         ),
     ]
     for i, w in enumerate(workers):
@@ -2172,7 +2652,7 @@ def render_overview(snap: dict) -> str:
             "".join(
                 f"""<tr><td class="nowrap"><a href="live#{E(r["queue"])}">{E(r["title"])}</a></td>
 <td class="n">{f"{r['pools_up']} of {r['pools']} slices" if r["multi_host"] else f"{num(r['up'])} of {num(r['max'])}"}</td>
-<td class="n">{num(r["chips"])}</td><td class="n">{num(r["max_chips"])}</td><td class="n">{num(r["busy"])}</td></tr>"""
+<td class="n">{num(r["chips"])}</td><td class="n">{"-" if r.get("spot") else num(r["max_chips"])}</td><td class="n">{num(r["busy"])}</td></tr>"""
                 for r in w["shapes"]
             )
             or '<tr><td colspan="5" class="empty">No TPU node pools.</td></tr>'
@@ -2212,7 +2692,10 @@ def render_overview(snap: dict) -> str:
             "Kueue",
             f"on {m['name']}",
             worst(kueue_checks),
-            "Admits a workload once its shape's quota is free. The queues of one TPU generation share a cohort and borrow each other's idle chips.",
+            "Admits a workload once its shape's quota is free, highest priority first. The queues of one TPU generation "
+            "share a cohort and borrow each other's idle chips. A v7x 1x1x1 or 2x2x1 step at pre-merge priority or "
+            "below that has waited 10 minutes for reserved chips is resubmitted to run on Spot; if no Spot node comes, "
+            "the launcher puts it back in line for reserved chips.",
             f'<div class="counts">{count(queued, "waiting for quota")}</div>{cohort_rows}'
             f'{check_items(kueue_checks)}<a class="more" href="live#quota">Quota on Live →</a>',
             manager_links,
@@ -2741,8 +3224,9 @@ def render_migration(
     metal a job holds its whole VM - a <code>tpu_v7x_16_queue</code> job holds that VM's 8 chips, and while the VM
     has no job all 8 are idle - plus the chips Kueue admitted on the GKE side, over the whole reservation's chip-hours
     through {E(base["window"])}: a VM down for a rebalance or a repair counts as chips the fleet had and did not use.
-    On kube it is Kueue's admitted chips against the cohort's quota over the window. Both count a chip from when work takes it
-    to when it lets go, whatever the TensorCores do meanwhile: occupancy, not compute.</li>
+    On kube it is Kueue's admitted chips against the cohort's quota over the window - the reservation's chips only:
+    Spot chips, beyond the reservation since 2026-10-13, are left out here and shown on Capacity. Both count a chip
+    from when work takes it to when it lets go, whatever the TensorCores do meanwhile: occupancy, not compute.</li>
   <li><b>Idle while jobs waited</b> is, minute by minute, the idle chips that whole waiting jobs would have fit
     in, smallest jobs first, so a few chips too few for the job waiting do not count. On bare metal: Buildkite's
     per-minute counts of connected and busy agents, and of jobs ready to run with no agent, as if any idle chip
@@ -2782,7 +3266,7 @@ def render_migration(
   <li>{gcs_link("gcp/monitoring/tpu_duty_cycle", "TensorCore duty cycle, per minute", root)} - not used: its series name
     TPU hosts, which the snapshot does not tie to CI agents</li>
 </ul>
-<p class="muted note">The kube side comes from Kueue's metrics and the workload timing table, as on Trends; bare metal
+<p class="muted note">The kube side comes from Kueue's metrics and the workload timing table, as on Capacity; bare metal
 now from the step log table. Rebuild the baseline with <code>dashboard/baseline/build_baseline.py &lt;snapshot dir&gt;</code>.</p>"""
 
     presets = "".join(
@@ -2866,6 +3350,19 @@ def build_history(
                     "used": used,
                     "nominal": history("nominal", q["name"], q["resource"]),
                     "pending": history("pending", q["name"]),
+                    "spot_used": history("spot_used", q["name"], q["resource"])
+                    if q.get("spot_quota")
+                    else None,
+                    "spot_nominal": history("spot_nominal", q["name"], q["resource"])
+                    if q.get("spot_quota")
+                    else None,
+                    # Steps waiting, in chips: each asks for one slice of the
+                    # queue's shape.
+                    "pending_chips": [
+                        None if v is None else round(v * (q.get("chips") or 0), 1)
+                        for v in history("pending", q["name"])
+                    ],
+                    "evicted": history("evicted", q["name"]),
                 },
                 # Not utilization: against the queue's own nominal, a queue that
                 # lives on borrowed chips reads hundreds of percent.
@@ -2889,9 +3386,21 @@ def build_history(
             }
         )
 
+    # Busy chips per node, summed by the queue its pool serves; a Spot pool's
+    # nodes under <shape>-spot.
+    by_hash = pool_index(pools)
+    busy_by: dict = {}
+    for key, points in hist.get("busy_nodes", {}).items():
+        p = pool_of(by_hash, key)
+        if not p:
+            continue
+        acc = busy_by.setdefault(p["queue"], [0.0] * len(ticks))
+        for i, v in enumerate(exact(points, ticks)):
+            if v:
+                acc[i] += v
+
     # Every TPU node that existed in the range, summed by the queue its pool
     # serves.
-    by_hash = pool_index(pools)
     agg: dict = {}
     for key, points in hist.get("nodes", {}).items():
         p = pool_of(by_hash, key)
@@ -2931,6 +3440,17 @@ def build_history(
         b["max"] += p["max_nodes"]
     hours = step / 3600
     for q in rows:
+        spot = agg.get(f"{q['name']}-spot")
+        q["spot_nodes"] = (
+            {
+                "chips": [round(v, 1) for v in spot["chips"]],
+                "created": spot["created"],
+                "busy": [round(v, 1) for v in busy_by.get(f"{q['name']}-spot", [0.0] * len(ticks))],
+            }
+            if spot
+            else None
+        )
+        q["busy"] = [round(v, 1) for v in busy_by.get(q["name"], [0.0] * len(ticks))]
         a, b = agg.get(q["name"]), pool_bounds.get(q["name"])
         if not b:
             q["nodes"] = None
@@ -2982,6 +3502,25 @@ def build_history(
         ]
         c["admitted"] = add_series(*(q["history"]["used"] for q in c["members"]))
         c["nominal"] = add_series(*(q["history"]["nominal"] for q in c["members"]))
+        spot = [q for q in c["members"] if q["history"].get("spot_used")]
+        # What Spot delivered, per shape: chips admitted onto Spot that had a node.
+        c["spot_shapes"] = [
+            (
+                queue_title(q).split(" ", 1)[-1],
+                [
+                    None if a is None else round(min(a, o or 0.0), 1)
+                    for a, o in zip(q["history"]["spot_used"], (q["spot_nodes"] or {}).get("chips") or [0.0] * len(ticks))
+                ],
+            )
+            for q in sorted(spot, key=lambda q: q["chips"])
+        ]
+        zero = [0.0] * len(ticks)
+        c["spot_admitted"] = add_series(*(q["history"]["spot_used"] for q in spot)) if spot else None
+        c["spot_on_nodes"] = (
+            add_series(*((q["spot_nodes"] or {}).get("chips", zero) for q in spot)) if spot else None
+        )
+        c["busy_reserved"] = add_series(*(q["busy"] for q in c["members"]))
+        c["pending_chips"] = add_series(*(q["history"]["pending_chips"] for q in c["members"]))
         model = DUTY_MODELS.get(c["family"], "")
         c["busy"] = history("busy", model) if model else [None] * len(ticks)
         on_nodes = [q["nodes"]["chips"] for q in c["members"] if q["nodes"]]
@@ -3040,43 +3579,278 @@ def failures_cell(r: dict) -> str:
     )
 
 
-def node_gaps(h: dict, c: dict) -> dict:
-    """Chip-hours admitted with no node up for them yet, and on nodes with
-    nothing admitted for them: between the cohort's two lines, and summed shape
-    by shape, where an idle node of one shape and a workload waiting on another
-    do not cancel."""
-    hours = h["span"]["step"] / 3600
+def chip_hours(values: list | None, step: int) -> float:
+    return sum(v for v in values or [] if v is not None) * step / 3600
 
-    def gaps(admitted: list, on_nodes: list) -> tuple[float, float]:
-        pairs = [(u or 0, o or 0) for u, o in zip(admitted, on_nodes)]
-        return (
-            sum(max(0, u - o) for u, o in pairs) * hours,
-            sum(max(0, o - u) for u, o in pairs) * hours,
+
+# Review's periods: the lengths offered, by the preset each reuses, and what
+# the page calls one.
+COMPARE_PERIODS = {"24h": "day", "7d": "week", "30d": "30 days"}
+# Each row: label, the figure's key, how it reads (pct, dur, count), which way
+# is better ("up", "down", or None for a figure that is neither), and the
+# glossary entry that explains it.
+PERIOD_ROWS = (
+    ("Chips held", "held", "pct", "up", "Chips held"),
+    ("TensorCores busy", "busy", "pct", "up", "Busy"),
+    ("Idle while jobs waited", "stranded", "pct", "down", "Idle while jobs waited"),
+    ("Queue wait, median", "wait_p50", "dur", "down", "Wait, startup, run"),
+    ("Queue wait, p90", "wait_p90", "dur", "down", "Wait, startup, run"),
+    ("Startup, median", "startup_p50", "dur", "down", "Wait, startup, run"),
+    ("Startup, p90", "startup_p90", "dur", "down", "Wait, startup, run"),
+    ("Workloads finished", "finished", "count", None, None),
+    ("Chip-hours admitted", "chip_hours", "count", None, None),
+    ("Test failures", "test_failures", "pct", "down", "Test failure"),
+    ("Infra failures", "infra", "count", "down", "Infra failure"),
+    ("Requeues", "requeues", "count", "down", "Requeue"),
+    ("Redispatches", "redispatches", "count", "down", "Redispatch"),
+    ("Preempted by Kueue", "preempted", "count", "down", "Evicted"),
+    ("Pods not ready in time", "not_ready", "count", "down", None),
+    ("Spot chip-hours on nodes", "spot_delivered", "count", None, "Spot"),
+    ("Spot chip-hours waiting for a node", "spot_waiting", "count", "down", "Spot"),
+)
+PERIOD_CHANGES_FIRST = 12
+PERIOD_PIPELINES = 4
+
+
+def period_figures(w: dict, days: int) -> dict:
+    """Per generation, one period's figures, from the views and reads every
+    other part of the dashboard makes for a range: the history view, the
+    per-minute waits Migration splits, the timing table's period summary and
+    the step log."""
+    h, waits, period = w.get("history") or {}, w.get("waits") or {}, w.get("period") or {}
+    out = {}
+    if not h.get("cohorts"):
+        return out
+    hours = h["span"]["step"] / 3600
+    for c in h["cohorts"]:
+        name = c["name"]
+        split = kube_split(h, waits, name) if waits else None
+        g = (period.get("generations") or {}).get(name) or {}
+        evicted = (period.get("evictions") or {}).get(name) or {}
+        admitted, on_nodes = c.get("spot_admitted"), c.get("spot_on_nodes") or []
+        spot = [(a, o or 0.0) for a, o in zip(admitted or [], on_nodes) if a is not None]
+        finished = g.get("finished")
+        daily = (period.get("daily") or {}).get(name) or {}
+        out[name] = {
+            "generation": c["generation"],
+            # Days count back from the period's end; the charts read forward.
+            "held": mean(split["daily_held"]) if split else None,
+            "stranded": mean(split["daily_stranded"]) if split else None,
+            "busy": c.get("busy_share"),
+            "wait_p50": g.get("wait_p50"),
+            "wait_p90": g.get("wait_p90"),
+            "startup_p50": g.get("startup_p50"),
+            "startup_p90": g.get("startup_p90"),
+            "finished": finished,
+            "chip_hours": c.get("chip_hours"),
+            "test_failures": g["failed"] / finished if finished else None,
+            "infra": g.get("infra"),
+            "requeues": g.get("requeues"),
+            "redispatches": g.get("redispatches"),
+            "preempted": evicted.get("Preempted", 0.0) if period else None,
+            "not_ready": evicted.get("PodsReadyTimeout", 0.0) if period else None,
+            "spot_delivered": sum(min(a, o) for a, o in spot) * hours if admitted else None,
+            "spot_waiting": sum(max(0.0, a - o) for a, o in spot) * hours if admitted else None,
+            "nominal": mean(c.get("nominal") or []),
+            "daily_held": list(reversed(split["daily_held"]))[-days:] if split else [],
+            "daily_wait": [(daily.get(d) or {}).get("wait_p90") for d in range(days)],
+        }
+    return out
+
+
+def period_delta(now, before, kind: str, better: str | None) -> str:
+    """The change between two periods' figures: an arrow, the amount in the
+    figure's own terms, and a class saying whether it is for the better."""
+    if now is None or before is None:
+        return '<span class="delta flat">-</span>'
+    d = now - before
+    if kind == "pct":
+        text, flat = f"{d * 100:+.1f} pts", abs(d) < 0.005
+    elif kind == "dur":
+        text, flat = ("+" if d >= 0 else "−") + ago(abs(d)), abs(d) < max(30, 0.05 * abs(before))
+    else:
+        rel = f" ({d / before:+.0%})" if before else ""
+        text = ("+" if d >= 0 else "−") + num(abs(d)) + rel
+        flat = abs(d) < 0.5 or (before and abs(d) / before < 0.03)
+    if flat:
+        return f'<span class="delta flat">= {E(text)}</span>'
+    arrow = "▲" if d > 0 else "▼"
+    cls = "neutral" if better is None else ("good" if (d > 0) == (better == "up") else "bad")
+    return f'<span class="delta {cls}">{arrow} {E(text)}</span>'
+
+
+def period_value(v, kind: str) -> str:
+    if v is None:
+        return '<span class="muted">-</span>'
+    if kind == "pct":
+        return f"{v * 100:.1f}%"
+    if kind == "dur":
+        return ago(v)
+    return num(v)
+
+
+def render_review(
+    compare: str, windows: dict, data: dict, changes: list, params: dict, sources: dict
+) -> str:
+    """The Review page: each generation's health figures for the period ending
+    at the last whole hour against the period before it, day by day where the
+    period is days long, PR build wall clock, and the fleet's merged changes
+    in the period - for a weekly look back, as Migration looks back at bare
+    metal."""
+    name = COMPARE_PERIODS[compare]
+    cur, prev = windows["current"], windows["previous"]
+    days = PRESETS[compare] // 86400
+    now_f = period_figures(data.get("current") or {}, days)
+    before_f = period_figures(data.get("previous") or {}, days)
+
+    def link(value: str) -> str:
+        kept = {k: v[0] for k, v in params.items() if k != "compare" and v}
+        return "review?" + urllib.parse.urlencode({**kept, "compare": value})
+
+    selector = "".join(
+        f'<a class="seg-btn{" active" if key == compare else ""}" href="{E(link(key))}">{E(label.capitalize())}</a>'
+        for key, label in COMPARE_PERIODS.items()
+    )
+    # The period itself is in the top bar; this names the one it is set against.
+    when = (
+        f'The {E(name)} before: <time data-ts="{prev["start"]}" data-fmt="datetime"></time> – '
+        f'<time data-ts="{prev["end"]}" data-fmt="datetime"></time>'
+    )
+
+    cards = []
+    ticks = [cur["start"] + i * 86400 for i in range(days)]
+    for gen, f in now_f.items():
+        b = before_f.get(gen, {})
+        rows = "".join(
+            f'<tr><td>{term(label, key_) if key_ else E(label)}</td>'
+            f'<td class="n">{period_value(f.get(key), kind)}</td>'
+            f'<td class="n muted">{period_value(b.get(key), kind)}</td>'
+            f'<td class="n nowrap">{period_delta(f.get(key), b.get(key), kind, better)}</td></tr>'
+            for label, key, kind, better, key_ in PERIOD_ROWS
+            if f.get(key) is not None or b.get(key) is not None
+        )
+        notes = []
+        if f.get("nominal") and b.get("nominal") and abs(f["nominal"] - b["nominal"]) >= 1:
+            notes.append(
+                f"Nominal changed, {num(b['nominal'])} → {num(f['nominal'])} chips on average: "
+                "compare the percentages, not the totals."
+            )
+        if f.get("spot_delivered") is not None and b.get("spot_delivered") is None:
+            notes.append("No Spot in the previous period.")
+        charts = ""
+        if days >= 7:
+
+            def pad(values: list) -> list:
+                return (list(values) + [None] * days)[:days]
+
+            held = line_chart(
+                "Chips held by day, % of nominal",
+                ticks,
+                [
+                    ("used", f"last {name}", pad([None if v is None else round(v * 100, 1) for v in f["daily_held"]])),
+                    ("used p50", f"the {name} before", pad([None if v is None else round(v * 100, 1) for v in b.get("daily_held", [])])),
+                ],
+                ymax=100,
+                fmt="day",
+                width=520,
+                height=170,
+            )
+            wait = line_chart(
+                "Queue wait p90 by day, minutes",
+                ticks,
+                [
+                    ("used", f"last {name}", pad([None if v is None else round(v / 60, 1) for v in f["daily_wait"]])),
+                    ("used p50", f"the {name} before", pad([None if v is None else round(v / 60, 1) for v in b.get("daily_wait", [])])),
+                ],
+                fmt="day",
+                width=520,
+                height=170,
+            )
+            charts = f'<div class="pop-charts">{held}{wait}</div>'
+        else:
+            charts = '<p class="muted note">The day-by-day charts need a week or 30 days.</p>'
+        cards.append(
+            f'<div class="card pop"><div class="card-head"><h2>{E(f["generation"])}</h2>'
+            f'<span class="sub">{" ".join(E(n) for n in notes)}</span></div>'
+            f'<div class="pop-grid"><div class="table-wrap"><table class="dense pop-table"><thead><tr>'
+            f'<th></th><th class="n">Last {E(name)}</th><th class="n">The {E(name)} before</th><th class="n">Change</th>'
+            f"</tr></thead><tbody>{rows}</tbody></table></div>{charts}</div></div>"
         )
 
-    wait, idle = gaps(c["admitted"], c["on_nodes"])
-    shapes = [
-        gaps(q["history"]["used"], q["nodes"]["chips"])
-        for q in h["queues"]
-        if q["cohort"] == c["name"] and q.get("nodes")
+    # PR build wall clock for the pipelines with the most clean PR builds.
+    def walls(w: dict) -> dict:
+        out = collections.defaultdict(list)
+        for b in (w.get("steps") or {}).get("builds") or []:
+            if b.get("kind") == "pr" and b.get("clean") == "true" and b.get("pole_finished"):
+                out[b["pipeline"]].append(float(b["pole_finished"]) - float(b["created"]))
+        return out
+
+    now_w, before_w = walls(data.get("current") or {}), walls(data.get("previous") or {})
+    top = sorted((p for p in now_w if len(now_w[p]) >= 10), key=lambda p: -len(now_w[p]))[:PERIOD_PIPELINES]
+    build_rows = "".join(
+        f'<tr><td>{E(p)}</td><td class="n">{len(now_w[p]):,}</td><td class="n muted">{len(before_w.get(p, [])):,}</td>'
+        f'<td class="n">{period_value(quantile(now_w[p], 0.5), "dur")}</td>'
+        f'<td class="n muted">{period_value(quantile(before_w.get(p, []), 0.5), "dur")}</td>'
+        f'<td class="n nowrap">{period_delta(quantile(now_w[p], 0.5), quantile(before_w.get(p, []), 0.5), "dur", "down")}</td>'
+        f'<td class="n">{period_value(quantile(now_w[p], 0.9), "dur")}</td>'
+        f'<td class="n muted">{period_value(quantile(before_w.get(p, []), 0.9), "dur")}</td>'
+        f'<td class="n nowrap">{period_delta(quantile(now_w[p], 0.9), quantile(before_w.get(p, []), 0.9), "dur", "down")}</td></tr>'
+        for p in top
+    )
+    builds = (
+        '<div class="card"><div class="card-head"><h2>PR build wall clock</h2>'
+        f'<span class="sub">clean kube PR builds - see <a href="steps?preset={"7d" if compare != "30d" else "30d"}">Pipelines → Steps</a></span></div>'
+        '<div class="table-wrap"><table class="dense pop-table"><thead><tr><th>Pipeline</th>'
+        f'<th class="n">Builds, last {E(name)}</th><th class="n">before</th>'
+        '<th class="n">Median</th><th class="n">before</th><th class="n">Change</th>'
+        '<th class="n">p90</th><th class="n">before</th><th class="n">Change</th>'
+        f"</tr></thead><tbody>{build_rows}</tbody></table></div></div>"
+        if build_rows
+        else ""
+    )
+
+    items = [
+        f'<li><a href="{E(c["url"])}" target="_blank" rel="noopener">{"#" + str(c["pr"]) if c["pr"] else "commit"}</a> '
+        f'{E(c["title"])} <span class="muted"><time data-ts="{c["at"]:.0f}" data-fmt="datetime"></time></span></li>'
+        for c in changes or []
     ]
-    return {
-        "wait": wait,
-        "idle": idle,
-        "shape_wait": sum(w for w, _ in shapes),
-        "shape_idle": sum(i for _, i in shapes),
-    }
+    more = (
+        f'<details><summary>{len(items) - PERIOD_CHANGES_FIRST} more</summary>'
+        f'<ul class="changes">{"".join(items[PERIOD_CHANGES_FIRST:])}</ul></details>'
+        if len(items) > PERIOD_CHANGES_FIRST
+        else ""
+    )
+    changed = (
+        '<div class="card"><div class="card-head"><h2>What changed</h2>'
+        f'<span class="sub">{len(items)} changes to the fleet (ci-infra tpu-inference/k8s) merged in the last {E(name)}</span></div>'
+        f'<ul class="changes">{"".join(items[:PERIOD_CHANGES_FIRST]) or "<li class=muted>None.</li>"}</ul>{more}</div>'
+    )
+    body = (
+        f'<div class="card range"><div class="segmented">{selector}</div><span class="muted note pop-when">{when}</span></div>'
+        + "".join(cards)
+        + builds
+        + changed
+    )
+    return REVIEW_PAGE.substitute(
+        assets=ASSETS,
+        errors=render_errors(sources),
+        period=E(name),
+        start=cur["start"],
+        end=cur["end"],
+        body=body,
+    )
 
 
-def render_trends(h: dict, sources: dict, query: str, queue_times: dict | None = None) -> str:
-    span = h["span"]
+def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None = None) -> str:
+    """Is capacity right, and where does chip-time go: per generation, the
+    chips there were - reserved and Spot - against what was asked of them, how
+    the reserved chips were spent, and where steps waited for a node."""
+    span, ticks, step = h["span"], h["ticks"], h["span"]["step"]
     fmt = "time" if span["end"] - span["start"] <= 2 * 86400 else "day"
-    every = max(1, len(h["ticks"]) // 24)
-    ticks = h["ticks"]
-    gaps = {c["name"]: node_gaps(h, c) for c in h["cohorts"]}
+    every = max(1, len(ticks) // 24)
     preset = f"&amp;preset={span['preset']}" if span.get("preset") in ("6h", "24h", "7d") else ""
+    overall = (queue_times or {}).get("overall") or {}
 
-    # Each queue's median and p90 wait, in minutes, in each stretch of the range.
     waits: dict = collections.defaultdict(dict)
     for r in (queue_times or {}).get("rows") or []:
         waits[r["queue"]][int(r["bucket"])] = (float(r["p50"]) / 60, float(r["p90"]) / 60)
@@ -3085,69 +3859,53 @@ def render_trends(h: dict, sources: dict, query: str, queue_times: dict | None =
         if queue_times
         else []
     )
-    overall = (queue_times or {}).get("overall") or {}
 
-    def shape_head(q: dict) -> str:
-        """A queue's size, name, average use and link to its jobs."""
-        u = unit(q)
-        size = f'{num(q["chips"])} chip{"s" if q["chips"] != 1 else ""} a step · ' if q["resource"] == TPU else ""
-        used = f'avg {num(q["mean_used"])} {u} in use' + (
-            f' · {num(q["stats"]["chip_hours"])} chip-hours' if q["resource"] == TPU else ""
-        )
-        return (
-            f'{size}<code>{E(q["name"])}</code> · {used} · '
-            f'<a href="jobs?queue={E(urllib.parse.quote(q["name"]))}{preset}">Jobs →</a>'
-        )
+    def last(values: list | None) -> float:
+        return next((v for v in reversed(values or []) if v is not None), 0.0)
 
-    def shape_body(q: dict) -> str:
-        """A queue's outcomes, nodes, chips and queue wait over the range."""
-        u, st, n = unit(q), q["stats"], q.get("nodes")
-        detail = ", ".join(f"{k} {v}" for k, v in st["infra_outcomes"])
-        outcomes = [
-            f"Finished <b>{num(st['finished'])}</b>, <b>{success_rate(st)}</b> passed",
-            f'{term("Failures test / infra", "Test failure", "Infra failure")} <b>{num(st["failed"])} / {num(st["infra"])}</b>'
-            + (f' <span class="muted">({E(detail)})</span>' if detail else ""),
-            f'{term("Evicted / requeued / redispatched", "Evicted", "Requeue", "Redispatch")} '
-            f"<b>{num(st['evictions'])} / {num(st['requeues'])} / {num(st['redispatches'])}</b>",
-            f'{term("Wait p50 / p90", "Wait, startup, run")} <b>{ago(st["wait_p50"])} / {ago(st["wait_p90"])}</b>',
-            f"Run p50 <b>{ago(st['run_p50'])}</b>",
-        ]
-        nodes = (
-            [
-                f'{term("Nodes created")} <b>{num(n["created"])}</b>, lifetime p50 <b>{ago(n["lifetime_p50"])}</b>',
-                f'{term("Held by workloads")} <b>{pct(n["held_share"])}</b>',
-                f'{term("Idle on nodes")} <b>{num(n["idle_chip_hours"])}</b> chip-hours',
-            ]
-            if n
-            else []
-        ) + [
-            f'{term("Admitted → running", "Wait, startup, run")} p50 / p90 '
-            f"<b>{ago(st['startup_p50'])} / {ago(st['startup_p90'])}</b>"
-        ]
+    def peak(values: list | None) -> float:
+        return max((v for v in values or [] if v is not None), default=0.0)
+
+    def shape_detail(q: dict) -> str:
+        """A shape's chips - admitted, on nodes, Spot, waiting - and its queue
+        wait over the range."""
+        u, n, hist = unit(q), q.get("nodes"), q["history"]
+        sn = q.get("spot_nodes")
+        spot = hist.get("spot_used")
+        if n:
+            chips = gap_chart(
+                "Chips admitted and on nodes",
+                ticks,
+                ("used", "admitted", hist["used"]),
+                ("nodes", "on nodes", n["chips"]),
+                ("waiting for nodes", "idle on nodes"),
+                ref=("nominal", hist["nominal"]),
+                spot=(spot, (sn or {}).get("chips") or [0.0] * len(ticks)) if spot else None,
+                fmt=fmt,
+                width=520,
+                height=180,
+            )
+        else:
+            chips = line_chart(
+                f"{u.capitalize()} in use",
+                ticks,
+                [("used", "in use", hist["used"])],
+                fmt=fmt,
+                width=520,
+                height=180,
+            )
         w = waits.get(q["name"], {})
         p50 = [w.get(i, (None, None))[0] for i in range(len(w_ticks))]
         p90 = [w.get(i, (None, None))[1] for i in range(len(w_ticks))]
-        # Hours once a queue's waits pass two of them: minutes would read 1,400.
         per = 60 if max([v for v in p90 if v is not None] + [0]) > 120 else 1
-        w_unit = "hours" if per == 60 else "minutes"
-
-        def scaled(values: list) -> list:
-            return [round(v / per, 1) if v is not None else None for v in values]
-
-        chips = line_chart(
-            f"{u.capitalize()} on nodes and in use" if n else f"{u.capitalize()} in use",
-            ticks,
-            ([("nodes", "on nodes", n["chips"])] if n else []) + [("used", "in use", q["history"]["used"])],
-            ref=("nominal", q["history"]["nominal"]) if q["resource"] == TPU else None,
-            fmt=fmt,
-            width=520,
-            height=180,
-        )
         wait = (
             line_chart(
-                f"Queue wait, {w_unit}",
+                f"Queue wait, {'hours' if per == 60 else 'minutes'}",
                 w_ticks,
-                [("used", "p90", scaled(p90)), ("used p50", "median", scaled(p50))],
+                [
+                    ("used", "p90", [None if v is None else round(v / per, 1) for v in p90]),
+                    ("used p50", "median", [None if v is None else round(v / per, 1) for v in p50]),
+                ],
                 fmt=fmt,
                 width=520,
                 height=180,
@@ -3155,57 +3913,201 @@ def render_trends(h: dict, sources: dict, query: str, queue_times: dict | None =
             if w_ticks
             else ""
         )
-        return f"""<p class="shape-facts">{"".join(f"<span>{x}</span>" for x in outcomes)}</p>
-  <p class="shape-facts">{"".join(f"<span>{x}</span>" for x in nodes)}</p>
-  <div class="charts shape-row">{chips}{wait}</div>
-  {values_table(ticks, ([("On nodes", n["chips"])] if n else []) + [(f"{u.capitalize()} in use", q["history"]["used"]), ("Nominal", q["history"]["nominal"])], every, "Values")}
-  {values_table(w_ticks, [(f"Wait p50, {w_unit}", scaled(p50)), (f"Wait p90, {w_unit}", scaled(p90))], max(1, len(w_ticks) // 24), "Wait values") if w_ticks else ""}"""
+        columns = (
+            [("Admitted", hist["used"])]
+            + ([("On nodes", n["chips"])] if n else [])
+            + ([("On Spot", spot), ("Spot on nodes", (sn or {}).get("chips") or [0.0] * len(ticks))] if spot else [])
+            + [("Waiting, chips", hist["pending_chips"]), ("Nominal", hist["nominal"])]
+        )
+        return f"""<div class="charts shape-row">{chips}{wait}</div>
+  {values_table(ticks, columns, every, "Values")}"""
 
     def shape_block(q: dict) -> str:
+        """A queue's rules on its heading, then its charts, open."""
+        st = q["stats"]
+        rules = (
+            [f"nominal {num(q['nominal'])}", f"borrows ≤{num(q['borrowing_limit'] or 0)}"]
+            + ([f"lends ≤{num(q['lending_limit'])}"] if q.get("lending_limit") is not None else [])
+            + (['<span class="spot-num">overflows to Spot</span>'] if q.get("spot_quota") else [])
+            + [RECLAIM.get(q["reclaim"], "never evicts")]
+        )
         return f"""<div class="shape-block" id="{E(q["name"])}">
-  <h4>{E(queue_title(q))} <span class="muted">· {shape_head(q)}</span></h4>
-  {shape_body(q)}
+  <h4>{E(queue_title(q))} <span class="muted">· {num(q["chips"])} chip{"s" if q["chips"] != 1 else ""} a step · {" · ".join(rules)} ·
+    <a href="jobs?queue={E(urllib.parse.quote(q["name"]))}{preset}">Jobs →</a> · <a href="live#{E(q["name"])}">Live →</a></span></h4>
+  <p class="shape-facts"><span>Wait p50 / p90 <b>{ago(st["wait_p50"])} / {ago(st["wait_p90"])}</b></span>
+    <span>Cold start p50 <b>{ago(st["startup_p50"])}</b></span><span>Run p50 <b>{ago(st["run_p50"])}</b></span>
+    <span>Evicted / requeued <b>{num(st["evictions"])} / {num(st["requeues"])}</b></span></p>
+  {shape_detail(q)}
 </div>"""
 
-    shapes_note = """<p class="muted note">Per shape: outcomes over the range, its nodes, then chips on nodes and
-  in use against its nominal, and the queue wait - submitted to quota reserved - as the median and p90 of the workloads
-  submitted in each stretch. Success leaves out cancelled workloads. Nodes come from GKE's per-node metrics: nodes
-  created counts scale-ups during the range, idle chip-hours are chips on nodes that no admitted workload held, and
-  admitted → running includes the wait for a scale-up. A workload is recorded when it ends, so the last stretches of
-  the wait chart miss what is still running.</p>"""
+    def shape_rows(members: list) -> str:
+        out = []
+        for q in members:
+            st, n, hist = q["stats"], q.get("nodes"), q["history"]
+            sn, spot = q.get("spot_nodes"), hist.get("spot_used")
+            quota = [f"{num(q['nominal'])}"]
+            quota.append(f"borrows ≤{num(q['borrowing_limit'])}" if q.get("borrowing_limit") else "borrows 0")
+            if q.get("lending_limit") is not None:
+                quota.append(f"lends ≤{num(q['lending_limit'])}")
+            if q.get("spot_quota"):
+                quota.append('<span class="spot-num">+ Spot</span>')
+            waited = chip_hours(
+                [None if a is None else max(0.0, a - min(a, o or 0.0)) for a, o in zip(spot, (sn or {}).get("chips") or [0.0] * len(ticks))],
+                step,
+            ) if spot else 0.0
+            out.append(
+                f"""<tr><td class="nowrap"><a href="#{E(q["name"])}">{E(queue_title(q))}</a></td>
+<td class="nowrap">{" · ".join(quota)}</td>
+<td class="n">{num(mean(hist["used"]) or 0)}{f' + <span class="spot-num">{num(mean(spot) or 0)}</span>' if spot else ""}</td>
+<td class="n">{num(peak(hist["pending"]))}</td>
+<td class="n nowrap">{ago(st["wait_p50"])} / {ago(st["wait_p90"])}</td>
+<td class="n">{ago(st["startup_p50"])}</td>
+<td class="n">{num(n["idle_chip_hours"]) if n else "-"}</td>
+<td class="n">{num(waited) if spot else "-"}</td>
+<td class="n nowrap">{num(st["evictions"])} / {num(st["requeues"])}</td>
+<td class="n nowrap"><a href="jobs?queue={E(urllib.parse.quote(q["name"]))}{preset}">Jobs →</a></td></tr>"""
+            )
+        return "".join(out)
 
-    def cohort_card(c: dict) -> str:
-        g, w = gaps[c["name"]], overall.get(c["name"])
+    shape_head = f"""<thead><tr><th>Shape</th><th>{term("Quota", "Nominal", "May borrow", "Spot")}</th>
+<th class="n">{term("Admitted, avg", "In use", "Spot")}</th><th class="n">{term("Waiting, peak", "Pending")}</th>
+<th class="n">{term("Wait p50 / p90", "Wait, startup, run")}</th><th class="n">{term("Cold start", "Wait, startup, run")}</th>
+<th class="n">{term("Idle, chip-h", "Idle on nodes")}</th><th class="n">{term("Spot wait, chip-h", "Spot")}</th>
+<th class="n">{term("Evicted / requeued", "Evicted", "Requeue")}</th><th></th></tr></thead>"""
+
+    def generation(c: dict) -> str:
+        members = [q for q in h["queues"] if q.get("cohort") == c["name"] and q["resource"] == TPU]
+        admitted, nominal, on_nodes = c["admitted"], c["nominal"], c["on_nodes"]
+        busy, pending = c["busy_reserved"], c["pending_chips"]
+        spot_adm, spot_on = c.get("spot_admitted"), c.get("spot_on_nodes")
+        has_spot = bool(spot_adm)
+        zero = [0.0] * len(ticks)
+
+        # Where the reserved chips went, step by step: the parts add up to the
+        # larger of nominal, admitted and on nodes.
+        parts = {k: [] for k in ("busy", "held", "nonode", "idle", "unused")}
+        for a, o, b, nm in zip(admitted, on_nodes or [None] * len(ticks), busy, nominal):
+            if None in (a, o, nm):
+                for k in parts:
+                    parts[k].append(None)
+                continue
+            held = min(a, o)
+            done = min(b or 0.0, held)
+            parts["busy"].append(round(done, 1))
+            parts["held"].append(round(held - done, 1))
+            parts["nonode"].append(round(max(0.0, a - o), 1))
+            parts["idle"].append(round(max(0.0, o - a), 1))
+            parts["unused"].append(round(max(0.0, nm - max(a, o)), 1))
+        names = [
+            ("busy", "busy computing", "busyb"),
+            ("held", "held, not computing", "heldb"),
+            ("nonode", "admitted, no node yet", "nonode"),
+            ("idle", "idle on nodes", "idleb"),
+            ("unused", "quota unused", "rest"),
+        ]
+        totals = {k: chip_hours(parts[k], step) for k in parts}
+        whole = sum(totals.values()) or 1
+        went = stacked_chart(
+            "Where the reserved chips went",
+            ticks,
+            [(label, parts[k]) for k, label, _ in names],
+            classes=[cls for _, _, cls in names],
+            ref=("nominal", nominal),
+            fmt=fmt,
+            width=1080,
+            height=200,
+        )
+        went_bar = share_bars(
+            [(f"{c['generation']} reserved", [totals[k] / whole for k, _, _ in names])],
+            [(label, cls) for _, label, cls in names],
+        )
+
+        # Supply and demand: admitted by shape, then Spot by shape, then the
+        # chips of steps still waiting for quota.
+        slots = {name: f"s{k + 1}" for k, (name, _) in enumerate(c["by_topology"])}
+        stack = list(c["by_topology"])
+        classes = [slots[name] for name, _ in c["by_topology"]]
+        for name, values in c.get("spot_shapes") or []:
+            stack.append((f"{name} on Spot", values))
+            classes.append(f"{slots.get(name, 's4')} spotband")
+        stack.append(("waiting for quota", pending))
+        classes.append("demand")
+        supply = stacked_chart(
+            "Chips admitted, by shape, and the chips of steps waiting",
+            ticks,
+            stack,
+            classes=classes,
+            ref=("nominal", nominal),
+            fmt=fmt,
+            width=1080,
+            height=240,
+        )
+
+        # Where steps had chips but no node: a scale-up on the reservation,
+        # a stockout on Spot.
+        no_node = [None if a is None or o is None else round(max(0.0, a - o), 1) for a, o in zip(admitted, on_nodes or [None] * len(ticks))]
+        friction_series = [("used", "reserved: waiting for a node", no_node)]
+        spot_wait = None
+        if has_spot:
+            spot_wait = [
+                None if a is None else round(max(0.0, a - min(a, o or 0.0)), 1)
+                for a, o in zip(spot_adm, spot_on or zero)
+            ]
+            friction_series.append(("spot", "Spot: waiting for a Spot node", spot_wait))
+        friction = line_chart(
+            "Chips admitted with no node to run on",
+            ticks,
+            friction_series,
+            fmt=fmt,
+            width=1080,
+            height=170,
+        )
+
+        w = overall.get(c["name"])
+        demand = [
+            None if a is None else a + (s or 0) + (p or 0)
+            for a, s, p in zip(admitted, spot_adm or zero, pending)
+        ]
+        waiting_hours = sum(1 for p in pending if p) * step / 3600
+        spot_tile = ""
+        if has_spot:
+            on_h, adm_h = chip_hours(spot_on, step), chip_hours(spot_adm, step)
+            stuck = chip_hours(spot_wait, step)
+            spot_tile = f"""<div class="tile"><span>{term("Spot", "Spot")}</span><b class="spot-num">{num(mean(spot_on) or 0)}</b>
+      <small>chips on Spot nodes on average, peak {num(peak(spot_on))}; {num(stuck)} of {num(adm_h)} chip-hours admitted onto Spot waited for a node ({pct(stuck / adm_h) if adm_h else "-"})</small></div>"""
+        tiles = f"""<div class="tiles">
+    <div class="tile"><span>Chips</span><b>{num(last(nominal))}</b>
+      <small>reserved; peak asked {num(peak(demand))}</small></div>
+    <div class="tile"><span>{term("Reservation used", "Utilization")}</span><b>{pct(c["utilization"])}</b>
+      <small>admitted, of nominal; {pct(totals["busy"] / whole)} busy computing</small></div>
+    <div class="tile"><span>{term("Queue wait, p90", "Wait, startup, run")}</span><b>{ago(w["p90"]) if w else "-"}</b>
+      <small>median {ago(w["p50"]) if w else "-"}; steps waited for quota {num(waiting_hours)} h of {num((span["end"] - span["start"]) / 3600)}</small></div>
+    {spot_tile}
+  </div>"""
         return f"""<div class="card">
-  <div class="card-head"><h2>{E(c["generation"])} chips</h2><span class="sub">cohort <code>{E(c["name"])}</code></span></div>
-  <div class="tiles">
-    <div class="tile"><span>{term("Admitted, average", "Utilization")}</span><b>{pct(c["utilization"])}</b><small>of nominal</small></div>
-    <div class="tile"><span>{term("Busy, average", "Busy")}</span><b>{pct(c["busy_share"])}</b><small>of nominal, by TensorCore duty</small></div>
-    <div class="tile"><span>{term("Queue wait, p90", "Wait, startup, run")}</span><b>{ago(w["p90"]) if w else "-"}</b><small>median {ago(w["p50"]) if w else "-"}</small></div>
-    <div class="tile"><span>Workloads finished</span><b>{num(c["finished"])}</b><small>{success_rate(c)} passed; {num(c["failed"])} test, {num(c["infra"])} infra failures</small></div>
-  </div>
-  {gap_chart("Chips admitted and on nodes", ticks, ("used", "admitted", c["admitted"]), ("nodes", "on nodes", c["on_nodes"]), ("waiting for nodes", "idle on nodes"), series=[("busy", "busy", c["busy"])], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=240)}
-  <p class="muted note">Over the range, <b>{g["wait"]:,.0f}</b> chip-hours waited for nodes and
-  <b>{g["idle"]:,.0f}</b> sat idle on nodes. Blue is chips Kueue admitted before a node was up to take
-  them - the scale-up wait; orange is chips on nodes with nothing admitted for them - a pool's minimum, or a node
-  not yet scaled down. Shape by shape it is {g["shape_wait"]:,.0f} chip-hours waiting and {g["shape_idle"]:,.0f}
-  idle: more than between the lines, where an idle node of one shape and a workload waiting on another cancel.</p>
-  {values_table(ticks, [("On nodes", c["on_nodes"]), ("Admitted", c["admitted"]), ("Busy", c["busy"]), ("Nominal", c["nominal"])], every, "Values")}
-  {stacked_chart("Admitted chips by topology", ticks, c["by_topology"], ref=("nominal", c["nominal"]), fmt=fmt, width=1080, height=220)}
-  {values_table(ticks, c["by_topology"] + [("Nominal", c["nominal"])], every, "Values by topology")}
+  <div class="card-head"><h2>{E(c["generation"])}</h2><span class="sub">cohort <code>{E(c["name"])}</code></span></div>
+  {tiles}
+  <h3 class="shapes-head">Supply and demand</h3>
+  {supply}
+  <p class="muted note">Each shape's admitted chips, smallest at the bottom{"; above them each Spot shape's chips running on Spot nodes, lighter" if has_spot else ""};
+  hatched, the chips the steps still waiting for quota asked for. The line is the reserved nominal: hatching above it is demand
+  the reservation could not meet.</p>
+  {values_table(ticks, stack + [("Nominal", nominal)], every, "Values")}
+  <h3 class="shapes-head">Where the reserved chips went</h3>
+  {went_bar}
+  {went}
+  <p class="muted note">Every reserved chip at every point is one of these: busy computing (TensorCore duty), held by an admitted
+  step but not computing (starting, compiling, loading, idle in the test), admitted before a node was up for it, on a node
+  no step holds, or quota no step was using.</p>
+  {values_table(ticks, [(label, parts[k]) for k, label, _ in names], every, "Values")}
+  <h3 class="shapes-head">Waiting for a node</h3>
+  {friction}
+  <p class="muted note">Chips admitted with no node to run on. On the reservation that is a node scaling up;
+  {"on Spot it is GCE having no Spot VM to give - a stockout - until the launcher gives up after 15 minutes and resubmits the step on the reservation." if has_spot else "a shape with Spot would show its stockouts here too."}</p>
   <h3 class="shapes-head">By shape</h3>
-  {shapes_note}
-  {"".join(shape_block(q) for q in h["queues"] if q["cohort"] == c["name"] and q["resource"] == TPU)}
+  <div class="table-wrap"><table class="dense shapes">{shape_head}<tbody>{shape_rows(members)}</tbody></table></div>
+  {"".join(shape_block(q) for q in members)}
 </div>"""
-
-    other = [q for q in h["queues"] if q["resource"] != TPU]
-    others = "".join(
-        f"""<div class="card" id="{E(q["name"])}">
-  <div class="card-head"><h2>CPU</h2><span class="sub">{shape_head(q)}</span></div>
-  {shape_body(q)}
-</div>"""
-        for q in other
-    )
 
     pipeline_rows, pipelines_more, pipelines_button = split_rows(
         [
@@ -3219,32 +4121,47 @@ def render_trends(h: dict, sources: dict, query: str, queue_times: dict | None =
     pipelines = f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Pipeline</th><th class="n">Finished</th><th class="n">Success</th>
 <th class="n">{term("Failures: test / infra", "Test failure", "Infra failure")}</th><th class="n">Chip-hours</th></tr></thead>
 <tbody>{pipeline_rows}</tbody>{pipelines_more}</table></div>
-{pipelines_button}
-<p class="muted note">Success is over workloads that finished either way; cancelled ones are left out.</p>"""
+{pipelines_button}"""
 
     presets = "".join(
         f'<a class="seg-btn{" active" if span.get("preset") == name else ""}" href="?preset={name}">{label}</a>'
         for name, label in PRESET_LABELS.items()
     )
-    return TRENDS_PAGE.substitute(
+    return CAPACITY_PAGE.substitute(
         assets=ASSETS,
         errors=render_errors(sources),
         presets=presets,
         start=span["start"],
         end=span["end"],
-        step=ago(span["step"]),
-        cohorts="".join(cohort_card(c) for c in h["cohorts"]),
-        others=others,
+        step=ago(step),
+        generations="".join(generation(c) for c in h["cohorts"]),
         pipelines=pipelines,
         query=E(query),
     )
-
 
 # --------------------------------------------------------------------------
 # Jobs
 
 # Rows the jobs table shows at first, and how many a page holds behind Show
 # more; the same for builds, when ended jobs are grouped by build.
+# The Pipelines tab's pages: one job at a time, and each step across builds.
+PIPELINE_PAGES = {
+    "jobs": ("Jobs", "every kube job, in flight and ended"),
+    "steps": ("Steps", "each step across a pipeline's builds"),
+}
+
+
+def subtabs(active: str) -> str:
+    return (
+        '<nav class="subtabs">'
+        + "".join(
+            f'<a class="subtab{" active" if key == active else ""}" href="{key}">{name}<small>{E(desc)}</small></a>'
+            for key, (name, desc) in PIPELINE_PAGES.items()
+        )
+        + "</nav>"
+    )
+
+
 JOBS_FIRST = 20
 JOBS_PER_PAGE = 200
 BUILDS_FIRST = 10
@@ -3377,7 +4294,8 @@ def render_job_history(
     for j in inflight:
         name, desc = JOB_STATES[j["real"]]
         flying.append(
-            f'<tr><td class="nowrap"><span class="state live" title="{E(desc)}">{E(name)}</span></td>'
+            f'<tr><td class="nowrap"><span class="state live" title="{E(desc)}">{E(name)}</span>'
+            f'{preempt_pills(j.get("preemptions") or [], snap["generated_at"])}</td>'
             f'<td class="n nowrap">{ago(j["for"])}</td>'
             f'<td class="nowrap">{build_link(j["pipeline"], j["number"])}</td><td class="step">{job_link(j)}</td>'
             f'<td class="branch">{E(branches.get((j["pipeline"], j["number"]), ""))}</td>'
@@ -3577,9 +4495,405 @@ def render_job_history(
     return JOBS_PAGE.substitute(
         assets=ASSETS,
         errors=render_errors(sources),
+        subtabs=subtabs("jobs"),
         generated=snap["generated_at"],
         start=span["start"],
         filters=filters,
         summary=summary,
         table=table,
+    )
+
+
+# The step log's kinds of build, as the Steps page names them.
+BUILD_KINDS = {"pr": "PRs", "main": "main", "nightly": "nightly"}
+# The pipeline the Steps page opens on: the main CI, not whichever ran most -
+# a dev pipeline's one-step builds can outnumber it.
+STEPS_PIPELINE = "vllm-torchtpu-ci"
+# Shards worth rebalancing: the longest job runs this much longer than the
+# shortest, and at least a fifth longer. A lone job worth splitting: it
+# finishes this far ahead of the next step.
+SPREAD_SECONDS = 300
+LEAD_SECONDS = 300
+# A lone job shorter than this is not worth splitting.
+SPLIT_SECONDS = 1200
+# A step that starts this far into its build is waiting on something.
+LATE_START_SECONDS = 900
+POLES_FIRST = 6
+STEPS_FIRST = 20
+STEP_SORTS = {
+    "last": "Finishes last",
+    "slowest": "Slowest job",
+    "chips": "Chip-hours",
+    "failures": "Failures",
+}
+# A typical job's time from its build's creation, in order: key, color, label.
+# The launcher's work comes either side of the pod, in one color.
+STEP_PHASES = (
+    ("start", "start", "before it starts"),
+    ("setup", "launcher", "launcher before the pod"),
+    ("wait", "wait", "waiting for Kueue"),
+    ("startup", "startup", "pod startup"),
+    ("test", "test", "test"),
+    ("teardown", "launcher", "launcher after: logs, artifacts"),
+)
+STEP_PHASE_KEYS = {
+    "start": "before it starts",
+    "launcher": "launcher, before and after the pod",
+    "wait": "waiting for Kueue",
+    "startup": "pod startup",
+    "test": "test",
+}
+
+
+def quantile(values: list, p: float) -> float | None:
+    values = sorted(values)
+    return values[min(len(values) - 1, int(p * len(values)))] if values else None
+
+
+def step_name(label: str) -> str:
+    # Emoji shortcodes Buildkite draws as icons; as text they crowd the name.
+    return re.sub(r"^(?::[\w+-]+:\s*)+", "", label or "") or "(unnamed step)"
+
+
+def render_steps(data: dict, sources: dict, span: dict, params: dict) -> str:
+    """Which steps decide how long a pipeline's builds take, and what those
+    steps spend it on, over the builds created in the range: what Jobs shows
+    one job at a time, summed up by step."""
+
+    def param(key: str) -> str:
+        return (params.get(key) or [""])[0].strip()
+
+    def number(value) -> float | None:
+        return float(value) if value not in (None, "") else None
+
+    builds = []
+    for b in data.get("builds") or []:
+        created, finished, after = (
+            number(b[k]) for k in ("created", "pole_finished", "next_finished")
+        )
+        builds.append(
+            {
+                **b,
+                "created": created,
+                "clean": b["clean"] == "true" and finished is not None,
+                "wall": finished - created if finished is not None else None,
+                "lead": finished - after if finished is not None and after is not None else None,
+                "retries": int(b["retries"] or 0),
+            }
+        )
+
+    # Each choice falls back to what the range has most of, so a link from a
+    # pipeline with no nightlies to one with them still shows something.
+    def choose(key: str, counts: collections.Counter, preferred: str) -> str:
+        if counts[param(key)]:
+            return param(key)
+        if counts[preferred] or not counts:
+            return preferred
+        return counts.most_common(1)[0][0]
+
+    by_pipeline = collections.Counter(b["pipeline"] for b in builds)
+    pipeline = choose("pipeline", by_pipeline, STEPS_PIPELINE)
+    ours = [b for b in builds if b["pipeline"] == pipeline]
+    by_kind = collections.Counter(b["kind"] for b in ours)
+    kind = choose("kind", by_kind, "pr")
+    ours = [b for b in ours if b["kind"] == kind]
+    clean = [b for b in ours if b["clean"]]
+    sort = param("sort") if param("sort") in STEP_SORTS else "last"
+    preset = span.get("preset") or "7d"
+
+    fields = (
+        "jobs", "builds", "failed", "retried", "ran_p50", "ran_p90", "start_p50", "setup_p50",
+        "wait_p50", "startup_p50", "test_p50", "test_p90", "teardown_p50", "chip_hours", "shards",
+        "shortest_p50", "longest_p50",
+    )
+    steps = [
+        {**{k: number(r.get(k)) for k in fields}, "step": r["step"], "exits": r["exits"] or ""}
+        for r in data.get("steps") or []
+        if (r["pipeline"], r["kind"]) == (pipeline, kind)
+    ]
+    by_step = {r["step"]: r for r in steps}
+    last = collections.defaultdict(list)
+    for b in clean:
+        last[b["pole"]].append(b)
+
+    def link(**change) -> str:
+        current = {"preset": preset, "pipeline": pipeline, "kind": kind, "sort": sort}
+        current.update(change)
+        if current["sort"] == "last":
+            current["sort"] = ""
+        return "steps?" + urllib.parse.urlencode({k: v for k, v in current.items() if v})
+
+    def jobs_link(step: str) -> str:
+        """The step's jobs one by one, on Jobs."""
+        name = E(step_name(step))
+        query = {
+            "preset": preset if preset in ("6h", "24h", "7d") else "7d",
+            "pipeline": pipeline,
+            "branch": {"pr": "pr", "main": "main"}.get(kind, ""),
+            "view": "job",
+            "q": step_name(step),
+        }
+        href = "jobs?" + urllib.parse.urlencode({k: v for k, v in query.items() if v})
+        return f'<a href="{E(href)}" title="This step\'s jobs on Jobs">{name}</a>'
+
+    def minutes(seconds: float | None) -> str:
+        return ago(seconds) if seconds is not None else "-"
+
+    def phases(r: dict) -> dict:
+        """A typical job's time, in STEP_PHASES order: each phase's median, so
+        they add up to its median Ran only roughly. A job that never went
+        through Kueue - an image build, say - is one phase."""
+        if r.get("test_p50") is None:
+            return {"start": r.get("start_p50") or 0, "test": r.get("ran_p50") or 0}
+        return {key: max(0.0, r.get(f"{key}_p50") or 0) for key, _, _ in STEP_PHASES}
+
+    def timeline(r: dict, scale: float) -> str:
+        p = phases(r)
+        # A step longer than the first rows' longest is drawn to the full width.
+        fit = min(1.0, scale / (sum(p.values()) or 1))
+        shown = [(key, cls, label) for key, cls, label in STEP_PHASES if p.get(key, 0) >= 30]
+        segs = "".join(
+            f'<span class="seg ph-{cls}" style="width:{100 * fit * p[key] / scale:.2f}%" '
+            f'title="{E(label)}: {minutes(p[key])}"></span>'
+            for key, cls, label in shown
+        )
+        text = " · ".join(f"{label} <b>{minutes(p[key])}</b>" for key, _, label in shown)
+        return (
+            f'<div class="bar step-bar" role="img" aria-label="{E(step_name(r["step"]))}: {E(re.sub("<[^>]+>", "", text))}">{segs}</div>'
+            f'<small class="muted">{text}</small>'
+        )
+
+    def jobs_cell(r: dict) -> str:
+        n = int(r.get("shards") or 1)
+        if n <= 1:
+            return f'1 <small class="muted">· {minutes(r.get("longest_p50") or r.get("ran_p50"))}</small>'
+        return (
+            f'{n} <small class="muted">· {minutes(r.get("shortest_p50"))}–{minutes(r.get("longest_p50"))}</small>'
+        )
+
+    def advice(r: dict, lead: float | None, follower: str) -> list[str]:
+        notes = []
+        n = int(r.get("shards") or 1)
+        shortest, longest = r.get("shortest_p50") or 0, r.get("longest_p50") or 0
+        spread = longest - shortest
+        if lead is not None and longest and lead > longest:
+            # It finished after the next step by more than it runs, so its
+            # run is not what held the build: a late start or a retry was.
+            notes.append(
+                f"Runs {minutes(longest)} but finished {minutes(lead)} after the next step: "
+                "it started late or was retried"
+            )
+        elif n > 1 and spread >= SPREAD_SECONDS and spread >= 0.2 * longest:
+            notes.append(f"Rebalance: its {n} jobs run {minutes(shortest)} to {minutes(longest)}")
+        elif n == 1 and lead is not None and lead >= LEAD_SECONDS and longest >= SPLIT_SECONDS:
+            notes.append(f"Split: one job, {minutes(lead)} ahead of the next step")
+        if lead is not None and lead < LEAD_SECONDS and follower:
+            notes.append(f"Close behind it: {E(step_name(follower))} - split both to gain")
+        if (r.get("start_p50") or 0) >= LATE_START_SECONDS:
+            notes.append(f"Starts {minutes(r.get('start_p50'))} into the build: what does it wait for?")
+        if r.get("jobs") and (r.get("retried") or 0) / r["jobs"] >= 0.05:
+            n_retried = int(r["retried"])
+            notes.append(f"{n_retried} {'retry' if n_retried == 1 else 'retries'} in the range")
+        return notes
+
+    walls = [b["wall"] for b in clean]
+    poles = sorted(last.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+
+    # Tiles: how long, what sets it, what splitting it buys, what retries cost.
+    tiles = ""
+    if clean:
+        top, top_builds = poles[0]
+        top_leads = [b["lead"] for b in top_builds if b["lead"] is not None]
+        top_next = collections.Counter(b["next"] for b in top_builds if b["next"]).most_common(1)
+        retried = [b["wall"] for b in clean if b["retries"]]
+        straight = [b["wall"] for b in clean if not b["retries"]]
+        tiles = (
+            '<div class="tiles">'
+            f'<div class="tile"><span>{term("Wall clock")}, median</span><b>{minutes(quantile(walls, 0.5))}</b>'
+            f"<small>p90 {minutes(quantile(walls, 0.9))} · {len(clean):,} {term('clean builds', 'Clean build')}</small></div>"
+            f'<div class="tile"><span>{term("Finishes last", "Last step")} most often</span>'
+            f'<b class="name">{E(step_name(top))}</b>'
+            f"<small>in {len(top_builds):,} of {len(clean):,} clean builds ({pct(len(top_builds) / len(clean))})</small></div>"
+            f'<div class="tile"><span>Splitting it saves at most</span><b>{minutes(quantile(top_leads, 0.5))}</b>'
+            f"<small>median, before {E(step_name(top_next[0][0])) if top_next else 'the next step'} finishes last instead</small></div>"
+            f'<div class="tile"><span>Needed a retry</span><b>{len(retried):,}</b>'
+            + (
+                f"<small>clean builds; wall clock median {minutes(quantile(retried, 0.5))} against "
+                f"{minutes(quantile(straight, 0.5))} without</small>"
+                if retried
+                else "<small>clean builds</small>"
+            )
+            + "</div>"
+            "</div>"
+        )
+
+    # Wall clock over the range, by when the build was created.
+    seconds = span["end"] - span["start"]
+    bucket = 7200 if seconds <= 2 * 86400 else 86400
+    count = max(1, -(-seconds // bucket))
+    ticks = [span["start"] + i * bucket for i in range(count)]
+    grouped = collections.defaultdict(list)
+    for b in clean:
+        grouped[min(count - 1, int((b["created"] - span["start"]) // bucket))].append(b["wall"])
+    p50 = [quantile(grouped[i], 0.5) for i in range(count)]
+    p90 = [quantile(grouped[i], 0.9) for i in range(count)]
+    per = 3600 if max([v for v in p90 if v is not None] + [0]) > 3 * 3600 else 60
+
+    def scaled(values: list) -> list:
+        return [None if v is None else round(v / per, 1) for v in values]
+
+    chart = (
+        line_chart(
+            f"Wall clock of clean builds, {'hours' if per == 3600 else 'minutes'}, by when they were created",
+            ticks,
+            [("used", "p90", scaled(p90)), ("used p50", "median", scaled(p50))],
+            extra=[("clean builds", [len(grouped[i]) for i in range(count)])],
+            fmt="time" if bucket < 86400 else "day",
+            width=1000,
+            height=220,
+        )
+        if clean
+        else '<p class="empty">No clean builds in the range.</p>'
+    )
+
+    # What finishes last, and what it spends its time on.
+    # One scale for the bars, so they compare: the longest of the rows shown
+    # before Show more.
+    scale = max(
+        [sum(phases(by_step[name]).values()) for name, _ in poles[:POLES_FIRST] if name in by_step]
+        + [1]
+    )
+    pole_rows = []
+    for name, bs in poles:
+        r = by_step.get(name) or {"step": name}
+        leads = [b["lead"] for b in bs if b["lead"] is not None]
+        follower = collections.Counter(b["next"] for b in bs if b["next"]).most_common(1)
+        follower = follower[0][0] if follower else ""
+        lead = quantile(leads, 0.5)
+        notes = advice(r, lead, follower)
+        pole_rows.append(
+            f'<tr><td class="step">{jobs_link(name)}'
+            + (f'<div class="advice">{"<br>".join(notes)}</div>' if notes else "")
+            + "</td>"
+            f'<td class="n nowrap"><b>{len(bs):,}</b> <small class="muted">{pct(len(bs) / len(clean))}</small></td>'
+            f'<td class="n nowrap">{minutes(quantile([b["wall"] for b in bs], 0.5))}</td>'
+            f'<td class="follower"><b>{minutes(lead)}</b>'
+            + (f'<br><small class="muted">{E(step_name(follower))}</small>' if follower else "")
+            + f'</td><td class="nowrap">{jobs_cell(r)}</td>'
+            f'<td class="timeline">{timeline(r, scale) if name in by_step else "-"}</td></tr>'
+        )
+    shown = "".join(pole_rows[:POLES_FIRST]) or '<tr><td colspan="6" class="empty">No clean builds in the range.</td></tr>'
+    hidden, button = show_more("poles-more", "".join(pole_rows[POLES_FIRST:]), max(0, len(pole_rows) - POLES_FIRST))
+    legend = "".join(
+        f'<span class="key"><i class="sw ph-{key}"></i>{E(label)}</span>'
+        for key, label in STEP_PHASE_KEYS.items()
+    )
+    poles_html = (
+        '<p class="muted lead">The step that finished last in each clean build, so the one that set its wall '
+        "clock. Splitting it, or making it faster, saves at most its lead over the next step; past that, the "
+        "next step finishes last.</p>"
+        f'<p class="bar-legend">A typical job, from the build\'s creation: {legend}</p>'
+        '<div class="table-wrap"><table class="dense poles"><thead><tr>'
+        f'<th>Step</th><th class="n">{term("Last in", "Last step")}</th><th class="n">{term("Wall clock")}</th>'
+        f'<th>{term("Ahead of the next")}</th><th>{term("Jobs a build")}</th><th class="timeline">Where a job\'s time goes</th>'
+        f"</tr></thead><tbody>{shown}</tbody>{hidden}</table></div>{button}"
+    )
+
+    # Every step, in the order asked for.
+    keys = {
+        "slowest": lambda r: -(r["longest_p50"] or r["ran_p50"] or 0),
+        "last": lambda r: -len(last.get(r["step"], ())),
+        "chips": lambda r: -(r["chip_hours"] or 0),
+        "failures": lambda r: -((r["failed"] or 0) / (r["jobs"] or 1)),
+    }
+    steps.sort(key=lambda r: (keys[sort](r), r["step"]))
+    step_rows = []
+    for r in steps:
+        failed = int(r["failed"] or 0)
+        fail = (
+            f'{failed:,} <small class="muted">{pct(failed / r["jobs"])}</small>'
+            + (f'<br><small class="muted">exit {E(r["exits"])}</small>' if r["exits"] else "")
+            if failed
+            else '<span class="muted">0</span>'
+        )
+        launcher = (
+            (r["setup_p50"] or 0) + (r["teardown_p50"] or 0)
+            if r["setup_p50"] is not None or r["teardown_p50"] is not None
+            else None
+        )
+        kube_cells = (
+            f'<td class="n nowrap">{minutes(launcher)} · {minutes(r["wait_p50"])} · '
+            f'{minutes(r["startup_p50"])} · <b>{minutes(r["test_p50"])}</b></td>'
+        )
+        n_last = len(last.get(r["step"], ()))
+        step_rows.append(
+            f'<tr><td class="step">{jobs_link(r["step"])}</td>'
+            f'<td class="n">{int(r["builds"] or 0):,}</td><td class="nowrap">{jobs_cell(r)}</td>'
+            f'<td class="n nowrap">{minutes(r["ran_p50"])} <small class="muted">· {minutes(r["ran_p90"])}</small></td>'
+            f'<td class="n nowrap">{minutes(r["start_p50"])}</td>{kube_cells}'
+            f'<td class="n">{num(r["chip_hours"]) if r["chip_hours"] else "-"}</td>'
+            f'<td class="n nowrap">{fail}</td>'
+            f'<td class="n">{int(r["retried"] or 0) or "-"}</td>'
+            f'<td class="n">{n_last or "-"}</td></tr>'
+        )
+    cols = 10
+    shown = "".join(step_rows[:STEPS_FIRST]) or f'<tr><td colspan="{cols}" class="empty">No steps in the range.</td></tr>'
+    hidden, button = show_more("steps-more", "".join(step_rows[STEPS_FIRST:]), max(0, len(step_rows) - STEPS_FIRST))
+
+    def seg(label: str, href: str, active: bool) -> str:
+        return f'<a class="seg-btn{" active" if active else ""}" href="{E(href)}">{label}</a>'
+
+    steps_html = (
+        '<div class="filter-row"><span class="filter-label">Sort by</span><div class="segmented">'
+        + "".join(seg(label, link(sort=key), sort == key) for key, label in STEP_SORTS.items())
+        + "</div></div>"
+        '<div class="table-wrap"><table class="dense steps"><thead><tr><th>Step</th>'
+        f'<th class="n">Builds</th><th>{term("Jobs a build")}</th>'
+        f'<th class="n">{term("Ran")} <small>p50 · p90</small></th><th class="n">{term("Starts")}</th>'
+        + f'<th class="n">{term("Launcher · Kueue · startup · test", "Kube phases")}</th>'
+        + f'<th class="n">{term("Chip-hours")}</th><th class="n">Failed</th><th class="n">Retried</th>'
+        f'<th class="n">{term("Last in", "Last step")}</th></tr></thead>'
+        f"<tbody>{shown}</tbody>{hidden}</table></div>{button}"
+    )
+
+    filters = (
+        '<div class="filter-row"><span class="filter-label">Range</span><div class="segmented">'
+        + "".join(seg(PRESET_LABELS[p], link(preset=p), preset == p) for p in ("24h", "7d", "30d"))
+        + '</div><span class="filter-label">Builds</span><div class="segmented">'
+        + "".join(
+            seg(f"{label} <small>{by_kind[key]:,}</small>", link(kind=key), kind == key)
+            for key, label in BUILD_KINDS.items()
+            if by_kind[key]
+        )
+        + '</div><form class="search" method="get" action="steps">'
+        + "".join(
+            f'<input type="hidden" name="{k}" value="{E(v)}">'
+            for k, v in (("preset", preset), ("sort", "" if sort == "last" else sort))
+            if v
+        )
+        + '<select name="pipeline" data-autosubmit aria-label="Pipeline">'
+        + "".join(
+            f'<option value="{E(name)}"{" selected" if name == pipeline else ""}>{E(name)} ({n:,})</option>'
+            for name, n in by_pipeline.most_common()
+        )
+        + "</select></form></div>"
+    )
+    summary = (
+        f"<b>{len(ours):,}</b> {'PR' if kind == 'pr' else E(kind)} builds of {E(pipeline)} on kube "
+        f"created in the last {E(PRESET_LABELS.get(preset, preset))}, "
+        f"<b>{len(clean):,}</b> of them clean: every job passed, or passed when retried. The rest "
+        "failed or were cancelled, so their wall clock says nothing about how long a build takes."
+    )
+    return STEPS_PAGE.substitute(
+        assets=ASSETS,
+        errors=render_errors(sources),
+        subtabs=subtabs("steps"),
+        start=span["start"],
+        end=span["end"],
+        filters=filters,
+        summary=summary,
+        tiles=tiles,
+        chart=chart,
+        poles=poles_html,
+        steps=steps_html,
     )

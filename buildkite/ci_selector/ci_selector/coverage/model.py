@@ -18,6 +18,8 @@ says nothing about them.
 
 from __future__ import annotations
 
+import gzip
+
 import hashlib
 import json
 import subprocess
@@ -46,7 +48,8 @@ ENV_ABSENT = "<unset>"
 # Buildkite agent uploads them from there. Named once, so the half that writes
 # the job directory and the half that reads it cannot drift apart silently.
 FNREC_DIR = ".fnrec"
-RECORD_GLOB = "fn.*.txt"
+# Plain, or gzipped by a fold that had to save disk (`fn.*.txt.gz`).
+RECORD_GLOB = "fn.*.txt*"
 
 # A build whose started jobs recorded less often than this is a delivery
 # failure, so the merge CLI refuses to write a table from it without
@@ -160,7 +163,8 @@ def read_process(path: Path) -> ProcessRecord | None:
     malformed = 0
     identity: dict = {}
 
-    with open(path, errors="replace") as fh:
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rt", errors="replace") as fh:
         for line in fh:
             parts = line.rstrip("\n").split("\t")
             tag = parts[0]
