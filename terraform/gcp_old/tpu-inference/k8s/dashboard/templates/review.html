@@ -1,0 +1,28 @@
+<!doctype html>
+<!--
+  The review page: the fleet's health for a period against the period before
+  it. views.py fills the placeholders - a dollar sign and a name - with
+  string.Template, so a literal dollar sign here must be doubled.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TPU CI kube · Review</title>
+<link rel="stylesheet" href="static/style.css?v=$assets">
+</head>
+<body>
+<header class="topbar">
+  <div class="inner">
+    <h1>TPU CI kube</h1>
+    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab" href="jobs">Pipelines</a><a class="tab" href="capacity">Capacity</a><a class="tab active" href="review">Review</a><a class="tab" href="migration">Migration</a></nav>
+    <span class="when">Last $period, <time data-ts="$start" data-fmt="datetime"></time> – <time data-ts="$end" data-fmt="datetime"></time>, against the $period before</span>
+  </div>
+</header>
+<main>
+$errors
+$body
+</main>
+<script src="static/app.js?v=$assets"></script>
+</body>
+</html>

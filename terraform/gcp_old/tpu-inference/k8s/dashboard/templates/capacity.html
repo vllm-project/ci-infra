@@ -22,15 +22,12 @@
 <header class="topbar">
   <div class="inner">
     <h1>TPU CI kube</h1>
-    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab" href="jobs">Pipelines</a><a class="tab active" href="capacity">Capacity</a><a class="tab" href="migration">Migration</a></nav>
+    <nav class="tabs"><a class="tab" href="./">Overview</a><a class="tab" href="live">Live</a><a class="tab" href="jobs">Pipelines</a><a class="tab active" href="capacity">Capacity</a><a class="tab" href="review">Review</a><a class="tab" href="migration">Migration</a></nav>
     <span class="when"><time data-ts="$start"></time> – <time data-ts="$end"></time> · one point per $step</span>
   </div>
 </header>
 <main>
 $errors
-$period
-
-<div class="section-label">Over a range</div>
 <div class="card range"><div class="segmented">$presets</div></div>
 
 $generations

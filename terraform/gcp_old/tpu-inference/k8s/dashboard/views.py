@@ -33,6 +33,7 @@ OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
 MIGRATION_PAGE = string.Template((TEMPLATES / "migration.html").read_text())
 JOBS_PAGE = string.Template((TEMPLATES / "jobs.html").read_text())
 CAPACITY_PAGE = string.Template((TEMPLATES / "capacity.html").read_text())
+REVIEW_PAGE = string.Template((TEMPLATES / "review.html").read_text())
 STEPS_PAGE = string.Template((TEMPLATES / "steps.html").read_text())
 # The bare-metal fleet before the migration, built once from the snapshot by
 # baseline/build_baseline.py; static, since that fleet is being torn down.
@@ -493,7 +494,7 @@ SOURCES = {
     },
     "GitHub": {
         "through": "GitHub's public REST API, no token",
-        "reads": ["Commits to terraform/gcp_old/tpu-inference/k8s on main, for Capacity's What changed"],
+        "reads": ["Commits to terraform/gcp_old/tpu-inference/k8s on main, for Review's What changed"],
         "needs": ["Nothing; unauthenticated, within GitHub's hourly limit per address"],
         "fails": ["Only What changed goes blank; it tries again after a minute"],
     },
@@ -3500,8 +3501,8 @@ def chip_hours(values: list | None, step: int) -> float:
     return sum(v for v in values or [] if v is not None) * step / 3600
 
 
-# Capacity's period over period: the lengths offered, by the preset each
-# reuses, and what the page calls one.
+# Review's periods: the lengths offered, by the preset each reuses, and what
+# the page calls one.
 COMPARE_PERIODS = {"24h": "day", "7d": "week", "30d": "30 days"}
 # Each row: label, the figure's key, how it reads (pct, dur, count), which way
 # is better ("up", "down", or None for a figure that is neither), and the
@@ -3606,11 +3607,14 @@ def period_value(v, kind: str) -> str:
     return num(v)
 
 
-def render_period(compare: str, windows: dict, data: dict, changes: list, params: dict) -> str:
-    """Capacity's period over period: each generation's health figures for
-    the period ending at the last whole hour against the period before it,
-    day by day where the period is days long, PR build wall clock, and the
-    fleet's merged changes in the period."""
+def render_review(
+    compare: str, windows: dict, data: dict, changes: list, params: dict, sources: dict
+) -> str:
+    """The Review page: each generation's health figures for the period ending
+    at the last whole hour against the period before it, day by day where the
+    period is days long, PR build wall clock, and the fleet's merged changes
+    in the period - for a weekly look back, as Migration looks back at bare
+    metal."""
     name = COMPARE_PERIODS[compare]
     cur, prev = windows["current"], windows["previous"]
     days = PRESETS[compare] // 86400
@@ -3619,17 +3623,16 @@ def render_period(compare: str, windows: dict, data: dict, changes: list, params
 
     def link(value: str) -> str:
         kept = {k: v[0] for k, v in params.items() if k != "compare" and v}
-        return "capacity?" + urllib.parse.urlencode({**kept, "compare": value})
+        return "review?" + urllib.parse.urlencode({**kept, "compare": value})
 
     selector = "".join(
         f'<a class="seg-btn{" active" if key == compare else ""}" href="{E(link(key))}">{E(label.capitalize())}</a>'
         for key, label in COMPARE_PERIODS.items()
     )
+    # The period itself is in the top bar; this names the one it is set against.
     when = (
-        f'Last {E(name)}, <time data-ts="{cur["start"]}" data-fmt="datetime"></time> – '
-        f'<time data-ts="{cur["end"]}" data-fmt="datetime"></time>, against the {E(name)} before, '
-        f'<time data-ts="{prev["start"]}" data-fmt="datetime"></time> – '
-        f'<time data-ts="{prev["end"]}" data-fmt="datetime"></time>.'
+        f'The {E(name)} before: <time data-ts="{prev["start"]}" data-fmt="datetime"></time> – '
+        f'<time data-ts="{prev["end"]}" data-fmt="datetime"></time>'
     )
 
     cards = []
@@ -3740,18 +3743,23 @@ def render_period(compare: str, windows: dict, data: dict, changes: list, params
         f'<span class="sub">{len(items)} changes to the fleet (ci-infra tpu-inference/k8s) merged in the last {E(name)}</span></div>'
         f'<ul class="changes">{"".join(items[:PERIOD_CHANGES_FIRST]) or "<li class=muted>None.</li>"}</ul>{more}</div>'
     )
-    return (
-        '<div class="section-label">Period over period</div>'
+    body = (
         f'<div class="card range"><div class="segmented">{selector}</div><span class="muted note pop-when">{when}</span></div>'
         + "".join(cards)
         + builds
         + changed
     )
+    return REVIEW_PAGE.substitute(
+        assets=ASSETS,
+        errors=render_errors(sources),
+        period=E(name),
+        start=cur["start"],
+        end=cur["end"],
+        body=body,
+    )
 
 
-def render_capacity(
-    h: dict, sources: dict, query: str, queue_times: dict | None = None, period: str = ""
-) -> str:
+def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None = None) -> str:
     """Is capacity right, and where does chip-time go: per generation, the
     chips there were - reserved and Spot - against what was asked of them, how
     the reserved chips were spent, and where steps waited for a node."""
@@ -4047,7 +4055,6 @@ def render_capacity(
         generations="".join(generation(c) for c in h["cohorts"]),
         pipelines=pipelines,
         query=E(query),
-        period=period,
     )
 
 # --------------------------------------------------------------------------

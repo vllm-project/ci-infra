@@ -295,7 +295,7 @@ class Windowed:
 
 
 def compare_windows(compare: str, now: float) -> dict:
-    """The two periods Capacity compares: the one ending at the last whole
+    """The two periods Review compares: the one ending at the last whole
     hour, and the one of the same length before it - so a week is set
     against the same weekdays a week earlier."""
     length = views.PRESETS[compare]
@@ -405,46 +405,45 @@ def serve(
                 return self.reply(200, "application/json", body.encode())
             if url.path == "/capacity":
                 span = parse_span(params, time.time())
+                view, sources = history.get(span)
+                queue_times, queue_times_status = wait_series.get(span)
+                page = views.render_capacity(
+                    view,
+                    {**sources, "wait_series": queue_times_status},
+                    f"?{url.query}" if url.query else "",
+                    queue_times,
+                )
+                return self.reply(200, "text/html; charset=utf-8", page.encode())
+            if url.path == "/review":
                 compare = (params.get("compare") or ["7d"])[0]
                 if compare not in views.COMPARE_PERIODS:
                     compare = "7d"
                 windows = compare_windows(compare, time.time())
-                # The range's own views and both compared periods' at once;
-                # each source caches by window, so a period already fetched
-                # for one costs nothing for the other.
+                # Both periods' reads at once; each source caches by window,
+                # so a period another page already read costs nothing here.
                 sources_by = {"history": history, "waits": waits, "period": period, "steps": steps}
-                with concurrent.futures.ThreadPoolExecutor(12) as pool:
-                    own = pool.submit(history.get, span)
-                    own_times = pool.submit(wait_series.get, span)
+                with concurrent.futures.ThreadPoolExecutor(10) as pool:
                     compared = {
                         name: {k: pool.submit(src.get, w) for k, src in sources_by.items()}
                         for name, w in windows.items()
                     }
                     changed = pool.submit(changes.get, windows["current"])
-                view, sources = own.result()
-                queue_times, queue_times_status = own_times.result()
                 pop = {name: {k: f.result() for k, f in fs.items()} for name, fs in compared.items()}
                 changes_data, changes_status = changed.result()
-                statuses = {
-                    f"{name}-{k}": status
-                    for name, parts in pop.items()
-                    for k, (_, status) in parts.items()
-                    if k != "history"
-                }
+                statuses = {"changes": changes_status}
                 for name, parts in pop.items():
-                    statuses.update({f"{name}-history-{k}": v for k, v in parts["history"][1].items()})
-                page = views.render_capacity(
-                    view,
-                    {**sources, "wait_series": queue_times_status, **statuses, "changes": changes_status},
-                    f"?{url.query}" if url.query else "",
-                    queue_times,
-                    period=views.render_period(
-                        compare,
-                        windows,
-                        {name: {k: v[0] for k, v in parts.items()} for name, parts in pop.items()},
-                        changes_data,
-                        params,
-                    ),
+                    for k, (_, status) in parts.items():
+                        if k == "history":
+                            statuses.update({f"{name}-history-{s}": v for s, v in status.items()})
+                        else:
+                            statuses[f"{name}-{k}"] = status
+                page = views.render_review(
+                    compare,
+                    windows,
+                    {name: {k: v[0] for k, v in parts.items()} for name, parts in pop.items()},
+                    changes_data,
+                    params,
+                    statuses,
                 )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
             # Capacity replaced Trends; /trends and /history, its old names, go there.

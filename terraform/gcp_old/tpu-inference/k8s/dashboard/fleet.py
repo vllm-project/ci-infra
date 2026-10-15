@@ -1527,8 +1527,8 @@ TEST_OUTCOMES = ("succeeded", "failed", "cancelled")
 
 
 def fetch_period(cfg: Config, start: int, end: int) -> dict:
-    """Each TPU generation over [start, end), for Capacity's period over
-    period: from the timing table, the workloads that ended in it - their
+    """Each TPU generation over [start, end), for the Review page:
+    from the timing table, the workloads that ended in it - their
     wait and startup percentiles, which cannot be put together from the
     per-queue ones, failures and retries, and the wait day by day - and from
     Kueue's metrics, its evictions by reason."""
@@ -1583,7 +1583,7 @@ FROM `{cfg.timing_table}` WHERE {where} GROUP BY generation, day"""
     return out
 
 
-# The repository and directory whose merged changes Capacity lists beside a
+# The repository and directory whose merged changes Review lists beside a
 # period: the fleet's configuration, launcher and dashboard.
 CHANGES_REPO = "vllm-project/ci-infra"
 CHANGES_PATH = "terraform/gcp_old/tpu-inference/k8s"
