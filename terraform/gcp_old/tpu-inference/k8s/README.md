@@ -445,6 +445,17 @@ evicted again, until the step's deadline. The launcher fails the step on the
 first such eviction, prints the kubelet's message, which names the container and
 how much it used, and records the outcome `evicted_storage`.
 
+**A pod no node of its shape can hold fails the step.** Kueue admits on chips
+alone, so a pod that asks for more ephemeral storage, memory or CPU than a node
+of its shape has is admitted and then never placed, holding its chips' quota
+until `waitForPodsReady` gives up hours later. While an admitted pod has no
+node, the launcher reads the cluster autoscaler's `NotTriggerScaleUp` events
+for it; `N Insufficient ephemeral-storage` (or memory, cpu) there is judged
+against the pools' node templates, so it means no new node would fit either,
+where a busy fleet reads `max node group size reached`. The launcher posts a
+warning on the build page naming the request, and if the autoscaler still says
+so 10 minutes later it fails the step and records the outcome `unfit`.
+
 **us-central1 holds both the manager and a worker.** They are separate clusters
 with separate control-plane CIDRs, but they share the region's Cloud Router and
 Cloud NAT, and both pull from the same Artifact Registry. Do not declare a second
