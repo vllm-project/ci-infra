@@ -831,6 +831,20 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
     )
     for j in jobs:
         j["preemptions"] = preemptions.get(j["id"], [])
+    # Each queue card's builds with their steps on that queue, so a build that
+    # runs many steps at once says which are on this shape.
+    order = list(JOB_STATES)
+    on_queue = collections.defaultdict(list)
+    for j in jobs:
+        if j["queue_name"] and j["real"] in ("dispatching", "starting", "partly", "running"):
+            on_queue[(j["queue_name"], j["pipeline"], j["number"])].append(j)
+    for q in queues:
+        for b in q.get("builds") or []:
+            steps = on_queue.get((q["name"], b["pipeline"], b["number"]), [])
+            b["steps"] = [
+                {k: j.get(k) for k in ("label", "url", "real", "for", "spot", "detail", "preemptions")}
+                for j in sorted(steps, key=lambda j: (-order.index(j["real"]), -(j["for"] or 0)))
+            ]
     for q in queues:
         for r in (q.get("next_up") or {}).get("rows", []):
             r["preemptions"] = preemptions.get(r["job"]["id"], []) if r["job"] else []
@@ -1780,13 +1794,45 @@ def preempted_line(q: dict) -> str:
     )
 
 
+def queue_steps_row(r: dict, sid: str, now: float) -> str:
+    """A queue card build's steps on that queue, in a row of their own under
+    it: each one's state, how long, and a link to it in the build."""
+    items = "".join(
+        f'<li><span class="muted">{E(JOB_STATES[j["real"]][0])}</span> {job_link(j)} '
+        f'<span class="muted">{ago(j["for"])}</span>'
+        + (' <span class="pill spot">on Spot</span>' if j.get("spot") else "")
+        + preempt_pills(j.get("preemptions") or [], now)
+        + (f' <span class="muted">· {E(j["detail"][:120])}</span>' if j.get("detail") and j["real"] != "running" else "")
+        + "</li>"
+        for j in r["steps"][:40]
+    )
+    more = f'<li class="muted">and {len(r["steps"]) - 40} more</li>' if len(r["steps"]) > 40 else ""
+    return (
+        f'<tr class="steps-row" id="{E(sid)}" hidden><td colspan="7">'
+        f'<ul class="steps-list">{items}{more}</ul></td></tr>'
+    )
+
+
 def render_live_queue(q: dict, now: float) -> str:
+    def sid_of(i: int) -> str:
+        return f"qs-{q['name']}-{i}"
+
+    def count_cell(r: dict, sid: str) -> str:
+        """Its running steps on this queue, opening the list of them."""
+        n = f'{num(r["running"])}{f""" <span class="spot-num">({r["spot"]} on Spot)</span>""" if r.get("spot") else ""}'
+        if not r.get("steps"):
+            return n
+        return (
+            f'<button type="button" class="steps-toggle" aria-expanded="false" aria-controls="{E(sid)}" '
+            f'title="This build\'s steps on {E(queue_title(q))}">{n}</button>'
+        )
+
     builds, builds_more, builds_button = split_rows(
         [
             "<tr>"
             f'<td class="nowrap">{build_link(r)}</td><td class="branch">{E(r["branch"])}</td><td>{E(r["source"])}</td>'
             f'<td class="nowrap">{priority_cell(r)}</td>'
-            f'<td class="n">{num(r["running"])}{f""" <span class="spot-num">({r["spot"]} on Spot)</span>""" if r.get("spot") else ""}'
+            f'<td class="n">{count_cell(r, sid_of(i))}'
             + (
                 f'<div class="sub-row">{num(r["waiting"])} waiting for a node'
                 + (f' <span class="spot-num">({r["spot_waiting"]} on Spot)</span>' if r.get("spot_waiting") else "")
@@ -1798,7 +1844,8 @@ def render_live_queue(q: dict, now: float) -> str:
             + "</td>"
             f'<td class="n">{num(r["held"])}</td>'
             f'<td class="n">{ago(r["running_for"])}</td></tr>'
-            for r in q["builds"]
+            + (queue_steps_row(r, sid_of(i), now) if r.get("steps") else "")
+            for i, r in enumerate(q["builds"])
         ],
         f"run-{q['name']}",
         '<tr><td colspan="7" class="empty">Nothing running.</td></tr>',
