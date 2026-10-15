@@ -664,6 +664,7 @@ def fnrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupSt
                 FNREC_COLLECT_KEY,
                 ":satellite: Collect Python coverage",
                 count_armed=True,
+                large=True,
             )
         ],
     )
@@ -689,6 +690,7 @@ def _collect_step(
     key: str,
     label: str,
     count_armed: bool = False,
+    large: bool = False,
 ) -> "BuildkiteCommandStep":
     blocked = {
         s.key[len("block-") :]
@@ -728,11 +730,18 @@ def _collect_step(
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
         f"{branch}/buildkite/ci_selector/recorders/{recorder}/collect.sh"
     )
-    queue = (
-        AgentQueue.SMALL_CPU_POSTMERGE
-        if get_global_config()["branch"] == "main"
-        else AgentQueue.SMALL_CPU_PREMERGE
-    )
+    # The Python fold holds every job's recordings at once. Nightly vllm/ci
+    # #94688 folded 680 jobs, 51 more than the night before, and the build
+    # died without a word on a 16 GB small-queue agent (r6in.large) in the
+    # merge that had just finished on 629. Only postmerge agents can write the
+    # bucket, and the small queue is the only smaller postmerge one.
+    on_main = get_global_config()["branch"] == "main"
+    if large:
+        queue = AgentQueue.CPU_POSTMERGE if on_main else AgentQueue.CPU_PREMERGE
+    else:
+        queue = (
+            AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
+        )
     return BuildkiteCommandStep(
         label=label,
         key=key,
