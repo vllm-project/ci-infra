@@ -445,6 +445,10 @@ th.group { text-align: center; border-bottom: 1px solid var(--line); }
 .tile span.term .tip { display: block; font-size: 13px; color: #fff; }
 th.n .term:hover .tip, th.n .term:focus .tip { left: auto; right: 0; }
 .table-wrap:has(.term:hover), .table-wrap:has(.term:focus) { overflow: visible; }
+/* A glass card is a stacking context of its own (backdrop-filter), so a
+   tooltip inside it cannot rise above the card after it whatever its z-index;
+   the card holding the term being read rises instead - under the top bar. */
+:is(.card, details.component, .stage, .tile):has(.term:hover, .term:focus) { position: relative; z-index: 4; }
 .shapes-head { margin: 22px 0 4px; font-size: 15px; }
 .shape-row { margin-top: 6px; }
 
