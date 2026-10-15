@@ -3482,3 +3482,112 @@ def test_a_file_the_build_runs_by_path_is_not_inert(state, path):
     claim = _classify(state, path, None)
     assert claim.rule != "inert"
     assert claim.run_all or claim.step_ids & state.auto_step_ids
+
+
+# ---- quiet Python changes: dead modules and comment-only edits -------------
+
+
+def _commit_tree(repo, files: dict[str, str | None], msg: str) -> str:
+    import subprocess
+
+    for path, text in files.items():
+        p = repo / path
+        if text is None:
+            p.unlink()
+        else:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "add", "-A"], check=True, capture_output=True)
+    subprocess.run([*git, "commit", "-qm", msg], check=True, capture_output=True)
+    return subprocess.run(
+        [*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.fixture
+def tiny_repo(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    base = _commit_tree(
+        tmp_path,
+        {
+            "vllm/__init__.py": "",
+            "vllm/scripts.py": "def main():\n    return 1\n",
+            "vllm/used.py": "X = 1\n",
+            "vllm/sibling.py": "from .rel import Y\n",
+            "vllm/rel.py": "Y = 2\n",
+            "vllm/app.py": "from vllm.used import X\n",
+            "vllm/doc.py": '"""Old."""\n\n# old comment\ndef f(a):\n    return a\n',
+            ".buildkite/npu.yaml": 'deps:\n  - "!vllm/scripts.py"\n',
+            # Mentions that are not uses: a link to an old tree and a logger
+            # name that merely starts with the module's dotted name.
+            "docs/design.md": "- <https://github.com/x/blob/abc/vllm/scripts.py#L1>\n",
+            "tools/tune.py": 'log = get("vllm.scripts.tune")\n',
+        },
+        "base",
+    )
+    return tmp_path, base
+
+
+def test_a_deleted_module_nothing_names_is_dead(tiny_repo):
+    from ci_selector.codemap.classify import _deleted_and_unreferenced
+
+    repo, _ = tiny_repo
+    # Only a `!path` exclusion in a step's deps still names it.
+    head = _commit_tree(repo, {"vllm/scripts.py": None}, "drop scripts")
+    assert _deleted_and_unreferenced(repo, head, "vllm/scripts.py")
+
+
+def test_a_deleted_module_still_imported_or_named_is_not_dead(tiny_repo):
+    from ci_selector.codemap.classify import _deleted_and_unreferenced
+
+    repo, _ = tiny_repo
+    head = _commit_tree(repo, {"vllm/used.py": None, "vllm/rel.py": None}, "drop")
+    entry = _commit_tree(
+        repo, {"vllm/scripts.py": None, "pyproject.toml": 'x = "vllm.scripts:main"\n'}, "ep"
+    )
+    assert not _deleted_and_unreferenced(repo, entry, "vllm/scripts.py")  # entry point
+    assert not _deleted_and_unreferenced(repo, head, "vllm/used.py")  # dotted import
+    assert not _deleted_and_unreferenced(repo, head, "vllm/rel.py")  # relative import
+    assert not _deleted_and_unreferenced(repo, head, "vllm/__init__.py")
+    assert not _deleted_and_unreferenced(repo, "no-such-ref", "vllm/scripts.py")
+
+
+def test_a_comment_only_edit_has_the_same_ast(tiny_repo):
+    from ci_selector.codemap.classify import _same_python_ast
+
+    repo, base = tiny_repo
+    path = "vllm/doc.py"
+    comments = _commit_tree(
+        repo, {path: '"""Old."""\n# new comment\n\ndef f(a):  # why\n    return a\n'}, "c"
+    )
+    assert _same_python_ast(repo, base, comments, path)
+    docstring = _commit_tree(repo, {path: '"""New."""\ndef f(a):\n    return a\n'}, "d")
+    assert not _same_python_ast(repo, comments, docstring, path)
+    code = _commit_tree(repo, {path: '"""New."""\ndef f(a):\n    return a + 1\n'}, "e")
+    assert not _same_python_ast(repo, docstring, code, path)
+
+
+def test_quiet_python_changes_select_nothing(state, monkeypatch):
+    """vllm#60923 deleted vllm/scripts.py, a shim nothing imported. The
+    empty-closure fail-open ran all 194 steps; a dead module or a comment-only
+    edit now selects nothing and leaves the rest of the diff to decide."""
+    import ci_selector.codemap.classify as classify
+    from ci_selector.codemap.state import DiffContext
+
+    path = "vllm/entrypoints/cli/main.py"
+    ctx = DiffContext(base="b", head="h", status={path: "D"})
+    monkeypatch.setattr(classify, "_deleted_and_unreferenced", lambda *a: True)
+    claim = classify._classify(state, path, ctx)
+    assert claim.rule == "inert" and not claim.run_all and not claim.step_ids
+
+    ctx = DiffContext(base="b", head="h", status={path: "M"})
+    monkeypatch.setattr(classify, "_same_python_ast", lambda *a: True)
+    claim = classify._classify(state, path, ctx)
+    assert claim.rule == "inert" and not claim.run_all and not claim.step_ids
+
+    # A real edit keeps the ordinary rules.
+    monkeypatch.setattr(classify, "_same_python_ast", lambda *a: False)
+    assert classify._classify(state, path, ctx).step_ids
