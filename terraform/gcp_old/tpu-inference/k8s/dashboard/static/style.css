@@ -120,6 +120,7 @@ a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
 .state-chip b { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
 .state-chip small { font-size: 12px; color: var(--ink-2); }
 .state-chip.zero b { color: var(--muted); font-weight: 500; }
+.state-chip small.sub { font-size: 11px; color: var(--muted); }
 .steps-toggle, .steps-toggle:hover { font: inherit; font-size: 13px; color: var(--ink); background: none;
   border: 0; border-radius: 0; padding: 0; box-shadow: none; cursor: pointer; }
 .steps-toggle::before { content: "\25B6"; display: inline-block; margin-right: 6px; font-size: 9px;
