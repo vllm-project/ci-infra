@@ -1906,21 +1906,43 @@ def job_link(j: dict) -> str:
 FIRST_ROWS = 5
 
 
+# The summary of where every kube job is: JOB_STATES grouped into the four
+# stages a step passes through. The tables below keep each job's own state.
+JOB_STAGES = (
+    (
+        "Before Kueue",
+        ("held", "waiting_agent", "agent_pending", "launching"),
+        "Buildkite has the step: held by its concurrency group, waiting for or starting its agent pod, "
+        "or the launcher checking out and submitting.",
+    ),
+    ("Waiting for quota", ("queued",), "Submitted to Kueue, waiting for its shape's quota."),
+    (
+        "Starting",
+        ("dispatching", "starting", "partly"),
+        "Quota reserved: being handed to a worker, waiting for a node, or its pods starting - some may "
+        "already run.",
+    ),
+    ("Running", ("running",), "Admitted and every pod up."),
+)
+
+
 def render_jobs(snap: dict) -> str:
     jobs = snap["jobs"]
     counts = {k: 0 for k in JOB_STATES}
     for j in jobs:
         counts[j["real"]] += 1
 
-    states = (
-        '<div class="state-row">'
-        + "".join(
-            f'<div class="state-chip{" zero" if not counts[k] else ""}" title="{E(desc)}">'
-            f"<b>{counts[k]}</b><small>{E(name)}</small></div>"
-            for k, (name, desc) in JOB_STATES.items()
+    def stage(name: str, keys: tuple, desc: str) -> str:
+        total = sum(counts[k] for k in keys)
+        # Which of its states the count is made of, when it is more than one.
+        parts = [f"{counts[k]} {JOB_STATES[k][0].lower()}" for k in keys if counts[k]]
+        sub = f'<small class="sub">{E(" · ".join(parts))}</small>' if len(keys) > 1 and parts else ""
+        return (
+            f'<div class="state-chip{" zero" if not total else ""}" title="{E(desc)}">'
+            f"<b>{total}</b><small>{E(name)}</small>{sub}</div>"
         )
-        + "</div>"
-    )
+
+    states = '<div class="state-row">' + "".join(stage(*s) for s in JOB_STAGES) + "</div>"
 
     def groups(selected: list) -> list:
         """One row per build, state and queue: a build's steps usually move
@@ -2013,7 +2035,7 @@ def render_jobs(snap: dict) -> str:
         '<tr><td colspan="4" class="empty">None.</td></tr>',
     )
     return f"""{states}
-<p class="muted lead">Where each kube job is, grouped by build. Hover a count for what the state means.</p>
+<p class="muted lead">Where each kube job is, grouped by build. Hover a count for what the stage means.</p>
 <h3>Not all running yet <span class="muted">({len(waiting)} jobs)</span></h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>State</th><th>Queue</th><th>Steps</th>
 <th class="n">Longest</th><th>Detail</th></tr></thead><tbody>{waiting_rows}</tbody>{more_rows}</table></div>
