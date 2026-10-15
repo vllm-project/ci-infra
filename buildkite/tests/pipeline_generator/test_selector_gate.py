@@ -57,8 +57,8 @@ def test_a_pr_build_records_the_selectors_keys():
 @pytest.mark.parametrize(
     "change, why",
     [
-        ({"pull_request": "false"}, "not a pull request"),
         ({"branch": "main"}, "main branch"),
+        ({"branch": "releases/v0.20"}, "release branch"),
         ({"nightly": "1"}, "nightly"),
         ({"run_all": True}, "run-all"),
         ({"only_step_keys": frozenset({"x"})}, "VLLM_CI_ONLY_STEP_KEYS"),

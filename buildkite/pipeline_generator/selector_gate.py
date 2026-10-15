@@ -5,7 +5,7 @@ Off unless `VLLM_CI_SELECTOR` is set:
   on      the selector's step keys replace the source_file_dependencies rules
   shadow  the selector runs and its decision is recorded; nothing changes
 
-Only PR builds are selected. Main, nightly, run-all and docs-only builds, and
+Only PR and branch builds are selected. Main, release-branch, nightly, run-all and docs-only builds, and
 builds that already name their steps (`VLLM_CI_ONLY_STEP_KEYS`), keep today's
 rules. Any failure keeps them too: the selector cannot be fetched or run, it
 times out, it declines to name steps (its own fail-open), or it names a step
@@ -48,11 +48,13 @@ def mode() -> str:
 
 def skip_reason(global_config: Dict[str, Any]) -> Optional[str]:
     """Why this build keeps today's rules without asking the selector."""
-    pull_request = global_config.get("pull_request")
-    if not pull_request or pull_request == "false":
-        return "not a pull request build"
-    if global_config.get("branch") == "main":
+    # A branch build diffs against its merge base with main, as a PR build
+    # does, so it is selected the same way. Main and release branches are not.
+    branch = global_config.get("branch") or ""
+    if not branch or branch == "main":
         return "main branch build"
+    if branch.startswith("releases/"):
+        return "release branch build"
     if global_config.get("nightly") == "1":
         return "nightly build (runs every step)"
     if global_config.get("run_all"):
