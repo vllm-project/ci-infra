@@ -93,13 +93,18 @@ module "eks" {
       ami_type       = "AL2023_x86_64_NVIDIA"
       instance_types = ["g6.12xlarge"]
       capacity_type  = "ON_DEMAND"
-      # 25 warm nodes at all times (fast job pickup, warm FSx clients, and holds
+      # 32 warm nodes at all times (fast job pickup, warm FSx clients, and holds
       # g6.12xlarge capacity against frequent AWS InsufficientInstanceCapacity
-      # in us-west-2), CA scales to 50 under load. Note: 25x g6.12xlarge
-      # on-demand 24/7 is ~$49k/mo — revisit with utilization data.
-      min_size     = 25
+      # in us-west-2), CA scales to 50 under load. Sized from 3 days of
+      # l4-k8s demand (Oct 2026): ~72 GPUs average, 105-120 GPUs in US-daytime
+      # peak hours; 25 nodes (100 GPUs) was saturated ~14:00-04:00 UTC and
+      # CA scale-up almost always failed with ICE. Note: 32x g6.12xlarge
+      # on-demand 24/7 is ~$63k/mo. desired_size is ignored by the module
+      # after creation, so raise it with the AWS CLI before applying a higher
+      # min_size.
+      min_size     = 32
       max_size     = 50
-      desired_size = 25
+      desired_size = 32
 
       labels = {
         "vllm.ci/gpu-pool"              = "l4x4"
