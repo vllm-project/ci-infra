@@ -153,3 +153,20 @@ def test_the_gate_is_inert_when_off(pr_config, monkeypatch):
     monkeypatch.delenv(selector_gate.SELECTOR_ENV_VAR)
     assert pg._selector_decision(_steps()) is None
     assert pr_config["only_step_keys"] is None
+
+
+def test_optional_steps_stay_optional(pr_config, monkeypatch):
+    """The selector named a nightly-only step on a PR (vllm#61804): it is
+    dropped, recorded, and the rest still applies."""
+    steps = _steps() + [
+        Step(label="Nightly", key="test-nightly", optional=True, commands=["n"],
+             depends_on=["image-build"]),
+    ]
+    monkeypatch.setattr(
+        selector_gate, "run_ci_select", _emission(["test-b", "test-nightly", "amd-test-nightly"])
+    )
+    record = pg._selector_decision(steps)
+    assert record["applied"] is True
+    assert record["selector_keys"] == ["test-b"]
+    assert record["selector_optional_dropped"] == ["amd-test-nightly", "test-nightly"]
+    assert pr_config["only_step_keys"] == frozenset({"test-b"})

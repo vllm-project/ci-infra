@@ -176,6 +176,12 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
         record = selector_gate.decide(global_config, legacy)
         keys = record["selector_keys"]
         if keys:
+            # A PR build never runs optional (nightly / manual) steps today, and
+            # the selector does not get to start doing so: they stay optional.
+            optional = selector_gate.optional_keys(steps)
+            record["selector_optional_dropped"] = sorted(set(keys) & optional)
+            keys = sorted(set(keys) - optional)
+            record["selector_keys"] = keys
             unknown = sorted(set(keys) - selector_gate.known_keys(steps))
             if unknown:
                 record["fallback"] = "selector named unknown step key(s): " + ", ".join(

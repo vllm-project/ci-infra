@@ -273,3 +273,14 @@ def known_keys(steps: Iterable[Any]) -> FrozenSet[str]:
             if (step.mirror or {}).get("amd"):
                 keys.add(f"amd-{step.key}")
     return frozenset(keys)
+
+
+def optional_keys(steps: Iterable[Any]) -> FrozenSet[str]:
+    """Keys of optional steps and their AMD mirrors: a PR build leaves these
+    to a manual unblock or the nightly, whatever the selector says."""
+    keys = set()
+    for step in steps:
+        if step.key and step.optional:
+            keys.add(step.key)
+            keys.add(f"amd-{step.key}")
+    return frozenset(keys)
