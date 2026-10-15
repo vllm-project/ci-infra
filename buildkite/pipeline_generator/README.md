@@ -70,10 +70,10 @@ repositories:
 A step runs when its `source_file_dependencies` match the change (or on
 nightly / `RUN_ALL` builds); optional steps never run on their own. Every
 other step is left out of the uploaded pipeline. One input step, **Run more
-jobs**, near the top of the build lists them all as checkboxes, one list per
-group (AMD steps under "AMD - <group of their NVIDIA step>"). Buildkite shows
-a select of 7 or more options as a dropdown, so a longer group is split into
-lists of 6, "<group> (1/3)" and so on. Tick any and
+jobs**, near the top of the build lists them all as checkboxes under their
+group names (AMD steps under "AMD - <group of their NVIDIA step>"). Buildkite
+shows a select of six or more options as a dropdown, `multiple` or not, so
+each job is a one-option select of its own. Tick any and
 submit, and a job behind it uploads the ticked steps together with the
 not-yet-uploaded steps they depend on. It then adds a new **Run more jobs** input step for the
 rest, so more can be picked later.

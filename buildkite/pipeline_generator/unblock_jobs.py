@@ -3,7 +3,7 @@
 The generator leaves the jobs it did not select out of the uploaded pipeline
 and writes them to DEFERRED_FILE instead, next to a copy of this script, both
 uploaded as artifacts of the bootstrap job. The pipeline gets one input step
-listing them as checkboxes, one list per group, and a job behind it that runs this script: it uploads the jobs
+listing them as checkboxes under their group names, and a job behind it that runs this script: it uploads the jobs
 picked in the input, with the deferred jobs they depend on, and a new input
 step for whatever is left, so more can be picked later.
 
@@ -23,52 +23,39 @@ SCRIPT_FILE = "unblock_jobs.py"
 
 INPUT_KEY = "run-more-jobs"
 UPLOAD_KEY = "upload-more-jobs"
-# The free-text field of the first round; later rounds add "-<round>". The
-# group checkbox lists add "-group-<group>" to that.
+# The free-text field of the first round; later rounds add "-<round>". Each
+# job's checkbox adds "-job-<step key>" to that.
 FIELD_KEY = "more-jobs"
 # Newline-separated keys of the deferred jobs uploaded so far, across rounds.
 UPLOADED_META_KEY = "more-jobs-uploaded"
 GROUP = ":heavy_plus_sign: Run more jobs"
-# Buildkite shows a select of 7 or more options as a dropdown, multiple or
-# not, so longer groups are split into lists of at most this many.
-MAX_CHECKBOXES = 6
 
 
 def _round_key(prefix: str, round_number: int) -> str:
     return prefix if round_number == 1 else f"{prefix}-{round_number}"
 
 
-def _group_fields(
+def _job_fields(
     entries: List[Dict[str, Any]], round_number: int
-) -> List[Tuple[str, str, List[Dict[str, Any]]]]:
-    """(field key, list name, entries) for each checkbox list, in order.
+) -> List[Tuple[str, str, Dict[str, Any]]]:
+    """(field key, field label, entry) for each job, one checkbox each.
 
-    An entry is listed under its "list" if it has one, else its group. A
-    group longer than MAX_CHECKBOXES becomes "<group> (1/3)", "(2/3)", ...
+    Buildkite documents a multiple select as checkboxes, but shows one of six
+    or more options as a dropdown, so every job is a select of its own. The
+    first job of each list carries the list's name as its label, the rest a
+    blank one, so the dialog reads as a heading over its checkboxes. An entry
+    is listed under its "list" if it has one, else its group.
     """
-    by_group: Dict[str, List[Dict[str, Any]]] = {}
+    by_list: Dict[str, List[Dict[str, Any]]] = {}
     for entry in entries:
-        by_group.setdefault(entry.get("list", entry["group"]), []).append(entry)
-    lists = []
-    for group, group_entries in by_group.items():
-        chunks = [
-            group_entries[i : i + MAX_CHECKBOXES]
-            for i in range(0, len(group_entries), MAX_CHECKBOXES)
-        ]
-        for i, chunk in enumerate(chunks, 1):
-            name = f"{group} ({i}/{len(chunks)})" if len(chunks) > 1 else group
-            lists.append((name, chunk))
+        by_list.setdefault(entry.get("list", entry["group"]), []).append(entry)
+    prefix = f"{_round_key(FIELD_KEY, round_number)}-job-"
     fields = []
-    used: Set[str] = set()
-    for group, group_entries in lists:
-        slug = re.sub(r"[^a-z0-9]+", "-", group.lower()).strip("-") or "jobs"
-        key = f"{_round_key(FIELD_KEY, round_number)}-group-{slug}"
-        suffix = 2
-        while key in used:
-            key = f"{_round_key(FIELD_KEY, round_number)}-group-{slug}-{suffix}"
-            suffix += 1
-        used.add(key)
-        fields.append((key, group, group_entries))
+    for name, list_entries in by_list.items():
+        for i, entry in enumerate(list_entries):
+            # Field keys allow letters, digits, "/", "-" and "_".
+            key = prefix + re.sub(r"[^A-Za-z0-9/_-]", "_", entry["step"]["key"])
+            fields.append((key, name if i == 0 else "", entry))
     return fields
 
 
@@ -91,9 +78,7 @@ def more_jobs_group(
     """The input step listing `entries`, and the job that uploads the picks.
 
     Each entry is {"group": ..., "step": <Buildkite command step>}, and
-    optionally "list", the checkbox list to show it in. A select
-    with `multiple` shows its options as checkboxes; one per group keeps each
-    list short enough to read, under the group's name.
+    optionally "list", the heading to show it under.
     """
     input_key = _round_key(INPUT_KEY, round_number)
     fields: List[Dict[str, Any]] = [
@@ -107,19 +92,18 @@ def more_jobs_group(
             ),
         }
     ]
-    for key, group, group_entries in _group_fields(entries, round_number):
+    for key, label, entry in _job_fields(entries, round_number):
         fields.append(
             {
-                "select": group,
+                "select": label,
                 "key": key,
                 "multiple": True,
                 "required": False,
                 "options": [
                     {
-                        "label": _option_label(e["step"]["label"]),
-                        "value": e["step"]["key"],
+                        "label": _option_label(entry["step"]["label"]),
+                        "value": entry["step"]["key"],
                     }
-                    for e in group_entries
                 ],
             }
         )
@@ -184,6 +168,17 @@ def _grouped(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [{"group": group, "steps": steps} for group, steps in groups.items()]
 
 
+def _meta_data_keys() -> Set[str]:
+    return set(
+        subprocess.run(
+            ["buildkite-agent", "meta-data", "keys"],
+            check=True,
+            stdout=subprocess.PIPE,
+            universal_newlines=True,
+        ).stdout.split()
+    )
+
+
 def _meta_data_get(key: str) -> str:
     # `exists` exits 100 for a key that was never set.
     exists = subprocess.run(["buildkite-agent", "meta-data", "exists", key])
@@ -211,8 +206,11 @@ def main(argv: List[str]) -> None:
     picked = set(
         _meta_data_get(_round_key(FIELD_KEY, round_number)).replace(",", " ").split()
     )
-    for key, _, _ in _group_fields(entries, round_number):
-        picked.update(_meta_data_get(key).split())
+    # One lookup per ticked box, not per job: an unticked one sets no key.
+    ticked = _meta_data_keys()
+    for key, _, _ in _job_fields(entries, round_number):
+        if key in ticked:
+            picked.update(_meta_data_get(key).split())
     selected, remaining = pick(entries, picked)
 
     groups = _grouped(selected)

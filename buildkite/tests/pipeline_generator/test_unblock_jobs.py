@@ -102,17 +102,17 @@ def test_more_jobs_group_lists_every_entry():
     input_step, upload_step = group["steps"]
     assert input_step["key"] == "run-more-jobs"
     assert input_step["depends_on"] == []
-    text, kernels, models = input_step["fields"]
+    text, a, b = input_step["fields"]
     assert text["key"] == "more-jobs"
     assert text["required"] is False
-    # One checkbox list per group: a multiple select renders as checkboxes.
-    assert [(f["select"], f["key"]) for f in (kernels, models)] == [
-        ("Kernels", "more-jobs-group-kernels"),
-        ("Models", "more-jobs-group-models"),
+    # One checkbox per job, headed by its group's name.
+    assert [(f["select"], f["key"]) for f in (a, b)] == [
+        ("Kernels", "more-jobs-job-a"),
+        ("Models", "more-jobs-job-b"),
     ]
-    assert all(f["multiple"] and not f["required"] for f in (kernels, models))
-    assert kernels["options"] == [{"label": "A", "value": "a"}]
-    assert models["options"] == [{"label": "B", "value": "b"}]
+    assert all(f["multiple"] and not f["required"] for f in (a, b))
+    assert a["options"] == [{"label": "A", "value": "a"}]
+    assert b["options"] == [{"label": "B", "value": "b"}]
     assert upload_step["depends_on"] == ["run-more-jobs"]
     assert upload_step["agents"] == {"queue": "small_cpu_queue_premerge"}
     (command,) = upload_step["commands"]
@@ -126,7 +126,7 @@ def test_later_rounds_get_their_own_keys():
     assert input_step["key"] == "run-more-jobs-3"
     assert [f["key"] for f in input_step["fields"]] == [
         "more-jobs-3",
-        "more-jobs-3-group-g",
+        "more-jobs-3-job-a",
     ]
     assert upload_step["key"] == "upload-more-jobs-3"
     assert upload_step["depends_on"] == ["run-more-jobs-3"]
@@ -143,7 +143,9 @@ class FakeAgent:
         assert command[0] == "buildkite-agent"
         stdout = ""
         returncode = 0
-        if command[1:3] == ["meta-data", "exists"]:
+        if command[1:3] == ["meta-data", "keys"]:
+            stdout = "\n".join(self.meta_data)
+        elif command[1:3] == ["meta-data", "exists"]:
             returncode = 0 if command[3] in self.meta_data else 100
         elif command[1:3] == ["meta-data", "get"]:
             stdout = self.meta_data[command[3]]
@@ -157,13 +159,19 @@ class FakeAgent:
         return subprocess.CompletedProcess(command, returncode, stdout=stdout)
 
 
-def test_group_field_keys_stay_unique():
-    fields = unblock_jobs._group_fields(
-        [_entry("a", group="Hardware AMD"), _entry("b", group="Hardware-AMD")], 1
+def test_only_the_first_job_of_a_group_carries_its_heading():
+    fields = unblock_jobs._job_fields(
+        [
+            _entry("a", group="CPU"),
+            _entry("b", group="CPU"),
+            _entry("c.d", group="GPU"),
+        ],
+        1,
     )
-    assert [key for key, _, _ in fields] == [
-        "more-jobs-group-hardware-amd",
-        "more-jobs-group-hardware-amd-2",
+    assert [(key, label) for key, label, _ in fields] == [
+        ("more-jobs-job-a", "CPU"),
+        ("more-jobs-job-b", ""),
+        ("more-jobs-job-c_d", "GPU"),
     ]
 
 
@@ -177,7 +185,7 @@ def test_main_uploads_picks_then_offers_the_rest(tmp_path, monkeypatch):
     (tmp_path / unblock_jobs.DEFERRED_FILE).write_text(
         json.dumps({"source_job": "job-1", "queue": "q", "steps": entries})
     )
-    agent = FakeAgent({"more-jobs-group-g": "a"})
+    agent = FakeAgent({"more-jobs-job-a": "a"})
     monkeypatch.setattr(unblock_jobs.subprocess, "run", agent.run)
 
     unblock_jobs.main(["unblock_jobs.py", "1", str(tmp_path)])
@@ -196,7 +204,7 @@ def test_main_uploads_picks_then_offers_the_rest(tmp_path, monkeypatch):
     # and with nothing left there is no third input step. The text field
     # and the checkboxes add up.
     agent.meta_data["more-jobs-2"] = "b"
-    agent.meta_data["more-jobs-2-group-g"] = "c"
+    agent.meta_data["more-jobs-2-job-c"] = "c"
     unblock_jobs.main(["unblock_jobs.py", "2", str(tmp_path)])
 
     upload = agent.uploads[-1]
@@ -276,20 +284,6 @@ def test_amd_steps_are_listed_under_their_nvidia_group(tmp_path, monkeypatch):
     assert {
         e["group"] for e in saved["steps"] if e["step"]["key"].startswith("amd-")
     } == {buildkite_step.AMD_GROUP}
-
-
-def test_long_groups_are_split_into_short_checkbox_lists():
-    """Buildkite shows a select of 7 or more options as a dropdown."""
-    entries = [_entry(f"k{i}", group="Kernels") for i in range(13)]
-
-    fields = unblock_jobs._group_fields(entries, 1)
-
-    assert [(name, len(chunk)) for _, name, chunk in fields] == [
-        ("Kernels (1/3)", 6),
-        ("Kernels (2/3)", 6),
-        ("Kernels (3/3)", 1),
-    ]
-    assert len({key for key, _, _ in fields}) == 3
 
 
 def test_option_labels_drop_emoji_codes_and_job_placeholders():
