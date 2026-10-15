@@ -39,19 +39,19 @@ module "ci_v7x_8" {
   vllm_torchtpu_ssh_checkout = true
 }
 
-# Twelve tpu7x-2s: the PR builds left on bare metal start many single-chip
-# steps at once (tpu-inference's unit tests hold one chip for up to 90
-# minutes), and below about twelve agents they queue. Four of the sixteen these
-# began as went back to the reservation, offsetting the tpu7x-16's borrowed
-# chips. A replay of 10-08 (vllm-torchtpu PRs at 75% and tpu-inference PRs at
-# 50% on kube) put twelve at a p90 wait of about 25 minutes.
+# Eight tpu7x-2s for the PR builds left on bare metal, which start their
+# single-chip steps all at once. The rest of the sixteen these began as went
+# back to the reservation. With every tpu-inference PR on bare metal (10-15),
+# twelve were 32% busy and a PR build filled all of them; replaying those
+# steps (p50 6, max 29 minutes) on eight put the wait at p90 4 and max 10
+# minutes, against 0 and 3 on twelve.
 module "ci_v7x_2" {
   source = "../modules/ci_v7x_gce"
   providers = {
     google-beta = google-beta.us-central1-c
   }
 
-  slice_count                           = 12
+  slice_count                           = 8
   hosts_per_slice                       = 1
   chips_per_host                        = 1
   topology                              = null
@@ -72,7 +72,7 @@ module "ci_v7x_2" {
 # One tpu7x-16 (two tpu7x-standard-4t hosts in one ICI domain) for the
 # multi-host steps of builds that stay on bare metal, now that the cicd
 # reservation is all in the kube v7x lane. Its 8 chips come from the
-# reservation's free capacity; with four tpu7x-2s returned, the fleet holds 52
+# reservation's free capacity; with eight tpu7x-2s returned, the fleet holds 48
 # of it.
 module "ci_v7x_16" {
   source = "../modules/ci_v7x_gce"
