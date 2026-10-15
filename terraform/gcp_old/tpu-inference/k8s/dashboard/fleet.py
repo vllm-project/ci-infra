@@ -335,7 +335,7 @@ def placement(pods: list) -> dict:
     out: dict = {}
     for pod in pods:
         meta, spec, status = pod["metadata"], pod.get("spec", {}), pod.get("status", {})
-        if meta.get("deletionTimestamp") or status.get("phase") in ("Succeeded", "Failed"):
+        if meta.get("deletionTimestamp") or status.get("phase") == "Failed":
             continue
         job = (meta.get("labels") or {}).get("buildkite.com/job-id", "").replace("-", "")
         if not job:
@@ -343,9 +343,15 @@ def placement(pods: list) -> dict:
         row = out.setdefault(
             job,
             {"spot": 0.0, "reserved": 0.0, "spot_waiting": 0.0, "reserved_waiting": 0.0,
-             "pods": 0, "pods_on_node": 0, "pods_running": 0},
+             "pods": 0, "pods_on_node": 0, "pods_running": 0, "pods_done": 0},
         )
         row["pods"] += 1
+        # A pod that has succeeded is the step done, not starting: between it
+        # and Kueue marking the workload finished the workload is still
+        # admitted, and counting no pod up there read as "pods starting".
+        if status.get("phase") == "Succeeded":
+            row["pods_done"] += 1
+            continue
         row["pods_on_node"] += 1 if spec.get("nodeName") else 0
         row["pods_running"] += 1 if status.get("phase") == "Running" else 0
         chips = sum(
@@ -579,6 +585,7 @@ def fetch_kueue(cfg: Config) -> dict:
                 "pods_total": place.get("pods", 0),
                 "pods_on_node": place.get("pods_on_node", 0),
                 "pods_running": place.get("pods_running", 0),
+                "pods_done": place.get("pods_done", 0),
                 # The WorkloadPriorityClass the launcher set, and the value Kueue
                 # copied from it: what orders the queue. Buildkite's own job
                 # priority is a different scale and orders nothing here. None

@@ -709,7 +709,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 row["oldest_wait"] = max(row["oldest_wait"] or 0, now - w["since"])
                 reason = pending_reason(w["reason"])
                 reasons[reason] = reasons.get(reason, 0) + 1
-            elif w.get("pods_ready"):
+            elif pods_all_up(w):
                 row["running"] += 1
                 row["held"] += w["amount"]
                 row["spot"] += 1 if w.get("spot") else 0
@@ -723,7 +723,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 # is still coming up - else waiting for a node: a scale-up, or
                 # a Spot stockout. Reserved quota is held all the same; Spot
                 # chips with no node hold nothing.
-                if w.get("pods_running"):
+                if pods_up(w):
                     row["partly"] += 1
                 else:
                     row["waiting"] += 1
@@ -750,17 +750,17 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 # waiting for a node - a scale-up, or a Spot stockout - which
                 # hold quota but run nothing.
                 "running_steps": sum(
-                    1 for w in wls if w["state"] == "admitted" and w.get("pods_ready")
+                    1 for w in wls if w["state"] == "admitted" and pods_all_up(w)
                 ),
                 "partly_steps": sum(
                     1
                     for w in wls
-                    if w["state"] == "admitted" and not w.get("pods_ready") and w.get("pods_running")
+                    if w["state"] == "admitted" and not pods_all_up(w) and pods_up(w)
                 ),
                 "starting_steps": sum(
                     1
                     for w in wls
-                    if w["state"] == "admitted" and not w.get("pods_ready") and not w.get("pods_running")
+                    if w["state"] == "admitted" and not pods_all_up(w) and not pods_up(w)
                 ),
                 "dispatching": sum(1 for w in wls if w["state"] == "dispatching"),
                 "pending": len(pending),
@@ -1112,6 +1112,18 @@ def preempt_pills(events: list, now: float) -> str:
     )
 
 
+def pods_up(w: dict) -> int:
+    """A workload's pods on the worker that run or have finished."""
+    return (w.get("pods_running") or 0) + (w.get("pods_done") or 0)
+
+
+def pods_all_up(w: dict) -> bool:
+    """Every pod of an admitted workload up: Kueue's PodsReady, or what the
+    worker's pods say when the manager's condition has not caught up - every
+    pod running or done."""
+    return bool(w.get("pods_ready") or (w.get("pods_total") and pods_up(w) == w["pods_total"]))
+
+
 def kube_jobs(
     bk_jobs: list, workloads: list, pods: list, queues: dict, now: float
 ) -> list:
@@ -1141,16 +1153,17 @@ def kube_jobs(
         elif w["state"] == "dispatching":
             state, since = "dispatching", w["since"]
         else:
-            state = (
-                "running" if w.get("pods_ready")
-                else "partly" if w.get("pods_running")
-                else "starting"
-            )
+            state = "running" if pods_all_up(w) else "partly" if pods_up(w) else "starting"
             since = w["since"]
-            total, up, placed = (w.get(k) or 0 for k in ("pods_total", "pods_running", "pods_on_node"))
+            total, up, done, placed = (
+                w.get(k) or 0 for k in ("pods_total", "pods_running", "pods_done", "pods_on_node")
+            )
             if state != "running" and total:
-                detail = f"{up} of {total} pods running" + (
-                    f", {total - placed} waiting for a node" if total > placed else ", the rest starting"
+                waiting = total - done - placed
+                detail = (
+                    f"{up} of {total} pods running"
+                    + (f", {done} done" if done else "")
+                    + (f", {waiting} waiting for a node" if waiting else ", the rest starting")
                 )
         q = queues.get(w["queue"]) if w else None
         out.append(
