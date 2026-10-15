@@ -25,6 +25,7 @@ validation here covers only what admission cannot know.
 
 import argparse
 import copy
+import datetime
 import json
 import os
 import re
@@ -171,6 +172,19 @@ FIRST_LOG_POLL_SECONDS = 2
 # gives up on a scale-up minutes after starting it, so a slower read loses
 # nothing and saves a Connect Gateway round trip per turn.
 SPOT_EVENTS_POLL_SECONDS = 30
+# How long the cluster autoscaler has to keep saying that no node of the
+# shape could hold a pod before the run fails. Long enough that one odd
+# verdict, or a pool's node template catching up after a change, does not end
+# a run that could still start; a pod that never fits holds its chips' quota
+# until then, where without this it held it until waitForPodsReady (hours).
+UNFIT_WAIT_SECONDS = 600
+# An autoscaler verdict counts only while it is this fresh: it repeats the
+# event every few minutes for as long as the pod stays unschedulable.
+UNFIT_VERDICT_MAX_AGE_SECONDS = 300
+# What a container can ask for more of than a whole node has. A busy fleet
+# reads differently - "max node group size reached", "out of resources" - and
+# passes; an Insufficient one of these against a pool's node template does not.
+UNFIT_REASON = re.compile(r"\b(\d+) Insufficient (ephemeral-storage|memory|cpu)\b")
 
 # Worker credentials are kept out of the default kubeconfig; see worker_env().
 WORKER_KUBECONFIG = "/tmp/worker.kubeconfig"
@@ -295,6 +309,41 @@ def announce_waiting(context, queue, note):
 
 def withdraw_waiting(context):
     agent("annotation", "remove", "--context", context)
+
+
+def unfit_context():
+    job_id = os.environ.get("BUILDKITE_JOB_ID")
+    return f"kueue-unfit-{job_id}" if job_id else None
+
+
+def announce_unfit(queue, asks, verdict, manifest, final):
+    """Tell the step's owner on the build page that its pods ask for more than
+    a node of its shape has: a warning while the launcher waits, an error once
+    it fails the step."""
+    context = unfit_context()
+    if not context:
+        return
+    label = os.environ.get("BUILDKITE_LABEL", "this step")
+    shown = os.path.relpath(manifest)
+    manifest = manifest if shown.startswith("..") else shown
+    if final:
+        style, text = "error", (
+            f":x: **{label}** failed without running: its pods ask for {asks}, "
+            f"more than a `{queue}` node has, so no node could ever be made for "
+            f"them. Lower the request in `{manifest}`.")
+    else:
+        style, text = "warning", (
+            f":warning: **{label}** cannot start: its pods ask for {asks}, more "
+            f"than a `{queue}` node has (cluster autoscaler: {verdict}). It "
+            f"fails in {UNFIT_WAIT_SECONDS // 60} minutes unless that changes; "
+            f"the request is in `{manifest}`.")
+    agent("annotate", "--context", context, "--style", style, text)
+
+
+def withdraw_unfit():
+    context = unfit_context()
+    if context:
+        agent("annotation", "remove", "--context", context)
 
 
 def kubectl(*args, check=True, timeout=CLI_TIMEOUT_SECONDS):
@@ -442,6 +491,68 @@ def spot_scale_up_failed(env, pod):
     if not events:
         return None
     return events[0].get("message") or "FailedScaleUp"
+
+
+def unplaced_chip_pod(items):
+    """The first chip-holding pod with no node, else None."""
+    for pod in items or []:
+        spec = pod.get("spec", {})
+        if (pod_chips(spec) and not spec.get("nodeName")
+                and pod.get("status", {}).get("phase") == "Pending"):
+            return pod
+    return None
+
+
+def event_age(event):
+    """Seconds since an event last happened, or None."""
+    when = event.get("lastTimestamp") or event.get("eventTime")
+    if not when:
+        return None
+    try:
+        t = datetime.datetime.fromisoformat(when.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()
+
+
+def unfit_verdict(env, pod):
+    """The cluster autoscaler's word that no node of any pool would fit this
+    pod, else None: the "N Insufficient <resource>" parts of its latest
+    NotTriggerScaleUp, if that is current.
+
+    Not the scheduler's FailedScheduling, which judges only the nodes that
+    exist and reads the same while a slice is still being made. The autoscaler
+    weighs each pool's node template - what a new node would have - so
+    Insufficient ephemeral-storage there means the pod asks for more than any
+    node of its shape can give. A shape's pools share one machine type and
+    disk, so one pool's verdict is all of them.
+    """
+    proc = worker_kubectl(
+        env, "get", "events", "--field-selector",
+        f"involvedObject.name={pod},reason=NotTriggerScaleUp", "-o", "json",
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        events = json.loads(proc.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return None
+    fresh = [e for e in events if (event_age(e) or 1e9) <= UNFIT_VERDICT_MAX_AGE_SECONDS]
+    if not fresh:
+        return None
+    newest = min(fresh, key=lambda e: event_age(e) or 1e9)
+    found = UNFIT_REASON.findall(newest.get("message") or "")
+    return ", ".join(f"{n} Insufficient {what}" for n, what in found) or None
+
+
+def asked_for(pod, verdict):
+    """What the pod's containers ask for of the resources a verdict names."""
+    names = set(re.findall(r"Insufficient (\S+)", verdict))
+    parts = []
+    for c in pod.get("spec", {}).get("initContainers", []) + pod.get("spec", {}).get("containers", []):
+        requests = (c.get("resources") or {}).get("requests") or {}
+        parts += [f"{c['name']} {k} {v}" for k, v in requests.items() if k in names]
+    return ", ".join(parts) or "its requests"
 
 
 # DisruptionTarget reasons that mean the node went away under the pod: the
@@ -2234,6 +2345,12 @@ def main():
         spot_failed = None
         spot_excluded = False
         spot_allowed = False
+        # The pod the autoscaler says no node could hold, when its events were
+        # last read, and since when it has kept saying so; see unfit_verdict().
+        unfit_pod = None
+        unfit_read = None
+        unfit_since = None
+        unfit_asks = None
         # Since when the current submission has waited for reserved chips: the
         # start, or the reclaim that sent it back to the queue.
         spot_offer_from = started
@@ -2403,6 +2520,48 @@ def main():
                     "at /cache/jax or /dev/shm.")
                 delete_workload(kind, name)
                 return finish("evicted_storage", 1)
+
+            # Pods that ask for more than any node of their shape has: the
+            # workload is admitted and holds its chips' quota, but no node will
+            # ever be made for them. Said on the build page as soon as the
+            # autoscaler says so, and failed if it keeps saying so.
+            unplaced = unplaced_chip_pod(items) if admitted else None
+            pod_name = unplaced["metadata"]["name"] if unplaced else None
+            if pod_name != unfit_pod:
+                if unfit_since is not None:
+                    withdraw_unfit()
+                unfit_pod, unfit_read, unfit_since = pod_name, None, None
+            if unplaced is not None and (
+                    unfit_read is None
+                    or time.monotonic() - unfit_read >= SPOT_EVENTS_POLL_SECONDS):
+                unfit_read = time.monotonic()
+                verdict = unfit_verdict(genv, pod_name)
+                if verdict and unfit_since is None:
+                    unfit_since = time.monotonic()
+                    unfit_asks = asked_for(unplaced, verdict)
+                    log(f"no {profile['queue']} node can hold {pod_name}: the "
+                        f"cluster autoscaler reports {verdict} for its pools; "
+                        f"it asks for {unfit_asks}. Failing in "
+                        f"{UNFIT_WAIT_SECONDS // 60} minutes unless that changes.")
+                    announce_unfit(profile["queue"], unfit_asks, verdict, manifest,
+                                   final=False)
+                elif not verdict and unfit_since is not None:
+                    log(f"the autoscaler no longer reports that {pod_name} fits "
+                        "no node - waiting on")
+                    withdraw_unfit()
+                    unfit_since = None
+            if (unfit_since is not None
+                    and time.monotonic() - unfit_since > UNFIT_WAIT_SECONDS):
+                timing["finished_at"] = utc_now()
+                print("^^^ +++", flush=True)
+                log(f"no {profile['queue']} node can hold {pod_name} - it asks "
+                    f"for {unfit_asks}, more than a node of the shape has, and the "
+                    f"autoscaler has said so for {UNFIT_WAIT_SECONDS // 60} "
+                    "minutes. Failing now rather than holding the quota: "
+                    f"lower the request in {manifest}.")
+                announce_unfit(profile["queue"], unfit_asks, "", manifest, final=True)
+                delete_workload(kind, name)
+                return finish("unfit", 1)
 
             # Under MultiKueue the local object is a shadow of one that ran on a
             # worker, so its own status may never be filled in. The Workload's

@@ -120,6 +120,7 @@ a.pill { text-decoration: none; } a.pill:hover { background: var(--line); }
 .state-chip b { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
 .state-chip small { font-size: 12px; color: var(--ink-2); }
 .state-chip.zero b { color: var(--muted); font-weight: 500; }
+.state-chip small.sub { font-size: 11px; color: var(--muted); }
 .steps-toggle, .steps-toggle:hover { font: inherit; font-size: 13px; color: var(--ink); background: none;
   border: 0; border-radius: 0; padding: 0; box-shadow: none; cursor: pointer; }
 .steps-toggle::before { content: "\25B6"; display: inline-block; margin-right: 6px; font-size: 9px;
@@ -444,6 +445,10 @@ th.group { text-align: center; border-bottom: 1px solid var(--line); }
 .tile span.term .tip { display: block; font-size: 13px; color: #fff; }
 th.n .term:hover .tip, th.n .term:focus .tip { left: auto; right: 0; }
 .table-wrap:has(.term:hover), .table-wrap:has(.term:focus) { overflow: visible; }
+/* A glass card is a stacking context of its own (backdrop-filter), so a
+   tooltip inside it cannot rise above the card after it whatever its z-index;
+   the card holding the term being read rises instead - under the top bar. */
+:is(.card, details.component, .stage, .tile):has(.term:hover, .term:focus) { position: relative; z-index: 4; }
 .shapes-head { margin: 22px 0 4px; font-size: 15px; }
 .shape-row { margin-top: 6px; }
 
@@ -620,3 +625,15 @@ table.poles td.follower { min-width: 140px; max-width: 220px; }
    what was borrowed. Spot's own causes wear .pill.spot. Small beside a name. */
 .pill.preempt { background: var(--borrowed-bg); color: #9a3a12; }
 .steps-list .pill, td .pill.preempt, td .pill.spot { font-size: 11px; padding: 0 7px; cursor: help; }
+/* Period over period: a generation's figures beside its day-by-day charts.
+   A change carries an arrow and its amount; the color says better or worse,
+   never alone - and a figure that is neither better nor worse stays ink. */
+.pop-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.pop-charts { display: grid; gap: 12px; }
+.pop-when { margin-left: 12px; }
+table.pop-table td:first-child { white-space: nowrap; }
+.delta { font-size: 13px; font-variant-numeric: tabular-nums; }
+.delta.good { color: #1d6b31; } .delta.bad { color: #b3261e; }
+.delta.neutral { color: var(--ink-2); } .delta.flat { color: var(--muted); }
+ul.changes { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; }
+@media (max-width: 1000px) { .pop-grid { grid-template-columns: 1fr; } }

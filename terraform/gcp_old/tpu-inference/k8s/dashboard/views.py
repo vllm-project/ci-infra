@@ -15,6 +15,7 @@ from pathlib import Path
 
 from charts import gap_chart, line_chart, share_bars, stacked_chart, values_table
 from fleet import (
+    TEST_OUTCOMES as FLEET_TEST_OUTCOMES,
     BK_LIMITED,
     BK_WAITING,
     DUTY_MODELS,
@@ -32,6 +33,7 @@ OVERVIEW_PAGE = string.Template((TEMPLATES / "overview.html").read_text())
 MIGRATION_PAGE = string.Template((TEMPLATES / "migration.html").read_text())
 JOBS_PAGE = string.Template((TEMPLATES / "jobs.html").read_text())
 CAPACITY_PAGE = string.Template((TEMPLATES / "capacity.html").read_text())
+REVIEW_PAGE = string.Template((TEMPLATES / "review.html").read_text())
 STEPS_PAGE = string.Template((TEMPLATES / "steps.html").read_text())
 # The bare-metal fleet before the migration, built once from the snapshot by
 # baseline/build_baseline.py; static, since that fleet is being torn down.
@@ -151,7 +153,7 @@ ASSETS = hashlib.sha256(
 
 # kube_workload_timing outcomes that are the test's or Buildkite's doing. Any
 # other outcome is the fleet ending a workload.
-TEST_OUTCOMES = {"succeeded", "failed", "cancelled"}
+TEST_OUTCOMES = set(FLEET_TEST_OUTCOMES)
 
 # Event reasons that mean something is wrong with the fleet rather than with a
 # test. Kueue's own "Pending" warnings are the backlog and are already reported
@@ -231,7 +233,11 @@ JOB_STATES = {
     ),
     "starting": (
         "Pods starting",
-        "Admitted; its pods are being scheduled, pulled or started.",
+        "Admitted; no pod running yet - waiting for a node, or being pulled or started.",
+    ),
+    "partly": (
+        "Partly running",
+        "Admitted; some of its pods run while the rest wait for a node or start - a slice still coming up.",
     ),
     "running": ("Running", "Admitted and every pod up."),
 }
@@ -486,6 +492,12 @@ SOURCES = {
         "needs": ["roles/logging.viewAccessor on the _AllLogs view"],
         "fails": ["Only each health check's History & logs goes blank"],
     },
+    "GitHub": {
+        "through": "GitHub's public REST API, no token",
+        "reads": ["Commits to terraform/gcp_old/tpu-inference/k8s on main, for Review's What changed"],
+        "needs": ["Nothing; unauthenticated, within GitHub's hourly limit per address"],
+        "fails": ["Only What changed goes blank; it tries again after a minute"],
+    },
     "BigQuery": {
         "through": "BigQuery",
         "reads": [
@@ -571,6 +583,9 @@ def render_source_table(sources: dict, links: dict) -> str:
 
 
 def render_errors(sources: dict) -> str:
+    # Once each: a page that reads one source for two windows gets its error
+    # from both.
+    failed = {(s["name"], s["error"]): s for s in sources.values() if s["error"]}
     errors = "".join(
         f'<p class="error">{E(s["name"])} failed: {E(s["error"])}'
         + (
@@ -579,8 +594,7 @@ def render_errors(sources: dict) -> str:
             else ""
         )
         + f' · <a href="./#source-{source_id(s["name"])}">what it reads and how to fix it</a></p>'
-        for s in sources.values()
-        if s["error"]
+        for s in failed.values()
     )
     return f'<div class="card errors">{errors}</div>' if errors else ""
 
@@ -625,6 +639,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
             "running": 0,
             "spot": 0,
             "waiting": 0,
+            "partly": 0,
             "spot_waiting": 0,
             "held": 0.0,
             "oldest_wait": None,
@@ -694,7 +709,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 row["oldest_wait"] = max(row["oldest_wait"] or 0, now - w["since"])
                 reason = pending_reason(w["reason"])
                 reasons[reason] = reasons.get(reason, 0) + 1
-            elif w.get("pods_ready"):
+            elif pods_all_up(w):
                 row["running"] += 1
                 row["held"] += w["amount"]
                 row["spot"] += 1 if w.get("spot") else 0
@@ -703,10 +718,15 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                         row["running_since"] or w["since"], w["since"]
                     )
             else:
-                # Admitted or being handed over, but no pod up yet: a node
-                # scaling up, or a Spot stockout. Reserved quota is held all the
-                # same; Spot chips with no node hold nothing.
-                row["waiting"] += 1
+                # Admitted or being handed over, not every pod up. Partly
+                # running when some are - a multi-pod step whose other slice
+                # is still coming up - else waiting for a node: a scale-up, or
+                # a Spot stockout. Reserved quota is held all the same; Spot
+                # chips with no node hold nothing.
+                if pods_up(w):
+                    row["partly"] += 1
+                else:
+                    row["waiting"] += 1
                 row["spot_waiting"] += 1 if w.get("spot") else 0
                 if not w.get("spot"):
                     row["held"] += w["amount"]
@@ -730,10 +750,17 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 # waiting for a node - a scale-up, or a Spot stockout - which
                 # hold quota but run nothing.
                 "running_steps": sum(
-                    1 for w in wls if w["state"] == "admitted" and w.get("pods_ready")
+                    1 for w in wls if w["state"] == "admitted" and pods_all_up(w)
+                ),
+                "partly_steps": sum(
+                    1
+                    for w in wls
+                    if w["state"] == "admitted" and not pods_all_up(w) and pods_up(w)
                 ),
                 "starting_steps": sum(
-                    1 for w in wls if w["state"] == "admitted" and not w.get("pods_ready")
+                    1
+                    for w in wls
+                    if w["state"] == "admitted" and not pods_all_up(w) and not pods_up(w)
                 ),
                 "dispatching": sum(1 for w in wls if w["state"] == "dispatching"),
                 "pending": len(pending),
@@ -743,7 +770,7 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
                 "next_up": next_up(q, wls) if pending else None,
                 # Pending is the next-up list's; this is what holds the chips.
                 "builds": sorted(
-                    (r for r in rows.values() if r["running"] or r["waiting"]),
+                    (r for r in rows.values() if r["running"] or r["waiting"] or r["partly"]),
                     key=lambda r: (-r["held"], -(r["priority"] or 0)),
                 ),
             }
@@ -804,6 +831,20 @@ def build_live(cfg: Config, data: dict, sources: dict) -> dict:
     )
     for j in jobs:
         j["preemptions"] = preemptions.get(j["id"], [])
+    # Each queue card's builds with their steps on that queue, so a build that
+    # runs many steps at once says which are on this shape.
+    order = list(JOB_STATES)
+    on_queue = collections.defaultdict(list)
+    for j in jobs:
+        if j["queue_name"] and j["real"] in ("dispatching", "starting", "partly", "running"):
+            on_queue[(j["queue_name"], j["pipeline"], j["number"])].append(j)
+    for q in queues:
+        for b in q.get("builds") or []:
+            steps = on_queue.get((q["name"], b["pipeline"], b["number"]), [])
+            b["steps"] = [
+                {k: j.get(k) for k in ("label", "url", "real", "for", "spot", "detail", "preemptions")}
+                for j in sorted(steps, key=lambda j: (-order.index(j["real"]), -(j["for"] or 0)))
+            ]
     for q in queues:
         for r in (q.get("next_up") or {}).get("rows", []):
             r["preemptions"] = preemptions.get(r["job"]["id"], []) if r["job"] else []
@@ -982,7 +1023,7 @@ def fleet_map(cfg: Config, kq: dict, health: dict, pools: list, snap: dict) -> d
     on_cluster = collections.defaultdict(collections.Counter)
     for j in snap["jobs"]:
         if j.get("cluster"):
-            on_cluster[j["cluster"]][j["real"]] += 1
+            on_cluster[j["cluster"]]["running" if j["real"] == "partly" else j["real"]] += 1
     held = collections.Counter()
     for w in kq["workloads"]:
         if w["cluster"] and w["state"] != "pending" and w["queue"] in tpu_queues:
@@ -1085,6 +1126,18 @@ def preempt_pills(events: list, now: float) -> str:
     )
 
 
+def pods_up(w: dict) -> int:
+    """A workload's pods on the worker that run or have finished."""
+    return (w.get("pods_running") or 0) + (w.get("pods_done") or 0)
+
+
+def pods_all_up(w: dict) -> bool:
+    """Every pod of an admitted workload up: Kueue's PodsReady, or what the
+    worker's pods say when the manager's condition has not caught up - every
+    pod running or done."""
+    return bool(w.get("pods_ready") or (w.get("pods_total") and pods_up(w) == w["pods_total"]))
+
+
 def kube_jobs(
     bk_jobs: list, workloads: list, pods: list, queues: dict, now: float
 ) -> list:
@@ -1114,10 +1167,18 @@ def kube_jobs(
         elif w["state"] == "dispatching":
             state, since = "dispatching", w["since"]
         else:
-            state, since = (
-                ("running" if w.get("pods_ready") else "starting"),
-                w["since"],
+            state = "running" if pods_all_up(w) else "partly" if pods_up(w) else "starting"
+            since = w["since"]
+            total, up, done, placed = (
+                w.get(k) or 0 for k in ("pods_total", "pods_running", "pods_done", "pods_on_node")
             )
+            if state != "running" and total:
+                waiting = total - done - placed
+                detail = (
+                    f"{up} of {total} pods running"
+                    + (f", {done} done" if done else "")
+                    + (f", {waiting} waiting for a node" if waiting else ", the rest starting")
+                )
         q = queues.get(w["queue"]) if w else None
         out.append(
             {
@@ -1568,7 +1629,7 @@ def render_live_summary(snap: dict) -> str:
 <td class="n">{num(q["borrowing_limit"]) if q["borrowing_limit"] else "-"}</td>
 {f'<td>{spot_text(q, cell=True) if q.get("spot_quota") else "-"}</td>' if has_spot else ""}
 <td>{E(RECLAIM_FROM.get(q["reclaim"], q["reclaim"])) if q["reclaim"] != "Never" else '<span class="muted">nobody</span>'}</td>
-<td class="n">{num(q["running_steps"])}{f'<div class="sub-row">{num(q["starting_steps"] + q["dispatching"])} waiting for a node</div>' if q["starting_steps"] + q["dispatching"] else ""}</td>
+<td class="n">{num(q["running_steps"])}{f'<div class="sub-row">{num(q["partly_steps"])} partly running</div>' if q.get("partly_steps") else ""}{f'<div class="sub-row">{num(q["starting_steps"] + q["dispatching"])} waiting for a node</div>' if q["starting_steps"] + q["dispatching"] else ""}</td>
 <td class="n">{num(q["pending"])}{f'<div class="sub-row">{num(q["pending_amount"])} chips</div>' if q["pending"] else ""}</td>
 <td class="barcell">{quota_bar(q, scale)}</td></tr>"""
             for q in members
@@ -1733,13 +1794,45 @@ def preempted_line(q: dict) -> str:
     )
 
 
+def queue_steps_row(r: dict, sid: str, now: float) -> str:
+    """A queue card build's steps on that queue, in a row of their own under
+    it: each one's state, how long, and a link to it in the build."""
+    items = "".join(
+        f'<li><span class="muted">{E(JOB_STATES[j["real"]][0])}</span> {job_link(j)} '
+        f'<span class="muted">{ago(j["for"])}</span>'
+        + (' <span class="pill spot">on Spot</span>' if j.get("spot") else "")
+        + preempt_pills(j.get("preemptions") or [], now)
+        + (f' <span class="muted">· {E(j["detail"][:120])}</span>' if j.get("detail") and j["real"] != "running" else "")
+        + "</li>"
+        for j in r["steps"][:40]
+    )
+    more = f'<li class="muted">and {len(r["steps"]) - 40} more</li>' if len(r["steps"]) > 40 else ""
+    return (
+        f'<tr class="steps-row" id="{E(sid)}" hidden><td colspan="7">'
+        f'<ul class="steps-list">{items}{more}</ul></td></tr>'
+    )
+
+
 def render_live_queue(q: dict, now: float) -> str:
+    def sid_of(i: int) -> str:
+        return f"qs-{q['name']}-{i}"
+
+    def count_cell(r: dict, sid: str) -> str:
+        """Its running steps on this queue, opening the list of them."""
+        n = f'{num(r["running"])}{f""" <span class="spot-num">({r["spot"]} on Spot)</span>""" if r.get("spot") else ""}'
+        if not r.get("steps"):
+            return n
+        return (
+            f'<button type="button" class="steps-toggle" aria-expanded="false" aria-controls="{E(sid)}" '
+            f'title="This build\'s steps on {E(queue_title(q))}">{n}</button>'
+        )
+
     builds, builds_more, builds_button = split_rows(
         [
             "<tr>"
             f'<td class="nowrap">{build_link(r)}</td><td class="branch">{E(r["branch"])}</td><td>{E(r["source"])}</td>'
             f'<td class="nowrap">{priority_cell(r)}</td>'
-            f'<td class="n">{num(r["running"])}{f""" <span class="spot-num">({r["spot"]} on Spot)</span>""" if r.get("spot") else ""}'
+            f'<td class="n">{count_cell(r, sid_of(i))}'
             + (
                 f'<div class="sub-row">{num(r["waiting"])} waiting for a node'
                 + (f' <span class="spot-num">({r["spot_waiting"]} on Spot)</span>' if r.get("spot_waiting") else "")
@@ -1747,10 +1840,12 @@ def render_live_queue(q: dict, now: float) -> str:
                 if r.get("waiting")
                 else ""
             )
+            + (f'<div class="sub-row">{num(r["partly"])} partly running</div>' if r.get("partly") else "")
             + "</td>"
             f'<td class="n">{num(r["held"])}</td>'
             f'<td class="n">{ago(r["running_for"])}</td></tr>'
-            for r in q["builds"]
+            + (queue_steps_row(r, sid_of(i), now) if r.get("steps") else "")
+            for i, r in enumerate(q["builds"])
         ],
         f"run-{q['name']}",
         '<tr><td colspan="7" class="empty">Nothing running.</td></tr>',
@@ -1794,7 +1889,7 @@ def render_live_queue(q: dict, now: float) -> str:
     <span class="more"><a href="jobs?queue={E(urllib.parse.quote(q["name"]))}">Jobs →</a> · <a href="capacity#{E(q["name"])}">Capacity →</a></span></div>
   <div class="stats">
     <p class="stat"><b>{num(q["pending"])}</b><span>pending · oldest {ago(q["oldest_wait"])}</span></p>
-    <p class="stat"><b>{num(q["running_steps"])}</b><span>running{f" · {num(q['starting_steps'])} waiting for a node" if q["starting_steps"] else ""}{f" · {q['dispatching']} handing over" if q["dispatching"] else ""}</span></p>
+    <p class="stat"><b>{num(q["running_steps"])}</b><span>running{f" · {num(q['partly_steps'])} partly running" if q.get("partly_steps") else ""}{f" · {num(q['starting_steps'])} waiting for a node" if q["starting_steps"] else ""}{f" · {q['dispatching']} handing over" if q["dispatching"] else ""}</span></p>
     {held}
   </div>
   <div class="pills">{"".join(pills)}</div>
@@ -1858,21 +1953,43 @@ def job_link(j: dict) -> str:
 FIRST_ROWS = 5
 
 
+# The summary of where every kube job is: JOB_STATES grouped into the four
+# stages a step passes through. The tables below keep each job's own state.
+JOB_STAGES = (
+    (
+        "Before Kueue",
+        ("held", "waiting_agent", "agent_pending", "launching"),
+        "Buildkite has the step: held by its concurrency group, waiting for or starting its agent pod, "
+        "or the launcher checking out and submitting.",
+    ),
+    ("Waiting for quota", ("queued",), "Submitted to Kueue, waiting for its shape's quota."),
+    (
+        "Starting",
+        ("dispatching", "starting", "partly"),
+        "Quota reserved: being handed to a worker, waiting for a node, or its pods starting - some may "
+        "already run.",
+    ),
+    ("Running", ("running",), "Admitted and every pod up."),
+)
+
+
 def render_jobs(snap: dict) -> str:
     jobs = snap["jobs"]
     counts = {k: 0 for k in JOB_STATES}
     for j in jobs:
         counts[j["real"]] += 1
 
-    states = (
-        '<div class="state-row">'
-        + "".join(
-            f'<div class="state-chip{" zero" if not counts[k] else ""}" title="{E(desc)}">'
-            f"<b>{counts[k]}</b><small>{E(name)}</small></div>"
-            for k, (name, desc) in JOB_STATES.items()
+    def stage(name: str, keys: tuple, desc: str) -> str:
+        total = sum(counts[k] for k in keys)
+        # Which of its states the count is made of, when it is more than one.
+        parts = [f"{counts[k]} {JOB_STATES[k][0].lower()}" for k in keys if counts[k]]
+        sub = f'<small class="sub">{E(" · ".join(parts))}</small>' if len(keys) > 1 and parts else ""
+        return (
+            f'<div class="state-chip{" zero" if not total else ""}" title="{E(desc)}">'
+            f"<b>{total}</b><small>{E(name)}</small>{sub}</div>"
         )
-        + "</div>"
-    )
+
+    states = '<div class="state-row">' + "".join(stage(*s) for s in JOB_STAGES) + "</div>"
 
     def groups(selected: list) -> list:
         """One row per build, state and queue: a build's steps usually move
@@ -1965,8 +2082,8 @@ def render_jobs(snap: dict) -> str:
         '<tr><td colspan="4" class="empty">None.</td></tr>',
     )
     return f"""{states}
-<p class="muted lead">Where each kube job is, grouped by build. Hover a count for what the state means.</p>
-<h3>Not running yet <span class="muted">({len(waiting)} jobs)</span></h3>
+<p class="muted lead">Where each kube job is, grouped by build. Hover a count for what the stage means.</p>
+<h3>Not all running yet <span class="muted">({len(waiting)} jobs)</span></h3>
 <div class="table-wrap"><table class="dense"><thead><tr><th>Build</th><th>State</th><th>Queue</th><th>Steps</th>
 <th class="n">Longest</th><th>Detail</th></tr></thead><tbody>{waiting_rows}</tbody>{more_rows}</table></div>
 {more_button}
@@ -2273,7 +2390,7 @@ def render_overview(snap: dict) -> str:
 
     held, waiting = steps.get("held", 0), steps.get("waiting_agent", 0)
     queued, dispatching = steps.get("queued", 0), steps.get("dispatching", 0)
-    on_workers = steps.get("starting", 0) + steps.get("running", 0)
+    on_workers = steps.get("starting", 0) + steps.get("partly", 0) + steps.get("running", 0)
     m = f["manager"]
     tpu_cohorts = [c for c in snap["cohorts"] if c["resource"] == TPU]
     connected = sum(1 for w in f["workers"] if w["connected"])
@@ -3464,6 +3581,264 @@ def failures_cell(r: dict) -> str:
 
 def chip_hours(values: list | None, step: int) -> float:
     return sum(v for v in values or [] if v is not None) * step / 3600
+
+
+# Review's periods: the lengths offered, by the preset each reuses, and what
+# the page calls one.
+COMPARE_PERIODS = {"24h": "day", "7d": "week", "30d": "30 days"}
+# Each row: label, the figure's key, how it reads (pct, dur, count), which way
+# is better ("up", "down", or None for a figure that is neither), and the
+# glossary entry that explains it.
+PERIOD_ROWS = (
+    ("Chips held", "held", "pct", "up", "Chips held"),
+    ("TensorCores busy", "busy", "pct", "up", "Busy"),
+    ("Idle while jobs waited", "stranded", "pct", "down", "Idle while jobs waited"),
+    ("Queue wait, median", "wait_p50", "dur", "down", "Wait, startup, run"),
+    ("Queue wait, p90", "wait_p90", "dur", "down", "Wait, startup, run"),
+    ("Startup, median", "startup_p50", "dur", "down", "Wait, startup, run"),
+    ("Startup, p90", "startup_p90", "dur", "down", "Wait, startup, run"),
+    ("Workloads finished", "finished", "count", None, None),
+    ("Chip-hours admitted", "chip_hours", "count", None, None),
+    ("Test failures", "test_failures", "pct", "down", "Test failure"),
+    ("Infra failures", "infra", "count", "down", "Infra failure"),
+    ("Requeues", "requeues", "count", "down", "Requeue"),
+    ("Redispatches", "redispatches", "count", "down", "Redispatch"),
+    ("Preempted by Kueue", "preempted", "count", "down", "Evicted"),
+    ("Pods not ready in time", "not_ready", "count", "down", None),
+    ("Spot chip-hours on nodes", "spot_delivered", "count", None, "Spot"),
+    ("Spot chip-hours waiting for a node", "spot_waiting", "count", "down", "Spot"),
+)
+PERIOD_CHANGES_FIRST = 12
+PERIOD_PIPELINES = 4
+
+
+def period_figures(w: dict, days: int) -> dict:
+    """Per generation, one period's figures, from the views and reads every
+    other part of the dashboard makes for a range: the history view, the
+    per-minute waits Migration splits, the timing table's period summary and
+    the step log."""
+    h, waits, period = w.get("history") or {}, w.get("waits") or {}, w.get("period") or {}
+    out = {}
+    if not h.get("cohorts"):
+        return out
+    hours = h["span"]["step"] / 3600
+    for c in h["cohorts"]:
+        name = c["name"]
+        split = kube_split(h, waits, name) if waits else None
+        g = (period.get("generations") or {}).get(name) or {}
+        evicted = (period.get("evictions") or {}).get(name) or {}
+        admitted, on_nodes = c.get("spot_admitted"), c.get("spot_on_nodes") or []
+        spot = [(a, o or 0.0) for a, o in zip(admitted or [], on_nodes) if a is not None]
+        finished = g.get("finished")
+        daily = (period.get("daily") or {}).get(name) or {}
+        out[name] = {
+            "generation": c["generation"],
+            # Days count back from the period's end; the charts read forward.
+            "held": mean(split["daily_held"]) if split else None,
+            "stranded": mean(split["daily_stranded"]) if split else None,
+            "busy": c.get("busy_share"),
+            "wait_p50": g.get("wait_p50"),
+            "wait_p90": g.get("wait_p90"),
+            "startup_p50": g.get("startup_p50"),
+            "startup_p90": g.get("startup_p90"),
+            "finished": finished,
+            "chip_hours": c.get("chip_hours"),
+            "test_failures": g["failed"] / finished if finished else None,
+            "infra": g.get("infra"),
+            "requeues": g.get("requeues"),
+            "redispatches": g.get("redispatches"),
+            "preempted": evicted.get("Preempted", 0.0) if period else None,
+            "not_ready": evicted.get("PodsReadyTimeout", 0.0) if period else None,
+            "spot_delivered": sum(min(a, o) for a, o in spot) * hours if admitted else None,
+            "spot_waiting": sum(max(0.0, a - o) for a, o in spot) * hours if admitted else None,
+            "nominal": mean(c.get("nominal") or []),
+            "daily_held": list(reversed(split["daily_held"]))[-days:] if split else [],
+            "daily_wait": [(daily.get(d) or {}).get("wait_p90") for d in range(days)],
+        }
+    return out
+
+
+def period_delta(now, before, kind: str, better: str | None) -> str:
+    """The change between two periods' figures: an arrow, the amount in the
+    figure's own terms, and a class saying whether it is for the better."""
+    if now is None or before is None:
+        return '<span class="delta flat">-</span>'
+    d = now - before
+    if kind == "pct":
+        text, flat = f"{d * 100:+.1f} pts", abs(d) < 0.005
+    elif kind == "dur":
+        text, flat = ("+" if d >= 0 else "−") + ago(abs(d)), abs(d) < max(30, 0.05 * abs(before))
+    else:
+        rel = f" ({d / before:+.0%})" if before else ""
+        text = ("+" if d >= 0 else "−") + num(abs(d)) + rel
+        flat = abs(d) < 0.5 or (before and abs(d) / before < 0.03)
+    if flat:
+        return f'<span class="delta flat">= {E(text)}</span>'
+    arrow = "▲" if d > 0 else "▼"
+    cls = "neutral" if better is None else ("good" if (d > 0) == (better == "up") else "bad")
+    return f'<span class="delta {cls}">{arrow} {E(text)}</span>'
+
+
+def period_value(v, kind: str) -> str:
+    if v is None:
+        return '<span class="muted">-</span>'
+    if kind == "pct":
+        return f"{v * 100:.1f}%"
+    if kind == "dur":
+        return ago(v)
+    return num(v)
+
+
+def render_review(
+    compare: str, windows: dict, data: dict, changes: list, params: dict, sources: dict
+) -> str:
+    """The Review page: each generation's health figures for the period ending
+    at the last whole hour against the period before it, day by day where the
+    period is days long, PR build wall clock, and the fleet's merged changes
+    in the period - for a weekly look back, as Migration looks back at bare
+    metal."""
+    name = COMPARE_PERIODS[compare]
+    cur, prev = windows["current"], windows["previous"]
+    days = PRESETS[compare] // 86400
+    now_f = period_figures(data.get("current") or {}, days)
+    before_f = period_figures(data.get("previous") or {}, days)
+
+    def link(value: str) -> str:
+        kept = {k: v[0] for k, v in params.items() if k != "compare" and v}
+        return "review?" + urllib.parse.urlencode({**kept, "compare": value})
+
+    selector = "".join(
+        f'<a class="seg-btn{" active" if key == compare else ""}" href="{E(link(key))}">{E(label.capitalize())}</a>'
+        for key, label in COMPARE_PERIODS.items()
+    )
+    # The period itself is in the top bar; this names the one it is set against.
+    when = (
+        f'The {E(name)} before: <time data-ts="{prev["start"]}" data-fmt="datetime"></time> – '
+        f'<time data-ts="{prev["end"]}" data-fmt="datetime"></time>'
+    )
+
+    cards = []
+    ticks = [cur["start"] + i * 86400 for i in range(days)]
+    for gen, f in now_f.items():
+        b = before_f.get(gen, {})
+        rows = "".join(
+            f'<tr><td>{term(label, key_) if key_ else E(label)}</td>'
+            f'<td class="n">{period_value(f.get(key), kind)}</td>'
+            f'<td class="n muted">{period_value(b.get(key), kind)}</td>'
+            f'<td class="n nowrap">{period_delta(f.get(key), b.get(key), kind, better)}</td></tr>'
+            for label, key, kind, better, key_ in PERIOD_ROWS
+            if f.get(key) is not None or b.get(key) is not None
+        )
+        notes = []
+        if f.get("nominal") and b.get("nominal") and abs(f["nominal"] - b["nominal"]) >= 1:
+            notes.append(
+                f"Nominal changed, {num(b['nominal'])} → {num(f['nominal'])} chips on average: "
+                "compare the percentages, not the totals."
+            )
+        if f.get("spot_delivered") is not None and b.get("spot_delivered") is None:
+            notes.append("No Spot in the previous period.")
+        charts = ""
+        if days >= 7:
+
+            def pad(values: list) -> list:
+                return (list(values) + [None] * days)[:days]
+
+            held = line_chart(
+                "Chips held by day, % of nominal",
+                ticks,
+                [
+                    ("used", f"last {name}", pad([None if v is None else round(v * 100, 1) for v in f["daily_held"]])),
+                    ("used p50", f"the {name} before", pad([None if v is None else round(v * 100, 1) for v in b.get("daily_held", [])])),
+                ],
+                ymax=100,
+                fmt="day",
+                width=520,
+                height=170,
+            )
+            wait = line_chart(
+                "Queue wait p90 by day, minutes",
+                ticks,
+                [
+                    ("used", f"last {name}", pad([None if v is None else round(v / 60, 1) for v in f["daily_wait"]])),
+                    ("used p50", f"the {name} before", pad([None if v is None else round(v / 60, 1) for v in b.get("daily_wait", [])])),
+                ],
+                fmt="day",
+                width=520,
+                height=170,
+            )
+            charts = f'<div class="pop-charts">{held}{wait}</div>'
+        else:
+            charts = '<p class="muted note">The day-by-day charts need a week or 30 days.</p>'
+        cards.append(
+            f'<div class="card pop"><div class="card-head"><h2>{E(f["generation"])}</h2>'
+            f'<span class="sub">{" ".join(E(n) for n in notes)}</span></div>'
+            f'<div class="pop-grid"><div class="table-wrap"><table class="dense pop-table"><thead><tr>'
+            f'<th></th><th class="n">Last {E(name)}</th><th class="n">The {E(name)} before</th><th class="n">Change</th>'
+            f"</tr></thead><tbody>{rows}</tbody></table></div>{charts}</div></div>"
+        )
+
+    # PR build wall clock for the pipelines with the most clean PR builds.
+    def walls(w: dict) -> dict:
+        out = collections.defaultdict(list)
+        for b in (w.get("steps") or {}).get("builds") or []:
+            if b.get("kind") == "pr" and b.get("clean") == "true" and b.get("pole_finished"):
+                out[b["pipeline"]].append(float(b["pole_finished"]) - float(b["created"]))
+        return out
+
+    now_w, before_w = walls(data.get("current") or {}), walls(data.get("previous") or {})
+    top = sorted((p for p in now_w if len(now_w[p]) >= 10), key=lambda p: -len(now_w[p]))[:PERIOD_PIPELINES]
+    build_rows = "".join(
+        f'<tr><td>{E(p)}</td><td class="n">{len(now_w[p]):,}</td><td class="n muted">{len(before_w.get(p, [])):,}</td>'
+        f'<td class="n">{period_value(quantile(now_w[p], 0.5), "dur")}</td>'
+        f'<td class="n muted">{period_value(quantile(before_w.get(p, []), 0.5), "dur")}</td>'
+        f'<td class="n nowrap">{period_delta(quantile(now_w[p], 0.5), quantile(before_w.get(p, []), 0.5), "dur", "down")}</td>'
+        f'<td class="n">{period_value(quantile(now_w[p], 0.9), "dur")}</td>'
+        f'<td class="n muted">{period_value(quantile(before_w.get(p, []), 0.9), "dur")}</td>'
+        f'<td class="n nowrap">{period_delta(quantile(now_w[p], 0.9), quantile(before_w.get(p, []), 0.9), "dur", "down")}</td></tr>'
+        for p in top
+    )
+    builds = (
+        '<div class="card"><div class="card-head"><h2>PR build wall clock</h2>'
+        f'<span class="sub">clean kube PR builds - see <a href="steps?preset={"7d" if compare != "30d" else "30d"}">Pipelines → Steps</a></span></div>'
+        '<div class="table-wrap"><table class="dense pop-table"><thead><tr><th>Pipeline</th>'
+        f'<th class="n">Builds, last {E(name)}</th><th class="n">before</th>'
+        '<th class="n">Median</th><th class="n">before</th><th class="n">Change</th>'
+        '<th class="n">p90</th><th class="n">before</th><th class="n">Change</th>'
+        f"</tr></thead><tbody>{build_rows}</tbody></table></div></div>"
+        if build_rows
+        else ""
+    )
+
+    items = [
+        f'<li><a href="{E(c["url"])}" target="_blank" rel="noopener">{"#" + str(c["pr"]) if c["pr"] else "commit"}</a> '
+        f'{E(c["title"])} <span class="muted"><time data-ts="{c["at"]:.0f}" data-fmt="datetime"></time></span></li>'
+        for c in changes or []
+    ]
+    more = (
+        f'<details><summary>{len(items) - PERIOD_CHANGES_FIRST} more</summary>'
+        f'<ul class="changes">{"".join(items[PERIOD_CHANGES_FIRST:])}</ul></details>'
+        if len(items) > PERIOD_CHANGES_FIRST
+        else ""
+    )
+    changed = (
+        '<div class="card"><div class="card-head"><h2>What changed</h2>'
+        f'<span class="sub">{len(items)} changes to the fleet (ci-infra tpu-inference/k8s) merged in the last {E(name)}</span></div>'
+        f'<ul class="changes">{"".join(items[:PERIOD_CHANGES_FIRST]) or "<li class=muted>None.</li>"}</ul>{more}</div>'
+    )
+    body = (
+        f'<div class="card range"><div class="segmented">{selector}</div><span class="muted note pop-when">{when}</span></div>'
+        + "".join(cards)
+        + builds
+        + changed
+    )
+    return REVIEW_PAGE.substitute(
+        assets=ASSETS,
+        errors=render_errors(sources),
+        period=E(name),
+        start=cur["start"],
+        end=cur["end"],
+        body=body,
+    )
 
 
 def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None = None) -> str:
