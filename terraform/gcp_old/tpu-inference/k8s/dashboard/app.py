@@ -278,7 +278,10 @@ class Windowed:
             hit = self._cache.get(key)
             # A failure is retried after a minute rather than ten: its cause,
             # a missing grant say, is usually fixed by hand while someone looks.
-            fresh = self.cfg.cache_seconds * (1 if hit and hit[1] else 10)
+            # So is a window ending in the last fifteen minutes, which rows
+            # still arrive in.
+            recent = time.time() - span["end"] < 900
+            fresh = self.cfg.cache_seconds * (1 if (hit and hit[1]) or recent else 10)
             if hit and time.time() - hit[2] < fresh:
                 return hit[0], {"name": self.name, "at": hit[2], "error": hit[1]}
         try:
@@ -379,6 +382,13 @@ def serve(
                 if "preset" not in params and "start" not in params:
                     params = {**params, "preset": ["24h"]}
                 span = parse_span(params, time.time())
+                # A list, not a chart: up to the current minute rather than
+                # the last chart step, which for a day is ten minutes and for
+                # a week an hour - a job that had just ended was gone from in
+                # flight and not yet among the ended.
+                if span["preset"]:
+                    end = -(-int(time.time()) // 60) * 60
+                    span = {**span, "start": end - views.PRESETS[span["preset"]], "end": end}
                 rows, status = jobs.get(span)
                 snap = live.snapshot()
                 page = views.render_job_history(
