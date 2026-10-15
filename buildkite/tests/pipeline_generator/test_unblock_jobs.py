@@ -170,7 +170,7 @@ def test_only_the_first_job_of_a_group_carries_its_heading():
     )
     assert [(key, label) for key, label, _ in fields] == [
         ("more-jobs-job-a", "CPU"),
-        ("more-jobs-job-b", ""),
+        ("more-jobs-job-b", unblock_jobs.NO_LABEL),
         ("more-jobs-job-c_d", "GPU"),
     ]
 

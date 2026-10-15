@@ -29,6 +29,9 @@ FIELD_KEY = "more-jobs"
 # Newline-separated keys of the deferred jobs uploaded so far, across rounds.
 UPLOADED_META_KEY = "more-jobs-uploaded"
 GROUP = ":heavy_plus_sign: Run more jobs"
+# The label of every checkbox after the first in a list. Buildkite rejects a
+# blank one ("can't be blank"), whitespace included, so a zero-width space.
+NO_LABEL = "\u200b"
 
 
 def _round_key(prefix: str, round_number: int) -> str:
@@ -42,8 +45,8 @@ def _job_fields(
 
     Buildkite documents a multiple select as checkboxes, but shows one of six
     or more options as a dropdown, so every job is a select of its own. The
-    first job of each list carries the list's name as its label, the rest a
-    blank one, so the dialog reads as a heading over its checkboxes. An entry
+    first job of each list carries the list's name as its label, the rest
+    NO_LABEL, so the dialog reads as a heading over its checkboxes. An entry
     is listed under its "list" if it has one, else its group.
     """
     by_list: Dict[str, List[Dict[str, Any]]] = {}
@@ -55,7 +58,7 @@ def _job_fields(
         for i, entry in enumerate(list_entries):
             # Field keys allow letters, digits, "/", "-" and "_".
             key = prefix + re.sub(r"[^A-Za-z0-9/_-]", "_", entry["step"]["key"])
-            fields.append((key, name if i == 0 else "", entry))
+            fields.append((key, name if i == 0 else NO_LABEL, entry))
     return fields
 
 
