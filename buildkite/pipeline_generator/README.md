@@ -4,11 +4,13 @@ A small tool to dynamically generate Buildkite pipeline for vLLM projects, runni
 
 ## Installation
 
-You can install it using pip:
+This is a member of the `buildkite/` uv workspace, so it is installed from the lockfile with the rest of the tools:
 
 ```bash
-pip install git+https://github.com/vllm-project/ci-infra.git#subdirectory=buildkite/pipeline_generator
+cd buildkite && uv sync --locked --package pipeline-generator
 ```
+
+That puts `pipeline-generator` on `buildkite/.venv/bin`, which is what CI runs.
 
 ## Usage
 
