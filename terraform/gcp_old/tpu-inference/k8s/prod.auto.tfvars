@@ -308,15 +308,15 @@ worker_clusters = [
         # reruns from the start, and a pull request outranks a nightly. When
         # the cohort is full the wait can run to an hour or two, since freed
         # chips go four at a time to the 2x2x1 backlog; the nightly still
-        # finishes before the working day. Four slice pools, so 2x2x4 can
-        # borrow up to two more slices (64 chips) for v7x-32 tests and
-        # bring-ups when the cohort is idle.
+        # finishes before the working day. Eight slice pools, all 128 chips,
+        # so 2x2x4 can borrow whatever the cohort leaves idle for v7x-32
+        # tests and bring-ups, as 2x2x2 can; an empty pool costs nothing.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x4"
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
-        slices        = 4
+        slices        = 8
         nominal_quota = 32
 
         reclaim_within_cohort = "LowerPriority"
