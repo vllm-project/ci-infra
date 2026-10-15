@@ -9,6 +9,7 @@ from buildkite_step import (
     COLLECT_GROUP,
     BuildkiteGroupStep,
     _generate_step_key,
+    _step_should_run,
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
@@ -17,6 +18,7 @@ from buildkite_step import (
     create_precommit_group_step,
 )
 from recorder_switches import fnrec_enabled
+import selector_gate
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
 
@@ -83,15 +85,34 @@ class PipelineGenerator:
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+        record = _selector_decision(steps)
         try:
             steps, selected_step_keys = select_steps_and_dependencies(
                 steps, global_config["only_step_keys"], torch_nightly=torch_nightly
             )
         except ValueError as error:
-            # Surface the reason on the build page, not only in the bootstrap log.
-            _annotate_best_effort(str(error), style="error")
-            raise
+            if not (record and record["applied"]):
+                # Surface the reason on the build page, not only in the bootstrap log.
+                _annotate_best_effort(str(error), style="error")
+                raise
+            # The selector's keys, never the build's own: back to today's rules.
+            record["applied"] = False
+            record["fallback"] = f"generator rejected the selector's keys: {error}"
+            global_config["only_step_keys"] = None
+            steps, selected_step_keys = select_steps_and_dependencies(
+                steps, None, torch_nightly=torch_nightly
+            )
         global_config["only_step_keys"] = selected_step_keys
+        if record is not None:
+            record["scheduled_keys"] = (
+                sorted(selected_step_keys)
+                if selected_step_keys is not None
+                else record["legacy_keys"]
+            )
+            selector_gate.write_and_upload(
+                record, os.path.dirname(self.output_file_path)
+            )
+            selector_gate.annotate(record)
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
@@ -132,6 +153,44 @@ class PipelineGenerator:
                 buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
             )
         return
+
+
+def _selector_decision(steps: List[Step]) -> Optional[dict]:
+    """Ask the test selector for this build's steps (selector_gate.py).
+
+    In "on" mode a usable answer replaces the source_file_dependencies rules
+    through `only_step_keys`, which the generator already expands with each
+    step's prerequisites. Returns the decision record, or None when the gate
+    is off. Never raises: a broken gate leaves today's rules in place.
+    """
+    gate = selector_gate.mode()
+    if not gate:
+        return None
+    global_config = get_global_config()
+    try:
+        for step in steps:
+            if not step.key:
+                step.key = _generate_step_key(step.label)
+        diff = global_config["list_file_diff"]
+        legacy = [s.key for s in steps if _step_should_run(s, diff)]
+        record = selector_gate.decide(global_config, legacy)
+        keys = record["selector_keys"]
+        if keys:
+            unknown = sorted(set(keys) - selector_gate.known_keys(steps))
+            if unknown:
+                record["fallback"] = "selector named unknown step key(s): " + ", ".join(
+                    unknown[:20]
+                )
+            elif gate == "on":
+                global_config["only_step_keys"] = frozenset(keys)
+                record["applied"] = True
+        return record
+    except Exception as error:  # noqa: BLE001 - the gate never breaks a build
+        print(f"ci-selector gate failed, keeping today's rules: {error}")
+        global_config["only_step_keys"] = None
+        record = selector_gate.base_record(global_config, gate)
+        record["fallback"] = f"gate error: {type(error).__name__}: {error}"[:2000]
+        return record
 
 
 def select_steps_and_dependencies(
