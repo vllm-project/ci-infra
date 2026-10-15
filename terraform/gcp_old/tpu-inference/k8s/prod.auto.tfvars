@@ -265,11 +265,9 @@ worker_clusters = [
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
-        min_nodes = 0
-        max_nodes = 32
-        # 32 while 2x2x4 has four slices nominal (below), 64 otherwise. It
-        # can still borrow up to 128 when the cohort is idle.
-        nominal_quota = 32
+        min_nodes     = 0
+        max_nodes     = 32
+        nominal_quota = 64
 
         # No Spot: 2x2x1 Spot VMs were stocked out on most busy evenings, and
         # each step offered Spot then waited 10-15 minutes for a node that
@@ -303,9 +301,8 @@ worker_clusters = [
         reclaim_within_cohort = "Never"
       },
       {
-        # Four slices nominal for now, two Kimi-K3 pairs at once, with the
-        # extra 32 chips taken from 2x2x1; two slices otherwise. Taken back
-        # only from lower-priority borrowers. The pairs are nightlies (unclassed) and the
+        # Two slices nominal for the Kimi-K3 pairs, taken back only from
+        # lower-priority borrowers. The pairs are nightlies (unclassed) and the
         # steps borrowing their chips overnight are mostly pre-merge PR steps,
         # so the pair waits for them rather than evicting them: an evicted step
         # reruns from the start, and a pull request outranks a nightly. When
@@ -320,7 +317,7 @@ worker_clusters = [
         zone             = "us-central1-c"
 
         slices        = 8
-        nominal_quota = 64
+        nominal_quota = 32
 
         reclaim_within_cohort = "LowerPriority"
       },
