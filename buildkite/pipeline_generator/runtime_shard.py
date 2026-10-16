@@ -572,6 +572,11 @@ def shard_job_setup() -> List[str]:
         f" > {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
         # On the path of whichever python runs pytest (a venv's included).
         f'export PYTHONPATH="{PLUGIN_DIR}$${{PYTHONPATH:+:$$PYTHONPATH}}"',
+        # And in python3's site-packages, which a command that sets its own
+        # PYTHONPATH (PYTHONPATH=/vllm-workspace pytest ...) doesn't replace.
+        f'python3 -c "import shutil, sysconfig; shutil.copy('
+        f"'{PLUGIN_DIR}/{PLUGIN_MODULE}.py', sysconfig.get_paths()['purelib'])\""
+        " || true",
     ]
 
 
