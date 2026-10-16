@@ -93,17 +93,21 @@ module "eks" {
       ami_type       = "AL2023_x86_64_NVIDIA"
       instance_types = ["g6.12xlarge"]
       capacity_type  = "ON_DEMAND"
-      # 32 warm nodes at all times (fast job pickup, warm FSx clients, and holds
-      # g6.12xlarge capacity against frequent AWS InsufficientInstanceCapacity
-      # in us-west-2), CA scales to 50 under load. Sized from 3 days of
-      # l4-k8s demand (Oct 2026): ~72 GPUs average, 105-120 GPUs in US-daytime
-      # peak hours; 25 nodes (100 GPUs) was saturated ~14:00-04:00 UTC and
-      # CA scale-up almost always failed with ICE. Note: 32x g6.12xlarge
-      # on-demand 24/7 is ~$63k/mo. desired_size is ignored by the module
-      # after creation, so raise it with the AWS CLI before applying a higher
-      # min_size.
+      # Fixed at 32 nodes (min == max): fast job pickup, warm FSx clients, and
+      # holds g6.12xlarge capacity against frequent AWS
+      # InsufficientInstanceCapacity in us-west-2. Sized from 3 days of l4-k8s
+      # demand (Oct 2026): ~72 GPUs average, 105-120 GPUs in US-daytime peak
+      # hours. Note: 32x g6.12xlarge on-demand 24/7 is ~$63k/mo.
+      #
+      # max_size must stay equal to min_size while ICE is common. CA enforces
+      # min_size against the ASG desired capacity, not running instances: on
+      # 2026-10-15 a failed scale-up left desired=50 with 26 running, and CA
+      # then scaled down 18 idle *real* nodes (50-18=32 >= min), leaving 8.
+      # With max == min, desired can never exceed min, so CA cannot remove
+      # nodes. desired_size is ignored by the module after creation, so set
+      # it with the AWS CLI before applying a higher min_size.
       min_size     = 32
-      max_size     = 50
+      max_size     = 32
       desired_size = 32
 
       labels = {
