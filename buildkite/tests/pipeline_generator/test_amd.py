@@ -202,6 +202,31 @@ def test_amd_device_rejects_conflicting_gpu_count(device, gpu_count):
         _render_single_step(step)
 
 
+@pytest.mark.parametrize(
+    "device,gpu_size",
+    [("mi250_1", "1"), ("mi250_2", "2"), ("mi250_4", "4"), ("mi250_8", "8")],
+)
+def test_mi250_steps_share_one_queue_split_by_gpu_size(device, gpu_size):
+    step = Step(
+        label="MI250 test",
+        group="Direct AMD",
+        key=f"amd-{device}",
+        device=device,
+        dind=False,
+        agent_tags={"gpu_size": "99", "queue": "other", "label": "x"},
+        commands=["pytest tests/foo.py"],
+    )
+
+    command_step = _render_single_step(step).steps[-1]
+
+    assert command_step.agents == {
+        "queue": AgentQueue.AMD_MI250,
+        "gpu_size": gpu_size,
+        "label": "x",
+    }
+    assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == gpu_size
+
+
 def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     monkeypatch.setenv(amd.ROCM_DEBUG_AGENT_ENV_VAR, "1")
     step = Step(

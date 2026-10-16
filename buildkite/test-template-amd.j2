@@ -294,7 +294,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         timeout_in_minutes: {{ step_timeout_in_minutes }}
         agents:
           {% if "mi250" in step.agent_pool %}
-          queue: amd_shadow
+          queue: amd_mi250
           gpu_size: "{{ step.agent_pool | split('_') | last }}"
           {% else %}
           queue: amd_{{ step.agent_pool }}
