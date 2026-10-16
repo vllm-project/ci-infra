@@ -130,6 +130,7 @@ class SymbolMap:
         commit: str = "",
         incomplete: bool = False,
         objects: int = 0,
+        sources: frozenset[str] = frozenset(),
     ):
         self._reach = reach or {}
         # Files some object WITHOUT kernels was compiled from or included.
@@ -142,6 +143,9 @@ class SymbolMap:
         self.commit = commit
         self.incomplete = incomplete
         self.objects = objects
+        # Files an object WITH kernels was compiled from (not its headers):
+        # where a host function that launches one can be defined.
+        self.sources = sources
 
     @property
     def available(self) -> bool:
@@ -149,6 +153,13 @@ class SymbolMap:
 
     def symbols(self, path: str) -> frozenset[str]:
         return self._reach.get(path, frozenset())
+
+    @property
+    def unknown(self) -> frozenset[str]:
+        return self._unknown
+
+    def all_symbols(self) -> frozenset[str]:
+        return frozenset().union(*self._reach.values()) if self._reach else frozenset()
 
     def knows(self, path: str) -> bool:
         """Whether the image build compiled anything from or including `path`.
@@ -273,6 +284,7 @@ def load_symbol_map(path: Path) -> SymbolMap:
     reach: dict[str, set[str]] = defaultdict(set)
     host: set[str] = set()
     unknown: set[str] = set()
+    sources: set[str] = set()
     try:
         for o in objects:
             paths = {o["source"], *o.get("deps", ())}
@@ -283,6 +295,7 @@ def load_symbol_map(path: Path) -> SymbolMap:
             # Symbols, not the `device` flag: a .cu holding only host code
             # compiles as a device object and still launches nothing.
             if symbols:
+                sources.add(o["source"])
                 for p in paths:
                     reach[p].update(symbols)
             else:
@@ -296,6 +309,7 @@ def load_symbol_map(path: Path) -> SymbolMap:
         commit=str(payload.get("commit") or ""),
         incomplete=bool(payload.get("incomplete")),
         objects=len(objects),
+        sources=frozenset(sources),
     )
 
 
@@ -327,6 +341,8 @@ def read_pr(
     allow_drops: bool = True,
     protected: frozenset[str] = frozenset(),
     attribute: Callable[[str, frozenset[str]], Attribution] | None = None,
+    declarations: Callable[[str], Attribution] | None = None,
+    python_cleared: frozenset[str] = frozenset(),
 ) -> KernelReading:
     """The kernel record over one PR's map selection.
 
@@ -341,6 +357,19 @@ def read_pr(
     touched (`changed_kernels`): the file then votes with those symbols only,
     so a step that launched other kernels from the same file is not held by
     them. Empty names mean the whole file, which is the reading without it.
+
+    `declarations(path)` is the same for a file the first cannot narrow: a
+    header or bindings file whose diff only declares or registers functions
+    (`changed_decls`). Its names are looked up across the whole map, since a
+    header's kernels are compiled elsewhere, and a file it narrows becomes
+    clearable even when host code includes it: what host code can see of a
+    declaration is the build and the op's own calls, and both have witnesses.
+    It narrows only when some usable row launched one of the kernels, so a
+    schema that fails to load still fails a step that runs.
+
+    `python_cleared` are steps the Python record cleared on every reason but
+    the csrc files it defers here. Their other files are not this record's to
+    weigh, but they are already weighed, so they do not hold the step.
     """
     table, sm = evidence.table, evidence.symbol_map
     reading = KernelReading()
@@ -358,6 +387,7 @@ def read_pr(
             continue
         symbols = sm.symbols(path)
         scope = f"{len(symbols)} kernel symbols"
+        narrowed = frozenset()
         if attribute is not None and symbols:
             names, note = attribute(path, symbols)
             narrowed = _symbols_named(names, symbols) if names else frozenset()
@@ -371,8 +401,26 @@ def read_pr(
                 scope += f" (whole file: {note}, none of them in the map)"
             else:
                 scope += f" (whole file: {note})"
+        declared = False
+        if not narrowed and declarations is not None:
+            names, note = declarations(path)
+            named = _symbols_named(names, sm.all_symbols()) if names else frozenset()
+            if named and any(
+                r.usable and r.kernels & named for r in table._rows.values()
+            ):
+                symbols, declared = named, True
+                scope = f"{len(named)} kernel symbols ({note})"
+                reading.reasons["file-narrowed-to-declared-kernels"] += 1
+            elif named:
+                scope += f" (declarations: {note}, but no usable row launched them)"
+            elif names:
+                scope += f" (declarations: {note}, none of them in the map)"
         voting[path] = symbols
         why = sm.why_not_clearable(path)
+        if declared and path not in sm.unknown:
+            # Host code including it, or compiling it with no kernels, sees
+            # only the declaration: see the docstring.
+            why = ""
         if not why and path in stale:
             why = "its source changed between the map's commit and this base"
         if why:
@@ -417,6 +465,7 @@ def read_pr(
             allow_drops,
             protected,
             held,
+            step_id in python_cleared,
         )
         if why_keep:
             reading.kept.append(step_id)
@@ -445,6 +494,7 @@ def _why_keep(
     allow_drops,
     protected,
     held,
+    others_cleared=False,
 ) -> str:
     """The first gate that holds the step, or "" when it may drop."""
     key = keys.key_for(step_id)
@@ -461,7 +511,13 @@ def _why_keep(
         return "selected-without-a-file"
     if not selectors:
         return "no-attributed-file"
-    if any(p not in voting for p in selectors):
+    if others_cleared:
+        # The Python record weighed and cleared every file outside the map;
+        # what is left to clear is this record's own.
+        selectors = {p for p in selectors if p in voting}
+        if not selectors:
+            return "no-attributed-file"
+    elif any(p not in voting for p in selectors):
         # A Python file, a cmake file, a csrc file outside the CUDA build:
         # some reason the map had is one this record cannot argue with.
         return "selected-by-a-file-outside-the-map"

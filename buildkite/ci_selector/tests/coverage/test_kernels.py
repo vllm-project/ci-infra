@@ -481,6 +481,114 @@ def test_attribution_narrows_a_file_to_its_changed_kernels(tmp_path):
     assert declined.dropped == [] and "whole file" in declined.files["csrc/a.cu"]
 
 
+def test_declarations_narrow_a_header_host_code_includes(tmp_path):
+    """`ops.h` changed only a prototype. The header is included by bindings
+    code without kernels, so read whole it may only select; read as the
+    declaration of `launch_a` it is kA alone, and may drop."""
+    objects = [
+        _obj("csrc/a.cu", ["kA", "kB"], deps=["csrc/ops.h"]),
+        _obj("csrc/bindings.cpp", [], deps=["csrc/ops.h"]),
+    ]
+    rows = {"runs-a": {"kernels": ["kA"]}, "runs-b": {"kernels": ["kB"]}}
+    ev = _evidence(tmp_path, rows, objects)
+    sel = _selection({"csrc/ops.h": ["runs-a", "runs-b"]})
+    keys = _keys("runs-a", "runs-b")
+    whole = _read(ev, sel, ["csrc/ops.h"], keys)
+    assert whole.dropped == [] and "may only select" in whole.files["csrc/ops.h"]
+    declared = _read(
+        ev,
+        sel,
+        ["csrc/ops.h"],
+        keys,
+        declarations=lambda p: (frozenset({"kA"}), "declares launch_a"),
+    )
+    assert declared.dropped == ["vllm_ci:runs-b"]
+    assert declared.reasons["file-narrowed-to-declared-kernels"] == 1
+    assert declared.files["csrc/ops.h"] == (
+        "1 kernel symbols (declares launch_a); may select and drop"
+    )
+
+
+def test_bindings_with_no_kernels_narrow_through_the_whole_map(tmp_path):
+    """`torch_bindings.cpp` compiles no kernel, so its own symbols are empty;
+    the declared names are looked up across every object."""
+    objects = [
+        _obj("csrc/a.cu", ["kA"]),
+        _obj("csrc/b.cu", ["kB"]),
+        _obj("csrc/torch_bindings.cpp", []),
+    ]
+    rows = {"runs-a": {"kernels": ["kA"]}, "runs-b": {"kernels": ["kB"]}}
+    ev = _evidence(tmp_path, rows, objects)
+    sel = _selection({"csrc/torch_bindings.cpp": ["runs-a", "runs-b"]})
+    r = _read(
+        ev,
+        sel,
+        ["csrc/torch_bindings.cpp"],
+        _keys("runs-a", "runs-b"),
+        declarations=lambda p: (frozenset({"kA"}), "declares launch_a"),
+    )
+    assert r.dropped == ["vllm_ci:runs-b"]
+
+
+def test_declarations_need_a_witness_and_a_readable_map(tmp_path):
+    """No usable row launched the declared kernels: a schema that fails to
+    load would fail nothing that runs, so the file stays whole. An object the
+    producer could not read still blocks drops for its files."""
+    objects = [
+        _obj("csrc/a.cu", ["kA", "kB"], deps=["csrc/ops.h"]),
+        _obj("csrc/bindings.cpp", [], deps=["csrc/ops.h"]),
+    ]
+    keys = _keys("runs-a", "runs-b")
+    sel = _selection({"csrc/ops.h": ["runs-a", "runs-b"]})
+    narrow = {"declarations": lambda p: (frozenset({"kA"}), "declares launch_a")}
+
+    failed = {
+        "runs-a": {"kernels": ["kA"], "passed": False},
+        "runs-b": {"kernels": ["kB"]},
+    }
+    r = _read(_evidence(tmp_path, failed, objects), sel, ["csrc/ops.h"], keys, **narrow)
+    assert r.dropped == [] and "no usable row launched them" in r.files["csrc/ops.h"]
+
+    unreadable = [*objects, _obj("csrc/c.cu", deps=["csrc/ops.h"], error="truncated")]
+    rows = {"runs-a": {"kernels": ["kA"]}, "runs-b": {"kernels": ["kB"]}}
+    r = _read(
+        _evidence(tmp_path, rows, unreadable), sel, ["csrc/ops.h"], keys, **narrow
+    )
+    assert r.dropped == [] and "could not be read" in r.files["csrc/ops.h"]
+
+
+def test_a_step_the_python_record_cleared_drops_on_its_csrc_files(tmp_path):
+    """Selected for a kernel file and a Python file. The kernel record cannot
+    weigh the Python file, so it held the step; once the Python record has
+    cleared that file (`python_cleared`), the kernel file is all that is left."""
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kZ"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
+    sel = _selection({"csrc/a.cu": ["silent"], "vllm/_custom_ops.py": ["silent"]})
+    keys = _keys("silent")
+    held = _read(ev, sel, ["csrc/a.cu", "vllm/_custom_ops.py"], keys)
+    assert held.dropped == []
+    assert held.reasons["selected-by-a-file-outside-the-map"] == 1
+    cleared = _read(
+        ev,
+        sel,
+        ["csrc/a.cu", "vllm/_custom_ops.py"],
+        keys,
+        python_cleared=frozenset({"vllm_ci:silent"}),
+    )
+    assert cleared.dropped == ["vllm_ci:silent"]
+    # still every gate on its own files: an image builder stays
+    built = _read(
+        ev,
+        sel,
+        ["csrc/a.cu", "vllm/_custom_ops.py"],
+        keys,
+        held=lambda p: {"vllm_ci:silent"},
+        python_cleared=frozenset({"vllm_ci:silent"}),
+    )
+    assert built.dropped == []
+
+
 # --- decide() wiring --------------------------------------------------------------
 
 
