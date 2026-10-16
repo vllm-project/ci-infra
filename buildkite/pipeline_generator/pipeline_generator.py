@@ -1,12 +1,16 @@
+import json
 import os
+import shutil
 import subprocess
-from typing import FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
 
 from amd import is_amd_device, normalize_amd_depends_on
 from buildkite_step import (
+    AMD_GROUP,
     COLLECT_GROUP,
+    PRECOMMIT_GROUP,
     BuildkiteGroupStep,
     _generate_step_key,
     _step_should_run,
@@ -16,11 +20,14 @@ from buildkite_step import (
     kernrec_collect_group,
     kernrec_enabled,
     create_precommit_group_step,
+    split_deferred_steps,
 )
+from constants import AgentQueue
 from recorder_switches import fnrec_enabled
 import selector_gate
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
+import unblock_jobs
 
 
 def _annotate_best_effort(message: str, style: Optional[str] = None) -> None:
@@ -117,6 +124,14 @@ class PipelineGenerator:
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
+        group_of_step = {
+            step.key: group_step.group
+            for group_step in buildkite_group_steps
+            for step in group_step.steps
+        }
+        buildkite_group_steps, deferred_group_steps = split_deferred_steps(
+            buildkite_group_steps
+        )
 
         # A recording build ends by collecting every job's recordings.
         # Both recorders share one group, so they don't make two groups
@@ -136,6 +151,7 @@ class PipelineGenerator:
         # Place it first so it shows up right after the bootstrap step.
         if global_config["pull_request"] and global_config["pull_request"] != "false":
             add_precommit_dependency(buildkite_group_steps)
+            add_precommit_dependency(deferred_group_steps)
             buildkite_group_steps.insert(
                 0,
                 create_precommit_group_step(
@@ -148,11 +164,72 @@ class PipelineGenerator:
             buildkite_steps_dict["steps"].append(
                 buildkite_group_step.dict(exclude_none=True)
             )
+        if deferred_group_steps:
+            # Right after pre-commit (if any), near the top of the build page.
+            position = int(
+                bool(buildkite_group_steps)
+                and buildkite_group_steps[0].group == PRECOMMIT_GROUP
+            )
+            buildkite_steps_dict["steps"].insert(
+                position,
+                write_deferred_steps(
+                    deferred_group_steps,
+                    os.path.dirname(self.output_file_path),
+                    group_of_step,
+                ),
+            )
         with open(self.output_file_path, "w") as f:
             yaml.dump(
                 buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
             )
         return
+
+
+def write_deferred_steps(
+    deferred_group_steps: List[BuildkiteGroupStep],
+    output_dir: str,
+    group_of_step: Optional[Dict[str, str]] = None,
+) -> dict:
+    """Save the steps left out of the pipeline for the "Run more jobs" input
+    step, and return its group.
+
+    The input step shows one checkbox list per group. AMD steps all share one
+    group of a few hundred, so each is listed under its NVIDIA step's group
+    instead ("AMD - Kernels"), after the NVIDIA lists. `group_of_step` maps
+    every generated step key to its group, to find that.
+
+    They go up as artifacts of this job, with the script that uploads the
+    picked ones, so that job runs exactly what was generated here.
+    """
+    artifact_dir = os.path.relpath(os.path.join(output_dir, unblock_jobs.DEFERRED_DIR))
+    os.makedirs(artifact_dir, exist_ok=True)
+    source_job = os.getenv("BUILDKITE_JOB_ID") or "bootstrap"
+    queue = AgentQueue.SMALL_CPU_PREMERGE.value
+    group_of_step = group_of_step or {}
+    entries = []
+    amd_entries = []
+    for group_step in deferred_group_steps:
+        for step in group_step.steps:
+            entry = {"group": group_step.group, "step": step.dict(exclude_none=True)}
+            if group_step.group == AMD_GROUP:
+                parent = step.key[len("amd-") :] if step.key.startswith("amd-") else ""
+                entry["list"] = f"AMD - {group_of_step.get(parent, 'Other')}"
+                amd_entries.append(entry)
+            else:
+                entries.append(entry)
+    entries += sorted(amd_entries, key=lambda entry: entry["list"])
+    with open(os.path.join(artifact_dir, unblock_jobs.DEFERRED_FILE), "w") as f:
+        json.dump({"source_job": source_job, "queue": queue, "steps": entries}, f)
+    shutil.copyfile(
+        unblock_jobs.__file__, os.path.join(artifact_dir, unblock_jobs.SCRIPT_FILE)
+    )
+    if os.getenv("BUILDKITE_JOB_ID"):
+        # Without these the input step has nothing to upload, so fail loudly.
+        subprocess.run(
+            ["buildkite-agent", "artifact", "upload", f"{artifact_dir}/*"],
+            check=True,
+        )
+    return unblock_jobs.more_jobs_group(entries, 1, artifact_dir, source_job, queue)
 
 
 def _selector_decision(steps: List[Step]) -> Optional[dict]:

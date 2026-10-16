@@ -574,15 +574,15 @@ def test_the_count_follows_a_narrowed_build(monkeypatch, fake_global_config):
     assert step.env["FNREC_EXPECTED_JOBS"] == "1"
 
 
-def test_the_count_skips_steps_behind_a_block(monkeypatch, fake_global_config):
-    """A blocked step never starts, so it can never deliver. Counting it puts
+def test_the_count_skips_deferred_steps(monkeypatch, fake_global_config):
+    """A deferred step never starts, so it can never deliver. Counting it puts
     the delivery rate below the floor and refuses a build that was fine."""
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
     groups = _rendered_groups(
         _step(key="a", group="g1"), _step(key="b", group="g2", label="Other")
     )
     step = buildkite_step.fnrec_collect_group(groups).steps[0]
-    assert step.depends_on == [], "the premise: both are behind a block"
+    assert step.depends_on == [], "the premise: both are deferred"
     assert step.env["FNREC_EXPECTED_JOBS"] == "0"
 
 

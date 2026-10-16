@@ -12,11 +12,15 @@ One manager and one worker per reservation, and that split is the whole design:
   fleet-wide quota. This is where a step's agent lives and where its log goes.
   It declares no node pools: nodes are auto-provisioned per pending pod, from
   the machine families the `manager-system` ComputeClass lists in order.
-- **Worker** — `tpu-ci-us-east5`, Standard, `us-east5`. v6e, 26 chips free of a
-  128-chip reservation, as `ct6e-standard-1t` (1x1) and `ct6e-standard-8t` (2x4).
-- **Worker** — `tpu-ci-us-central1`, Standard, `us-central1`. v7x, 8 chips, as
-  `tpu7x-standard-1t` (1x1x1), `tpu7x-standard-4t` (2x2x1) and `tpu7x-standard-4t`
-  (2x2x2, multi-host across two VMs). Every v7x step in the fleet runs here.
+- **Worker** — `tpu-ci-us-east5`, Standard, `us-east5`. v6e, as
+  `ct6e-standard-1t` (1x1) and `ct6e-standard-8t` (2x4).
+- **Worker** — `tpu-ci-us-central1`, Standard, `us-central1`. v7x, as
+  `tpu7x-standard-1t` (1x1x1, with a Spot pool beside the reserved one) and
+  `tpu7x-standard-4t` (2x2x1, and multi-host 2x2x2 across two VMs and 2x2x4
+  across four). Every v7x step in the fleet runs here.
+
+How many chips each shape gets is in `prod.auto.tfvars`; read it there rather
+than from a doc.
 
 A worker reports to the manager over Connect Gateway and runs no agent of its
 own. MultiKueue joins them: the manager admits, the worker executes. An operator
@@ -31,6 +35,7 @@ manager where the launcher built the podspec.
 
 | Path | What it is |
 | --- | --- |
+| `AGENTS.md` | How to work on the fleet: access, where to change what, deploying, rules. Start here. |
 | `*.tf` | The clusters, node pools, buckets, IAM. Terraform owns infrastructure only. |
 | `prod.auto.tfvars` | The fleet. Cluster list, shapes, reservations, versions, timeouts. The single input to both Terraform and the generator. |
 | `scripts/generate_manifests.py` | Renders `kueue/generated/` from `prod.auto.tfvars`. |
@@ -215,6 +220,65 @@ or its artifacts can upload.
 
 `kueue/launcher/launch.py` is the program. It is a file rather than YAML so it
 can be linted and run; `deploy_manifests.py` builds the ConfigMap from it.
+
+## How the launcher works
+
+The launcher runs once per step, in the agent pod's `launcher` container, and
+lasts as long as the step. In order:
+
+1. **Resolve.** Read the profile registry (`/opt/launcher/profiles/profiles.yaml`,
+   from the `tpu-launcher-profiles` ConfigMap that `generate_manifests.py`
+   renders out of `prod.auto.tfvars`). Render the manifest or the built-in
+   `job.yaml`, merge `pod_defaults.yaml`, and read the shape back out of the
+   pods to choose the queue. Validation, pinning the image to a digest, the
+   priority class (the step's `WORKLOAD_PRIORITY`, else the build's
+   `WORKLOAD_PRIORITY` meta-data), env forwarding and the deadline are settled
+   here, before anything is submitted.
+2. **Submit.** Create the Job or JobSet `bk-<job uuid without dashes>` in the
+   manager's `buildkite` namespace, owned by the agent pod and labelled
+   `buildkite.com/job-id`. A step at or below `tpu_spot_max_priority` keeps a
+   copy without the Spot exclusion for later.
+3. **Watch**, every 5 seconds until the workload ends:
+   - not yet admitted: annotate the build with Kueue's reason; resubmit if
+     MultiKueue dropped the dispatch; after `tpu_spot_after_seconds`, resubmit
+     pinned to Spot if the step may use it; give up at the queue or dispatch
+     budget (`not_admitted`);
+   - admitted: get credentials for the worker, read the workload's pods there
+     and stream the `workload` containers' output into the step log;
+   - a Spot pod with no node, or whose node was reclaimed: resubmit off Spot;
+   - a pod evicted for its disk use: fail (`evicted_storage`);
+   - a pod no node of its shape can hold: warn, then fail (`unfit`);
+   - the workload finished: take the exit code from its pods.
+4. **Record.** Print one JSON line with the workload's timing and outcome and
+   insert it into `ci_efficiency_metrics.kube_workload_timing`, which the
+   dashboard's Jobs and Review pages read.
+
+On a Buildkite cancel, the agent pod gets SIGTERM and the launcher starts
+deleting the workload, but its container is usually killed within the same
+second. The workload is owned by the agent pod, so the garbage collector
+removes it once the pod object is deleted, normally within seconds. If the
+agent pod object stays behind, in `Error` say, the workload and its pods stay
+until the agent Job's TTL removes the pod, about ten minutes.
+
+**The registry and the code are read once, at start.** A deploy that changes
+`launch.py`, a timeout or `spot_queues` reaches only steps that start after it;
+a running launcher keeps what it started with.
+
+The outcomes the timing record carries:
+
+| Outcome | Meaning |
+| --- | --- |
+| `succeeded`, `failed` | The workload finished. `failed` carries the pods' exit code. |
+| `cancelled` | Buildkite cancelled the step. |
+| `not_admitted` | Not admitted, or not dispatched, within its budget; or a resubmission failed. |
+| `evicted_storage` | A pod was evicted for its disk use. |
+| `unfit` | A pod asks for more than any node of its shape has. |
+| `removed` | The Job or JobSet disappeared from under the launcher. |
+| `api_unreachable` | The manager's API server did not answer for 10 minutes. |
+| `error` | The launcher itself failed; the traceback is in the step log. |
+
+The dashboard counts every outcome other than `succeeded`, `failed` and
+`cancelled` as an infrastructure failure.
 
 ## Runbook
 
@@ -409,16 +473,17 @@ so the first node to want it waits out the conversion — measured at 87s for a
 2.7 GB image — and every node after it mounts the same digest in about two
 seconds. Caching layers on the node cannot help; the digest is new every build.
 
-**A step may legitimately queue for hours, but not inside the launcher.**
-`tpu_queue_max_seconds` and `tpu_runtime_max_seconds` are separate budgets —
-how long to wait for chips, and how long to hold them — and the first is set
-well under what the fleet actually makes a step wait. Something ends a kube
-step at 5h59m48s as `exit_status -1` with an empty log, whatever
-`timeout_in_minutes` says, so a launcher permitted to wait past that never gets
-to report why. Queueing longer than the budget belongs in Buildkite instead: a
-step held by a `concurrency_group` is `limited`, has a null `started_at`, and
-burns no clock. The launcher annotates what it is waiting for; read that before
-assuming a fault.
+**A step may legitimately queue for hours, but not forever inside the
+launcher.** `tpu_queue_max_seconds` and `tpu_runtime_max_seconds` are separate
+budgets — how long to wait for chips, and how long to hold them. The agent
+pod's own deadline (`job-active-deadline-seconds` in the agent-stack config) is
+derived to sit above both plus two hours, so one of the launcher's budgets
+always fires first and the step log says which. A kube step that ends as
+`exit_status -1` is therefore a cancellation or the workload's own deadline, not
+a Buildkite cap. Queueing that should not hold an agent pod at all belongs in
+Buildkite: a step held by a `concurrency_group` is `limited`, has a null
+`started_at`, and burns no clock. The launcher annotates what it is waiting for;
+read that before assuming a fault.
 
 **A reservation that never reaches a worker is resubmitted, not waited out.**
 MultiKueue sometimes reconciles a fresh reservation once, creates no copy on
@@ -732,10 +797,118 @@ A usage-over-quota ratio hides this, because both sides double and the ratio
 comes out right for the wrong reason. Do not take a plausible ratio as evidence
 the query is sound.
 
-## When a step is stuck
+## Debugging a step
 
-Work down from admission. Everything here is on the manager unless it says
-otherwise.
+Start from the step's log in Buildkite. The launcher's own lines start with
+`~~~ launcher:`; it also annotates the build while a step waits for quota or
+cannot be placed. The dashboard's Live page shows where every kube job is now,
+and Jobs lists the ones that ended, with their outcome.
+
+A kube step is `running` in Buildkite from the moment its agent pod starts,
+which can be hours before it gets chips. Whether it has them is the launcher's
+`admitted to worker cluster` line, or `admitted_at` in the timing table.
+
+### What the launcher's status lines mean
+
+| Line | Meaning |
+| --- | --- |
+| `waiting for quota: ...` | In Kueue's queue. Kueue's message says how many chips are missing. Normal. |
+| `waiting for admission`, `dispatching to <worker>` | Quota is reserved and MultiKueue is placing it on a worker, which takes seconds. Longer: "A reservation that never reaches a worker". |
+| `quota reserved Ns ago but ... - resubmitting` | MultiKueue dropped the dispatch and the launcher resubmitted. |
+| `admitted to worker cluster <worker>` | Admitted on the worker. The pods come next. |
+| `pod not scheduled yet: Unschedulable` | Waiting for a node, usually a scale-up. A multi-host slice from zero takes several minutes. Read the events below. |
+| `container waiting: PodInitializing` | The node is up. Init containers and the gcsfuse sidecar are starting, or the image is pulling. |
+| `evicted (...), waiting for re-admission` | Kueue preempted it (a reclaim within the cohort) and it is back in the queue. |
+| `waited Ns for reserved chips - resubmitting to run on Spot`, `admitted onto Spot but no Spot node`, `Spot node reclaimed under <pod> - back to the queue` | Spot overflow; see "Spot overflow". |
+| `no <queue> node can hold <pod>` | A pod asks for more ephemeral storage, memory or CPU than a node of its shape has. It fails after 10 minutes unless the autoscaler changes its mind. |
+| `pod evicted for its disk use` | Something in the workload wrote to the container's disk; the message names the container and the amount. |
+| `not admitted within Ns`, `not dispatched within Ns` | A budget ran out. Look at the queue's backlog before at the step. |
+| `no answer from the manager's API server` | The manager's control plane was unreachable for 10 minutes. The workload may need deleting by hand. |
+
+### From a Buildkite job to its objects
+
+Everything is named from the Buildkite job UUID:
+
+| Object | Cluster | Name |
+| --- | --- | --- |
+| Agent pod, running the launcher | manager | `buildkite-<job uuid>-<suffix>`, container `launcher` |
+| Job or JobSet | manager, copied to a worker | `bk-<job uuid without dashes>` |
+| Kueue Workload | manager and worker | `job-bk-<...>-<hash>` or `jobset-bk-<...>-<hash>` |
+| Workload pods | worker | `bk-<...>-<suffix>` for a Job, `bk-<...>-<role>-<job>-<pod>-<suffix>` for a JobSet; container `workload` |
+
+The workload's pods carry `buildkite.com/job-id=<job uuid>`:
+
+```bash
+kubectl -n buildkite get pods -l buildkite.com/job-id=<job uuid>    # on the worker
+```
+
+### Reading logs and events after the pods are gone
+
+Cloud Logging keeps every cluster's container output and Kubernetes events:
+
+```bash
+P=cloud-ullm-inference-ci-cd
+
+# The launcher's log.
+gcloud logging read --project $P --freshness 1d --order asc --format='value(timestamp,textPayload)' \
+  'resource.type="k8s_container" AND resource.labels.container_name="launcher" AND resource.labels.pod_name:"buildkite-<job uuid>"'
+
+# The workload's own output, on the worker.
+gcloud logging read --project $P --freshness 1d --order asc --format='value(timestamp,resource.labels.pod_name,textPayload)' \
+  'resource.type="k8s_container" AND resource.labels.container_name="workload" AND resource.labels.pod_name:"bk-<uuid without dashes>"'
+
+# Events for the step's objects, on every cluster.
+gcloud logging read --project $P --freshness 1d --order asc \
+  --format='value(timestamp,resource.labels.cluster_name,jsonPayload.reason,jsonPayload.message)' \
+  "logName=\"projects/$P/logs/events\" AND jsonPayload.involvedObject.name:\"bk-<uuid without dashes>\""
+
+# The autoscaler's reasons, per node pool, for not adding a node.
+gcloud logging read --project $P --freshness 2h --format=json \
+  "logName=\"projects/$P/logs/container.googleapis.com%2Fcluster-autoscaler-visibility\" AND resource.labels.cluster_name=\"tpu-ci-us-central1\" AND jsonPayload.noDecisionStatus.noScaleUp:*"
+```
+
+How to read the events while a pod waits for a node:
+
+- `TriggeredScaleUp` — a node, or a whole slice, is being made. Wait.
+- `NotTriggerScaleUp` with `max node group size reached` or `in backoff after
+  failed scale-up` — the shape is busy, or a scale-up failed and is being
+  retried. Wait.
+- `NotTriggerScaleUp` with `N Insufficient ephemeral-storage` (or `memory`,
+  `cpu`) — no node of the shape would fit the pod, now or later. The launcher
+  fails these as `unfit`; fix the manifest's requests.
+- `FailedScaleUp` with `GCE out of resources` — a stockout, almost always on
+  Spot. The launcher moves the step off Spot.
+- `FailedScheduling` judges only the nodes that exist, and reads the same while
+  a slice is still being made. It is not evidence of a problem by itself.
+- `FailedCreate ... follower pod node selector for topology domain not found` —
+  JobSet's exclusive placement holding a multi-host Job's other pods until its
+  first pod has a node pool. Normal.
+- `Evicted` — read the message: it names the resource and the container.
+
+### Failures that look like the fleet's but are not
+
+These happen inside the workload and only, or mostly, on kube. The fix is in
+the test repo or its manifest.
+
+| Symptom | Cause | What to do |
+| --- | --- | --- |
+| libtpu `START_SESSION failed` or `Cannot write the request to vBAR before deadline`; other ranks stuck in `CreateTpuSystemState` | A new process group started while the chip was still resetting after the previous one exited; the node's `tpu-device-plugin` logs `vBAR register read returned 0xffffffff`. libtpu reaches the chip through the device plugin's vBAR socket on GKE and not on a TPU VM. Also seen on a multi-host slice reused within a minute of the previous JobSet. | Read the device plugin's log on the node around the start. Wait for the device or retry the launch; it is not a port race. |
+| Intermittent `SocketServer: Connection closed recv() == 0` between processes on one host | libtpu's `TPU_PROCESS_PORT` overlaps another listener; with `SO_REUSEPORT` the kernel splits connections between them. | Move one of them; tpu-inference #3730 moved libtpu to 8476+rank. |
+| Multi-host engines hang creating the PJRT client after `Accessing retired flag 'eventmanager2_as_default_eventmanager'` | Two independent engines in the JobSet's default group, so GKE's webhook sets `MEGASCALE_NUM_SLICES=2` on both and each waits for a slice that never joins. | Give each engine its own `replicatedJobs[].groupName`. |
+| Non-head pods fail importing a `trust_remote_code` module (`transformers_modules... has no attribute ...`) | The workers on a host race to write the HF modules cache, which starts empty in every pod. | Warm the cache once per pod before starting Ray (vllm-torchtpu `warm_remote_code.py`). |
+| Pod evicted for ephemeral storage; the step fails `evicted_storage` | The workload writes to the container's disk, usually `~/.cache/vllm` (`VLLM_CACHE_ROOT` unset) or `HF_HOME` outside `/cache/hf/hub`. | Point it at `/cache/jax/...` and list the variable in the test repo's `common.sh` `FORWARD`. |
+| `403 ... storage.buckets.get` from `runai_streamer` | The workload identity can read objects but not bucket metadata, which runai reads first. | Grant `roles/storage.bucketViewer` on that bucket. |
+| `401 ... User Access Token ... is expired` in every step that downloads from HF | The HF token expired. | Add a version to the secret named by `env_secrets.HF_TOKEN` in `prod.auto.tfvars`; SecretSync copies it within minutes. Check that the new token can read the gated repos too. |
+| The Job is `Failed` with no failed container and no OOM | The workload's deadline: `tpu_test_max_seconds` unless the manifest or step states one. | Set `activeDeadlineSeconds` in the manifest or `TPU_MAX_RUNTIME_SECONDS` on the step. |
+
+When comparing a kube step with the same step on the VM fleet, compare each
+job's `exit_status`, not the build's state (many VM steps are `soft_fail`), and
+compare the test phase (the pytest window), not the step's duration, which on
+kube includes queueing and startup.
+
+### Working down from admission
+
+Everything here is on the manager unless it says otherwise.
 
 ```bash
 # Is it admitted, and if not, why?
@@ -748,15 +921,17 @@ kubectl get clusterqueue
 
 # Admitted but nothing running: it is on the worker that owns that shape -
 # tpu-ci-us-east5 for ct6e, tpu-ci-us-central1 for tpu7x.
-gcloud container clusters get-credentials <cluster> \
-  --region <region> --project cloud-ullm-inference-ci-cd
-kubectl get pods -n buildkite
+kubectl --context gke_cloud-ullm-inference-ci-cd_<region>_<worker> get pods -n buildkite
 ```
 
 Admission only means the chips are reserved. The pod still has to be scheduled,
 the node possibly created from zero, and the image pulled — tens of minutes on a
 cold pool. The launcher reports where it is in that gap; a step sitting quietly
 at "waiting for a node" is usually the autoscaler, not a fault.
+
+A workload that names a Spot pin but sits with `NoMatchingFlavor` was offered
+Spot by a launcher that started before its queue's Spot flavor was removed; see
+"Deploying" in `AGENTS.md`. Cancel and retry the step.
 
 **What a Buildkite job is actually asking for.** The agent page will not tell
 you. Its `k8s:node=` tag is the manager node the *agent* pod landed on — a CPU
