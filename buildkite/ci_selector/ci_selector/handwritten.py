@@ -434,8 +434,6 @@ IMAGE_BUILD_KEY_PREFIX = "image-build"
 
 # What a mirror step depends on when its override declares nothing.
 # `normalize_amd_depends_on` puts this at the front of every AMD step's deps.
-# Note the block-step fallback at buildkite_step.py:791 spells the same value
-# as a bare literal rather than using the constant, so the two can part ways.
 MIRROR_DEFAULT_DEPENDS_ON = (AMD_ARTIFACT_STEP,)
 
 # Taken from the generator's amd.py rather than copied. Re-exported here so

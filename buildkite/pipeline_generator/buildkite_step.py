@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Tuple, Union, Literal
+from pydantic import BaseModel, Field
+from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
 import math
 import os
@@ -38,6 +38,8 @@ import runtime_shard
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
 PRECOMMIT_STEP_KEY = "pre-commit"
+PRECOMMIT_GROUP = "GitHub pre-commit check"
+AMD_GROUP = "Hardware-AMD Tests"
 PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
@@ -177,7 +179,7 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
     )
-    return BuildkiteGroupStep(group="GitHub pre-commit check", steps=[precommit_step])
+    return BuildkiteGroupStep(group=PRECOMMIT_GROUP, steps=[precommit_step])
 
 
 def add_precommit_dependency(
@@ -242,6 +244,9 @@ class BuildkiteCommandStep(BaseModel):
     timeout_in_minutes: Optional[int] = None
     priority: Optional[int] = None
     allow_dependency_failure: Optional[bool] = None
+    # Not selected to run: left out of the pipeline and offered in the
+    # "Run more jobs" input step instead (see split_deferred_steps).
+    deferred: bool = Field(default=False, exclude=True)
 
     def to_yaml(self):
         return {
@@ -265,18 +270,34 @@ class BuildkiteCommandStep(BaseModel):
         }
 
 
-class BuildkiteBlockStep(BaseModel):
-    block: str
-    depends_on: Optional[Union[str, List[str]]] = None
-    key: str
-
-    def to_yaml(self):
-        return {"block": self.block, "depends_on": self.depends_on, "key": self.key}
-
-
 class BuildkiteGroupStep(BaseModel):
     group: str
-    steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
+    steps: List[BuildkiteCommandStep]
+
+
+def split_deferred_steps(
+    groups: List[BuildkiteGroupStep],
+) -> Tuple[List[BuildkiteGroupStep], List[BuildkiteGroupStep]]:
+    """Split the groups into the steps that run and the deferred ones.
+
+    A deferred step that a running step depends on, directly or not, runs
+    too: the running step would otherwise wait on a step that is not there.
+    """
+    by_key = {s.key: s for g in groups for s in g.steps}
+    pending = [s for s in by_key.values() if not s.deferred]
+    while pending:
+        for dependency in pending.pop().depends_on or []:
+            needed = by_key.get(dependency)
+            if needed is not None and needed.deferred:
+                needed.deferred = False
+                pending.append(needed)
+    runnable, deferred = [], []
+    for group in groups:
+        for wanted, out in ((False, runnable), (True, deferred)):
+            steps = [s for s in group.steps if s.deferred == wanted]
+            if steps:
+                out.append(BuildkiteGroupStep(group=group.group, steps=steps))
+    return runnable, deferred
 
 
 # Devices routed to agent-stack-k8s. Shared with the fnrec checkout decision
@@ -697,30 +718,11 @@ def _collect_step(
     count_armed: bool = False,
     large: bool = False,
 ) -> "BuildkiteCommandStep":
-    steps = [s for g in groups for s in g.steps]
-    blocked = {s.key for s in steps if isinstance(s, BuildkiteBlockStep)}
-    # Block keys do not consistently encode the command they gate: directly
-    # declared AMD jobs use block-amd-<key> without adding amd- to the job.
-    # Follow the actual edges, including jobs waiting on a blocked image or
-    # another blocked job, so collection never waits for manual approval.
-    dependents: Dict[str, List[str]] = {}
-    for step in steps:
-        if isinstance(step, BuildkiteCommandStep):
-            for dependency in step.depends_on or []:
-                dependents.setdefault(dependency, []).append(step.key)
-    pending = list(blocked)
-    while pending:
-        for dependent in dependents.get(pending.pop(), []):
-            if dependent not in blocked:
-                blocked.add(dependent)
-                pending.append(dependent)
-    runnable = [
-        s for s in steps if isinstance(s, BuildkiteCommandStep) and s.key not in blocked
-    ]
+    runnable = [s for g in groups for s in g.steps if not s.deferred]
     # Only the steps that record, and what they wait for: the image build
     # uploads the kernel symbol map. Waiting on every step held the kernel
     # collect of nightly vllm/ci #90897 behind 34 AMD jobs, none of which
-    # records a kernel. Steps behind a block step are left out, because a
+    # records a kernel. Deferred steps are left out, because a
     # dependency that never starts would hold this step forever. A cancelled
     # one ends it waiting_failed, allow_dependency_failure or not, and it
     # cannot be retried; the collect scripts can fold the build from another.
@@ -916,39 +918,6 @@ def _prepare_commands(
         final_commands.insert(0, f"cd {step.working_dir}")
 
     return final_commands
-
-
-def _create_block_step(
-    *,
-    block: str,
-    key: str,
-    command_step: BuildkiteCommandStep,
-    depends_on: Optional[Union[str, List[str]]] = None,
-    append_to_command_depends_on: bool = True,
-) -> BuildkiteBlockStep:
-    if isinstance(depends_on, list):
-        block_depends_on = list(depends_on)
-    else:
-        block_depends_on = depends_on
-    block_step = BuildkiteBlockStep(
-        block=block,
-        depends_on=block_depends_on,
-        key=key,
-    )
-    command_depends_on = list(command_step.depends_on or [])
-    if not append_to_command_depends_on:
-        command_depends_on = [
-            block_step.key,
-            *[
-                dependency
-                for dependency in command_depends_on
-                if dependency != block_step.key
-            ],
-        ]
-    elif block_step.key not in command_depends_on:
-        command_depends_on.append(block_step.key)
-    command_step.depends_on = command_depends_on
-    return block_step
 
 
 def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
@@ -1158,14 +1127,7 @@ def convert_group_step_to_buildkite_step(
                         [KERNREC_ARTIFACT_PATH] if _kernrec_applies(step, "amd") else []
                     ),
                 )
-                if not _step_should_run(step, list_file_diff):
-                    block_step = _create_block_step(
-                        block=f"Run {amd_step.label}",
-                        key=f"block-amd-{step_key}",
-                        command_step=amd_step,
-                        depends_on=amd_step.depends_on,
-                    )
-                    amd_hardware_steps.append(block_step)
+                amd_step.deferred = not _step_should_run(step, list_file_diff)
                 amd_hardware_steps.append(amd_step)
                 continue
 
@@ -1228,15 +1190,7 @@ def convert_group_step_to_buildkite_step(
                     _recording_timeout(step, step.timeout_in_minutes)
                 )
 
-            if include_step and not _step_should_run(step, list_file_diff):
-                block_step = _create_block_step(
-                    block=f"Run {step.label}",
-                    key=f"block-{step_key}",
-                    command_step=buildkite_step,
-                    depends_on=[],
-                    append_to_command_depends_on=False,
-                )
-                group_steps_list.append(block_step)
+            buildkite_step.deferred = not _step_should_run(step, list_file_diff)
 
             # add plugin
             if not step.no_plugin and not (
@@ -1277,7 +1231,7 @@ def convert_group_step_to_buildkite_step(
             if include_step:
                 group_steps_list.append(buildkite_step)
 
-            # Create AMD mirror step and its block step if specified/applicable
+            # Create AMD mirror step if specified/applicable
             if (
                 include_amd
                 and step.mirror
@@ -1386,28 +1340,13 @@ def convert_group_step_to_buildkite_step(
                         else []
                     ),
                 )
-                if not _amd_mirror_should_run(
+                amd_step.deferred = not _amd_mirror_should_run(
                     _step_should_run(
                         _get_amd_mirror_effective_step(step, amd),
                         list_file_diff,
                     ),
                     list_file_diff,
-                ):
-                    # Block step depends on the shared AMD image build.
-                    mirror_build_dep = (
-                        amd_step.depends_on[0]
-                        if amd_step.depends_on
-                        else "image-build-amd"
-                    )
-                    amd_block_step = _create_block_step(
-                        block=f"Run {amd_step.label}"
-                        if amd.get("label")
-                        else f"Run AMD: {step.label}",
-                        key=f"block-amd-{step_key}",
-                        command_step=amd_step,
-                        depends_on=[mirror_build_dep],
-                    )
-                    amd_hardware_steps.append(amd_block_step)
+                )
                 amd_hardware_steps.append(amd_step)
 
         if group_steps_list:
@@ -1418,7 +1357,7 @@ def convert_group_step_to_buildkite_step(
     # If AMD hardware steps exist, make them a group step.
     if amd_hardware_steps:
         buildkite_group_steps.append(
-            BuildkiteGroupStep(group="Hardware-AMD Tests", steps=amd_hardware_steps)
+            BuildkiteGroupStep(group=AMD_GROUP, steps=amd_hardware_steps)
         )
 
     return buildkite_group_steps
