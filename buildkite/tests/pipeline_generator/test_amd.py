@@ -84,6 +84,27 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkey
     assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
 
 
+def test_amd_cpu_step_keeps_main_infra_retry_without_nvidia_rules():
+    step = Step(
+        label="AMD build",
+        group="Hardware - AMD Build",
+        key="amd-build-no-yaml-retry",
+        device="amd_cpu",
+        commands=["build"],
+    )
+
+    command_step = _render_single_step(step).steps[-1]
+
+    # Only the NVIDIA defaults gain the timeout (-1, cancel) and 128 rules.
+    assert command_step.retry == {
+        "automatic": [
+            {"signal_reason": "stack_error", "limit": 1},
+            {"exit_status": -1, "limit": 1},
+            {"exit_status": 255, "limit": 1},
+        ]
+    }
+
+
 @pytest.mark.parametrize(
     ("device", "queue", "dind", "expected_gpu_count"),
     [
@@ -168,6 +189,9 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         "limit": 1,
     }
     assert {"exit_status": 134, "limit": 1} in command_step.retry["automatic"]
+    assert all(
+        r.get("signal_reason") != "cancel" for r in command_step.retry["automatic"]
+    )
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")
