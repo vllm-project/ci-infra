@@ -87,7 +87,9 @@ def test_a_selector_failure_keeps_todays_rules():
 
 
 def test_the_selectors_own_refusal_keeps_todays_rules():
-    record = selector_gate.decide(PR, ["x"], _emission([], omit=True, reason="run-all: rust"))
+    record = selector_gate.decide(
+        PR, ["x"], _emission([], omit=True, reason="run-all: rust")
+    )
     assert record["selector_keys"] is None
     assert "run-all: rust" in record["fallback"]
 
@@ -103,16 +105,27 @@ def test_the_record_is_written_as_json(tmp_path, monkeypatch):
 # ---- through the generator -------------------------------------------------
 
 import pipeline_generator as pg  # noqa: E402
+import unblock_jobs  # noqa: E402
 from step import Step  # noqa: E402
 
 
 def _steps():
     return [
         Step(label="Image", key="image-build", commands=["build"]),
-        Step(label="A", key="test-a", depends_on=["image-build"], commands=["a"],
-             source_file_dependencies=["vllm/"]),
-        Step(label="B", key="test-b", depends_on=["image-build"], commands=["b"],
-             source_file_dependencies=["tests/b/"]),
+        Step(
+            label="A",
+            key="test-a",
+            depends_on=["image-build"],
+            commands=["a"],
+            source_file_dependencies=["vllm/"],
+        ),
+        Step(
+            label="B",
+            key="test-b",
+            depends_on=["image-build"],
+            commands=["b"],
+            source_file_dependencies=["tests/b/"],
+        ),
     ]
 
 
@@ -132,10 +145,12 @@ def test_on_mode_hands_the_selectors_keys_to_the_generator(pr_config, monkeypatc
     monkeypatch.setattr(selector_gate, "run_ci_select", _emission(["test-b"]))
     record = pg._selector_decision(_steps())
     assert record["applied"] is True
-    assert pr_config["only_step_keys"] == frozenset({"test-b"})
+    assert pr_config.get("selector_step_keys") == frozenset({"test-b"})
     # today's rules: the image build always runs, and vllm/ matched test-a
     assert record["legacy_keys"] == ["image-build", "test-a"]
-    selected, keys = pg.select_steps_and_dependencies(_steps(), pr_config["only_step_keys"])
+    selected, keys = pg.select_steps_and_dependencies(
+        _steps(), pr_config.get("selector_step_keys")
+    )
     assert keys == frozenset({"image-build", "test-b"}), "prerequisites come along"
 
 
@@ -144,34 +159,66 @@ def test_shadow_mode_records_but_changes_nothing(pr_config, monkeypatch):
     monkeypatch.setattr(selector_gate, "run_ci_select", _emission(["test-b"]))
     record = pg._selector_decision(_steps())
     assert record["selector_keys"] == ["test-b"] and record["applied"] is False
-    assert pr_config["only_step_keys"] is None
+    assert pr_config.get("selector_step_keys") is None
 
 
 def test_an_unknown_key_keeps_todays_rules(pr_config, monkeypatch):
     monkeypatch.setattr(selector_gate, "run_ci_select", _emission(["test-b", "gone"]))
     record = pg._selector_decision(_steps())
     assert record["applied"] is False and "gone" in record["fallback"]
-    assert pr_config["only_step_keys"] is None
+    assert pr_config.get("selector_step_keys") is None
 
 
 def test_the_gate_is_inert_when_off(pr_config, monkeypatch):
     monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "off")
     assert pg._selector_decision(_steps()) is None
-    assert pr_config["only_step_keys"] is None
+    assert pr_config.get("selector_step_keys") is None
 
 
 def test_optional_steps_stay_optional(pr_config, monkeypatch):
     """The selector named a nightly-only step on a PR (vllm#61804): it is
     dropped, recorded, and the rest still applies."""
     steps = _steps() + [
-        Step(label="Nightly", key="test-nightly", optional=True, commands=["n"],
-             depends_on=["image-build"]),
+        Step(
+            label="Nightly",
+            key="test-nightly",
+            optional=True,
+            commands=["n"],
+            depends_on=["image-build"],
+        ),
     ]
     monkeypatch.setattr(
-        selector_gate, "run_ci_select", _emission(["test-b", "test-nightly", "amd-test-nightly"])
+        selector_gate,
+        "run_ci_select",
+        _emission(["test-b", "test-nightly", "amd-test-nightly"]),
     )
     record = pg._selector_decision(steps)
     assert record["applied"] is True
     assert record["selector_keys"] == ["test-b"]
     assert record["selector_optional_dropped"] == ["amd-test-nightly", "test-nightly"]
-    assert pr_config["only_step_keys"] == frozenset({"test-b"})
+    assert pr_config.get("selector_step_keys") == frozenset({"test-b"})
+
+
+def test_steps_the_selector_skips_are_offered_in_run_more_jobs(
+    pr_config, monkeypatch, tmp_path
+):
+    """The selector's keys pick what runs; every other step stays in the
+    pipeline as deferred, so "Run more jobs" can still add it."""
+    monkeypatch.setattr(selector_gate, "run_ci_select", _emission(["test-b"]))
+    monkeypatch.setattr(pg, "read_steps_from_job_dir", lambda _: _steps())
+    monkeypatch.delenv("BUILDKITE_JOB_ID", raising=False)
+    monkeypatch.setenv("PATH", "")  # no buildkite-agent: uploads are skipped
+    pr_config["job_dirs"] = ["jobs"]
+    generator = object.__new__(pg.PipelineGenerator)
+    generator.output_file_path = str(tmp_path / "pipeline.yaml")
+    generator.generate()
+
+    record = json.load(open(tmp_path / selector_gate.DECISION_FILE))
+    assert record["applied"] is True
+    assert record["scheduled_keys"] == ["image-build", "test-b"]
+    pipeline = open(tmp_path / "pipeline.yaml").read()
+    deferred = json.load(
+        open(tmp_path / unblock_jobs.DEFERRED_DIR / unblock_jobs.DEFERRED_FILE)
+    )
+    assert [e["step"]["key"] for e in deferred["steps"]] == ["test-a"]
+    assert "key: test-b" in pipeline and "key: test-a" not in pipeline

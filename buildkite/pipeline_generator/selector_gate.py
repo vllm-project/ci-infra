@@ -36,14 +36,16 @@ SELECTOR_ENV_VAR = "VLLM_CI_SELECTOR"
 DECISION_FILE = "ci_selector_decision.json"
 RECORD_VERSION = 1
 CI_INFRA_REPO = "https://github.com/vllm-project/ci-infra.git"
-RECORD_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/{recorder}/latest.json"
+RECORD_URL = (
+    "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/{recorder}/latest.json"
+)
 # The whole selector run, fetches included. Past it the build keeps today's
 # rules rather than wait.
 SELECTOR_TIMEOUT_SECONDS = 20 * 60
 
 
 def mode() -> str:
-    """"on" (the default), "shadow", or "" for off. An unknown value reads as
+    """ "on" (the default), "shadow", or "" for off. An unknown value reads as
     the default, so a typo cannot quietly switch selection off."""
     value = (os.getenv(SELECTOR_ENV_VAR) or "on").strip().lower()
     if value == "off":
@@ -178,8 +180,15 @@ def annotate(record: Dict[str, Any]) -> None:
         )
     try:
         subprocess.run(
-            ["buildkite-agent", "annotate", text, "--context", "ci-selector",
-             "--style", "info"],
+            [
+                "buildkite-agent",
+                "annotate",
+                text,
+                "--context",
+                "ci-selector",
+                "--style",
+                "info",
+            ],
             check=False,
             timeout=60,
         )
@@ -220,7 +229,9 @@ def _uv(workdir: str) -> str:
 
 def _latest(recorder: str) -> Optional[Dict[str, Any]]:
     try:
-        with urllib.request.urlopen(RECORD_URL.format(recorder=recorder), timeout=30) as r:
+        with urllib.request.urlopen(
+            RECORD_URL.format(recorder=recorder), timeout=30
+        ) as r:
             return json.loads(r.read())
     except Exception as error:  # noqa: BLE001 - informational only
         return {"error": str(error)}
@@ -235,8 +246,17 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     checkout = os.path.join(workdir, "ci-infra")
     _run(
-        ["git", "clone", "--quiet", "--depth", "1", "--branch", branch,
-         CI_INFRA_REPO, checkout],
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--depth",
+            "1",
+            "--branch",
+            branch,
+            CI_INFRA_REPO,
+            checkout,
+        ],
         timeout=left(),
     )
     ci_infra_commit = _run(["git", "-C", checkout, "rev-parse", "HEAD"]).strip()
@@ -251,14 +271,21 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
         run
         + [
             "ci-select",
-            "--repo", repo,
-            "--diff", f"{base}...{head}",
+            "--repo",
+            repo,
+            "--diff",
+            f"{base}...{head}",
             "--emit-keys",
-            "--pipeline", pipeline,
-            "--table", os.path.join(data, "table.json.gz"),
-            "--kernel-table", os.path.join(data, "kernel_table.json.gz"),
-            "--kernel-symbol-map", os.path.join(data, "kernel_symbol_map.json.gz"),
-            "--explain", explain_path,
+            "--pipeline",
+            pipeline,
+            "--table",
+            os.path.join(data, "table.json.gz"),
+            "--kernel-table",
+            os.path.join(data, "kernel_table.json.gz"),
+            "--kernel-symbol-map",
+            os.path.join(data, "kernel_symbol_map.json.gz"),
+            "--explain",
+            explain_path,
         ],
         capture_output=True,
         text=True,

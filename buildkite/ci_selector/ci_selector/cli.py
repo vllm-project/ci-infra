@@ -315,7 +315,9 @@ def explain(state, sel, d) -> dict:
             "key": keys.get(sid),
             "selected": sid in d.steps,
             "outcome": outcome.get(sid, "kept" if sid in d.steps else "not-selected"),
-            "map_reasons": [r[:EXPLAIN_REASON_CHARS] for r in reasons[:EXPLAIN_REASONS]],
+            "map_reasons": [
+                r[:EXPLAIN_REASON_CHARS] for r in reasons[:EXPLAIN_REASONS]
+            ],
             "map_reason_count": len(reasons),
         }
     return {

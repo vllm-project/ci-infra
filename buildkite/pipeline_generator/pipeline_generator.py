@@ -93,7 +93,18 @@ class PipelineGenerator:
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
         record = _selector_decision(steps)
+        scheduled = None
         try:
+            if record is not None and record["applied"]:
+                # Validate the selector's keys and add their prerequisites.
+                # Every step stays in the pipeline; the rest are deferred
+                # (_step_should_run), so "Run more jobs" still offers them.
+                _, scheduled = select_steps_and_dependencies(
+                    steps,
+                    global_config["selector_step_keys"],
+                    torch_nightly=torch_nightly,
+                )
+                global_config["selector_step_keys"] = scheduled
             steps, selected_step_keys = select_steps_and_dependencies(
                 steps, global_config["only_step_keys"], torch_nightly=torch_nightly
             )
@@ -105,16 +116,15 @@ class PipelineGenerator:
             # The selector's keys, never the build's own: back to today's rules.
             record["applied"] = False
             record["fallback"] = f"generator rejected the selector's keys: {error}"
-            global_config["only_step_keys"] = None
+            global_config["selector_step_keys"] = None
+            scheduled = None
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, None, torch_nightly=torch_nightly
+                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
             )
         global_config["only_step_keys"] = selected_step_keys
         if record is not None:
             record["scheduled_keys"] = (
-                sorted(selected_step_keys)
-                if selected_step_keys is not None
-                else record["legacy_keys"]
+                sorted(scheduled) if scheduled is not None else record["legacy_keys"]
             )
             selector_gate.write_and_upload(
                 record, os.path.dirname(self.output_file_path)
@@ -236,9 +246,11 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
     """Ask the test selector for this build's steps (selector_gate.py).
 
     In "on" mode a usable answer replaces the source_file_dependencies rules
-    through `only_step_keys`, which the generator already expands with each
-    step's prerequisites. Returns the decision record, or None when the gate
-    is off. Never raises: a broken gate leaves today's rules in place.
+    through `selector_step_keys`, which `generate` expands with each step's
+    prerequisites. Unlike `only_step_keys` it removes no step from the
+    pipeline: the ones it leaves out are deferred into "Run more jobs".
+    Returns the decision record, or None when the gate is off. Never raises:
+    a broken gate leaves today's rules in place.
     """
     gate = selector_gate.mode()
     if not gate:
@@ -265,12 +277,12 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
                     unknown[:20]
                 )
             elif gate == "on":
-                global_config["only_step_keys"] = frozenset(keys)
+                global_config["selector_step_keys"] = frozenset(keys)
                 record["applied"] = True
         return record
     except Exception as error:  # noqa: BLE001 - the gate never breaks a build
         print(f"ci-selector gate failed, keeping today's rules: {error}")
-        global_config["only_step_keys"] = None
+        global_config["selector_step_keys"] = None
         record = selector_gate.base_record(global_config, gate)
         record["fallback"] = f"gate error: {type(error).__name__}: {error}"[:2000]
         return record
