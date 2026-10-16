@@ -347,7 +347,7 @@ def test_header_included_by_host_code_selects_but_never_drops(tmp_path):
 def test_unreadable_object_blocks_drops_for_its_files(tmp_path):
     ev = _evidence(
         tmp_path,
-        {"silent": {"kernels": []}},
+        {"silent": {"kernels": ["kOther"]}},
         [_obj("csrc/bad.cu", [], error="cuobjdump failed"), _obj("csrc/a.cu", ["kA"])],
     )
     sel = _selection({"csrc/bad.cu": ["silent"]})
@@ -356,7 +356,9 @@ def test_unreadable_object_blocks_drops_for_its_files(tmp_path):
 
 
 def test_file_outside_the_map_leaves_the_map_alone(tmp_path):
-    ev = _evidence(tmp_path, {"silent": {"kernels": []}}, [_obj("csrc/a.cu", ["kA"])])
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kOther"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
     sel = _selection({"csrc/cpu/attention.cpp": ["silent"]})
     r = _read(ev, sel, ["csrc/cpu/attention.cpp", "docs/x.md"], _keys("silent"))
     assert r.dropped == [] and r.added == []
@@ -371,7 +373,7 @@ def test_file_outside_the_map_leaves_the_map_alone(tmp_path):
 def test_unmatched_pair_and_stale_file_only_select(tmp_path):
     ev = _evidence(
         tmp_path,
-        {"silent": {"kernels": []}, "missed": {"kernels": ["kA"]}},
+        {"silent": {"kernels": ["kOther"]}, "missed": {"kernels": ["kA"]}},
         [_obj("csrc/a.cu", ["kA"])],
         table_commit="abc",
         map_commit="def",
@@ -390,7 +392,9 @@ def test_unmatched_pair_and_stale_file_only_select(tmp_path):
 
 
 def test_python_record_positive_evidence_holds_the_step(tmp_path):
-    ev = _evidence(tmp_path, {"silent": {"kernels": []}}, [_obj("csrc/a.cu", ["kA"])])
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kOther"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
     sel = _selection({"csrc/a.cu": ["silent"]})
     r = _read(
         ev, sel, ["csrc/a.cu"], _keys("silent"), protected=frozenset({"vllm_ci:silent"})
@@ -403,8 +407,8 @@ def test_a_drop_needs_every_selecting_file_cleared(tmp_path):
         tmp_path,
         {
             "runs-b": {"kernels": ["kB"]},
-            "runs-none": {"kernels": []},
-            "runs-none-2": {"kernels": []},
+            "runs-none": {"kernels": ["kOther"]},
+            "runs-none-2": {"kernels": ["kOther"]},
         },
         [
             _obj("csrc/a.cu", ["kA"]),
@@ -628,8 +632,8 @@ def test_decide_applies_the_kernel_record(tmp_path, csrc_diff, monkeypatch):
         tmp_path,
         {
             "launched": {"kernels": ["kA"]},
-            "silent": {"kernels": []},
-            "declared": {"kernels": []},
+            "silent": {"kernels": ["kOther"]},
+            "declared": {"kernels": ["kOther"]},
         },
         [_obj("csrc/a.cu", ["kA"])],
     )
@@ -695,7 +699,7 @@ def test_decide_unmatched_pair_drops_only_on_opt_in(tmp_path, csrc_diff, monkeyp
     root, base, head = csrc_diff
     ev = _evidence(
         tmp_path,
-        {"silent": {"kernels": []}},
+        {"silent": {"kernels": ["kOther"]}},
         [_obj("csrc/a.cu", ["kA"])],
         map_commit="def",
     )
@@ -718,7 +722,9 @@ def test_decide_without_a_state_or_with_bad_evidence_changes_nothing(
     tmp_path, csrc_diff
 ):
     root, base, head = csrc_diff
-    ev = _evidence(tmp_path, {"silent": {"kernels": []}}, [_obj("csrc/a.cu", ["kA"])])
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kOther"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
     sel = _selection({"csrc/a.cu": ["silent"]})
     d = decide(
         None, sel, root, base, head, table=Table(None, unavailable="x"), kernels=ev
@@ -802,3 +808,19 @@ def test_fetch_script_reports_nothing_published(tmp_path, monkeypatch):
     mod = _serve(monkeypatch, {})
     assert mod.main(["--url", "https://bucket/ci", "--out", str(tmp_path / "o")]) == 1
     assert not (tmp_path / "o" / "kernel_table.json.gz").exists()
+
+
+def test_a_row_that_launched_no_kernel_at_all_never_drops(tmp_path):
+    """An ABI audit, a CPU job or a dependency check records an empty kernel
+    set. That silence is about no kernel in particular: such a step reaches
+    csrc some other way (`torch-stable-abi-audit` reads the built library),
+    so it keeps whatever changed."""
+    ev = _evidence(
+        tmp_path,
+        {"audit": {"kernels": []}, "gpu": {"kernels": ["kOther"]}},
+        [_obj("csrc/a.cu", ["kA"])],
+    )
+    sel = _selection({"csrc/a.cu": ["audit", "gpu"]})
+    r = _read(ev, sel, ["csrc/a.cu"], _keys("audit", "gpu"))
+    assert r.dropped == ["vllm_ci:gpu"]
+    assert r.reasons["row-launched-no-kernel-at-all"] == 1

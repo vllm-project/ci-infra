@@ -31,7 +31,8 @@ file is the unit otherwise. Per changed file F and step S:
     S's row launched a kernel from F              -> select. The map gets no vote.
     S's USABLE row launched none, F is CLEARABLE   -> drop, if F is all the map
                                                      had on S
-    no row, or F is nothing the map can answer for -> the map decides
+    no row, a row with no kernels at all, or F is
+    nothing the map can answer for                 -> the map decides
 
 Usable is the row's health: every job passed, every shard reported, no
 dropped records (`recorders/kernrec/kernel_table.py::usable`). Clearable is the file's:
@@ -505,6 +506,11 @@ def _why_keep(
         return "no-row"
     if launched(row):
         return "row-launched-a-kernel-from-a-changed-file"
+    if not row.kernels:
+        # A step that launched no kernel at all (an ABI audit, a CPU job, a
+        # dependency check) reaches csrc some other way, if at all, and its
+        # silence says nothing about which kernels it depends on.
+        return "row-launched-no-kernel-at-all"
     if step_id in protected:
         return "held-by-the-python-record"
     if any(r in FILELESS_RULES for r in rules):
