@@ -124,6 +124,11 @@ class Table:
         return str(self.source.get("pipeline") or "")
 
     @property
+    def recorded_at(self) -> str:
+        """When the table was built, just before it was published."""
+        return str(self.source.get("recorded_at") or "")
+
+    @property
     def available(self) -> bool:
         return not self.unavailable
 
