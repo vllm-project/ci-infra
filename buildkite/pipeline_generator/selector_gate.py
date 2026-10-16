@@ -1,9 +1,11 @@
 """Let the test selector (buildkite/ci_selector) choose a PR build's steps.
 
-Off unless `VLLM_CI_SELECTOR` is set:
+On by default. `VLLM_CI_SELECTOR` overrides it for one build:
 
-  on      the selector's step keys replace the source_file_dependencies rules
+  on      (the default) the selector's step keys replace the
+          source_file_dependencies rules
   shadow  the selector runs and its decision is recorded; nothing changes
+  off     the selector does not run; today's rules, and no record
 
 Only PR and branch builds are selected. Main, release-branch, nightly, run-all and docs-only builds, and
 builds that already name their steps (`VLLM_CI_ONLY_STEP_KEYS`), keep today's
@@ -41,9 +43,12 @@ SELECTOR_TIMEOUT_SECONDS = 20 * 60
 
 
 def mode() -> str:
-    """"on", "shadow", or "" (off)."""
-    value = (os.getenv(SELECTOR_ENV_VAR) or "").strip().lower()
-    return value if value in ("on", "shadow") else ""
+    """"on" (the default), "shadow", or "" for off. An unknown value reads as
+    the default, so a typo cannot quietly switch selection off."""
+    value = (os.getenv(SELECTOR_ENV_VAR) or "on").strip().lower()
+    if value == "off":
+        return ""
+    return value if value in ("on", "shadow") else "on"
 
 
 def skip_reason(global_config: Dict[str, Any]) -> Optional[str]:
@@ -84,6 +89,7 @@ def base_record(global_config: Dict[str, Any], gate_mode: str) -> Dict[str, Any]
         "fallback": None,
         "selector": None,
         "selector_keys": None,
+        "explain": None,
         "legacy_keys": None,
         "scheduled_keys": None,
         "records": None,
@@ -122,6 +128,9 @@ def decide(
     record["selector"] = result.get("emission")
     record["records"] = result.get("records")
     record["selector_log"] = result.get("log")
+    # Per step: the map's reasons and what each record did. What a miss is
+    # diagnosed from later, without re-running the selector.
+    record["explain"] = result.get("explain")
     record["ci_infra_commit"] = result.get("ci_infra_commit")
     emission = result.get("emission") or {}
     if emission.get("omit", True) or not emission.get("keys"):
@@ -235,6 +244,7 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     uv = _uv(workdir)
     run = [uv, "run", "--quiet", "--no-dev", "--python", "3.12", "--project", project]
     data = os.path.join(workdir, "data")
+    explain_path = os.path.join(workdir, "explain.json")
     _run(run + ["ci-fetch-function-record", "--out", data], timeout=left())
     _run(run + ["ci-fetch-kernel-record", "--out", data], timeout=left())
     out = subprocess.run(
@@ -248,6 +258,7 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
             "--table", os.path.join(data, "table.json.gz"),
             "--kernel-table", os.path.join(data, "kernel_table.json.gz"),
             "--kernel-symbol-map", os.path.join(data, "kernel_symbol_map.json.gz"),
+            "--explain", explain_path,
         ],
         capture_output=True,
         text=True,
@@ -256,8 +267,15 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     )
     if out.returncode != 0:
         raise RuntimeError(f"ci-select exited {out.returncode}: {out.stderr[-1500:]}")
+    explain = None
+    try:
+        with open(explain_path) as f:
+            explain = json.load(f)
+    except (OSError, ValueError):
+        pass  # informational; the decision stands without it
     return {
         "emission": json.loads(out.stdout),
+        "explain": explain,
         "records": {"fnrec": _latest("fnrec"), "kernrec": _latest("kernrec")},
         "log": out.stderr[-4000:],
         "ci_infra_commit": ci_infra_commit,

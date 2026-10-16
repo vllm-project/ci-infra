@@ -27,6 +27,7 @@ def _emission(keys, omit=False, reason=""):
         "records": {"fnrec": {"build": 1}},
         "log": "coverage: ...",
         "ci_infra_commit": "c" * 40,
+        "explain": {"version": 1, "steps": {"vllm_ci:y": {"key": "y"}}},
     }
 
 
@@ -35,18 +36,22 @@ def _gate_on(monkeypatch):
     monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "on")
 
 
-def test_off_unless_the_switch_is_set(monkeypatch):
+def test_on_unless_switched_off(monkeypatch):
     monkeypatch.delenv(selector_gate.SELECTOR_ENV_VAR)
-    assert selector_gate.mode() == ""
+    assert selector_gate.mode() == "on"
+    # a typo must not quietly turn selection off
     monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "bogus")
-    assert selector_gate.mode() == ""
+    assert selector_gate.mode() == "on"
     monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "Shadow")
     assert selector_gate.mode() == "shadow"
+    monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "OFF")
+    assert selector_gate.mode() == ""
 
 
 def test_a_pr_build_records_the_selectors_keys():
     record = selector_gate.decide(PR, ["x", "y", "z"], _emission(["y", "a"]))
     assert record["selector_keys"] == ["a", "y"]
+    assert record["explain"]["steps"]["vllm_ci:y"]["key"] == "y"
     assert record["legacy_keys"] == ["x", "y", "z"]
     assert record["fallback"] is None and record["skipped"] is None
     assert record["base"] == PR["merge_base_commit"] and record["head"] == PR["commit"]
@@ -150,7 +155,7 @@ def test_an_unknown_key_keeps_todays_rules(pr_config, monkeypatch):
 
 
 def test_the_gate_is_inert_when_off(pr_config, monkeypatch):
-    monkeypatch.delenv(selector_gate.SELECTOR_ENV_VAR)
+    monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "off")
     assert pg._selector_decision(_steps()) is None
     assert pr_config["only_step_keys"] is None
 
