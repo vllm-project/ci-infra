@@ -543,9 +543,9 @@ rejects the duplicate.
 
 A single-host shape can have Spot capacity beside its reservation:
 `spot = { max_nodes = N }` on its `tpu_node_pools` entry adds a `<shape>-spot`
-node pool in the same zone, with no reservation and a
-`cloud.google.com/gke-spot` taint, and gives the shape's ClusterQueue a second
-flavor, `<generation>-spot`. Nothing about a step changes: no flag, no queue,
+node pool in the shape's zone, or in each of `spot.zones`, with no reservation
+and a `cloud.google.com/gke-spot` taint, and gives the shape's ClusterQueue a
+second flavor, `<generation>-spot`. Nothing about a step changes: no flag, no queue,
 no label. Kueue tries the reserved flavor first, borrowing from the cohort
 included, and admits onto Spot only when the reservation cannot take the
 workload - overflow, since the reservation is paid for either way. It reaches
