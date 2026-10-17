@@ -1332,8 +1332,9 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.plugins = [_get_step_plugin(step)]
                 # L4-on-EKS steps get a retry policy that also covers pod-level
                 # failures (agent stops), unless the step opted out explicitly.
+                # The repo-wide infra retries (-1, 255, 94) still apply.
                 if step.device == DeviceType.L4 and not step.retry:
-                    buildkite_step.retry = K8S_RETRY
+                    buildkite_step.retry = ensure_infra_failure_retry(K8S_RETRY)
 
             shard_mode = (
                 _runtime_shard_mode(step, step_key, list_file_diff)
