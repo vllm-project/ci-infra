@@ -153,6 +153,7 @@ def test_non_l4_steps_keep_existing_routing(device, num_devices, queue):
         "automatic": [
             buildkite_step.EXIT_STATUS_NEGATIVE_ONE_RETRY,
             buildkite_step.EXIT_STATUS_255_RETRY,
+            buildkite_step.EXIT_STATUS_94_RETRY,
         ]
     }
     if device in ("h100", "a100"):
