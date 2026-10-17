@@ -40,6 +40,12 @@ if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
 
+# Like upstream CI, PR builds run only on an explicit `/amd-ci run` comment.
+if [[ "${BUILDKITE_SOURCE:-}" == "webhook" && "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
+    buildkite-agent annotate "AMD CI does not start automatically on PRs. Comment \`/amd-ci run\` to start it." --style "info" || true
+    exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------

@@ -157,8 +157,13 @@ def sweep_from_artifacts(
     commit: str,
     pipeline: str,
     expected_jobs: int = 0,
+    consume: bool = False,
 ) -> dict:
     """Turn a build's downloaded `.fnrec/` artifacts into a sweep directory.
+
+    Process records land gzipped. `consume` also deletes each download once it
+    is unpacked: a nightly's line records outgrow the collect agent's disk
+    when every tarball and its unpacked copy sit side by side.
 
     Folding still happens in `merge_build`; this only supplies what
     `ci-fetch-build` normally reads from the Buildkite API.
@@ -183,11 +188,15 @@ def sweep_from_artifacts(
         out.mkdir(parents=True, exist_ok=True)
         if delivery == "tar":
             with open(entry, "rb") as fh:
-                unpack(fh, str(out))
+                unpack(fh, str(out), compress=True)
+            if consume:
+                entry.unlink()
         else:
             for f in sorted(entry.iterdir()):
                 if f.is_file():
-                    place_raw(f.name, f.read_bytes(), str(out))
+                    place_raw(f.name, f.read_bytes(), str(out), compress=True)
+                    if consume:
+                        f.unlink()
         jobs.append(_job_from_recordings(job_id, out, delivery))
 
     index = {
@@ -725,6 +734,8 @@ def main() -> None:
                 args.commit,
                 args.pipeline,
                 expected_jobs=args.expected_jobs,
+                # The collect step's downloads are its own to drop.
+                consume=True,
             )
             builds.append(staged)
         rows = merge_builds(builds, args.repo, verbose=args.verbose, censuses=censuses)

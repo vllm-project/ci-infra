@@ -8,7 +8,8 @@ command the plan covers, it:
   - skips collecting the files planned for other shards,
   - keeps this job's tests: its files, and its part of each file split by
     test. A collected file the plan doesn't name (one the generator could
-    not see) runs in the first shard, so no test can drop out of every shard,
+    not see) runs in the first shard that runs the command, so no test can
+    drop out of every shard,
   - opens a Buildkite log group per file, opens the group of a file that
     fails, and puts the failures and summary in their own open group,
   - turns "no tests ran" into success when every test went to other shards.
@@ -67,12 +68,15 @@ class ShardPlugin:
         self.split = command["split"]  # file -> {"shards", "assign"}
         self.prefix = command["prefix"]
         self.label = command["label"]
+        self.fallback = command.get("fallback", 0)
         self.shard = shard
         self.shards = shards
         self.reporter = None
         self.counts = {}  # file -> its tests here
         self.totals = {}  # file -> its tests in all shards
         self.unplanned = []
+        self.elsewhere = {}  # other shard -> its tests collected here
+        self.elsewhere_files = {}  # other shard -> its files not collected here
         self.dropped = 0
         self.current = None
         self.expanded = False
@@ -83,6 +87,7 @@ class ShardPlugin:
         shard = self.files.get(relative.replace(os.sep, "/"))
         if shard is not None and shard != self.shard:
             self.dropped += 1
+            self.elsewhere_files.setdefault(shard, set()).add(relative)
             return True
         return None
 
@@ -104,7 +109,7 @@ class ShardPlugin:
             return self.files[file]
         if file not in self.unplanned:
             self.unplanned.append(file)
-        return 0
+        return self.fallback
 
     @pytest.hookimpl(trylast=True)  # after -m, -k and conftest hooks
     def pytest_collection_modifyitems(self, session, config, items):
@@ -112,11 +117,13 @@ class ShardPlugin:
         for item in items:
             file = item.nodeid.split("::")[0]
             self.totals[file] = self.totals.get(file, 0) + 1
-            if self._owner(item, file) == self.shard:
+            owner = self._owner(item, file)
+            if owner == self.shard:
                 keep.append(item)
                 self.counts[file] = self.counts.get(file, 0) + 1
             else:
                 drop.append(item)
+                self.elsewhere[owner] = self.elsewhere.get(owner, 0) + 1
         if drop:
             self.dropped += len(drop)
             config.hook.pytest_deselected(items=drop)
@@ -129,16 +136,31 @@ class ShardPlugin:
         self.reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if self.reporter is None:
             return
-        tests = sum(self.counts.values())
-        self._say(
-            f"runtime-shard: shard {self.shard + 1}/{self.shards} runs {tests} "
-            f"of {sum(self.totals.values())} tests in {len(self.counts)} files"
-        )
-        if self.unplanned and self.shard == 0:
+        self._say(self._where())
+        if self.unplanned and self.shard == self.fallback:
             self._say(
-                "runtime-shard: not in the plan, so run in shard 1: "
+                f"runtime-shard: not in the plan, so run in shard {self.fallback + 1}: "
                 + ", ".join(self.unplanned)
             )
+
+    def _where(self):
+        """Which of the command's tests run here, and where the rest run, so
+        a shard that runs few or none of them doesn't read as tests skipped."""
+        tests, files = sum(self.counts.values()), len(self.counts)
+        here = f"runtime-shard: shard {self.shard + 1}/{self.shards}"
+        rest = []
+        for shard in sorted(set(self.elsewhere) | set(self.elsewhere_files)):
+            parts = []
+            if self.elsewhere.get(shard):
+                parts.append(_plural(self.elsewhere[shard], "test"))
+            if self.elsewhere_files.get(shard):
+                parts.append(_plural(len(self.elsewhere_files[shard]), "file"))
+            rest.append(f"shard {shard + 1} ({' and '.join(parts)})")
+        elsewhere = ", ".join(rest)
+        if not tests:
+            return f"{here} runs none of this command's tests; they run in {elsewhere}"
+        line = f"{here} runs {_plural(tests, 'test')} in {_plural(files, 'file')}"
+        return f"{line}; the rest run in {elsewhere}" if rest else line
 
     def _say(self, line):
         # Buildkite reads a group header only at the start of a line.
@@ -159,7 +181,10 @@ class ShardPlugin:
             f"--- :test_tube: {self.label}, file {number}/{len(self.counts)}: {shown}"
         )
         if self.counts.get(file, 0) < self.totals.get(file, 0):
-            title += f"   ({self.counts[file]} of {self.totals[file]} tests)"
+            title += (
+                f"   ({self.counts[file]} of {self.totals[file]} tests,"
+                " split by test; the rest run in other shards)"
+            )
         self._say(title)
 
     @pytest.hookimpl(trylast=True)  # after -v prints FAILED or ERROR
@@ -181,3 +206,7 @@ class ShardPlugin:
         # is not a failure. A command that collects nothing at all still is.
         if exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED and self.dropped:
             session.exitstatus = pytest.ExitCode.OK
+
+
+def _plural(count, noun):
+    return f"{count} {noun}{'' if count == 1 else 's'}"

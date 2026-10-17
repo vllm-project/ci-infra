@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union, Literal
+from pydantic import BaseModel, Field
+from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
 import math
 import os
@@ -14,6 +14,7 @@ from amd import (
     build_amd_step_options,
     ensure_amd_stack_error_retry,
     get_amd_agent_queue,
+    get_amd_label,
     get_amd_setup_commands,
     get_amd_timeout_in_minutes,
     get_rocm_base_refresh_env,
@@ -39,6 +40,8 @@ import runtime_shard
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
 PRECOMMIT_STEP_KEY = "pre-commit"
+PRECOMMIT_GROUP = "GitHub pre-commit check"
+AMD_GROUP = "Hardware-AMD Tests"
 PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
@@ -97,9 +100,11 @@ def _otel_setup_command() -> str:
         "ci_otel_start() { :; }; ci_otel_finish() { :; }; "
         'ci_otel_run() { shift 2; env "$$@"; return $$?; }; '
         'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
-        # `|| :` keeps the assignment itself successful under `sh -e` when the
-        # checkout has no .git; the missing-helper path below stays fail-open.
-        "$$(git rev-parse --show-toplevel 2>/dev/null || :)/"
+        # Native AMD pods run from /vllm-workspace, which has no .git; their
+        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The fallback keeps the
+        # assignment successful under `sh -e`; a missing helper stays fail-open.
+        "$$(git rev-parse --show-toplevel 2>/dev/null || "
+        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-}")/'
         '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
         'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
@@ -176,7 +181,7 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
     )
-    return BuildkiteGroupStep(group="GitHub pre-commit check", steps=[precommit_step])
+    return BuildkiteGroupStep(group=PRECOMMIT_GROUP, steps=[precommit_step])
 
 
 def add_precommit_dependency(
@@ -241,6 +246,9 @@ class BuildkiteCommandStep(BaseModel):
     timeout_in_minutes: Optional[int] = None
     priority: Optional[int] = None
     allow_dependency_failure: Optional[bool] = None
+    # Not selected to run: left out of the pipeline and offered in the
+    # "Run more jobs" input step instead (see split_deferred_steps).
+    deferred: bool = Field(default=False, exclude=True)
 
     def to_yaml(self):
         return {
@@ -264,18 +272,34 @@ class BuildkiteCommandStep(BaseModel):
         }
 
 
-class BuildkiteBlockStep(BaseModel):
-    block: str
-    depends_on: Optional[Union[str, List[str]]] = None
-    key: str
-
-    def to_yaml(self):
-        return {"block": self.block, "depends_on": self.depends_on, "key": self.key}
-
-
 class BuildkiteGroupStep(BaseModel):
     group: str
-    steps: List[Union[BuildkiteCommandStep, BuildkiteBlockStep]]
+    steps: List[BuildkiteCommandStep]
+
+
+def split_deferred_steps(
+    groups: List[BuildkiteGroupStep],
+) -> Tuple[List[BuildkiteGroupStep], List[BuildkiteGroupStep]]:
+    """Split the groups into the steps that run and the deferred ones.
+
+    A deferred step that a running step depends on, directly or not, runs
+    too: the running step would otherwise wait on a step that is not there.
+    """
+    by_key = {s.key: s for g in groups for s in g.steps}
+    pending = [s for s in by_key.values() if not s.deferred]
+    while pending:
+        for dependency in pending.pop().depends_on or []:
+            needed = by_key.get(dependency)
+            if needed is not None and needed.deferred:
+                needed.deferred = False
+                pending.append(needed)
+    runnable, deferred = [], []
+    for group in groups:
+        for wanted, out in ((False, runnable), (True, deferred)):
+            steps = [s for s in group.steps if s.deferred == wanted]
+            if steps:
+                out.append(BuildkiteGroupStep(group=group.group, steps=steps))
+    return runnable, deferred
 
 
 # Devices routed to agent-stack-k8s. Shared with the fnrec checkout decision
@@ -663,6 +687,7 @@ def fnrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupSt
                 FNREC_COLLECT_KEY,
                 ":satellite: Collect Python coverage",
                 count_armed=True,
+                large=True,
             )
         ],
     )
@@ -688,23 +713,13 @@ def _collect_step(
     key: str,
     label: str,
     count_armed: bool = False,
+    large: bool = False,
 ) -> "BuildkiteCommandStep":
-    blocked = {
-        s.key[len("block-") :]
-        for g in groups
-        for s in g.steps
-        if isinstance(s, BuildkiteBlockStep)
-    }
-    runnable = [
-        s
-        for g in groups
-        for s in g.steps
-        if isinstance(s, BuildkiteCommandStep) and s.key not in blocked
-    ]
+    runnable = [s for g in groups for s in g.steps if not s.deferred]
     # Only the steps that record, and what they wait for: the image build
     # uploads the kernel symbol map. Waiting on every step held the kernel
     # collect of nightly vllm/ci #90897 behind 34 AMD jobs, none of which
-    # records a kernel. Steps behind a block step are left out, because a
+    # records a kernel. Deferred steps are left out, because a
     # dependency that never starts would hold this step forever. A cancelled
     # one ends it waiting_failed, allow_dependency_failure or not, and it
     # cannot be retried; the collect scripts can fold the build from another.
@@ -727,11 +742,18 @@ def _collect_step(
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
         f"{branch}/buildkite/ci_selector/recorders/{recorder}/collect.sh"
     )
-    queue = (
-        AgentQueue.SMALL_CPU_POSTMERGE
-        if get_global_config()["branch"] == "main"
-        else AgentQueue.SMALL_CPU_PREMERGE
-    )
+    # The Python fold holds every job's recordings at once. Nightly vllm/ci
+    # #94688 folded 680 jobs, 51 more than the night before, and the build
+    # died without a word on a 16 GB small-queue agent (r6in.large) in the
+    # merge that had just finished on 629. Only postmerge agents can write the
+    # bucket, and the small queue is the only smaller postmerge one.
+    on_main = get_global_config()["branch"] == "main"
+    if large:
+        queue = AgentQueue.CPU_POSTMERGE if on_main else AgentQueue.CPU_PREMERGE
+    else:
+        queue = (
+            AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
+        )
     return BuildkiteCommandStep(
         label=label,
         key=key,
@@ -815,10 +837,12 @@ def _prepare_commands(
     commands = (
         _fnrec_setup_commands(step, setup_profile) if fnrec_armed else []
     ) + _get_setup_commands(step, setup_profile)
-    # AMD mirrors use a separate runtime and do not expose the agent binary
-    # needed to mint the short-lived upload credential. Native agent tracing
-    # still covers those jobs; command/test spans are injected elsewhere.
-    trace_commands = step.otel_tracing_enabled() and setup_profile != "amd"
+    # Legacy AMD dind forwards no BUILDKITE_* into its container, so it cannot
+    # mint the short-lived upload credential. Native AMD pods keep the job's
+    # environment, which is all ci_otel.py needs to request it over HTTPS.
+    trace_commands = step.otel_tracing_enabled() and (
+        setup_profile != "amd" or not step.dind
+    )
     if trace_commands:
         commands.append(_otel_setup_command())
 
@@ -886,39 +910,6 @@ def _prepare_commands(
     return final_commands
 
 
-def _create_block_step(
-    *,
-    block: str,
-    key: str,
-    command_step: BuildkiteCommandStep,
-    depends_on: Optional[Union[str, List[str]]] = None,
-    append_to_command_depends_on: bool = True,
-) -> BuildkiteBlockStep:
-    if isinstance(depends_on, list):
-        block_depends_on = list(depends_on)
-    else:
-        block_depends_on = depends_on
-    block_step = BuildkiteBlockStep(
-        block=block,
-        depends_on=block_depends_on,
-        key=key,
-    )
-    command_depends_on = list(command_step.depends_on or [])
-    if not append_to_command_depends_on:
-        command_depends_on = [
-            block_step.key,
-            *[
-                dependency
-                for dependency in command_depends_on
-                if dependency != block_step.key
-            ],
-        ]
-    elif block_step.key not in command_depends_on:
-        command_depends_on.append(block_step.key)
-    command_step.depends_on = command_depends_on
-    return block_step
-
-
 def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
     normalized = source_file.rstrip("/")
     if not normalized:
@@ -968,11 +959,24 @@ RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
 
 
 def _runtime_shard_mode(
-    step: Step, step_key: str, list_file_diff: List[str]
+    step: Step,
+    step_key: str,
+    list_file_diff: List[str],
+    amd: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """How to run a step with `automatic_shard: true`: "on" (as shards),
-    "shadow" (one job, plus an annotation of the plan), or None (as usual)."""
-    if not step.automatic_shard or not _step_should_run(step, list_file_diff):
+    "shadow" (one job, plus an annotation of the plan), or None (as usual).
+    For an AMD mirror, `step` is the mirror's effective step and `amd` its
+    block, whose own `automatic_shard` must be set too."""
+    if not step.automatic_shard or (amd and not amd.get("automatic_shard")):
+        return None
+    if amd:
+        should_run = _amd_mirror_should_run(
+            _step_should_run(step, list_file_diff), list_file_diff
+        )
+    else:
+        should_run = _step_should_run(step, list_file_diff)
+    if not should_run:
         return None
     mode = os.getenv(RUNTIME_SHARD_ENV_VAR) or "on"
     if mode not in ("on", "shadow"):
@@ -981,56 +985,75 @@ def _runtime_shard_mode(
                 f"automatic_shard ignored on {step_key}: {RUNTIME_SHARD_ENV_VAR}={mode} is not on, shadow or off"
             )
         return None
-    if fnrec_enabled() or kernrec_enabled():
-        # The recorders expect each step to run as one job.
-        print(f"automatic_shard ignored on {step_key}: recording build")
-        return None
     if (
         runtime_shard.split_commands(step.commands or []) is None
         or step.no_plugin
-        or is_amd_device(step.device)
+        or (is_amd_device(step.device) and step.dind)
         or (step.num_nodes and step.num_nodes >= 2)
     ):
         print(
-            f"automatic_shard ignored on {step_key}: only single-node NVIDIA steps "
-            "whose test commands are all plain pytest can be sharded"
+            f"automatic_shard ignored on {step_key}: only single-node, non-dind "
+            "steps whose test commands are all plain pytest can be sharded"
         )
         return None
     return mode
 
 
 def _shard_at_generation(
-    step: Step, step_key: str, command_step: BuildkiteCommandStep, mode: str
-) -> None:
+    step: Step,
+    step_key: str,
+    queue: AgentQueue,
+    commands: List[str],
+    env: Optional[Dict[str, str]],
+    mode: str,
+) -> Optional[Tuple[int, List[str], Dict[str, str]]]:
     """Plan an enrolled step's shards from the checkout (runtime_shard.py)
-    and, in "on" mode, run its job as one parallel job per shard: the same
-    commands, after installing the plugin that keeps each job's tests. Short
-    of a plan of two or more shards, the job is left as it is, so sharding
-    never blocks the step's tests. "shadow" only annotates the plan.
+    and, in "on" mode, turn its job's prepared commands and env into one
+    parallel job per shard: the same commands, after installing the plugin
+    that keeps each job's tests. Returns (shards, commands, env), or None to
+    leave the job as it is: short of a plan of two or more shards, so
+    sharding never blocks the step's tests. "shadow" only annotates the plan.
+    The NVIDIA job and a native AMD mirror's both go through here.
     """
     result, text = runtime_shard.plan_step(
-        step_key, step.commands or [], step.working_dir, os.getcwd()
+        step_key, step.commands or [], step.working_dir, os.getcwd(), queue
     )
     print(text)
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
-        return
+        return None
     if result is None or result["overBudget"]:
         runtime_shard.annotate(step_key, text, "warning")
     if result is None or result["shards"] < 2:
-        return
-    command_step.parallelism = result["shards"]
-    # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
-    command_step.label = f"{command_step.label} shard %N/%t"
-    env = dict(command_step.env or {})
+        return None
+    env = dict(env or {})
+    # pytest-shard, installed in the image for fixed shards, would print its
+    # own "Running N items in this shard" over this plan's selection.
     env["PYTEST_ADDOPTS"] = (
-        f"{env.get('PYTEST_ADDOPTS', '')} -p {runtime_shard.PLUGIN_MODULE}".strip()
-    )
+        f"{env.get('PYTEST_ADDOPTS', '')} -p no:pytest-shard"
+        f" -p {runtime_shard.PLUGIN_MODULE}"
+    ).strip()
     plan = {"shards": result["shards"], "commands": result["commands"]}
     env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
     env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()
-    command_step.env = env
-    command_step.commands = runtime_shard.shard_job_setup() + command_step.commands
+    commands = list(commands)
+    count = len(step.commands or [])
+    for planned in result["commands"]:
+        # The job's line for a step command follows its "Command (i/n)" header.
+        header = f"+++ :test_tube: Command ({planned['position'] + 1}/{count}):"
+        at = next(
+            (
+                i
+                for i, c in enumerate(commands)
+                if c.startswith("echo ") and header in c
+            ),
+            None,
+        )
+        if at is not None and at + 1 < len(commands):
+            commands[at + 1] = runtime_shard.guard(
+                commands[at + 1], planned, result["shards"]
+            )
+    return result["shards"], runtime_shard.shard_job_setup() + commands, env
 
 
 def convert_group_step_to_buildkite_step(
@@ -1091,14 +1114,7 @@ def convert_group_step_to_buildkite_step(
                     agent_tags=step.agent_tags,
                     extra_artifact_paths=_fnrec_artifact_paths(step, "amd"),
                 )
-                if not _step_should_run(step, list_file_diff):
-                    block_step = _create_block_step(
-                        block=f"Run {amd_step.label}",
-                        key=f"block-amd-{step_key}",
-                        command_step=amd_step,
-                        depends_on=amd_step.depends_on,
-                    )
-                    amd_hardware_steps.append(block_step)
+                amd_step.deferred = not _step_should_run(step, list_file_diff)
                 amd_hardware_steps.append(amd_step)
                 continue
 
@@ -1167,15 +1183,7 @@ def convert_group_step_to_buildkite_step(
                     _recording_timeout(step, step.timeout_in_minutes)
                 )
 
-            if include_step and not _step_should_run(step, list_file_diff):
-                block_step = _create_block_step(
-                    block=f"Run {step.label}",
-                    key=f"block-{step_key}",
-                    command_step=buildkite_step,
-                    depends_on=[],
-                    append_to_command_depends_on=False,
-                )
-                group_steps_list.append(block_step)
+            buildkite_step.deferred = not _step_should_run(step, list_file_diff)
 
             # add plugin
             if not step.no_plugin and not (
@@ -1193,12 +1201,30 @@ def convert_group_step_to_buildkite_step(
                 if include_step
                 else None
             )
-            if shard_mode:
-                _shard_at_generation(step, step_key, buildkite_step, shard_mode)
+            sharded = (
+                _shard_at_generation(
+                    step,
+                    step_key,
+                    get_agent_queue(step),
+                    buildkite_step.commands,
+                    buildkite_step.env,
+                    shard_mode,
+                )
+                if shard_mode
+                else None
+            )
+            if sharded:
+                (
+                    buildkite_step.parallelism,
+                    buildkite_step.commands,
+                    buildkite_step.env,
+                ) = sharded
+                # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
+                buildkite_step.label = f"{buildkite_step.label} shard %N/%t"
             if include_step:
                 group_steps_list.append(buildkite_step)
 
-            # Create AMD mirror step and its block step if specified/applicable
+            # Create AMD mirror step if specified/applicable
             if (
                 include_amd
                 and step.mirror
@@ -1220,35 +1246,69 @@ def convert_group_step_to_buildkite_step(
                             "commands": custom_commands,
                             "working_dir": amd.get("working_dir", step.working_dir),
                             "no_plugin": amd_no_plugin,
+                            "dind": amd.get("dind", True),
                         }
                     )
-                    amd_commands_str = " && ".join(
-                        _prepare_commands(
-                            amd_command_step,
-                            variables_to_inject,
-                            setup_profile="amd",
-                        )
+                    amd_commands = _prepare_commands(
+                        amd_command_step,
+                        variables_to_inject,
+                        setup_profile="amd",
                     )
                 else:
                     amd_command_step = step.model_copy(
-                        update={"no_plugin": amd_no_plugin}
+                        update={
+                            "no_plugin": amd_no_plugin,
+                            "dind": amd.get("dind", True),
+                        }
                     )
-                    amd_commands_str = " && ".join(
-                        _prepare_commands(
-                            amd_command_step,
-                            variables_to_inject,
-                            setup_profile="amd",
-                        )
+                    amd_commands = _prepare_commands(
+                        amd_command_step,
+                        variables_to_inject,
+                        setup_profile="amd",
                     )
 
                 extra_env = dict(step.env or {})
                 extra_env.update(amd.get("env", {}))
+                # A native mirror that opted in plans its own shards, from its
+                # own commands and timings; an explicit parallelism wins.
+                amd_parallelism = amd.get("parallelism", step.parallelism)
+                amd_label = amd.get("label")
+                amd_key = f"amd-{step_key}"
+                amd_shard_mode = (
+                    _runtime_shard_mode(
+                        _get_amd_mirror_effective_step(amd_command_step, amd),
+                        amd_key,
+                        list_file_diff,
+                        amd,
+                    )
+                    if "parallelism" not in amd
+                    else None
+                )
+                amd_sharded = (
+                    _shard_at_generation(
+                        amd_command_step,
+                        amd_key,
+                        get_amd_agent_queue(amd["device"]),
+                        amd_commands,
+                        extra_env,
+                        amd_shard_mode,
+                    )
+                    if amd_shard_mode
+                    else None
+                )
+                if amd_sharded:
+                    amd_parallelism, amd_commands, extra_env = amd_sharded
+                    # Buildkite fills in %N (from 1) and %t (the shard count).
+                    amd_label = (
+                        f"{amd_label or get_amd_label(step.label, amd['device'])}"
+                        " shard %N/%t"
+                    )
                 amd_step = _create_amd_step(
                     label=step.label,
                     key=f"amd-{step_key}",
                     device=amd["device"],
                     num_devices=amd_num_devices,
-                    commands_str=amd_commands_str,
+                    commands_str=" && ".join(amd_commands),
                     depends_on=amd.get("depends_on"),
                     extra_env=extra_env,
                     dind=amd.get("dind", True),
@@ -1256,38 +1316,23 @@ def convert_group_step_to_buildkite_step(
                     no_gpu=amd_no_gpu,
                     num_nodes=amd.get("num_nodes", step.num_nodes),
                     soft_fail=amd.get("soft_fail", step.soft_fail or False),
-                    parallelism=amd.get("parallelism", step.parallelism),
+                    parallelism=amd_parallelism,
                     concurrency=amd.get("concurrency", step.concurrency),
                     concurrency_group=amd.get(
                         "concurrency_group", step.concurrency_group
                     ),
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
-                    display_label=amd.get("label"),
+                    display_label=amd_label,
                     extra_artifact_paths=_fnrec_artifact_paths(amd_command_step, "amd"),
                 )
-                if not _amd_mirror_should_run(
+                amd_step.deferred = not _amd_mirror_should_run(
                     _step_should_run(
                         _get_amd_mirror_effective_step(step, amd),
                         list_file_diff,
                     ),
                     list_file_diff,
-                ):
-                    # Block step depends on the shared AMD image build.
-                    mirror_build_dep = (
-                        amd_step.depends_on[0]
-                        if amd_step.depends_on
-                        else "image-build-amd"
-                    )
-                    amd_block_step = _create_block_step(
-                        block=f"Run {amd_step.label}"
-                        if amd.get("label")
-                        else f"Run AMD: {step.label}",
-                        key=f"block-amd-{step_key}",
-                        command_step=amd_step,
-                        depends_on=[mirror_build_dep],
-                    )
-                    amd_hardware_steps.append(amd_block_step)
+                )
                 amd_hardware_steps.append(amd_step)
 
         if group_steps_list:
@@ -1298,10 +1343,16 @@ def convert_group_step_to_buildkite_step(
     # If AMD hardware steps exist, make them a group step.
     if amd_hardware_steps:
         buildkite_group_steps.append(
-            BuildkiteGroupStep(group="Hardware-AMD Tests", steps=amd_hardware_steps)
+            BuildkiteGroupStep(group=AMD_GROUP, steps=amd_hardware_steps)
         )
 
     return buildkite_group_steps
+
+
+# Steps on these devices never run on their own, nightly included: they are
+# offered in the "Run more jobs" input step instead, like optional steps.
+# Steps named in VLLM_CI_ONLY_STEP_KEYS still run.
+MANUAL_ONLY_DEVICES = frozenset({DeviceType.L4.value})
 
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
@@ -1310,6 +1361,8 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
     if global_config["only_step_keys"] is not None:
         return step.key in global_config["only_step_keys"]
+    if step.device in MANUAL_ONLY_DEVICES:
+        return False
     if step.key and (
         step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
     ):

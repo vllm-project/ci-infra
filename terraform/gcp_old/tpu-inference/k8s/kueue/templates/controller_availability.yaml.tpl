@@ -43,7 +43,8 @@ ${SELECTOR}
 # Two replicas under leader election: one reconciles, both serve the webhook,
 # and a lost leader is replaced within the 15 s lease. The class matches
 # kube-dns's, so kube-dns can no longer preempt it and gets a new system node
-# instead.
+# instead. A controller may also be pinned to a compute class, appended after
+# the priority (see controller_availability() in generate_manifests.py).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,7 +54,7 @@ spec:
   replicas: 2
   template:
     spec:
-      priorityClassName: system-cluster-critical
+      priorityClassName: system-cluster-critical${PLACEMENT}
       affinity:
         podAntiAffinity:
           # Preferred, not required: a cluster with one system node still runs

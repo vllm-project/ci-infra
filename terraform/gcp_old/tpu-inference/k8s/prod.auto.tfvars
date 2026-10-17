@@ -2,6 +2,21 @@ project_id  = "cloud-ullm-inference-ci-cd"
 name_prefix = "tpu-ci"
 network     = "projects/cloud-ullm-inference-ci-cd/global/networks/default"
 
+# Saturday and Sunday 15:00-23:00 UTC (08:00-16:00 PDT, 07:00-15:00 PST): the
+# fleet's quietest hours. On 10-10 and 10-11 at most 34 of the 128 v7x chips
+# and none of the v6e chips were running in them; in the same hours on 10-12,
+# the first weekday with every PR on kube, 12-132 were, and 40-130 run every
+# night, weekends included, for the nightlies.
+#
+# The start and end are the first occurrence, a Saturday already past: the
+# date only anchors the series, and what repeats is their time of day and the
+# 8 hours between them.
+maintenance_window = {
+  start_time = "2026-10-10T15:00:00Z"
+  end_time   = "2026-10-10T23:00:00Z"
+  recurrence = "FREQ=WEEKLY;BYDAY=SA,SU"
+}
+
 # Read by both terraform and scripts/generate_manifests.py; see variables.tf for
 # why there is only the one.
 namespace = "buildkite"
@@ -115,6 +130,20 @@ tpu_admission_max_seconds = 3600
 tpu_dispatch_retry_seconds = 120
 tpu_dispatch_retries       = 2
 
+# Long enough for a TPU node to come up from zero, short of recoveryTimeout (30
+# minutes, kueue/common-config.yaml), so a replacement pod stuck on Spot is
+# moved before Kueue requeues the workload, possibly onto Spot again.
+tpu_spot_wait_seconds = 900
+# On 10-13, 6 of the 9 Spot pods with a failed scale-up got a node within 5
+# minutes of it; the other 3 waited 7 to 13.
+tpu_spot_failed_scale_up_seconds = 300
+tpu_spot_after_seconds           = 600
+# Pre-merge (50) and integration (30) steps may use Spot after the wait, so
+# Spot also absorbs the PR load that fills the reservation in working hours,
+# when no scheduled runs are queued. Post-merge (100) and oncall-fix (120)
+# wait for reserved chips.
+tpu_spot_max_priority = 50
+
 # Every CI image this fleet runs is built into the manager project's Artifact
 # Registry, and a step names its own tag, so the project is the boundary rather
 # than the repository. Trailing slash required: without it the prefix would also
@@ -222,6 +251,21 @@ worker_clusters = [
         min_nodes     = 0
         max_nodes     = 128
         nominal_quota = 16
+
+        # Overflow onto Spot once the reservation and what this shape can
+        # borrow are spent. The project has 256 Spot v7x chips in us-central1;
+        # this is the only Spot pool and takes 64 of them. On 10-13 it ran 294
+        # Spot starts against 19 stockout fallbacks, and its 32-chip quota was
+        # full in the evening peak.
+        #
+        # The AI zone as well as the reservation's zone: GCE runs out of Spot
+        # VMs per zone, and these are the two us-central1 zones that offer
+        # TPU7x. The quota is regional, so this changes where Spot nodes come
+        # from, not how many.
+        spot = {
+          max_nodes = 64
+          zones     = ["us-central1-ai1a", "us-central1-c"]
+        }
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -232,6 +276,12 @@ worker_clusters = [
         min_nodes     = 0
         max_nodes     = 32
         nominal_quota = 64
+
+        # No Spot: 2x2x1 Spot VMs were stocked out on most busy evenings, and
+        # each step offered Spot then waited 10-15 minutes for a node that
+        # never came before falling back. On 10-13 that was 262 steps against
+        # 173 Spot starts, and a replay put total queue time 27% higher with
+        # it than without.
       },
       {
         # Eight chips as one slice across two VMs, placed from the named
@@ -247,34 +297,37 @@ worker_clusters = [
         slices        = 16
         nominal_quota = 16
 
-        # Takes its two slices back from any borrower. Waiting for borrowers
-        # to finish does not work for a slice: four chips have to free on the
-        # same pair of hosts while single-host steps take each chip as it
-        # frees, and 10-07..10-09 2x2x2 spent 42% of its waiting time with its
-        # own quota lent out. The borrowers are mostly short 2x2x1 steps, and
-        # an evicted step reruns from the start in a fresh pod.
-        reclaim_within_cohort = "Any"
+        # Waits for borrowers to finish instead of evicting them. Within its
+        # own quota this queue is admitted ahead of any borrower once eight
+        # chips are free, which in working hours is soon enough; evicting
+        # threw away the borrowers' runs instead - in a replay of 10-12 to
+        # 10-14, 153 evictions and 224 chip-hours of runs, mostly unclassed
+        # tpu-inference steps on 1x1x1, against a total queue time 7% lower
+        # without them. The cost is at night, when the nightlies keep the
+        # cohort full: a slice waited p90 60 minutes instead of 45 in that
+        # replay.
+        reclaim_within_cohort = "Never"
       },
       {
-        # Two slices nominal for the Kimi-K3 pairs, taken back from any
-        # borrower, as 2x2x2 does. A pair needs all 32 chips at once, and
-        # waiting for borrowers does not get them: they return the chips four
-        # at a time to a backlog of 2x2x1 steps that takes each as it frees.
-        # On 10-11, with reclaim limited to lower-priority borrowers, the
-        # nightly pair (unclassed, below the pre-merge steps borrowing its
-        # chips) waited 2.2 h. An evicted step reruns from the start in a
-        # fresh pod. Four slice pools, so 2x2x4 can borrow up to two more
-        # slices (64 chips) for v7x-32 tests and bring-ups when the cohort is
-        # idle.
+        # Two slices nominal for the Kimi-K3 pairs, taken back only from
+        # lower-priority borrowers. The pairs are nightlies (unclassed) and the
+        # steps borrowing their chips overnight are mostly pre-merge PR steps,
+        # so the pair waits for them rather than evicting them: an evicted step
+        # reruns from the start, and a pull request outranks a nightly. When
+        # the cohort is full the wait can run to an hour or two, since freed
+        # chips go four at a time to the 2x2x1 backlog; the nightly still
+        # finishes before the working day. Eight slice pools, all 128 chips,
+        # so 2x2x4 can borrow whatever the cohort leaves idle for v7x-32
+        # tests and bring-ups, as 2x2x2 can; an empty pool costs nothing.
         machine_type     = "tpu7x-standard-4t"
         topology         = "2x2x4"
         reservation_name = "cloudtpu-20251114223000-2002888989"
         zone             = "us-central1-c"
 
-        slices        = 4
+        slices        = 8
         nominal_quota = 32
 
-        reclaim_within_cohort = "Any"
+        reclaim_within_cohort = "LowerPriority"
       },
     ]
   },
@@ -292,7 +345,7 @@ buildkite_org        = "vllm"
 buildkite_cluster_id = "0219f117-7dc6-4a04-aee2-1619736fd800"
 
 # Built by dashboard/cloudbuild.yaml; the tag is the build revision there.
-dashboard_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/queue-dashboard:13"
+dashboard_image = "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-ci/queue-dashboard:27"
 
 # The token modules/ci_monitoring's BigQuery puller already lists these
 # pipelines' builds with.

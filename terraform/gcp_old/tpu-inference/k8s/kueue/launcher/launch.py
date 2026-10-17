@@ -25,6 +25,7 @@ validation here covers only what admission cannot know.
 
 import argparse
 import copy
+import datetime
 import json
 import os
 import re
@@ -66,6 +67,13 @@ POD_DEFAULTS = os.environ.get(
 
 ACCELERATOR_KEY = "cloud.google.com/gke-tpu-accelerator"
 TOPOLOGY_KEY = "cloud.google.com/gke-tpu-topology"
+# GKE's label on a Spot node, and the nodeSelector Kueue writes into a pod it
+# admits on a Spot flavor (resource_flavor_spot.yaml.tpl).
+SPOT_LABEL = "cloud.google.com/gke-spot"
+# GKE's label for how a node was provisioned, standard or spot, which the
+# reserved flavor of a generation with Spot names as its nodeLabels; see
+# require_spot().
+PROVISIONING_LABEL = "cloud.google.com/gke-provisioning"
 TPU_RESOURCE = "google.com/tpu"
 
 # Kueue reads this on the top-level object for both Job and JobSet, never on
@@ -122,6 +130,17 @@ BUILDKITE_DENY = frozenset({
 DEFAULTS_ANNOTATION = "tpu-ci.google.com/defaults"
 DEFAULTS_STANDARD = "standard"
 
+# What a manifest on the standard defaults sets to go without the fleet's
+# caches. An empty value is the same as none set, for a manifest whose step
+# chooses. See inherit_defaults().
+CACHES_ANNOTATION = "tpu-ci.google.com/caches"
+CACHES_NONE = "none"
+
+# GKE's names, not ours: the gcsfuse CSI driver, and the prefix of the pod
+# annotations that configure the sidecar GKE injects for it.
+GCSFUSE_DRIVER = "gcsfuse.csi.storage.gke.io"
+GCSFUSE_ANNOTATION_PREFIX = "gke-gcsfuse/"
+
 # The `event` of the one JSON line emit_timing() prints per workload, so the
 # record can be found in the step log and in Cloud Logging when the BigQuery
 # insert did not land.
@@ -149,6 +168,23 @@ POLL_SECONDS = 5
 # node can be created, run and removed between two ordinary polls, leaving
 # nothing to read.
 FIRST_LOG_POLL_SECONDS = 2
+# How often a pod waiting for a Spot node has its events read. The autoscaler
+# gives up on a scale-up minutes after starting it, so a slower read loses
+# nothing and saves a Connect Gateway round trip per turn.
+SPOT_EVENTS_POLL_SECONDS = 30
+# How long the cluster autoscaler has to keep saying that no node of the
+# shape could hold a pod before the run fails. Long enough that one odd
+# verdict, or a pool's node template catching up after a change, does not end
+# a run that could still start; a pod that never fits holds its chips' quota
+# until then, where without this it held it until waitForPodsReady (hours).
+UNFIT_WAIT_SECONDS = 600
+# An autoscaler verdict counts only while it is this fresh: it repeats the
+# event every few minutes for as long as the pod stays unschedulable.
+UNFIT_VERDICT_MAX_AGE_SECONDS = 300
+# What a container can ask for more of than a whole node has. A busy fleet
+# reads differently - "max node group size reached", "out of resources" - and
+# passes; an Insufficient one of these against a pool's node template does not.
+UNFIT_REASON = re.compile(r"\b(\d+) Insufficient (ephemeral-storage|memory|cpu)\b")
 
 # Worker credentials are kept out of the default kubeconfig; see worker_env().
 WORKER_KUBECONFIG = "/tmp/worker.kubeconfig"
@@ -275,6 +311,41 @@ def withdraw_waiting(context):
     agent("annotation", "remove", "--context", context)
 
 
+def unfit_context():
+    job_id = os.environ.get("BUILDKITE_JOB_ID")
+    return f"kueue-unfit-{job_id}" if job_id else None
+
+
+def announce_unfit(queue, asks, verdict, manifest, final):
+    """Tell the step's owner on the build page that its pods ask for more than
+    a node of its shape has: a warning while the launcher waits, an error once
+    it fails the step."""
+    context = unfit_context()
+    if not context:
+        return
+    label = os.environ.get("BUILDKITE_LABEL", "this step")
+    shown = os.path.relpath(manifest)
+    manifest = manifest if shown.startswith("..") else shown
+    if final:
+        style, text = "error", (
+            f":x: **{label}** failed without running: its pods ask for {asks}, "
+            f"more than a `{queue}` node has, so no node could ever be made for "
+            f"them. Lower the request in `{manifest}`.")
+    else:
+        style, text = "warning", (
+            f":warning: **{label}** cannot start: its pods ask for {asks}, more "
+            f"than a `{queue}` node has (cluster autoscaler: {verdict}). It "
+            f"fails in {UNFIT_WAIT_SECONDS // 60} minutes unless that changes; "
+            f"the request is in `{manifest}`.")
+    agent("annotate", "--context", context, "--style", style, text)
+
+
+def withdraw_unfit():
+    context = unfit_context()
+    if context:
+        agent("annotation", "remove", "--context", context)
+
+
 def kubectl(*args, check=True, timeout=CLI_TIMEOUT_SECONDS):
     """Run one kubectl call against the manager.
 
@@ -364,6 +435,220 @@ def never_dispatched(workload):
     return (quota_reserved(workload) and not status.get("clusterName")
             and not status.get("nominatedClusterNames")
             and not (admitted and admitted.get("status") == "True"))
+
+
+def pinned_to_spot(spec):
+    """Whether every term of a pod's required node affinity asks for a Spot
+    node, as require_spot() writes it."""
+    terms = (((spec.get("affinity") or {}).get("nodeAffinity") or {})
+             .get("requiredDuringSchedulingIgnoredDuringExecution") or {}).get(
+                 "nodeSelectorTerms") or []
+    return bool(terms) and all(
+        any(e.get("key") == SPOT_LABEL and e.get("operator") == "In"
+            and "true" in (e.get("values") or [])
+            for e in t.get("matchExpressions", []))
+        for t in terms)
+
+
+def spot_unschedulable(items):
+    """The name of a chip-holding pod admitted onto Spot that is waiting for a
+    node, else None.
+
+    The pod's own nodeSelector says which flavor the worker admitted it on:
+    Kueue writes the Spot flavor's into it and the reserved flavor has none.
+    A pod pinned to Spot by its affinity counts too, whichever flavor it got:
+    admitted on reserved it has no Spot toleration and can never schedule, so
+    it needs the same way back as a stockout.
+    """
+    for pod in items or []:
+        spec = pod.get("spec", {})
+        if (((spec.get("nodeSelector") or {}).get(SPOT_LABEL) == "true"
+                or pinned_to_spot(spec))
+                and pod_chips(spec)
+                and pod.get("status", {}).get("phase") == "Pending"
+                and not spec.get("nodeName")):
+            return pod["metadata"]["name"]
+    return None
+
+
+def spot_scale_up_failed(env, pod):
+    """The cluster autoscaler's FailedScaleUp message on this pod, else None.
+
+    The autoscaler sends it to every pod a batch of new nodes was for when any
+    node in the batch fails, so it does not mean this pod gets no node: on
+    10-13 all 9 Spot pods that had one got a node, 6 of them within 5 minutes.
+    """
+    proc = worker_kubectl(
+        env, "get", "events", "--field-selector",
+        f"involvedObject.name={pod},reason=FailedScaleUp", "-o", "json",
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        events = json.loads(proc.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return None
+    if not events:
+        return None
+    return events[0].get("message") or "FailedScaleUp"
+
+
+def unplaced_chip_pod(items):
+    """The first chip-holding pod with no node, else None."""
+    for pod in items or []:
+        spec = pod.get("spec", {})
+        if (pod_chips(spec) and not spec.get("nodeName")
+                and pod.get("status", {}).get("phase") == "Pending"):
+            return pod
+    return None
+
+
+def event_age(event):
+    """Seconds since an event last happened, or None."""
+    when = event.get("lastTimestamp") or event.get("eventTime")
+    if not when:
+        return None
+    try:
+        t = datetime.datetime.fromisoformat(when.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()
+
+
+def unfit_verdict(env, pod):
+    """The cluster autoscaler's word that no node of any pool would fit this
+    pod, else None: the "N Insufficient <resource>" parts of its latest
+    NotTriggerScaleUp, if that is current.
+
+    Not the scheduler's FailedScheduling, which judges only the nodes that
+    exist and reads the same while a slice is still being made. The autoscaler
+    weighs each pool's node template - what a new node would have - so
+    Insufficient ephemeral-storage there means the pod asks for more than any
+    node of its shape can give. A shape's pools share one machine type and
+    disk, so one pool's verdict is all of them.
+    """
+    proc = worker_kubectl(
+        env, "get", "events", "--field-selector",
+        f"involvedObject.name={pod},reason=NotTriggerScaleUp", "-o", "json",
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        events = json.loads(proc.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return None
+    fresh = [e for e in events if (event_age(e) or 1e9) <= UNFIT_VERDICT_MAX_AGE_SECONDS]
+    if not fresh:
+        return None
+    newest = min(fresh, key=lambda e: event_age(e) or 1e9)
+    found = UNFIT_REASON.findall(newest.get("message") or "")
+    return ", ".join(f"{n} Insufficient {what}" for n, what in found) or None
+
+
+def asked_for(pod, verdict):
+    """What the pod's containers ask for of the resources a verdict names."""
+    names = set(re.findall(r"Insufficient (\S+)", verdict))
+    parts = []
+    for c in pod.get("spec", {}).get("initContainers", []) + pod.get("spec", {}).get("containers", []):
+        requests = (c.get("resources") or {}).get("requests") or {}
+        parts += [f"{c['name']} {k} {v}" for k, v in requests.items() if k in names]
+    return ", ".join(parts) or "its requests"
+
+
+# DisruptionTarget reasons that mean the node went away under the pod: the
+# kubelet's during a Spot reclaim's shutdown, the taint manager's or pod GC's
+# when the node went NotReady or vanished before the kubelet could say so.
+NODE_LOST_REASONS = {"TerminationByKubelet", "DeletionByTaintManager",
+                     "DeletionByPodGC"}
+
+
+def spot_reclaimed(items):
+    """The name of a chip-holding pod that lost its Spot node, else None.
+
+    A kubelet eviction carries TerminationByKubelet too, but with the pod's
+    reason Evicted: that pod outgrew its node rather than losing it. A pod
+    that had already succeeded lost nothing.
+    """
+    for pod in items or []:
+        spec = pod.get("spec", {})
+        status = pod.get("status", {})
+        if ((spec.get("nodeSelector") or {}).get(SPOT_LABEL) != "true"
+                or not pod_chips(spec)
+                or status.get("reason") == "Evicted"
+                or status.get("phase") == "Succeeded"):
+            continue
+        for c in status.get("conditions") or []:
+            if (c.get("type") == "DisruptionTarget" and c.get("status") == "True"
+                    and c.get("reason") in NODE_LOST_REASONS):
+                return pod["metadata"]["name"]
+    return None
+
+
+def spot_eligible(doc, registry, queue):
+    """Whether this run may ever use Spot: its queue has a Spot flavor and its
+    priority class is at or below the registry's Spot line. Unclassed scores 0.
+    A registry that predates the values lets only unclassed and low through."""
+    if queue not in (registry.get("spot_queues") or []):
+        return False
+    cls = doc.get("metadata", {}).get("labels", {}).get(PRIORITY_LABEL)
+    values = registry.get("priority_values")
+    if not values:
+        return cls in (None, "low")
+    value = values.get(cls, 0) if cls else 0
+    return value <= int(registry.get("spot_max_priority", 0))
+
+
+def pin_spot(doc, rules):
+    """Pin every chip-holding pod to one side of Spot, so Kueue has exactly one
+    flavor to choose, on the manager and on the worker alike.
+
+    Kueue matches a pod's required node affinity against each flavor using
+    only the keys that flavor's nodeLabels define, and drops the rest
+    (flavorassigner.go). The Spot flavor defines cloud.google.com/gke-spot; the
+    reserved flavor of a generation with Spot defines
+    cloud.google.com/gke-provisioning=standard (resource_flavor.yaml.tpl). So a
+    rule on gke-spot alone can rule the Spot flavor out but never the reserved
+    one; pinning to Spot takes a rule on gke-provisioning too.
+
+    Set in every term, since terms are alternatives, and replacing any earlier
+    pin rather than adding to it, which would rule out both.
+    """
+    keys = {r["key"] for r in rules}
+    for spec in pod_specs(doc):
+        if not pod_chips(spec):
+            continue
+        terms = (spec.setdefault("affinity", {})
+                 .setdefault("nodeAffinity", {})
+                 .setdefault("requiredDuringSchedulingIgnoredDuringExecution", {})
+                 .setdefault("nodeSelectorTerms", []))
+        if not terms:
+            terms.append({})
+        for term in terms:
+            term["matchExpressions"] = [
+                e for e in term.get("matchExpressions", [])
+                if e.get("key") not in keys | {PROVISIONING_LABEL}
+            ] + [dict(r) for r in rules]
+
+
+def exclude_spot(doc):
+    """Rule Spot out, so the workload waits for reserved chips."""
+    pin_spot(doc, [{"key": SPOT_LABEL, "operator": "NotIn", "values": ["true"]}])
+
+
+def require_spot(doc):
+    """Rule the reservation out, so the workload runs on Spot or not at all.
+
+    Not both allowed: under MultiKueue the manager and the worker each choose a
+    flavor, and a worker with reserved room put a workload on reserved that the
+    manager had booked on Spot. The manager's Spot quota then filled with
+    workloads on reserved nodes and its view of the reservation fell short of
+    the worker's. gke-provisioning In spot is what rules the reserved flavor
+    out, gke-spot In true what keeps the pod on a Spot node either way.
+    """
+    pin_spot(doc, [
+        {"key": SPOT_LABEL, "operator": "In", "values": ["true"]},
+        {"key": PROVISIONING_LABEL, "operator": "In", "values": ["spot"]},
+    ])
 
 
 def resubmit(kind, name, doc, before_create=None):
@@ -1048,6 +1333,10 @@ def inherit_defaults(doc, profile):
     The sidecar annotations come with the caches: without gke-gcsfuse/volumes
     GKE injects no sidecar and the claims silently never mount.
 
+    A manifest that sets tpu-ci.google.com/caches: none gets neither the caches
+    nor, unless it mounts a gcsfuse volume of its own, the sidecar annotations;
+    see `caches` in pod_defaults.yaml. Everything else applies as usual.
+
     Additive throughout. Anything the manifest already sets - a volume, a mount
     path, an annotation, an env name, a field of the pod or Job spec - is left
     alone, so a role can add its own or override one it needs to differ on.
@@ -1062,6 +1351,19 @@ def inherit_defaults(doc, profile):
     defaults = pod_defaults()
     every = defaults["everyPod"]["annotations"]
     tpu = defaults["tpuPods"]
+    caches = set()
+    if annotations.get(CACHES_ANNOTATION) == CACHES_NONE:
+        caches = set(tpu.get("caches") or [])
+        if not caches:
+            # A deploy applies this program and pod_defaults.yaml as two
+            # ConfigMaps in turn, so a launcher starting between the two can
+            # read a pod_defaults.yaml older than itself.
+            raise SystemExit(
+                f"{POD_DEFAULTS} names no tpuPods.caches, so {CACHES_ANNOTATION}: "
+                f"{CACHES_NONE} cannot be honoured and the pods would mount the "
+                "caches anyway. Regenerate and redeploy the manifests; if a "
+                "deploy is in flight, retry the step."
+            )
 
     for key, value in (defaults.get("workload") or {}).items():
         doc["spec"].setdefault(key, value)
@@ -1092,7 +1394,14 @@ def inherit_defaults(doc, profile):
         if not pod_chips(spec):
             continue
 
+        # Read before the caches are added: a pod without them still needs the
+        # sidecar for a gcsfuse volume of its own.
+        own_gcsfuse = any((v.get("csi") or {}).get("driver") == GCSFUSE_DRIVER
+                          for v in spec.get("volumes") or [])
         for key, value in tpu["annotations"].items():
+            if (caches and not own_gcsfuse
+                    and key.startswith(GCSFUSE_ANNOTATION_PREFIX)):
+                continue
             on_pod.setdefault(key, value)
         for key, value in tpu["spec"].items():
             spec.setdefault(key, copy.deepcopy(value))
@@ -1100,7 +1409,7 @@ def inherit_defaults(doc, profile):
         have = {v.get("name") for v in spec.setdefault("volumes", [])}
         spec["volumes"].extend(
             copy.deepcopy(v) for v in tpu["volumes"]
-            if v.get("name") not in have
+            if v.get("name") not in have and v.get("name") not in caches
         )
 
         for container in spec.get("containers", []):
@@ -1113,7 +1422,7 @@ def inherit_defaults(doc, profile):
             # applied after the mount it sits in rather than under it.
             container["volumeMounts"][:0] = [
                 copy.deepcopy(m) for m in tpu["volumeMounts"]
-                if m.get("mountPath") not in at
+                if m.get("mountPath") not in at and m.get("name") not in caches
             ]
             named = {e.get("name")
                      for e in container.setdefault("env", [])}
@@ -1234,6 +1543,22 @@ def validate(doc, registry, where):
         raise SystemExit(
             f"{where}: sets {PRIORITY_LABEL}. Remove it - a step says what a "
             f"run is worth in {PRIORITY_ENV}."
+        )
+
+    # inherit_defaults() acts on the one value it knows, so a misspelt value or
+    # one without the standard defaults would leave the caches mounted.
+    annotations = doc.get("metadata", {}).get("annotations") or {}
+    caches = annotations.get(CACHES_ANNOTATION)
+    if caches and caches != CACHES_NONE:
+        raise SystemExit(
+            f"{where}: {CACHES_ANNOTATION} is {caches!r}. The one value is "
+            f"{CACHES_NONE!r}; leave it unset or empty to keep the caches."
+        )
+    if caches == CACHES_NONE and annotations.get(DEFAULTS_ANNOTATION) != DEFAULTS_STANDARD:
+        raise SystemExit(
+            f"{where}: sets {CACHES_ANNOTATION}: {CACHES_NONE} without "
+            f"{DEFAULTS_ANNOTATION}: {DEFAULTS_STANDARD}. Only the standard "
+            "defaults add the caches, so there is nothing for it to leave out."
         )
 
     # The launcher's own account can create JobSets, so a workload running as
@@ -1548,12 +1873,16 @@ def worker_kubectl(env, *args, timeout=60):
     again next turn". A read that hangs past its timeout is the same case, so
     it comes back as a failed call too. Raised, it would end the launcher,
     which deletes a workload that is running fine.
+
+    The workload's log is whatever bytes it wrote, and one sequence that is not
+    UTF-8 would otherwise raise out of the decode; replaced, it shows as U+FFFD
+    in the step log instead.
     """
     try:
         return subprocess.run(
             ["kubectl", "-n", NAMESPACE, *args],
-            env=env, capture_output=True, text=True, check=False,
-            timeout=timeout,
+            env=env, capture_output=True, text=True, errors="replace",
+            check=False, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(args, 1, "", f"timed out after {timeout}s")
@@ -1851,6 +2180,14 @@ def main():
     finalise(doc, profile, registry, name, labels, owner_reference(),
              shlex.join(command) if command else None, manifest)
     kind = SUPPORTED_KINDS[doc["kind"]]
+    # Every run starts with Spot ruled out, so an overflow the reservation
+    # clears within minutes never lands on Spot, where it would hold quota while
+    # GCE has no VM to give and leave reserved chips idle as they free up. A run
+    # at or below the Spot priority line keeps a copy without the rule, which
+    # the watch below submits once it has waited spot_after_seconds for
+    # reserved chips.
+    spot_doc = copy.deepcopy(doc) if spot_eligible(doc, registry, profile["queue"]) else None
+    exclude_spot(doc)
     # The cpu profile's one host when no pod holds chips.
     hosts = chip_hosts(doc) or int(profile["hosts"])
 
@@ -1983,6 +2320,9 @@ def main():
         # of the registry that names them still runs.
         redispatch_after = int(registry.get("dispatch_retry_seconds", 300))
         redispatch_max = int(registry.get("dispatch_retries", 2))
+        spot_wait = int(registry.get("spot_wait_seconds", 900))
+        spot_failed_wait = int(registry.get("spot_failed_scale_up_seconds", 300))
+        spot_after = int(registry.get("spot_after_seconds", 600))
         started = time.monotonic()
         reserved = None
         # Since when the current submission has been reserved without MultiKueue
@@ -1995,6 +2335,25 @@ def main():
         last_startup = None
         last_note = None
         genv = None
+        # Since when a pod admitted onto Spot has been waiting for a node; see
+        # spot_unschedulable().
+        spot_waiting = None
+        # The pod waiting, when its events were last read, and since when and
+        # why the autoscaler has failed to add a node for it.
+        spot_pod = None
+        spot_events_read = None
+        spot_failed = None
+        spot_excluded = False
+        spot_allowed = False
+        # The pod the autoscaler says no node could hold, when its events were
+        # last read, and since when it has kept saying so; see unfit_verdict().
+        unfit_pod = None
+        unfit_read = None
+        unfit_since = None
+        unfit_asks = None
+        # Since when the current submission has waited for reserved chips: the
+        # start, or the reclaim that sent it back to the queue.
+        spot_offer_from = started
         job_id = labels.get("buildkite.com/job-id")
 
         while True:
@@ -2100,6 +2459,28 @@ def main():
                 last_note = None
                 continue
 
+            # A run that may use Spot, still waiting for quota after spot_after:
+            # resubmitted pinned to Spot; see require_spot(). Once, and not after
+            # falling back from Spot. Nothing was reserved, so no worker holds a
+            # copy.
+            if (spot_doc is not None and not spot_allowed and not spot_excluded
+                    and reserved is None and not admitted
+                    and time.monotonic() - spot_offer_from > spot_after):
+                spot_allowed = True
+                log(f"waited {time.monotonic() - spot_offer_from:.0f}s for "
+                    "reserved chips - resubmitting to run on Spot")
+                doc = copy.deepcopy(spot_doc)
+                require_spot(doc)
+                created = with_grace(resubmit, kind, name, doc)
+                if created is None:
+                    log(f"{kind}/{name} cannot be resubmitted")
+                    stop_announcing()
+                    delete_workload(kind, name)
+                    return finish("not_admitted", 1)
+                uid = created["metadata"]["uid"]
+                last_note = None
+                continue
+
             if not admitted and time.monotonic() - since > limit:
                 # Time spent unable to reach the manager counts against this on
                 # purpose: the budget is carved so the run still fits inside the
@@ -2140,17 +2521,47 @@ def main():
                 delete_workload(kind, name)
                 return finish("evicted_storage", 1)
 
-            # A failed read is not a started pod: leave it to the next turn.
-            if admitted and items is not None and not running:
-                s = startup_note(genv, items)
-                if s is None:
-                    running = True
-                elif s != last_startup:
-                    log(s)
-                    last_startup = s
-
-            if collector:
-                collector.poll(items)
+            # Pods that ask for more than any node of their shape has: the
+            # workload is admitted and holds its chips' quota, but no node will
+            # ever be made for them. Said on the build page as soon as the
+            # autoscaler says so, and failed if it keeps saying so.
+            unplaced = unplaced_chip_pod(items) if admitted else None
+            pod_name = unplaced["metadata"]["name"] if unplaced else None
+            if pod_name != unfit_pod:
+                if unfit_since is not None:
+                    withdraw_unfit()
+                unfit_pod, unfit_read, unfit_since = pod_name, None, None
+            if unplaced is not None and (
+                    unfit_read is None
+                    or time.monotonic() - unfit_read >= SPOT_EVENTS_POLL_SECONDS):
+                unfit_read = time.monotonic()
+                verdict = unfit_verdict(genv, pod_name)
+                if verdict and unfit_since is None:
+                    unfit_since = time.monotonic()
+                    unfit_asks = asked_for(unplaced, verdict)
+                    log(f"no {profile['queue']} node can hold {pod_name}: the "
+                        f"cluster autoscaler reports {verdict} for its pools; "
+                        f"it asks for {unfit_asks}. Failing in "
+                        f"{UNFIT_WAIT_SECONDS // 60} minutes unless that changes.")
+                    announce_unfit(profile["queue"], unfit_asks, verdict, manifest,
+                                   final=False)
+                elif not verdict and unfit_since is not None:
+                    log(f"the autoscaler no longer reports that {pod_name} fits "
+                        "no node - waiting on")
+                    withdraw_unfit()
+                    unfit_since = None
+            if (unfit_since is not None
+                    and time.monotonic() - unfit_since > UNFIT_WAIT_SECONDS):
+                timing["finished_at"] = utc_now()
+                print("^^^ +++", flush=True)
+                log(f"no {profile['queue']} node can hold {pod_name} - it asks "
+                    f"for {unfit_asks}, more than a node of the shape has, and the "
+                    f"autoscaler has said so for {UNFIT_WAIT_SECONDS // 60} "
+                    "minutes. Failing now rather than holding the quota: "
+                    f"lower the request in {manifest}.")
+                announce_unfit(profile["queue"], unfit_asks, "", manifest, final=True)
+                delete_workload(kind, name)
+                return finish("unfit", 1)
 
             # Under MultiKueue the local object is a shadow of one that ran on a
             # worker, so its own status may never be filled in. The Workload's
@@ -2176,6 +2587,110 @@ def main():
                 done = bool(completed and completed.get("status") == "True") or wl_succeeded
                 failed_cond = condition(obj, "Failed")
                 failed = bool(failed_cond and failed_cond.get("status") == "True") or wl_failed
+
+            # Spot quota is a count, not capacity: Kueue admits onto it with no
+            # Spot VM to be had, and the pool failing to scale up changes
+            # nothing Kueue sees. Waited out, waitForPodsReady requeues the
+            # workload with its Spot quota free, and it can be admitted onto
+            # Spot again. Resubmitted once with Spot ruled out, it waits for the
+            # reservation instead. The autoscaler failing to add a node for the
+            # pod is the earlier sign, but only a sign; see
+            # spot_scale_up_failed().
+            if items is not None:
+                pending = None if spot_excluded else spot_unschedulable(items)
+                if pending:
+                    if spot_waiting is None:
+                        spot_waiting = time.monotonic()
+                    if pending != spot_pod:
+                        spot_pod, spot_events_read, spot_failed = pending, None, None
+                    if spot_failed is None and (
+                            spot_events_read is None
+                            or time.monotonic() - spot_events_read
+                            >= SPOT_EVENTS_POLL_SECONDS):
+                        spot_events_read = time.monotonic()
+                        why = spot_scale_up_failed(genv, pending)
+                        if why:
+                            spot_failed = (time.monotonic(), why)
+                            log(f"no Spot node added for {pending} yet: {why} - "
+                                f"waiting up to {spot_failed_wait}s more")
+                else:
+                    spot_waiting = None
+                    spot_pod, spot_events_read, spot_failed = None, None, None
+            # A reclaimed Spot node takes its pod with it, and the Job's
+            # replacement would be pinned to Spot like the first - where nodes go
+            # in waves: on 10-13 one lasted 3 minutes at the median on 1x1x1 and
+            # 14 on 2x2x1, and 17 of the 41 steps reclaimed once were reclaimed
+            # again. Back to the queue instead, as at submission: reserved chips
+            # first, Spot again only after another spot_after of waiting for
+            # them. Not once the run is over: pod GC marks a done run's pods the
+            # same way when their node goes.
+            reclaimed = (spot_reclaimed(items)
+                         if items is not None and not spot_excluded
+                         and not (done or failed) else None)
+            fallback = None
+            if reclaimed:
+                fallback = (f"Spot node reclaimed under {reclaimed} - back to "
+                            "the queue, reserved chips first")
+                if spot_doc is not None:
+                    doc = copy.deepcopy(spot_doc)
+                spot_allowed = False
+                spot_offer_from = time.monotonic()
+            elif (spot_failed is not None
+                    and time.monotonic() - spot_failed[0] > spot_failed_wait):
+                fallback = (f"admitted onto Spot but no Spot node "
+                            f"{time.monotonic() - spot_failed[0]:.0f}s after "
+                            f"the autoscaler failed to add one ({spot_failed[1]})"
+                            " - resubmitting to wait for the reserved capacity "
+                            "instead")
+                spot_excluded = True
+            elif (spot_waiting is not None
+                    and time.monotonic() - spot_waiting > spot_wait):
+                fallback = (f"admitted onto Spot but no Spot node for "
+                            f"{time.monotonic() - spot_waiting:.0f}s - "
+                            "resubmitting to wait for the reserved capacity "
+                            "instead")
+                spot_excluded = True
+            if fallback:
+                log(fallback)
+                exclude_spot(doc)
+                # The worker that admitted the copy holds its pods; the same
+                # wait as a redispatch, for the same reason.
+                may_hold = set(offered) | {timing["cluster"]}
+                created = with_grace(
+                    resubmit, kind, name, doc,
+                    lambda: remote_copy_gone(may_hold, job_id, registry))
+                if created is None:
+                    log(f"{kind}/{name} cannot be resubmitted")
+                    stop_announcing()
+                    delete_workload(kind, name)
+                    return finish("not_admitted", 1)
+                uid = created["metadata"]["uid"]
+                reserved = None
+                undispatched = None
+                offered = set()
+                admitted = False
+                running = False
+                last_startup = None
+                last_note = None
+                # It may be admitted on another worker, which needs its own
+                # credentials and log reader.
+                genv = None
+                collector = None
+                spot_waiting = None
+                spot_pod, spot_events_read, spot_failed = None, None, None
+                continue
+
+            # A failed read is not a started pod: leave it to the next turn.
+            if admitted and items is not None and not running:
+                s = startup_note(genv, items)
+                if s is None:
+                    running = True
+                elif s != last_startup:
+                    log(s)
+                    last_startup = s
+
+            if collector:
+                collector.poll(items)
 
             if done or failed:
                 timing["finished_at"] = (condition_time(workload, "Finished")

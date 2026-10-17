@@ -16,6 +16,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
+  # The cluster autoscaler reports a failed scale-up only as an event on the
+  # pending pod; the launcher reads it to move a step off Spot before
+  # tpu_spot_wait_seconds runs out.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

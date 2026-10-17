@@ -308,3 +308,19 @@ def test_a_blend_of_readers_is_visible(built, tmp_path):
     merged = union_rows(rows[key], other)
     assert set(merged.stamp.evidence_source.split("|")) == {"joblog", "pytest"}
     assert Stamp().evidence_source == "", "and a row built by neither says nothing"
+
+
+def test_a_consuming_fold_gzips_the_records_and_drops_each_download(built, tmp_path):
+    """Nightlies since line records failed `fnrec-collect` with ENOSPC: every
+    tarball and its unpacked copy sat side by side on a small agent."""
+    sweep_root, artifacts, repo = built
+    offline = merge_build(sweep_root, repo.root)
+    staged = tmp_path / "staged"
+    sweep_from_artifacts(artifacts, staged, "77", repo.head(), "ci", consume=True)
+    assert not list(artifacts.glob("*.tar.gz")), "each download dropped once unpacked"
+    records = list(staged.glob("jobs/*/fnrec/fn.*"))
+    assert records and all(p.name.endswith(".txt.gz") for p in records)
+    folded = merge_builds([staged], repo.root)
+    assert {k: r.functions for k, r in folded.items()} == {
+        k: r.functions for k, r in offline.items()
+    }

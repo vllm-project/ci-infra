@@ -37,6 +37,14 @@ resource "google_container_cluster" "worker" {
     channel = var.release_channel
   }
 
+  maintenance_policy {
+    recurring_window {
+      start_time = var.maintenance_window.start_time
+      end_time   = var.maintenance_window.end_time
+      recurrence = var.maintenance_window.recurrence
+    }
+  }
+
   private_cluster_config {
     enable_private_nodes    = true
     enable_private_endpoint = false
@@ -250,7 +258,7 @@ resource "google_compute_resource_policy" "tpu_slice" {
 # reach the floor. max_nodes exceeds this pool's share of the reservation, so
 # the shapes compete for what is free rather than each owning a fixed slice.
 resource "google_container_node_pool" "worker_tpu" {
-  for_each = local.tpu_node_pools
+  for_each = merge(local.tpu_node_pools, local.spot_tpu_node_pools)
 
   name     = each.value.name
   project  = google_container_cluster.worker[each.value.worker].project
@@ -258,20 +266,22 @@ resource "google_container_node_pool" "worker_tpu" {
   location = google_container_cluster.worker[each.value.worker].location
 
   # The cluster pins no zones, so without this the pool spreads across the
-  # region and lands in zones that cannot serve the reservation.
-  node_locations = [each.value.zone]
+  # region's default zones: ones that cannot serve the reservation, and for
+  # v7x, one that has no such machine. A reserved pool takes its reservation's
+  # zone; a Spot pool may list more.
+  node_locations = each.value.zones
 
-  # The per-zone pair, not total_: node_locations pins the pool to one zone so
-  # the two carry the same number, but only this pair is the field GKE sizes a
-  # TPU slice against. Set as a total, the per-zone field arrives as zero and
-  # the pool is rejected - "Maximum node count 0 is not a valid size of TPU pod
+  # The per-zone pair, not total_: only this pair is the field GKE sizes a TPU
+  # slice against. Set as a total, the per-zone field arrives as zero and the
+  # pool is rejected - "Maximum node count 0 is not a valid size of TPU pod
   # slice with topology 2x2x2" - which surfaces only on shapes spanning more
-  # than one host, since a single-host pool has no slice to divide.
+  # than one host, since a single-host pool has no slice to divide. So
+  # max_nodes is per zone, and a Spot pool in two zones can hold twice as many
+  # nodes; its flavor's quota is what bounds the chips.
   #
   # ANY rather than the default: TPU autoscaling wants the zone with capacity,
-  # and a balanced spread across zones cannot build a slice at all. Moot while
-  # node_locations is one zone, and stated so that adding a second does not
-  # quietly turn it on.
+  # and a balanced spread across zones cannot build a slice at all. A Spot pool
+  # in two zones scales up in whichever has Spot VMs.
   autoscaling {
     min_node_count  = each.value.min_nodes
     max_node_count  = each.value.max_nodes
@@ -286,7 +296,12 @@ resource "google_container_node_pool" "worker_tpu" {
   node_config {
     machine_type    = each.value.machine_type
     service_account = google_service_account.worker_nodes[each.value.worker].email
-    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+
+    # Reclaimable on 30 seconds' notice, and drawn from the zone's Spot quota
+    # rather than the reservation. GKE labels the nodes cloud.google.com/gke-spot,
+    # which the Spot ResourceFlavor selects on.
+    spot         = each.value.capacity == "spot"
+    oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
 
     workload_metadata_config {
       mode = "GKE_METADATA"
@@ -326,12 +341,25 @@ resource "google_container_node_pool" "worker_tpu" {
       effect = "NO_SCHEDULE"
     }
 
+    # Only a pod Kueue admitted on the Spot flavor carries the toleration, so
+    # nothing lands here while the reserved quota has room - and a pod admitted
+    # on the reserved flavor cannot, whatever the scheduler finds free.
+    dynamic "taint" {
+      for_each = each.value.capacity == "spot" ? [1] : []
+      content {
+        key    = "cloud.google.com/gke-spot"
+        value  = "true"
+        effect = "NO_SCHEDULE"
+      }
+    }
+
     # The reservation is specificReservationRequired, so a node without this
     # affinity does not draw from it - it asks for on-demand capacity and fails.
+    # A Spot VM cannot draw from a reservation at all.
     reservation_affinity {
-      consume_reservation_type = "SPECIFIC_RESERVATION"
-      key                      = "compute.googleapis.com/reservation-name"
-      values                   = [each.value.reservation_name]
+      consume_reservation_type = each.value.capacity == "spot" ? "NO_RESERVATION" : "SPECIFIC_RESERVATION"
+      key                      = each.value.capacity == "spot" ? null : "compute.googleapis.com/reservation-name"
+      values                   = each.value.capacity == "spot" ? null : [each.value.reservation_name]
     }
 
     metadata = {
@@ -370,6 +398,10 @@ resource "google_container_node_pool" "worker_tpu" {
     precondition {
       condition     = each.value.is_multi_host || (each.value.max_nodes != null && each.value.stated_slices == null)
       error_message = "${each.value.shape}: a single-host shape is sized by min_nodes and max_nodes (max_nodes required); slices is for multi-host shapes."
+    }
+    precondition {
+      condition     = each.value.capacity != "spot" || !each.value.is_multi_host
+      error_message = "${each.value.shape}: Spot is for single-host shapes. GKE reclaims a multi-host slice whole, and a slice half of which is Spot is not one Kueue or JobSet can place."
     }
     precondition {
       condition     = !each.value.is_multi_host || (each.value.stated_min_nodes == null && each.value.stated_max_nodes == null)

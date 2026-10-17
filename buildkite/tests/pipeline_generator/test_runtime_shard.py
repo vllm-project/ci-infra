@@ -8,6 +8,7 @@ import pytest
 
 import buildkite_step
 import runtime_shard as rs
+from constants import AgentQueue
 from step import Step
 
 SETUP = ["apt-get update && apt-get install -y curl", "export PYTHONFAULTHANDLER=1"]
@@ -163,6 +164,22 @@ def test_plan_counts_an_unknown_file_as_the_steps_median_file():
     assert rs.plan(commands, small)["unknownFileSeconds"] == 5  # the floor
 
 
+def test_plan_counts_an_untimed_file_under_a_filter_at_the_floor():
+    """`-m hybrid_model` over a directory: main timed the files the marker
+    selects tests in, and the others most likely have none to run."""
+    command = "pytest -v -s models -m hybrid_model -k 'not granite'"
+    files = ["hybrid.py", "mamba.py", "gemma.py", "phimoe.py"]
+    timed = {"hybrid.py": 900, "mamba.py": 900}
+    result = rs.plan(_commands(command, files), _timings(command, timed))
+    assert result["unknownFiles"] == []
+    assert result["filteredUnknownFiles"] == ["tests/gemma.py", "tests/phimoe.py"]
+    assert result["shards"] == 2 and sorted(result["estimates"]) == [905, 905]
+    assert "under a -m/-k filter, counted as 5 s each" in rs.summary("k", result)
+    # Only excluding tests ("not slow_test", above) keeps most files running.
+    assert not rs._picks_tests("pytest x -m '(not slow_test)' -k 'not granite'")
+    assert rs._picks_tests("pytest x -mcore_model") and rs._picks_tests("pytest -k=a x")
+
+
 def test_plan_finds_main_timings_after_a_pr_edits_the_command():
     """Main's timings carry the command's 80-character preview; a PR that adds
     a flag changes it, and every file would otherwise count as unknown."""
@@ -252,6 +269,16 @@ def _render(step):
     return group.steps
 
 
+class _Annotations(list):
+    """The generator's annotations; `calls` holds its (key, queue) timing requests."""
+
+    calls = None
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+
 @pytest.fixture
 def checkout(tmp_path, monkeypatch):
     """A vLLM checkout with the step's tests, as the generator runs in, and
@@ -261,8 +288,12 @@ def checkout(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     timings = _timings(TESTS[0], ME_FILES)
     timings["files"] += _timings(TESTS[1], {ENTRYPOINT: 100})["files"]
-    monkeypatch.setattr(rs, "fetch_timings", lambda key: timings)
-    annotations = []
+    annotations = _Annotations()
+    monkeypatch.setattr(
+        rs,
+        "fetch_timings",
+        lambda key, queue: annotations.calls.append((key, queue)) or timings,
+    )
     monkeypatch.setattr(rs, "annotate", lambda *args: annotations.append(args))
     return annotations
 
@@ -280,10 +311,15 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     for field in ("depends_on", "agents", "plugins", "retry", "timeout_in_minutes"):
         assert getattr(step, field) == getattr(plain, field)
     # Its commands are the step's own, after installing the plugin: the same
-    # log headers and tracing labels, so main's timings keep matching.
-    assert step.commands[2:] == plain.commands
+    # log headers and tracing labels, so main's timings keep matching. A test
+    # command runs only in the shards that have its tests.
     assert step.commands[:2] == rs.shard_job_setup()
-    assert step.env["PYTEST_ADDOPTS"] == "-p runtime_shard_plugin"
+    jobs = step.commands[2:]
+    assert len(jobs) == len(plain.commands)
+    guarded = [job for job, own in zip(jobs, plain.commands) if job != own]
+    assert len(guarded) == 1 and TESTS[1] in guarded[0]  # the one-file command
+    assert guarded[0].startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
+    assert step.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
     me, entrypoint = plan["commands"]
@@ -294,12 +330,38 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     assert checkout == []  # a good plan leaves the build page alone
 
 
+def test_a_command_runs_only_in_the_shards_with_its_tests():
+    planned = {
+        "files": {"tests/a.py": 2},
+        "split": {"tests/b.py": {"shards": {"0": 2, "1": 0}}},
+    }
+    script = rs.guard("echo RAN", planned, 3).replace("$$", "$")
+    ran = {}
+    for job in range(3):
+        env = dict(os.environ, BUILDKITE_PARALLEL_JOB=str(job))
+        out = subprocess.run(
+            ["sh", "-ec", script], env=env, capture_output=True, text=True
+        )
+        assert out.returncode == 0, out.stderr
+        ran[job] = out.stdout.strip()
+    assert ran[0] == ran[2] == "RAN"
+    assert ran[1] == (
+        "runtime-shard: this shard has no tests of this command; they run in shard 1, 3"
+    )
+    # A command every shard has a part of runs as it is.
+    everywhere = {
+        "files": {"tests/a.py": 0, "tests/c.py": 1, "tests/d.py": 2},
+        "split": {},
+    }
+    assert rs.guard("echo RAN", everywhere, 3) == "echo RAN"
+
+
 def test_generator_keeps_the_single_job_without_a_plan(
     fake_global_config, checkout, monkeypatch
 ):
     fake_global_config["run_all"] = True
     [plain] = _render(_step())
-    monkeypatch.setattr(rs, "fetch_timings", lambda key: None)
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
     [step] = _render(_step(automatic_shard=True))
     assert step.to_yaml() == plain.to_yaml()
     [(_, text, style)] = checkout
@@ -335,21 +397,171 @@ def test_generator_ignores_the_flag_where_it_cannot_shard(
         assert _render(step)[0].parallelism is None
     monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "off")  # the rollback switch
     assert _render(_step(automatic_shard=True))[0].parallelism is None
-    monkeypatch.delenv("VLLM_CI_RUNTIME_SHARD")
-    monkeypatch.setattr(buildkite_step, "fnrec_enabled", lambda: True)
-    assert _render(_step(automatic_shard=True))[0].parallelism is None
     assert checkout == []
+
+
+def test_generator_shards_on_a_recording_build_too(
+    fake_global_config, checkout, monkeypatch
+):
+    """Nightly recording builds shard like PRs. The table builder unions a
+    step's shards into one row and checks every shard reported, so an
+    unsharded step only ran long (or timed out) for nothing."""
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(buildkite_step, "fnrec_enabled", lambda: True)
+    monkeypatch.setattr(buildkite_step, "kernrec_enabled", lambda: True)
+    [step] = _render(_step(automatic_shard=True))
+    assert step.parallelism == 3
+    assert step.commands[:2] == rs.shard_job_setup()
+
+
+def _mirror_step(**amd):
+    amd = {"device": "mi325_1", "dind": False, "automatic_shard": True, **amd}
+    return _step(automatic_shard=True, mirror={"amd": amd})
+
+
+def _render_mirror(step):
+    """The mirror's job, from the generator's Hardware-AMD Tests group."""
+    groups = buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+    [amd] = [g for g in groups if g.group == "Hardware-AMD Tests"]
+    return amd.steps[-1]
+
+
+def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
+    fake_global_config["run_all"] = True
+    plain = _render_mirror(_step(mirror={"amd": {"device": "mi325_1", "dind": False}}))
+    job = _render_mirror(_mirror_step())
+    assert job.key == "amd-model-executor" and job.parallelism == 3
+    assert job.label == "AMD: Model Executor (mi325_1) shard %N/%t"
+    assert job.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
+    plan = rs.unpack(job.env["RUNTIME_SHARD_PLAN"])
+    assert plan["shards"] == 3
+    assert "RUNTIME_SHARD_PLUGIN" in job.env
+    # The shard setup goes in front of the mirror's own commands, and, as on
+    # CUDA, the one-file command runs only in the shard that has its tests.
+    guarded = rs.guard(TESTS[1], plan["commands"][1], 3)
+    assert guarded.startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
+    mirror = plain.env["VLLM_TEST_COMMANDS"]
+    assert mirror.count(f"&& {TESTS[1]}") == 1
+    assert job.env["VLLM_TEST_COMMANDS"] == " && ".join(
+        rs.shard_job_setup() + [mirror.replace(f"&& {TESTS[1]}", f"&& {guarded}")]
+    )
+    # The CUDA step is planned separately, on its own queue.
+    assert checkout.calls == [
+        ("model-executor", AgentQueue.H200_35GB),
+        ("amd-model-executor", AgentQueue.AMD_MI325_1),
+    ]
+
+
+def test_generator_leaves_an_unflagged_or_dind_mirror_alone(
+    fake_global_config, checkout
+):
+    fake_global_config["run_all"] = True
+    for step in (
+        _mirror_step(automatic_shard=False),
+        _mirror_step(dind=True),
+        _step(
+            mirror={
+                "amd": {"device": "mi325_1", "dind": False, "automatic_shard": True}
+            }
+        ),
+    ):
+        job = _render_mirror(step)
+        assert job.parallelism is None and "RUNTIME_SHARD_PLAN" not in job.env
+    assert "amd-model-executor" not in [key for key, _ in checkout.calls]
+
+
+def test_an_explicit_mirror_parallelism_skips_planning(fake_global_config, checkout):
+    fake_global_config["run_all"] = True
+    job = _render_mirror(_mirror_step(parallelism=2))
+    assert job.parallelism == 2 and "RUNTIME_SHARD_PLAN" not in job.env
+    assert "amd-model-executor" not in [key for key, _ in checkout.calls]
+
+
+def test_a_mirror_without_a_plan_keeps_the_inherited_parallelism(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
+    step = _mirror_step()
+    step.parallelism = 2
+    assert _render_mirror(step).parallelism == 2
+
+
+def test_a_mirror_without_timings_runs_as_one_job(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    plain = _render_mirror(_mirror_step(automatic_shard=False))
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
+    checkout.clear()
+    job = _render_mirror(_mirror_step())
+    assert job.to_yaml() == plain.to_yaml()
+    assert any(
+        key == "amd-model-executor" and style == "warning" and "runs as one job" in text
+        for key, text, style in checkout
+    )
+
+
+def test_a_mirror_is_planned_when_its_own_step_runs(fake_global_config, checkout):
+    # The mirror's effective step decides, not the CUDA step's source deps.
+    fake_global_config["list_file_diff"] = ["vllm/model_executor/a.py"]
+    step = _mirror_step(optional=True)
+    step.source_file_dependencies = ["vllm/model_executor/"]
+    assert _render_mirror(step).parallelism is None  # behind a block step
+    assert "amd-model-executor" not in [key for key, _ in checkout.calls]
+    # The native runner script is a dependency of the mirror only.
+    fake_global_config["list_file_diff"] = [
+        ".buildkite/scripts/hardware_ci/run-amd-test.sh"
+    ]
+    step = _mirror_step()
+    step.source_file_dependencies = ["vllm/model_executor/"]
+    assert _render_mirror(step).parallelism == 3
+
+
+def test_shadow_and_off_apply_to_mirrors(fake_global_config, checkout, monkeypatch):
+    fake_global_config["run_all"] = True
+    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "shadow")
+    assert _render_mirror(_mirror_step()).parallelism is None
+    assert any(key == "amd-model-executor" for key, *_ in checkout.calls)
+    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "off")
+    checkout.clear()
+    assert _render_mirror(_mirror_step()).parallelism is None and checkout == []
+
+
+def test_a_mirror_shards_on_a_recording_build_too(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(buildkite_step, "fnrec_enabled", lambda: True)
+    monkeypatch.setattr(buildkite_step, "kernrec_enabled", lambda: True)
+    assert _render_mirror(_mirror_step()).parallelism == 3
+
+
+def test_fetch_timings_sends_the_queue(monkeypatch):
+    urls = []
+
+    def urlopen(url, timeout):
+        urls.append(url)
+        raise OSError("down")
+
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("amd-k", AgentQueue.AMD_MI325_1) is None
+    assert "stepKey=amd-k" in urls[0] and "queue=amd_mi325_1" in urls[0]
 
 
 def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     fake_global_config, checkout
 ):
-    fake_global_config["run_all"] = True
+    # L4 steps only run when picked, so pick it.
+    fake_global_config["only_step_keys"] = frozenset({"model-executor"})
     [plain] = _render(_step(device="l4"))
     [step] = _render(_step(device="l4", automatic_shard=True))
     assert "kubernetes" in step.plugins[0] and step.plugins == plain.plugins
     assert step.retry == plain.retry == buildkite_step.K8S_RETRY
-    assert step.parallelism == 3 and step.commands[2:] == plain.commands
+    assert step.parallelism == 3 and len(step.commands[2:]) == len(plain.commands)
+    # The same commands, the one-file command run only by the shard with it.
+    changed = [new for new, old in zip(step.commands[2:], plain.commands) if new != old]
+    assert len(changed) == 1 and changed[0].startswith("case ")
 
 
 def test_shard_job_setup_installs_the_plugin_for_any_python():
@@ -448,8 +660,10 @@ def test_every_test_runs_in_exactly_one_shard(tmp_path, monkeypatch):
     timings = _with_tests(
         _timings(command, seconds), "big/test_big.py", {**per_test, "test_g": 300}
     )
-    monkeypatch.setattr(rs, "fetch_timings", lambda key: timings)
-    result, _ = rs.plan_step("k", [command], "/vllm-workspace/tests", str(tmp_path))
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    result, _ = rs.plan_step(
+        "k", [command], "/vllm-workspace/tests", str(tmp_path), AgentQueue.H200
+    )
     assert result["commands"][0]["split"]  # big/test_big.py is cut by test
     plan = {"shards": result["shards"], "commands": result["commands"]}
     # The PR adds what main never timed: a function and a file.
@@ -473,7 +687,13 @@ def test_every_test_runs_in_exactly_one_shard(tmp_path, monkeypatch):
         # A file's group says when it holds only part of the file.
         for line in _groups(run.stdout):
             if "big/test_big.py" in line:
-                assert re.search(r"\(\d of 6 tests\)$", line), line
+                assert re.search(
+                    r"\(\d of 6 tests, split by test; the rest run in other shards\)$",
+                    line,
+                ), line
+        # And says where the command's other tests run.
+        summary = re.search(r"^runtime-shard: shard .*$", run.stdout, re.M).group(0)
+        assert "; the rest run in shard " in summary, summary
     assert sorted(ran) == sorted(everything)  # each test exactly once
 
 
@@ -506,7 +726,11 @@ def test_a_shard_opens_a_log_group_per_file(tmp_path):
     ]
     # All of a command's tests in other shards: nothing to run is no failure.
     run = _run(tmp_path, two, plan, 0)
-    assert run.returncode == 0 and "runs 0 of" in run.stdout, run.stdout
+    assert run.returncode == 0, run.stdout
+    assert (
+        "runtime-shard: shard 1/2 runs none of this command's tests; "
+        "they run in shard 2 (1 test)"
+    ) in run.stdout
     assert _run(tmp_path, two, plan, 1).returncode == 0
     # But a command that selects nothing at all still fails, as it would alone.
     plan["commands"].append(_command_plan("pytest -v pkg -k nothing", "C", files))

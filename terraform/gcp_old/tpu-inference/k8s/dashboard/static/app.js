@@ -53,6 +53,12 @@ for (const plot of document.querySelectorAll(".plot")) {
 function reveal(id) {
   const target = id && document.getElementById(id);
   for (let el = target; el; el = el.parentElement) if (el.tagName === "DETAILS") el.open = true;
+  // A shape's row on Capacity or Now: open the charts or detail it toggles.
+  const toggle = target && target.tagName === "TR" && target.querySelector(".steps-toggle");
+  if (toggle) {
+    const row = document.getElementById(toggle.getAttribute("aria-controls"));
+    if (row) { row.hidden = false; toggle.setAttribute("aria-expanded", "true"); }
+  }
 }
 document.addEventListener("click", (ev) => {
   const a = ev.target.closest('a[href^="#"]');
@@ -92,4 +98,35 @@ for (const b of document.querySelectorAll(".show-more")) {
     rows.hidden = !rows.hidden;
     b.textContent = rows.hidden ? b.dataset.more : b.dataset.fewer;
   });
+}
+
+// Live and Overview reload every data-refresh seconds to stay current, but not
+// while the reader has something open - a details section, a build's steps, the
+// rows behind Show more - since a reload closes it. The top bar says it is
+// waiting, with a button to reload anyway, and once the last thing is closed the
+// page reloads a few seconds later.
+const every = Number(document.body.dataset.refresh || 0);
+const note = document.querySelector(".topbar .refresh");
+if (every && note) {
+  const opened = () =>
+    document.querySelector("details[open], .steps-toggle[aria-expanded='true']") ||
+    [...document.querySelectorAll(".show-more")].some((b) => document.getElementById(b.dataset.target)?.hidden === false);
+  const due = Date.now() + every * 1000;
+  let paused = false, closedAt = null;
+  setInterval(() => {
+    if (Date.now() < due) return;
+    if (opened()) {
+      closedAt = null;
+      if (!paused) {
+        paused = true;
+        const now = document.createElement("button");
+        now.type = "button";
+        now.textContent = "Refresh now";
+        now.addEventListener("click", () => location.reload());
+        note.replaceChildren("reload paused while a section is open · ", now);
+      }
+    } else if (!paused || Date.now() - (closedAt ??= Date.now()) >= 5000) {
+      location.reload();
+    }
+  }, 1000);
 }

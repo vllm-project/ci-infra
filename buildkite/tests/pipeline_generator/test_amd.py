@@ -173,13 +173,13 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     )
 
     group_step = _render_single_step(step)
-    block_step, command_step = group_step.steps
+    (command_step,) = group_step.steps
 
     assert group_step.group == "Hardware-AMD Tests"
-    assert block_step.block == f"Run AMD: AMD direct test ({device})"
-    assert block_step.depends_on == ["image-build-amd"]
+    # Optional, so it waits in the "Run more jobs" input step.
+    assert command_step.deferred
     assert command_step.label == f"AMD: AMD direct test ({device})"
-    assert command_step.depends_on == ["image-build-amd", block_step.key]
+    assert command_step.depends_on == ["image-build-amd"]
     assert command_step.agents == {"queue": queue}
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
@@ -279,7 +279,7 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     )
 
     group_step = _render_single_step(step)
-    _, command_step = group_step.steps
+    (command_step,) = group_step.steps
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
@@ -371,8 +371,9 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
         group for group in group_steps if group.group == "Hardware-AMD Tests"
     )
 
-    assert isinstance(default_group.steps[0], buildkite_step.BuildkiteBlockStep)
+    assert default_group.steps[0].deferred
     assert len(amd_group.steps) == 1
+    assert not amd_group.steps[0].deferred
     assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteCommandStep)
 
 
@@ -406,8 +407,9 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device,
         group for group in group_steps if group.group == "Hardware-AMD Tests"
     )
 
-    assert isinstance(default_group.steps[0], buildkite_step.BuildkiteBlockStep)
+    assert default_group.steps[0].deferred
     assert len(amd_group.steps) == 1
+    assert not amd_group.steps[0].deferred
     amd_command_step = amd_group.steps[0]
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
     assert amd_command_step.key == "amd-native-mirrored-test"
@@ -479,9 +481,8 @@ def test_untagged_mirror_defaults_to_dind(
         group for group in group_steps if group.group == "Hardware-AMD Tests"
     )
 
-    assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteBlockStep)
-    amd_command_step = amd_group.steps[1]
-    assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
+    (amd_command_step,) = amd_group.steps
+    assert amd_command_step.deferred
     assert amd_command_step.plugins is None
     assert amd_command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
 
@@ -745,9 +746,7 @@ def test_amd_mirror_label_override(fake_global_config, amd_label, expected_amd_l
         (2, 2),  # explicit override -> independent AMD shard count
     ],
 )
-def test_amd_mirror_parallelism_override(
-    fake_global_config, amd_parallelism, expected
-):
+def test_amd_mirror_parallelism_override(fake_global_config, amd_parallelism, expected):
     """NVIDIA sharding must not multiply AMD mirrors: mirror.amd.parallelism
     overrides the inherited parent parallelism when set."""
     amd_config = {
@@ -782,9 +781,7 @@ def test_amd_mirror_parallelism_override(
         for s in nvidia_group.steps
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
-    amd_group = next(
-        g for g in group_steps if g.group == "Hardware-AMD Tests"
-    )
+    amd_group = next(g for g in group_steps if g.group == "Hardware-AMD Tests")
     amd_step = next(
         s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )

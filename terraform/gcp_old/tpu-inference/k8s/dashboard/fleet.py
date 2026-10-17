@@ -103,7 +103,10 @@ class Token:
                     text=True,
                     check=True,
                 )
-                self._value, self._expiry = out.stdout.strip(), time.time() + 1800
+                # gcloud hands back its own cached token without saying when it
+                # expires, which can be in minutes, so ask again often: the call
+                # is cheap, and a token held past its expiry is a 401 per read.
+                self._value, self._expiry = out.stdout.strip(), time.time() + 300
             else:
                 req = urllib.request.Request(
                     "http://metadata.google.internal/computeMetadata/v1/instance/"
@@ -303,19 +306,102 @@ def queue_resource(cq: dict) -> str:
     return TPU if TPU in covered else (covered[0] if covered else "")
 
 
+# A Spot ResourceFlavor is named <generation>-spot (generate_manifests.py). As a
+# PromQL matcher: the reserved flavors' series, and the Spot ones'.
+RESERVED_FLAVOR = 'flavor!~".*-spot"'
+SPOT_FLAVOR = 'flavor=~".*-spot"'
+
+
+def is_spot(flavor: str) -> bool:
+    return flavor.endswith("-spot")
+
+
+# The node selector Kueue writes into a pod it admits on a Spot flavor
+# (resource_flavor_spot.yaml.tpl); a reserved flavor writes none.
+SPOT_LABEL = "cloud.google.com/gke-spot"
+
+
+def placement(pods: list) -> dict:
+    """Per Buildkite job, its pods on a worker: how many there are, on a node
+    and running - every pod, the chip-less ones included, since Kueue calls a
+    workload ready only once all are - and the TPU chips of them on a Spot
+    node, on a reserved node, and admitted onto Spot with no node yet.
+
+    The worker's Kueue admits a workload again after the manager's and picks
+    its own flavor, and that choice is the one the pods follow; the manager's
+    can say Spot for pods on reserved nodes or the other way round. A
+    multi-pod job can land on both.
+    """
+    out: dict = {}
+    for pod in pods:
+        meta, spec, status = pod["metadata"], pod.get("spec", {}), pod.get("status", {})
+        if meta.get("deletionTimestamp") or status.get("phase") == "Failed":
+            continue
+        job = (meta.get("labels") or {}).get("buildkite.com/job-id", "").replace("-", "")
+        if not job:
+            continue
+        row = out.setdefault(
+            job,
+            {"spot": 0.0, "reserved": 0.0, "spot_waiting": 0.0, "reserved_waiting": 0.0,
+             "pods": 0, "pods_on_node": 0, "pods_running": 0, "pods_done": 0},
+        )
+        row["pods"] += 1
+        # A pod that has succeeded is the step done, not starting: between it
+        # and Kueue marking the workload finished the workload is still
+        # admitted, and counting no pod up there read as "pods starting".
+        if status.get("phase") == "Succeeded":
+            row["pods_done"] += 1
+            continue
+        row["pods_on_node"] += 1 if spec.get("nodeName") else 0
+        row["pods_running"] += 1 if status.get("phase") == "Running" else 0
+        chips = sum(
+            quantity((c.get("resources", {}).get("requests") or {}).get(TPU))
+            for c in spec.get("containers", [])
+        )
+        if not chips:
+            continue
+        spot = (spec.get("nodeSelector") or {}).get(SPOT_LABEL) == "true"
+        key = ("spot" if spot else "reserved") if spec.get("nodeName") else (
+            "spot_waiting" if spot else "reserved_waiting"
+        )
+        row[key] += chips
+    return out
+
+
 def cq_summary(cq: dict) -> dict:
+    """A ClusterQueue's quota and usage. Nominal, borrowing and usage are the
+    reserved flavor's: a Spot flavor's quota is chips GCE may not have, never
+    lent or borrowed, so it is counted apart rather than as capacity the queue
+    is guaranteed."""
     resource = queue_resource(cq)
-    nominal = borrowing = 0.0
+    nominal = borrowing = spot_quota = 0.0
+    # What it may lend, when it is capped below its nominal; None lends all.
+    lending = None
     for group in cq["spec"].get("resourceGroups", []):
         for flavor in group["flavors"]:
             for r in flavor["resources"]:
-                if r["name"] == resource:
+                if r["name"] != resource:
+                    continue
+                if is_spot(flavor["name"]):
+                    spot_quota += quantity(r.get("nominalQuota"))
+                else:
                     nominal += quantity(r.get("nominalQuota"))
                     borrowing += quantity(r.get("borrowingLimit"))
-    used = borrowed = 0.0
-    for flavor in cq.get("status", {}).get("flavorsUsage", []):
+                    if r.get("lendingLimit") is not None:
+                        lending = (lending or 0.0) + quantity(r.get("lendingLimit"))
+    used = borrowed = spot_used = 0.0
+    # The quota held - what Kueue admits against - not flavorsUsage, which
+    # counts admitted workloads only: on the manager a workload holds its quota
+    # from reservation while MultiKueue hands it to a worker, and leaving those
+    # out showed chips free that Kueue would not give anyone.
+    status = cq.get("status", {})
+    for flavor in status.get("flavorsReservation") or status.get("flavorsUsage") or []:
         for r in flavor["resources"]:
-            if r["name"] == resource:
+            if r["name"] != resource:
+                continue
+            if is_spot(flavor["name"]):
+                spot_used += quantity(r.get("total"))
+            else:
                 used += quantity(r.get("total"))
                 borrowed += quantity(r.get("borrowed"))
     preemption = cq["spec"].get("preemption") or {}
@@ -327,6 +413,9 @@ def cq_summary(cq: dict) -> dict:
         "borrowing_limit": borrowing,
         "used": used,
         "borrowed": borrowed,
+        "lending_limit": lending,
+        "spot_quota": spot_quota,
+        "spot_used": spot_used,
         # How the queue preempts, in Kueue's words: taking lent quota back from
         # borrowers (Never, LowerPriority, Any), within its own queue (Never,
         # LowerPriority, LowerOrNewerEqualPriority), and in order to borrow.
@@ -420,8 +509,25 @@ def fetch_kueue(cfg: Config) -> dict:
         # The agent pods agent-stack-k8s creates, one per kube step.
         "pods": f"{cfg.gateway}/api/v1/namespaces/{ns}/pods?labelSelector=buildkite.com%2Fjob-uuid",
     }
-    with concurrent.futures.ThreadPoolExecutor(len(urls)) as pool:
+    # Where the pods are, from each worker: an unreachable worker costs the
+    # Spot figures for its jobs, not the page.
+    workers = {
+        c["name"]: f"{c['gateway']}/api/v1/namespaces/{ns}/pods?labelSelector=buildkite.com%2Fjob-id"
+        for c in cfg.clusters
+        if c["name"] != cfg.metrics_cluster
+    }
+
+    def worker_pods(url: str) -> tuple[list, str]:
+        try:
+            return google(url)["items"], ""
+        except Exception as e:  # noqa: BLE001 - shown on the page, not raised
+            return [], f"{type(e).__name__}: {e}"[:200]
+
+    with concurrent.futures.ThreadPoolExecutor(len(urls) + len(workers)) as pool:
+        placed = dict(zip(workers, pool.map(worker_pods, workers.values())))
         got = dict(zip(urls, pool.map(lambda u: google(u)["items"], urls.values())))
+    places = placement([pod for items, _ in placed.values() for pod in items])
+    placement_errors = {name: error for name, (_, error) in placed.items() if error}
 
     queues = [cq_summary(cq) for cq in got["cqs"]]
     resources = {q["name"]: q["resource"] for q in queues}
@@ -429,6 +535,12 @@ def fetch_kueue(cfg: Config) -> dict:
     owners = {
         (kind, o["metadata"]["name"]): o["metadata"].get("labels", {})
         for kind, key in (("Job", "jobs"), ("JobSet", "jobsets"))
+        for o in got[key]
+    }
+    # The Job or JobSet behind each uid, for the job a preemption names.
+    job_uids = {
+        o["metadata"]["uid"]: (o["metadata"].get("labels") or {}).get("buildkite.com/job-id", "").replace("-", "")
+        for key in ("jobs", "jobsets")
         for o in got[key]
     }
     job_builds = {
@@ -453,6 +565,7 @@ def fetch_kueue(cfg: Config) -> dict:
         labels = {}
         for ref in wl["metadata"].get("ownerReferences", []):
             labels = owners.get((ref["kind"], ref["name"]), labels)
+        place = places.get(labels.get("buildkite.com/job-id", "").replace("-", ""), {})
         workloads.append(
             {
                 **state,
@@ -462,6 +575,17 @@ def fetch_kueue(cfg: Config) -> dict:
                 "cluster": wl.get("status", {}).get("clusterName"),
                 "queue": queue,
                 "amount": workload_amount(wl, resources.get(queue, TPU)),
+                # Its pods' chips on the worker: on Spot nodes, and admitted
+                # onto Spot with no node yet (see placement()).
+                "spot_chips": place.get("spot", 0.0),
+                "spot_waiting_chips": place.get("spot_waiting", 0.0),
+                "spot": bool(place.get("spot") or place.get("spot_waiting")),
+                # Its pods on the worker, for a step part of which runs while
+                # the rest waits for a node.
+                "pods_total": place.get("pods", 0),
+                "pods_on_node": place.get("pods_on_node", 0),
+                "pods_running": place.get("pods_running", 0),
+                "pods_done": place.get("pods_done", 0),
                 # The WorkloadPriorityClass the launcher set, and the value Kueue
                 # copied from it: what orders the queue. Buildkite's own job
                 # priority is a different scale and orders nothing here. None
@@ -545,6 +669,8 @@ def fetch_kueue(cfg: Config) -> dict:
         "pods": pods,
         "job_builds": job_builds,
         "next_up": next_up,
+        "placement_errors": placement_errors,
+        "job_uids": job_uids,
     }
 
 
@@ -612,7 +738,8 @@ def prom(cfg: Config, kind: str, params: dict) -> list:
         f"https://monitoring.googleapis.com/v1/projects/{cfg.project}/location/global/"
         f"prometheus/api/v1/{kind}?" + urllib.parse.urlencode(params)
     )
-    return google(url)["data"]["result"]
+    # A query no series matches answers null rather than an empty list.
+    return google(url)["data"]["result"] or []
 
 
 def prom_range(
@@ -639,6 +766,13 @@ def prom_now(cfg: Config, query: str, by: tuple, at: float | None = None) -> dic
 
 def kueue_selector(cfg: Config) -> str:
     return f'cluster="{cfg.metrics_cluster}"'
+
+
+def worker_kueue_selector(cfg: Config) -> str:
+    """The workers' Kueue series. Each worker admits a workload again and picks
+    its own flavor, which is where the pods go, so Spot usage is theirs."""
+    names = "|".join(c["name"] for c in cfg.clusters if c["name"] != cfg.metrics_cluster)
+    return f'cluster=~"{names}"'
 
 
 def duty_selector(cfg: Config) -> str:
@@ -686,6 +820,27 @@ def current(metric: str, by: str) -> str:
     return f"max by ({by}) (last_over_time({metric}[2m]))"
 
 
+def reserved_agreement(cfg: Config) -> dict:
+    """fetch_health's queries for the manager's and the workers' reserved
+    chips per generation, and the gap between them that has lasted."""
+    # The quota held, which on the manager includes workloads still being
+    # handed to a worker: one held there that no worker admits is a gap too.
+    usage = f'kueue_cluster_queue_resource_reservation{{{{{{sel}},resource="{TPU}",{RESERVED_FLAVOR}}}}}'
+    manager = (
+        f"sum by (flavor) ("
+        f"{current(usage.format(sel=kueue_selector(cfg)), 'cluster_queue, flavor, resource')})"
+    )
+    workers = (
+        f"sum by (flavor) ("
+        f"{current(usage.format(sel=worker_kueue_selector(cfg)), 'cluster, cluster_queue, flavor, resource')})"
+    )
+    return {
+        "reserved_manager": (manager, ("flavor",)),
+        "reserved_workers": (workers, ("flavor",)),
+        "reserved_gap": (f"min_over_time((abs({workers} - {manager}))[10m:1m])", ("flavor",)),
+    }
+
+
 def fetch_health(cfg: Config) -> dict:
     sel = kueue_selector(cfg)
     busy_duty = f"kubernetes_io:node_accelerator_duty_cycle{{{node_selector(cfg)}}}"
@@ -719,6 +874,11 @@ def fetch_health(cfg: Config) -> dict:
             ("cluster_name", "node_name"),
         ),
         "nodes": (node_presence(cfg), ("cluster_name", "node_name")),
+        # Reserved chips per generation as the manager's Kueue counts them and
+        # as the workers' do: each admits a workload and picks its flavor on
+        # its own, so the two can part. The gap is the smallest over ten
+        # minutes, since every dispatch opens a short one.
+        **reserved_agreement(cfg),
     }
     # The node metrics as of NODE_LAG ago, when every node has reported.
     lagged = {"busy", "nodes"}
@@ -759,20 +919,42 @@ def fetch_history(cfg: Config, start: int, end: int, step: int) -> dict:
             ("cluster_queue",),
         ),
         "used": (
-            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{sel}}}', per_queue)}){window}))",
+            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{sel},{RESERVED_FLAVOR}}}', per_queue)}){window}))",
+            ("cluster_queue", "resource"),
+        ),
+        # Admitted onto Spot by the workers, whose choice the pods follow;
+        # summed over workers, each collapsed to one controller pod.
+        "spot_used": (
+            f"sum by (cluster_queue, resource) (avg_over_time(({current(f'kueue_cluster_queue_resource_usage{{{worker_kueue_selector(cfg)},{SPOT_FLAVOR}}}', 'cluster, ' + per_queue)}){window}))",
             ("cluster_queue", "resource"),
         ),
         # The step's largest, so a quota change mid-step shows the quota the
         # usage could reach.
         "nominal": (
-            f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{sel}}}', per_queue)}){window}))",
+            f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{sel},{RESERVED_FLAVOR}}}', per_queue)}){window}))",
             ("cluster_queue", "resource"),
+        ),
+        "spot_nominal": (
+            f"sum by (cluster_queue, resource) (max_over_time(({current(f'kueue_cluster_queue_nominal_quota{{{sel},{SPOT_FLAVOR}}}', per_queue)}){window}))",
+            ("cluster_queue", "resource"),
+        ),
+        # Evictions in each step, by queue: preemption to reclaim lent quota, a
+        # node gone, a pod that never became ready.
+        "evicted": (
+            f"sum by (cluster_queue) (increase(kueue_evicted_workloads_total{{{sel}}}[{step}s]))",
+            ("cluster_queue",),
         ),
         # Busy chips: TensorCore duty cycle, percent per chip, summed. Nodes that
         # do not report it - the disagg multi-host pods' - count as idle.
         "busy": (
             f"sum_over_time((sum by (model) (last_over_time({duty}[{NODE_LOOKBACK}])) / 100){window}) {share}",
             ("model",),
+        ),
+        # Busy chips per node, for views.py to sum by node pool as it does
+        # presence: the model label cannot tell a Spot node from a reserved one.
+        "busy_nodes": (
+            f"sum_over_time((sum by (cluster_name, node_name) (last_over_time({duty}[{NODE_LOOKBACK}])) / 100){window}) {share}",
+            ("cluster_name", "node_name"),
         ),
         # Each TPU node's share of each step, by name, for views.py to sum by
         # node pool: a week is a few thousand node lifetimes and a few hundred
@@ -823,16 +1005,20 @@ def fetch_node_pools(cfg: Config) -> list:
                 continue
             auto = p.get("autoscaling", {})
             multi_host = bool(p.get("placementPolicy", {}).get("tpuTopology"))
+            spot = bool(p["config"].get("spot"))
+            # The Kueue queue it serves: a multi-host pool is one slice, named
+            # <shape>-<slice>. A Spot pool, <shape>-spot, keeps its own name, so
+            # its nodes are never counted as the shape's reserved ones.
+            queue = re.sub(r"-\d+$", "", p["name"]) if multi_host else p["name"]
             pools.append(
                 {
                     "cluster": name,
                     "name": p["name"],
-                    # The Kueue queue it serves: a multi-host pool is one slice,
-                    # named <shape>-<slice>.
-                    "queue": re.sub(r"-\d+$", "", p["name"])
-                    if multi_host
-                    else p["name"],
+                    "queue": queue,
+                    # The shape a Spot pool overflows from; its own otherwise.
+                    "shape": re.sub(r"-spot$", "", queue),
                     "multi_host": multi_host,
+                    "spot": spot,
                     "chips_per_node": int(chips[1]),
                     "min_nodes": int(
                         auto.get("minNodeCount") or auto.get("totalMinNodeCount") or 0
@@ -1005,6 +1191,94 @@ def fetch_logs(cfg: Config, fleet_reasons=(), routine=()) -> dict:
         }
 
 
+# What took a running or admitted step's chips, from two records: Kueue's
+# events on the manager's workloads, and the launcher's lines (launch.py) when a
+# Spot node went away under a step or never came. Fetched for the whole fleet
+# in one query each, not per job.
+PREEMPTION_HOURS = 24
+SPOT_RECLAIMED = "Spot node reclaimed under"
+SPOT_NO_NODE = "admitted onto Spot but no Spot node"
+# Kueue's Preempted message names why; its words, and what the page calls each.
+KUEUE_PREEMPTION = (
+    ("reclamation within the cohort", "reclaim"),
+    ("prioritization in the ClusterQueue", "priority"),
+    ("fair sharing within the cohort", "fair_share"),
+)
+PREEMPTION_PATHS = re.compile(r"preemptor path: [^;]*?([\w-]+); preemptee path: [^;]*?([\w-]+);")
+PREEMPTOR_JOB = re.compile(r"JobUID: ([0-9a-f-]{36})")
+
+
+def fetch_preemptions(cfg: Config) -> list[dict]:
+    """The last PREEMPTION_HOURS of preemptions and Spot fallbacks, one row
+    each, with the Buildkite job it hit: Kueue preempting a workload to give
+    its chips back to a queue that lent them (or to a higher priority in the
+    same queue), naming the queue and job that took them; a Spot node
+    reclaimed under a step; a step admitted onto Spot that never got a node;
+    a workload whose pods were not ready in time."""
+    events = (
+        f'logName="projects/{cfg.project}/logs/events" '
+        f'AND resource.labels.cluster_name="{cfg.metrics_cluster}" '
+        'AND jsonPayload.involvedObject.kind="Workload" '
+        'AND jsonPayload.reason=("Preempted" OR "Evicted")'
+    )
+    lines = (
+        f'resource.type="k8s_container" AND resource.labels.cluster_name="{cfg.metrics_cluster}" '
+        f'AND resource.labels.namespace_name="{cfg.namespace}" '
+        f'AND (textPayload:"{SPOT_RECLAIMED}" OR textPayload:"{SPOT_NO_NODE}")'
+    )
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        a = pool.submit(read_logs, cfg, events, PREEMPTION_HOURS, 1000)
+        b = pool.submit(read_logs, cfg, lines, PREEMPTION_HOURS, 1000)
+        event_entries, line_entries = a.result(), b.result()
+    out, seen = [], set()
+
+    def add(row: dict) -> None:
+        # The event exporter can write one event more than once.
+        key = (row["job"], row["cause"], int(row["t"]))
+        if row["job"] and key not in seen:
+            seen.add(key)
+            out.append(row)
+
+    for e in event_entries:
+        payload = e.get("jsonPayload") or {}
+        message = payload.get("message") or ""
+        row = {
+            "t": log_time(e["timestamp"]),
+            "job": job_hex(payload.get("involvedObject", {}).get("name", "")),
+            "queue": "",
+            "by_queue": "",
+            "by_job_uid": "",
+        }
+        if payload.get("reason") == "Preempted":
+            cause = next((c for words, c in KUEUE_PREEMPTION if words in message), "preempted")
+            paths = PREEMPTION_PATHS.search(message)
+            by = PREEMPTOR_JOB.search(message)
+            row.update(
+                cause=cause,
+                by_queue=paths.group(1) if paths else "",
+                queue=paths.group(2) if paths else "",
+                by_job_uid=by.group(1) if by else "",
+            )
+        elif message.startswith("Preempted"):
+            continue  # its Preempted event says the same, with more
+        else:
+            row["cause"] = "pods_ready" if "PodsReady" in message else "evicted"
+        add(row)
+    for e in line_entries:
+        text = e.get("textPayload") or ""
+        add(
+            {
+                "t": log_time(e["timestamp"]),
+                "job": job_hex(e.get("resource", {}).get("labels", {}).get("pod_name", "")),
+                "cause": "spot_reclaim" if SPOT_RECLAIMED in text else "spot_no_node",
+                "queue": "",
+                "by_queue": "",
+                "by_job_uid": "",
+            }
+        )
+    return sorted(out, key=lambda r: r["t"])
+
+
 def fetch_waits(cfg: Config, start: int, end: int) -> dict:
     """Per queue over [start, end), a point a minute where Prometheus allows:
     pending workloads, admitted TPU chips and nominal TPU quota, for Migration's
@@ -1012,7 +1286,7 @@ def fetch_waits(cfg: Config, start: int, end: int) -> dict:
     its first half and idle in its second would average to idle chips beside
     waiting jobs."""
     sel = kueue_selector(cfg)
-    tpu = f'{sel},resource="{TPU}"'
+    tpu = f'{sel},resource="{TPU}",{RESERVED_FLAVOR}'
     per_queue = "cluster_queue, flavor, resource"
     # Prometheus answers at most 11,000 points a series.
     step = max(60, -(-(end - start) // 11000 // 60) * 60)
@@ -1124,6 +1398,234 @@ SELECT queue, COUNT(*) AS jobs,
   {quantile(50)} AS wait_p50, {quantile(90)} AS wait_p90
 FROM jobs GROUP BY queue"""
     return bigquery(cfg, sql)
+
+
+# Steps that wait for the rest of their build rather than doing work, so they
+# always finish last and say nothing about which step held the build up.
+WATCHER_STEPS = ("E2E_SUMMARY",)
+# Shorter steps are gates, notifications and uploads, never a build's long pole.
+MIN_STEP_SECONDS = 120
+
+
+def fetch_steps(cfg: Config, start: int, end: int) -> dict:
+    """The kube builds created in [start, end) and their steps, from the step
+    log beside the kube timing table: per build, the step that finished last
+    and the one before it; per step, its time, shards, failures and
+    chip-hours, with the kube phases of the jobs that ran on kube."""
+    if not cfg.timing_table:
+        return {"builds": [], "steps": []}
+    table = cfg.timing_table.rsplit(".", 1)[0] + ".step_execution_logs"
+    watchers = ", ".join(f"'{s}'" for s in WATCHER_STEPS)
+    # One row per job: the table can hold a job more than once. A build's kind
+    # is a property of the build, so every job of it agrees. A kube build is
+    # one with any job on kube, as a build's TPU steps all run on one fleet.
+    jobs = f"""
+WITH job_rows AS (
+  SELECT pipeline_slug AS pipeline, build_number AS build, step_name AS step, job_id,
+    ANY_VALUE(CASE WHEN build_source = 'schedule' THEN 'nightly'
+      WHEN branch = 'main' THEN 'main' ELSE 'pr' END) AS kind,
+    MIN(build_created_at) AS created, ANY_VALUE(queue) AS queue,
+    MIN(started_at) AS started, MAX(finished_at) AS finished,
+    ANY_VALUE(state HAVING MAX finished_at) AS state,
+    LOGICAL_OR(IFNULL(retried, FALSE)) AS retried,
+    LOGICAL_OR(IFNULL(soft_failed, FALSE)) AS soft_failed,
+    ANY_VALUE(exit_status HAVING MAX finished_at) AS exit_status
+  FROM `{table}`
+  WHERE created_at >= TIMESTAMP_SECONDS({start - 86400})
+    AND build_created_at >= TIMESTAMP_SECONDS({start}) AND build_created_at < TIMESTAMP_SECONDS({end})
+    AND started_at IS NOT NULL AND finished_at IS NOT NULL
+  GROUP BY pipeline, build, step, job_id),
+jobs AS (
+  SELECT * FROM job_rows
+  QUALIFY LOGICAL_OR(queue = 'kube') OVER (PARTITION BY pipeline, build))"""
+    # A build is clean when every job it did not retry passed; only those say
+    # how long a build takes. A step's time in a build runs from its first job
+    # starting to its last finishing.
+    builds = f"""{jobs},
+per_step AS (
+  SELECT pipeline, build, step, MIN(started) AS started, MAX(finished) AS finished
+  FROM jobs
+  WHERE step NOT IN ({watchers}) AND TIMESTAMP_DIFF(finished, started, SECOND) >= {MIN_STEP_SECONDS}
+  GROUP BY pipeline, build, step),
+ranked AS (
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY pipeline, build ORDER BY finished DESC) AS place
+  FROM per_step),
+builds AS (
+  SELECT pipeline, build, ANY_VALUE(kind) AS kind, MIN(created) AS created, COUNT(*) AS jobs,
+    COUNTIF(retried) AS retries,
+    COUNTIF(state != 'passed' AND NOT retried AND NOT soft_failed) AS unfinished
+  FROM jobs GROUP BY pipeline, build)
+SELECT b.pipeline, b.build, b.kind, UNIX_SECONDS(b.created) AS created, b.jobs, b.retries,
+  b.unfinished = 0 AS clean, p.step AS pole, UNIX_SECONDS(p.started) AS pole_started,
+  UNIX_SECONDS(p.finished) AS pole_finished, n.step AS next, UNIX_SECONDS(n.finished) AS next_finished
+FROM builds b
+LEFT JOIN ranked p ON p.pipeline = b.pipeline AND p.build = b.build AND p.place = 1
+LEFT JOIN ranked n ON n.pipeline = b.pipeline AND n.build = b.build AND n.place = 2"""
+    # The timing table has a row per workload, and a job more than one when it
+    # was requeued or resubmitted. A kube job's run splits into the launcher's
+    # setup up to its first submission, the wait to its last admission (earlier
+    # attempts included), its last workload's startup and test, and the
+    # launcher's teardown - logs and artifacts - after. Its chip-hours are
+    # every workload's.
+    last = "HAVING MAX COALESCE(ended_at, finished_at)"
+
+    def quantile(expr: str, q: int) -> str:
+        return f"APPROX_QUANTILES({expr}, 100 IGNORE NULLS)[SAFE_OFFSET({q})]"
+
+    def passed(expr: str) -> str:
+        return f"IF(state = 'passed', {expr}, NULL)"
+
+    steps = f"""{jobs},
+timing AS (
+  SELECT job_id, MIN(submitted_at) AS submitted,
+    ANY_VALUE(admitted_at {last}) AS admitted,
+    ANY_VALUE(first_pod_started_at {last}) AS pod_started,
+    ANY_VALUE(finished_at {last}) AS pod_finished,
+    SUM(chips * TIMESTAMP_DIFF(IFNULL(finished_at, ended_at), admitted_at, SECOND)) AS chip_s
+  FROM `{cfg.timing_table}`
+  WHERE created_at >= TIMESTAMP_SECONDS({start - 86400}) AND job_id IS NOT NULL
+  GROUP BY job_id),
+j AS (
+  SELECT jobs.*, TIMESTAMP_DIFF(finished, started, SECOND) AS ran_s,
+    TIMESTAMP_DIFF(started, created, SECOND) AS start_s,
+    TIMESTAMP_DIFF(timing.submitted, started, SECOND) AS setup_s,
+    TIMESTAMP_DIFF(timing.admitted, timing.submitted, SECOND) AS wait_s,
+    TIMESTAMP_DIFF(timing.pod_started, timing.admitted, SECOND) AS startup_s,
+    TIMESTAMP_DIFF(timing.pod_finished, timing.pod_started, SECOND) AS test_s,
+    TIMESTAMP_DIFF(finished, timing.pod_finished, SECOND) AS teardown_s,
+    timing.chip_s
+  FROM jobs LEFT JOIN timing USING (job_id)),
+shards AS (
+  SELECT pipeline, kind, step, COUNT(*) AS n, MIN(ran_s) AS shortest, MAX(ran_s) AS longest
+  FROM j WHERE state = 'passed' GROUP BY pipeline, kind, step, build),
+spread AS (
+  SELECT pipeline, kind, step, APPROX_TOP_COUNT(n, 1)[OFFSET(0)].value AS shards,
+    {quantile("shortest", 50)} AS shortest_p50, {quantile("longest", 50)} AS longest_p50
+  FROM shards GROUP BY pipeline, kind, step),
+exits AS (
+  SELECT pipeline, kind, step, STRING_AGG(CONCAT(code, ' ×', CAST(n AS STRING)), ', ' ORDER BY n DESC LIMIT 3) AS exits
+  FROM (
+    SELECT pipeline, kind, step, IFNULL(CAST(exit_status AS STRING), 'none') AS code, COUNT(*) AS n
+    FROM j WHERE state = 'failed' AND NOT soft_failed GROUP BY pipeline, kind, step, code)
+  GROUP BY pipeline, kind, step)
+SELECT pipeline, kind, step, COUNT(*) AS jobs, COUNT(DISTINCT build) AS builds,
+  COUNTIF(state = 'failed' AND NOT soft_failed) AS failed, COUNTIF(retried) AS retried,
+  ANY_VALUE(queue) AS queue,
+  {quantile(passed("ran_s"), 50)} AS ran_p50, {quantile(passed("ran_s"), 90)} AS ran_p90,
+  {quantile(passed("start_s"), 50)} AS start_p50,
+  {quantile(passed("setup_s"), 50)} AS setup_p50, {quantile(passed("wait_s"), 50)} AS wait_p50,
+  {quantile(passed("startup_s"), 50)} AS startup_p50, {quantile(passed("test_s"), 50)} AS test_p50,
+  {quantile(passed("test_s"), 90)} AS test_p90, {quantile(passed("teardown_s"), 50)} AS teardown_p50,
+  SUM(chip_s) / 3600 AS chip_hours,
+  ANY_VALUE(spread.shards) AS shards, ANY_VALUE(spread.shortest_p50) AS shortest_p50,
+  ANY_VALUE(spread.longest_p50) AS longest_p50, ANY_VALUE(exits.exits) AS exits
+FROM j
+LEFT JOIN spread USING (pipeline, kind, step)
+LEFT JOIN exits USING (pipeline, kind, step)
+GROUP BY pipeline, kind, step"""
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        a, b = pool.submit(bigquery, cfg, builds), pool.submit(bigquery, cfg, steps)
+        return {"builds": a.result(), "steps": b.result()}
+
+
+# kube_workload_timing outcomes that are the test's or Buildkite's doing. Any
+# other outcome is the fleet ending a workload.
+TEST_OUTCOMES = ("succeeded", "failed", "cancelled")
+
+
+def fetch_period(cfg: Config, start: int, end: int) -> dict:
+    """Each TPU generation over [start, end), for the Review page:
+    from the timing table, the workloads that ended in it - their
+    wait and startup percentiles, which cannot be put together from the
+    per-queue ones, failures and retries, and the wait day by day - and from
+    Kueue's metrics, its evictions by reason."""
+    out: dict = {"generations": {}, "daily": {}, "evictions": {}}
+    sel = kueue_selector(cfg)
+    evictions = prom_now(
+        cfg,
+        f"sum by (cluster_queue, reason) (increase(kueue_evicted_workloads_total{{{sel}}}[{end - start}s]))",
+        ("cluster_queue", "reason"),
+        end,
+    )
+    for key, n in evictions.items():
+        queue, reason = key.split("|")
+        gen = out["evictions"].setdefault(queue.split("-")[0], {})
+        gen[reason] = gen.get(reason, 0.0) + n
+    if not cfg.timing_table:
+        return out
+    where = (
+        f"ended_at >= TIMESTAMP_SECONDS({start}) AND ended_at < TIMESTAMP_SECONDS({end}) "
+        f"AND submitted_at >= TIMESTAMP_SECONDS({start - 2 * 86400})"
+    )
+    generation = "SPLIT(queue, '-')[OFFSET(0)]"
+    tests = ", ".join(f"'{o}'" for o in TEST_OUTCOMES)
+    wait = "TIMESTAMP_DIFF(quota_reserved_at, submitted_at, SECOND)"
+    startup = "TIMESTAMP_DIFF(first_pod_started_at, admitted_at, SECOND)"
+
+    def quantiles(expr: str, name: str) -> str:
+        q = f"APPROX_QUANTILES({expr}, 100 IGNORE NULLS)"
+        return f"{q}[SAFE_OFFSET(50)] AS {name}_p50, {q}[SAFE_OFFSET(90)] AS {name}_p90"
+
+    totals = f"""
+SELECT {generation} AS generation, COUNT(*) AS finished,
+  COUNTIF(outcome = 'failed') AS failed, COUNTIF(outcome NOT IN ({tests})) AS infra,
+  SUM(IFNULL(requeues, 0)) AS requeues, SUM(IFNULL(redispatches, 0)) AS redispatches,
+  {quantiles(wait, "wait")}, {quantiles(startup, "startup")}
+FROM `{cfg.timing_table}` WHERE {where} GROUP BY generation"""
+    daily = f"""
+SELECT {generation} AS generation, DIV(UNIX_SECONDS(ended_at) - {start}, 86400) AS day,
+  COUNT(*) AS n, {quantiles(wait, "wait")}
+FROM `{cfg.timing_table}` WHERE {where} GROUP BY generation, day"""
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        a, b = pool.submit(bigquery, cfg, totals), pool.submit(bigquery, cfg, daily)
+        rows, days = a.result(), b.result()
+    for r in rows:
+        out["generations"][r["generation"]] = {
+            k: (float(v) if v not in (None, "") else None) for k, v in r.items() if k != "generation"
+        }
+    for r in days:
+        out["daily"].setdefault(r["generation"], {})[int(r["day"])] = {
+            k: (float(r[k]) if r[k] not in (None, "") else None) for k in ("n", "wait_p50", "wait_p90")
+        }
+    return out
+
+
+# The repository and directory whose merged changes Review lists beside a
+# period: the fleet's configuration, launcher and dashboard.
+CHANGES_REPO = "vllm-project/ci-infra"
+CHANGES_PATH = "terraform/gcp_old/tpu-inference/k8s"
+
+
+def fetch_changes(cfg: Config, start: int, end: int) -> list[dict]:
+    """Commits to the fleet's directory on main in [start, end), newest first,
+    from GitHub's public API - no token; the caller caches, well inside the
+    unauthenticated hourly limit."""
+
+    def iso(t: int) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+    query = urllib.parse.urlencode(
+        {"path": CHANGES_PATH, "since": iso(start), "until": iso(end), "per_page": 100}
+    )
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{CHANGES_REPO}/commits?{query}",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "tpu-ci-dashboard"},
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        commits = json.load(response)
+    out = []
+    for c in commits:
+        title = c["commit"]["message"].splitlines()[0]
+        pr = re.search(r"\(#(\d+)\)$", title)
+        out.append(
+            {
+                "title": re.sub(r"\s*\(#\d+\)$", "", title),
+                "pr": int(pr.group(1)) if pr else None,
+                "at": log_time(c["commit"]["committer"]["date"]),
+                "url": f"https://github.com/{CHANGES_REPO}/pull/{pr.group(1)}" if pr else c["html_url"],
+            }
+        )
+    return out
 
 
 def fetch_stats(cfg: Config, start: int, end: int) -> dict:

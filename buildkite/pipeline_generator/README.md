@@ -65,6 +65,30 @@ repositories:
   premerge: "vllm-ci-test-repo"     # Used for PR/pre-merge builds
 ```
 
+## Jobs that are not selected
+
+A step runs when its `source_file_dependencies` match the change (or on
+nightly / `RUN_ALL` builds); optional steps and L4 steps
+(`MANUAL_ONLY_DEVICES`) never run on their own. Every
+other step is left out of the uploaded pipeline. One input step, **Run more
+jobs**, near the top of the build lists them all as checkboxes under their
+group names (AMD steps under "AMD - <group of their NVIDIA step>"). Buildkite
+shows a select of six or more options as a dropdown, `multiple` or not, so
+each job is a one-option select of its own, labelled with its group's name
+if it is the group's first and with a zero-width space otherwise (Buildkite
+rejects a blank label). Tick any and
+submit, and a job behind it uploads the ticked steps together with the
+not-yet-uploaded steps they depend on. It then adds a new **Run more jobs** input step for the
+rest, so more can be picked later.
+
+The left-out steps are written to `<output dir>/deferred/deferred_steps.json`,
+next to a copy of `unblock_jobs.py`, and uploaded as artifacts of the
+bootstrap job; the upload job runs that copy, so it uploads exactly what was
+generated. The input step also has an optional **Job keys** text field
+(`more-jobs`; later rounds use `more-jobs-2`, `more-jobs-3`, ...) that takes
+step keys one per line, so to pick through the API, unblock the input step
+with `{"fields": {"more-jobs": "<key>\n<key>"}}`.
+
 ## Environment Variables
 
 The generator relies on several environment variables, typically provided by Buildkite or set by user:

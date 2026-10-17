@@ -484,6 +484,26 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
                 "shape's share of the reservation"
             )
 
+        # Spot is overflow beside the reservation, single-host only: GKE reclaims
+        # a multi-host slice whole, and Kueue admits chips, not slices, so a
+        # slice half of which could be Spot is not one it can place.
+        spot = pool.get("spot")
+        spot_quota = spot_capacity = 0
+        if spot:
+            if hosts > 1:
+                raise ValueError(
+                    f"{name}: spot is for single-host shapes; a {topology} slice "
+                    f"spans {hosts} hosts"
+                )
+            spot_capacity = int(spot["max_nodes"]) * chips
+            spot_quota = int(spot.get("nominal_quota") or spot_capacity)
+            if spot_quota % slice_chips or spot_quota > spot_capacity:
+                raise ValueError(
+                    f"{name}: spot.nominal_quota={spot_quota} has to be whole "
+                    f"{slice_chips}-chip slices and at most the {spot_capacity} "
+                    "chips its Spot pool can hold"
+                )
+
         memory_gb = machine_memory_gb.get(machine_type)
         if memory_gb is None:
             raise ValueError(
@@ -514,6 +534,9 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
             "capacity": capacity,
             # And this: what its quota cannot lend. See queues().
             "parked": parked,
+            # The same pair for the shape's Spot pool, 0 when it has none.
+            "spot_quota": spot_quota,
+            "spot_capacity": spot_capacity,
         }
     return out
 
@@ -565,6 +588,23 @@ def priority_classes() -> str:
     )
 
 
+def reserved_flavor_labels(spot: dict[str, int]) -> dict[str, str]:
+    """The nodeLabels block of each reserved flavor that has a Spot flavor
+    beside it.
+
+    Kueue matches a pod's node affinity against a flavor using only the keys
+    that flavor defines, so the launcher can pin a workload to Spot only with a
+    rule on a key the reserved flavor defines. GKE labels every node with how
+    it was provisioned - standard for the reserved pools, spot for the Spot
+    ones - and puts the label in each pool's node template, so a reserved pool
+    scaled to zero still matches the nodeSelector Kueue writes from it.
+    """
+    return {
+        family: "\nspec:\n  nodeLabels:\n    cloud.google.com/gke-provisioning: standard"
+        for family in sorted({cohort(name) for name in spot})
+    }
+
+
 def queues(
     shapes: dict[str, int],
     namespace: str,
@@ -572,6 +612,7 @@ def queues(
     reclaim: dict[str, str] | None = None,
     capacities: dict[str, int | None] | None = None,
     parked: dict[str, int] | None = None,
+    spot: dict[str, int] | None = None,
 ) -> str:
     """A flavor per machine family, then a queue per shape sharing it.
 
@@ -586,10 +627,19 @@ def queues(
     against those chips would wait for hardware sitting idle in this shape's
     nodes.
     """
-    out = [priority_classes()] + [
-        render("resource_flavor", ACCELERATOR=family)
-        for family in sorted({cohort(name) for name in shapes})
-    ]
+    spot = {name: chips for name, chips in (spot or {}).items() if chips}
+    labels = reserved_flavor_labels(spot)
+    out = (
+        [priority_classes()]
+        + [
+            render("resource_flavor", ACCELERATOR=family, NODE_LABELS=labels.get(family, ""))
+            for family in sorted({cohort(name) for name in shapes})
+        ]
+        + [
+            render("resource_flavor_spot", ACCELERATOR=family)
+            for family in sorted({cohort(name) for name in spot})
+        ]
+    )
     for name, chips in sorted(shapes.items()):
         out.append(
             render(
@@ -605,9 +655,39 @@ def queues(
                 RECLAIM_WITHIN_COHORT=(reclaim or {}).get(name, "Never"),
                 BORROWING_LIMIT=borrowing_limit(chips, (capacities or {}).get(name)),
                 LENDING_LIMIT=lending_limit(chips, (parked or {}).get(name, 0)),
+                FLAVOR_FUNGIBILITY=FLAVOR_FUNGIBILITY if name in spot else "",
+                SPOT_FLAVOR=spot_flavor(cohort(name), spot[name]) if name in spot else "",
             )
         )
     return "".join(out)
+
+
+# Reserved first, Spot only once it is spent. MayStopSearch admits on the
+# reserved flavor whenever it fits, borrowing from the cohort included, so Spot
+# is reached only when the shape could not run on the reservation at all.
+# TryNextFlavor on preemption: if the reservation fits only by preempting - a
+# reclaim of lent quota - take Spot instead of evicting a running workload.
+FLAVOR_FUNGIBILITY = """
+  flavorFungibility:
+    whenCanBorrow: MayStopSearch
+    whenCanPreempt: TryNextFlavor"""
+
+
+def spot_flavor(family: str, chips: int) -> str:
+    """The Spot flavor's entry in a queue's flavor list, after the reserved one.
+
+    borrowingLimit 0: the quota is the chips the shape's own Spot pool can
+    hold. Reserved quota is borrowable because every shape's pool draws on one
+    reservation; Spot pools are capped one by one, so another shape's idle
+    Spot quota stands for nodes of the wrong shape, and borrowing it would
+    admit a workload no node can take.
+    """
+    return f"""
+        - name: {family}-spot
+          resources:
+            - name: google.com/tpu
+              nominalQuota: {chips}
+              borrowingLimit: 0"""
 
 
 def borrowing_limit(quota: int, capacity: int | None) -> str:
@@ -718,11 +798,22 @@ def launcher_profiles(
             # Checked in the launcher, where the valid names are known: Kueue
             # refuses to create a Workload naming a class it cannot find.
             "priorities": sorted(WORKLOAD_PRIORITIES),
+            # And their values, for the Spot line below.
+            "priority_values": {
+                name: value for name, (value, _) in sorted(WORKLOAD_PRIORITIES.items())
+            },
             "queue_max_seconds": int(tfvars["tpu_queue_max_seconds"]),
             "runtime_max_seconds": int(tfvars["tpu_runtime_max_seconds"]),
             "admission_max_seconds": int(tfvars["tpu_admission_max_seconds"]),
             "dispatch_retry_seconds": int(tfvars["tpu_dispatch_retry_seconds"]),
             "dispatch_retries": int(tfvars["tpu_dispatch_retries"]),
+            "spot_wait_seconds": int(tfvars["tpu_spot_wait_seconds"]),
+            "spot_failed_scale_up_seconds": int(tfvars["tpu_spot_failed_scale_up_seconds"]),
+            "spot_after_seconds": int(tfvars["tpu_spot_after_seconds"]),
+            "spot_max_priority": int(tfvars["tpu_spot_max_priority"]),
+            # The queues with a Spot flavor: a run in any other has no Spot to
+            # wait for, and resubmitting it would only cost its place in line.
+            "spot_queues": sorted(name for name, entry in fleet.items() if entry["spot_quota"]),
             # Where the launcher streams one timing record per workload. The
             # table is modules/ci_monitoring's, beside the Buildkite step
             # table it joins to on job_id; k8s/iam.tf lets the launcher write
@@ -753,7 +844,7 @@ def launcher_profiles(
                         for key, value in entry["shape"].items()
                         # Kueue's, not the launcher's: what a shape's queue may
                         # hold says nothing about where one workload runs.
-                        if key not in ("quota", "capacity", "parked")
+                        if key not in ("quota", "capacity", "parked", "spot_quota", "spot_capacity")
                     },
                     "max_runtime_seconds": int(tfvars["tpu_test_max_seconds"]),
                 }
@@ -843,6 +934,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             "quota": 0,
             "capacity": None,
             "parked": 0,
+            "spot_quota": 0,
+            "spot_capacity": 0,
             # What the compute class builds a node against. One size for the
             # lane; a step wanting another states its own manifest.
             **CPU_JOB_SIZE,
@@ -851,10 +944,19 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             # The shape is stored once, not summed: two clusters running it
             # run the same hardware. Only the quota adds up.
             entry = fleet.setdefault(
-                name, {"quota": 0, "capacity": None, "parked": 0, "workers": [], "shape": shape}
+                name,
+                {
+                    "quota": 0,
+                    "capacity": None,
+                    "parked": 0,
+                    "spot_quota": 0,
+                    "workers": [],
+                    "shape": shape,
+                },
             )
             entry["quota"] += shape["quota"]
             entry["parked"] += shape["parked"]
+            entry["spot_quota"] += shape["spot_quota"]
             if shape["capacity"] is not None:
                 entry["capacity"] = (entry["capacity"] or 0) + shape["capacity"]
             entry["workers"].append(cluster_name)
@@ -891,6 +993,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 namespace,
                 checks=False,
                 capacities={name: shape["capacity"] for name, shape in local.items()},
+                spot={name: shape["spot_quota"] for name, shape in local.items()},
             ),
         )
         write(
@@ -949,7 +1052,15 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
 
     base = out_dir / manager_dir
     write(base / "system" / "10-kueue-config.yaml", kueue_config("manager"))
-    write(base / "controllers" / "00-controllers.yaml", controller_availability())
+    # The manager's Kueue runs on the class's nodes, which only pods naming the
+    # class can use. On a general system node, the kube-dns or konnectivity-agent
+    # replicas GKE adds as the fleet grows outrank the Managed Prometheus
+    # collector (gmp-critical, below system-cluster-critical), preempt it when
+    # the node is full, and nothing scrapes Kueue until a collector fits again.
+    write(
+        base / "controllers" / "00-controllers.yaml",
+        controller_availability({"kueue-system": MANAGER_COMPUTE_CLASS}),
+    )
     # Manager only. A worker's TPU pods do call buildkite-agent, but with the
     # per-job access token the launcher forwards, not with this one - see the
     # template.
@@ -1034,9 +1145,9 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
     )
     # Everything the fleet runs on the manager lives in this namespace, so
     # setting the class here covers the launcher pods and the agent pods without
-    # either of their templates having to name a node. The controllers in
-    # kueue-system and jobset-system are upstream's and stay on plain
-    # auto-provisioning, which falls back across families of its own accord.
+    # either of their templates having to name a node. The JobSet controller is
+    # upstream's and stays on plain auto-provisioning, which falls back across
+    # families of its own accord; Kueue's names the class in its own overlay.
     write(
         base / "queues" / "00-namespace.yaml",
         render(
@@ -1054,6 +1165,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             reclaim=reclaim_policies(tfvars),
             capacities={name: entry["capacity"] for name, entry in fleet.items()},
             parked={name: entry["parked"] for name, entry in fleet.items()},
+            spot={name: entry["spot_quota"] for name, entry in fleet.items()},
         ),
     )
     write(
@@ -1145,8 +1257,9 @@ def monitoring_kueue() -> str:
     )
 
 
-def controller_availability() -> str:
-    """Replicas, priority and a disruption budget for the upstream controllers.
+def controller_availability(classes: dict[str, str] | None = None) -> str:
+    """Replicas, priority and a disruption budget for the upstream controllers,
+    and for a namespace in classes, the compute class its controller runs in.
 
     The same on every cluster: the manager's Kueue serves the webhook the
     launcher's job goes through, and a worker's serves the copy MultiKueue
@@ -1155,12 +1268,28 @@ def controller_availability() -> str:
     docs = []
     for namespace, deployment, labels in CONTROLLERS:
         selector = "\n".join(f"{key}: {value}" for key, value in sorted(labels.items()))
+        name = (classes or {}).get(namespace)
+        # GKE adds the toleration itself to a pod that names a class; it is
+        # spelled out so the pod schedules even if that webhook is not there.
+        placement = (
+            f"""
+nodeSelector:
+  cloud.google.com/compute-class: {name}
+tolerations:
+  - key: cloud.google.com/compute-class
+    operator: Equal
+    value: {name}
+    effect: NoSchedule"""
+            if name
+            else ""
+        )
         docs.append(render(
             "controller_availability",
             NAMESPACE=namespace,
             DEPLOYMENT=deployment,
             SELECTOR=indent(selector, 6),
             POD_SELECTOR=indent(selector, 20),
+            PLACEMENT=("\n" + indent(placement.strip("\n"), 6)) if placement else "",
         ))
     return "".join(docs)
 

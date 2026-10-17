@@ -232,7 +232,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         commands:
           - bash .buildkite/scripts/rocm/aiter-nightly-overlay.sh
         key: "aiter-nightly-amd"
-        timeout_in_minutes: 20
+        timeout_in_minutes: 60
 {{ amd_infra_retry('        ', true) }}
         agents:
           queue: amd-cpu

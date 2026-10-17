@@ -184,14 +184,12 @@ def test_collect_group_waits_on_nothing_that_records_no_kernels(
     )
 
 
-def test_collect_group_skips_steps_behind_a_block(monkeypatch, fake_global_config):
+def test_collect_group_skips_deferred_steps(monkeypatch, fake_global_config):
     monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
-    # Not a nightly and no matching file diff: the generator gates the step
-    # behind a block step, so the collect step must not depend on it.
+    # Not a nightly and no matching file diff: the generator leaves the step
+    # out as deferred, so the collect step must not depend on it.
     groups = _rendered_groups(_gpu_step(key="kernels", group="kernels"))
-    assert any(
-        isinstance(s, buildkite_step.BuildkiteBlockStep) for s in groups[0].steps
-    )
+    assert all(s.deferred for s in groups[0].steps)
     (step,) = buildkite_step.kernrec_collect_group(groups).steps
     assert step.depends_on == [], (
         "a dependency that never starts would hold the step forever"

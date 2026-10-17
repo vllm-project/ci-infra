@@ -63,6 +63,25 @@ variable "release_channel" {
   default = "REGULAR"
 }
 
+variable "maintenance_window" {
+  type = object({
+    start_time = string
+    end_time   = string
+    recurrence = string
+  })
+  description = <<-EOT
+    When GKE may upgrade every cluster's control plane and nodes: the first
+    occurrence as RFC 3339 times, repeated by an RFC 5545 RRULE. A node upgrade
+    drains each node in turn, and a drained TPU node takes a running step's pod
+    with it - the Job replaces the pod and the step reruns from the start.
+    Without a window GKE upgrades at any hour; on 10-13 it drained the reserved
+    2x2x1 pool at midday and evicted five running steps in half an hour.
+
+    GKE requires at least 48 hours of window in any 32 days, in pieces of at
+    least 4 hours.
+  EOT
+}
+
 variable "enable_private_endpoint" {
   type        = bool
   description = "Whether the control plane is reachable only from inside the VPC. False while the cluster is administered from laptops and from Buildkite agents that live outside it."
@@ -307,6 +326,52 @@ variable "tpu_dispatch_retries" {
   description = "How many times the launcher resubmits a workload whose dispatch stalled (see tpu_dispatch_retry_seconds) before leaving it to tpu_admission_max_seconds."
 }
 
+variable "tpu_spot_wait_seconds" {
+  type        = number
+  description = <<-EOT
+    How long a pod admitted onto Spot may go unscheduled before the launcher
+    resubmits its workload with Spot ruled out, once per step.
+
+    Spot quota is a count, not capacity: Kueue admits onto it whether or not
+    GCE has a Spot VM to give, and a pool that cannot scale up changes nothing
+    Kueue sees. Left alone, the workload holds the admission until
+    waitForPodsReady requeues it, and requeued with its Spot quota free it can
+    be admitted onto Spot again. The resubmission waits for the reservation,
+    as a shape without a Spot pool would.
+  EOT
+}
+
+variable "tpu_spot_failed_scale_up_seconds" {
+  type        = number
+  description = <<-EOT
+    How long a pod admitted onto Spot may stay unscheduled after the cluster
+    autoscaler reports a failed scale-up for it (a FailedScaleUp event, "GCE
+    out of resources") before the launcher resubmits its workload with Spot
+    ruled out, as tpu_spot_wait_seconds does with no such report.
+
+    Not at once: the autoscaler sends the event to every pod a batch of new
+    nodes was for when any node in the batch fails, and the pool keeps
+    retrying, so many of those pods still get a node.
+  EOT
+}
+
+variable "tpu_spot_after_seconds" {
+  type        = number
+  description = <<-EOT
+    How long a step at or below tpu_spot_max_priority waits for reserved chips
+    before the launcher resubmits it with Spot allowed. Every step starts with
+    Spot ruled out: Kueue sends a workload to Spot the moment the reservation
+    is full, so a small overflow the reservation clears within minutes landed
+    on Spot, held its quota through a stockout, and left reserved chips idle
+    as they freed up. Twice the reservation's p90 scale-up.
+  EOT
+}
+
+variable "tpu_spot_max_priority" {
+  type        = number
+  description = "The highest WorkloadPriorityClass value that may use Spot; unclassed scores 0. Steps above it wait for reserved chips, and take them first as they free up."
+}
+
 variable "tpu_runtime_max_seconds" {
   type        = number
   description = <<-EOT
@@ -419,6 +484,26 @@ variable "worker_clusters" {
 
       slices                = optional(number)
       reclaim_within_cohort = optional(string, "Never")
+
+      # Spot capacity beside the reservation, for a single-host shape: a second
+      # node pool, <shape>-spot, drawing on the region's Spot quota instead of
+      # the reservation. Kueue admits a workload onto it
+      # only once the shape's reserved quota, and what it can borrow from the
+      # cohort, is spent - overflow, not a replacement, since the reservation
+      # is paid for whether it is used or not. See "Spot overflow" in README.md.
+      spot = optional(object({
+        # The Spot pool's ceiling, which the Spot quota bounds rather than any
+        # reservation.
+        max_nodes = number
+        # Chips of the shape's ClusterQueue the Spot flavor holds; the pool's
+        # capacity if unset.
+        nominal_quota = optional(number)
+        # Zones the Spot pool may scale up in; the shape's zone if unset. No
+        # reservation ties Spot to that zone, and GCE runs out of Spot VMs one
+        # zone at a time. max_nodes applies in each zone; the flavor's quota
+        # is what bounds the total.
+        zones = optional(list(string))
+      }))
     })), [])
   }))
   description = "Worker clusters. location is a region; the cluster pins no zones, because only a TPU node cares which zone it is in and its own node pool pins it there."

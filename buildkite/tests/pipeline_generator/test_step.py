@@ -126,9 +126,7 @@ def test_selected_steps_support_label_generated_keys():
         (None, "multimodal-processor"),
     ],
 )
-def test_selected_steps_support_amd_mirror_keys(
-    fake_global_config, key, generated_key
-):
+def test_selected_steps_support_amd_mirror_keys(fake_global_config, key, generated_key):
     steps = [
         Step(label="AMD image", key="image-build-amd", commands=["build"]),
         Step(
@@ -151,9 +149,7 @@ def test_selected_steps_support_amd_mirror_keys(
         steps, frozenset({f"amd-{generated_key}"})
     )
     fake_global_config["only_step_keys"] = selected_keys
-    groups = buildkite_step.convert_group_step_to_buildkite_step(
-        group_steps(selected)
-    )
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(selected))
     generated_keys = [job.key for group in groups for job in group.steps]
 
     assert [step.key for step in selected] == [
@@ -168,7 +164,7 @@ def test_selected_steps_support_amd_mirror_keys(
 def test_an_optional_step_named_by_the_selector_runs_unblocked(fake_global_config):
     """The selector treats optional steps as ordinary ones and names them in
     VLLM_CI_ONLY_STEP_KEYS when the evidence reaches them. That relies on this:
-    a named step runs, optional or not. Blocked, it would be selected and still
+    a named step runs, optional or not. Deferred, it would be selected and still
     never run."""
     steps = [
         Step(
@@ -181,9 +177,7 @@ def test_an_optional_step_named_by_the_selector_runs_unblocked(fake_global_confi
     emitted = [job for group in groups for job in group.steps]
 
     assert [job.key for job in emitted] == ["nightly-eval"]
-    assert not any(
-        isinstance(job, buildkite_step.BuildkiteBlockStep) for job in emitted
-    )
+    assert not any(job.deferred for job in emitted)
 
 
 def test_a100_steps_are_not_emitted_but_amd_mirrors_are():
@@ -285,7 +279,6 @@ def test_every_generated_job_has_a_unique_key():
     assert all(keys)
     assert len(keys) == len(set(keys))
     assert "test-a" in keys
-    assert "block-test-a" in keys
 
 
 def test_explicit_step_key_is_preserved():
@@ -639,17 +632,54 @@ def test_otel_does_not_change_errexit_behavior(fake_global_config, tmp_path):
     assert not output.exists()
 
 
-def test_otel_trace_is_disabled_for_amd_mirror(fake_global_config):
-    fake_global_config["branch"] = "main"
-    step = Step(label="AMD mirror", commands=["pytest tests"])
+def test_otel_setup_finds_helpers_in_checkout_outside_git(tmp_path):
+    # Native AMD pods run from /vllm-workspace, which is not a git checkout.
+    checkout = tmp_path / "checkout"
+    helper_dir = checkout / ".buildkite" / "scripts" / "ci-otel"
+    helper_dir.mkdir(parents=True)
+    (helper_dir / "ci_otel.sh").write_text("echo helper-loaded >&2\n")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "CI_INFRA_OTEL_DIR"}
+    env["BUILDKITE_BUILD_CHECKOUT_PATH"] = str(checkout)
+    env["GIT_CEILING_DIRECTORIES"] = str(tmp_path)
+    script = buildkite_step._otel_setup_command().replace("$$", "$")
 
-    commands = buildkite_step._prepare_commands(
-        step,
-        variables_to_inject={},
-        setup_profile="amd",
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", script],
+        cwd=workspace,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
     )
 
-    assert not any("ci_otel" in command for command in commands)
+    assert result.returncode == 0, result.stderr
+    assert "helper-loaded" in result.stderr
+
+
+@pytest.mark.parametrize("dind, traced", [(False, True), (True, False)])
+def test_otel_trace_covers_native_amd_mirrors_only(fake_global_config, dind, traced):
+    fake_global_config["branch"] = "main"
+    step = Step(
+        label="AMD mirror",
+        group="Mirrors",
+        commands=["pytest tests"],
+        device="h200_18gb",
+        mirror={"amd": {"device": "mi300_1", "dind": dind}},
+    )
+
+    group_steps = buildkite_step.convert_group_step_to_buildkite_step(
+        {step.group: [step]}
+    )
+    amd_group = next(
+        group for group in group_steps if group.group == "Hardware-AMD Tests"
+    )
+
+    amd_step = next(
+        s for s in amd_group.steps if isinstance(s, buildkite_step.BuildkiteCommandStep)
+    )
+    assert ("ci_otel" in amd_step.model_dump_json()) is traced
 
 
 def test_otel_trace_is_disabled_for_pull_requests(fake_global_config):
@@ -1047,3 +1077,28 @@ def test_step_explicitly_listing_excluded_subtree_still_matches():
 
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
+
+
+@pytest.mark.parametrize("nightly", ["0", "1"])
+def test_l4_step_is_deferred_even_when_its_sources_change(fake_global_config, nightly):
+    fake_global_config["nightly"] = nightly
+    fake_global_config["run_all"] = True
+    step = Step(
+        label="L4 test",
+        key="l4-test",
+        device="l4",
+        source_file_dependencies=["changed.py"],
+        commands=["test"],
+    )
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps([step]))
+    runnable, deferred = buildkite_step.split_deferred_steps(groups)
+
+    assert not runnable
+    assert [job.key for group in deferred for job in group.steps] == ["l4-test"]
+
+
+def test_l4_step_named_by_the_selector_runs(fake_global_config):
+    fake_global_config["only_step_keys"] = frozenset({"l4-test"})
+    step = Step(label="L4 test", key="l4-test", device="l4", commands=["test"])
+
+    assert buildkite_step._step_should_run(step, [])
