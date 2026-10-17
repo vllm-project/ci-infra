@@ -1077,3 +1077,28 @@ def test_step_explicitly_listing_excluded_subtree_still_matches():
 
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
+
+
+@pytest.mark.parametrize("nightly", ["0", "1"])
+def test_l4_step_is_deferred_even_when_its_sources_change(fake_global_config, nightly):
+    fake_global_config["nightly"] = nightly
+    fake_global_config["run_all"] = True
+    step = Step(
+        label="L4 test",
+        key="l4-test",
+        device="l4",
+        source_file_dependencies=["changed.py"],
+        commands=["test"],
+    )
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps([step]))
+    runnable, deferred = buildkite_step.split_deferred_steps(groups)
+
+    assert not runnable
+    assert [job.key for group in deferred for job in group.steps] == ["l4-test"]
+
+
+def test_l4_step_named_by_the_selector_runs(fake_global_config):
+    fake_global_config["only_step_keys"] = frozenset({"l4-test"})
+    step = Step(label="L4 test", key="l4-test", device="l4", commands=["test"])
+
+    assert buildkite_step._step_should_run(step, [])
