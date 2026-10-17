@@ -1336,20 +1336,12 @@ def convert_group_step_to_buildkite_step(
     return buildkite_group_steps
 
 
-# Steps on these devices never run on their own, nightly included: they are
-# offered in the "Run more jobs" input step instead, like optional steps.
-# Steps named in VLLM_CI_ONLY_STEP_KEYS still run.
-MANUAL_ONLY_DEVICES = frozenset({DeviceType.L4.value})
-
-
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     if os.getenv("NOAUTO") == "1":
         return False
     global_config = get_global_config()
     if global_config["only_step_keys"] is not None:
         return step.key in global_config["only_step_keys"]
-    if step.device in MANUAL_ONLY_DEVICES:
-        return False
     if step.key and (
         step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
     ):
