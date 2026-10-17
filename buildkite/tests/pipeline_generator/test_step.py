@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import buildkite_step
+from constants import AgentQueue
 from pipeline_generator import select_steps_and_dependencies
 from step import Step, group_steps, read_steps_from_job_dir
 
@@ -1077,3 +1078,45 @@ def test_step_explicitly_listing_excluded_subtree_still_matches():
 
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
+
+
+@pytest.mark.parametrize(
+    ("key", "label", "branch", "queue"),
+    [
+        (
+            "image-build",
+            ":docker: Build image",
+            "main",
+            AgentQueue.CPU_POSTMERGE_US_EAST_1,
+        ),
+        (
+            "image-build",
+            ":docker: Build image",
+            "user:feature",
+            AgentQueue.CPU_PREMERGE_US_EAST_1,
+        ),
+        (
+            "image-build-cpu",
+            ":docker: Build CPU image",
+            "user:feature",
+            AgentQueue.MEDIUM_CPU_PREMERGE,
+        ),
+        (
+            "image-build-smoke-test",
+            ":docker: :smoking: Non-root smoke tests",
+            "user:feature",
+            AgentQueue.MEDIUM_CPU_PREMERGE,
+        ),
+        (
+            "image-build-arm64",
+            ":docker: Build arm64 image",
+            "user:feature",
+            AgentQueue.ARM64_CPU_PREMERGE,
+        ),
+    ],
+)
+def test_docker_step_queue_routing(monkeypatch, key, label, branch, queue):
+    config = {**buildkite_step.get_global_config(), "branch": branch}
+    monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
+    step = Step(label=label, key=key, commands=["true"])
+    assert buildkite_step.get_agent_queue(step) == queue
