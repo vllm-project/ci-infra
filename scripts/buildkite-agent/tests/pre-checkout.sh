@@ -13,6 +13,8 @@ function /usr/bin/buildkite-agent() {
 }
 # The deployed hook uses GNU base64; also run these tests on macOS.
 function base64() { command base64 | tr -d '\n'; }
+# timeout(1) can't run the shell-function stub above; drop the time limit.
+function timeout() { shift; "$@"; }
 
 check() (
     name=$1 branch=$2 commit=$3 pr=$4 refspec=$5 expected=$6
@@ -46,8 +48,15 @@ check invalid-sha owner:feature zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz false u
 # generated steps' automatic exit_status 255 retry fires instead of failing
 # the build.
 export BUILDKITE_SECRET_FETCH_DELAY=0
+marks=$(mktemp)
 (
-    function /usr/bin/buildkite-agent() { return 1; }
+    # Fails every call, including the meta-data write, which must not change the
+    # exit status. The retry mark is recorded before the write fails.
+    function /usr/bin/buildkite-agent() {
+        [[ "$1 $2" == 'meta-data set' ]] && echo "$3=$4" >"$marks"
+        return 1
+    }
+    export BUILDKITE_JOB_ID=job-1
     export BUILDKITE_PIPELINE_ID=018cdabc-d930-49f6-9085-634c4cb582ed
     export BUILDKITE_REPO=https://github.com/vllm-project/vllm.git
     export BUILDKITE_BRANCH=feature BUILDKITE_COMMIT="$sha"
@@ -55,6 +64,8 @@ export BUILDKITE_SECRET_FETCH_DELAY=0
     source "$hook" 2>/dev/null
 ) || status=$?
 [[ "${status:-0}" -eq 255 ]] || { echo "FAIL secret-store-down: expected 255, got ${status:-0}"; exit 1; }
+[[ "$(<"$marks")" == 'infra-retry:job-1:github-token=github-token,5,exhausted' ]] ||
+    { echo "FAIL secret-store-down: mark was '$(<"$marks")'"; exit 1; }
 printf 'PASS %s\n' secret-store-down
 
 # A transient secret-store failure (e.g. a host DNS blip) is retried in-hook.
@@ -74,14 +85,18 @@ printf 'PASS %s\n' secret-store-down
                 printf 'test-only-placeholder'
                 ;;
             'redactor add') cat >/dev/null ;;
+            'meta-data set') echo "$3=$4" >"$marks" ;;
             *) return 1 ;;
         esac
     }
+    export BUILDKITE_JOB_ID=job-1
     export BUILDKITE_PIPELINE_ID=018cdabc-d930-49f6-9085-634c4cb582ed
     export BUILDKITE_REPO=https://github.com/vllm-project/vllm.git
     export BUILDKITE_BRANCH=feature BUILDKITE_COMMIT="$sha"
     unset BUILDKITE_PULL_REQUEST BUILDKITE_REFSPEC GIT_CONFIG_COUNT
     source "$hook" 2>/dev/null
     [[ "$GIT_CONFIG_COUNT" == 1 && "$(<"$failures")" == 0 ]]
+    [[ "$(<"$marks")" == 'infra-retry:job-1:github-token=github-token,3,recovered' ]]
 ) || { echo "FAIL secret-store-transient"; exit 1; }
 printf 'PASS %s\n' secret-store-transient
+rm -f "$marks"

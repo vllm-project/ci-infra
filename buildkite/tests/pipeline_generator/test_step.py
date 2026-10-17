@@ -725,6 +725,7 @@ def test_generated_steps_retry_when_the_agent_is_lost():
         "automatic": [
             {"exit_status": -1, "limit": 1},
             {"exit_status": 255, "limit": 1},
+            {"exit_status": 94, "limit": 1},
         ],
     }
 
@@ -745,6 +746,7 @@ def test_agent_lost_retry_preserves_step_retry_conditions():
         "automatic": [
             {"exit_status": -1, "limit": 1},
             {"exit_status": 255, "limit": 1},
+            {"exit_status": 94, "limit": 1},
             {"exit_status": 143, "limit": 2},
         ],
     }
@@ -767,6 +769,7 @@ def test_infra_retry_tolerates_exit_status_arrays():
         "automatic": [
             {"exit_status": -1, "limit": 1},
             {"exit_status": 255, "limit": 1},
+            {"exit_status": 94, "limit": 1},
             {"exit_status": [1, 2], "limit": 1},
         ],
     }
@@ -787,7 +790,31 @@ def test_infra_retry_dedupes_statuses_inside_arrays():
     assert command_step.retry == {
         "automatic": [
             {"exit_status": -1, "limit": 1},
+            {"exit_status": 94, "limit": 1},
             {"exit_status": [2, 255], "limit": 1},
+        ],
+    }
+
+
+def test_infra_retry_keeps_a_steps_own_rule_for_a_git_mirror_timeout():
+    # 94 is the agent's own "checkout timed out waiting for a Git mirrors
+    # lock"; a step that already says how to retry it keeps its rule.
+    step = Step(
+        label="Agent retry with its own 94 policy",
+        group="Failure handling",
+        key="image-build-agent-retry-with-94-policy",
+        device="h100",
+        commands=["pytest tests/basic.py"],
+        retry={"automatic": [{"exit_status": 94, "limit": 3}]},
+    )
+
+    command_step = _render_single_step(step).steps[0]
+
+    assert command_step.retry == {
+        "automatic": [
+            {"exit_status": -1, "limit": 1},
+            {"exit_status": 255, "limit": 1},
+            {"exit_status": 94, "limit": 3},
         ],
     }
 
@@ -1077,3 +1104,17 @@ def test_step_explicitly_listing_excluded_subtree_still_matches():
 
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
+
+
+def test_the_precommit_gate_retries_infra_failures():
+    # A checkout that times out on the Git mirror lock would otherwise fail
+    # the gate and block every test that depends on it.
+    group = buildkite_step.create_precommit_group_step("vllm-project/vllm", "abc123")
+    (gate,) = group.steps
+    assert gate.retry == {
+        "automatic": [
+            {"exit_status": -1, "limit": 1},
+            {"exit_status": 255, "limit": 1},
+            {"exit_status": 94, "limit": 1},
+        ],
+    }

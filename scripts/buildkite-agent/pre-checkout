@@ -11,8 +11,9 @@ set -e
 # Exit-code convention:
 #   - exit 1   = genuine misconfiguration. The job fails immediately.
 #   - exit 255 = provider/infrastructure failure (the agent secret store is
-#                unreachable). The agent preserves a hook's exit code as the
-#                job's exit status, and the generated pipeline steps auto-retry
+#                unreachable) that survived every in-hook retry. The agent
+#                preserves a hook's exit code as the job's exit status, and the
+#                generated pipeline steps auto-retry
 #                exit_status 255 (like agent-lost -1) — so one network blip
 #                doesn't kill the whole build.
 
@@ -43,9 +44,12 @@ secret_attempts=${BUILDKITE_SECRET_FETCH_ATTEMPTS:-5}
 secret_delay=${BUILDKITE_SECRET_FETCH_DELAY:-2}
 for ((attempt = 1; ; attempt++)); do
     if github_pat=$(/usr/bin/buildkite-agent secret get GITHUB_READONLY_PAT); then
+        # Record a retry that fired; recording must never fail or stall the job.
+        ((attempt == 1)) || timeout 10 /usr/bin/buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}:github-token" "github-token,${attempt},recovered" || true
         break
     fi
     if ((attempt >= secret_attempts)); then
+        timeout 10 /usr/bin/buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}:github-token" "github-token,${attempt},exhausted" || true
         echo "ERROR: could not fetch GITHUB_READONLY_PAT from the agent secret store after ${attempt} attempts (provider/infrastructure failure — exiting 255 to trigger the infra retry)" >&2
         exit 255
     fi
