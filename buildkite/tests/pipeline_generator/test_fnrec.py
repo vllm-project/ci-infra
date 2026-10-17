@@ -487,6 +487,8 @@ def test_collect_group_folds_the_build_from_the_generating_branch(
         "ci-infra/my-branch/buildkite/ci_selector/recorders/fnrec/collect.sh"
         in step.commands[-1]
     )
+    # A lost agent or a Git mirror lock timeout retries, like any step.
+    assert step.retry == buildkite_step.ensure_infra_failure_retry(None)
 
 
 def test_collect_group_waits_only_on_steps_that_record(monkeypatch, fake_global_config):
