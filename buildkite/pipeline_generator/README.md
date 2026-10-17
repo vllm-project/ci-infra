@@ -68,8 +68,7 @@ repositories:
 ## Jobs that are not selected
 
 A step runs when its `source_file_dependencies` match the change (or on
-nightly / `RUN_ALL` builds); optional steps and L4 steps
-(`MANUAL_ONLY_DEVICES`) never run on their own. Every
+nightly / `RUN_ALL` builds); optional steps never run on their own. Every
 other step is left out of the uploaded pipeline. One input step, **Run more
 jobs**, near the top of the build lists them all as checkboxes under their
 group names (AMD steps under "AMD - <group of their NVIDIA step>"). Buildkite

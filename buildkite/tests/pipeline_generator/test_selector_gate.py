@@ -104,7 +104,6 @@ def test_the_record_is_written_as_json(tmp_path, monkeypatch):
 
 # ---- through the generator -------------------------------------------------
 
-import buildkite_step  # noqa: E402
 import pipeline_generator as pg  # noqa: E402
 import unblock_jobs  # noqa: E402
 from step import Step  # noqa: E402
@@ -223,14 +222,3 @@ def test_steps_the_selector_skips_are_offered_in_run_more_jobs(
     )
     assert [e["step"]["key"] for e in deferred["steps"]] == ["test-a"]
     assert "key: test-b" in pipeline and "key: test-a" not in pipeline
-
-
-def test_an_l4_step_the_selector_picks_runs_and_the_rest_stay_manual(
-    fake_global_config,
-):
-    """L4 steps never run on their own (#826); one the selector names does."""
-    fake_global_config["selector_step_keys"] = frozenset({"l4-picked"})
-    picked = Step(label="Picked", key="l4-picked", device="l4", commands=["t"])
-    other = Step(label="Other", key="l4-other", device="l4", commands=["t"])
-    assert buildkite_step._step_should_run(picked, [])
-    assert not buildkite_step._step_should_run(other, [])
