@@ -1,4 +1,5 @@
 import os
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
@@ -103,8 +104,32 @@ def ensure_amd_stack_error_retry(
     return retry_policy
 
 
+def rocm_build_layout() -> bool:
+    """The vLLM checkout builds its ROCm images with build.sh (else the old chain)."""
+    return os.path.exists(".buildkite/scripts/rocm/build.sh")
+
+
+def rocm_ci_repo() -> str:
+    """The trust rule: only non-PR builds of vllm-project/vllm main, not the
+    AITER nightly, write rocm/vllm-ci."""
+    repo = os.getenv("BUILDKITE_REPO", "")
+    trusted = (
+        os.getenv("BUILDKITE_PULL_REQUEST") == "false"
+        and os.getenv("BUILDKITE_BRANCH") == "main"
+        and re.search(r"[/:]vllm-project/vllm(\.git)?$", repo)
+        and os.getenv("AITER_NIGHTLY") != "1"
+    )
+    return "rocm/vllm-ci" if trusted else "rocm/vllm-ci-pr"
+
+
+def get_amd_pod_image() -> str:
+    if rocm_build_layout():
+        return f"{rocm_ci_repo()}:build-$BUILDKITE_BUILD_ID"
+    return AMD_NATIVE_BASE_IMAGE
+
+
 def get_rocm_base_refresh_timeout() -> int:
-    if os.getenv("ROCM_BASE_REFRESH_SKIP", "0") == "1":
+    if os.getenv("ROCM_BASE_REFRESH_SKIP", "0") == "1" and not rocm_build_layout():
         return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
     return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
 
@@ -117,6 +142,8 @@ def _amd_mirror_should_run(default_should_run: bool, list_file_diff: List[str]) 
 
 def get_rocm_base_refresh_env() -> Dict[str, str]:
     """Bind the refresh script controls to the timeout decision."""
+    if rocm_build_layout():
+        return {}
     return {
         "ROCM_BASE_REFRESH_SKIP": os.getenv("ROCM_BASE_REFRESH_SKIP", "0"),
         "ROCM_BASE_REFRESH_FORCE": os.getenv("ROCM_BASE_REFRESH_FORCE", "0"),
@@ -317,7 +344,7 @@ def _get_amd_env(
         env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
         env.update(
             {
-                "VLLM_CI_BASE_IMAGE": AMD_NATIVE_BASE_IMAGE,
+                "VLLM_CI_BASE_IMAGE": get_amd_pod_image(),
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
@@ -467,7 +494,7 @@ def build_amd_step_options(
         }
         plugins = [
             get_amd_k8s_plugin(
-                image=AMD_NATIVE_BASE_IMAGE,
+                image=get_amd_pod_image(),
                 gpu_count=gpu_count,
                 workspace=AMD_NATIVE_WORKSPACE,
                 workspace_volume_name=AMD_NATIVE_WORKSPACE_VOLUME,
@@ -476,6 +503,12 @@ def build_amd_step_options(
                 uses_dra=config.uses_dra,
             )
         ]
+        if rocm_build_layout():
+            # The per-build image holds /vllm-workspace; an emptyDir would hide it.
+            pod = plugins[0]["kubernetes"]["podSpecPatch"]
+            vm = pod["containers"][0]["volumeMounts"]
+            pod["containers"][0]["volumeMounts"] = [m for m in vm if m["name"] != AMD_NATIVE_WORKSPACE_VOLUME]
+            pod["volumes"] = [v for v in pod["volumes"] if v["name"] != AMD_NATIVE_WORKSPACE_VOLUME]
 
     if no_plugin:
         env = dict(extra_env or {}) or None

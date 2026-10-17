@@ -84,6 +84,69 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkey
     assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
 
 
+@pytest.fixture
+def build_sh_layout(tmp_path, monkeypatch):
+    """A vLLM checkout that builds its ROCm images with build.sh."""
+    (tmp_path / ".buildkite/scripts/rocm").mkdir(parents=True)
+    (tmp_path / ".buildkite/scripts/rocm/build.sh").touch()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BUILDKITE_REPO", "https://github.com/vllm-project/vllm.git")
+    monkeypatch.setenv("BUILDKITE_PULL_REQUEST", "false")
+    monkeypatch.setenv("BUILDKITE_BRANCH", "main")
+    monkeypatch.delenv("AITER_NIGHTLY", raising=False)
+    return monkeypatch
+
+
+@pytest.mark.parametrize(
+    "env,expected",
+    [
+        ({}, "rocm/vllm-ci"),
+        ({"BUILDKITE_PULL_REQUEST": "42"}, "rocm/vllm-ci-pr"),
+        ({"BUILDKITE_REPO": "git@github.com:someone/vllm.git"}, "rocm/vllm-ci-pr"),
+        ({"AITER_NIGHTLY": "1"}, "rocm/vllm-ci-pr"),
+        ({"BUILDKITE_BRANCH": "releases/v0.99"}, "rocm/vllm-ci-pr"),
+    ],
+)
+def test_build_sh_layout_build_steps_get_trusted_repo(build_sh_layout, env, expected):
+    for name, value in env.items():
+        build_sh_layout.setenv(name, value)
+    build_sh_layout.setenv("ROCM_BASE_REFRESH_SKIP", "1")  # ignored by build.sh
+
+    step = _rocm_base_refresh_step().model_copy(
+        update={"concurrency_group": "g/$ROCM_CI_REPO/$BUILDKITE_BRANCH"}
+    )
+
+    command_step = _render_single_step(step).steps[0]
+
+    assert command_step.env == {"ROCM_CI_REPO": expected}
+    assert command_step.concurrency_group == f"g/{expected}/$BUILDKITE_BRANCH"
+    assert command_step.timeout_in_minutes == 540
+    assert command_step.agents == {"queue": AgentQueue.AMD_CPU}
+
+
+def test_build_sh_layout_pods_run_the_build_image(build_sh_layout):
+    build_sh_layout.setenv("BUILDKITE_PULL_REQUEST", "42")
+    step = Step(
+        label="AMD test",
+        group="Direct AMD",
+        key="amd-test",
+        device="mi300_1",
+        dind=False,
+        commands=["pytest tests/foo.py"],
+    )
+
+    command_step = _render_single_step(step).steps[-1]
+
+    assert command_step.depends_on[0] == "image-build-amd"
+    pod = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
+    container = pod["containers"][0]
+    assert container["image"] == "rocm/vllm-ci-pr:build-$BUILDKITE_BUILD_ID"
+    assert command_step.env["VLLM_CI_BASE_IMAGE"] == container["image"]
+    assert container["imagePullPolicy"] == "Always"
+    assert [m["name"] for m in container["volumeMounts"]] == ["devshm"]
+    assert [v["name"] for v in pod["volumes"]] == ["devshm"]
+
+
 @pytest.mark.parametrize(
     ("device", "queue", "dind", "expected_gpu_count"),
     [
