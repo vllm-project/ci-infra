@@ -1,0 +1,2 @@
+- device: mi355_dpx
+  fallbacks: [mi355_1]

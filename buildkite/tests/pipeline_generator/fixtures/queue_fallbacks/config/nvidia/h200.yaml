@@ -1,0 +1,2 @@
+- device: h200_18gb
+  fallbacks: [h200_35gb]

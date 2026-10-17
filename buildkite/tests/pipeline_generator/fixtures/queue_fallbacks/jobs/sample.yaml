@@ -1,0 +1,28 @@
+group: Sample
+steps:
+- label: Kernels
+  key: kernels
+  device: h200_18gb
+  commands:
+  - pytest -v -s kernels
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+- label: Basic Correctness
+  key: basic-correctness
+  device: mi300_1
+  commands:
+  - pytest -v -s basic_correctness
+- label: No Fallback
+  key: no-fallback
+  device: mi300_1
+  fallback: false
+  commands:
+  - pytest -v -s hardware
+- label: Models
+  key: models
+  num_devices: 2
+  commands:
+  - pytest -v -s models

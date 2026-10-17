@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from typing import Dict, FrozenSet, List, Optional, TypedDict
+from typing import Dict, FrozenSet, List, Optional, Tuple, TypedDict
 
 import yaml
 
@@ -30,6 +30,7 @@ class GlobalConfig(TypedDict):
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
     only_step_keys: Optional[FrozenSet[str]] = None
+    fallback_dirs: Tuple[str, ...] = ()
 
 
 config = None
@@ -37,6 +38,9 @@ config = None
 
 def init_global_config(pipeline_config_path: str):
     global config
+    # queue_fallbacks imports the step modules, which import this one.
+    from queue_fallbacks import config_fallback_dirs
+
     if config:
         return
     pipeline_config = yaml.safe_load(open(pipeline_config_path, "r"))
@@ -83,6 +87,7 @@ def init_global_config(pipeline_config_path: str):
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
         only_step_keys=_parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR)),
+        fallback_dirs=config_fallback_dirs(pipeline_config),
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True

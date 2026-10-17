@@ -330,8 +330,8 @@ def _get_step_plugin(step: Step):
 
 
 def get_agent_queue(step: Step):
-    branch = get_global_config()["branch"]
     if step.label.startswith(":docker:"):
+        branch = get_global_config()["branch"]
         if "arm64" in step.label:
             if branch == "main":
                 return AgentQueue.ARM64_CPU_POSTMERGE

@@ -1,0 +1,1 @@
+- pin: {device: mi250_1, state: closed, until: "2026-10-20T00:00:00Z", reason: "node upgrade"}

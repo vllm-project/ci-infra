@@ -35,6 +35,8 @@ class Step(BaseModel):
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
     # Plan this step's tests into shards from main's timings (runtime_shard.py).
     automatic_shard: bool = False
+    # False keeps the step on its device when its queue is closed (queue_fallbacks.py).
+    fallback: bool = True
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
