@@ -47,16 +47,18 @@ run() {
 calls() { cat "$tmp/$1.log" 2>/dev/null | wc -l | tr -d ' '; }
 
 run all-pass 0 '' ''
-run login-blip 0 'infra-retry:job-1:image-pull=image-pull,3,recovered' '2 4 ' FAIL_AWS=2
+run login-blip 0 'infra-retry:job-1:ecr-public-login=ecr-public-login,3,recovered' '2 4 ' FAIL_AWS=2
 grep -q 'failed (attempt 1/5); retrying in 2s' "$tmp/stderr" || { echo "FAIL log line"; exit 1; }
-run login-down 255 'infra-retry:job-1:image-pull=image-pull,5,exhausted' '2 4 8 16 ' FAIL_AWS=99
+run login-down 255 'infra-retry:job-1:ecr-public-login=ecr-public-login,5,exhausted' '2 4 8 16 ' FAIL_AWS=99
 [[ $(calls aws) -eq 5 ]] || { echo "FAIL login-down: aws called $(calls aws) times"; exit 1; }
 grep -q -- '--cli-connect-timeout 10' "$tmp/aws.log" || { echo "FAIL aws timeout flag"; exit 1; }
-run nvidia-smi-blip 0 'infra-retry:job-1:image-pull=image-pull,2,recovered' '2 ' FAIL_SMI=1
-run nvidia-smi-down 255 'infra-retry:job-1:image-pull=image-pull,5,exhausted' '2 4 8 16 ' FAIL_SMI=99
+run nvidia-smi-blip 0 'infra-retry:job-1:gpu-discovery=gpu-discovery,2,recovered' '2 ' FAIL_SMI=1
+run nvidia-smi-down 255 'infra-retry:job-1:gpu-discovery=gpu-discovery,5,exhausted' '2 4 8 16 ' FAIL_SMI=99
 run pull-blip 0 'infra-retry:job-1:image-pull=image-pull,2,recovered' '2 ' FAIL_PULL=1
 run pull-down 255 'infra-retry:job-1:image-pull=image-pull,5,exhausted' '2 4 8 16 ' FAIL_PULL=99
 run mark-write-fails-blip 0 - '2 ' FAIL_PULL=1 MARK_FAILS=1
+# Two calls that each retry in one job keep separate counts.
+run two-classes 0 $'infra-retry:job-1:gpu-discovery=gpu-discovery,2,recovered\ninfra-retry:job-1:image-pull=image-pull,3,recovered' '2 2 4 ' FAIL_SMI=1 FAIL_PULL=2
 run mark-write-fails-down 255 - '2 4 8 16 ' FAIL_PULL=99 MARK_FAILS=1
 
 # Waiter: the winner's pull failed (no done marker), so the waiter pulls itself.

@@ -174,7 +174,9 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     )
 
     assert command_step.retry == amd.AMD_RETRY
-    assert len(command_step.retry["automatic"]) == 7
+    assert len(command_step.retry["automatic"]) == 8
+    # The agent's Git mirror lock timeout, raised before the command runs.
+    assert {"exit_status": 94, "limit": 1} in command_step.retry["automatic"]
     assert command_step.retry["automatic"][0] == {
         "signal_reason": "stack_error",
         "limit": 1,
