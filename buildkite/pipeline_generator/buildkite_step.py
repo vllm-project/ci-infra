@@ -50,6 +50,12 @@ EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 # (ECR login, secret-store fetch, docker pull). The agent preserves a hook's
 # exit code as the job's exit status, so retry 255 like agent-lost.
 EXIT_STATUS_255_RETRY = {"exit_status": 255, "limit": 1}
+# The agent's own "checkout timed out waiting for a Git mirrors lock", raised
+# before the step's command runs, so a retry can't hide a test failure. Of 8
+# such failures in two days, 7 passed when retried by hand. Crash statuses
+# (134, 139) are deliberately not here: they were mostly one real,
+# recurring crash that a retry would only repeat.
+EXIT_STATUS_94_RETRY = {"exit_status": 94, "limit": 1}
 
 # Pod-level failures on EKS surface as agent stops / lost pods rather than
 # clean non-zero exits, which exit-code-only retries would miss.
@@ -959,7 +965,8 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
 def ensure_infra_failure_retry(
     retry: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Add one-time retries for agent-lost (-1) and provider hook (255) failures."""
+    """Add one-time retries for agent-lost (-1), provider hook (255) and
+    Git mirror lock (94) failures."""
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -986,7 +993,11 @@ def ensure_infra_failure_retry(
             existing_statuses.add(exit_status)
     infra_conditions = [
         dict(condition)
-        for condition in (EXIT_STATUS_NEGATIVE_ONE_RETRY, EXIT_STATUS_255_RETRY)
+        for condition in (
+            EXIT_STATUS_NEGATIVE_ONE_RETRY,
+            EXIT_STATUS_255_RETRY,
+            EXIT_STATUS_94_RETRY,
+        )
         if condition["exit_status"] not in existing_statuses
     ]
     retry_policy["automatic"] = [*infra_conditions, *automatic_conditions]
