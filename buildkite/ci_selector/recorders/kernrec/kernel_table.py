@@ -26,13 +26,14 @@ decide whether to trust it: how many jobs fed it, whether they all passed,
 and whether any recorder reported dropped records.
 
     {
-      "version": 1,
+      "version": 3,
       "source": {"org": "vllm", "pipeline": "ci", "build": 90039,
                  "commit": "<sha the steps ran>", "recorded_at": "..."},
       "names": ["_Z21fusedQKNormRopeKernel...", "fused_moe_kernel", ...],
       "rows": {
         "fusion-e2e-quick-h100": {
           "jobs": 1, "passed": true, "complete": true,
+          "backend": "cuda", "recording_available": true, "trace_complete": true,
           "shards": {"expected": 3, "seen": 3},   # null expected: not parallel
           "processes": 4, "dropped": 0,
           "kernels": [0, 17, 42, ...]        # indexes into names
@@ -44,7 +45,7 @@ and whether any recorder reported dropped records.
 A query joins it with a kernel symbol map for the same commit: a changed
 file -> the symbols compiled from it or from objects that included it ->
 every row whose kernel set meets them. A row that is usable (all jobs
-passed, every shard present, nothing dropped) and meets none of them is a
+passed, every shard present, clean traces, nothing dropped) and meets none of them is a
 step the change cannot reach through any kernel. A step with no row is a step the record
 knows nothing about, and stays with the static map.
 """
@@ -59,29 +60,108 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-TABLE_VERSION = 2
+TABLE_VERSION = 3
 
 
 def read_recording(path: Path) -> tuple[set[str], int, bool]:
-    """(names, dropped, clean_exit) from one kern.<pid>.txt."""
+    """Read names and loss counters; only validated native footers are clean.
+
+    Older recordings remain positive evidence. Their footers do not attest
+    error accounting, so they cannot establish an absence of launches.
+    """
     names: set[str] = set()
     dropped = 0
     clean = False
-    for line in path.read_text(errors="replace").splitlines():
+    errors = False
+    headers = 0
+    footers = 0
+    valid_header = False
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return names, dropped, False
+    for line in lines:
         if not line:
             continue
+        clean = False  # A footer must be the final nonempty line.
         if line.startswith("#"):
-            if line.startswith("# dropped="):
-                dropped += int(line.split("=", 1)[1])
-            elif line.startswith("# end "):
-                clean = True
-                for kv in line[6:].split():
-                    k, _, v = kv.partition("=")
-                    if k == "dropped":
-                        dropped = max(dropped, int(v))
+            try:
+                if line.startswith("# kernrec "):
+                    headers += 1
+                    pairs = [p.split("=", 1) for p in line.split() if "=" in p]
+                    fields = dict(pairs)
+                    valid_header = (
+                        not names
+                        and headers == 1
+                        and line.startswith("# kernrec v1 ")
+                        and len(fields) == len(pairs)
+                        and (fields.get("backend"), fields.get("recorder"))
+                        in {("cuda", "cupti"), ("rocm", "rocprofiler-sdk")}
+                    )
+                elif line.startswith("# dropped="):
+                    value = int(line.split("=", 1)[1])
+                    if value < 0:
+                        raise ValueError("negative loss counter")
+                    dropped += value
+                elif line.startswith("# error"):
+                    errors = True
+                elif line.startswith("# end "):
+                    footers += 1
+                    fields = dict(p.split("=", 1) for p in line[6:].split())
+                    total = int(fields["dropped"])
+                    dropped = max(dropped, total)
+                    clean = (
+                        valid_header
+                        and footers == 1
+                        and not errors
+                        and total >= 0
+                        and int(fields["errors"]) == 0
+                        and int(fields["unresolved"]) == 0
+                        and int(fields["unique"]) == len(names)
+                        and int(fields["records"]) >= len(names)
+                    )
+            except (KeyError, ValueError):
+                errors = True
             continue
         names.add(line)
-    return names, dropped, clean
+    return names, dropped, clean and not errors
+
+
+def _backend(path: Path) -> str:
+    try:
+        with path.open() as stream:
+            header = stream.readline().split()
+    except OSError:
+        return "unknown"
+    return next(
+        (p.split("=", 1)[1] for p in header if p.startswith("backend=")), "cuda"
+    )
+
+
+def _trace_health(job_dir: Path, files: list[Path]) -> tuple[str, bool, bool]:
+    """Backend, complete observed-process traces, recording availability.
+
+    Neither backend independently inventories every expected GPU worker.
+    Completeness here concerns the processes that initialized the recorder.
+    """
+    backends = {_backend(f) for f in files}
+    meta = {}
+    try:
+        meta = json.loads((job_dir / "kernrec.json").read_text())
+        if not isinstance(meta, dict):
+            meta = {"collection_error": "invalid sidecar"}
+    except (OSError, ValueError):
+        pass
+    if not backends:
+        backends.add(meta.get("backend", "unknown"))
+    backend = next(iter(backends)) if len(backends) == 1 else "unknown"
+    complete = bool(files) and backend in {"cuda", "rocm"}
+    for path in files:
+        _, dropped, clean = read_recording(path)
+        complete = complete and clean and dropped == 0
+    available = bool(files) and meta.get("collection_available") is not False
+    complete = complete and available and not meta.get("collection_error")
+    return backend, bool(complete), available
 
 
 def _jobs_from_step_layout(root: Path, job_state: dict[str, str]):
@@ -103,6 +183,7 @@ def _jobs_from_step_layout(root: Path, job_state: dict[str, str]):
                 "passed": state in (None, "passed"),
                 "shard": None,
                 "shard_count": None,
+                "trace_health": _trace_health(job_dir, files),
             }
 
 
@@ -150,6 +231,7 @@ def _jobs_from_kernrec_layout(root: Path, job_state: dict[str, str]):
             "passed": passed,
             "shard": _int_or_none(meta.get("parallel_job")),
             "shard_count": _int_or_none(meta.get("parallel_job_count")),
+            "trace_health": _trace_health(job_dir, files),
         }
 
 
@@ -163,6 +245,8 @@ def usable(row: dict) -> bool:
         bool(row.get("passed"))
         and bool(row.get("complete", True))
         and not row.get("dropped")
+        and row.get("backend", "cuda") in {"cuda", "rocm"}
+        and row.get("trace_complete") is True
     )
 
 
@@ -184,6 +268,8 @@ def build(a) -> int:
     rows: dict[str, dict] = {}
     unfiled = 0
     for job in job_iter:
+        if a.backend and job["trace_health"][0] not in {a.backend, "unknown"}:
+            continue
         if not job["step_key"]:
             unfiled += 1
             continue
@@ -197,10 +283,18 @@ def build(a) -> int:
                 "dropped": 0,
                 "shards": {"expected": None, "seen": set()},
                 "kernels": set(),
+                "backend": job["trace_health"][0],
+                "trace_complete": True,
+                "recording_available": True,
             },
         )
         row["jobs"] += 1
         row["passed"] = row["passed"] and job["passed"]
+        backend, trace_complete, recording_available = job["trace_health"]
+        row["recording_available"] &= recording_available
+        if row["backend"] != backend:
+            row["backend"] = "unknown"
+        row["trace_complete"] = row["trace_complete"] and trace_complete
         if job["shard_count"] is not None:
             row["shards"]["expected"] = max(
                 row["shards"]["expected"] or 0, job["shard_count"]
@@ -318,9 +412,16 @@ def query(a) -> int:
             continue
         select, drop, unusable = [], [], []
         for k, r in t["rows"].items():
-            if row_sets[k] & syms:
+            backend_matches = r.get("backend", "cuda") == m.get("backend", "cuda")
+            if backend_matches and row_sets[k] & syms:
                 select.append(k)
-            elif usable(r):
+            elif (
+                backend_matches
+                and usable(r)
+                and not m.get("incomplete")
+                and map_commit
+                and map_commit == t["source"]["commit"]
+            ):
                 drop.append(k)
             else:
                 unusable.append(k)
@@ -373,6 +474,7 @@ def main() -> int:
         default=None,
         help="<job-id>/kern.*.txt + kernrec.json layout (artifact download)",
     )
+    b.add_argument("--backend", choices=("cuda", "rocm"))
     b.add_argument("--build", type=int, required=True)
     b.add_argument("--commit", default="")
     b.add_argument("--org", default="vllm")

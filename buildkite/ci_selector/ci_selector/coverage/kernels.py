@@ -12,9 +12,9 @@ csrc directly.
 Two files, produced together by a recording build (`recorders/kernrec/README.md`):
 
   kernel_table.json.gz       one row per step: the set of kernel names the
-                             step's processes launched (CUPTI), plus whether
-                             every job passed, every shard reported and no
-                             records were dropped
+                             step's processes launched (CUPTI or ROCProfiler SDK), plus whether
+                             every job passed, every shard reported, traces
+                             completed cleanly and no records were dropped
   kernel_symbol_map.json.gz  per compiled object: its source file, the
                              headers it included, and the kernel entry
                              symbols it defines, read off the objects the
@@ -62,9 +62,10 @@ from pathlib import Path
 from .rules import RowKeys
 
 #: `recorders/kernrec/kernel_table.py::TABLE_VERSION`. A drift test compares the two.
-TABLE_VERSION = 2
+TABLE_VERSION = 3
 #: What `tools/ci/kernel_symbol_map.py` in vLLM writes.
-MAP_VERSION = 1
+MAP_VERSION = 2
+BACKENDS = frozenset({"cuda", "rocm"})
 
 #: Selection rules that carry no changed file: image builds that always run,
 #: preflight force-selects and a pipeline-wide run-all. A step holding one is
@@ -81,11 +82,19 @@ class KernelRow:
     dropped: int
     jobs: int = 0
     processes: int = 0
+    backend: str = "cuda"
+    trace_complete: bool = False
 
     @property
     def usable(self) -> bool:
-        """The same three conditions as `recorders/kernrec/kernel_table.py::usable`."""
-        return self.passed and self.complete and not self.dropped
+        """The same health gates as `recorders/kernrec/kernel_table.py::usable`."""
+        return (
+            self.passed
+            and self.complete
+            and not self.dropped
+            and self.backend in BACKENDS
+            and self.trace_complete
+        )
 
 
 class KernelTable:
@@ -130,6 +139,7 @@ class SymbolMap:
         commit: str = "",
         incomplete: bool = False,
         objects: int = 0,
+        backend: str = "cuda",
     ):
         self._reach = reach or {}
         # Files some object WITHOUT kernels was compiled from or included.
@@ -142,6 +152,7 @@ class SymbolMap:
         self.commit = commit
         self.incomplete = incomplete
         self.objects = objects
+        self.backend = backend
 
     @property
     def available(self) -> bool:
@@ -157,6 +168,8 @@ class SymbolMap:
 
     def why_not_clearable(self, path: str) -> str:
         """Empty when a silence about `path` may drop a step."""
+        if self.incomplete:
+            return "the build's symbol map is incomplete"
         if path in self._unknown:
             return "an object compiled from or including it could not be read"
         if path in self._host:
@@ -211,7 +224,7 @@ def load_table(path: Path) -> KernelTable:
     if payload is None:
         return KernelTable(None, why)
     version = payload.get("version")
-    if version != TABLE_VERSION:
+    if version not in (2, TABLE_VERSION):
         return KernelTable(
             None,
             f"{path} is kernel table version {version!r}, expected {TABLE_VERSION}; "
@@ -219,7 +232,11 @@ def load_table(path: Path) -> KernelTable:
         )
     names = payload.get("names")
     blobs = payload.get("rows")
-    if not isinstance(names, list) or not isinstance(blobs, dict):
+    if (
+        not isinstance(names, list)
+        or not all(isinstance(name, str) for name in names)
+        or not isinstance(blobs, dict)
+    ):
         return KernelTable(None, f"{path} has no names list or rows object")
     if not blobs:
         # An empty rows object is a broken table, never "no step launched anything".
@@ -229,6 +246,23 @@ def load_table(path: Path) -> KernelTable:
         for key, b in blobs.items():
             # Indexed, not .get(): a missing health field would default to
             # the healthy value and read a weaker table as stronger.
+            backend = b["backend"] if version == TABLE_VERSION else "cuda"
+            trace_complete = b["trace_complete"] if version == TABLE_VERSION else False
+            if not isinstance(backend, str) or backend not in BACKENDS | {"unknown"}:
+                raise ValueError(f"unknown kernel backend: {backend!r}")
+            if not isinstance(trace_complete, bool):
+                raise ValueError("trace_complete must be a boolean")
+            if any(type(b[field]) is not bool for field in ("passed", "complete")):
+                raise ValueError("passed and complete must be booleans")
+            for field in ("dropped", "jobs", "processes"):
+                value = b.get(field, 0)
+                if type(value) is not int or value < 0:
+                    raise ValueError(f"{field} must be a nonnegative integer")
+            if not isinstance(b["kernels"], list) or any(
+                type(index) is not int or not 0 <= index < len(names)
+                for index in b["kernels"]
+            ):
+                raise ValueError("kernel indices must refer to names")
             rows[key] = KernelRow(
                 key=key,
                 kernels=frozenset(names[i] for i in b["kernels"]),
@@ -237,6 +271,8 @@ def load_table(path: Path) -> KernelTable:
                 dropped=int(b["dropped"]),
                 jobs=int(b.get("jobs", 0)),
                 processes=int(b.get("processes", 0)),
+                backend=backend,
+                trace_complete=trace_complete,
             )
     except (KeyError, TypeError, IndexError, ValueError) as exc:
         return KernelTable(None, f"{path}: unreadable row: {type(exc).__name__}: {exc}")
@@ -255,10 +291,15 @@ def load_symbol_map(path: Path) -> SymbolMap:
     if payload is None:
         return SymbolMap(None, unavailable=why)
     version = payload.get("version")
-    if version != MAP_VERSION:
+    if version not in (1, MAP_VERSION):
         return SymbolMap(
             None,
             unavailable=f"{path} is symbol map version {version!r}, expected {MAP_VERSION}",
+        )
+    backend = payload.get("backend") if version == MAP_VERSION else "cuda"
+    if not isinstance(backend, str) or backend not in BACKENDS:
+        return SymbolMap(
+            None, unavailable=f"{path}: unknown kernel backend {backend!r}"
         )
     # The producer fails closed: any object it could not read after a retry
     # empties the whole map and says why. Nothing to join then.
@@ -296,6 +337,7 @@ def load_symbol_map(path: Path) -> SymbolMap:
         commit=str(payload.get("commit") or ""),
         incomplete=bool(payload.get("incomplete")),
         objects=len(objects),
+        backend=backend,
     )
 
 
@@ -306,6 +348,8 @@ class KernelReading:
     added: list[str] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
     kept: list[str] = field(default_factory=list)
+    # Positive observations, including steps the map already selected.
+    executes: list[str] = field(default_factory=list)
     reasons: Counter = field(default_factory=Counter)
     #: changed file -> what this record could do with it, for the report
     files: dict[str, str] = field(default_factory=dict)
@@ -384,18 +428,20 @@ def read_pr(
             reading.reasons["file-may-drop"] += 1
 
     def launched(row: KernelRow) -> bool:
-        return any(syms and row.kernels & syms for syms in voting.values())
+        return row.backend == sm.backend and any(
+            syms and row.kernels & syms for syms in voting.values()
+        )
 
     # ADD. Ungated: one launch proves the step runs code from the file, and a
     # failed or incomplete row is still a record of what did run.
     already = set(selection.selected)
-    for step_id in keys.candidates():
-        if step_id in already:
-            continue
+    for step_id in dict.fromkeys([*keys.candidates(), *selection.selected]):
         key = keys.key_for(step_id)
         row = table.row(key) if key else None
         if row is not None and launched(row):
-            reading.added.append(step_id)
+            reading.executes.append(step_id)
+            if step_id not in already:
+                reading.added.append(step_id)
     reading.reasons["row-adds-a-step-the-map-missed"] += len(reading.added)
 
     # DROP. Every gate resolves toward keeping.
@@ -417,6 +463,7 @@ def read_pr(
             allow_drops,
             protected,
             held,
+            sm.backend,
         )
         if why_keep:
             reading.kept.append(step_id)
@@ -445,6 +492,7 @@ def _why_keep(
     allow_drops,
     protected,
     held,
+    backend,
 ) -> str:
     """The first gate that holds the step, or "" when it may drop."""
     key = keys.key_for(step_id)
@@ -453,6 +501,8 @@ def _why_keep(
     row = table.row(key)
     if row is None:
         return "no-row"
+    if row.backend != backend:
+        return "row-and-map-from-different-backends"
     if launched(row):
         return "row-launched-a-kernel-from-a-changed-file"
     if step_id in protected:

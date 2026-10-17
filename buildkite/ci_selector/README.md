@@ -8,7 +8,7 @@ Works out which vLLM CI jobs a diff needs to run. It derives the answer from the
 
 **The coverage record** is a table of what each step actually ran on real CI builds, one row per step, produced by an instrumented build. The recorder that produces it is `recorders/fnrec/`, loaded into every Python process of a step when the build has `VLLM_CI_FNREC=1`; `scripts/` turns a build's recordings into the table.
 
-**The kernel record** is the same idea for `csrc/`, where no Python frame exists: a table of the GPU kernels each step launched (CUPTI, recorded on the nightly and daily runs) joined to a map of which csrc file each kernel was compiled from (read off the image build's objects). Both are produced by `recorders/kernrec/`.
+**The kernel record** is the same idea for `csrc/`, where no Python frame exists: a table of the GPU kernels each step launched (CUPTI on NVIDIA or [ROCProfiler SDK on AMD](recorders/kernrec/ROCM.md)) joined to a map of which csrc file each kernel was compiled from (read off the image build's objects). `recorders/kernrec/` collects the tables; vLLM's image builds produce the maps.
 
 **The library record** answers for a dependency bump, where the changed file is a version pin: the same recorder also writes, per step, which functions of a few watched libraries (flashinfer, DeepGEMM, flash-attn, Triton; `coverage/libraries.py`) code outside them called at runtime. A diff that only moves such a pin runs the steps that called the library instead of every step on its image. It only drops, only steps selected for such pins alone, and a row recorded before the library was watched keeps its step. Torch is not watched: a torch bump runs everything.
 
@@ -22,7 +22,7 @@ Neither is a stage of the other. `decide.py` reads all of them, per changed file
 
 A changed `.cu` votes with the kernels its diff touched, not the whole file: `coverage/changed_kernels.py` reads both sides of the file, finds the definition each changed line falls in (a `__global__`, a `__device__` helper and the kernels reaching it, a host launcher and the kernels it launches, a constant and the functions using it) and joins the names back to the map's symbols. Anything it cannot name falls back to the whole file. `CI_SELECTOR_KERNEL_ATTRIBUTION=file` restores the whole-file reading for measurement.
 
-Selecting takes one observation and carries no gate. Dropping carries all of them. For the kernel record the gates are: the row is healthy (every job passed, every shard reported, no dropped records), the file is clearable (compiled into kernels and into no host-only object, so a header `torch_bindings.cpp` includes may select but never drop), the step was selected for nothing but files the record can clear, and the table and map come from the same commit.
+Selecting takes one observation and carries no gate. Dropping carries all of them. For the kernel record the gates are: the row is healthy (every job passed, every shard reported, clean native traces, no dropped records), the file is clearable (compiled into kernels and into no host-only object, so a header `torch_bindings.cpp` includes may select but never drop), the step was selected for nothing but files the record can clear, and the table and map come from the same commit.
 
 ## Setup
 
