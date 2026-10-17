@@ -138,7 +138,13 @@ def test_build_sh_layout_renders_vllm_build_steps(ci_repo):
     assert "$ROCM_CI_REPO" in base["concurrency_group"]
     assert base["env"]["TERM"] == "xterm-256color"
     assert image["depends_on"] == ["refresh-rocm-base-amd"]
-    assert image["retry"] == BUILD_STEPS[1]["retry"]
+    # Infra failures (pod provisioning, lost agents) retry first, then vLLM's own rules.
+    infra = [
+        {"signal_reason": reason, "limit": 1}
+        for reason in ("stack_error", "agent_stop", "agent_refused")
+    ]
+    assert image["retry"]["automatic"] == infra + BUILD_STEPS[1]["retry"]["automatic"]
+    assert base["retry"]["automatic"][:3] == infra
 
     gpu = steps["mi300_1: MoE"]
     assert gpu["depends_on"] == "image-build-amd"
@@ -146,6 +152,42 @@ def test_build_sh_layout_renders_vllm_build_steps(ci_repo):
     assert pod["containers"][0]["image"] == f"{ci_repo}:build-$BUILDKITE_BUILD_ID"
     assert [v["name"] for v in pod["volumes"]] == ["devshm"]
     assert [m["name"] for m in pod["containers"][0]["volumeMounts"]] == ["devshm"]
+
+
+@pytest.mark.parametrize("build_steps", [[], BUILD_STEPS])
+def test_gpu_job_env_matches_the_checkouts_runner(build_steps):
+    """Checkouts without build.sh keep the old run-amd-test.sh, which needs the
+    artifact and workspace handoff; build.sh images already contain both."""
+    rendered = minijinja.render_str(
+        TEMPLATE,
+        amd_build_steps=build_steps,
+        ci_repo="rocm/vllm-ci-pr",
+        branch="main",
+        list_file_diff="",
+        mirror_hw="amdproduction",
+        run_all="1",
+        nightly="0",
+        steps=[
+            {
+                "label": "MoE",
+                "agent_pool": "mi300_1",
+                "mirror_hardwares": ["amdproduction"],
+                "dind": False,
+                "commands": ["true"],
+            }
+        ],
+    )
+    env = yaml.safe_load(rendered)[0]["steps"][-1]["env"]
+    handoff = {
+        "VLLM_CI_USE_ARTIFACTS": "1",
+        "VLLM_CI_ARTIFACT_STEP": "image-build-amd",
+        "VLLM_CI_WORKSPACE": "/vllm-workspace",
+        "VLLM_CI_REQUIRE_WORKSPACE_MOUNT": "1",
+    }
+    if build_steps:
+        assert not handoff.keys() & env.keys()
+    else:
+        assert {k: env.get(k) for k in handoff} == handoff
 
 
 def test_build_sh_layout_gates_build_steps_by_source_files():
@@ -165,23 +207,30 @@ VLLM = "https://github.com/vllm-project/vllm.git"
 
 
 @pytest.mark.parametrize(
-    "pr,repo,aiter,expected",
+    "pr,repo,aiter,expected,branch",
     [
-        ("false", VLLM, "0", "rocm/vllm-ci"),
-        ("false", "git@github.com:vllm-project/vllm.git", "0", "rocm/vllm-ci"),
-        ("123", VLLM, "0", "rocm/vllm-ci-pr"),
-        ("", VLLM, "0", "rocm/vllm-ci-pr"),
-        ("false", "https://github.com/someone/vllm.git", "0", "rocm/vllm-ci-pr"),
-        ("false", "https://github.com/vllm-project/vllm-x.git", "0", "rocm/vllm-ci-pr"),
-        ("false", VLLM, "1", "rocm/vllm-ci-pr"),
+        ("false", VLLM, "0", "rocm/vllm-ci", "main"),
+        ("false", "git@github.com:vllm-project/vllm.git", "0", "rocm/vllm-ci", "main"),
+        ("123", VLLM, "0", "rocm/vllm-ci-pr", "main"),
+        ("", VLLM, "0", "rocm/vllm-ci-pr", "main"),
+        ("false", "https://github.com/someone/vllm.git", "0", "rocm/vllm-ci-pr", "main"),
+        ("false", "https://github.com/vllm-project/vllm-x.git", "0", "rocm/vllm-ci-pr", "main"),
+        ("false", VLLM, "1", "rocm/vllm-ci-pr", "main"),
+        # A pushed or manually built branch other than main never writes the trusted repo.
+        ("false", VLLM, "0", "rocm/vllm-ci-pr", "releases/v0.99"),
     ],
 )
-def test_bootstrap_trust_rule(pr, repo, aiter, expected):
+def test_bootstrap_trust_rule(pr, repo, aiter, expected, branch):
     bootstrap = (BUILDKITE_DIR / "bootstrap-amd.sh").read_text()
     rule = re.search(
         r"ROCM_CI_REPO=rocm/vllm-ci-pr\n.*?export ROCM_CI_REPO\n", bootstrap, re.S
     )
-    env = {"BUILDKITE_PULL_REQUEST": pr, "BUILDKITE_REPO": repo, "AITER_NIGHTLY": aiter}
+    env = {
+        "BUILDKITE_PULL_REQUEST": pr,
+        "BUILDKITE_REPO": repo,
+        "AITER_NIGHTLY": aiter,
+        "BUILDKITE_BRANCH": branch,
+    }
     out = subprocess.run(
         ["bash", "-c", rule.group(0) + 'echo "$ROCM_CI_REPO"'],
         env={**os.environ, **env},

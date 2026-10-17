@@ -110,11 +110,12 @@ def rocm_build_layout() -> bool:
 
 
 def rocm_ci_repo() -> str:
-    """The trust rule: only non-PR vllm-project/vllm builds, not the AITER
-    nightly, write rocm/vllm-ci."""
+    """The trust rule: only non-PR builds of vllm-project/vllm main, not the
+    AITER nightly, write rocm/vllm-ci."""
     repo = os.getenv("BUILDKITE_REPO", "")
     trusted = (
         os.getenv("BUILDKITE_PULL_REQUEST") == "false"
+        and os.getenv("BUILDKITE_BRANCH") == "main"
         and re.search(r"[/:]vllm-project/vllm(\.git)?$", repo)
         and os.getenv("AITER_NIGHTLY") != "1"
     )

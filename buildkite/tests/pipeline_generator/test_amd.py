@@ -92,6 +92,7 @@ def build_sh_layout(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BUILDKITE_REPO", "https://github.com/vllm-project/vllm.git")
     monkeypatch.setenv("BUILDKITE_PULL_REQUEST", "false")
+    monkeypatch.setenv("BUILDKITE_BRANCH", "main")
     monkeypatch.delenv("AITER_NIGHTLY", raising=False)
     return monkeypatch
 
@@ -103,6 +104,7 @@ def build_sh_layout(tmp_path, monkeypatch):
         ({"BUILDKITE_PULL_REQUEST": "42"}, "rocm/vllm-ci-pr"),
         ({"BUILDKITE_REPO": "git@github.com:someone/vllm.git"}, "rocm/vllm-ci-pr"),
         ({"AITER_NIGHTLY": "1"}, "rocm/vllm-ci-pr"),
+        ({"BUILDKITE_BRANCH": "releases/v0.99"}, "rocm/vllm-ci-pr"),
     ],
 )
 def test_build_sh_layout_build_steps_get_trusted_repo(build_sh_layout, env, expected):
