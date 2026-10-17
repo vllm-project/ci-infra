@@ -2,9 +2,7 @@
 
 A tool that reads a pull request's changed files and works out which CI jobs need to run. It derives that answer from the repository on every run, so there is nothing to keep in sync and nothing to go stale.
 
-Today it only prints. Nothing in CI calls it, so it can be reviewed before it decides anything.
-
-`README.md` covers running it. `ci_selector/decide.py` is the decision rule.
+The pipeline generator calls it on every pull request build and runs the jobs it names (section 7). `HOW_IT_WORKS.md` explains it for contributors, `README.md` covers running it, and `ci_selector/decide.py` is the decision rule.
 
 ## Terms
 
@@ -155,17 +153,15 @@ Inside csrc the kernel record decides per kernel where it can and per file where
 
 ## 7. Integration
 
-**None of this is wired up yet.** The tool prints a job list and nothing reads it: no Buildkite step and no workflow calls it, and turning it on is a separate piece of work. This section is the design for that, and the two gaps below are what it still has to clear.
+The pipeline generator calls the tool from its bootstrap step (`buildkite/pipeline_generator/selector_gate.py`). It runs `ci-select --emit-keys` from a shallow ci-infra checkout with the latest published records, and the keys it gets back decide which steps run. The generator walks each named step's `depends_on` chain for everything else: the tool names test steps only, and image builds and other prerequisites follow. Every step it does not name stays in the pipeline as deferred, so the build's **Run more jobs** input step can still add it.
 
-The generator reads `VLLM_CI_ONLY_STEP_KEYS`, an environment variable holding a list of step keys, and walks each named step's `depends_on` chain for everything else. The tool names test steps only; image builds and other prerequisites follow.
+Main, release branches, nightly and run-all builds, and builds that already name their steps through `VLLM_CI_ONLY_STEP_KEYS` are left to the generator's own rules. Each decision is uploaded as `.buildkite/ci_selector_decision.json`, with today's rules' answer beside it and, per step, why it ran.
 
-Emission is the one place where a bug makes CI run less rather than more. Three failure modes resolve to omitting the variable, and an omitted variable means the generator applies its own rules: when the answer is "run everything", when a selected step cannot be named, and when the key set is empty, since an empty list would mean "run nothing". The same holds a level up, where a crash or timeout leaves the variable unset.
+Emission is the one place where a bug makes CI run less rather than more. Three failure modes resolve to omitting the key list, and an omitted list means the generator applies its own rules: when the answer is "run everything", when a selected step cannot be named, and when the key set is empty, since an empty list would mean "run nothing". The same holds a level up: a crash, a timeout, a key the generator does not know, or a dependency it cannot resolve all leave today's rules in place, and the decision file says which. Optional steps the tool names are left optional, as today's rules leave them.
 
-Two gaps are open.
+One gap is open.
 
-**Emitted names are not verified against the generator.** The safeguard above only fires when the tool can produce no name at all. A name it produces but spells wrong passes. The generator then rejects the name and the whole upload fails. Both of the old causes are closed: the key derivation is now the generator's own imported function rather than a transcription, and since ci-infra #520 a pinned build accepts `amd-` mirror keys, which is the spelling the tool emits.
-
-**`VLLM_CI_ONLY_STEP_KEYS` reaches one pipeline only.** Everything above rests on setting that variable on a build, and it is set per build on one named pipeline. Some pull requests also trigger `amd-ci` or `intel-ci` through a label, and those are separate builds that never receive it, so they run unchanged and gain nothing. Handing them the same list would not work either: amd-ci renders a legacy template that reads no variable at all, and intel-ci runs a forked generator in which none of the emitted keys name a step. Neither pipeline has been scored, since crosscheck filters to the pull request pipeline, and neither has coverage rows.
+**The selection reaches one pipeline only.** The generator applies the keys to the one pipeline it is generating, `ci`. Some pull requests also trigger `amd-ci` or `intel-ci` through a label, and those are separate builds that never see them, so they run unchanged and gain nothing. Handing them the same list would not work either: amd-ci renders a legacy template that reads no key list at all, and intel-ci runs a forked generator in which none of the emitted keys name a step. Neither pipeline has been scored, since crosscheck filters to the pull request pipeline, and neither has coverage rows.
 
 ## 8. Limits
 
