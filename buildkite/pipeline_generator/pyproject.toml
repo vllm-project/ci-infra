@@ -29,10 +29,12 @@ py-modules = [
     "runtime_shard",
     "runtime_shard_plugin",
     "unblock_jobs",
+    "queue_fallbacks",
+    "queue_health",
 ]
 
 [tool.setuptools.packages.find]
-include = [".", "otel_helpers", "plugin", "utils_lib"]
+include = [".", "fallback_rules", "otel_helpers", "plugin", "utils_lib"]
 
 [tool.setuptools.package-data]
 otel_helpers = ["*.sh"]

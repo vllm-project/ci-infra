@@ -89,8 +89,8 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkey
     [
         ("mi300_4", AgentQueue.AMD_MI300_4, False, "4"),
         ("mi300_4", AgentQueue.AMD_MI300_4, True, "4"),
-        ("mi325_1", AgentQueue.AMD_MI325_1, False, "1"),
-        ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
+        ("mi355_1", AgentQueue.AMD_MI355_1, False, "1"),
+        ("mi355_1", AgentQueue.AMD_MI355_1, True, "1"),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX, False, "1"),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX, True, "1"),
     ],
@@ -231,7 +231,7 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
 @pytest.mark.parametrize(
     "device,queue",
     [
-        ("mi325_1", AgentQueue.AMD_MI325_1),
+        ("mi355_1", AgentQueue.AMD_MI355_1),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX),
     ],
 )
@@ -317,7 +317,7 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
 @pytest.mark.parametrize(
     "device,queue",
     [
-        ("mi325_1", AgentQueue.AMD_MI325_1),
+        ("mi355_1", AgentQueue.AMD_MI355_1),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX),
     ],
 )
@@ -510,7 +510,7 @@ def test_amd_mirror_enforces_its_own_timeout(
         timeout_in_minutes=40,
         mirror={
             "amd": {
-                "device": "mi325_1",
+                "device": "mi355_1",
                 "depends_on": ["image-build-amd"],
                 "timeout_in_minutes": mirror_timeout,
             }
@@ -556,7 +556,7 @@ def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
         timeout_in_minutes=40,
         mirror={
             "amd": {
-                "device": "mi325_1",
+                "device": "mi355_1",
                 "depends_on": ["image-build-amd"],
                 "timeout_in_minutes": 75,
             }
@@ -597,7 +597,7 @@ def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
         timeout_in_minutes=40,
         mirror={
             "amd": {
-                "device": "mi325_1",
+                "device": "mi355_1",
                 "depends_on": ["image-build-amd"],
             }
         },
@@ -687,7 +687,7 @@ def test_amd_mirror_parallelism_override(fake_global_config, amd_parallelism, ex
     """NVIDIA sharding must not multiply AMD mirrors: mirror.amd.parallelism
     overrides the inherited parent parallelism when set."""
     amd_config = {
-        "device": "mi325_1",
+        "device": "mi355_1",
         "depends_on": ["image-build-amd"],
         # pooling-shaped mirror: custom unsharded AMD command preserved
         "commands": ["pytest tests/pooling.py"],

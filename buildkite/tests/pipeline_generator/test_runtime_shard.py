@@ -415,7 +415,7 @@ def test_generator_shards_on_a_recording_build_too(
 
 
 def _mirror_step(**amd):
-    amd = {"device": "mi325_1", "dind": False, "automatic_shard": True, **amd}
+    amd = {"device": "mi355_1", "dind": False, "automatic_shard": True, **amd}
     return _step(automatic_shard=True, mirror={"amd": amd})
 
 
@@ -428,10 +428,10 @@ def _render_mirror(step):
 
 def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
     fake_global_config["run_all"] = True
-    plain = _render_mirror(_step(mirror={"amd": {"device": "mi325_1", "dind": False}}))
+    plain = _render_mirror(_step(mirror={"amd": {"device": "mi355_1", "dind": False}}))
     job = _render_mirror(_mirror_step())
     assert job.key == "amd-model-executor" and job.parallelism == 3
-    assert job.label == "AMD: Model Executor (mi325_1) shard %N/%t"
+    assert job.label == "AMD: Model Executor (mi355_1) shard %N/%t"
     assert job.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(job.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
@@ -448,7 +448,7 @@ def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
     # The CUDA step is planned separately, on its own queue.
     assert checkout.calls == [
         ("model-executor", AgentQueue.H200_35GB),
-        ("amd-model-executor", AgentQueue.AMD_MI325_1),
+        ("amd-model-executor", AgentQueue.AMD_MI355_1),
     ]
 
 
@@ -461,7 +461,7 @@ def test_generator_leaves_an_unflagged_or_dind_mirror_alone(
         _mirror_step(dind=True),
         _step(
             mirror={
-                "amd": {"device": "mi325_1", "dind": False, "automatic_shard": True}
+                "amd": {"device": "mi355_1", "dind": False, "automatic_shard": True}
             }
         ),
     ):
@@ -545,8 +545,8 @@ def test_fetch_timings_sends_the_queue(monkeypatch):
         raise OSError("down")
 
     monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
-    assert rs.fetch_timings("amd-k", AgentQueue.AMD_MI325_1) is None
-    assert "stepKey=amd-k" in urls[0] and "queue=amd_mi325_1" in urls[0]
+    assert rs.fetch_timings("amd-k", AgentQueue.AMD_MI355_1) is None
+    assert "stepKey=amd-k" in urls[0] and "queue=amd_mi355_1" in urls[0]
 
 
 def test_generator_shards_a_kubernetes_step_with_its_pod_spec(

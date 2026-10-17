@@ -20,6 +20,7 @@ from ...handwritten import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     DEFAULT_WORKING_DIR,
     IMAGE_BUILD_KEY_PREFIX,
+    MANUAL_ONLY_DEVICES,
 )
 
 
@@ -30,7 +31,6 @@ def derive_step_key(label: str) -> str:
     cannot disagree.
     """
     return _generate_step_key(label)
-
 
 
 OPTIONAL_ENV = "CI_SELECTOR_OPTIONAL"
@@ -48,6 +48,7 @@ def optional_mode() -> str:
             f"{OPTIONAL_ENV}={raw!r}, expected one of: {', '.join(OPTIONAL_MODES)}"
         )
     return raw
+
 
 @dataclass
 class PipelineConfig:
@@ -144,8 +145,11 @@ class Step:
 
     @property
     def ci_optional(self) -> bool:
-        """What CI does today: an optional step waits for a manual unblock.
-        The comparison and the leak scoring read this."""
+        """What CI does today: an optional step, or any step on a manual-only
+        device, waits for a manual unblock. The comparison and the leak scoring
+        read this."""
+        if self.device in MANUAL_ONLY_DEVICES:
+            return True
         return self.optional and not self.always_runs
 
     @property

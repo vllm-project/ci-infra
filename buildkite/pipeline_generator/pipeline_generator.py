@@ -24,6 +24,7 @@ from buildkite_step import (
 from constants import AgentQueue
 from recorder_switches import fnrec_enabled
 from global_config import get_global_config, init_global_config
+from queue_fallbacks import apply_queue_fallbacks
 from step import Step, group_steps, read_steps_from_job_dir
 import unblock_jobs
 
@@ -99,10 +100,13 @@ class PipelineGenerator:
             _annotate_best_effort(str(error), style="error")
             raise
         global_config["only_step_keys"] = selected_step_keys
+        steps, probes = apply_queue_fallbacks(steps, global_config)
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
-        buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
+        buildkite_group_steps = (
+            sorted(buildkite_group_steps, key=lambda x: x.group) + probes
+        )
         group_of_step = {
             step.key: group_step.group
             for group_step in buildkite_group_steps
