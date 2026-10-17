@@ -185,6 +185,9 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         depends_on=[],
         agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
+        # A failed gate blocks every test after it, so an infra failure
+        # before its check runs must retry, not fail the build.
+        retry=ensure_infra_failure_retry(None),
     )
     return BuildkiteGroupStep(group=PRECOMMIT_GROUP, steps=[precommit_step])
 
@@ -812,6 +815,7 @@ def _collect_step(
         soft_fail=True,
         # the wait, then downloading every job's recordings, which takes a while
         timeout_in_minutes=COLLECT_AFTER_MINUTES + 90,
+        retry=ensure_infra_failure_retry(None),
     )
 
 
