@@ -41,22 +41,25 @@ set -eo pipefail
 # retry in another hook never overwrites it. Recording must never fail or
 # stall the job: the agent retries the write for minutes when its API is
 # unreachable.
+# mark_retry <class> <attempts> <outcome>
 mark_retry() {
-  timeout 10 buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}:image-pull" "image-pull,$1,$2" || true
+  timeout 10 buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}:$1" "$1,$2,$3" || true
 }
 
-# retry_or_fail <description> <command> [args...]
+# retry_or_fail <class> <description> <command> [args...]
+# <class> names the call in its retry mark, so retries of different calls in
+# one job each keep their own count.
 retry_or_fail() {
-  local description=$1 attempt delay=2
-  shift
+  local class=$1 description=$2 attempt delay=2
+  shift 2
   for (( attempt = 1; ; attempt++ )); do
     if "$@"; then
-      (( attempt == 1 )) || mark_retry "$attempt" recovered
+      (( attempt == 1 )) || mark_retry "$class" "$attempt" recovered
       return 0
     fi
     if (( attempt >= 5 )); then
       echo "ERROR: $description failed after $attempt attempts (provider/infrastructure failure — exiting 255 to trigger the infra retry)" >&2
-      mark_retry "$attempt" exhausted
+      mark_retry "$class" "$attempt" exhausted
       exit 255
     fi
     echo "WARNING: $description failed (attempt $attempt/5); retrying in ${delay}s" >&2
@@ -89,8 +92,8 @@ ecr_cache_login() {
   aws --cli-connect-timeout 10 ecr get-login-password --region us-west-2 \
     | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-west-2.amazonaws.com
 }
-retry_or_fail "ECR public login" ecr_public_login
-retry_or_fail "ECR pull-through-cache login" ecr_cache_login
+retry_or_fail ecr-public-login "ECR public login" ecr_public_login
+retry_or_fail ecr-cache-login "ECR pull-through-cache login" ecr_cache_login
 
 # ── Pin this agent to one MIG slice ───────────────────────────────────────────
 # Agent names look like "<host>-<N>"; N selects the MIG device.
@@ -102,7 +105,7 @@ fi
 
 # Assigns $nvidia_smi_list in the current shell so retry_or_fail can re-run it.
 list_gpus() { nvidia_smi_list=$(nvidia-smi -L); }
-retry_or_fail "nvidia-smi -L" list_gpus
+retry_or_fail gpu-discovery "nvidia-smi -L" list_gpus
 mapfile -t UUIDS < <(grep -oP 'UUID: \KMIG-[^\)]+' <<< "$nvidia_smi_list")
 if (( AGENT_NUMBER < 1 || AGENT_NUMBER > ${#UUIDS[@]} )); then
   echo "ERROR: Agent number $AGENT_NUMBER exceeds available MIG devices (${#UUIDS[@]})"
@@ -149,7 +152,7 @@ if [[ -n "$IMAGE" ]]; then
       echo "Image $IMAGE is now available."
     else
       echo "Pulling image $IMAGE..."
-      retry_or_fail "docker pull $IMAGE" docker pull "$IMAGE"
+      retry_or_fail image-pull "docker pull $IMAGE" docker pull "$IMAGE"
       touch "$DONE_FILE"
       echo "Image pull complete."
     fi
