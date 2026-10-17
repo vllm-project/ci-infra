@@ -222,3 +222,24 @@ def test_steps_the_selector_skips_are_offered_in_run_more_jobs(
     )
     assert [e["step"]["key"] for e in deferred["steps"]] == ["test-a"]
     assert "key: test-b" in pipeline and "key: test-a" not in pipeline
+
+
+def test_todays_keys_include_the_amd_mirrors_that_would_run(pr_config):
+    """legacy_keys is the baseline the selector is compared with, so it has to
+    count the AMD mirrors today's rules run, as the selector's keys do."""
+    steps = _steps() + [
+        Step(
+            label="M",
+            key="test-m",
+            commands=["m"],
+            depends_on=["image-build"],
+            source_file_dependencies=["vllm/"],
+            mirror={"amd": {"device": "mi300_1", "depends_on": ["image-build-amd"]}},
+        ),
+    ]
+    assert pg._legacy_keys(steps, ["vllm/foo.py"]) == [
+        "image-build",
+        "test-a",
+        "test-m",
+        "amd-test-m",
+    ]

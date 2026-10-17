@@ -12,7 +12,9 @@ from buildkite_step import (
     COLLECT_GROUP,
     PRECOMMIT_GROUP,
     BuildkiteGroupStep,
+    _amd_mirror_should_run,
     _generate_step_key,
+    _get_amd_mirror_effective_step,
     _step_should_run,
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
@@ -242,6 +244,21 @@ def write_deferred_steps(
     return unblock_jobs.more_jobs_group(entries, 1, artifact_dir, source_job, queue)
 
 
+def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
+    """The keys today's rules run, AMD mirrors included, decided the way
+    convert_group_step_to_buildkite_step decides them."""
+    keys = []
+    for step in steps:
+        if _step_should_run(step, diff):
+            keys.append(step.key)
+        amd = (step.mirror or {}).get("amd")
+        if amd and _amd_mirror_should_run(
+            _step_should_run(_get_amd_mirror_effective_step(step, amd), diff), diff
+        ):
+            keys.append(f"amd-{step.key}")
+    return keys
+
+
 def _selector_decision(steps: List[Step]) -> Optional[dict]:
     """Ask the test selector for this build's steps (selector_gate.py).
 
@@ -261,7 +278,7 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
             if not step.key:
                 step.key = _generate_step_key(step.label)
         diff = global_config["list_file_diff"]
-        legacy = [s.key for s in steps if _step_should_run(s, diff)]
+        legacy = _legacy_keys(steps, diff)
         record = selector_gate.decide(global_config, legacy)
         keys = record["selector_keys"]
         if keys:
