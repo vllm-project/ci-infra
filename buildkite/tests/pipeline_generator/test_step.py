@@ -1188,3 +1188,17 @@ def test_docker_step_queue_routing(monkeypatch, key, label, branch, queue):
     monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
     step = Step(label=label, key=key, commands=["true"])
     assert buildkite_step.get_agent_queue(step) == queue
+
+
+def test_the_precommit_gate_retries_infra_failures():
+    # A checkout that times out on the Git mirror lock would otherwise fail
+    # the gate and block every test that depends on it.
+    group = buildkite_step.create_precommit_group_step("vllm-project/vllm", "abc123")
+    (gate,) = group.steps
+    assert gate.retry == {
+        "automatic": [
+            {"exit_status": -1, "limit": 1},
+            {"exit_status": 255, "limit": 1},
+            {"exit_status": 94, "limit": 1},
+        ],
+    }
