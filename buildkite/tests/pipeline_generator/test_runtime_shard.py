@@ -556,7 +556,9 @@ def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     [plain] = _render(_step(device="l4"))
     [step] = _render(_step(device="l4", automatic_shard=True))
     assert "kubernetes" in step.plugins[0] and step.plugins == plain.plugins
-    assert step.retry == plain.retry == buildkite_step.K8S_RETRY
+    assert step.retry == plain.retry == buildkite_step.ensure_infra_failure_retry(
+        buildkite_step.K8S_RETRY
+    )
     assert step.parallelism == 3 and len(step.commands[2:]) == len(plain.commands)
     # The same commands, the one-file command run only by the shard with it.
     changed = [new for new, old in zip(step.commands[2:], plain.commands) if new != old]
