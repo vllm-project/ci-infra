@@ -1546,6 +1546,8 @@ def _create_amd_step(
     )
     if display_label:
         options["label"] = display_label
+    # AMD's own retries plus the repo-wide infra ones every other step gets.
+    options["retry"] = ensure_infra_failure_retry(options.get("retry"))
     if extra_artifact_paths:
         options["artifact_paths"] = _merge_artifact_paths(
             options.get("artifact_paths"), extra_artifact_paths
