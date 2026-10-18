@@ -552,8 +552,7 @@ def test_fetch_timings_sends_the_queue(monkeypatch):
 def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     fake_global_config, checkout
 ):
-    # L4 steps only run when picked, so pick it.
-    fake_global_config["only_step_keys"] = frozenset({"model-executor"})
+    fake_global_config["run_all"] = True
     [plain] = _render(_step(device="l4"))
     [step] = _render(_step(device="l4", automatic_shard=True))
     assert "kubernetes" in step.plugins[0] and step.plugins == plain.plugins

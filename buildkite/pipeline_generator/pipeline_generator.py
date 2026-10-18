@@ -12,7 +12,10 @@ from buildkite_step import (
     COLLECT_GROUP,
     PRECOMMIT_GROUP,
     BuildkiteGroupStep,
+    _amd_mirror_should_run,
     _generate_step_key,
+    _get_amd_mirror_effective_step,
+    _step_should_run,
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
@@ -23,6 +26,7 @@ from buildkite_step import (
 )
 from constants import AgentQueue
 from recorder_switches import fnrec_enabled
+import selector_gate
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
 import unblock_jobs
@@ -90,15 +94,49 @@ class PipelineGenerator:
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+        record = _selector_decision(steps)
+        scheduled = None
         try:
+            if record is not None and record["applied"]:
+                # Validate the selector's keys and add their prerequisites.
+                # Every step stays in the pipeline; the rest are deferred
+                # (_step_should_run), so "Run more jobs" still offers them.
+                _, scheduled = select_steps_and_dependencies(
+                    steps,
+                    global_config["selector_step_keys"],
+                    torch_nightly=torch_nightly,
+                )
+                global_config["selector_step_keys"] = scheduled
             steps, selected_step_keys = select_steps_and_dependencies(
                 steps, global_config["only_step_keys"], torch_nightly=torch_nightly
             )
         except ValueError as error:
-            # Surface the reason on the build page, not only in the bootstrap log.
-            _annotate_best_effort(str(error), style="error")
-            raise
+            if not (record and record["applied"]):
+                # Surface the reason on the build page, not only in the bootstrap log.
+                _annotate_best_effort(str(error), style="error")
+                raise
+            # The selector's keys, never the build's own: back to today's rules.
+            record["applied"] = False
+            record["fallback"] = f"generator rejected the selector's keys: {error}"
+            global_config["selector_step_keys"] = None
+            scheduled = None
+            steps, selected_step_keys = select_steps_and_dependencies(
+                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+            )
         global_config["only_step_keys"] = selected_step_keys
+        if record is not None:
+            if scheduled is not None:
+                # The selector's choice plus the AMD steps today's rules run.
+                amd = selector_gate.amd_keys(steps)
+                record["scheduled_keys"] = sorted(
+                    set(scheduled) | (set(record["legacy_keys"]) & amd)
+                )
+            else:
+                record["scheduled_keys"] = record["legacy_keys"]
+            selector_gate.write_and_upload(
+                record, os.path.dirname(self.output_file_path)
+            )
+            selector_gate.annotate(record)
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
@@ -209,6 +247,73 @@ def write_deferred_steps(
             check=True,
         )
     return unblock_jobs.more_jobs_group(entries, 1, artifact_dir, source_job, queue)
+
+
+def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
+    """The keys today's rules run, AMD mirrors included, decided the way
+    convert_group_step_to_buildkite_step decides them."""
+    keys = []
+    for step in steps:
+        if _step_should_run(step, diff):
+            keys.append(step.key)
+        amd = (step.mirror or {}).get("amd")
+        if amd and _amd_mirror_should_run(
+            _step_should_run(_get_amd_mirror_effective_step(step, amd), diff), diff
+        ):
+            keys.append(f"amd-{step.key}")
+    return keys
+
+
+def _selector_decision(steps: List[Step]) -> Optional[dict]:
+    """Ask the test selector for this build's steps (selector_gate.py).
+
+    In "on" mode a usable answer replaces the source_file_dependencies rules
+    through `selector_step_keys`, which `generate` expands with each step's
+    prerequisites. Unlike `only_step_keys` it removes no step from the
+    pipeline: the ones it leaves out are deferred into "Run more jobs".
+    AMD steps, native and mirrored, are not the selector's: they keep the
+    source_file_dependencies rules.
+    Returns the decision record, or None when the gate is off. Never raises:
+    a broken gate leaves today's rules in place.
+    """
+    gate = selector_gate.mode()
+    if not gate:
+        return None
+    global_config = get_global_config()
+    try:
+        for step in steps:
+            if not step.key:
+                step.key = _generate_step_key(step.label)
+        diff = global_config["list_file_diff"]
+        legacy = _legacy_keys(steps, diff)
+        record = selector_gate.decide(global_config, legacy)
+        keys = record["selector_keys"]
+        if keys:
+            # A PR build never runs optional (nightly / manual) steps today, and
+            # the selector does not get to start doing so: they stay optional.
+            optional = selector_gate.optional_keys(steps)
+            record["selector_optional_dropped"] = sorted(set(keys) & optional)
+            keys = sorted(set(keys) - optional)
+            # AMD steps keep today's rules; the selector decides the rest.
+            amd = selector_gate.amd_keys(steps)
+            record["selector_amd_left_to_todays_rules"] = sorted(set(keys) & amd)
+            keys = sorted(set(keys) - amd)
+            record["selector_keys"] = keys
+            unknown = sorted(set(keys) - selector_gate.known_keys(steps))
+            if unknown:
+                record["fallback"] = "selector named unknown step key(s): " + ", ".join(
+                    unknown[:20]
+                )
+            elif gate == "on":
+                global_config["selector_step_keys"] = frozenset(keys)
+                record["applied"] = True
+        return record
+    except Exception as error:  # noqa: BLE001 - the gate never breaks a build
+        print(f"ci-selector gate failed, keeping today's rules: {error}")
+        global_config["selector_step_keys"] = None
+        record = selector_gate.base_record(global_config, gate)
+        record["fallback"] = f"gate error: {type(error).__name__}: {error}"[:2000]
+        return record
 
 
 def select_steps_and_dependencies(
