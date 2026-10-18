@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
 import math
 import os
+import time
 import re
 import shlex
 
@@ -705,6 +706,34 @@ def _carries(step: "BuildkiteCommandStep", recorder: str) -> bool:
     return any(path in str(v) for v in (step.env or {}).values())
 
 
+# A collect step folds what has been uploaded once every recording step has
+# finished, or this long after the pipeline was generated, whichever is first.
+# A job still running then is left out of the table, which reads its shard as
+# missing. The full runs finish their recording jobs well inside it; the long
+# tails are blocked or hung jobs.
+COLLECT_AFTER_MINUTES = 180
+
+# Polls each recording step's state through the agent until all have finished
+# or the deadline passes. `$$`: Buildkite would interpolate a bare `$` at
+# upload time, in the bootstrap's environment. An unreadable state (an older
+# agent, a step that is not there) reads as unfinished, so the step waits to
+# the deadline rather than collecting early.
+COLLECT_WAIT = (
+    'deadline="$$CI_SELECTOR_COLLECT_DEADLINE"; '
+    'while [ "$$(date +%s)" -lt "$$deadline" ]; do '
+    'pending=""; '
+    "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
+    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+    'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
+    "done; "
+    '[ -z "$$pending" ] && { echo "every recording step has finished"; break; }; '
+    'echo "waiting on $$pending ($${s:-state unknown}); collecting at the latest at '
+    '$$(date -u -d "@$$deadline" +%H:%MZ)"; '
+    "sleep 300; "
+    "done"
+)
+
+
 def _collect_step(
     groups: "List[BuildkiteGroupStep]",
     recorder: str,
@@ -723,18 +752,28 @@ def _collect_step(
     # cannot be retried; the collect scripts can fold the build from another.
     armed = [s for s in runnable if _carries(s, recorder)]
     runnable_keys = {s.key for s in runnable}
-    depends_on = [s.key for s in armed]
+    # Waits on what the recording steps wait on (the image build, which
+    # uploads the kernel symbol map), not on the recording steps themselves:
+    # one of those cancelled or timed out ended the step waiting_failed, and
+    # the full runs of 2026-10-16 to 18 published nothing because of it. The
+    # command waits for them instead (COLLECT_WAIT), up to a deadline.
+    depends_on = []
     for dep in (d for s in armed for d in (s.depends_on or [])):
         if dep in runnable_keys and dep not in depends_on:
             depends_on.append(dep)
-    env = None
+    env = {
+        "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(s.key for s in armed),
+        "CI_SELECTOR_COLLECT_DEADLINE": str(
+            int(time.time()) + COLLECT_AFTER_MINUTES * 60
+        ),
+    }
     if count_armed:
         # The fold needs a denominator: its job list holds only what uploaded,
         # so without one a build that lost its recordings looks complete.
         # Taken off the same list that decides what this step waits for, so it
         # can never count a job that never starts. A step with parallelism N is
         # one step and N jobs, and a lost shard is the case this exists for.
-        env = {"FNREC_EXPECTED_JOBS": str(sum(s.parallelism or 1 for s in armed))}
+        env["FNREC_EXPECTED_JOBS"] = str(sum(s.parallelism or 1 for s in armed))
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
@@ -758,13 +797,15 @@ def _collect_step(
         env=env,
         agents={"queue": queue.value},
         commands=[
+            COLLECT_WAIT,
             f'curl -sSfL --retry 3 --max-time 60 -o /tmp/{recorder}-collect.sh "{url}"'
-            + f" && bash /tmp/{recorder}-collect.sh"
+            + f" && bash /tmp/{recorder}-collect.sh",
         ],
         depends_on=depends_on,
         allow_dependency_failure=True,
         soft_fail=True,
-        timeout_in_minutes=90,  # downloading every job's recordings takes a while
+        # the wait, then downloading every job's recordings, which takes a while
+        timeout_in_minutes=COLLECT_AFTER_MINUTES + 90,
     )
 
 

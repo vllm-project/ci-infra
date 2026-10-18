@@ -477,14 +477,15 @@ def test_collect_group_folds_the_build_from_the_generating_branch(
     (step,) = collect.steps
     assert collect.group == buildkite_step.COLLECT_GROUP
     assert step.key == buildkite_step.FNREC_COLLECT_KEY
-    assert set(step.depends_on) == {"a", "b"}
+    assert set(step.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()) == {"a", "b"}
+    assert not set(step.depends_on) & {"a", "b"}, "waited for in the command"
     assert step.allow_dependency_failure is True, (
         "a failed job's recording is still evidence"
     )
     assert step.soft_fail is True, "publishing must not turn the build red"
     assert (
         "ci-infra/my-branch/buildkite/ci_selector/recorders/fnrec/collect.sh"
-        in step.commands[0]
+        in step.commands[-1]
     )
 
 
@@ -501,7 +502,10 @@ def test_collect_group_waits_only_on_steps_that_record(monkeypatch, fake_global_
     keys = [s.key for g in groups for s in g.steps if hasattr(s, "commands")]
     assert {"amd-mirrored", "image"} <= set(keys), f"premise: {keys}"
     step = buildkite_step.fnrec_collect_group(groups).steps[0]
-    assert set(step.depends_on) == {"mirrored", "amd-mirrored"}
+    assert set(step.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()) == {
+        "mirrored",
+        "amd-mirrored",
+    }
 
 
 def test_the_two_collect_steps_share_one_group(monkeypatch, fake_global_config):
@@ -524,7 +528,7 @@ def test_the_collect_url_names_a_file_that_exists(monkeypatch, fake_global_confi
     """The step curls this at run time; a wrong path is a 404 in CI."""
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
     groups = _rendered_groups(_step(key="a", group="g1"))
-    command = buildkite_step.fnrec_collect_group(groups).steps[0].commands[0]
+    command = buildkite_step.fnrec_collect_group(groups).steps[0].commands[-1]
     name = command.split("recorders/fnrec/")[1].split('"')[0]
     assert (PAYLOAD / name).is_file(), f"{name} is not in {PAYLOAD}"
 
