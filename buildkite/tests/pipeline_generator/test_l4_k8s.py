@@ -37,8 +37,13 @@ L4_RETRY = buildkite_step.ensure_infra_failure_retry(buildkite_step.K8S_RETRY)
 
 
 def test_default_l4_steps_also_retry_the_infra_exit_codes():
-    statuses = {c.get("exit_status") for c in L4_RETRY["automatic"]}
+    statuses = {
+        c.get("exit_status")
+        for c in L4_RETRY["automatic"]
+        if not isinstance(c.get("exit_status"), list)
+    }
     assert {-1, 1, 128, 255, 94} <= statuses
+    assert {"exit_status": [201, 202, 203, 204, 205], "limit": 1} in L4_RETRY["automatic"]
     assert L4_RETRY["automatic"][-2:] == [
         {"signal_reason": "agent_stop", "limit": 1},
         {"signal_reason": "agent_refused", "limit": 1},
@@ -168,6 +173,7 @@ def test_non_l4_steps_keep_existing_routing(device, num_devices, queue):
             buildkite_step.EXIT_STATUS_NEGATIVE_ONE_RETRY,
             buildkite_step.EXIT_STATUS_255_RETRY,
             buildkite_step.EXIT_STATUS_94_RETRY,
+            buildkite_step.EXIT_STATUS_HOOK_RETRY,
         ]
     }
     if device in ("h100", "a100"):
