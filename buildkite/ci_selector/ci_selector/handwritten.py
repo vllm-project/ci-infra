@@ -26,7 +26,6 @@ from __future__ import annotations
 # The pipeline generator, a sibling package in this repo. It publishes flat
 # top-level modules, so these imports are unqualified.
 import amd as _amd
-import buildkite_step as _buildkite_step
 from amd import AMD_ARTIFACT_STEP
 from global_config import ONLY_STEP_KEYS_ENV_VAR
 
@@ -442,11 +441,6 @@ MIRROR_DEFAULT_DEPENDS_ON = (AMD_ARTIFACT_STEP,)
 # keep importing every one of these facts from the same place.
 AMD_ALWAYS_RUN_STEP_KEYS = _amd.AMD_ALWAYS_RUN_STEP_KEYS
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = _amd.AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
-
-# Steps on these devices never run on their own, not even the image builds;
-# they are only offered in the "Run more jobs" input step. Taken from the
-# generator's buildkite_step.py like the two above.
-MANUAL_ONLY_DEVICES = _buildkite_step.MANUAL_ONLY_DEVICES
 
 # Step fields we model. Anything else lands in Step.extra, fails a drift test,
 # and is force-selected at run time, so a new generator feature cannot pass

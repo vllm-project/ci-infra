@@ -333,7 +333,6 @@ def test_our_replica_behaves_like_the_generators_own_rule():
         AMD_ALWAYS_RUN_STEP_KEYS,
         AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
         IMAGE_BUILD_KEY_PREFIX,
-        MANUAL_ONLY_DEVICES,
     )
     from ci_selector.validate.generator_replica import step_should_run
 
@@ -344,7 +343,6 @@ def test_our_replica_behaves_like_the_generators_own_rule():
         "Step": SimpleNamespace,
         "get_global_config": lambda: config,
         "AMD_ALWAYS_RUN_STEP_KEYS": AMD_ALWAYS_RUN_STEP_KEYS,
-        "MANUAL_ONLY_DEVICES": MANUAL_ONLY_DEVICES,
         "AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES": list(
             AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
         ),
@@ -359,7 +357,7 @@ def test_our_replica_behaves_like_the_generators_own_rule():
 
     amd_script = AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES[0]
     keys = [None, "lora", "image-build", "image-build-amd", *AMD_ALWAYS_RUN_STEP_KEYS]
-    devices = [None, "h100", "mi300_1", "cpu-small", *sorted(MANUAL_ONLY_DEVICES)]
+    devices = [None, "h100", "mi300_1", "cpu-small"]
     diffs = [[], ["vllm/x.py"], ["tests/t.py"], [amd_script], ["docs/a.md"]]
     checked = 0
     for key, device, dind, optional, deps, diff, run_all in itertools.product(
