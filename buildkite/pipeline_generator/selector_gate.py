@@ -3,13 +3,15 @@
 On by default. `VLLM_CI_SELECTOR` overrides it for one build:
 
   on      (the default) the selector's step keys replace the
-          source_file_dependencies rules
+          source_file_dependencies rules, for every step but AMD ones
+          (native and `amd-` mirrors), which keep those rules
   shadow  the selector runs and its decision is recorded; nothing changes
   off     the selector does not run; today's rules, and no record
 
-Only PR and branch builds are selected. Main, release-branch, nightly, run-all and docs-only builds, and
-builds that already name their steps (`VLLM_CI_ONLY_STEP_KEYS`), keep today's
-rules. Any failure keeps them too: the selector cannot be fetched or run, it
+PR, branch and main builds are selected; a main build diffs against its
+parent commit, as today's rules do there. Release-branch, nightly, run-all
+(the scheduled full CI runs) and docs-only builds, and builds that already
+name their steps (`VLLM_CI_ONLY_STEP_KEYS`), keep today's rules. Any failure keeps them too: the selector cannot be fetched or run, it
 times out, it declines to name steps (its own fail-open), or it names a step
 this generator does not know. The selector never makes a build fail.
 
@@ -53,13 +55,17 @@ def mode() -> str:
     return value if value in ("on", "shadow") else "on"
 
 
-def skip_reason(global_config: Dict[str, Any]) -> Optional[str]:
-    """Why this build keeps today's rules without asking the selector."""
+def skip_reason(
+    global_config: Dict[str, Any], base: Optional[str] = None
+) -> Optional[str]:
+    """Why this build keeps today's rules without asking the selector.
+    `base` is the build's diff_base, when the caller already has it."""
     # A branch build diffs against its merge base with main, as a PR build
-    # does, so it is selected the same way. Main and release branches are not.
+    # does; a main build against its parent commit. Release branches are not
+    # selected.
     branch = global_config.get("branch") or ""
-    if not branch or branch == "main":
-        return "main branch build"
+    if not branch:
+        return "no branch"
     if branch.startswith("releases/"):
         return "release branch build"
     if global_config.get("nightly") == "1":
@@ -68,9 +74,31 @@ def skip_reason(global_config: Dict[str, Any]) -> Optional[str]:
         return "run-all build (label or run_all_patterns)"
     if global_config.get("only_step_keys") is not None:
         return "steps named explicitly by VLLM_CI_ONLY_STEP_KEYS"
-    if not global_config.get("merge_base_commit") or not global_config.get("commit"):
-        return "no merge base or commit to diff"
+    if not (base or diff_base(global_config)) or not global_config.get("commit"):
+        return "no base or commit to diff"
     return None
+
+
+def diff_base(global_config: Dict[str, Any]) -> Optional[str]:
+    """The commit this build's diff starts from. On main the merge base is the
+    build's own commit, so it is the parent instead, which is what the
+    generator's own list_file_diff uses there (HEAD~1)."""
+    if global_config.get("branch") != "main":
+        return global_config.get("merge_base_commit")
+    commit = global_config.get("commit")
+    if not commit:
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", f"{commit}^"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
 
 
 def base_record(global_config: Dict[str, Any], gate_mode: str) -> Dict[str, Any]:
@@ -82,7 +110,7 @@ def base_record(global_config: Dict[str, Any], gate_mode: str) -> Dict[str, Any]
         "pipeline": global_config.get("name"),
         "pull_request": global_config.get("pull_request"),
         "branch": global_config.get("branch"),
-        "base": global_config.get("merge_base_commit"),
+        "base": diff_base(global_config),
         "head": global_config.get("commit"),
         "ci_infra_branch": os.getenv("VLLM_CI_BRANCH") or "main",
         "changed_files": list(global_config.get("list_file_diff") or []),
@@ -109,7 +137,7 @@ def decide(
     gate_mode = mode()
     record = base_record(global_config, gate_mode)
     record["legacy_keys"] = sorted(set(legacy_keys))
-    why = skip_reason(global_config)
+    why = skip_reason(global_config, record["base"])
     if why:
         record["skipped"] = why
         return record
@@ -118,7 +146,7 @@ def decide(
     try:
         result = run_selector(
             repo=os.getcwd(),
-            base=global_config["merge_base_commit"],
+            base=record["base"],
             head=global_config["commit"],
             pipeline=global_config["name"],
         )
@@ -317,6 +345,22 @@ def known_keys(steps: Iterable[Any]) -> FrozenSet[str]:
             keys.add(step.key)
             if (step.mirror or {}).get("amd"):
                 keys.add(f"amd-{step.key}")
+    return frozenset(keys)
+
+
+def amd_keys(steps: Iterable[Any]) -> FrozenSet[str]:
+    """Keys of AMD steps: native ones and the `amd-` mirrors. These keep the
+    source_file_dependencies rules; the selector decides the rest."""
+    from amd import is_amd_device
+
+    keys = set()
+    for step in steps:
+        if not step.key:
+            continue
+        if is_amd_device(step.device):
+            keys.add(step.key)
+        if (step.mirror or {}).get("amd"):
+            keys.add(f"amd-{step.key}")
     return frozenset(keys)
 
 

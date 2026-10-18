@@ -125,9 +125,14 @@ class PipelineGenerator:
             )
         global_config["only_step_keys"] = selected_step_keys
         if record is not None:
-            record["scheduled_keys"] = (
-                sorted(scheduled) if scheduled is not None else record["legacy_keys"]
-            )
+            if scheduled is not None:
+                # The selector's choice plus the AMD steps today's rules run.
+                amd = selector_gate.amd_keys(steps)
+                record["scheduled_keys"] = sorted(
+                    set(scheduled) | (set(record["legacy_keys"]) & amd)
+                )
+            else:
+                record["scheduled_keys"] = record["legacy_keys"]
             selector_gate.write_and_upload(
                 record, os.path.dirname(self.output_file_path)
             )
@@ -266,6 +271,8 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
     through `selector_step_keys`, which `generate` expands with each step's
     prerequisites. Unlike `only_step_keys` it removes no step from the
     pipeline: the ones it leaves out are deferred into "Run more jobs".
+    AMD steps, native and mirrored, are not the selector's: they keep the
+    source_file_dependencies rules.
     Returns the decision record, or None when the gate is off. Never raises:
     a broken gate leaves today's rules in place.
     """
@@ -287,6 +294,10 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
             optional = selector_gate.optional_keys(steps)
             record["selector_optional_dropped"] = sorted(set(keys) & optional)
             keys = sorted(set(keys) - optional)
+            # AMD steps keep today's rules; the selector decides the rest.
+            amd = selector_gate.amd_keys(steps)
+            record["selector_amd_left_to_todays_rules"] = sorted(set(keys) & amd)
+            keys = sorted(set(keys) - amd)
             record["selector_keys"] = keys
             unknown = sorted(set(keys) - selector_gate.known_keys(steps))
             if unknown:

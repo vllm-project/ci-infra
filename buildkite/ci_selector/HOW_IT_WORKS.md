@@ -35,7 +35,7 @@ A few examples of how that plays out:
 - Every job it did not pick is still listed under **Run more jobs**, near the top of the build. Open it, tick the jobs you want and submit; they run on the same build, with anything they depend on. Use it whenever you want extra coverage, no need to ask anyone.
 - The **`ready-run-all-tests`** label runs everything, as before.
 
-Builds on `main`, release branches and the nightly runs are not affected: they run everything.
+AMD jobs are not picked by the selector for now: they run on the same `source_file_dependencies` rules as before. Each merge to `main` is selected the same way, against the commit before it. The scheduled full CI runs on `main` and release branches are not affected: they run everything.
 
 ## If it skipped something it should not have
 
@@ -50,7 +50,7 @@ The selector steps aside, and the old rules apply, whenever:
 
 - it fails, times out, or names a job the pipeline does not have;
 - the build already names its jobs (`VLLM_CI_ONLY_STEP_KEYS`, used by retry builds);
-- the build is on `main`, a release branch, or the nightly.
+- the build is a scheduled full CI run or on a release branch.
 
 It never makes a build fail.
 

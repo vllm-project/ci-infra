@@ -3,6 +3,7 @@ what it records, and that it never makes a build fail."""
 
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -62,7 +63,6 @@ def test_a_pr_build_records_the_selectors_keys():
 @pytest.mark.parametrize(
     "change, why",
     [
-        ({"branch": "main"}, "main branch"),
         ({"branch": "releases/v0.20"}, "release branch"),
         ({"nightly": "1"}, "nightly"),
         ({"run_all": True}, "run-all"),
@@ -104,6 +104,7 @@ def test_the_record_is_written_as_json(tmp_path, monkeypatch):
 
 # ---- through the generator -------------------------------------------------
 
+import buildkite_step  # noqa: E402
 import pipeline_generator as pg  # noqa: E402
 import unblock_jobs  # noqa: E402
 from step import Step  # noqa: E402
@@ -243,3 +244,91 @@ def test_todays_keys_include_the_amd_mirrors_that_would_run(pr_config):
         "test-m",
         "amd-test-m",
     ]
+
+
+def _steps_with_mirrors():
+    return _steps() + [
+        Step(
+            label="Mirrored",
+            key="test-m",
+            commands=["m"],
+            depends_on=["image-build"],
+            source_file_dependencies=["vllm/"],
+            mirror={"amd": {"device": "mi300_1", "depends_on": ["image-build-amd"]}},
+        ),
+        Step(
+            label="Quiet",
+            key="test-q",
+            commands=["q"],
+            depends_on=["image-build"],
+            source_file_dependencies=["tests/q/"],
+            mirror={"amd": {"device": "mi300_1", "depends_on": ["image-build-amd"]}},
+        ),
+        Step(
+            label="Native AMD",
+            key="native-amd",
+            device="mi355_1",
+            commands=["n"],
+            source_file_dependencies=["vllm/"],
+        ),
+        Step(label="Image AMD", key="image-build-amd", commands=["build"]),
+    ]
+
+
+def test_amd_steps_stay_on_todays_rules(pr_config, monkeypatch):
+    """The selector decides NVIDIA steps only. An AMD step today's rules run
+    still runs although the selector did not name it; one the selector named
+    but today's rules do not run stays deferred."""
+    monkeypatch.setattr(
+        selector_gate, "run_ci_select", _emission(["test-b", "amd-test-q"])
+    )
+    steps = _steps_with_mirrors()
+    record = pg._selector_decision(steps)
+    assert record["applied"] is True
+    assert record["selector_keys"] == ["test-b"]
+    assert record["selector_amd_left_to_todays_rules"] == ["amd-test-q"]
+
+    def runs(step, amd=None):
+        if amd is not None:
+            step = buildkite_step._get_amd_mirror_effective_step(step, amd)
+        return buildkite_step._step_should_run(step, pr_config["list_file_diff"])
+
+    by_key = {s.key: s for s in steps}
+    assert runs(by_key["test-b"]) and not runs(by_key["test-a"]), (
+        "NVIDIA: the selector's"
+    )
+    assert runs(by_key["test-m"], by_key["test-m"].mirror["amd"]), (
+        "vllm/ matched its mirror"
+    )
+    assert not runs(by_key["test-q"], by_key["test-q"].mirror["amd"]), (
+        "today's rules say no"
+    )
+    assert runs(by_key["native-amd"]), "native AMD: today's rules"
+
+
+def test_a_main_build_is_selected_against_its_parent(monkeypatch):
+    """Main builds use the selector too, diffing against the parent commit,
+    as today's rules do there; the scheduled full runs (NIGHTLY/RUN_ALL)
+    still run everything."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="p" * 40 + "\n", stderr="")
+
+    monkeypatch.setattr(selector_gate.subprocess, "run", fake_run)
+    main = dict(PR, branch="main", pull_request="false")
+    seen = {}
+
+    def emission(**kw):
+        seen.update(kw)
+        return _emission(["y"])(**kw)
+
+    record = selector_gate.decide(main, ["x", "y"], emission)
+    assert record["skipped"] is None and record["selector_keys"] == ["y"]
+    assert record["base"] == "p" * 40 and seen["base"] == "p" * 40
+    assert calls == [["git", "rev-parse", f"{main['commit']}^"]]
+    full_run = selector_gate.decide(
+        dict(main, nightly="1", run_all=True), ["x"], emission
+    )
+    assert full_run["skipped"].startswith("nightly")
