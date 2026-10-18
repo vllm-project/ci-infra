@@ -44,8 +44,8 @@ check short-sha owner:feature 002c42b false unset ''
 check missing-commit owner:feature '' false unset ''
 check invalid-sha owner:feature zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz false unset ''
 
-# When the agent secret store is unreachable, the hook must exit 255 so the
-# generated steps' automatic exit_status 255 retry fires instead of failing
+# When the agent secret store is unreachable, the hook must exit 201 so the
+# generated steps' automatic hook-failure retry fires instead of failing
 # the build.
 export BUILDKITE_SECRET_FETCH_DELAY=0
 marks=$(mktemp)
@@ -63,7 +63,7 @@ marks=$(mktemp)
     unset BUILDKITE_PULL_REQUEST BUILDKITE_REFSPEC GIT_CONFIG_COUNT
     source "$hook" 2>/dev/null
 ) || status=$?
-[[ "${status:-0}" -eq 255 ]] || { echo "FAIL secret-store-down: expected 255, got ${status:-0}"; exit 1; }
+[[ "${status:-0}" -eq 201 ]] || { echo "FAIL secret-store-down: expected 201, got ${status:-0}"; exit 1; }
 [[ "$(<"$marks")" == 'infra-retry:job-1:github-token=github-token,5,exhausted' ]] ||
     { echo "FAIL secret-store-down: mark was '$(<"$marks")'"; exit 1; }
 printf 'PASS %s\n' secret-store-down
