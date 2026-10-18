@@ -1345,7 +1345,10 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     # The test selector's choice (selector_gate.py), prerequisites included.
     # Unlike only_step_keys it removes nothing: the rest are deferred, so
     # "Run more jobs" still offers them.
-    if global_config.get("selector_step_keys") is not None:
+    # AMD steps, native or mirrored, stay on the rules below.
+    if global_config.get("selector_step_keys") is not None and not is_amd_device(
+        step.device
+    ):
         return step.key in global_config["selector_step_keys"]
     if step.key and (
         step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS

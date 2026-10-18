@@ -3,7 +3,8 @@
 On by default. `VLLM_CI_SELECTOR` overrides it for one build:
 
   on      (the default) the selector's step keys replace the
-          source_file_dependencies rules
+          source_file_dependencies rules, for every step but AMD ones
+          (native and `amd-` mirrors), which keep those rules
   shadow  the selector runs and its decision is recorded; nothing changes
   off     the selector does not run; today's rules, and no record
 
@@ -317,6 +318,22 @@ def known_keys(steps: Iterable[Any]) -> FrozenSet[str]:
             keys.add(step.key)
             if (step.mirror or {}).get("amd"):
                 keys.add(f"amd-{step.key}")
+    return frozenset(keys)
+
+
+def amd_keys(steps: Iterable[Any]) -> FrozenSet[str]:
+    """Keys of AMD steps: native ones and the `amd-` mirrors. These keep the
+    source_file_dependencies rules; the selector decides the rest."""
+    from amd import is_amd_device
+
+    keys = set()
+    for step in steps:
+        if not step.key:
+            continue
+        if is_amd_device(step.device):
+            keys.add(step.key)
+        if (step.mirror or {}).get("amd"):
+            keys.add(f"amd-{step.key}")
     return frozenset(keys)
 
 

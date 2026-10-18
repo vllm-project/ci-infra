@@ -28,7 +28,7 @@ Selecting takes one observation and carries no gate. Dropping carries all of the
 
 ## In CI
 
-The pipeline generator calls the selector on every PR and branch build (`buildkite/pipeline_generator/selector_gate.py`). The selector's step keys decide which jobs run, image builds and other prerequisites included; every other job is deferred into the build's **Run more jobs** input step. Builds on `main`, release branches, nightly and run-all builds, and builds that name their own steps (`VLLM_CI_ONLY_STEP_KEYS`) keep the generator's own rules, and so does any build where the selector fails, times out, or names a step the generator does not know.
+The pipeline generator calls the selector on every PR and branch build (`buildkite/pipeline_generator/selector_gate.py`). The selector's step keys decide which jobs run, image builds and other prerequisites included; every other job is deferred into the build's **Run more jobs** input step. AMD steps, native and `amd-` mirrors, are left out of that: they keep the `source_file_dependencies` rules, and the decision file lists any the selector named under `selector_amd_left_to_todays_rules`. Builds on `main`, release branches, nightly and run-all builds, and builds that name their own steps (`VLLM_CI_ONLY_STEP_KEYS`) keep the generator's own rules, and so does any build where the selector fails, times out, or names a step the generator does not know.
 
 `VLLM_CI_SELECTOR` overrides it for one build: `shadow` runs the selector and records its decision without applying it, `off` skips it.
 
