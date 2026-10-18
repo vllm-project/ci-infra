@@ -3,6 +3,7 @@ what it records, and that it never makes a build fail."""
 
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -62,7 +63,6 @@ def test_a_pr_build_records_the_selectors_keys():
 @pytest.mark.parametrize(
     "change, why",
     [
-        ({"branch": "main"}, "main branch"),
         ({"branch": "releases/v0.20"}, "release branch"),
         ({"nightly": "1"}, "nightly"),
         ({"run_all": True}, "run-all"),
@@ -304,3 +304,31 @@ def test_amd_steps_stay_on_todays_rules(pr_config, monkeypatch):
         "today's rules say no"
     )
     assert runs(by_key["native-amd"]), "native AMD: today's rules"
+
+
+def test_a_main_build_is_selected_against_its_parent(monkeypatch):
+    """Main builds use the selector too, diffing against the parent commit,
+    as today's rules do there; the scheduled full runs (NIGHTLY/RUN_ALL)
+    still run everything."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="p" * 40 + "\n", stderr="")
+
+    monkeypatch.setattr(selector_gate.subprocess, "run", fake_run)
+    main = dict(PR, branch="main", pull_request="false")
+    seen = {}
+
+    def emission(**kw):
+        seen.update(kw)
+        return _emission(["y"])(**kw)
+
+    record = selector_gate.decide(main, ["x", "y"], emission)
+    assert record["skipped"] is None and record["selector_keys"] == ["y"]
+    assert record["base"] == "p" * 40 and seen["base"] == "p" * 40
+    assert calls == [["git", "rev-parse", f"{main['commit']}^"]]
+    full_run = selector_gate.decide(
+        dict(main, nightly="1", run_all=True), ["x"], emission
+    )
+    assert full_run["skipped"].startswith("nightly")
