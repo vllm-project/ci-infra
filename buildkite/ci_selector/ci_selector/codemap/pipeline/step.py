@@ -20,7 +20,6 @@ from ...handwritten import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     DEFAULT_WORKING_DIR,
     IMAGE_BUILD_KEY_PREFIX,
-    MANUAL_ONLY_DEVICES,
 )
 
 
@@ -145,11 +144,8 @@ class Step:
 
     @property
     def ci_optional(self) -> bool:
-        """What CI does today: an optional step, or any step on a manual-only
-        device, waits for a manual unblock. The comparison and the leak scoring
-        read this."""
-        if self.device in MANUAL_ONLY_DEVICES:
-            return True
+        """What CI does today: an optional step waits for a manual unblock.
+        The comparison and the leak scoring read this."""
         return self.optional and not self.always_runs
 
     @property

@@ -26,7 +26,7 @@ import regex as re
 
 from ..codemap.claim import deps_match, docs_only
 from ..codemap.pipeline.step import PipelineConfig, Step
-from ..handwritten import AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES, MANUAL_ONLY_DEVICES
+from ..handwritten import AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
 
 
 def should_run_all(config: PipelineConfig, paths: list[str]) -> bool:
@@ -42,8 +42,6 @@ def should_run_all(config: PipelineConfig, paths: list[str]) -> bool:
 def step_should_run(step: Step, paths: list[str], run_all: bool) -> bool:
     from ..codemap.hardware import family_of_device
 
-    if step.device in MANUAL_ONLY_DEVICES:
-        return False
     if step.always_runs:
         return True
     if step.optional:
