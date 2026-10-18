@@ -119,6 +119,8 @@ def base_record(global_config: Dict[str, Any], gate_mode: str) -> Dict[str, Any]
         "fallback": None,
         "selector": None,
         "selector_keys": None,
+        # Keys of AMD steps, which keep today's rules; set by the generator.
+        "amd_keys": None,
         "explain": None,
         "legacy_keys": None,
         "scheduled_keys": None,
@@ -189,17 +191,25 @@ def write_and_upload(record: Dict[str, Any], output_dir: str) -> str:
 
 
 def annotate(record: Dict[str, Any]) -> None:
+    """One line on the build page. Counts leave AMD steps out: those keep
+    today's rules whatever the selector says (`amd_keys`)."""
+    amd = set(record.get("amd_keys") or ())
+
+    def count(field: str) -> int:
+        return len(set(record.get(field) or ()) - amd)
+
     if record["applied"]:
-        n, m = len(record["scheduled_keys"] or []), len(record["legacy_keys"] or [])
         text = (
-            f":dart: ci-selector chose {len(record['selector_keys'])} test steps "
-            f"({n} scheduled with their prerequisites); today's rules: {m}."
+            f":dart: ci-selector chose {count('selector_keys')} test steps "
+            f"({count('scheduled_keys')} scheduled with their prerequisites); "
+            f"today's rules: {count('legacy_keys')}. AMD steps not counted: "
+            "they keep today's rules."
         )
     elif record["mode"] == "shadow" and record["selector_keys"]:
         text = (
             f":dart: ci-selector (shadow) would choose "
-            f"{len(record['selector_keys'])} test steps; today's rules ran "
-            f"{len(record['legacy_keys'] or [])}."
+            f"{count('selector_keys')} test steps; today's rules ran "
+            f"{count('legacy_keys')}. AMD steps not counted."
         )
     else:
         text = (

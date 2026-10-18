@@ -332,3 +332,23 @@ def test_a_main_build_is_selected_against_its_parent(monkeypatch):
         dict(main, nightly="1", run_all=True), ["x"], emission
     )
     assert full_run["skipped"].startswith("nightly")
+
+
+def test_the_annotation_counts_leave_amd_steps_out(monkeypatch):
+    texts = []
+    monkeypatch.setattr(
+        selector_gate.subprocess, "run", lambda cmd, **kw: texts.append(cmd[2])
+    )
+    record = dict(
+        selector_gate.base_record(PR, "on"),
+        applied=True,
+        selector_keys=["test-b"],
+        scheduled_keys=["image-build", "test-b", "amd-test-m", "image-build-amd"],
+        legacy_keys=["image-build", "test-a", "amd-test-a", "native-amd"],
+        amd_keys=["amd-test-a", "amd-test-m", "native-amd"],
+    )
+    selector_gate.annotate(record)
+    assert texts[0].startswith(
+        ":dart: ci-selector chose 1 test steps (3 scheduled with their "
+        "prerequisites); today's rules: 2."
+    )
