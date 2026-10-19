@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import regex as re
+import yaml
 
 from .graph.build import FullGraph
 from .graph.model_registry import resolve_module_name
@@ -348,6 +349,25 @@ def _registered_entries(full: FullGraph) -> dict[str, tuple[str, str]]:
     return entries
 
 
+def config_list_names(path: str, text: str) -> list[str]:
+    """The entries of a config list: for a yaml list, every name under its
+    `common` and per-platform keys (any platform may run them); otherwise one
+    name per line, blanks and comments skipped. A yaml file that is not a
+    mapping of name lists (a per-model config) lists nothing."""
+    if path.endswith((".yaml", ".yml")):
+        try:
+            lists = yaml.safe_load(text)
+        except yaml.YAMLError:
+            return []
+        if not isinstance(lists, dict) or not all(
+            isinstance(v, list) or v is None for v in lists.values()
+        ):
+            return []
+        return [str(name) for v in lists.values() for name in v or ()]
+    names = (line.strip() for line in text.splitlines())
+    return [name for name in names if name and not name.startswith("#")]
+
+
 def _config_text(repo: Path, data_file: str, errors: list[str] | None = None) -> str:
     """A config file's text, plus one level of indirection: a list file
     (models-small.txt) enumerates per-model yaml configs whose contents
@@ -362,9 +382,8 @@ def _config_text(repo: Path, data_file: str, errors: list[str] | None = None) ->
         return ""
     out = "\n" + text
     parent = data_file.rsplit("/", 1)[0]
-    for line in text.splitlines():
-        name = line.strip()
-        if not name or name.startswith("#") or "/" in name:
+    for name in config_list_names(data_file, text):
+        if "/" in name:
             continue
         if name.endswith((".yaml", ".yml", ".json", ".txt")):
             try:

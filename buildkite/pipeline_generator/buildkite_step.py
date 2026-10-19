@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
 import math
 import os
+import time
 import re
 import shlex
 
@@ -331,6 +332,8 @@ def _get_step_plugin(step: Step):
 
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
+    if step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
+        return AgentQueue.AMD_CPU
     if step.label.startswith(":docker:"):
         if "arm64" in step.label:
             if branch == "main":
@@ -377,8 +380,6 @@ def get_agent_queue(step: Step):
         return AgentQueue.INTEL_GPU
     elif step.device == DeviceType.ARM_CPU:
         return AgentQueue.ARM_CPU
-    elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
-        return AgentQueue.AMD_CPU
     elif amd_gpu_queue := get_amd_agent_queue(step.device):
         return amd_gpu_queue
     elif step.device == DeviceType.GH200:
@@ -710,6 +711,34 @@ def _carries(step: "BuildkiteCommandStep", recorder: str) -> bool:
     return any(path in str(v) for v in (step.env or {}).values())
 
 
+# A collect step folds what has been uploaded once every recording step has
+# finished, or this long after the pipeline was generated, whichever is first.
+# A job still running then is left out of the table, which reads its shard as
+# missing. The full runs finish their recording jobs well inside it; the long
+# tails are blocked or hung jobs.
+COLLECT_AFTER_MINUTES = 180
+
+# Polls each recording step's state through the agent until all have finished
+# or the deadline passes. `$$`: Buildkite would interpolate a bare `$` at
+# upload time, in the bootstrap's environment. An unreadable state (an older
+# agent, a step that is not there) reads as unfinished, so the step waits to
+# the deadline rather than collecting early.
+COLLECT_WAIT = (
+    'deadline="$$CI_SELECTOR_COLLECT_DEADLINE"; '
+    'while [ "$$(date +%s)" -lt "$$deadline" ]; do '
+    'pending=""; '
+    "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
+    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+    'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
+    "done; "
+    '[ -z "$$pending" ] && { echo "every recording step has finished"; break; }; '
+    'echo "waiting on $$pending ($${s:-state unknown}); collecting at the latest at '
+    '$$(date -u -d "@$$deadline" +%H:%MZ)"; '
+    "sleep 300; "
+    "done"
+)
+
+
 def _collect_step(
     groups: "List[BuildkiteGroupStep]",
     recorder: str,
@@ -728,18 +757,28 @@ def _collect_step(
     # cannot be retried; the collect scripts can fold the build from another.
     armed = [s for s in runnable if _carries(s, recorder)]
     runnable_keys = {s.key for s in runnable}
-    depends_on = [s.key for s in armed]
+    # Waits on what the recording steps wait on (the image build, which
+    # uploads the kernel symbol map), not on the recording steps themselves:
+    # one of those cancelled or timed out ended the step waiting_failed, and
+    # the full runs of 2026-10-16 to 18 published nothing because of it. The
+    # command waits for them instead (COLLECT_WAIT), up to a deadline.
+    depends_on = []
     for dep in (d for s in armed for d in (s.depends_on or [])):
         if dep in runnable_keys and dep not in depends_on:
             depends_on.append(dep)
-    env = None
+    env = {
+        "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(s.key for s in armed),
+        "CI_SELECTOR_COLLECT_DEADLINE": str(
+            int(time.time()) + COLLECT_AFTER_MINUTES * 60
+        ),
+    }
     if count_armed:
         # The fold needs a denominator: its job list holds only what uploaded,
         # so without one a build that lost its recordings looks complete.
         # Taken off the same list that decides what this step waits for, so it
         # can never count a job that never starts. A step with parallelism N is
         # one step and N jobs, and a lost shard is the case this exists for.
-        env = {"FNREC_EXPECTED_JOBS": str(sum(s.parallelism or 1 for s in armed))}
+        env["FNREC_EXPECTED_JOBS"] = str(sum(s.parallelism or 1 for s in armed))
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
@@ -763,13 +802,15 @@ def _collect_step(
         env=env,
         agents={"queue": queue.value},
         commands=[
+            COLLECT_WAIT,
             f'curl -sSfL --retry 3 --max-time 60 -o /tmp/{recorder}-collect.sh "{url}"'
-            + f" && bash /tmp/{recorder}-collect.sh"
+            + f" && bash /tmp/{recorder}-collect.sh",
         ],
         depends_on=depends_on,
         allow_dependency_failure=True,
         soft_fail=True,
-        timeout_in_minutes=90,  # downloading every job's recordings takes a while
+        # the wait, then downloading every job's recordings, which takes a while
+        timeout_in_minutes=COLLECT_AFTER_MINUTES + 90,
     )
 
 
@@ -1226,8 +1267,8 @@ def convert_group_step_to_buildkite_step(
                     buildkite_step.commands,
                     buildkite_step.env,
                 ) = sharded
-                # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
-                buildkite_step.label = f"{buildkite_step.label} shard %N/%t"
+                # Buildkite fills in %N (from 1) and %t (the shard count): "... Shard 2/4".
+                buildkite_step.label = f"{buildkite_step.label} Shard %N/%t"
             if include_step:
                 group_steps_list.append(buildkite_step)
 
@@ -1310,7 +1351,7 @@ def convert_group_step_to_buildkite_step(
                     # Buildkite fills in %N (from 1) and %t (the shard count).
                     amd_label = (
                         f"{amd_label or get_amd_label(step.label, amd['device'])}"
-                        " shard %N/%t"
+                        " Shard %N/%t"
                     )
                 amd_step = _create_amd_step(
                     label=step.label,
@@ -1369,6 +1410,14 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
     if global_config["only_step_keys"] is not None:
         return step.key in global_config["only_step_keys"]
+    # The test selector's choice (selector_gate.py), prerequisites included.
+    # Unlike only_step_keys it removes nothing: the rest are deferred, so
+    # "Run more jobs" still offers them.
+    # AMD steps, native or mirrored, stay on the rules below.
+    if global_config.get("selector_step_keys") is not None and not is_amd_device(
+        step.device
+    ):
+        return step.key in global_config["selector_step_keys"]
     if step.key and (
         step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
     ):

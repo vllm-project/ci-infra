@@ -1077,3 +1077,22 @@ def test_step_explicitly_listing_excluded_subtree_still_matches():
 
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
+
+
+@pytest.mark.parametrize(
+    "diff, docs_only",
+    [
+        (["docs/a.md", "mkdocs.yaml"], True),
+        (["recipes/models/Qwen/Qwen3-4B.yaml"], True),
+        (["recipes/models/Qwen/Qwen3-4B.yaml", "docs/b.md"], True),
+        (["recipes/models/Qwen/Qwen3-4B.yaml", "vllm/x.py"], False),
+        (["tools/recipes/gen.py"], False),
+        ([], False),
+    ],
+)
+def test_docs_and_recipe_only_changes_skip_ci(diff, docs_only):
+    """recipes/ is read only by a GitHub workflow, so a change made of recipes
+    and docs builds nothing, NVIDIA or ROCm."""
+    from pipeline_generator import is_docs_only_change
+
+    assert is_docs_only_change(diff) is docs_only

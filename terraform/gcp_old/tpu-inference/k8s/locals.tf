@@ -74,6 +74,7 @@ locals {
 
                 family   = split("-", pool.machine_type)[0]
                 capacity = "reserved"
+                zones    = [pool.zone]
               })
         ]]]
       ]
@@ -107,6 +108,7 @@ locals {
               stated_slices    = null
               family           = split("-", pool.machine_type)[0]
               capacity         = "spot"
+              zones            = pool.spot.zones != null ? pool.spot.zones : [pool.zone]
             })
           ]
         ] if pool.spot != null

@@ -51,9 +51,9 @@ def test_direct_optional_amd_job_does_not_hold_collection(
         assert rendered.deferred
 
     collect = _collect(groups, recorder)
-    # Deferred steps are excluded from the collect step's dependencies.
+    # Deferred steps are excluded from the steps the collect step waits for.
     expected = {regular.key, optional.key} if nightly else {regular.key}
-    assert set(collect.depends_on) == expected
+    assert set(collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()) == expected
     assert collect.allow_dependency_failure is True
     if recorder == "fnrec":
         assert collect.env["FNREC_EXPECTED_JOBS"] == ("4" if nightly else "3")
@@ -97,7 +97,9 @@ def test_collection_skips_deferred_steps(recorder, reverse):
     if reverse:
         groups.reverse()
     collect = _collect(groups, recorder)
-    assert set(collect.depends_on) == {"unrelated", "automatic-image"}
+    # It waits for the recording step and depends on that step's prerequisite.
+    assert collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"] == "unrelated"
+    assert collect.depends_on == ["automatic-image"]
     assert collect.allow_dependency_failure is True
     assert collect.soft_fail is True
     if recorder == "fnrec":

@@ -257,7 +257,15 @@ worker_clusters = [
         # this is the only Spot pool and takes 64 of them. On 10-13 it ran 294
         # Spot starts against 19 stockout fallbacks, and its 32-chip quota was
         # full in the evening peak.
-        spot = { max_nodes = 64 }
+        #
+        # The AI zone as well as the reservation's zone: GCE runs out of Spot
+        # VMs per zone, and these are the two us-central1 zones that offer
+        # TPU7x. The quota is regional, so this changes where Spot nodes come
+        # from, not how many.
+        spot = {
+          max_nodes = 64
+          zones     = ["us-central1-ai1a", "us-central1-c"]
+        }
       },
       {
         machine_type     = "tpu7x-standard-4t"

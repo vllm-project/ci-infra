@@ -71,6 +71,7 @@ from .graph.model_registry import resolve_module_name
 from .pipeline.buildkite import CI_DIR
 from .pipeline.step import PipelineConfig
 from .pipeline.targets import working_dir_to_repo_rel
+from .registered_names import config_list_names
 from .repo import is_test_basename, is_test_file
 from .selection import (
     Selection,
@@ -471,7 +472,9 @@ def _named_in_invoked_tests(state: RepoState, path: str) -> bool:
 def _list_entries(state: RepoState, path: str, ref: str | None) -> set[str]:
     """The entries of a config list at `ref`, or on the base checkout when
     None: one relative path per line, blanks and comments skipped as the
-    harness does. Empty when it cannot be read."""
+    harness does. A yaml list maps `common` and each platform to its entries;
+    any platform may run them, so all are entries. Empty when it cannot be
+    read."""
     if ref is None:
         try:
             text = (Path(state.repo) / path).read_text()
@@ -486,11 +489,7 @@ def _list_entries(state: RepoState, path: str, ref: str | None) -> set[str]:
         if proc.returncode != 0:
             return set()
         text = proc.stdout
-    return {
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    }
+    return set(config_list_names(path, text))
 
 
 # What a config-list harness lists: its configs and the lists themselves.
