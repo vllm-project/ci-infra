@@ -184,7 +184,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
       {% endif %}
       {% endfor %}
       {% else %}
-      - label: "AMD: :docker: refresh ROCm base"
+      - label: ":docker: Refresh ROCm base"
         depends_on: ~
         soft_fail: false
         commands:
@@ -203,7 +203,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         agents:
           queue: amd-cpu
 
-      - label: "AMD: :docker: ensure ci_base"
+      - label: ":docker: Ensure ROCm ci_base"
         depends_on: "refresh-rocm-base-amd"
         soft_fail: false
         commands:
@@ -226,7 +226,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
       {% if aiter_nightly == "1" %}
       {# Installs the AITER nightly over the stock ci_base and pushes the result
          as this build's ci_base-build tag, so every later step uses it. #}
-      - label: "AMD: :crescent_moon: install AITER nightly"
+      - label: ":crescent_moon: Install AITER nightly"
         depends_on: "ensure-ci-base-amd"
         soft_fail: false
         commands:
@@ -240,7 +240,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
 
       {% set ci_base_ready_key = "aiter-nightly-amd" if aiter_nightly == "1" else "ensure-ci-base-amd" %}
 
-      - label: "AMD: :docker: build test image and artifacts"
+      - label: ":docker: Build ROCm test image and artifacts"
         depends_on: "{{ ci_base_ready_key }}"
         soft_fail: false
         commands:
@@ -275,7 +275,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
 
       {# Native pods pull amd_native_base_image(). Fail before those jobs
          schedule if that tag is not on Docker Hub. DinD jobs do not wait. #}
-      - label: "AMD: :docker: verify native ci_base"
+      - label: ":docker: Verify native ROCm ci_base"
         depends_on: "{{ ci_base_ready_key }}"
         soft_fail: false
         commands:
@@ -333,12 +333,12 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
          change and nobody to click, so in the AITER nightly nothing is gated. #}
       {% if aiter_nightly == "1" %}{% set step_gated = false %}{% endif %}
       {% if step_gated %}
-      - block: "Run {{ step.agent_pool }}: {{ step.label }}"
+      - block: "Run {{ step.label }}"
         depends_on: image-build-amd
         key: block-{{ step_slug }}
       {% endif %}
 
-      - label: "{{ step.agent_pool }}: {{ step.label }}"
+      - label: "{{ step.label }}"
         {% if step.dind == false and not amd_build_steps %}
         depends_on:
           - {{ "block-" ~ step_slug if step_gated else "image-build-amd" }}

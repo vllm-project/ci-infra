@@ -90,8 +90,8 @@ def test_amd_template_block_keys_and_dependencies(label, slug, dind, build_steps
     expected_key = f"block-mi355_4-{slug}"
     assert re.fullmatch(r"[A-Za-z0-9_:-]+", block["key"])
     assert block["key"] == expected_key
-    assert block["block"] == f"Run mi355_4: {label}"
-    assert command["label"] == f"mi355_4: {label}"
+    assert block["block"] == f"Run {label}"
+    assert command["label"] == label
     assert command["depends_on"] == (
         expected_key
         if dind or build_steps
@@ -146,7 +146,7 @@ def test_build_sh_layout_renders_vllm_build_steps(ci_repo):
     assert image["retry"]["automatic"] == infra + BUILD_STEPS[1]["retry"]["automatic"]
     assert base["retry"]["automatic"][:3] == infra
 
-    gpu = steps["mi300_1: MoE"]
+    gpu = steps["MoE"]
     assert gpu["depends_on"] == "image-build-amd"
     pod = gpu["plugins"][0]["kubernetes"]["podSpecPatch"]
     assert pod["containers"][0]["image"] == f"{ci_repo}:build-$BUILDKITE_BUILD_ID"
@@ -200,7 +200,12 @@ def test_aiter_nightly_build_sh_layout_has_no_overlay_step():
     steps = _render(aiter_nightly="1", ci_repo="rocm/vllm-ci-pr")
     assert "aiter-nightly-amd" not in steps
     assert steps["image-build-amd"]["depends_on"] == ["refresh-rocm-base-amd"]
-    assert {k for k in steps if k.startswith("mi")} == {"mi300_1: MoE"}
+    gpu_jobs = {
+        k
+        for k, s in steps.items()
+        if s.get("agents", {}).get("queue", "").startswith("amd_mi")
+    }
+    assert gpu_jobs == {"MoE"}
 
 
 VLLM = "https://github.com/vllm-project/vllm.git"

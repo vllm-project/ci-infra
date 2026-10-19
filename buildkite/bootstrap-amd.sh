@@ -242,15 +242,15 @@ ROCM_BASE_DOCKERFILE="docker/Dockerfile.rocm_base"
 # Early exit start: skip pipeline if conditions are met
 # ----------------------------------------------------------------------
 
-# skip pipeline if *every* changed file is docs/** OR **/*.md OR mkdocs.yaml
+# skip pipeline if *every* changed file is docs/** OR recipes/** OR **/*.md OR mkdocs.yaml
 if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
   if [[ -n "${file_diff:-}" ]]; then
     docs_only=1
     # Iterate robustly over newline-separated paths
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
-      # Match any of: docs/**  OR  **/*.md  OR  mkdocs.yaml
-      if [[ "${f#docs/}" != "$f" || "$f" == *.md || "$f" == "mkdocs.yaml" ]]; then
+      # Match any of: docs/**  OR  recipes/**  OR  **/*.md  OR  mkdocs.yaml
+      if [[ "${f#docs/}" != "$f" || "${f#recipes/}" != "$f" || "$f" == *.md || "$f" == "mkdocs.yaml" ]]; then
         continue
       else
         docs_only=0
@@ -264,7 +264,7 @@ if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
 \`\`\`
 $(printf '%s\n' "$file_diff" | tr -d '\r')
 \`\`\`" --style "info" || true
-      echo "[docs-only] All changes are docs/**, *.md, or mkdocs.yaml. Exiting before pipeline upload."
+      echo "[docs-only] All changes are docs/**, recipes/**, *.md, or mkdocs.yaml. Exiting before pipeline upload."
       exit 0
     fi
   fi

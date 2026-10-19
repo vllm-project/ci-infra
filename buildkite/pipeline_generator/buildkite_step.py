@@ -333,6 +333,8 @@ def _get_step_plugin(step: Step):
 
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
+    if step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
+        return AgentQueue.AMD_CPU
     if step.label.startswith(":docker:"):
         if "arm64" in step.label:
             if branch == "main":
@@ -379,8 +381,6 @@ def get_agent_queue(step: Step):
         return AgentQueue.INTEL_GPU
     elif step.device == DeviceType.ARM_CPU:
         return AgentQueue.ARM_CPU
-    elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
-        return AgentQueue.AMD_CPU
     elif amd_gpu_queue := get_amd_agent_queue(step.device):
         return amd_gpu_queue
     elif step.device == DeviceType.GH200:
@@ -1219,8 +1219,8 @@ def convert_group_step_to_buildkite_step(
                     buildkite_step.commands,
                     buildkite_step.env,
                 ) = sharded
-                # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
-                buildkite_step.label = f"{buildkite_step.label} shard %N/%t"
+                # Buildkite fills in %N (from 1) and %t (the shard count): "... Shard 2/4".
+                buildkite_step.label = f"{buildkite_step.label} Shard %N/%t"
             if include_step:
                 group_steps_list.append(buildkite_step)
 
@@ -1301,7 +1301,7 @@ def convert_group_step_to_buildkite_step(
                     # Buildkite fills in %N (from 1) and %t (the shard count).
                     amd_label = (
                         f"{amd_label or get_amd_label(step.label, amd['device'])}"
-                        " shard %N/%t"
+                        " Shard %N/%t"
                     )
                 amd_step = _create_amd_step(
                     label=step.label,

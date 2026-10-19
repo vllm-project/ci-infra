@@ -1819,6 +1819,23 @@ def test_a_config_list_routes_to_the_steps_reading_it(state):
     assert "vllm_ci:lm-eval-large-models-8xh200" not in claim.step_ids
 
 
+def test_a_yaml_config_list_lists_every_platforms_entries(tmp_path):
+    """A yaml list keeps `common` plus per-platform entries; any platform may
+    run them, so a change to any entry routes to the steps reading it."""
+    from types import SimpleNamespace
+
+    from ci_selector.codemap.classify import _list_entries
+
+    (tmp_path / "models-small.yaml").write_text(
+        "# comment\ncommon:\n- a.yaml\n- b.yaml\nrocm:\n- c.yaml\n"
+    )
+    repo = SimpleNamespace(repo=tmp_path)
+    entries = _list_entries(repo, "models-small.yaml", None)
+    assert entries == {"a.yaml", "b.yaml", "c.yaml"}
+    (tmp_path / "broken.yaml").write_text("common: [a.yaml\n")
+    assert _list_entries(repo, "broken.yaml", None) == set()
+
+
 def test_the_harness_default_list_is_read_from_its_conftest(state):
     from ci_selector.codemap.classify import _default_list
 

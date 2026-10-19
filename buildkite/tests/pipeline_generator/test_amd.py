@@ -55,7 +55,7 @@ def _render_single_step(step):
 
 def _rocm_base_refresh_step():
     return Step(
-        label="AMD: :docker: refresh ROCm base",
+        label=":docker: Refresh ROCm base",
         group="Hardware - AMD Build",
         key=amd.AMD_ROCM_BASE_REFRESH_STEP_KEY,
         device="amd_cpu",
@@ -63,6 +63,17 @@ def _rocm_base_refresh_step():
         commands=["bash .buildkite/scripts/rocm/refresh-base-image.sh"],
         concurrency=1,
         concurrency_group="vllm/rocm/base-build/$BUILDKITE_COMMIT",
+    )
+
+
+@pytest.mark.parametrize("branch", ["main", "feature"])
+def test_amd_cpu_docker_step_stays_on_the_amd_cpu_queue(fake_global_config, branch):
+    """A ":docker:" label must not pull an amd_cpu step onto the NVIDIA CPU
+    queues; the device decides."""
+    fake_global_config["branch"] = branch
+
+    assert buildkite_step.get_agent_queue(_rocm_base_refresh_step()) == (
+        AgentQueue.AMD_CPU
     )
 
 
@@ -178,7 +189,8 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert group_step.group == "Hardware-AMD Tests"
     # Optional, so it waits in the "Run more jobs" input step.
     assert command_step.deferred
-    assert command_step.label == f"AMD: AMD direct test ({device})"
+    tag = {"mi300_4": "MI300", "mi325_1": "MI325", "mi355_dpx": "MI355 DPX"}[device]
+    assert command_step.label == f":amd: ({tag}) AMD direct test"
     assert command_step.depends_on == ["image-build-amd"]
     assert command_step.agents == {"queue": queue}
     assert command_step.commands == [
@@ -684,9 +696,32 @@ def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
 
 
 @pytest.mark.parametrize(
+    "label,device,expected",
+    [
+        ("Basic Correctness", "mi250_1", ":amd: (MI250) Basic Correctness"),
+        (
+            ":nvidia: (H200) Basic Correctness",
+            "mi300_1",
+            ":amd: (MI300) Basic Correctness",
+        ),
+        (
+            ":computer: (CPU) Docker Build Metadata",
+            "mi325_8",
+            ":amd: (MI325) Docker Build Metadata",
+        ),
+        ("LM Eval Small Models", "mi355_dpx", ":amd: (MI355 DPX) LM Eval Small Models"),
+        (":amd: (MI355) Fusion E2E TP2", "mi355_2", ":amd: (MI355) Fusion E2E TP2"),
+        (":docker: Refresh ROCm base", "amd_cpu", ":docker: Refresh ROCm base"),
+    ],
+)
+def test_amd_label_reads_amd_tag_title(label, device, expected):
+    assert amd.get_amd_label(label, device) == expected
+
+
+@pytest.mark.parametrize(
     "amd_label,expected_amd_label",
     [
-        (None, "AMD: Mirrored label test (mi300_1)"),
+        (None, ":amd: (MI300) Mirrored label test"),
         (
             ":amd: MI300 Attention Kernels",
             ":amd: MI300 Attention Kernels",
@@ -731,9 +766,8 @@ def test_amd_mirror_label_override(fake_global_config, amd_label, expected_amd_l
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
-    # A mirror-level label is used verbatim; without one the derived
-    # "AMD: <label> (<device>)" form is unchanged. The NVIDIA label is
-    # never affected either way.
+    # A mirror-level label is used verbatim; without one the label reads
+    # ":amd: (<tag>) <label>". The NVIDIA label is never affected either way.
     assert amd_command_step.label == expected_amd_label
     assert default_command_step.label == "Mirrored label test"
 
