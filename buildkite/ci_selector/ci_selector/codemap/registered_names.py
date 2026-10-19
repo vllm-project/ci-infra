@@ -370,7 +370,7 @@ def config_list_names(path: str, text: str) -> list[str]:
 
 def _config_text(repo: Path, data_file: str, errors: list[str] | None = None) -> str:
     """A config file's text, plus one level of indirection: a list file
-    (models-small.yaml) enumerates per-model yaml configs whose contents
+    (models-small.txt) enumerates per-model yaml configs whose contents
     carry the actual model ids and backend flags. Unreadable files are
     recorded into `errors` (graph.parse_errors) so preflight sees the
     degraded haystack instead of a silent ''."""
