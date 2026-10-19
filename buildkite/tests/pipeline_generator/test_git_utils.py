@@ -35,6 +35,8 @@ def test_get_pr_labels_retries_5xx_then_succeeds(buildkite_job, capsys):
         "infra-retry:job-1:bootstrap-labels",
         "bootstrap-labels,3,recovered",
     ]
+    # Capped like the hooks' mark, so a stuck agent can't stall bootstrap.
+    assert buildkite_job.call_args.kwargs["timeout"] == 10
 
 
 def test_get_pr_labels_gives_up_after_five_attempts(buildkite_job):

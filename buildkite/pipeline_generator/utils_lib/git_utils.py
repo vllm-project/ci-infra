@@ -71,7 +71,7 @@ def _record_infra_retry(attempts: int, outcome: str) -> None:
                 f"bootstrap-labels,{attempts},{outcome}",
             ],
             check=False,
-            timeout=30,
+            timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         pass
