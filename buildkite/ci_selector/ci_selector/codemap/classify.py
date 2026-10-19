@@ -495,7 +495,7 @@ def _list_entries(state: RepoState, path: str, ref: str | None) -> set[str]:
 # What a config-list harness lists: its configs and the lists themselves.
 _CONFIG_SUFFIXES = (".yaml", ".yml", ".json", ".txt")
 # The harness's own default, for a step that passes no list: gsm8k's conftest
-# adds the option with default="configs/models-small.yaml".
+# adds the option with default="configs/models-small.txt".
 _LIST_DEFAULT = re.compile(
     r"""["']--config-list-file["'].*?default\s*=\s*["']([^"']+)["']""", re.S
 )
