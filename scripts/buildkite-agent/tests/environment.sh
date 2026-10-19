@@ -17,7 +17,9 @@ sed "s#/usr/local/libexec/#$dir/#" "$dir/environment" >"$tmp/environment"
 # $tmp/<name>.log and sleeps to $tmp/sleep.log.
 stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" >"$tmp/bin/$1"; chmod +x "$tmp/bin/$1"; }
 counted='n=$(cat "$T/$N.log" 2>/dev/null | wc -l); echo "$*" >>"$T/$N.log"; (( n >= FAIL )) || exit 1'
-stub aws "N=aws FAIL=\${FAIL_AWS:-0} T=$tmp; $counted"   # empty stdout: only pipefail sees it fail
+# "ecr" (the pull-through-cache login) counts apart from "ecr-public", so each
+# login can be failed on its own; $3 is the service after --cli-connect-timeout 10.
+stub aws "[[ \$3 == ecr ]] && N=awscache FAIL=\${FAIL_AWS_CACHE:-0} || N=aws FAIL=\${FAIL_AWS:-0}; T=$tmp; $counted"   # empty stdout: only pipefail sees it fail
 stub nvidia-smi "N=smi FAIL=\${FAIL_SMI:-0} T=$tmp; $counted; echo '  MIG 1g.18gb Device 0: (UUID: MIG-abc)'"
 stub docker "[[ \$1 == login ]] && { cat >/dev/null; exit 0; }; N=pull FAIL=\${FAIL_PULL:-0} T=$tmp; $counted"
 stub sleep "echo \$1 >>$tmp/sleep.log"
@@ -52,6 +54,9 @@ grep -q 'failed (attempt 1/5); retrying in 2s' "$tmp/stderr" || { echo "FAIL log
 run login-down 202 'infra-retry:job-1:ecr-public-login=ecr-public-login,5,exhausted' '2 4 8 16 ' FAIL_AWS=99
 [[ $(calls aws) -eq 5 ]] || { echo "FAIL login-down: aws called $(calls aws) times"; exit 1; }
 grep -q -- '--cli-connect-timeout 10' "$tmp/aws.log" || { echo "FAIL aws timeout flag"; exit 1; }
+run cache-login-blip 0 'infra-retry:job-1:ecr-cache-login=ecr-cache-login,2,recovered' '2 ' FAIL_AWS_CACHE=1
+run cache-login-down 203 'infra-retry:job-1:ecr-cache-login=ecr-cache-login,5,exhausted' '2 4 8 16 ' FAIL_AWS_CACHE=99
+[[ $(calls aws) -eq 1 && $(calls awscache) -eq 5 ]] || { echo "FAIL cache-login-down: public login called $(calls aws), cache login $(calls awscache) times"; exit 1; }
 run nvidia-smi-blip 0 'infra-retry:job-1:gpu-discovery=gpu-discovery,2,recovered' '2 ' FAIL_SMI=1
 run nvidia-smi-down 204 'infra-retry:job-1:gpu-discovery=gpu-discovery,5,exhausted' '2 4 8 16 ' FAIL_SMI=99
 run pull-blip 0 'infra-retry:job-1:image-pull=image-pull,2,recovered' '2 ' FAIL_PULL=1
