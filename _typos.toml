@@ -1,5 +1,0 @@
-[default.extend-words]
-# ROCm's Heterogeneous System Architecture runtime (HSA_TOOLS_LIB, HSA_ENABLE_DEBUG).
-HSA = "HSA"
-# Slug of "Model café" in test_amd_template.py.
-caf = "caf"
