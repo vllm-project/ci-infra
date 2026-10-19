@@ -200,11 +200,13 @@ _LABEL_HARDWARE_PREFIX = re.compile(r"^:[a-z0-9_+-]+: \([^)]*\) ")
 
 
 def get_amd_label_tag(device: Optional[str]) -> str:
-    """The hardware tag of an AMD label: "MI355 DPX" for mi355_dpx, else the
-    pool's family ("mi300_1" -> "MI300")."""
+    """The hardware tag of an AMD GPU label: "MI355 DPX" for mi355_dpx, else
+    the pool's family ("mi300_1" -> "MI300"); empty for non-GPU devices."""
     value = _device_value(device) or ""
     if value == DeviceType.AMD_MI355_DPX.value:
         return "MI355 DPX"
+    if not value.startswith("mi"):
+        return ""
     return value.split("_", 1)[0].upper()
 
 

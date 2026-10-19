@@ -331,6 +331,8 @@ def _get_step_plugin(step: Step):
 
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
+    if step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
+        return AgentQueue.AMD_CPU
     if step.label.startswith(":docker:"):
         if "arm64" in step.label:
             if branch == "main":
@@ -377,8 +379,6 @@ def get_agent_queue(step: Step):
         return AgentQueue.INTEL_GPU
     elif step.device == DeviceType.ARM_CPU:
         return AgentQueue.ARM_CPU
-    elif step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
-        return AgentQueue.AMD_CPU
     elif amd_gpu_queue := get_amd_agent_queue(step.device):
         return amd_gpu_queue
     elif step.device == DeviceType.GH200:

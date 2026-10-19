@@ -71,6 +71,7 @@ from .graph.model_registry import resolve_module_name
 from .pipeline.buildkite import CI_DIR
 from .pipeline.step import PipelineConfig
 from .pipeline.targets import working_dir_to_repo_rel
+from .registered_names import config_list_names
 from .repo import is_test_basename, is_test_file
 from .selection import (
     Selection,
@@ -488,24 +489,7 @@ def _list_entries(state: RepoState, path: str, ref: str | None) -> set[str]:
         if proc.returncode != 0:
             return set()
         text = proc.stdout
-    if path.endswith((".yaml", ".yml")):
-        try:
-            lists = yaml.safe_load(text)
-        except yaml.YAMLError:
-            return set()
-        if not isinstance(lists, dict):
-            return set()
-        return {
-            str(entry)
-            for entries in lists.values()
-            if isinstance(entries, list)
-            for entry in entries
-        }
-    return {
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    }
+    return set(config_list_names(path, text))
 
 
 # What a config-list harness lists: its configs and the lists themselves.

@@ -46,9 +46,10 @@ def step_slug_candidates(step) -> list[str]:
     with '+' spelled out or dropped, and for a mirror whichever label the
     generator would have used.
 
-    A mirror is published under its own yaml label, or the parent wrap if it
-    declares none. Emitting both invents a spelling naming two vendors at once,
-    which nothing posts. Older revisions replay through the wrap.
+    A mirror is published under its own yaml label or, if it declares none, the
+    parent's title under the AMD tag (":amd: (<tag>) <title>"). Emitting both
+    invents a spelling naming two vendors at once, which nothing posts. Older
+    revisions replay through the "AMD: <parent> (<device>)" wrap.
 
     Each spelling is slugged whole, not assembled from slugged parts: `_slug`
     strips a trailing `-n`, which swallowed the `%N` of a sharded mirror.

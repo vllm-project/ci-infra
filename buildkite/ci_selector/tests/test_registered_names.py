@@ -676,3 +676,25 @@ def test_no_parser_selecting_flag_is_unwatched(vllm_repo):
         "add the flag, and its snake_case config spelling, to "
         "PARSER_SELECTING_FLAGS in ci_selector/codemap/registered_names.py",
     )
+
+
+def test_a_yaml_config_list_reads_its_entries_configs(tmp_path):
+    """A yaml config list (common plus per-platform names) is a list file:
+    every entry's config text reaches the haystack and none of its lines is
+    read as a missing file."""
+    from ci_selector.codemap.registered_names import _config_text
+
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "a.yaml").write_text("model_name: org/model-a\n")
+    (configs / "b.yaml").write_text("model_name: org/model-b\n")
+    (configs / "models-small.yaml").write_text(
+        "# comment\ncommon:\n- a.yaml\ncdna4:\n- b.yaml\n"
+    )
+    errors: list[str] = []
+    text = _config_text(tmp_path, "configs/models-small.yaml", errors)
+    assert "org/model-a" in text and "org/model-b" in text
+    assert errors == []
+    # A per-model config is not a list: its keys are not file names.
+    assert "org/model-a" in _config_text(tmp_path, "configs/a.yaml", errors)
+    assert errors == []

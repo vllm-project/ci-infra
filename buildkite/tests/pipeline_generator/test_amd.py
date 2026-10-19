@@ -66,6 +66,17 @@ def _rocm_base_refresh_step():
     )
 
 
+@pytest.mark.parametrize("branch", ["main", "feature"])
+def test_amd_cpu_docker_step_stays_on_the_amd_cpu_queue(fake_global_config, branch):
+    """A ":docker:" label must not pull an amd_cpu step onto the NVIDIA CPU
+    queues; the device decides."""
+    fake_global_config["branch"] = branch
+
+    assert buildkite_step.get_agent_queue(_rocm_base_refresh_step()) == (
+        AgentQueue.AMD_CPU
+    )
+
+
 def test_rocm_base_selector_keeps_build_timeout():
     command_step = _render_single_step(_rocm_base_refresh_step()).steps[0]
 
@@ -637,6 +648,7 @@ def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
         ),
         ("LM Eval Small Models", "mi355_dpx", ":amd: (MI355 DPX) LM Eval Small Models"),
         (":amd: (MI355) Fusion E2E TP2", "mi355_2", ":amd: (MI355) Fusion E2E TP2"),
+        (":docker: Refresh ROCm base", "amd_cpu", ":docker: Refresh ROCm base"),
     ],
 )
 def test_amd_label_reads_amd_tag_title(label, device, expected):
