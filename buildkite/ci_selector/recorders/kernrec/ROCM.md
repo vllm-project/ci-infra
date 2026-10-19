@@ -7,7 +7,8 @@ package attribution, including AITER, comes from the separate function recorder.
 
 ## Dependencies and setup
 
-Use the ROCm CI image's pinned ROCProfiler SDK **1.3.2** headers and runtime.
+Use the ROCm CI image's ROCProfiler SDK headers and runtime: **1.3.2** (ROCm 7.2) or
+**1.3.5** (ROCm 10).
 `docker/Dockerfile.rocm_base` in vLLM builds that dependency from its pinned
 revision. The recorder rejects other SDK versions until they have been validated.
 A C++17 compiler is needed to build the small injection library in the image.
@@ -44,8 +45,9 @@ LD_PRELOAD=/opt/rocm/lib/librocprofiler-sdk.so \
 Use a fresh output directory for each run. Preserve any required existing
 `LD_PRELOAD` entries. Preload the SDK, and name the recorder in
 `ROCP_TOOL_LIBRARIES`. Torch import initializes the SDK before the first GPU
-operation; forking after that point cannot record child kernels. Launchers that
-call `os.fork()` directly still require separate validation. Allow workers to
+operation; forking after that point cannot record child kernels. A forked child
+that loads GPU code writes `# error=gpu_use_after_fork`, which keeps the trace
+incomplete; children that exec or never load GPU code leave no file. Allow workers to
 finish shutdown: force-killed processes leave incomplete traces. Avoid
 simultaneous GPU profilers; profiler-specific tests are excluded from recording.
 
@@ -54,7 +56,8 @@ simultaneous GPU profilers; profiler-specific tests are excluded from recording.
 Each process that initializes the SDK writes a durable header before kernel work:
 
 ```text
-# kernrec v1 backend=rocm recorder=rocprofiler-sdk pid=4242 ppid=4200 exe=...
+# kernrec v1 backend=rocm recorder=rocprofiler-sdk activity=1 pid=4242 ppid=4200 exe=...
+# gpu_active
 _Z...native_kernel...
 triton_kernel_name
 # end records=42 unique=2 dropped=0 errors=0 unresolved=0
@@ -68,8 +71,10 @@ them without losing template specializations.
 The SDK recorder uses lossless buffers, reports callback loss counts, and flushes
 periodically (`KERNREC_FLUSH_MS`, default 1000). It retains names flushed before an
 abrupt exit. An unresolved dispatch ID, recorder error, dropped record, missing
-footer, or unsupported fork-after-initialization prevents the trace from
-justifying a skipped test. A clean footer describes the **observed processes**;
+footer, or GPU use after fork prevents the trace from justifying a skipped test.
+The exception is a process that never loaded GPU code (no `# gpu_active` line):
+it cannot have dispatched kernels, so it may exit without a footer, e.g. a
+daemon killed at shutdown. A clean footer describes the **observed processes**;
 neither this recorder nor CUPTI independently inventories every expected worker.
 Workers must inherit injection settings and artifact storage. Environment-clearing
 launchers and remote workers need separate setup and validation.

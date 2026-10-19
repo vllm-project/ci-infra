@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CPU-only producer contract checks; SDK 1.3.2 headers/library are required.
+# CPU-only producer contract checks; SDK 1.3.2 or 1.3.5 headers/library are required.
 set -euo pipefail
 SOURCE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROCM_ROOT=${ROCM_PATH:-/opt/rocm}

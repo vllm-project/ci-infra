@@ -64,7 +64,8 @@ TABLE_VERSION = 3
 
 
 def read_recording(path: Path) -> tuple[set[str], int, bool]:
-    """Read names and loss counters; only validated native footers are clean.
+    """Read names and loss counters; only validated native footers are clean,
+    or an idle ROCm process that reports activity and never loaded GPU code.
 
     Older recordings remain positive evidence. Their footers do not attest
     error accounting, so they cannot establish an absence of launches.
@@ -76,6 +77,8 @@ def read_recording(path: Path) -> tuple[set[str], int, bool]:
     headers = 0
     footers = 0
     valid_header = False
+    reports_activity = False
+    active = False
     try:
         lines = path.read_text(errors="replace").splitlines()
     except OSError:
@@ -98,6 +101,12 @@ def read_recording(path: Path) -> tuple[set[str], int, bool]:
                         and (fields.get("backend"), fields.get("recorder"))
                         in {("cuda", "cupti"), ("rocm", "rocprofiler-sdk")}
                     )
+                    reports_activity = (
+                        fields.get("backend") == "rocm"
+                        and fields.get("activity") == "1"
+                    )
+                elif line == "# gpu_active":
+                    active = True
                 elif line.startswith("# dropped="):
                     value = int(line.split("=", 1)[1])
                     if value < 0:
@@ -124,15 +133,28 @@ def read_recording(path: Path) -> tuple[set[str], int, bool]:
                 errors = True
             continue
         names.add(line)
-    return names, dropped, clean and not errors
+    # Loading GPU code precedes every dispatch, so a process that never went
+    # active lost nothing by exiting without a footer (e.g. a killed daemon).
+    idle = (
+        valid_header
+        and reports_activity
+        and headers == 1
+        and footers == 0
+        and not active
+        and not names
+        and not dropped
+    )
+    return names, dropped, (clean or idle) and not errors
 
 
-def _backend(path: Path) -> str:
+def _backend(path: Path) -> str | None:
     try:
         with path.open() as stream:
             header = stream.readline().split()
     except OSError:
         return "unknown"
+    if header[:2] != ["#", "kernrec"]:
+        return None  # read_recording already makes it unclean
     return next(
         (p.split("=", 1)[1] for p in header if p.startswith("backend=")), "cuda"
     )
@@ -144,7 +166,7 @@ def _trace_health(job_dir: Path, files: list[Path]) -> tuple[str, bool, bool]:
     Neither backend independently inventories every expected GPU worker.
     Completeness here concerns the processes that initialized the recorder.
     """
-    backends = {_backend(f) for f in files}
+    backends = {_backend(f) for f in files} - {None}
     meta = {}
     try:
         meta = json.loads((job_dir / "kernrec.json").read_text())
@@ -159,6 +181,9 @@ def _trace_health(job_dir: Path, files: list[Path]) -> tuple[str, bool, bool]:
     for path in files:
         _, dropped, clean = read_recording(path)
         complete = complete and clean and dropped == 0
+    listed = meta.get("recordings")
+    if isinstance(listed, list) and not set(listed) <= {f.name for f in files}:
+        complete = False  # a recording the job wrote was not downloaded
     available = bool(files) and meta.get("collection_available") is not False
     complete = complete and available and not meta.get("collection_error")
     return backend, bool(complete), available

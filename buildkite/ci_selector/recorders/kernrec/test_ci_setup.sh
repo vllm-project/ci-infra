@@ -20,8 +20,9 @@ printf 'int tool(void) { return 0; }\n' > "$WORK/fixtures/tool.c"
 cc -shared -fPIC "$WORK/fixtures/tool.c" -o "$WORK/fixtures/tool.so"
 cc -shared -fPIC "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/sdk.so"
 cc -shared -fPIC -DPATCH=3 "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/wrong-sdk.so"
+cc -shared -fPIC -DPATCH=5 "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/rocm10-sdk.so"
 
-for mode in cuda rocm rocm-spawn rocm-fork rocm-forkserver missing-sdk missing-compiler failed-build wrong-version conflict stale; do
+for mode in cuda rocm rocm10 rocm-spawn rocm-fork rocm-forkserver missing-sdk missing-compiler failed-build wrong-version conflict stale disabled; do
   case_dir="$WORK/$mode"
   mkdir -p "$case_dir/checkout" "$case_dir/cache" "$case_dir/source" \
     "$case_dir/rocm/include/rocprofiler-sdk" "$case_dir/rocm/lib" "$case_dir/bin"
@@ -29,6 +30,7 @@ for mode in cuda rocm rocm-spawn rocm-fork rocm-forkserver missing-sdk missing-c
   cp "$WORK/fixtures/sdk.so" "$case_dir/rocm/lib/librocprofiler-sdk.so"
   cp "$WORK/fixtures/tool.so" "$case_dir/cache/libkernrec.so"
   [[ "$mode" != wrong-version ]] || cp "$WORK/fixtures/wrong-sdk.so" "$case_dir/rocm/lib/librocprofiler-sdk.so"
+  [[ "$mode" != rocm10 ]] || cp "$WORK/fixtures/rocm10-sdk.so" "$case_dir/rocm/lib/librocprofiler-sdk.so"
   [[ "$mode" != missing-sdk ]] || rm "$case_dir/rocm/lib/librocprofiler-sdk.so"
   if [[ "$mode" == stale ]]; then
     mkdir -p "$case_dir/checkout/.kernrec/job"
@@ -49,6 +51,7 @@ CURL
   backend=rocm; [[ "$mode" != cuda ]] || backend=cuda
   compiler=true; [[ "$mode" != missing-compiler ]] || compiler="$case_dir/missing-cxx"
   existing_tool=""; [[ "$mode" != conflict ]] || existing_tool=existing-profiler
+  disable=""; [[ "$mode" != disabled ]] || disable=1
   mkdir -p "$case_dir/other-checkout"
   rc=0
   env -u KERNREC_ACTIVE_DIR -u VLLM_WORKER_MULTIPROC_METHOD -u VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS \
@@ -56,7 +59,7 @@ CURL
     PATH="$case_dir/bin:$PATH" CXX="$compiler" ROCM_PATH="$case_dir/rocm" \
     KERNREC_CACHE_DIR="$case_dir/cache" KERNREC_SOURCE_DIR="$case_dir/source" \
     KERNREC_BACKEND="$backend" BUILDKITE_BUILD_CHECKOUT_PATH="$case_dir/other-checkout" \
-    KERNREC_CHECKOUT_PATH="$case_dir/checkout" \
+    KERNREC_CHECKOUT_PATH="$case_dir/checkout" KERNREC_DISABLE="$disable" \
     BUILDKITE_JOB_ID=job BUILDKITE_STEP_KEY=step BUILDKITE_LABEL=$'quoted "label"\nline' \
     ROCP_TOOL_LIBRARIES="$existing_tool" LD_PRELOAD="$WORK/fixtures/tool.so" \
     HSA_OVERRIDE_GFX_VERSION=9.4.2 \
@@ -99,14 +102,17 @@ assert (root / "workload").read_text() == "once\n"
 assert not (root / "network").exists()
 assert initial["sidecar"]["exit_status"] is None
 assert final["exit_status"] == 7
+assert final["recordings"] == sorted(p.name for p in (root / "checkout/.kernrec/job").glob("kern.*.txt"))
+assert "recordings" not in initial["sidecar"]
 assert final["label"] == 'quoted "label"\nline'
 assert final["provenance"]["environment"]["HSA_OVERRIDE_GFX_VERSION"] == "9.4.2"
-assert final["collection_available"] == (mode in {"cuda", "rocm", "rocm-spawn"})
-if mode in {"rocm", "rocm-spawn"}:
+assert final["collection_available"] == (mode in {"cuda", "rocm", "rocm10", "rocm-spawn"})
+if mode in {"rocm", "rocm10", "rocm-spawn"}:
     assert initial["tool"] == str(root / "cache/libkernrec_rocm.so")
     assert initial["preload"] == str(root / "rocm/lib/librocprofiler-sdk.so") + ":" + previous_preload
     assert (root / "builds").read_text() == "build\n", "reuse the job's successful build"
-    assert final["provenance"]["versions"]["rocprofiler-sdk"] == "1.3.2"
+    assert final["provenance"]["versions"]["rocprofiler-sdk"] == ("1.3.5" if mode == "rocm10" else "1.3.2")
+    assert final["provenance"]["expected_rocprofiler_sdk"] == final["provenance"]["versions"]["rocprofiler-sdk"]
     assert initial["worker_method"] == "spawn"
     assert initial["worker_shutdown"] == ("17" if mode == "rocm-spawn" else "30")
     assert final["provenance"]["environment"]["VLLM_WORKER_MULTIPROC_METHOD"] == "spawn"

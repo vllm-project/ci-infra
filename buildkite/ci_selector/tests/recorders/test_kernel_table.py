@@ -387,6 +387,68 @@ def test_native_health_requires_complete_error_free_recording(
     assert "observed" in table["names"]
 
 
+IDLE = (
+    "# kernrec v1 backend=rocm recorder=rocprofiler-sdk activity=1 pid=7 ppid=1 exe=py"
+)
+
+
+@pytest.mark.parametrize(
+    "text,clean",
+    [
+        (f"{IDLE}\n# sdk_version=10302 build_sdk_version=10302\n", True),
+        (f"{IDLE}\n# gpu_active\n", False),
+        (f"{IDLE}\n# gpu_active\nk\n", False),
+        (f"{IDLE}\n# dropped=1\n", False),
+        (f"{IDLE}\n# error=flush_failed\n", False),
+        (IDLE.replace(" activity=1", "") + "\n", False),
+        (
+            IDLE.replace(
+                "backend=rocm recorder=rocprofiler-sdk", "backend=cuda recorder=cupti"
+            )
+            + "\n",
+            False,
+        ),
+    ],
+    ids=["idle", "active", "names", "dropped", "error", "no-activity", "cuda"],
+)
+def test_footerless_rocm_process_is_clean_only_if_it_never_loaded_gpu_code(
+    tmp_path, text, clean
+):
+    """A killed process that never loaded GPU code cannot have lost kernels."""
+    path = tmp_path / "kern.7.txt"
+    path.write_text(text)
+    assert kernel_table.read_recording(path)[2] is clean
+
+
+@pytest.mark.parametrize("missing", [False, True], ids=["all-present", "one-missing"])
+def test_job_inventory_catches_a_partial_download(tmp_path, missing):
+    """A recording the job listed at finish but the fold lacks is incomplete."""
+    job = tmp_path / ".kernrec" / "job"
+    _sidecar(job)
+    meta = json.loads((job / "kernrec.json").read_text())
+    meta["recordings"] = ["kern.1.txt", "kern.2.txt"]
+    (job / "kernrec.json").write_text(json.dumps(meta))
+    _recording(job / "kern.1.txt", ["k"])
+    if not missing:
+        _recording(job / "kern.2.txt", ["k"])
+    table, _ = _build_kernrec(tmp_path, job.parent)
+    assert table["rows"]["step-x"]["trace_complete"] is (not missing)
+
+
+def test_headerless_file_does_not_decide_the_backend(tmp_path):
+    job = tmp_path / ".kernrec" / "job"
+    _sidecar(job)
+    _recording(job / "kern.1.txt", ["k"])
+    text = (job / "kern.1.txt").read_text()
+    (job / "kern.1.txt").write_text(
+        text.replace(
+            "backend=cuda recorder=cupti", "backend=rocm recorder=rocprofiler-sdk"
+        )
+    )
+    (job / "kern.2.txt").write_text("")
+    assert kernel_table._trace_health(job, sorted(job.glob("kern.*.txt")))[0] == "rocm"
+
+
 def test_successful_job_without_recordings_cannot_authorize_drops(tmp_path):
     job = tmp_path / ".kernrec" / "job"
     _sidecar(job)

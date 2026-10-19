@@ -5,6 +5,7 @@
 #include <rocprofiler-sdk/registration.h>
 #include <rocprofiler-sdk/version.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
@@ -20,8 +21,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#if ROCPROFILER_SDK_VERSION != 10302
-#error "kernrec-rocm requires the validated ROCProfiler SDK 1.3.2 headers"
+#if ROCPROFILER_SDK_VERSION != 10302 && ROCPROFILER_SDK_VERSION != 10305
+#error "kernrec-rocm requires validated ROCProfiler SDK 1.3.2 (ROCm 7.2) or 1.3.5 (ROCm 10) headers"
 #endif
 
 namespace {
@@ -33,7 +34,7 @@ struct State {
   pid_t pid = getpid();
   int fd = -1;
   char dir[4096]{};
-  bool stopping = false, timer_started = false, started = false;
+  bool stopping = false, timer_started = false, started = false, active = false;
   long flush_ms = 1000;
   uint64_t records = 0, dropped = 0, errors = 0;
   rocprofiler_context_id_t context{};
@@ -121,7 +122,7 @@ bool open_output() {
   char header[1400];
   int length = snprintf(header, sizeof(header),
                         "# kernrec v1 backend=rocm recorder=rocprofiler-sdk "
-                        "pid=%ld ppid=%ld exe=%s\n",
+                        "activity=1 pid=%ld ppid=%ld exe=%s\n",
                         static_cast<long>(state->pid), static_cast<long>(getppid()),
                         count > 0 ? exe : "?");
   output(header, static_cast<size_t>(length));
@@ -145,27 +146,38 @@ char* append_pid(char* dest, pid_t pid) {
 }
 
 // Only async-signal-safe operations: inherited SDK and mutex state are unusable.
-// Even a child doing no GPU work is conservatively visible as incomplete.
 void fork_child() {
   if (!state) return;
   if (state->fd >= 0) close(state->fd);
   state->fd = -1;
+}
+
+std::atomic<pid_t> marked_child{0};
+
+// A fork child keeps the SDK's callbacks but not its buffer threads, so its
+// dispatches are lost. Loading GPU code is the first sign that it can launch
+// kernels; exec'd and CPU-only children never get here and leave no file.
+bool forked_child() {
+  if (!state || state->pid == getpid()) return false;
+  pid_t pid = getpid();
+  if (marked_child.exchange(pid) == pid) return true;
   char path[4096];
   char* end = append(path, state->dir);
   end = append(end, "/kern.");
-  end = append_pid(end, getpid());
+  end = append_pid(end, pid);
   end = append(end, ".txt");
   *end = 0;
   int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
-  if (fd < 0) return;
+  if (fd < 0) return true;
   char header[256];
   end = append(header, "# kernrec v1 backend=rocm recorder=rocprofiler-sdk pid=");
-  end = append_pid(end, getpid());
+  end = append_pid(end, pid);
   end = append(end, " ppid=");
   end = append_pid(end, getppid());
-  end = append(end, " forked=1\n# error=fork_after_sdk_init\n");
+  end = append(end, " forked=1\n# error=gpu_use_after_fork\n");
   write_all(fd, header, static_cast<size_t>(end - header));
   close(fd);
+  return true;
 }
 
 void emit_name(const std::string& name) {
@@ -177,9 +189,9 @@ void emit_name(const std::string& name) {
 
 void symbols_callback(rocprofiler_callback_tracing_record_t record,
                       rocprofiler_user_data_t*, void*) {
-  if (!owned() || record.kind != ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT ||
+  if (record.kind != ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT ||
       record.operation != ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER ||
-      record.phase != ROCPROFILER_CALLBACK_PHASE_LOAD)
+      record.phase != ROCPROFILER_CALLBACK_PHASE_LOAD || forked_child() || !owned())
     return;
   pthread_mutex_lock(&state->lock);
   try {
@@ -195,6 +207,12 @@ void symbols_callback(rocprofiler_callback_tracing_record_t record,
       if (name.find_first_of("\r\n") != std::string::npos || name[0] == '#') {
         error_locked("invalid_kernel_name");
       } else {
+        // Loading code precedes any dispatch, so an inactive process that never
+        // reaches its footer (e.g. a killed daemon) cannot have lost kernels.
+        if (!state->active) {
+          state->active = true;
+          output("# gpu_active\n", 13);
+        }
         // Keep copied names after unload: outstanding dispatch records use them.
         auto inserted = state->symbols.emplace(symbol->kernel_id, name);
         if (!inserted.second && inserted.first->second != name)

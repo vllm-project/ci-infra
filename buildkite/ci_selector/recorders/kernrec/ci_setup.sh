@@ -49,11 +49,14 @@ data = {
     "provenance": {
         "ci_infra_branch": env.get("KERNREC_BRANCH", env.get("VLLM_CI_BRANCH", "main")),
         "versions": versions,
-        "expected_rocprofiler_sdk": "1.3.2" if backend == "rocm" else None,
+        "expected_rocprofiler_sdk": env.get("KERNREC_SDK_VERSION") if backend == "rocm" else None,
         "environment": {key: value for key, value in sorted(env.items())
                         if key in names or key.startswith("VLLM_ROCM_USE_AITER")},
     },
 }
+if data["exit_status"] is not None:
+    # Inventory at finish, so the collector can tell a partial download apart.
+    data["recordings"] = sorted(p.name for p in Path(env["KERNREC_DIR"]).glob("kern.*.txt"))
 path = Path(env["KERNREC_DIR"]) / "kernrec.json"
 temporary = path.with_suffix(".json.tmp")
 temporary.write_text(json.dumps(data, indent=2) + "\n")
@@ -87,6 +90,11 @@ kernrec_setup() {
   kernrec_write_sidecar null
   # The generator also calls finish: another prelude may replace the EXIT trap.
   trap 'kernrec_finish $?' EXIT
+  # The host found no checkout to upload from, so a recording here would be lost.
+  if [[ "${KERNREC_DISABLE:-}" == 1 ]]; then
+    KERNREC_COLLECTION_ERROR="checkout unavailable; recordings cannot be uploaded"
+    return 1
+  fi
   if [[ "${KERNREC_ACTIVE_DIR:-}" != "$KERNREC_DIR" ]] && compgen -G "$KERNREC_DIR/kern.*.txt" >/dev/null; then
     KERNREC_COLLECTION_ERROR="existing recordings require a fresh job directory"
     return 1
@@ -141,7 +149,7 @@ PY
         timeout 60 bash "$source/build-rocm.sh" "$dir/libkernrec_rocm.so.tmp" >"$KERNREC_DIR/setup.log" 2>&1 \
           && mv "$dir/libkernrec_rocm.so.tmp" "$dir/libkernrec_rocm.so" || return 1
       fi
-      KERNREC_COLLECTION_ERROR="ROCProfiler SDK 1.3.2 runtime preflight failed; see preflight.log"
+      KERNREC_COLLECTION_ERROR="ROCProfiler SDK 1.3.2/1.3.5 runtime preflight failed; see preflight.log"
       timeout 10 "${KERNREC_PYTHON:-python3}" - "$sdk_lib/librocprofiler-sdk.so" "$dir/libkernrec_rocm.so" >"$KERNREC_DIR/preflight.log" 2>&1 <<'PY' || return 1
 import ctypes
 import sys
@@ -151,14 +159,15 @@ sdk.rocprofiler_get_version.argtypes = [ctypes.POINTER(ctypes.c_uint32)] * 3
 sdk.rocprofiler_get_version.restype = ctypes.c_int
 status = sdk.rocprofiler_get_version(*(ctypes.byref(part) for part in version))
 actual = tuple(part.value for part in version)
-if status != 0 or actual != (1, 3, 2):
-    raise SystemExit(f"expected ROCProfiler SDK 1.3.2, got {actual}, status={status}")
+if status != 0 or actual not in {(1, 3, 2), (1, 3, 5)}:
+    raise SystemExit(f"expected ROCProfiler SDK 1.3.2 or 1.3.5, got {actual}, status={status}")
 ctypes.CDLL(sys.argv[2])
-print("ROCProfiler SDK 1.3.2 and recorder dependencies loaded")
+print("ROCProfiler SDK %d.%d.%d and recorder dependencies loaded" % actual)
 PY
       export VLLM_WORKER_MULTIPROC_METHOD=spawn
       export VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS="${VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS:-30}"
-      export KERNREC_SDK_VERSION=1.3.2
+      KERNREC_SDK_VERSION=$(sed -n 's/^ROCProfiler SDK \([0-9.]*\) .*/\1/p' "$KERNREC_DIR/preflight.log")
+      export KERNREC_SDK_VERSION
       export ROCP_TOOL_LIBRARIES="$dir/libkernrec_rocm.so"
       case ":${LD_PRELOAD:-}:" in
         *":$sdk_lib/librocprofiler-sdk.so:"*) ;;

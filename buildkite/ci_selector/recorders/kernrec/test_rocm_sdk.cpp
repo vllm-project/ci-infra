@@ -44,14 +44,19 @@ int main(int argc, char** argv) {
   assert(argc == 2);
   setenv("KERNREC_DIR", argv[1], 1);
   rocprofiler_client_id_t client{};
-  assert(rocprofiler_configure(10302, "1.3.2", 0, &client));
-  assert(contents(getpid()).find("backend=rocm recorder=rocprofiler-sdk") !=
+  assert(rocprofiler_configure(ROCPROFILER_SDK_VERSION, "", 0, &client));
+  assert(contents(getpid()).find("backend=rocm recorder=rocprofiler-sdk activity=1 ") !=
          std::string::npos);
+  assert(contents(getpid()).find("# gpu_active") == std::string::npos);
 
   // Only dispatched symbols belong in the output; unload cannot invalidate names.
   symbol(1, "_Z4usedv.kd");
   symbol(2, "_Z6unusedv.kd");
   symbol(1, "_Z4usedv.kd", ROCPROFILER_CALLBACK_PHASE_UNLOAD);
+  // The first loaded code object marks the process active, once.
+  auto loaded = contents(getpid());
+  assert(loaded.find("# gpu_active\n") != std::string::npos);
+  assert(loaded.find("# gpu_active", loaded.find("# gpu_active") + 1) == std::string::npos);
   dispatch(1);
   dispatch(1);
   dispatch(3);
@@ -62,20 +67,36 @@ int main(int argc, char** argv) {
   dispatch(1, 3);
   dispatch(1, 5);
 
-  // A forked child must neither enter inherited locks nor append a clean footer.
+  // A forked child must neither enter inherited locks nor write a recording
+  // unless it loads GPU code; then its trace is marked incomplete.
   pid_t child = fork();
   assert(child >= 0);
   if (child == 0) {
     dispatch(1, 5);
+    symbol(4, "_Z6parentv.kd", ROCPROFILER_CALLBACK_PHASE_UNLOAD);
     tool_fini(nullptr);
     _exit(0);
   }
   int status = 0;
   assert(waitpid(child, &status, 0) == child && status == 0);
+  assert(access((std::string(state->dir) + "/kern." + std::to_string(child) + ".txt").c_str(),
+                F_OK) != 0);
+
+  child = fork();
+  assert(child >= 0);
+  if (child == 0) {
+    symbol(5, "_Z5childv.kd");
+    symbol(6, "_Z6child2v.kd");
+    dispatch(5);
+    tool_fini(nullptr);
+    _exit(0);
+  }
+  assert(waitpid(child, &status, 0) == child && status == 0);
   auto child_text = contents(child);
-  assert(child_text.find("# error=fork_after_sdk_init") != std::string::npos);
+  assert(child_text.find("forked=1\n# error=gpu_use_after_fork\n") != std::string::npos);
+  assert(child_text.find("# error", child_text.find("# error") + 1) == std::string::npos);
   assert(child_text.find("# end") == std::string::npos);
-  assert(child_text.find("_Z4usedv") == std::string::npos);
+  assert(child_text.find("_Z5childv") == std::string::npos);
 
   dispatch(999, 5);
   dispatch_callback({}, {}, nullptr, 1, nullptr, 5);
