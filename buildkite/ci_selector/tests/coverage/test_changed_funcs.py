@@ -857,3 +857,97 @@ def test_platform_patching_tests_are_found(tmp_path):
     assert platform_mockers(repo.root, ref, [changed]) == {
         "vllm/ops.py": {"tests/test_a.py", "tests/test_e.py", "tests/test_g.py"}
     }
+
+
+ADDED_GUARD_SRC = """\
+import torch
+
+from vllm.platforms import current_platform
+
+
+def setup():
+    return 1
+
+
+def shutdown(state):
+    torch.accelerator.synchronize()
+    state.clear()
+"""
+
+
+@pytest.mark.parametrize(
+    "edit, family",
+    [
+        # vllm#62276: a whole new `if is_rocm():` block, plus the imports it uses
+        (
+            lambda s: s.replace(
+                "import torch\n", "import torch\n\nfrom vllm.graphs import Graphs\n"
+            ).replace(
+                "    state.clear()\n",
+                "    if current_platform.is_rocm():\n"
+                "        Graphs.clear_all()\n"
+                "    state.clear()\n",
+            ),
+            {"amd"},
+        ),
+        # a pure guard under `not`/`or`: the header reaches what the block does
+        (
+            lambda s: s.replace(
+                "    state.clear()\n",
+                "    if current_platform.is_rocm() or current_platform.is_xpu():\n"
+                "        state.reset()\n"
+                "    state.clear()\n",
+            ),
+            {"amd", "xpu"},
+        ),
+        # the condition reads more than the platform: it runs everywhere
+        (
+            lambda s: s.replace(
+                "    state.clear()\n",
+                "    if state.ready() and current_platform.is_rocm():\n"
+                "        state.reset()\n"
+                "    state.clear()\n",
+            ),
+            None,
+        ),
+        # an `else` runs on the other families
+        (
+            lambda s: s.replace(
+                "    state.clear()\n",
+                "    if current_platform.is_rocm():\n"
+                "        state.reset()\n"
+                "    else:\n"
+                "        state.drop()\n",
+            ),
+            None,
+        ),
+        # imports alone still reach every family
+        (lambda s: s.replace("import torch\n", "import torch\nimport os\n"), None),
+        # an import beside an unguarded change: every family, as before
+        (
+            lambda s: s.replace("import torch\n", "import torch\nimport os\n").replace(
+                "    return 1\n", "    return 2\n"
+            ),
+            None,
+        ),
+    ],
+    ids=[
+        "new-guard-block-and-imports",
+        "or-of-guards",
+        "impure-condition",
+        "with-else",
+        "imports-only",
+        "import-and-unguarded-change",
+    ],
+)
+def test_a_newly_guarded_block_reaches_only_its_platform(tmp_path, edit, family):
+    """vllm#62276 added `if current_platform.is_rocm(): ...` to
+    GPUModelRunner.shutdown and the imports it needs. Elsewhere the header
+    only reads the platform and skips the block, and in a file with changed
+    functions an import is not use, so the change is ROCm's alone."""
+    repo = Repo(tmp_path)
+    repo.write("vllm/r.py", ADDED_GUARD_SRC)
+    base = repo.commit("base")
+    repo.write("vllm/r.py", edit(ADDED_GUARD_SRC))
+    (f,) = build(repo.root, base, repo.commit("edit")).files
+    assert f.platform == (frozenset(family) if family else None)
