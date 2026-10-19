@@ -216,8 +216,9 @@ def test_amd_native_runtime_dependency_still_exists(vllm_repo):
 
 
 # Real labels from .buildkite/test_areas against real status contexts. A mirror
-# has two spellings: its own yaml label, used verbatim, and the wrapped form
-# "AMD: <parent> (<device>)" that older revisions carry.
+# has two spellings: its own yaml label, used verbatim, or the parent's title
+# under the AMD device's tag, ":amd: (<tag>) <title>". Older revisions wrapped
+# the parent instead: "AMD: <parent> (<device>)".
 MIRROR_CASES = [
     (
         "declared label",
@@ -230,6 +231,12 @@ MIRROR_CASES = [
         None,
         ":nvidia: (H200) Basic Correctness",
         "amd-nvidia-h200-basic-correctness-mi300-1",
+    ),
+    (
+        "wrapped parent label, current form",
+        None,
+        ":nvidia: (H200) Basic Correctness",
+        "amd-mi300-basic-correctness",
     ),
     (
         # `_slug` strips a trailing `-n`, so assembling the slug from parts ate
