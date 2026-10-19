@@ -1206,8 +1206,8 @@ def convert_group_step_to_buildkite_step(
                     buildkite_step.commands,
                     buildkite_step.env,
                 ) = sharded
-                # Buildkite fills in %N (from 1) and %t (the shard count): "... shard 2/4".
-                buildkite_step.label = f"{buildkite_step.label} shard %N/%t"
+                # Buildkite fills in %N (from 1) and %t (the shard count): "... Shard 2/4".
+                buildkite_step.label = f"{buildkite_step.label} Shard %N/%t"
             if include_step:
                 group_steps_list.append(buildkite_step)
 

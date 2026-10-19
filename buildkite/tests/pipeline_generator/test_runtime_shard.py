@@ -307,7 +307,7 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     # The step's own job, in its own group, with its key, depends_on, agents,
     # plugins and retries: only parallel.
     assert step.key == "model-executor" and step.parallelism == 3
-    assert step.label == "Model Executor shard %N/%t"
+    assert step.label == "Model Executor Shard %N/%t"
     for field in ("depends_on", "agents", "plugins", "retry", "timeout_in_minutes"):
         assert getattr(step, field) == getattr(plain, field)
     # Its commands are the step's own, after installing the plugin: the same
