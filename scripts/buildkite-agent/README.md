@@ -85,7 +85,9 @@ sudo systemctl enable --now buildkite-agent
   The agent preserves a hook's exit code as the job's exit status, and the
   generated pipeline steps retry 201-205 once (alongside -1 agent-lost, 255
   agent-terminated and 94 Git mirror lock), so one network blip can't kill a
-  whole build. No test or agent exits in 201-205; keep new codes there. Every
+  whole build. Buildkite's agent reserves 0, 1, 94, 255, -1 and 128 + a signal
+  number (https://buildkite.com/docs/agent/lifecycle#exit-codes), and no
+  test exited in 201-205 over three days of CI failures; keep new codes there. Every
   provider call retries in place first (5 attempts, sleeping 2/4/8/16 s, then
   its code), written inline in each hook. Keep every provider call behind that
   loop; never let it fall through to the default exit 1. Each retry that fires
