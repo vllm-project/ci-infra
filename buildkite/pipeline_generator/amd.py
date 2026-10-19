@@ -119,7 +119,7 @@ def rocm_ci_repo() -> str:
         and re.search(r"[/:]vllm-project/vllm(\.git)?$", repo)
         and os.getenv("AITER_NIGHTLY") != "1"
     )
-    return "rocm/vllm-ci" if trusted else "rocm/vllm-ci-pr"
+    return "rocm/vllm-ci" if trusted else "rocm/vllm-dev"
 
 
 def get_amd_pod_image() -> str:

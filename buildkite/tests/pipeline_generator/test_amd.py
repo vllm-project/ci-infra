@@ -112,10 +112,10 @@ def build_sh_layout(tmp_path, monkeypatch):
     "env,expected",
     [
         ({}, "rocm/vllm-ci"),
-        ({"BUILDKITE_PULL_REQUEST": "42"}, "rocm/vllm-ci-pr"),
-        ({"BUILDKITE_REPO": "git@github.com:someone/vllm.git"}, "rocm/vllm-ci-pr"),
-        ({"AITER_NIGHTLY": "1"}, "rocm/vllm-ci-pr"),
-        ({"BUILDKITE_BRANCH": "releases/v0.99"}, "rocm/vllm-ci-pr"),
+        ({"BUILDKITE_PULL_REQUEST": "42"}, "rocm/vllm-dev"),
+        ({"BUILDKITE_REPO": "git@github.com:someone/vllm.git"}, "rocm/vllm-dev"),
+        ({"AITER_NIGHTLY": "1"}, "rocm/vllm-dev"),
+        ({"BUILDKITE_BRANCH": "releases/v0.99"}, "rocm/vllm-dev"),
     ],
 )
 def test_build_sh_layout_build_steps_get_trusted_repo(build_sh_layout, env, expected):
@@ -151,7 +151,7 @@ def test_build_sh_layout_pods_run_the_build_image(build_sh_layout):
     assert command_step.depends_on[0] == "image-build-amd"
     pod = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
     container = pod["containers"][0]
-    assert container["image"] == "rocm/vllm-ci-pr:build-$BUILDKITE_BUILD_ID"
+    assert container["image"] == "rocm/vllm-dev:build-$BUILDKITE_BUILD_ID"
     assert command_step.env["VLLM_CI_BASE_IMAGE"] == container["image"]
     assert container["imagePullPolicy"] == "Always"
     assert [m["name"] for m in container["volumeMounts"]] == ["devshm"]

@@ -69,7 +69,7 @@ def test_amd_template_block_keys_and_dependencies(label, slug, dind, build_steps
     rendered = minijinja.render_str(
         TEMPLATE,
         amd_build_steps=build_steps,
-        ci_repo="rocm/vllm-ci-pr",
+        ci_repo="rocm/vllm-dev",
         branch="test-branch",
         list_file_diff="",
         mirror_hw="amdproduction",
@@ -126,7 +126,7 @@ def _render(list_file_diff="", aiter_nightly="0", ci_repo="rocm/vllm-ci"):
     return {step.get("key", step.get("label")): step for step in steps}
 
 
-@pytest.mark.parametrize("ci_repo", ["rocm/vllm-ci", "rocm/vllm-ci-pr"])
+@pytest.mark.parametrize("ci_repo", ["rocm/vllm-ci", "rocm/vllm-dev"])
 def test_build_sh_layout_renders_vllm_build_steps(ci_repo):
     steps = _render(ci_repo=ci_repo)
     build = [s for s in steps.values() if s.get("agents") == {"queue": "amd-cpu"}]
@@ -161,7 +161,7 @@ def test_gpu_job_env_matches_the_checkouts_runner(build_steps):
     rendered = minijinja.render_str(
         TEMPLATE,
         amd_build_steps=build_steps,
-        ci_repo="rocm/vllm-ci-pr",
+        ci_repo="rocm/vllm-dev",
         branch="main",
         list_file_diff="",
         mirror_hw="amdproduction",
@@ -197,7 +197,7 @@ def test_build_sh_layout_gates_build_steps_by_source_files():
 
 
 def test_aiter_nightly_build_sh_layout_has_no_overlay_step():
-    steps = _render(aiter_nightly="1", ci_repo="rocm/vllm-ci-pr")
+    steps = _render(aiter_nightly="1", ci_repo="rocm/vllm-dev")
     assert "aiter-nightly-amd" not in steps
     assert steps["image-build-amd"]["depends_on"] == ["refresh-rocm-base-amd"]
     gpu_jobs = {
@@ -216,19 +216,19 @@ VLLM = "https://github.com/vllm-project/vllm.git"
     [
         ("false", VLLM, "0", "rocm/vllm-ci", "main"),
         ("false", "git@github.com:vllm-project/vllm.git", "0", "rocm/vllm-ci", "main"),
-        ("123", VLLM, "0", "rocm/vllm-ci-pr", "main"),
-        ("", VLLM, "0", "rocm/vllm-ci-pr", "main"),
-        ("false", "https://github.com/someone/vllm.git", "0", "rocm/vllm-ci-pr", "main"),
-        ("false", "https://github.com/vllm-project/vllm-x.git", "0", "rocm/vllm-ci-pr", "main"),
-        ("false", VLLM, "1", "rocm/vllm-ci-pr", "main"),
+        ("123", VLLM, "0", "rocm/vllm-dev", "main"),
+        ("", VLLM, "0", "rocm/vllm-dev", "main"),
+        ("false", "https://github.com/someone/vllm.git", "0", "rocm/vllm-dev", "main"),
+        ("false", "https://github.com/vllm-project/vllm-x.git", "0", "rocm/vllm-dev", "main"),
+        ("false", VLLM, "1", "rocm/vllm-dev", "main"),
         # A pushed or manually built branch other than main never writes the trusted repo.
-        ("false", VLLM, "0", "rocm/vllm-ci-pr", "releases/v0.99"),
+        ("false", VLLM, "0", "rocm/vllm-dev", "releases/v0.99"),
     ],
 )
 def test_bootstrap_trust_rule(pr, repo, aiter, expected, branch):
     bootstrap = (BUILDKITE_DIR / "bootstrap-amd.sh").read_text()
     rule = re.search(
-        r"ROCM_CI_REPO=rocm/vllm-ci-pr\n.*?export ROCM_CI_REPO\n", bootstrap, re.S
+        r"ROCM_CI_REPO=rocm/vllm-dev\n.*?export ROCM_CI_REPO\n", bootstrap, re.S
     )
     env = {
         "BUILDKITE_PULL_REQUEST": pr,

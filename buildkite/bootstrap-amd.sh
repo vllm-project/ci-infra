@@ -168,7 +168,7 @@ upload_pipeline() {
     if [[ -f scripts/rocm/build.sh ]]; then
         # vLLM defines its ROCm build steps in hardware_tests/amd.yaml. The one trust rule: only non-PR builds
         # of vllm-project/vllm main, AITER nightly excluded, write rocm/vllm-ci. Exported for $ROCM_CI_REPO in amd.yaml.
-        ROCM_CI_REPO=rocm/vllm-ci-pr
+        ROCM_CI_REPO=rocm/vllm-dev
         if [[ ${BUILDKITE_PULL_REQUEST:-} == false && ${BUILDKITE_BRANCH:-} == main \
               && ${BUILDKITE_REPO:-} =~ [/:]vllm-project/vllm(\.git)?$ && $AITER_NIGHTLY != 1 ]]; then
             ROCM_CI_REPO=rocm/vllm-ci

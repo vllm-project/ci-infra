@@ -89,7 +89,7 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 
 `buildkite/test-template-amd.j2` renders vLLM's [`test-amd.yaml`](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-amd.yaml) into Buildkite YAML using [minijinja-cli](https://github.com/mitsuhiko/minijinja).
 
-When the vLLM checkout has `.buildkite/scripts/rocm/build.sh`, the ROCm build steps come from vLLM's `.buildkite/hardware_tests/amd.yaml` (the template and `amd.py` alike) and GPU pods run `$ROCM_CI_REPO:build-$BUILDKITE_BUILD_ID`. `ROCM_CI_REPO` is the trust decision: `rocm/vllm-ci` for non-PR builds of `vllm-project/vllm` `main` that are not the AITER nightly, else `rocm/vllm-ci-pr`. Older checkouts keep the previous build chain.
+When the vLLM checkout has `.buildkite/scripts/rocm/build.sh`, the ROCm build steps come from vLLM's `.buildkite/hardware_tests/amd.yaml` (the template and `amd.py` alike) and GPU pods run `$ROCM_CI_REPO:build-$BUILDKITE_BUILD_ID`. `ROCM_CI_REPO` is the trust decision: `rocm/vllm-ci` for non-PR builds of `vllm-project/vllm` `main` that are not the AITER nightly, else `rocm/vllm-dev`. Older checkouts keep the previous build chain.
 
 ROCm release images are built by a separate `amd-release` pipeline, which `release-pipeline.yaml` triggers once per ROCm stack (`ROCM_STACK`). Buildkite settings: same cluster as `amd-ci`; one step `buildkite-agent pipeline upload .buildkite/rocm-release.yaml` on queue `amd-cpu`; builds only from triggers (release pipeline allowed); no GitHub statuses; no intermediate-build skipping.
 
@@ -97,7 +97,7 @@ ROCm release images are built by a separate `amd-release` pipeline, which `relea
 
 `AITER_NIGHTLY=1`, on a scheduled `amd-ci` build of `main`, tests last night's [AITER](https://github.com/ROCm/aiter) build against vLLM. Every `amdproduction` step on MI300 or MI355 (`amdgfx942nightly`, `amdgfx950nightly`) runs, unblocked. MI250 is left out: AITER builds no kernels for it.
 
-With `build.sh`, `image-build-amd` installs the newest AITER nightly wheel built for the image's ROCm, torch and Python into the test image (selected by vLLM's `select_aiter_nightly_wheel.py`; an `AITER_SPEC` in the build env pins a pip spec instead), and the build writes only to `rocm/vllm-ci-pr`. Older checkouts instead run:
+With `build.sh`, `image-build-amd` installs the newest AITER nightly wheel built for the image's ROCm, torch and Python into the test image (selected by vLLM's `select_aiter_nightly_wheel.py`; an `AITER_SPEC` in the build env pins a pip spec instead), and the build writes only to `rocm/vllm-dev`. Older checkouts instead run:
 
 1. `aiter-nightly-amd` (vLLM's [`.buildkite/scripts/rocm/aiter-nightly-overlay.sh`](https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/rocm/aiter-nightly-overlay.sh)) installs the newest AITER nightly wheel built for the image's ROCm, torch and Python over this build's ci_base, and pushes the result as this build's `rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID`, in place of the stock one.
 2. The test image and every native GPU job run on that image. Test image layers go to an `aiter-nightly` cache branch.
