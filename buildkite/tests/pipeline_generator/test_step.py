@@ -723,10 +723,12 @@ def test_generated_steps_retry_when_the_agent_is_lost():
 
     assert command_step.retry == {
         "automatic": [
+            {"exit_status": -1, "signal_reason": "cancel", "limit": 1},
             {"exit_status": -1, "limit": 1},
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
+            {"exit_status": 128, "limit": 1},
         ],
     }
 
@@ -745,10 +747,12 @@ def test_agent_lost_retry_preserves_step_retry_conditions():
 
     assert command_step.retry == {
         "automatic": [
+            {"exit_status": -1, "signal_reason": "cancel", "limit": 1},
             {"exit_status": -1, "limit": 1},
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
+            {"exit_status": 128, "limit": 1},
             {"exit_status": 143, "limit": 2},
         ],
     }
@@ -769,10 +773,12 @@ def test_infra_retry_tolerates_exit_status_arrays():
 
     assert command_step.retry == {
         "automatic": [
+            {"exit_status": -1, "signal_reason": "cancel", "limit": 1},
             {"exit_status": -1, "limit": 1},
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
+            {"exit_status": 128, "limit": 1},
             {"exit_status": [1, 2], "limit": 1},
         ],
     }
@@ -792,9 +798,11 @@ def test_infra_retry_dedupes_statuses_inside_arrays():
 
     assert command_step.retry == {
         "automatic": [
+            {"exit_status": -1, "signal_reason": "cancel", "limit": 1},
             {"exit_status": -1, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
+            {"exit_status": 128, "limit": 1},
             {"exit_status": [2, 255], "limit": 1},
         ],
     }
@@ -816,13 +824,40 @@ def test_infra_retry_keeps_a_steps_own_rule_for_a_git_mirror_timeout():
 
     assert command_step.retry == {
         "automatic": [
+            {"exit_status": -1, "signal_reason": "cancel", "limit": 1},
             {"exit_status": -1, "limit": 1},
             {"exit_status": 255, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
+            {"exit_status": 128, "limit": 1},
             {"exit_status": 94, "limit": 3},
         ],
     }
 
+
+
+def test_infra_retry_keeps_yaml_agent_lost_rule_without_duplicates():
+    # A step that lists -1 itself keeps its own limit; the timeout rule is
+    # deduped with the general -1 rule, so no duplicate -1 rule appears.
+    step = Step(
+        label="Agent retry with its own -1 rule",
+        group="Failure handling",
+        key="image-build-agent-retry-with-own-rule",
+        device="h100",
+        commands=["pytest tests/basic.py"],
+        retry={"automatic": [{"exit_status": -1, "limit": 2}]},
+    )
+
+    command_step = _render_single_step(step).steps[0]
+
+    assert command_step.retry == {
+        "automatic": [
+            {"exit_status": 255, "limit": 1},
+            {"exit_status": 94, "limit": 1},
+            {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
+            {"exit_status": 128, "limit": 1},
+            {"exit_status": -1, "limit": 2},
+        ],
+    }
 
 def test_multi_gpu_step_dumps_nvidia_topology():
     step = Step(
@@ -1137,10 +1172,12 @@ def test_the_precommit_gate_retries_infra_failures():
     (gate,) = group.steps
     assert gate.retry == {
         "automatic": [
+            {"exit_status": -1, "signal_reason": "cancel", "limit": 1},
             {"exit_status": -1, "limit": 1},
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
+            {"exit_status": 128, "limit": 1},
         ],
     }
 
@@ -1159,10 +1196,12 @@ def test_a_step_that_retries_a_hook_code_keeps_its_own_rule_for_it():
 
     assert command_step.retry == {
         "automatic": [
+            {"exit_status": -1, "signal_reason": "cancel", "limit": 1},
             {"exit_status": -1, "limit": 1},
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 204, 205], "limit": 1},
+            {"exit_status": 128, "limit": 1},
             {"exit_status": [2, 203], "limit": 2},
         ],
     }
