@@ -61,9 +61,10 @@ def _render(**overrides):
 def _tests(steps):
     """The GPU test steps, by label."""
     return {
-        step["label"].split(": ", 1)[1]: step
+        step["label"]: step
         for step in steps.values()
-        if step.get("label", "").startswith("mi")
+        if "label" in step
+        and (step.get("agents") or {}).get("queue", "").startswith("amd_mi")
     }
 
 

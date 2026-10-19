@@ -55,7 +55,7 @@ def _render_single_step(step):
 
 def _rocm_base_refresh_step():
     return Step(
-        label="AMD: :docker: refresh ROCm base",
+        label=":docker: Refresh ROCm base",
         group="Hardware - AMD Build",
         key=amd.AMD_ROCM_BASE_REFRESH_STEP_KEY,
         device="amd_cpu",
@@ -115,7 +115,8 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert group_step.group == "Hardware-AMD Tests"
     # Optional, so it waits in the "Run more jobs" input step.
     assert command_step.deferred
-    assert command_step.label == f"AMD: AMD direct test ({device})"
+    tag = {"mi300_4": "MI300", "mi325_1": "MI325", "mi355_dpx": "MI355 DPX"}[device]
+    assert command_step.label == f":amd: ({tag}) AMD direct test"
     assert command_step.depends_on == ["image-build-amd"]
     assert command_step.agents == {"queue": queue}
     assert command_step.commands == [
@@ -176,8 +177,8 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert amd.ROCM_DEBUG_AGENT_ENV_VAR in test_commands
     assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
     assert "[ -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
-    assert "export HSA_TOOLS_LIB=" not in test_commands
-    assert "HSA_ENABLE_DEBUG=1" not in test_commands
+    assert "export HAS_TOOLS_LIB=" not in test_commands
+    assert "HAS_ENABLE_DEBUG=1" not in test_commands
     assert "WARNING: ROCm debug agent not found at" not in test_commands
     assert "cd /vllm-workspace/tests" in test_commands
     assert "pytest tests/foo.py" in test_commands
@@ -221,9 +222,9 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
     assert (
-        "export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
+        "export HAS_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
     )
-    assert "HSA_ENABLE_DEBUG=1" in test_commands
+    assert "HAS_ENABLE_DEBUG=1" in test_commands
     assert "ROCm debug agent enabled" in test_commands
     assert "WARNING: ROCm debug agent not found at" in test_commands
 
@@ -621,9 +622,31 @@ def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
 
 
 @pytest.mark.parametrize(
+    "label,device,expected",
+    [
+        ("Basic Correctness", "mi250_1", ":amd: (MI250) Basic Correctness"),
+        (
+            ":nvidia: (H200) Basic Correctness",
+            "mi300_1",
+            ":amd: (MI300) Basic Correctness",
+        ),
+        (
+            ":computer: (CPU) Docker Build Metadata",
+            "mi325_8",
+            ":amd: (MI325) Docker Build Metadata",
+        ),
+        ("LM Eval Small Models", "mi355_dpx", ":amd: (MI355 DPX) LM Eval Small Models"),
+        (":amd: (MI355) Fusion E2E TP2", "mi355_2", ":amd: (MI355) Fusion E2E TP2"),
+    ],
+)
+def test_amd_label_reads_amd_tag_title(label, device, expected):
+    assert amd.get_amd_label(label, device) == expected
+
+
+@pytest.mark.parametrize(
     "amd_label,expected_amd_label",
     [
-        (None, "AMD: Mirrored label test (mi300_1)"),
+        (None, ":amd: (MI300) Mirrored label test"),
         (
             ":amd: MI300 Attention Kernels",
             ":amd: MI300 Attention Kernels",
@@ -668,9 +691,8 @@ def test_amd_mirror_label_override(fake_global_config, amd_label, expected_amd_l
         if isinstance(s, buildkite_step.BuildkiteCommandStep)
     )
 
-    # A mirror-level label is used verbatim; without one the derived
-    # "AMD: <label> (<device>)" form is unchanged. The NVIDIA label is
-    # never affected either way.
+    # A mirror-level label is used verbatim; without one the label reads
+    # ":amd: (<tag>) <label>". The NVIDIA label is never affected either way.
     assert amd_command_step.label == expected_amd_label
     assert default_command_step.label == "Mirrored label test"
 

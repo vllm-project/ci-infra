@@ -471,7 +471,9 @@ def _named_in_invoked_tests(state: RepoState, path: str) -> bool:
 def _list_entries(state: RepoState, path: str, ref: str | None) -> set[str]:
     """The entries of a config list at `ref`, or on the base checkout when
     None: one relative path per line, blanks and comments skipped as the
-    harness does. Empty when it cannot be read."""
+    harness does. A yaml list maps `common` and each platform to its entries;
+    any platform may run them, so all are entries. Empty when it cannot be
+    read."""
     if ref is None:
         try:
             text = (Path(state.repo) / path).read_text()
@@ -486,6 +488,19 @@ def _list_entries(state: RepoState, path: str, ref: str | None) -> set[str]:
         if proc.returncode != 0:
             return set()
         text = proc.stdout
+    if path.endswith((".yaml", ".yml")):
+        try:
+            lists = yaml.safe_load(text)
+        except yaml.YAMLError:
+            return set()
+        if not isinstance(lists, dict):
+            return set()
+        return {
+            str(entry)
+            for entries in lists.values()
+            if isinstance(entries, list)
+            for entry in entries
+        }
     return {
         line.strip()
         for line in text.splitlines()
@@ -496,7 +511,7 @@ def _list_entries(state: RepoState, path: str, ref: str | None) -> set[str]:
 # What a config-list harness lists: its configs and the lists themselves.
 _CONFIG_SUFFIXES = (".yaml", ".yml", ".json", ".txt")
 # The harness's own default, for a step that passes no list: gsm8k's conftest
-# adds the option with default="configs/models-small.txt".
+# adds the option with default="configs/models-small.yaml".
 _LIST_DEFAULT = re.compile(
     r"""["']--config-list-file["'].*?default\s*=\s*["']([^"']+)["']""", re.S
 )

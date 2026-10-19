@@ -431,7 +431,7 @@ def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
     plain = _render_mirror(_step(mirror={"amd": {"device": "mi325_1", "dind": False}}))
     job = _render_mirror(_mirror_step())
     assert job.key == "amd-model-executor" and job.parallelism == 3
-    assert job.label == "AMD: Model Executor (mi325_1) shard %N/%t"
+    assert job.label == ":amd: (MI325) Model Executor Shard %N/%t"
     assert job.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(job.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3

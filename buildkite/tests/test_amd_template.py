@@ -52,8 +52,8 @@ def test_amd_template_block_keys_and_dependencies(label, slug, dind):
     expected_key = f"block-mi355_4-{slug}"
     assert re.fullmatch(r"[A-Za-z0-9_:-]+", block["key"])
     assert block["key"] == expected_key
-    assert block["block"] == f"Run mi355_4: {label}"
-    assert command["label"] == f"mi355_4: {label}"
+    assert block["block"] == f"Run {label}"
+    assert command["label"] == label
     assert command["depends_on"] == (
         expected_key if dind else [expected_key, "verify-native-ci-base-amd"]
     )

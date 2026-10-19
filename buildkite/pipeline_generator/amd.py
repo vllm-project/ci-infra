@@ -1,4 +1,5 @@
 import os
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
@@ -195,8 +196,28 @@ def get_amd_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
     return config.queue if config else None
 
 
+_LABEL_HARDWARE_PREFIX = re.compile(r"^:[a-z0-9_+-]+: \([^)]*\) ")
+
+
+def get_amd_label_tag(device: Optional[str]) -> str:
+    """The hardware tag of an AMD label: "MI355 DPX" for mi355_dpx, else the
+    pool's family ("mi300_1" -> "MI300")."""
+    value = _device_value(device) or ""
+    if value == DeviceType.AMD_MI355_DPX.value:
+        return "MI355 DPX"
+    return value.split("_", 1)[0].upper()
+
+
 def get_amd_label(label: str, device: Optional[str]) -> str:
-    return f"AMD: {label} ({_device_value(device) or ''})"
+    """Every AMD job reads ":amd: (<tag>) <title>", like the :nvidia: ones.
+    A label already in that form is kept; any other hardware prefix is
+    replaced with the AMD device's."""
+    if label.startswith(":amd: ("):
+        return label
+    tag = get_amd_label_tag(device)
+    if not tag:
+        return label
+    return f":amd: ({tag}) {_LABEL_HARDWARE_PREFIX.sub('', label, count=1)}"
 
 
 def normalize_amd_depends_on(depends_on: Optional[List[str]]) -> List[str]:
@@ -275,7 +296,7 @@ def _get_rocm_debug_agent_setup_command() -> str:
 
     return (
         f"if test -f {ROCM_DEBUG_AGENT_LIB}; then "
-        f"export HSA_TOOLS_LIB={ROCM_DEBUG_AGENT_LIB} && export HSA_ENABLE_DEBUG=1 "
+        f"export HAS_TOOLS_LIB={ROCM_DEBUG_AGENT_LIB} && export HAS_ENABLE_DEBUG=1 "
         f"&& echo ROCm debug agent enabled: {ROCM_DEBUG_AGENT_LIB}; "
         f"else echo 'WARNING: ROCm debug agent not found at {ROCM_DEBUG_AGENT_LIB}; "
         "skipping coredump setup'; "

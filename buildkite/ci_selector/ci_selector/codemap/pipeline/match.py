@@ -36,6 +36,11 @@ def amd_label(label: str, device: str | None) -> str:
     return get_amd_label(label, device)
 
 
+def legacy_amd_label(label: str, device: str | None) -> str:
+    """The "AMD: <label> (<device>)" wrap older revisions carry."""
+    return f"AMD: {label} ({device or ''})"
+
+
 def step_slug_candidates(step) -> list[str]:
     """Every status-context spelling a step can take: its key, the label slug
     with '+' spelled out or dropped, and for a mirror whichever label the
@@ -56,8 +61,9 @@ def step_slug_candidates(step) -> list[str]:
         else:
             base_label = step.label.rsplit(" (", 1)[0]
             for pw in (True, False):
-                out.append(_slug(amd_label(base_label, None), pw))
+                out.append(_slug(legacy_amd_label(base_label, None), pw))
                 if step.device:
+                    out.append(_slug(legacy_amd_label(base_label, step.device), pw))
                     out.append(_slug(amd_label(base_label, step.device), pw))
     else:
         if step.key:

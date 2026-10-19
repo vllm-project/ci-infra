@@ -1288,7 +1288,7 @@ def convert_group_step_to_buildkite_step(
                     # Buildkite fills in %N (from 1) and %t (the shard count).
                     amd_label = (
                         f"{amd_label or get_amd_label(step.label, amd['device'])}"
-                        " shard %N/%t"
+                        " Shard %N/%t"
                     )
                 amd_step = _create_amd_step(
                     label=step.label,
