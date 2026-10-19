@@ -334,7 +334,7 @@ def test_a_main_build_is_selected_against_its_parent(monkeypatch):
     assert full_run["skipped"].startswith("nightly")
 
 
-def test_the_annotation_counts_leave_amd_steps_out(monkeypatch):
+def test_the_annotation_counts_nvidia_steps_only(monkeypatch):
     texts = []
     monkeypatch.setattr(
         selector_gate.subprocess, "run", lambda cmd, **kw: texts.append(cmd[2])
@@ -342,13 +342,25 @@ def test_the_annotation_counts_leave_amd_steps_out(monkeypatch):
     record = dict(
         selector_gate.base_record(PR, "on"),
         applied=True,
-        selector_keys=["test-b"],
-        scheduled_keys=["image-build", "test-b", "amd-test-m", "image-build-amd"],
-        legacy_keys=["image-build", "test-a", "amd-test-a", "native-amd"],
-        amd_keys=["amd-test-a", "amd-test-m", "native-amd"],
+        selector_keys=["test-b", "cpu-test"],
+        scheduled_keys=["image-build", "test-b", "cpu-test", "amd-test-m"],
+        legacy_keys=["image-build", "test-a", "test-b", "amd-test-a", "native-amd"],
+        nvidia_keys=["test-a", "test-b"],
     )
     selector_gate.annotate(record)
-    assert texts[0].startswith(
-        ":dart: ci-selector chose 1 test steps (3 scheduled with their "
+    assert texts[0] == (
+        ":dart: ci-selector chose 1 NVIDIA test steps (1 scheduled with their "
         "prerequisites); today's rules: 2."
     )
+
+
+def test_nvidia_keys_are_the_gpu_steps_on_nvidia_devices():
+    steps = [
+        Step(label="H", key="h", device="h100", commands=["x"]),
+        Step(label="L", key="l", device="l4", commands=["x"]),
+        Step(label="Default GPU", key="d", commands=["x"]),
+        Step(label=":docker: build", key="image-build", commands=["x"]),
+        Step(label="CPU", key="c", device="cpu-small", commands=["x"]),
+        Step(label="AMD", key="a", device="mi300_1", commands=["x"]),
+    ]
+    assert selector_gate.nvidia_keys(steps) == {"h", "l", "d"}
