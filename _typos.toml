@@ -1,3 +1,0 @@
-[default.extend-words]
-# ROCm's Heterogeneous System Architecture runtime (HSA_TOOLS_LIB, HSA_ENABLE_DEBUG).
-HSA = "HSA"
