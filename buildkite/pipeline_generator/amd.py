@@ -296,7 +296,7 @@ def _get_rocm_debug_agent_setup_command() -> str:
 
     return (
         f"if test -f {ROCM_DEBUG_AGENT_LIB}; then "
-        f"export HAS_TOOLS_LIB={ROCM_DEBUG_AGENT_LIB} && export HAS_ENABLE_DEBUG=1 "
+        f"export HSA_TOOLS_LIB={ROCM_DEBUG_AGENT_LIB} && export HSA_ENABLE_DEBUG=1 "
         f"&& echo ROCm debug agent enabled: {ROCM_DEBUG_AGENT_LIB}; "
         f"else echo 'WARNING: ROCm debug agent not found at {ROCM_DEBUG_AGENT_LIB}; "
         "skipping coredump setup'; "

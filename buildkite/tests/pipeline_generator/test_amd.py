@@ -177,8 +177,8 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert amd.ROCM_DEBUG_AGENT_ENV_VAR in test_commands
     assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
     assert "[ -f /opt/rocm/lib/librocm-debug-agent.so.2" not in test_commands
-    assert "export HAS_TOOLS_LIB=" not in test_commands
-    assert "HAS_ENABLE_DEBUG=1" not in test_commands
+    assert "export HSA_TOOLS_LIB=" not in test_commands
+    assert "HSA_ENABLE_DEBUG=1" not in test_commands
     assert "WARNING: ROCm debug agent not found at" not in test_commands
     assert "cd /vllm-workspace/tests" in test_commands
     assert "pytest tests/foo.py" in test_commands
@@ -222,9 +222,9 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert "if test -f /opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
     assert (
-        "export HAS_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
+        "export HSA_TOOLS_LIB=/opt/rocm/lib/librocm-debug-agent.so.2" in test_commands
     )
-    assert "HAS_ENABLE_DEBUG=1" in test_commands
+    assert "HSA_ENABLE_DEBUG=1" in test_commands
     assert "ROCm debug agent enabled" in test_commands
     assert "WARNING: ROCm debug agent not found at" in test_commands
 
