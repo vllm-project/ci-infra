@@ -396,7 +396,8 @@ def is_docs_only_change(list_file_diff: List[str]) -> bool:
     for file_path in list_file_diff:
         if not file_path:
             continue
-        if file_path.startswith("docs/"):
+        # recipes/ holds model recipes: only a GitHub workflow reads them.
+        if file_path.startswith(("docs/", "recipes/")):
             continue
         if file_path.endswith(".md"):
             continue

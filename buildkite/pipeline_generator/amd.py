@@ -1,4 +1,5 @@
 import os
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
@@ -190,8 +191,30 @@ def get_amd_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
     return config.queue if config else None
 
 
+_LABEL_HARDWARE_PREFIX = re.compile(r"^:[a-z0-9_+-]+: \([^)]*\) ")
+
+
+def get_amd_label_tag(device: Optional[str]) -> str:
+    """The hardware tag of an AMD GPU label: "MI355 DPX" for mi355_dpx, else
+    the pool's family ("mi300_1" -> "MI300"); empty for non-GPU devices."""
+    value = _device_value(device) or ""
+    if value == DeviceType.AMD_MI355_DPX.value:
+        return "MI355 DPX"
+    if not value.startswith("mi"):
+        return ""
+    return value.split("_", 1)[0].upper()
+
+
 def get_amd_label(label: str, device: Optional[str]) -> str:
-    return f"AMD: {label} ({_device_value(device) or ''})"
+    """Every AMD job reads ":amd: (<tag>) <title>", like the :nvidia: ones.
+    A label already in that form is kept; any other hardware prefix is
+    replaced with the AMD device's."""
+    if label.startswith(":amd: ("):
+        return label
+    tag = get_amd_label_tag(device)
+    if not tag:
+        return label
+    return f":amd: ({tag}) {_LABEL_HARDWARE_PREFIX.sub('', label, count=1)}"
 
 
 def normalize_amd_depends_on(depends_on: Optional[List[str]]) -> List[str]:

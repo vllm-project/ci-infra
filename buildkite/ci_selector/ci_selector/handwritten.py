@@ -619,7 +619,7 @@ RELEASE_PIPELINE_FILES = (".buildkite/release-pipeline.yaml",)
 
 # ci-infra's is_docs_only_change, verbatim. See the warning above before
 # merging these with NO_CODE_*.
-DOCS_ONLY_PREFIXES = ("docs/",)
+DOCS_ONLY_PREFIXES = ("docs/", "recipes/")
 DOCS_ONLY_SUFFIXES = (".md",)
 DOCS_ONLY_EXACT = ("mkdocs.yaml",)
 

@@ -307,7 +307,7 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     # The step's own job, in its own group, with its key, depends_on, agents,
     # plugins and retries: only parallel.
     assert step.key == "model-executor" and step.parallelism == 3
-    assert step.label == "Model Executor shard %N/%t"
+    assert step.label == "Model Executor Shard %N/%t"
     for field in ("depends_on", "agents", "plugins", "retry", "timeout_in_minutes"):
         assert getattr(step, field) == getattr(plain, field)
     # Its commands are the step's own, after installing the plugin: the same
@@ -431,7 +431,7 @@ def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
     plain = _render_mirror(_step(mirror={"amd": {"device": "mi355_1", "dind": False}}))
     job = _render_mirror(_mirror_step())
     assert job.key == "amd-model-executor" and job.parallelism == 3
-    assert job.label == "AMD: Model Executor (mi355_1) shard %N/%t"
+    assert job.label == ":amd: (MI355) Model Executor Shard %N/%t"
     assert job.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(job.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
