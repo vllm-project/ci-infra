@@ -289,11 +289,18 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
         record = selector_gate.decide(global_config, legacy)
         keys = record["selector_keys"]
         if keys:
-            # A PR build never runs optional (nightly / manual) steps today, and
-            # the selector does not get to start doing so: they stay optional.
-            optional = selector_gate.optional_keys(steps)
+            # Steps whose own definition the diff changed or added run, even
+            # optional ones: the change is to them, and otherwise it would go
+            # untested until the nightly (vllm#61832 added automatic_shard to
+            # three nightly-only steps).
+            changed = set((record.get("selector") or {}).get("changed_keys") or ())
+            changed &= selector_gate.known_keys(steps)
+            record["selector_changed_steps"] = sorted(changed)
+            # Every other optional (nightly / manual) step stays optional, as
+            # on any PR build today.
+            optional = selector_gate.optional_keys(steps) - changed
             record["selector_optional_dropped"] = sorted(set(keys) & optional)
-            keys = sorted(set(keys) - optional)
+            keys = sorted((set(keys) | changed) - optional)
             # AMD steps keep today's rules; the selector decides the rest.
             amd = selector_gate.amd_keys(steps)
             record["selector_amd_left_to_todays_rules"] = sorted(set(keys) & amd)
