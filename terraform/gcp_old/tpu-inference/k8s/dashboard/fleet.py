@@ -471,8 +471,8 @@ def workload_state(wl: dict, now: float) -> dict | None:
             "state": "dispatching",
             "since": parse_time(conds["QuotaReserved"]["lastTransitionTime"]),
         }
-    # Kueue tries only the head of a BestEffortFIFO queue, so only the head has
-    # a QuotaReserved=False condition saying why. The rest are queued behind it
+    # Kueue tries only the head of a queue, so only the head has a
+    # QuotaReserved=False condition saying why. The rest are queued behind it
     # and have no reason of their own yet.
     reserved = conds.get("QuotaReserved")
     if true("Evicted"):
