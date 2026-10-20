@@ -99,12 +99,15 @@ class KernelTable:
         commit: str = "",
         build=None,
         pipeline: str = "",
+        recorded_at: str = "",
     ):
         self._rows = rows or {}
         self.unavailable = unavailable
         self.commit = commit
         self.build = build
         self.pipeline = pipeline
+        # When the table was built, just before it was published.
+        self.recorded_at = recorded_at
 
     @property
     def available(self) -> bool:
@@ -246,6 +249,7 @@ def load_table(path: Path) -> KernelTable:
         commit=str(src.get("commit") or ""),
         build=src.get("build"),
         pipeline=str(src.get("pipeline") or ""),
+        recorded_at=str(src.get("recorded_at") or ""),
     )
 
 

@@ -9,6 +9,7 @@ from ci_selector.pr_comment import (
     PrSelection,
     StepView,
     not_counted,
+    _published,
     post,
     render,
 )
@@ -25,7 +26,10 @@ def _selection(**over):
         selector=[StepView("a", 1), StepView("d", 3), StepView("c", 1, "amd")],
         plumbing=8,
         added_by={("d", ""): "Python record"},
-        records=["Python record: build 1 at `abc`", "kernel record: x"],
+        records=[
+            "Python record: 2026-10-01 (build 2)",
+            "kernel record: 2026-09-30 (build 1)",
+        ],
     )
     fields.update(over)
     return PrSelection(**fields)
@@ -351,9 +355,28 @@ def test_optional_steps_stay_out_of_the_comparison():
 
 def test_missing_records_are_said_up_front():
     """A footer-only note went unnoticed for the shadow trial's first day."""
-    body = render(_selection(records=["Python record: not used (table version 5)", "kernel record: x"]))
+    body = render(
+        _selection(
+            records=["Python record: not used (table version 5)", "kernel record: x"]
+        )
+    )
     assert "[!WARNING]" in body and "table version 5" in body.split("<details>")[0]
     assert "[!WARNING]" not in render(_selection())
+
+
+def test_the_records_used_are_named_up_front_by_day():
+    """Which day's records answered sits above the lists, not in the footer."""
+    body = render(_selection())
+    top, footer = body.split("<details>")[0], body.split("<sub>")[1]
+    line = "Python record: 2026-10-01 (build 2) · kernel record: 2026-09-30 (build 1)"
+    assert line in top and "record" not in footer
+
+
+def test_a_record_is_named_by_the_day_it_was_published():
+    t = SimpleNamespace(recorded_at="2026-10-01T22:09:03Z", build="92249")
+    assert _published(t) == "2026-10-01 (build 92249)"
+    # a table built before it carried the time still says which build it is
+    assert _published(SimpleNamespace(recorded_at="", build=91312)) == "build 91312"
 
 
 def test_a_record_that_cannot_be_fetched_is_not_reused(tmp_path, monkeypatch):
