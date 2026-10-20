@@ -11,10 +11,10 @@ from pydantic import ValidationError
 import global_config
 import pipeline_generator
 import queue_fallbacks
-from buildkite_step import convert_group_step_to_buildkite_step, get_agent_queue
+from buildkite_step import convert_group_step_to_buildkite_step
 from amd import AMD_DEVICE_CONFIGS
 from constants import AgentQueue
-from fallback_rules import common, rules_for
+from fallback_rules import PLATFORMS, common, rules_for
 from queue_fallbacks import (
     SUPPORTED_DEVICES,
     apply_fallbacks,
@@ -39,7 +39,9 @@ FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "queue_fallbacks"
 CONFIG_DIR = os.path.join(FIXTURES, "config")
 JOBS_DIR = os.path.join(FIXTURES, "jobs")
 UNSUPPORTED_JOBS_DIR = os.path.join(FIXTURES, "unsupported_jobs")
+NVIDIA = ("h100", "h200", "h200_18gb", "h200_35gb", "b200", "b200-k8s", "l4", "a100")
 UNSUPPORTED = (
+    *NVIDIA,
     "cpu",
     "cpu-small",
     "cpu-medium",
@@ -52,7 +54,6 @@ UNSUPPORTED = (
     "amd_cpu",
     "zen5",
     "dgx-spark",
-    "a100",
 )
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
 
@@ -122,7 +123,6 @@ def test_load_chains(cfg):
     assert dict(cfg.chains) == {
         "mi300_1": ("mi355_1", "mi355_dpx"),
         "mi355_dpx": ("mi355_1",),
-        "h200_18gb": ("h200_35gb",),
     }
     assert cfg.health.pipeline == "queue-health"
     assert cfg.health.token_secret == "QUEUE_FALLBACK_BUILDKITE_API_TOKEN"
@@ -148,7 +148,7 @@ def test_load_health_policies(policies, cfg):
         )
         assert (entry.queues, entry.group) == ((queue,), None)
     assert policies.units["amd_mi300_1"].device == "mi300_1"
-    assert policies.units["mithril-h100-pool"].device == "h100"
+    assert AgentQueue.MITHRIL_H100.value not in policies.units
 
 
 def test_health_policies_do_not_read_chains(fake_global_config, tmp_path):
@@ -176,11 +176,11 @@ def test_config_is_immutable(cfg, policies):
 
 def test_policy_layers(policies):
     # common defaults, then amd/ defaults, then the device's own keys.
-    nvidia = policy_for(policies, "h200_18gb")
-    assert nvidia.reopen_after == 2 * 3600
-    assert nvidia.close_when.params == {"above": 0.7}
-    assert nvidia.close_when.window == 2 * 3600
-    assert policy_for(policies, "mi300_1").reopen_after == 3600
+    mi300 = policy_for(policies, "mi300_1")
+    assert mi300.reopen_after == 3600
+    assert mi300.close_when.params == {"above": 0.7}
+    assert mi300.close_when.window == 2 * 3600
+    assert mi300.probes == 3
     assert policy_for(policies, "mi355_8").reopen_after == 3600
     dpx = policy_for(policies, "mi355_dpx")
     assert (dpx.close_when.params, dpx.close_when.window) == ({"above": 0.5}, 3600)
@@ -277,14 +277,6 @@ def test_close_when_params_are_immutable(policies):
         (
             {"common/x.yaml": "- group: {name: g, devices: [mi300_1]}\n"},
             "group belongs in a platform dir",
-        ),
-        (
-            {"amd/x.yaml": "- group: {name: g, devices: [mi300_1, h200]}\n"},
-            "h200 is not an amd device",
-        ),
-        (
-            {"nvidia/x.yaml": "- group: {name: g, devices: [h200, mi300_1]}\n"},
-            "mi300_1 is not an nvidia device",
         ),
         (
             {
@@ -395,7 +387,7 @@ def test_policies_rejected_by_the_checker_only(
 
 
 UNSUPPORTED_MESSAGE = (
-    "unsupported device for queue fallback: {} \\(only CUDA and AMD GPU devices\\)"
+    "unsupported device for queue fallback: {} \\(only AMD GPU devices\\)"
 )
 
 
@@ -420,11 +412,24 @@ def test_load_rejects_unsupported_devices(
         load(dirs)
 
 
+@pytest.mark.parametrize("load", LOADERS)
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"nvidia/h200.yaml": "- device: h200_18gb\n  fallbacks: [h200_35gb]\n"},
+        {"nvidia/defaults.yaml": ""},
+    ],
+)
+def test_load_rejects_an_nvidia_dir(fake_global_config, tmp_path, load, files):
+    dirs = write_config(tmp_path, files)
+    with pytest.raises(ValueError, match="qf/nvidia/: unsupported for queue fallback"):
+        load(dirs)
+
+
 def test_supported_devices():
-    cuda = ("h100", "h200", "h200_18gb", "h200_35gb", "b200", "b200-k8s", "l4")
-    assert {platform_of(device) for device in cuda} == {"nvidia"}
+    assert PLATFORMS == ("amd",)
     assert {platform_of(device) for device in AMD_DEVICE_CONFIGS} == {"amd"}
-    assert SUPPORTED_DEVICES == {*cuda, *AMD_DEVICE_CONFIGS}
+    assert SUPPORTED_DEVICES == set(AMD_DEVICE_CONFIGS)
     for device in (*UNSUPPORTED, None):
         with pytest.raises(ValueError, match="unsupported device"):
             platform_of(device)
@@ -633,7 +638,7 @@ def test_platform_rules_override_common(monkeypatch):
 
     monkeypatch.setitem(amd.RULES, "infra_failure_rate", lambda jobs, above: True)
     assert rules_for("amd")["infra_failure_rate"]([], above=1.0)
-    assert not rules_for("nvidia")["infra_failure_rate"]([], above=1.0)
+    assert not common.RULES["infra_failure_rate"]([], above=1.0)
 
 
 # Snapshot
@@ -851,6 +856,10 @@ def test_map_device_unchanged(cfg):
     assert map_device(step(fallback=False), cfg, snap) == ("mi300_1", None)
     assert map_device(step("mi355_8"), cfg, snap) == ("mi355_8", None)
     assert map_device(step(None), cfg, snap) == (None, None)
+    # NVIDIA steps are never moved, whatever the snapshot says of their queue.
+    nvidia = snapshot({"h200_18gb": closed(), "h200_35gb": closed()})
+    for device in NVIDIA:
+        assert map_device(step(device), cfg, nvidia) == (device, None)
 
 
 def test_pins_come_from_the_snapshot(fake_global_config, tmp_path):
@@ -883,19 +892,42 @@ def test_pins_come_from_the_snapshot(fake_global_config, tmp_path):
 
 def test_apply_fallbacks_maps_step_and_amd_mirror(cfg):
     steps = [
-        step("h200_18gb", mirror={"amd": {"device": "mi300_1", "env": {"A": "1"}}}),
+        step("mi355_dpx", mirror={"amd": {"device": "mi300_1", "env": {"A": "1"}}}),
         Step(label="Other", device="mi300_1", fallback=False),
     ]
-    snap = snapshot({"amd_mi300_1": closed(), "h200_18gb": closed("maintenance")})
+    snap = snapshot({"amd_mi300_1": closed(), "amd_mi355_dpx": closed("maintenance")})
     mapped, decisions = apply_fallbacks(steps, cfg, snap)
-    assert mapped[0].device == "h200_35gb"
+    assert mapped[0].device == "mi355_1"
     assert mapped[0].mirror == {"amd": {"device": "mi355_1", "env": {"A": "1"}}}
     assert steps[0].mirror["amd"]["device"] == "mi300_1"
     assert mapped[1] is steps[1]
     assert decisions == {
-        "h200_18gb closed (maintenance) -> h200_35gb": ["kernels"],
+        "mi355_dpx closed (maintenance) -> mi355_1": ["kernels"],
         "mi300_1 closed (72% infra failures over 2h) -> mi355_1": ["amd-kernels"],
     }
+
+
+def test_apply_fallbacks_moves_only_the_amd_mirror_of_an_nvidia_step(cfg):
+    mirror = {"amd": {"device": "mi300_1", "env": {"A": "1"}}}
+    nvidia = step("h200_18gb", mirror=mirror)
+    snap = snapshot({"amd_mi300_1": closed(), "h200_18gb": closed("maintenance")})
+    (mapped,), decisions = apply_fallbacks([nvidia], cfg, snap)
+    assert mapped.device == "h200_18gb"
+    assert mapped.mirror == {"amd": {"device": "mi355_1", "env": {"A": "1"}}}
+    assert decisions == {
+        "mi300_1 closed (72% infra failures over 2h) -> mi355_1": ["amd-kernels"],
+    }
+    # Along its AMD chain: mi300_1, mi355_1, mi355_dpx, else kept.
+    snap = snapshot({q: closed() for q in ("amd_mi300_1", "amd_mi355_1")})
+    (mapped,), _ = apply_fallbacks([nvidia], cfg, snap)
+    assert (mapped.device, mapped.mirror["amd"]["device"]) == ("h200_18gb", "mi355_dpx")
+    snap = snapshot(
+        {q: closed() for q in ("amd_mi300_1", "amd_mi355_1", "amd_mi355_dpx")}
+    )
+    (mapped,), decisions = apply_fallbacks([nvidia], cfg, snap)
+    assert mapped is nvidia
+    ((reason, keys),) = decisions.items()
+    assert reason.endswith("-> kept mi300_1") and keys == ["amd-kernels"]
 
 
 def test_apply_fallbacks_unchanged_steps_are_the_same_objects(cfg):
@@ -915,8 +947,6 @@ def render(steps):
     [
         # Native AMD step.
         ({"device": "mi300_1"}, {"device": "mi355_1"}),
-        # NVIDIA step.
-        ({"device": "h200_18gb"}, {"device": "h200_35gb"}),
         # AMD mirror of an NVIDIA step.
         (
             {
@@ -934,7 +964,7 @@ def test_mapped_step_renders_as_written_for_its_device(cfg, kwargs, written):
     def make(**fields):
         return Step(label="Kernels", commands=["pytest -v -s kernels"], **fields)
 
-    snap = snapshot({"amd_mi300_1": closed(), "h200_18gb": closed()})
+    snap = snapshot({"amd_mi300_1": closed()})
     mapped, _ = apply_fallbacks([make(**kwargs)], cfg, snap)
     assert render(mapped) == render([make(**written)])
     assert render(mapped) != render([make(**kwargs)])
@@ -1030,11 +1060,7 @@ def test_generate_maps_closed_queues(generate):
     snap = snapshot({"amd_mi300_1": closed()})
     mapped = generate([CONFIG_DIR], snap)
     assert mapped != today
-    jobs = {
-        job["key"]: job
-        for group in yaml.safe_load(mapped)["steps"]
-        for job in group.get("steps", [])
-    }
+    jobs = jobs_of(mapped)
     queues = {
         key: job["agents"]["queue"] for key, job in jobs.items() if "agents" in job
     }
@@ -1042,6 +1068,8 @@ def test_generate_maps_closed_queues(generate):
     assert queues["basic-correctness"] == "amd_mi355_1"
     assert queues["no-fallback"] == "amd_mi300_1"
     assert queues["kernels"] == "h200_18gb"
+    # The NVIDIA step is rendered exactly as before; only its AMD mirror moved.
+    assert jobs["kernels"] == jobs_of(today)["kernels"]
     ((reason, keys),) = generate.annotations[-1].items()
     assert reason == "mi300_1 closed (72% infra failures over 2h) -> mi355_1"
     assert sorted(keys) == ["amd-kernels", "basic-correctness"]
@@ -1058,18 +1086,31 @@ def jobs_of(pipeline):
 @pytest.mark.parametrize("branch", ["test-branch", "main"])
 def test_generate_never_maps_unsupported_devices(generate, branch):
     today = generate(job_dir=UNSUPPORTED_JOBS_DIR, branch=branch)
-    queues = {job["agents"]["queue"] for job in jobs_of(today).values()}
-    assert {"intel-cpu", "gh200_queue", "amd-cpu", "amd-zen5-cpu"} <= queues
+    jobs = jobs_of(today)
+    queue_of = {
+        key[len("on-") :]: job["agents"]["queue"]
+        for key, job in jobs.items()
+        if key.startswith("on-")
+    }
+    # The retired A100 fleet renders no steps.
+    assert set(queue_of) == set(UNSUPPORTED) - {"a100"}
+    assert {"intel-cpu", "gh200_queue", "amd-cpu", "amd-zen5-cpu"} <= {
+        *queue_of.values()
+    }
+    keys = sorted(jobs)
     everything_closed = snapshot({queue.value: closed() for queue in AgentQueue})
+    # Each device's own queue probing on it, and every AMD queue probing on
+    # its own device with the keys of all these steps.
     everything_probing = snapshot(
         {
-            queue: probing(device=device, keys=[f"on-{device}"])
-            for device, queue in (
-                ("cpu", "cpu_queue_premerge_us_east_1"),
-                ("gh200", "gh200_queue"),
-                ("amd_cpu", "amd-cpu"),
-                ("zen5", "amd-zen5-cpu"),
-            )
+            **{
+                queue: probing(device=device, keys=[f"on-{device}"])
+                for device, queue in queue_of.items()
+            },
+            **{
+                device_queue(device): probing(device=device, keys=keys)
+                for device in AMD_DEVICE_CONFIGS
+            },
         }
     )
     for snap in (everything_closed, everything_probing):
@@ -1085,7 +1126,9 @@ def test_probe_key():
     assert probe_key("amd_mi300_1", 2, "amd-kernels") == (
         "probe-amd_mi300_1-r2-amd-kernels"
     )
-    assert probe_key("H200", 1, "a.b c:d/e") == "probe-H200-r1-a-b-c-d-e"
+    assert probe_key("amd_mi355_1", 1, "a.b c:d/e") == (
+        "probe-amd_mi355_1-r1-a-b-c-d-e"
+    )
     long = probe_key("amd_mi300_1", 1, "x" * 200)
     assert len(long) == 100 and long.startswith("probe-amd_mi300_1-r1-xxx")
 
@@ -1169,7 +1212,6 @@ def test_probe_renders_as_written_for_its_device(fake_global_config):
 def test_probe_is_one_job(fake_global_config):
     gated = {"parallelism": 4, "concurrency": 1, "concurrency_group": "g"}
     native = Step(label="Basic", key="basic", device="mi300_1", commands=["x"], **gated)
-    nvidia = Step(label="Ops", key="ops", device="h200", commands=["x"], **gated)
     mirrored = Step(
         label="Kernels",
         key="kernels",
@@ -1182,11 +1224,10 @@ def test_probe_is_one_job(fake_global_config):
     snap = snapshot(
         {
             "amd_mi355_1": probing(device="mi355_1", keys=["basic", "amd-kernels"]),
-            "H200": probing(device="h200", keys=["ops"]),
         }
     )
-    (group,) = probe_steps([native, nvidia, mirrored], snap)
-    assert len(group.steps) == 3
+    (group,) = probe_steps([native, mirrored], snap)
+    assert len(group.steps) == 2
     for probe in group.steps:
         assert probe.parallelism is None
         assert probe.concurrency is None and probe.concurrency_group is None
@@ -1215,6 +1256,8 @@ def test_probe_runs_even_if_its_step_does_not(fake_global_config):
         {"amd_mi300_1": probing(device="nope", keys=["basic"])},
         # Unsupported devices.
         {"amd-cpu": probing(device="amd_cpu", keys=["basic"])},
+        {"H200": probing(device="h200", keys=["kernels"])},
+        {"h200_18gb": probing(device="h200_18gb", keys=["kernels"])},
         # An NVIDIA step cannot probe an AMD queue.
         {"amd_mi300_1": probing(keys=["kernels"])},
         # Only probing queues run probes.
@@ -1300,8 +1343,4 @@ def test_snapshot_is_read_once_for_mapping_and_probes(fake_global_config, monkey
 
 def test_device_queue_without_global_config(monkeypatch):
     monkeypatch.setattr(global_config, "config", None)
-    assert queue_fallbacks.device_queue("h100") == AgentQueue.MITHRIL_H100.value
-    step = Step(label="Basic Correctness", device="l4", commands=["x"])
-    assert get_agent_queue(step) == AgentQueue.L4_K8S
-    with pytest.raises(ValueError, match="not initialized"):
-        get_agent_queue(Step(label=":docker: build image", commands=["x"]))
+    assert queue_fallbacks.device_queue("mi300_1") == AgentQueue.AMD_MI300_1.value

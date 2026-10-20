@@ -10,7 +10,6 @@ import pytest
 
 import global_config
 import queue_health
-from amd import AMD_DEVICE_CONFIGS
 from queue_fallbacks import (
     SUPPORTED_DEVICES,
     Probe,
@@ -348,7 +347,7 @@ def test_closed_queue_starts_a_round_when_due(cfg):
 
 
 def test_probe_device_is_the_queues_policy_device(cfg):
-    for queue, device in [("amd_mi355_1", "mi355_1"), ("h200_35gb", "h200_35gb")]:
+    for queue, device in [("amd_mi355_1", "mi355_1"), ("amd_mi300_2", "mi300_2")]:
         entry = check(cfg, {queue: closed_entry()})[queue]
         assert entry.probe.device == device == cfg.units[queue].device
 
@@ -508,12 +507,17 @@ def test_every_state_has_a_bounded_exit(cfg):
     assert entry.state == "open" and entry.probe_round == 5
 
 
-def test_broken_queue_stays_closed_until_its_probes_pass(cfg):
-    """A Kubernetes queue outage: jobs never start and fail with stack_error 5h after
+def test_broken_queue_stays_closed_until_its_probes_pass(fake_global_config, tmp_path):
+    """A queue outage: jobs never start and fail with stack_error 5h after
     they became runnable, longer than the 2h window plus a backoff of up to
     8h can see. Every 10 minutes the checker runs and every 20 minutes a
-    main build runs 6 steps on the queue while it is open, or its probes."""
-    queue, keys, fixed = "l4-k8s", [f"k{i}" for i in range(6)], NOW + 50 * HOUR
+    main build runs 6 steps on the queue while it is open, or its probes.
+    The queue has the common policy only (reopen_after 2h)."""
+    shutil.copytree(CONFIG_DIR, tmp_path / "qf")
+    os.remove(tmp_path / "qf" / "amd" / "defaults.yaml")
+    cfg = load_health_policies([str(tmp_path / "qf")])
+    queue, keys, fixed = "amd_mi355_1", [f"k{i}" for i in range(6)], NOW + 50 * HOUR
+    assert cfg.units[queue].policy.reopen_after == 2 * 3600
     runs = []  # (runnable_at, step key)
 
     def view(runnable, key, now):
@@ -828,25 +832,32 @@ def test_pin_on_a_member_pins_the_group(fake_global_config, tmp_path):
 
 
 def test_unwatched_devices_get_no_entries(fake_global_config, tmp_path):
+    # A complete policy for the mi300 group only.
     shutil.copytree(CONFIG_DIR, tmp_path / "qf")
-    os.remove(tmp_path / "qf" / "common" / "rules.yaml")
-    shutil.rmtree(tmp_path / "qf" / "nvidia")
-    (tmp_path / "qf" / "amd" / "defaults.yaml").write_text(
-        "- defaults:\n"
+    for name in ("common/rules.yaml", "amd/overrides.yaml", "amd/mi355.yaml"):
+        os.remove(tmp_path / "qf" / name)
+    (tmp_path / "qf" / "amd" / "groups.yaml").write_text(
+        "- group:\n"
+        "    name: mi300\n"
+        "    devices: [mi300_1, mi300_8]\n"
         "    close_when: {rule: infra_failure_rate, above: 0.7, window: 2h,"
         " min_jobs: 20}\n"
-        "    reopen_after: 1h\n"
         "    probes: 3\n"
     )
     cfg = load_health_policies([str(tmp_path / "qf")])
-    jobs = [job(q, "infra") for q in ("h200_18gb", MI300) for _ in range(20)]
-    prev = {"h200_18gb": closed_entry()}
+    # NVIDIA queues and AMD queues without a policy are never watched.
+    unwatched = ("h200_18gb", "amd_mi355_1")
+    jobs = [job(q, "infra") for q in (*unwatched, MI300) for _ in range(20)]
+    prev = {q: closed_entry() for q in unwatched}
     queues = check(cfg, prev, jobs)
-    assert set(queues) == {device_queue(d) for d in AMD_DEVICE_CONFIGS}
+    assert set(queues) == {MI300, MI300_8}
     assert queues[MI300].state == "closed"
     # Nothing to probe either.
-    step = Step(label="K", key="kernels", device="h200_18gb", commands=["x"])
-    assert probe_steps([step], snapshot(queues)) == []
+    steps = [
+        Step(label="K", key="kernels", device="h200_18gb", commands=["x"]),
+        Step(label="B", key="basic", device="mi355_1", commands=["x"]),
+    ]
+    assert probe_steps(steps, snapshot(queues)) == []
 
 
 def test_no_watched_queue_publishes_an_empty_snapshot(fake_global_config, tmp_path):
@@ -1111,12 +1122,12 @@ def test_main_rejects_configs_that_do_not_load_as_one(
     assert "nothing published" in out
 
 
-def test_main_with_a_cuda_chain_and_pin_needs_no_global_config(monkeypatch, tmp_path):
+def test_main_with_a_chain_and_pin_needs_no_global_config(monkeypatch, tmp_path):
     monkeypatch.setattr(global_config, "config", None)
     repo = tmp_path / "repo"
     shutil.copytree(REPO, repo)
-    (repo / ".buildkite/queue_fallbacks/nvidia/pins.yaml").write_text(
-        '- pin: {device: h200_35gb, state: closed, until: "2026-10-20T00:00:00Z", '
+    (repo / ".buildkite/queue_fallbacks/amd/pins.yaml").write_text(
+        '- pin: {device: mi355_1, state: closed, until: "2026-10-20T00:00:00Z", '
         'reason: "maintenance"}\n'
     )
     monkeypatch.chdir(repo)
@@ -1130,6 +1141,28 @@ def test_main_with_a_cuda_chain_and_pin_needs_no_global_config(monkeypatch, tmp_
         FakeBuildkite({"ci": [], "queue-health": []}),
     )
     queues = Snapshot.model_validate_json(raw).queues
-    assert queues["h200_18gb"].state == "open"
-    assert queues["h200_35gb"].state == "closed"
-    assert queues["h200_35gb"].reason == "pinned: maintenance"
+    assert queues[MI300].state == "open"
+    assert queues["amd_mi355_1"].state == "closed"
+    assert queues["amd_mi355_1"].reason == "pinned: maintenance"
+
+
+def test_main_rejects_an_nvidia_dir(main_env, monkeypatch, tmp_path, capsys):
+    calls, run, env = main_env
+    shutil.copytree(REPO, tmp_path, dirs_exist_ok=True)
+    nvidia = tmp_path / ".buildkite/queue_fallbacks/nvidia"
+    nvidia.mkdir()
+    (nvidia / "h200.yaml").write_text("- device: h200_18gb\n  fallbacks: [h200_35gb]\n")
+    monkeypatch.chdir(tmp_path)
+    code = queue_health.main(
+        CONFIGS,
+        env=env,
+        get_secret=lambda name: pytest.fail("no secret needed"),
+        run=run,
+    )
+    out = capsys.readouterr().out
+    assert code == 1 and calls == []
+    assert (
+        ".buildkite/queue_fallbacks/nvidia/: unsupported for queue fallback "
+        "(only AMD GPU devices)" in out
+    )
+    assert "nothing published" in out

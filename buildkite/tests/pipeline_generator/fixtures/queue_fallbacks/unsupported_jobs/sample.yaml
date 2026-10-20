@@ -1,5 +1,40 @@
 group: Unsupported
 steps:
+- label: On h100
+  key: on-h100
+  device: h100
+  commands:
+  - pytest -v -s h100
+- label: On h200
+  key: on-h200
+  device: h200
+  commands:
+  - pytest -v -s h200
+- label: On h200_18gb
+  key: on-h200_18gb
+  device: h200_18gb
+  commands:
+  - pytest -v -s h200_18gb
+- label: On h200_35gb
+  key: on-h200_35gb
+  device: h200_35gb
+  commands:
+  - pytest -v -s h200_35gb
+- label: On b200
+  key: on-b200
+  device: b200
+  commands:
+  - pytest -v -s b200
+- label: On b200-k8s
+  key: on-b200-k8s
+  device: b200-k8s
+  commands:
+  - pytest -v -s b200-k8s
+- label: On l4
+  key: on-l4
+  device: l4
+  commands:
+  - pytest -v -s l4
 - label: On cpu
   key: on-cpu
   device: cpu

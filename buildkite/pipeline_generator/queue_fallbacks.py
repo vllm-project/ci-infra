@@ -1,15 +1,15 @@
 """Map steps off closed queues to the next device in their declared chain.
 
-Entries come from `<fallback_dir>/{common,nvidia,amd}/*.yaml` (pipeline config
+Entries come from `<fallback_dir>/{common,amd}/*.yaml` (pipeline config
 `fallback_dirs`). The generator reads only the chains (`load_chains`), the
 health checker only the policies, groups and pins (`load_health_policies`);
 it watches only queues with a complete policy, a group's queues as one.
 Queue state, pins included, comes only from the checker's snapshot, the
 meta-data `queue-health` of the latest passed main build of its pipeline
 (`read_snapshot`). Without config the generator is unchanged; without a fresh
-snapshot every queue is open. Only CUDA and AMD GPU devices take part. Builds
-of main also run the snapshot's probes of probing queues, as soft-failing
-shadow steps.
+snapshot every queue is open. Only AMD GPU devices take part; NVIDIA queues
+are not handled yet. Builds of main also run the snapshot's probes of probing
+queues, as soft-failing shadow steps.
 """
 
 import inspect
@@ -56,7 +56,6 @@ from buildkite_step import (
     BuildkiteGroupStep,
     _generate_step_key,
     convert_group_step_to_buildkite_step,
-    get_agent_queue,
 )
 from constants import DeviceType
 from fallback_rules import PLATFORMS, rules_for
@@ -64,6 +63,8 @@ from recorder_switches import fnrec_enabled, kernrec_enabled
 from step import Step
 
 COMMON = "common"
+# Platform dirs not handled yet; rejected rather than silently ignored.
+UNSUPPORTED_DIRS = ("nvidia",)
 REST_URL = "https://api.buildkite.com/v2"
 SNAPSHOT_META_KEY = "queue-health"
 SNAPSHOT_VERSION = 1
@@ -185,37 +186,20 @@ class HealthPolicies:
     pins: Mapping[str, Pin]
 
 
-CUDA_DEVICES = frozenset(
-    device.value
-    for device in (
-        DeviceType.H100,
-        DeviceType.H200,
-        DeviceType.H200_18GB,
-        DeviceType.H200_35GB,
-        DeviceType.B200,
-        DeviceType.B200_K8S,
-        DeviceType.L4,
-    )
-)
-SUPPORTED_DEVICES = CUDA_DEVICES | frozenset(AMD_DEVICE_CONFIGS)
+SUPPORTED_DEVICES = frozenset(AMD_DEVICE_CONFIGS)
 
 
 def platform_of(device: Optional[str]) -> str:
     if device in AMD_DEVICE_CONFIGS:
         return "amd"
-    if device in CUDA_DEVICES:
-        return "nvidia"
     raise ValueError(
-        f"unsupported device for queue fallback: {device} "
-        "(only CUDA and AMD GPU devices)"
+        f"unsupported device for queue fallback: {device} (only AMD GPU devices)"
     )
 
 
 def device_queue(device: str) -> str:
     """The queue the generator sends a step on `device` to."""
-    if device in AMD_DEVICE_CONFIGS:
-        return AMD_DEVICE_CONFIGS[device].queue.value
-    return get_agent_queue(Step(label=device, device=device)).value
+    return AMD_DEVICE_CONFIGS[device].queue.value
 
 
 _KNOWN_DEVICES = frozenset(device.value for device in DeviceType)
@@ -390,6 +374,12 @@ def _read_entries(dirs: Sequence[str], repo_root: str):
         root = os.path.join(repo_root, fallback_dir)
         if not os.path.isdir(root):
             raise ValueError(f"Queue fallback directory not found: {fallback_dir}")
+        for kind_dir in UNSUPPORTED_DIRS:
+            if os.path.isdir(os.path.join(root, kind_dir)):
+                raise ValueError(
+                    f"{os.path.join(fallback_dir, kind_dir)}/: unsupported for "
+                    "queue fallback (only AMD GPU devices)"
+                )
         for kind_dir in (COMMON, *PLATFORMS):
             path = os.path.join(root, kind_dir)
             if not os.path.isdir(path):

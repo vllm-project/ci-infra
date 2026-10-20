@@ -7,11 +7,11 @@ that holds the pipeline configs and the fallback dirs they list. Each run
 loads the health policies and pins under the union of the configs'
 `fallback_dirs` (relative to the working directory, the repo root), the
 previous snapshot (the generator's, stale or not) and the recent jobs of the
-main builds of the scanned pipelines; moves every watched queue, one with a
-complete policy, through open -> closed -> probing -> open (or back to closed
-with a doubled backoff), a group's queues as one on their pooled jobs;
-applies the pins; and, as its last action, publishes the new snapshot as this
-build's `queue-health` meta-data. Any error before that, an unavailable
+main builds of the scanned pipelines; moves every watched queue, an AMD GPU
+queue with a complete policy, through open -> closed -> probing -> open (or
+back to closed with a doubled backoff), a group's queues as one on their
+pooled jobs; applies the pins; and, as its last action, publishes the new
+snapshot as this build's `queue-health` meta-data. Any error before that, an unavailable
 history included, fails the build and publishes nothing; the last snapshot
 then goes stale and the generator treats every queue as open.
 

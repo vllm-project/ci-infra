@@ -102,15 +102,14 @@ steps on the next device of a static, declared chain. Shadow probes in later
 `main` builds decide when it reopens. Nothing ranks or picks queues: health
 only decides whether to skip to the next declared entry.
 
-Only CUDA and AMD GPU devices take part:
+Only AMD GPU devices take part: the keys of `amd.AMD_DEVICE_CONFIGS`
+(`mi250_*`, `mi300_*`, `mi355_*`, `mi355_dpx`). NVIDIA queues are not handled
+yet.
 
-- CUDA: `h100`, `h200`, `h200_18gb`, `h200_35gb`, `b200`, `b200-k8s`, `l4`
-- AMD: the keys of `amd.AMD_DEVICE_CONFIGS` (`mi250_*`, `mi300_*`, `mi355_*`,
-  `mi355_dpx`)
-
-Every other device (`a100`, `cpu*`, `intel_*`, `arm_cpu`, `gh200`,
-`ascend_npu`, `amd_cpu`, `zen5`, `dgx-spark`) and every step without a device is never
-mapped and never probed; its output is unchanged.
+Every other device (NVIDIA GPUs, `cpu*`, `intel_*`, `arm_cpu`, `gh200`,
+`ascend_npu`, `amd_cpu`, `zen5`, `dgx-spark`) and every step without a device
+is never mapped, never probed and never watched; its output is unchanged. The
+AMD mirror of an NVIDIA step is an AMD job and follows its AMD chain.
 
 ```
 every 10 min   queue-health pipeline (.buildkite/pipelines/queue-health.yml)
@@ -168,20 +167,21 @@ and publishes it unchanged.
 `fallback_dirs` in the pipeline config lists directories in the vLLM repo;
 anything but a list of non-empty paths is an error, and a repeated path is
 read once. One parser, `config_fallback_dirs`, reads it for the generator and
-the checker. Each directory holds `common/`, `nvidia/` and `amd/` subdirectories of `*.yaml`
-files, read in sorted order; a missing subdirectory is empty. Every file is a
-list of small, independent entries, each exactly one of `defaults`, `device`,
-`group`, `pin` or `health`. Durations are written as `30m`, `2h` or `1d`.
+the checker. Each directory holds `common/` and `amd/` subdirectories of
+`*.yaml` files, read in sorted order; a missing subdirectory is empty, and an
+`nvidia/` one fails generation. Every file is a list of small, independent
+entries, each exactly one of `defaults`, `device`, `group`, `pin` or
+`health`. Durations are written as `30m`, `2h` or `1d`.
 
 Mistakes in any entry fail generation with the file and entry number: an
 unknown key or bad value, an unknown device, a second entry for a device, a
 device in its own fallbacks, a second pin for a queue, a pin `until` without
 a timezone, or a missing or second `health` entry; for groups, a `group` in
 `common/`, a second group of the same name, a device listed twice or in two
-groups, a device of another platform than the group's directory, and policy
-keys on the `device` entry of a grouped device (`<d> is in group <g>: set its
-policy on the group`). A device outside the supported set fails with
-`unsupported device for queue fallback: <d> (only CUDA and AMD GPU devices)`.
+groups, and policy keys on the `device` entry of a grouped device (`<d> is in
+group <g>: set its policy on the group`). Naming any device but an AMD GPU
+device, as an entry, a fallback, a group member or a pin, fails with
+`unsupported device for queue fallback: <d> (only AMD GPU devices)`.
 Mistakes that only show once policies are merged fail the checker, not
 generation: an unknown rule or rule parameter, a `device` or `group` entry
 with policy keys whose merged policy is still incomplete, a pin on a device
@@ -195,7 +195,7 @@ that is not watched, or a second pin in one group.
     max_age: 30m                      # an older snapshot is ignored
     pipelines: [ci]                   # pipelines whose jobs are scanned and probed
 
-# amd/defaults.yaml: the AMD policy; no common defaults, so NVIDIA is not watched
+# amd/defaults.yaml: the AMD policy
 - defaults:
     close_when: {rule: infra_failure_rate, above: 0.67, window: 30m, min_jobs: 20}
     reopen_after: 2h                  # first backoff, and each probe round's length
@@ -230,24 +230,23 @@ Optional forms, not used in the vLLM config today:
 
 A device's queue is the one the generator already sends it to. The checker
 watches a device only if its merged policy is complete (`close_when`,
-`reopen_after` and `probes`): the common defaults, then its platform's
-defaults, then its `group` entry or, if ungrouped, its own `device` entry;
-each top-level key is replaced whole, so an entry's `close_when` replaces the
+`reopen_after` and `probes`): the common defaults, then the `amd/` defaults,
+then its `group` entry or, if ungrouped, its own `device` entry; each
+top-level key is replaced whole, so an entry's `close_when` replaces the
 default one. A device without a complete policy is not watched: it has no
-snapshot entry, is never closed or probed, and stays open in every chain. So
-policies can be set for one platform only, as above. A `device` or `group`
-entry that sets policy keys must complete its policy. A watched queue that is
-in no chain can close and be probed, but no step moves off it.
+snapshot entry, is never closed or probed, and stays open in every chain. A
+`device` or `group` entry that sets policy keys must complete its policy. A
+watched queue that is in no chain can close and be probed, but no step moves
+off it.
 
-A `group` (in `amd/` or `nvidia/`, all its devices of that platform, a device
-in at most one group) is the unit of health for queues on one cluster: the
-rule sees the pooled jobs of all its queues (`window` and `min_jobs` over the
-pool), there is one state, and every member queue's snapshot entry mirrors it,
-its reason prefixed `group <name>: `. A grouped device's policy is set on the
-group only; its `device` entry may hold a chain and nothing else. An
-ungrouped device is a unit of one. A lone queue follows the policy of the
-first supported device on it by name; today every supported queue has
-exactly one device.
+A `group` (in `amd/`, a device in at most one group) is the unit of health for
+queues on one cluster: the rule sees the pooled jobs of all its queues
+(`window` and `min_jobs` over the pool), there is one state, and every member
+queue's snapshot entry mirrors it, its reason prefixed `group <name>: `. A
+grouped device's policy is set on the group only; its `device` entry may hold
+a chain and nothing else. An ungrouped device is a unit of one. A lone queue
+follows the policy of the first supported device on it by name; today every
+supported queue has exactly one device.
 
 Pins are kept by unit. While a pin's `until` is in the future, the checker
 writes the pin's `state` and `until` into the snapshot with the reason
@@ -257,17 +256,18 @@ say. A pin needs a watched device, and a group takes one pin. Once the pin
 expires or is removed, the queues go back to the rules as `open`, and
 failures from before that count.
 
-Steps need nothing new. A step follows its device's chain, and its AMD mirror
-(`mirror.amd.device`) follows that device's chain. `fallback: false` on a step
-keeps it, and its mirror, on their own devices.
+Steps need nothing new. A step on an AMD GPU device follows its device's
+chain, and an AMD mirror (`mirror.amd.device`), an NVIDIA step's included,
+follows that device's chain. `fallback: false` on a step keeps it, and its
+mirror, on their own devices.
 
 ### Rules
 
 A rule is a named Python predicate in `fallback_rules/`: it gets a list of
 jobs on a queue plus the parameters from `close_when` (every key except
 `rule`, `window` and `min_jobs`), and returns True when the queue should be
-closed. `common.py` holds rules for every platform; `nvidia.py` and `amd.py`
-can add rules or override common ones by name.
+closed. `common.py` holds the shared rules; `amd.py` can add rules or
+override common ones by name.
 
 ```python
 # fallback_rules/common.py
@@ -305,7 +305,7 @@ publishing nothing.
 
 As the checker loads every listed directory as one config, all `ci_config*`
 files that set `fallback_dirs` must share the same `common/` (one `health`
-entry for all of them), and no device, pin queue or platform `defaults` may
+entry for all of them), and no device, pin queue or `amd/` `defaults` may
 be declared in two of their directories.
 
 A run reads the token, the current snapshot, then the jobs of the
@@ -399,8 +399,9 @@ adds, for each key present in the build, one copy of that step pinned to
   `Queue probes` group, and nothing depends on it;
 - listed in the build's annotation.
 
-A key that is not in the build, a step whose platform differs from the probe
-device's, or a probe device that is not on the queue gets no probe.
+A key that is not in the build, a step not declared on an AMD GPU device (an
+NVIDIA step itself, but not its AMD mirror), or a probe device that is not on
+the queue gets no probe.
 
 At the first checker run at or after the deadline, each key of the round
 gives at most one piece of evidence: of the jobs on the queue keyed
@@ -478,7 +479,7 @@ GraphQL access as well.
 | No `fallback_dirs`, no chain for a device, or `fallback: false` | As before |
 | A device without a complete policy | Never closed or probed; always open in chains |
 | PR builds | Routed by the snapshot, but their jobs never count toward health |
-| A device other than the supported CUDA and AMD GPU devices | Never mapped or probed; naming it in config fails generation |
+| A device other than the AMD GPU devices, NVIDIA included | Never mapped, probed or watched; naming it in config fails generation |
 | Snapshot missing, stale, malformed, or the API unreachable | Every queue open, pins ignored, with a one-line note in the log |
 | Every queue in a chain closed | The step's own device, with an annotation |
 | Fewer than `min_jobs` recent jobs (pooled for a group) | The queue stays open |

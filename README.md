@@ -83,7 +83,7 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 - **AMD mirroring**: Steps can define `mirror.amd` to automatically create parallel AMD test runs
 - **Source file dependencies**: Steps can specify which source files they depend on for intelligent test filtering
 - **Block steps**: Optional tests are gated behind manual approval blocks
-- **Queue fallback**: Steps on a queue closed for infra failures by the scheduled `queue-health` pipeline run on the next device of a declared chain (opt-in via `fallback_dirs`; see the [pipeline generator README](buildkite/pipeline_generator/README.md#queue-fallback))
+- **Queue fallback**: AMD steps and AMD mirrors on an AMD queue closed for infra failures by the scheduled `queue-health` pipeline run on the next AMD device of a declared chain (opt-in via `fallback_dirs`; see the [pipeline generator README](buildkite/pipeline_generator/README.md#queue-fallback)). NVIDIA queues are not handled yet.
 - **Variable injection**: Automatically injects registry URLs, cache tags, and image references into step commands
 
 #### Jinja2 Template (AMD CI)
