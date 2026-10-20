@@ -9,12 +9,22 @@
 # boot, and the jobs killed to get there have to run again. The multi-host
 # shapes reclaim anyway, since without it they wait for a whole slice to free.
 # withinClusterQueue stays Never: priority decides who goes next, not who stops.
+#
+# queueingStrategy is BestEffortFIFO unless prod.auto.tfvars sets it: a
+# workload that does not fit is passed over for a smaller one behind it. In a
+# queue that mixes sizes the large ones can wait for hours, since chips free
+# up one small workload at a time and are taken before enough are free at
+# once. StrictFIFO admits nothing behind a head that does not fit, so within a
+# priority the queue runs in order. Only the manager orders the queue: a worker
+# runs what the manager dispatched, and a strict head there that disagrees with
+# the manager about usage would block everything dispatched after it.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: ${QUEUE_NAME}
 spec:
   cohortName: ${ACCELERATOR}${FLAVOR_FUNGIBILITY}
+  queueingStrategy: ${QUEUEING_STRATEGY}
   preemption:
     reclaimWithinCohort: ${RECLAIM_WITHIN_COHORT}
     withinClusterQueue: Never
