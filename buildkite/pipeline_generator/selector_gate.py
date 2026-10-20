@@ -119,6 +119,10 @@ def base_record(global_config: Dict[str, Any], gate_mode: str) -> Dict[str, Any]
         "fallback": None,
         "selector": None,
         "selector_keys": None,
+        # Keys of AMD steps, which keep today's rules, and of NVIDIA GPU
+        # steps, which the annotation counts; set by the generator.
+        "amd_keys": None,
+        "nvidia_keys": None,
         "explain": None,
         "legacy_keys": None,
         "scheduled_keys": None,
@@ -189,17 +193,26 @@ def write_and_upload(record: Dict[str, Any], output_dir: str) -> str:
 
 
 def annotate(record: Dict[str, Any]) -> None:
+    """One line on the build page, counting NVIDIA steps only
+    (`nvidia_keys`), so the selector and today's rules compare like for like:
+    AMD steps keep today's rules, and image builds and CPU steps are not what
+    the comparison is about."""
+    nvidia = set(record.get("nvidia_keys") or ())
+
+    def count(field: str) -> int:
+        return len(set(record.get(field) or ()) & nvidia)
+
     if record["applied"]:
-        n, m = len(record["scheduled_keys"] or []), len(record["legacy_keys"] or [])
         text = (
-            f":dart: ci-selector chose {len(record['selector_keys'])} test steps "
-            f"({n} scheduled with their prerequisites); today's rules: {m}."
+            f":dart: ci-selector chose {count('selector_keys')} NVIDIA test steps "
+            f"({count('scheduled_keys')} scheduled with their prerequisites); "
+            f"today's rules: {count('legacy_keys')}."
         )
     elif record["mode"] == "shadow" and record["selector_keys"]:
         text = (
             f":dart: ci-selector (shadow) would choose "
-            f"{len(record['selector_keys'])} test steps; today's rules ran "
-            f"{len(record['legacy_keys'] or [])}."
+            f"{count('selector_keys')} NVIDIA test steps; today's rules ran "
+            f"{count('legacy_keys')}."
         )
     else:
         text = (
@@ -345,6 +358,38 @@ def known_keys(steps: Iterable[Any]) -> FrozenSet[str]:
             keys.add(step.key)
             if (step.mirror or {}).get("amd"):
                 keys.add(f"amd-{step.key}")
+    return frozenset(keys)
+
+
+# Every device a step runs NVIDIA GPUs on. A step with no device runs on the
+# default GPU queue unless it is an image build.
+NVIDIA_DEVICES = frozenset(
+    {
+        "h100",
+        "h200",
+        "h200_18gb",
+        "h200_35gb",
+        "b200",
+        "b200-k8s",
+        "a100",
+        "l4",
+        "gh200",
+        "dgx-spark",
+    }
+)
+
+
+def nvidia_keys(steps: Iterable[Any]) -> FrozenSet[str]:
+    """Keys of the steps that run on NVIDIA GPUs."""
+    keys = set()
+    for step in steps:
+        if not step.key:
+            continue
+        device = step.device.value if hasattr(step.device, "value") else step.device
+        if device in NVIDIA_DEVICES or (
+            device is None and not (step.label or "").startswith(":docker:")
+        ):
+            keys.add(step.key)
     return frozenset(keys)
 
 

@@ -125,6 +125,8 @@ class PipelineGenerator:
             )
         global_config["only_step_keys"] = selected_step_keys
         if record is not None:
+            record["amd_keys"] = sorted(selector_gate.amd_keys(steps))
+            record["nvidia_keys"] = sorted(selector_gate.nvidia_keys(steps))
             if scheduled is not None:
                 # The selector's choice plus the AMD steps today's rules run.
                 amd = selector_gate.amd_keys(steps)
