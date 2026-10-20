@@ -51,6 +51,9 @@ class Selection:
     docs_affected: bool = False
     docs_reasons: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Keys of the steps whose definition the diff changed or added, as spelled
+    # at head (Claim.changed_step_keys, unioned over every claim).
+    changed_step_keys: set[str] = field(default_factory=set)
 
 
 def _record(
