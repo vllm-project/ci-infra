@@ -258,16 +258,19 @@ def _init_global_config(env):
             global_config.config = None
 
 
-def test_nightly_is_off_by_default():
-    config = _init_global_config({})
-    assert config["aiter_nightly"] == "0"
-    assert config["docs_only_disable"] == "0"
-
-
-def test_nightly_never_skips_docs_only_changes():
-    config = _init_global_config({"AITER_NIGHTLY": "1", "DOCS_ONLY_DISABLE": "0"})
-    assert config["aiter_nightly"] == "1"
-    assert config["docs_only_disable"] == "1"
+@pytest.mark.parametrize(
+    "env, aiter_nightly, docs_only_disable",
+    [
+        ({}, "0", "0"),
+        ({"DOCS_ONLY_DISABLE": "1"}, "0", "1"),
+        # The nightly never skips docs-only changes.
+        ({"AITER_NIGHTLY": "1", "DOCS_ONLY_DISABLE": "0"}, "1", "1"),
+    ],
+)
+def test_nightly_config(env, aiter_nightly, docs_only_disable):
+    config = _init_global_config(env)
+    assert config["aiter_nightly"] == aiter_nightly
+    assert config["docs_only_disable"] == docs_only_disable
 
 
 def test_nightly_cannot_combine_with_torch_nightly():
