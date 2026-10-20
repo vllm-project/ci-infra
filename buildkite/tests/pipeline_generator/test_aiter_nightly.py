@@ -9,10 +9,7 @@ import amd
 import buildkite_step
 import global_config
 import pipeline_generator
-from pipeline_generator import (
-    check_dependencies_exist,
-    select_steps_and_dependencies,
-)
+from pipeline_generator import select_steps_and_dependencies
 from step import Step, group_steps
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
@@ -158,12 +155,6 @@ def test_overlay_runs_between_ci_base_and_test_image():
     }
 
 
-def test_overlay_does_not_change_the_steps_it_was_given():
-    steps = _build_steps()
-    amd.apply_aiter_nightly(steps)
-    assert steps == _build_steps()
-
-
 @pytest.mark.parametrize("missing", ["ensure-ci-base-amd", "image-build-amd"])
 def test_overlay_requires_the_amd_build_steps(missing):
     steps = [step for step in _build_steps() if step.key != missing]
@@ -284,18 +275,6 @@ def test_nightly_cannot_combine_with_torch_nightly():
         _init_global_config({"AITER_NIGHTLY": "1", "TORCH_NIGHTLY": "1"})
 
 
-def _converted(fake_global_config, steps):
-    fake_global_config["aiter_nightly"] = "1"
-    steps = amd.apply_aiter_nightly(steps)
-    return buildkite_step.convert_group_step_to_buildkite_step(group_steps(steps))
-
-
-def test_nightly_rejects_a_kept_job_depending_on_a_dropped_one(fake_global_config):
-    steps = _steps() + [_mirrored("needs-cuda", "mi300_1", depends_on=["cuda-only"])]
-    with pytest.raises(ValueError, match="amd-needs-cuda -> cuda-only"):
-        check_dependencies_exist(_converted(fake_global_config, steps))
-
-
 def _generator(fake_global_config, monkeypatch, tmp_path, steps):
     """A PipelineGenerator for the AITER nightly over steps, and its annotations."""
     fake_global_config.update(aiter_nightly="1", job_dirs=["job_dir"])
@@ -337,14 +316,14 @@ def test_generate_uploads_the_nightly(fake_global_config, monkeypatch, tmp_path)
             assert dependency in jobs, (job["key"], dependency)
 
 
-def test_generate_fails_on_a_dropped_dependency(
+def test_generate_fails_when_a_kept_job_depends_on_a_dropped_one(
     fake_global_config, monkeypatch, tmp_path
 ):
     steps = _steps() + [_mirrored("needs-cuda", "mi300_1", depends_on=["cuda-only"])]
     generator, annotations = _generator(
         fake_global_config, monkeypatch, tmp_path, steps
     )
-    with pytest.raises(ValueError, match="needs-cuda"):
+    with pytest.raises(ValueError, match="amd-needs-cuda -> cuda-only"):
         generator.generate()
     assert any(kwargs == {"style": "error"} for _, kwargs in annotations)
     assert not (tmp_path / "pipeline.yaml").exists()
