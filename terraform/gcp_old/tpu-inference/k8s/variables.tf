@@ -487,6 +487,10 @@ variable "worker_clusters" {
       # The order the shape's queue admits in, BestEffortFIFO or StrictFIFO.
       # See queue_group.yaml.tpl.
       queueing_strategy = optional(string, "BestEffortFIFO")
+      # The most of its nominal_quota the shape's queue lends to the cohort,
+      # in whole slices; unset lends all of it. The rest waits for this shape
+      # alone, idle or not.
+      lending_limit = optional(number)
 
       # Spot capacity beside the reservation, for a single-host shape: a second
       # node pool, <shape>-spot, drawing on the region's Spot quota instead of

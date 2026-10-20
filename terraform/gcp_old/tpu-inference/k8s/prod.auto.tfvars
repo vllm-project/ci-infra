@@ -305,6 +305,13 @@ worker_clusters = [
 
         slices        = 16
         nominal_quota = 16
+        # Lends one slice and keeps the other. With all 16 lendable, 2x2x1
+        # borrowed both, and freed chips went back four at a time to the next
+        # 2x2x1 step, never eight at once: on 10-20 the queue admitted nothing
+        # for 90 minutes while 10 Multihost TorchTPU Presubmits (one per
+        # vllm-torchtpu build) waited. Keeping one slice costs at most 8 idle
+        # chips when no 2x2x2 step is waiting.
+        lending_limit = 8
 
         # Waits for borrowers to finish instead of evicting them. Within its
         # own quota this queue is admitted ahead of any borrower once eight
