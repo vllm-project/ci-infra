@@ -1597,6 +1597,34 @@
     "reference_url": "https://github.com/vllm-project/vllm/pull/61134",
     "notes": "PR #61134 (dtype-aware dummy weight init) merged with E2E Core blocked in PR build 94334; first post-merge main 94362 failed e2e-core-1-gpu on mamba prefix-cache MRV1 tests. Selector trial: v7's answer for #61134 had e2e-core-1-gpu in would_add \u2014 it would have run the lane pre-merge. Found by @Sherlock's audit; recorded by kimi-no-na-wa."
    }
+  },
+  {
+   "id": "pr-61983-main-96024-multi-modal-models-extended-generation-2",
+   "job_name": ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 2) Shard %N",
+   "job_key": "multi-modal-models-extended-generation-2",
+   "culprit_pr": {
+    "number": 61983,
+    "url": "https://github.com/vllm-project/vllm/pull/61983",
+    "merge_commit": "53172fa72ef8c775cd294273b2e7b0c7c21240f2"
+   },
+   "pr_ci": {
+    "ran": false,
+    "state": "not_selected",
+    "build_number": 95998,
+    "job_id": null,
+    "url": "https://buildkite.com/vllm/ci/builds/95998"
+   },
+   "main_failure": {
+    "build_number": 96024,
+    "job_id": "01a1569e-0ddd-4c12-aa15-6b230e31fdb5",
+    "url": "https://buildkite.com/vllm/ci/builds/96024#01a1569e-0ddd-4c12-aa15-6b230e31fdb5",
+    "signature": "ValueError: Free memory on device cuda:0 (27.14/32.5 GiB) < 0.92 util target \u2014 transformers 5.20.2 bump; deterministic in both failing shards"
+   },
+   "causal_confirmation": {
+    "kind": "code_analysis",
+    "reference_url": "https://github.com/vllm-project/vllm/pull/61983",
+    "notes": "PR #61983 (transformers 5.20.2 bump) had no Extended Generation 2 lane rendered in PR build 95998; daily 96024 failed shards 1 and 4 deterministically. Lane is optional:true \u2014 the selector trial flags it under optional-would-also-run but does not auto-run optional steps (standing policy). Found by @Sherlock; recorded by kimi-no-na-wa. Note: this is the optional-lane policy class, distinct from a selector mapping miss."
+   }
   }
  ]
 }
