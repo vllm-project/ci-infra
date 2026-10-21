@@ -28,7 +28,11 @@ from constants import AgentQueue, Platform
 from platforms import runs_on
 from recorder_switches import fnrec_enabled
 import selector_gate
-from global_config import PLATFORM_ENV_VAR, get_global_config, init_global_config
+from global_config import (
+    ONLY_PLATFORM_ENV_VAR,
+    get_global_config,
+    init_global_config,
+)
 from step import Step, group_steps, read_steps_from_job_dir
 import unblock_jobs
 
@@ -88,7 +92,7 @@ class PipelineGenerator:
             reason = (
                 "torch nightly validates CUDA only"
                 if global_config["torch_nightly"] == "1"
-                else f"{PLATFORM_ENV_VAR}={platform.value}"
+                else f"{ONLY_PLATFORM_ENV_VAR}={platform.value}"
             )
             _annotate_best_effort(f"Only {platform.value} jobs run: {reason}.")
 

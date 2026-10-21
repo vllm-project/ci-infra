@@ -42,7 +42,7 @@ class DeviceType(str, Enum):
 
 
 class Platform(str, Enum):
-    """A build restricted to one platform runs only its jobs (VLLM_CI_PLATFORM)."""
+    """A build restricted to one platform runs only its jobs (VLLM_CI_ONLY_PLATFORM)."""
 
     AMD = "amd"
     CUDA = "cuda"
