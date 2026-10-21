@@ -410,7 +410,7 @@ spec:
   cohortName: tpu7x
   queueingStrategy: StrictFIFO
   preemption:
-    reclaimWithinCohort: Never
+    reclaimWithinCohort: LowerPriority
     withinClusterQueue: Never
   namespaceSelector:
     matchLabels:

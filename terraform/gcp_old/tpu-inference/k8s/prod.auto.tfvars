@@ -286,6 +286,16 @@ worker_clusters = [
         # 6 chip-hours a day idle while a head waited for enough free chips.
         queueing_strategy = "StrictFIFO"
 
+        # Takes its own quota back from lower-priority borrowers. A StrictFIFO
+        # head that only fits by preemption, with nothing it may preempt, holds
+        # its chips in every scheduling cycle while the queue's reclaim policy
+        # is not Any, so the other shapes' heads see them as taken; on 10-20
+        # and 10-21 2x2x2 admitted nothing for over an hour at a time and
+        # 1x1x1 fell to 3-6 of its 16 chips. LowerPriority lets the head evict
+        # priority-0 borrowers when 2x2x1 is under its nominal quota; it does
+        # not end that hold while 2x2x1 itself is borrowing.
+        reclaim_within_cohort = "LowerPriority"
+
         # No Spot: 2x2x1 Spot VMs were stocked out on most busy evenings, and
         # each step offered Spot then waited 10-15 minutes for a node that
         # never came before falling back. On 10-13 that was 262 steps against
