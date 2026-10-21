@@ -466,15 +466,6 @@ rather than throw their runs away. A reclaimed slice still waits for the
 evicted nodes to scale down, about ten minutes, before its own nodes boot. If a shape is starving, the lever is the
 split in `prod.auto.tfvars`, not the node pools.
 
-**2x2x1 admits in order within a priority.** Its queue mixes 4-chip steps with
-8-chip ones that take two VMs. Kueue's default, `BestEffortFIFO`, passes over a
-workload that does not fit for a smaller one behind it, so freed chips went four
-at a time to 4-chip steps while an 8-chip step waited for hours. The queue is
-`StrictFIFO` on the manager (`queueing_strategy` in `prod.auto.tfvars`): nothing
-behind a head that does not fit is admitted, and a higher priority still goes
-first. The cost is chips left idle while the head waits for enough to free up.
-The other shapes keep `BestEffortFIFO`.
-
 **A cold pool's first image pull is slow, and that is not streaming failing.**
 Image streaming is on for every TPU pool, but GKE serves an image it has
 converted and it converts each digest once. CI pushes a new digest every build,
@@ -679,8 +670,8 @@ doc does.
   first five pending in the order Kueue will consider them, the rest a click away, with their priority
   class, from Kueue's visibility API - the check that priority orders the
   queue - and the rest counted by build; then Kueue's reason for anything
-  pending. Only the head of a queue carries a reason; the rest are counted as
-  queued behind it.
+  pending. Only the head of a BestEffortFIFO queue carries a reason; the rest
+  are counted as queued behind it.
 - **Cluster problems** - events from every cluster's `buildkite` namespace
   that are the fleet's fault (failed creates, failed scale-ups, mount
   failures, evictions, OOM kills), repeats grouped. Routine warnings - Kueue's
