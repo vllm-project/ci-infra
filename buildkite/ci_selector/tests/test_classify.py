@@ -2248,9 +2248,11 @@ def test_rocm_release_script_zero_claims_before_family_fail_open(state):
     assert claim.rule == "release-ci" and not claim.run_all and not claim.step_ids
 
 
-def test_release_refs_derived_and_disjoint_from_live_steps(state):
-    """The derived release refs are non-empty, include the tools/ member, and reference
-    nothing a modeled step consumes."""
+def test_release_refs_derived_and_never_hide_live_steps(state):
+    """The derived release refs are non-empty and include the tools/ member. A ref
+    a modeled step also consumes (the ROCm release runs CI's build.sh) keeps that
+    step's claim: the release pipeline never zeroes a file live jobs use."""
+    from ci_selector.codemap.classify import _classify
     from ci_selector.handwritten import RELEASE_PIPELINE_FILES
 
     refs = state.release_refs
@@ -2261,7 +2263,12 @@ def test_release_refs_derived_and_disjoint_from_live_steps(state):
         for st in p.targets.values():
             live |= set(st.scripts_seen) | set(st.data_files)
             live |= {t.path for t in st.targets}
-    assert refs.isdisjoint(live), sorted(refs & live)
+    for path in sorted(refs & live):
+        claim = _classify(state, path, None)
+        assert claim.rule != "release-ci" and (claim.run_all or claim.step_ids), (
+            path,
+            claim.rule,
+        )
     for rel in RELEASE_PIPELINE_FILES:
         assert not any(rel == p.config.config_file for p in state.pipelines)
 

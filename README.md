@@ -91,7 +91,7 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 
 When the vLLM checkout has `.buildkite/scripts/rocm/build.sh`, the ROCm build steps come from vLLM's `.buildkite/hardware_tests/amd.yaml` (the template and `amd.py` alike) and GPU pods run `$ROCM_CI_REPO:build-$BUILDKITE_BUILD_ID`. `ROCM_CI_REPO` is the trust decision: `rocm/vllm-ci` for non-PR builds of `vllm-project/vllm` `main` that are not the AITER nightly, else `rocm/vllm-dev`. Older checkouts keep the previous build chain.
 
-ROCm release images are built by a separate `amd-release` pipeline, which `release-pipeline.yaml` triggers once per ROCm stack (`ROCM_STACK`). Buildkite settings: same cluster as `amd-ci`; one step `buildkite-agent pipeline upload .buildkite/rocm-release.yaml` on queue `amd-cpu`; builds only from triggers (release pipeline allowed); no GitHub statuses; no intermediate-build skipping.
+ROCm release images are built in vLLM's release pipeline itself, on its own `cpu_queue_release` agents (`build.sh rocm release`, reusing the CI-tested images in `rocm/vllm-ci`); no AMD agent or pipeline from this repo takes part.
 
 #### AITER nightly (AMD CI)
 
