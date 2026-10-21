@@ -24,6 +24,7 @@ generator runs on the small CPU queue's python3.
 
 import base64
 import fnmatch
+import hashlib
 import json
 import math
 import os
@@ -35,6 +36,7 @@ import sys
 import urllib.parse
 import urllib.request
 import zlib
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 from constants import AgentQueue
@@ -98,11 +100,28 @@ _PYTHON_FILES = ("test_*.py", "*_test.py")
 _NORECURSE = ("*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv")
 
 
-def command_preview(command: str) -> str:
-    """The label main's timing spans carry for a command: the first 80
-    characters, with quotes and `$` removed, as the generator echoes it before
-    running the command (see _prepare_commands)."""
+def _legacy_preview(command: str) -> str:
     return command[:80].replace("'", "").replace('"', "").replace("$", "")
+
+
+def command_preview(command: str) -> str:
+    """A readable timing label, with a hash of the full unsanitized command."""
+    preview = _legacy_preview(command)
+    digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:12]
+    return f"{preview} [{digest}]"
+
+
+def command_labels(commands: List[str]) -> List[str]:
+    """Hashed previews, numbered from the second identical command (` #2`)."""
+    labels: List[str] = []
+    for command in commands:
+        label = preview = command_preview(command)
+        number = 1
+        while label in labels:
+            number += 1
+            label = f"{preview} #{number}"
+        labels.append(label)
+    return labels
 
 
 def env_and_words(command: str) -> Tuple[Dict[str, str], List[str]]:
@@ -302,7 +321,8 @@ def plan(
 
     Args:
         commands: Per pytest command of the step: {"command", "files",
-            "selected"}, as from discover().
+            "selected"}, as from discover(), and optionally "span_label",
+            the command's label on main's spans (command_labels()).
         timings: The timing endpoint's response for the step, or None.
         max_shard_seconds: Test-time budget for one shard.
         max_number_of_shards: Upper bound on the number of shards.
@@ -316,9 +336,11 @@ def plan(
         has timed. The rest are counts and flagged files.
 
     """
-    file_seconds = {}  # (preview, file) -> seconds on main
-    file_tests = {}  # (preview, file) -> {nodeid: seconds on main}
-    previews: Dict[str, List[str]] = {}  # file -> previews main ran it under
+    file_seconds = {}  # (label, file) -> seconds on main
+    file_tests = {}  # (label, file) -> {nodeid: seconds on main}
+    previews: Dict[str, List[str]] = {}  # file -> labels main ran it under
+    commands_per_file = Counter(file for entry in commands for file in entry["files"])
+    legacy_previews = Counter(_legacy_preview(entry["command"]) for entry in commands)
     for timing in (timings or {}).get("files", []):
         key = (timing["command"], timing["file"])
         file_seconds[key] = timing["observedMs"] / 1000
@@ -328,20 +350,31 @@ def plan(
                 t["nodeid"]: t["observedMs"] / 1000 for t in timing["tests"]
             }
 
-    def timing_key(command: str, file: str) -> Optional[Tuple[str, str]]:
-        """A step runs a file under one command in practice, so the file
-        alone finds its timing: a PR that edits the command (and so its
-        preview) keeps main's timings. The preview only picks between
-        commands that run the same file."""
-        key = (command_preview(command), file)
+    def timing_key(entry: Dict, file: str) -> Optional[Tuple[str, str]]:
+        """Match the exact label, then an unambiguous legacy preview. Fall
+        back by file only when current and historical commands are unique."""
+        key = (entry.get("span_label") or command_preview(entry["command"]), file)
         if key in file_seconds:
             return key
-        if len(previews.get(file, [])) == 1:
-            return (previews[file][0], file)
+        historical = previews.get(file, [])
+        hashed = [
+            label
+            for label in historical
+            if re.search(r" \[[0-9a-f]{12}\](?: #\d+)?$", label)
+        ]
+        # Prefer hashed history during rollout. Old labels cannot prove full
+        # command identity; reuse them only when current previews are unique.
+        legacy = _legacy_preview(entry["command"])
+        if hashed:
+            historical = hashed
+        elif legacy_previews[legacy] == 1 and (legacy, file) in file_seconds:
+            return (legacy, file)
+        if commands_per_file[file] == 1 and len(historical) == 1:
+            return (historical[0], file)
         return None
 
     keys = {
-        (index, file): timing_key(entry["command"], file)
+        (index, file): timing_key(entry, file)
         for index, entry in enumerate(commands)
         for file in entry["files"]
     }
@@ -496,14 +529,22 @@ def plan_step(
     reason = ""
     result = None
     try:
-        _, tests = split_commands(commands)
+        setup, tests = split_commands(commands)
         cwd = root
         if working_dir:
             workspace = CONTAINER_WORKSPACE.rstrip("/")
             if not (working_dir.rstrip("/") + "/").startswith(workspace + "/"):
                 raise ValueError(f"working_dir {working_dir} is outside the checkout")
             cwd = os.path.join(root, os.path.relpath(working_dir, workspace))
-        discovered = [{"command": c, **discover(c, cwd, root)} for c in tests]
+        labels = command_labels(commands)
+        discovered = [
+            {
+                "command": c,
+                "span_label": labels[len(setup) + index],
+                **discover(c, cwd, root),
+            }
+            for index, c in enumerate(tests)
+        ]
         if not any(entry["files"] for entry in discovered):
             raise ValueError("no test files found")
         result = plan(discovered, fetch_timings(step_key, queue))
@@ -512,9 +553,11 @@ def plan_step(
         else:
             prefix = os.path.relpath(cwd, root).replace(os.sep, "/")
             prefix = "" if prefix == "." else prefix + "/"
-            for entry, planned in zip(discovered, result["commands"]):
+            for index, (entry, planned) in enumerate(
+                zip(discovered, result["commands"])
+            ):
                 _, words = env_and_words(entry["command"])
-                position = commands.index(entry["command"])
+                position = len(setup) + index
                 planned["args"] = words[1:]
                 planned["prefix"] = prefix
                 planned["label"] = f"Command ({position + 1}/{len(commands)})"

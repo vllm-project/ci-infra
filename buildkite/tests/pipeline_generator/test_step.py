@@ -356,7 +356,7 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
     match = re.search(r'ci_otel_start 2 ("[^"]*"|\S+)', commands[4])
     assert match is not None
     (quoted_label,) = match.groups()
-    assert shlex.split(quoted_label)[0] == "test VALUE = ready"
+    assert shlex.split(quoted_label)[0] == "test VALUE = ready [2c178d9428af]"
     assert "'" not in commands[4]
 
 
@@ -427,6 +427,28 @@ def test_otel_trace_keeps_assignment_prefixed_commands_in_shell(fake_global_conf
         assert "ci_otel_run" not in command
     assert "TP_SIZE=1 pytest tests/entrypoints" in commands[2]
     assert "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed" in commands[4]
+
+
+def test_otel_trace_hashes_commands_whose_previews_match(fake_global_config):
+    fake_global_config["branch"] = "main"
+    long = "pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/"
+    step = Step(label="Traced", commands=[long + "fp8.txt", long + "int8.txt"])
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    labels = [
+        shlex.split(re.search(r"ci_otel_run \d+ (.*?) pytest", c).group(1))[0]
+        for c in (commands[2], commands[4])
+    ]
+    assert labels[0] != labels[1]
+    assert all(label.startswith(long[:80] + " [") for label in labels)
+    assert commands[3].endswith(f'Command (2/2): {labels[1]}"')
+    assert commands[2].endswith(step.commands[0])
+    assert commands[4].endswith(step.commands[1])
 
 
 def test_is_simple_command():
