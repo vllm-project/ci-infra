@@ -475,14 +475,6 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
                 f"{name}: nominal_quota={quota} has to be whole {slice_chips}-chip "
                 f"slices and at most the {capacity} chips its pools can hold"
             )
-        # What the shape's queue may lend, if capped: whole slices, so the
-        # part it keeps is slices it can run.
-        cap = pool.get("lending_limit")
-        if cap is not None and (cap % slice_chips or not 0 <= cap <= quota):
-            raise ValueError(
-                f"{name}: lending_limit={cap} has to be whole {slice_chips}-chip "
-                f"slices between 0 and its nominal_quota={quota}"
-            )
         # Chips the pool's floor keeps booted, which no other shape can use.
         parked = 0 if hosts > 1 else int(pool.get("min_nodes") or 0) * chips
         if parked > quota:
@@ -549,11 +541,9 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
     return out
 
 
-def queue_policies(
-    tfvars: dict, key: str, default: str | int | None
-) -> dict[str, str | int | None]:
+def queue_policies(tfvars: dict, key: str, default: str) -> dict[str, str]:
     """A per-pool setting that belongs to the shape's queue on the manager."""
-    out: dict[str, str | int | None] = {}
+    out: dict[str, str] = {}
     for worker in tfvars["worker_clusters"]:
         for pool in worker.get("tpu_node_pools", []):
             name = f"{pool['machine_type']}-{pool['topology']}"
@@ -624,7 +614,6 @@ def queues(
     strategy: dict[str, str] | None = None,
     capacities: dict[str, int | None] | None = None,
     parked: dict[str, int] | None = None,
-    lending: dict[str, int | None] | None = None,
     spot: dict[str, int] | None = None,
 ) -> str:
     """A flavor per machine family, then a queue per shape sharing it.
@@ -668,9 +657,7 @@ def queues(
                 RECLAIM_WITHIN_COHORT=(reclaim or {}).get(name, "Never"),
                 QUEUEING_STRATEGY=(strategy or {}).get(name, "BestEffortFIFO"),
                 BORROWING_LIMIT=borrowing_limit(chips, (capacities or {}).get(name)),
-                LENDING_LIMIT=lending_limit(
-                    chips, (parked or {}).get(name, 0), (lending or {}).get(name)
-                ),
+                LENDING_LIMIT=lending_limit(chips, (parked or {}).get(name, 0)),
                 FLAVOR_FUNGIBILITY=FLAVOR_FUNGIBILITY if name in spot else "",
                 SPOT_FLAVOR=spot_flavor(cohort(name), spot[name]) if name in spot else "",
             )
@@ -713,16 +700,11 @@ def borrowing_limit(quota: int, capacity: int | None) -> str:
     return f"\n              borrowingLimit: {capacity - quota}"
 
 
-def lending_limit(quota: int, parked: int, cap: int | None = None) -> str:
-    """The lendingLimit line a queue's quota carries, or nothing.
-
-    The lesser of what the pool's floor leaves free and the lending_limit
-    prod.auto.tfvars sets.
-    """
-    limits = ([quota - parked] if parked else []) + ([cap] if cap is not None else [])
-    if not limits:
+def lending_limit(quota: int, parked: int) -> str:
+    """The lendingLimit line a queue's quota carries, or nothing."""
+    if not parked:
         return ""
-    return f"\n              lendingLimit: {min(limits)}"
+    return f"\n              lendingLimit: {quota - parked}"
 
 
 def fleet_secret_docs(tfvars: dict, namespace: str) -> str:
@@ -1187,7 +1169,6 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             strategy=queue_policies(tfvars, "queueing_strategy", "BestEffortFIFO"),
             capacities={name: entry["capacity"] for name, entry in fleet.items()},
             parked={name: entry["parked"] for name, entry in fleet.items()},
-            lending=queue_policies(tfvars, "lending_limit", None),
             spot={name: entry["spot_quota"] for name, entry in fleet.items()},
         ),
     )

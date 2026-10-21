@@ -462,9 +462,7 @@ Kueue considers a workload that fits a queue's own quota before one that has to
 borrow, so a shape under its nominal gets freed chips first. 2x2x4 also evicts
 lower-priority borrowers to get its slices back (`reclaimWithinCohort:
 LowerPriority`); the other shapes, 2x2x2 included, wait for borrowers to finish
-rather than throw their runs away. 2x2x2 lends only one of its two slices
-(`lending_limit` in `prod.auto.tfvars`): with both lendable, 2x2x1 borrowed them
-and took freed chips back four at a time, so 2x2x2 never saw eight free at once. A reclaimed slice still waits for the
+rather than throw their runs away. A reclaimed slice still waits for the
 evicted nodes to scale down, about ten minutes, before its own nodes boot. If a shape is starving, the lever is the
 split in `prod.auto.tfvars`, not the node pools.
 
