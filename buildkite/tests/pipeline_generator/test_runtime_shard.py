@@ -151,7 +151,7 @@ def test_one_job_over_the_budget_says_so():
     text = rs.summary("k", result)
     assert "fit in one job" not in text
     assert "`tests/a.py` takes 20.0 min on its own" in text
-    assert "It runs on 1 shard, the fewest" in text
+    assert "1 shard is the fewest" in text
 
 
 def test_plan_without_timings_runs_the_step_as_one_job():
@@ -387,9 +387,9 @@ def test_plan_drops_a_shard_that_cannot_beat_one_long_test():
         "time per shard (min): 18.6, 17.8. Timings: median of 2 main builds, "
         "the newest 7. Split by test: `tests/big.py`. :warning: "
         "`tests/big.py::test_slow` takes 18.6 min on its own, over the 18-min "
-        "target, and can't be split across shards, so the step can't finish "
-        "in under 18.6 min. It runs on 2 shards, the fewest that finish in "
-        "18.6 min."
+        "target. One test can't be split across shards, so its shard needs at "
+        "least 18.6 min whatever the shard count. 2 shards is the fewest that "
+        "keep every shard within 18.6 min."
     )
 
 
@@ -436,8 +436,8 @@ def test_plan_at_the_most_shards_drops_one_that_does_not_help():
     result = rs.plan(_commands(TESTS[0], files), _timings(TESTS[0], files))
     assert result["shards"] == 5 and max(result["estimates"]) == 2400
     text = rs.summary("k", result)
-    assert "can't finish in under 30.0 min" in text
-    assert "It runs on 5 shards, the fewest that finish in 40.0 min." in text
+    assert "its shard needs at least 30.0 min" in text
+    assert "5 shards is the fewest that keep every shard within 40.0 min." in text
     assert sorted(result["commands"][0]["files"]) == sorted(f"tests/{f}" for f in files)
 
 

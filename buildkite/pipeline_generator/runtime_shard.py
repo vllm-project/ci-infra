@@ -522,10 +522,10 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
         shards = f"{result['shards']} shard{'s' if result['shards'] != 1 else ''}"
         text += (
             f" :warning: `{long_test['name']}` takes {minutes} on its own, over "
-            f"the {MAX_SHARD_SECONDS / 60:.0f}-min target, and can't be split "
-            f"across shards, so the step can't finish in under {minutes}. It "
-            f"runs on {shards}, the fewest that finish in "
-            f"{max(result['estimates']) / 60:.1f} min."
+            f"the {MAX_SHARD_SECONDS / 60:.0f}-min target. One test can't be "
+            f"split across shards, so its shard needs at least {minutes} "
+            f"whatever the shard count. {shards} is the fewest that keep every "
+            f"shard within {max(result['estimates']) / 60:.1f} min."
         )
     elif result["overBudget"]:
         text += (
