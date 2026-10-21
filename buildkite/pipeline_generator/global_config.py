@@ -5,10 +5,12 @@ from typing import Dict, FrozenSet, List, Optional, TypedDict
 
 import yaml
 
+from constants import Platform
 from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels
 
 
 ONLY_STEP_KEYS_ENV_VAR = "VLLM_CI_ONLY_STEP_KEYS"
+PLATFORM_ENV_VAR = "VLLM_CI_PLATFORM"
 STEP_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -30,6 +32,7 @@ class GlobalConfig(TypedDict):
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
     only_step_keys: Optional[FrozenSet[str]] = None
+    platform: Optional[Platform] = None
 
 
 config = None
@@ -83,6 +86,9 @@ def init_global_config(pipeline_config_path: str):
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
         only_step_keys=_parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR)),
+        platform=_parse_platform(
+            os.getenv(PLATFORM_ENV_VAR), os.getenv("TORCH_NIGHTLY") == "1"
+        ),
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
@@ -118,6 +124,28 @@ def _parse_only_step_keys(value: Optional[str]) -> Optional[FrozenSet[str]]:
     if len(set(parsed)) != len(parsed):
         raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} contains duplicate step keys.")
     return frozenset(parsed)
+
+
+def _parse_platform(value: Optional[str], torch_nightly: bool) -> Optional[Platform]:
+    platform = None
+    if value and value.strip():
+        try:
+            platform = Platform(value.strip().lower())
+        except ValueError as error:
+            raise ValueError(
+                f"{PLATFORM_ENV_VAR} must be one of: "
+                + ", ".join(p.value for p in Platform)
+            ) from error
+    if torch_nightly:
+        # Torch nightly validates the CUDA torch build. The other platforms pin
+        # their own torch and gain nothing from it.
+        if platform not in (None, Platform.CUDA):
+            raise ValueError(
+                f"TORCH_NIGHTLY runs only CUDA jobs, "
+                f"so {PLATFORM_ENV_VAR}={platform.value} cannot be combined with it."
+            )
+        return Platform.CUDA
+    return platform
 
 
 def _validate_pipeline_config(pipeline_config: Dict):

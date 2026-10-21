@@ -6,7 +6,7 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import is_amd_device, normalize_amd_depends_on
+from amd import normalize_amd_depends_on
 from buildkite_step import (
     AMD_GROUP,
     COLLECT_GROUP,
@@ -24,10 +24,11 @@ from buildkite_step import (
     create_precommit_group_step,
     split_deferred_steps,
 )
-from constants import AgentQueue
+from constants import AgentQueue, Platform
+from platforms import runs_on
 from recorder_switches import fnrec_enabled
 import selector_gate
-from global_config import get_global_config, init_global_config
+from global_config import PLATFORM_ENV_VAR, get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
 import unblock_jobs
 
@@ -82,14 +83,14 @@ class PipelineGenerator:
                     f.write("true")
                 return
 
-        torch_nightly = global_config["torch_nightly"] == "1"
-        if torch_nightly:
-            # ROCm has its own pinned torch and gains nothing from validating
-            # against a CUDA torch-nightly build, so the AMD lane is excluded
-            # further downstream (see is_amd_device / include_amd).
-            _annotate_best_effort(
-                "AMD lane excluded: torch-nightly validates CUDA only."
+        platform = global_config["platform"]
+        if platform:
+            reason = (
+                "torch nightly validates CUDA only"
+                if global_config["torch_nightly"] == "1"
+                else f"{PLATFORM_ENV_VAR}={platform.value}"
             )
+            _annotate_best_effort(f"Only {platform.value} jobs run: {reason}.")
 
         steps = []
         for job_dir in global_config["job_dirs"]:
@@ -102,13 +103,11 @@ class PipelineGenerator:
                 # Every step stays in the pipeline; the rest are deferred
                 # (_step_should_run), so "Run more jobs" still offers them.
                 _, scheduled = select_steps_and_dependencies(
-                    steps,
-                    global_config["selector_step_keys"],
-                    torch_nightly=torch_nightly,
+                    steps, global_config["selector_step_keys"]
                 )
                 global_config["selector_step_keys"] = scheduled
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+                steps, global_config["only_step_keys"], platform=platform
             )
         except ValueError as error:
             if not (record and record["applied"]):
@@ -121,7 +120,7 @@ class PipelineGenerator:
             global_config["selector_step_keys"] = None
             scheduled = None
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+                steps, global_config["only_step_keys"], platform=platform
             )
         global_config["only_step_keys"] = selected_step_keys
         if record is not None:
@@ -326,14 +325,14 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
 def select_steps_and_dependencies(
     steps: List[Step],
     requested_step_keys: Optional[FrozenSet[str]],
-    torch_nightly: bool = False,
+    platform: Optional[Platform] = None,
 ) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
     if requested_step_keys is None:
         return steps, None
 
     steps_by_key = {}
     dependencies_by_key = {}
-    amd_step_keys = set()
+    off_platform_keys = set()
     for step in steps:
         # Steps without an explicit key are uploaded with a label-derived key
         # (see convert_group_step_to_buildkite_step), so retry builds reference
@@ -344,8 +343,8 @@ def select_steps_and_dependencies(
             raise ValueError(f"Duplicate CI step key: {step.key}")
         steps_by_key[step.key] = step
         dependencies_by_key[step.key] = step.depends_on or []
-        if is_amd_device(step.device):
-            amd_step_keys.add(step.key)
+        if not runs_on(platform, step.device):
+            off_platform_keys.add(step.key)
 
         # AMD mirrors are uploaded as generated `amd-<key>` steps, so retry
         # builds reference them by that key too.
@@ -358,19 +357,19 @@ def select_steps_and_dependencies(
             dependencies_by_key[mirror_key] = normalize_amd_depends_on(
                 amd_mirror.get("depends_on")
             )
-            amd_step_keys.add(mirror_key)
+            if not runs_on(platform, amd_mirror.get("device")):
+                off_platform_keys.add(mirror_key)
 
     missing = requested_step_keys - steps_by_key.keys()
     if missing:
         raise ValueError("Unknown CI step key(s): " + ", ".join(sorted(missing)))
 
-    if torch_nightly:
-        requested_amd_keys = requested_step_keys & amd_step_keys
-        if requested_amd_keys:
-            raise ValueError(
-                "AMD CI step key(s) requested, but AMD steps are excluded from "
-                "torch-nightly runs: " + ", ".join(sorted(requested_amd_keys))
-            )
+    requested_off_platform_keys = requested_step_keys & off_platform_keys
+    if requested_off_platform_keys:
+        raise ValueError(
+            f"CI step key(s) requested, but this build runs only {platform.value} "
+            "steps: " + ", ".join(sorted(requested_off_platform_keys))
+        )
 
     selected_step_keys = set(requested_step_keys)
     pending = list(requested_step_keys)
