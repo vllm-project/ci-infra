@@ -43,8 +43,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Packaging artifacts, written by `pip install ./buildkite/pipeline_generator`
-# and by any other source install in this repo
+# Packaging artifacts, written by uv sync's editable install of
+# buildkite/pipeline_generator and by any other source install in this repo
 build/
 dist/
 *.egg-info/
