@@ -311,6 +311,14 @@ def _least_loaded(sizes: List[float], count: int) -> Tuple[List[int], List[float
     return shard_of, loads
 
 
+def _one_command_each(units: List[Tuple], shard_of: List[int], count: int) -> bool:
+    """Whether each of `count` shards runs the units of a single command."""
+    commands_of: List[set] = [set() for _ in range(count)]
+    for unit, shard in zip(units, shard_of):
+        commands_of[shard].add(unit[0])
+    return all(len(c) == 1 for c in commands_of)
+
+
 def plan(
     commands: List[Dict],
     timings: Optional[Dict],
@@ -385,7 +393,7 @@ def plan(
 
     # One unit per file, or per part of a file over the budget.
     units = []  # (command index, file, part or None, seconds)
-    whole = []  # per unit: its name if main timed it and it can't be cut
+    whole = []  # per unit: its name if main timed it so and it can't be cut
     assigns: Dict[Tuple[int, str], Dict[str, int]] = {}
     unknown_files, filtered_unknown_files, oversized = [], [], []
     filtered = [_picks_tests(entry["command"]) for entry in commands]
@@ -400,9 +408,12 @@ def plan(
             unknown_files.append(file)
         tests = file_tests.get(key) if key is not None else None
         selected = file in commands[index]["selected"]
+        # Main ran this very command: a PR's edit (say, to one test of the
+        # file) would leave main's time for the whole file a guess.
+        exact = key == (command_preview(commands[index]["command"]), file)
         if seconds <= max_shard_seconds or not tests or selected:
             units.append((index, file, None, seconds))
-            whole.append(file if key is not None else None)
+            whole.append(file if exact else None)
             continue
         # By test function, its parametrized cases together: they share setup
         # (a model, compiled kernels) that main paid once, in the first case.
@@ -429,7 +440,7 @@ def plan(
         for part, load in enumerate(loads):
             units.append((index, file, part, load))
             alone = part_of.count(part) == 1
-            whole.append(names[part_of.index(part)] if alone else None)
+            whole.append(names[part_of.index(part)] if alone and exact else None)
 
     sizes = [unit[3] for unit in units]
     most = min(max_number_of_shards, len(units))
@@ -449,10 +460,7 @@ def plan(
         slowest = max(loads)
         for fewer in range(1, count):
             fewer_shard_of, fewer_loads = _least_loaded(sizes, fewer)
-            commands_of = [set() for _ in range(fewer)]
-            for unit, shard in zip(units, fewer_shard_of):
-                commands_of[shard].add(unit[0])
-            one_each = all(len(c) == 1 for c in commands_of)
+            one_each = _one_command_each(units, fewer_shard_of, fewer)
             if max(fewer_loads) <= slowest and one_each:
                 count, shard_of, loads = fewer, fewer_shard_of, fewer_loads
                 break
@@ -477,6 +485,8 @@ def plan(
         "oversizedFiles": oversized,
         "overBudget": max(loads) > max_shard_seconds,
         "longTest": long_test,
+        # Fewer shards would be slower or start a second command in one.
+        "fewest": bool(long_test) and _one_command_each(units, shard_of, count),
         "timingSource": {
             k: (timings or {}).get(k) for k in ("buildNumber", "buildNumbers")
         },
@@ -528,12 +538,16 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             f" :warning: `{long_test['name']}` takes {minutes} on its own, over "
             f"the {MAX_SHARD_SECONDS / 60:.0f}-min target. One test can't be "
             f"split across shards, so its shard needs at least {minutes} "
-            f"whatever the shard count. {shards} is the fewest that keep every "
-            f"shard within {max(result['estimates']) / 60:.1f} min"
+            f"whatever the shard count."
         )
-        if len(result["commands"]) > 1:
-            text += " without a shard starting a second command"
-        text += "."
+        if result["fewest"]:
+            text += (
+                f" {shards} is the fewest that keep every shard within "
+                f"{max(result['estimates']) / 60:.1f} min"
+            )
+            if len(result["commands"]) > 1:
+                text += " without a shard starting a second command"
+            text += "."
     elif result["overBudget"]:
         text += (
             f" :warning: At {result['shards']} shards, the most allowed, a shard "

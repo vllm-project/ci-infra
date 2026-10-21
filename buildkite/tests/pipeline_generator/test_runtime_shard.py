@@ -514,6 +514,32 @@ def test_plan_keeps_three_commands_apart_though_their_times_would_fit():
     )
 
 
+def test_plan_keeps_its_shards_when_a_pr_narrows_the_long_file():
+    """Main timed all of a.py; this command runs one of its tests, so a.py
+    takes main's whole-file time only for want of a better guess."""
+    files = {"a.py": 1200, "b.py": 600, "c.py": 600}
+    edited = TESTS[0].replace("model_executor", "model_executor/a.py::test_fast")
+    commands = _commands(edited, files, selected=["a.py"])
+    result = rs.plan(commands, _timings(TESTS[0], files))
+    assert result["unknownFiles"] == [] and result["shards"] == 3
+    assert result["longTest"] is None
+
+
+def test_a_plan_at_the_cap_that_mixes_commands_claims_no_fewest():
+    """Six shards for seven commands: one shard runs two, and five shards
+    would keep within 20 min too, were the commands allowed to share."""
+    commands, files = [], []
+    for i, seconds in enumerate([1200] + [600] * 6):
+        command = f"pytest -v -s t{i}.py"
+        commands += _commands(command, [f"t{i}.py"])
+        files += _timings(command, {f"t{i}.py": seconds})["files"]
+    result = rs.plan(commands, {"buildNumber": 7, "buildNumbers": [7], "files": files})
+    assert result["shards"] == 6
+    text = rs.summary("k", result)
+    assert "`tests/t0.py` takes 20.0 min on its own" in text
+    assert "fewest" not in text and "second command" not in text
+
+
 def test_plan_over_the_most_shards_still_assigns_every_file():
     files = {f"t{i}.py": 1000 for i in range(8)}
     result = rs.plan(_commands(TESTS[0], files), _timings(TESTS[0], files))
