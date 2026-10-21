@@ -277,6 +277,15 @@ worker_clusters = [
         max_nodes     = 32
         nominal_quota = 64
 
+        # In order within a priority. The queue mixes 4-chip steps with 8-chip
+        # ones (two VMs), and under BestEffortFIFO every 4 freed chips went to
+        # the next 4-chip step: on 10-19 a pre-merge 8-chip step waited p90
+        # 128 minutes against 30 for a 4-chip one. Replaying that day under
+        # StrictFIFO moved the 8-chip p90 from 144 to 43 minutes and the
+        # 4-chip p90 from 30 to 42, raised the mean wait 5%, and left about
+        # 6 chip-hours a day idle while a head waited for enough free chips.
+        queueing_strategy = "StrictFIFO"
+
         # No Spot: 2x2x1 Spot VMs were stocked out on most busy evenings, and
         # each step offered Spot then waited 10-15 minutes for a node that
         # never came before falling back. On 10-13 that was 262 steps against
