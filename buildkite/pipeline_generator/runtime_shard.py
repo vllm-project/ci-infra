@@ -385,6 +385,7 @@ def plan(
 
     # One unit per file, or per part of a file over the budget.
     units = []  # (command index, file, part or None, seconds)
+    whole = []  # per unit: its name if main timed it and it can't be cut
     assigns: Dict[Tuple[int, str], Dict[str, int]] = {}
     unknown_files, filtered_unknown_files, oversized = [], [], []
     filtered = [_picks_tests(entry["command"]) for entry in commands]
@@ -401,6 +402,7 @@ def plan(
         selected = file in commands[index]["selected"]
         if seconds <= max_shard_seconds or not tests or selected:
             units.append((index, file, None, seconds))
+            whole.append(file if key is not None else None)
             continue
         # By test function, its parametrized cases together: they share setup
         # (a model, compiled kernels) that main paid once, in the first case.
@@ -426,6 +428,8 @@ def plan(
         }
         for part, load in enumerate(loads):
             units.append((index, file, part, load))
+            alone = part_of.count(part) == 1
+            whole.append(names[part_of.index(part)] if alone else None)
 
     sizes = [unit[3] for unit in units]
     most = min(max_number_of_shards, len(units))
@@ -434,6 +438,20 @@ def plan(
     while max(loads) > max_shard_seconds and count < most:
         count += 1
         shard_of, loads = _least_loaded(sizes, count)
+    # One timed test over the budget sets the step's time whatever the count:
+    # the fewest shards that are no slower save the jobs the rest would cost.
+    # Not across commands: a shard pays pytest's startup per command it runs,
+    # which main's timings leave out.
+    longest = max(range(len(sizes)), key=lambda u: sizes[u])
+    long_test = None
+    if len(commands) == 1 and whole[longest] and sizes[longest] > max_shard_seconds:
+        long_test = {"name": whole[longest], "seconds": sizes[longest]}
+        slowest = max(loads)
+        for fewer in range(1, count):
+            fewer_shard_of, fewer_loads = _least_loaded(sizes, fewer)
+            if max(fewer_loads) <= slowest:
+                count, shard_of, loads = fewer, fewer_shard_of, fewer_loads
+                break
 
     planned: List[Dict] = [{"files": {}, "split": {}} for _ in commands]
     for (index, file, part, _), shard in zip(units, shard_of):
@@ -454,6 +472,7 @@ def plan(
         "filteredUnknownFiles": filtered_unknown_files,
         "oversizedFiles": oversized,
         "overBudget": max(loads) > max_shard_seconds,
+        "longTest": long_test,
         "timingSource": {
             k: (timings or {}).get(k) for k in ("buildNumber", "buildNumbers")
         },
@@ -467,7 +486,7 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             f"**Runtime sharding for `{step_key}`:** no plan ({reason}). "
             "The step runs as one job, as it would without sharding."
         )
-    if result["shards"] == 1:
+    if result["shards"] == 1 and not result["overBudget"]:
         return (
             f"**Runtime sharding for `{step_key}`:** its {result['files']} files "
             f"fit in one job ({result['estimates'][0] / 60:.1f} min of tests)."
@@ -497,7 +516,18 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
     if result["oversizedFiles"]:
         files = ", ".join(f"`{f}`" for f in result["oversizedFiles"])
         text += f" Split by test: {files}."
-    if result["overBudget"]:
+    long_test = result.get("longTest")
+    if result["overBudget"] and long_test:
+        minutes = f"{long_test['seconds'] / 60:.1f} min"
+        shards = f"{result['shards']} shard{'s' if result['shards'] != 1 else ''}"
+        text += (
+            f" :warning: `{long_test['name']}` takes {minutes} on its own, over "
+            f"the {MAX_SHARD_SECONDS / 60:.0f}-min target, and can't be split "
+            f"across shards, so the step can't finish in under {minutes}. It "
+            f"runs on {shards}, the fewest that finish in "
+            f"{max(result['estimates']) / 60:.1f} min."
+        )
+    elif result["overBudget"]:
         text += (
             f" :warning: At {result['shards']} shards, the most allowed, a shard "
             f"is still over {MAX_SHARD_SECONDS / 60:.0f} min of test time."
