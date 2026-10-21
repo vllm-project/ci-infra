@@ -466,7 +466,7 @@ def test_plan_keeps_its_shards_when_the_long_unit_holds_several_tests():
 
 def test_plan_keeps_its_shards_for_a_step_of_several_commands():
     """Each command a shard runs starts pytest again, which main's timings
-    leave out: fewer shards would add that to the slowest shard."""
+    leave out: any fewer shards would put both commands in one."""
     timings = _with_tests(
         _timings(TESTS[0], {"big.py": 2184}),
         "big.py",
@@ -477,6 +477,41 @@ def test_plan_keeps_its_shards_for_a_step_of_several_commands():
     result = rs.plan(commands, timings)
     assert result["shards"] == 4
     assert sorted(result["estimates"]) == [300, 504, 564, 1116]
+
+
+def test_plan_of_several_commands_drops_a_shard_that_keeps_one_command_each():
+    """Fewer shards are fine when no shard has to start a second command:
+    the other command's two files share a shard."""
+    timings = _timings(TESTS[0], {"big.py": 1200})
+    timings["files"] += _timings(TESTS[1], {"b1.py": 540, "b2.py": 480})["files"]
+    commands = _commands(TESTS[0], ["big.py"]) + _commands(TESTS[1], ["b1.py", "b2.py"])
+    result = rs.plan(commands, timings)
+    assert result["shards"] == 2 and result["estimates"] == [1200, 1020]
+    assert result["commands"][0]["split"] == {}
+    assert result["commands"][0]["files"] == {"tests/big.py": 0}
+    assert result["commands"][1]["files"] == {"tests/b1.py": 1, "tests/b2.py": 1}
+    assert rs.summary("k", result).endswith(
+        "2 shards is the fewest that keep every shard within 20.0 min "
+        "without a shard starting a second command."
+    )
+
+
+def test_plan_keeps_three_commands_apart_though_their_times_would_fit():
+    """Two shards would finish the 9.4 and 8.4 min commands together at
+    17.8 min, under the 18.6 min test, before two pytest startups."""
+    commands, files = [], []
+    for command, (file, seconds) in zip(
+        [TESTS[0], TESTS[1], TESTS[0] + " -x"],
+        [("a.py", 1116), ("b.py", 564), ("c.py", 504)],
+    ):
+        commands += _commands(command, [file])
+        files += _timings(command, {file: seconds})["files"]
+    result = rs.plan(commands, {"buildNumber": 7, "buildNumbers": [7], "files": files})
+    assert result["shards"] == 3 and result["estimates"] == [1116, 564, 504]
+    assert rs.summary("k", result).endswith(
+        "3 shards is the fewest that keep every shard within 18.6 min "
+        "without a shard starting a second command."
+    )
 
 
 def test_plan_over_the_most_shards_still_assigns_every_file():

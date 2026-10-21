@@ -440,16 +440,20 @@ def plan(
         shard_of, loads = _least_loaded(sizes, count)
     # One timed test over the budget sets the step's time whatever the count:
     # the fewest shards that are no slower save the jobs the rest would cost.
-    # Not across commands: a shard pays pytest's startup per command it runs,
-    # which main's timings leave out.
+    # Each shard keeps to one command: a shard pays pytest's startup per
+    # command it runs, which main's timings leave out.
     longest = max(range(len(sizes)), key=lambda u: sizes[u])
     long_test = None
-    if len(commands) == 1 and whole[longest] and sizes[longest] > max_shard_seconds:
+    if whole[longest] and sizes[longest] > max_shard_seconds:
         long_test = {"name": whole[longest], "seconds": sizes[longest]}
         slowest = max(loads)
         for fewer in range(1, count):
             fewer_shard_of, fewer_loads = _least_loaded(sizes, fewer)
-            if max(fewer_loads) <= slowest:
+            commands_of = [set() for _ in range(fewer)]
+            for unit, shard in zip(units, fewer_shard_of):
+                commands_of[shard].add(unit[0])
+            one_each = all(len(c) == 1 for c in commands_of)
+            if max(fewer_loads) <= slowest and one_each:
                 count, shard_of, loads = fewer, fewer_shard_of, fewer_loads
                 break
 
@@ -525,8 +529,11 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             f"the {MAX_SHARD_SECONDS / 60:.0f}-min target. One test can't be "
             f"split across shards, so its shard needs at least {minutes} "
             f"whatever the shard count. {shards} is the fewest that keep every "
-            f"shard within {max(result['estimates']) / 60:.1f} min."
+            f"shard within {max(result['estimates']) / 60:.1f} min"
         )
+        if len(result["commands"]) > 1:
+            text += " without a shard starting a second command"
+        text += "."
     elif result["overBudget"]:
         text += (
             f" :warning: At {result['shards']} shards, the most allowed, a shard "
