@@ -154,7 +154,11 @@ spec:
 # queue that mixes sizes the large ones can wait for hours, since chips free
 # up one small workload at a time and are taken before enough are free at
 # once. StrictFIFO admits nothing behind a head that does not fit, so within a
-# priority the queue runs in order. Only the manager orders the queue: a worker
+# priority the queue runs in order. In Kueue v0.20.1 a strict head that fits
+# only by preemption, with nothing it may preempt, also reserves its request in
+# every scheduling cycle unless reclaimWithinCohort is Any, so the cohort's
+# other queues never see the chips it is waiting for and starve while it
+# borrows. Only the manager orders the queue: a worker
 # runs what the manager dispatched, and a strict head there that disagrees with
 # the manager about usage would block everything dispatched after it.
 apiVersion: kueue.x-k8s.io/v1beta2
@@ -212,7 +216,11 @@ spec:
 # queue that mixes sizes the large ones can wait for hours, since chips free
 # up one small workload at a time and are taken before enough are free at
 # once. StrictFIFO admits nothing behind a head that does not fit, so within a
-# priority the queue runs in order. Only the manager orders the queue: a worker
+# priority the queue runs in order. In Kueue v0.20.1 a strict head that fits
+# only by preemption, with nothing it may preempt, also reserves its request in
+# every scheduling cycle unless reclaimWithinCohort is Any, so the cohort's
+# other queues never see the chips it is waiting for and starve while it
+# borrows. Only the manager orders the queue: a worker
 # runs what the manager dispatched, and a strict head there that disagrees with
 # the manager about usage would block everything dispatched after it.
 apiVersion: kueue.x-k8s.io/v1beta2
@@ -272,7 +280,11 @@ spec:
 # queue that mixes sizes the large ones can wait for hours, since chips free
 # up one small workload at a time and are taken before enough are free at
 # once. StrictFIFO admits nothing behind a head that does not fit, so within a
-# priority the queue runs in order. Only the manager orders the queue: a worker
+# priority the queue runs in order. In Kueue v0.20.1 a strict head that fits
+# only by preemption, with nothing it may preempt, also reserves its request in
+# every scheduling cycle unless reclaimWithinCohort is Any, so the cohort's
+# other queues never see the chips it is waiting for and starve while it
+# borrows. Only the manager orders the queue: a worker
 # runs what the manager dispatched, and a strict head there that disagrees with
 # the manager about usage would block everything dispatched after it.
 apiVersion: kueue.x-k8s.io/v1beta2
@@ -332,7 +344,11 @@ spec:
 # queue that mixes sizes the large ones can wait for hours, since chips free
 # up one small workload at a time and are taken before enough are free at
 # once. StrictFIFO admits nothing behind a head that does not fit, so within a
-# priority the queue runs in order. Only the manager orders the queue: a worker
+# priority the queue runs in order. In Kueue v0.20.1 a strict head that fits
+# only by preemption, with nothing it may preempt, also reserves its request in
+# every scheduling cycle unless reclaimWithinCohort is Any, so the cohort's
+# other queues never see the chips it is waiting for and starve while it
+# borrows. Only the manager orders the queue: a worker
 # runs what the manager dispatched, and a strict head there that disagrees with
 # the manager about usage would block everything dispatched after it.
 apiVersion: kueue.x-k8s.io/v1beta2
@@ -399,7 +415,11 @@ spec:
 # queue that mixes sizes the large ones can wait for hours, since chips free
 # up one small workload at a time and are taken before enough are free at
 # once. StrictFIFO admits nothing behind a head that does not fit, so within a
-# priority the queue runs in order. Only the manager orders the queue: a worker
+# priority the queue runs in order. In Kueue v0.20.1 a strict head that fits
+# only by preemption, with nothing it may preempt, also reserves its request in
+# every scheduling cycle unless reclaimWithinCohort is Any, so the cohort's
+# other queues never see the chips it is waiting for and starve while it
+# borrows. Only the manager orders the queue: a worker
 # runs what the manager dispatched, and a strict head there that disagrees with
 # the manager about usage would block everything dispatched after it.
 apiVersion: kueue.x-k8s.io/v1beta2
@@ -408,7 +428,7 @@ metadata:
   name: tpu7x-standard-4t-2x2x1
 spec:
   cohortName: tpu7x
-  queueingStrategy: StrictFIFO
+  queueingStrategy: BestEffortFIFO
   preemption:
     reclaimWithinCohort: Never
     withinClusterQueue: Never
@@ -458,7 +478,11 @@ spec:
 # queue that mixes sizes the large ones can wait for hours, since chips free
 # up one small workload at a time and are taken before enough are free at
 # once. StrictFIFO admits nothing behind a head that does not fit, so within a
-# priority the queue runs in order. Only the manager orders the queue: a worker
+# priority the queue runs in order. In Kueue v0.20.1 a strict head that fits
+# only by preemption, with nothing it may preempt, also reserves its request in
+# every scheduling cycle unless reclaimWithinCohort is Any, so the cohort's
+# other queues never see the chips it is waiting for and starve while it
+# borrows. Only the manager orders the queue: a worker
 # runs what the manager dispatched, and a strict head there that disagrees with
 # the manager about usage would block everything dispatched after it.
 apiVersion: kueue.x-k8s.io/v1beta2
@@ -517,7 +541,11 @@ spec:
 # queue that mixes sizes the large ones can wait for hours, since chips free
 # up one small workload at a time and are taken before enough are free at
 # once. StrictFIFO admits nothing behind a head that does not fit, so within a
-# priority the queue runs in order. Only the manager orders the queue: a worker
+# priority the queue runs in order. In Kueue v0.20.1 a strict head that fits
+# only by preemption, with nothing it may preempt, also reserves its request in
+# every scheduling cycle unless reclaimWithinCohort is Any, so the cohort's
+# other queues never see the chips it is waiting for and starve while it
+# borrows. Only the manager orders the queue: a worker
 # runs what the manager dispatched, and a strict head there that disagrees with
 # the manager about usage would block everything dispatched after it.
 apiVersion: kueue.x-k8s.io/v1beta2
