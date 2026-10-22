@@ -466,14 +466,13 @@ rather than throw their runs away. A reclaimed slice still waits for the
 evicted nodes to scale down, about ten minutes, before its own nodes boot. If a shape is starving, the lever is the
 split in `prod.auto.tfvars`, not the node pools.
 
-**2x2x1 admits in order within a priority.** Its queue mixes 4-chip steps with
-8-chip ones that take two VMs. Kueue's default, `BestEffortFIFO`, passes over a
-workload that does not fit for a smaller one behind it, so freed chips went four
-at a time to 4-chip steps while an 8-chip step waited for hours. The queue is
-`StrictFIFO` on the manager (`queueing_strategy` in `prod.auto.tfvars`): nothing
-behind a head that does not fit is admitted, and a higher priority still goes
-first. The cost is chips left idle while the head waits for enough to free up.
-The other shapes keep `BestEffortFIFO`.
+**8-chip 2x2x1 steps can wait behind 4-chip ones.** The 2x2x1 queue mixes
+4-chip steps with 8-chip ones that take two VMs. Every queue is
+`BestEffortFIFO`, which passes over a workload that does not fit for a smaller
+one behind it, so freed chips go four at a time to 4-chip steps while an 8-chip
+step waits. `StrictFIFO` (`queueing_strategy` in `prod.auto.tfvars`) would admit
+in order, but in Kueue v0.20.1 a strict head that has to borrow holds its chips
+on every scheduling pass, and 2x2x2 and 1x1x1 admit nothing while it does.
 
 **A cold pool's first image pull is slow, and that is not streaming failing.**
 Image streaming is on for every TPU pool, but GKE serves an image it has
