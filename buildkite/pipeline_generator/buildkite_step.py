@@ -22,6 +22,7 @@ from amd import (
     get_rocm_base_refresh_timeout,
     is_amd_device,
     is_amd_gpu_device,
+    runs_on,
 )
 from step import Step
 from utils_lib.docker_utils import (
@@ -33,7 +34,6 @@ from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
-from platforms import runs_on
 from recorder_switches import fnrec_enabled, kernrec_enabled
 import runtime_shard
 

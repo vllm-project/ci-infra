@@ -26,7 +26,6 @@ py-modules = [
     "constants",
     "recorder_switches",
     "amd",
-    "platforms",
     "runtime_shard",
     "runtime_shard_plugin",
     "unblock_jobs",

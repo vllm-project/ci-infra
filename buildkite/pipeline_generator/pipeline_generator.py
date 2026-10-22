@@ -6,7 +6,7 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import normalize_amd_depends_on
+from amd import normalize_amd_depends_on, runs_on
 from buildkite_step import (
     AMD_GROUP,
     COLLECT_GROUP,
@@ -25,7 +25,6 @@ from buildkite_step import (
     split_deferred_steps,
 )
 from constants import AgentQueue, Platform
-from platforms import runs_on
 from recorder_switches import fnrec_enabled
 import selector_gate
 from global_config import (

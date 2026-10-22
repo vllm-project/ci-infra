@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
-from constants import AgentQueue, DeviceType
+from constants import AgentQueue, DeviceType, Platform
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
@@ -185,6 +185,12 @@ def is_amd_device(device: Optional[str]) -> bool:
     return _device_value(device) == DeviceType.AMD_CPU.value or is_amd_gpu_device(
         device
     )
+
+
+def runs_on(platform: Optional[Platform], device: Optional[str]) -> bool:
+    """Whether a build restricted to `platform` runs a job on `device`: `amd`
+    runs the AMD jobs, `cuda` every other job. No platform runs every job."""
+    return platform is None or is_amd_device(device) == (platform == Platform.AMD)
 
 
 def valid_amd_gpu_devices() -> List[str]:

@@ -137,8 +137,8 @@ def _parse_platform(value: Optional[str], torch_nightly: bool) -> Optional[Platf
                 + ", ".join(p.value for p in Platform)
             ) from error
     if torch_nightly:
-        # Torch nightly validates the CUDA torch build. The other platforms pin
-        # their own torch and gain nothing from it.
+        # Torch nightly validates the CUDA torch build. ROCm pins its own torch
+        # and gains nothing from it.
         if platform not in (None, Platform.CUDA):
             raise ValueError(
                 f"TORCH_NIGHTLY runs only CUDA jobs, so "

@@ -967,11 +967,12 @@ def _generated_keys(platform):
     return {job.key for group in groups for job in group.steps}
 
 
-def test_cuda_platform_omits_amd_build_gpu_and_mirror_steps_and_other_hardware():
+def test_cuda_platform_omits_only_amd_build_gpu_and_mirror_steps():
     assert _generated_keys(Platform.CUDA) == {
         "image-build",
         "multimodal-processor",
         "cpu-test",
+        "intel-cpu-test",
     }
 
 
