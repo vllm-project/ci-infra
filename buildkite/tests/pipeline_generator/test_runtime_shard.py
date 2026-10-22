@@ -393,6 +393,81 @@ def test_plan_drops_a_shard_that_cannot_beat_one_long_test():
     )
 
 
+@pytest.mark.parametrize("edited", [False, True])
+def test_plan_checks_the_full_command_before_trimming(edited):
+    command = "pytest -v -s model_executor " + "--timeout=900 " * 6
+    current = command + " -k 'not test_slow'" if edited else command
+    assert len(command) > 80 and current[:80] == command[:80]
+    tests = {"test_slow": 1116, "test_a": 564, "test_b": 504}
+    timings = _with_tests(_timings(command, {"big.py": 2184}), "big.py", tests)
+    result = rs.plan(_commands(current, ["big.py"]), timings)
+    if edited:
+        assert result["shards"] == 3 and result["estimates"] == [1116, 564, 504]
+        assert result["longTest"] is None
+    else:
+        assert result["shards"] == 2 and result["estimates"] == [1116, 1068]
+        assert result["longTest"] == {
+            "name": "tests/big.py::test_slow",
+            "seconds": 1116,
+        }
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_plan_uses_legacy_timings_without_trimming(split):
+    seconds = {"long.py": 1200, "a.py": 600, "b.py": 600}
+    timings = _timings(TESTS[0], seconds)
+    if split:
+        seconds = {"big.py": 2400}
+        timings = _with_tests(
+            _timings(TESTS[0], seconds),
+            "big.py",
+            {"test_slow": 1200, "test_a": 600, "test_b": 600},
+        )
+    for timing in timings["files"]:
+        timing["command"] = (
+            "pytest -v -s model_executor -m (not slow_test) --timeout=900"
+        )
+    result = rs.plan(_commands(TESTS[0], seconds), timings)
+    assert result["unknownFiles"] == []
+    assert result["shards"] == 3 and result["estimates"] == [1200, 600, 600]
+    assert result["longTest"] is None
+
+
+@pytest.mark.parametrize("historical_suffix", ["", " #2"])
+def test_plan_trims_only_on_the_matching_command_occurrence(historical_suffix):
+    command = TESTS[0]
+    seconds = {"long.py": 1200, "a.py": 600, "b.py": 600}
+    commands = _commands(command, seconds)
+    commands[0]["span_label"] = rs.command_labels([command, command])[1]
+    timings = _timings(command, seconds)
+    for timing in timings["files"]:
+        timing["command"] += historical_suffix
+    result = rs.plan(commands, timings)
+    if historical_suffix:
+        assert result["shards"] == 2 and result["estimates"] == [1200, 1200]
+        assert result["longTest"] == {"name": "tests/long.py", "seconds": 1200}
+    else:
+        assert result["shards"] == 3 and result["estimates"] == [1200, 600, 600]
+        assert result["longTest"] is None
+
+
+def test_plan_step_recognizes_the_second_identical_commands_long_test(
+    tmp_path, monkeypatch
+):
+    _project(tmp_path, {"pkg/test_a.py": "def test_1(): pass\n"})
+    command = "pytest -v pkg/test_a.py"
+    timings = _timings(command, {"pkg/test_a.py": 30})
+    second = _timings(command, {"pkg/test_a.py": 1200})["files"][0]
+    second["command"] = rs.command_labels([command, command])[1]
+    timings["files"].append(second)
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    result, _ = rs.plan_step(
+        "k", [command, command], "/vllm-workspace/tests", str(tmp_path), AgentQueue.H200
+    )
+    assert result["estimates"] == [1200, 30]
+    assert result["longTest"] == {"name": "tests/pkg/test_a.py", "seconds": 1200}
+
+
 def test_plan_takes_the_fewest_shards_no_slower():
     """Two shards and three both finish with the 20-min file: two it is."""
     seconds = {"long.py": 1200, "a.py": 10, "b.py": 10, "c.py": 10}

@@ -410,9 +410,13 @@ def plan(
             unknown_files.append(file)
         tests = file_tests.get(key) if key is not None else None
         selected = file in commands[index]["selected"]
-        # Main ran this very command: a PR's edit (say, to one test of the
-        # file) would leave main's time for the whole file a guess.
-        exact = key == (command_preview(commands[index]["command"]), file)
+        # Only this occurrence's full-command hash can justify trimming;
+        # legacy and file-only matches remain estimates.
+        entry = commands[index]
+        exact = key == (
+            entry.get("span_label") or command_preview(entry["command"]),
+            file,
+        )
         if seconds <= max_shard_seconds or not tests or selected:
             units.append((index, file, None, seconds))
             whole.append(file if exact else None)
