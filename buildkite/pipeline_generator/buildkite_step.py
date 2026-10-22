@@ -45,16 +45,33 @@ PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
+# A job that hits its timeout also reports exit status -1. It gets its own rule
+# ahead of the general -1 rule so timeout retries are counted separately.
+TIMEOUT_RETRY = {"exit_status": -1, "signal_reason": "cancel", "limit": 1}
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
-# The self-hosted GPU agent hooks exit 255 on provider/infrastructure failures
-# (ECR login, secret-store fetch, docker pull). The agent preserves a hook's
-# exit code as the job's exit status, so retry 255 like agent-lost.
+# 255 is the agent being terminated, and what the self-hosted GPU agent hooks
+# exited with on any provider failure before they had codes of their own.
 EXIT_STATUS_255_RETRY = {"exit_status": 255, "limit": 1}
+# The hooks' own codes for a provider call that failed every in-hook retry,
+# one per call so each failure is told apart in Buildkite: 201 GitHub token
+# (pre-checkout), 202 ECR public login, 203 ECR cache login, 204 GPU discovery,
+# 205 docker pull (environment). No test or agent exits in this range.
+HOOK_FAILURE_EXIT_STATUSES = [201, 202, 203, 204, 205]
+EXIT_STATUS_HOOK_RETRY = {"exit_status": HOOK_FAILURE_EXIT_STATUSES, "limit": 1}
+# The agent's own "checkout timed out waiting for a Git mirrors lock", raised
+# before the step's command runs, so a retry can't hide a test failure. Of 8
+# such failures in two days, 7 passed when retried by hand. Crash statuses
+# (134, 139) are deliberately not here: they were mostly one real,
+# recurring crash that a retry would only repeat.
+EXIT_STATUS_94_RETRY = {"exit_status": 94, "limit": 1}
+# Checkout failures happen before the test starts, so a retry can't mask one.
+EXIT_STATUS_128_RETRY = {"exit_status": 128, "limit": 1}
 
 # Pod-level failures on EKS surface as agent stops / lost pods rather than
 # clean non-zero exits, which exit-code-only retries would miss.
 K8S_RETRY = {
     "automatic": [
+        TIMEOUT_RETRY,
         EXIT_STATUS_NEGATIVE_ONE_RETRY,
         {"exit_status": 1, "limit": 1},
         {"exit_status": 128, "limit": 1},
@@ -179,6 +196,9 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         depends_on=[],
         agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
+        # A failed gate blocks every test after it, so an infra failure
+        # before its check runs must retry, not fail the build.
+        retry=ensure_infra_failure_retry(None),
     )
     return BuildkiteGroupStep(group=PRECOMMIT_GROUP, steps=[precommit_step])
 
@@ -806,6 +826,7 @@ def _collect_step(
         soft_fail=True,
         # the wait, then downloading every job's recordings, which takes a while
         timeout_in_minutes=COLLECT_AFTER_MINUTES + 90,
+        retry=ensure_infra_failure_retry(None),
     )
 
 
@@ -957,9 +978,12 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
 
 
 def ensure_infra_failure_retry(
-    retry: Optional[Dict[str, Any]],
+    retry: Optional[Dict[str, Any]], nvidia: bool = True
 ) -> Dict[str, Any]:
-    """Add one-time retries for agent-lost (-1) and provider hook (255) failures."""
+    """Add one-time retries for agent-lost (-1), agent-terminated (255), Git
+    mirror lock (94) and the hooks' provider failures (201-205), plus timeout
+    (-1, cancel) and checkout (128) failures on non-AMD steps. A status the
+    step already retries keeps the step's own rule."""
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -984,11 +1008,23 @@ def ensure_infra_failure_retry(
             existing_statuses.update(exit_status)
         else:
             existing_statuses.add(exit_status)
-    infra_conditions = [
-        dict(condition)
-        for condition in (EXIT_STATUS_NEGATIVE_ONE_RETRY, EXIT_STATUS_255_RETRY)
-        if condition["exit_status"] not in existing_statuses
+    defaults = [
+        EXIT_STATUS_NEGATIVE_ONE_RETRY,
+        EXIT_STATUS_255_RETRY,
+        EXIT_STATUS_94_RETRY,
+        EXIT_STATUS_HOOK_RETRY,
     ]
+    if nvidia:
+        defaults = [TIMEOUT_RETRY, *defaults, EXIT_STATUS_128_RETRY]
+    infra_conditions = []
+    for condition in defaults:
+        status = condition["exit_status"]
+        if isinstance(status, list):
+            remaining = [s for s in status if s not in existing_statuses]
+            if remaining:
+                infra_conditions.append({**condition, "exit_status": remaining})
+        elif status not in existing_statuses:
+            infra_conditions.append(dict(condition))
     retry_policy["automatic"] = [*infra_conditions, *automatic_conditions]
     return retry_policy
 
@@ -1188,7 +1224,9 @@ def convert_group_step_to_buildkite_step(
                 )
             if step.retry:
                 buildkite_step.retry = step.retry
-            buildkite_step.retry = ensure_infra_failure_retry(buildkite_step.retry)
+            buildkite_step.retry = ensure_infra_failure_retry(
+                buildkite_step.retry, nvidia=not is_amd_device(step.device)
+            )
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
             if is_amd_device(step.device):
@@ -1221,8 +1259,9 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.plugins = [_get_step_plugin(step)]
                 # L4-on-EKS steps get a retry policy that also covers pod-level
                 # failures (agent stops), unless the step opted out explicitly.
+                # The repo-wide infra retries (-1, 255, 94) still apply.
                 if step.device == DeviceType.L4 and not step.retry:
-                    buildkite_step.retry = K8S_RETRY
+                    buildkite_step.retry = ensure_infra_failure_retry(K8S_RETRY)
 
             shard_mode = (
                 _runtime_shard_mode(step, step_key, list_file_diff)
@@ -1519,6 +1558,8 @@ def _create_amd_step(
     )
     if display_label:
         options["label"] = display_label
+    # AMD's own retries plus the repo-wide infra ones every other step gets.
+    options["retry"] = ensure_infra_failure_retry(options.get("retry"), nvidia=False)
     if extra_artifact_paths:
         options["artifact_paths"] = _merge_artifact_paths(
             options.get("artifact_paths"), extra_artifact_paths

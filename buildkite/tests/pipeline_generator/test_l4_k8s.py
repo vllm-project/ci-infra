@@ -31,12 +31,31 @@ def _make_l4_step(num_devices, **kwargs):
     )
 
 
+# A default L4 step keeps its pod-level retries and also gets the repo-wide
+# infra ones, the Git mirror lock timeout (94) included.
+L4_RETRY = buildkite_step.ensure_infra_failure_retry(buildkite_step.K8S_RETRY)
+
+
+def test_default_l4_steps_also_retry_the_infra_exit_codes():
+    statuses = {
+        c.get("exit_status")
+        for c in L4_RETRY["automatic"]
+        if not isinstance(c.get("exit_status"), list)
+    }
+    assert {-1, 1, 128, 255, 94} <= statuses
+    assert {"exit_status": [201, 202, 203, 204, 205], "limit": 1} in L4_RETRY["automatic"]
+    assert L4_RETRY["automatic"][-2:] == [
+        {"signal_reason": "agent_stop", "limit": 1},
+        {"signal_reason": "agent_refused", "limit": 1},
+    ]
+
+
 def test_4gpu_l4_step_uses_k8s_plugin():
     command_step = _render_command_step(_make_l4_step(num_devices=4))
 
     assert command_step.agents == {"queue": AgentQueue.L4_K8S}
     assert command_step.agents["queue"] == "l4-k8s"
-    assert command_step.retry == buildkite_step.K8S_RETRY
+    assert command_step.retry == L4_RETRY
 
     assert len(command_step.plugins) == 1
     plugin = command_step.plugins[0]
@@ -87,7 +106,7 @@ def test_1gpu_l4_step_uses_k8s_plugin():
     command_step = _render_command_step(_make_l4_step(num_devices=1))
 
     assert command_step.agents == {"queue": AgentQueue.L4_K8S}
-    assert command_step.retry == buildkite_step.K8S_RETRY
+    assert command_step.retry == L4_RETRY
 
     container = command_step.plugins[0]["kubernetes"]["podSpec"]["containers"][0]
     assert container["resources"]["limits"]["nvidia.com/gpu"] == 1
@@ -110,6 +129,13 @@ def test_l4_step_without_num_devices_defaults_to_one_gpu():
     assert container["resources"]["limits"]["nvidia.com/gpu"] == 1
     assert container["resources"]["requests"]["cpu"] == "10"
 
+
+
+def test_k8s_retry_counts_timeouts_separately_ahead_of_agent_lost():
+    assert buildkite_step.K8S_RETRY["automatic"][:2] == [
+        {"exit_status": -1, "signal_reason": "cancel", "limit": 1},
+        {"exit_status": -1, "limit": 1},
+    ]
 
 def test_l4_step_keeps_explicit_retry():
     explicit_retry = {"automatic": [{"exit_status": 5, "limit": 3}]}
@@ -151,8 +177,12 @@ def test_non_l4_steps_keep_existing_routing(device, num_devices, queue):
     # nothing beyond it (in particular not K8S_RETRY).
     assert command_step.retry == {
         "automatic": [
+            buildkite_step.TIMEOUT_RETRY,
             buildkite_step.EXIT_STATUS_NEGATIVE_ONE_RETRY,
             buildkite_step.EXIT_STATUS_255_RETRY,
+            buildkite_step.EXIT_STATUS_94_RETRY,
+            buildkite_step.EXIT_STATUS_HOOK_RETRY,
+            buildkite_step.EXIT_STATUS_128_RETRY,
         ]
     }
     if device in ("h100", "a100"):

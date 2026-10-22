@@ -23,19 +23,50 @@
 # Exit-code convention:
 #   - exit 1   = genuine misconfiguration (wrong spawn count, stale CDI spec).
 #                The job fails immediately.
-#   - exit 255 = provider/infrastructure failure (AWS CLI / ECR, registry,
-#                docker pull, nvidia-smi driver hiccup). The agent preserves a
-#                hook's exit code as the job's exit status, and the generated
-#                pipeline steps auto-retry exit_status 255 (like agent-lost
-#                -1) — so one network blip doesn't kill the whole build.
+#   - exit 202-205 = a provider/infrastructure call failed every in-hook retry:
+#                202 ECR public login, 203 ECR pull-through-cache login,
+#                204 GPU discovery (nvidia-smi -L), 205 docker pull. The agent
+#                preserves a hook's exit code as the job's exit status, so each
+#                failure is told apart in Buildkite, and the generated steps
+#                retry 201-205 once (pre-checkout uses 201). No test or agent
+#                exits in that range.
 
-set -e
+set -eo pipefail
 
-# retry_exit: fail the job with 255 so the generated steps' automatic
-# exit_status 255 retry re-runs it. Use only for provider/infra failures.
-retry_exit() {
-  echo "ERROR: $1 (provider/infrastructure failure — exiting 255 to trigger the infra retry)" >&2
-  exit 255
+# Provider calls retry in place before giving up: 5 attempts, sleeping 2/4/8/16 s
+# between them, then exit with the call's own code (202-205) so the generated
+# steps' automatic retry re-runs the job. Use only for provider/infra failures.
+#
+# Every retry that fires also records "<class>,<attempts>,<outcome>" under the
+# build meta-data key infra-retry:<job id>:<class>, one key per class so a
+# retry in another hook never overwrites it. Recording must never fail or
+# stall the job: the agent retries the write for minutes when its API is
+# unreachable.
+# mark_retry <class> <attempts> <outcome>
+mark_retry() {
+  timeout 10 buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}:$1" "$1,$2,$3" || true
+}
+
+# retry_or_fail <class> <exit code> <description> <command> [args...]
+# <class> names the call in its retry mark, so retries of different calls in
+# one job each keep their own count; <exit code> tells them apart in Buildkite.
+retry_or_fail() {
+  local class=$1 code=$2 description=$3 attempt delay=2
+  shift 3
+  for (( attempt = 1; ; attempt++ )); do
+    if "$@"; then
+      (( attempt == 1 )) || mark_retry "$class" "$attempt" recovered
+      return 0
+    fi
+    if (( attempt >= 5 )); then
+      echo "ERROR: $description failed after $attempt attempts (provider/infrastructure failure — exiting $code to trigger the infra retry)" >&2
+      mark_retry "$class" "$attempt" exhausted
+      exit "$code"
+    fi
+    echo "WARNING: $description failed (attempt $attempt/5); retrying in ${delay}s" >&2
+    sleep "$delay"
+    delay=$(( delay * 2 ))
+  done
 }
 
 # Number of MIG slices per GPU (7 for 1g.18gb, 4 for 1g.35gb).
@@ -53,12 +84,17 @@ export BUILDKITE_ANALYTICS_TOKEN="<analytics-token>"   # optional
 export HF_HOME=/mnt/vllm-ci
 
 # ── ECR login ─────────────────────────────────────────────────────────────────
-aws ecr-public get-login-password --region us-east-1 \
-  | docker login --username AWS --password-stdin public.ecr.aws \
-  || retry_exit "ECR public login failed"
-aws ecr get-login-password --region us-west-2 \
-  | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-west-2.amazonaws.com \
-  || retry_exit "ECR pull-through-cache login failed"
+# --cli-connect-timeout bounds one hung connect (the CLI default is 60 s).
+ecr_public_login() {
+  aws --cli-connect-timeout 10 ecr-public get-login-password --region us-east-1 \
+    | docker login --username AWS --password-stdin public.ecr.aws
+}
+ecr_cache_login() {
+  aws --cli-connect-timeout 10 ecr get-login-password --region us-west-2 \
+    | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-west-2.amazonaws.com
+}
+retry_or_fail ecr-public-login 202 "ECR public login" ecr_public_login
+retry_or_fail ecr-cache-login 203 "ECR pull-through-cache login" ecr_cache_login
 
 # ── Pin this agent to one MIG slice ───────────────────────────────────────────
 # Agent names look like "<host>-<N>"; N selects the MIG device.
@@ -68,8 +104,9 @@ if [[ -z "$AGENT_NUMBER" ]]; then
   exit 1
 fi
 
-nvidia_smi_list=$(nvidia-smi -L) \
-  || retry_exit "nvidia-smi -L failed (driver/GPU hiccup)"
+# Assigns $nvidia_smi_list in the current shell so retry_or_fail can re-run it.
+list_gpus() { nvidia_smi_list=$(nvidia-smi -L); }
+retry_or_fail gpu-discovery 204 "nvidia-smi -L" list_gpus
 mapfile -t UUIDS < <(grep -oP 'UUID: \KMIG-[^\)]+' <<< "$nvidia_smi_list")
 if (( AGENT_NUMBER < 1 || AGENT_NUMBER > ${#UUIDS[@]} )); then
   echo "ERROR: Agent number $AGENT_NUMBER exceeds available MIG devices (${#UUIDS[@]})"
@@ -105,21 +142,29 @@ if [[ -n "$IMAGE" ]]; then
     echo "Image $IMAGE already pulled (done marker exists), skipping pull."
   else
     exec 9>"$LOCK_FILE"
-    if flock -n 9; then
-      echo "Pulling image $IMAGE (this agent won the lock)..."
-      docker pull "$IMAGE" || retry_exit "docker pull $IMAGE failed"
-      touch "$DONE_FILE"
-      echo "Image pull complete."
-    else
+    if ! flock -n 9; then
       echo "Waiting for another agent to finish pulling $IMAGE..."
       flock 9
+    fi
+    # We hold the lock: we won it, or the winner released it. The winner's pull
+    # succeeded only if it left the done marker; otherwise pull it ourselves.
+    # Retries hold the lock so the other agents wait instead of stampeding.
+    if [[ -f "$DONE_FILE" ]]; then
       echo "Image $IMAGE is now available."
+    else
+      echo "Pulling image $IMAGE..."
+      retry_or_fail image-pull 205 "docker pull $IMAGE" docker pull "$IMAGE"
+      touch "$DONE_FILE"
+      echo "Image pull complete."
     fi
     exec 9>&-
   fi
 fi
 
 # ── CDI device injection + shallow git clones ─────────────────────────────────
+# The CDI script pipes into `grep -q`, which exits at the first match; under
+# pipefail the writer's SIGPIPE would read as a missing device.
+set +o pipefail
 source /usr/local/libexec/buildkite-gpu-cdi-env.sh
 export BUILDKITE_GIT_CLONE_FLAGS="-v --depth=1 --filter=blob:none"
 export BUILDKITE_GIT_FETCH_FLAGS="-v --prune --depth=1"

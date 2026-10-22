@@ -50,6 +50,8 @@ AMD_RETRY = {
         {"exit_status": 128, "limit": 1},
         # ROCm/KFD reports GPU hangs by aborting the process (SIGABRT).
         {"exit_status": 134, "limit": 1},
+        # The agent's Git mirror lock timeout, raised before the command runs.
+        {"exit_status": 94, "limit": 1},
         {"signal_reason": "agent_stop", "limit": 1},
         {"signal_reason": "agent_refused", "limit": 1},
     ],
