@@ -464,9 +464,9 @@ def test_plan_keeps_its_shards_when_the_long_unit_holds_several_tests():
     assert sorted(result["estimates"]) == [300, 600, 600, 1200]
 
 
-def test_plan_keeps_its_shards_for_a_step_of_several_commands():
-    """Each command a shard runs starts pytest again, which main's timings
-    leave out: any fewer shards would put both commands in one."""
+def test_plan_combines_commands_in_a_shard_within_the_budget():
+    """The second command's file joins a part of the first in a shard that
+    stays within the 18-min budget, as packing does in any step."""
     timings = _with_tests(
         _timings(TESTS[0], {"big.py": 2184}),
         "big.py",
@@ -475,8 +475,7 @@ def test_plan_keeps_its_shards_for_a_step_of_several_commands():
     timings["files"] += _timings(TESTS[1], {"small.py": 300})["files"]
     commands = _commands(TESTS[0], ["big.py"]) + _commands(TESTS[1], ["small.py"])
     result = rs.plan(commands, timings)
-    assert result["shards"] == 4
-    assert sorted(result["estimates"]) == [300, 504, 564, 1116]
+    assert result["shards"] == 3 and result["estimates"] == [1116, 564, 804]
 
 
 def test_plan_of_several_commands_drops_a_shard_that_keeps_one_command_each():
@@ -492,13 +491,13 @@ def test_plan_of_several_commands_drops_a_shard_that_keeps_one_command_each():
     assert result["commands"][1]["files"] == {"tests/b1.py": 1, "tests/b2.py": 1}
     assert rs.summary("k", result).endswith(
         "2 shards is the fewest that keep every shard within 20.0 min "
-        "without a shard starting a second command."
+        "and any shard running several commands within 18 min."
     )
 
 
-def test_plan_keeps_three_commands_apart_though_their_times_would_fit():
-    """Two shards would finish the 9.4 and 8.4 min commands together at
-    17.8 min, under the 18.6 min test, before two pytest startups."""
+def test_plan_puts_two_short_commands_in_one_shard_within_the_budget():
+    """The 9.4 and 8.4 min commands share a shard at 17.8 min, within the
+    18-min budget."""
     commands, files = [], []
     for command, (file, seconds) in zip(
         [TESTS[0], TESTS[1], TESTS[0] + " -x"],
@@ -507,10 +506,40 @@ def test_plan_keeps_three_commands_apart_though_their_times_would_fit():
         commands += _commands(command, [file])
         files += _timings(command, {file: seconds})["files"]
     result = rs.plan(commands, {"buildNumber": 7, "buildNumbers": [7], "files": files})
-    assert result["shards"] == 3 and result["estimates"] == [1116, 564, 504]
+    assert result["shards"] == 2 and result["estimates"] == [1116, 1068]
     assert rs.summary("k", result).endswith(
-        "3 shards is the fewest that keep every shard within 18.6 min "
-        "without a shard starting a second command."
+        "2 shards is the fewest that keep every shard within 18.6 min "
+        "and any shard running several commands within 18 min."
+    )
+
+
+def test_plan_combines_commands_that_reach_the_budget_exactly():
+    commands, files = [], []
+    for command, (file, seconds) in zip(
+        [TESTS[0], TESTS[1], TESTS[0] + " -x"],
+        [("a.py", 1116), ("b.py", 540), ("c.py", 540)],
+    ):
+        commands += _commands(command, [file])
+        files += _timings(command, {file: seconds})["files"]
+    result = rs.plan(commands, {"buildNumber": 7, "buildNumbers": [7], "files": files})
+    assert result["shards"] == 2 and result["estimates"] == [1116, 1080]
+
+
+def test_plan_keeps_commands_apart_past_the_budget():
+    """Together the 10 and 9 min commands would take 19 min: within the
+    20-min test, but over the budget a shard of two commands keeps to."""
+    commands, files = [], []
+    for command, (file, seconds) in zip(
+        [TESTS[0], TESTS[1], TESTS[0] + " -x"],
+        [("a.py", 1200), ("b.py", 600), ("c.py", 540)],
+    ):
+        commands += _commands(command, [file])
+        files += _timings(command, {file: seconds})["files"]
+    result = rs.plan(commands, {"buildNumber": 7, "buildNumbers": [7], "files": files})
+    assert result["shards"] == 3 and result["estimates"] == [1200, 600, 540]
+    assert rs.summary("k", result).endswith(
+        "3 shards is the fewest that keep every shard within 20.0 min "
+        "and any shard running several commands within 18 min."
     )
 
 

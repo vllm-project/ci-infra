@@ -311,12 +311,14 @@ def _least_loaded(sizes: List[float], count: int) -> Tuple[List[int], List[float
     return shard_of, loads
 
 
-def _one_command_each(units: List[Tuple], shard_of: List[int], count: int) -> bool:
-    """Whether each of `count` shards runs the units of a single command."""
-    commands_of: List[set] = [set() for _ in range(count)]
+def _mixed_within(
+    units: List[Tuple], shard_of: List[int], loads: List[float], budget: float
+) -> bool:
+    """Whether every shard that runs more than one command keeps to `budget`."""
+    commands_of: List[set] = [set() for _ in loads]
     for unit, shard in zip(units, shard_of):
         commands_of[shard].add(unit[0])
-    return all(len(c) == 1 for c in commands_of)
+    return all(len(c) == 1 or load <= budget for c, load in zip(commands_of, loads))
 
 
 def plan(
@@ -451,8 +453,8 @@ def plan(
         shard_of, loads = _least_loaded(sizes, count)
     # One timed test over the budget sets the step's time whatever the count:
     # the fewest shards that are no slower save the jobs the rest would cost.
-    # Each shard keeps to one command: a shard pays pytest's startup per
-    # command it runs, which main's timings leave out.
+    # A shard of several commands keeps to the budget, as packing does: it
+    # pays pytest's startup per command, which main's timings leave out.
     longest = max(range(len(sizes)), key=lambda u: sizes[u])
     long_test = None
     if whole[longest] and sizes[longest] > max_shard_seconds:
@@ -460,8 +462,8 @@ def plan(
         slowest = max(loads)
         for fewer in range(1, count):
             fewer_shard_of, fewer_loads = _least_loaded(sizes, fewer)
-            one_each = _one_command_each(units, fewer_shard_of, fewer)
-            if max(fewer_loads) <= slowest and one_each:
+            mixed = _mixed_within(units, fewer_shard_of, fewer_loads, max_shard_seconds)
+            if max(fewer_loads) <= slowest and mixed:
                 count, shard_of, loads = fewer, fewer_shard_of, fewer_loads
                 break
 
@@ -485,8 +487,9 @@ def plan(
         "oversizedFiles": oversized,
         "overBudget": max(loads) > max_shard_seconds,
         "longTest": long_test,
-        # Fewer shards would be slower or start a second command in one.
-        "fewest": bool(long_test) and _one_command_each(units, shard_of, count),
+        # Fewer shards would be slower or mix commands past the budget.
+        "fewest": bool(long_test)
+        and _mixed_within(units, shard_of, loads, max_shard_seconds),
         "timingSource": {
             k: (timings or {}).get(k) for k in ("buildNumber", "buildNumbers")
         },
@@ -546,7 +549,10 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
                 f"{max(result['estimates']) / 60:.1f} min"
             )
             if len(result["commands"]) > 1:
-                text += " without a shard starting a second command"
+                text += (
+                    " and any shard running several commands within "
+                    f"{MAX_SHARD_SECONDS / 60:.0f} min"
+                )
             text += "."
     elif result["overBudget"]:
         text += (
