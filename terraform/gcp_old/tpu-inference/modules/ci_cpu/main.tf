@@ -64,7 +64,8 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       #!/bin/bash
 
       apt-get update
-      apt-get install -y curl build-essential jq git python3 python3-pip
+      apt-get install -y curl build-essential jq git git-lfs python3 python3-pip
+      git lfs install --system --skip-repo || true
       sudo curl -L https://github.com/mikefarah/yq/releases/download/v4.53.2/yq_linux_amd64 -o /usr/bin/yq && sudo chmod +x /usr/bin/yq
 
       curl -o- https://get.docker.com/ | bash -
@@ -163,10 +164,8 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       # read it. Secrets go to the file only.
       echo "HF_TOKEN=$HF_TOKEN" | sudo tee -a /etc/environment > /dev/null
 
-      ${file("${path.module}/../shared/keep-agent-connected.sh")}
-
-      systemctl stop docker
-      systemctl start docker
+      ${chomp(file("${path.module}/../shared/keep-agent-connected.sh"))}
+      ${chomp(file("${path.module}/../shared/docker-cache-cleanup.sh"))}
 
       systemctl enable buildkite-agent
       systemctl restart buildkite-agent

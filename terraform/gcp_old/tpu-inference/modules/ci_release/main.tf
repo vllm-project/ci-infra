@@ -62,6 +62,7 @@ resource "google_compute_instance" "agent" {
       allowed_pipeline_ids        = join(" ", var.allowed_pipeline_ids)
       read_secret_function        = file("${path.module}/../shared/read-secret.sh")
       keep_agent_connected        = file("${path.module}/../shared/keep-agent-connected.sh")
+      docker_cache_cleanup        = file("${path.module}/../shared/docker-cache-cleanup.sh")
     })
   }
 }
