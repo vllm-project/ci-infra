@@ -181,7 +181,7 @@ def test_plan_counts_an_untimed_file_under_a_filter_at_the_floor():
 
 
 def test_plan_finds_main_timings_after_a_pr_edits_the_command():
-    """An edited command has a different hash but keeps its file timings
+    """An edited command has a different label but keeps its file timings
     when each file has only one current and historical command."""
     files = {f"t{i}.py": 500 for i in range(4)}
     edited = TESTS[0].replace("pytest -v -s", "pytest -v -s -x")
@@ -201,7 +201,7 @@ def test_plan_tells_apart_commands_that_run_the_same_file():
     assert rs.plan(commands, timings)["unknownFiles"] == ["tests/a.py"]
 
 
-def test_command_labels_hash_the_full_command_and_number_identical_commands():
+def test_command_labels_are_full_commands_numbered_when_identical():
     long = "pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/"
     fp8, int8, other = long + "fp8.txt", long + "int8.txt", "pytest -v -s a.py"
     assert fp8[:80] == int8[:80]
@@ -214,16 +214,15 @@ def test_command_labels_hash_the_full_command_and_number_identical_commands():
     assert rs.command_labels([fp8] * 3) == [first, first + " #2", first + " #3"]
 
 
-def test_command_preview_hashes_before_truncation_or_sanitizing():
-    command = "pytest 'a.py' $FLAGS"
-    label = rs.command_preview(command)
-    assert label.startswith("pytest a.py FLAGS [") and label.endswith("]")
-    assert re.fullmatch(r"pytest a.py FLAGS \[[0-9a-f]{12}\]", label)
-    assert label != rs.command_preview("pytest a.py FLAGS")
-    assert label == rs.command_preview(command)
-    assert rs.command_preview("pytest tests/你好.py").startswith(
-        "pytest tests/你好.py ["
-    )
+def test_command_preview_is_the_whole_command_as_echoed():
+    assert rs.command_preview("pytest 'a.py' $FLAGS") == "pytest a.py FLAGS"
+    assert rs.command_preview("pytest a.py \\\n  -k fast") == "pytest a.py \\   -k fast"
+    long = "pytest -v -s " + "x" * 200
+    assert rs.command_preview(long) == long  # not cut at 80 characters
+    # A command of 80 characters or fewer keeps the label main already has.
+    short = "pytest -v -s 'tests/a.py'"
+    assert rs.command_preview(short) == rs._legacy_preview(short)
+    assert rs.command_preview("pytest tests/你好.py") == "pytest tests/你好.py"
 
 
 def test_plan_does_not_reuse_one_legacy_timing_for_two_current_commands():
@@ -261,25 +260,27 @@ def test_plan_rejects_a_legacy_preview_shared_by_current_commands():
     assert rs.plan(commands, timings) is None
 
 
-@pytest.mark.parametrize("suffix", ["", " #2"])
-def test_plan_prefers_hashed_history_over_legacy_history_during_rollout(suffix):
-    timings = _timings("pytest a.py", {"a.py": 30})
-    timings["files"][0]["command"] += suffix
+def test_plan_prefers_the_full_label_over_its_old_prefix_during_rollout():
+    """Main's runs carry a long command's old 80-character label and its full
+    one; a PR that edits the command reads the full one's timing."""
+    full = "pytest " + "-v " * 30 + "a.py"
+    timings = _timings(full, {"a.py": 30})
     timings["files"] += [
-        dict(timings["files"][0], command="pytest a.py", observedMs=900000)
+        dict(timings["files"][0], command=full[:80], observedMs=900000)
     ]
-    # Editing a unique command still reuses its file timing, even while the
-    # endpoint returns both the old preview and the new hash for that file.
-    commands = _commands("pytest -v a.py", ["a.py"])
+    commands = _commands(full + " -x", ["a.py"])
     result = rs.plan(commands, timings)
     assert result["unknownFiles"] == [] and result["estimates"] == [30]
 
 
-def test_plan_does_not_prefer_a_legacy_match_over_another_commands_hash():
-    one, two = "pytest a.py", "pytest a.py -v"
+def test_plan_does_not_read_a_shared_old_prefix_for_either_command():
+    """Two long commands that main ran under one 80-character label: that
+    timing pools both, so neither reads it."""
+    base = "pytest " + "-v " * 30 + "a.py"
+    one, two = base + " --tb=short", base + " --tb=long"
     commands = _commands(one, ["a.py"]) + _commands(two, ["a.py"])
     timings = _timings(two, {"a.py": 30})
-    timings["files"] += [dict(timings["files"][0], command=one, observedMs=900000)]
+    timings["files"] += [dict(timings["files"][0], command=one[:80], observedMs=900000)]
     result = rs.plan(commands, timings)
     assert result["unknownFiles"] == ["tests/a.py"]
     assert result["estimates"] == [60]
@@ -311,7 +312,7 @@ def test_plan_step_tells_apart_two_identical_commands(tmp_path, monkeypatch):
 def test_plan_step_reads_each_commands_timing_when_their_previews_match(
     tmp_path, monkeypatch
 ):
-    """The generator's hash suffix selects each command's own timings."""
+    """Full labels select each command's own timings past 80 characters."""
     _project(tmp_path, {"pkg/test_a.py": "def test_1(): pass\ndef test_2(): pass\n"})
     base = "pytest " + "-v " * 30 + "pkg/test_a.py"
     one, two = base + " -k test_1", base + " -k test_2"

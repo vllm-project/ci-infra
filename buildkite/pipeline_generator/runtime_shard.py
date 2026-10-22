@@ -24,7 +24,6 @@ generator runs on the small CPU queue's python3.
 
 import base64
 import fnmatch
-import hashlib
 import json
 import math
 import os
@@ -101,18 +100,20 @@ _NORECURSE = ("*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "
 
 
 def _legacy_preview(command: str) -> str:
+    """The label main's spans carried before full labels: 80 characters."""
     return command[:80].replace("'", "").replace('"', "").replace("$", "")
 
 
 def command_preview(command: str) -> str:
-    """A readable timing label, with a hash of the full unsanitized command."""
-    preview = _legacy_preview(command)
-    digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:12]
-    return f"{preview} [{digest}]"
+    """A command's timing label, as the generator echoes it before running it
+    (see _prepare_commands): the whole command, quotes and `$` removed and line
+    breaks as spaces. One of 80 characters or fewer keeps its old label."""
+    label = command.replace("'", "").replace('"', "").replace("$", "")
+    return label.replace("\r", " ").replace("\n", " ")
 
 
 def command_labels(commands: List[str]) -> List[str]:
-    """Hashed previews, numbered from the second identical command (` #2`)."""
+    """Commands' labels, numbered from the second identical one (` #2`)."""
     labels: List[str] = []
     for command in commands:
         label = preview = command_preview(command)
@@ -351,24 +352,31 @@ def plan(
             }
 
     def timing_key(entry: Dict, file: str) -> Optional[Tuple[str, str]]:
-        """Match the exact label, then an unambiguous legacy preview. Fall
-        back by file only when current and historical commands are unique."""
+        """The command's own label; then its old 80-character one, if no other
+        current command shares it and main hasn't timed it in full since;
+        then, if this command alone runs the file, the one label main timed
+        the file under (a PR that edits the command keeps main's timings)."""
         key = (entry.get("span_label") or command_preview(entry["command"]), file)
         if key in file_seconds:
             return key
         historical = previews.get(file, [])
-        hashed = [
+        legacy = _legacy_preview(entry["command"])
+        # While main's runs carry both, a command's old 80-character label is
+        # a prefix of its full one, which is the newer timing.
+        superseded = any(h != legacy and h.startswith(legacy) for h in historical)
+        if (
+            legacy_previews[legacy] == 1
+            and (legacy, file) in file_seconds
+            and not superseded
+        ):
+            return (legacy, file)
+        historical = [
             label
             for label in historical
-            if re.search(r" \[[0-9a-f]{12}\](?: #\d+)?$", label)
+            if not any(
+                other != label and other.startswith(label) for other in historical
+            )
         ]
-        # Prefer hashed history during rollout. Old labels cannot prove full
-        # command identity; reuse them only when current previews are unique.
-        legacy = _legacy_preview(entry["command"])
-        if hashed:
-            historical = hashed
-        elif legacy_previews[legacy] == 1 and (legacy, file) in file_seconds:
-            return (legacy, file)
         if commands_per_file[file] == 1 and len(historical) == 1:
             return (historical[0], file)
         return None

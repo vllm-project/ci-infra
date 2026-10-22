@@ -356,7 +356,7 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
     match = re.search(r'ci_otel_start 2 ("[^"]*"|\S+)', commands[4])
     assert match is not None
     (quoted_label,) = match.groups()
-    assert shlex.split(quoted_label)[0] == "test VALUE = ready [2c178d9428af]"
+    assert shlex.split(quoted_label)[0] == "test VALUE = ready"
     assert "'" not in commands[4]
 
 
@@ -429,7 +429,7 @@ def test_otel_trace_keeps_assignment_prefixed_commands_in_shell(fake_global_conf
     assert "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed" in commands[4]
 
 
-def test_otel_trace_hashes_commands_whose_previews_match(fake_global_config):
+def test_otel_trace_labels_long_commands_in_full(fake_global_config):
     fake_global_config["branch"] = "main"
     long = "pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/"
     step = Step(label="Traced", commands=[long + "fp8.txt", long + "int8.txt"])
@@ -445,7 +445,7 @@ def test_otel_trace_hashes_commands_whose_previews_match(fake_global_config):
         for c in (commands[2], commands[4])
     ]
     assert labels[0] != labels[1]
-    assert all(label.startswith(long[:80] + " [") for label in labels)
+    assert labels == step.commands
     assert commands[3].endswith(f'Command (2/2): {labels[1]}"')
     assert commands[2].endswith(step.commands[0])
     assert commands[4].endswith(step.commands[1])
