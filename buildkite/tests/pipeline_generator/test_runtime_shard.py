@@ -152,6 +152,20 @@ def test_one_job_over_the_budget_says_so():
     assert "fit in one job" not in text
     assert "`tests/a.py` takes 20.0 min on its own" in text
     assert "1 shard is the fewest" in text
+    assert "runs as one job for 1 file" in text
+    assert "The planner cannot split it further" in text
+
+
+def test_legacy_one_job_over_budget_describes_the_actual_plan():
+    timings = _timings("pytest a.py", {"a.py": 1200})
+    timings["files"][0]["command"] = "pytest a.py"
+    result = rs.plan(_commands("pytest a.py", ["a.py"]), timings)
+    assert result["shards"] == 1 and result["longTest"] is None
+    assert rs.summary("k", result) == (
+        "**Runtime sharding for `k`:** runs as one job for 1 file; estimated "
+        "test time (min): 20.0. Timings: median of 2 main builds, the newest 7."
+        " :warning: The plan is still over 18 min of test time in at least one job."
+    )
 
 
 def test_plan_without_timings_runs_the_step_as_one_job():
@@ -383,11 +397,11 @@ def test_plan_drops_a_shard_that_cannot_beat_one_long_test():
     assert result["shards"] == 2 and result["estimates"] == [1116, 1068]
     assert result["overBudget"]
     assert rs.summary("k", result) == (
-        "**Runtime sharding for `k`:** 2 shards for 1 files; estimated test "
-        "time per shard (min): 18.6, 17.8. Timings: median of 2 main builds, "
+        "**Runtime sharding for `k`:** 2 shards for 1 file; estimated test "
+        "time (min): 18.6, 17.8. Timings: median of 2 main builds, "
         "the newest 7. Split by test: `tests/big.py`. :warning: "
         "`tests/big.py::test_slow` takes 18.6 min on its own, over the 18-min "
-        "target. One test can't be split across shards, so its shard needs at "
+        "target. The planner cannot split it further, so its shard needs at "
         "least 18.6 min whatever the shard count. 2 shards is the fewest that "
         "keep every shard within 18.6 min."
     )
@@ -473,6 +487,7 @@ def test_plan_takes_the_fewest_shards_no_slower():
     seconds = {"long.py": 1200, "a.py": 10, "b.py": 10, "c.py": 10}
     result = rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))
     assert result["shards"] == 2 and result["estimates"] == [1200, 30]
+    assert "2 shards for 4 files; estimated test time (min):" in rs.summary("k", result)
 
 
 def test_plan_of_one_long_test_and_skipped_ones_is_one_job():

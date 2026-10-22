@@ -515,9 +515,12 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
     estimates = ", ".join(f"{s / 60:.1f}" for s in result["estimates"])
     source = result["timingSource"]
     builds = len(source.get("buildNumbers") or [source.get("buildNumber")])
+    allocation = (
+        "runs as one job" if result["shards"] == 1 else f"{result['shards']} shards"
+    )
     text = (
-        f"**Runtime sharding for `{step_key}`:** {result['shards']} shards for "
-        f"{result['files']} files; estimated test time per shard (min): "
+        f"**Runtime sharding for `{step_key}`:** {allocation} for "
+        f"{result['files']} file{'s' if result['files'] != 1 else ''}; estimated test time (min): "
         f"{estimates}. Timings: median of {builds} main build"
         f"{'s' if builds != 1 else ''}, the newest {source.get('buildNumber')}."
     )
@@ -543,8 +546,8 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
         shards = f"{result['shards']} shard{'s' if result['shards'] != 1 else ''}"
         text += (
             f" :warning: `{long_test['name']}` takes {minutes} on its own, over "
-            f"the {MAX_SHARD_SECONDS / 60:.0f}-min target. One test can't be "
-            f"split across shards, so its shard needs at least {minutes} "
+            f"the {MAX_SHARD_SECONDS / 60:.0f}-min target. The planner cannot "
+            f"split it further, so its shard needs at least {minutes} "
             f"whatever the shard count."
         )
         if result["fewest"]:
@@ -560,8 +563,8 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             text += "."
     elif result["overBudget"]:
         text += (
-            f" :warning: At {result['shards']} shards, the most allowed, a shard "
-            f"is still over {MAX_SHARD_SECONDS / 60:.0f} min of test time."
+            f" :warning: The plan is still over {MAX_SHARD_SECONDS / 60:.0f} min "
+            "of test time in at least one job."
         )
     return text
 
