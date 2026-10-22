@@ -18,6 +18,7 @@ class Step(BaseModel):
     device: Optional[str] = None
     agent_tags: Optional[Dict[str, str]] = None
     num_devices: Optional[int] = None
+    resource_claim_template: Optional[str] = Field(default=None, min_length=1)
     num_nodes: Optional[int] = None
     source_file_dependencies: Optional[List[str]] = None
     soft_fail: Optional[bool] = False
