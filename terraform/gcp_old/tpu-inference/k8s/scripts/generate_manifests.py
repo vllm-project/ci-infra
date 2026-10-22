@@ -541,15 +541,16 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
     return out
 
 
-def reclaim_policies(tfvars: dict) -> dict[str, str]:
+def queue_policies(tfvars: dict, key: str, default: str) -> dict[str, str]:
+    """A per-pool setting that belongs to the shape's queue on the manager."""
     out: dict[str, str] = {}
     for worker in tfvars["worker_clusters"]:
         for pool in worker.get("tpu_node_pools", []):
             name = f"{pool['machine_type']}-{pool['topology']}"
-            policy = pool.get("reclaim_within_cohort", "Never")
+            policy = pool.get(key, default)
             if out.setdefault(name, policy) != policy:
                 raise ValueError(
-                    f"{name}: worker clusters disagree on reclaim_within_cohort "
+                    f"{name}: worker clusters disagree on {key} "
                     f"({out[name]} vs {policy}); it is one queue on the manager"
                 )
     return out
@@ -610,6 +611,7 @@ def queues(
     namespace: str,
     checks: bool,
     reclaim: dict[str, str] | None = None,
+    strategy: dict[str, str] | None = None,
     capacities: dict[str, int | None] | None = None,
     parked: dict[str, int] | None = None,
     spot: dict[str, int] | None = None,
@@ -653,6 +655,7 @@ def queues(
                 NOMINAL_QUOTA=CPU_QUEUE_CORES if name == CPU_QUEUE else chips,
                 ADMISSION_CHECKS=dispatch_check(name, checks),
                 RECLAIM_WITHIN_COHORT=(reclaim or {}).get(name, "Never"),
+                QUEUEING_STRATEGY=(strategy or {}).get(name, "BestEffortFIFO"),
                 BORROWING_LIMIT=borrowing_limit(chips, (capacities or {}).get(name)),
                 LENDING_LIMIT=lending_limit(chips, (parked or {}).get(name, 0)),
                 FLAVOR_FUNGIBILITY=FLAVOR_FUNGIBILITY if name in spot else "",
@@ -1162,7 +1165,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
             {name: entry["quota"] for name, entry in fleet.items()},
             namespace,
             checks=True,
-            reclaim=reclaim_policies(tfvars),
+            reclaim=queue_policies(tfvars, "reclaim_within_cohort", "Never"),
+            strategy=queue_policies(tfvars, "queueing_strategy", "BestEffortFIFO"),
             capacities={name: entry["capacity"] for name, entry in fleet.items()},
             parked={name: entry["parked"] for name, entry in fleet.items()},
             spot={name: entry["spot_quota"] for name, entry in fleet.items()},

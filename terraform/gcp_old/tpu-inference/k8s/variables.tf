@@ -484,6 +484,9 @@ variable "worker_clusters" {
 
       slices                = optional(number)
       reclaim_within_cohort = optional(string, "Never")
+      # The order the shape's queue admits in, BestEffortFIFO or StrictFIFO.
+      # See queue_group.yaml.tpl.
+      queueing_strategy = optional(string, "BestEffortFIFO")
 
       # Spot capacity beside the reservation, for a single-host shape: a second
       # node pool, <shape>-spot, drawing on the region's Spot quota instead of
@@ -556,6 +559,15 @@ variable "worker_clusters" {
       ]
     ]))
     error_message = "tpu_node_pools[*].reclaim_within_cohort must be Never, LowerPriority or Any."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for w in var.worker_clusters : [
+        for p in w.tpu_node_pools : contains(["BestEffortFIFO", "StrictFIFO"], p.queueing_strategy)
+      ]
+    ]))
+    error_message = "tpu_node_pools[*].queueing_strategy must be BestEffortFIFO or StrictFIFO."
   }
 }
 
