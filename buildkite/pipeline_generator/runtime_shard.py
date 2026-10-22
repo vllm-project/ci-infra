@@ -461,7 +461,13 @@ def plan(
     # pays pytest's startup per command, which main's timings leave out.
     longest = max(range(len(sizes)), key=lambda u: sizes[u])
     long_test = None
-    if whole[longest] and sizes[longest] > max_shard_seconds:
+    # A guessed file could outgrow the space left by tighter packing.
+    if (
+        whole[longest]
+        and sizes[longest] > max_shard_seconds
+        and not unknown_files
+        and not filtered_unknown_files
+    ):
         long_test = {"name": whole[longest], "seconds": sizes[longest]}
         slowest = max(loads)
         for fewer in range(1, count):
@@ -552,7 +558,7 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
         )
         if result["fewest"]:
             text += (
-                f" {shards} is the fewest that keep every shard within "
+                f" {shards} is the fewest the planner finds that keep every shard within "
                 f"{max(result['estimates']) / 60:.1f} min"
             )
             if len(result["commands"]) > 1:

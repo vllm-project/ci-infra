@@ -151,7 +151,7 @@ def test_one_job_over_the_budget_says_so():
     text = rs.summary("k", result)
     assert "fit in one job" not in text
     assert "`tests/a.py` takes 20.0 min on its own" in text
-    assert "1 shard is the fewest" in text
+    assert "1 shard is the fewest the planner finds" in text
     assert "runs as one job for 1 file" in text
     assert "The planner cannot split it further" in text
 
@@ -402,7 +402,7 @@ def test_plan_drops_a_shard_that_cannot_beat_one_long_test():
         "the newest 7. Split by test: `tests/big.py`. :warning: "
         "`tests/big.py::test_slow` takes 18.6 min on its own, over the 18-min "
         "target. The planner cannot split it further, so its shard needs at "
-        "least 18.6 min whatever the shard count. 2 shards is the fewest that "
+        "least 18.6 min whatever the shard count. 2 shards is the fewest the planner finds that "
         "keep every shard within 18.6 min."
     )
 
@@ -527,7 +527,10 @@ def test_plan_at_the_most_shards_drops_one_that_does_not_help():
     assert result["shards"] == 5 and max(result["estimates"]) == 2400
     text = rs.summary("k", result)
     assert "its shard needs at least 30.0 min" in text
-    assert "5 shards is the fewest that keep every shard within 40.0 min." in text
+    assert (
+        "5 shards is the fewest the planner finds that keep every shard within 40.0 min."
+        in text
+    )
     assert sorted(result["commands"][0]["files"]) == sorted(f"tests/{f}" for f in files)
 
 
@@ -541,6 +544,19 @@ def test_plan_keeps_its_shards_when_the_long_unit_is_a_guess():
     assert result["unknownFiles"] == ["tests/new.py"]
     assert result["shards"] == 5
     assert sorted(result["estimates"]) == [600, 600, 1200, 1200, 3600]
+
+
+@pytest.mark.parametrize("filtered", [False, True])
+def test_plan_keeps_its_shards_when_a_smaller_unit_has_no_timing(filtered):
+    command = TESTS[0] + (" -k fast" if filtered else "")
+    seconds = {"long.py": 1200, "a.py": 600, "b.py": 600}
+    result = rs.plan(
+        _commands(command, [*seconds, "new.py"]), _timings(command, seconds)
+    )
+    field = "filteredUnknownFiles" if filtered else "unknownFiles"
+    assert result[field] == ["tests/new.py"]
+    assert result["shards"] == 4
+    assert result["longTest"] is None
 
 
 def test_plan_keeps_its_shards_when_the_long_unit_holds_several_tests():
@@ -580,7 +596,7 @@ def test_plan_of_several_commands_drops_a_shard_that_keeps_one_command_each():
     assert result["commands"][0]["files"] == {"tests/big.py": 0}
     assert result["commands"][1]["files"] == {"tests/b1.py": 1, "tests/b2.py": 1}
     assert rs.summary("k", result).endswith(
-        "2 shards is the fewest that keep every shard within 20.0 min "
+        "2 shards is the fewest the planner finds that keep every shard within 20.0 min "
         "and any shard running several commands within 18 min."
     )
 
@@ -598,7 +614,7 @@ def test_plan_puts_two_short_commands_in_one_shard_within_the_budget():
     result = rs.plan(commands, {"buildNumber": 7, "buildNumbers": [7], "files": files})
     assert result["shards"] == 2 and result["estimates"] == [1116, 1068]
     assert rs.summary("k", result).endswith(
-        "2 shards is the fewest that keep every shard within 18.6 min "
+        "2 shards is the fewest the planner finds that keep every shard within 18.6 min "
         "and any shard running several commands within 18 min."
     )
 
@@ -628,7 +644,7 @@ def test_plan_keeps_commands_apart_past_the_budget():
     result = rs.plan(commands, {"buildNumber": 7, "buildNumbers": [7], "files": files})
     assert result["shards"] == 3 and result["estimates"] == [1200, 600, 540]
     assert rs.summary("k", result).endswith(
-        "3 shards is the fewest that keep every shard within 20.0 min "
+        "3 shards is the fewest the planner finds that keep every shard within 20.0 min "
         "and any shard running several commands within 18 min."
     )
 
