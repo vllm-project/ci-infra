@@ -11,7 +11,10 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp" "/tmp/docker-pull-locks/test_image_$$"*' EXIT
 mkdir "$tmp/bin"
 # Source the repo's CDI script instead of the installed one.
-sed "s#/usr/local/libexec/#$dir/#" "$dir/environment" >"$tmp/environment"
+# and keep the host-wide ECR login marker and lock inside $tmp.
+sed -e "s#/usr/local/libexec/#$dir/#" -e "s#/tmp/buildkite-ecr-login#$tmp/ecr-login#" \
+    "$dir/environment" >"$tmp/environment"
+marker=$tmp/ecr-login.success
 
 # A stub fails its first $FAIL_<NAME> calls, then succeeds. Calls are logged to
 # $tmp/<name>.log and sleeps to $tmp/sleep.log.
@@ -21,10 +24,12 @@ counted='n=$(cat "$T/$N.log" 2>/dev/null | wc -l); echo "$*" >>"$T/$N.log"; (( n
 # login can be failed on its own; $3 is the service after --cli-connect-timeout 10.
 stub aws "[[ \$3 == ecr ]] && N=awscache FAIL=\${FAIL_AWS_CACHE:-0} || N=aws FAIL=\${FAIL_AWS:-0}; T=$tmp; $counted"   # empty stdout: only pipefail sees it fail
 stub nvidia-smi "N=smi FAIL=\${FAIL_SMI:-0} T=$tmp; $counted; echo '  MIG 1g.18gb Device 0: (UUID: MIG-abc)'"
-stub docker "[[ \$1 == login ]] && { cat >/dev/null; exit 0; }; N=pull FAIL=\${FAIL_PULL:-0} T=$tmp; $counted"
+# A login records its registry in the Docker config, as docker login does.
+stub docker "[[ \$1 == login ]] && { cat >/dev/null; mkdir -p \$DOCKER_CONFIG; echo \"\\\"\${!#}\\\": {}\" >>\$DOCKER_CONFIG/config.json; exit 0; }; N=pull FAIL=\${FAIL_PULL:-0} T=$tmp; $counted"
 stub sleep "echo \$1 >>$tmp/sleep.log"
 # WAITER=1 loses the non-blocking lock; WAITER_DONE=<file> is created when the blocking wait ends.
-stub flock "[[ \$1 == -n ]] && { [[ -z \${WAITER:-} ]]; exit; }; [[ -z \${WAITER_DONE:-} ]] || touch \$WAITER_DONE; exit 0"
+# LOGIN_LOCK_BUSY=1 times out the bounded wait (-w) for the ECR login lock.
+stub flock "[[ \$1 == -n ]] && { [[ -z \${WAITER:-} ]]; exit; }; [[ \$1 == -w ]] && { [[ -z \${LOGIN_LOCK_BUSY:-} ]]; exit; }; [[ -z \${WAITER_DONE:-} ]] || touch \$WAITER_DONE; exit 0"
 # Lists our device first, then enough lines to fill the pipe, so `grep -q` exits
 # early and the writer dies of SIGPIPE like the real one can.
 stub nvidia-ctk "echo nvidia.com/gpu=MIG-abc; exec seq 1000000"
@@ -35,8 +40,10 @@ run() {
     local name=$1 want=$2 mark=$3 sleeps=$4 status=0 got_mark got_sleeps
     shift 4
     rm -f "$tmp"/*.log
+    # KEEP_MARKER=1 keeps a previous job's ECR login, as on a busy host.
+    [[ -n ${KEEP_MARKER:-} ]] || rm -rf "$marker" "$tmp/docker"
     rm -f "/tmp/docker-pull-locks/test_image_$$"*
-    env "$@" PATH="$tmp/bin:$PATH" BUILDKITE_AGENT_NAME=host-1 BUILDKITE_JOB_ID=job-1 \
+    env "$@" PATH="$tmp/bin:$PATH" DOCKER_CONFIG="$tmp/docker" BUILDKITE_AGENT_NAME=host-1 BUILDKITE_JOB_ID=job-1 \
         BUILDKITE_PLUGIN_DOCKER_IMAGE="test/image:$$" \
         bash "$tmp/environment" >/dev/null 2>"$tmp/stderr" || status=$?
     [[ "$status" -eq "$want" ]] || { echo "FAIL $name: expected status $want, got $status"; cat "$tmp/stderr"; exit 1; }
@@ -74,3 +81,35 @@ run waiter-down 205 'infra-retry:job-1:image-pull=image-pull,5,exhausted' '2 4 8
 # Waiter: the winner's pull succeeded (done marker appears), so no pull.
 run waiter-sees-done 0 '' '' WAITER=1 WAITER_DONE="/tmp/docker-pull-locks/test_image_$$.lock.done"
 [[ $(calls pull) -eq 0 ]] || { echo "FAIL waiter-sees-done: pulled"; exit 1; }
+
+# One ECR login per host every 10 h: a later job reuses it, an old one is redone.
+run first-job-logs-in 0 '' ''
+[[ -f $marker && $(calls aws) -eq 1 && $(calls awscache) -eq 1 ]] || { echo "FAIL first-job-logs-in"; exit 1; }
+KEEP_MARKER=1 run next-job-reuses-login 0 '' ''
+[[ $(calls aws) -eq 0 && $(calls awscache) -eq 0 ]] || { echo "FAIL next-job-reuses-login: logged in again"; exit 1; }
+touch -t 202001010000 "$marker"
+KEEP_MARKER=1 run stale-login-is-redone 0 '' ''
+[[ $(calls aws) -eq 1 && $(calls awscache) -eq 1 ]] || { echo "FAIL stale-login-is-redone"; exit 1; }
+# Credentials gone from the Docker config (a logout, a rewritten config): log in
+# again even though the marker is fresh.
+KEEP_MARKER=1 run first-of-pair 0 '' ''
+rm "$tmp/docker/config.json"
+KEEP_MARKER=1 run lost-credentials-relogin 0 '' ''
+[[ $(calls aws) -eq 1 && $(calls awscache) -eq 1 ]] || { echo "FAIL lost-credentials-relogin"; exit 1; }
+sed -i '/dkr.ecr/d' "$tmp/docker/config.json"
+KEEP_MARKER=1 run one-registry-missing-relogin 0 '' ''
+[[ $(calls aws) -eq 1 && $(calls awscache) -eq 1 ]] || { echo "FAIL one-registry-missing-relogin"; exit 1; }
+sed -i '/"public.ecr.aws"/d' "$tmp/docker/config.json"
+KEEP_MARKER=1 run public-registry-missing-relogin 0 '' ''
+[[ $(calls aws) -eq 1 && $(calls awscache) -eq 1 ]] || { echo "FAIL public-registry-missing-relogin"; exit 1; }
+# A failed login leaves no marker, so the next job tries again.
+run failed-login-not-reused 203 - - FAIL_AWS_CACHE=99
+[[ ! -e $marker ]] || { echo "FAIL failed-login-not-reused: marker written"; exit 1; }
+# A failed pull may mean the stored login is gone, so the next job logs in again.
+run failed-pull-drops-login 205 - - FAIL_PULL=99
+[[ ! -e $marker ]] || { echo "FAIL failed-pull-drops-login: marker kept"; exit 1; }
+# Another job holding the login lock too long (an ECR outage it is retrying
+# through) fails this job as a login failure, rather than queuing it to repeat
+# the same retries.
+run login-lock-timeout 202 - - LOGIN_LOCK_BUSY=1
+[[ $(calls aws) -eq 0 ]] || { echo "FAIL login-lock-timeout: logged in anyway"; exit 1; }
