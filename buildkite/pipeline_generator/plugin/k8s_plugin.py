@@ -302,7 +302,106 @@ l4_plugin_template = {
 }
 
 
+# Per-GPU sizing for intel-gpu-k8s.
+INTEL_CPU_REQUEST_PER_GPU = 8
+INTEL_CPU_LIMIT_PER_GPU = 32
+INTEL_MEM_REQUEST_PER_GPU = 32
+INTEL_MEM_LIMIT_PER_GPU = 64
+INTEL_SHM_PER_GPU = 8
+
+intel_gpu_k8s_plugin_template = {
+    "kubernetes": {
+        "checkout": {"skip": True},
+        "podSpec": {
+            "resourceClaims": [
+                {"name": "gpu", "resourceClaimTemplateName": ""},
+            ],
+            "initContainers": [
+                {
+                    "name": "copy-vllm-src",
+                    "image": "",
+                    "command": ["cp", "-a", "/workspace/vllm", "/mnt/workspace/"],
+                    "volumeMounts": [
+                        {"name": "workspace", "mountPath": "/mnt/workspace"},
+                    ],
+                },
+            ],
+            "containers": [
+                {
+                    "image": "",
+                    "workingDir": "/workspace/vllm",
+                    "env": [
+                        {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
+                        {"name": "VLLM_TEST_DEVICE", "value": "xpu"},
+                        {"name": "PYTHONPATH", "value": ".."},
+                        {"name": "VLLM_DISABLE_COMPILE_CACHE", "value": "1"},
+                        {"name": "HF_HOME", "value": "/data/huggingface"},
+                        {
+                            "name": "HF_TOKEN",
+                            "valueFrom": {
+                                "secretKeyRef": {
+                                    "name": "hf-token-secret",
+                                    "key": "token",
+                                },
+                            },
+                        },
+                    ],
+                    "resources": {
+                        "claims": [{"name": "gpu"}],
+                        "requests": {"cpu": "", "memory": ""},
+                        "limits": {"cpu": "", "memory": ""},
+                    },
+                    "volumeMounts": [
+                        {"name": "dshm", "mountPath": "/dev/shm"},
+                        {
+                            "name": "hf-cache",
+                            "mountPath": "/data/huggingface",
+                        },
+                    ],
+                },
+            ],
+            "volumes": [
+                {
+                    "name": "dshm",
+                    "emptyDir": {"medium": "Memory", "sizeLimit": ""},
+                },
+                {
+                    "name": "hf-cache",
+                    "hostPath": {
+                        "path": "/var/lib/hf-cache",
+                        "type": "DirectoryOrCreate",
+                    },
+                },
+            ],
+        },
+    },
+}
+
+
 def get_k8s_plugin(step: Step, image: str):
+    if step.device == DeviceType.INTEL_GPU_K8S:
+        num_gpus = step.num_devices or 1
+        plugin = copy.deepcopy(intel_gpu_k8s_plugin_template)
+        pod_spec = plugin["kubernetes"]["podSpec"]
+        pod_spec["resourceClaims"][0]["resourceClaimTemplateName"] = (
+            step.resource_claim_template or f"b70-{num_gpus}"
+        )
+        for container in pod_spec["containers"] + pod_spec["initContainers"]:
+            container["image"] = f"{image}-xpu"
+        resources = pod_spec["containers"][0]["resources"]
+        resources["requests"] = {
+            "cpu": str(INTEL_CPU_REQUEST_PER_GPU * num_gpus),
+            "memory": f"{INTEL_MEM_REQUEST_PER_GPU * num_gpus}Gi",
+        }
+        resources["limits"] = {
+            "cpu": str(INTEL_CPU_LIMIT_PER_GPU * num_gpus),
+            "memory": f"{INTEL_MEM_LIMIT_PER_GPU * num_gpus}Gi",
+        }
+        pod_spec["volumes"][0]["emptyDir"]["sizeLimit"] = (
+            f"{INTEL_SHM_PER_GPU * num_gpus}Gi"
+        )
+        return plugin
+
     plugin = None
     if step.device == DeviceType.H100:
         plugin = copy.deepcopy(h100_plugin_template)
