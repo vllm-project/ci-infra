@@ -232,6 +232,7 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 | `RUN_ALL` | Force all tests to run |
 | `SKIP_TIMEOUT` | Omit configured step timeouts from Python-generated pipelines when set to `1` |
 | `NIGHTLY` | Include optional nightly tests |
+| `VLLM_CI_ONLY_PLATFORM` | Python-generated pipelines: run only one platform's jobs, `amd` or `cuda` (see the [pipeline generator README](buildkite/pipeline_generator/README.md#environment-variables)) |
 | `VLLM_USE_PRECOMPILED` | Use precompiled wheels (`1`) or build from source (`0`) |
 | `COV_ENABLED` | Enable pytest coverage collection and Codecov upload |
 | `DOCS_ONLY_DISABLE` | Skip docs-only detection (always run CI) |
