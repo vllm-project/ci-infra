@@ -9,7 +9,7 @@ pipeline, from the vLLM checkout it runs in:
   timings   main's median time per file for the step (ci.vllm.ai), with
             per-test medians for a file over one shard's budget.
   plan      whole files into the fewest shards that keep each within the
-            budget, largest file first (at most 6). A file over the budget is
+            budget, largest file first (at most 10). A file over the budget is
             split by test function, using its per-test medians.
 
 The step is then emitted as its own job with `parallelism: N`. Every parallel
@@ -43,7 +43,9 @@ TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
 # Test time per shard; setup is not counted. Planned below the 20-minute limit
 # so run-to-run noise rarely pushes a real shard over it.
 MAX_SHARD_SECONDS = 1080
-MAX_NUMBER_OF_SHARDS = 6
+# A step that needs more gets the most even split of this many shards, over
+# the budget and flagged, rather than more jobs.
+MAX_NUMBER_OF_SHARDS = 10
 # A file main has no timing for (new in the PR, say) counts as the step's
 # median file, and at least this. Under a command that picks tests by a
 # marker or keyword (`-m hybrid_model` over a directory of other models), it

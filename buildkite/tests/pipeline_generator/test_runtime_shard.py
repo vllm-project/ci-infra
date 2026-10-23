@@ -236,10 +236,18 @@ def test_plan_never_splits_a_file_the_command_names_by_test_id():
     assert result["commands"][0]["split"] == {} and result["oversizedFiles"] == []
 
 
-def test_plan_over_the_most_shards_still_assigns_every_file():
-    files = {f"t{i}.py": 1000 for i in range(8)}
+def test_plan_gives_a_long_step_up_to_ten_shards():
+    files = {f"t{i}.py": 1000 for i in range(10)}
     result = rs.plan(_commands(TESTS[0], files), _timings(TESTS[0], files))
-    assert result["shards"] == 6 and result["overBudget"]
+    assert result["shards"] == 10 and not result["overBudget"]
+
+
+def test_plan_of_a_step_that_needs_sixteen_shards_stops_at_ten():
+    # 16 files of nearly a full shard each: 16 shards to fit the budget.
+    files = {f"t{i:02}.py": 1000 for i in range(16)}
+    result = rs.plan(_commands(TESTS[0], files), _timings(TESTS[0], files))
+    assert result["shards"] == 10 and result["overBudget"]
+    assert sorted(result["estimates"]) == [1000.0] * 4 + [2000.0] * 6
     assert sorted(result["commands"][0]["files"]) == [f"tests/{f}" for f in files]
     assert ":warning:" in rs.summary("k", result)
 
