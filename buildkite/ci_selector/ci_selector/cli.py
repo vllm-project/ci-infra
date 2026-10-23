@@ -246,6 +246,10 @@ def _restrict(sel, d):
             **{k: v for k, v in sel.selected_paths.items() if k in steps},
             **{s: [None] for s in added},
         },
+        selected_files={
+            **{k: v for k, v in sel.selected_files.items() if k in steps},
+            **{s: [None] for s in added},
+        },
     )
 
 

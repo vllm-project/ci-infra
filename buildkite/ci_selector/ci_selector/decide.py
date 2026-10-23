@@ -100,6 +100,9 @@ class Decision:
     # may not drop these.
     executes_by_coverage: set[str] = field(default_factory=set)
     executes_by_proxy: set[str] = field(default_factory=set)
+    # Steps the Python record cleared on its own files but kept for csrc
+    # files the kernel record answers for. That record may drop these.
+    cleared_by_coverage: set[str] = field(default_factory=set)
     # The kernel record's contribution, kept apart the same way.
     added_by_kernels: set[str] = field(default_factory=set)
     dropped_by_kernels: set[str] = field(default_factory=set)
@@ -153,6 +156,9 @@ def decide(
     out = Decision(steps=set(selection.selected), from_map=set(selection.selected))
 
     table = table if table is not None else fetch_table()
+    # Fetched before the Python record, which defers the csrc files this one
+    # answers for. Applied after it, as before.
+    kernels = kernels if kernels is not None else fetch_kernel_evidence()
     if not table.available:
         out.coverage_note = table.unavailable
     else:
@@ -162,7 +168,17 @@ def decide(
         if getattr(state, "pipelines", None):
             out.unreadable_rows = _unreadable_rows(state, table)
         try:
-            _apply_record(out, table, selection, repo, base, head, mode, state)
+            _apply_record(
+                out,
+                table,
+                selection,
+                repo,
+                base,
+                head,
+                mode,
+                state,
+                deferred=_deferred_to_kernels(kernels, selection),
+            )
         except Exception as exc:  # noqa: BLE001 - see the module docstring
             # Broad on purpose. A narrower handler would have to decide what
             # to do with a half-built reading, and the only safe answer is
@@ -172,9 +188,9 @@ def decide(
             out.dropped_by_coverage.clear()
             out.executes_by_coverage.clear()
             out.executes_by_proxy.clear()
+            out.cleared_by_coverage.clear()
             out.coverage_note = f"coverage unusable ({type(exc).__name__}: {exc})"
 
-    kernels = kernels if kernels is not None else fetch_kernel_evidence()
     if kernels.unavailable:
         out.kernel_note = kernels.unavailable
     else:
@@ -261,6 +277,7 @@ def _apply_record(
     head: str | None,
     mode: PhaseMode = DEFAULT_MODE,
     state=None,
+    deferred: frozenset[str] = frozenset(),
 ) -> None:
     from .codemap.worktree import state_for
     from .coverage.changed_funcs import build as build_query
@@ -316,6 +333,7 @@ def _apply_record(
         mode=mode,
         reached_via=_reached_via(repo, base, head, unresolved, union_names, state),
         platform_mockers=platform_mockers(repo, base, query.files),
+        deferred=deferred,
     )
     out.stale_steps = len(stale)
     out.reasons = dict(reading.reasons)
@@ -327,6 +345,7 @@ def _apply_record(
     out.dropped_by_coverage = set(reading.dropped)
     out.executes_by_coverage = set(reading.executes)
     out.executes_by_proxy = set(reading.executes_by_proxy)
+    out.cleared_by_coverage = set(reading.cleared)
     out.steps |= out.added_by_coverage
     out.steps -= out.dropped_by_coverage
 
@@ -490,7 +509,11 @@ def _apply_kernel_record(
         stale=stale,
         allow_drops=allow_drops,
         protected=_protected_from_kernel_drops(out),
+        python_cleared=frozenset(out.cleared_by_coverage),
         attribute=_kernel_attribution(repo, base, head, attribution_mode),
+        declarations=_declaration_attribution(
+            repo, base, head, kernels.symbol_map, attribution_mode
+        ),
     )
     out.kernel_reasons = dict(reading.reasons)
     out.kernel_files = dict(reading.files)
@@ -525,6 +548,17 @@ def _apply_library_record(
     )
     out.library_reasons = dict(reasons)
     out.dropped_by_libraries = set(dropped) & out.steps
+
+
+def _deferred_to_kernels(kernels: KernelEvidence, selection) -> frozenset[str]:
+    """Changed csrc files the kernel record will answer for: the ones its map
+    compiled. Empty when the record is unusable, so nothing waits on it."""
+    if kernels.unavailable:
+        return frozenset()
+    sm = kernels.symbol_map
+    return frozenset(
+        p for p in selection.selected_by_file if p.startswith("csrc/") and sm.knows(p)
+    )
 
 
 def _protected_from_kernel_drops(out: Decision) -> frozenset[str]:
@@ -582,5 +616,30 @@ def _kernel_attribution(repo: Path, base: str, head: str | None, mode: str):
     def narrow(path: str, symbols: frozenset[str]):
         a = attribute(repo, base, head, path, symbols)
         return (a.kernels if a.narrowed else frozenset()), a.why
+
+    return narrow
+
+
+def _declaration_attribution(repo: Path, base: str, head: str | None, sm, mode: str):
+    """The narrowing for a header or bindings file whose diff only declares or
+    registers functions (`coverage/changed_decls`), or None for the whole-file
+    reading."""
+    if mode == "file":
+        return None
+    from .coverage.changed_decls import attribute
+    from .coverage.changed_kernels import kernel_names_in
+
+    def narrow(path: str):
+        if not path.startswith("csrc/"):
+            return frozenset(), ""
+        a = attribute(
+            repo,
+            base,
+            head,
+            path,
+            sm.sources,
+            lambda f: kernel_names_in(sm.symbols(f)),
+        )
+        return a.kernels, a.why
 
     return narrow
