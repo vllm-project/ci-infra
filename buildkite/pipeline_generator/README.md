@@ -98,6 +98,7 @@ The generator relies on several environment variables, typically provided by Bui
 * `BUILDKITE_PULL_REQUEST_BASE_BRANCH`: Base branch for PRs.
 * `NIGHTLY`: Set to "1" to auto-run the curated torch-nightly steps (those tagged `mirror.torch_nightly`).
 * `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build. AMD build/test steps and AMD mirrors are dropped entirely for this run, since ROCm uses its own pinned torch and gains no signal from validating against a CUDA torch-nightly build.
+* `AITER_NIGHTLY`: Set to "1" to test the latest [AITER](https://github.com/ROCm/aiter) nightly wheel. Intended for a scheduled build of `main`. Adds `aiter-nightly-amd` (vLLM's `.buildkite/scripts/rocm/aiter-nightly-overlay.sh`) after `ensure-ci-base-amd` to install the wheel over this build's ci_base, and builds `image-build-amd` on the result. Only AMD steps run: the AMD CPU build steps, and the GPU jobs on the archs vLLM builds AITER for, gfx942 (MI300, MI325) and gfx950 (MI355). Every other step, MI250 included, is dropped; generation fails if a kept step depends on a dropped one. Nothing is gated behind a block step, even with `NOAUTO=1`, and docs-only changes do not skip the build. Cannot be combined with `TORCH_NIGHTLY`.
 * `RUN_ALL`: Set to "1" to force run all steps.
 * `SKIP_TIMEOUT`: Set to "1" at pipeline generation time to omit all configured step timeouts.
 * `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.
@@ -108,7 +109,9 @@ The generator relies on several environment variables, typically provided by Bui
     set, the generator emits those steps and their transitive dependencies,
     ignoring normal source-file selection. Generated AMD mirror keys such as
     `amd-multi-modal-processor` are accepted and select only the mirror plus
-    its AMD dependencies. Unknown keys fail generation.
+    its AMD dependencies. Unknown keys fail generation. With
+    `AITER_NIGHTLY=1`, so does a key for a step the AITER nightly does not
+    run, such as a CUDA or MI250 job.
 
 Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
 `buildkite-analytics-token-secret` Secret's `token` key when it is available.

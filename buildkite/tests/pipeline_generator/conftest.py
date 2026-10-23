@@ -30,6 +30,7 @@ def fake_global_config(monkeypatch):
         "docs_only_disable": "1",
         "nightly": "0",
         "torch_nightly": "0",
+        "aiter_nightly": "0",
         "run_all": False,
         "list_file_diff": [],
         "fail_fast": False,

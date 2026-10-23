@@ -6,7 +6,12 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import is_amd_device, normalize_amd_depends_on
+from amd import (
+    apply_aiter_nightly,
+    is_amd_device,
+    normalize_amd_depends_on,
+    runs_in_aiter_nightly,
+)
 from buildkite_step import (
     AMD_GROUP,
     COLLECT_GROUP,
@@ -94,6 +99,15 @@ class PipelineGenerator:
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+
+        aiter_nightly = global_config["aiter_nightly"] == "1"
+        if aiter_nightly:
+            try:
+                steps = apply_aiter_nightly(steps)
+            except ValueError as error:
+                _annotate_best_effort(str(error), style="error")
+                raise
+
         record = _selector_decision(steps)
         scheduled = None
         try:
@@ -108,7 +122,10 @@ class PipelineGenerator:
                 )
                 global_config["selector_step_keys"] = scheduled
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+                steps,
+                global_config["only_step_keys"],
+                torch_nightly=torch_nightly,
+                aiter_nightly=aiter_nightly,
             )
         except ValueError as error:
             if not (record and record["applied"]):
@@ -121,7 +138,10 @@ class PipelineGenerator:
             global_config["selector_step_keys"] = None
             scheduled = None
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+                steps,
+                global_config["only_step_keys"],
+                torch_nightly=torch_nightly,
+                aiter_nightly=aiter_nightly,
             )
         global_config["only_step_keys"] = selected_step_keys
         if record is not None:
@@ -140,6 +160,12 @@ class PipelineGenerator:
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
+        if aiter_nightly:
+            try:
+                check_dependencies_exist(buildkite_group_steps)
+            except ValueError as error:
+                _annotate_best_effort(str(error), style="error")
+                raise
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
         group_of_step = {
             step.key: group_step.group
@@ -327,6 +353,7 @@ def select_steps_and_dependencies(
     steps: List[Step],
     requested_step_keys: Optional[FrozenSet[str]],
     torch_nightly: bool = False,
+    aiter_nightly: bool = False,
 ) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
     if requested_step_keys is None:
         return steps, None
@@ -334,6 +361,7 @@ def select_steps_and_dependencies(
     steps_by_key = {}
     dependencies_by_key = {}
     amd_step_keys = set()
+    aiter_nightly_keys = set()
     for step in steps:
         # Steps without an explicit key are uploaded with a label-derived key
         # (see convert_group_step_to_buildkite_step), so retry builds reference
@@ -346,6 +374,8 @@ def select_steps_and_dependencies(
         dependencies_by_key[step.key] = step.depends_on or []
         if is_amd_device(step.device):
             amd_step_keys.add(step.key)
+        if runs_in_aiter_nightly(step.device):
+            aiter_nightly_keys.add(step.key)
 
         # AMD mirrors are uploaded as generated `amd-<key>` steps, so retry
         # builds reference them by that key too.
@@ -359,6 +389,8 @@ def select_steps_and_dependencies(
                 amd_mirror.get("depends_on")
             )
             amd_step_keys.add(mirror_key)
+            if runs_in_aiter_nightly(amd_mirror.get("device")):
+                aiter_nightly_keys.add(mirror_key)
 
     missing = requested_step_keys - steps_by_key.keys()
     if missing:
@@ -370,6 +402,14 @@ def select_steps_and_dependencies(
             raise ValueError(
                 "AMD CI step key(s) requested, but AMD steps are excluded from "
                 "torch-nightly runs: " + ", ".join(sorted(requested_amd_keys))
+            )
+    if aiter_nightly:
+        excluded_keys = requested_step_keys - aiter_nightly_keys
+        if excluded_keys:
+            raise ValueError(
+                "CI step key(s) requested, but AITER nightly runs only the AMD "
+                "build steps and AMD GPU jobs on gfx942/gfx950: "
+                + ", ".join(sorted(excluded_keys))
             )
 
     selected_step_keys = set(requested_step_keys)
@@ -391,6 +431,26 @@ def select_steps_and_dependencies(
         if step.key in selected_step_keys or f"amd-{step.key}" in selected_step_keys
     ]
     return selected, frozenset(selected_step_keys)
+
+
+def check_dependencies_exist(groups: List[BuildkiteGroupStep]) -> None:
+    """Fail rather than upload a depends_on on a step not in the pipeline."""
+    jobs = [job for group in groups for job in group.steps]
+    keys = {job.key for job in jobs}
+    broken = sorted(
+        f"{job.key} -> {dependency}"
+        for job in jobs
+        for dependency in (
+            [job.depends_on]
+            if isinstance(job.depends_on, str)
+            else job.depends_on or []
+        )
+        if dependency not in keys
+    )
+    if broken:
+        raise ValueError(
+            "Step(s) depend on steps not in the pipeline: " + ", ".join(broken)
+        )
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:
