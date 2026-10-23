@@ -43,8 +43,8 @@ TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
 # Test time per shard; setup is not counted. Planned below the 20-minute limit
 # so run-to-run noise rarely pushes a real shard over it.
 MAX_SHARD_SECONDS = 1080
-# A step that needs more gets the most even split of this many shards, over
-# the budget and flagged, rather than more jobs.
+# A step that needs more gets the best balance of this many shards it finds,
+# over the budget and flagged, rather than more jobs.
 MAX_NUMBER_OF_SHARDS = 10
 # A file main has no timing for (new in the PR, say) counts as the step's
 # median file, and at least this. Under a command that picks tests by a
@@ -352,57 +352,76 @@ def plan(
         return None
     unknown_seconds = max(MIN_UNKNOWN_FILE_SECONDS, statistics.median(known))
 
-    # One unit per file, or per part of a file over the budget.
-    units = []  # (command index, file, part or None, seconds)
-    assigns: Dict[Tuple[int, str], Dict[str, int]] = {}
-    unknown_files, filtered_unknown_files, oversized = [], [], []
+    unknown_files, filtered_unknown_files = [], []
     filtered = [_picks_tests(entry["command"]) for entry in commands]
+    seconds_of = {}
     for (index, file), key in keys.items():
         if key is not None:
-            seconds = file_seconds[key]
+            seconds_of[(index, file)] = file_seconds[key]
         elif filtered[index]:
-            seconds = MIN_UNKNOWN_FILE_SECONDS
+            seconds_of[(index, file)] = MIN_UNKNOWN_FILE_SECONDS
             filtered_unknown_files.append(file)
         else:
-            seconds = unknown_seconds
+            seconds_of[(index, file)] = unknown_seconds
             unknown_files.append(file)
-        tests = file_tests.get(key) if key is not None else None
-        selected = file in commands[index]["selected"]
-        if seconds <= max_shard_seconds or not tests or selected:
-            units.append((index, file, None, seconds))
-            continue
-        # By test function, its parametrized cases together: they share setup
-        # (a model, compiled kernels) that main paid once, in the first case.
-        # A function over the budget alone is cut by case.
-        oversized.append(file)
-        functions: Dict[str, float] = {}
-        for nodeid, test_seconds in tests.items():
-            function = nodeid.split("[")[0]
-            functions[function] = functions.get(function, 0.0) + test_seconds
-        groups: Dict[str, float] = {}  # a function, or one case of a big one
-        group_of = {}
-        for nodeid, test_seconds in tests.items():
-            function = nodeid.split("[")[0]
-            group = nodeid if functions[function] > max_shard_seconds else function
-            group_of[nodeid] = group
-            groups[group] = groups.get(group, 0.0) + test_seconds
-        names = sorted(groups)
-        parts = min(len(names), math.ceil(seconds / max_shard_seconds))
-        part_of, loads = _least_loaded([groups[n] for n in names], parts)
-        part_of_group = dict(zip(names, part_of))
-        assigns[(index, file)] = {
-            nodeid: part_of_group[group_of[nodeid]] for nodeid in tests
-        }
-        for part, load in enumerate(loads):
-            units.append((index, file, part, load))
 
-    sizes = [unit[3] for unit in units]
-    most = min(max_number_of_shards, len(units))
-    count = min(max(1, math.ceil(sum(sizes) / max_shard_seconds)), most)
-    shard_of, loads = _least_loaded(sizes, count)
-    while max(loads) > max_shard_seconds and count < most:
-        count += 1
+    def pack(part_seconds: float) -> Tuple:
+        """Cut each file over the budget into parts of about `part_seconds`,
+        then pack the units into the fewest shards within the budget."""
+        # One unit per file, or per part of a file over the budget.
+        units = []  # (command index, file, part or None, seconds)
+        assigns: Dict[Tuple[int, str], Dict[str, int]] = {}
+        oversized = []
+        for (index, file), key in keys.items():
+            seconds = seconds_of[(index, file)]
+            tests = file_tests.get(key) if key is not None else None
+            selected = file in commands[index]["selected"]
+            if seconds <= max_shard_seconds or not tests or selected:
+                units.append((index, file, None, seconds))
+                continue
+            # By test function, its parametrized cases together: they share
+            # setup (a model, compiled kernels) that main paid once, in the
+            # first case. A function over the budget alone is cut by case.
+            oversized.append(file)
+            functions: Dict[str, float] = {}
+            for nodeid, test_seconds in tests.items():
+                function = nodeid.split("[")[0]
+                functions[function] = functions.get(function, 0.0) + test_seconds
+            groups: Dict[str, float] = {}  # a function, or one case of a big one
+            group_of = {}
+            for nodeid, test_seconds in tests.items():
+                function = nodeid.split("[")[0]
+                group = nodeid if functions[function] > max_shard_seconds else function
+                group_of[nodeid] = group
+                groups[group] = groups.get(group, 0.0) + test_seconds
+            names = sorted(groups)
+            parts = min(len(names), math.ceil(seconds / part_seconds))
+            part_of, part_loads = _least_loaded([groups[n] for n in names], parts)
+            part_of_group = dict(zip(names, part_of))
+            assigns[(index, file)] = {
+                nodeid: part_of_group[group_of[nodeid]] for nodeid in tests
+            }
+            for part, load in enumerate(part_loads):
+                units.append((index, file, part, load))
+
+        sizes = [unit[3] for unit in units]
+        most = min(max_number_of_shards, len(units))
+        count = min(max(1, math.ceil(sum(sizes) / max_shard_seconds)), most)
         shard_of, loads = _least_loaded(sizes, count)
+        while max(loads) > max_shard_seconds and count < most:
+            count += 1
+            shard_of, loads = _least_loaded(sizes, count)
+        return units, assigns, oversized, count, shard_of, loads
+
+    units, assigns, oversized, count, shard_of, loads = pack(max_shard_seconds)
+    # Over the budget at the most shards, budget-sized parts can outnumber
+    # the shards and double up. Parts of an even share of the most shards may
+    # balance better; keep whichever plan's slowest shard is shorter.
+    share = sum(seconds_of.values()) / max_number_of_shards
+    if share > max_shard_seconds:
+        coarser = pack(share)
+        if max(coarser[5]) < max(loads):
+            units, assigns, oversized, count, shard_of, loads = coarser
 
     planned: List[Dict] = [{"files": {}, "split": {}} for _ in commands]
     for (index, file, part, _), shard in zip(units, shard_of):

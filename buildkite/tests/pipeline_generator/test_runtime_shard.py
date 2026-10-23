@@ -252,6 +252,33 @@ def test_plan_of_a_step_that_needs_sixteen_shards_stops_at_ten():
     assert ":warning:" in rs.summary("k", result)
 
 
+def test_plan_cuts_a_file_too_long_for_the_most_shards_into_one_part_each():
+    # 160 tests of 100 s: 15 parts at the budget would put two parts in five
+    # of the 10 shards. Cut to the most shards instead, each gets one.
+    timings = _with_tests(
+        _timings(TESTS[0], {"big.py": 16000}),
+        "big.py",
+        {f"test_{i:03}": 100 for i in range(160)},
+    )
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assert result["shards"] == 10 and result["overBudget"]
+    assert result["estimates"] == [1600.0] * 10
+
+
+def test_plan_keeps_budget_sized_parts_when_they_balance_better():
+    # Cut to an even share of 10 shards, big.py's parts would stack on the
+    # 1,000 s files; at the budget, its 15 small parts fill around them.
+    seconds = {"big.py": 16000, **{f"f{i}.py": 1000 for i in range(5)}}
+    timings = _with_tests(
+        _timings(TESTS[0], seconds),
+        "big.py",
+        {f"test_{i:03}": 100 for i in range(160)},
+    )
+    result = rs.plan(_commands(TESTS[0], seconds), timings)
+    assert result["shards"] == 10 and result["overBudget"]
+    assert result["estimates"] == [2100.0] * 10
+
+
 # The generator
 
 
