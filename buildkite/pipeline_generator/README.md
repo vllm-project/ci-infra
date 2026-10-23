@@ -116,6 +116,21 @@ The Secret is optional, so missing credentials do not prevent jobs from running.
 Provision it in a Buildkite job namespace with
 `infra-k8s/create-buildkite-analytics-secret.sh` to enable test result uploads.
 
+## Intel GPU on Kubernetes (`intel_gpu_k8s`)
+
+Steps with `device: intel_gpu_k8s` run as agent-stack-k8s Pods on queue
+`intel-gpu-k8s` (Arc Pro B70). `device: intel_gpu` keeps the bare-metal
+agents and `run-intel-test.sh`. Each Pod:
+
+* runs the `image-build-xpu` output, `<registry>/<repo>:<commit>-xpu`;
+* gets `num_devices` (1, 2, 4 or 8; default 1) GPUs through the DRA
+  ResourceClaimTemplate `b70-<num_devices>`, with CPU, memory and
+  `/dev/shm` scaled to match;
+* skips the checkout and runs from the image's `/workspace/vllm`, which an
+  init container copies into the agent's `/workspace` volume (that volume
+  would otherwise hide it), so set `working_dir: /workspace/vllm`;
+* reads `HF_TOKEN` from the `hf-token-secret` Secret's `token` key.
+
 ## OpenTelemetry command and test timing
 
 The generator automatically instruments every standard NVIDIA and CPU job in

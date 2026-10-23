@@ -302,7 +302,117 @@ l4_plugin_template = {
 }
 
 
+# Intel Arc Pro B70 (vllm-ci cluster, agent-stack-k8s on queue intel-gpu-k8s).
+# GPUs are allocated by DRA: the cluster has ResourceClaimTemplates b70-<N>.
+INTEL_GPU_K8S_DEVICE_COUNTS = (1, 2, 4, 8)
+# Per GPU. The worker has 8 GPUs, 192 CPUs and 1 TiB of RAM.
+INTEL_GPU_K8S_CPU_PER_GPU = 8
+INTEL_GPU_K8S_CPU_LIMIT_PER_GPU = 32
+INTEL_GPU_K8S_MEM_PER_GPU_GI = 32
+INTEL_GPU_K8S_MEM_LIMIT_PER_GPU_GI = 64
+INTEL_GPU_K8S_SHM_PER_GPU_GI = 8
+# The XPU image keeps the vLLM tree (and the editable tests/vllm_test_utils)
+# at /workspace/vllm, but agent-stack-k8s mounts its own emptyDir over
+# /workspace in every container. The init container copies the image's tree
+# into that volume first, so tests see the image's tree, not an empty dir.
+INTEL_GPU_K8S_WORKSPACE = "/workspace/vllm"
+
+intel_gpu_k8s_plugin_template = {
+    "kubernetes": {
+        # The tests run from the image's tree; nothing reads the checkout.
+        "checkout": {"skip": True},
+        "podSpec": {
+            "resourceClaims": [{"name": "gpu", "resourceClaimTemplateName": ""}],
+            "initContainers": [
+                {
+                    "name": "copy-vllm-src",
+                    "image": "",
+                    "command": ["cp", "-a", INTEL_GPU_K8S_WORKSPACE, "/mnt/workspace/"],
+                    "volumeMounts": [
+                        {"name": "workspace", "mountPath": "/mnt/workspace"}
+                    ],
+                }
+            ],
+            "containers": [
+                {
+                    "image": "",
+                    "resources": {
+                        "claims": [{"name": "gpu"}],
+                        "requests": {"cpu": "", "memory": ""},
+                        "limits": {"cpu": "", "memory": ""},
+                    },
+                    "volumeMounts": [
+                        {"name": "devshm", "mountPath": "/dev/shm"},
+                        {"name": "hf-cache", "mountPath": HF_HOME},
+                    ],
+                    "env": [
+                        {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
+                        # What run-intel-test.sh exports for its container.
+                        {"name": "PYTHONPATH", "value": ".."},
+                        # Remove once intel/intel-xpu-backend-for-triton#7682
+                        # is fixed.
+                        {"name": "VLLM_DISABLE_COMPILE_CACHE", "value": "1"},
+                        {"name": "HF_HOME", "value": HF_HOME},
+                        {
+                            "name": "HF_TOKEN",
+                            "valueFrom": {
+                                "secretKeyRef": {
+                                    "name": "hf-token-secret",
+                                    "key": "token",
+                                }
+                            },
+                        },
+                        get_buildkite_analytics_token_env(),
+                    ],
+                }
+            ],
+            "volumes": [
+                {"name": "devshm", "emptyDir": {"medium": "Memory", "sizeLimit": ""}},
+                {
+                    "name": "hf-cache",
+                    "hostPath": {
+                        "path": "/var/lib/hf-cache",
+                        "type": "DirectoryOrCreate",
+                    },
+                },
+            ],
+        },
+    }
+}
+
+
+def get_intel_gpu_k8s_plugin(step: Step, image: str):
+    num_gpus = step.num_devices or 1
+    if num_gpus not in INTEL_GPU_K8S_DEVICE_COUNTS:
+        raise ValueError(
+            f"{step.label}: num_devices must be one of "
+            f"{INTEL_GPU_K8S_DEVICE_COUNTS} on {step.device}, got {num_gpus}"
+        )
+    # Upstream image-build-xpu pushes <registry>/<repo>:<commit>-xpu.
+    image = f"{image}-xpu"
+    plugin = copy.deepcopy(intel_gpu_k8s_plugin_template)
+    pod_spec = plugin["kubernetes"]["podSpec"]
+    pod_spec["resourceClaims"][0]["resourceClaimTemplateName"] = f"b70-{num_gpus}"
+    pod_spec["initContainers"][0]["image"] = image
+    container = pod_spec["containers"][0]
+    container["image"] = image
+    container["resources"]["requests"] = {
+        "cpu": str(num_gpus * INTEL_GPU_K8S_CPU_PER_GPU),
+        "memory": f"{num_gpus * INTEL_GPU_K8S_MEM_PER_GPU_GI}Gi",
+    }
+    container["resources"]["limits"] = {
+        "cpu": str(num_gpus * INTEL_GPU_K8S_CPU_LIMIT_PER_GPU),
+        "memory": f"{num_gpus * INTEL_GPU_K8S_MEM_LIMIT_PER_GPU_GI}Gi",
+    }
+    pod_spec["volumes"][0]["emptyDir"]["sizeLimit"] = (
+        f"{num_gpus * INTEL_GPU_K8S_SHM_PER_GPU_GI}Gi"
+    )
+    return plugin
+
+
 def get_k8s_plugin(step: Step, image: str):
+    if step.device == DeviceType.INTEL_GPU_K8S:
+        return get_intel_gpu_k8s_plugin(step, image)
     plugin = None
     if step.device == DeviceType.H100:
         plugin = copy.deepcopy(h100_plugin_template)

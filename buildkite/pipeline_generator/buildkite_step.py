@@ -218,6 +218,14 @@ def _get_step_agents(step: Step) -> Dict[str, str]:
 SetupProfile = Literal["nvidia", "amd", "none"]
 
 
+def _get_setup_profile(step: Step) -> SetupProfile:
+    """Setup profile of a non-AMD step. Intel XPU pods get none: there is no
+    nvidia-smi, and the recorders only target CUDA and ROCm."""
+    if step.device == DeviceType.INTEL_GPU_K8S:
+        return "none"
+    return "nvidia"
+
+
 def _get_timeout_in_minutes(
     timeout_in_minutes: Optional[int],
 ) -> Optional[int]:
@@ -309,6 +317,7 @@ K8S_PLUGIN_DEVICES = (
     DeviceType.A100.value,
     DeviceType.B200_K8S.value,
     DeviceType.L4.value,
+    DeviceType.INTEL_GPU_K8S.value,
 )
 
 
@@ -378,6 +387,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.INTEL_HPU
     elif step.device == DeviceType.INTEL_GPU:
         return AgentQueue.INTEL_GPU
+    elif step.device == DeviceType.INTEL_GPU_K8S:
+        return AgentQueue.INTEL_GPU_K8S
     elif step.device == DeviceType.ARM_CPU:
         return AgentQueue.ARM_CPU
     elif amd_gpu_queue := get_amd_agent_queue(step.device):
@@ -475,6 +486,7 @@ def _kernrec_applies(step: Step) -> bool:
     """The steps _get_setup_commands arms with the nvidia profile."""
     return (
         kernrec_enabled()
+        and _get_setup_profile(step) == "nvidia"
         and not step.no_plugin
         and not step.label.startswith(":docker:")
         and step.key not in KERNREC_SKIP_STEPS
@@ -1158,7 +1170,8 @@ def convert_group_step_to_buildkite_step(
                 continue
 
             # command step
-            step_commands = _prepare_commands(step, variables_to_inject)
+            setup_profile = _get_setup_profile(step)
+            step_commands = _prepare_commands(step, variables_to_inject, setup_profile)
 
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
@@ -1175,12 +1188,11 @@ def convert_group_step_to_buildkite_step(
             if step.env:
                 buildkite_step.env = step.env
             # Each recorder writes under its own <checkout>/.<name>/<job-id>,
-            # which the agent collects from the checkout. _prepare_commands
-            # above used its default profile, so this is the nvidia path.
+            # which the agent collects from the checkout.
             recorder_globs: List[str] = []
             if _kernrec_applies(step):
                 recorder_globs.append(KERNREC_ARTIFACT_PATH)
-            if _fnrec_applies(step, "nvidia"):
+            if _fnrec_applies(step, setup_profile):
                 recorder_globs.extend(FNREC_ARTIFACT_PATHS)
             if recorder_globs:
                 buildkite_step.artifact_paths = _merge_artifact_paths(

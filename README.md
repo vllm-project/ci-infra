@@ -78,8 +78,8 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 **Config:** Driven by a YAML config file (`ci_config.yaml`) that specifies job directories, registries, repositories, and `run_all_patterns`. See the [pipeline generator README](buildkite/pipeline_generator/README.md) for details.
 
 **Features:**
-- **Device types**: CPU, GPU (L4), A100, H100, H200, H200 18GB (MIG), B200, GH200, Intel CPU/HPU/GPU, ARM CPU, Ascend NPU, AMD MI250/MI325/MI355 (1-8 devices)
-- **Plugin generation**: Docker plugin for EC2-based queues, Kubernetes pod specs for H100/H200/A100
+- **Device types**: CPU, GPU (L4), A100, H100, H200, H200 18GB (MIG), B200, GH200, Intel CPU/HPU/GPU, Intel GPU on Kubernetes (`intel_gpu_k8s`), ARM CPU, Ascend NPU, AMD MI250/MI325/MI355 (1-8 devices)
+- **Plugin generation**: Docker plugin for EC2-based queues, Kubernetes pod specs for H100/H200/A100/B200/L4 and Intel GPU
 - **AMD mirroring**: Steps can define `mirror.amd` to automatically create parallel AMD test runs
 - **Source file dependencies**: Steps can specify which source files they depend on for intelligent test filtering
 - **Block steps**: Optional tests are gated behind manual approval blocks
