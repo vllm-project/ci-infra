@@ -126,8 +126,10 @@ def test_discover_finds_the_files_pytest_would(tmp_path):
 def test_plan_packs_the_largest_files_first_into_the_fewest_shards():
     seconds = {"a.py": 100, "b.py": 600, "c.py": 300, "d.py": 500, "e.py": 200}
     seconds["f.py"] = 400
-    result = rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))
-    # 2100 s doesn't fit two shards of 1080 s; three, evenly.
+    timings = dict(_timings(TESTS[0], seconds), setupMs=120_000)
+    result = rs.plan(_commands(TESTS[0], seconds), timings)
+    # After 120 s of setup, 2100 s doesn't fit two shards of 1020 s of tests;
+    # three, evenly.
     assert result["shards"] == 3 and result["estimates"] == [700, 700, 700]
     files = result["commands"][0]["files"]
     assert {f for f, s in files.items() if s == files["tests/b.py"]} == {
@@ -135,6 +137,37 @@ def test_plan_packs_the_largest_files_first_into_the_fewest_shards():
         "tests/b.py",
     }
     assert not result["overBudget"] and result["unknownFiles"] == []
+
+
+def test_plan_charges_setup_up_to_the_limit_and_flags_more():
+    seconds = {f"t{i}.py": 475 for i in range(4)}  # 1900 s of tests
+
+    def planned(setup_seconds):
+        timings = dict(_timings(TESTS[0], seconds), setupMs=setup_seconds * 1000)
+        return rs.plan(_commands(TESTS[0], seconds), timings)
+
+    # Two shards of 950 s fit 1140 s with up to 190 s of setup each.
+    assert planned(0)["shards"] == 2 and planned(180)["shards"] == 2
+    assert not rs.setup_too_long(planned(180))
+    assert ":warning:" not in rs.summary("k", planned(180))
+    # Charged in full, 600 s would leave 540 s per shard: four shards. It is
+    # charged as 180 s instead, and flagged.
+    slow = planned(600)
+    assert slow["shards"] == 2 and slow["setupSeconds"] == 600
+    assert rs.setup_too_long(slow)
+    assert "Setup takes 10.0 min per job" in rs.summary("k", slow)
+    # A step without setupMs (an older endpoint) charges none.
+    assert rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))[
+        "setupSeconds"
+    ] == 0
+
+
+def test_a_one_job_plan_flags_a_long_setup_too():
+    seconds = {"a.py": 300}
+    timings = dict(_timings(TESTS[0], seconds), setupMs=240_000)
+    result = rs.plan(_commands(TESTS[0], seconds), timings)
+    assert result["shards"] == 1
+    assert "Setup takes 4.0 min per job" in rs.summary("k", result)
 
 
 def test_plan_of_a_step_that_fits_in_one_job():
@@ -409,6 +442,20 @@ def test_generator_keeps_the_single_job_without_a_plan(
     assert step.to_yaml() == plain.to_yaml() and "not in the checkout" in checkout[0][1]
 
 
+def test_generator_warns_of_a_long_setup_on_a_good_plan(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    timings = _timings(TESTS[0], ME_FILES)
+    timings["files"] += _timings(TESTS[1], {ENTRYPOINT: 100})["files"]
+    timings["setupMs"] = 200_000
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    [step] = _render(_step(automatic_shard=True))
+    assert step.parallelism == 3
+    [(_, text, style)] = checkout
+    assert style == "warning" and "Setup takes 3.3 min per job" in text
+
+
 def test_generator_shadow_mode_only_annotates(
     fake_global_config, checkout, monkeypatch
 ):
@@ -582,6 +629,9 @@ def test_fetch_timings_sends_the_queue(monkeypatch):
     monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
     assert rs.fetch_timings("amd-k", AgentQueue.AMD_MI325_1) is None
     assert "stepKey=amd-k" in urls[0] and "queue=amd_mi325_1" in urls[0]
+    # Per-test times for any file a shard's tests could fail to hold: the
+    # budget less the most setup charged, 16 min.
+    assert "testsOverMs=960000" in urls[0]
 
 
 def test_generator_shards_a_kubernetes_step_with_its_pod_spec(

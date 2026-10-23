@@ -7,9 +7,10 @@ pipeline, from the vLLM checkout it runs in:
             path arguments walked with pytest's file patterns, less its
             --ignore options.
   timings   main's median time per file for the step (ci.vllm.ai), with
-            per-test medians for a file over one shard's budget.
-  plan      whole files into the fewest shards that keep each within the
-            budget, largest file first (at most 10). A file over the budget is
+            per-test medians for a file over one shard's budget, and its
+            median setup per job.
+  plan      whole files into the fewest shards that keep each job, setup and
+            tests, within the budget, largest file first (at most 10). A file over the budget is
             split by test function, using its per-test medians.
 
 The step is then emitted as its own job with `parallelism: N`. Every parallel
@@ -40,9 +41,12 @@ from typing import Dict, List, Optional, Tuple
 from constants import AgentQueue
 
 TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
-# Test time per shard; setup is not counted. Planned below the 20-minute limit
-# so run-to-run noise rarely pushes a real shard over it.
-MAX_SHARD_SECONDS = 1080
+# One shard's job: its setup (main's setupMs) and its tests. Planned below the
+# 20-minute limit so run-to-run noise rarely pushes a real shard over it.
+MAX_SHARD_SECONDS = 1140
+# Setup is charged up to this much; a step whose setup takes longer is flagged
+# for review rather than given more shards, each paying that setup again.
+MAX_SETUP_SECONDS = 180
 # A step that needs more gets the best balance of this many shards it finds,
 # over the budget and flagged, rather than more jobs.
 MAX_NUMBER_OF_SHARDS = 10
@@ -271,7 +275,7 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
     query = {
         "stepKey": step_key,
         "queue": queue.value,
-        "testsOverMs": MAX_SHARD_SECONDS * 1000,
+        "testsOverMs": (MAX_SHARD_SECONDS - MAX_SETUP_SECONDS) * 1000,
     }
     url = TIMINGS_URL + "?" + urllib.parse.urlencode(query)
     try:
@@ -306,7 +310,7 @@ def plan(
         commands: Per pytest command of the step: {"command", "files",
             "selected"}, as from discover().
         timings: The timing endpoint's response for the step, or None.
-        max_shard_seconds: Test-time budget for one shard.
+        max_shard_seconds: Budget for one shard's job, setup and tests.
         max_number_of_shards: Upper bound on the number of shards.
 
     Returns:
@@ -315,9 +319,13 @@ def plan(
         step fits in one job), "estimates" per shard in seconds, and per
         command the shard of each of its "files" and, for each file split by
         test, "split": the shard of each part and the part of each test main
-        has timed. The rest are counts and flagged files.
+        has timed. "setupSeconds" is main's setup per job; "estimates"
+        leave it out. The rest are counts and flagged files.
 
     """
+    setup_seconds = (timings or {}).get("setupMs", 0) / 1000
+    # From here on, the budget is the shard's test time.
+    max_shard_seconds -= min(setup_seconds, MAX_SETUP_SECONDS)
     file_seconds = {}  # (preview, file) -> seconds on main
     file_tests = {}  # (preview, file) -> {nodeid: seconds on main}
     previews: Dict[str, List[str]] = {}  # file -> previews main ran it under
@@ -442,6 +450,7 @@ def plan(
         "filteredUnknownFiles": filtered_unknown_files,
         "oversizedFiles": oversized,
         "overBudget": max(loads) > max_shard_seconds,
+        "setupSeconds": round(setup_seconds, 1),
         "timingSource": {
             k: (timings or {}).get(k) for k in ("buildNumber", "buildNumbers")
         },
@@ -455,10 +464,12 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             f"**Runtime sharding for `{step_key}`:** no plan ({reason}). "
             "The step runs as one job, as it would without sharding."
         )
+    setup = result.get("setupSeconds", 0)
     if result["shards"] == 1:
         return (
             f"**Runtime sharding for `{step_key}`:** its {result['files']} files "
-            f"fit in one job ({result['estimates'][0] / 60:.1f} min of tests)."
+            f"fit in one job ({result['estimates'][0] / 60:.1f} min of tests, "
+            f"{setup / 60:.1f} min of setup)." + _setup_warning(setup)
         )
     estimates = ", ".join(f"{s / 60:.1f}" for s in result["estimates"])
     source = result["timingSource"]
@@ -466,7 +477,8 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
     text = (
         f"**Runtime sharding for `{step_key}`:** {result['shards']} shards for "
         f"{result['files']} files; estimated test time per shard (min): "
-        f"{estimates}. Timings: median of {builds} main build"
+        f"{estimates}, after {setup / 60:.1f} min of setup in each. Timings: "
+        f"median of {builds} main build"
         f"{'s' if builds != 1 else ''}, the newest {source.get('buildNumber')}."
     )
     if result["unknownFiles"]:
@@ -488,9 +500,23 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
     if result["overBudget"]:
         text += (
             f" :warning: At {result['shards']} shards, the most allowed, a shard "
-            f"is still over {MAX_SHARD_SECONDS / 60:.0f} min of test time."
+            f"is still over {MAX_SHARD_SECONDS / 60:.0f} min with its setup."
         )
-    return text
+    return text + _setup_warning(setup)
+
+
+def setup_too_long(result: Optional[Dict]) -> bool:
+    return bool(result) and result.get("setupSeconds", 0) > MAX_SETUP_SECONDS
+
+
+def _setup_warning(setup: float) -> str:
+    if setup <= MAX_SETUP_SECONDS:
+        return ""
+    return (
+        f" :warning: Setup takes {setup / 60:.1f} min per job on main, over the "
+        f"{MAX_SETUP_SECONDS / 60:.0f}-min limit: worth checking why. The plan "
+        f"charges {MAX_SETUP_SECONDS / 60:.0f} min of it."
+    )
 
 
 def plan_step(
