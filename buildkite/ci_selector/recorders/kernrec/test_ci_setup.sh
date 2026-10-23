@@ -120,7 +120,8 @@ if mode in {"rocm", "rocm10", "rocm-spawn"}:
 elif mode == "cuda":
     assert initial["cuda"] == str(root / "cache/libkernrec.so")
     assert initial["preload"] == previous_preload
-    assert initial["worker_method"] is initial["worker_shutdown"] is None
+    assert initial["worker_method"] is None
+    assert initial["worker_shutdown"] == "30"
 else:
     assert final["collection_error"]
     assert initial["preload"] == previous_preload

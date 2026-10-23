@@ -122,6 +122,7 @@ PY
         export LD_LIBRARY_PATH="$cupti${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
       fi
       export CUDA_INJECTION64_PATH="$dir/libkernrec.so"
+      export VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS="${VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS:-30}"
       ;;
     rocm)
       # Torch import initializes the SDK before vLLM's first device call.
