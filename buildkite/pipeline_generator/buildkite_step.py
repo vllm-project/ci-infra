@@ -22,6 +22,8 @@ from amd import (
     get_rocm_base_refresh_timeout,
     is_amd_device,
     is_amd_gpu_device,
+    rocm_build_layout,
+    rocm_ci_repo,
 )
 from step import Step
 from utils_lib.docker_utils import (
@@ -1195,6 +1197,17 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.retry = ensure_amd_stack_error_retry(
                     buildkite_step.retry
                 )
+                if rocm_build_layout():
+                    repo = rocm_ci_repo()
+                    buildkite_step.env = {
+                        **(buildkite_step.env or {}),
+                        "ROCM_CI_REPO": repo,
+                    }
+                    # Not in the uploader's environment, so resolve it here.
+                    if step.concurrency_group:
+                        buildkite_step.concurrency_group = (
+                            step.concurrency_group.replace("$ROCM_CI_REPO", repo)
+                        )
             if step.key == AMD_ROCM_BASE_REFRESH_STEP_KEY:
                 refresh_env = dict(buildkite_step.env or {})
                 refresh_env.update(get_rocm_base_refresh_env())
