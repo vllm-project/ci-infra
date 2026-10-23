@@ -20,6 +20,7 @@ def test_direct_optional_amd_job_does_not_hold_collection(
 ):
     """Optional steps are deferred (excluded from collection) until nightly."""
     monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
     fake_global_config.update(run_all=True, nightly="1" if nightly else "0")
     regular = Step(
@@ -82,7 +83,12 @@ def test_collection_skips_deferred_steps(recorder, reverse):
         buildkite_step.BuildkiteGroupStep(
             group="Workers",
             steps=[
-                command("deferred-downstream", ["deferred-worker"], parallelism=2, deferred=True),
+                command(
+                    "deferred-downstream",
+                    ["deferred-worker"],
+                    parallelism=2,
+                    deferred=True,
+                ),
                 command("deferred-worker", parallelism=4, deferred=True),
                 command("unrelated", ["automatic-image"], parallelism=3),
             ],

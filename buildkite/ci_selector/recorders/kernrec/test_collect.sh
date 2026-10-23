@@ -15,6 +15,8 @@
 #   6. rerun of a commit already published, this time with a corrupt map
 #      -> exit 1 and every byte already under S3 (pair + latest.json) untouched
 #      (Codex P2 on #620: the commit prefix is written as a unit)
+#   9. rerun of a commit already published, this time with no usable row
+#      (every job failed) -> exit 1 and S3 untouched, like 6
 #
 # Real Python is used for kernel_table.py; only network/cloud commands are
 # faked. Set KERNREC_PYTHON to the project's virtual-environment interpreter.
@@ -31,10 +33,11 @@ run_case() { # name expect_exit expect_latest(yes|no) expect_commit_upload(yes|n
   local T; T=$(mktemp -d)
   mkdir -p "$T/bin" "$T/s3" "$T/artifacts" "$T/build/.kernrec/job-a"
   # a recording + sidecar for one non-parallel step
-  printf '# kernrec v1 pid=1 ppid=0 exe=python\nkernA\n# end records=1 unique=1 dropped=0\n' > "$T/build/.kernrec/job-a/kern.1.txt"
+  printf '# kernrec v1 backend=cuda recorder=cupti pid=1 ppid=0 exe=python\nkernA\n# end records=1 unique=1 dropped=0 errors=0 unresolved=0\n' > "$T/build/.kernrec/job-a/kern.1.txt"
   echo '{"step_key":"step-x","exit_status":0,"parallel_job":"","parallel_job_count":""}' > "$T/build/.kernrec/job-a/kernrec.json"
   # no-rows: a recording that cannot be filed (blank step key) -> a table with no rows
   [[ "$mode" == "no-rows" ]] && echo '{"step_key":"","exit_status":0}' > "$T/build/.kernrec/job-a/kernrec.json"
+  [[ "$mode" == "unusable-rerun" ]] && echo '{"step_key":"step-x","exit_status":1}' > "$T/build/.kernrec/job-a/kernrec.json"
   # a usable symbol map unless the case says otherwise
   if [[ "$mode" != "no-map" ]]; then
     "$KERNREC_PYTHON" - "$T/build/kernel_symbol_map.json.gz" <<'PY'
@@ -61,13 +64,13 @@ PY
     printf 'invalid map' > "$T/build/kernel_symbol_map.rocm.json.gz"
   fi
   # rerun: an earlier build already published a valid pair for this commit and
-  # latest.json points at it; this build's map is garbage
-  if [[ "$mode" == "corrupt-map-rerun" || "$mode" == both-bad-cuda ]]; then
+  # latest.json points at it; this build's map is garbage (or its table unusable)
+  if [[ "$mode" == "corrupt-map-rerun" || "$mode" == both-bad-cuda || "$mode" == "unusable-rerun" ]]; then
     mkdir -p "$T/s3/bkt/ci/kernrec/abc"
     cp "$T/build/kernel_symbol_map.json.gz" "$T/s3/bkt/ci/kernrec/abc/"
     printf 'table from build 41' | gzip > "$T/s3/bkt/ci/kernrec/abc/kernel_table.json.gz"
     echo '{"commit":"abc","build":41}' > "$T/s3/bkt/ci/kernrec/latest.json"
-    printf 'this is not gzip' > "$T/build/kernel_symbol_map.json.gz"
+    [[ "$mode" == "unusable-rerun" ]] || printf 'this is not gzip' > "$T/build/kernel_symbol_map.json.gz"
   fi
   local s3_before; s3_before=$(s3_digest "$T/s3")
   local cuda_before=""
@@ -156,6 +159,7 @@ run_case no-builder        1 no  no  no-builder
 run_case no-rows           1 no  no  no-rows
 run_case no-identity       0 no  no  no-identity
 run_case corrupt-map-rerun 1 yes yes corrupt-map-rerun yes
+run_case unusable-rerun    1 yes yes unusable-rerun yes
 run_case fork-branch       0 no  no  fork-branch yes
 run_case other-build       0 yes yes other-build
 run_case rocm-only         0 no  no  rocm-only no yes

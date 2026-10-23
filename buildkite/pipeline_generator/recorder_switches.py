@@ -13,11 +13,16 @@ the docker plugin cannot import back into.
 import os
 
 KERNREC_ENV_VAR = "VLLM_CI_KERNREC"
+KERNREC_AMD_ENV_VAR = "VLLM_CI_KERNREC_AMD"
 FNREC_ENV_VAR = "VLLM_CI_FNREC"
 
 
 def kernrec_enabled() -> bool:
     return os.getenv(KERNREC_ENV_VAR, "") == "1"
+
+
+def kernrec_amd_enabled() -> bool:
+    return os.getenv(KERNREC_AMD_ENV_VAR, "") == "1"
 
 
 def fnrec_enabled() -> bool:

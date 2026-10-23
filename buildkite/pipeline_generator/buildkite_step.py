@@ -33,7 +33,7 @@ from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
-from recorder_switches import fnrec_enabled, kernrec_enabled
+from recorder_switches import fnrec_enabled, kernrec_amd_enabled, kernrec_enabled
 import runtime_shard
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
@@ -473,12 +473,15 @@ KERNREC_SKIP_STEPS = {
 
 def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool:
     """Whether the step can load a backend-specific kernel recorder."""
+    if setup_profile == "amd":
+        enabled = kernrec_amd_enabled() and not (step.num_nodes and step.num_nodes > 1)
+    else:
+        enabled = kernrec_enabled()
     return (
-        kernrec_enabled()
+        enabled
         and not step.no_plugin
         and not step.label.startswith(":docker:")
         and step.key not in KERNREC_SKIP_STEPS
-        and not (setup_profile == "amd" and step.num_nodes and step.num_nodes > 1)
     )
 
 
@@ -1189,7 +1192,9 @@ def convert_group_step_to_buildkite_step(
 
             if step.env:
                 buildkite_step.env = step.env
-            if kernrec_enabled() and step_key in {"image-build", "image-build-amd"}:
+            if (kernrec_enabled() and step_key == "image-build") or (
+                kernrec_amd_enabled() and step_key == "image-build-amd"
+            ):
                 buildkite_step.env = {
                     **(buildkite_step.env or {}),
                     "VLLM_KERNEL_SYMBOL_MAP": "1",

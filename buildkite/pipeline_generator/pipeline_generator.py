@@ -20,6 +20,7 @@ from buildkite_step import (
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
     kernrec_collect_group,
+    kernrec_amd_enabled,
     kernrec_enabled,
     create_precommit_group_step,
     split_deferred_steps,
@@ -154,7 +155,7 @@ class PipelineGenerator:
         # Both recorders share one group, so they don't make two groups
         # with the same name.
         collect = []
-        if kernrec_enabled():
+        if kernrec_enabled() or kernrec_amd_enabled():
             collect += kernrec_collect_group(buildkite_group_steps).steps
         if fnrec_enabled():
             collect += fnrec_collect_group(buildkite_group_steps).steps

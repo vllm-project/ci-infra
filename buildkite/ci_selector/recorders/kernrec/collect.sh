@@ -4,7 +4,7 @@
 # publish both.
 #
 # Runs on a small CPU agent after every other step (the pipeline generator
-# appends it when VLLM_CI_KERNREC=1). Needs nothing from the Buildkite API:
+# appends it when VLLM_CI_KERNREC=1 or VLLM_CI_KERNREC_AMD=1). Needs nothing from the Buildkite API:
 # the recordings arrive as this build's own artifacts, and each job's
 # kernrec.json sidecar (written by ci_setup.sh on exit) names its step and
 # exit status.
@@ -12,8 +12,8 @@
 # Publishes to two places. Always: the table and the map as artifacts of this
 # job, whatever state they are in, for debugging. Each backend publishes
 # independently, only when both its table and map validate
-# (table has rows, map has objects and no failure reason) and the agent has
-# AWS credentials:
+# (table has a usable row, map has objects and no failure reason) and the
+# agent has AWS credentials:
 #
 #   s3://$CI_SELECTOR_BUCKET/<pipeline>/<commit>/kernel_table.json.gz
 #   s3://$CI_SELECTOR_BUCKET/<pipeline>/<commit>/kernel_symbol_map.json.gz
@@ -90,6 +90,7 @@ for backend in cuda rocm; do
 import gzip
 import json
 import sys
+from kernel_table import usable
 try:
     backend, table, symbols, commit = sys.argv[1:]
     with gzip.open(table, "rt") as stream:
@@ -97,16 +98,17 @@ try:
     with gzip.open(symbols, "rt") as stream:
         symbols = json.load(stream)
     valid = (
-        bool(table.get("rows"))
+        any(usable(row) for row in table["rows"].values())
         and all(row.get("backend", "cuda") in {backend, "unknown"}
                 for row in table["rows"].values())
+        and symbols.get("version") in (1, 2)
         and bool(symbols.get("objects"))
         and not symbols.get("reason")
         and symbols.get("backend", "cuda") == backend
         and symbols.get("commit") == commit
     )
     print("yes" if valid else "no")
-except (OSError, EOFError, ValueError, TypeError, AttributeError):
+except (OSError, EOFError, KeyError, ValueError, TypeError, AttributeError):
     print("no")
 PY
   )

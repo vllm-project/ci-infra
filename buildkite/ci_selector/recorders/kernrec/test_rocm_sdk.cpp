@@ -4,6 +4,7 @@
 #include <cassert>
 #include <fstream>
 #include <iterator>
+#include <sys/resource.h>
 #include <sys/wait.h>
 
 using Symbol = rocprofiler_callback_tracing_code_object_kernel_symbol_register_data_t;
@@ -110,5 +111,18 @@ int main(int argc, char** argv) {
   assert(text.find("# error=missing_buffer_headers\n") != std::string::npos);
   assert(text.find("# end records=7 unique=2 dropped=5 errors=1 unresolved=1\n") !=
          std::string::npos);
+
+  // A full disk after the header must not hide the process going active.
+  child = fork();
+  assert(child >= 0);
+  if (child == 0) {
+    assert(rocprofiler_configure(ROCPROFILER_SDK_VERSION, "", 0, &client));
+    signal(SIGXFSZ, SIG_IGN);
+    rlimit full{static_cast<rlim_t>(contents(getpid()).size()), RLIM_INFINITY};
+    assert(setrlimit(RLIMIT_FSIZE, &full) == 0);
+    symbol(1, "_Z4usedv.kd");
+    _exit(contents(getpid()).empty() ? 0 : 1);
+  }
+  assert(waitpid(child, &status, 0) == child && status == 0);
   puts("ROCm SDK callback contract checks passed");
 }

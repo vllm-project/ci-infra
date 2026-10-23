@@ -62,10 +62,15 @@ bool write_all(int fd, const char* data, size_t size) {
 
 void output(const char* data, size_t size) {
   if (state->fd >= 0 && !write_all(state->fd, data, size)) {
+    int error = errno;
     ++state->errors;
+    // Without its later lines a recording can pass for an idle process, so
+    // leave an empty, unclean one instead.
+    if (ftruncate(state->fd, 0) != 0)
+      fprintf(stderr, "kernrec-rocm: cannot discard recording: %s\n", strerror(errno));
     close(state->fd);
     state->fd = -1;
-    fprintf(stderr, "kernrec-rocm: cannot write recording: %s\n", strerror(errno));
+    fprintf(stderr, "kernrec-rocm: cannot write recording: %s\n", strerror(error));
   }
 }
 

@@ -115,17 +115,25 @@ def test_on_leaves_no_plugin_steps_alone(monkeypatch):
     assert not _artifact_paths(rendered)
 
 
-@pytest.mark.parametrize("key", ["image-build", "image-build-amd"])
+@pytest.mark.parametrize(
+    "key,switch,other",
+    [
+        ("image-build", "KERNREC_ENV_VAR", "KERNREC_AMD_ENV_VAR"),
+        ("image-build-amd", "KERNREC_AMD_ENV_VAR", "KERNREC_ENV_VAR"),
+    ],
+)
 def test_recorder_opt_in_requests_matching_build_symbol_maps(
-    monkeypatch, fake_global_config, key
+    monkeypatch, fake_global_config, key, switch, other
 ):
-    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(getattr(recorder_switches, switch), "1")
+    monkeypatch.delenv(getattr(recorder_switches, other), raising=False)
     fake_global_config["run_amd"] = True
     step = _gpu_step(key=key, label=":docker: build image", env={"EXISTING": "value"})
     rendered = _render(step)
     assert rendered.env == {"EXISTING": "value", "VLLM_KERNEL_SYMBOL_MAP": "1"}
     assert not any("kernrec" in command for command in _commands(rendered))
-    monkeypatch.delenv(recorder_switches.KERNREC_ENV_VAR)
+    monkeypatch.delenv(getattr(recorder_switches, switch))
+    monkeypatch.setenv(getattr(recorder_switches, other), "1")
     assert _render(step).env == {"EXISTING": "value"}
 
 
@@ -181,6 +189,7 @@ def test_collect_group_waits_for_both_recording_backends_and_their_images(
 ):
     """Armed AMD mirrors now contribute recordings, host-only steps do not."""
     monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
     fake_global_config["nightly"] = "1"
     fake_global_config["run_amd"] = True
     groups = _rendered_groups(
@@ -211,7 +220,7 @@ def test_collect_group_waits_for_both_recording_backends_and_their_images(
 def test_amd_uses_rocm_setup_artifacts_and_finish(
     monkeypatch, fake_global_config, mirror
 ):
-    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
     fake_global_config["run_amd"] = True
     fake_global_config["nightly"] = "1"
     step = _gpu_step(
@@ -240,6 +249,7 @@ def test_amd_multinode_mirrors_stay_unarmed_without_affecting_cuda(
     monkeypatch, fake_global_config, nodes
 ):
     monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
     fake_global_config["run_amd"] = True
     fake_global_config["nightly"] = "1"
     groups = _rendered_groups(
@@ -255,6 +265,32 @@ def test_amd_multinode_mirrors_stay_unarmed_without_affecting_cuda(
     (collect,) = buildkite_step.kernrec_collect_group(groups).steps
     waits_for = collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()
     assert ("amd-kernels" in waits_for) is armed
+
+
+@pytest.mark.parametrize("cuda,amd", [(1, 0), (0, 1)])
+def test_cuda_and_amd_switches_arm_their_backend_alone(
+    monkeypatch, fake_global_config, cuda, amd
+):
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, str(cuda))
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, str(amd))
+    fake_global_config["run_amd"] = True
+    fake_global_config["nightly"] = "1"
+    groups = _rendered_groups(
+        _gpu_step(key="image-build", label=":docker: build image"),
+        _gpu_step(key="image-build-amd", label=":docker: build image"),
+        _gpu_step(
+            key="kernels",
+            depends_on=["image-build"],
+            mirror={"amd": {"device": "mi300_1", "depends_on": ["image-build-amd"]}},
+        ),
+    )
+    steps = {step.key: step for group in groups for step in group.steps}
+    assert buildkite_step._carries(steps["kernels"], "kernrec") is bool(cuda)
+    assert buildkite_step._carries(steps["amd-kernels"], "kernrec") is bool(amd)
+    (collect,) = buildkite_step.kernrec_collect_group(groups).steps
+    armed = ["amd-kernels"] if amd else ["kernels"]
+    assert collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split() == armed
+    assert collect.depends_on == [steps[armed[0]].depends_on[0]]
 
 
 def test_collect_group_skips_deferred_steps(monkeypatch, fake_global_config):
@@ -354,7 +390,7 @@ def test_amd_multiline_commands_preserve_state_status_and_recorder_epilogues(
     command,
     returncode,
 ):
-    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, str(kernrec))
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, str(kernrec))
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, str(fnrec))
     monkeypatch.delenv("CONTINUE_ON_FAILURE", raising=False)
     fake_global_config["run_all"] = True

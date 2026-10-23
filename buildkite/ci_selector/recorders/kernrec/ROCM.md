@@ -13,7 +13,7 @@ Use the ROCm CI image's ROCProfiler SDK headers and runtime: **1.3.2** (ROCm 7.2
 revision. The recorder rejects other SDK versions until they have been validated.
 A C++17 compiler is needed to build the small injection library in the image.
 
-`VLLM_CI_KERNREC=1` enables recording on eligible AMD steps. Native
+`VLLM_CI_KERNREC_AMD=1` enables recording on eligible AMD steps. Native
 jobs and single-node Docker jobs are supported; multi-node AMD jobs remain
 unarmed until remote injection and artifact collection are validated. On AMD,
 `ci_setup.sh` builds the recorder against the installed SDK and checks the runtime
