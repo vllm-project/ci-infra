@@ -12,7 +12,8 @@ timeout 30 systemctl stop buildkite-agent 2>/dev/null \
   || true
 
 apt-get update
-apt-get install -y curl jq git python3
+apt-get install -y curl jq git git-lfs python3
+git lfs install --system --skip-repo || true
 
 if ! command -v docker >/dev/null; then
   curl -fsSL https://get.docker.com/ | bash -
@@ -59,9 +60,12 @@ EOF
 # checked out over HTTPS, which this hook leaves alone.
 cat <<'EOF' > /etc/buildkite-agent/hooks/pre-checkout
 #!/bin/bash
+if [ -n "$${BUILDKITE_BUILD_CHECKOUT_PATH:-}" ] && [ -d "$${BUILDKITE_BUILD_CHECKOUT_PATH}/.git/hooks" ]; then
+  rm -f "$${BUILDKITE_BUILD_CHECKOUT_PATH}/.git/hooks/"{post-checkout,post-commit,post-merge,pre-push} 2>/dev/null || true
+fi
 case "$BUILDKITE_REPO" in
   git@github.com:vllm-project/vllm-torchtpu.git|ssh://git@github.com/vllm-project/vllm-torchtpu.git)
-    key_file=$(mktemp)
+    key_file=$(mktemp /tmp/buildkite-agent-deploy-key.XXXXXX)
     if buildkite-agent secret get VLLM_TORCHTPU_DEPLOY_KEY > "$key_file" && [ -s "$key_file" ]; then
       export GIT_SSH_COMMAND="ssh -i $key_file -o IdentitiesOnly=yes -o BatchMode=yes"
       export VLLM_TORCHTPU_DEPLOY_KEY_FILE="$key_file"
@@ -111,8 +115,7 @@ sed -i '/^tags=/d' /etc/buildkite-agent/buildkite-agent.cfg
 echo 'tags="queue=${buildkite_queue_name}"' >> /etc/buildkite-agent/buildkite-agent.cfg
 
 ${keep_agent_connected}
-
-systemctl restart docker
+${docker_cache_cleanup}
 
 systemctl unmask buildkite-agent
 systemctl enable buildkite-agent

@@ -457,7 +457,7 @@ def test_header_included_by_host_code_selects_but_never_drops(
 def test_unreadable_object_blocks_drops_for_its_files(tmp_path):
     ev = _evidence(
         tmp_path,
-        {"silent": {"kernels": []}},
+        {"silent": {"kernels": ["kOther"]}},
         [_obj("csrc/bad.cu", [], error="cuobjdump failed"), _obj("csrc/a.cu", ["kA"])],
     )
     sel = _selection({"csrc/bad.cu": ["silent"]})
@@ -466,7 +466,9 @@ def test_unreadable_object_blocks_drops_for_its_files(tmp_path):
 
 
 def test_file_outside_the_map_leaves_the_map_alone(tmp_path):
-    ev = _evidence(tmp_path, {"silent": {"kernels": []}}, [_obj("csrc/a.cu", ["kA"])])
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kOther"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
     sel = _selection({"csrc/cpu/attention.cpp": ["silent"]})
     r = _read(ev, sel, ["csrc/cpu/attention.cpp", "docs/x.md"], _keys("silent"))
     assert r.dropped == [] and r.added == []
@@ -481,7 +483,7 @@ def test_file_outside_the_map_leaves_the_map_alone(tmp_path):
 def test_unmatched_pair_and_stale_file_only_select(tmp_path):
     ev = _evidence(
         tmp_path,
-        {"silent": {"kernels": []}, "missed": {"kernels": ["kA"]}},
+        {"silent": {"kernels": ["kOther"]}, "missed": {"kernels": ["kA"]}},
         [_obj("csrc/a.cu", ["kA"])],
         table_commit="abc",
         map_commit="def",
@@ -500,7 +502,9 @@ def test_unmatched_pair_and_stale_file_only_select(tmp_path):
 
 
 def test_python_record_positive_evidence_holds_the_step(tmp_path):
-    ev = _evidence(tmp_path, {"silent": {"kernels": []}}, [_obj("csrc/a.cu", ["kA"])])
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kOther"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
     sel = _selection({"csrc/a.cu": ["silent"]})
     r = _read(
         ev, sel, ["csrc/a.cu"], _keys("silent"), protected=frozenset({"vllm_ci:silent"})
@@ -513,8 +517,8 @@ def test_a_drop_needs_every_selecting_file_cleared(tmp_path):
         tmp_path,
         {
             "runs-b": {"kernels": ["kB"]},
-            "runs-none": {"kernels": []},
-            "runs-none-2": {"kernels": []},
+            "runs-none": {"kernels": ["kOther"]},
+            "runs-none-2": {"kernels": ["kOther"]},
         },
         [
             _obj("csrc/a.cu", ["kA"]),
@@ -591,6 +595,114 @@ def test_attribution_narrows_a_file_to_its_changed_kernels(tmp_path):
     assert declined.dropped == [] and "whole file" in declined.files["csrc/a.cu"]
 
 
+def test_declarations_narrow_a_header_host_code_includes(tmp_path):
+    """`ops.h` changed only a prototype. The header is included by bindings
+    code without kernels, so read whole it may only select; read as the
+    declaration of `launch_a` it is kA alone, and may drop."""
+    objects = [
+        _obj("csrc/a.cu", ["kA", "kB"], deps=["csrc/ops.h"]),
+        _obj("csrc/bindings.cpp", [], deps=["csrc/ops.h"]),
+    ]
+    rows = {"runs-a": {"kernels": ["kA"]}, "runs-b": {"kernels": ["kB"]}}
+    ev = _evidence(tmp_path, rows, objects)
+    sel = _selection({"csrc/ops.h": ["runs-a", "runs-b"]})
+    keys = _keys("runs-a", "runs-b")
+    whole = _read(ev, sel, ["csrc/ops.h"], keys)
+    assert whole.dropped == [] and "may only select" in whole.files["csrc/ops.h"]
+    declared = _read(
+        ev,
+        sel,
+        ["csrc/ops.h"],
+        keys,
+        declarations=lambda p: (frozenset({"kA"}), "declares launch_a"),
+    )
+    assert declared.dropped == ["vllm_ci:runs-b"]
+    assert declared.reasons["file-narrowed-to-declared-kernels"] == 1
+    assert declared.files["csrc/ops.h"] == (
+        "1 kernel symbols (declares launch_a); may select and drop"
+    )
+
+
+def test_bindings_with_no_kernels_narrow_through_the_whole_map(tmp_path):
+    """`torch_bindings.cpp` compiles no kernel, so its own symbols are empty;
+    the declared names are looked up across every object."""
+    objects = [
+        _obj("csrc/a.cu", ["kA"]),
+        _obj("csrc/b.cu", ["kB"]),
+        _obj("csrc/torch_bindings.cpp", []),
+    ]
+    rows = {"runs-a": {"kernels": ["kA"]}, "runs-b": {"kernels": ["kB"]}}
+    ev = _evidence(tmp_path, rows, objects)
+    sel = _selection({"csrc/torch_bindings.cpp": ["runs-a", "runs-b"]})
+    r = _read(
+        ev,
+        sel,
+        ["csrc/torch_bindings.cpp"],
+        _keys("runs-a", "runs-b"),
+        declarations=lambda p: (frozenset({"kA"}), "declares launch_a"),
+    )
+    assert r.dropped == ["vllm_ci:runs-b"]
+
+
+def test_declarations_need_a_witness_and_a_readable_map(tmp_path):
+    """No usable row launched the declared kernels: a schema that fails to
+    load would fail nothing that runs, so the file stays whole. An object the
+    producer could not read still blocks drops for its files."""
+    objects = [
+        _obj("csrc/a.cu", ["kA", "kB"], deps=["csrc/ops.h"]),
+        _obj("csrc/bindings.cpp", [], deps=["csrc/ops.h"]),
+    ]
+    keys = _keys("runs-a", "runs-b")
+    sel = _selection({"csrc/ops.h": ["runs-a", "runs-b"]})
+    narrow = {"declarations": lambda p: (frozenset({"kA"}), "declares launch_a")}
+
+    failed = {
+        "runs-a": {"kernels": ["kA"], "passed": False},
+        "runs-b": {"kernels": ["kB"]},
+    }
+    r = _read(_evidence(tmp_path, failed, objects), sel, ["csrc/ops.h"], keys, **narrow)
+    assert r.dropped == [] and "no usable row launched them" in r.files["csrc/ops.h"]
+
+    unreadable = [*objects, _obj("csrc/c.cu", deps=["csrc/ops.h"], error="truncated")]
+    rows = {"runs-a": {"kernels": ["kA"]}, "runs-b": {"kernels": ["kB"]}}
+    r = _read(
+        _evidence(tmp_path, rows, unreadable), sel, ["csrc/ops.h"], keys, **narrow
+    )
+    assert r.dropped == [] and "could not be read" in r.files["csrc/ops.h"]
+
+
+def test_a_step_the_python_record_cleared_drops_on_its_csrc_files(tmp_path):
+    """Selected for a kernel file and a Python file. The kernel record cannot
+    weigh the Python file, so it held the step; once the Python record has
+    cleared that file (`python_cleared`), the kernel file is all that is left."""
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kZ"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
+    sel = _selection({"csrc/a.cu": ["silent"], "vllm/_custom_ops.py": ["silent"]})
+    keys = _keys("silent")
+    held = _read(ev, sel, ["csrc/a.cu", "vllm/_custom_ops.py"], keys)
+    assert held.dropped == []
+    assert held.reasons["selected-by-a-file-outside-the-map"] == 1
+    cleared = _read(
+        ev,
+        sel,
+        ["csrc/a.cu", "vllm/_custom_ops.py"],
+        keys,
+        python_cleared=frozenset({"vllm_ci:silent"}),
+    )
+    assert cleared.dropped == ["vllm_ci:silent"]
+    # still every gate on its own files: an image builder stays
+    built = _read(
+        ev,
+        sel,
+        ["csrc/a.cu", "vllm/_custom_ops.py"],
+        keys,
+        held=lambda p: {"vllm_ci:silent"},
+        python_cleared=frozenset({"vllm_ci:silent"}),
+    )
+    assert built.dropped == []
+
+
 # --- decide() wiring --------------------------------------------------------------
 
 
@@ -630,8 +742,8 @@ def test_decide_applies_the_kernel_record(tmp_path, csrc_diff, monkeypatch):
         tmp_path,
         {
             "launched": {"kernels": ["kA"]},
-            "silent": {"kernels": []},
-            "declared": {"kernels": []},
+            "silent": {"kernels": ["kOther"]},
+            "declared": {"kernels": ["kOther"]},
         },
         [_obj("csrc/a.cu", ["kA"])],
     )
@@ -699,7 +811,7 @@ def test_decide_unmatched_pair_drops_only_on_opt_in(tmp_path, csrc_diff, monkeyp
     root, base, head = csrc_diff
     ev = _evidence(
         tmp_path,
-        {"silent": {"kernels": []}},
+        {"silent": {"kernels": ["kOther"]}},
         [_obj("csrc/a.cu", ["kA"])],
         map_commit="def",
     )
@@ -722,7 +834,9 @@ def test_decide_without_a_state_or_with_bad_evidence_changes_nothing(
     tmp_path, csrc_diff
 ):
     root, base, head = csrc_diff
-    ev = _evidence(tmp_path, {"silent": {"kernels": []}}, [_obj("csrc/a.cu", ["kA"])])
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kOther"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
     sel = _selection({"csrc/a.cu": ["silent"]})
     d = decide(
         None, sel, root, base, head, table=Table(None, unavailable="x"), kernels=ev
@@ -837,9 +951,11 @@ def test_combined_backend_records_preserve_observations(
 ):
     """CUDA silence cannot override an AMD observation or incomplete AMD row."""
     root, base, head = csrc_diff
+    # CUDA rows that launched kernels, none of them from the changed file: an
+    # empty kernel set is no evidence at all (row-launched-no-kernel-at-all).
     cuda = _evidence(
         tmp_path,
-        {"shared": {"kernels": []}, "cuda-only": {"kernels": []}},
+        {"shared": {"kernels": ["kOther"]}, "cuda-only": {"kernels": ["kOther"]}},
         [_obj("csrc/a.cu", ["kA"])],
     )
     amd_dir = tmp_path / "amd"
@@ -911,3 +1027,19 @@ def test_invalid_health_types_cannot_authorize_kernel_drops(tmp_path, field, val
     payload = json.loads(gzip.decompress(path.read_bytes()))
     payload["rows"]["s"][field] = value
     assert not load_table(_gz(path, payload)).available
+
+
+def test_a_row_that_launched_no_kernel_at_all_never_drops(tmp_path):
+    """An ABI audit, a CPU job or a dependency check records an empty kernel
+    set. That silence is about no kernel in particular: such a step reaches
+    csrc some other way (`torch-stable-abi-audit` reads the built library),
+    so it keeps whatever changed."""
+    ev = _evidence(
+        tmp_path,
+        {"audit": {"kernels": []}, "gpu": {"kernels": ["kOther"]}},
+        [_obj("csrc/a.cu", ["kA"])],
+    )
+    sel = _selection({"csrc/a.cu": ["audit", "gpu"]})
+    r = _read(ev, sel, ["csrc/a.cu"], _keys("audit", "gpu"))
+    assert r.dropped == ["vllm_ci:gpu"]
+    assert r.reasons["row-launched-no-kernel-at-all"] == 1

@@ -212,6 +212,10 @@ class Reading:
     dropped: list[str] = field(default_factory=list)
     kept: list[str] = field(default_factory=list)
     reasons: Counter = field(default_factory=Counter)
+    # Kept steps this record clears once the csrc files it defers to the
+    # kernel record are set aside (`deferred`). Read by that record: it may
+    # drop one of these when it clears those files itself.
+    cleared: list[str] = field(default_factory=list)
     # Steps the record removed whose CI job actually failed. The number that matters
     # more than any ratio in this file.
     dropped_and_failed: list[str] = field(default_factory=list)
@@ -313,6 +317,7 @@ def read_pr(
     failed_missed: dict[str, str] | None = None,
     reached_via: dict[str, frozenset[str]] | None = None,
     platform_mockers: dict[str, frozenset[str]] | None = None,
+    deferred: frozenset[str] = frozenset(),
 ) -> Reading:
     """The record over one PR's map selection.
 
@@ -326,6 +331,10 @@ def read_pr(
     git read per file and both want the same answer. So does `reached_via`: a
     new file the record has never seen, mapped to the known files a step must
     import to run it.
+
+    `deferred` are changed csrc files the kernel record answers for. Steps
+    this reading keeps get a second look with those set aside
+    (`_clear_deferred`); the ones it clears land in `cleared`, still kept.
     """
     reading = Reading()
     via = reached_via or {}
@@ -408,82 +417,39 @@ def read_pr(
             reading.kept.append(step_id)
             reading.reasons["no-attributed-file"] += 1
             continue
-        # Every file the map picked this step for changed without changing
-        # behaviour: line endings, or annotations and layout the code does not
-        # see. There is nothing for the step to test.
-        preserving = set(query.inert) | set(query.eol_only)
-        if preserving and scope <= preserving:
-            reading.dropped.append(step_id)
-            reading.reasons["only-behaviour-preserving-changes"] += 1
-            if set(matched.get(step_id, ())) & failed:
-                reading.dropped_and_failed.append(step_id)
-            continue
-        if foreign and scope <= preserving | foreign:
-            # What is left runs only on another family's hardware.
-            reading.dropped.append(step_id)
-            reading.reasons["changed-code-runs-on-another-platform"] += 1
-            if set(matched.get(step_id, ())) & failed:
-                reading.dropped_and_failed.append(step_id)
-            continue
-        scope = scope - foreign
+        verdict, why = _weigh(
+            table, query, key, scope, foreign, unresolved, known_files, via, mode
+        )
         # Counted so a stand-in that never fires cannot pass for one that
-        # fired and found nothing.
-        if proxy_paths and scope & proxy_paths:
+        # fired and found nothing. The two early drops never consult one.
+        consulted = bool(proxy_paths & (scope - foreign)) and why not in _EARLY_DROPS
+        if consulted:
             reading.reasons["proxy-evidence-consulted"] += 1
-
-        scoped = query.restrict(scope)
-        # The unknown-name gates, per step and not per PR. Whole-diff was the
-        # same mistake as the fail-open: an unknown name in a file unrelated to
-        # this step's selection kept every step on the PR.
-        local = {p: n for p, n in unresolved.items() if p in scope}
-        unseen = [p for p in local if p not in known_files and p not in via]
-        if unseen:
-            reading.kept.append(step_id)
-            reading.reasons["unknown-code-blocks-narrowing"] += 1
-            continue
-
-        # A row recorded before the recorder wrote tests/ holds no tests/ name
-        # at all, and its silence about one is no evidence. Tables merge rows
-        # across builds, so old and new rows can sit side by side. The same
-        # recorder change started writing `#pkg` lines, so a row with no
-        # packages is an old row. Having no tests/ path is not the sign: a
-        # step that runs only scripts (examples, lm-eval) enters none.
-        row = table.row(key)
-        if (
-            row is not None
-            and any(
-                f.path in scope and f.path.startswith(TESTS_SCOPE) and f.in_recorder_scope
-                for f in query.files
-            )
-            and not row.stamp.packages
-        ):
-            reading.kept.append(step_id)
-            reading.reasons["row-predates-tests-recording"] += 1
-            continue
-
-        evidence = table.look_up(key, scoped, mode).evidence
-        if evidence.authorizes_drop and local:
-            # The file projection the design specifies under an unknown
-            # function: a step whose row touches a file carrying unknown code
-            # keeps, because that code could be reached from what it does run.
-            # A new file's code runs wherever the files reaching it are
-            # imported, so those stand in for it.
-            touched = set(local).union(*(via.get(p, ()) for p in local))
-            row = table.row(key)
-            if row is not None and any(p in row.functions for p in touched):
-                reading.kept.append(step_id)
-                reading.reasons["file-projection-keeps"] += 1
-                continue
-
-        reading.reasons[evidence.value] += 1
-        if evidence.authorizes_drop:
+        reading.reasons[why] += 1
+        if verdict:
             reading.dropped.append(step_id)
-            if proxy_paths and scope & proxy_paths:
+            if consulted:
                 reading.reasons["proxy-evidence-drop"] += 1
             if set(matched.get(step_id, ())) & failed:
                 reading.dropped_and_failed.append(step_id)
         else:
             reading.kept.append(step_id)
+
+    if deferred:
+        _clear_deferred(
+            table,
+            selection,
+            query,
+            keys,
+            reading,
+            unresolved,
+            known_files,
+            via,
+            mode,
+            stale,
+            deferred,
+            platform_mockers,
+        )
 
     _add_from_rows(
         table,
@@ -496,6 +462,163 @@ def read_pr(
         platform_mockers,
     )
     return reading
+
+
+#: `_weigh`'s verdicts that need no evidence from a row.
+_EARLY_DROPS = frozenset(
+    {"only-behaviour-preserving-changes", "changed-code-runs-on-another-platform"}
+)
+
+
+def _weigh(
+    table: Table,
+    query: Query,
+    key: str,
+    scope: set[str],
+    foreign: frozenset[str] | set[str],
+    unresolved: dict[str, set[str]],
+    known_files: frozenset[str],
+    via: dict[str, frozenset[str]],
+    mode: PhaseMode,
+) -> tuple[bool, str]:
+    """Whether the record may drop a step selected for exactly `scope`, and
+    the reason counter for it. The gates after a step's reasons are known."""
+    # Every file the map picked this step for changed without changing
+    # behaviour: line endings, or annotations and layout the code does not
+    # see. There is nothing for the step to test.
+    preserving = set(query.inert) | set(query.eol_only)
+    if preserving and scope <= preserving:
+        return True, "only-behaviour-preserving-changes"
+    if foreign and scope <= preserving | foreign:
+        # What is left runs only on another family's hardware.
+        return True, "changed-code-runs-on-another-platform"
+    scope = scope - foreign
+
+    scoped = query.restrict(scope)
+    # The unknown-name gates, per step and not per PR. Whole-diff was the
+    # same mistake as the fail-open: an unknown name in a file unrelated to
+    # this step's selection kept every step on the PR.
+    local = {p: n for p, n in unresolved.items() if p in scope}
+    unseen = [p for p in local if p not in known_files and p not in via]
+    if unseen:
+        return False, "unknown-code-blocks-narrowing"
+
+    # A row recorded before the recorder wrote tests/ holds no tests/ name
+    # at all, and its silence about one is no evidence. Tables merge rows
+    # across builds, so old and new rows can sit side by side. The same
+    # recorder change started writing `#pkg` lines, so a row with no
+    # packages is an old row. Having no tests/ path is not the sign: a
+    # step that runs only scripts (examples, lm-eval) enters none.
+    row = table.row(key)
+    if (
+        row is not None
+        and any(
+            f.path in scope and f.path.startswith(TESTS_SCOPE) and f.in_recorder_scope
+            for f in query.files
+        )
+        and not row.stamp.packages
+    ):
+        return False, "row-predates-tests-recording"
+
+    evidence = table.look_up(key, scoped, mode).evidence
+    if evidence.authorizes_drop and local:
+        # The file projection the design specifies under an unknown
+        # function: a step whose row touches a file carrying unknown code
+        # keeps, because that code could be reached from what it does run.
+        # A new file's code runs wherever the files reaching it are
+        # imported, so those stand in for it.
+        touched = set(local).union(*(via.get(p, ()) for p in local))
+        if row is not None and any(p in row.functions for p in touched):
+            return False, "file-projection-keeps"
+    return evidence.authorizes_drop, evidence.value
+
+
+def _clear_deferred(
+    table: Table,
+    selection,
+    query: Query,
+    keys: RowKeys,
+    reading: Reading,
+    unresolved: dict[str, set[str]],
+    known_files: frozenset[str],
+    via: dict[str, frozenset[str]],
+    mode: PhaseMode,
+    stale: frozenset[str],
+    deferred: frozenset[str],
+    platform_mockers: dict[str, frozenset[str]] | None,
+) -> None:
+    """A second reading of the steps the first kept, with the changed csrc
+    files the kernel record answers for set aside: their reasons, and the
+    op-wrapper stand-ins that answer for them here. A step cleared on what is
+    left goes to `reading.cleared` and stays kept; the kernel record drops it
+    if it also clears those files.
+
+    Without this, a PR changing a kernel and a Python file both held every
+    step: this record kept it for the csrc reason it cannot weigh (or for a
+    stand-in covering every op the file binds), the kernel record for the
+    Python file it cannot weigh. Neither answer changes here; the step only
+    becomes the kernel record's to decide.
+
+    Stand-ins are set aside only when every csrc file that can produce one is
+    deferred, since they are not told apart by the file they stand in for.
+    """
+    direct_query = query
+    if any(f.proxy for f in query.files):
+        stand_in_sources = {
+            f.path
+            for f in query.files
+            if not f.proxy
+            and f.path.startswith("csrc/")
+            and not f.path.startswith(("csrc/cpu/", "csrc/rocm/"))
+        }
+        if not stand_in_sources <= deferred:
+            return
+        direct_query = Query(
+            base=query.base,
+            head=query.head,
+            files=[f for f in query.files if not f.proxy],
+        )
+    direct_executes = set(reading.executes) - set(reading.executes_by_proxy)
+    attribution = selection.selected_paths or {}
+    for step_id in reading.kept:
+        if step_id in direct_executes or step_id in stale:
+            continue
+        key = keys.key_for(step_id)
+        reasons = attribution.get(step_id)
+        files = selection.selected_files.get(step_id) or []
+        if key is None or reasons is None or len(files) != len(reasons):
+            continue
+        rest = [r for r, f in zip(reasons, files) if f not in deferred]
+        if len(rest) == len(reasons) and not any(r is None for r in reasons):
+            continue  # nothing deferred: the first reading stands
+        if any(r is None for r in rest):
+            continue
+        scope = {p for r in rest for p in r}
+        if scope:
+            row = table.row(key)
+            foreign = _foreign(query, keys.steps.get(step_id), row, platform_mockers)
+            if row is not None and any(
+                row_shows_use(row, f, name, mode)
+                for f in direct_query.files
+                if f.path not in foreign
+                for name in f.names
+            ):
+                continue
+            verdict, _ = _weigh(
+                table,
+                direct_query,
+                key,
+                scope,
+                foreign,
+                unresolved,
+                known_files,
+                via,
+                mode,
+            )
+            if not verdict:
+                continue
+        reading.cleared.append(step_id)
+        reading.reasons["cleared-pending-kernel-record"] += 1
 
 
 def _add_from_rows(

@@ -1,7 +1,7 @@
 # Agents for the TPU Release Buildkite cluster, which runs only the pipelines
-# that publish images. The Docker Hub tokens are cluster secrets there, so no
-# agent in the TPU cluster can fetch them, and these VMs are the only agents in
-# TPU Release.
+# that publish images and wheels. The Docker Hub tokens are cluster secrets
+# there, so no agent in the TPU cluster can fetch them, and these VMs are the
+# only agents in TPU Release.
 #
 # They run as their own account rather than ci-agent-cpu. Every CI job on the
 # cpu fleets can use ci-agent-cpu, so if it could read the release agent token,
@@ -89,12 +89,13 @@ module "ci_release_vllm_torchtpu" {
   purpose                     = "vllm-torchtpu"
   buildkite_queue_name        = "release-vllm-torchtpu"
   buildkite_token_secret_name = local.release_buildkite_token_secret_name
-  # vllm-torchtpu-nightly-image
-  allowed_pipeline_ids = ["01a03701-56d0-48db-9f8f-ad6c2bb80daf"]
+  # vllm-torchtpu-release: the nightly images and each release's images and
+  # wheels (vllm-torchtpu .buildkite/release/).
+  allowed_pipeline_ids = ["01a15672-1725-440f-8d06-f4fcce00bf1d"]
 
   # A quarter of cpu_64_core, where the three images take 7-8 min. It builds
-  # once a day, so a slower build costs only that build's wall clock, while a
-  # 64-core VM would sit idle the rest of the day.
+  # once a day plus the occasional release, so a slower build costs only that
+  # build's wall clock, while a 64-core VM would sit idle the rest of the day.
   machine_type = "n2d-standard-16"
   disk_size    = 250
 
