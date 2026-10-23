@@ -445,7 +445,7 @@ def test_recording_gives_steps_a_timeout_margin(monkeypatch):
     monkeypatch.delenv(recorder_switches.FNREC_ENV_VAR, raising=False)
     assert _timeout(_render(step)) == 40
     monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
-    assert _timeout(_render(step)) == 50
+    assert _timeout(_render(step)) == 60, "RECORDING_MIN_EXTRA_MINUTES beats 1.25x here"
     assert _timeout(_render(_gpu_step(timeout_in_minutes=40, no_plugin=True))) == 40, (
         "no recorder on the step, no margin"
     )
@@ -473,3 +473,58 @@ def test_collect_waits_for_recording_steps_in_its_command_up_to_a_deadline(
     assert not re.search(
         r"(?<!\$)\$(?!\$)[A-Za-z_({]", step.commands[0].replace("$$", "")
     )
+
+
+def _clear_recorders(monkeypatch):
+    for name in ("KERNREC_ENV_VAR", "KERNREC_AMD_ENV_VAR", "FNREC_ENV_VAR"):
+        monkeypatch.delenv(getattr(recorder_switches, name), raising=False)
+
+
+def _amd_limits(minutes):
+    """Rendered limits of a native AMD step and an AMD mirror, keyed by step key."""
+    groups = _rendered_groups(
+        _gpu_step(mirror={"amd": {"device": "mi300_1", "timeout_in_minutes": minutes}}),
+        _gpu_step(
+            key="native",
+            label=":amd: (MI300) Native",
+            device="mi300_1",
+            dind=False,
+            timeout_in_minutes=minutes,
+        ),
+    )
+    return {s.key: s.timeout_in_minutes for g in groups for s in g.steps}
+
+
+@pytest.mark.parametrize("minutes, expected", [(20, 40), (100, 125)])
+def test_recorded_nvidia_step_gets_the_larger_margin(
+    monkeypatch, fake_global_config, minutes, expected
+):
+    """At least RECORDING_MIN_EXTRA_MINUTES, else the NVIDIA factor."""
+    _clear_recorders(monkeypatch)
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    assert _render(_gpu_step(timeout_in_minutes=minutes)).timeout_in_minutes == expected
+
+
+@pytest.mark.parametrize("minutes, expected", [(20, 40), (55, 110), (200, 360)])
+def test_recorded_amd_steps_get_the_amd_margin(
+    monkeypatch, fake_global_config, minutes, expected
+):
+    """Native AMD steps and AMD mirrors, after the three-hour AMD cap
+    (vllm/ci #96785 timed out two recorded AMD jobs at their plain limits)."""
+    _clear_recorders(monkeypatch)
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    fake_global_config["run_amd"] = True
+    limits = _amd_limits(minutes)
+    assert limits["amd-kernels"] == expected
+    assert limits["native"] == expected
+
+
+def test_unrecorded_steps_keep_their_limits(monkeypatch, fake_global_config):
+    _clear_recorders(monkeypatch)
+    fake_global_config["nightly"] = "1"
+    fake_global_config["run_amd"] = True
+    assert _render(_gpu_step(timeout_in_minutes=20)).timeout_in_minutes == 20
+    limits = _amd_limits(55)
+    assert (limits["amd-kernels"], limits["native"]) == (55, 55)

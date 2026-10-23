@@ -488,15 +488,24 @@ def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool
 # Recording costs time on some steps, and several already finish within a
 # minute of their limit on main: a recording run (vllm/ci #90641) timed out
 # entrypoints-unit-tests, examples and pipeline-context-parallelism-4-gpus
-# while every test passed. The margin applies only where a recorder is armed,
-# so ordinary builds keep their limits.
-RECORDING_TIMEOUT_FACTOR = 1.25
+# while every test passed. On AMD the ROCProfiler SDK intercepts every kernel
+# dispatch: vllm/ci #96785 ran launch-bound jobs up to 2.4x their main time
+# (v1-spec-decode 16.5 -> 39.8 min) and timed out e2e-scheduling-accuracy and
+# minimax-m3-monokernel. A recorded step gets the larger of the factor and
+# RECORDING_MIN_EXTRA_MINUTES on top of its limit. The margin applies only
+# where a recorder is armed, so ordinary builds keep their limits.
+RECORDING_TIMEOUT_FACTOR = {"nvidia": 1.25, "amd": 2.0}
+RECORDING_MIN_EXTRA_MINUTES = 20
 
 
-def _recording_timeout(step: Step, minutes: int) -> int:
-    # Only the nvidia branch reaches here; AMD steps are capped separately.
-    if _kernrec_applies(step) or _fnrec_applies(step, "nvidia"):
-        return math.ceil(minutes * RECORDING_TIMEOUT_FACTOR)
+def _recording_timeout(
+    step: Step, minutes: int, setup_profile: SetupProfile = "nvidia"
+) -> int:
+    if _kernrec_applies(step, setup_profile) or _fnrec_applies(step, setup_profile):
+        return max(
+            math.ceil(minutes * RECORDING_TIMEOUT_FACTOR[setup_profile]),
+            minutes + RECORDING_MIN_EXTRA_MINUTES,
+        )
     return minutes
 
 
@@ -1170,6 +1179,7 @@ def convert_group_step_to_buildkite_step(
                     + (
                         [KERNREC_ARTIFACT_PATH] if _kernrec_applies(step, "amd") else []
                     ),
+                    recorded_step=step,
                 )
                 amd_step.deferred = not _step_should_run(step, list_file_diff)
                 amd_hardware_steps.append(amd_step)
@@ -1229,7 +1239,9 @@ def convert_group_step_to_buildkite_step(
                 )
             elif is_amd_device(step.device):
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
-                    get_amd_timeout_in_minutes(step.timeout_in_minutes)
+                    _recording_timeout(
+                        step, get_amd_timeout_in_minutes(step.timeout_in_minutes), "amd"
+                    )
                 )
             elif step.timeout_in_minutes:
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
@@ -1385,6 +1397,7 @@ def convert_group_step_to_buildkite_step(
                         if _kernrec_applies(amd_command_step, "amd")
                         else []
                     ),
+                    recorded_step=amd_command_step,
                 )
                 amd_step.deferred = not _amd_mirror_should_run(
                     _step_should_run(
@@ -1534,8 +1547,11 @@ def _create_amd_step(
     agent_tags: Optional[Dict[str, str]] = None,
     display_label: Optional[str] = None,
     extra_artifact_paths: Optional[List[str]] = None,
+    recorded_step: Optional[Step] = None,
 ) -> BuildkiteCommandStep:
-    """Create a Buildkite command step that runs through the AMD CI wrapper."""
+    """Create a Buildkite command step that runs through the AMD CI wrapper.
+
+    `recorded_step` is the step whose recorders decide the recording margin."""
     options = build_amd_step_options(
         label=label,
         device=device,
@@ -1563,6 +1579,10 @@ def _create_amd_step(
         concurrency=concurrency,
         concurrency_group=concurrency_group,
         timeout_in_minutes=_get_timeout_in_minutes(
-            get_amd_timeout_in_minutes(timeout_in_minutes)
+            _recording_timeout(
+                recorded_step, get_amd_timeout_in_minutes(timeout_in_minutes), "amd"
+            )
+            if recorded_step is not None
+            else get_amd_timeout_in_minutes(timeout_in_minutes)
         ),
     )
