@@ -1061,7 +1061,11 @@ def _shard_at_generation(
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
         return None
-    if result is None or result["overBudget"]:
+    if (
+        result is None
+        or result["overBudget"]
+        or runtime_shard.setup_too_long(result)
+    ):
         runtime_shard.annotate(step_key, text, "warning")
     if result is None or result["shards"] < 2:
         return None

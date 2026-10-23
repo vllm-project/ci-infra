@@ -126,8 +126,10 @@ def test_discover_finds_the_files_pytest_would(tmp_path):
 def test_plan_packs_the_largest_files_first_into_the_fewest_shards():
     seconds = {"a.py": 100, "b.py": 600, "c.py": 300, "d.py": 500, "e.py": 200}
     seconds["f.py"] = 400
-    result = rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))
-    # 2100 s doesn't fit two shards of 1080 s; three, evenly.
+    timings = dict(_timings(TESTS[0], seconds), setupMs=120_000)
+    result = rs.plan(_commands(TESTS[0], seconds), timings)
+    # After 120 s of setup, 2100 s doesn't fit two shards of 1020 s of tests;
+    # three, evenly.
     assert result["shards"] == 3 and result["estimates"] == [700, 700, 700]
     files = result["commands"][0]["files"]
     assert {f for f, s in files.items() if s == files["tests/b.py"]} == {
@@ -135,6 +137,37 @@ def test_plan_packs_the_largest_files_first_into_the_fewest_shards():
         "tests/b.py",
     }
     assert not result["overBudget"] and result["unknownFiles"] == []
+
+
+def test_plan_charges_setup_up_to_the_limit_and_flags_more():
+    seconds = {f"t{i}.py": 475 for i in range(4)}  # 1900 s of tests
+
+    def planned(setup_seconds):
+        timings = dict(_timings(TESTS[0], seconds), setupMs=setup_seconds * 1000)
+        return rs.plan(_commands(TESTS[0], seconds), timings)
+
+    # Two shards of 950 s fit 1140 s with up to 190 s of setup each.
+    assert planned(0)["shards"] == 2 and planned(180)["shards"] == 2
+    assert not rs.setup_too_long(planned(180))
+    assert ":warning:" not in rs.summary("k", planned(180))
+    # Charged in full, 600 s would leave 540 s per shard: four shards. It is
+    # charged as 180 s instead, and flagged.
+    slow = planned(600)
+    assert slow["shards"] == 2 and slow["setupSeconds"] == 600
+    assert rs.setup_too_long(slow)
+    assert "Setup takes 10.0 min per job" in rs.summary("k", slow)
+    # A step without setupMs (an older endpoint) charges none.
+    assert rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))[
+        "setupSeconds"
+    ] == 0
+
+
+def test_a_one_job_plan_flags_a_long_setup_too():
+    seconds = {"a.py": 300}
+    timings = dict(_timings(TESTS[0], seconds), setupMs=240_000)
+    result = rs.plan(_commands(TESTS[0], seconds), timings)
+    assert result["shards"] == 1
+    assert "Setup takes 4.0 min per job" in rs.summary("k", result)
 
 
 def test_plan_of_a_step_that_fits_in_one_job():
@@ -236,12 +269,352 @@ def test_plan_never_splits_a_file_the_command_names_by_test_id():
     assert result["commands"][0]["split"] == {} and result["oversizedFiles"] == []
 
 
-def test_plan_over_the_most_shards_still_assigns_every_file():
-    files = {f"t{i}.py": 1000 for i in range(8)}
+def test_plan_gives_a_long_step_up_to_ten_shards():
+    files = {f"t{i}.py": 1000 for i in range(10)}
     result = rs.plan(_commands(TESTS[0], files), _timings(TESTS[0], files))
-    assert result["shards"] == 6 and result["overBudget"]
+    assert result["shards"] == 10 and not result["overBudget"]
+
+
+def test_plan_of_a_step_that_needs_sixteen_shards_stops_at_ten():
+    # 16 files of nearly a full shard each: 16 shards to fit the budget.
+    files = {f"t{i:02}.py": 1000 for i in range(16)}
+    result = rs.plan(_commands(TESTS[0], files), _timings(TESTS[0], files))
+    assert result["shards"] == 10 and result["overBudget"]
+    assert sorted(result["estimates"]) == [1000.0] * 4 + [2000.0] * 6
     assert sorted(result["commands"][0]["files"]) == [f"tests/{f}" for f in files]
     assert ":warning:" in rs.summary("k", result)
+
+
+def test_plan_cuts_a_file_too_long_for_the_most_shards_into_one_part_each():
+    # 160 tests of 100 s: 15 parts at the budget would put two parts in five
+    # of the 10 shards. Cut to the most shards instead, each gets one.
+    timings = _with_tests(
+        _timings(TESTS[0], {"big.py": 16000}),
+        "big.py",
+        {f"test_{i:03}": 100 for i in range(160)},
+    )
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assert result["shards"] == 10 and result["overBudget"]
+    assert result["estimates"] == [1600.0] * 10
+
+
+def test_plan_keeps_budget_sized_parts_when_they_balance_better():
+    # Cut to an even share of 10 shards, big.py's parts would stack on the
+    # 1,000 s files; at the budget, its 15 small parts fill around them.
+    seconds = {"big.py": 16000, **{f"f{i}.py": 1000 for i in range(5)}}
+    timings = _with_tests(
+        _timings(TESTS[0], seconds),
+        "big.py",
+        {f"test_{i:03}": 100 for i in range(160)},
+    )
+    result = rs.plan(_commands(TESTS[0], seconds), timings)
+    assert result["shards"] == 10 and result["overBudget"]
+    assert result["estimates"] == [2100.0] * 10
+
+
+
+# Trimming shards one long test makes useless. Each step here has 1 min of
+# setup: 18 min of tests per shard.
+
+
+def _timed(timings):
+    timings["setupMs"] = 60_000
+    return timings
+
+
+def test_one_job_over_the_budget_says_so():
+    seconds = {"a.py": 1200}
+    result = rs.plan(_commands(TESTS[0], seconds), _timed(_timings(TESTS[0], seconds)))
+    assert result["shards"] == 1 and result["overBudget"]
+    text = rs.summary("k", result)
+    assert "fit in one job" not in text and "one job for 1 file;" in text
+    assert "`tests/a.py` takes 20.0 min on its own, over the 18.0 min" in text
+    assert "The planner cannot split it further" in text
+    assert "1 shard is the fewest the planner finds that keep every shard within 20.0 min." in text
+
+
+def test_a_one_job_plan_without_a_long_test_says_it_is_over():
+    # Main timed a.py under another command: an estimate, which can't name it.
+    timings = _timed(_timings("pytest a.py", {"a.py": 1200}))
+    result = rs.plan(_commands(TESTS[0], ["a.py"]), timings)
+    assert result["shards"] == 1 and result["longTest"] is None
+    assert rs.summary("k", result).endswith(
+        ":warning: At least one job is still over 19 min with its setup."
+    )
+
+
+def test_plan_drops_a_shard_that_cannot_beat_one_long_test():
+    """One test alone sets how long the step takes: a third shard would only
+    pay for another job, so the rest share the second."""
+    timings = _timed(
+        _with_tests(
+            _timings(TESTS[0], {"big.py": 2184}),
+            "big.py",
+            {"test_slow": 1116, "test_a": 564, "test_b": 504},
+        )
+    )
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assert result["shards"] == 2 and result["estimates"] == [1116, 1068]
+    assert result["overBudget"]
+    assert rs.summary("k", result).endswith(
+        "Split by test: `tests/big.py`. :warning: `tests/big.py::test_slow` "
+        "takes 18.6 min on its own, over the 18.0 min a shard has for tests. "
+        "The planner cannot split it further, so its shard needs at least "
+        "18.6 min whatever the shard count. 2 shards is the fewest the planner finds that keep "
+        "every shard within 18.6 min."
+    )
+
+
+def test_plan_trims_on_a_command_edited_past_its_label():
+    # Main's labels keep 80 characters, so an edit past them still reads as
+    # main's command. Accepted until labels carry the whole command (#835).
+    command = "pytest -v -s model_executor " + "--timeout=900 " * 6
+    edited = command + " -k 'not test_slow'"
+    assert len(command) > 80 and edited[:80] == command[:80]
+    tests = {"test_slow": 1116, "test_a": 564, "test_b": 504}
+    timings = _timed(_with_tests(_timings(command, {"big.py": 2184}), "big.py", tests))
+    result = rs.plan(_commands(edited, ["big.py"]), timings)
+    assert result["shards"] == 2 and result["longTest"]["seconds"] == 1116
+
+
+def test_plan_does_not_trim_a_step_whose_commands_share_a_label():
+    # Two commands with the same 80-character label share main's timings: the
+    # long test could be either one's.
+    command = "pytest -v -s model_executor " + "--timeout=900 " * 6
+    other = command + " -x"
+    tests = {"test_slow": 1116, "test_a": 564, "test_b": 504}
+    timings = _timed(_with_tests(_timings(command, {"big.py": 2184}), "big.py", tests))
+    timings["files"] += _timings(other, {"small.py": 60})["files"]
+    commands = _commands(command, ["big.py"]) + _commands(other, ["small.py"])
+    result = rs.plan(commands, timings)
+    assert result["longTest"] is None and result["shards"] == 4
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_plan_uses_timings_found_by_file_without_trimming(split):
+    seconds = {"long.py": 1200, "a.py": 600, "b.py": 600}
+    timings = _timings(TESTS[0], seconds)
+    if split:
+        seconds = {"big.py": 2400}
+        timings = _with_tests(
+            _timings(TESTS[0], seconds),
+            "big.py",
+            {"test_slow": 1200, "test_a": 600, "test_b": 600},
+        )
+    for timing in timings["files"]:
+        timing["command"] = "pytest -v -s model_executor -m (not slow_test)"
+    result = rs.plan(_commands(TESTS[0], seconds), _timed(timings))
+    assert result["unknownFiles"] == []
+    assert result["shards"] == 3 and result["estimates"] == [1200, 600, 600]
+    assert result["longTest"] is None
+
+
+def test_plan_takes_the_fewest_shards_no_slower():
+    """Two shards and three both finish with the 20-min file: two it is."""
+    seconds = {"long.py": 1200, "a.py": 10, "b.py": 10, "c.py": 10}
+    result = rs.plan(_commands(TESTS[0], seconds), _timed(_timings(TESTS[0], seconds)))
+    assert result["shards"] == 2 and result["estimates"] == [1200, 30]
+
+
+def test_plan_of_one_long_file_and_many_short_ones_takes_three_not_ten():
+    seconds = {"long.py": 1500, **{f"f{i:02}.py": 60 for i in range(30)}}
+    result = rs.plan(_commands(TESTS[0], seconds), _timed(_timings(TESTS[0], seconds)))
+    assert result["shards"] == 3 and result["estimates"] == [1500, 900, 900]
+
+
+def test_plan_of_one_long_test_and_skipped_ones_is_one_job():
+    """Skipped tests take no time: a second shard would only run those."""
+    timings = _timed(
+        _with_tests(
+            _timings(TESTS[0], {"big.py": 1116}),
+            "big.py",
+            {"test_slow": 1116, "test_skipped": 0},
+        )
+    )
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assert result["shards"] == 1 and result["estimates"] == [1116]
+
+
+def test_a_test_of_exactly_the_budget_is_not_long():
+    seconds = {"a.py": 1080, "b.py": 60}
+    result = rs.plan(_commands(TESTS[0], seconds), _timed(_timings(TESTS[0], seconds)))
+    assert result["shards"] == 2 and not result["overBudget"]
+    assert result["longTest"] is None
+
+
+@pytest.mark.parametrize("rest", [450, 480])  # 35.5 and 36.5 min in all
+def test_plan_of_one_long_test_holds_steady_across_twice_the_budget(rest):
+    """Main's medians drift: a step just over twice the budget used to take a
+    third shard that the long test kept from finishing any sooner."""
+    tests = {"test_slow": 1230, "test_a": rest, "test_b": rest}
+    timings = _timed(
+        _with_tests(_timings(TESTS[0], {"big.py": sum(tests.values())}), "big.py", tests)
+    )
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assert result["shards"] == 2 and result["estimates"] == [1230, 2 * rest]
+
+
+def test_plan_at_the_most_shards_drops_one_that_does_not_help():
+    """At the cap the slowest shard is 50 min with ten shards or nine."""
+    files = {"t0.py": 3000, **{f"t{i}.py": 1500 for i in range(1, 17)}}
+    result = rs.plan(_commands(TESTS[0], files), _timed(_timings(TESTS[0], files)))
+    assert result["shards"] == 9 and max(result["estimates"]) == 3000
+    text = rs.summary("k", result)
+    assert "its shard needs at least 50.0 min" in text
+    assert "9 shards is the fewest the planner finds that keep every shard within 50.0 min." in text
+    assert sorted(result["commands"][0]["files"]) == sorted(f"tests/{f}" for f in files)
+
+
+def test_plan_keeps_its_shards_when_the_long_unit_is_a_guess():
+    """A file main never timed counts as the median file: an hour here. Were it
+    taken at its word the timed tests would share two shards, and a new file
+    that takes a minute would leave the step an hour long."""
+    tests = {f"test_{i}": 600 for i in range(6)}
+    timings = _timed(_with_tests(_timings(TESTS[0], {"big.py": 3600}), "big.py", tests))
+    result = rs.plan(_commands(TESTS[0], ["big.py", "new.py"]), timings)
+    assert result["unknownFiles"] == ["tests/new.py"]
+    assert result["shards"] == 5
+    assert sorted(result["estimates"]) == [600, 600, 1200, 1200, 3600]
+
+
+@pytest.mark.parametrize("filtered", [False, True])
+def test_plan_keeps_its_shards_when_a_smaller_unit_has_no_timing(filtered):
+    command = TESTS[0] + (" -k fast" if filtered else "")
+    seconds = {"long.py": 1200, "a.py": 600, "b.py": 600}
+    result = rs.plan(
+        _commands(command, [*seconds, "new.py"]), _timed(_timings(command, seconds))
+    )
+    field = "filteredUnknownFiles" if filtered else "unknownFiles"
+    assert result[field] == ["tests/new.py"]
+    assert result["shards"] == 4
+    assert result["longTest"] is None
+
+
+def test_plan_keeps_its_shards_when_the_long_unit_holds_several_tests():
+    """Cutting a file of four 10-minute tests in three parts puts two tests
+    in one: a part over the budget that no single test is."""
+    tests = {f"test_{i}": 600 for i in range(4)}
+    seconds = {"big.py": 2400, "small.py": 300}
+    timings = _timed(_with_tests(_timings(TESTS[0], seconds), "big.py", tests))
+    result = rs.plan(_commands(TESTS[0], seconds), timings)
+    assert result["shards"] == 4
+    assert sorted(result["estimates"]) == [300, 600, 600, 1200]
+
+
+def test_plan_combines_commands_in_a_shard_within_the_budget():
+    """The second command's file joins a part of the first in a shard that
+    stays within the budget, as packing does in any step."""
+    timings = _with_tests(
+        _timings(TESTS[0], {"big.py": 2184}),
+        "big.py",
+        {"test_slow": 1116, "test_a": 564, "test_b": 504},
+    )
+    timings["files"] += _timings(TESTS[1], {"small.py": 300})["files"]
+    commands = _commands(TESTS[0], ["big.py"]) + _commands(TESTS[1], ["small.py"])
+    result = rs.plan(commands, _timed(timings))
+    assert result["shards"] == 3 and result["estimates"] == [1116, 564, 804]
+
+
+def test_plan_of_several_commands_drops_a_shard_that_keeps_one_command_each():
+    """Fewer shards are fine when no shard has to start a second command:
+    the other command's two files share a shard."""
+    timings = _timings(TESTS[0], {"big.py": 1200})
+    timings["files"] += _timings(TESTS[1], {"b1.py": 540, "b2.py": 480})["files"]
+    commands = _commands(TESTS[0], ["big.py"]) + _commands(TESTS[1], ["b1.py", "b2.py"])
+    result = rs.plan(commands, _timed(timings))
+    assert result["shards"] == 2 and result["estimates"] == [1200, 1020]
+    assert result["commands"][0]["files"] == {"tests/big.py": 0}
+    assert result["commands"][1]["files"] == {"tests/b1.py": 1, "tests/b2.py": 1}
+    assert rs.summary("k", result).endswith(
+        "2 shards is the fewest the planner finds that keep every shard within 20.0 min and any "
+        "shard running several commands within 18.0 min."
+    )
+
+
+def _three_commands(seconds):
+    commands, files = [], []
+    for command, (file, s) in zip(
+        [TESTS[0], TESTS[1], TESTS[0] + " -x"],
+        [("a.py", seconds[0]), ("b.py", seconds[1]), ("c.py", seconds[2])],
+    ):
+        commands += _commands(command, [file])
+        files += _timings(command, {file: s})["files"]
+    return commands, _timed({"buildNumber": 7, "buildNumbers": [7], "files": files})
+
+
+def test_plan_puts_two_short_commands_in_one_shard_within_the_budget():
+    result = rs.plan(*_three_commands([1116, 564, 504]))
+    assert result["shards"] == 2 and result["estimates"] == [1116, 1068]
+
+
+def test_plan_combines_commands_that_reach_the_budget_exactly():
+    result = rs.plan(*_three_commands([1116, 540, 540]))
+    assert result["shards"] == 2 and result["estimates"] == [1116, 1080]
+
+
+def test_plan_keeps_commands_apart_past_the_budget():
+    """Together the 10 and 9 min commands would take 19 min: within the
+    20-min test, but over the budget a shard of two commands keeps to."""
+    result = rs.plan(*_three_commands([1200, 600, 540]))
+    assert result["shards"] == 3 and result["estimates"] == [1200, 600, 540]
+    assert rs.summary("k", result).endswith(
+        "3 shards is the fewest the planner finds that keep every shard within 20.0 min and any "
+        "shard running several commands within 18.0 min."
+    )
+
+
+def test_plan_keeps_its_shards_when_a_pr_narrows_the_long_file():
+    """Main timed all of a.py; this command runs one of its tests, so a.py
+    takes main's whole-file time only for want of a better guess."""
+    files = {"a.py": 1200, "b.py": 600, "c.py": 600}
+    edited = TESTS[0].replace("model_executor", "model_executor/a.py::test_fast")
+    commands = _commands(edited, files, selected=["a.py"])
+    result = rs.plan(commands, _timed(_timings(TESTS[0], files)))
+    assert result["unknownFiles"] == [] and result["shards"] == 3
+    assert result["longTest"] is None
+
+
+def test_a_plan_that_mixes_commands_claims_no_fewest():
+    """Ten shards for eleven commands: one shard runs two, and fewer shards
+    would keep within 20 min too, were the commands allowed to share."""
+    commands, files = [], []
+    for i, seconds in enumerate([1200] + [600] * 10):
+        command = f"pytest -v -s t{i}.py"
+        commands += _commands(command, [f"t{i}.py"])
+        files += _timings(command, {f"t{i}.py": seconds})["files"]
+    timings = _timed({"buildNumber": 7, "buildNumbers": [7], "files": files})
+    result = rs.plan(commands, timings)
+    assert result["shards"] == 10
+    text = rs.summary("k", result)
+    assert "`tests/t0.py` takes 20.0 min on its own" in text
+    assert "fewest" not in text
+
+
+def test_generator_runs_a_step_of_one_long_test_in_two_jobs(
+    fake_global_config, tmp_path, monkeypatch
+):
+    """One test over the budget and two that share the other shard."""
+    command = "pytest -v -s evals/test_accuracy.py"
+    _tree(tmp_path / "tests", ["evals/test_accuracy.py"])
+    monkeypatch.chdir(tmp_path)
+    timings = _timed(
+        _with_tests(
+            _timings(command, {"evals/test_accuracy.py": 2184}),
+            "evals/test_accuracy.py",
+            {"test_slow": 1116, "test_a": 564, "test_b": 504},
+        )
+    )
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    annotations = []
+    monkeypatch.setattr(rs, "annotate", lambda *args: annotations.append(args))
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(commands=SETUP + [command], automatic_shard=True))
+    assert step.parallelism == 2
+    [(key, text, style)] = annotations
+    assert (
+        style == "warning"
+        and "`tests/evals/test_accuracy.py::test_slow` takes 18.6 min" in text
+    )
 
 
 # The generator
@@ -372,6 +745,20 @@ def test_generator_keeps_the_single_job_without_a_plan(
     [plain] = _render(_step(commands=commands))
     [step] = _render(_step(automatic_shard=True, commands=commands))
     assert step.to_yaml() == plain.to_yaml() and "not in the checkout" in checkout[0][1]
+
+
+def test_generator_warns_of_a_long_setup_on_a_good_plan(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    timings = _timings(TESTS[0], ME_FILES)
+    timings["files"] += _timings(TESTS[1], {ENTRYPOINT: 100})["files"]
+    timings["setupMs"] = 200_000
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    [step] = _render(_step(automatic_shard=True))
+    assert step.parallelism == 3
+    [(_, text, style)] = checkout
+    assert style == "warning" and "Setup takes 3.3 min per job" in text
 
 
 def test_generator_shadow_mode_only_annotates(
@@ -547,6 +934,9 @@ def test_fetch_timings_sends_the_queue(monkeypatch):
     monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
     assert rs.fetch_timings("amd-k", AgentQueue.AMD_MI325_1) is None
     assert "stepKey=amd-k" in urls[0] and "queue=amd_mi325_1" in urls[0]
+    # Per-test times for any file a shard's tests could fail to hold: the
+    # budget less the most setup charged, 16 min.
+    assert "testsOverMs=960000" in urls[0]
 
 
 def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
