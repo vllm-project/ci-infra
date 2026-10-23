@@ -10,8 +10,10 @@ pipeline, from the vLLM checkout it runs in:
             per-test medians for a file over one shard's budget, and its
             median setup per job.
   plan      whole files into the fewest shards that keep each job, setup and
-            tests, within the budget, largest file first (at most 10). A file over the budget is
-            split by test function, using its per-test medians.
+            tests, within the budget, largest file first (at most 10). A file
+            over the budget is split by test function, using its per-test
+            medians. When one test alone is over it, only as many shards as
+            finish no later.
 
 The step is then emitted as its own job with `parallelism: N`. Every parallel
 job runs the step's commands unchanged; runtime_shard_plugin.py, loaded into
@@ -298,6 +300,16 @@ def _least_loaded(sizes: List[float], count: int) -> Tuple[List[int], List[float
     return shard_of, loads
 
 
+def _mixed_within(
+    units: List[Tuple], shard_of: List[int], loads: List[float], budget: float
+) -> bool:
+    """Whether every shard that runs more than one command keeps to `budget`."""
+    commands_of: List[set] = [set() for _ in loads]
+    for unit, shard in zip(units, shard_of):
+        commands_of[shard].add(unit[0])
+    return all(len(c) == 1 or load <= budget for c, load in zip(commands_of, loads))
+
+
 def plan(
     commands: List[Dict],
     timings: Optional[Dict],
@@ -373,11 +385,22 @@ def plan(
             seconds_of[(index, file)] = unknown_seconds
             unknown_files.append(file)
 
+    # Only main's timing under this command's own label can justify trimming
+    # shards (below); a file-only match, or a label two of the step's commands
+    # share, is still an estimate.
+    labels = [command_preview(entry["command"]) for entry in commands]
+    exact = {
+        (index, file): len(set(labels)) == len(labels)
+        and key == (labels[index], file)
+        for (index, file), key in keys.items()
+    }
+
     def pack(part_seconds: float) -> Tuple:
         """Cut each file over the budget into parts of about `part_seconds`,
         then pack the units into the fewest shards within the budget."""
         # One unit per file, or per part of a file over the budget.
         units = []  # (command index, file, part or None, seconds)
+        whole = []  # per unit: its name if main timed it exactly and it can't be cut
         assigns: Dict[Tuple[int, str], Dict[str, int]] = {}
         oversized = []
         for (index, file), key in keys.items():
@@ -386,6 +409,7 @@ def plan(
             selected = file in commands[index]["selected"]
             if seconds <= max_shard_seconds or not tests or selected:
                 units.append((index, file, None, seconds))
+                whole.append(file if exact[(index, file)] else None)
                 continue
             # By test function, its parametrized cases together: they share
             # setup (a model, compiled kernels) that main paid once, in the
@@ -411,6 +435,9 @@ def plan(
             }
             for part, load in enumerate(part_loads):
                 units.append((index, file, part, load))
+                alone = part_of.count(part) == 1
+                name = names[part_of.index(part)] if alone else None
+                whole.append(name if exact[(index, file)] else None)
 
         sizes = [unit[3] for unit in units]
         most = min(max_number_of_shards, len(units))
@@ -419,9 +446,9 @@ def plan(
         while max(loads) > max_shard_seconds and count < most:
             count += 1
             shard_of, loads = _least_loaded(sizes, count)
-        return units, assigns, oversized, count, shard_of, loads
+        return units, assigns, oversized, count, shard_of, loads, whole
 
-    units, assigns, oversized, count, shard_of, loads = pack(max_shard_seconds)
+    units, assigns, oversized, count, shard_of, loads, whole = pack(max_shard_seconds)
     # Over the budget at the most shards, budget-sized parts can outnumber
     # the shards and double up. Parts of an even share of the most shards may
     # balance better; keep whichever plan's slowest shard is shorter.
@@ -429,7 +456,30 @@ def plan(
     if share > max_shard_seconds:
         coarser = pack(share)
         if max(coarser[5]) < max(loads):
-            units, assigns, oversized, count, shard_of, loads = coarser
+            units, assigns, oversized, count, shard_of, loads, whole = coarser
+
+    # One timed test over the budget sets the step's time whatever the count:
+    # the fewest shards that are no slower save the jobs the rest would cost.
+    # A shard of several commands keeps to the budget, as packing does: it
+    # pays pytest's startup per command, which main's timings leave out.
+    sizes = [unit[3] for unit in units]
+    longest = max(range(len(sizes)), key=lambda u: sizes[u])
+    long_test = None
+    # A guessed file could outgrow the space left by tighter packing.
+    if (
+        whole[longest]
+        and sizes[longest] > max_shard_seconds
+        and not unknown_files
+        and not filtered_unknown_files
+    ):
+        long_test = {"name": whole[longest], "seconds": sizes[longest]}
+        slowest = max(loads)
+        for fewer in range(1, count):
+            fewer_shard_of, fewer_loads = _least_loaded(sizes, fewer)
+            mixed = _mixed_within(units, fewer_shard_of, fewer_loads, max_shard_seconds)
+            if max(fewer_loads) <= slowest and mixed:
+                count, shard_of, loads = fewer, fewer_shard_of, fewer_loads
+                break
 
     planned: List[Dict] = [{"files": {}, "split": {}} for _ in commands]
     for (index, file, part, _), shard in zip(units, shard_of):
@@ -451,6 +501,9 @@ def plan(
         "oversizedFiles": oversized,
         "overBudget": max(loads) > max_shard_seconds,
         "setupSeconds": round(setup_seconds, 1),
+        "longTest": long_test,
+        # Fewer shards would be slower or mix commands past the budget.
+        "fewest": _mixed_within(units, shard_of, loads, max_shard_seconds),
         "timingSource": {
             k: (timings or {}).get(k) for k in ("buildNumber", "buildNumbers")
         },
@@ -465,7 +518,7 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             "The step runs as one job, as it would without sharding."
         )
     setup = result.get("setupSeconds", 0)
-    if result["shards"] == 1:
+    if result["shards"] == 1 and not result["overBudget"]:
         return (
             f"**Runtime sharding for `{step_key}`:** its {result['files']} files "
             f"fit in one job ({result['estimates'][0] / 60:.1f} min of tests, "
@@ -474,9 +527,13 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
     estimates = ", ".join(f"{s / 60:.1f}" for s in result["estimates"])
     source = result["timingSource"]
     builds = len(source.get("buildNumbers") or [source.get("buildNumber")])
+    allocation = (
+        "one job" if result["shards"] == 1 else f"{result['shards']} shards"
+    )
     text = (
-        f"**Runtime sharding for `{step_key}`:** {result['shards']} shards for "
-        f"{result['files']} files; estimated test time per shard (min): "
+        f"**Runtime sharding for `{step_key}`:** {allocation} for "
+        f"{result['files']} file{'s' if result['files'] != 1 else ''}; "
+        "estimated test time per shard (min): "
         f"{estimates}, after {setup / 60:.1f} min of setup in each. Timings: "
         f"median of {builds} main build"
         f"{'s' if builds != 1 else ''}, the newest {source.get('buildNumber')}."
@@ -497,10 +554,32 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
     if result["oversizedFiles"]:
         files = ", ".join(f"`{f}`" for f in result["oversizedFiles"])
         text += f" Split by test: {files}."
-    if result["overBudget"]:
+    long_test = result.get("longTest")
+    if result["overBudget"] and long_test:
+        minutes = f"{long_test['seconds'] / 60:.1f} min"
+        budget = (MAX_SHARD_SECONDS - min(setup, MAX_SETUP_SECONDS)) / 60
         text += (
-            f" :warning: At {result['shards']} shards, the most allowed, a shard "
-            f"is still over {MAX_SHARD_SECONDS / 60:.0f} min with its setup."
+            f" :warning: `{long_test['name']}` takes {minutes} on its own, over "
+            f"the {budget:.1f} min a shard has for tests. The planner cannot "
+            f"split it further, so its shard needs at least {minutes} "
+            "whatever the shard count."
+        )
+        if result["fewest"]:
+            shards = f"{result['shards']} shard{'s' if result['shards'] != 1 else ''}"
+            text += (
+                f" {shards} is the fewest the planner finds that keep every shard within "
+                f"{max(result['estimates']) / 60:.1f} min"
+            )
+            if len(result["commands"]) > 1:
+                text += (
+                    " and any shard running several commands within "
+                    f"{budget:.1f} min"
+                )
+            text += "."
+    elif result["overBudget"]:
+        text += (
+            f" :warning: At least one job is still over "
+            f"{MAX_SHARD_SECONDS / 60:.0f} min with its setup."
         )
     return text + _setup_warning(setup)
 
