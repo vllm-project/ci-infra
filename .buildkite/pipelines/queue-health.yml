@@ -1,0 +1,64 @@
+# Buildkite pipeline for the queue-health checker
+#
+# Scheduled every 10 minutes in the pipeline's Buildkite settings (no Terraform
+# resource manages this schedule, as for rebuild-cpu-ami).
+#
+# Each build reads the queue health policies and pins of vLLM main (the
+# fallback_dirs of its .buildkite/ci_config*.yaml), the snapshot of the latest
+# passed main build of this pipeline and the recent jobs of the
+# health.pipelines builds, applies the health rules and pins, and publishes the
+# per-queue state as this build's meta-data "queue-health", as its last
+# action. The pipeline generator reads it from the latest passed main build to
+# move steps off closed queues, and adds the shadow probes of probing queues
+# to main builds. This build runs no probes and no generator. Any error
+# before publishing fails it, publishing nothing.
+#
+# Builds must not be canceled by newer ones (leave "Cancel intermediate builds"
+# off): each run starts from the previous snapshot, and concurrency 1 makes
+# this build its only writer.
+#
+# Pausing the schedule is a safe rollback: the snapshot goes stale and every
+# queue is treated as open. See buildkite/pipeline_generator/README.md.
+
+steps:
+  - label: ":stethoscope: Queue health"
+    key: queue-health
+    command:
+      - |
+        set -euo pipefail
+
+        GENERATOR="$$PWD/buildkite/pipeline_generator"
+
+        echo "--- :python: Installing checker dependencies"
+        python3 -m pip install pydantic pyyaml requests
+
+        # The checker reads only the pipeline configs and their fallback_dirs.
+        echo "--- :git: Checking out vLLM's queue fallback config"
+        rm -rf vllm-src
+        git clone --depth 1 --filter=blob:none --sparse \
+          https://github.com/vllm-project/vllm.git vllm-src
+        cd vllm-src
+        git sparse-checkout set --no-cone '/.buildkite/ci_config*.yaml'
+        CONFIGS=(.buildkite/ci_config*.yaml)
+        DIRS="$$(PYTHONPATH="$$GENERATOR" python3 -c \
+          'import sys, queue_health; print("\n".join(queue_health.fallback_dirs(sys.argv[1:])))' \
+          "$${CONFIGS[@]}")"
+        PATTERNS=()
+        while IFS= read -r dir; do
+          if [[ -n "$$dir" ]]; then PATTERNS+=("/$${dir%/}/"); fi
+        done <<< "$$DIRS"
+        if (( $${#PATTERNS[@]} )); then
+          git sparse-checkout add "$${PATTERNS[@]}"
+        fi
+
+        echo "--- :stethoscope: Checking queues"
+        python3 "$$GENERATOR/queue_health.py" "$${CONFIGS[@]}"
+    agents:
+      queue: small_cpu_queue_postmerge
+    timeout_in_minutes: 10
+    concurrency: 1
+    concurrency_group: "ci-infra/queue-health"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent/infrastructure failures only
+          limit: 1

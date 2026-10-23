@@ -480,6 +480,9 @@ KNOWN_STEP_FIELDS = {
     # Runtime sharding: splits the step's own tests across jobs at build time
     # without changing which tests run, so selection needs nothing from it.
     "automatic_shard",
+    # Queue fallback opt-out: only picks which declared device a step runs on
+    # when its queue is closed, never which tests run.
+    "fallback",
     # Buildkite built-in, absent from the generator's Step model, so it is
     # dropped before reaching a command. Governs ordering after a failure.
     "allow_dependency_failure",

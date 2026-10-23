@@ -1,0 +1,2 @@
+- device: mi300_1
+  fallbacks: [mi355_1]

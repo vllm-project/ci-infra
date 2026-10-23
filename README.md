@@ -61,7 +61,7 @@ Steps dispatched to agent queues
     ├── CPU queues ─── Docker image build, compilation, CPU tests
     ├── GPU queues ─── Single/multi-GPU tests (L4, A100, H100, H200, B200)
     ├── TPU queues ─── TPU-specific tests (v5, v6e, v7x)
-    └── AMD queues ─── ROCm tests (MI250, MI325, MI355)
+    └── AMD queues ─── ROCm tests (MI250, MI300, MI355)
     │
     ▼
 Results reported back (test results, coverage via Codecov)
@@ -78,11 +78,12 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 **Config:** Driven by a YAML config file (`ci_config.yaml`) that specifies job directories, registries, repositories, and `run_all_patterns`. See the [pipeline generator README](buildkite/pipeline_generator/README.md) for details.
 
 **Features:**
-- **Device types**: CPU, GPU (L4), A100, H100, H200, H200 18GB (MIG), B200, GH200, Intel CPU/HPU/GPU, ARM CPU, Ascend NPU, AMD MI250/MI325/MI355 (1-8 devices)
+- **Device types**: CPU, GPU (L4), A100, H100, H200, H200 18GB (MIG), B200, GH200, Intel CPU/HPU/GPU, ARM CPU, Ascend NPU, AMD MI250 (1-4 devices), MI300/MI355 (1-8 devices)
 - **Plugin generation**: Docker plugin for EC2-based queues, Kubernetes pod specs for H100/H200/A100
 - **AMD mirroring**: Steps can define `mirror.amd` to automatically create parallel AMD test runs
 - **Source file dependencies**: Steps can specify which source files they depend on for intelligent test filtering
 - **Block steps**: Optional tests are gated behind manual approval blocks
+- **Queue fallback**: AMD steps and AMD mirrors on an AMD queue closed for infra failures by the scheduled `queue-health` pipeline run on the next AMD device of a declared chain (opt-in via `fallback_dirs`; see the [pipeline generator README](buildkite/pipeline_generator/README.md#queue-fallback)). NVIDIA queues are not handled yet.
 - **Variable injection**: Automatically injects registry URLs, cache tags, and image references into step commands
 
 #### Jinja2 Template (AMD CI)

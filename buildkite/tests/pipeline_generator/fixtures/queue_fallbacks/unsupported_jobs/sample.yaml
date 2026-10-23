@@ -1,0 +1,101 @@
+group: Unsupported
+steps:
+- label: On h100
+  key: on-h100
+  device: h100
+  commands:
+  - pytest -v -s h100
+- label: On h200
+  key: on-h200
+  device: h200
+  commands:
+  - pytest -v -s h200
+- label: On h200_18gb
+  key: on-h200_18gb
+  device: h200_18gb
+  commands:
+  - pytest -v -s h200_18gb
+- label: On h200_35gb
+  key: on-h200_35gb
+  device: h200_35gb
+  commands:
+  - pytest -v -s h200_35gb
+- label: On b200
+  key: on-b200
+  device: b200
+  commands:
+  - pytest -v -s b200
+- label: On b200-k8s
+  key: on-b200-k8s
+  device: b200-k8s
+  commands:
+  - pytest -v -s b200-k8s
+- label: On l4
+  key: on-l4
+  device: l4
+  commands:
+  - pytest -v -s l4
+- label: On cpu
+  key: on-cpu
+  device: cpu
+  commands:
+  - pytest -v -s cpu
+- label: On cpu-small
+  key: on-cpu-small
+  device: cpu-small
+  commands:
+  - pytest -v -s cpu-small
+- label: On cpu-medium
+  key: on-cpu-medium
+  device: cpu-medium
+  commands:
+  - pytest -v -s cpu-medium
+- label: On intel_cpu
+  key: on-intel_cpu
+  device: intel_cpu
+  commands:
+  - pytest -v -s intel_cpu
+- label: On intel_hpu
+  key: on-intel_hpu
+  device: intel_hpu
+  commands:
+  - pytest -v -s intel_hpu
+- label: On intel_gpu
+  key: on-intel_gpu
+  device: intel_gpu
+  commands:
+  - pytest -v -s intel_gpu
+- label: On arm_cpu
+  key: on-arm_cpu
+  device: arm_cpu
+  commands:
+  - pytest -v -s arm_cpu
+- label: On gh200
+  key: on-gh200
+  device: gh200
+  commands:
+  - pytest -v -s gh200
+- label: On ascend_npu
+  key: on-ascend_npu
+  device: ascend_npu
+  commands:
+  - pytest -v -s ascend_npu
+- label: On amd_cpu
+  key: on-amd_cpu
+  device: amd_cpu
+  commands:
+  - pytest -v -s amd_cpu
+- label: On zen5
+  key: on-zen5
+  device: zen5
+  commands:
+  - pytest -v -s zen5
+- label: On dgx-spark
+  key: on-dgx-spark
+  device: dgx-spark
+  commands:
+  - pytest -v -s dgx-spark
+- label: No Device
+  key: no-device
+  commands:
+  - pytest -v -s other

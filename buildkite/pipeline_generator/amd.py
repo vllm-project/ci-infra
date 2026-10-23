@@ -135,15 +135,10 @@ AMD_DEVICE_CONFIGS = {
     DeviceType.AMD_MI250_1.value: AmdDeviceConfig(AgentQueue.AMD_MI250_1, 1),
     DeviceType.AMD_MI250_2.value: AmdDeviceConfig(AgentQueue.AMD_MI250_2, 2),
     DeviceType.AMD_MI250_4.value: AmdDeviceConfig(AgentQueue.AMD_MI250_4, 4),
-    DeviceType.AMD_MI250_8.value: AmdDeviceConfig(AgentQueue.AMD_MI250_8, 8),
     DeviceType.AMD_MI300_1.value: AmdDeviceConfig(AgentQueue.AMD_MI300_1, 1),
     DeviceType.AMD_MI300_2.value: AmdDeviceConfig(AgentQueue.AMD_MI300_2, 2),
     DeviceType.AMD_MI300_4.value: AmdDeviceConfig(AgentQueue.AMD_MI300_4, 4),
     DeviceType.AMD_MI300_8.value: AmdDeviceConfig(AgentQueue.AMD_MI300_8, 8),
-    DeviceType.AMD_MI325_1.value: AmdDeviceConfig(AgentQueue.AMD_MI325_1, 1),
-    DeviceType.AMD_MI325_2.value: AmdDeviceConfig(AgentQueue.AMD_MI325_2, 2),
-    DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4),
-    DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8),
     DeviceType.AMD_MI355_DPX.value: AmdDeviceConfig(
         AgentQueue.AMD_MI355_DPX, 1, uses_dra=True
     ),

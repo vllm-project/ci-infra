@@ -32,7 +32,6 @@ def derive_step_key(label: str) -> str:
     return _generate_step_key(label)
 
 
-
 OPTIONAL_ENV = "CI_SELECTOR_OPTIONAL"
 OPTIONAL_MODES = ("ordinary", "manual")
 
@@ -48,6 +47,7 @@ def optional_mode() -> str:
             f"{OPTIONAL_ENV}={raw!r}, expected one of: {', '.join(OPTIONAL_MODES)}"
         )
     return raw
+
 
 @dataclass
 class PipelineConfig:

@@ -1,0 +1,3 @@
+- device: mi355_dpx
+  fallbacks: [mi355_1]
+  close_when: {rule: infra_failure_rate, above: 0.5, window: 1h, min_jobs: 10}

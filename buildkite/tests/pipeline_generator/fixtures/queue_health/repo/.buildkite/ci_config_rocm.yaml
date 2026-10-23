@@ -1,0 +1,4 @@
+name: vllm_ci_rocm
+fallback_dirs:
+  - ".buildkite/queue_fallbacks"
+  - ".buildkite/queue_fallbacks_rocm"

@@ -1,0 +1,3 @@
+name: vllm_ci
+fallback_dirs:
+  - ".buildkite/queue_fallbacks"
