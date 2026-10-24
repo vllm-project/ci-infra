@@ -911,9 +911,10 @@ def _prepare_commands(
         commands.append("CI_OVERALL_STATUS=0")
 
     if step.commands:
+        labels = runtime_shard.command_labels(step.commands)
         for i, cmd in enumerate(step.commands):
-            # Sanitize command preview for use in echo (remove quotes and special chars)
-            preview = cmd[:80].replace("'", "").replace('"', "").replace("$", "")
+            # Quotes and $ removed, for use in echo; unique within the step.
+            preview = labels[i]
             commands.append(
                 f"echo '+++ :test_tube: Command ({i + 1}/{len(step.commands)}): {preview}'"
             )

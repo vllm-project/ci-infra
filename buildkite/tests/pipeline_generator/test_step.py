@@ -429,6 +429,28 @@ def test_otel_trace_keeps_assignment_prefixed_commands_in_shell(fake_global_conf
     assert "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed" in commands[4]
 
 
+def test_otel_trace_labels_long_commands_in_full(fake_global_config):
+    fake_global_config["branch"] = "main"
+    long = "pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/"
+    step = Step(label="Traced", commands=[long + "fp8.txt", long + "int8.txt"])
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    labels = [
+        shlex.split(re.search(r"ci_otel_run \d+ (.*?) pytest", c).group(1))[0]
+        for c in (commands[2], commands[4])
+    ]
+    assert labels[0] != labels[1]
+    assert labels == step.commands
+    assert commands[3].endswith(f'Command (2/2): {labels[1]}"')
+    assert commands[2].endswith(step.commands[0])
+    assert commands[4].endswith(step.commands[1])
+
+
 def test_is_simple_command():
     assert buildkite_step._is_simple_command("pytest tests")
     assert buildkite_step._is_simple_command("python script.py")
