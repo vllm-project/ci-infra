@@ -454,7 +454,7 @@ def test_recording_gives_steps_a_timeout_margin(monkeypatch):
     monkeypatch.delenv(recorder_switches.FNREC_ENV_VAR, raising=False)
     assert _timeout(step) == 40
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
-    assert _timeout(step) == 50
+    assert _timeout(step) == 60, "RECORDING_MIN_EXTRA_MINUTES beats 1.25x here"
 
 
 def _rendered_groups(*steps):

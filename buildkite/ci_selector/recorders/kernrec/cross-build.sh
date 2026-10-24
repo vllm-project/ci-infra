@@ -4,54 +4,52 @@
 # The test image is nvidia/cuda:<ver>-base and has no compiler, so the library
 # is prebuilt and committed next to this script. This reproduces that build:
 # zig cross-compiles to x86_64 glibc 2.28 against the CUPTI and CUDA headers
-# from NVIDIA's own pip wheels and apt packages. Pin CUPTI to the CUDA minor
-# the image runs (see CUDA_VERSION in vLLM's docker/Dockerfile).
+# from NVIDIA's own pip wheels and apt packages. Every input is pinned, so the
+# defaults rebuild the committed library byte for byte. Pin CUPTI to the CUDA
+# minor the image runs (see CUDA_VERSION in vLLM's docker/Dockerfile).
 #
 #   ./cross-build.sh            # CUDA 13.0 by default
-#   CUDA_MINOR=12.9 ./cross-build.sh
+#   CUPTI_VERSION=12.9.79 RUNTIME_VERSION=12.9.79 CRT_VERSION=12.9.86-1 ./cross-build.sh
 #
 # Needs: python3, curl, unzip, ar, tar. Everything else is fetched into
 # $WORK (default ./.cross-build, safe to delete).
 set -euo pipefail
 cd "$(dirname "$0")"
 
-CUDA_MINOR="${CUDA_MINOR:-13.0}"
+ZIGLANG_VERSION="${ZIGLANG_VERSION:-0.14.1}"
+CUPTI_VERSION="${CUPTI_VERSION:-13.0.85}"
+RUNTIME_VERSION="${RUNTIME_VERSION:-13.0.96}"
+CRT_VERSION="${CRT_VERSION:-13.0.88-1}"
 WORK="${WORK:-$PWD/.cross-build}"
+CUDA_MINOR="${CUPTI_VERSION%.*}"
 MAJOR="${CUDA_MINOR%%.*}"
 mkdir -p "$WORK/wheels" "$WORK/hdr"
 
 # --- toolchain: zig via pip, in a private venv ------------------------------
-if [ ! -x "$WORK/venv/bin/python" ]; then
-  python3 -m venv "$WORK/venv"
-  "$WORK/venv/bin/pip" install -q ziglang pyelftools
-fi
+[ -x "$WORK/venv/bin/python" ] || python3 -m venv "$WORK/venv"
+"$WORK/venv/bin/pip" install -q "ziglang==$ZIGLANG_VERSION" pyelftools
 ZIG="$WORK/venv/bin/python -m ziglang"
 
 # --- headers + libcupti from pip wheels --------------------------------------
 # CUDA 13 wheels are `nvidia-cuda-cupti` (flat nvidia/cu13 layout); CUDA 12
 # wheels are `nvidia-cuda-cupti-cu12` (nvidia/cuda_cupti layout).
-pypi_pick() { # package version-prefix -> "filename url"
-  curl -s "https://pypi.org/pypi/$1/json" | python3 -c '
+pypi_pick() { # package version -> "filename url"
+  curl -sSf "https://pypi.org/pypi/$1/$2/json" | python3 -c '
 import json, sys
-pkg, pre = sys.argv[1], sys.argv[2]
-rel = json.load(sys.stdin)["releases"]
-vs = sorted((v for v in rel if v.startswith(pre) and "rc" not in v),
-            key=lambda v: [int(x) for x in v.split(".")])
-if not vs: sys.exit(f"no {pkg} {pre}* on PyPI")
-files = [f for f in rel[vs[-1]] if "manylinux" in f["filename"] and "x86_64" in f["filename"]]
-print(files[0]["filename"], files[0]["url"])' "$1" "$2"
+files = [f for f in json.load(sys.stdin)["urls"] if "manylinux" in f["filename"] and "x86_64" in f["filename"]]
+print(files[0]["filename"], files[0]["url"])'
 }
-fetch_wheel() { # package version-prefix
+fetch_wheel() { # package version
   read -r fn url < <(pypi_pick "$1" "$2")
   [ -s "$WORK/wheels/$fn" ] || curl -sSfL -o "$WORK/wheels/$fn" "$url"
   echo "$WORK/wheels/$fn"
 }
 if [ "$MAJOR" -ge 13 ]; then
-  CUPTI_WHL=$(fetch_wheel nvidia-cuda-cupti "$CUDA_MINOR.")
-  RUNTIME_WHL=$(fetch_wheel nvidia-cuda-runtime "$MAJOR.")
+  CUPTI_WHL=$(fetch_wheel nvidia-cuda-cupti "$CUPTI_VERSION")
+  RUNTIME_WHL=$(fetch_wheel nvidia-cuda-runtime "$RUNTIME_VERSION")
 else
-  CUPTI_WHL=$(fetch_wheel "nvidia-cuda-cupti-cu$MAJOR" "$CUDA_MINOR.")
-  RUNTIME_WHL=$(fetch_wheel "nvidia-cuda-runtime-cu$MAJOR" "$MAJOR.")
+  CUPTI_WHL=$(fetch_wheel "nvidia-cuda-cupti-cu$MAJOR" "$CUPTI_VERSION")
+  RUNTIME_WHL=$(fetch_wheel "nvidia-cuda-runtime-cu$MAJOR" "$RUNTIME_VERSION")
 fi
 unzip -q -o "$CUPTI_WHL" 'nvidia/*/include/*' 'nvidia/*/lib/libcupti.so.*' -d "$WORK/hdr"
 unzip -q -o "$RUNTIME_WHL" 'nvidia/*/include/*' -d "$WORK/hdr"
@@ -62,11 +60,7 @@ CUPTI_SO=$(find "$WORK/hdr" -name "libcupti.so.$MAJOR" | head -1)
 # --- crt/host_defines.h: only shipped in the apt package cuda-crt -----------
 if [ ! -f "$INC/crt/host_defines.h" ]; then
   REPO=https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64
-  PKG="cuda-crt-${CUDA_MINOR/./-}"
-  # No early exit in awk: with pipefail, curl dying of SIGPIPE would abort us.
-  DEB=$(curl -s "$REPO/Packages" | awk -v p="Package: $PKG" '$0==p{f=1} f&&/^Filename:/{print $2; f=0}' | head -1)
-  [ -n "$DEB" ] || { echo "cross-build: $PKG not in $REPO" >&2; exit 1; }
-  curl -sSfL -o "$WORK/crt.deb" "$REPO/$DEB"
+  curl -sSfL -o "$WORK/crt.deb" "$REPO/cuda-crt-${CUDA_MINOR/./-}_${CRT_VERSION}_amd64.deb"
   rm -rf "$WORK/crt" && mkdir -p "$WORK/crt" && (cd "$WORK/crt" && ar x ../crt.deb data.tar.xz && tar -xf data.tar.xz)
   mkdir -p "$INC/crt" && cp "$(dirname "$(find "$WORK/crt" -name host_defines.h | head -1)")"/* "$INC/crt/"
 fi
@@ -92,4 +86,4 @@ with open("libkernrec.so", "rb") as f:
     assert any(n.startswith("libcupti.so.") for n in needed), needed
     print("libkernrec.so ok: needs", needed, "exports", exported)
 PY
-echo "built with $KT against $(basename "$CUPTI_WHL")"
+echo "built with $KT against $(basename "$CUPTI_WHL"), ziglang $ZIGLANG_VERSION"
