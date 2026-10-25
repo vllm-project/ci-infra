@@ -2281,6 +2281,13 @@ def test_unreferenced_rocm_ci_script_escalates_its_own_pipeline(state):
     assert set(sel.run_all) == {"vllm_rocm_ci"}
 
 
+def test_rocm_stack_tooling_never_runs_the_cuda_pipeline(state):
+    """therock_wheels.py is a ROCm stack input (build.sh's stack key, the stack
+    Dockerfile's COPY): a change to it may run every AMD job, never all of CI."""
+    sel = select(state, ["tools/vllm-rocm/therock_wheels.py"])
+    assert not {"vllm_ci", "vllm_intel_ci"} & set(sel.run_all), sel.run_all
+
+
 def test_docker_input_relabel_still_run_all(state):
     """A docker-image COPY source keeps its run-all but says why."""
     from ci_selector.codemap.classify import _classify
@@ -3227,16 +3234,22 @@ def test_image_union_exempt_membership(state):
     )
 
 
-def test_rust_reaches_hardware_image_consumers(state):
+def test_rust_reaches_hardware_image_consumers(state, vllm_repo):
     """Leg 2 pinned both ways: the ROCm bake steps and CPU suites compile rust
     in-step so they stay; the intel test steps only consume a prebuilt image
     whose rust is inert without the gate, so they go. The derived replacement
     for rust/ in rocm's run_all_patterns."""
     sel = select(state, ["rust/src/server/src/lib.rs"])
+    # The ROCm base step of each build layout (build.sh replaced ensure-ci-base-amd).
+    base_step = (
+        "vllm_rocm_ci:refresh-rocm-base-amd"
+        if (vllm_repo / ".buildkite/scripts/rocm/build.sh").exists()
+        else "vllm_rocm_ci:ensure-ci-base-amd"
+    )
     for sid in (
         "vllm_rocm_ci:cpu-kernel-tests",
         "vllm_rocm_ci:image-build-amd",
-        "vllm_rocm_ci:ensure-ci-base-amd",
+        base_step,
         "vllm_intel_ci:image-build-xpu",
     ):
         assert sid in sel.selected, sid

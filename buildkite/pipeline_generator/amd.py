@@ -29,6 +29,9 @@ AMD_NATIVE_POD_IDENTITY_ENV = {
 }
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
     ".buildkite/scripts/hardware_ci/run-amd-test.sh",
+    # A prefix: the pytest plugins run-amd-test.sh loads into every AMD pytest
+    # run (build.sh layout), e.g. amd_ci_fast_exit.py.
+    ".buildkite/scripts/hardware_ci/amd_ci_",
 )
 AMD_STANDARD_TIMEOUT_MINUTES = 3 * 60
 AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
@@ -341,6 +344,16 @@ def get_amd_setup_commands() -> List[str]:
     ]
 
 
+_AMD_ARTIFACT_WORKSPACE_ENV = (
+    "VLLM_CI_ARTIFACT_STEP",
+    "VLLM_CI_ARTIFACT_CHECKSUM_GLOB",
+    "VLLM_CI_USE_ARTIFACTS",
+    "VLLM_CI_ARTIFACT_GLOB",
+    "VLLM_CI_WORKSPACE",
+    "VLLM_CI_REQUIRE_WORKSPACE_MOUNT",
+)
+
+
 def _get_amd_env(
     *,
     commands: str,
@@ -379,6 +392,11 @@ def _get_amd_env(
                 "PYTORCH_ROCM_ARCH": "",
             }
         )
+        if rocm_build_layout():
+            # The per-build image already holds vLLM and /vllm-workspace: no test
+            # artifact to install and no workspace volume.
+            for name in _AMD_ARTIFACT_WORKSPACE_ENV:
+                env.pop(name, None)
     else:
         env.update(
             {
@@ -495,6 +513,10 @@ def build_amd_step_options(
 
     if not isinstance(dind, bool):
         raise ValueError("AMD dind must be a boolean.")
+    if rocm_build_layout():
+        # The build.sh layout has no DinD path: every GPU job is a native pod,
+        # as test-template-amd.j2 renders it.
+        dind, no_plugin = False, False
     if not dind and no_plugin:
         raise ValueError(
             "Native AMD jobs cannot use no_plugin; the wrapper installs the test artifact."
@@ -514,6 +536,9 @@ def build_amd_step_options(
             "VLLM_CI_REQUIRE_WORKSPACE_MOUNT": "1",
             "PYTORCH_ROCM_ARCH": "",
         }
+        if rocm_build_layout():
+            for name in _AMD_ARTIFACT_WORKSPACE_ENV:
+                container_env.pop(name, None)
         plugins = [
             get_amd_k8s_plugin(
                 image=get_amd_pod_image(),

@@ -10,7 +10,9 @@ import yaml
 
 BUILDKITE_DIR = Path(__file__).parents[1]
 TEMPLATE = (BUILDKITE_DIR / "test-template-amd.j2").read_text()
-# vLLM's hardware_tests/amd.yaml, as bootstrap passes it when the checkout has build.sh.
+# Shaped like vLLM's hardware_tests/amd.yaml, as bootstrap passes it when the checkout has
+# build.sh. The last step is synthetic: no such step exists in vLLM, it exercises the
+# template's source_file_dependencies gating for build steps.
 BUILD_STEPS = [
     {
         "label": "AMD: :docker: ROCm stack and runtime",
@@ -31,13 +33,13 @@ BUILD_STEPS = [
         "retry": {"automatic": [{"exit_status": 1, "limit": 1}]},
     },
     {
-        "label": "AMD: :docker: ROCm 7.2 check",
-        "key": "rocm72-check-amd",
+        "label": "AMD: gated build step",
+        "key": "gated-build-amd",
         "depends_on": [],
-        "commands": ["bash .buildkite/scripts/rocm/build.sh rocm_72 base"],
+        "commands": ["true"],
         "timeout_in_minutes": 180,
         "soft_fail": True,
-        "source_file_dependencies": ["docker/Dockerfile.rocm_72_base", "csrc/"],
+        "source_file_dependencies": ["csrc/"],
     },
 ]
 
@@ -191,8 +193,8 @@ def test_gpu_job_env_matches_the_checkouts_runner(build_steps):
 
 
 def test_build_sh_layout_gates_build_steps_by_source_files():
-    assert "rocm72-check-amd" not in _render(list_file_diff="vllm/envs.py")
-    check = _render(list_file_diff="vllm/envs.py|csrc/ops.cu")["rocm72-check-amd"]
+    assert "gated-build-amd" not in _render(list_file_diff="vllm/envs.py")
+    check = _render(list_file_diff="vllm/envs.py|csrc/ops.cu")["gated-build-amd"]
     assert check["soft_fail"] is True and check["depends_on"] == []
 
 

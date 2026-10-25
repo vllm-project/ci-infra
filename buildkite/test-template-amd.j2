@@ -108,10 +108,12 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                         value: "1"
                       - name: VLLM_CI_EXPECTED_GPU_COUNT
                         value: "{{ 0 if step.no_gpu else (step.num_gpus or 1) }}"
+                      {% if not amd_build_steps %}
                       - name: VLLM_CI_WORKSPACE
                         value: /vllm-workspace
                       - name: VLLM_CI_REQUIRE_WORKSPACE_MOUNT
                         value: "1"
+                      {% endif %}
                       - name: PYTORCH_ROCM_ARCH
                         value: ""
                       # Correlate in-pod GPU/BDF diagnostics with the K8s host.
@@ -318,7 +320,8 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         {% endfor %}
         {% if native %}
           {% for file in list_file_diff %}
-            {% if file == ".buildkite/scripts/hardware_ci/run-amd-test.sh" %}
+            {# The runner, and the pytest plugins it loads into every run. #}
+            {% if file == ".buildkite/scripts/hardware_ci/run-amd-test.sh" or file[:38] == ".buildkite/scripts/hardware_ci/amd_ci_" %}
               {% set ns.blocked = 0 %}
             {% endif %}
           {% endfor %}
@@ -418,7 +421,10 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           {% if container_timeout_s %}
           CONTAINER_TIMEOUT_S: "{{ container_timeout_s }}"
           {% endif %}
-          {% if step.num_nodes and step.num_nodes >= 2 %}
+          {% if step.num_nodes and step.num_nodes >= 2 and amd_build_steps %}
+          VLLM_CI_EXECUTION_MODE: "single-node"
+          VLLM_TEST_COMMANDS: "echo 'num_nodes >= 2 is not supported: build.sh-layout AMD jobs are single-node pods' >&2; exit 1"
+          {% elif step.num_nodes and step.num_nodes >= 2 %}
           VLLM_CI_EXECUTION_MODE: "multi-node"
           VLLM_NUM_GPUS_PER_NODE: "{{ step.num_gpus or 1 }}"
           VLLM_NODE_COMMAND_COUNT: "{{ step.commands | length }}"

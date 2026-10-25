@@ -153,7 +153,9 @@ EXCLUSIVE_NAMESPACES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] =
         ("vllm/platforms/cpu.py", "vllm/platforms/zen_cpu.py"),
         "cpu",
     ),
-    (("csrc/rocm/",), (), "amd"),
+    # tools/vllm-rocm/: the ROCm stack's build tooling (therock_wheels.py is
+    # COPYed by docker/Dockerfile.rocm_base only).
+    (("csrc/rocm/", "tools/vllm-rocm/"), (), "amd"),
     ((), ("vllm/platforms/tpu.py",), "tpu"),
     (
         (
