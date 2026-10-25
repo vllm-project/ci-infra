@@ -231,7 +231,7 @@ class TestTheDrop:
         dropped, why = self._read(
             table, self._selection("quiet"), protected=frozenset({"vllm_ci:quiet"})
         )
-        assert dropped == [] and why["held-by-the-python-record"] == 1
+        assert dropped == [] and why["held-by-an-execution-record"] == 1
 
     def test_no_bump_weighs_nothing(self, tmp_path, tmp_repo):
         table = self._table(tmp_path, tmp_repo, quiet=self.WATCHED)
@@ -297,6 +297,76 @@ def test_torch_is_not_watched():
 class TestDecide:
     """Wired last in `decide`, after both other records, and only subtracting."""
 
+    @pytest.mark.parametrize(
+        "backends", [("cuda",), ("rocm",), ("cuda", "rocm"), ("rocm", "cuda")]
+    )
+    def test_a_kernel_observation_survives_library_narrowing(
+        self, tmp_path, tmp_repo, backends
+    ):
+        """A map-selected step's native call outweighs its library silence."""
+        from types import SimpleNamespace
+
+        from ci_selector.coverage.kernels import (
+            KernelEvidence,
+            KernelRow,
+            KernelTable,
+            SymbolMap,
+        )
+        from ci_selector.decide import decide
+
+        tmp_repo.write("requirements/cuda.txt", "flashinfer-python==0.7.0\n")
+        tmp_repo.write("csrc/a.cu", "__global__ void kA() {}\n")
+        base = tmp_repo.commit("pin and kernel")
+        tmp_repo.write("requirements/cuda.txt", "flashinfer-python==0.7.1\n")
+        tmp_repo.write("csrc/a.cu", "__global__ void kA() { /* changed */ }\n")
+        head = tmp_repo.commit("bump and kernel edit")
+        table = TestTheDrop()._table(
+            tmp_path,
+            tmp_repo,
+            launched={"libs": ["flashinfer"]},
+            quiet={"libs": ["flashinfer"]},
+        )
+        sel = TestTheDrop()._selection("launched", "quiet")
+        steps = [
+            SimpleNamespace(step_id=f"vllm_ci:{k}", buildkite_key=k, label=k)
+            for k in ("launched", "quiet")
+        ]
+        state = SimpleNamespace(
+            pipelines=[
+                SimpleNamespace(config=SimpleNamespace(name="vllm_ci"), steps=steps)
+            ]
+        )
+        observed_backend = "rocm" if "rocm" in backends else "cuda"
+        kernels = [
+            KernelEvidence(
+                KernelTable(
+                    {
+                        key: KernelRow(
+                            key,
+                            frozenset({"kA"})
+                            if key == "launched" and backend == observed_backend
+                            else frozenset(),
+                            passed=True,
+                            complete=True,
+                            dropped=0,
+                            backend=backend,
+                            trace_complete=True,
+                        )
+                        for key in ("launched", "quiet")
+                    },
+                    commit=base,
+                ),
+                SymbolMap(
+                    {"csrc/a.cu": frozenset({"kA"})}, commit=base, backend=backend
+                ),
+            )
+            for backend in backends
+        ]
+        d = decide(state, sel, tmp_repo.root, base, head, table=table, kernels=kernels)
+        assert d.kernel_note == ""
+        assert d.steps == {"vllm_ci:launched"}
+        assert d.dropped_by_libraries == {"vllm_ci:quiet"}
+
     def test_a_bump_drops_the_step_that_never_called_the_library(
         self, tmp_path, tmp_repo
     ):
@@ -333,7 +403,7 @@ class TestDecide:
             base,
             head,
             table=table,
-            kernels=SimpleNamespace(unavailable="not under test"),
+            kernels=[],
         )
         assert d.bumped == {"requirements/cuda.txt": frozenset({"flashinfer"})}
         assert d.dropped_by_libraries == {"vllm_ci:quiet"}

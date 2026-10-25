@@ -30,12 +30,19 @@ fi
 
 cat <<'EOF' > /etc/buildkite-agent/hooks/pre-checkout
 #!/bin/bash
+# Containerized steps that mount the host checkout directory can leave
+# git-lfs hooks in .git/hooks/, which run on the host during the next job's
+# checkout. Clear them before buildkite-agent checks the repo out.
+if [ -n "${BUILDKITE_BUILD_CHECKOUT_PATH:-}" ] && [ -d "${BUILDKITE_BUILD_CHECKOUT_PATH}/.git/hooks" ]; then
+  rm -f "${BUILDKITE_BUILD_CHECKOUT_PATH}/.git/hooks/"{post-checkout,post-commit,post-merge,pre-push} 2>/dev/null || true
+fi
+
 # vllm-torchtpu is checked out over SSH with its read-only deploy key. The key
 # is the Buildkite secret VLLM_TORCHTPU_DEPLOY_KEY, whose access policy lists
 # the pipelines that need it, so other jobs on this VM can't read it.
 case "$BUILDKITE_REPO" in
   git@github.com:vllm-project/vllm-torchtpu.git|ssh://git@github.com/vllm-project/vllm-torchtpu.git)
-    key_file=$(mktemp)
+    key_file=$(mktemp /tmp/buildkite-agent-deploy-key.XXXXXX)
     if buildkite-agent secret get VLLM_TORCHTPU_DEPLOY_KEY > "$key_file" && [ -s "$key_file" ]; then
       export GIT_SSH_COMMAND="ssh -i $key_file -o IdentitiesOnly=yes -o BatchMode=yes"
       export VLLM_TORCHTPU_DEPLOY_KEY_FILE="$key_file"

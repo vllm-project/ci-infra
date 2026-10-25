@@ -332,3 +332,45 @@ def test_a_main_build_is_selected_against_its_parent(monkeypatch):
         dict(main, nightly="1", run_all=True), ["x"], emission
     )
     assert full_run["skipped"].startswith("nightly")
+
+
+def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkeypatch):
+    """vllm#61832 added automatic_shard to three nightly-only steps; the
+    selector names them in changed_keys, and they run. Other optional steps
+    stay optional."""
+    steps = _steps() + [
+        Step(
+            label="Nightly changed",
+            key="nightly-changed",
+            optional=True,
+            commands=["n"],
+            depends_on=["image-build"],
+        ),
+        Step(
+            label="Nightly other",
+            key="nightly-other",
+            optional=True,
+            commands=["n"],
+            depends_on=["image-build"],
+        ),
+    ]
+
+    def emission(**kw):
+        return {
+            "emission": {
+                "omit": False,
+                "reason": "",
+                "keys": ["test-b", "nightly-other"],
+                "changed_keys": ["nightly-changed", "gone-at-head"],
+            },
+            "records": {},
+            "log": "",
+            "ci_infra_commit": "c" * 40,
+        }
+
+    monkeypatch.setattr(selector_gate, "run_ci_select", emission)
+    record = pg._selector_decision(steps)
+    assert record["applied"] is True
+    assert record["selector_changed_steps"] == ["nightly-changed"]
+    assert record["selector_keys"] == ["nightly-changed", "test-b"]
+    assert record["selector_optional_dropped"] == ["nightly-other"]

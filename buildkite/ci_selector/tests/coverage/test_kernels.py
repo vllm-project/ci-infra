@@ -60,6 +60,8 @@ def _table(tmp_path: Path, rows: dict[str, dict], commit="abc", version=TABLE_VE
             "shards": {"expected": None, "seen": 1},
             "processes": 1,
             "dropped": r.get("dropped", 0),
+            "backend": r.get("backend", "cuda"),
+            "trace_complete": r.get("trace_complete", True),
             "kernels": sorted(idx[k] for k in r.get("kernels", ())),
         }
         for key, r in rows.items()
@@ -181,9 +183,9 @@ def test_loaders_fail_safe(tmp_path):
     assert "cuobjdump" in load_symbol_map(m).unavailable
     assert "no objects" in load_symbol_map(_map(tmp_path, [])).unavailable
     payload = json.load(gzip.open(_map(tmp_path, [_obj("csrc/a.cu", ["kA"])]), "rt"))
-    payload["version"] = 2
+    payload["version"] = 99
     assert (
-        "version 2"
+        "version 99"
         in load_symbol_map(_gz(tmp_path / "v2.json.gz", payload)).unavailable
     )
 
@@ -209,9 +211,106 @@ def test_table_reads_rows_and_health(tmp_path):
     assert t.row("missing") is None
 
 
+def test_legacy_cuda_records_remain_readable(tmp_path):
+    path = _table(tmp_path, {"cuda": {"kernels": ["k"]}}, version=2)
+    payload = json.loads(gzip.decompress(path.read_bytes()))
+    del payload["rows"]["cuda"]["backend"]
+    del payload["rows"]["cuda"]["trace_complete"]
+    row = load_table(_gz(path, payload)).row("cuda")
+    assert row.backend == "cuda" and not row.usable
+    assert row.kernels == frozenset({"k"})
+    assert load_symbol_map(_map(tmp_path, [_obj("csrc/x.cu", ["k"])])).backend == "cuda"
+
+
+@pytest.mark.parametrize("backend", [None, "unknown", "hip", [], {}])
+def test_new_symbol_maps_require_a_known_backend(tmp_path, backend):
+    sm = load_symbol_map(
+        _map(tmp_path, [_obj("csrc/x.cu", ["k"])], version=2, backend=backend)
+    )
+    assert not sm.available
+
+
+def test_new_table_requires_trace_health(tmp_path):
+    path = _table(tmp_path, {"amd": {"kernels": ["k"], "backend": "rocm"}})
+    payload = json.loads(gzip.decompress(path.read_bytes()))
+    del payload["rows"]["amd"]["trace_complete"]
+    assert not load_table(_gz(path, payload)).available
+
+
+@pytest.mark.parametrize(
+    "map_backend,row_backend", [("rocm", "cuda"), ("cuda", "rocm")]
+)
+def test_kernel_evidence_cannot_cross_gpu_backends(tmp_path, map_backend, row_backend):
+    """Identical names and commits do not identify the same GPU build."""
+    evidence = _evidence(
+        tmp_path,
+        {
+            "unselected": {"kernels": ["k"], "backend": row_backend},
+            "selected": {"kernels": ["other"], "backend": row_backend},
+        },
+        [_obj("csrc/shared.cu", ["k"])],
+        version=2,
+        backend=map_backend,
+    )
+    reading = _read(
+        evidence,
+        _selection({"csrc/shared.cu": ["selected"]}),
+        ["csrc/shared.cu"],
+        _keys("selected", "unselected"),
+    )
+    assert reading.added == reading.dropped == []
+    assert reading.reasons["row-and-map-from-different-backends"] == 1
+
+
+@pytest.mark.parametrize("trace_complete", [False, True])
+def test_rocm_absence_requires_complete_trace_but_presence_does_not(
+    tmp_path, trace_complete
+):
+    rows = {
+        key: {"backend": "rocm", "trace_complete": trace_complete, "kernels": kernels}
+        for key, kernels in {"hit": ["k"], "miss": ["other"]}.items()
+    }
+    evidence = _evidence(
+        tmp_path, rows, [_obj("csrc/rocm/x.cu", ["k"])], version=2, backend="rocm"
+    )
+    reading = _read(
+        evidence,
+        _selection({"csrc/rocm/x.cu": ["miss"]}),
+        ["csrc/rocm/x.cu"],
+        _keys("hit", "miss"),
+    )
+    assert reading.added == ["vllm_ci:hit"]
+    assert reading.dropped == (["vllm_ci:miss"] if trace_complete else [])
+
+
+def test_incomplete_symbol_map_cannot_clear_a_rocm_step(tmp_path):
+    evidence = _evidence(
+        tmp_path,
+        {"amd": {"backend": "rocm", "kernels": ["other"]}},
+        [_obj("csrc/rocm/x.cu", ["k"])],
+        version=2,
+        backend="rocm",
+        incomplete=True,
+    )
+    reading = _read(
+        evidence,
+        _selection({"csrc/rocm/x.cu": ["amd"]}),
+        ["csrc/rocm/x.cu"],
+        _keys("amd"),
+    )
+    assert reading.dropped == []
+    assert "incomplete" in reading.files["csrc/rocm/x.cu"]
+
+
 def test_usable_mirrors_kernrec():
     def row(**kw):
-        health = {"passed": True, "complete": True, "dropped": 0, **kw}
+        health = {
+            "passed": True,
+            "complete": True,
+            "dropped": 0,
+            "trace_complete": True,
+            **kw,
+        }
         return KernelRow("s", frozenset(), **health)
 
     assert row().usable
@@ -220,7 +319,8 @@ def test_usable_mirrors_kernrec():
     assert not row(dropped=1).usable
 
 
-def test_symbol_map_reach_host_and_unknown(tmp_path):
+@pytest.mark.parametrize("version,backend", [(1, "cuda"), (2, "rocm")])
+def test_symbol_map_reach_host_and_unknown(tmp_path, version, backend):
     sm = load_symbol_map(
         _map(
             tmp_path,
@@ -235,6 +335,8 @@ def test_symbol_map_reach_host_and_unknown(tmp_path):
                     error="cuobjdump: cannot open",
                 ),
             ],
+            version=version,
+            backend=backend,
         )
     )
     assert sm.available and sm.objects == 4
@@ -327,15 +429,23 @@ def test_three_lines_and_every_gate(tmp_path):
     assert set(r.kept) | set(r.dropped) == set(sel.selected)
 
 
-def test_header_included_by_host_code_selects_but_never_drops(tmp_path):
+@pytest.mark.parametrize("version,backend", [(1, "cuda"), (2, "rocm")])
+def test_header_included_by_host_code_selects_but_never_drops(
+    tmp_path, version, backend
+):
     ev = _evidence(
         tmp_path,
-        {"silent": {"kernels": ["kZ"]}, "missed": {"kernels": ["kA"]}},
+        {
+            key: {"kernels": [kernel], "backend": backend}
+            for key, kernel in [("silent", "kZ"), ("missed", "kA")]
+        },
         [
             _obj("csrc/a.cu", ["kA"], deps=["csrc/h.h"]),
             _obj("csrc/bindings.cpp", [], deps=["csrc/h.h"]),
             _obj("csrc/z.cu", ["kZ"]),
         ],
+        version=version,
+        backend=backend,
     )
     sel = _selection({"csrc/h.h": ["silent"]})
     r = _read(ev, sel, ["csrc/h.h"], _keys("silent", "missed"))
@@ -347,7 +457,7 @@ def test_header_included_by_host_code_selects_but_never_drops(tmp_path):
 def test_unreadable_object_blocks_drops_for_its_files(tmp_path):
     ev = _evidence(
         tmp_path,
-        {"silent": {"kernels": []}},
+        {"silent": {"kernels": ["kOther"]}},
         [_obj("csrc/bad.cu", [], error="cuobjdump failed"), _obj("csrc/a.cu", ["kA"])],
     )
     sel = _selection({"csrc/bad.cu": ["silent"]})
@@ -356,7 +466,9 @@ def test_unreadable_object_blocks_drops_for_its_files(tmp_path):
 
 
 def test_file_outside_the_map_leaves_the_map_alone(tmp_path):
-    ev = _evidence(tmp_path, {"silent": {"kernels": []}}, [_obj("csrc/a.cu", ["kA"])])
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kOther"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
     sel = _selection({"csrc/cpu/attention.cpp": ["silent"]})
     r = _read(ev, sel, ["csrc/cpu/attention.cpp", "docs/x.md"], _keys("silent"))
     assert r.dropped == [] and r.added == []
@@ -371,7 +483,7 @@ def test_file_outside_the_map_leaves_the_map_alone(tmp_path):
 def test_unmatched_pair_and_stale_file_only_select(tmp_path):
     ev = _evidence(
         tmp_path,
-        {"silent": {"kernels": []}, "missed": {"kernels": ["kA"]}},
+        {"silent": {"kernels": ["kOther"]}, "missed": {"kernels": ["kA"]}},
         [_obj("csrc/a.cu", ["kA"])],
         table_commit="abc",
         map_commit="def",
@@ -390,7 +502,9 @@ def test_unmatched_pair_and_stale_file_only_select(tmp_path):
 
 
 def test_python_record_positive_evidence_holds_the_step(tmp_path):
-    ev = _evidence(tmp_path, {"silent": {"kernels": []}}, [_obj("csrc/a.cu", ["kA"])])
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kOther"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
     sel = _selection({"csrc/a.cu": ["silent"]})
     r = _read(
         ev, sel, ["csrc/a.cu"], _keys("silent"), protected=frozenset({"vllm_ci:silent"})
@@ -403,8 +517,8 @@ def test_a_drop_needs_every_selecting_file_cleared(tmp_path):
         tmp_path,
         {
             "runs-b": {"kernels": ["kB"]},
-            "runs-none": {"kernels": []},
-            "runs-none-2": {"kernels": []},
+            "runs-none": {"kernels": ["kOther"]},
+            "runs-none-2": {"kernels": ["kOther"]},
         },
         [
             _obj("csrc/a.cu", ["kA"]),
@@ -481,6 +595,114 @@ def test_attribution_narrows_a_file_to_its_changed_kernels(tmp_path):
     assert declined.dropped == [] and "whole file" in declined.files["csrc/a.cu"]
 
 
+def test_declarations_narrow_a_header_host_code_includes(tmp_path):
+    """`ops.h` changed only a prototype. The header is included by bindings
+    code without kernels, so read whole it may only select; read as the
+    declaration of `launch_a` it is kA alone, and may drop."""
+    objects = [
+        _obj("csrc/a.cu", ["kA", "kB"], deps=["csrc/ops.h"]),
+        _obj("csrc/bindings.cpp", [], deps=["csrc/ops.h"]),
+    ]
+    rows = {"runs-a": {"kernels": ["kA"]}, "runs-b": {"kernels": ["kB"]}}
+    ev = _evidence(tmp_path, rows, objects)
+    sel = _selection({"csrc/ops.h": ["runs-a", "runs-b"]})
+    keys = _keys("runs-a", "runs-b")
+    whole = _read(ev, sel, ["csrc/ops.h"], keys)
+    assert whole.dropped == [] and "may only select" in whole.files["csrc/ops.h"]
+    declared = _read(
+        ev,
+        sel,
+        ["csrc/ops.h"],
+        keys,
+        declarations=lambda p: (frozenset({"kA"}), "declares launch_a"),
+    )
+    assert declared.dropped == ["vllm_ci:runs-b"]
+    assert declared.reasons["file-narrowed-to-declared-kernels"] == 1
+    assert declared.files["csrc/ops.h"] == (
+        "1 kernel symbols (declares launch_a); may select and drop"
+    )
+
+
+def test_bindings_with_no_kernels_narrow_through_the_whole_map(tmp_path):
+    """`torch_bindings.cpp` compiles no kernel, so its own symbols are empty;
+    the declared names are looked up across every object."""
+    objects = [
+        _obj("csrc/a.cu", ["kA"]),
+        _obj("csrc/b.cu", ["kB"]),
+        _obj("csrc/torch_bindings.cpp", []),
+    ]
+    rows = {"runs-a": {"kernels": ["kA"]}, "runs-b": {"kernels": ["kB"]}}
+    ev = _evidence(tmp_path, rows, objects)
+    sel = _selection({"csrc/torch_bindings.cpp": ["runs-a", "runs-b"]})
+    r = _read(
+        ev,
+        sel,
+        ["csrc/torch_bindings.cpp"],
+        _keys("runs-a", "runs-b"),
+        declarations=lambda p: (frozenset({"kA"}), "declares launch_a"),
+    )
+    assert r.dropped == ["vllm_ci:runs-b"]
+
+
+def test_declarations_need_a_witness_and_a_readable_map(tmp_path):
+    """No usable row launched the declared kernels: a schema that fails to
+    load would fail nothing that runs, so the file stays whole. An object the
+    producer could not read still blocks drops for its files."""
+    objects = [
+        _obj("csrc/a.cu", ["kA", "kB"], deps=["csrc/ops.h"]),
+        _obj("csrc/bindings.cpp", [], deps=["csrc/ops.h"]),
+    ]
+    keys = _keys("runs-a", "runs-b")
+    sel = _selection({"csrc/ops.h": ["runs-a", "runs-b"]})
+    narrow = {"declarations": lambda p: (frozenset({"kA"}), "declares launch_a")}
+
+    failed = {
+        "runs-a": {"kernels": ["kA"], "passed": False},
+        "runs-b": {"kernels": ["kB"]},
+    }
+    r = _read(_evidence(tmp_path, failed, objects), sel, ["csrc/ops.h"], keys, **narrow)
+    assert r.dropped == [] and "no usable row launched them" in r.files["csrc/ops.h"]
+
+    unreadable = [*objects, _obj("csrc/c.cu", deps=["csrc/ops.h"], error="truncated")]
+    rows = {"runs-a": {"kernels": ["kA"]}, "runs-b": {"kernels": ["kB"]}}
+    r = _read(
+        _evidence(tmp_path, rows, unreadable), sel, ["csrc/ops.h"], keys, **narrow
+    )
+    assert r.dropped == [] and "could not be read" in r.files["csrc/ops.h"]
+
+
+def test_a_step_the_python_record_cleared_drops_on_its_csrc_files(tmp_path):
+    """Selected for a kernel file and a Python file. The kernel record cannot
+    weigh the Python file, so it held the step; once the Python record has
+    cleared that file (`python_cleared`), the kernel file is all that is left."""
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kZ"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
+    sel = _selection({"csrc/a.cu": ["silent"], "vllm/_custom_ops.py": ["silent"]})
+    keys = _keys("silent")
+    held = _read(ev, sel, ["csrc/a.cu", "vllm/_custom_ops.py"], keys)
+    assert held.dropped == []
+    assert held.reasons["selected-by-a-file-outside-the-map"] == 1
+    cleared = _read(
+        ev,
+        sel,
+        ["csrc/a.cu", "vllm/_custom_ops.py"],
+        keys,
+        python_cleared=frozenset({"vllm_ci:silent"}),
+    )
+    assert cleared.dropped == ["vllm_ci:silent"]
+    # still every gate on its own files: an image builder stays
+    built = _read(
+        ev,
+        sel,
+        ["csrc/a.cu", "vllm/_custom_ops.py"],
+        keys,
+        held=lambda p: {"vllm_ci:silent"},
+        python_cleared=frozenset({"vllm_ci:silent"}),
+    )
+    assert built.dropped == []
+
+
 # --- decide() wiring --------------------------------------------------------------
 
 
@@ -520,8 +742,8 @@ def test_decide_applies_the_kernel_record(tmp_path, csrc_diff, monkeypatch):
         tmp_path,
         {
             "launched": {"kernels": ["kA"]},
-            "silent": {"kernels": []},
-            "declared": {"kernels": []},
+            "silent": {"kernels": ["kOther"]},
+            "declared": {"kernels": ["kOther"]},
         },
         [_obj("csrc/a.cu", ["kA"])],
     )
@@ -539,7 +761,9 @@ def test_decide_applies_the_kernel_record(tmp_path, csrc_diff, monkeypatch):
     assert d.steps == {"vllm_ci:launched"}
     assert "abc" in d.kernel_pair and "DIFFERENT" not in d.kernel_pair
     assert d.kernel_files["csrc/a.cu"].endswith("; may select and drop")
-    assert d.kernel_files["csrc/a.cu"].startswith("1 of 1 kernel symbols (changed: kA)")
+    assert d.kernel_files["csrc/a.cu"].startswith(
+        "cuda: 1 of 1 kernel symbols (changed: kA)"
+    )
 
 
 TWO_KERNELS = """\
@@ -587,7 +811,7 @@ def test_decide_unmatched_pair_drops_only_on_opt_in(tmp_path, csrc_diff, monkeyp
     root, base, head = csrc_diff
     ev = _evidence(
         tmp_path,
-        {"silent": {"kernels": []}},
+        {"silent": {"kernels": ["kOther"]}},
         [_obj("csrc/a.cu", ["kA"])],
         map_commit="def",
     )
@@ -610,7 +834,9 @@ def test_decide_without_a_state_or_with_bad_evidence_changes_nothing(
     tmp_path, csrc_diff
 ):
     root, base, head = csrc_diff
-    ev = _evidence(tmp_path, {"silent": {"kernels": []}}, [_obj("csrc/a.cu", ["kA"])])
+    ev = _evidence(
+        tmp_path, {"silent": {"kernels": ["kOther"]}}, [_obj("csrc/a.cu", ["kA"])]
+    )
     sel = _selection({"csrc/a.cu": ["silent"]})
     d = decide(
         None, sel, root, base, head, table=Table(None, unavailable="x"), kernels=ev
@@ -648,6 +874,28 @@ def test_fetch_kernel_evidence_reads_the_configured_paths(tmp_path, monkeypatch)
     monkeypatch.setenv(KERNEL_TABLE_ENV, str(t))
     monkeypatch.setenv(KERNEL_MAP_ENV, str(m))
     assert fetch_kernel_evidence().matched
+
+
+def test_default_records_include_both_backends_and_explicit_paths_override(
+    tmp_path, monkeypatch
+):
+    from ci_selector.coverage.source import fetch_kernel_records
+
+    for backend, prefix in [("cuda", "CI_SELECTOR"), ("rocm", "CI_SELECTOR_ROCM")]:
+        directory = tmp_path / backend
+        directory.mkdir()
+        table = _table(directory, {backend: {"backend": backend, "kernels": ["k"]}})
+        symbols = _map(
+            directory, [_obj("csrc/a.cu", ["k"])], version=2, backend=backend
+        )
+        monkeypatch.setenv(f"{prefix}_KERNEL_TABLE", str(table))
+        monkeypatch.setenv(f"{prefix}_KERNEL_SYMBOL_MAP", str(symbols))
+    assert [pair.symbol_map.backend for pair in fetch_kernel_records()] == [
+        "cuda",
+        "rocm",
+    ]
+    explicit = fetch_kernel_records(table, symbols)
+    assert len(explicit) == 1 and explicit[0].symbol_map.backend == "rocm"
 
 
 # --- the fetch script -----------------------------------------------------------------
@@ -694,3 +942,104 @@ def test_fetch_script_reports_nothing_published(tmp_path, monkeypatch):
     mod = _serve(monkeypatch, {})
     assert mod.main(["--url", "https://bucket/ci", "--out", str(tmp_path / "o")]) == 1
     assert not (tmp_path / "o" / "kernel_table.json.gz").exists()
+
+
+@pytest.mark.parametrize("amd_health", [True, False])
+@pytest.mark.parametrize("amd_backend", ["rocm", "unknown"])
+def test_combined_backend_records_preserve_observations(
+    tmp_path, csrc_diff, amd_health, amd_backend
+):
+    """CUDA silence cannot override an AMD observation or incomplete AMD row."""
+    root, base, head = csrc_diff
+    # CUDA rows that launched kernels, none of them from the changed file: an
+    # empty kernel set is no evidence at all (row-launched-no-kernel-at-all).
+    cuda = _evidence(
+        tmp_path,
+        {"shared": {"kernels": ["kOther"]}, "cuda-only": {"kernels": ["kOther"]}},
+        [_obj("csrc/a.cu", ["kA"])],
+    )
+    amd_dir = tmp_path / "amd"
+    amd_dir.mkdir()
+    amd = _evidence(
+        amd_dir,
+        {
+            "shared": {
+                "kernels": ["kA"] if amd_health else [],
+                "backend": amd_backend,
+                "trace_complete": amd_health,
+            }
+        },
+        [_obj("csrc/a.cu", ["kA"])],
+        version=2,
+        backend="rocm",
+    )
+    sel = _selection({"csrc/a.cu": ["shared", "cuda-only"]})
+    state = _state(_Step("shared"), _Step("cuda-only"))
+    for pairs in ([cuda, amd], [amd, cuda]):
+        result = decide(
+            state,
+            sel,
+            root,
+            base,
+            head,
+            table=Table(None, unavailable="none"),
+            kernels=pairs,
+        )
+        assert result.used_kernels
+        assert result.steps == {"vllm_ci:shared"}
+        assert result.dropped_by_kernels == {"vllm_ci:cuda-only"}
+
+
+def test_fetch_rocm_pair_keeps_cuda_files_separate(tmp_path, monkeypatch):
+    base = "https://bucket/ci"
+    t = _table(tmp_path, {"amd": {"backend": "rocm", "kernels": ["k"]}}, commit="c1")
+    m = _map(
+        tmp_path, [_obj("csrc/a.cu", ["k"])], commit="c1", version=2, backend="rocm"
+    )
+    files = {
+        f"{base}/latest.rocm.json": json.dumps({"commit": "c1", "build": 9}).encode(),
+        f"{base}/c1/kernel_table.rocm.json.gz": t.read_bytes(),
+        f"{base}/c1/kernel_symbol_map.rocm.json.gz": m.read_bytes(),
+    }
+    mod = _serve(monkeypatch, files)
+    out = tmp_path / "out"
+    out.mkdir()
+    cuda = out / "kernel_table.json.gz"
+    cuda.write_bytes(b"existing CUDA evidence")
+    assert mod.main(["--url", base, "--out", str(out), "--backend", "rocm"]) == 0
+    assert cuda.read_bytes() == b"existing CUDA evidence"
+    assert load_table(out / "kernel_table.rocm.json.gz").row("amd").backend == "rocm"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("passed", "false"),
+        ("complete", 1),
+        ("dropped", 0.5),
+        ("dropped", -1),
+        ("kernels", [-1]),
+        ("kernels", [True]),
+    ],
+)
+def test_invalid_health_types_cannot_authorize_kernel_drops(tmp_path, field, value):
+    path = _table(tmp_path, {"s": {"kernels": ["k"]}})
+    payload = json.loads(gzip.decompress(path.read_bytes()))
+    payload["rows"]["s"][field] = value
+    assert not load_table(_gz(path, payload)).available
+
+
+def test_a_row_that_launched_no_kernel_at_all_never_drops(tmp_path):
+    """An ABI audit, a CPU job or a dependency check records an empty kernel
+    set. That silence is about no kernel in particular: such a step reaches
+    csrc some other way (`torch-stable-abi-audit` reads the built library),
+    so it keeps whatever changed."""
+    ev = _evidence(
+        tmp_path,
+        {"audit": {"kernels": []}, "gpu": {"kernels": ["kOther"]}},
+        [_obj("csrc/a.cu", ["kA"])],
+    )
+    sel = _selection({"csrc/a.cu": ["audit", "gpu"]})
+    r = _read(ev, sel, ["csrc/a.cu"], _keys("audit", "gpu"))
+    assert r.dropped == ["vllm_ci:gpu"]
+    assert r.reasons["row-launched-no-kernel-at-all"] == 1

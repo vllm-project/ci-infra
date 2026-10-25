@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import regex as re
+import yaml
 from ci_selector.codemap.claim import matches_source_dependency
 from ci_selector.codemap.classify import select
 from ci_selector.gitdiff import DiffFile, changed_paths
@@ -3628,3 +3629,108 @@ def test_quiet_python_changes_select_nothing(state, monkeypatch):
     # A real edit keeps the ordinary rules.
     monkeypatch.setattr(classify, "_same_python_ast", lambda *a: False)
     assert classify._classify(state, path, ctx).step_ids
+
+
+# --- a step yaml claims only the steps whose definition changed ---
+
+
+def test_a_changed_step_entry_is_the_only_one_named():
+    from ci_selector.codemap.classify import changed_step_entries
+
+    before = {
+        "group": "Q",
+        "steps": [{"key": "a", "commands": ["x"]}, {"label": "B", "commands": ["y"]}],
+    }
+    after = {
+        "group": "Q",
+        "steps": [
+            {"key": "a", "commands": ["x"], "automatic_shard": True},
+            {"label": "B", "commands": ["y"]},
+        ],
+    }
+    changed, added, mirror_only = changed_step_entries(before, after)
+    assert set(changed) == {"a"} and not added and not mirror_only
+    assert changed_step_entries(before, before) == ({}, {}, {})
+
+
+def test_a_change_outside_the_step_list_keeps_every_step():
+    from ci_selector.codemap.classify import changed_step_entries
+
+    before = {"group": "Q", "depends_on": ["image-build"], "steps": [{"key": "a"}]}
+    after = {"group": "Q", "depends_on": ["image-build-cpu"], "steps": [{"key": "a"}]}
+    assert changed_step_entries(before, after) is None
+    # an unnamed entry cannot be placed either
+    assert changed_step_entries({"steps": [{"commands": ["x"]}]}, after) is None
+
+
+def test_added_removed_and_mirror_only_entries_are_told_apart():
+    from ci_selector.codemap.classify import changed_step_entries
+
+    before = {
+        "steps": [
+            {"key": "gone"},
+            {"key": "m", "commands": ["x"], "mirror": {"amd": {"device": "mi300_1"}}},
+        ]
+    }
+    after = {
+        "steps": [
+            {"key": "m", "commands": ["x"], "mirror": {"amd": {"device": "mi355_1"}}},
+            {"key": "new", "commands": ["y"]},
+        ]
+    }
+    changed, added, mirror_only = changed_step_entries(before, after)
+    assert not changed and set(added) == {"new"} and set(mirror_only) == {"m"}
+
+
+def _claim_for(state, monkeypatch, path, edit):
+    import copy
+
+    from ci_selector.codemap import classify
+    from ci_selector.codemap.state import DiffContext
+
+    before = yaml.safe_load((state.repo / path).read_text())
+    after = copy.deepcopy(before)
+    edit(after)
+    docs = {"base": before, "head": after}
+    monkeypatch.setattr(classify, "_yaml_at", lambda st, p, ref: docs[ref])
+    ctx = DiffContext(base="base", head="head", status={path: "M"})
+    return classify._classify_buildkite(
+        state, path, [p.config for p in state.pipelines], ctx
+    )
+
+
+def test_a_changed_step_brings_its_mirror_and_nothing_else(state, monkeypatch):
+    """vllm#61832 added `automatic_shard` to four steps in four files and
+    selected all 74 steps those files define."""
+    from ci_selector.codemap import classify
+
+    path = ".buildkite/test_areas/quantization.yaml"
+
+    def edit(doc):
+        step = next(s for s in doc["steps"] if s.get("key") == "quantized-models-test")
+        step["automatic_shard"] = True
+
+    claim = _claim_for(state, monkeypatch, path, edit)
+    parents = {s for s in claim.step_ids if s.endswith(":quantized-models-test")}
+    targeted = classify._steps_targeting(state, path)
+    assert parents
+    assert claim.step_ids - targeted <= {
+        s for s in claim.step_ids if "quantized-models-test" in s
+    }
+    assert "quantized-models-test" in claim.changed_step_keys
+
+
+def test_an_added_step_is_named_by_its_head_key(state, monkeypatch):
+    """A step the diff adds is in no base state; its head key is how CI is
+    told to run it."""
+    path = ".buildkite/test_areas/quantization.yaml"
+
+    def edit(doc):
+        doc["steps"].append(
+            {"label": "New Thing", "key": "brand-new-step", "commands": ["pytest x"],
+             "optional": True}
+        )
+
+    claim = _claim_for(state, monkeypatch, path, edit)
+    assert claim.changed_step_keys == {"brand-new-step"}
+    assert "changes the definition of 1" in claim.detail

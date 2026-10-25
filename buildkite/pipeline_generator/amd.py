@@ -158,13 +158,24 @@ class AmdDeviceConfig:
     queue: AgentQueue
     default_gpu_count: int
     uses_dra: bool = False
+    # One queue serves every GPU count; the agent stacks behind it are told
+    # apart by their gpu_size tag, so the step must target it explicitly.
+    gpu_size_tag: bool = False
 
 
 AMD_DEVICE_CONFIGS = {
-    DeviceType.AMD_MI250_1.value: AmdDeviceConfig(AgentQueue.AMD_MI250_1, 1),
-    DeviceType.AMD_MI250_2.value: AmdDeviceConfig(AgentQueue.AMD_MI250_2, 2),
-    DeviceType.AMD_MI250_4.value: AmdDeviceConfig(AgentQueue.AMD_MI250_4, 4),
-    DeviceType.AMD_MI250_8.value: AmdDeviceConfig(AgentQueue.AMD_MI250_8, 8),
+    DeviceType.AMD_MI250_1.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI250, 1, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI250_2.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI250, 2, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI250_4.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI250, 4, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI250_8.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI250, 8, gpu_size_tag=True
+    ),
     DeviceType.AMD_MI300_1.value: AmdDeviceConfig(AgentQueue.AMD_MI300_1, 1),
     DeviceType.AMD_MI300_2.value: AmdDeviceConfig(AgentQueue.AMD_MI300_2, 2),
     DeviceType.AMD_MI300_4.value: AmdDeviceConfig(AgentQueue.AMD_MI300_4, 4),
@@ -295,6 +306,8 @@ def get_amd_agents(
         )
 
     agents = {"queue": config.queue}
+    if config.gpu_size_tag:
+        agents["gpu_size"] = str(config.default_gpu_count)
     if agent_tags is not None and not isinstance(agent_tags, dict):
         raise ValueError("AMD agent_tags must be a mapping.")
     if not agent_tags:
@@ -312,8 +325,9 @@ def get_amd_agents(
             raise ValueError(
                 "AMD agent_tags keys and values must be non-empty strings."
             )
-        if key != "queue":
-            agents[key] = value
+        if key == "queue" or (config.gpu_size_tag and key == "gpu_size"):
+            continue
+        agents[key] = value
     return agents
 
 
