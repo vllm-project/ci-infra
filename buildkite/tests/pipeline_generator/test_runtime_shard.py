@@ -306,6 +306,23 @@ def test_plan_prefers_the_full_label_over_its_old_prefix_during_rollout():
     assert result["unknownFiles"] == [] and result["estimates"] == [30]
 
 
+def test_plan_matches_a_multiline_command_s_old_label_to_its_full_one():
+    """A multi-line command's old label kept its line breaks, which the full
+    label turns into spaces: they are still one command. A PR that replaces
+    it, or edits it past 80 characters, reads the full label's timing."""
+    case = "set -eu\ncase $BUILDKITE_PARALLEL_JOB in\n  0)\n    " + " ".join(
+        f"pytest -v -s tests/t{i}.py" for i in range(4)
+    )
+    old = rs._legacy_preview(case)
+    assert "\n" in old and old != rs.command_preview(old)
+    timings = _timings(case, {"a.py": 30})
+    timings["files"] += [dict(timings["files"][0], command=old, observedMs=900000)]
+    result = rs.plan(_commands("pytest -v -s a.py", ["a.py"]), timings)
+    assert result["unknownFiles"] == [] and result["estimates"] == [30]
+    result = rs.plan(_commands(case + " -x", ["a.py"]), timings)
+    assert result["unknownFiles"] == [] and result["estimates"] == [30]
+
+
 def test_plan_does_not_read_a_shared_old_prefix_for_either_command():
     """Two long commands that main ran under one 80-character label: that
     timing pools both, so neither reads it."""
@@ -491,21 +508,21 @@ def test_plan_drops_a_shard_that_cannot_beat_one_long_test():
     )
 
 
-def test_plan_trims_on_a_command_edited_past_its_label():
-    # Main's labels keep 80 characters, so an edit past them still reads as
-    # main's command. Accepted until labels carry the whole command (#835).
+def test_plan_does_not_trim_on_a_command_edited_past_80_characters():
+    # Labels carry the whole command, so an edit past 80 characters is a new
+    # command: it reads main's timings by file, untrimmed.
     command = "pytest -v -s model_executor " + "--timeout=900 " * 6
     edited = command + " -k 'not test_slow'"
     assert len(command) > 80 and edited[:80] == command[:80]
     tests = {"test_slow": 1116, "test_a": 564, "test_b": 504}
     timings = _timed(_with_tests(_timings(command, {"big.py": 2184}), "big.py", tests))
     result = rs.plan(_commands(edited, ["big.py"]), timings)
-    assert result["shards"] == 2 and result["longTest"]["seconds"] == 1116
+    assert result["longTest"] is None and result["shards"] == 3
 
 
-def test_plan_does_not_trim_a_step_whose_commands_share_a_label():
-    # Two commands with the same 80-character label share main's timings: the
-    # long test could be either one's.
+def test_plan_trims_a_step_whose_commands_share_their_first_80_characters():
+    # Full labels tell the two commands apart, so the long test is known to be
+    # the first one's.
     command = "pytest -v -s model_executor " + "--timeout=900 " * 6
     other = command + " -x"
     tests = {"test_slow": 1116, "test_a": 564, "test_b": 504}
@@ -513,7 +530,7 @@ def test_plan_does_not_trim_a_step_whose_commands_share_a_label():
     timings["files"] += _timings(other, {"small.py": 60})["files"]
     commands = _commands(command, ["big.py"]) + _commands(other, ["small.py"])
     result = rs.plan(commands, timings)
-    assert result["longTest"] is None and result["shards"] == 4
+    assert result["longTest"]["seconds"] == 1116 and result["shards"] == 3
 
 
 @pytest.mark.parametrize("split", [False, True])
