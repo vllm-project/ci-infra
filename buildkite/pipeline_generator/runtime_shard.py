@@ -337,11 +337,9 @@ def plan(
         has timed. The rest are counts and flagged files.
 
     """
-    file_seconds = {}  # (label, file) -> seconds on main
-    file_tests = {}  # (label, file) -> {nodeid: seconds on main}
-    previews: Dict[str, List[str]] = {}  # file -> labels main ran it under
-    commands_per_file = Counter(file for entry in commands for file in entry["files"])
-    legacy_previews = Counter(_legacy_preview(entry["command"]) for entry in commands)
+    file_seconds = {}  # (preview, file) -> seconds on main
+    file_tests = {}  # (preview, file) -> {nodeid: seconds on main}
+    previews: Dict[str, List[str]] = {}  # file -> previews main ran it under
     for timing in (timings or {}).get("files", []):
         key = (timing["command"], timing["file"])
         file_seconds[key] = timing["observedMs"] / 1000
@@ -350,6 +348,9 @@ def plan(
             file_tests[key] = {
                 t["nodeid"]: t["observedMs"] / 1000 for t in timing["tests"]
             }
+
+    commands_per_file = Counter(file for entry in commands for file in entry["files"])
+    legacy_previews = Counter(_legacy_preview(entry["command"]) for entry in commands)
 
     def timing_key(entry: Dict, file: str) -> Optional[Tuple[str, str]]:
         """The command's own label; then its old 80-character one, if no other
