@@ -385,8 +385,11 @@ def plan(
         historical = previews.get(file, [])
         legacy = _legacy_preview(entry["command"])
         # While main's runs carry both, a command's old 80-character label is
-        # a prefix of its full one, which is the newer timing.
-        superseded = any(h != legacy and h.startswith(legacy) for h in historical)
+        # a prefix of its full one, which is the newer timing. The old label
+        # kept line breaks that the full one turns into spaces.
+        superseded = any(
+            h != legacy and h.startswith(command_preview(legacy)) for h in historical
+        )
         if (
             legacy_previews[legacy] == 1
             and (legacy, file) in file_seconds
@@ -397,7 +400,8 @@ def plan(
             label
             for label in historical
             if not any(
-                other != label and other.startswith(label) for other in historical
+                other != label and other.startswith(command_preview(label))
+                for other in historical
             )
         ]
         if commands_per_file[file] == 1 and len(historical) == 1:
