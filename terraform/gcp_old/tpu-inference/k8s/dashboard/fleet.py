@@ -1577,9 +1577,23 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|_bk;t=\d+\x07?")
 
 
 def job_log(cfg: Config, pipeline: str, build: object, job_id: str) -> str:
-    """A Buildkite job's log, as text."""
-    body = buildkite(cfg, f"/pipelines/{pipeline}/builds/{build}/jobs/{job_id}/log")
-    return (body or {}).get("content") or ""
+    """The last LOG_TAIL bytes of a Buildkite job's log, as text. Read as a
+    stream of the plain-text log, keeping only the tail: an image build's log
+    runs to tens of megabytes, and two of those whole would not fit the
+    service's memory."""
+    path = f"/pipelines/{pipeline}/builds/{build}/jobs/{job_id}/log"
+    if LOCAL:
+        # The bk CLI parses every reply as JSON, so locally the JSON log.
+        return ((buildkite(cfg, path) or {}).get("content") or "")[-LOG_TAIL:]
+    request = urllib.request.Request(
+        f"https://api.buildkite.com/v2/organizations/{cfg.org}{path}.txt",
+        headers={"Authorization": f"Bearer {cfg.token}"},
+    )
+    tail = b""
+    with urllib.request.urlopen(request, timeout=120) as response:
+        while chunk := response.read(1 << 16):
+            tail = (tail + chunk)[-LOG_TAIL:]
+    return tail.decode("utf-8", "replace")
 
 
 def classify_log(text: str, exit_status: object, state: str | None) -> tuple[str, str]:
