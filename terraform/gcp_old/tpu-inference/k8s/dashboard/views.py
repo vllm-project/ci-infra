@@ -17,6 +17,8 @@ from charts import gap_chart, line_chart, share_bars, stacked_chart, values_tabl
 from fleet import (
     TEST_OUTCOMES as FLEET_TEST_OUTCOMES,
     BK_LIMITED,
+    CAUSE_NAMES,
+    CPU_QUEUES,
     BK_WAITING,
     DUTY_MODELS,
     GENERATIONS,
@@ -24,6 +26,7 @@ from fleet import (
     TPU,
     Config,
     job_hex,
+    shape,
 )
 
 E = html.escape
@@ -102,7 +105,11 @@ TERMS = {
     "Redispatch": "The launcher resubmitting a reservation no worker picked up.",
     "Test failure": "The test exited non-zero.",
     "Infra failure": "A workload the fleet ended: never admitted, API unreachable, storage eviction, "
-    "launcher error.",
+    "no node fits, launcher error.",
+    "CPU-queue failure": "A failed job on the cpu or cpu_64_core queue - image builds, gates, notifications - "
+    "whose log shows the fleet failed it: disk full, killed for memory, Docker daemon, image registry, package "
+    "download, network, the agent lost, or a timeout. Read from the end of the job's log; the rest failed for "
+    "their own reasons.",
     "Wait, startup, run": "Wait is submitted to quota reserved; startup (admitted to running) is "
     "admitted to the first container running; run is first container to finished.",
     "Clean build": "A build in which every job passed, or passed when retried. Only clean builds count "
@@ -3689,8 +3696,143 @@ def period_value(v, kind: str) -> str:
     return num(v)
 
 
+# Kube launcher outcomes that are the fleet's, as Review names and explains
+# them; the launcher records the outcome (README "How the launcher works").
+KUBE_INFRA = {
+    "not_admitted": ("Not admitted in time", "No quota, or no worker took it, within the launcher's budget."),
+    "evicted_storage": ("Evicted for disk use", "A pod wrote more to its disk than the node allows."),
+    "unfit": ("No node fits", "A pod asks for more than any node of its shape has."),
+    "removed": ("Workload removed", "The Job or JobSet disappeared from under the launcher."),
+    "api_unreachable": ("Manager API unreachable", "The manager's API server did not answer for 10 minutes."),
+    "error": ("Launcher error", "The launcher itself failed; the traceback is in the step log."),
+}
+INFRA_FIRST = 15
+
+
+def infra_card(name: str, cur: dict, prev: dict, causes: tuple, org: str, project: str) -> str:
+    """The fleet's failures over the period against the one before: kube
+    workloads the launcher ended for the fleet's reasons, and CPU-queue jobs
+    whose logs show the fleet failed them - counted by cause, then each of
+    the period's listed with what it said and links to it."""
+    known, unread, read_error = causes
+
+    def kube_counts(w: dict) -> collections.Counter:
+        return collections.Counter(r["outcome"] for r in w.get("kube") or [])
+
+    def cpu_counts(w: dict) -> collections.Counter:
+        return collections.Counter(
+            known[j["job_id"]][0] for j in w.get("cpu") or [] if j["job_id"] in known
+        )
+
+    kc, kp, cc, cp = kube_counts(cur), kube_counts(prev), cpu_counts(cur), cpu_counts(prev)
+
+    def row(label: str, now: int, before: int) -> str:
+        return (
+            f'<tr><td>{label}</td><td class="n">{num(now)}</td><td class="n muted">{num(before)}</td>'
+            f'<td class="n nowrap">{period_delta(now, before, "count", "down")}</td></tr>'
+        )
+
+    rows = ['<tr class="group"><td colspan="4">GKE: kube steps the fleet ended</td></tr>']
+    outcomes = list(KUBE_INFRA) + sorted((set(kc) | set(kp)) - set(KUBE_INFRA))
+    rows += [
+        row(E(KUBE_INFRA.get(o, (o, ""))[0]), kc.get(o, 0), kp.get(o, 0))
+        for o in outcomes
+        if kc.get(o) or kp.get(o)
+    ] or ['<tr><td class="muted" colspan="4">None in either period.</td></tr>']
+    rows.append(f'<tr class="group"><td colspan="4">CPU queues ({", ".join(CPU_QUEUES)}): jobs the fleet failed</td></tr>')
+    rows += [
+        row(E(CAUSE_NAMES[k]), cc.get(k, 0), cp.get(k, 0))
+        for k in CAUSE_NAMES
+        if cc.get(k) or cp.get(k)
+    ] or [
+        f'<tr><td class="muted" colspan="4">{"None so far: logs still being read." if unread else "None in either period."}</td></tr>'
+    ]
+    rows.append(row('<span class="muted">Failed for their own reasons (tests, checks, notifications)</span>', cc.get("own", 0), cp.get("own", 0)))
+    reading = (
+        f'<p class="muted note">{num(unread)} failed CPU-queue job logs are still being read; reload in a minute for the rest.</p>'
+        if unread
+        else ""
+    )
+    if read_error:
+        reading += f'<p class="note error">Some logs could not be read, and are tried again in ten minutes: {E(read_error)}</p>'
+
+    def job_url(pipeline: str, build: object, job_id: str) -> str:
+        return f"https://buildkite.com/{org}/{pipeline}/builds/{build}#{job_id}"
+
+    def log_url(job_id: str, ended: float) -> str:
+        q = f'resource.type="k8s_container"\nresource.labels.container_name="launcher"\nresource.labels.pod_name:"buildkite-{job_id}"'
+        span = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ended - 13 * 3600))}/{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ended + 600))}"
+        return (
+            "https://console.cloud.google.com/logs/query;query=" + urllib.parse.quote(q, safe="")
+            + f";timeRange={urllib.parse.quote(span, safe='')}?project={project}"
+        )
+
+    def link(url: str, text: str) -> str:
+        return f'<a href="{E(url)}" target="_blank" rel="noopener">{E(text)}</a>'
+
+    items = []
+    for r in cur.get("kube") or []:
+        label, meaning = KUBE_INFRA.get(r["outcome"], (r["outcome"], ""))
+        step = re.sub(r"^(?::[\w+-]+:\s*)+", "", r.get("label") or "") or "(unnamed step)"
+        items.append((
+            float(r["ended"]),
+            f'<td class="nowrap"><time data-ts="{float(r["ended"]):.0f}" data-fmt="datetime"></time></td>'
+            f'<td class="nowrap" title="{E(r["queue"])}">GKE · {E(" ".join(filter(None, (shape(r["queue"])["generation"], shape(r["queue"])["topology"]))) or r["queue"])}</td>'
+            f'<td class="nowrap">{E(r["pipeline"] or "")} #{E(str(r["build"] or ""))}</td><td>{E(step)}</td>'
+            f"<td>{E(label)}</td><td class=\"muted\">{E(meaning)}</td>"
+            f'<td class="nowrap">{link(job_url(r["pipeline"], r["build"], r["job_id"]), "job")} · '
+            f'{link(log_url(r["job_id"], float(r["ended"])), "launcher log")}</td>',
+        ))
+    for j in cur.get("cpu") or []:
+        cause, line = known.get(j["job_id"], ("", ""))
+        if cause in ("", "own"):
+            continue
+        step = re.sub(r"^(?::[\w+-]+:\s*)+", "", j.get("step") or "") or "(unnamed step)"
+        retried = ' <span class="muted">(retried)</span>' if j.get("retried") == "true" else ""
+        items.append((
+            float(j["ended"]),
+            f'<td class="nowrap"><time data-ts="{float(j["ended"]):.0f}" data-fmt="datetime"></time></td>'
+            f'<td class="nowrap">{E(j["queue"])}</td>'
+            f'<td class="nowrap">{E(j["pipeline"])} #{E(str(j["build"]))}</td><td>{E(step)}{retried}</td>'
+            f'<td>{E(CAUSE_NAMES.get(cause, cause))}</td><td><code class="logline">{E(line) or "-"}</code></td>'
+            f'<td class="nowrap">{link(job_url(j["pipeline"], j["build"], j["job_id"]), "job and log")}</td>',
+        ))
+    items.sort(key=lambda t: -t[0])
+    lines = [f"<tr>{html}</tr>" for _, html in items]
+    head = (
+        '<thead><tr><th>When</th><th>Where</th><th>Build</th><th>Step</th><th>Cause</th><th>What it said</th>'
+        "<th>Links</th></tr></thead>"
+    )
+    more = (
+        f'<details><summary>{len(lines) - INFRA_FIRST} more</summary><div class="table-wrap"><table class="dense infra">'
+        f'{head}<tbody>{"".join(lines[INFRA_FIRST:])}</tbody></table></div></details>'
+        if len(lines) > INFRA_FIRST
+        else ""
+    )
+    listed = (
+        f'<div class="table-wrap"><table class="dense infra">{head}<tbody>{"".join(lines[:INFRA_FIRST])}</tbody></table></div>{more}'
+        if lines
+        else '<p class="muted note">No infrastructure failures in the period.</p>'
+    )
+    return (
+        '<div class="card"><div class="card-head"><h2>Infrastructure failures</h2>'
+        f'<span class="sub">{term("the fleet failing a job, not its test", "Infra failure", "CPU-queue failure")}</span></div>'
+        f'<div class="table-wrap"><table class="dense pop-table"><thead><tr><th></th><th class="n">Last {E(name)}</th>'
+        f'<th class="n">The {E(name)} before</th><th class="n">Change</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+        f"{reading}<h3 class=\"shapes-head\">The last {E(name)}'s, newest first</h3>{listed}</div>"
+    )
+
+
 def render_review(
-    compare: str, windows: dict, data: dict, changes: list, params: dict, sources: dict
+    compare: str,
+    windows: dict,
+    data: dict,
+    changes: list,
+    params: dict,
+    sources: dict,
+    causes: tuple = ({}, 0, ""),
+    org: str = "",
+    project: str = "",
 ) -> str:
     """The Review page: each generation's health figures for the period ending
     at the last whole hour against the period before it, day by day where the
@@ -3825,9 +3967,18 @@ def render_review(
         f'<span class="sub">{len(items)} changes to the fleet (ci-infra tpu-inference/k8s) merged in the last {E(name)}</span></div>'
         f'<ul class="changes">{"".join(items[:PERIOD_CHANGES_FIRST]) or "<li class=muted>None.</li>"}</ul>{more}</div>'
     )
+    infra = infra_card(
+        name,
+        (data.get("current") or {}).get("infra") or {},
+        (data.get("previous") or {}).get("infra") or {},
+        causes,
+        org,
+        project,
+    )
     body = (
         f'<div class="card range"><div class="segmented">{selector}</div><span class="muted note pop-when">{when}</span></div>'
         + "".join(cards)
+        + infra
         + builds
         + changed
     )
@@ -3841,10 +3992,60 @@ def render_review(
     )
 
 
-def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None = None) -> str:
-    """Is capacity right, and where does chip-time go: per generation, the
-    chips there were - reserved and Spot - against what was asked of them, how
-    the reserved chips were spent, and where steps waited for a node."""
+def wait_chart(title: str, ticks: list, values: dict, fmt: str, width: int) -> str:
+    """A median and p90 queue wait line per stretch, in minutes or, past two
+    hours, hours. values maps a stretch's index to (p50, p90) in minutes."""
+    p50 = [values.get(i, (None, None))[0] for i in range(len(ticks))]
+    p90 = [values.get(i, (None, None))[1] for i in range(len(ticks))]
+    per = 60 if max([v for v in p90 if v is not None] + [0]) > 120 else 1
+    return line_chart(
+        f"{title}, {'hours' if per == 60 else 'minutes'}",
+        ticks,
+        [
+            ("used", "p90", [None if v is None else round(v / per, 1) for v in p90]),
+            ("used p50", "median", [None if v is None else round(v / per, 1) for v in p50]),
+        ],
+        fmt=fmt,
+        width=width,
+        height=180 if width < 1000 else 170,
+    )
+
+
+def build_walls(builds: list, start: int, bucket: int, count: int) -> list:
+    """Per pipeline with the most clean kube PR builds created in the range,
+    its builds' wall clock - creation to the last step finishing - as a median
+    and p90 per stretch, in minutes: [(pipeline, builds, {index: (p50, p90)})]."""
+    per: dict = collections.defaultdict(lambda: collections.defaultdict(list))
+    for b in builds:
+        if b.get("kind") == "pr" and b.get("clean") == "true" and b.get("pole_finished"):
+            i = int((float(b["created"]) - start) // bucket)
+            if 0 <= i < count:
+                per[b["pipeline"]][i].append((float(b["pole_finished"]) - float(b["created"])) / 60)
+    ranked = sorted(per, key=lambda p: -sum(len(v) for v in per[p].values()))
+    return [
+        (
+            p,
+            sum(len(v) for v in per[p].values()),
+            {i: (quantile(v, 0.5), quantile(v, 0.9)) for i, v in per[p].items()},
+        )
+        for p in ranked
+        if sum(len(v) for v in per[p].values()) >= max(WALL_MIN_BUILDS, count)
+    ][:PERIOD_PIPELINES]
+
+
+# A pipeline needs this many clean PR builds in the range for its wall clock
+# trend, and at least one a stretch on average: fewer draw a line of single
+# builds across mostly empty stretches.
+WALL_MIN_BUILDS = 10
+
+
+def render_capacity(
+    h: dict, sources: dict, query: str, queue_times: dict | None = None, builds: list | None = None
+) -> str:
+    """Is capacity right, and where does chip-time go: how long PR builds take,
+    then per generation the chips there were - reserved and Spot - against
+    what was asked of them, how the reserved chips were spent, how long steps
+    waited, and where they waited for a node."""
     span, ticks, step = h["span"], h["ticks"], h["span"]["step"]
     fmt = "time" if span["end"] - span["start"] <= 2 * 86400 else "day"
     every = max(1, len(ticks) // 24)
@@ -3854,6 +4055,9 @@ def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None
     waits: dict = collections.defaultdict(dict)
     for r in (queue_times or {}).get("rows") or []:
         waits[r["queue"]][int(r["bucket"])] = (float(r["p50"]) / 60, float(r["p90"]) / 60)
+    cohort_waits: dict = collections.defaultdict(dict)
+    for r in (queue_times or {}).get("cohort_rows") or []:
+        cohort_waits[r["prefix"]][int(r["bucket"])] = (float(r["p50"]) / 60, float(r["p90"]) / 60)
     w_ticks = (
         [queue_times["start"] + i * queue_times["bucket"] for i in range(queue_times["count"])]
         if queue_times
@@ -3894,25 +4098,7 @@ def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None
                 width=520,
                 height=180,
             )
-        w = waits.get(q["name"], {})
-        p50 = [w.get(i, (None, None))[0] for i in range(len(w_ticks))]
-        p90 = [w.get(i, (None, None))[1] for i in range(len(w_ticks))]
-        per = 60 if max([v for v in p90 if v is not None] + [0]) > 120 else 1
-        wait = (
-            line_chart(
-                f"Queue wait, {'hours' if per == 60 else 'minutes'}",
-                w_ticks,
-                [
-                    ("used", "p90", [None if v is None else round(v / per, 1) for v in p90]),
-                    ("used p50", "median", [None if v is None else round(v / per, 1) for v in p50]),
-                ],
-                fmt=fmt,
-                width=520,
-                height=180,
-            )
-            if w_ticks
-            else ""
-        )
+        wait = wait_chart("Queue wait", w_ticks, waits.get(q["name"], {}), fmt, 520) if w_ticks else ""
         columns = (
             [("Admitted", hist["used"])]
             + ([("On nodes", n["chips"])] if n else [])
@@ -4084,9 +4270,18 @@ def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None
       <small>median {ago(w["p50"]) if w else "-"}; steps waited for quota {num(waiting_hours)} h of {num((span["end"] - span["start"]) / 3600)}</small></div>
     {spot_tile}
   </div>"""
+        cohort_wait = (
+            f"""<h3 class="shapes-head">Queue wait, all shapes</h3>
+  {wait_chart("Queue wait", w_ticks, cohort_waits.get(c["name"], {}), fmt, 1080)}
+  <p class="muted note">Submitted to quota reserved, every {E(c["generation"])} shape together, by when the step was submitted.
+  A step enters the count when it ends, so the last stretch misses what is still running. Each shape's own is under By shape.</p>"""
+            if w_ticks
+            else ""
+        )
         return f"""<div class="card">
   <div class="card-head"><h2>{E(c["generation"])}</h2><span class="sub">cohort <code>{E(c["name"])}</code></span></div>
   {tiles}
+  {cohort_wait}
   <h3 class="shapes-head">Supply and demand</h3>
   {supply}
   <p class="muted note">Each shape's admitted chips, smallest at the bottom{"; above them each Spot shape's chips running on Spot nodes, lighter" if has_spot else ""};
@@ -4123,6 +4318,18 @@ def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None
 <tbody>{pipeline_rows}</tbody>{pipelines_more}</table></div>
 {pipelines_button}"""
 
+    trend = ""
+    if w_ticks:
+        walls = build_walls(builds or [], queue_times["start"], queue_times["bucket"], queue_times["count"])
+        charts = "".join(
+            wait_chart(f"{p} · {n:,} builds · wall clock", w_ticks, v, fmt, 520) for p, n, v in walls
+        )
+        trend = f"""<div class="section-label">PR build wall clock</div>
+<div class="card"><div class="charts walls">{charts or '<p class="muted note">Too few clean kube PR builds in the range.</p>'}</div>
+<p class="muted note">{term("Clean", "Clean build")} kube PR builds by when they were created: {term("wall clock", "Wall clock")}, creation to
+the last step finishing, median and p90, for the pipelines with the most of them. Queueing is part of it - a kube step waits for chips inside its job.
+<a href="steps{E(query) if query else ""}">Pipelines → Steps</a> shows which step finishes last.</p></div>"""
+
     presets = "".join(
         f'<a class="seg-btn{" active" if span.get("preset") == name else ""}" href="?preset={name}">{label}</a>'
         for name, label in PRESET_LABELS.items()
@@ -4134,6 +4341,7 @@ def render_capacity(h: dict, sources: dict, query: str, queue_times: dict | None
         start=span["start"],
         end=span["end"],
         step=ago(step),
+        trend=trend,
         generations="".join(generation(c) for c in h["cohorts"]),
         pipelines=pipelines,
         query=E(query),

@@ -1314,28 +1314,30 @@ def fetch_wait_series(cfg: Config, start: int, end: int) -> dict:
     seconds = end - start
     bucket = 3600 if seconds <= 2 * 86400 else 4 * 3600 if seconds <= 8 * 86400 else 12 * 3600
     wait = "TIMESTAMP_DIFF(quota_reserved_at, submitted_at, SECOND)"
-    rows = bigquery(cfg, f"""
-SELECT queue, DIV(UNIX_SECONDS(submitted_at) - {start}, {bucket}) AS bucket,
-  APPROX_QUANTILES({wait}, 100)[OFFSET(50)] AS p50,
-  APPROX_QUANTILES({wait}, 100)[OFFSET(90)] AS p90, COUNT(*) AS n
-FROM `{cfg.timing_table}`
+    where = f"""FROM `{cfg.timing_table}`
 WHERE submitted_at >= TIMESTAMP_SECONDS({start}) AND submitted_at < TIMESTAMP_SECONDS({end})
-  AND quota_reserved_at IS NOT NULL
-GROUP BY queue, bucket""")
-    # And each cohort's across the window, for the page's headline.
-    overall = bigquery(cfg, f"""
-SELECT SPLIT(queue, '-')[OFFSET(0)] AS prefix,
-  APPROX_QUANTILES({wait}, 100)[OFFSET(50)] AS p50, APPROX_QUANTILES({wait}, 100)[OFFSET(90)] AS p90
-FROM `{cfg.timing_table}`
-WHERE submitted_at >= TIMESTAMP_SECONDS({start}) AND submitted_at < TIMESTAMP_SECONDS({end})
-  AND quota_reserved_at IS NOT NULL
-GROUP BY prefix""")
+  AND quota_reserved_at IS NOT NULL"""
+    quantiles = f"""APPROX_QUANTILES({wait}, 100)[OFFSET(50)] AS p50,
+  APPROX_QUANTILES({wait}, 100)[OFFSET(90)] AS p90, COUNT(*) AS n"""
+    stretch = f"DIV(UNIX_SECONDS(submitted_at) - {start}, {bucket}) AS bucket"
+    prefix = "SPLIT(queue, '-')[OFFSET(0)] AS prefix"
+    queries = {
+        "rows": f"SELECT queue, {stretch}, {quantiles} {where} GROUP BY queue, bucket",
+        # Each cohort's - every shape in it together - per stretch, for its
+        # card's wait chart, and across the window, for its headline.
+        "cohort_rows": f"SELECT {prefix}, {stretch}, {quantiles} {where} GROUP BY prefix, bucket",
+        "overall": f"SELECT {prefix}, {quantiles} {where} GROUP BY prefix",
+    }
+    with concurrent.futures.ThreadPoolExecutor(len(queries)) as pool:
+        futures = {k: pool.submit(bigquery, cfg, q) for k, q in queries.items()}
+        got = {k: f.result() for k, f in futures.items()}
     return {
         "start": start,
         "bucket": bucket,
         "count": -(-seconds // bucket),
-        "rows": rows,
-        "overall": {r["prefix"]: {"p50": float(r["p50"]), "p90": float(r["p90"])} for r in overall},
+        "rows": got["rows"],
+        "cohort_rows": got["cohort_rows"],
+        "overall": {r["prefix"]: {"p50": float(r["p50"]), "p90": float(r["p90"])} for r in got["overall"]},
     }
 
 
@@ -1531,6 +1533,124 @@ GROUP BY pipeline, kind, step"""
 # kube_workload_timing outcomes that are the test's or Buildkite's doing. Any
 # other outcome is the fleet ending a workload.
 TEST_OUTCOMES = ("succeeded", "failed", "cancelled")
+
+
+# The non-kube queues whose failures Review sorts into the fleet's and the
+# job's own: the image builds, gates and notifications every build depends on.
+CPU_QUEUES = ("cpu", "cpu_64_core")
+# What a CPU-queue job's log says when the fleet, not the job, failed it, in
+# the order tried: the first cause with a matching line wins. Every failure
+# exits 1, so the cause is only in the log.
+LOG_CAUSES = (
+    ("disk_full", "Disk full", r"no space left on device|enospc|errno 28|disk quota exceeded"),
+    ("oom", "Killed for memory", r"exit code:? 137|killed process|oom-kill|cannot allocate memory"),
+    ("docker", "Docker daemon", r"docker\.sock|cannot connect to the docker daemon"),
+    (
+        "registry",
+        "Image registry",
+        r"failed to do request|failed commit on ref|failed to push|error pushing|blob upload unknown"
+        r"|unexpected status( code)?:? ?[45]\d\d|unauthorized: authentication required|toomanyrequests"
+        r"|failed to pull|manifest unknown|pull access denied",
+    ),
+    (
+        "package",
+        "Package download",
+        r"failed to download `|http status (client|server) error|could not install packages due to an oserror"
+        r"|readtimeouterror",
+    ),
+    (
+        "network",
+        "Download or network",
+        r"huggingface_hub\.(errors|utils)|5\d\d server error|429 client error|connection reset|read timed out"
+        r"|temporary failure in name resolution|max retries exceeded with url|could not resolve host"
+        r"|tls handshake timeout|i/o timeout",
+    ),
+)
+_LOG_PATTERNS = [(key, re.compile(rx, re.I)) for key, _, rx in LOG_CAUSES]
+# Causes that need no log line: how the agent reported the job ending.
+EXIT_CAUSES = {"agent_lost": "Agent lost", "timeout": "Timed out"}
+CAUSE_NAMES = {**{key: name for key, name, _ in LOG_CAUSES}, **EXIT_CAUSES}
+# Where a job says why it died: a log can hold a test's expected errors early
+# on, and an image build's whole output - tens of megabytes - before it.
+LOG_TAIL = 400_000
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|_bk;t=\d+\x07?")
+
+
+def job_log(cfg: Config, pipeline: str, build: object, job_id: str) -> str:
+    """The last LOG_TAIL bytes of a Buildkite job's log, as text. Read as a
+    stream of the plain-text log, keeping only the tail: an image build's log
+    runs to tens of megabytes, and two of those whole would not fit the
+    service's memory."""
+    path = f"/pipelines/{pipeline}/builds/{build}/jobs/{job_id}/log"
+    if LOCAL:
+        # The bk CLI parses every reply as JSON, so locally the JSON log.
+        return ((buildkite(cfg, path) or {}).get("content") or "")[-LOG_TAIL:]
+    request = urllib.request.Request(
+        f"https://api.buildkite.com/v2/organizations/{cfg.org}{path}.txt",
+        headers={"Authorization": f"Bearer {cfg.token}"},
+    )
+    tail = b""
+    with urllib.request.urlopen(request, timeout=120) as response:
+        while chunk := response.read(1 << 16):
+            tail = (tail + chunk)[-LOG_TAIL:]
+    return tail.decode("utf-8", "replace")
+
+
+def classify_log(text: str, exit_status: object, state: str | None) -> tuple[str, str]:
+    """Whether a failed CPU-queue job was the fleet's, and the line that says
+    so: (cause, line), cause "own" when nothing in the log's tail points at
+    the fleet. A job the agent lost exits -1 with nothing to match."""
+    tail = _ANSI.sub("", text[-LOG_TAIL:])
+    lines = [line.strip() for line in tail.splitlines() if line.strip()]
+    for key, rx in _LOG_PATTERNS:
+        hit = next((line for line in reversed(lines) if rx.search(line)), None)
+        if hit:
+            return key, hit[:300]
+    if state == "timed_out":
+        return "timeout", ""
+    if str(exit_status) == "-1":
+        if any("signal: terminated" in line for line in lines[-50:]):
+            return "own", "cancelled"
+        return "agent_lost", ""
+    return "own", ""
+
+
+def fetch_infra(cfg: Config, start: int, end: int) -> dict:
+    """Review's infrastructure failures over [start, end): kube workloads the
+    fleet ended, from the timing table, and failed jobs on the CPU queues, from
+    the step log beside it - each with what a link to its Buildkite job needs.
+    Which CPU-queue failures were the fleet's is in their logs, read by the
+    page as it goes (app.LogCauses)."""
+    if not cfg.timing_table:
+        return {"kube": [], "cpu": []}
+    tests = ", ".join(f"'{o}'" for o in TEST_OUTCOMES)
+    table = cfg.timing_table.rsplit(".", 1)[0] + ".step_execution_logs"
+    queues = ", ".join(f"'{q}'" for q in CPU_QUEUES)
+    kube = f"""
+SELECT workload, job_id, pipeline, build_number AS build, label, queue, outcome, exit_code,
+  UNIX_SECONDS(ended_at) AS ended
+FROM `{cfg.timing_table}`
+WHERE ended_at >= TIMESTAMP_SECONDS({start}) AND ended_at < TIMESTAMP_SECONDS({end})
+  AND submitted_at >= TIMESTAMP_SECONDS({start - 2 * 86400})
+  AND outcome NOT IN ({tests})
+ORDER BY ended DESC"""
+    # One row per job: the step log can hold a job more than once.
+    cpu = f"""
+SELECT pipeline_slug AS pipeline, build_number AS build, job_id, step_name AS step, queue,
+  ANY_VALUE(state HAVING MAX finished_at) AS state,
+  ANY_VALUE(exit_status HAVING MAX finished_at) AS exit_status,
+  LOGICAL_OR(IFNULL(retried, FALSE)) AS retried, LOGICAL_OR(IFNULL(soft_failed, FALSE)) AS soft_failed,
+  UNIX_SECONDS(MAX(finished_at)) AS ended
+FROM `{table}`
+WHERE created_at >= TIMESTAMP_SECONDS({start - 86400})
+  AND finished_at >= TIMESTAMP_SECONDS({start}) AND finished_at < TIMESTAMP_SECONDS({end})
+  AND queue IN ({queues})
+GROUP BY pipeline, build, job_id, step, queue
+HAVING state IN ('failed', 'timed_out')
+ORDER BY ended DESC"""
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        a, b = pool.submit(bigquery, cfg, kube), pool.submit(bigquery, cfg, cpu)
+        return {"kube": a.result(), "cpu": b.result()}
 
 
 def fetch_period(cfg: Config, start: int, end: int) -> dict:

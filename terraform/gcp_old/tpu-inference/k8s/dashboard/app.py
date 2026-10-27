@@ -297,6 +297,66 @@ class Windowed:
         return data, {"name": self.name, "at": time.time(), "error": error}
 
 
+class LogCauses:
+    """Which failed CPU-queue jobs the fleet failed, read from each job's log
+    once and kept: a finished job's log does not change. Logs are read a few
+    at a time in the background, newest first, so a page shows what is known
+    and the rest fills in on later loads. A read that fails is tried again
+    after RETRY_SECONDS, and the page shows the last failure - a token without
+    the read_build_logs scope fails every read."""
+
+    # Buildkite allows an org token 200 REST calls a minute, shared with the
+    # live page's reads; two readers stay well under it.
+    WORKERS = 2
+    RETRY_SECONDS = 600
+
+    def __init__(self, cfg: fleet.Config) -> None:
+        self.cfg = cfg
+        self._lock = threading.Lock()
+        self._known: dict[str, tuple[str, str]] = {}
+        self._queued: set[str] = set()
+        self._failed: dict[str, float] = {}
+        self._error = ("", 0.0)
+        self._pool = concurrent.futures.ThreadPoolExecutor(self.WORKERS)
+
+    def _read(self, job: dict) -> None:
+        try:
+            text = fleet.job_log(self.cfg, job["pipeline"], job["build"], job["job_id"])
+            result = fleet.classify_log(text, job.get("exit_status"), job.get("state"))
+        except Exception as e:  # noqa: BLE001 - counted as unread, retried later
+            error = f"{type(e).__name__}: {e}"[:300]
+            print(f"log read failed for {job['job_id']}: {error}", file=sys.stderr)
+            result = None
+        with self._lock:
+            if result:
+                self._known[job["job_id"]] = result
+                self._failed.pop(job["job_id"], None)
+            else:
+                self._failed[job["job_id"]] = time.time()
+                self._error = (error, time.time())
+            self._queued.discard(job["job_id"])
+
+    def lookup(self, jobs: list) -> tuple[dict, int, str]:
+        """The causes known for jobs, how many are still to be read, and the
+        last read's error if one failed in the last RETRY_SECONDS; the unknown
+        ones not recently failed are queued."""
+        now = time.time()
+        with self._lock:
+            missing = [
+                j
+                for j in jobs
+                if j["job_id"] not in self._known
+                and j["job_id"] not in self._queued
+                and now - self._failed.get(j["job_id"], 0.0) > self.RETRY_SECONDS
+            ]
+            self._queued.update(j["job_id"] for j in missing)
+            known = {j["job_id"]: self._known[j["job_id"]] for j in jobs if j["job_id"] in self._known}
+            error = self._error[0] if now - self._error[1] < self.RETRY_SECONDS else ""
+        for j in sorted(missing, key=lambda j: -float(j.get("ended") or 0)):
+            self._pool.submit(self._read, j)
+        return known, len(jobs) - len(known), error
+
+
 def compare_windows(compare: str, now: float) -> dict:
     """The two periods Review compares: the one ending at the last whole
     hour, and the one of the same length before it - so a week is set
@@ -343,6 +403,8 @@ def serve(
     steps: Windowed,
     period: Windowed,
     changes: Windowed,
+    infra: Windowed,
+    log_causes: LogCauses,
     port: int,
 ) -> None:
     class Handler(BaseHTTPRequestHandler):
@@ -415,13 +477,19 @@ def serve(
                 return self.reply(200, "application/json", body.encode())
             if url.path == "/capacity":
                 span = parse_span(params, time.time())
-                view, sources = history.get(span)
-                queue_times, queue_times_status = wait_series.get(span)
+                with concurrent.futures.ThreadPoolExecutor(3) as pool:
+                    got_view = pool.submit(history.get, span)
+                    got_waits = pool.submit(wait_series.get, span)
+                    got_steps = pool.submit(steps.get, span)
+                view, sources = got_view.result()
+                queue_times, queue_times_status = got_waits.result()
+                steps_data, steps_status = got_steps.result()
                 page = views.render_capacity(
                     view,
-                    {**sources, "wait_series": queue_times_status},
+                    {**sources, "wait_series": queue_times_status, "steps": steps_status},
                     f"?{url.query}" if url.query else "",
                     queue_times,
+                    steps_data.get("builds") or [],
                 )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
             if url.path == "/review":
@@ -431,7 +499,7 @@ def serve(
                 windows = compare_windows(compare, time.time())
                 # Both periods' reads at once; each source caches by window,
                 # so a period another page already read costs nothing here.
-                sources_by = {"history": history, "waits": waits, "period": period, "steps": steps}
+                sources_by = {"history": history, "waits": waits, "period": period, "steps": steps, "infra": infra}
                 with concurrent.futures.ThreadPoolExecutor(10) as pool:
                     compared = {
                         name: {k: pool.submit(src.get, w) for k, src in sources_by.items()}
@@ -447,13 +515,18 @@ def serve(
                             statuses.update({f"{name}-history-{s}": v for s, v in status.items()})
                         else:
                             statuses[f"{name}-{k}"] = status
+                data = {name: {k: v[0] for k, v in parts.items()} for name, parts in pop.items()}
+                cpu_failures = [j for w in data.values() for j in (w.get("infra") or {}).get("cpu") or []]
                 page = views.render_review(
                     compare,
                     windows,
-                    {name: {k: v[0] for k, v in parts.items()} for name, parts in pop.items()},
+                    data,
                     changes_data,
                     params,
                     statuses,
+                    log_causes.lookup(cpu_failures),
+                    live.cfg.org,
+                    live.cfg.project,
                 )
                 return self.reply(200, "text/html; charset=utf-8", page.encode())
             # Capacity replaced Trends; /trends and /history, its old names, go there.
@@ -530,6 +603,8 @@ def main() -> None:
         Windowed(cfg, "BigQuery", fleet.fetch_steps, {"builds": [], "steps": []}),
         Windowed(cfg, "BigQuery", fleet.fetch_period, {"generations": {}, "daily": {}, "evictions": {}}),
         Windowed(cfg, "GitHub", fleet.fetch_changes, []),
+        Windowed(cfg, "BigQuery", fleet.fetch_infra, {"kube": [], "cpu": []}),
+        LogCauses(cfg),
         args.port,
     )
 
