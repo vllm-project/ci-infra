@@ -2249,9 +2249,11 @@ def test_rocm_release_script_zero_claims_before_family_fail_open(state):
     assert claim.rule == "release-ci" and not claim.run_all and not claim.step_ids
 
 
-def test_release_refs_derived_and_disjoint_from_live_steps(state):
-    """The derived release refs are non-empty, include the tools/ member, and reference
-    nothing a modeled step consumes."""
+def test_release_refs_derived_and_never_hide_live_steps(state):
+    """The derived release refs are non-empty and include the tools/ member. A ref
+    a modeled step also consumes (the ROCm release runs CI's build.sh) keeps that
+    step's claim: the release pipeline never zeroes a file live jobs use."""
+    from ci_selector.codemap.classify import _classify
     from ci_selector.handwritten import RELEASE_PIPELINE_FILES
 
     refs = state.release_refs
@@ -2262,7 +2264,12 @@ def test_release_refs_derived_and_disjoint_from_live_steps(state):
         for st in p.targets.values():
             live |= set(st.scripts_seen) | set(st.data_files)
             live |= {t.path for t in st.targets}
-    assert refs.isdisjoint(live), sorted(refs & live)
+    for path in sorted(refs & live):
+        claim = _classify(state, path, None)
+        assert claim.rule != "release-ci" and (claim.run_all or claim.step_ids), (
+            path,
+            claim.rule,
+        )
     for rel in RELEASE_PIPELINE_FILES:
         assert not any(rel == p.config.config_file for p in state.pipelines)
 
@@ -2273,6 +2280,13 @@ def test_unreferenced_rocm_ci_script_escalates_its_own_pipeline(state):
     never every pipeline and never the floor."""
     sel = select(state, [".buildkite/scripts/rocm/ci-bake-rocm.sh"])
     assert set(sel.run_all) == {"vllm_rocm_ci"}
+
+
+def test_rocm_stack_tooling_never_runs_the_cuda_pipeline(state):
+    """therock_wheels.py is a ROCm stack input (build.sh's stack key, the stack
+    Dockerfile's COPY): a change to it may run every AMD job, never all of CI."""
+    sel = select(state, ["tools/vllm-rocm/therock_wheels.py"])
+    assert not {"vllm_ci", "vllm_intel_ci"} & set(sel.run_all), sel.run_all
 
 
 def test_docker_input_relabel_still_run_all(state):
@@ -3221,16 +3235,22 @@ def test_image_union_exempt_membership(state):
     )
 
 
-def test_rust_reaches_hardware_image_consumers(state):
+def test_rust_reaches_hardware_image_consumers(state, vllm_repo):
     """Leg 2 pinned both ways: the ROCm bake steps and CPU suites compile rust
     in-step so they stay; the intel test steps only consume a prebuilt image
     whose rust is inert without the gate, so they go. The derived replacement
     for rust/ in rocm's run_all_patterns."""
     sel = select(state, ["rust/src/server/src/lib.rs"])
+    # The ROCm base step of each build layout (build.sh replaced ensure-ci-base-amd).
+    base_step = (
+        "vllm_rocm_ci:refresh-rocm-base-amd"
+        if (vllm_repo / ".buildkite/scripts/rocm/build.sh").exists()
+        else "vllm_rocm_ci:ensure-ci-base-amd"
+    )
     for sid in (
         "vllm_rocm_ci:cpu-kernel-tests",
         "vllm_rocm_ci:image-build-amd",
-        "vllm_rocm_ci:ensure-ci-base-amd",
+        base_step,
         "vllm_intel_ci:image-build-xpu",
     ):
         assert sid in sel.selected, sid

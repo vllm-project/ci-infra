@@ -1674,10 +1674,13 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
         )
         & state.auto_step_ids
     ):
+        # The generator may still escalate on it (a run_all pattern): carry
+        # that, or the claim proposes less than CI will run.
         return Claim(
             "release-ci",
             f"{path} is referenced only by the release pipeline; no live "
             "test-pipeline jobs; nothing to run",
+            run_all=_run_all_escalation(path, configs),
         )
     family = hardware.exclusive_family_of_path(path)
     if family and path not in state.exclusive_disabled:

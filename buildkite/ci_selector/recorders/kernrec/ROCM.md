@@ -87,13 +87,17 @@ step. Positive observations can still select steps from incomplete recordings.
 ## Native source maps
 
 ROCm builds retain compile commands, Ninja header dependencies, and automatic
-HIPify provenance. On the vLLM side, `VLLM_KERNEL_SYMBOL_MAP=1` enables map
-generation and artifact export. The build runs:
+HIPify provenance. On the vLLM side, `VLLM_KERNEL_SYMBOL_MAP=1` (set by the
+generator on `image-build-amd`) enables the artifact export. With the build.sh
+layout, every CI csrc compile writes the map before removing its build tree:
 
 ```bash
-.venv/bin/python tools/ci/kernel_symbol_map.py --backend rocm \
-  --build-root build --source-root . --out dist/kernel_symbol_map.rocm.json.gz
+python3 tools/ci/rocm_kernel_symbol_map.py \
+  --build-root build --source-root . --out /kernel-map/kernel_symbol_map.rocm.json.gz
 ```
+
+Older checkouts run `tools/ci/kernel_symbol_map.py --backend rocm` in a separate
+stage, only when the opt-in is set.
 
 The map includes generated-source and generated-header provenance back to the
 original checkout. ROCm LLVM tools extract AMDGPU entries from the actual objects.
@@ -104,9 +108,10 @@ an empty map with a failure reason; incomplete maps cannot justify drops. AITER
 and other external/JIT kernel names are observable; this vLLM native map does not
 claim their external source ownership.
 
-The `kernel-symbol-map-rocm` Docker target exports
-`kernel_symbol_map.rocm.json.gz`. The ROCm CI bake wrapper uploads that artifact
-when the map opt-in is enabled. Collection partitions recordings by backend and
+The `kernel-symbol-map` bake target (`kernel-symbol-map-rocm` in older
+checkouts) exports `kernel_symbol_map.rocm.json.gz`, stamped with the build's
+commit, and `build.sh ci` (the bake wrapper in older checkouts) uploads it when
+the map opt-in is enabled. Collection partitions recordings by backend and
 publishes each valid pair independently:
 
 | Backend | Table | Map | Latest pointer |
