@@ -23,6 +23,8 @@ BUILD_STEPS = [
         "concurrency": 1,
         "concurrency_group": "vllm/rocm/base/rocm/$ROCM_CI_REPO/$BUILDKITE_BRANCH",
         "env": {"TERM": "xterm-256color"},
+        # build.sh exits 75 on a registry error.
+        "retry": {"automatic": [{"exit_status": 75, "limit": 1}]},
     },
     {
         "label": "AMD: :docker: build image",
@@ -146,7 +148,7 @@ def test_build_sh_layout_renders_vllm_build_steps(ci_repo):
         for reason in ("stack_error", "agent_stop", "agent_refused")
     ]
     assert image["retry"]["automatic"] == infra + BUILD_STEPS[1]["retry"]["automatic"]
-    assert base["retry"]["automatic"][:3] == infra
+    assert base["retry"]["automatic"] == infra + BUILD_STEPS[0]["retry"]["automatic"]
 
     gpu = steps["MoE"]
     assert gpu["depends_on"] == "image-build-amd"
@@ -221,7 +223,13 @@ VLLM = "https://github.com/vllm-project/vllm.git"
         ("123", VLLM, "0", "rocm/vllm-dev", "main"),
         ("", VLLM, "0", "rocm/vllm-dev", "main"),
         ("false", "https://github.com/someone/vllm.git", "0", "rocm/vllm-dev", "main"),
-        ("false", "https://github.com/vllm-project/vllm-x.git", "0", "rocm/vllm-dev", "main"),
+        (
+            "false",
+            "https://github.com/vllm-project/vllm-x.git",
+            "0",
+            "rocm/vllm-dev",
+            "main",
+        ),
         ("false", VLLM, "1", "rocm/vllm-dev", "main"),
         # A pushed or manually built branch other than main never writes the trusted repo.
         ("false", VLLM, "0", "rocm/vllm-dev", "releases/v0.99"),
