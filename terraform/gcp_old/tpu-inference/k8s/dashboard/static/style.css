@@ -637,3 +637,7 @@ table.pop-table td:first-child { white-space: nowrap; }
 .delta.neutral { color: var(--ink-2); } .delta.flat { color: var(--muted); }
 ul.changes { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; }
 @media (max-width: 1000px) { .pop-grid { grid-template-columns: 1fr; } }
+/* Review's infrastructure failures: a group heading row in the counts, and
+   the log line that gave each listed failure its cause. */
+table.pop-table tr.group td { padding-top: 10px; font-weight: 600; color: var(--ink-2); border-bottom: 1px solid var(--line); }
+table.infra code.logline { display: block; max-width: 520px; white-space: pre-wrap; word-break: break-all; font-size: 11px; }

@@ -687,10 +687,14 @@ doc does.
   collapsed beneath.
 
 **Capacity** (`/capacity`; `/trends` and `/history` redirect here), for the last 6 hours, 24 hours, 7 days or 30 days (`/api/history` also takes `?start=&end=` in epoch seconds, up to 90 days):
-is capacity right, and where does chip-time go. A card per generation:
+is capacity right, and where does chip-time go. At the top, PR build wall
+clock over the range: for the pipelines with at least one clean kube PR build a
+stretch, the median and p90 of creation to the last step finishing, by when the
+build was created (`fleet.fetch_steps`, the builds Pipelines → Steps reads). Then
+a card per generation:
 tiles for the reserved chips and the peak asked of them, the share of the
 reservation used and busy computing, the queue wait, and what Spot delivered;
-supply and demand - each shape's admitted chips stacked under the nominal, each
+the queue wait of every shape in the cohort together over time; supply and demand - each shape's admitted chips stacked under the nominal, each
 Spot shape's chips running on Spot nodes above them, and hatched, the chips of
 steps still waiting for quota, so demand the reservation could not meet shows
 above the line; where the reserved chips went - busy computing, held but not
@@ -708,6 +712,27 @@ GKE's per-node metrics, which name a node and nothing else; the GKE API's list
 of node pools ties each name to its pool through the pool's instance group,
 which outlives the nodes it creates. TensorCore busy is read per node too, so
 a Spot node's compute is not counted as the reservation's.
+
+**Review** (`/review`, the last day, week or 30 days to the last whole hour,
+against the same length before it) is the look back for a weekly review: per
+generation, chips held, busy, idle while jobs waited, waits, startup, failures,
+requeues and Spot, with the change; day by day where the period is a week or
+more; then infrastructure failures, PR build wall clock, and the fleet's merged
+changes. Infrastructure failures are of two kinds. Kube steps the launcher ended
+for the fleet's reasons - its outcome in `kube_workload_timing` is not
+succeeded, failed or cancelled - each listed with what the outcome means, its
+Buildkite job and its launcher log in Logs Explorer. And failed jobs on the CPU
+queues (`fleet.CPU_QUEUES`: image builds, gates and notifications), from
+`step_execution_logs`: every one exits 1, so whether the fleet failed it is only
+in its log. `app.LogCauses` reads each failed job's log once through the
+Buildkite API, two at a time in the background, newest first, and keeps the
+result, since a finished job's log does not change; `fleet.classify_log` matches
+the last 400 KB against `fleet.LOG_CAUSES` - disk full, killed for memory, the
+Docker daemon, the image registry, a package download, the network - or, with
+nothing matching, an agent lost (exit -1) or a timeout. The rest count as the
+job's own. Each of the fleet's is listed with the log line that gave its cause
+and a link to the job. A fresh instance reads the period's logs again; the page
+says how many are still being read.
 
 **Migration** (`/migration`, last 24 hours by default; `/compare` and `/baseline`
 still work) puts the bare-metal fleet
