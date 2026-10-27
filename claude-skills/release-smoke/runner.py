@@ -162,8 +162,9 @@ def run_one(lane_idx, item, gpus, port):
         f"HF_HOME={hf_home}",
         "-v",
         f"{hf_home}:{hf_home}",
+        # Let the server wait as long as we do: weights on NFS can take ~1h.
         "-e",
-        "VLLM_ENGINE_READY_TIMEOUT_S=3600",
+        f"VLLM_ENGINE_READY_TIMEOUT_S={HEALTH_TIMEOUT_S}",
     ]
     for k, v in item["env"].items():
         cmd += ["-e", f"{k}={v}"]
