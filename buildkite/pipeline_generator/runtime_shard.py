@@ -6,13 +6,13 @@ pipeline, from the vLLM checkout it runs in:
   discover  every test file each of the step's pytest commands names: its
             path arguments walked with pytest's file patterns, less its
             --ignore options.
-  timings   main's median time per file for the step (ci.vllm.ai), with
-            per-test medians for a file over one shard's budget, and its
+  timings   main's p80 time per file for the step (ci.vllm.ai), with
+            per-test p80s for a file over one shard's budget, and its
             median setup per job.
   plan      whole files into the fewest shards that keep each job, setup and
             tests, within the budget, largest file first (at most 10). A file
             over the budget is split by test function, using its per-test
-            medians. When one test alone is over it, only as many shards as
+            p80s. When one test alone is over it, only as many shards as
             finish no later.
 
 The step is then emitted as its own job with `parallelism: N`. Every parallel
@@ -291,7 +291,7 @@ def discover(command: str, cwd: str, root: str) -> Dict:
 
 
 def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
-    """Main's per-file medians for the step on `queue`, with per-test medians
+    """Main's per-file p80s for the step on `queue`, with per-test p80s
     for the files over one shard's budget; None if the endpoint has none or is
     down."""
     query = {
@@ -581,7 +581,7 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
         f"{result['files']} file{'s' if result['files'] != 1 else ''}; "
         "estimated test time per shard (min): "
         f"{estimates}, after {setup / 60:.1f} min of setup in each. Timings: "
-        f"median of {builds} main build"
+        f"p80 of {builds} main build"
         f"{'s' if builds != 1 else ''}, the newest {source.get('buildNumber')}."
     )
     if result["unknownFiles"]:
