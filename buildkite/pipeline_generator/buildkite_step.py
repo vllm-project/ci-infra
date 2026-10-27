@@ -22,6 +22,7 @@ from amd import (
     get_rocm_base_refresh_timeout,
     is_amd_device,
     is_amd_gpu_device,
+    runs_on,
 )
 from step import Step
 from utils_lib.docker_utils import (
@@ -1132,9 +1133,7 @@ def convert_group_step_to_buildkite_step(
     print(variables_to_inject)
     global_config = get_global_config()
     list_file_diff = global_config["list_file_diff"]
-    # ROCm has its own pinned torch and gains nothing from validating against
-    # a CUDA torch-nightly build, so the AMD lane is excluded entirely there.
-    include_amd = global_config["torch_nightly"] != "1"
+    platform = global_config["platform"]
 
     amd_hardware_steps = []
 
@@ -1148,11 +1147,11 @@ def convert_group_step_to_buildkite_step(
             # The A100 fleet is retired; retain declarations only for AMD mirrors.
             include_step = (
                 step.device != DeviceType.A100
-                and (include_amd or not is_amd_device(step.device))
+                and runs_on(platform, step.device)
                 and (only_step_keys is None or step_key in only_step_keys)
             )
             if is_amd_gpu_device(step.device):
-                if not include_amd:
+                if not runs_on(platform, step.device):
                     continue
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
@@ -1296,9 +1295,9 @@ def convert_group_step_to_buildkite_step(
 
             # Create AMD mirror step if specified/applicable
             if (
-                include_amd
-                and step.mirror
+                step.mirror
                 and step.mirror.get("amd")
+                and runs_on(platform, step.mirror["amd"].get("device"))
                 and (only_step_keys is None or f"amd-{step_key}" in only_step_keys)
             ):
                 amd = step.mirror["amd"]
