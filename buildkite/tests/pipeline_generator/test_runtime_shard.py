@@ -36,7 +36,7 @@ def _timings(command, seconds):
 
 
 def _with_tests(timings, file, test_seconds):
-    """Attach per-test medians to one file of a _timings() response."""
+    """Attach per-test p80s to one file of a _timings() response."""
     for entry in timings["files"]:
         if entry["file"] == f"tests/{file}":
             entry["tests"] = [
@@ -150,6 +150,7 @@ def test_plan_charges_setup_up_to_the_limit_and_flags_more():
     assert planned(0)["shards"] == 2 and planned(180)["shards"] == 2
     assert not rs.setup_too_long(planned(180))
     assert ":warning:" not in rs.summary("k", planned(180))
+    assert "Timings: p80 of 2 main builds" in rs.summary("k", planned(180))
     # Charged in full, 600 s would leave 540 s per shard: four shards. It is
     # charged as 180 s instead, and flagged.
     slow = planned(600)
