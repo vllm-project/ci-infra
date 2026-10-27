@@ -19,6 +19,10 @@ building right now, so it is `rc0` for the first cut.
 - **GitHub CLI (`gh`)** — authenticated with repo access to `vllm-project/vllm`.
 - Local clone of `vllm-project/vllm` with `origin` remote.
 
+If `bk` defaults to another org (`bk config list` shows `selected_org`),
+every call 404s with "No organization found". Run
+`export BUILDKITE_ORGANIZATION_SLUG=vllm` first.
+
 ---
 
 ## Step 1: Find the greenest full CI run
@@ -148,13 +152,17 @@ curl -s -X PUT \
 
 ## Step 5: Wait for the release images
 
-Monitor the x86_64 CUDA 13.0 and ROCm image builds until they pass
-(~30–60 min each). Also watch the CUDA 12.9 x86_64 images
-(`build-release-image-x86-cuda-12-9` and its `-ubuntu2404` variant). These
-jobs stay blocked on main's release-v2 builds, so a build break that only
-affects 12.9 first shows up at the cut. In v0.31.0 the snapshot runtime
-helper needed CUDA 13 headers. vllm-project/vllm#59118 fixed it and was
-cherry-picked.
+Monitor the x86_64 CUDA 13.0 and ROCm 10.0 image builds until they pass
+(~30–60 min each). ROCm has two stacks: 10.0 (`build-rocm100-release-image`)
+is the default and the one perf-eval uses, and 7.2
+(`build-rocm72-release-image`) is kept for a transition period. CUDA 12.9
+was dropped from the release pipeline in vllm-project/vllm#62575 (before
+v0.33.0). The Rubin CUDA 13.4 steps run only when `NIGHTLY=1`, so on an RC
+they show as `broken`, which here means skipped. That is expected.
+
+Step keys change between releases. If the monitor reports `missing`, list
+the build's image steps
+(`bk build view … --json`, filter `step_key` on `image`) and fix `KEYS`.
 
 macOS has no `timeout` command, so the loop wraps each API call in a Python
 subprocess timeout. That way a hung call can't stall the monitor:
@@ -163,8 +171,9 @@ subprocess timeout. That way a hung call can't stall the monitor:
 python3 - <<'EOF'
 import json, subprocess, time
 BUILD = "<build_number>"
-KEYS = ["build-release-image-x86", "build-release-image-x86-cuda-12-9",
-        "build-release-image-x86-cuda-12-9-ubuntu2404", "build-rocm-release-image"]
+KEYS = ["build-release-image-x86", "build-release-image-arm64",
+        "build-rocm100-release-image", "build-rocm72-release-image",
+        "build-xpu-release-image", "build-wheel-macos-arm64-cpu"]
 DONE = {"passed", "failed", "canceled", "timed_out", "broken", "skipped"}
 while True:
     try:
@@ -191,18 +200,15 @@ The resulting image URIs follow these patterns:
 # x86_64 CUDA 13.0
 public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-x86_64
 
-# x86_64 CUDA 12.9 (Ubuntu 24.04 variant: ...-x86_64-cu129-ubuntu2404)
-public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-x86_64-cu129
-
-# ROCm
-public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-rocm
+# ROCm 10.0 (default; ROCm 7.2 is ...-rocm72)
+public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-rocm100
 
 # aarch64 CUDA (GB200)
 public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-aarch64
 ```
 
 **Unblock "additional wheels" once per RC.** The macOS arm64 CPU wheel,
-along with the CUDA 12.9, x86 CPU, XPU and arm64 wheels, builds only after
+along with the x86 CPU, XPU and arm64 CPU wheels, builds only after
 that block step is unblocked. Main's nightlies leave it blocked, so a
 macOS-only compile break stays hidden until the release. In v0.32.0,
 vllm-project/vllm#54113 called `socket2::Socket::domain()`, which doesn't
@@ -274,7 +280,7 @@ bk build create --yes \
   --message "vX.Y.ZrcN candidate" \
   --env "VLLM_COMMIT=<commit_sha>" \
   --env "VLLM_IMAGE_CUDA=public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-x86_64" \
-  --env "VLLM_IMAGE_ROCM=public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-rocm"
+  --env "VLLM_IMAGE_ROCM=public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-rocm100"
 ```
 
 > **Note:** The `--commit` and `--branch` here refer to the **perf-eval
@@ -814,16 +820,12 @@ python3.12 -m venv /tmp/vllm-smoke && /tmp/vllm-smoke/bin/pip install vllm==X.Y.
   title as its message. A manual `bk build create` only adds a duplicate
   that queues behind it on `small_cpu_queue_release`. Tag pushes don't
   start builds.
-- **CUDA 12.9 images build only at the cut:** they stay blocked on main's
-  release-v2 builds. So a 12.9-only compile break first surfaces on the
-  release branch. In v0.31.0 it was vllm-project/vllm#59118, and it had to
-  be cherry-picked.
 - **`bk job log` flags:** `bk job log <job_id> --pipeline vllm/<p>
   --build-number <N>`. The flag is `--build-number`, not `--build`.
 - **Image naming:** The x86_64 CUDA 13.0 release image is
   `public.ecr.aws/q9t5s3a7/vllm-release-repo:<full_commit_sha>-x86_64`.
-  The ROCm image is `...:<full_commit_sha>-rocm`. The commit SHA is the
-  HEAD of the release branch at build time.
+  The ROCm image is `...:<full_commit_sha>-rocm100` (`-rocm` before
+  v0.33.0). The commit SHA is the HEAD of the release branch at build time.
 - **Perf-eval image env vars:** Use `VLLM_IMAGE_CUDA` and `VLLM_IMAGE_ROCM`
   (not `VLLM_IMAGE`) when both CUDA and ROCm workloads should run. Setting
   only `VLLM_IMAGE` causes ROCm workloads to get the CUDA image or be
