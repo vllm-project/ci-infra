@@ -44,6 +44,7 @@ the pods, which is usually where a finished or cancelled step has to be read.
 | --- | --- | --- |
 | A worker's cluster, node pools, buckets | `workers/<env>/<worker>.tf`, `modules/worker/` | `terraform plan`, `terraform apply` in `workers/<env>/` |
 | The manager, the dashboard, IAM, which workers the fleet has | `manager/` | `terraform plan`, `terraform apply` in `manager/` |
+| A new worker, ours or a partner's | `workers/<env>/`, `manager/prod.auto.tfvars` | README "Add a worker"; the environment's administrators follow `modules/worker/README.md` |
 | Queues, quota, flavors, priorities, launcher timeouts | `workers/<env>/<worker>.tf`, `manager/prod.auto.tfvars`, `kueue/templates/`, `scripts/generate_manifests.py` | `./scripts/generate_manifests.py`, commit `kueue/generated/`, deploy |
 | What the launcher does | `kueue/launcher/launch.py` | deploy; it ships as the `tpu-launcher-scripts` ConfigMap |
 | What every workload pod gets | `kueue/launcher/pod_defaults.yaml` | deploy |

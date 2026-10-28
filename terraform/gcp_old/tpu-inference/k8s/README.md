@@ -39,7 +39,7 @@ manager where the launcher built the podspec.
 | `manager/` | The manager's Terraform root: the manager cluster, the dashboard, and every grant in `cloud-ullm-inference-ci-cd`, including the ones each worker needs. Terraform owns infrastructure only. |
 | `manager/prod.auto.tfvars` | The fleet: which workers it has, versions, launcher timeouts, the secrets workloads may ask for. |
 | `workers/<environment>/` | One Terraform root and state per environment, applied by whoever administers it; ours is `cloud-ullm-inference-ci-cd`, with both workers. Each worker is a module block calling `modules/worker`, in a file of its own name, and the shapes, quotas and reservations in it are the only place they are written. See "Add a worker". |
-| `modules/worker/` | One worker cluster: its node pools, node service account and cache buckets, all in the worker's own project. |
+| `modules/worker/` | One worker cluster: its node pools, node service account and cache buckets, all in the worker's own project. Its README is what an environment's administrators need. |
 | `scripts/generate_manifests.py` | Renders `kueue/generated/` from `manager/prod.auto.tfvars` and the module block in each listed worker's `main.tf`. |
 | `scripts/deploy_manifests.py` | Installs Kueue and JobSet, applies `kueue/generated/`. |
 | `kueue/templates/` | The templates the generator renders. |
@@ -353,56 +353,44 @@ Connect Gateway, which checks IAM on the manager's project and then the
 worker's own RBAC. Its pods authenticate in its own project's Workload Identity
 pool, which the manager grants by name.
 
-1. **Prerequisites in the worker's project:** the TPU reservation; the
-   `container`, `compute`, `iam`, `storage` and `secretmanager` APIs; a subnet
-   with Private Google Access; a Cloud NAT in the region, since Kueue and
-   JobSet are pulled from registry.k8s.io (see "Before adding a region"); and a
-   GCS bucket for the environment's state.
-2. **Outside `cloud-ullm-inference-ci-cd`, let them create the membership.**
-   Add whoever will run the apply to `worker_deployers` in
+What the environment's administrators need, run and do not provide is in
+[`modules/worker/README.md`](modules/worker/README.md); for a partner, that is
+the page to send. Our side:
+
+1. **Outside `cloud-ullm-inference-ci-cd`, let them create the membership.**
+   Add whoever will run their apply to `worker_deployers` in
    `manager/prod.auto.tfvars` and apply `manager/`. GKE creates the cluster's
    fleet membership in the manager's project as that identity. Remove them
    once the cluster exists.
-3. **Write the module block.** In an existing environment, add `<name>.tf`
-   beside the others. For a new one, copy `main.tf` and one worker's file from
-   `workers/cloud-ullm-inference-ci-cd/` into `workers/<environment>/` and
-   change the backend and locals. Then set the module's arguments: name,
-   project, region, network, a `/28` for the control plane, and the pools and
-   quotas. `tpu-ci-<name>` is the cluster's fleet membership ID, so `<name>`
-   is unique in the fleet. Every argument is a literal or one of the
-   environment's locals, because `generate_manifests.py` reads them.
-4. **Apply it**, as the environment's administrators:
-   `terraform -chdir=workers/<environment> init && terraform -chdir=workers/<environment> apply`.
-5. **Let the deploy in.** In a project where the person deploying has no role,
-   the worker's administrators bind them, since Connect Gateway passes their
-   identity through to the worker's API server:
-
-   ```bash
-   kubectl create clusterrolebinding tpu-ci-deploy-<user> --clusterrole=cluster-admin --user=<user>@google.com
-   ```
-
-   In our own projects IAM already covers it. Kueue and the launcher need
-   nothing here; the deploy creates their bindings.
-6. **List it, apply the manager, generate, deploy.** Add
+2. **Write the module block,** on a branch. In an existing environment, add
+   `<name>.tf` beside the others. For a new one, copy `main.tf` and one
+   worker's file from `workers/cloud-ullm-inference-ci-cd/` into
+   `workers/<environment>/` and change the backend and locals. Then set the
+   module's arguments: name, project, region, network, a `/28` for the control
+   plane, and the pools and quotas. `tpu-ci-<name>` is the cluster's fleet
+   membership ID, so `<name>` is unique in the fleet.
+3. **They apply it, and bind whoever deploys** to `cluster-admin`, as the
+   module's README describes. In our own projects we apply it ourselves, and
+   IAM already lets the deploy in.
+4. **List it, apply the manager, generate, deploy.** Add
    `<name> = { project, location }` to `workers` in `manager/prod.auto.tfvars`
    and apply `manager/`. That grants the worker's node account Artifact
    Registry, and its project's pool the CI buckets, BigQuery and the fleet
-   secrets. It comes after step 4 because the grants name the node account the
+   secrets. It comes after step 3 because the grants name the node account the
    worker's module creates. Then `generate_manifests.py`, which adds the worker
    to the manager's queues for its shapes with its quota added to the fleet's,
    and `deploy_manifests.py`.
 
 After that, a pool or quota change is an edit to the worker's module block,
-which its environment's administrators apply and we generate and deploy. A Kueue, JobSet or
-launcher change needs nothing from them. To remove a worker, take it out of
-`workers`, apply `manager/`, generate and deploy, delete its MultiKueueCluster
-on the manager by hand (the deploy never prunes), and then remove its module
-block and apply its environment.
+which its environment's administrators apply and we generate and deploy. To
+remove a worker, take it out of `workers`, apply `manager/`, generate and
+deploy, delete its MultiKueueCluster on the manager by hand (the deploy never
+prunes), and then remove its module block and apply its environment.
 
-Whoever administers a worker can read everything on it: the secrets in
-`env_secrets`, which are synced to every worker, each job's
-`BUILDKITE_AGENT_ACCESS_TOKEN`, and the cache buckets in its project. The agent
-token and the git deploy key stay on the manager.
+Whoever administers a worker can read everything on it, including the secrets
+in `env_secrets`, which are synced to every worker. Decide that before listing
+a partner's worker; the agent token and the git deploy key stay on the manager
+either way.
 
 ### Rotate the Buildkite agent token
 
