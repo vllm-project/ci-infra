@@ -455,9 +455,9 @@ what restarted it, and job pickup stops until it is back. Running jobs do not
 depend on it.
 
 **Every v7x shape has quota of its own, and 2x2x4 takes it back.** The 128
-chips split 76 to `tpu7x-standard-4t-2x2x1` (19 slices), 32 to
+chips split 72 to `tpu7x-standard-4t-2x2x1` (18 slices), 32 to
 `tpu7x-standard-4t-2x2x4` (two slices), 16 to `tpu7x-standard-4t-2x2x2` (two
-slices) and 4 to `tpu7x-standard-1t-1x1x1`; any shape can borrow what the
+slices) and 8 to `tpu7x-standard-1t-1x1x1`; any shape can borrow what the
 others leave idle.
 Kueue considers a workload that fits a queue's own quota before one that has to
 borrow, so a shape under its nominal gets freed chips first. 2x2x4 also evicts

@@ -231,11 +231,12 @@ worker_clusters = [
     # pairs), two slices, 16, on 2x2x2 - an 8-chip step waits for a whole slice
     # while single-host steps take chips as they free, and two or more wanted a
     # slice at once 19% of the time (10-06..10-09) - and the other 80 on the
-    # single-host shapes, 76 on 2x2x1 (19 slices) and 4 on 1x1x1. 2x2x1 holds
-    # almost all of it because 83% of queued v7x work sits there (10-14..10-28)
-    # and has no Spot pool, while 1x1x1 keeps 4 reserved chips for post-merge
-    # steps (above tpu_spot_max_priority) and spills the rest onto Spot after
-    # tpu_spot_after_seconds.
+    # single-host shapes, 72 on 2x2x1 (18 slices) and 8 on 1x1x1. 2x2x1 holds
+    # most of it because 83% of queued v7x work sits there (10-14..10-28) and
+    # it has no Spot pool. 1x1x1 keeps 8 for post-merge steps: they rank above
+    # tpu_spot_max_priority, so reserved chips are all they can use, and on
+    # weekdays they hold up to 8 at once 90% of the time (10-19..10-27). PR
+    # steps spill onto Spot after tpu_spot_after_seconds.
     # Every pool can grow to all 128 chips, so a shape can borrow whatever the
     # others leave idle: the cohort accounting decides how many run at once and
     # the node pools only decide what a chip can be shaped into.
@@ -251,7 +252,7 @@ worker_clusters = [
 
         min_nodes     = 0
         max_nodes     = 128
-        nominal_quota = 4
+        nominal_quota = 8
 
         # Overflow onto Spot once the reservation and what this shape can
         # borrow are spent. The project has 256 Spot v7x chips in us-central1;
@@ -272,7 +273,7 @@ worker_clusters = [
 
         min_nodes     = 0
         max_nodes     = 32
-        nominal_quota = 76
+        nominal_quota = 72
 
         # No Spot: 2x2x1 Spot VMs were stocked out on most busy evenings, and
         # each step offered Spot then waited 10-15 minutes for a node that
