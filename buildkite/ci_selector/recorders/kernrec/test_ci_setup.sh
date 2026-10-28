@@ -17,13 +17,22 @@ int rocprofiler_get_version(uint32_t* major, uint32_t* minor, uint32_t* patch) {
 }
 C
 printf 'int tool(void) { return 0; }\n' > "$WORK/fixtures/tool.c"
-cc -shared -fPIC "$WORK/fixtures/tool.c" -o "$WORK/fixtures/tool.so"
-cc -shared -fPIC "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/sdk.so"
-cc -shared -fPIC -DPATCH=3 "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/wrong-sdk.so"
-cc -shared -fPIC -DPATCH=5 "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/rocm10-sdk.so"
+modes="cuda rocm rocm10 rocm-spawn rocm-fork rocm-forkserver missing-sdk missing-compiler failed-build wrong-version conflict stale disabled"
+if command -v "${CC:-cc}" >/dev/null 2>&1; then
+  "${CC:-cc}" -shared -fPIC "$WORK/fixtures/tool.c" -o "$WORK/fixtures/tool.so"
+  "${CC:-cc}" -shared -fPIC "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/sdk.so"
+  "${CC:-cc}" -shared -fPIC -DPATCH=3 "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/wrong-sdk.so"
+  "${CC:-cc}" -shared -fPIC -DPATCH=5 "$WORK/fixtures/sdk.c" -o "$WORK/fixtures/rocm10-sdk.so"
+else
+  # No C compiler (the GitHub runner image has none): placeholder libraries,
+  # and only the cases that never load them. The CUDA case is among them.
+  for lib in tool sdk wrong-sdk rocm10-sdk; do printf 'placeholder\n' > "$WORK/fixtures/$lib.so"; done
+  modes="cuda rocm-fork rocm-forkserver missing-sdk missing-compiler failed-build conflict stale disabled"
+  echo "no C compiler (${CC:-cc}): skipping rocm rocm10 rocm-spawn wrong-version"
+fi
 
 for shell in bash sh; do
-for mode in cuda rocm rocm10 rocm-spawn rocm-fork rocm-forkserver missing-sdk missing-compiler failed-build wrong-version conflict stale disabled; do
+for mode in $modes; do
   case_dir="$WORK/$shell-$mode"
   mkdir -p "$case_dir/checkout" "$case_dir/cache" "$case_dir/source" \
     "$case_dir/rocm/include/rocprofiler-sdk" "$case_dir/rocm/lib" "$case_dir/bin"
