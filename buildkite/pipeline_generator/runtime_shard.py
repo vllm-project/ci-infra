@@ -57,8 +57,9 @@ MAX_NUMBER_OF_SHARDS = 10
 # median file, and at least this. Under a command that picks tests by a
 # marker or keyword (`-m hybrid_model` over a directory of other models), it
 # counts as this alone: main timed every file the filter picks tests in, so
-# one it never timed most likely has none. A filter that excludes ("not
-# slow_test") still runs most files, so a new file there counts as usual.
+# one it never timed most likely has none, also when the filter excludes
+# some too (`core_model and not slow_test`). A filter that only excludes
+# ("not slow_test") still runs most files, so a new file there counts as usual.
 MIN_UNKNOWN_FILE_SECONDS = 5
 _FILTER_OPTIONS = ("-m", "-k")
 # Where the image keeps the checkout; a step's working_dir lives under it.
@@ -201,9 +202,82 @@ def _picks_tests(command: str) -> bool:
             expression = arg[2:].lstrip("=")
         else:
             continue
-        if not re.search(r"\bnot\b", expression):
+        if _requires_a_name(expression):
             return True
     return False
+
+
+# pytest's -m/-k tokens (_pytest/mark/expression.py): parentheses, `=` and
+# `,` in marker arguments, quoted strings, and names; `and`, `or` and `not`
+# are keywords.
+_FILTER_TOKEN = re.compile(r"""\s+|[()=,]|'[^']*'|"[^"]*"|(?::?\w|:|\+|-|\.|\[|\]|\\|/)+""")
+
+
+def _requires_a_name(expression: str) -> bool:
+    """Whether pytest keeps a test none of whose names the -m/-k expression
+    mentions out: true for `core_model and not slow_test` and `not not a`,
+    false for `not slow_test` and `a or not b`. Follows pytest's grammar
+    (_pytest/mark/expression.py), evaluating every name as not matching. An
+    expression pytest can't read counts as picking unless it contains `not`."""
+    tokens, position = [], 0
+    while position < len(expression):
+        match = _FILTER_TOKEN.match(expression, position)
+        if not match:
+            return not re.search(r"\bnot\b", expression)
+        if not match.group().isspace():
+            tokens.append(match.group())
+        position = match.end()
+    if not tokens:  # `-m ''` filters nothing
+        return False
+    tokens.append("")  # end of input
+
+    def any_of(i):  # and_expr ('or' and_expr)*
+        value, i = all_of(i)
+        while tokens[i] == "or":
+            other, i = all_of(i + 1)
+            value = value or other
+        return value, i
+
+    def all_of(i):  # not_expr ('and' not_expr)*
+        value, i = term(i)
+        while tokens[i] == "and":
+            other, i = term(i + 1)
+            value = value and other
+        return value, i
+
+    def term(i):  # 'not' not_expr | '(' expr ')' | ident kwargs?
+        if tokens[i] == "not":
+            value, i = term(i + 1)
+            return not value, i
+        if tokens[i] == "(":
+            value, i = any_of(i + 1)
+            if tokens[i] != ")":
+                raise ValueError(expression)
+            return value, i + 1
+        if tokens[i] in ("", ")", "and", "or", "=", ",") or tokens[i][0] in ("'", '"'):
+            raise ValueError(expression)
+        i += 1
+        if tokens[i] == "(":  # a marker's arguments: `split(group=0, x='y')`
+            while True:
+                name, equals, value, after = tokens[i + 1 : i + 5]
+                if not name.isidentifier() or name in ("and", "or", "not") or equals != "=" \
+                        or value in ("(", ")", "=", ","):
+                    raise ValueError(expression)
+                i += 4
+                if after == ")":
+                    i += 1
+                    break
+                if after != ",":
+                    raise ValueError(expression)
+        return False, i  # no name matches
+
+    try:
+        value, end = any_of(0)
+        if tokens[end]:
+            raise ValueError(expression)
+        return not value
+    except ValueError:
+        return not re.search(r"\bnot\b", expression)
 
 
 def pack(value) -> str:

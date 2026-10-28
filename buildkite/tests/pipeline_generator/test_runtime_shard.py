@@ -213,6 +213,40 @@ def test_plan_counts_an_untimed_file_under_a_filter_at_the_floor():
     assert rs._picks_tests("pytest x -mcore_model") and rs._picks_tests("pytest -k=a x")
 
 
+def test_a_filter_that_requires_a_name_picks_tests_even_with_a_not():
+    """`core_model and (not slow_test)` keeps only core_model tests, so a
+    file main never timed most likely has none (Language Models (Standard):
+    5 timed files, about 40 untimed ones it collects but runs nothing in).
+    The rule is pytest's: does the expression keep a test it names nothing of?"""
+    for expression in ["core_model and (not slow_test)", "not slow_test and core_model",
+                       "a and (b or not c)", "(a or b) and not c", "a or (b and not c)", "not not a",
+                       "split(group=0) and not core_model", "inductor_partition and not +rms_norm",
+                       "mark(x='a b', n=-1) and not c", "m(a=1, b=2, c=3) and not d", "tests/x.py::t[a-b] and not c"]:
+        assert rs._picks_tests(f"pytest x -m \"{expression}\""), expression
+    for expression in ["not slow_test", "not (a and b)", "a or not b", "(not a) or b",
+                       "a and not b or not c", "not(slow_test)", "a or not(b)", "not mark(x=1)",
+                       "not a and not b"]:
+        assert not rs._picks_tests(f"pytest x -m \"{expression}\""), expression
+    assert not rs._picks_tests("pytest x -m ''")  # an empty filter keeps everything
+    # Any one filter that picks is enough; -k counts as -m does.
+    assert rs._picks_tests("pytest x -m 'not slow_test' -k 'a and not b'")
+
+
+def test_a_filter_the_grammar_cant_read_falls_back_to_looking_for_not():
+    """pytest rejects these; the old rule decides: picking unless the
+    expression says `not`."""
+    for expression in ["x and not and", "x and not or", "x and not )", "a and not (b", "not a and",
+                       "a and not b(c", "not a ~ b", "a and not 'b'", "a and not not =",
+                       "a and not not ,", "a and not not 'b'", "m(x) and not c", "m(x=1 y=2) and not c",
+                       "m(x=) and not c", "m(not=1) and not c", "m(x=1,) and not c",
+                       "m(and=1) and not c", "m(or=1) and not c", "m(x=() and not c",
+                       "m(x=)) and not c", "m(x==) and not c", "m(x=,) and not c"]:
+        assert not rs._picks_tests(f"pytest x -m \"{expression}\""), expression
+    assert not rs._picks_tests("""pytest x -m 'a and not not "b"'""")  # a string isn't a name
+    for expression in ["a and", "(a", "a b", "a = b", "a(b"]:
+        assert rs._picks_tests(f"pytest x -m \"{expression}\""), expression
+
+
 def test_plan_finds_main_timings_after_a_pr_edits_the_command():
     """An edited command has a different label but keeps its file timings
     when each file has only one current and historical command."""
