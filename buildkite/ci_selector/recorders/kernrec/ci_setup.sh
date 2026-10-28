@@ -1,10 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Sourced before CI workloads. CUDA uses the shipped CUPTI tool; ROCm builds
 # our tool against the image's preprovisioned ROCProfiler SDK. Setup failures
 # leave the workload runnable and an unavailable recording sidecar.
+#
+# POSIX sh only: NVIDIA docker jobs source this from /bin/sh (dash), AMD jobs
+# from bash. test_ci_setup.sh runs every case under both.
 
 kernrec_write_sidecar() {
-  [[ -n "${KERNREC_DIR:-}" && -d "$KERNREC_DIR" ]] || return 0
+  [ -n "${KERNREC_DIR:-}" ] && [ -d "$KERNREC_DIR" ] || return 0
   "${KERNREC_PYTHON:-python3}" - "${1:-null}" <<'PY' 2>/dev/null || true
 import importlib.metadata
 import json
@@ -65,10 +68,18 @@ temporary.replace(path)
 PY
 }
 
+# Whether $1 already holds a kern.*.txt recording, without a bash-only glob test.
+kernrec_has_recordings() {
+  for kernrec_file in "$1"/kern.*.txt; do
+    [ -e "$kernrec_file" ] && return 0
+  done
+  return 1
+}
+
 kernrec_finish() {
   local rc="${1:-0}"
   kernrec_write_sidecar "$rc"
-  if [[ -n "${KERNREC_ROOT:-}" ]]; then
+  if [ -n "${KERNREC_ROOT:-}" ]; then
     chmod -R a+rwX "$KERNREC_ROOT/.kernrec" 2>/dev/null || true
   fi
 }
@@ -79,9 +90,9 @@ kernrec_setup() {
   local dir="${KERNREC_CACHE_DIR:-/tmp/kernrec/${BUILDKITE_JOB_ID:-local}}"
   local root="" candidate
   for candidate in "${KERNREC_CHECKOUT_PATH:-}" "${BUILDKITE_BUILD_CHECKOUT_PATH:-}" /workdir; do
-    if [[ -n "$candidate" && -d "$candidate" ]]; then root="$candidate"; break; fi
+    if [ -n "$candidate" ] && [ -d "$candidate" ]; then root="$candidate"; break; fi
   done
-  [[ -n "$root" ]] || root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  [ -n "$root" ] || root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
   export KERNREC_ROOT="$root" KERNREC_DIR="$root/.kernrec/${BUILDKITE_JOB_ID:-local}"
   export KERNREC_BACKEND="${KERNREC_BACKEND:-cuda}"
   export KERNREC_COLLECTION_AVAILABLE=0 KERNREC_COLLECTION_ERROR="setup incomplete"
@@ -91,11 +102,11 @@ kernrec_setup() {
   # The generator also calls finish: another prelude may replace the EXIT trap.
   trap 'kernrec_finish $?' EXIT
   # The host found no checkout to upload from, so a recording here would be lost.
-  if [[ "${KERNREC_DISABLE:-}" == 1 ]]; then
+  if [ "${KERNREC_DISABLE:-}" = 1 ]; then
     KERNREC_COLLECTION_ERROR="checkout unavailable; recordings cannot be uploaded"
     return 1
   fi
-  if [[ "${KERNREC_ACTIVE_DIR:-}" != "$KERNREC_DIR" ]] && compgen -G "$KERNREC_DIR/kern.*.txt" >/dev/null; then
+  if [ "${KERNREC_ACTIVE_DIR:-}" != "$KERNREC_DIR" ] && kernrec_has_recordings "$KERNREC_DIR"; then
     KERNREC_COLLECTION_ERROR="existing recordings require a fresh job directory"
     return 1
   fi
@@ -103,7 +114,7 @@ kernrec_setup() {
 
   case "$KERNREC_BACKEND" in
     cuda)
-      if [[ ! -s "$dir/libkernrec.so" ]]; then
+      if [ ! -s "$dir/libkernrec.so" ]; then
         KERNREC_COLLECTION_ERROR="CUDA recorder download failed"
         curl -sSfL --retry 3 --max-time 60 -o "$dir/libkernrec.so.tmp" "$base/libkernrec.so" \
           && mv "$dir/libkernrec.so.tmp" "$dir/libkernrec.so" || return 1
@@ -118,7 +129,7 @@ hits = sorted(glob.glob(os.path.join(root, "**", "libcupti.so.1[0-9]"), recursiv
 print(os.path.dirname(hits[0]) if hits else "")
 PY
       )
-      if [[ -n "$cupti" ]]; then
+      if [ -n "$cupti" ]; then
         export LD_LIBRARY_PATH="$cupti${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
       fi
       export CUDA_INJECTION64_PATH="$dir/libkernrec.so"
@@ -128,19 +139,19 @@ PY
       # Torch import initializes the SDK before vLLM's first device call.
       # Respect workloads that explicitly require fork by leaving them unarmed.
       KERNREC_COLLECTION_ERROR="ROCm collection requires VLLM_WORKER_MULTIPROC_METHOD=spawn"
-      [[ "${VLLM_WORKER_MULTIPROC_METHOD:-spawn}" == spawn ]] || return 1
+      [ "${VLLM_WORKER_MULTIPROC_METHOD:-spawn}" = spawn ] || return 1
       local rocm="${ROCM_PATH:-/opt/rocm}" sdk_include sdk_lib source file
       sdk_include="${ROCPROFILER_SDK_INCLUDE:-$rocm/include}"
       sdk_lib="${ROCPROFILER_SDK_LIB:-$rocm/lib}"
       KERNREC_COLLECTION_ERROR="preprovisioned ROCProfiler SDK or compiler unavailable"
-      [[ -f "$sdk_include/rocprofiler-sdk/rocprofiler.h" && -f "$sdk_lib/librocprofiler-sdk.so" ]] || return 1
+      [ -f "$sdk_include/rocprofiler-sdk/rocprofiler.h" ] && [ -f "$sdk_lib/librocprofiler-sdk.so" ] || return 1
       command -v "${CXX:-g++}" >/dev/null 2>&1 || return 1
       KERNREC_COLLECTION_ERROR="another ROCProfiler tool is already configured"
-      [[ -z "${ROCP_TOOL_LIBRARIES:-}" || "$ROCP_TOOL_LIBRARIES" == "$dir/libkernrec_rocm.so" ]] || return 1
-      if [[ ! -s "$dir/libkernrec_rocm.so" ]]; then
+      [ -z "${ROCP_TOOL_LIBRARIES:-}" ] || [ "$ROCP_TOOL_LIBRARIES" = "$dir/libkernrec_rocm.so" ] || return 1
+      if [ ! -s "$dir/libkernrec_rocm.so" ]; then
         source="${KERNREC_SOURCE_DIR:-$dir/source}"
         mkdir -p "$source" || return 1
-        if [[ -z "${KERNREC_SOURCE_DIR:-}" ]]; then
+        if [ -z "${KERNREC_SOURCE_DIR:-}" ]; then
           KERNREC_COLLECTION_ERROR="ROCm recorder source download failed"
           for file in build-rocm.sh kernrec_rocm.cpp; do
             curl -sSfL --retry 3 --max-time 60 -o "$source/$file" "$base/$file" || return 1

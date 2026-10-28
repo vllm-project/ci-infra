@@ -64,3 +64,10 @@ jobs:
         env:
           VLLM_REPO: ${{ runner.temp }}/vllm
         run: uv run pytest tests -q --durations=10
+
+      # The kernel recorder's setup is sourced by whatever shell runs the CI
+      # job: /bin/sh (dash) in NVIDIA docker jobs, bash on AMD. The script runs
+      # every case under both, so a bash-only construct fails here.
+      - name: Kernel recorder setup under bash and sh
+        working-directory: buildkite/ci_selector
+        run: KERNREC_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" bash recorders/kernrec/test_ci_setup.sh
