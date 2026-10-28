@@ -311,6 +311,7 @@ K8S_PLUGIN_DEVICES = (
     DeviceType.A100.value,
     DeviceType.B200_K8S.value,
     DeviceType.L4.value,
+    DeviceType.INTEL_GPU_K8S.value,
 )
 
 
@@ -380,6 +381,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.INTEL_HPU
     elif step.device == DeviceType.INTEL_GPU:
         return AgentQueue.INTEL_GPU
+    elif step.device == DeviceType.INTEL_GPU_K8S:
+        return AgentQueue.INTEL_GPU_K8S
     elif step.device == DeviceType.ARM_CPU:
         return AgentQueue.ARM_CPU
     elif amd_gpu_queue := get_amd_agent_queue(step.device):
@@ -481,6 +484,7 @@ def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool
         enabled = kernrec_enabled()
     return (
         enabled
+        and step.device != DeviceType.INTEL_GPU_K8S
         and not step.no_plugin
         and not step.label.startswith(":docker:")
         and step.key not in KERNREC_SKIP_STEPS
@@ -607,6 +611,7 @@ def _fnrec_applies(step: Step, setup_profile: SetupProfile) -> bool:
     """
     return (
         fnrec_enabled()
+        and step.device != DeviceType.INTEL_GPU_K8S
         and setup_profile != "none"
         and not step.label.startswith(":docker:")
         and not (step.num_nodes and step.num_nodes >= 2)
@@ -1193,7 +1198,12 @@ def convert_group_step_to_buildkite_step(
                 continue
 
             # command step
-            step_commands = _prepare_commands(step, variables_to_inject)
+            setup_profile: SetupProfile = (
+                "none" if step.device == DeviceType.INTEL_GPU_K8S else "nvidia"
+            )
+            step_commands = _prepare_commands(
+                step, variables_to_inject, setup_profile
+            )
 
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
