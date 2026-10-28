@@ -44,9 +44,12 @@ config:
   #
   # Set well above what the chips can admit. The ClusterQueues ration hardware;
   # this only rations how much of the backlog is visible, and it is one limit
-  # across every queue: when it binds, Buildkite's order decides what runs, not
-  # Kueue. A waiting job pod asks for 100m CPU and 1Gi.
-  max-in-flight: 200
+  # across every queue and both worker clusters: when it binds, Buildkite's
+  # order decides what runs, not Kueue, and a v7x backlog keeps v6e and
+  # CPU-only steps from starting while their hardware sits idle. A busy
+  # weekday holds ~200 v7x steps waiting for chips. A waiting job pod asks for
+  # 100m CPU and 1Gi, so 400 of them fit well inside manager_max_cpu.
+  max-in-flight: 400
 
   # How long a container may sit unable to start before the controller gives
   # up on the step. The chart's thirty seconds assumes a warm node and a small
