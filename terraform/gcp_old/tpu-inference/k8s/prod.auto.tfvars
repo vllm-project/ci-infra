@@ -231,10 +231,11 @@ worker_clusters = [
     # pairs), two slices, 16, on 2x2x2 - an 8-chip step waits for a whole slice
     # while single-host steps take chips as they free, and two or more wanted a
     # slice at once 19% of the time (10-06..10-09) - and the other 80 on the
-    # single-host shapes, 64 on 2x2x1 and 16 on 1x1x1. 2x2x1 holds the most
-    # because post-merge, PR and perf steps queue there (10-01..10-08 it averaged
-    # 14.3 chips in use against 1x1x1's 2.8, and on 10-08 evening every pending
-    # v7x workload was a 2x2x1).
+    # single-host shapes, 76 on 2x2x1 (19 slices) and 4 on 1x1x1. 2x2x1 holds
+    # almost all of it because 83% of queued v7x work sits there (10-14..10-28)
+    # and has no Spot pool, while 1x1x1 keeps 4 reserved chips for post-merge
+    # steps (above tpu_spot_max_priority) and spills the rest onto Spot after
+    # tpu_spot_after_seconds.
     # Every pool can grow to all 128 chips, so a shape can borrow whatever the
     # others leave idle: the cohort accounting decides how many run at once and
     # the node pools only decide what a chip can be shaped into.
@@ -250,7 +251,7 @@ worker_clusters = [
 
         min_nodes     = 0
         max_nodes     = 128
-        nominal_quota = 16
+        nominal_quota = 4
 
         # Overflow onto Spot once the reservation and what this shape can
         # borrow are spent. The project has 256 Spot v7x chips in us-central1;
@@ -258,14 +259,10 @@ worker_clusters = [
         # Spot starts against 19 stockout fallbacks, and its 32-chip quota was
         # full in the evening peak.
         #
-        # The AI zone as well as the reservation's zone: GCE runs out of Spot
-        # VMs per zone, and these are the two us-central1 zones that offer
-        # TPU7x. The quota is regional, so this changes where Spot nodes come
-        # from, not how many.
-        spot = {
-          max_nodes = 64
-          zones     = ["us-central1-ai1a", "us-central1-c"]
-        }
+        # Pinned to the shape's zone (us-central1-c): it is the only working
+        # TPU7x zone in us-central1 (the AI zone refuses instances as
+        # unavailable, and the other default zones have no TPU7x).
+        spot = { max_nodes = 64 }
       },
       {
         machine_type     = "tpu7x-standard-4t"
@@ -275,7 +272,7 @@ worker_clusters = [
 
         min_nodes     = 0
         max_nodes     = 32
-        nominal_quota = 64
+        nominal_quota = 76
 
         # No Spot: 2x2x1 Spot VMs were stocked out on most busy evenings, and
         # each step offered Spot then waited 10-15 minutes for a node that
