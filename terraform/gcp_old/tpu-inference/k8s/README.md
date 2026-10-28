@@ -19,8 +19,8 @@ One manager and one worker per reservation, and that split is the whole design:
   `tpu7x-standard-4t` (2x2x1, and multi-host 2x2x2 across two VMs and 2x2x4
   across four). Every v7x step in the fleet runs here.
 
-How many chips each shape gets is in `prod.auto.tfvars`; read it there rather
-than from a doc.
+How many chips each shape gets is in the worker's module block under
+`workers/`; read it there rather than from a doc.
 
 A worker reports to the manager over Connect Gateway and runs no agent of its
 own. MultiKueue joins them: the manager admits, the worker executes. An operator
@@ -36,15 +36,17 @@ manager where the launcher built the podspec.
 | Path | What it is |
 | --- | --- |
 | `AGENTS.md` | How to work on the fleet: access, where to change what, deploying, rules. Start here. |
-| `*.tf` | The clusters, node pools, buckets, IAM. Terraform owns infrastructure only. |
-| `prod.auto.tfvars` | The fleet. Cluster list, shapes, reservations, versions, timeouts. The single input to both Terraform and the generator. |
-| `scripts/generate_manifests.py` | Renders `kueue/generated/` from `prod.auto.tfvars`. |
+| `manager/` | The manager's Terraform root: the manager cluster, the dashboard, and every grant in `cloud-ullm-inference-ci-cd`, including the ones each worker needs. Terraform owns infrastructure only. |
+| `manager/prod.auto.tfvars` | The fleet: which workers it has, versions, launcher timeouts, the secrets workloads may ask for. |
+| `workers/<environment>/` | One Terraform root and state per environment, applied by whoever administers it; ours is `cloud-ullm-inference-ci-cd`, with both workers. Each worker is a module block calling `modules/worker`, in a file of its own name, and the shapes, quotas and reservations in it are the only place they are written. See "Add a worker". |
+| `modules/worker/` | One worker cluster: its node pools, node service account and cache buckets, all in the worker's own project. |
+| `scripts/generate_manifests.py` | Renders `kueue/generated/` from `manager/prod.auto.tfvars` and the module block in each listed worker's `main.tf`. |
 | `scripts/deploy_manifests.py` | Installs Kueue and JobSet, applies `kueue/generated/`. |
 | `kueue/templates/` | The templates the generator renders. |
 | `kueue/generated/` | The YAML that actually gets applied. Committed on purpose — see below. |
 | `kueue/launcher/` | The program every TPU step runs, its Job, and its image build. |
 | `kueue/launcher/pod_defaults.yaml` | What the fleet gives a workload's pods: caches, gcsfuse settings, eviction and retry policy. One definition, inherited by the built-in Job and by every manifest. |
-| `dashboard.tf`, `dashboard/` | The fleet's health dashboard: a Cloud Run service, its program (`app.py` serves, `fleet.py` reads, `views.py` and `charts.py` render), templates, static files and image build. |
+| `manager/dashboard.tf`, `dashboard/` | The fleet's health dashboard: a Cloud Run service, its program (`app.py` serves, `fleet.py` reads, `views.py` and `charts.py` render), templates, static files and image build. |
 
 Terraform stops at the cluster; `deploy_manifests.py` starts there. The
 Kubernetes and Helm providers need a reachable API server at plan time, which
@@ -65,8 +67,9 @@ manager and on every worker that carried it.
 ```bash
 pip install -r scripts/requirements.txt
 
-terraform init && terraform apply          # if any *.tf or the shape list changed
-./scripts/generate_manifests.py            # if prod.auto.tfvars or a template changed
+terraform -chdir=workers/<env> apply       # if a worker there or modules/worker changed
+terraform -chdir=manager apply             # if manager/ changed, or a worker joined or left
+./scripts/generate_manifests.py            # if a worker's shapes, manager/prod.auto.tfvars or a template changed
 ./scripts/deploy_manifests.py              # diff, confirm, apply
 ```
 
@@ -228,7 +231,7 @@ lasts as long as the step. In order:
 
 1. **Resolve.** Read the profile registry (`/opt/launcher/profiles/profiles.yaml`,
    from the `tpu-launcher-profiles` ConfigMap that `generate_manifests.py`
-   renders out of `prod.auto.tfvars`). Render the manifest or the built-in
+   renders out of the fleet's Terraform). Render the manifest or the built-in
    `job.yaml`, merge `pod_defaults.yaml`, and read the shape back out of the
    pods to choose the queue. Validation, pinning the image to a digest, the
    priority class (the step's `WORKLOAD_PRIORITY`, else the build's
@@ -311,8 +314,8 @@ gcloud compute routers list --project cloud-ullm-inference-ci-cd
 
 ### Add a TPU shape
 
-Add it to `tpu_node_pools` for the right cluster in `prod.auto.tfvars`, then
-`terraform apply`, `generate_manifests.py`, `deploy_manifests.py`. That creates
+Add it to `tpu_node_pools` in the worker's module block, then `terraform apply`
+in its environment, `generate_manifests.py`, `deploy_manifests.py`. That creates
 the node pool, a ResourceFlavor, a ClusterQueue and a LocalQueue, and puts the
 shape in the profile registry the launcher matches against. Steps reach it by
 `--machine-type` / `--topology`; there is no new Buildkite queue.
@@ -333,6 +336,73 @@ A single-host entry sizes its pool with `min_nodes` and `max_nodes`. A
 multi-host entry takes `slices` instead: GKE sizes each multi-host pool at
 exactly one slice and rejects any other size, so `slices` is how many slice
 pools the shape gets.
+
+### Add a worker
+
+Workers are grouped into environments, `workers/<environment>/`: one Terraform
+root and one state each, applied by whoever administers it. Ours is
+`workers/cloud-ullm-inference-ci-cd/`, with the v6e and v7x workers; a partner
+gets an environment of their own, for one worker or several. Each worker is a
+module block calling `modules/worker`, in a file named for the worker. The
+manager lists the workers it dispatches to, and nothing else connects them, so
+nobody needs a role in a project that is not theirs.
+
+That works because nothing reaches a worker through its project. Every worker
+joins the manager's fleet. Kueue, the launcher and the deploy reach it through
+Connect Gateway, which checks IAM on the manager's project and then the
+worker's own RBAC. Its pods authenticate in its own project's Workload Identity
+pool, which the manager grants by name.
+
+1. **Prerequisites in the worker's project:** the TPU reservation; the
+   `container`, `compute`, `iam`, `storage` and `secretmanager` APIs; a subnet
+   with Private Google Access; a Cloud NAT in the region, since Kueue and
+   JobSet are pulled from registry.k8s.io (see "Before adding a region"); and a
+   GCS bucket for the environment's state.
+2. **Outside `cloud-ullm-inference-ci-cd`, let them create the membership.**
+   Add whoever will run the apply to `worker_deployers` in
+   `manager/prod.auto.tfvars` and apply `manager/`. GKE creates the cluster's
+   fleet membership in the manager's project as that identity. Remove them
+   once the cluster exists.
+3. **Write the module block.** In an existing environment, add `<name>.tf`
+   beside the others. For a new one, copy `main.tf` and one worker's file from
+   `workers/cloud-ullm-inference-ci-cd/` into `workers/<environment>/` and
+   change the backend and locals. Then set the module's arguments: name,
+   project, region, network, a `/28` for the control plane, and the pools and
+   quotas. `tpu-ci-<name>` is the cluster's fleet membership ID, so `<name>`
+   is unique in the fleet. Every argument is a literal or one of the
+   environment's locals, because `generate_manifests.py` reads them.
+4. **Apply it**, as the environment's administrators:
+   `terraform -chdir=workers/<environment> init && terraform -chdir=workers/<environment> apply`.
+5. **Let the deploy in.** In a project where the person deploying has no role,
+   the worker's administrators bind them, since Connect Gateway passes their
+   identity through to the worker's API server:
+
+   ```bash
+   kubectl create clusterrolebinding tpu-ci-deploy-<user> --clusterrole=cluster-admin --user=<user>@google.com
+   ```
+
+   In our own projects IAM already covers it. Kueue and the launcher need
+   nothing here; the deploy creates their bindings.
+6. **List it, apply the manager, generate, deploy.** Add
+   `<name> = { project, location }` to `workers` in `manager/prod.auto.tfvars`
+   and apply `manager/`. That grants the worker's node account Artifact
+   Registry, and its project's pool the CI buckets, BigQuery and the fleet
+   secrets. It comes after step 4 because the grants name the node account the
+   worker's module creates. Then `generate_manifests.py`, which adds the worker
+   to the manager's queues for its shapes with its quota added to the fleet's,
+   and `deploy_manifests.py`.
+
+After that, a pool or quota change is an edit to the worker's module block,
+which its environment's administrators apply and we generate and deploy. A Kueue, JobSet or
+launcher change needs nothing from them. To remove a worker, take it out of
+`workers`, apply `manager/`, generate and deploy, delete its MultiKueueCluster
+on the manager by hand (the deploy never prunes), and then remove its module
+block and apply its environment.
+
+Whoever administers a worker can read everything on it: the secrets in
+`env_secrets`, which are synced to every worker, each job's
+`BUILDKITE_AGENT_ACCESS_TOKEN`, and the cache buckets in its project. The agent
+token and the git deploy key stay on the manager.
 
 ### Rotate the Buildkite agent token
 
@@ -362,7 +432,8 @@ gcloud builds submit --project cloud-ullm-inference-ci-cd --region us-central1 \
   --substitutions _CLOUD_SDK_VERSION=584.0.0,_REVISION=1 .
 ```
 
-Then point `launcher_image` in `prod.auto.tfvars` at the new tag and redeploy.
+Then point `launcher_image` in `manager/prod.auto.tfvars` at the new tag and
+redeploy.
 Bump `_REVISION` when the Dockerfile changes without the base image changing, so
 a tag always names one set of bytes. The staging directory has to be named: the
 default is a multi-region `us` bucket, which `constraints/gcp.resourceLocations`
@@ -380,8 +451,8 @@ gcloud builds submit --project cloud-ullm-inference-ci-cd --region us-central1 \
   --substitutions _REVISION=2 .
 ```
 
-Then set `dashboard_image` in `prod.auto.tfvars` to the new tag and
-`terraform apply`. To try a change first, run it against the live fleet with
+Then set `dashboard_image` in `manager/prod.auto.tfvars` to the new tag and
+`terraform -chdir=manager apply`. To try a change first, run it against the live fleet with
 your own credentials - gcloud for Google APIs, the `bk` CLI for Buildkite - with
 the environment `dashboard.tf` sets:
 
@@ -402,12 +473,13 @@ past.
 
 There are two per worker cluster — a compilation cache and a model cache — and
 their names carry a hash of the cluster's project and region, so list them
-rather than typing them:
+rather than typing them. The workers' environments first, then the manager:
 
 ```bash
-terraform state list | grep google_storage_bucket.workload
-gcloud storage rm -r 'gs://tpu-ci-cache-*/**' 'gs://tpu-ci-models-*/**'
-terraform destroy
+terraform -chdir=workers/<env> state list | grep google_storage_bucket.workload
+gcloud storage rm -r 'gs://tpu-ci-cache-<hash>/**' 'gs://tpu-ci-models-<hash>/**'
+terraform -chdir=workers/<env> destroy
+terraform -chdir=manager destroy
 ```
 
 ## Things that will surprise you
@@ -465,13 +537,13 @@ lower-priority borrowers to get its slices back (`reclaimWithinCohort:
 LowerPriority`); the other shapes, 2x2x2 included, wait for borrowers to finish
 rather than throw their runs away. A reclaimed slice still waits for the
 evicted nodes to scale down, about ten minutes, before its own nodes boot. If a shape is starving, the lever is the
-split in `prod.auto.tfvars`, not the node pools.
+split in `workers/us-central1/main.tf`, not the node pools.
 
 **8-chip 2x2x1 steps can wait behind 4-chip ones.** The 2x2x1 queue mixes
 4-chip steps with 8-chip ones that take two VMs. Every queue is
 `BestEffortFIFO`, which passes over a workload that does not fit for a smaller
 one behind it, so freed chips go four at a time to 4-chip steps while an 8-chip
-step waits. `StrictFIFO` (`queueing_strategy` in `prod.auto.tfvars`) would admit
+step waits. `StrictFIFO` (`queueing_strategy` on the shape's pool) would admit
 in order, but in Kueue v0.20.1 a strict head that has to borrow holds its chips
 on every scheduling pass, and 2x2x2 and 1x1x1 admit nothing while it does.
 
@@ -635,8 +707,8 @@ admits chips rather than slices.
 
 ## The health dashboard
 
-`terraform output dashboard_url`, behind IAP; `dashboard_viewers` in
-`prod.auto.tfvars` says who gets in. It is the page Buildkite cannot give the
+`terraform -chdir=manager output dashboard_url`, behind IAP;
+`dashboard_viewers` in `manager/prod.auto.tfvars` says who gets in. It is the page Buildkite cannot give the
 kube fleet, where every step is on the one `kube` queue until the launcher picks
 a Kueue queue for it, and where a step shows as running from the moment its
 agent pod starts.
@@ -932,7 +1004,7 @@ the test repo or its manifest.
 | Non-head pods fail importing a `trust_remote_code` module (`transformers_modules... has no attribute ...`) | The workers on a host race to write the HF modules cache, which starts empty in every pod. | Warm the cache once per pod before starting Ray (vllm-torchtpu `warm_remote_code.py`). |
 | Pod evicted for ephemeral storage; the step fails `evicted_storage` | The workload writes to the container's disk, usually `~/.cache/vllm` (`VLLM_CACHE_ROOT` unset) or `HF_HOME` outside `/cache/hf/hub`. | Point it at `/cache/jax/...` and list the variable in the test repo's `common.sh` `FORWARD`. |
 | `403 ... storage.buckets.get` from `runai_streamer` | The workload identity can read objects but not bucket metadata, which runai reads first. | Grant `roles/storage.bucketViewer` on that bucket. |
-| `401 ... User Access Token ... is expired` in every step that downloads from HF | The HF token expired. | Add a version to the secret named by `env_secrets.HF_TOKEN` in `prod.auto.tfvars`; SecretSync copies it within minutes. Check that the new token can read the gated repos too. |
+| `401 ... User Access Token ... is expired` in every step that downloads from HF | The HF token expired. | Add a version to the secret named by `env_secrets.HF_TOKEN` in `manager/prod.auto.tfvars`; SecretSync copies it within minutes. Check that the new token can read the gated repos too. |
 | The Job is `Failed` with no failed container and no OOM | The workload's deadline: `tpu_test_max_seconds` unless the manifest or step states one. | Set `activeDeadlineSeconds` in the manifest or `TPU_MAX_RUNTIME_SECONDS` on the step. |
 
 When comparing a kube step with the same step on the VM fleet, compare each

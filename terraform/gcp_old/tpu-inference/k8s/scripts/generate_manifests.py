@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Render the Kueue objects for every cluster from prod.auto.tfvars.
+"""Render the Kueue objects for every cluster from the Terraform that builds it.
 
 Kueue's queues have to agree with the node pools Terraform builds: a quota that
 does not match the reservation either strands chips or admits work that can
-never be scheduled. Reading the same tfvars Terraform reads keeps the two from
-drifting, at the cost of parsing HCL here.
+never be scheduled. Reading the same configuration Terraform reads keeps the two
+from drifting, at the cost of parsing HCL here: manager/prod.auto.tfvars for the
+fleet, and for each worker the manager lists, its module block in whichever
+environment under workers/ declares it.
 
 The output goes to kueue/generated/, which is committed. Reviewing a queue
 change means reading the diff of the YAML that will be applied, not inferring
@@ -31,14 +33,16 @@ import hcl2
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-TFVARS = ROOT / "prod.auto.tfvars"
+TFVARS = ROOT / "manager" / "prod.auto.tfvars"
+WORKERS = ROOT / "workers"
 TEMPLATES = ROOT / "kueue" / "templates"
 DEFAULT_OUT = ROOT / "kueue" / "generated"
 
 # The namespace is read from the tfvars rather than set here, because the cache
-# bucket IAM in cache.tf names the workload's service account by namespace: the
-# two have to agree, and one of them has to be the source. variables.tf carries
-# the reasoning for there being only the one namespace.
+# bucket IAM in modules/worker names the workload's service account by
+# namespace: the two have to agree, and one of them has to be the source.
+# manager/variables.tf carries the reasoning for there being only the one
+# namespace.
 
 # What the SecretSync calls the Secret it writes, and what the agent-stack-k8s
 # chart is told to read. Here rather than in either template because it is the
@@ -137,7 +141,7 @@ CPU_JOB_SIZE = {
 }
 
 # The BigQuery table the launcher streams its timing records into, named as
-# modules/ci_monitoring and k8s/iam.tf name it.
+# modules/ci_monitoring and manager/iam.tf name it.
 TIMING_DATASET = "ci_efficiency_metrics"
 TIMING_TABLE = "kube_workload_timing"
 
@@ -241,10 +245,137 @@ def load_tfvars(path: Path) -> dict:
         return hcl2.load(f, serialization_options=TFVARS_OPTIONS)
 
 
+# How a worker's module block names the module, which is how one is told apart
+# from anything else an environment's root calls.
+WORKER_MODULE_SOURCE = "../../modules/worker"
+
+LOCAL_REFERENCE = re.compile(r"\$\{local\.(\w+)\}")
+
+
+def find_workers() -> dict[str, dict]:
+    """Every worker declared under workers/, by name.
+
+    An environment is a directory under workers/ - one Terraform root and one
+    state, applied by whoever administers it - and each worker in it is a
+    module block calling modules/worker. That block is the one place the
+    worker's shapes and quotas are written, so they are read from it rather
+    than restated for the manager.
+
+    That only works while every argument is a literal, or a whole reference to
+    one of the environment's locals, which are literals too: anything else
+    arrives here as its source text, which this cannot evaluate, so it is
+    refused rather than rendered as a string.
+
+    Each worker comes back with where it was declared: "_at" for messages,
+    and "_env" and "_label", its environment and module label.
+    """
+    found: dict[str, dict] = {}
+    for env in sorted(p for p in WORKERS.iterdir() if p.is_dir()):
+        parsed = {path: load_tfvars(path) for path in sorted(env.glob("*.tf"))}
+        local = {}
+        for doc in parsed.values():
+            for block in doc.get("locals", []):
+                local.update({k: v for k, v in block.items() if k != "__is_block__"})
+
+        for path, doc in parsed.items():
+            for block in doc.get("module", []):
+                for label, body in block.items():
+                    if body.get("source") != WORKER_MODULE_SOURCE:
+                        continue
+                    at = f"{path.relative_to(WORKERS.parent)} (module {label!r})"
+
+                    def resolve(value, arg):
+                        if isinstance(value, str) and "${" in value:
+                            ref = LOCAL_REFERENCE.fullmatch(value)
+                            if not ref or ref.group(1) not in local:
+                                raise SystemExit(
+                                    f"{at}: {arg} = {value}. Arguments to "
+                                    "modules/worker are read by "
+                                    "generate_manifests.py and have to be "
+                                    "literals or a local that is one."
+                                )
+                            return resolve(local[ref.group(1)], arg)
+                        if isinstance(value, dict):
+                            return {k: resolve(v, f"{arg}.{k}") for k, v in value.items()
+                                    if k != "__is_block__"}
+                        if isinstance(value, list):
+                            return [resolve(v, f"{arg}[{i}]") for i, v in enumerate(value)]
+                        return value
+
+                    worker = {k: resolve(v, k) for k, v in body.items()
+                              if k not in ("source", "__is_block__")}
+                    worker["_at"] = at
+                    worker["_env"], worker["_label"] = env.name, label
+                    if worker["name"] in found:
+                        raise SystemExit(
+                            f"two workers are named {worker['name']!r}: "
+                            f"{found[worker['name']]['_at']} and {at}. The name is "
+                            "the cluster's Fleet membership ID, unique in the fleet."
+                        )
+                    found[worker["name"]] = worker
+    return found
+
+
+def load_fleet(path: Path = TFVARS) -> dict:
+    """The manager's tfvars, with worker_clusters filled in from the workers'
+    environments.
+
+    A worker is in the fleet if the manager lists it, and is described by its
+    module block. The two overlap on what Terraform needs on both sides -
+    Terraform cannot read another root's configuration - so they are checked
+    here, where a mismatch is a refused render rather than a grant to the wrong
+    project or a MultiKueueCluster naming a membership that does not exist.
+    """
+    tfvars = load_tfvars(path)
+    listed = tfvars.get("workers", {})
+    declared = find_workers()
+    # Built but not in the fleet: a worker on its way in, before the manager
+    # lists it, or on its way out, before it is destroyed.
+    for name in sorted(set(declared) - set(listed)):
+        print(f"{declared[name]['_at']}: {name!r} is not in the workers map in "
+              "manager/prod.auto.tfvars, so it is not in the fleet.",
+              file=sys.stderr)
+
+    fleet = {
+        "project_id": tfvars["project_id"],
+        "name_prefix": tfvars["name_prefix"],
+        "namespace": tfvars["namespace"],
+    }
+    workers = []
+    for name, entry in sorted(listed.items()):
+        if name not in declared:
+            raise SystemExit(
+                f"manager/prod.auto.tfvars lists worker {name!r}, and no module "
+                f"block under workers/ calls modules/worker with name = {name!r}"
+            )
+        worker = declared[name]
+        stated = {"project": entry["project"], "location": entry["location"]}
+        wrong = {k: (v, worker.get(k)) for k, v in stated.items() if worker.get(k) != v}
+        if wrong:
+            raise SystemExit(
+                f"{worker['_at']} disagrees with its entry in "
+                "manager/prod.auto.tfvars: "
+                + ", ".join(f"{k} is {got!r} there and {want!r} here"
+                            for k, (want, got) in wrong.items())
+            )
+        wrong = {k: (v, worker["fleet"].get(k)) for k, v in fleet.items()
+                 if worker["fleet"].get(k) != v}
+        if wrong:
+            raise SystemExit(
+                f"{worker['_at']} joins a different fleet from "
+                "manager/prod.auto.tfvars: "
+                + ", ".join(f"fleet.{k} is {got!r} there and {want!r} here"
+                            for k, (want, got) in wrong.items())
+            )
+        workers.append(worker)
+    tfvars["worker_clusters"] = workers
+    return tfvars
+
+
 def bucket_name(prefix: str, project: str, location: str, purpose: str) -> str:
     """Where a worker's cache lives, derived rather than configured.
 
-    locals.tf derives it identically and creates the bucket; this writes the
+    modules/worker derives it identically and creates the bucket; this writes the
     same string into a PersistentVolume's volumeHandle. Two derivations of one
     name can drift, and the failure is quiet - a volume pointing at a bucket
     that was never created - so deploy_manifests.py checks that every bucket a
@@ -260,19 +391,18 @@ def bucket_name(prefix: str, project: str, location: str, purpose: str) -> str:
     return f"{prefix}-{purpose}-{digest}"
 
 
-def worker_node_service_account(prefix: str, project: str, location: str) -> str:
+def worker_node_service_account(prefix: str, project: str, short_name: str) -> str:
     """The identity a worker's nodes run as, derived rather than configured.
 
-    iam.tf builds the same string and creates the account; a ComputeClass names
-    it so that the nodes GKE auto-creates run as it too, rather than falling
-    through to the Compute Engine default account. Two derivations of one name
-    can drift, and getting it wrong is not loud: GKE accepts an account that
-    does not exist and the node pool fails to register, or - worse, if the name
-    happens to resolve - the nodes come up with more authority than intended.
-    The suffix is the location because that is a worker's short name; see
-    locals.tf.
+    modules/worker builds the same string and creates the account; a
+    ComputeClass names it so that the nodes GKE auto-creates run as it too,
+    rather than falling through to the Compute Engine default account. Two
+    derivations of one name can drift, and getting it wrong is not loud: GKE
+    accepts an account that does not exist and the node pool fails to register,
+    or - worse, if the name happens to resolve - the nodes come up with more
+    authority than intended.
     """
-    return f"{prefix}-wkr-{location}@{project}.iam.gserviceaccount.com"
+    return f"{prefix}-wkr-{short_name}@{project}.iam.gserviceaccount.com"
 
 
 def dashboard_service_account(prefix: str, project: str) -> str:
@@ -410,9 +540,9 @@ def shapes(worker: dict, machine_memory_gb: dict) -> dict[str, dict]:
     """Every TPU shape a worker cluster can run, keyed by queue name.
 
     A queue is named for its node pool - <machine type>-<topology>, e.g.
-    ct6e-standard-8t-2x4, joined the same way locals.tf joins it - rather than
-    for the cluster's copy of that pool, because two regions running the same
-    shape are one queue on the manager and MultiKueue picks the region.
+    ct6e-standard-8t-2x4, joined the same way modules/worker joins it - rather
+    than for the cluster's copy of that pool, because two regions running the
+    same shape are one queue on the manager and MultiKueue picks the region.
 
     Everything here but the quota is a fact about the hardware, and it is the
     same dict the launcher's profile registry is built from. So the queue that
@@ -819,7 +949,7 @@ def launcher_profiles(
             "spot_queues": sorted(name for name, entry in fleet.items() if entry["spot_quota"]),
             # Where the launcher streams one timing record per workload. The
             # table is modules/ci_monitoring's, beside the Buildkite step
-            # table it joins to on job_id; k8s/iam.tf lets the launcher write
+            # table it joins to on job_id; manager/iam.tf lets the launcher write
             # to it.
             "timing_table": (
                 f"{tfvars['project_id']}.{TIMING_DATASET}.{TIMING_TABLE}"
@@ -891,7 +1021,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
     # Keyed by the MultiKueueCluster name a fleet entry records, so a shape can
     # be taken back to the worker it runs on - and from there to that worker's
     # buckets, which an inline CSI volume has to name at submission.
-    worker_by_name = {f"{prefix}-{w['location']}": w for w in workers}
+    worker_by_name = {f"{prefix}-{w['name']}": w for w in workers}
 
     manager_name = f"{prefix}-manager"
     manager_dir = "manager"
@@ -915,7 +1045,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         # the way the fleet does and a region is a leaf under it. Both parts are
         # needed: two projects may each run a us-east5.
         worker_dir = f"workers/{worker['project']}/{worker['location']}"
-        cluster_name = f"{prefix}-{worker['location']}"
+        cluster_name = f"{prefix}-{worker['name']}"
         clusters.append(
             {
                 "dir": worker_dir,
@@ -977,7 +1107,7 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 "compute_class_worker",
                 NAME=WORKER_COMPUTE_CLASS,
                 NODE_SERVICE_ACCOUNT=worker_node_service_account(
-                    prefix, worker["project"], worker["location"]
+                    prefix, worker["project"], worker["name"]
                 ),
             ),
         )
@@ -1239,6 +1369,8 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         # For the chart render, which is the one thing deployed by flag rather
         # than by manifest and so cannot read its namespace off the object.
         "namespace": namespace,
+        # Where every worker's membership is, for the credentials.
+        "fleet_project": project,
         "clusters": clusters,
     }
 
@@ -1325,7 +1457,7 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
 
-    tfvars = load_tfvars(TFVARS)
+    tfvars = load_fleet()
 
     # Rendered into a fresh tree so a cluster or a generation that goes away
     # leaves no file behind for deploy_manifests.py to keep applying.

@@ -7,9 +7,9 @@
 # The caches, as claims a pod can name without knowing where they live.
 #
 # Static PersistentVolumes rather than inline CSI volumes in the workload. The
-# bucket is regional (see cache.tf), so its name differs per cluster, and in
-# the workload it would mean every manifest and step carrying a bucket name it
-# has no business knowing. Here the claim names are identical everywhere and
+# bucket is regional (see modules/worker/cache.tf), so its name differs per
+# cluster, and in the workload it would mean every manifest and step carrying a
+# bucket name it has no business knowing. Here the claim names are identical everywhere and
 # resolve at mount time, in whichever cluster MultiKueue actually landed the
 # pod in - which also has to be here rather than created by the workload,
 # because MultiKueue copies only the Job. gcsfuse serves ReadWriteMany, so

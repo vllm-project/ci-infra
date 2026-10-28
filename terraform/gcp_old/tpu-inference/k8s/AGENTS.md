@@ -19,9 +19,10 @@ it is that way; read its "Running a step", "How the launcher works" and
   steps call the launcher through `.buildkite/kubernetes/run.sh` and
   `run_multihost.sh`, and an environment variable reaches the pod only if
   `.buildkite/kubernetes/common.sh` lists it in `FORWARD`.
-- Shapes, quotas, Spot pools, priorities and launcher timeouts are in
-  `prod.auto.tfvars`. Read current numbers there; numbers quoted anywhere else,
-  this file included, go stale.
+- Shapes, quotas and Spot pools are in each worker's module block under
+  `workers/`; launcher timeouts and which workers the fleet has are in
+  `manager/prod.auto.tfvars`. Read current numbers there; numbers quoted
+  anywhere else, this file included, go stale.
 
 ## Access
 
@@ -41,8 +42,9 @@ the pods, which is usually where a finished or cancelled step has to be read.
 
 | To change | Edit | Then |
 | --- | --- | --- |
-| Clusters, node pools, buckets, IAM | `*.tf`, `prod.auto.tfvars` | `terraform plan`, `terraform apply` |
-| Queues, quota, flavors, priorities, launcher timeouts | `prod.auto.tfvars`, `kueue/templates/`, `scripts/generate_manifests.py` | `./scripts/generate_manifests.py`, commit `kueue/generated/`, deploy |
+| A worker's cluster, node pools, buckets | `workers/<env>/<worker>.tf`, `modules/worker/` | `terraform plan`, `terraform apply` in `workers/<env>/` |
+| The manager, the dashboard, IAM, which workers the fleet has | `manager/` | `terraform plan`, `terraform apply` in `manager/` |
+| Queues, quota, flavors, priorities, launcher timeouts | `workers/<env>/<worker>.tf`, `manager/prod.auto.tfvars`, `kueue/templates/`, `scripts/generate_manifests.py` | `./scripts/generate_manifests.py`, commit `kueue/generated/`, deploy |
 | What the launcher does | `kueue/launcher/launch.py` | deploy; it ships as the `tpu-launcher-scripts` ConfigMap |
 | What every workload pod gets | `kueue/launcher/pod_defaults.yaml` | deploy |
 | The launcher image (Cloud CLI version) | `kueue/launcher/Dockerfile` | README "Rebuild the launcher image" |
@@ -116,7 +118,7 @@ runs out.
 - Do not empty or recreate the cache buckets: a cold cache costs about 2.7x a
   suite's chips to refill.
 - A multi-host node pool is exactly one slice. More slices of a shape means
-  more pools (`slices` in `prod.auto.tfvars`), not a larger `max_nodes`.
+  more pools (`slices` on the worker's pool), not a larger `max_nodes`.
 - Before moving the clusters to a new GKE minor version, check that a pod with
   a gcsfuse PVC still scales a TPU pool from zero. On a 1.36.4 test cluster it
   did not (10-14): the autoscaler refused every TPU pool and logged it as

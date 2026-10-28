@@ -1,4 +1,4 @@
-# A cache bucket pair per worker cluster, in that cluster's own region.
+# A cache bucket pair for this worker cluster, in its own project and region.
 #
 # The caches are the largest single lever on how efficiently the fleet uses its
 # chips, and distance decides their cost: a compilation-cache miss costs about
@@ -18,8 +18,8 @@ resource "google_storage_bucket" "workload" {
   for_each = local.workload_buckets
 
   name     = each.value.name
-  project  = each.value.project
-  location = each.value.location
+  project  = var.project
+  location = var.location
 
   uniform_bucket_level_access = true
   storage_class               = "STANDARD"
@@ -71,9 +71,9 @@ resource "google_storage_bucket" "workload" {
     }
   }
 
-  labels = merge(local.common_labels, {
-    purpose = "tpu-ci-${each.value.purpose}"
-    region  = each.value.location
+  labels = merge(local.labels, {
+    purpose = "tpu-ci-${each.key}"
+    region  = var.location
   })
 }
 
@@ -85,7 +85,7 @@ resource "google_storage_bucket_iam_member" "workload" {
 
   bucket = google_storage_bucket.workload[each.key].name
   role   = "roles/storage.objectUser"
-  member = "serviceAccount:${each.value.project}.svc.id.goog[${var.namespace}/tpu-workload]"
+  member = "serviceAccount:${var.project}.svc.id.goog[${var.fleet.namespace}/tpu-workload]"
 }
 
 # A zonal read cache in front of a bucket, for the zones a worker names.
@@ -106,10 +106,8 @@ resource "google_storage_bucket_iam_member" "workload" {
 resource "google_storage_anywhere_cache" "workload" {
   for_each = local.rapid_caches
 
-  bucket = google_storage_bucket.workload[
-    join("/", slice(split("/", each.key), 0, 3))
-  ].name
-  zone = each.value.zone
+  bucket = google_storage_bucket.workload[each.value.purpose].name
+  zone   = each.value.zone
 
   # A week, against a default of one day. The lane reads a model once a night,
   # so a day-long entry can expire in the hour before the run that wanted it -
