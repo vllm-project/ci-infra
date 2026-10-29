@@ -64,14 +64,20 @@ own apply binds the fleet's deployer account to `cluster-admin`
 exists, and whoever applies the worker is the one party certain to be able to
 create it.
 
-`kueue/generated/` is committed so that reviewing a quota change means reading
-the YAML that will be applied rather than inferring it from a template.
+`kueue/generated/` is committed so that what a deploy applies is exactly what
+is in git, and so that a change's effect on it can be read when it matters.
 `deploy_manifests.py` refuses to run if the committed tree differs from a fresh
-render, so it doubles as a drift detector - but only between the templates and
-the committed tree. It applies, never prunes, so **deleting an object from the
-tree does not delete it from the clusters**: a change that removes a queue, a
-flavor or an admission check needs the matching `kubectl delete` by hand, on the
-manager and on every worker that carried it.
+render, so the tree is the render of the inputs and nothing else, and it doubles
+as a drift detector - but only between the templates and the committed tree.
+That is why a review is of the inputs - `manager/prod.auto.tfvars`, the module
+blocks under `workers/`, the templates and the generator - and why GitHub
+collapses this tree in pull requests (`.gitattributes`); expand a file when the
+inputs' effect on it is the question.
+
+The deploy applies, never prunes, so **deleting an object from the tree does
+not delete it from the clusters**: a change that removes a queue, a flavor or an
+admission check needs the matching `kubectl delete` by hand, on the manager and
+on every worker that carried it.
 
 ## Deploying a change
 
