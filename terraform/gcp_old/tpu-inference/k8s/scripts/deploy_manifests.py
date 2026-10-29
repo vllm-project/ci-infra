@@ -431,6 +431,38 @@ def plan(cluster: dict, index: dict) -> list[Step]:
     return steps
 
 
+def act_as_deployer(deployer: str) -> None:
+    """Point the current context at a token for the fleet's deployer account.
+
+    Every cluster's IAM or RBAC lets that account in, and a worker in another
+    project binds only that name, so it is what kubectl has to present. The
+    kubeconfig get-credentials writes runs gke-gcloud-auth-plugin, which here
+    reads application default credentials and caches its tokens; in testing,
+    neither gcloud's impersonation setting nor the plugin's own
+    --impersonate_service_account changed the identity it presented from the
+    operator's. A token gcloud mints for the account does.
+
+    It lasts an hour and each cluster gets a fresh one, which outlasts a
+    cluster's deploy. It is written only to the script's own kubeconfig, which
+    is deleted on exit.
+    """
+    proc = subprocess.run(
+        ["gcloud", "auth", "print-access-token", f"--impersonate-service-account={deployer}"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode:
+        raise SystemExit(
+            f"cannot act as {deployer}; deploying needs you in deployers in "
+            f"manager/prod.auto.tfvars.\n{proc.stderr.strip()}"
+        )
+    path = Path(os.environ["KUBECONFIG"])
+    config = yaml.safe_load(path.read_text())
+    [context] = [c for c in config["contexts"] if c["name"] == config["current-context"]]
+    [user] = [u for u in config["users"] if u["name"] == context["context"]["user"]]
+    user["user"] = {"token": proc.stdout.strip()}
+    path.write_text(yaml.safe_dump(config))
+
+
 def deploy_cluster(cluster: dict, index: dict, preview: bool) -> bool:
     """Configure one cluster, or preview it. False if the preview was partial."""
     print(f"\n=== {cluster['name']} ({cluster['location']}, {cluster['role']}) ===")
@@ -439,10 +471,10 @@ def deploy_cluster(cluster: dict, index: dict, preview: bool) -> bool:
     # cluster selected and quietly apply one cluster's manifests to another.
     #
     # A worker through Connect Gateway, by its membership in the manager's
-    # fleet, whatever project it is in: the operator may hold no role in that
-    # project, so the cluster's own endpoint would refuse them. What they may
-    # do inside it is what IAM on their own project, or the worker's RBAC,
-    # allows - see README "Workers".
+    # fleet, whatever project it is in: the deployer account may hold no role
+    # in that project, so the cluster's own endpoint would refuse it. Inside,
+    # it is let in by its IAM on this project for our own workers, and by the
+    # binding modules/worker/deploy.tf creates for a worker anywhere else.
     if cluster["role"] == "worker":
         run_command("gcloud", "container", "fleet", "memberships", "get-credentials",
                     cluster["name"], "--project", index["fleet_project"],
@@ -451,6 +483,8 @@ def deploy_cluster(cluster: dict, index: dict, preview: bool) -> bool:
         run_command("gcloud", "container", "clusters", "get-credentials", cluster["name"],
                     "--project", cluster["project"], "--location", cluster["location"],
                     quiet=True)
+
+    act_as_deployer(index["deployer"])
 
     steps = plan(cluster, index)
     complete = True

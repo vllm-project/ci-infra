@@ -97,6 +97,37 @@ resource "google_project_iam_member" "worker_deployers" {
   member  = each.value
 }
 
+# The identity scripts/deploy_manifests.py runs as, on every cluster in the
+# fleet. One account rather than each operator's own, so that a worker in
+# another project binds one name to cluster-admin (modules/worker/deploy.tf)
+# and who may deploy is decided here, by var.deployers.
+resource "google_service_account" "deployer" {
+  project      = var.project_id
+  account_id   = "${var.name_prefix}-deployer"
+  display_name = "Kube fleet deploy"
+}
+
+# container.admin for the clusters in this project - the manager and the
+# workers here - whose API servers authorize it by IAM. The gateway roles for
+# the workers it reaches through Connect Gateway: gatewayEditor because the
+# deploy writes, and gkehub.viewer because getting credentials reads the
+# membership.
+resource "google_project_iam_member" "deployer" {
+  for_each = toset(["roles/container.admin", "roles/gkehub.gatewayEditor", "roles/gkehub.viewer"])
+
+  project = var.project_id
+  role    = each.value
+  member  = google_service_account.deployer.member
+}
+
+resource "google_service_account_iam_member" "deployers" {
+  for_each = toset(var.deployers)
+
+  service_account_id = google_service_account.deployer.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = each.value
+}
+
 # Read of the registry metadata, not of the layers: the launcher never pulls an
 # image, it asks which digest a tag currently points at so that every pod in a
 # workload is pinned to one set of bytes. The pull itself is the node service
