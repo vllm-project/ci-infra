@@ -1407,6 +1407,14 @@ FROM jobs GROUP BY queue"""
 WATCHER_STEPS = ("E2E_SUMMARY",)
 # Shorter steps are gates, notifications and uploads, never a build's long pole.
 MIN_STEP_SECONDS = 120
+# GitHub native merge queue builds run on temporary branches of this form;
+# they carry the merge gate once post-merge push builds on `main` are skipped.
+MERGE_QUEUE_PREFIX = "gh-readonly-queue/"
+
+
+def is_merge_branch(branch: str | None) -> bool:
+    """Whether a Buildkite branch is `main` or a GitHub merge-queue branch."""
+    return branch == "main" or bool(branch and branch.startswith(MERGE_QUEUE_PREFIX))
 
 
 def fetch_steps(cfg: Config, start: int, end: int) -> dict:
@@ -1425,7 +1433,8 @@ def fetch_steps(cfg: Config, start: int, end: int) -> dict:
 WITH job_rows AS (
   SELECT pipeline_slug AS pipeline, build_number AS build, step_name AS step, job_id,
     ANY_VALUE(CASE WHEN build_source = 'schedule' THEN 'nightly'
-      WHEN branch = 'main' THEN 'main' ELSE 'pr' END) AS kind,
+      WHEN branch = 'main' OR STARTS_WITH(branch, '{MERGE_QUEUE_PREFIX}') THEN 'main'
+      ELSE 'pr' END) AS kind,
     MIN(build_created_at) AS created, ANY_VALUE(queue) AS queue,
     MIN(started_at) AS started, MAX(finished_at) AS finished,
     ANY_VALUE(state HAVING MAX finished_at) AS state,
