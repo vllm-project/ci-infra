@@ -213,6 +213,21 @@ variable "tpu_node_pools" {
   }
 }
 
+variable "cpu_workloads" {
+  type    = bool
+  default = false
+  # Whether the fleet's CPU-only workloads - `launch --cpu`, or a manifest
+  # asking for no TPU - may run here. Read by generate_manifests.py, which
+  # gives the worker a cpu queue and puts it in the manager's cpu-workers only
+  # if this is set; no resource here reads it.
+  #
+  # Off unless asked for, because the manager hands such a workload to
+  # whichever listed worker admits it first, and it runs on worker-cpu nodes
+  # billed to that worker's project. A chip-less role inside a TPU workload is
+  # not one of these: it runs beside its TPU roles, on whichever worker has
+  # them, and the worker-cpu class is on every worker for it.
+}
+
 variable "labels" {
   type        = map(string)
   description = "Labels applied to every resource here that takes them, beside managed_by and component."

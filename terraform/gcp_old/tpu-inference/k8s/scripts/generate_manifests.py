@@ -1063,19 +1063,24 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         # Not read from a node pool - there is no hardware to describe. In the
         # same map as the shapes so the queue, the AdmissionCheck, the
         # MultiKueueConfig and the profile all come from the existing code.
-        local[CPU_QUEUE] = {
-            "queue": CPU_QUEUE,
-            "chips": 0,
-            "hosts": 1,
-            "quota": 0,
-            "capacity": None,
-            "parked": 0,
-            "spot_quota": 0,
-            "spot_capacity": 0,
-            # What the compute class builds a node against. One size for the
-            # lane; a step wanting another states its own manifest.
-            **CPU_JOB_SIZE,
-        }
+        #
+        # Only on a worker whose block opts in with cpu_workloads: the manager
+        # hands a CPU-only workload to whichever listed worker admits it
+        # first, and its nodes are billed to that worker's project.
+        if worker.get("cpu_workloads"):
+            local[CPU_QUEUE] = {
+                "queue": CPU_QUEUE,
+                "chips": 0,
+                "hosts": 1,
+                "quota": 0,
+                "capacity": None,
+                "parked": 0,
+                "spot_quota": 0,
+                "spot_capacity": 0,
+                # What the compute class builds a node against. One size for
+                # the lane; a step wanting another states its own manifest.
+                **CPU_JOB_SIZE,
+            }
         for name, shape in local.items():
             # The shape is stored once, not summed: two clusters running it
             # run the same hardware. Only the quota adds up.
@@ -1182,6 +1187,16 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 NAMESPACE=namespace,
                 DASHBOARD_SERVICE_ACCOUNT=dashboard_service_account(prefix, project),
             ),
+        )
+
+    # The launcher offers --cpu and the built-in CPU Job on every step, so a
+    # fleet with no worker taking them would accept such a step and queue it
+    # for ever. Refused here, where it is a missing line in a worker's block.
+    if CPU_QUEUE not in fleet:
+        raise SystemExit(
+            "no worker sets cpu_workloads = true, so CPU-only steps would have "
+            "nowhere to run; set it in the module block of a worker that should "
+            "take them"
         )
 
     worker_names = sorted(c["name"] for c in clusters if c["role"] == "worker")
