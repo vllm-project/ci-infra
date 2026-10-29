@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Install Kueue and JobSet on every cluster in prod.auto.tfvars and apply this
-fleet's configuration on top.
+"""Install Kueue and JobSet on the manager and every worker it lists, and apply
+this fleet's configuration on top.
 
 Not Terraform: the Kubernetes and Helm providers need a reachable API server at
 plan time, which turns creating a cluster and configuring it into two separate
@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -45,9 +46,8 @@ from generate_manifests import (
     LAUNCHER_SCRIPT,
     LAUNCHER_SCRIPT_CONFIGMAP,
     LAUNCHER_SCRIPT_KEY,
-    TFVARS,
     generate,
-    load_tfvars,
+    load_fleet,
 )
 
 # Server-side apply records which manager owns which field, and removes any
@@ -437,9 +437,20 @@ def deploy_cluster(cluster: dict, index: dict, preview: bool) -> bool:
 
     # Only stdout is dropped. A failure here would otherwise leave the previous
     # cluster selected and quietly apply one cluster's manifests to another.
-    run_command("gcloud", "container", "clusters", "get-credentials", cluster["name"],
-                "--project", cluster["project"], "--location", cluster["location"],
-                quiet=True)
+    #
+    # A worker through Connect Gateway, by its membership in the manager's
+    # fleet, whatever project it is in: the operator may hold no role in that
+    # project, so the cluster's own endpoint would refuse them. What they may
+    # do inside it is what IAM on their own project, or the worker's RBAC,
+    # allows - see README "Workers".
+    if cluster["role"] == "worker":
+        run_command("gcloud", "container", "fleet", "memberships", "get-credentials",
+                    cluster["name"], "--project", index["fleet_project"],
+                    "--location", cluster["location"], quiet=True)
+    else:
+        run_command("gcloud", "container", "clusters", "get-credentials", cluster["name"],
+                    "--project", cluster["project"], "--location", cluster["location"],
+                    quiet=True)
 
     steps = plan(cluster, index)
     complete = True
@@ -464,7 +475,7 @@ def verify_generated() -> dict:
     cannot describe different fleets.
     """
     with tempfile.TemporaryDirectory() as fresh:
-        index = generate(load_tfvars(TFVARS), Path(fresh))
+        index = generate(load_fleet(), Path(fresh))
         if subprocess.run(["diff", "-ru", str(DEFAULT_OUT), fresh]).returncode:
             raise SystemExit(
                 "\nkueue/generated is out of date: "
@@ -473,15 +484,37 @@ def verify_generated() -> dict:
     return index
 
 
+def bucket_exists(bucket: str, token: str) -> bool:
+    """Whether a bucket exists, whether or not we can read it.
+
+    A worker's buckets are in its own project, where the operator may hold no
+    role, so a describe would be refused whether the bucket exists or not.
+    Storage answers a bucket that exists and is not ours with 403 and one that
+    does not exist with 404, which is the distinction this check is after.
+    """
+    request = urllib.request.Request(
+        f"https://storage.googleapis.com/storage/v1/b/{bucket}?fields=name",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(request):
+            return True
+    except urllib.error.HTTPError as error:
+        if error.code in (403, 404):
+            return error.code == 403
+        raise
+
+
 def verify_buckets() -> None:
     """Every bucket a PersistentVolume names has to exist already.
 
-    generate_manifests.py derives the name and locals.tf derives it again to
-    create the bucket, so the two can drift - and Kubernetes will not notice. A
-    volume naming a bucket nobody created applies cleanly and keeps working
-    until a pod tries to mount it, which is somewhere else, later, and reads as
-    a broken pod rather than a broken name. Terraform runs before this script,
-    so by now the bucket either exists or the name is wrong.
+    generate_manifests.py derives the name and modules/worker derives it again
+    to create the bucket, so the two can drift - and Kubernetes will not
+    notice. A volume naming a bucket nobody created applies cleanly and keeps
+    working until a pod tries to mount it, which is somewhere else, later, and
+    reads as a broken pod rather than a broken name. The worker's environment
+    is applied before this script, so by now the bucket either exists or the
+    name is wrong.
 
     Read by line rather than parsed: this tree is generated, so the spelling is
     ours, and it saves the script a YAML dependency it otherwise does not need.
@@ -492,19 +525,15 @@ def verify_buckets() -> None:
         for line in path.read_text().splitlines()
         if line.strip().startswith("volumeHandle:")
     })
-    missing = [
-        bucket for bucket in handles
-        if subprocess.run(
-            ["gcloud", "storage", "buckets", "describe", f"gs://{bucket}"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        ).returncode
-    ]
+    token = subprocess.run(["gcloud", "auth", "print-access-token"],
+                           capture_output=True, text=True, check=True).stdout.strip()
+    missing = [bucket for bucket in handles if not bucket_exists(bucket, token)]
     if missing:
         raise SystemExit(
             f"\nno such bucket: {', '.join(missing)}\n"
-            "A PersistentVolume names it, so either terraform has not been "
-            "applied yet, or locals.tf and generate_manifests.py no longer "
-            "derive the same name."
+            "A PersistentVolume names it, so either the worker's environment "
+            "has not been applied yet, or modules/worker and generate_manifests.py no "
+            "longer derive the same name."
         )
     print(f"{len(handles)} cache bucket(s) exist.")
 

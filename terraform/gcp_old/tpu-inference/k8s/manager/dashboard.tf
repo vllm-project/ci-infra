@@ -11,13 +11,13 @@
 # certificate or domain.
 
 locals {
-  # Every cluster's Connect Gateway endpoint, keyed by membership. workers.tf
-  # registers each cluster into this project's fleet under its own name, in its
-  # own region.
+  # Every cluster's Connect Gateway endpoint, keyed by membership.
+  # modules/worker registers each cluster into this project's fleet under its
+  # own name, in its own region, whichever root created it.
   dashboard_gateways = {
     for name, location in merge(
       { (google_container_cluster.manager.name) = var.manager_region },
-      { for w in google_container_cluster.worker : w.name => w.location },
+      { for w in local.workers : w.cluster_name => w.location },
     ) :
     name => join("/", [
       "https://${location}-connectgateway.googleapis.com/v1",

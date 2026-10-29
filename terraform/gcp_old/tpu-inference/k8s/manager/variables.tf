@@ -99,34 +99,66 @@ variable "namespace" {
     workers too, because MultiKueue mirrors a workload into the namespace it
     came from.
 
-    Here rather than only in generate_manifests.py because the cache bucket
-    grants name the workload's service account by namespace, so Terraform and
-    the generator have to agree on it. Required rather than defaulted for the
-    same reason: a default would be a second place the name is written.
+    Here rather than only in generate_manifests.py because the grants to the
+    workload's service account name it by namespace, so Terraform and the
+    generator have to agree on it. Required rather than defaulted for the same
+    reason: a default would be a second place the name is written. Each
+    worker's module block states it again, as fleet.namespace, and the generator
+    refuses one that differs.
   EOT
 }
 
-variable "cache_lifecycle_age_days" {
-  type        = number
-  default     = 30
+variable "workers" {
+  type = map(object({
+    project  = string
+    location = string
+  }))
   description = <<-EOT
-    Days before a compilation cache object is deleted.
+    The workers this manager dispatches to, by name.
 
-    Longer than the four days the bare-metal bucket uses, because the two are
-    not alike: this bucket is per region and shared by every shape, so an entry
-    is worth more and the whole namespace is only tens of gigabytes.
+    Each is a module block in an environment under ../workers/, a root of its
+    own applied by whoever administers it, and joins the fleet by being listed
+    here: this root grants its node account and its project's workloads what
+    they need from project_id, and generate_manifests.py reads its shapes and
+    quotas from that module block and renders its queues. Listing a worker is
+    what gives its project the fleet's secrets, so it is a decision made here
+    rather than by the worker existing.
+
+    The name is the cluster's less name_prefix, and so its Fleet membership ID.
+    Project and location are restated from the module block because Terraform
+    cannot read another root's configuration; generate_manifests.py refuses a
+    worker whose module block disagrees.
   EOT
+
+  validation {
+    condition = alltrue([
+      for w in values(var.workers) : length(regexall("^[a-z0-9]+-[a-z0-9]+[0-9]$", w.location)) > 0
+    ])
+    error_message = "workers[*].location must be a region, as the worker's module block states it."
+  }
+
+  # Grants and the rendered tree are keyed on this pair. Two clusters in one
+  # region of one project are possible in GKE, but not in this fleet.
+  validation {
+    condition = length(distinct([
+      for w in values(var.workers) : "${w.project}/${w.location}"
+    ])) == length(var.workers)
+    error_message = "Two workers have the same project and location."
+  }
 }
 
-variable "models_lifecycle_age_days" {
-  type        = number
-  default     = 120
+variable "worker_deployers" {
+  type        = list(string)
+  default     = []
   description = <<-EOT
-    Days before a cached model object is deleted.
+    Principals that apply a workers/ environment in a project other than
+    project_id, as IAM members (user:, group:, serviceAccount:).
 
-    Longer than the compilation cache, because the two are not alike. A model
-    is expensive to fetch and does not change; a compilation entry is cheap to
-    recreate and is invalidated by any compiler change.
+    Granted gkehub.editor on project_id, because GKE creates the cluster's
+    Fleet membership here, in this project's fleet, as whoever creates the
+    cluster. Nothing else of this project is theirs. The role reaches every
+    membership in the fleet, so list a principal only while its worker is
+    being built or rebuilt.
   EOT
 }
 
@@ -393,199 +425,21 @@ variable "tpu_runtime_max_seconds" {
   EOT
 }
 
-variable "worker_clusters" {
-  type = list(object({
-    # Identifies the cluster: every name it gets is derived from this pair, so
-    # there is no label to invent and none to keep in step. See locals.workers.
-    project  = string
-    location = string
-
-    network                = string
-    subnetwork             = string
-    master_ipv4_cidr_block = string
-
-    # Sized for the cluster's own components and nothing else: the CSI drivers,
-    # the metrics agent, and the per-cluster half of Kueue and JobSet. That
-    # stack asks for 2.3 of the four cores with everything scheduled, and
-    # us-east5 has run it on this size throughout.
-    #
-    # A workload role that holds no chips is not what this pool is for, however
-    # much it looks like the only place such a role could go. It asks for the
-    # worker-cpu compute class, which builds a node against that pod's own
-    # requests and removes it afterwards. Growing this pool to fit one instead
-    # buys a node that is idle between runs and still too small for the next
-    # role that wants more.
-    #
-    # e2 despite the worker-cpu class ordering it last for supply, because that
-    # ordering is about eight-core nodes built on demand at burst and this is
-    # one four-core node that already exists. On the shape this pool asks for,
-    # e2 is the family us-east5 actually has: n2-standard-4 is exhausted in
-    # us-east5-b, which is where a surge upgrade of this pool has to land.
-    system_machine_type = optional(string, "e2-standard-4")
-    system_min_nodes    = optional(number, 1)
-    # A ceiling, not a plan: both workers have run on one node since they were
-    # built, and a node that is never asked for is never billed. High because
-    # this pool should not be what limits anything - what bounds the fleet is
-    # chips, and what bounds burst CPU is the worker-cpu class, which states its
-    # own families and sizes. A number here that can be reached turns an
-    # unrelated pod into an outage, and reaching it is silent: the autoscaler
-    # reports `max node group size reached` into pod events nobody is reading.
-    system_max_nodes = optional(number, 64)
-
-    # Zones to put a Rapid Cache in, for both of this worker's buckets. Empty
-    # disables it, which is the default: a cache is billed on what it holds,
-    # and holding a copy of a bucket nothing reads from that zone is spending
-    # for nothing.
-    #
-    # Where, not just whether, because the cache is zonal and only serves reads
-    # from its own zone - so the zones worth naming are the ones the TPU pools
-    # below sit in. Deriving it from them was tempting and is wrong: a shape
-    # can exist in a zone the fleet has not run in for months, and that is
-    # exactly the cache nobody wants to pay for.
-    #
-    # It reads through: no mount changes, no staged copy, nothing to repopulate
-    # when a model is added. Measured on the 480B checkpoint against
-    # us-central1-c, warm, from 483s to 304s.
-    rapid_cache_zones = optional(list(string), [])
-
-    # One per TPU shape this cluster can run. The node pool's name is its shape
-    # - <machine type>-<topology>, e.g. ct6e-standard-8t-2x4, plus -<slice> for
-    # each of a multi-host shape's slice pools, e.g. tpu7x-standard-4t-2x2x2-0 -
-    # and locals.tf derives it from the two fields below rather than taking it
-    # from here, so it cannot name hardware the pool does not have.
-    # generate_manifests.py names the shape's Kueue queue the same way.
-    tpu_node_pools = optional(list(object({
-      # A topology does not imply a machine type: 2x4 is eight chips either as
-      # one ct6e-standard-8t or as two ct6e-standard-4t, and those differ in pod
-      # count, chips per pod and JobSet parallelism.
-      machine_type = string
-      topology     = string
-
-      reservation_name = string
-      # The reservation is zonal and the cluster pins no zones, so this is the
-      # only thing keeping a node out of a zone that cannot serve it.
-      zone = string
-
-      # Scale-down floor: nodes this shape keeps once it has booted them. Those
-      # chips are unavailable to the other shapes from then on, idle or not.
-      min_nodes = optional(number)
-      # Above this pool's share of the reservation, so the shapes compete for
-      # free chips; the reservation running out is what stops a scale-up.
-      # Single-host shapes only, as is min_nodes: a multi-host shape sets slices
-      # instead, since GKE sizes each of its pools at exactly one slice.
-      max_nodes = optional(number)
-
-      # This shape's share of the reservation, in chips: the nominalQuota of
-      # its ClusterQueue, which no resource here reads - chips the shape can
-      # always have, while the queues sit in one cohort and lend out whatever
-      # is idle. Summed across a cluster it should be the chips the reservation
-      # actually has free, which max_nodes oversubscribes.
-      nominal_quota = number
-
-      slices                = optional(number)
-      reclaim_within_cohort = optional(string, "Never")
-      # The order the shape's queue admits in, BestEffortFIFO or StrictFIFO.
-      # See queue_group.yaml.tpl.
-      queueing_strategy = optional(string, "BestEffortFIFO")
-
-      # Spot capacity beside the reservation, for a single-host shape: a second
-      # node pool, <shape>-spot, drawing on the region's Spot quota instead of
-      # the reservation. Kueue admits a workload onto it
-      # only once the shape's reserved quota, and what it can borrow from the
-      # cohort, is spent - overflow, not a replacement, since the reservation
-      # is paid for whether it is used or not. See "Spot overflow" in README.md.
-      spot = optional(object({
-        # The Spot pool's ceiling, which the Spot quota bounds rather than any
-        # reservation.
-        max_nodes = number
-        # Chips of the shape's ClusterQueue the Spot flavor holds; the pool's
-        # capacity if unset.
-        nominal_quota = optional(number)
-        # Zones the Spot pool may scale up in; the shape's zone if unset. No
-        # reservation ties Spot to that zone, and GCE runs out of Spot VMs one
-        # zone at a time. max_nodes applies in each zone; the flavor's quota
-        # is what bounds the total.
-        zones = optional(list(string))
-      }))
-    })), [])
-  }))
-  description = "Worker clusters. location is a region; the cluster pins no zones, because only a TPU node cares which zone it is in and its own node pool pins it there."
-  default     = []
-
-  validation {
-    condition = alltrue([
-      for w in var.worker_clusters :
-      length(regexall("^[a-z0-9]+-[a-z0-9]+[0-9]$", w.location)) > 0
-    ])
-    error_message = "worker_clusters[*].location must be a region, not a zone: a zone here silently gets a zonal control plane, and changing it later rebuilds the cluster."
-  }
-
-  # A list has no keys, so nothing here is unique by construction the way a map
-  # key would be. locals.tf keys every cluster on this pair, so a repeat does
-  # not fail - it drops one of the two clusters, silently. Two clusters in one
-  # region are fine; two in one region *and* one project are the same cluster.
-  validation {
-    condition = length(distinct([
-      for w in var.worker_clusters : "${w.project}/${w.location}"
-    ])) == length(var.worker_clusters)
-    error_message = "Two worker_clusters have the same project and location. A cluster is identified by that pair, so the second would overwrite the first."
-  }
-
-  # The pool name is derived, so a repeated shape does not collide loudly the
-  # way a repeated map key would - it silently drops one of the two pools.
-  validation {
-    condition = alltrue([
-      for w in var.worker_clusters :
-      length(distinct([
-        for p in w.tpu_node_pools : "${p.machine_type}-${p.topology}"
-      ])) == length(w.tpu_node_pools)
-    ])
-    error_message = "Two tpu_node_pools in one worker cluster have the same machine type and topology. The node pool is named for that pair, so the second would overwrite the first."
-  }
-
-  validation {
-    condition = alltrue(flatten([
-      for w in var.worker_clusters : [
-        for p in w.tpu_node_pools : p.slices == null || (p.slices >= 1 && floor(p.slices) == p.slices)
-      ]
-    ]))
-    error_message = "tpu_node_pools[*].slices must be a whole number, at least 1."
-  }
-
-  validation {
-    condition = alltrue(flatten([
-      for w in var.worker_clusters : [
-        for p in w.tpu_node_pools : contains(["Never", "LowerPriority", "Any"], p.reclaim_within_cohort)
-      ]
-    ]))
-    error_message = "tpu_node_pools[*].reclaim_within_cohort must be Never, LowerPriority or Any."
-  }
-
-  validation {
-    condition = alltrue(flatten([
-      for w in var.worker_clusters : [
-        for p in w.tpu_node_pools : contains(["BestEffortFIFO", "StrictFIFO"], p.queueing_strategy)
-      ]
-    ]))
-    error_message = "tpu_node_pools[*].queueing_strategy must be BestEffortFIFO or StrictFIFO."
-  }
-}
-
-
 variable "machine_memory_gb" {
   type        = map(number)
   description = <<-EOT
     Host memory per TPU machine type, in the decimal GB the accelerator-
     optimized machine family documentation quotes.
 
-    Every machine_type named by a tpu_node_pools entry needs one here, and a
+    Every machine_type a worker's tpu_node_pools names needs one here, and a
     new machine generation or variant is the moment to add it -
     generate_manifests.py refuses a shape it cannot size rather than guessing.
 
     Read only by generate_manifests.py, which sizes the pod's memory-backed
-    volumes and its memory request from it. Here rather than in that script so
-    that it sits beside the pools that name these machine types, since the two
-    have to be edited together.
+    volumes and its memory request from it. Here rather than in each worker's
+    root because it is a fact about the machine type, the same in every
+    project, and the sizes it produces have to agree across workers that share
+    a queue.
   EOT
 }
 

@@ -13,7 +13,7 @@
 
 # Nodes here are private, so egress - image pulls, Buildkite's API, Secret
 # Manager - goes through the Cloud NAT covering this region. It is created
-# outside this config, with the rest of the networking; see workers.tf.
+# outside this config, with the rest of the networking; see modules/worker.
 resource "google_container_cluster" "manager" {
   project  = var.project_id
   name     = "${var.name_prefix}-manager"
@@ -158,4 +158,8 @@ resource "google_container_cluster" "manager" {
       monitoring_config,
     ]
   }
+}
+
+data "google_project" "manager" {
+  project_id = var.project_id
 }

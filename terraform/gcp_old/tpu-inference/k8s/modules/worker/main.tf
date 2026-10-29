@@ -1,7 +1,11 @@
-# Worker clusters: where the TPUs are. Standard, not Autopilot, because a TPU
-# node needs reservation affinity on a named reservation, the google.com/tpu
-# taint and a placement policy carrying an explicit topology - none of which
-# Autopilot lets through.
+# A worker cluster: where the TPUs are. Everything here is in the worker's own
+# project, so whoever administers that project can build it from an
+# environment under workers/; what the worker needs from the fleet's project is
+# granted by manager/.
+#
+# Standard, not Autopilot, because a TPU node needs reservation affinity on a
+# named reservation, the google.com/tpu taint and a placement policy carrying an
+# explicit topology - none of which Autopilot lets through.
 #
 # The control plane is regional and the cluster sets no node_locations. The one
 # thing with an opinion about zones is a TPU node, which must land in its
@@ -15,18 +19,15 @@
 # manager's already serves us-central1, and a second one declared here for a
 # worker in the same region would be refused. See the README before adding a
 # region.
-resource "google_container_cluster" "worker" {
-  for_each = local.workers
-
+resource "google_container_cluster" "this" {
   # Also the Fleet membership ID, and every worker joins the manager's fleet
-  # whatever project it runs in - so two clusters in one region in different
-  # projects would ask for one membership and the second apply would be refused.
-  name     = "${var.name_prefix}-${each.value.short_name}"
-  project  = each.value.project
-  location = each.value.location
+  # whatever project it runs in, so the name is unique across the fleet.
+  name     = "${var.fleet.name_prefix}-${var.name}"
+  project  = var.project
+  location = var.location
 
-  network    = each.value.network
-  subnetwork = each.value.subnetwork
+  network    = var.network
+  subnetwork = var.subnetwork
 
   remove_default_node_pool = true
   initial_node_count       = 1
@@ -37,18 +38,21 @@ resource "google_container_cluster" "worker" {
     channel = var.release_channel
   }
 
-  maintenance_policy {
-    recurring_window {
-      start_time = var.maintenance_window.start_time
-      end_time   = var.maintenance_window.end_time
-      recurrence = var.maintenance_window.recurrence
+  dynamic "maintenance_policy" {
+    for_each = var.maintenance_window == null ? [] : [var.maintenance_window]
+    content {
+      recurring_window {
+        start_time = maintenance_policy.value.start_time
+        end_time   = maintenance_policy.value.end_time
+        recurrence = maintenance_policy.value.recurrence
+      }
     }
   }
 
   private_cluster_config {
     enable_private_nodes    = true
     enable_private_endpoint = false
-    master_ipv4_cidr_block  = each.value.master_ipv4_cidr_block
+    master_ipv4_cidr_block  = var.master_ipv4_cidr_block
   }
 
   # Empty: GKE picks and creates the pod and service secondary ranges. The
@@ -56,7 +60,7 @@ resource "google_container_cluster" "worker" {
   ip_allocation_policy {}
 
   workload_identity_config {
-    workload_pool = "${each.value.project}.svc.id.goog"
+    workload_pool = "${var.project}.svc.id.goog"
   }
 
   # How the cache buckets reach a pod. The driver is a GKE addon, off by
@@ -96,7 +100,7 @@ resource "google_container_cluster" "worker" {
   # from this block and ties its lifecycle to the cluster; a separate
   # google_gke_hub_membership collides with that one instead of adopting it.
   fleet {
-    project = var.project_id
+    project = var.fleet.project_id
   }
 
   # Every TPU shape on a cluster draws on one reservation, so a node that has
@@ -124,7 +128,7 @@ resource "google_container_cluster" "worker" {
       # project-wide secretmanager.secretAccessor, because the bare-metal agent
       # VMs run as it. Workload Identity is on for these nodes too, so what this
       # closes is the kubelet's own reach rather than any pod's.
-      service_account = google_service_account.worker_nodes[each.key].email
+      service_account = google_service_account.nodes.email
       # Wider than the six GKE would pick, deliberately: a scope only ever
       # subtracts from what IAM already allows, and the account above holds
       # nothing worth a second bound. Narrow scopes on a broad account would be
@@ -152,9 +156,9 @@ resource "google_container_cluster" "worker" {
     }
   }
 
-  resource_labels = merge(local.common_labels, {
+  resource_labels = merge(local.labels, {
     role   = "worker"
-    worker = each.value.short_name
+    worker = var.name
   })
 
   lifecycle {
@@ -169,13 +173,11 @@ resource "google_container_cluster" "worker" {
 # Everything that is not a TPU: the metrics agent, CSI drivers, and the
 # per-cluster half of anything MultiKueue installs. TPU nodes carry a NoSchedule
 # taint, so without this pool a worker has nowhere to run system pods.
-resource "google_container_node_pool" "worker_system" {
-  for_each = local.workers
-
+resource "google_container_node_pool" "system" {
   name     = "system"
-  project  = each.value.project
-  cluster  = google_container_cluster.worker[each.key].name
-  location = each.value.location
+  project  = var.project
+  cluster  = google_container_cluster.this.name
+  location = var.location
 
   # total_, not the per-zone min_node_count/max_node_count: in a regional
   # cluster those are multiplied by the number of zones, so a floor of 1 would
@@ -193,8 +195,8 @@ resource "google_container_node_pool" "worker_system" {
   # zone the outgoing node already sits in, so a family this region is short of
   # fails that upgrade no matter what is set here.
   autoscaling {
-    total_min_node_count = each.value.system_min_nodes
-    total_max_node_count = each.value.system_max_nodes
+    total_min_node_count = var.system_min_nodes
+    total_max_node_count = var.system_max_nodes
     location_policy      = "ANY"
   }
 
@@ -204,9 +206,9 @@ resource "google_container_node_pool" "worker_system" {
   }
 
   node_config {
-    machine_type    = each.value.system_machine_type
+    machine_type    = var.system_machine_type
     image_type      = "COS_CONTAINERD"
-    service_account = google_service_account.worker_nodes[each.key].email
+    service_account = google_service_account.nodes.email
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
 
     workload_metadata_config {
@@ -220,7 +222,7 @@ resource "google_container_node_pool" "worker_system" {
 
     labels = {
       "tpu-ci.google.com/role"   = "system"
-      "tpu-ci.google.com/worker" = each.value.short_name
+      "tpu-ci.google.com/worker" = var.name
     }
 
     metadata = {
@@ -243,8 +245,8 @@ resource "google_compute_resource_policy" "tpu_slice" {
     if pool.is_multi_host && pool.family == "tpu7x"
   }
 
-  project = local.workers[each.value.worker].project
-  region  = local.workers[each.value.worker].location
+  project = var.project
+  region  = var.location
   name    = "${each.value.name}-slice"
 
   workload_policy {
@@ -257,13 +259,13 @@ resource "google_compute_resource_policy" "tpu_slice" {
 # nodes it has already booted; GKE creates them only for a pending pod, never to
 # reach the floor. max_nodes exceeds this pool's share of the reservation, so
 # the shapes compete for what is free rather than each owning a fixed slice.
-resource "google_container_node_pool" "worker_tpu" {
+resource "google_container_node_pool" "tpu" {
   for_each = merge(local.tpu_node_pools, local.spot_tpu_node_pools)
 
   name     = each.value.name
-  project  = google_container_cluster.worker[each.value.worker].project
-  cluster  = google_container_cluster.worker[each.value.worker].name
-  location = google_container_cluster.worker[each.value.worker].location
+  project  = google_container_cluster.this.project
+  cluster  = google_container_cluster.this.name
+  location = google_container_cluster.this.location
 
   # The cluster pins no zones, so without this the pool spreads across the
   # region's default zones: ones that cannot serve the reservation, and for
@@ -295,7 +297,7 @@ resource "google_container_node_pool" "worker_tpu" {
 
   node_config {
     machine_type    = each.value.machine_type
-    service_account = google_service_account.worker_nodes[each.value.worker].email
+    service_account = google_service_account.nodes.email
 
     # Reclaimable on 30 seconds' notice, and drawn from the zone's Spot quota
     # rather than the reservation. GKE labels the nodes cloud.google.com/gke-spot,
@@ -331,7 +333,7 @@ resource "google_container_node_pool" "worker_tpu" {
     }
 
     labels = {
-      "tpu-ci.google.com/worker"  = each.value.short_name
+      "tpu-ci.google.com/worker"  = var.name
       "tpu-ci.google.com/profile" = each.value.shape
     }
 
@@ -408,22 +410,4 @@ resource "google_container_node_pool" "worker_tpu" {
       error_message = "${each.value.shape}: a multi-host shape is sized by slices; GKE sizes each of its pools at exactly one slice (${each.value.hosts} hosts), so leave min_nodes and max_nodes out."
     }
   }
-}
-
-# Only for a worker in another project. When the worker shares the manager's
-# project, enabling the GKE Hub API already grants the service agent this role
-# on it; declaring it here would make Terraform the owner of a binding Google
-# manages, and destroy would revoke it.
-resource "google_project_iam_member" "gkehub_service_agent" {
-  for_each = toset([
-    for w in var.worker_clusters : w.project if w.project != var.project_id
-  ])
-
-  project = each.value
-  role    = "roles/gkehub.serviceAgent"
-  member  = "serviceAccount:service-${data.google_project.manager.number}@gcp-sa-gkehub.iam.gserviceaccount.com"
-}
-
-data "google_project" "manager" {
-  project_id = var.project_id
 }

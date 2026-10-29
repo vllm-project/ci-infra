@@ -10,9 +10,10 @@ resource "google_service_account" "manager_nodes" {
 # nothing beyond container.defaultNodeServiceAccount - GKE's maintained
 # definition of what it takes to boot, log and report metrics. Anything a
 # workload needs goes on the workload's own account through Workload Identity.
+# A worker's nodes get the same, from modules/worker.
 #
 # It does not cover pulling private images; that is granted per repository
-# below, to both node accounts.
+# below, to the manager's node account and to every worker's.
 resource "google_project_iam_member" "manager_nodes" {
   project = var.project_id
   role    = "roles/container.defaultNodeServiceAccount"
@@ -29,24 +30,9 @@ resource "google_artifact_registry_repository_iam_member" "manager_nodes" {
   member     = "serviceAccount:${google_service_account.manager_nodes.email}"
 }
 
-# One per worker cluster rather than one shared account, so that revoking a
-# worker's access is deleting a principal and not editing a policy.
-resource "google_service_account" "worker_nodes" {
-  for_each = local.workers
-
-  project      = each.value.project
-  account_id   = "${var.name_prefix}-wkr-${each.value.short_name}"
-  display_name = "Worker GKE Node SA (${each.value.short_name})"
-}
-
-resource "google_project_iam_member" "worker_nodes" {
-  for_each = local.workers
-
-  project = each.value.project
-  role    = "roles/container.defaultNodeServiceAccount"
-  member  = "serviceAccount:${google_service_account.worker_nodes[each.key].email}"
-}
-
+# Every worker's node account: its nodes pull CI images from this project,
+# whatever project they are in. The accounts are modules/worker's, so a
+# worker's environment has to be applied before it is listed in var.workers.
 resource "google_artifact_registry_repository_iam_member" "worker_nodes" {
   for_each = local.worker_node_repository_bindings
 
@@ -54,7 +40,7 @@ resource "google_artifact_registry_repository_iam_member" "worker_nodes" {
   location   = each.value.location
   repository = each.value.repository
   role       = "roles/artifactregistry.reader"
-  member     = "serviceAccount:${google_service_account.worker_nodes[each.value.worker_name].email}"
+  member     = "serviceAccount:${local.workers[each.value.worker_name].node_service_account}"
 }
 
 # Lets the manager's Kueue controller reach a worker's API server through
@@ -70,10 +56,13 @@ resource "google_artifact_registry_repository_iam_member" "worker_nodes" {
 #
 # So what bounds the controller inside a worker is not IAM but the
 # kueue-multikueue-remote ClusterRole the generated manifests bind it to there.
+#
+# On var.project_id whatever project a worker runs in, as launcher_gateway
+# below: every cluster joins this project's fleet, so that is where the
+# gkeMemberships resource the gateway checks lives. A grant on a worker's own
+# project reaches nothing.
 resource "google_project_iam_member" "kueue_manager_gateway" {
-  for_each = toset([for w in var.worker_clusters : w.project])
-
-  project = each.value
+  project = var.project_id
   role    = "roles/gkehub.gatewayEditor"
   member  = local.kueue_controller_principal
 }
@@ -86,15 +75,26 @@ resource "google_project_iam_member" "kueue_manager_gateway" {
 # gatewayReader rather than gatewayEditor, since reading logs is get, list and
 # watch; gkehub.viewer alongside it because resolving the membership reads it.
 #
-# On var.project_id whatever project a worker runs in - workers.tf registers
-# every cluster into this project's fleet, so that is where the gkeMemberships
-# resource the gateway checks lives.
+# On var.project_id whatever project a worker runs in - modules/worker
+# registers every cluster into this project's fleet, so that is where the
+# gkeMemberships resource the gateway checks lives.
 resource "google_project_iam_member" "launcher_gateway" {
   for_each = toset(["roles/gkehub.gatewayReader", "roles/gkehub.viewer"])
 
   project = var.project_id
   role    = each.value
   member  = local.launcher_principal
+}
+
+# Whoever builds a worker in another project, for the length of the build: GKE
+# creates the cluster's membership in this project's fleet as them. See the
+# variable.
+resource "google_project_iam_member" "worker_deployers" {
+  for_each = toset(var.worker_deployers)
+
+  project = var.project_id
+  role    = "roles/gkehub.editor"
+  member  = each.value
 }
 
 # Read of the registry metadata, not of the layers: the launcher never pulls an

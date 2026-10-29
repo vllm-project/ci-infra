@@ -31,16 +31,29 @@ data "google_secret_manager_secret" "env_secret" {
   secret_id = each.value.secret
 }
 
-# The Workload Identity pool is the project's rather than a cluster's, so this
-# one principal covers the manager and both workers, and a new worker inherits
-# the grant by existing.
+# Read by the sync on each worker, as the secret-sync account in the Workload
+# Identity pool of the worker's project. The pool is the project's rather than
+# a cluster's, so this is one grant per project a worker runs in, and a new
+# worker in a project already listed inherits it by existing.
+locals {
+  env_secret_grants = merge([
+    for project in local.worker_projects : {
+      for env_name, secret in var.env_secrets : "${project}/${env_name}" => {
+        env_name = env_name
+        project  = secret.project
+        member   = "serviceAccount:${project}.svc.id.goog[${var.namespace}/secret-sync]"
+      }
+    }
+  ]...)
+}
+
 resource "google_secret_manager_secret_iam_member" "env_secret_sync" {
-  for_each = var.env_secrets
+  for_each = local.env_secret_grants
 
   project   = each.value.project
-  secret_id = data.google_secret_manager_secret.env_secret[each.key].secret_id
+  secret_id = data.google_secret_manager_secret.env_secret[each.value.env_name].secret_id
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/secret-sync]"
+  member    = each.value.member
 }
 
 # The GitHub deploy key, which the agent's checkout container takes from its
