@@ -25,6 +25,7 @@ from fleet import (
     JOB_ID,
     TPU,
     Config,
+    is_merge_branch,
     job_hex,
     shape,
 )
@@ -3702,6 +3703,7 @@ KUBE_INFRA = {
     "not_admitted": ("Not admitted in time", "No quota, or no worker took it, within the launcher's budget."),
     "evicted_storage": ("Evicted for disk use", "A pod wrote more to its disk than the node allows."),
     "unfit": ("No node fits", "A pod asks for more than any node of its shape has."),
+    "pod_lost": ("Pods lost before running", "Every pod retry was spent before the workload container ran."),
     "removed": ("Workload removed", "The Job or JobSet disappeared from under the launcher."),
     "api_unreachable": ("Manager API unreachable", "The manager's API server did not answer for 10 minutes."),
     "error": ("Launcher error", "The launcher itself failed; the traceback is in the step log."),
@@ -4428,9 +4430,9 @@ def render_job_history(
     def matches(pipe: str, build: object, label: str, branch_name: str | None) -> bool:
         if pipeline and pipe != pipeline:
             return False
-        if branch == "main" and branch_name != "main":
+        if branch == "main" and not is_merge_branch(branch_name):
             return False
-        if branch == "pr" and branch_name in ("main", None):
+        if branch == "pr" and (not branch_name or is_merge_branch(branch_name)):
             return False
         haystack = f"{pipe} #{build} {label} {branch_name or ''}".lower()
         return not text or text.lower() in haystack

@@ -825,7 +825,7 @@ snapshot, then every workload that ended in the range from
 exit code, wait, startup and run - a build a row, its steps opening beneath it
 with the failures first, or job by job. Filters for queues (any number), outcome,
 branch and pipeline and a search over step, build and branch sit above it, and a
-line under them sums up what they leave. Each queue card on Live and each shape block on Capacity links to its queue's jobs.
+line under them sums up what they leave. Each queue card on Live and each shape block on Capacity links to its queue's jobs. Both Jobs (`/jobs`) and Steps (`/steps`) count GitHub merge-queue (`gh-readonly-queue/*`) builds under `main` rather than `PRs`, keeping `main` metrics meaningful once post-merge push builds are skipped and keeping merge-queue runs out of PR wall-clock charts.
 
 Migration also counts *infrastructure failures*: failed jobs whose log ends in
 the fleet's fault - a full disk, a TPU that would not start, a bus error, a kill
