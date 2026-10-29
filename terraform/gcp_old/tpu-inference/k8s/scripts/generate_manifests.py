@@ -352,6 +352,8 @@ def load_fleet(path: Path = TFVARS) -> dict:
                 f"block under workers/ calls modules/worker with name = {name!r}"
             )
         worker = declared[name]
+        # Listed but paused: see dispatch in manager/variables.tf.
+        worker["_dispatch"] = entry.get("dispatch", True)
         stated = {"project": entry["project"], "location": entry["location"]}
         wrong = {k: (v, worker.get(k)) for k, v in stated.items() if worker.get(k) != v}
         if wrong:
@@ -1033,6 +1035,9 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
     # manager's quota is the fleet's, because it admits on behalf of all of
     # them; each worker then admits again against its own.
     fleet: dict[str, dict] = {}
+    # Every shape some worker can run, paused or not; see the check after the
+    # loop.
+    offered: dict[str, list[str]] = {}
     clusters = [
         {
             "dir": manager_dir,
@@ -1081,7 +1086,14 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 # the lane; a step wanting another states its own manifest.
                 **CPU_JOB_SIZE,
             }
-        for name, shape in local.items():
+        for name in local:
+            offered.setdefault(name, []).append(cluster_name)
+        # A paused worker is still rendered and deployed, and keeps its
+        # MultiKueueCluster below, so pausing orphans nothing and resuming is
+        # the same one line. What it loses is the manager's side: its chips
+        # leave the fleet's quota and it leaves every MultiKueueConfig, so
+        # nothing new is dispatched to it.
+        for name, shape in (local.items() if worker["_dispatch"] else ()):
             # The shape is stored once, not summed: two clusters running it
             # run the same hardware. Only the quota adds up.
             entry = fleet.setdefault(
@@ -1187,6 +1199,19 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
                 NAMESPACE=namespace,
                 DASHBOARD_SERVICE_ACCOUNT=dashboard_service_account(prefix, project),
             ),
+        )
+
+    # A shape whose only workers are paused would leave the manager's tree,
+    # and the deploy does not delete queues: the manager's queue for it would
+    # stay, with a MultiKueueConfig still naming the paused worker, and keep
+    # dispatching to it. Refused rather than rendered as a pause that is not one.
+    if stranded := sorted(set(offered) - set(fleet)):
+        raise SystemExit(
+            "pausing would leave no worker dispatching "
+            + ", ".join(f"{s} (only on {', '.join(offered[s])})" for s in stranded)
+            + ". The deploy keeps a queue that leaves the tree, so the manager "
+            "would go on dispatching it to the paused worker. Keep one worker "
+            "with each shape dispatching."
         )
 
     # The launcher offers --cpu and the built-in CPU Job on every step, so a

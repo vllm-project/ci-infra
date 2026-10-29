@@ -112,6 +112,13 @@ variable "workers" {
   type = map(object({
     project  = string
     location = string
+    # False pauses the worker: generate_manifests.py leaves its chips out of
+    # the manager's quota and takes it out of every MultiKueueConfig, so
+    # nothing new is dispatched to it, but still renders and deploys
+    # everything else - its own manifests and its MultiKueueCluster - and the
+    # grants here stay. Resuming is setting it back. See README "Pause or
+    # remove a worker".
+    dispatch = optional(bool, true)
   }))
   description = <<-EOT
     The workers this manager dispatches to, by name.

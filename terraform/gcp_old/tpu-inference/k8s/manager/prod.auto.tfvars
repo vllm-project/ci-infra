@@ -161,7 +161,8 @@ deployers = [
 # The workers this manager dispatches to. Each is a module block in an
 # environment under ../workers/, where its shapes, quotas and reservations
 # are; this is only what Terraform here needs to grant it access, restated
-# from there.
+# from there. `dispatch = false` on an entry pauses it; see README "Pause or
+# remove a worker".
 workers = {
   # v6e.
   "us-east5" = {

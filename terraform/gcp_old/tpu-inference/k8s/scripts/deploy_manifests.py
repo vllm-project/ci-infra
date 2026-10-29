@@ -350,6 +350,61 @@ class Settle(Step):
         return True
 
 
+@dataclass(frozen=True)
+class PruneMultiKueueClusters(Step):
+    """Delete the manager's MultiKueueClusters the tree no longer renders.
+
+    The one exception to applying and never pruning. A MultiKueueCluster is
+    the manager's registration of a worker and entirely this fleet's, and the
+    only way one leaves the tree is the worker leaving the workers map in
+    manager/prod.auto.tfvars. Nothing refers to it after that, so it does no
+    harm, but left behind it keeps the manager connected to a cluster that may
+    be about to be destroyed, and the manager no longer matches git.
+
+    After the queues, whose MultiKueueConfigs have stopped naming it by then.
+    """
+
+    rendered: tuple[str, ...]
+    what: str = "remove MultiKueueClusters the tree no longer renders"
+
+    def _stale(self) -> list[str] | None:
+        proc = subprocess.run(
+            ["kubectl", "get", "multikueueclusters.kueue.x-k8s.io",
+             "-o", "jsonpath={.items[*].metadata.name}"],
+            capture_output=True, text=True,
+        )
+        if proc.returncode:
+            return None
+        return sorted(set(proc.stdout.split()) - set(self.rendered))
+
+    def run(self) -> None:
+        stale = self._stale()
+        if stale is None:
+            raise SystemExit("failed: listing MultiKueueClusters on the manager")
+        for name in stale:
+            run_command("kubectl", "delete", "multikueuecluster.kueue.x-k8s.io", name)
+
+    def diff(self) -> bool:
+        stale = self._stale()
+        if stale is None:
+            print("  (could not list MultiKueueClusters; nothing installed yet, "
+                  "or the cluster refused)", file=sys.stderr)
+            return False
+        for name in stale:
+            print(f"  would delete multikueuecluster/{name}")
+        return True
+
+
+def rendered_multikueue_clusters(base: Path) -> tuple[str, ...]:
+    """The MultiKueueClusters the manager's tree declares."""
+    path = base / "queues" / "20-multikueue.yaml"
+    return tuple(sorted(
+        doc["metadata"]["name"]
+        for doc in yaml.safe_load_all(path.read_text())
+        if doc and doc.get("kind") == "MultiKueueCluster"
+    ))
+
+
 def plan(cluster: dict, index: dict) -> list[Step]:
     """The install order, written once.
 
@@ -383,6 +438,9 @@ def plan(cluster: dict, index: dict) -> list[Step]:
         # created here.
         Apply("queues", base / "queues"),
     ]
+
+    if cluster["role"] == "manager":
+        steps.append(PruneMultiKueueClusters(rendered=rendered_multikueue_clusters(base)))
 
     # Before the workload directory, whose PodTemplate mounts it. Manager only,
     # keyed off the launcher manifest being rendered for this cluster.
