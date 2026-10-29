@@ -77,7 +77,9 @@ inputs' effect on it is the question.
 The deploy applies, never prunes, so **deleting an object from the tree does
 not delete it from the clusters**: a change that removes a queue, a flavor or an
 admission check needs the matching `kubectl delete` by hand, on the manager and
-on every worker that carried it.
+on every worker that carried it. The one exception is a worker's
+MultiKueueCluster on the manager, which the deploy deletes once the worker
+leaves `workers` - see "Pause or remove a worker".
 
 ## Deploying a change
 
@@ -406,14 +408,48 @@ the page to send. Our side:
 
 After that, a pool or quota change is an edit to the worker's module block,
 which its environment's administrators apply and we generate and deploy. To
-remove a worker, take it out of `workers`, apply `manager/`, generate and
-deploy, delete its MultiKueueCluster on the manager by hand (the deploy never
-prunes), and then remove its module block and apply its environment.
+take a worker out again, see "Pause or remove a worker".
 
 Whoever administers a worker can read everything on it, including the secrets
 in `env_secrets`, which are synced to every worker. Decide that before listing
 a partner's worker; the agent token and the git deploy key stay on the manager
 either way.
+
+### Pause or remove a worker
+
+**Pause** stops the manager dispatching to a worker and leaves everything else
+in place, so it is undone the same way:
+
+1. Set `dispatch = false` on its entry in `workers` in
+   `manager/prod.auto.tfvars`.
+2. `generate_manifests.py` and `deploy_manifests.py`. The manager's queues lose
+   the worker's quota and it leaves every MultiKueueConfig; its own manifests
+   and its MultiKueueCluster are still rendered and deployed, and no
+   Terraform changes.
+
+Resume by removing the line, then generate and deploy. Pausing the only worker
+with some shape is refused: that shape would leave the tree, and the deploy
+keeps a queue that leaves the tree, so the manager would go on dispatching to
+the paused worker.
+
+Do it while the worker is idle (`kubectl get workloads -n buildkite` on the
+manager, or the dashboard). What Kueue does with a workload already running on
+a worker that leaves its MultiKueueConfig has not been tested here; expect it
+to be requeued and rerun elsewhere.
+
+**Remove** takes it out of the fleet, in this order:
+
+1. Pause it, as above, and wait for it to be idle.
+2. Take its entry out of `workers`, apply `manager/` (its grants go), then
+   generate and deploy. The deploy deletes its MultiKueueCluster from the
+   manager, so the manager matches git again.
+3. Its environment's administrators destroy it: empty its two cache buckets
+   (see "Tear the fleet down"), then `terraform -chdir=workers/<env> destroy`,
+   or remove just its module block and apply if the environment has others.
+4. Delete its module block, or the environment, from git - after step 3, since
+   that is the configuration the destroy needs.
+
+Reverting the PR that listed a worker is steps 2 to 4 without the pause.
 
 ### Rotate the Buildkite agent token
 

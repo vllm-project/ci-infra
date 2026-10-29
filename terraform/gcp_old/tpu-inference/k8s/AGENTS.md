@@ -115,6 +115,8 @@ runs out.
 - Never edit `kueue/generated/` by hand.
 - Removing an object from `kueue/generated/` does not remove it from the
   clusters. Delete it by hand on the manager and on every worker that had it.
+  The exception is a worker's MultiKueueCluster, which the deploy deletes once
+  the worker leaves `workers` (README "Pause or remove a worker").
 - Do not change a running workload by hand (`kubectl patch`, deleting its
   pods or Workload) to unstick one step. Cancel or retry the step in
   Buildkite. Do not retry or cancel other people's PR builds; tell the owner
