@@ -403,11 +403,13 @@ def test_plan_cuts_a_function_over_the_budget_by_case():
     assert len(set(assign.values())) == 2 and result["shards"] == 2
 
 
-def test_plan_never_splits_a_file_the_command_names_by_test_id():
+def test_plan_keeps_a_node_selection_whole_without_matching_command_timings():
     timings = _with_tests(
         _timings(TESTS[0], {"big.py": 2000}), "big.py", {"test_a": 1000, "test_b": 1000}
     )
-    commands = _commands(TESTS[0], ["big.py", "small.py"], selected=["big.py"])
+    commands = _commands(
+        TESTS[0] + "::test_a", ["big.py", "small.py"], selected=["big.py"]
+    )
     result = rs.plan(commands, timings)
     assert result["commands"][0]["split"] == {} and result["oversizedFiles"] == []
 
@@ -985,6 +987,34 @@ def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
     ]
 
 
+def test_generator_shards_a_standalone_native_amd_step(fake_global_config, checkout):
+    fake_global_config["run_all"] = True
+    job = _render_mirror(_step(device="mi325_1", dind=False, automatic_shard=True))
+    assert job.key == "model-executor"
+    assert job.parallelism == 3
+    assert job.label.endswith("Shard %N/%t")
+    plan = rs.unpack(job.env[rs.PLAN_ENV])
+    assert plan["shards"] == 3
+    assert checkout.calls == [("model-executor", AgentQueue.AMD_MI325_1)]
+    assert "runtime_shard_plugin" in job.env["PYTEST_ADDOPTS"]
+    assert rs.shard_job_setup()[0] in job.env["VLLM_TEST_COMMANDS"]
+
+
+@pytest.mark.parametrize("overrides", [{"dind": True}, {"parallelism": 2}])
+def test_standalone_amd_keeps_dind_and_explicit_shards(
+    fake_global_config, checkout, overrides
+):
+    fake_global_config["run_all"] = True
+    job = _render_mirror(
+        _step(
+            **{"device": "mi325_1", "dind": False, "automatic_shard": True, **overrides}
+        )
+    )
+    assert rs.PLAN_ENV not in (job.env or {})
+    assert job.parallelism == overrides.get("parallelism")
+    assert checkout.calls == []
+
+
 def test_generator_leaves_an_unflagged_or_dind_mirror_alone(
     fake_global_config, checkout
 ):
@@ -1166,6 +1196,40 @@ def _command_plan(command, label, files):
         "files": files,
         "split": {},
     }
+
+
+def test_selected_function_cases_run_once_across_shards(tmp_path, monkeypatch):
+    _project(
+        tmp_path,
+        {
+            "test_selected.py": (
+                "import pytest\n"
+                "@pytest.mark.parametrize('i', range(5))\n"
+                "def test_selected(i): pass\n"
+                "def test_other(): raise AssertionError('outside the selected function')\n"
+            )
+        },
+    )
+    command = "pytest -v test_selected.py::test_selected -k 'not [4]'"
+    timings = _with_tests(
+        _timings(command, {"test_selected.py": 1600}),
+        "test_selected.py",
+        {f"test_selected[{i}]": 400 for i in range(4)},
+    )
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    result, _ = rs.plan_step(
+        "k", [command], "/vllm-workspace/tests", str(tmp_path), AgentQueue.H200
+    )
+    assert result["shards"] == 2
+    plan = {"shards": result["shards"], "commands": result["commands"]}
+    expected = _ran(_run(tmp_path, command, None, 0).stdout)
+    assert len(expected) == 4
+    actual = []
+    for shard in range(plan["shards"]):
+        run = _run(tmp_path, command, plan, shard)
+        assert run.returncode == 0, run.stdout + run.stderr
+        actual.extend(_ran(run.stdout))
+    assert sorted(actual) == sorted(expected)
 
 
 def test_every_test_runs_in_exactly_one_shard(tmp_path, monkeypatch):
