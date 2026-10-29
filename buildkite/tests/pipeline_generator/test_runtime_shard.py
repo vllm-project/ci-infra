@@ -829,8 +829,9 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     # Its commands are the step's own, after installing the plugin: the same
     # log headers and tracing labels, so main's timings keep matching. A test
     # command runs only in the shards that have its tests.
-    assert step.commands[:2] == rs.shard_job_setup()
-    jobs = step.commands[2:]
+    setup = rs.shard_job_setup()
+    assert step.commands[: len(setup)] == setup
+    jobs = step.commands[len(setup) :]
     assert len(jobs) == len(plain.commands)
     guarded = [job for job, own in zip(jobs, plain.commands) if job != own]
     assert len(guarded) == 1 and TESTS[1] in guarded[0]  # the one-file command
@@ -941,7 +942,8 @@ def test_generator_shards_on_a_recording_build_too(
     monkeypatch.setattr(buildkite_step, "kernrec_enabled", lambda: True)
     [step] = _render(_step(automatic_shard=True))
     assert step.parallelism == 3
-    assert step.commands[:2] == rs.shard_job_setup()
+    setup = rs.shard_job_setup()
+    assert step.commands[: len(setup)] == setup
 
 
 def _mirror_step(**amd):
@@ -1093,30 +1095,73 @@ def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     [step] = _render(_step(device="l4", automatic_shard=True))
     assert "kubernetes" in step.plugins[0] and step.plugins == plain.plugins
     assert step.retry == plain.retry == buildkite_step.K8S_RETRY
-    assert step.parallelism == 3 and len(step.commands[2:]) == len(plain.commands)
+    jobs = step.commands[len(rs.shard_job_setup()) :]
+    assert step.parallelism == 3 and len(jobs) == len(plain.commands)
     # The same commands, the one-file command run only by the shard with it.
-    changed = [new for new, old in zip(step.commands[2:], plain.commands) if new != old]
+    changed = [new for new, old in zip(jobs, plain.commands) if new != old]
     assert len(changed) == 1 and changed[0].startswith("case ")
 
 
-def test_shard_job_setup_installs_the_plugin_for_any_python():
-    script = "\n".join(rs.shard_job_setup()).replace("$$", "$")
-    script += '\npython3 -c "import runtime_shard_plugin as p; print(p.__file__)"'
-    env = dict(os.environ, RUNTIME_SHARD_PLUGIN=rs.plugin_source(), PYTHONPATH="/x")
-    env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env["PATH"]
-    run = subprocess.run(
-        ["bash", "-ec", script + '\necho "$PYTHONPATH"'],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
+def _run_after_setup(tmp_path, command, pythonpath="/x"):
+    """A shard job's setup, then the command, with python3 a fresh venv's: the
+    setup's copy goes there and not into the python running these tests."""
+    if not (tmp_path / "venv").exists():
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", tmp_path / "venv"],
+            check=True,
+        )
+    script = "\n".join(rs.shard_job_setup() + [command]).replace("$$", "$")
+    env = dict(
+        os.environ, RUNTIME_SHARD_PLUGIN=rs.plugin_source(), PYTHONPATH=pythonpath
     )
+    env["PATH"] = str(tmp_path / "venv" / "bin") + os.pathsep + env["PATH"]
+    return subprocess.run(
+        ["bash", "-ec", script], env=env, capture_output=True, text=True, check=True
+    )
+
+
+FIND_PLUGIN = (
+    'python3 -c "import importlib.util as u;'
+    " print(u.find_spec('runtime_shard_plugin').origin)\""
+)
+
+
+def test_shard_job_setup_installs_the_plugin_for_any_python(tmp_path):
+    run = _run_after_setup(tmp_path, FIND_PLUGIN + '\necho "$PYTHONPATH"')
     path, pythonpath = run.stdout.split()
     assert path == f"{rs.PLUGIN_DIR}/runtime_shard_plugin.py"
     assert pythonpath == f"{rs.PLUGIN_DIR}:/x"
     source = os.path.join(os.path.dirname(rs.__file__), "runtime_shard_plugin.py")
     with open(path) as installed, open(source) as original:
         assert installed.read() == original.read()
+
+
+def test_a_command_setting_its_own_pythonpath_still_finds_the_plugin(tmp_path):
+    # vLLM's entrypoints-integration-api-server runs
+    # `PYTHONPATH=/vllm-workspace pytest ...`, which replaces the exported path.
+    for command in (
+        f"PYTHONPATH=/vllm-workspace {FIND_PLUGIN}",
+        f"export PYTHONPATH=/x; {FIND_PLUGIN}",
+        f"env -u PYTHONPATH {FIND_PLUGIN}",
+    ):
+        run = _run_after_setup(tmp_path, command)
+        [found] = run.stdout.split()
+        assert found.startswith(str(tmp_path / "venv" / "lib")), (command, found)
+        assert found.endswith("/site-packages/runtime_shard_plugin.py")
+
+
+def test_shard_job_setup_runs_where_site_packages_is_read_only(tmp_path):
+    # The copy is best effort: the exported PYTHONPATH still covers the job.
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", tmp_path / "venv"], check=True
+    )
+    [site] = (tmp_path / "venv" / "lib").glob("python*/site-packages")
+    site.chmod(0o555)
+    try:
+        run = _run_after_setup(tmp_path, FIND_PLUGIN)
+    finally:
+        site.chmod(0o755)
+    assert run.stdout.split() == [f"{rs.PLUGIN_DIR}/runtime_shard_plugin.py"]
 
 
 # The plugin, in real pytest runs: each shard runs the step's command as is.
