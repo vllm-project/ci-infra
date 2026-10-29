@@ -384,7 +384,7 @@ spec:
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
               nominalQuota: 8
-              borrowingLimit: 120
+              borrowingLimit: 124
         - name: tpu7x-spot
           resources:
             - name: google.com/tpu
@@ -451,7 +451,7 @@ spec:
             - name: google.com/tpu
               # Chips, not nodes. This is a ceiling on what Kueue will admit at
               # once, not a promise that a slice of the right shape is free.
-              nominalQuota: 72
+              nominalQuota: 76
               borrowingLimit: 56
 ---
 apiVersion: kueue.x-k8s.io/v1beta2

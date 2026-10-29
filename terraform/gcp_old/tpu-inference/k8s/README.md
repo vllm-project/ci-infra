@@ -17,7 +17,13 @@ One manager and one worker per reservation, and that split is the whole design:
 - **Worker** — `tpu-ci-us-central1`, Standard, `us-central1`. v7x, as
   `tpu7x-standard-1t` (1x1x1, with a Spot pool beside the reserved one) and
   `tpu7x-standard-4t` (2x2x1, and multi-host 2x2x2 across two VMs and 2x2x4
-  across four). Every v7x step in the fleet runs here.
+  across four).
+- **Worker** — `tpu-ci-inferact`, Standard, `us-central1`, in Inferact's
+  project `inferact-vllm-tpu`. v7x, the single-host shapes only (1x1x1 and
+  2x2x1, no Spot), on 4 chips of a reservation it shares with Inferact's own
+  work and the bare-metal agents. The manager's queues for those shapes span
+  it and `tpu-ci-us-central1`, and a workload runs on whichever admits it
+  first.
 
 How many chips each shape gets is in the worker's module block under
 `workers/`; read it there rather than from a doc.
@@ -1070,8 +1076,10 @@ kubectl describe workload -n buildkite <name>
 # nominalQuota 0 is admitted only out of its cohort's idle chips.
 kubectl get clusterqueue
 
-# Admitted but nothing running: it is on the worker that owns that shape -
-# tpu-ci-us-east5 for ct6e, tpu-ci-us-central1 for tpu7x.
+# Admitted but nothing running: it is on a worker that has that shape -
+# tpu-ci-us-east5 for ct6e, tpu-ci-us-central1 for tpu7x, or tpu-ci-inferact
+# for single-host tpu7x; the workload's MultiKueue admission check names
+# which. tpu-ci-inferact is reached as AGENTS.md "Access" describes.
 kubectl --context gke_cloud-ullm-inference-ci-cd_<region>_<worker> get pods -n buildkite
 ```
 

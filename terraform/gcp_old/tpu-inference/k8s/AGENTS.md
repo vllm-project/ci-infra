@@ -12,8 +12,9 @@ it is that way; read its "Running a step", "How the launcher works" and
   `kueue/launcher/launch.py` for as long as the step lasts.
 - The launcher renders a Job or JobSet, submits it to Kueue on the manager and
   watches it until it ends. Kueue admits it against fleet quota, and
-  MultiKueue copies it to the worker that owns the shape: `tpu-ci-us-east5`
-  for v6e, `tpu-ci-us-central1` for v7x. The TPU pods run on the worker.
+  MultiKueue copies it to a worker that has the shape: `tpu-ci-us-east5`
+  for v6e, `tpu-ci-us-central1` for v7x, or `tpu-ci-inferact` (in Inferact's
+  project) for single-host v7x. The TPU pods run on the worker.
 - Which steps go to kube is decided in the test repos, not here: `CI_FLEET`
   and `.buildkite/kube_rollout.conf` in vllm-torchtpu and tpu-inference. Their
   steps call the launcher through `.buildkite/kubernetes/run.sh` and
