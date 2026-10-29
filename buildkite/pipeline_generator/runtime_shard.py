@@ -224,8 +224,8 @@ def discover(command: str, cwd: str, root: str) -> Dict:
 
     Returns:
         {"files": its test files, relative to root as pytest's node IDs name
-        them; "selected": the files it names by test ID, which run as written
-        and are never split}.
+        them; "selected": the files it names by test ID, which need matching
+        command timings before their selected tests can be split}.
 
     Raises:
         ValueError: A path argument isn't in the checkout, or the command
@@ -453,7 +453,11 @@ def plan(
             seconds = seconds_of[(index, file)]
             tests = file_tests.get(key) if key is not None else None
             selected = file in commands[index]["selected"]
-            if seconds <= max_shard_seconds or not tests or selected:
+            if (
+                seconds <= max_shard_seconds
+                or not tests
+                or (selected and not exact[(index, file)])
+            ):
                 units.append((index, file, None, seconds))
                 whole.append(file if exact[(index, file)] else None)
                 continue

@@ -1164,20 +1164,43 @@ def convert_group_step_to_buildkite_step(
                         setup_profile="amd",
                     )
                 )
+                amd_parallelism = step.parallelism
+                amd_env = step.env
+                amd_label = step.label
+                amd_shard_mode = (
+                    _runtime_shard_mode(step, step_key, list_file_diff)
+                    if step.parallelism is None
+                    else None
+                )
+                amd_sharded = (
+                    _shard_at_generation(
+                        step,
+                        step_key,
+                        get_amd_agent_queue(step.device),
+                        amd_commands,
+                        amd_env,
+                        amd_shard_mode,
+                    )
+                    if amd_shard_mode
+                    else None
+                )
+                if amd_sharded:
+                    amd_parallelism, amd_commands, amd_env = amd_sharded
+                    amd_label = f"{amd_label} Shard %N/%t"
                 amd_step = _create_amd_step(
-                    label=step.label,
+                    label=amd_label,
                     key=step_key,
                     device=step.device,
                     num_devices=step.num_devices,
                     commands_str=" && ".join(amd_commands),
                     depends_on=step.depends_on,
-                    extra_env=step.env,
+                    extra_env=amd_env,
                     dind=step.dind,
                     no_plugin=step.no_plugin or False,
                     no_gpu=step.no_gpu or False,
                     num_nodes=step.num_nodes,
                     soft_fail=step.soft_fail,
-                    parallelism=step.parallelism,
+                    parallelism=amd_parallelism,
                     concurrency=step.concurrency,
                     concurrency_group=step.concurrency_group,
                     timeout_in_minutes=step.timeout_in_minutes,
