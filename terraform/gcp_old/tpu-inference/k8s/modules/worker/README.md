@@ -112,9 +112,16 @@ fleet's to decide.
 
 ## Afterwards
 
-- **A pool or quota change** is an edit to the worker's module block. You
-  apply it; the maintainers regenerate and deploy.
+- **A pool change** - a new shape, `max_nodes`, `slices`, a reservation - is
+  an edit to the worker's module block. You apply it; the maintainers
+  regenerate and deploy.
+- **A quota change** - `nominal_quota`, `reclaim_within_cohort`,
+  `queueing_strategy`, `cpu_workloads` - is read only by the fleet's generator.
+  Your plan shows no change, and the maintainers deploy it without you.
 - **A Kueue, JobSet or launcher change** needs nothing from you.
+- **CPU-only steps** run on your cluster only if its module block sets
+  `cpu_workloads = true`, since the nodes they create are billed to your
+  project. It is off by default.
 - **What you can see:** as the cluster's administrators, everything on it,
   including the credentials copied there and each job's Buildkite access
   token while the job runs.

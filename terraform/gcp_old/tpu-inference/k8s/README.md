@@ -31,6 +31,13 @@ chips, and the fleet's secrets, put there by GKE SecretSync — a workload pod
 runs on the worker, so a `secretKeyRef` has to resolve there rather than on the
 manager where the launcher built the podspec.
 
+A CPU-only workload - `launch --cpu`, or a manifest asking for no TPU - goes to
+the manager's `cpu` queue, which hands it to whichever worker admits it first.
+Only workers whose module block sets `cpu_workloads = true` are on that list,
+since the nodes it creates are billed to the worker's project: ours are, a
+partner's is not unless agreed. A chip-less role inside a TPU workload is
+different, and runs beside its TPU roles on any worker.
+
 ## Layout
 
 | Path | What it is |
@@ -377,7 +384,8 @@ the page to send. Our side:
    `workers/<environment>/` and change the backend and locals. Then set the
    module's arguments: name, project, region, network, a `/28` for the control
    plane, and the pools and quotas. `tpu-ci-<name>` is the cluster's fleet
-   membership ID, so `<name>` is unique in the fleet.
+   membership ID, so `<name>` is unique in the fleet. Leave `cpu_workloads`
+   unset unless the fleet's CPU-only steps should run there too.
 3. **They apply it.** The apply also binds the fleet's deployer account to
    `cluster-admin` in the new cluster, which is how the deploy gets in. In our
    own projects we apply it ourselves, and the account's IAM lets it in.

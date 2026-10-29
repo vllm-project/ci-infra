@@ -117,6 +117,9 @@ module "us-central1" {
     },
   ]
 
+  # Our project, so the fleet's CPU-only steps may run here too.
+  cpu_workloads = true
+
   maintenance_window = local.maintenance_window
   labels             = local.labels
 }
