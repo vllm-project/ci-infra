@@ -8,7 +8,7 @@
 # why every argument there is a literal, or one of the locals below, which the
 # generator also reads. See README "Add a worker".
 terraform {
-  required_version = ">= 1.7.0"
+  required_version = ">= 1.5.0"
 
   backend "gcs" {
     bucket = "tpu_commons_ci-infra_tf"
