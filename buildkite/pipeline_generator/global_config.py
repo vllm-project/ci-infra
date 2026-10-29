@@ -55,11 +55,7 @@ def init_global_config(pipeline_config_path: str):
             raise ValueError(
                 f"Invalid branch name: {branch}. Contains disallowed characters."
             )
-    torch_nightly = os.getenv("TORCH_NIGHTLY", "0")
     aiter_nightly = os.getenv("AITER_NIGHTLY", "0")
-    if torch_nightly == "1" and aiter_nightly == "1":
-        # Torch nightly drops the AMD lane; AITER nightly keeps only that lane.
-        raise ValueError("TORCH_NIGHTLY and AITER_NIGHTLY cannot both be set.")
     # The AITER nightly tests main as-is; a docs-only head commit must not skip it.
     docs_only_disable = (
         "1" if aiter_nightly == "1" else os.getenv("DOCS_ONLY_DISABLE", "0")
@@ -83,7 +79,7 @@ def init_global_config(pipeline_config_path: str):
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
-        torch_nightly=torch_nightly,
+        torch_nightly=os.getenv("TORCH_NIGHTLY", "0"),
         aiter_nightly=aiter_nightly,
         run_all=_should_run_all(
             pr_labels,

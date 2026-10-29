@@ -175,7 +175,24 @@ def test_nightly_builds_with_vllms_build_steps_into_vllm_dev(
 def test_flag_off_renders_the_stock_pipeline(fake_global_config, build_sh_layout):
     build_sh_layout.delenv("AITER_NIGHTLY")
     jobs = _render(fake_global_config, "0")
-    assert {"cuda-only", "amd-mi250", "direct-mi250"} <= set(jobs)
+    assert set(jobs) == {
+        "refresh-rocm-base-amd",
+        "image-build-amd",
+        "image-build",
+        "cuda-only",
+        "mi300",
+        "amd-mi300",
+        "mi325",
+        "amd-mi325",
+        "mi355",
+        "amd-mi355",
+        "mi250",
+        "amd-mi250",
+        "optional",
+        "amd-optional",
+        "direct-mi355",
+        "direct-mi250",
+    }
     assert jobs["image-build-amd"].env["ROCM_CI_REPO"] == "rocm/vllm-ci"
     # Steps are deferred as usual when nothing they depend on changed.
     assert jobs["amd-optional"].deferred
@@ -239,11 +256,6 @@ def test_nightly_config(env, aiter_nightly, docs_only_disable):
     config = _init_global_config(env)
     assert config["aiter_nightly"] == aiter_nightly
     assert config["docs_only_disable"] == docs_only_disable
-
-
-def test_nightly_cannot_combine_with_torch_nightly():
-    with pytest.raises(ValueError, match="TORCH_NIGHTLY and AITER_NIGHTLY"):
-        _init_global_config({"AITER_NIGHTLY": "1", "TORCH_NIGHTLY": "1"})
 
 
 def _generator(fake_global_config, monkeypatch, tmp_path, steps):
@@ -319,28 +331,54 @@ def test_generate_uploads_only_the_amd_image_steps_early(
     assert "amd-mi300" in final
 
 
-def test_generate_fails_when_a_kept_job_depends_on_a_dropped_one(
-    fake_global_config, build_sh_layout, monkeypatch, tmp_path
-):
-    steps = _steps() + [_mirrored("needs-cuda", "mi300_1", depends_on=["cuda-only"])]
-    generator, annotations, _ = _generator(
-        fake_global_config, monkeypatch, tmp_path, steps
-    )
-    with pytest.raises(ValueError, match="amd-needs-cuda -> cuda-only"):
-        generator.generate()
-    assert any(kwargs == {"style": "error"} for _, kwargs in annotations)
-    assert not (tmp_path / "out/pipeline.yaml").exists()
+def _depends_on_a_dropped_step(fake_global_config):
+    return _steps() + [_mirrored("needs-cuda", "mi300_1", depends_on=["cuda-only"])]
 
 
-def test_generate_rejects_a_checkout_without_build_sh(
-    fake_global_config, build_sh_layout, monkeypatch, tmp_path
-):
+def _with_torch_nightly(fake_global_config):
+    fake_global_config["torch_nightly"] = "1"
+    return _steps()
+
+
+def _without_build_sh(fake_global_config):
     # Older vLLM checkouts would silently test the stock AITER.
     os.remove(".buildkite/scripts/rocm/build.sh")
-    generator, annotations, _ = _generator(
-        fake_global_config, monkeypatch, tmp_path, _steps()
+    return _steps()
+
+
+@pytest.mark.parametrize(
+    "setup, error",
+    [
+        (_depends_on_a_dropped_step, "amd-needs-cuda -> cuda-only"),
+        (_with_torch_nightly, "TORCH_NIGHTLY and AITER_NIGHTLY"),
+        (_without_build_sh, "build.sh"),
+    ],
+)
+def test_generate_fails_before_uploading_anything(
+    fake_global_config, build_sh_layout, monkeypatch, tmp_path, setup, error
+):
+    # A real build: the image steps would otherwise go up early, and run with
+    # no tests after them.
+    build_sh_layout.setenv("BUILDKITE_JOB_ID", "job-1")
+    steps = setup(fake_global_config)
+    generator, annotations, uploads = _generator(
+        fake_global_config, monkeypatch, tmp_path, steps
     )
-    with pytest.raises(ValueError, match="build.sh"):
+    with pytest.raises(ValueError, match=error):
         generator.generate()
-    assert any(kwargs == {"style": "error"} for _, kwargs in annotations)
+    assert [kwargs for text, kwargs in annotations if error in text] == [
+        {"style": "error"}
+    ]
+    assert uploads == []
     assert not (tmp_path / "out/pipeline.yaml").exists()
+
+
+def test_dependency_check_sees_the_jobs_the_nightly_uploads(
+    fake_global_config, build_sh_layout
+):
+    """aiter_nightly_jobs predicts, before the early upload, what
+    convert_group_step_to_buildkite_step emits."""
+    rendered = _render(fake_global_config, "1")
+    assert pipeline_generator.aiter_nightly_jobs(_steps()) == {
+        key: job.depends_on or [] for key, job in rendered.items()
+    }

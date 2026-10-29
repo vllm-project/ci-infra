@@ -3,13 +3,14 @@ import json
 import os
 import shutil
 import subprocess
-from typing import Dict, FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, NoReturn, Optional, Tuple
 
 import yaml
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     is_amd_device,
+    is_amd_gpu_device,
     normalize_amd_depends_on,
     rocm_build_layout,
     runs_in_aiter_nightly,
@@ -59,6 +60,12 @@ def _annotate_best_effort(message: str, style: Optional[str] = None) -> None:
         pass
 
 
+def _fail_generation(message: str) -> NoReturn:
+    """Fail the build with the reason on the build page, not only in the log."""
+    _annotate_best_effort(message, style="error")
+    raise ValueError(message)
+
+
 class PipelineGenerator:
     def __init__(
         self,
@@ -95,6 +102,17 @@ class PipelineGenerator:
                 return
 
         torch_nightly = global_config["torch_nightly"] == "1"
+        aiter_nightly = global_config["aiter_nightly"] == "1"
+        if aiter_nightly and torch_nightly:
+            # Torch nightly drops the AMD lane; AITER nightly keeps only that lane.
+            _fail_generation("TORCH_NIGHTLY and AITER_NIGHTLY cannot both be set.")
+        if aiter_nightly and not rocm_build_layout():
+            # vLLM's build.sh installs the wheel in image-build-amd. Older
+            # checkouts would silently test the stock AITER.
+            _fail_generation(
+                "AITER nightly needs vLLM's .buildkite/scripts/rocm/build.sh, "
+                "which installs the AITER nightly wheel; this checkout has none."
+            )
         if torch_nightly:
             # ROCm has its own pinned torch and gains nothing from validating
             # against a CUDA torch-nightly build, so the AMD lane is excluded
@@ -103,20 +121,18 @@ class PipelineGenerator:
                 "AMD lane excluded: torch-nightly validates CUDA only."
             )
 
-        aiter_nightly = global_config["aiter_nightly"] == "1"
-        if aiter_nightly and not rocm_build_layout():
-            # vLLM's build.sh installs the wheel in image-build-amd. Older
-            # checkouts would silently test the stock AITER.
-            message = (
-                "AITER nightly needs vLLM's .buildkite/scripts/rocm/build.sh, "
-                "which installs the AITER nightly wheel; this checkout has none."
-            )
-            _annotate_best_effort(message, style="error")
-            raise ValueError(message)
-
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+        if aiter_nightly:
+            # Before the image steps go up early: a failed build must not
+            # leave them running with no tests after them.
+            broken = aiter_nightly_broken_dependencies(steps)
+            if broken:
+                _fail_generation(
+                    "AITER nightly: step(s) depend on steps it drops: "
+                    + ", ".join(broken)
+                )
         early_keys = upload_image_steps_early(
             steps, os.path.dirname(self.output_file_path)
         )
@@ -172,12 +188,6 @@ class PipelineGenerator:
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
-        if aiter_nightly:
-            try:
-                check_dependencies_exist(buildkite_group_steps)
-            except ValueError as error:
-                _annotate_best_effort(str(error), style="error")
-                raise
         buildkite_group_steps = sorted(buildkite_group_steps, key=lambda x: x.group)
         group_of_step = {
             step.key: group_step.group
@@ -454,7 +464,6 @@ def select_steps_and_dependencies(
     steps_by_key = {}
     dependencies_by_key = {}
     amd_step_keys = set()
-    aiter_nightly_keys = set()
     for step in steps:
         # Steps without an explicit key are uploaded with a label-derived key
         # (see convert_group_step_to_buildkite_step), so retry builds reference
@@ -467,8 +476,6 @@ def select_steps_and_dependencies(
         dependencies_by_key[step.key] = step.depends_on or []
         if is_amd_device(step.device):
             amd_step_keys.add(step.key)
-        if runs_in_aiter_nightly(step.device):
-            aiter_nightly_keys.add(step.key)
 
         # AMD mirrors are uploaded as generated `amd-<key>` steps, so retry
         # builds reference them by that key too.
@@ -482,8 +489,6 @@ def select_steps_and_dependencies(
                 amd_mirror.get("depends_on")
             )
             amd_step_keys.add(mirror_key)
-            if runs_in_aiter_nightly(amd_mirror.get("device")):
-                aiter_nightly_keys.add(mirror_key)
 
     missing = requested_step_keys - steps_by_key.keys()
     if missing:
@@ -497,7 +502,7 @@ def select_steps_and_dependencies(
                 "torch-nightly runs: " + ", ".join(sorted(requested_amd_keys))
             )
     if aiter_nightly:
-        excluded_keys = requested_step_keys - aiter_nightly_keys
+        excluded_keys = requested_step_keys - aiter_nightly_jobs(steps).keys()
         if excluded_keys:
             raise ValueError(
                 "CI step key(s) requested, but AITER nightly runs only the AMD "
@@ -526,24 +531,34 @@ def select_steps_and_dependencies(
     return selected, frozenset(selected_step_keys)
 
 
-def check_dependencies_exist(groups: List[BuildkiteGroupStep]) -> None:
-    """Fail rather than upload a depends_on on a step not in the pipeline."""
-    jobs = [job for group in groups for job in group.steps]
-    keys = {job.key for job in jobs}
-    broken = sorted(
-        f"{job.key} -> {dependency}"
-        for job in jobs
-        for dependency in (
-            [job.depends_on]
-            if isinstance(job.depends_on, str)
-            else job.depends_on or []
-        )
-        if dependency not in keys
+def aiter_nightly_jobs(steps: List[Step]) -> Dict[str, List[str]]:
+    """The jobs the AITER nightly uploads, by key, with their depends_on as
+    convert_group_step_to_buildkite_step emits them."""
+    jobs = {}
+    for step in steps:
+        key = step.key or _generate_step_key(step.label)
+        if runs_in_aiter_nightly(step.device):
+            jobs[key] = (
+                normalize_amd_depends_on(step.depends_on)
+                if is_amd_gpu_device(step.device)
+                else list(step.depends_on or [])
+            )
+        amd_mirror = (step.mirror or {}).get("amd")
+        if amd_mirror and runs_in_aiter_nightly(amd_mirror.get("device")):
+            jobs[f"amd-{key}"] = normalize_amd_depends_on(amd_mirror.get("depends_on"))
+    return jobs
+
+
+def aiter_nightly_broken_dependencies(steps: List[Step]) -> List[str]:
+    """Each "job -> dependency" where a job the AITER nightly runs depends on a
+    step it drops."""
+    jobs = aiter_nightly_jobs(steps)
+    return sorted(
+        f"{key} -> {dependency}"
+        for key, dependencies in jobs.items()
+        for dependency in dependencies
+        if dependency not in jobs
     )
-    if broken:
-        raise ValueError(
-            "Step(s) depend on steps not in the pipeline: " + ", ".join(broken)
-        )
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:
