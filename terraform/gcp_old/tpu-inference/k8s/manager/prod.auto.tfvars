@@ -174,6 +174,13 @@ workers = {
     project  = "cloud-ullm-inference-ci-cd"
     location = "us-central1"
   }
+  # v7x, in Inferact's project. Paused: configured and reachable, and sent no
+  # work; true resumes it. See README "Pause or remove a worker".
+  "inferact" = {
+    project  = "inferact-vllm-tpu"
+    location = "us-central1"
+    dispatch = false
+  }
 }
 
 labels = {
