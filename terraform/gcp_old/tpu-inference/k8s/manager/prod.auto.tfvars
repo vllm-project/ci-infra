@@ -152,6 +152,12 @@ allowed_image_repos = [
   "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/",
 ]
 
+# Who may deploy: each acts as the tpu-ci-deployer account, which is what
+# every cluster's RBAC or IAM lets in.
+deployers = [
+  "user:mhhua@google.com",
+]
+
 # The workers this manager dispatches to. Each is a module block in an
 # environment under ../workers/, where its shapes, quotas and reservations
 # are; this is only what Terraform here needs to grant it access, restated

@@ -302,8 +302,11 @@ def find_workers() -> dict[str, dict]:
                             return [resolve(v, f"{arg}[{i}]") for i, v in enumerate(value)]
                         return value
 
+                    # Meta-arguments are Terraform's, not the worker's: the
+                    # kubernetes provider a root passes is the one thing a
+                    # worker's block legitimately computes.
                     worker = {k: resolve(v, k) for k, v in body.items()
-                              if k not in ("source", "__is_block__")}
+                              if k not in ("source", "providers", "depends_on", "__is_block__")}
                     worker["_at"] = at
                     worker["_env"], worker["_label"] = env.name, label
                     if worker["name"] in found:
@@ -1371,6 +1374,9 @@ def generate(tfvars: dict, out_dir: Path) -> dict:
         "namespace": namespace,
         # Where every worker's membership is, for the credentials.
         "fleet_project": project,
+        # What the deploy runs as. manager/iam.tf creates it and
+        # modules/worker/deploy.tf binds it, under this same name.
+        "deployer": f"{prefix}-deployer@{project}.iam.gserviceaccount.com",
         "clusters": clusters,
     }
 

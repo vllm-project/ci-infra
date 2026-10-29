@@ -72,6 +72,10 @@ There is no test suite. At least:
 
 ## Deploying
 
+`deploy_manifests.py` runs as the `tpu-ci-deployer` service account, which is
+what every cluster lets in. Add yourself to `deployers` in
+`manager/prod.auto.tfvars` and apply `manager/` before your first deploy.
+
 The fleet runs whatever was last applied, which is not always main. Changes
 are applied from the open PR and merged once they are live and checked:
 

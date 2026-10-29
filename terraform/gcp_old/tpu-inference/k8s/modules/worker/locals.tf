@@ -4,6 +4,11 @@ locals {
     component  = "tpu-ci"
   })
 
+  # The account scripts/deploy_manifests.py runs as. manager/ creates it under
+  # the same name; deriving it here rather than taking it as a variable keeps
+  # a worker's root from naming some other identity cluster-admin.
+  deployer = "${var.fleet.name_prefix}-deployer@${var.fleet.project_id}.iam.gserviceaccount.com"
+
   # Every pool on this cluster. The pool name is derived from the shape rather
   # than given in the tfvars, so it cannot describe hardware the pool does not
   # have.
