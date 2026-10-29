@@ -392,7 +392,13 @@ the page to send. Our side:
 2. **They apply it.** The apply also binds the fleet's deployer account to
    `cluster-admin` in the new cluster, which is how the deploy gets in. In our
    own projects we apply it ourselves, and the account's IAM lets it in.
-3. **List it, apply the manager, generate, deploy.** Add
+3. **Optionally, register it first.** Add it to `fleet_members` in
+   `manager/prod.auto.tfvars` and apply `manager/`. That registers the cluster
+   and nothing else, so registration and the deploy account's way in
+   (AGENTS.md "Access") can be checked before anything is granted or
+   dispatched. Step 4 moves the entry to `workers`; its registration carries
+   over.
+4. **List it, apply the manager, generate, deploy.** Add
    `<name> = { project, location }` to `workers` in `manager/prod.auto.tfvars`
    and apply `manager/`. That registers a cluster from another project in the
    fleet (`manager/fleet.tf`; one in this project registered itself when it

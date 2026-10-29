@@ -176,6 +176,16 @@ workers = {
   }
 }
 
+# Registered in the fleet ahead of joining workers, so registration and the
+# deploy account's way into the cluster can be checked on their own.
+fleet_members = {
+  # Inferact's v7x worker (../workers/inferact-vllm-tpu/).
+  "inferact" = {
+    project  = "inferact-vllm-tpu"
+    location = "us-central1"
+  }
+}
+
 labels = {
   environment = "production"
   workload    = "tpu-ci"

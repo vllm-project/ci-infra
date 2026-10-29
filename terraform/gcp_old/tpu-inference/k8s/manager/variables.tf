@@ -165,6 +165,24 @@ variable "deployers" {
   EOT
 }
 
+variable "fleet_members" {
+  type = map(object({
+    project  = string
+    location = string
+  }))
+  default     = {}
+  description = <<-EOT
+    Clusters in other projects that this root registers in the fleet without
+    making them workers, by name as in workers.
+
+    Registration is all an entry gets: the cluster becomes reachable through
+    Connect Gateway, so the deploy account's way in can be checked, and
+    nothing is granted, rendered or dispatched. Listing it in workers does all
+    of that; take it out of here in the same change, and its membership
+    carries over (manager/fleet.tf).
+  EOT
+}
+
 variable "image_repositories" {
   type = list(object({
     location   = string
