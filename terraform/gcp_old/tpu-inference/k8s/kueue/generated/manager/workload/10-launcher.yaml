@@ -109,6 +109,10 @@ data:
     - tpu7x-standard-1t-1x1x1
     timing_table: cloud-ullm-inference-ci-cd.ci_efficiency_metrics.kube_workload_timing
     workers:
+      tpu-ci-inferact:
+        membership: tpu-ci-inferact
+        project: cloud-ullm-inference-ci-cd
+        location: us-central1
       tpu-ci-us-central1:
         membership: tpu-ci-us-central1
         project: cloud-ullm-inference-ci-cd

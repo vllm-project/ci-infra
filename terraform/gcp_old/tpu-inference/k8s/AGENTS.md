@@ -33,10 +33,26 @@ gcloud container clusters get-credentials tpu-ci-us-east5 --location us-east5 --
 ```
 
 The contexts are `gke_cloud-ullm-inference-ci-cd_<region>_<cluster>`. Do not
-pass `--dns-endpoint`: the DNS endpoint it writes answers 403. Buildkite is the
-`bk` CLI against org `vllm`. Every cluster's container logs and Kubernetes
-events are in Cloud Logging in `cloud-ullm-inference-ci-cd`, and they outlive
-the pods, which is usually where a finished or cancelled step has to be read.
+pass `--dns-endpoint`: the DNS endpoint it writes answers 403.
+
+`tpu-ci-inferact` is in `inferact-vllm-tpu`, where we hold no role. It is
+reached through its fleet membership, and inside it only `tpu-ci-deployer` is
+let in, so act as that account with a token gcloud mints for it - the GKE auth
+plugin keeps presenting your own identity whatever impersonation is set. You
+need to be in `deployers`, and the token lasts an hour:
+
+```bash
+gcloud container fleet memberships get-credentials tpu-ci-inferact --location us-central1 --project cloud-ullm-inference-ci-cd
+U=connectgateway_cloud-ullm-inference-ci-cd_us-central1_tpu-ci-inferact
+kubectl config unset users.$U.exec
+kubectl config set-credentials $U --token="$(gcloud auth print-access-token --impersonate-service-account=tpu-ci-deployer@cloud-ullm-inference-ci-cd.iam.gserviceaccount.com)"
+```
+
+Buildkite is the `bk` CLI against org `vllm`. Every cluster's container logs
+and Kubernetes events are in Cloud Logging in its own project -
+`cloud-ullm-inference-ci-cd`, except `tpu-ci-inferact`'s, which are in
+`inferact-vllm-tpu` - and they outlive the pods, which is usually where a
+finished or cancelled step has to be read.
 
 ## Where to change what
 
