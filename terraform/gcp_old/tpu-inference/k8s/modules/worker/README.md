@@ -23,7 +23,10 @@ All of it in your project:
   models, which the CI workloads read and write, and a Rapid Cache in front of
   each in the zones you name.
 - If your project is not `cloud-ullm-inference-ci-cd`, `roles/gkehub.serviceAgent`
-  for the fleet's GKE Hub service agent, which registering the cluster needs.
+  for the fleet's GKE Hub service agent, which registering the cluster needs,
+  and in the cluster a binding of the fleet's deployer account,
+  `tpu-ci-deployer@cloud-ullm-inference-ci-cd.iam.gserviceaccount.com`, to
+  `cluster-admin`. See "Why the deployer binding".
 
 ## Before you apply
 
@@ -61,9 +64,9 @@ No secrets and no tokens:
 ## Applying
 
 The fleet's maintainers send a branch with your environment: `main.tf` with
-the backend and the locals your workers share, and a `<name>.tf` per worker
-with its module block filled in from your project, region, network, control
-plane `/28`, reservation and shapes. Then:
+the backend, the locals your workers share and the kubernetes provider, and a
+`<name>.tf` per worker with its module block filled in from your project,
+region, network, control plane `/28`, reservation and shapes. Then:
 
 ```bash
 terraform -chdir=workers/<environment> init
@@ -74,23 +77,38 @@ Keep every argument in a module block a literal, or one of the environment's
 locals. The fleet's generator reads them to build the Kueue queues for your
 shapes, and it cannot evaluate an expression.
 
-## After applying
+The apply talks to the new cluster once, to create the deployer binding, so it
+has to reach the cluster's endpoint, which is public and authenticated. The
+kubernetes provider in `main.tf` is what it uses:
 
-Bind whoever deploys for the fleet, which the maintainers will name:
+```hcl
+data "google_client_config" "default" {}
 
-```bash
-kubectl create clusterrolebinding tpu-ci-deploy-<user> --clusterrole=cluster-admin --user=<user>@google.com
+provider "kubernetes" {
+  host                   = "https://${module.<name>.endpoint}"
+  cluster_ca_certificate = base64decode(module.<name>.ca_certificate)
+  token                  = data.google_client_config.default.access_token
+}
 ```
+
+With more than one worker in the environment, give each its own provider
+alias and pass it in the module block as `providers = { kubernetes = ... }`.
+
+Once it is applied, the maintainers list the worker in the fleet and deploy
+to it. Nothing else is needed from you.
+
+## Why the deployer binding
 
 Terraform stops at the cluster. What runs inside it - Kueue, JobSet, the
 queues and their quota, the RBAC the manager dispatches through, the secret
 syncs, the cache volumes - is installed and upgraded by the fleet's deploy,
 because it changes with every quota change and every Kueue or launcher
-release. The deploy reaches your API server through Connect Gateway as the
-person running it, and in your cluster only RBAC can authorize them, since
-they hold no role in your project.
-
-The maintainers then list the worker in the fleet and deploy to it.
+release. The deploy runs as the deployer account and reaches your API server
+through Connect Gateway, which passes that identity through. The account holds
+no role in your project, so in your cluster only RBAC can authorize it, and
+the binding is that RBAC. It grants nothing outside the cluster, and deleting
+it shuts the fleet's deploy out. Which people may act as the account is the
+fleet's to decide.
 
 ## Afterwards
 

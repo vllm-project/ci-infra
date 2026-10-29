@@ -51,7 +51,11 @@ manager where the launcher built the podspec.
 Terraform stops at the cluster; `deploy_manifests.py` starts there. The
 Kubernetes and Helm providers need a reachable API server at plan time, which
 would make creating a cluster and configuring it two runs with a hand-edited
-variable in between.
+variable in between. The one exception is a worker in another project, whose
+own apply binds the fleet's deployer account to `cluster-admin`
+(`modules/worker/deploy.tf`): nothing can be deployed there until that binding
+exists, and whoever applies the worker is the one party certain to be able to
+create it.
 
 `kueue/generated/` is committed so that reviewing a quota change means reading
 the YAML that will be applied rather than inferring it from a template.
@@ -72,6 +76,11 @@ terraform -chdir=manager apply             # if manager/ changed, or a worker jo
 ./scripts/generate_manifests.py            # if a worker's shapes, manager/prod.auto.tfvars or a template changed
 ./scripts/deploy_manifests.py              # diff, confirm, apply
 ```
+
+The deploy runs as `tpu-ci-deployer@cloud-ullm-inference-ci-cd.iam.gserviceaccount.com`,
+through gcloud impersonation, on every cluster: our own let it in by its IAM
+on this project, and a worker elsewhere by the binding its apply creates. To
+run it you have to be in `deployers` in `manager/prod.auto.tfvars`.
 
 `deploy_manifests.py --mode diff` shows what would change and stops;
 `--mode apply` skips the preview and the prompt. It walks the manager first so
@@ -369,9 +378,9 @@ the page to send. Our side:
    module's arguments: name, project, region, network, a `/28` for the control
    plane, and the pools and quotas. `tpu-ci-<name>` is the cluster's fleet
    membership ID, so `<name>` is unique in the fleet.
-3. **They apply it, and bind whoever deploys** to `cluster-admin`, as the
-   module's README describes. In our own projects we apply it ourselves, and
-   IAM already lets the deploy in.
+3. **They apply it.** The apply also binds the fleet's deployer account to
+   `cluster-admin` in the new cluster, which is how the deploy gets in. In our
+   own projects we apply it ourselves, and the account's IAM lets it in.
 4. **List it, apply the manager, generate, deploy.** Add
    `<name> = { project, location }` to `workers` in `manager/prod.auto.tfvars`
    and apply `manager/`. That grants the worker's node account Artifact

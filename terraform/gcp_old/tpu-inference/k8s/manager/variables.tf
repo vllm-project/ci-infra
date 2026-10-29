@@ -147,6 +147,17 @@ variable "workers" {
   }
 }
 
+variable "deployers" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Who may run scripts/deploy_manifests.py, as IAM members (user:, group:,
+    serviceAccount:). Each may act as the fleet's deployer account, which is
+    what the deploy runs as on every cluster, including workers in other
+    projects that bind that account to cluster-admin.
+  EOT
+}
+
 variable "worker_deployers" {
   type        = list(string)
   default     = []
