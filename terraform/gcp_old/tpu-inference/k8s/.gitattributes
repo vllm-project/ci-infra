@@ -1,0 +1,5 @@
+# Collapsed in pull request diffs. Review the inputs - manager/prod.auto.tfvars,
+# the module blocks under workers/, the templates - rather than this output;
+# deploy_manifests.py refuses a tree that differs from a fresh render. Here
+# rather than inside kueue/generated/, which the generator replaces whole.
+kueue/generated/** linguist-generated=true
