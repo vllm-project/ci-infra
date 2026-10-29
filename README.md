@@ -1,6 +1,6 @@
 # vLLM CI Infrastructure
 
-Infrastructure-as-Code and bootstrap scripts for vLLM's continuous integration pipeline, built on [Buildkite](https://buildkite.com/) with autoscaling compute across AWS and GCP.
+Bootstrap scripts, pipeline generation, and test selection for vLLM's continuous integration pipeline, built on [Buildkite](https://buildkite.com/). Infrastructure configuration is maintained in [ci-infra-private](https://github.com/vllm-project/ci-infra-private) (maintainer access required).
 
 ## Repository Structure
 
@@ -14,15 +14,10 @@ ci-infra/
 │   ├── test-template-amd.j2  # AMD/ROCm Jinja2 pipeline template
 │   └── scripts/           # Helper scripts (Docker bake, Codecov upload)
 ├── docker/                # Docker buildx bake configuration (ci.hcl)
-├── terraform/
-│   ├── aws/               # AWS infrastructure (primary, active)
-│   ├── gcp/               # GCP GKE cluster and compute instances
-│   └── gcp_old/           # GCP TPU infrastructure (v5, v6e, v7x)
 ├── packer/
 │   ├── cpu/               # CPU build AMI with warm Docker cache
 │   └── gpu/               # GPU AMI with NVIDIA drivers
 ├── infra-k8s/             # Kubernetes-based Buildkite agent deployment
-├── github/                # GitHub Actions runner groups (Neural Magic, IBM)
 ├── claude-skills/         # Portable CI automations and investigation skills
 └── usage-stats/           # Usage telemetry collection (Vector)
 ```
@@ -123,49 +118,9 @@ The AMD and Intel bootstrap scripts additionally handle:
 
 ## Infrastructure
 
-### AWS (Primary)
+Terraform configuration for AWS, GCP, TPU/Kubernetes infrastructure, and GitHub runner groups is maintained in [ci-infra-private](https://github.com/vllm-project/ci-infra-private). The original `terraform/` and `github/` directory layouts are preserved there. Infrastructure maintainers need access to that repository to plan or update deployments.
 
-Managed via Terraform in `terraform/aws/`. Uses the [Buildkite Elastic CI Stack for AWS](https://github.com/buildkite/elastic-ci-stack-for-aws) (v6.21.0) to deploy autoscaling agent clusters as CloudFormation stacks.
-
-**Regions**: us-west-2 (GPU + CPU queues), us-east-1 (CPU build queues with warm-cache AMI, release queues)
-
-#### Agent Queues
-
-| Queue | Instance Type | Max | Purpose |
-|-------|--------------|-----|---------|
-| `small_cpu_queue_premerge` | r6in.large | 40 | Bootstrap, docs, lightweight tasks |
-| `medium_cpu_queue_premerge` | r6in.4xlarge | 60 | Medium CPU workloads, PR image builds |
-| `cpu_queue_premerge` | r6in.16xlarge (512GB) | 10 | CUDA kernel compilation |
-| `cpu_queue_premerge_us_east_1` | r6in.16xlarge (512GB) | 20 | CPU builds (warm-cache AMI) |
-| `arm64_cpu_queue_premerge` | r7g.16xlarge | 10 | ARM64 builds |
-| `gpu_1_queue` | g6.4xlarge (1x L4) | 208 | Single-GPU tests |
-| `gpu_4_queue` | g6.12xlarge (4x L4) | 64 | Multi-GPU tests |
-
-Equivalent postmerge and release queues exist with ECR write access for pushing images. Specialized hardware (H100, H200, B200, A100) is managed via Kubernetes or dedicated pools.
-
-**Each queue consists of:**
-- An EC2 Auto Scaling Group that scales instances based on workload
-- A Lambda function that polls Buildkite to assess capacity needs
-- Buildkite agents running on each instance, executing jobs in Docker containers
-- All on-demand (100%), terminated after each job for isolation
-
-#### AWS Resources
-
-- **VPC**: Isolated networks in us-west-2 and us-east-1 (10.0.0.0/16, 4 public subnets each)
-- **ECR**: `vllm-ci-test-cache` (PR builds) and `vllm-ci-postmerge-cache` (main branch) with 14-day lifecycle
-- **S3**: `vllm-build-sccache` for C++ compiler cache, `vllm-wheels` / `vllm-wheels-dev` for wheel binaries
-- **Secrets Manager**: HuggingFace token, Buildkite analytics token
-- **SSM Parameter Store**: Agent tokens, AMI IDs
-
-### GCP
-
-- **GKE** (`terraform/gcp/`): Kubernetes clusters in us-central1 and us-west1 with L4 GPU node pools (g2-standard machines, up to 64 nodes). Autopilot cluster available. Artifact registry with 7-day cleanup. Compute instance groups for CPU builders.
-- **TPU** (`terraform/gcp_old/`): TPU infrastructure across multiple GCP projects:
-  - **TPU v5**: v5litepod-1 nodes for CI testing
-  - **TPU v6e**: v6e-1 and v6e-8 nodes with hyperdisk-balanced storage
-  - **TPU v7x**: v7x-2 and v7x-8 nodes with up to 4TB disk
-  - **CPU**: e2-standard-2 and n2-standard-64 instances for CPU-only workloads
-  - **Monitoring**: e2-micro instances running buildkite-agent-metrics exporter with GCP Ops Agent
+Public pipeline generation and test selection remain here. Infrastructure provisioning and state management are handled from the private repository.
 
 ### Kubernetes
 
@@ -203,15 +158,6 @@ C++ compilation outputs are cached in S3 (`vllm-build-sccache` in us-west-2), co
 ### Precompiled Wheels
 
 When no critical source files have changed, CI uses precompiled wheels from the merge-base commit (hosted at `wheels.vllm.ai`) instead of building from source.
-
-## GitHub Runner Groups
-
-The `github/` directory contains Terraform configurations for GitHub Actions runner groups used by partner organizations:
-
-- **Neural Magic** (`group-neural-magic/`): Dedicated runner group for Neural Magic workloads.
-- **IBM** (`group-ibm/`): Dedicated runner group for IBM workloads.
-
-These are deployed with `terraform apply` and require a GitHub PAT with organizational admin permissions.
 
 ## Development
 
