@@ -351,6 +351,8 @@ resource "aws_iam_policy" "bk_stack_sccache_bucket_read_write_access" {
   })
 }
 
+# Postmerge and release queues can read wheels and publish development wheels.
+# Publishing release wheels requires the separate release-only policy below.
 resource "aws_iam_policy" "vllm_wheels_bucket_read_write_access" {
   name = "read-write-access-to-vllm-wheels-bucket"
 
@@ -359,8 +361,7 @@ resource "aws_iam_policy" "vllm_wheels_bucket_read_write_access" {
     Statement = [{
       Action = [
         "s3:Get*",
-        "s3:List",
-        "s3:PutObject"
+        "s3:ListBucket"
       ],
       Effect = "Allow",
       Resource = [
@@ -369,8 +370,31 @@ resource "aws_iam_policy" "vllm_wheels_bucket_read_write_access" {
         "arn:aws:s3:::vllm-wheels-dev",
         "arn:aws:s3:::vllm-wheels-dev/*"
       ]
+    }, {
+      Action   = ["s3:PutObject"]
+      Effect   = "Allow"
+      Resource = "arn:aws:s3:::vllm-wheels-dev/*"
     }]
   })
+}
+
+resource "aws_iam_policy" "vllm_release_wheels_bucket_write_access" {
+  name = "write-access-to-vllm-release-wheels-bucket"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Action   = ["s3:PutObject"]
+      Effect   = "Allow"
+      Resource = "arn:aws:s3:::vllm-wheels/*"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "vllm_release_wheels_bucket_write_access" {
+  for_each   = aws_cloudformation_stack.bk_queue_release
+  role       = each.value.outputs.InstanceRoleName
+  policy_arn = aws_iam_policy.vllm_release_wheels_bucket_write_access.arn
 }
 
 resource "aws_iam_role_policy_attachment" "premerge_ecr_public_read_access" {
@@ -433,31 +457,19 @@ resource "aws_iam_role_policy_attachment" "postmerge_ecr_cache_read_write_access
 }
 
 resource "aws_iam_role_policy_attachment" "release_ecr_public_read_write_access" {
-  for_each   = merge(
-    aws_cloudformation_stack.bk_queue_postmerge,
-    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
-    aws_cloudformation_stack.bk_queue_release,
-  )
+  for_each   = aws_cloudformation_stack.bk_queue_release
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.release_ecr_public_read_write_access_policy.arn
 }
 
 resource "aws_iam_role_policy_attachment" "cpu_release_ecr_public_read_write_access" {
-  for_each   = merge(
-    aws_cloudformation_stack.bk_queue_postmerge,
-    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
-    aws_cloudformation_stack.bk_queue_release,
-  )
+  for_each   = aws_cloudformation_stack.bk_queue_release
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.cpu_release_ecr_public_read_write_access_policy.arn
 }
 
 resource "aws_iam_role_policy_attachment" "arm64_cpu_release_ecr_public_read_write_access" {
-  for_each   = merge(
-    aws_cloudformation_stack.bk_queue_postmerge,
-    aws_cloudformation_stack.bk_queue_postmerge_us_east_1,
-    aws_cloudformation_stack.bk_queue_release,
-  )
+  for_each   = aws_cloudformation_stack.bk_queue_release
   role       = each.value.outputs.InstanceRoleName
   policy_arn = aws_iam_policy.arm64_cpu_release_ecr_public_read_write_access_policy.arn
 }
