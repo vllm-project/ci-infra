@@ -9,9 +9,9 @@ import yaml
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
-    apply_aiter_nightly,
     is_amd_device,
     normalize_amd_depends_on,
+    rocm_build_layout,
     runs_in_aiter_nightly,
 )
 from buildkite_step import (
@@ -103,18 +103,20 @@ class PipelineGenerator:
                 "AMD lane excluded: torch-nightly validates CUDA only."
             )
 
+        aiter_nightly = global_config["aiter_nightly"] == "1"
+        if aiter_nightly and not rocm_build_layout():
+            # vLLM's build.sh installs the wheel in image-build-amd. Older
+            # checkouts would silently test the stock AITER.
+            message = (
+                "AITER nightly needs vLLM's .buildkite/scripts/rocm/build.sh, "
+                "which installs the AITER nightly wheel; this checkout has none."
+            )
+            _annotate_best_effort(message, style="error")
+            raise ValueError(message)
+
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
-
-        aiter_nightly = global_config["aiter_nightly"] == "1"
-        if aiter_nightly:
-            try:
-                steps = apply_aiter_nightly(steps)
-            except ValueError as error:
-                _annotate_best_effort(str(error), style="error")
-                raise
-
         early_keys = upload_image_steps_early(
             steps, os.path.dirname(self.output_file_path)
         )
