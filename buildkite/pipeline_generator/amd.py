@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 from constants import AgentQueue, DeviceType
-from step import Step
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
@@ -39,14 +38,11 @@ AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
 AMD_ROCM_BASE_DOCKERFILE = "docker/Dockerfile.rocm_base"
 AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES = 9 * 60
 AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES = 15
-AMD_CI_BASE_STEP_KEY = "ensure-ci-base-amd"
-AITER_NIGHTLY_STEP_KEY = "aiter-nightly-amd"
-AITER_NIGHTLY_TIMEOUT_MINUTES = 60
 # vLLM builds AITER only for these (AITER_ROCM_ARCH in docker/Dockerfile.rocm_base).
 AITER_GPU_ARCHS = frozenset({"gfx942", "gfx950"})
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
     {
-        AMD_CI_BASE_STEP_KEY,
+        "ensure-ci-base-amd",
         AMD_ROCM_BASE_REFRESH_STEP_KEY,
     }
 )
@@ -244,67 +240,6 @@ def runs_in_aiter_nightly(device: Optional[str]) -> bool:
         return True
     config = get_amd_device_config(device)
     return config is not None and config.arch in AITER_GPU_ARCHS
-
-
-def apply_aiter_nightly(steps: List[Step]) -> List[Step]:
-    """Insert the AITER nightly overlay after ensure-ci-base-amd, and build
-    image-build-amd on its image.
-
-    The overlay replaces this build's ci_base-build tag, so native jobs need no
-    change.
-    """
-    steps_by_key = {step.key: step for step in steps if step.key}
-    missing = [
-        key
-        for key in (AMD_CI_BASE_STEP_KEY, AMD_ARTIFACT_STEP)
-        if key not in steps_by_key
-    ]
-    if missing:
-        raise ValueError(
-            "AITER nightly requires the AMD build step(s): " + ", ".join(missing)
-        )
-
-    ci_base = steps_by_key[AMD_CI_BASE_STEP_KEY]
-    overlay = Step(
-        label="AMD: :crescent_moon: install AITER nightly",
-        group=ci_base.group,
-        key=AITER_NIGHTLY_STEP_KEY,
-        depends_on=[AMD_CI_BASE_STEP_KEY],
-        device=DeviceType.AMD_CPU.value,
-        no_plugin=True,
-        commands=["bash .buildkite/scripts/rocm/aiter-nightly-overlay.sh"],
-        timeout_in_minutes=AITER_NIGHTLY_TIMEOUT_MINUTES,
-        retry={
-            "automatic": [
-                {"exit_status": 1, "limit": 1},  # Transient Docker/BuildKit failure
-                {"exit_status": 2, "limit": 1},  # Registry handoff failed
-                {"exit_status": -10, "limit": 1},  # Agent was lost
-            ]
-        },
-    )
-
-    image_build = steps_by_key[AMD_ARTIFACT_STEP]
-    depends_on = [*(image_build.depends_on or []), AITER_NIGHTLY_STEP_KEY]
-    # build-test-image.sh builds on rocm-ci-base-image (stock ci_base). Point it at
-    # the overlay's image here, so a re-run of ensure-ci-base-amd cannot set it back.
-    commands = [
-        "buildkite-agent meta-data set rocm-ci-base-image "
-        '"$$(buildkite-agent meta-data get aiter-nightly-ci-base)"',
-        *(image_build.commands or []),
-    ]
-    # Its own cache branch, and no shared content cache export: main's stays intact.
-    env = {
-        **(image_build.env or {}),
-        "ROCM_CACHE_BRANCH_NAME": "aiter-nightly",
-        "ROCM_CONTENT_CACHE_EXPORT_MODE": "never",
-    }
-    image_build = image_build.model_copy(
-        update={"depends_on": depends_on, "commands": commands, "env": env}
-    )
-
-    return [
-        image_build if step.key == AMD_ARTIFACT_STEP else step for step in steps
-    ] + [overlay]
 
 
 def get_amd_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
