@@ -248,7 +248,9 @@ lasts as long as the step. In order:
    - a Spot pod with no node, or whose node was reclaimed: resubmit off Spot;
    - a pod evicted for its disk use: fail (`evicted_storage`);
    - a pod no node of its shape can hold: warn, then fail (`unfit`);
-   - the workload finished: take the exit code from its pods.
+   - the workload finished: take the exit code from its pods (or fail as
+     `pod_lost` if every pod retry was spent before the `workload` container
+     ran).
 4. **Record.** Print one JSON line with the workload's timing and outcome and
    insert it into `ci_efficiency_metrics.kube_workload_timing`, which the
    dashboard's Jobs and Review pages read.
@@ -264,18 +266,33 @@ until the agent Job's TTL removes the pod, about ten minutes.
 `launch.py`, a timeout or `spot_queues` reaches only steps that start after it;
 a running launcher keeps what it started with.
 
-The outcomes the timing record carries:
+The outcomes the timing record carries, and the exit code `launch.py` returns
+for each:
 
-| Outcome | Meaning |
-| --- | --- |
-| `succeeded`, `failed` | The workload finished. `failed` carries the pods' exit code. |
-| `cancelled` | Buildkite cancelled the step. |
-| `not_admitted` | Not admitted, or not dispatched, within its budget; or a resubmission failed. |
-| `evicted_storage` | A pod was evicted for its disk use. |
-| `unfit` | A pod asks for more than any node of its shape has. |
-| `removed` | The Job or JobSet disappeared from under the launcher. |
-| `api_unreachable` | The manager's API server did not answer for 10 minutes. |
-| `error` | The launcher itself failed; the traceback is in the step log. |
+| Outcome | Exit code | Meaning |
+| --- | --- | --- |
+| `succeeded` | `0` | The workload finished cleanly. |
+| `failed` | pod's (`1` default) | The workload failed: the `workload` container's exit code when all roles agree, or `1` when roles disagree or the step hit `activeDeadlineSeconds`. |
+| `cancelled` | `128 + signal` | Buildkite cancelled the step (`143` on SIGTERM). |
+| `not_admitted` | `75` | Not admitted, or not dispatched, within its budget; or a resubmission failed. |
+| `evicted_storage` | `75` | A pod was evicted for its disk use. |
+| `unfit` | `75` | A pod asks for more than any node of its shape has. |
+| `pod_lost` | `75` | Every pod retry (`backoffLimit` / `maxRestarts`) was spent before the `workload` container ran. |
+| `removed` | `75` | The Job or JobSet disappeared from under the launcher. |
+| `api_unreachable` | `75` | The manager's API server did not answer for 10 minutes. |
+| `error` | `75` | The launcher itself failed; the traceback is in the step log. |
+
+Exit code `75` (`EX_TEMPFAIL` from `<sysexits.h>`) marks every fleet outcome, while
+test failures, step timeouts (`DeadlineExceeded`) and invalid flags or manifests
+exit `1` (or `2` from `argparse`). Buildkite pipelines can retry infrastructure
+failures alone without rerunning broken tests:
+
+```yaml
+retry:
+  automatic:
+    - exit_status: 75
+      limit: 2
+```
 
 The dashboard counts every outcome other than `succeeded`, `failed` and
 `cancelled` as an infrastructure failure.

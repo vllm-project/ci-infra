@@ -37,6 +37,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import traceback
 import urllib.request
 
 try:
@@ -111,6 +112,12 @@ HOST_SIZED_VOLUMES = {
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$")
 
 WORKLOAD_CONTAINER = "workload"
+
+# EX_TEMPFAIL (<sysexits.h>): returned whenever the launcher ends a run for a
+# fleet reason rather than a test failure, so a step's automatic retry rule on
+# exit_status 75 retries capacity, node and control-plane faults without
+# rerunning failing tests or step timeouts.
+EXIT_INFRA = 75
 
 # Held back from the BUILDKITE_* sweep in forward_env. BUILDKITE_COMMAND is the
 # step's own command line, which would have the workload re-run the launcher
@@ -346,7 +353,7 @@ def withdraw_unfit():
         agent("annotation", "remove", "--context", context)
 
 
-def kubectl(*args, check=True, timeout=CLI_TIMEOUT_SECONDS):
+def kubectl(*args, check=True, timeout=CLI_TIMEOUT_SECONDS, input_text=None):
     """Run one kubectl call against the manager.
 
     A call that never returns holds the admitted workload's chips past the step
@@ -359,7 +366,8 @@ def kubectl(*args, check=True, timeout=CLI_TIMEOUT_SECONDS):
     try:
         return subprocess.run(
             ["kubectl", "-n", NAMESPACE, *args],
-            check=check, capture_output=True, text=True, timeout=timeout,
+            input=input_text, check=check, capture_output=True, text=True,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         if check:
@@ -371,6 +379,17 @@ def kubectl(*args, check=True, timeout=CLI_TIMEOUT_SECONDS):
 # Retrying these waits out the whole grace period to arrive at the same
 # refusal, while the workload holds its chips throughout.
 FATAL_API_ERRORS = ("(Forbidden)", "(Unauthorized)")
+INVALID_MANIFEST_ERRORS = (
+    "(Invalid)",
+    "(BadRequest)",
+    "error validating data",
+    "unknown field",
+    "strict decoding error",
+)
+
+
+class ManifestError(Exception):
+    """A manifest or RBAC refusal from kubectl apply that will not clear on retry."""
 
 
 class ApiUnreachable(Exception):
@@ -381,6 +400,26 @@ class ApiUnreachable(Exception):
     that could not be reached has said nothing about a workload that is on a
     worker cluster and carries on regardless.
     """
+
+
+def apply_manifest(doc):
+    """Create or replace a workload manifest on the manager.
+
+    Raises ManifestError when the API server rejects the manifest itself and
+    ApiUnreachable on any other failure, so with_grace retries control-plane
+    and webhook blips without retrying a broken manifest.
+    """
+    proc = kubectl("apply", "-f", "-", input_text=json.dumps(doc), check=False)
+    if proc.stdout:
+        print(proc.stdout, end="", flush=True)
+    if proc.returncode == 0:
+        return
+    if proc.stderr:
+        print(proc.stderr, end="", file=sys.stderr, flush=True)
+    detail = proc.stderr.strip()[:300]
+    if any(marker in proc.stderr for marker in FATAL_API_ERRORS + INVALID_MANIFEST_ERRORS):
+        raise ManifestError(detail or "manifest rejected")
+    raise ApiUnreachable(detail or f"kubectl apply exited {proc.returncode}")
 
 
 def kubectl_json(*args):
@@ -668,11 +707,7 @@ def resubmit(kind, name, doc, before_create=None):
         time.sleep(POLL_SECONDS)
     if before_create is not None and not before_create():
         return None
-    subprocess.run(
-        ["kubectl", "-n", NAMESPACE, "apply", "-f", "-"],
-        input=json.dumps(doc), text=True, check=True,
-        timeout=CLI_TIMEOUT_SECONDS,
-    )
+    apply_manifest(doc)
     return kubectl_json("get", kind, name)
 
 
@@ -1791,6 +1826,47 @@ def workload_exit_code(items):
     return code if 0 < code < 256 else None
 
 
+POLICY_EXIT_CODE = re.compile(r"\bfailed with exit code (\d+)\b")
+# Reasons a Job or JobSet gives when every pod retry was spent without the
+# workload container tripping podFailurePolicy (which fails on the first
+# non-zero exit) and without hitting activeDeadlineSeconds.
+PODS_LOST_REASONS = frozenset({"BackoffLimitExceeded", "MaxRestartsExceeded"})
+
+
+def policy_exit_code(*conditions):
+    """The exit code named in a PodFailurePolicy message, or None.
+
+    MultiKueue deletes the worker's Job as soon as it finishes, so a fast
+    step's pods can be gone before the final worker_pods() read; the
+    controller's condition keeps the code that tripped FailJob.
+    """
+    for cond in conditions:
+        match = POLICY_EXIT_CODE.search((cond or {}).get("message") or "")
+        if match:
+            code = int(match.group(1))
+            return code if 0 < code < 256 else None
+    return None
+
+
+def pods_lost(*conditions):
+    """Whether the Job or JobSet spent its pod retries without running.
+
+    pod_defaults.yaml fails the Job on the first non-zero exit from the
+    workload container, so reaching the retry limit means pods were rejected,
+    evicted or lost before the container ever exited.
+    """
+    for cond in conditions:
+        if not cond:
+            continue
+        reason = cond.get("reason") or ""
+        message = cond.get("message") or ""
+        if (reason in PODS_LOST_REASONS
+                or "BackoffLimitExceeded" in message
+                or "MaxRestartsExceeded" in message):
+            return True
+    return False
+
+
 def storage_eviction(items):
     """The kubelet's message if it evicted a pod for its disk use, else None.
 
@@ -2220,6 +2296,7 @@ def main():
         return code
 
     deleted = False
+    submitted = False
     collector = None
 
     def cleanup(signum, _frame):
@@ -2237,17 +2314,8 @@ def main():
     signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
 
-    log(f"submitting {doc['kind']} {name} to {profile['queue']} "
-        f"({hosts} x {profile['chips']} chips, from {manifest})")
-    subprocess.run(
-        ["kubectl", "-n", NAMESPACE, "apply", "-f", "-"],
-        input=json.dumps(doc), text=True, check=True,
-        timeout=CLI_TIMEOUT_SECONDS,
-    )
-    timing["submitted_at"] = utc_now()
-
-    # Everything below holds an admitted workload, so the except clauses delete
-    # it: the ownerReference only collects it once the launcher's own pod
+    # Everything inside `try` that created a workload deletes it in the except
+    # clauses: the ownerReference only collects it once the launcher's own pod
     # object is removed, and a pod that exited non-zero stays for minutes to
     # hours while the chips sit unavailable.
     #
@@ -2306,12 +2374,18 @@ def main():
             return value
 
     try:
+        log(f"submitting {doc['kind']} {name} to {profile['queue']} "
+            f"({hosts} x {profile['chips']} chips, from {manifest})")
+        with_grace(apply_manifest, doc)
+        submitted = True
+        timing["submitted_at"] = utc_now()
+
         created = with_grace(kubectl_json, "get", kind, name)
         if created is None:
             # The apply above succeeded, so something removed it since.
             log(f"{kind}/{name} was removed immediately after being created")
             stop_announcing()
-            return finish("removed", 1)
+            return finish("removed", EXIT_INFRA)
         uid = created["metadata"]["uid"]
         timing["created_at"] = created["metadata"].get("creationTimestamp")
         admission_limit = admission_timeout(registry)
@@ -2361,7 +2435,7 @@ def main():
             if obj is None:
                 log(f"{kind}/{name} disappeared")
                 stop_announcing()
-                return finish("removed", 1)
+                return finish("removed", EXIT_INFRA)
 
             # Watched for the whole run, not just until admission: preemption
             # happens after it.
@@ -2451,7 +2525,7 @@ def main():
                     log(f"{kind}/{name} cannot be resubmitted")
                     stop_announcing()
                     delete_workload(kind, name)
-                    return finish("not_admitted", 1)
+                    return finish("not_admitted", EXIT_INFRA)
                 uid = created["metadata"]["uid"]
                 reserved = None
                 undispatched = None
@@ -2476,7 +2550,7 @@ def main():
                     log(f"{kind}/{name} cannot be resubmitted")
                     stop_announcing()
                     delete_workload(kind, name)
-                    return finish("not_admitted", 1)
+                    return finish("not_admitted", EXIT_INFRA)
                 uid = created["metadata"]["uid"]
                 last_note = None
                 continue
@@ -2494,7 +2568,7 @@ def main():
                 log(f"not {what} within {limit}s{blind} - {why}")
                 stop_announcing()
                 delete_workload(kind, name)
-                return finish("not_admitted", 1)
+                return finish("not_admitted", EXIT_INFRA)
             if note != last_note:
                 log(note)
                 last_note = note
@@ -2515,11 +2589,11 @@ def main():
                     collector.sweep()
                 print("^^^ +++", flush=True)
                 log(f"pod evicted for its disk use: {evicted}"[:600])
-                log("failing now rather than rerunning it: the rerun writes the "
-                    "same files and is evicted again. Point whatever wrote them "
-                    "at /cache/jax or /dev/shm.")
+                log("ending this workload rather than letting the Job spend "
+                    "every pod retry on the same disk write. Point whatever "
+                    "wrote the files at /cache/jax or /dev/shm.")
                 delete_workload(kind, name)
-                return finish("evicted_storage", 1)
+                return finish("evicted_storage", EXIT_INFRA)
 
             # Pods that ask for more than any node of their shape has: the
             # workload is admitted and holds its chips' quota, but no node will
@@ -2561,7 +2635,7 @@ def main():
                     f"lower the request in {manifest}.")
                 announce_unfit(profile["queue"], unfit_asks, "", manifest, final=True)
                 delete_workload(kind, name)
-                return finish("unfit", 1)
+                return finish("unfit", EXIT_INFRA)
 
             # Under MultiKueue the local object is a shadow of one that ran on a
             # worker, so its own status may never be filled in. The Workload's
@@ -2663,7 +2737,7 @@ def main():
                     log(f"{kind}/{name} cannot be resubmitted")
                     stop_announcing()
                     delete_workload(kind, name)
-                    return finish("not_admitted", 1)
+                    return finish("not_admitted", EXIT_INFRA)
                 uid = created["metadata"]["uid"]
                 reserved = None
                 undispatched = None
@@ -2734,8 +2808,13 @@ def main():
 
                     # Expand the last section on the build page.
                     print("^^^ +++", flush=True)
+                    code = (workload_exit_code(pods)
+                            or policy_exit_code(failed_cond, finished))
+                    if code is None and pods_lost(failed_cond, finished):
+                        log(f"{kind}/{name} lost its pods before running")
+                        return finish("pod_lost", EXIT_INFRA)
                     log(f"{kind}/{name} failed")
-                    return finish("failed", workload_exit_code(pods) or 1)
+                    return finish("failed", code or 1)
                 log(f"{kind}/{name} completed")
                 return finish("succeeded", 0)
 
@@ -2743,6 +2822,14 @@ def main():
                 time.sleep(FIRST_LOG_POLL_SECONDS)
             else:
                 time.sleep(POLL_SECONDS)
+    except ManifestError:
+        stop_announcing()
+        if submitted and not deleted:
+            deleted = True
+            delete_workload(kind, name)
+        if submitted:
+            return finish("error", 1)
+        return 1
     except ApiUnreachable as err:
         # Handled apart from the traceback below because the delete it is about
         # to attempt goes to the same API server that just stopped answering,
@@ -2750,32 +2837,42 @@ def main():
         stop_announcing()
         log(f"no answer from the manager's API server for {API_GRACE_SECONDS}s: "
             f"{err}")
-        if not deleted:
+        if submitted and not deleted:
             deleted = True
             if not delete_workload(kind, name):
                 log(f"WARNING: {kind}/{name} could not be deleted either, so it "
                     "may still be running on its worker cluster and holding its "
                     "chips. It is collected when this pod's object is removed.")
         print("^^^ +++", flush=True)
-        return finish("api_unreachable", 1)
+        return finish("api_unreachable", EXIT_INFRA)
+    except Exception:
+        traceback.print_exc()
+        stop_announcing()
+        if submitted and not deleted:
+            deleted = True
+            delete_workload(kind, name)
+        print("^^^ +++", flush=True)
+        return finish("error", EXIT_INFRA)
     except BaseException as exc:
         # cleanup() exits with 128 + the signal on a Buildkite cancellation.
         code = exc.code if isinstance(exc, SystemExit) else None
         if isinstance(code, int) and code >= 128:
-            finish("cancelled", code)
-        else:
-            finish("error", None)
+            if submitted:
+                finish("cancelled", code)
+        elif submitted:
+            finish("error", code if isinstance(code, int) else 1)
         stop_announcing()
-        if not deleted:
+        if submitted and not deleted:
             deleted = True
             delete_workload(kind, name)
         raise
     finally:
-        timing["blind_seconds"] = round(blind_total)
-        timing["ended_at"] = utc_now()
-        # Last, so on every path the workload has already been deleted or has
-        # finished: the insert never delays freeing the chips.
-        emit_timing(timing, registry.get("timing_table"))
+        if submitted or timing.get("outcome"):
+            timing["blind_seconds"] = round(blind_total)
+            timing["ended_at"] = utc_now()
+            # Last, so on every path the workload has already been deleted or has
+            # finished: the insert never delays freeing the chips.
+            emit_timing(timing, registry.get("timing_table"))
 
 
 if __name__ == "__main__":
