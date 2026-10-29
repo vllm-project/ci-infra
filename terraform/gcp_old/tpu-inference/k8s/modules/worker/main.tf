@@ -96,11 +96,20 @@ resource "google_container_cluster" "this" {
   }
 
   # MultiKueue reaches workers through the Connect Gateway, which resolves a
-  # Fleet membership rather than a kubeconfig. GKE creates the membership itself
-  # from this block and ties its lifecycle to the cluster; a separate
-  # google_gke_hub_membership collides with that one instead of adopting it.
-  fleet {
-    project = var.fleet.project_id
+  # Fleet membership rather than a kubeconfig. In the fleet's own project GKE
+  # creates the membership from this block and ties its lifecycle to the
+  # cluster; a separate google_gke_hub_membership collides with that one
+  # instead of adopting it.
+  #
+  # In any other project the block would have GKE register the cluster as
+  # whoever creates it, which needs gkehub rights in the fleet's project that
+  # the worker's administrators have no reason to hold. manager/ registers such
+  # a cluster instead, when it lists it, with the grants in iam.tf here.
+  dynamic "fleet" {
+    for_each = var.project == var.fleet.project_id ? [1] : []
+    content {
+      project = var.fleet.project_id
+    }
   }
 
   # Every TPU shape on a cluster draws on one reservation, so a node that has
@@ -166,6 +175,10 @@ resource "google_container_cluster" "this" {
       # GKE turns this on by itself and reports it back, so it diffs on every
       # plan if tracked.
       monitoring_config,
+
+      # A cluster manager/ registered reports its membership here though this
+      # config states none, and dropping the block would read as a change.
+      fleet,
     ]
   }
 }

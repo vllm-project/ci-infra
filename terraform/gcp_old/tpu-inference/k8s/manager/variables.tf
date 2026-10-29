@@ -165,21 +165,6 @@ variable "deployers" {
   EOT
 }
 
-variable "worker_deployers" {
-  type        = list(string)
-  default     = []
-  description = <<-EOT
-    Principals that apply a workers/ environment in a project other than
-    project_id, as IAM members (user:, group:, serviceAccount:).
-
-    Granted gkehub.editor on project_id, because GKE creates the cluster's
-    Fleet membership here, in this project's fleet, as whoever creates the
-    cluster. Nothing else of this project is theirs. The role reaches every
-    membership in the fleet, so list a principal only while its worker is
-    being built or rebuilt.
-  EOT
-}
-
 variable "image_repositories" {
   type = list(object({
     location   = string

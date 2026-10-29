@@ -381,12 +381,7 @@ What the environment's administrators need, run and do not provide is in
 [`modules/worker/README.md`](modules/worker/README.md); for a partner, that is
 the page to send. Our side:
 
-1. **Outside `cloud-ullm-inference-ci-cd`, let them create the membership.**
-   Add whoever will run their apply to `worker_deployers` in
-   `manager/prod.auto.tfvars` and apply `manager/`. GKE creates the cluster's
-   fleet membership in the manager's project as that identity. Remove them
-   once the cluster exists.
-2. **Write the module block,** on a branch. In an existing environment, add
+1. **Write the module block,** on a branch. In an existing environment, add
    `<name>.tf` beside the others. For a new one, copy `main.tf` and one
    worker's file from `workers/cloud-ullm-inference-ci-cd/` into
    `workers/<environment>/` and change the backend and locals. Then set the
@@ -394,15 +389,17 @@ the page to send. Our side:
    plane, and the pools and quotas. `tpu-ci-<name>` is the cluster's fleet
    membership ID, so `<name>` is unique in the fleet. Leave `cpu_workloads`
    unset unless the fleet's CPU-only steps should run there too.
-3. **They apply it.** The apply also binds the fleet's deployer account to
+2. **They apply it.** The apply also binds the fleet's deployer account to
    `cluster-admin` in the new cluster, which is how the deploy gets in. In our
    own projects we apply it ourselves, and the account's IAM lets it in.
-4. **List it, apply the manager, generate, deploy.** Add
+3. **List it, apply the manager, generate, deploy.** Add
    `<name> = { project, location }` to `workers` in `manager/prod.auto.tfvars`
-   and apply `manager/`. That grants the worker's node account Artifact
-   Registry, and its project's pool the CI buckets, BigQuery and the fleet
-   secrets. It comes after step 3 because the grants name the node account the
-   worker's module creates. Then `generate_manifests.py`, which adds the worker
+   and apply `manager/`. That registers a cluster from another project in the
+   fleet (`manager/fleet.tf`; one in this project registered itself when it
+   was created), and grants the worker's node account Artifact Registry and
+   its project's pool the CI buckets, BigQuery and the fleet secrets. It comes
+   after step 2 because the registration needs the cluster, and the grants
+   the node account its module creates. Then `generate_manifests.py`, which adds the worker
    to the manager's queues for its shapes with its quota added to the fleet's,
    and `deploy_manifests.py`.
 
@@ -440,7 +437,8 @@ to be requeued and rerun elsewhere.
 **Remove** takes it out of the fleet, in this order:
 
 1. Pause it, as above, and wait for it to be idle.
-2. Take its entry out of `workers`, apply `manager/` (its grants go), then
+2. Take its entry out of `workers`, apply `manager/` (its grants go, and a
+   cluster from another project is unregistered from the fleet), then
    generate and deploy. The deploy deletes its MultiKueueCluster from the
    manager, so the manager matches git again.
 3. Its environment's administrators destroy it: empty its two cache buckets

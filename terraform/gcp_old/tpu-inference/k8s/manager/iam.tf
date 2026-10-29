@@ -86,17 +86,6 @@ resource "google_project_iam_member" "launcher_gateway" {
   member  = local.launcher_principal
 }
 
-# Whoever builds a worker in another project, for the length of the build: GKE
-# creates the cluster's membership in this project's fleet as them. See the
-# variable.
-resource "google_project_iam_member" "worker_deployers" {
-  for_each = toset(var.worker_deployers)
-
-  project = var.project_id
-  role    = "roles/gkehub.editor"
-  member  = each.value
-}
-
 # The identity scripts/deploy_manifests.py runs as, on every cluster in the
 # fleet. One account rather than each operator's own, so that a worker in
 # another project binds one name to cluster-admin (modules/worker/deploy.tf)

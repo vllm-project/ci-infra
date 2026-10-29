@@ -25,18 +25,23 @@ resource "google_project_iam_member" "nodes" {
   member  = "serviceAccount:${google_service_account.nodes.email}"
 }
 
-# Only for a worker in another project from the fleet. When the worker shares
-# the fleet's project, enabling the GKE Hub API already grants the service agent
-# this role on it; declaring it here would make Terraform the owner of a binding
-# Google manages, and destroy would revoke it.
+# What the fleet's GKE Hub service agent needs in another project to register
+# a cluster there, which manager/ does when it lists the worker: both roles,
+# per GKE's cross-project registration instructions. When the worker shares
+# the fleet's project, enabling the GKE Hub API already grants the first;
+# declaring it here would make Terraform the owner of a binding Google
+# manages, and destroy would revoke it.
 #
 # Per cluster although the binding is per project, so a second worker in the
 # same project declares the same binding, and destroying either revokes it for
 # both.
 resource "google_project_iam_member" "gkehub_service_agent" {
-  count = var.project == var.fleet.project_id ? 0 : 1
+  for_each = var.project == var.fleet.project_id ? toset([]) : toset([
+    "roles/gkehub.serviceAgent",
+    "roles/gkehub.crossProjectServiceAgent",
+  ])
 
   project = var.project
-  role    = "roles/gkehub.serviceAgent"
+  role    = each.value
   member  = "serviceAccount:service-${var.fleet.project_number}@gcp-sa-gkehub.iam.gserviceaccount.com"
 }

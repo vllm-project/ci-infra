@@ -4,7 +4,8 @@ One TPU worker cluster for the kube CI fleet, built in your own project. The
 cluster joins the fleet in `cloud-ullm-inference-ci-cd`; the fleet's manager
 dispatches CI workloads to it, and the fleet's deploy installs what runs inside
 it. You own the cluster and the project. You need no access to the fleet's
-project beyond one temporary grant, and the fleet needs no role in yours.
+project, and the fleet needs no role in yours: the maintainers register the
+cluster in the fleet from their side once it exists.
 
 Your workers are module blocks in an environment, `workers/<environment>/`:
 one Terraform root and one state, for one worker or several.
@@ -23,8 +24,9 @@ All of it in your project:
   models, which the CI workloads read and write, and a Rapid Cache in front of
   each in the zones you name.
 - If your project is not `cloud-ullm-inference-ci-cd`, `roles/gkehub.serviceAgent`
-  for the fleet's GKE Hub service agent, which registering the cluster needs,
-  and in the cluster a binding of the fleet's deployer account,
+  and `roles/gkehub.crossProjectServiceAgent` for the fleet's GKE Hub service
+  agent, which the maintainers' registration of the cluster needs, and in the
+  cluster a binding of the fleet's deployer account,
   `tpu-ci-deployer@cloud-ullm-inference-ci-cd.iam.gserviceaccount.com`, to
   `cluster-admin`. See "Why the deployer binding".
 
@@ -41,11 +43,6 @@ In your project:
   and JobSet are pulled from registry.k8s.io.
 - A GCS bucket for the Terraform state.
 - Permission to create all of the above, which is what applying runs as.
-
-Send the fleet's maintainers the identity you will apply as. They grant it
-`roles/gkehub.editor` on `cloud-ullm-inference-ci-cd` for as long as the build
-takes, because GKE creates the cluster's fleet membership there as whoever
-creates the cluster.
 
 ## What you do not provide
 
