@@ -10,11 +10,12 @@ set -e
 
 # Exit-code convention:
 #   - exit 1   = genuine misconfiguration. The job fails immediately.
-#   - exit 255 = provider/infrastructure failure (the agent secret store is
-#                unreachable). The agent preserves a hook's exit code as the
-#                job's exit status, and the generated pipeline steps auto-retry
-#                exit_status 255 (like agent-lost -1) — so one network blip
-#                doesn't kill the whole build.
+#   - exit 201 = the GitHub token fetch failed every in-hook retry (the agent
+#                secret store is unreachable). The agent preserves a hook's
+#                exit code as the job's exit status, and the generated
+#                pipeline steps retry 201-205 once, the codes the hooks keep
+#                for infrastructure failures (environment uses 202-205), so
+#                one network blip doesn't kill the whole build.
 
 # Authenticate only the two canonical repositories.
 case "${BUILDKITE_PIPELINE_ID:-}:${BUILDKITE_REPO:-}" in
@@ -41,19 +42,34 @@ fi
 # much cheaper than a job-level retry that re-queues and re-runs the env hook.
 secret_attempts=${BUILDKITE_SECRET_FETCH_ATTEMPTS:-5}
 secret_delay=${BUILDKITE_SECRET_FETCH_DELAY:-2}
+secret_error=$(mktemp)
 for ((attempt = 1; ; attempt++)); do
-    if github_pat=$(/usr/bin/buildkite-agent secret get GITHUB_READONLY_PAT); then
+    if github_pat=$(/usr/bin/buildkite-agent secret get GITHUB_READONLY_PAT 2>"$secret_error"); then
+        # Record a retry that fired; recording must never fail or stall the job.
+        ((attempt == 1)) || timeout 10 /usr/bin/buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}:github-token" "github-token,${attempt},recovered" || true
         break
     fi
+    cat "$secret_error" >&2
+    # A 404 means the secret is missing or this pipeline's policy denies it: a
+    # misconfiguration that no retry fixes.
+    if grep -q '404 Not Found' "$secret_error"; then
+        rm -f "$secret_error"
+        ((attempt == 1)) || timeout 10 /usr/bin/buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}:github-token" "github-token,${attempt},refused" || true
+        echo "ERROR: the agent secret store refused GITHUB_READONLY_PAT (missing, or denied to this pipeline); not retrying" >&2
+        exit 1
+    fi
     if ((attempt >= secret_attempts)); then
-        echo "ERROR: could not fetch GITHUB_READONLY_PAT from the agent secret store after ${attempt} attempts (provider/infrastructure failure — exiting 255 to trigger the infra retry)" >&2
-        exit 255
+        timeout 10 /usr/bin/buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}:github-token" "github-token,${attempt},exhausted" || true
+        rm -f "$secret_error"
+        echo "ERROR: could not fetch GITHUB_READONLY_PAT from the agent secret store after ${attempt} attempts (provider/infrastructure failure — exiting 201 to trigger the infra retry)" >&2
+        exit 201
     fi
     echo "WARNING: GITHUB_READONLY_PAT fetch failed (attempt ${attempt}/${secret_attempts}); retrying in ${secret_delay}s" >&2
     sleep "$secret_delay"
     secret_delay=$((secret_delay * 2))
 done
-unset attempt secret_attempts secret_delay
+rm -f "$secret_error"
+unset attempt secret_attempts secret_delay secret_error
 github_basic=$(printf 'x-access-token:%s' "$github_pat" | base64 -w0)
 
 # The secret command redacts the raw PAT. Register the derived Basic payload and

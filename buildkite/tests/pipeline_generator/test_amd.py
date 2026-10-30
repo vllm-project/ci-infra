@@ -158,6 +158,28 @@ def test_build_sh_layout_pods_run_the_build_image(build_sh_layout):
     assert [v["name"] for v in pod["volumes"]] == ["devshm"]
 
 
+def test_amd_cpu_step_gets_only_the_repo_wide_retries():
+    step = Step(
+        label="AMD build",
+        group="Hardware - AMD Build",
+        key="amd-build-no-yaml-retry",
+        device="amd_cpu",
+        commands=["build"],
+    )
+
+    command_step = _render_single_step(step).steps[-1]
+
+    assert command_step.retry == {
+        "automatic": [
+            {"signal_reason": "stack_error", "limit": 1},
+            {"exit_status": -1, "limit": 1},
+            {"exit_status": 255, "limit": 1},
+            {"exit_status": 94, "limit": 1},
+            {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
+        ]
+    }
+
+
 @pytest.mark.parametrize(
     ("device", "queue", "dind", "expected_gpu_count"),
     [
@@ -236,13 +258,16 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         amd.AMD_NATIVE_BASE_IMAGE if not dind else amd.AMD_STABLE_CI_BASE_IMAGE
     )
 
-    assert command_step.retry == amd.AMD_RETRY
-    assert len(command_step.retry["automatic"]) == 7
-    assert command_step.retry["automatic"][0] == {
-        "signal_reason": "stack_error",
-        "limit": 1,
-    }
-    assert {"exit_status": 134, "limit": 1} in command_step.retry["automatic"]
+    # AMD's own retries plus the repo-wide infra ones (255, 94, 201-205).
+    assert command_step.retry == buildkite_step.ensure_infra_failure_retry(
+        amd.AMD_RETRY
+    )
+    automatic = command_step.retry["automatic"]
+    assert {"exit_status": 94, "limit": 1} in automatic
+    assert {"exit_status": 255, "limit": 1} in automatic
+    assert {"exit_status": [201, 202, 203, 204, 205], "limit": 1} in automatic
+    assert {"signal_reason": "stack_error", "limit": 1} in automatic
+    assert {"exit_status": 134, "limit": 1} in automatic
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")
@@ -639,6 +664,10 @@ def test_amd_mirror_enforces_its_own_timeout(
     # timeout up to the standard AMD limit.
     assert default_command_step.timeout_in_minutes == 40
     assert amd_command_step.timeout_in_minutes == expected_timeout
+    # A mirror gets the same retries as a direct AMD step.
+    assert amd_command_step.retry == buildkite_step.ensure_infra_failure_retry(
+        amd.AMD_RETRY
+    )
 
 
 def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
