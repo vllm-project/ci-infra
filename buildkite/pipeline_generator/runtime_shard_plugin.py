@@ -191,7 +191,7 @@ class ShardPlugin:
             "finished_at": time.time(),
             "expected": self.expected,
             "planned": self.planned,
-            "ran": sorted(self.ran),
+            "ran": sorted(self.ran)[1 if self.shard == 1 else 0:],  # STAGING ONLY: plant a miss
         }
         try:
             os.makedirs(job_dir, exist_ok=True)
