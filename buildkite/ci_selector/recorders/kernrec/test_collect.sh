@@ -17,6 +17,10 @@
 #      (Codex P2 on #620: the commit prefix is written as a unit)
 #   9. rerun of a commit already published, this time with no usable row
 #      (every job failed) -> exit 1 and S3 untouched, like 6
+#  10. with the generator's armed counts (CASE_ENV): a backend armed but not
+#      whole (nothing delivered, too few jobs, no valid pair) fails the step
+#      and is not published, while a whole one still publishes; every run
+#      leaves kernrec_collect_summary.json
 #
 # Real Python is used for kernel_table.py; only network/cloud commands are
 # faked. Set KERNREC_PYTHON to the project's virtual-environment interpreter.
@@ -38,6 +42,7 @@ run_case() { # name expect_exit expect_latest(yes|no) expect_commit_upload(yes|n
   # no-rows: a recording that cannot be filed (blank step key) -> a table with no rows
   [[ "$mode" == "no-rows" ]] && echo '{"step_key":"","exit_status":0}' > "$T/build/.kernrec/job-a/kernrec.json"
   [[ "$mode" == "unusable-rerun" ]] && echo '{"step_key":"step-x","exit_status":1}' > "$T/build/.kernrec/job-a/kernrec.json"
+  [[ "$mode" == "empty" ]] && rm -rf "$T/build/.kernrec/job-a"
   # a usable symbol map unless the case says otherwise
   if [[ "$mode" != "no-map" ]]; then
     "$KERNREC_PYTHON" - "$T/build/kernel_symbol_map.json.gz" <<'PY'
@@ -112,7 +117,7 @@ EOF
 
   local branch=main
   [[ "$mode" == "fork-branch" ]] && branch="khluu:some-branch"
-  local extra=()
+  local extra=(${CASE_ENV:-})
   [[ "$mode" == "other-build" ]] && extra=(KERNREC_SOURCE_BUILD_ID=src-uuid KERNREC_SOURCE_BUILD_NUMBER=41 KERNREC_SOURCE_JOBS=job-a)
   ( cd "$T" && PATH="$T/bin:$PATH" BUILDKITE_COMMIT=abc BUILDKITE_BUILD_NUMBER=42 BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
       env ${extra[@]+"${extra[@]}"} bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
@@ -122,6 +127,7 @@ EOF
   [[ -f "$T/s3/bkt/ci/kernrec/latest.rocm.json" && -f "$T/s3/bkt/ci/kernrec/abc/kernel_table.rocm.json.gz" ]] && rocm=yes
   [[ "$(s3_digest "$T/s3")" == "$s3_before" ]] && untouched=yes
   local verdict=OK
+  [[ -f "$T/artifacts/kernrec_collect_summary.json" || "$mode" == no-builder ]] || { verdict=FAIL; fail=1; echo "      no kernrec_collect_summary.json"; }
   [[ "$rc" == "$want_rc" && "$latest" == "$want_latest" && "$commit" == "$want_commit" ]] || { verdict=FAIL; fail=1; }
   [[ "$want_untouched" == "no" || "$untouched" == "yes" ]] || { verdict=FAIL; fail=1; }
   [[ "$rocm" == "$want_rocm" ]] || { verdict=FAIL; fail=1; }
@@ -166,4 +172,10 @@ run_case rocm-only         0 no  no  rocm-only no yes
 run_case both-backends     0 yes yes both no yes
 run_case broken-cuda       0 yes yes both-bad-cuda no yes
 run_case broken-rocm       0 yes yes both-bad-rocm
+run_case unarmed-empty     0 no  no  empty
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=1" run_case armed-whole       0 yes yes both no yes
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=1" run_case armed-cuda-lost   1 no  no  rocm-only no yes
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1" run_case armed-empty       1 no  no  empty
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=5" run_case armed-short       1 no  no  normal
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=1" run_case armed-broken-cuda 1 yes yes both-bad-cuda no yes
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" || { echo "collect.sh publishing rules: FAIL"; exit 1; }

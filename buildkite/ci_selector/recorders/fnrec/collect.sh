@@ -4,6 +4,10 @@
 #
 # No -e: every gate below exits on its own, and a publishing failure must not
 # look like a fold that produced nothing.
+#
+# Every way out leaves fnrec_collect_summary.json (an artifact) and an
+# annotation, and a build the generator armed (FNREC_EXPECTED_JOBS > 0) that
+# delivered nothing fails the step instead of passing as "nothing to fold".
 set -uo pipefail
 
 BRANCH="${VLLM_CI_BRANCH:-main}"
@@ -33,9 +37,30 @@ if [[ -n "${FNREC_SOURCE_BUILD_ID:-}" ]]; then
   echo "folding build ${BUILD} (${FNREC_SOURCE_BUILD_ID}) from build ${BUILDKITE_BUILD_NUMBER}"
 fi
 
+DELIVERED=0 ROWS=0 VERDICT="not reached"
+report() {
+  local rc=$? style=info
+  [[ "$rc" == 0 ]] || style=error
+  python3 - "${BUILD}" "${COMMIT}" "${EXPECTED_JOBS}" "${DELIVERED}" "${ROWS}" "${VERDICT}" "$rc" \
+    > "${WORK}/fnrec_collect_summary.json" <<'PY' || true
+import json, sys
+build, commit, expected, delivered, rows, verdict, rc = sys.argv[1:]
+print(json.dumps({"recorder": "fnrec", "build": int(build), "commit": commit,
+                  "expected_jobs": int(expected) if expected else None,
+                  "delivered_jobs": int(delivered), "rows": int(rows),
+                  "verdict": verdict, "exit_status": int(rc)}, indent=2))
+PY
+  (cd "${WORK}" && buildkite-agent artifact upload fnrec_collect_summary.json >/dev/null 2>&1) || true
+  buildkite-agent annotate --style "$style" --context fnrec-collect \
+    "Python recordings of build ${BUILD}: ${DELIVERED}/${EXPECTED_JOBS:-?} jobs delivered, ${ROWS} rows (${VERDICT})" \
+    >/dev/null 2>&1 || true
+  rm -rf -- "${WORK}"
+  exit "$rc"
+}
+
 WORK="$(mktemp -d)"
 cd "${WORK}" || exit 1
-trap 'rm -rf -- "${WORK}"' EXIT
+trap report EXIT
 
 echo "--- :satellite: Collecting Python recordings of build ${BUILD}"
 if [[ -n "${FNREC_SOURCE_JOBS:-}" ]]; then
@@ -52,7 +77,14 @@ fi
 n_tar=$(find .fnrec -maxdepth 1 -name '*.tar.gz' 2>/dev/null | wc -l | tr -d ' ')
 n_raw=$(find .fnrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
 echo "${n_tar} packed and ${n_raw} unpacked jobs"
-if [[ "$((n_tar + n_raw))" == "0" ]]; then
+DELIVERED=$((n_tar + n_raw))
+if [[ "${DELIVERED}" == "0" ]]; then
+  if [[ "${EXPECTED_JOBS:-0}" -gt 0 ]]; then
+    VERDICT="nothing delivered"
+    echo "the generator armed ${EXPECTED_JOBS} jobs and none delivered a recording" >&2
+    exit 1
+  fi
+  VERDICT="nothing to fold"
   echo "nothing to fold; done"
   exit 0
 fi
@@ -98,7 +130,7 @@ fold python -m ci_selector.scripts.build \
   "${VLLM_CHECKOUT}" --fnrec .fnrec --build "${BUILD}" --commit "${COMMIT}" \
   ${expected[@]+"${expected[@]}"} \
   --pipeline "${PIPELINE}" --out out/table.json.gz \
-  || { echo "table build failed" >&2; exit 1; }
+  || { VERDICT="table build failed"; echo "table build failed" >&2; exit 1; }
 
 read -r table_ok table_commit <<<"$(fold python - <<'PY'
 import sys
@@ -116,10 +148,13 @@ echo "--- :arrow_up: Uploading the table as an artifact"
 
 # A backstop. Nothing recorded means nothing was delivered, which the check
 # above refuses first, so this only catches a table that loads but is empty.
+ROWS=$(fold python -c 'import sys; from pathlib import Path; from ci_selector.coverage.table import load; print(len(load(Path("out/table.json.gz"))))' 2>/dev/null || echo 0)
 if [[ "${table_ok}" != "yes" ]]; then
+  VERDICT="no usable rows"
   echo "table has no usable rows; not publishing" >&2
   exit 1
 fi
+VERDICT=ok
 # The prefix says which tree this table describes, so the table has to agree.
 # Otherwise every fetch refuses it, long after latest.json points at it.
 if [[ "${table_commit}" != "${COMMIT}" ]]; then

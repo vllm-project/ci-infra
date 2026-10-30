@@ -291,6 +291,25 @@ def test_cuda_and_amd_switches_arm_their_backend_alone(
     armed = ["amd-kernels"] if amd else ["kernels"]
     assert collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split() == armed
     assert collect.depends_on == [steps[armed[0]].depends_on[0]]
+    assert collect.env["KERNREC_EXPECTED_JOBS_CUDA"] == str(cuda)
+    assert collect.env["KERNREC_EXPECTED_JOBS_ROCM"] == str(amd)
+
+
+def test_collect_step_counts_armed_jobs_per_backend(monkeypatch, fake_global_config):
+    """Each backend publishes on its own, so each needs its own denominator:
+    vllm/ci #97886 published ROCm with every CUDA recording lost, and passed."""
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    fake_global_config["run_amd"] = True
+    groups = _rendered_groups(
+        _gpu_step(key="kernels", mirror={"amd": {"device": "mi300_1"}}),
+        _gpu_step(key="sharded", group="g2", label="Sharded", parallelism=3),
+        _gpu_step(key="host", group="host", label="Host step", no_plugin=True),
+    )
+    (collect,) = buildkite_step.kernrec_collect_group(groups).steps
+    assert collect.env["KERNREC_EXPECTED_JOBS_CUDA"] == "4", "a shard is a job"
+    assert collect.env["KERNREC_EXPECTED_JOBS_ROCM"] == "1", "the mirror"
 
 
 def test_collect_group_skips_deferred_steps(monkeypatch, fake_global_config):
