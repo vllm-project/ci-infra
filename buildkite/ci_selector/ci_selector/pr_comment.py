@@ -28,7 +28,7 @@ from pathlib import Path
 from .codemap.classify import select
 from .codemap.pipeline.match import match_jobs
 from .codemap.worktree import git_out, state_for
-from .coverage.source import fetch_kernel_evidence, fetch_table
+from .coverage.source import fetch_kernel_records, fetch_table
 from .decide import decide
 from .gitdiff import changed_paths, diff_files
 from .handwritten import IMAGE_BUILD_KEY_PREFIX, PR_PIPELINE
@@ -666,14 +666,19 @@ def refresh_records() -> None:
     )
     from .scripts import fetch_functions, fetch_kernels
 
-    for mod, names in (
-        (fetch_functions, (TABLE_NAME,)),
-        (fetch_kernels, (KERNEL_TABLE_NAME, KERNEL_MAP_NAME)),
+    for mod, argv, names in (
+        (fetch_functions, [], (TABLE_NAME,)),
+        (fetch_kernels, [], (KERNEL_TABLE_NAME, KERNEL_MAP_NAME)),
+        (
+            fetch_kernels,
+            ["--backend", "rocm"],
+            ("kernel_table.rocm.json.gz", "kernel_symbol_map.rocm.json.gz"),
+        ),
     ):
-        rc = mod.main([])
+        rc = mod.main(argv)
         if rc:
             print(
-                f"warning: {mod.__name__} exited {rc}; not using a stale copy",
+                f"warning: {mod.__name__} {argv} exited {rc}; not using a stale copy",
                 file=sys.stderr,
             )
             for name in names:
@@ -685,7 +690,7 @@ def run(args) -> int:
     if not args.no_fetch:
         refresh_records()
     table = fetch_table(args.table)
-    kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
+    kernels = fetch_kernel_records(args.kernel_table, args.kernel_symbol_map)
     result = select_for_pr(
         repo,
         args.number,

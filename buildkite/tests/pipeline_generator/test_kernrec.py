@@ -2,12 +2,14 @@
 
 Off, nothing changes: no setup command, no artifact paths. On, every GPU step
 sources the setup script from the generating ci-infra branch and uploads
-`.kernrec/**`, while AMD, docker-build and no-plugin steps stay untouched.
+`.kernrec/**` with an explicit CUDA or ROCm backend. Docker-build and
+no-plugin steps stay untouched.
 """
 
 import buildkite_step
 import pytest
 import recorder_switches
+import subprocess
 from step import Step
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
@@ -75,7 +77,9 @@ def test_on_arms_gpu_steps_from_the_generating_branch(monkeypatch):
         next(c for c in commands if "pytest -v -s kernels/core" in c)
     )
     # A download failure must not fail the step.
-    assert setup[0].rstrip().endswith('echo "kernrec: setup skipped"')
+    assert setup[0].rstrip().endswith('echo "kernrec: setup skipped"; }')
+    assert "KERNREC_BACKEND=cuda" in setup[0]
+    assert 'KERNREC_BRANCH="my-branch"' in setup[0]
     # _prepare_commands turns single quotes into double quotes; the command
     # must not depend on any.
     assert "'" not in setup[0]
@@ -111,6 +115,28 @@ def test_on_leaves_no_plugin_steps_alone(monkeypatch):
     assert not _artifact_paths(rendered)
 
 
+@pytest.mark.parametrize(
+    "key,switch,other",
+    [
+        ("image-build", "KERNREC_ENV_VAR", "KERNREC_AMD_ENV_VAR"),
+        ("image-build-amd", "KERNREC_AMD_ENV_VAR", "KERNREC_ENV_VAR"),
+    ],
+)
+def test_recorder_opt_in_requests_matching_build_symbol_maps(
+    monkeypatch, fake_global_config, key, switch, other
+):
+    monkeypatch.setenv(getattr(recorder_switches, switch), "1")
+    monkeypatch.delenv(getattr(recorder_switches, other), raising=False)
+    fake_global_config["run_amd"] = True
+    step = _gpu_step(key=key, label=":docker: build image", env={"EXISTING": "value"})
+    rendered = _render(step)
+    assert rendered.env == {"EXISTING": "value", "VLLM_KERNEL_SYMBOL_MAP": "1"}
+    assert not any("kernrec" in command for command in _commands(rendered))
+    monkeypatch.delenv(getattr(recorder_switches, switch))
+    monkeypatch.setenv(getattr(recorder_switches, other), "1")
+    assert _render(step).env == {"EXISTING": "value"}
+
+
 def test_on_leaves_skipped_steps_alone(monkeypatch):
     """A step in KERNREC_SKIP_STEPS runs as if the recorder were off: no setup,
     no artifact paths, so no row, and the selector keeps it."""
@@ -142,24 +168,28 @@ def test_collect_group_depends_on_the_recording_steps(monkeypatch, fake_global_c
     assert collect.group == buildkite_step.KERNREC_COLLECT_GROUP
     (step,) = collect.steps
     assert step.key == buildkite_step.KERNREC_COLLECT_KEY
-    assert set(step.depends_on) == {"kernels", "fusion"}
+    assert set(step.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()) == {
+        "kernels",
+        "fusion",
+    }
+    assert step.depends_on == [], "waited for in the command, not by depends_on"
     assert step.allow_dependency_failure is True, (
         "a failed job's recording is still evidence"
     )
     assert step.soft_fail is True, "publishing must not turn the build red"
     assert (
         "ci-infra/my-branch/buildkite/ci_selector/recorders/kernrec/collect.sh"
-        in step.commands[0]
+        in step.commands[-1]
     )
     assert step.agents["queue"] == buildkite_step.AgentQueue.SMALL_CPU_PREMERGE.value
 
 
-def test_collect_group_waits_on_nothing_that_records_no_kernels(
+def test_collect_group_waits_for_both_recording_backends_and_their_images(
     monkeypatch, fake_global_config
 ):
-    """Nightly vllm/ci #90897: every NVIDIA job had finished and the kernel
-    collect still waited on 34 AMD jobs, none of which records a kernel."""
+    """Armed AMD mirrors now contribute recordings, host-only steps do not."""
     monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
     fake_global_config["nightly"] = "1"
     fake_global_config["run_amd"] = True
     groups = _rendered_groups(
@@ -179,9 +209,107 @@ def test_collect_group_waits_on_nothing_that_records_no_kernels(
     keys = [s.key for g in groups for s in g.steps if hasattr(s, "commands")]
     assert {"amd-kernels", "host"} <= set(keys), f"premise: {keys}"
     (step,) = buildkite_step.kernrec_collect_group(groups).steps
-    assert set(step.depends_on) == {"kernels", "image-build"}, (
-        "the recording step, and the image build that uploads the symbol map"
+    assert step.depends_on == ["image-build"], "the image build uploads the symbol map"
+    assert set(step.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()) == {
+        "kernels",
+        "amd-kernels",
+    }, "both recording backends"
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+def test_amd_uses_rocm_setup_artifacts_and_finish(
+    monkeypatch, fake_global_config, mirror
+):
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
+    fake_global_config["run_amd"] = True
+    fake_global_config["nightly"] = "1"
+    step = _gpu_step(
+        **(
+            {"mirror": {"amd": {"device": "mi300_1"}}}
+            if mirror
+            else {"device": "mi300_1"}
+        )
     )
+    groups = _rendered_groups(step)
+    key = "amd-kernels" if mirror else "kernels"
+    rendered = next(s for g in groups for s in g.steps if s.key == key)
+    commands = _commands(rendered)
+    joined = "\n".join([*commands, *rendered.env.values()])
+    assert "KERNREC_BACKEND=rocm" in joined
+    assert "KERNREC_BACKEND=cuda" not in joined
+    assert joined.index("KERNREC_BACKEND=rocm") < joined.index(
+        "pytest -v -s kernels/core"
+    )
+    assert joined.index("pytest -v -s kernels/core") < joined.index("kernrec_finish")
+    assert buildkite_step.KERNREC_ARTIFACT_PATH in _artifact_paths(rendered)
+
+
+@pytest.mark.parametrize("nodes", [None, 1, 2])
+def test_amd_multinode_mirrors_stay_unarmed_without_affecting_cuda(
+    monkeypatch, fake_global_config, nodes
+):
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
+    fake_global_config["run_amd"] = True
+    fake_global_config["nightly"] = "1"
+    groups = _rendered_groups(
+        _gpu_step(mirror={"amd": {"device": "mi300_1", "num_nodes": nodes}})
+    )
+    steps = {step.key: step for group in groups for step in group.steps}
+    assert buildkite_step._carries(steps["kernels"], "kernrec")
+    amd = steps["amd-kernels"]
+    armed = nodes != 2
+    assert buildkite_step._carries(amd, "kernrec") is armed
+    assert (buildkite_step.KERNREC_ARTIFACT_PATH in amd.artifact_paths) is armed
+    assert ("kernrec_finish" in amd.env["VLLM_TEST_COMMANDS"]) is armed
+    (collect,) = buildkite_step.kernrec_collect_group(groups).steps
+    waits_for = collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()
+    assert ("amd-kernels" in waits_for) is armed
+
+
+@pytest.mark.parametrize("cuda,amd", [(1, 0), (0, 1)])
+def test_cuda_and_amd_switches_arm_their_backend_alone(
+    monkeypatch, fake_global_config, cuda, amd
+):
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, str(cuda))
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, str(amd))
+    fake_global_config["run_amd"] = True
+    fake_global_config["nightly"] = "1"
+    groups = _rendered_groups(
+        _gpu_step(key="image-build", label=":docker: build image"),
+        _gpu_step(key="image-build-amd", label=":docker: build image"),
+        _gpu_step(
+            key="kernels",
+            depends_on=["image-build"],
+            mirror={"amd": {"device": "mi300_1", "depends_on": ["image-build-amd"]}},
+        ),
+    )
+    steps = {step.key: step for group in groups for step in group.steps}
+    assert buildkite_step._carries(steps["kernels"], "kernrec") is bool(cuda)
+    assert buildkite_step._carries(steps["amd-kernels"], "kernrec") is bool(amd)
+    (collect,) = buildkite_step.kernrec_collect_group(groups).steps
+    armed = ["amd-kernels"] if amd else ["kernels"]
+    assert collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split() == armed
+    assert collect.depends_on == [steps[armed[0]].depends_on[0]]
+    assert collect.env["KERNREC_EXPECTED_JOBS_CUDA"] == str(cuda)
+    assert collect.env["KERNREC_EXPECTED_JOBS_ROCM"] == str(amd)
+
+
+def test_collect_step_counts_armed_jobs_per_backend(monkeypatch, fake_global_config):
+    """Each backend publishes on its own, so each needs its own denominator:
+    vllm/ci #97886 published ROCm with every CUDA recording lost, and passed."""
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    fake_global_config["run_amd"] = True
+    groups = _rendered_groups(
+        _gpu_step(key="kernels", mirror={"amd": {"device": "mi300_1"}}),
+        _gpu_step(key="sharded", group="g2", label="Sharded", parallelism=3),
+        _gpu_step(key="host", group="host", label="Host step", no_plugin=True),
+    )
+    (collect,) = buildkite_step.kernrec_collect_group(groups).steps
+    assert collect.env["KERNREC_EXPECTED_JOBS_CUDA"] == "4", "a shard is a job"
+    assert collect.env["KERNREC_EXPECTED_JOBS_ROCM"] == "1", "the mirror"
 
 
 def test_collect_group_skips_deferred_steps(monkeypatch, fake_global_config):
@@ -248,6 +376,77 @@ def test_finish_stays_off_with_the_recorder(monkeypatch):
     assert not any("kernrec_finish" in c for c in _commands(_render(_gpu_step())))
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        buildkite_step._kernrec_setup_command("rocm"),
+        buildkite_step._kernrec_finish_command(),
+    ],
+)
+def test_amd_recorder_helpers_do_not_mask_an_earlier_command_failure(command):
+    result = subprocess.run(["bash", "-c", "false && " + command.replace("$$", "$")])
+    assert result.returncode == 1
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+@pytest.mark.parametrize("kernrec,fnrec", [(0, 0), (1, 0), (0, 1), (1, 1)])
+@pytest.mark.parametrize(
+    "command,returncode",
+    [
+        ("case yes in yes) export RECORDER_TEST_VALUE=ready ;; esac\n", 0),
+        ("export RECORDER_TEST_VALUE=ready # trailing comment", 0),
+        ("read -r RECORDER_TEST_VALUE <<'EOF'\nready\nEOF\n", 0),
+        ("export RECORDER_TEST_VALUE=ready\nfalse # final failure", 1),
+    ],
+)
+def test_amd_multiline_commands_preserve_state_status_and_recorder_epilogues(
+    monkeypatch,
+    fake_global_config,
+    tmp_path,
+    mirror,
+    kernrec,
+    fnrec,
+    command,
+    returncode,
+):
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, str(kernrec))
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, str(fnrec))
+    monkeypatch.delenv("CONTINUE_ON_FAILURE", raising=False)
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(buildkite_step, "get_amd_setup_commands", lambda: [])
+    monkeypatch.setattr(
+        buildkite_step,
+        "_kernrec_setup_command",
+        lambda backend="cuda": (
+            'kernrec_finish() { printf "kernrec:%s:%s\\n" '
+            '"$$1" "$$RECORDER_TEST_VALUE"; }'
+        ),
+    )
+    monkeypatch.setattr(buildkite_step, "_fnrec_setup_commands", lambda *args: [])
+    monkeypatch.setattr(
+        buildkite_step,
+        "_fnrec_pack_command",
+        lambda: 'printf "fnrec:%s\\n" "$$RECORDER_TEST_VALUE"',
+    )
+    step = _gpu_step(
+        working_dir=str(tmp_path),
+        commands=[command, 'test "$$RECORDER_TEST_VALUE" = ready'],
+        **(
+            {"mirror": {"amd": {"device": "mi300_1", "dind": False}}}
+            if mirror
+            else {"device": "mi300_1", "dind": False}
+        ),
+    )
+    key = "amd-kernels" if mirror else "kernels"
+    rendered = next(s for g in _rendered_groups(step) for s in g.steps if s.key == key)
+    script = rendered.env["VLLM_TEST_COMMANDS"].replace("$$", "$")
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == returncode, result.stderr
+    lines = result.stdout.splitlines()
+    assert ("kernrec:0:ready" in lines) is bool(kernrec and returncode == 0)
+    assert ("fnrec:ready" in lines) is bool(fnrec and returncode == 0)
+
+
 def _timeout(rendered):
     return (
         rendered.get("timeout_in_minutes")
@@ -265,7 +464,86 @@ def test_recording_gives_steps_a_timeout_margin(monkeypatch):
     monkeypatch.delenv(recorder_switches.FNREC_ENV_VAR, raising=False)
     assert _timeout(_render(step)) == 40
     monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
-    assert _timeout(_render(step)) == 50
+    assert _timeout(_render(step)) == 60, "RECORDING_MIN_EXTRA_MINUTES beats 1.25x here"
     assert _timeout(_render(_gpu_step(timeout_in_minutes=40, no_plugin=True))) == 40, (
         "no recorder on the step, no margin"
     )
+
+
+def test_collect_waits_for_recording_steps_in_its_command_up_to_a_deadline(
+    monkeypatch, fake_global_config
+):
+    """A cancelled or timed-out dependency ends a step waiting_failed,
+    allow_dependency_failure or not, and it cannot be retried (full runs
+    95480, 95553, 95634). So the collect step depends only on the image build
+    and waits for the recording steps itself, up to COLLECT_AFTER_MINUTES."""
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    monkeypatch.setattr(buildkite_step.time, "time", lambda: 1_000_000)
+    (step,) = buildkite_step.kernrec_collect_group(_rendered_groups(_gpu_step())).steps
+    assert step.env["CI_SELECTOR_COLLECT_DEADLINE"] == str(
+        1_000_000 + buildkite_step.COLLECT_AFTER_MINUTES * 60
+    )
+    assert step.commands[0] == buildkite_step.COLLECT_WAIT
+    assert step.timeout_in_minutes > buildkite_step.COLLECT_AFTER_MINUTES
+    # every runtime variable is escaped from upload-time interpolation
+    import re
+
+    assert not re.search(
+        r"(?<!\$)\$(?!\$)[A-Za-z_({]", step.commands[0].replace("$$", "")
+    )
+
+
+def _clear_recorders(monkeypatch):
+    for name in ("KERNREC_ENV_VAR", "KERNREC_AMD_ENV_VAR", "FNREC_ENV_VAR"):
+        monkeypatch.delenv(getattr(recorder_switches, name), raising=False)
+
+
+def _amd_limits(minutes):
+    """Rendered limits of a native AMD step and an AMD mirror, keyed by step key."""
+    groups = _rendered_groups(
+        _gpu_step(mirror={"amd": {"device": "mi300_1", "timeout_in_minutes": minutes}}),
+        _gpu_step(
+            key="native",
+            label=":amd: (MI300) Native",
+            device="mi300_1",
+            dind=False,
+            timeout_in_minutes=minutes,
+        ),
+    )
+    return {s.key: s.timeout_in_minutes for g in groups for s in g.steps}
+
+
+@pytest.mark.parametrize("minutes, expected", [(20, 40), (100, 125)])
+def test_recorded_nvidia_step_gets_the_larger_margin(
+    monkeypatch, fake_global_config, minutes, expected
+):
+    """At least RECORDING_MIN_EXTRA_MINUTES, else the NVIDIA factor."""
+    _clear_recorders(monkeypatch)
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    assert _render(_gpu_step(timeout_in_minutes=minutes)).timeout_in_minutes == expected
+
+
+@pytest.mark.parametrize("minutes, expected", [(20, 40), (55, 110), (200, 360)])
+def test_recorded_amd_steps_get_the_amd_margin(
+    monkeypatch, fake_global_config, minutes, expected
+):
+    """Native AMD steps and AMD mirrors, after the three-hour AMD cap
+    (vllm/ci #96785 timed out two recorded AMD jobs at their plain limits)."""
+    _clear_recorders(monkeypatch)
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    fake_global_config["run_amd"] = True
+    limits = _amd_limits(minutes)
+    assert limits["amd-kernels"] == expected
+    assert limits["native"] == expected
+
+
+def test_unrecorded_steps_keep_their_limits(monkeypatch, fake_global_config):
+    _clear_recorders(monkeypatch)
+    fake_global_config["nightly"] = "1"
+    fake_global_config["run_amd"] = True
+    assert _render(_gpu_step(timeout_in_minutes=20)).timeout_in_minutes == 20
+    limits = _amd_limits(55)
+    assert (limits["amd-kernels"], limits["native"]) == (55, 55)

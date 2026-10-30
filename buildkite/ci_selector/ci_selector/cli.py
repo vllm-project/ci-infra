@@ -46,6 +46,12 @@ def _common() -> argparse.ArgumentParser:
     )
     p.add_argument("--pipeline", help="which pipeline --emit-keys names steps for")
     p.add_argument(
+        "--explain",
+        type=Path,
+        help="also write, per step, why it was selected and what each record "
+        "did to it (JSON), for evaluating a decision afterwards",
+    )
+    p.add_argument(
         "--no-base-worktree",
         action="store_true",
         help="with --diff BASE..HEAD, analyze from the current checkout "
@@ -88,12 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--kernel-table",
         type=Path,
-        help="kernel table to read (default: coverage-data/kernel_table.json.gz)",
+        help="explicit kernel table override (default: CUDA and ROCm pairs)",
     )
     parser.add_argument(
         "--kernel-symbol-map",
         type=Path,
-        help="kernel symbol map to read (default: coverage-data/kernel_symbol_map.json.gz)",
+        help="explicit kernel symbol map override (default: CUDA and ROCm pairs)",
     )
     return parser
 
@@ -160,13 +166,13 @@ def main(argv: list[str] | None = None) -> int:
     sel = select(state, paths, base=base, head=head)
 
     if args._mode != "codemap":
-        from .coverage.source import fetch_kernel_evidence, fetch_table
+        from .coverage.source import fetch_kernel_records, fetch_table
         from .decide import decide
 
         table = fetch_table(args.table)
         if table.dead_interpreter:
             print(f"coverage: {table.dead_interpreter}", file=sys.stderr)
-        kernels = fetch_kernel_evidence(args.kernel_table, args.kernel_symbol_map)
+        kernels = fetch_kernel_records(args.kernel_table, args.kernel_symbol_map)
         d = decide(state, sel, repo, base, head, table=table, kernels=kernels)
         if d.coverage_note:
             print(f"coverage: {d.coverage_note}", file=sys.stderr)
@@ -199,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"{d.library_reasons})",
                 file=sys.stderr,
             )
+        if getattr(args, "explain", None):
+            write_explain(args.explain, state, sel, d)
         sel = _restrict(sel, d)
 
     if args.emit_keys:
@@ -238,6 +246,10 @@ def _restrict(sel, d):
             **{k: v for k, v in sel.selected_paths.items() if k in steps},
             **{s: [None] for s in added},
         },
+        selected_files={
+            **{k: v for k, v in sel.selected_files.items() if k in steps},
+            **{s: [None] for s in added},
+        },
     )
 
 
@@ -271,3 +283,64 @@ def _warn_if_stale_checkout(repo: Path, head: str) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+#: Per step, how many of the map's reasons and how much of each to keep. A
+#: hub file can give a step dozens of near-identical reasons.
+EXPLAIN_REASONS = 5
+EXPLAIN_REASON_CHARS = 300
+
+
+def explain(state, sel, d) -> dict:
+    """Why each step ran or did not: the map's reasons, and what the coverage,
+    kernel and library records did to it. Keyed by Buildkite step key, the
+    name the build's jobs carry, so a later failure can be looked up here."""
+    keys: dict[str, str] = {}
+    for pdata in getattr(state, "pipelines", ()):
+        for step in pdata.steps:
+            key = step.buildkite_key or step.key
+            if key:
+                keys[step.step_id] = key
+    outcome = {}
+    for sid in d.added_by_coverage:
+        outcome[sid] = "added-by-coverage"
+    for sid in d.added_by_kernels:
+        outcome[sid] = "added-by-kernels"
+    for sid in d.dropped_by_coverage:
+        outcome[sid] = "dropped-by-coverage"
+    for sid in d.dropped_by_kernels:
+        outcome[sid] = "dropped-by-kernels"
+    for sid in d.dropped_by_libraries:
+        outcome[sid] = "dropped-by-libraries"
+    steps = {}
+    for sid in sorted(set(sel.selected) | set(outcome)):
+        reasons = sel.selected.get(sid, [])
+        steps[sid] = {
+            "key": keys.get(sid),
+            "selected": sid in d.steps,
+            "outcome": outcome.get(sid, "kept" if sid in d.steps else "not-selected"),
+            "map_reasons": [
+                r[:EXPLAIN_REASON_CHARS] for r in reasons[:EXPLAIN_REASONS]
+            ],
+            "map_reason_count": len(reasons),
+        }
+    return {
+        "version": 1,
+        "run_all": dict(sel.run_all),
+        "notes": list(sel.notes),
+        "coverage": {"note": d.coverage_note, "reasons": dict(d.reasons)},
+        "kernels": {
+            "note": d.kernel_note,
+            "pair": d.kernel_pair,
+            "reasons": dict(d.kernel_reasons),
+            "files": dict(d.kernel_files),
+        },
+        "libraries": {"note": d.library_note, "reasons": dict(d.library_reasons)},
+        "steps": steps,
+    }
+
+
+def write_explain(path: Path, state, sel, d) -> None:
+    import json
+
+    path.write_text(json.dumps(explain(state, sel, d), indent=1, sort_keys=True))

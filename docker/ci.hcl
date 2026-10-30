@@ -75,6 +75,12 @@ variable "VLLM_MERGE_BASE_COMMIT" {
   default = ""
 }
 
+# The commit a PR branched from, as a cache source only. Unlike the
+# VLLM_MERGE_BASE_COMMIT build arg, it does not change the cache key.
+variable "VLLM_CACHE_MERGE_BASE_COMMIT" {
+  default = ""
+}
+
 # Image tags (set by CI)
 
 variable "IMAGE_TAG" {
@@ -95,6 +101,12 @@ variable "CACHE_FROM_BASE" {
   default = ""
 }
 
+# The name the vLLM image build scripts export; used when CACHE_FROM_BASE
+# is unset.
+variable "CACHE_FROM_BASE_BRANCH" {
+  default = ""
+}
+
 variable "CACHE_FROM_MAIN" {
   default = ""
 }
@@ -111,8 +123,10 @@ function "get_cache_from" {
     BUILDKITE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${BUILDKITE_COMMIT},mode=max" : "",
     PARENT_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${PARENT_COMMIT},mode=max" : "",
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${VLLM_MERGE_BASE_COMMIT},mode=max" : "",
+    VLLM_CACHE_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${REGISTRY}/vllm-ci-test-cache:${VLLM_CACHE_MERGE_BASE_COMMIT},mode=max" : "",
     CACHE_FROM != "" ? "type=registry,ref=${CACHE_FROM},mode=max" : "",
     CACHE_FROM_BASE != "" ? "type=registry,ref=${CACHE_FROM_BASE},mode=max" : "",
+    CACHE_FROM_BASE == "" && CACHE_FROM_BASE_BRANCH != "" ? "type=registry,ref=${CACHE_FROM_BASE_BRANCH},mode=max" : "",
     CACHE_FROM_MAIN != "" ? "type=registry,ref=${CACHE_FROM_MAIN},mode=max" : "",
   ])
 }

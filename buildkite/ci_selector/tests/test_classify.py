@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import regex as re
+import yaml
 from ci_selector.codemap.claim import matches_source_dependency
 from ci_selector.codemap.classify import select
 from ci_selector.gitdiff import DiffFile, changed_paths
@@ -1819,6 +1820,23 @@ def test_a_config_list_routes_to_the_steps_reading_it(state):
     assert "vllm_ci:lm-eval-large-models-8xh200" not in claim.step_ids
 
 
+def test_a_yaml_config_list_lists_every_platforms_entries(tmp_path):
+    """A yaml list keeps `common` plus per-platform entries; any platform may
+    run them, so a change to any entry routes to the steps reading it."""
+    from types import SimpleNamespace
+
+    from ci_selector.codemap.classify import _list_entries
+
+    (tmp_path / "models-small.yaml").write_text(
+        "# comment\ncommon:\n- a.yaml\n- b.yaml\nrocm:\n- c.yaml\n"
+    )
+    repo = SimpleNamespace(repo=tmp_path)
+    entries = _list_entries(repo, "models-small.yaml", None)
+    assert entries == {"a.yaml", "b.yaml", "c.yaml"}
+    (tmp_path / "broken.yaml").write_text("common: [a.yaml\n")
+    assert _list_entries(repo, "broken.yaml", None) == set()
+
+
 def test_the_harness_default_list_is_read_from_its_conftest(state):
     from ci_selector.codemap.classify import _default_list
 
@@ -2231,9 +2249,11 @@ def test_rocm_release_script_zero_claims_before_family_fail_open(state):
     assert claim.rule == "release-ci" and not claim.run_all and not claim.step_ids
 
 
-def test_release_refs_derived_and_disjoint_from_live_steps(state):
-    """The derived release refs are non-empty, include the tools/ member, and reference
-    nothing a modeled step consumes."""
+def test_release_refs_derived_and_never_hide_live_steps(state):
+    """The derived release refs are non-empty and include the tools/ member. A ref
+    a modeled step also consumes (the ROCm release runs CI's build.sh) keeps that
+    step's claim: the release pipeline never zeroes a file live jobs use."""
+    from ci_selector.codemap.classify import _classify
     from ci_selector.handwritten import RELEASE_PIPELINE_FILES
 
     refs = state.release_refs
@@ -2244,7 +2264,12 @@ def test_release_refs_derived_and_disjoint_from_live_steps(state):
         for st in p.targets.values():
             live |= set(st.scripts_seen) | set(st.data_files)
             live |= {t.path for t in st.targets}
-    assert refs.isdisjoint(live), sorted(refs & live)
+    for path in sorted(refs & live):
+        claim = _classify(state, path, None)
+        assert claim.rule != "release-ci" and (claim.run_all or claim.step_ids), (
+            path,
+            claim.rule,
+        )
     for rel in RELEASE_PIPELINE_FILES:
         assert not any(rel == p.config.config_file for p in state.pipelines)
 
@@ -2255,6 +2280,13 @@ def test_unreferenced_rocm_ci_script_escalates_its_own_pipeline(state):
     never every pipeline and never the floor."""
     sel = select(state, [".buildkite/scripts/rocm/ci-bake-rocm.sh"])
     assert set(sel.run_all) == {"vllm_rocm_ci"}
+
+
+def test_rocm_stack_tooling_never_runs_the_cuda_pipeline(state):
+    """therock_wheels.py is a ROCm stack input (build.sh's stack key, the stack
+    Dockerfile's COPY): a change to it may run every AMD job, never all of CI."""
+    sel = select(state, ["tools/vllm-rocm/therock_wheels.py"])
+    assert not {"vllm_ci", "vllm_intel_ci"} & set(sel.run_all), sel.run_all
 
 
 def test_docker_input_relabel_still_run_all(state):
@@ -3203,16 +3235,22 @@ def test_image_union_exempt_membership(state):
     )
 
 
-def test_rust_reaches_hardware_image_consumers(state):
+def test_rust_reaches_hardware_image_consumers(state, vllm_repo):
     """Leg 2 pinned both ways: the ROCm bake steps and CPU suites compile rust
     in-step so they stay; the intel test steps only consume a prebuilt image
     whose rust is inert without the gate, so they go. The derived replacement
     for rust/ in rocm's run_all_patterns."""
     sel = select(state, ["rust/src/server/src/lib.rs"])
+    # The ROCm base step of each build layout (build.sh replaced ensure-ci-base-amd).
+    base_step = (
+        "vllm_rocm_ci:refresh-rocm-base-amd"
+        if (vllm_repo / ".buildkite/scripts/rocm/build.sh").exists()
+        else "vllm_rocm_ci:ensure-ci-base-amd"
+    )
     for sid in (
         "vllm_rocm_ci:cpu-kernel-tests",
         "vllm_rocm_ci:image-build-amd",
-        "vllm_rocm_ci:ensure-ci-base-amd",
+        base_step,
         "vllm_intel_ci:image-build-xpu",
     ):
         assert sid in sel.selected, sid
@@ -3591,3 +3629,108 @@ def test_quiet_python_changes_select_nothing(state, monkeypatch):
     # A real edit keeps the ordinary rules.
     monkeypatch.setattr(classify, "_same_python_ast", lambda *a: False)
     assert classify._classify(state, path, ctx).step_ids
+
+
+# --- a step yaml claims only the steps whose definition changed ---
+
+
+def test_a_changed_step_entry_is_the_only_one_named():
+    from ci_selector.codemap.classify import changed_step_entries
+
+    before = {
+        "group": "Q",
+        "steps": [{"key": "a", "commands": ["x"]}, {"label": "B", "commands": ["y"]}],
+    }
+    after = {
+        "group": "Q",
+        "steps": [
+            {"key": "a", "commands": ["x"], "automatic_shard": True},
+            {"label": "B", "commands": ["y"]},
+        ],
+    }
+    changed, added, mirror_only = changed_step_entries(before, after)
+    assert set(changed) == {"a"} and not added and not mirror_only
+    assert changed_step_entries(before, before) == ({}, {}, {})
+
+
+def test_a_change_outside_the_step_list_keeps_every_step():
+    from ci_selector.codemap.classify import changed_step_entries
+
+    before = {"group": "Q", "depends_on": ["image-build"], "steps": [{"key": "a"}]}
+    after = {"group": "Q", "depends_on": ["image-build-cpu"], "steps": [{"key": "a"}]}
+    assert changed_step_entries(before, after) is None
+    # an unnamed entry cannot be placed either
+    assert changed_step_entries({"steps": [{"commands": ["x"]}]}, after) is None
+
+
+def test_added_removed_and_mirror_only_entries_are_told_apart():
+    from ci_selector.codemap.classify import changed_step_entries
+
+    before = {
+        "steps": [
+            {"key": "gone"},
+            {"key": "m", "commands": ["x"], "mirror": {"amd": {"device": "mi300_1"}}},
+        ]
+    }
+    after = {
+        "steps": [
+            {"key": "m", "commands": ["x"], "mirror": {"amd": {"device": "mi355_1"}}},
+            {"key": "new", "commands": ["y"]},
+        ]
+    }
+    changed, added, mirror_only = changed_step_entries(before, after)
+    assert not changed and set(added) == {"new"} and set(mirror_only) == {"m"}
+
+
+def _claim_for(state, monkeypatch, path, edit):
+    import copy
+
+    from ci_selector.codemap import classify
+    from ci_selector.codemap.state import DiffContext
+
+    before = yaml.safe_load((state.repo / path).read_text())
+    after = copy.deepcopy(before)
+    edit(after)
+    docs = {"base": before, "head": after}
+    monkeypatch.setattr(classify, "_yaml_at", lambda st, p, ref: docs[ref])
+    ctx = DiffContext(base="base", head="head", status={path: "M"})
+    return classify._classify_buildkite(
+        state, path, [p.config for p in state.pipelines], ctx
+    )
+
+
+def test_a_changed_step_brings_its_mirror_and_nothing_else(state, monkeypatch):
+    """vllm#61832 added `automatic_shard` to four steps in four files and
+    selected all 74 steps those files define."""
+    from ci_selector.codemap import classify
+
+    path = ".buildkite/test_areas/quantization.yaml"
+
+    def edit(doc):
+        step = next(s for s in doc["steps"] if s.get("key") == "quantized-models-test")
+        step["automatic_shard"] = True
+
+    claim = _claim_for(state, monkeypatch, path, edit)
+    parents = {s for s in claim.step_ids if s.endswith(":quantized-models-test")}
+    targeted = classify._steps_targeting(state, path)
+    assert parents
+    assert claim.step_ids - targeted <= {
+        s for s in claim.step_ids if "quantized-models-test" in s
+    }
+    assert "quantized-models-test" in claim.changed_step_keys
+
+
+def test_an_added_step_is_named_by_its_head_key(state, monkeypatch):
+    """A step the diff adds is in no base state; its head key is how CI is
+    told to run it."""
+    path = ".buildkite/test_areas/quantization.yaml"
+
+    def edit(doc):
+        doc["steps"].append(
+            {"label": "New Thing", "key": "brand-new-step", "commands": ["pytest x"],
+             "optional": True}
+        )
+
+    claim = _claim_for(state, monkeypatch, path, edit)
+    assert claim.changed_step_keys == {"brand-new-step"}
+    assert "changes the definition of 1" in claim.detail

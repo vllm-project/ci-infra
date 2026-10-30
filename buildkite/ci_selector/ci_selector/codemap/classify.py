@@ -71,6 +71,7 @@ from .graph.model_registry import resolve_module_name
 from .pipeline.buildkite import CI_DIR
 from .pipeline.step import PipelineConfig
 from .pipeline.targets import working_dir_to_repo_rel
+from .registered_names import config_list_names
 from .repo import is_test_basename, is_test_file
 from .selection import (
     Selection,
@@ -152,6 +153,7 @@ def select(
         else:
             claim = _classify(state, path, ctx)
         sel.claims.append(claim)
+        sel.changed_step_keys |= claim.changed_step_keys
         for pipeline in claim.run_all:
             if pipeline not in sel.run_all:
                 sel.run_all[pipeline] = f"{claim.rule}: {claim.detail}"
@@ -471,7 +473,9 @@ def _named_in_invoked_tests(state: RepoState, path: str) -> bool:
 def _list_entries(state: RepoState, path: str, ref: str | None) -> set[str]:
     """The entries of a config list at `ref`, or on the base checkout when
     None: one relative path per line, blanks and comments skipped as the
-    harness does. Empty when it cannot be read."""
+    harness does. A yaml list maps `common` and each platform to its entries;
+    any platform may run them, so all are entries. Empty when it cannot be
+    read."""
     if ref is None:
         try:
             text = (Path(state.repo) / path).read_text()
@@ -486,11 +490,7 @@ def _list_entries(state: RepoState, path: str, ref: str | None) -> set[str]:
         if proc.returncode != 0:
             return set()
         text = proc.stdout
-    return {
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    }
+    return set(config_list_names(path, text))
 
 
 # What a config-list harness lists: its configs and the lists themselves.
@@ -876,9 +876,7 @@ _HUNK_RANGE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 def _op_named(text: str, ops: frozenset[str]) -> set[str]:
     """Ops a line names as a callable or a registration: `op(`, `"op(` or
     `"op"`, or a helper spelled `op_<suffix>(` such as `op_caller(`."""
-    return {
-        op for op in ops if re.search(rf'\b{re.escape(op)}(?:_\w+)?\s*[("]', text)
-    }
+    return {op for op in ops if re.search(rf'\b{re.escape(op)}(?:_\w+)?\s*[("]', text)}
 
 
 _SCOPE_OPENER = re.compile(r'\b(namespace\b|extern\s+"C")')
@@ -1034,15 +1032,27 @@ def _narrowed_native_state(
         return None
     repo = Path(state.repo)
     diff = subprocess.run(
-        ["git", "-C", str(repo), "diff", "-U0", "--no-color", ctx.base, ctx.head,
-         "--", path],
-        capture_output=True, text=True,
+        [
+            "git",
+            "-C",
+            str(repo),
+            "diff",
+            "-U0",
+            "--no-color",
+            ctx.base,
+            ctx.head,
+            "--",
+            path,
+        ],
+        capture_output=True,
+        text=True,
     )
     sides = {}
     for ref in (ctx.base, ctx.head):
         shown = subprocess.run(
             ["git", "-C", str(repo), "show", f"{ref}:{path}"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if shown.returncode != 0:
             return None
@@ -1069,7 +1079,8 @@ def _narrowed_native_state(
     if not touched or touched == ops:
         return None
     narrowed = dataclasses.replace(
-        state.native_ops, file_ops={**state.native_ops.file_ops, path: frozenset(touched)}
+        state.native_ops,
+        file_ops={**state.native_ops.file_ops, path: frozenset(touched)},
     )
     return dataclasses.replace(state, native_ops=narrowed)
 
@@ -1087,9 +1098,16 @@ def _env_entries_touched(text: str, lines: set[int]) -> set[str] | None:
         if isinstance(node, ast.Dict):
             for k, v in zip(node.keys, node.values):
                 if isinstance(k, ast.Constant) and isinstance(k.value, str):
-                    spans.append((range(k.lineno, (v.end_lineno or k.lineno) + 1), k.value))
+                    spans.append(
+                        (range(k.lineno, (v.end_lineno or k.lineno) + 1), k.value)
+                    )
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            spans.append((range(node.lineno, (node.end_lineno or node.lineno) + 1), node.target.id))
+            spans.append(
+                (
+                    range(node.lineno, (node.end_lineno or node.lineno) + 1),
+                    node.target.id,
+                )
+            )
     out: set[str] = set()
     source = text.splitlines()
     for n in lines:
@@ -1103,7 +1121,9 @@ def _env_entries_touched(text: str, lines: set[int]) -> set[str] | None:
     return out
 
 
-def _env_change_misses_build(state: RepoState, path: str, ctx: DiffContext | None) -> bool:
+def _env_change_misses_build(
+    state: RepoState, path: str, ctx: DiffContext | None
+) -> bool:
     """Whether a change to the build's env-var module touches only variables
     the build never reads. vllm#58919 added VLLM_MOONCAKE_CONNECTOR_TIMEOUT
     and every image step (210) came along, since setup.py loads the module."""
@@ -1112,13 +1132,28 @@ def _env_change_misses_build(state: RepoState, path: str, ctx: DiffContext | Non
     repo = Path(state.repo)
 
     def show(ref, p):
-        r = subprocess.run(["git", "-C", str(repo), "show", f"{ref}:{p}"],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            ["git", "-C", str(repo), "show", f"{ref}:{p}"],
+            capture_output=True,
+            text=True,
+        )
         return r.stdout if r.returncode == 0 else None
 
     diff = subprocess.run(
-        ["git", "-C", str(repo), "diff", "-U0", "--no-color", ctx.base, ctx.head, "--", path],
-        capture_output=True, text=True,
+        [
+            "git",
+            "-C",
+            str(repo),
+            "diff",
+            "-U0",
+            "--no-color",
+            ctx.base,
+            ctx.head,
+            "--",
+            path,
+        ],
+        capture_output=True,
+        text=True,
     )
     reader = show(ctx.base, BUILD_ENV_READER)
     if diff.returncode != 0 or reader is None:
@@ -1167,7 +1202,10 @@ def _same_python_ast(repo: Path, base: str, head: str, path: str) -> bool:
 def _git_grep(repo: Path, *args: str) -> str | None:
     """git grep output; "" for no match (exit 1); None if git failed."""
     r = subprocess.run(
-        ["git", "-C", str(repo), "grep", *args], capture_output=True, text=True, check=False
+        ["git", "-C", str(repo), "grep", *args],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if r.returncode == 0:
         return r.stdout
@@ -1204,18 +1242,26 @@ def _deleted_and_unreferenced(repo: Path, head: str, path: str) -> bool:
         return False
     dotted = path.removesuffix(".py").replace("/", ".")
     out = _git_grep(repo, "-n", "-w", "-F", "-e", dotted, "-e", path, head, "--")
-    if out is None or any(_names_module(line, head, dotted, path) for line in out.splitlines()):
+    if out is None or any(
+        _names_module(line, head, dotted, path) for line in out.splitlines()
+    ):
         return False
     pkg, stem = posixpath.split(path.removesuffix(".py"))
     rel = _git_grep(
-        repo, "-n", "-E",
+        repo,
+        "-n",
+        "-E",
         rf"from \.+{re.escape(stem)}\b|from \.+ import .*\b{re.escape(stem)}\b",
-        head, "--", f"{pkg}/" if pkg else ".",
+        head,
+        "--",
+        f"{pkg}/" if pkg else ".",
     )
     return rel == ""
 
 
-def _quiet_python_change(state: RepoState, path: str, ctx: DiffContext | None) -> Claim | None:
+def _quiet_python_change(
+    state: RepoState, path: str, ctx: DiffContext | None
+) -> Claim | None:
     """A Python change no test can observe selects nothing: a deleted module
     nothing at head imports or names, or an edit that leaves the AST as it
     was. Without both ends of a real diff, the normal rules apply."""
@@ -1483,7 +1529,7 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
     if native is not None:
         return native
     if path.startswith(".buildkite/"):
-        return _classify_buildkite(state, path, configs)
+        return _classify_buildkite(state, path, configs, ctx)
     # A file exclusive to a family with no live steps has nothing to run. The
     # link is re-derived every build, so that family appearing in any job yaml
     # switches selection back on. A device the taxonomy cannot map turns the
@@ -1628,10 +1674,13 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
         )
         & state.auto_step_ids
     ):
+        # The generator may still escalate on it (a run_all pattern): carry
+        # that, or the claim proposes less than CI will run.
         return Claim(
             "release-ci",
             f"{path} is referenced only by the release pipeline; no live "
             "test-pipeline jobs; nothing to run",
+            run_all=_run_all_escalation(path, configs),
         )
     family = hardware.exclusive_family_of_path(path)
     if family and path not in state.exclusive_disabled:
@@ -1744,12 +1793,120 @@ def _run_all_escalation(path: str, configs: list[PipelineConfig]) -> set[str]:
     }
 
 
+def _yaml_at(state: RepoState, path: str, ref: str):
+    proc = subprocess.run(
+        ["git", "-C", str(state.repo), "show", f"{ref}:{path}"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        return yaml.safe_load(proc.stdout)
+    except yaml.YAMLError:
+        return None
+
+
+def _step_entries(doc) -> dict[str, dict] | None:
+    """name -> entry for a plain list of uniquely named steps, else None."""
+    if not isinstance(doc, dict) or not isinstance(doc.get("steps"), list):
+        return None
+    out: dict[str, dict] = {}
+    for step in doc["steps"]:
+        name = (
+            (step.get("key") or step.get("label")) if isinstance(step, dict) else None
+        )
+        if not isinstance(name, str) or name in out:
+            return None
+        out[name] = step
+    return out
+
+
+def changed_step_entries(before, after):
+    """(entries changed in place, entries added, entries changed only in
+    their `mirror` block), each name -> head entry; or None when anything
+    outside the step list changed (a shared default, a group setting), or a
+    side is not a plain list of uniquely named steps: then every step the file
+    defines may run differently. Anchors and aliases resolve in the parse, so
+    editing a shared anchor changes exactly the steps that use it. Removed
+    entries have nothing left to run."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return None
+    rest = lambda d: {k: v for k, v in d.items() if k != "steps"}  # noqa: E731
+    if rest(before) != rest(after):
+        return None
+    old, new = _step_entries(before), _step_entries(after)
+    if old is None or new is None:
+        return None
+    changed, added, mirror_only = {}, {}, {}
+    for name, step in new.items():
+        if name not in old:
+            added[name] = step
+        elif old[name] != step:
+            strip = lambda s: {k: v for k, v in s.items() if k != "mirror"}  # noqa: E731
+            (changed if strip(old[name]) != strip(step) else mirror_only)[name] = step
+    return changed, added, mirror_only
+
+
+def _head_keys(entry: dict, name: str, own: bool, mirror: bool) -> set[str]:
+    """The keys an entry is uploaded under: its own, and `amd-<key>` for its
+    AMD mirror, which inherits the step's own definition."""
+    from .pipeline.step import derive_step_key
+
+    key = entry.get("key") or derive_step_key(entry.get("label") or name)
+    out = {key} if own else set()
+    if mirror and isinstance(entry.get("mirror"), dict) and entry["mirror"].get("amd"):
+        out.add(f"amd-{key}")
+    return out
+
+
+def _changed_steps(state: RepoState, path: str, ctx, defining: set[str]):
+    """(base step ids whose definition changed, head keys of those plus the
+    added ones), or None to keep every step the file defines."""
+    if ctx is None or ctx.status.get(path) != "M":
+        return None
+    parsed = changed_step_entries(
+        _yaml_at(state, path, ctx.base), _yaml_at(state, path, ctx.head)
+    )
+    if parsed is None:
+        return None
+    changed, added, mirror_only = parsed
+    steps = [s for p in state.pipelines for s in p.steps if s.step_id in defining]
+    ids: set[str] = set()
+    keys: set[str] = set()
+    for name, entry in changed.items():
+        parents = {
+            s.step_id for s in steps if not s.mirror_hw and (s.key or s.label) == name
+        }
+        if not parents:
+            return None  # an entry we cannot place: keep the whole file
+        ids |= parents | {s.step_id for s in steps if s.mirror_of in parents}
+        keys |= _head_keys(entry, name, own=True, mirror=True)
+    for name, entry in mirror_only.items():
+        parents = {
+            s.step_id for s in steps if not s.mirror_hw and (s.key or s.label) == name
+        }
+        if not parents:
+            return None
+        ids |= {s.step_id for s in steps if s.mirror_of in parents}
+        keys |= _head_keys(entry, name, own=False, mirror=True)
+    for name, entry in added.items():
+        keys |= _head_keys(entry, name, own=True, mirror=True)
+    return ids, keys
+
+
 def _classify_buildkite(
-    state: RepoState, path: str, configs: list[PipelineConfig]
+    state: RepoState, path: str, configs: list[PipelineConfig], ctx=None
 ) -> Claim:
     """Ordered: live consumers first, then the legacy and inert zero-claims, so
     a retired file that ever rejoins the live pipelines is claimed by its steps
-    instead of being silenced. Then no-code, then the catch-all run-all."""
+    instead of being silenced. Then no-code, then the catch-all run-all.
+
+    A modified step yaml claims the steps whose own definition changed, not
+    every step the file defines: vllm#61832 added `automatic_shard` to four
+    steps in four files and selected all 74 they define. Steps the diff adds
+    are named by their head keys (`changed_step_keys`), since no base step
+    exists to select."""
     for config in configs:
         if path == config.config_file:
             return Claim(
@@ -1769,7 +1926,17 @@ def _classify_buildkite(
         # a yaml on its own pipeline's run_all list would silently propose
         # only the steps it defines, all of which may be always-run.
         escalates = _run_all_escalation(path, configs)
-        detail = f"{path} defines these steps"
+        narrowed = _changed_steps(state, path, ctx, defining)
+        changed_keys: set[str] = set()
+        if narrowed is not None:
+            n_defined = len(defining)
+            defining, changed_keys = narrowed
+            detail = (
+                f"{path} changes the definition of {len(changed_keys)} of its "
+                f"steps ({n_defined} defined)"
+            )
+        else:
+            detail = f"{path} defines these steps"
         if escalates:
             detail += f"; the generator also escalates {sorted(escalates)} on it"
         return Claim(
@@ -1781,6 +1948,7 @@ def _classify_buildkite(
             step_detail={
                 sid: f"{path} is used by this step's command" for sid in targeted
             },
+            changed_step_keys=changed_keys,
         )
     # `_steps_targeting`, not a scripts_seen/data_files check: this leg used to
     # miss a file that is a step's pytest TARGET, reached through its

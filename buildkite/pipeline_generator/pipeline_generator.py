@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import shutil
@@ -6,26 +7,35 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import is_amd_device, normalize_amd_depends_on
+from amd import AMD_ALWAYS_RUN_STEP_KEYS, is_amd_device, normalize_amd_depends_on
 from buildkite_step import (
     AMD_GROUP,
     COLLECT_GROUP,
     PRECOMMIT_GROUP,
     BuildkiteGroupStep,
+    _amd_mirror_should_run,
     _generate_step_key,
+    _get_amd_mirror_effective_step,
+    _step_should_run,
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
     kernrec_collect_group,
+    kernrec_amd_enabled,
     kernrec_enabled,
     create_precommit_group_step,
     split_deferred_steps,
 )
 from constants import AgentQueue
 from recorder_switches import fnrec_enabled
+import selector_gate
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
 import unblock_jobs
+
+# Set to "0" to upload the whole pipeline at once, as before.
+EARLY_IMAGE_UPLOAD_ENV_VAR = "VLLM_CI_EARLY_IMAGE_UPLOAD"
+EARLY_IMAGE_PIPELINE_FILE = "pipeline-images.yaml"
 
 
 def _annotate_best_effort(message: str, style: Optional[str] = None) -> None:
@@ -90,15 +100,52 @@ class PipelineGenerator:
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+        early_keys = upload_image_steps_early(
+            steps, os.path.dirname(self.output_file_path)
+        )
+        record = _selector_decision(steps)
+        scheduled = None
         try:
+            if record is not None and record["applied"]:
+                # Validate the selector's keys and add their prerequisites.
+                # Every step stays in the pipeline; the rest are deferred
+                # (_step_should_run), so "Run more jobs" still offers them.
+                _, scheduled = select_steps_and_dependencies(
+                    steps,
+                    global_config["selector_step_keys"],
+                    torch_nightly=torch_nightly,
+                )
+                global_config["selector_step_keys"] = scheduled
             steps, selected_step_keys = select_steps_and_dependencies(
                 steps, global_config["only_step_keys"], torch_nightly=torch_nightly
             )
         except ValueError as error:
-            # Surface the reason on the build page, not only in the bootstrap log.
-            _annotate_best_effort(str(error), style="error")
-            raise
+            if not (record and record["applied"]):
+                # Surface the reason on the build page, not only in the bootstrap log.
+                _annotate_best_effort(str(error), style="error")
+                raise
+            # The selector's keys, never the build's own: back to today's rules.
+            record["applied"] = False
+            record["fallback"] = f"generator rejected the selector's keys: {error}"
+            global_config["selector_step_keys"] = None
+            scheduled = None
+            steps, selected_step_keys = select_steps_and_dependencies(
+                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+            )
         global_config["only_step_keys"] = selected_step_keys
+        if record is not None:
+            if scheduled is not None:
+                # The selector's choice plus the AMD steps today's rules run.
+                amd = selector_gate.amd_keys(steps)
+                record["scheduled_keys"] = sorted(
+                    set(scheduled) | (set(record["legacy_keys"]) & amd)
+                )
+            else:
+                record["scheduled_keys"] = record["legacy_keys"]
+            selector_gate.write_and_upload(
+                record, os.path.dirname(self.output_file_path)
+            )
+            selector_gate.annotate(record)
         grouped_steps = group_steps(steps)
 
         buildkite_group_steps = convert_group_step_to_buildkite_step(grouped_steps)
@@ -116,7 +163,7 @@ class PipelineGenerator:
         # Both recorders share one group, so they don't make two groups
         # with the same name.
         collect = []
-        if kernrec_enabled():
+        if kernrec_enabled() or kernrec_amd_enabled():
             collect += kernrec_collect_group(buildkite_group_steps).steps
         if fnrec_enabled():
             collect += fnrec_collect_group(buildkite_group_steps).steps
@@ -137,6 +184,11 @@ class PipelineGenerator:
                     global_config["github_repo_name"], global_config["commit"]
                 ),
             )
+
+        if early_keys:
+            # Already in the build: a second upload of a key would fail it.
+            buildkite_group_steps = _without_keys(buildkite_group_steps, early_keys)
+            deferred_group_steps = _without_keys(deferred_group_steps, early_keys)
 
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
@@ -162,6 +214,82 @@ class PipelineGenerator:
                 buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
             )
         return
+
+
+def _is_image_step(step: Step) -> bool:
+    # The steps _step_should_run always runs: they build the images every
+    # test depends on, whatever the diff or the test selector says.
+    return bool(step.key) and (
+        step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
+    )
+
+
+def upload_image_steps_early(steps: List[Step], output_dir: str) -> FrozenSet[str]:
+    """Upload the image build steps before the rest of the pipeline is
+    generated, and return their keys.
+
+    The test selector takes minutes per build, and the image builds wait for
+    the pipeline upload that follows it although they never depend on its
+    answer. Uploaded here, they start that much sooner; `generate` leaves
+    them out of the final pipeline. Returns no keys, so everything goes up
+    together as before, when the upload fails or does not apply.
+    """
+    global_config = get_global_config()
+    if (
+        os.getenv(EARLY_IMAGE_UPLOAD_ENV_VAR) == "0"
+        or not os.getenv("BUILDKITE_JOB_ID")
+        or global_config["only_step_keys"] is not None
+    ):
+        return frozenset()
+    early = [copy.deepcopy(step) for step in steps if _is_image_step(step)]
+    # Only steps whose prerequisites go up with them.
+    while True:
+        keys = {step.key for step in early}
+        kept = [s for s in early if all(d in keys for d in s.depends_on or [])]
+        if len(kept) == len(early):
+            break
+        early = kept
+    if not early:
+        return frozenset()
+    groups, _ = split_deferred_steps(
+        convert_group_step_to_buildkite_step(group_steps(early))
+    )
+    keys = frozenset(step.key for group in groups for step in group.steps)
+    if not keys:
+        return frozenset()
+    path = os.path.join(output_dir, EARLY_IMAGE_PIPELINE_FILE)
+    with open(path, "w") as f:
+        yaml.dump(
+            {"steps": [group.dict(exclude_none=True) for group in groups]},
+            f,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+    try:
+        result = subprocess.run(
+            ["buildkite-agent", "pipeline", "upload", path], check=False, timeout=120
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"Early image upload failed, uploading with the pipeline: {error}")
+        return frozenset()
+    if result.returncode != 0:
+        print("Early image upload failed, uploading with the pipeline")
+        return frozenset()
+    print(f"Uploaded the image builds early: {', '.join(sorted(keys))}")
+    return keys
+
+
+def _without_keys(
+    groups: List[BuildkiteGroupStep], keys: FrozenSet[str]
+) -> List[BuildkiteGroupStep]:
+    kept = []
+    for group in groups:
+        steps = [step for step in group.steps if step.key not in keys]
+        if len(steps) == len(group.steps):
+            kept.append(group)
+        elif steps:
+            kept.append(group.model_copy(update={"steps": steps}))
+    return kept
 
 
 def write_deferred_steps(
@@ -209,6 +337,80 @@ def write_deferred_steps(
             check=True,
         )
     return unblock_jobs.more_jobs_group(entries, 1, artifact_dir, source_job, queue)
+
+
+def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
+    """The keys today's rules run, AMD mirrors included, decided the way
+    convert_group_step_to_buildkite_step decides them."""
+    keys = []
+    for step in steps:
+        if _step_should_run(step, diff):
+            keys.append(step.key)
+        amd = (step.mirror or {}).get("amd")
+        if amd and _amd_mirror_should_run(
+            _step_should_run(_get_amd_mirror_effective_step(step, amd), diff), diff
+        ):
+            keys.append(f"amd-{step.key}")
+    return keys
+
+
+def _selector_decision(steps: List[Step]) -> Optional[dict]:
+    """Ask the test selector for this build's steps (selector_gate.py).
+
+    In "on" mode a usable answer replaces the source_file_dependencies rules
+    through `selector_step_keys`, which `generate` expands with each step's
+    prerequisites. Unlike `only_step_keys` it removes no step from the
+    pipeline: the ones it leaves out are deferred into "Run more jobs".
+    AMD steps, native and mirrored, are not the selector's: they keep the
+    source_file_dependencies rules.
+    Returns the decision record, or None when the gate is off. Never raises:
+    a broken gate leaves today's rules in place.
+    """
+    gate = selector_gate.mode()
+    if not gate:
+        return None
+    global_config = get_global_config()
+    try:
+        for step in steps:
+            if not step.key:
+                step.key = _generate_step_key(step.label)
+        diff = global_config["list_file_diff"]
+        legacy = _legacy_keys(steps, diff)
+        record = selector_gate.decide(global_config, legacy)
+        keys = record["selector_keys"]
+        if keys:
+            # Steps whose own definition the diff changed or added run, even
+            # optional ones: the change is to them, and otherwise it would go
+            # untested until the nightly (vllm#61832 added automatic_shard to
+            # three nightly-only steps).
+            changed = set((record.get("selector") or {}).get("changed_keys") or ())
+            changed &= selector_gate.known_keys(steps)
+            record["selector_changed_steps"] = sorted(changed)
+            # Every other optional (nightly / manual) step stays optional, as
+            # on any PR build today.
+            optional = selector_gate.optional_keys(steps) - changed
+            record["selector_optional_dropped"] = sorted(set(keys) & optional)
+            keys = sorted((set(keys) | changed) - optional)
+            # AMD steps keep today's rules; the selector decides the rest.
+            amd = selector_gate.amd_keys(steps)
+            record["selector_amd_left_to_todays_rules"] = sorted(set(keys) & amd)
+            keys = sorted(set(keys) - amd)
+            record["selector_keys"] = keys
+            unknown = sorted(set(keys) - selector_gate.known_keys(steps))
+            if unknown:
+                record["fallback"] = "selector named unknown step key(s): " + ", ".join(
+                    unknown[:20]
+                )
+            elif gate == "on":
+                global_config["selector_step_keys"] = frozenset(keys)
+                record["applied"] = True
+        return record
+    except Exception as error:  # noqa: BLE001 - the gate never breaks a build
+        print(f"ci-selector gate failed, keeping today's rules: {error}")
+        global_config["selector_step_keys"] = None
+        record = selector_gate.base_record(global_config, gate)
+        record["fallback"] = f"gate error: {type(error).__name__}: {error}"[:2000]
+        return record
 
 
 def select_steps_and_dependencies(
@@ -287,7 +489,8 @@ def is_docs_only_change(list_file_diff: List[str]) -> bool:
     for file_path in list_file_diff:
         if not file_path:
             continue
-        if file_path.startswith("docs/"):
+        # recipes/ holds model recipes: only a GitHub workflow reads them.
+        if file_path.startswith(("docs/", "recipes/")):
             continue
         if file_path.endswith(".md"):
             continue

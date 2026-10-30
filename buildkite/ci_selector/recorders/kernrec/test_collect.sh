@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# collect.sh under mocked externals: buildkite-agent, curl, aws, python3
+# collect.sh under mocked externals: buildkite-agent, curl, aws
 # stand-ins on PATH. Checks the publishing rules that matter:
 #
 #   1. happy path: table + usable map -> both under <commit>/, latest.json written
@@ -15,41 +15,73 @@
 #   6. rerun of a commit already published, this time with a corrupt map
 #      -> exit 1 and every byte already under S3 (pair + latest.json) untouched
 #      (Codex P2 on #620: the commit prefix is written as a unit)
+#   9. rerun of a commit already published, this time with no usable row
+#      (every job failed) -> exit 1 and S3 untouched, like 6
+#  10. with the generator's armed counts (CASE_ENV): a backend armed but not
+#      whole (nothing delivered, too few jobs, no valid pair) fails the step
+#      and is not published, while a whole one still publishes; every run
+#      leaves kernrec_collect_summary.json
 #
-# Real python3 is used for kernel_table.py; only the network/cloud commands
-# are faked. Run from anywhere; needs bash and python3.
+# Real Python is used for kernel_table.py; only network/cloud commands are
+# faked. Set KERNREC_PYTHON to the project's virtual-environment interpreter.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
+: "${KERNREC_PYTHON:?set to the project virtual-environment Python}"
+export KERNREC_PYTHON
 fail=0
 
 s3_digest() { (cd "$1" && find . -type f | sort | xargs cksum 2>/dev/null); }
 
 run_case() { # name expect_exit expect_latest(yes|no) expect_commit_upload(yes|no) mode [s3_untouched(yes|no)]
-  local name=$1 want_rc=$2 want_latest=$3 want_commit=$4 mode=$5 want_untouched=${6:-no}
+  local name=$1 want_rc=$2 want_latest=$3 want_commit=$4 mode=$5 want_untouched=${6:-no} want_rocm=${7:-no}
   local T; T=$(mktemp -d)
   mkdir -p "$T/bin" "$T/s3" "$T/artifacts" "$T/build/.kernrec/job-a"
   # a recording + sidecar for one non-parallel step
-  printf '# kernrec v1 pid=1 ppid=0 exe=python\nkernA\n# end records=1 unique=1 dropped=0\n' > "$T/build/.kernrec/job-a/kern.1.txt"
+  printf '# kernrec v1 backend=cuda recorder=cupti pid=1 ppid=0 exe=python\nkernA\n# end records=1 unique=1 dropped=0 errors=0 unresolved=0\n' > "$T/build/.kernrec/job-a/kern.1.txt"
   echo '{"step_key":"step-x","exit_status":0,"parallel_job":"","parallel_job_count":""}' > "$T/build/.kernrec/job-a/kernrec.json"
   # no-rows: a recording that cannot be filed (blank step key) -> a table with no rows
   [[ "$mode" == "no-rows" ]] && echo '{"step_key":"","exit_status":0}' > "$T/build/.kernrec/job-a/kernrec.json"
+  [[ "$mode" == "unusable-rerun" ]] && echo '{"step_key":"step-x","exit_status":1}' > "$T/build/.kernrec/job-a/kernrec.json"
+  [[ "$mode" == "empty" ]] && rm -rf "$T/build/.kernrec/job-a"
   # a usable symbol map unless the case says otherwise
   if [[ "$mode" != "no-map" ]]; then
-    python3 - "$T/build/kernel_symbol_map.json.gz" <<'PY'
+    "$KERNREC_PYTHON" - "$T/build/kernel_symbol_map.json.gz" <<'PY'
 import gzip, json, sys
 json.dump({"version": 1, "commit": "abc", "objects": [{"source": "csrc/a.cu", "target": "_C", "object": "o", "device": True, "symbols": ["kernA"], "deps": ["csrc/a.cu"]}], "stats": {}}, gzip.open(sys.argv[1], "wt"))
 PY
   fi
+  if [[ "$mode" == rocm-* || "$mode" == both* ]]; then
+    mkdir -p "$T/build/.kernrec/job-amd"
+    printf '# kernrec v1 backend=rocm recorder=rocprofiler-sdk pid=2\nkernAMD\n# end records=1 unique=1 dropped=0 errors=0 unresolved=0\n' > "$T/build/.kernrec/job-amd/kern.2.txt"
+    echo '{"step_key":"amd-step-x","exit_status":0,"backend":"rocm"}' > "$T/build/.kernrec/job-amd/kernrec.json"
+    "$KERNREC_PYTHON" - "$T/build/kernel_symbol_map.rocm.json.gz" <<'PY'
+import gzip, json, sys
+with gzip.open(sys.argv[1], "wt") as stream:
+    json.dump({"version": 2, "backend": "rocm", "commit": "abc", "objects": [
+        {"source": "csrc/a.cu", "symbols": ["kernAMD"], "device": True}
+    ]}, stream)
+PY
+  fi
+  if [[ "$mode" == rocm-* ]]; then
+    rm -rf "$T/build/.kernrec/job-a" "$T/build/kernel_symbol_map.json.gz"
+  fi
+  if [[ "$mode" == both-bad-rocm ]]; then
+    printf 'invalid map' > "$T/build/kernel_symbol_map.rocm.json.gz"
+  fi
   # rerun: an earlier build already published a valid pair for this commit and
-  # latest.json points at it; this build's map is garbage
-  if [[ "$mode" == "corrupt-map-rerun" ]]; then
+  # latest.json points at it; this build's map is garbage (or its table unusable)
+  if [[ "$mode" == "corrupt-map-rerun" || "$mode" == both-bad-cuda || "$mode" == "unusable-rerun" ]]; then
     mkdir -p "$T/s3/bkt/ci/kernrec/abc"
     cp "$T/build/kernel_symbol_map.json.gz" "$T/s3/bkt/ci/kernrec/abc/"
     printf 'table from build 41' | gzip > "$T/s3/bkt/ci/kernrec/abc/kernel_table.json.gz"
     echo '{"commit":"abc","build":41}' > "$T/s3/bkt/ci/kernrec/latest.json"
-    printf 'this is not gzip' > "$T/build/kernel_symbol_map.json.gz"
+    [[ "$mode" == "unusable-rerun" ]] || printf 'this is not gzip' > "$T/build/kernel_symbol_map.json.gz"
   fi
   local s3_before; s3_before=$(s3_digest "$T/s3")
+  local cuda_before=""
+  if [[ "$mode" == both-bad-cuda ]]; then
+    cuda_before=$(cksum "$T/s3/bkt/ci/kernrec/abc/kernel_table.json.gz" "$T/s3/bkt/ci/kernrec/abc/kernel_symbol_map.json.gz" "$T/s3/bkt/ci/kernrec/latest.json")
+  fi
 
   # --- stubs ---------------------------------------------------------------
   cat > "$T/bin/buildkite-agent" <<EOF
@@ -59,7 +91,7 @@ echo "\$*" >> "$T/agent.log"
 case "\$1 \$2" in
   "artifact download")
     if [[ "\$3" == *kernrec* ]]; then cp -R "$T/build/.kernrec" "\$4/" 2>/dev/null; fi
-    if [[ "\$3" == *kernel_symbol_map* ]]; then cp "$T/build/kernel_symbol_map.json.gz" "\$4/" 2>/dev/null || exit 1; fi
+    if [[ "\$3" == *kernel_symbol_map* ]]; then cp "$T/build/\$3" "\$4/" 2>/dev/null || exit 1; fi
     ;;
   "artifact upload") for f in \$3; do cp "\$f" "$T/artifacts/"; done ;;
 esac
@@ -85,22 +117,41 @@ EOF
 
   local branch=main
   [[ "$mode" == "fork-branch" ]] && branch="khluu:some-branch"
-  local extra=()
+  local extra=(${CASE_ENV:-})
   [[ "$mode" == "other-build" ]] && extra=(KERNREC_SOURCE_BUILD_ID=src-uuid KERNREC_SOURCE_BUILD_NUMBER=41 KERNREC_SOURCE_JOBS=job-a)
   ( cd "$T" && PATH="$T/bin:$PATH" BUILDKITE_COMMIT=abc BUILDKITE_BUILD_NUMBER=42 BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
       env ${extra[@]+"${extra[@]}"} bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
-  local latest=no commit=no untouched=no
+  local latest=no commit=no untouched=no rocm=no
   [[ -f "$T/s3/bkt/ci/kernrec/latest.json" ]] && latest=yes
   [[ -f "$T/s3/bkt/ci/kernrec/abc/kernel_table.json.gz" ]] && commit=yes
+  [[ -f "$T/s3/bkt/ci/kernrec/latest.rocm.json" && -f "$T/s3/bkt/ci/kernrec/abc/kernel_table.rocm.json.gz" ]] && rocm=yes
   [[ "$(s3_digest "$T/s3")" == "$s3_before" ]] && untouched=yes
   local verdict=OK
+  [[ -f "$T/artifacts/kernrec_collect_summary.json" || "$mode" == no-builder ]] || { verdict=FAIL; fail=1; echo "      no kernrec_collect_summary.json"; }
   [[ "$rc" == "$want_rc" && "$latest" == "$want_latest" && "$commit" == "$want_commit" ]] || { verdict=FAIL; fail=1; }
   [[ "$want_untouched" == "no" || "$untouched" == "yes" ]] || { verdict=FAIL; fail=1; }
+  [[ "$rocm" == "$want_rocm" ]] || { verdict=FAIL; fail=1; }
+  if [[ "$mode" == both-bad-cuda ]]; then
+    [[ "$cuda_before" == "$(cksum "$T/s3/bkt/ci/kernrec/abc/kernel_table.json.gz" "$T/s3/bkt/ci/kernrec/abc/kernel_symbol_map.json.gz" "$T/s3/bkt/ci/kernrec/latest.json")" ]] || { verdict=FAIL; fail=1; }
+  fi
+  if [[ "$rocm" == yes ]]; then
+    "$KERNREC_PYTHON" - "$T/s3/bkt/ci/kernrec" <<'PY' || { verdict=FAIL; fail=1; }
+import gzip, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+pointer = json.loads((root / "latest.rocm.json").read_text())
+assert pointer["backend"] == "rocm"
+assert pointer["files"] == ["kernel_symbol_map.rocm.json.gz", "kernel_table.rocm.json.gz"]
+table = json.load(gzip.open(root / "abc/kernel_table.rocm.json.gz", "rt"))
+assert set(table["rows"]) == {"amd-step-x"}
+assert table["names"] == ["kernAMD"]
+PY
+  fi
   if [[ "$mode" == "other-build" ]]; then
     # both downloads went to the source build, per job, and the table is stamped with it
-    [[ "$(grep -c -- '--build src-uuid' "$T/agent.log")" == 2 ]] || { verdict=FAIL; fail=1; echo "      agent calls: $(cat "$T/agent.log")"; }
+    [[ "$(grep -c -- '--build src-uuid' "$T/agent.log")" == 3 ]] || { verdict=FAIL; fail=1; echo "      agent calls: $(cat "$T/agent.log")"; }
     grep -q '^artifact download .kernrec/job-a/\* ' "$T/agent.log" || { verdict=FAIL; fail=1; echo "      no per-job download"; }
-    python3 -c 'import gzip,json,sys; t=json.load(gzip.open(sys.argv[1],"rt")); sys.exit(0 if t["source"]["build"] == 41 else 1)' "$T/artifacts/kernel_table.json.gz" \
+    "$KERNREC_PYTHON" -c 'import gzip,json,sys; t=json.load(gzip.open(sys.argv[1],"rt")); sys.exit(0 if t["source"]["build"] == 41 else 1)' "$T/artifacts/kernel_table.json.gz" \
       || { verdict=FAIL; fail=1; echo "      table not stamped with build 41"; }
   fi
   printf '%-4s %-18s exit=%s (want %s)  latest=%s (want %s)  commit_upload=%s (want %s)  s3_untouched=%s\n' "$verdict" "$name" "$rc" "$want_rc" "$latest" "$want_latest" "$commit" "$want_commit" "$untouched"
@@ -114,6 +165,17 @@ run_case no-builder        1 no  no  no-builder
 run_case no-rows           1 no  no  no-rows
 run_case no-identity       0 no  no  no-identity
 run_case corrupt-map-rerun 1 yes yes corrupt-map-rerun yes
+run_case unusable-rerun    1 yes yes unusable-rerun yes
 run_case fork-branch       0 no  no  fork-branch yes
 run_case other-build       0 yes yes other-build
+run_case rocm-only         0 no  no  rocm-only no yes
+run_case both-backends     0 yes yes both no yes
+run_case broken-cuda       0 yes yes both-bad-cuda no yes
+run_case broken-rocm       0 yes yes both-bad-rocm
+run_case unarmed-empty     0 no  no  empty
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=1" run_case armed-whole       0 yes yes both no yes
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=1" run_case armed-cuda-lost   1 no  no  rocm-only no yes
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1" run_case armed-empty       1 no  no  empty
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=5" run_case armed-short       1 no  no  normal
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=1" run_case armed-broken-cuda 1 yes yes both-bad-cuda no yes
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" || { echo "collect.sh publishing rules: FAIL"; exit 1; }

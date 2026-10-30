@@ -430,6 +430,28 @@ def test_otel_trace_keeps_assignment_prefixed_commands_in_shell(fake_global_conf
     assert "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed" in commands[4]
 
 
+def test_otel_trace_labels_long_commands_in_full(fake_global_config):
+    fake_global_config["branch"] = "main"
+    long = "pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/"
+    step = Step(label="Traced", commands=[long + "fp8.txt", long + "int8.txt"])
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    labels = [
+        shlex.split(re.search(r"ci_otel_run \d+ (.*?) pytest", c).group(1))[0]
+        for c in (commands[2], commands[4])
+    ]
+    assert labels[0] != labels[1]
+    assert labels == step.commands
+    assert commands[3].endswith(f'Command (2/2): {labels[1]}"')
+    assert commands[2].endswith(step.commands[0])
+    assert commands[4].endswith(step.commands[1])
+
+
 def test_is_simple_command():
     assert buildkite_step._is_simple_command("pytest tests")
     assert buildkite_step._is_simple_command("python script.py")
@@ -1078,6 +1100,25 @@ def test_step_explicitly_listing_excluded_subtree_still_matches():
 
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
+
+
+@pytest.mark.parametrize(
+    "diff, docs_only",
+    [
+        (["docs/a.md", "mkdocs.yaml"], True),
+        (["recipes/models/Qwen/Qwen3-4B.yaml"], True),
+        (["recipes/models/Qwen/Qwen3-4B.yaml", "docs/b.md"], True),
+        (["recipes/models/Qwen/Qwen3-4B.yaml", "vllm/x.py"], False),
+        (["tools/recipes/gen.py"], False),
+        ([], False),
+    ],
+)
+def test_docs_and_recipe_only_changes_skip_ci(diff, docs_only):
+    """recipes/ is read only by a GitHub workflow, so a change made of recipes
+    and docs builds nothing, NVIDIA or ROCm."""
+    from pipeline_generator import is_docs_only_change
+
+    assert is_docs_only_change(diff) is docs_only
 
 
 @pytest.mark.parametrize(

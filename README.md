@@ -1,6 +1,6 @@
 # vLLM CI Infrastructure
 
-Infrastructure-as-Code and bootstrap scripts for vLLM's continuous integration pipeline, built on [Buildkite](https://buildkite.com/) with autoscaling compute across AWS and GCP.
+Bootstrap scripts, pipeline generation, and test selection for vLLM's continuous integration pipeline, built on [Buildkite](https://buildkite.com/). Infrastructure configuration is maintained in [ci-infra-private](https://github.com/vllm-project/ci-infra-private) (maintainer access required).
 
 ## Repository Structure
 
@@ -14,15 +14,10 @@ ci-infra/
 │   ├── test-template-amd.j2  # AMD/ROCm Jinja2 pipeline template
 │   └── scripts/           # Helper scripts (Docker bake, Codecov upload)
 ├── docker/                # Docker buildx bake configuration (ci.hcl)
-├── terraform/
-│   ├── aws/               # AWS infrastructure (primary, active)
-│   ├── gcp/               # GCP GKE cluster and compute instances
-│   └── gcp_old/           # GCP TPU infrastructure (v5, v6e, v7x)
 ├── packer/
 │   ├── cpu/               # CPU build AMI with warm Docker cache
 │   └── gpu/               # GPU AMI with NVIDIA drivers
 ├── infra-k8s/             # Kubernetes-based Buildkite agent deployment
-├── github/                # GitHub Actions runner groups (Neural Magic, IBM)
 ├── claude-skills/         # Portable CI automations and investigation skills
 └── usage-stats/           # Usage telemetry collection (Vector)
 ```
@@ -89,15 +84,20 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 
 `buildkite/test-template-amd.j2` renders vLLM's [`test-amd.yaml`](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-amd.yaml) into Buildkite YAML using [minijinja-cli](https://github.com/mitsuhiko/minijinja).
 
+When the vLLM checkout has `.buildkite/scripts/rocm/build.sh`, the ROCm build steps come from vLLM's `.buildkite/hardware_tests/amd.yaml` (the template and `amd.py` alike) and GPU pods run `$ROCM_CI_REPO:build-$BUILDKITE_BUILD_ID`. `ROCM_CI_REPO` is the trust decision: `rocm/vllm-ci` for non-PR builds of `vllm-project/vllm` `main` that are not the AITER nightly, else `rocm/vllm-dev`. Older checkouts keep the previous build chain.
+
+ROCm release images are built in vLLM's release pipeline itself, on its own `cpu_queue_release` agents (`build.sh rocm release`, which builds its own stack and runtime images from source with the CI cache as a build cache, and never ships images from `rocm/vllm-ci`); no AMD agent or pipeline from this repo takes part.
+
 #### AITER nightly (AMD CI)
 
-`AITER_NIGHTLY=1`, on a scheduled `amd-ci` build of `main`, tests last night's [AITER](https://github.com/ROCm/aiter) build against vLLM:
+`AITER_NIGHTLY=1`, on a scheduled `amd-ci` build of `main`, tests last night's [AITER](https://github.com/ROCm/aiter) build against vLLM. Every `amdproduction` step on MI300 or MI355 (`amdgfx942nightly`, `amdgfx950nightly`) runs, unblocked. MI250 is left out: AITER builds no kernels for it.
 
-1. `aiter-nightly-amd` (vLLM's [`.buildkite/scripts/rocm/aiter-nightly-overlay.sh`](https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/rocm/aiter-nightly-overlay.sh)) installs the newest AITER nightly wheel built for the image's ROCm, torch and Python over this build's ci_base, and pushes the result as this build's `rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID`, in place of the stock one.
+With `build.sh`, `image-build-amd` installs the newest AITER nightly wheel built for the image's ROCm, torch and Python into the test image (selected by vLLM's `select_aiter_nightly_wheel.py`; an `AITER_SPEC` in the build env pins a pip spec instead), and the build writes only to `rocm/vllm-dev`. Older checkouts (before the build.sh layout) instead run:
+
+1. `aiter-nightly-amd` (vLLM's [`.buildkite/scripts/rocm/aiter-nightly-overlay.sh`](https://github.com/vllm-project/vllm/blob/fc0cfcdc05/.buildkite/scripts/rocm/aiter-nightly-overlay.sh)) installs the newest AITER nightly wheel built for the image's ROCm, torch and Python over this build's ci_base, and pushes the result as this build's `rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID`, in place of the stock one.
 2. The test image and every native GPU job run on that image. Test image layers go to an `aiter-nightly` cache branch.
-3. Every `amdproduction` step on MI300 or MI355 (`amdgfx942nightly`, `amdgfx950nightly`) runs, unblocked. MI250 is left out: AITER builds no kernels for it.
 
-The overlay step fails before any GPU job runs, with an error annotation and exit code: `10` no wheel for the image's ROCm/torch/Python, `11` install failed. The newest wheel is tested however old it is; the annotation shows its build date.
+With `build.sh`, a failed selection or install fails `image-build-amd` (retried once as exit 1); the wheel and its build date are in the build log. In older checkouts the overlay step fails before any GPU job runs, with an error annotation and exit code: `10` no wheel for the image's ROCm/torch/Python, `11` install failed. The newest wheel is tested however old it is; the annotation shows its build date.
 
 A retried overlay step reinstalls the wheel its first attempt chose.
 
@@ -118,49 +118,9 @@ The AMD and Intel bootstrap scripts additionally handle:
 
 ## Infrastructure
 
-### AWS (Primary)
+Terraform configuration for AWS, GCP, TPU/Kubernetes infrastructure, and GitHub runner groups is maintained in [ci-infra-private](https://github.com/vllm-project/ci-infra-private). The original `terraform/` and `github/` directory layouts are preserved there. Infrastructure maintainers need access to that repository to plan or update deployments.
 
-Managed via Terraform in `terraform/aws/`. Uses the [Buildkite Elastic CI Stack for AWS](https://github.com/buildkite/elastic-ci-stack-for-aws) (v6.21.0) to deploy autoscaling agent clusters as CloudFormation stacks.
-
-**Regions**: us-west-2 (GPU + CPU queues), us-east-1 (CPU build queues with warm-cache AMI, release queues)
-
-#### Agent Queues
-
-| Queue | Instance Type | Max | Purpose |
-|-------|--------------|-----|---------|
-| `small_cpu_queue_premerge` | r6in.large | 40 | Bootstrap, docs, lightweight tasks |
-| `medium_cpu_queue_premerge` | r6in.4xlarge | 60 | Medium CPU workloads, PR non-CUDA image builds |
-| `cpu_queue_premerge` | r6in.16xlarge (512GB) | 10 | CUDA kernel compilation |
-| `cpu_queue_premerge_us_east_1` | r6in.16xlarge (512GB) | 20 | CPU builds, PR CUDA image build (warm-cache AMI) |
-| `arm64_cpu_queue_premerge` | r7g.16xlarge | 10 | ARM64 builds |
-| `gpu_1_queue` | g6.4xlarge (1x L4) | 208 | Single-GPU tests |
-| `gpu_4_queue` | g6.12xlarge (4x L4) | 64 | Multi-GPU tests |
-
-Equivalent postmerge and release queues exist with ECR write access for pushing images. Specialized hardware (H100, H200, B200, A100) is managed via Kubernetes or dedicated pools.
-
-**Each queue consists of:**
-- An EC2 Auto Scaling Group that scales instances based on workload
-- A Lambda function that polls Buildkite to assess capacity needs
-- Buildkite agents running on each instance, executing jobs in Docker containers
-- All on-demand (100%), terminated after each job for isolation
-
-#### AWS Resources
-
-- **VPC**: Isolated networks in us-west-2 and us-east-1 (10.0.0.0/16, 4 public subnets each)
-- **ECR**: `vllm-ci-test-cache` (PR builds) and `vllm-ci-postmerge-cache` (main branch) with 14-day lifecycle
-- **S3**: `vllm-build-sccache` for C++ compiler cache, `vllm-wheels` / `vllm-wheels-dev` for wheel binaries
-- **Secrets Manager**: HuggingFace token, Buildkite analytics token
-- **SSM Parameter Store**: Agent tokens, AMI IDs
-
-### GCP
-
-- **GKE** (`terraform/gcp/`): Kubernetes clusters in us-central1 and us-west1 with L4 GPU node pools (g2-standard machines, up to 64 nodes). Autopilot cluster available. Artifact registry with 7-day cleanup. Compute instance groups for CPU builders.
-- **TPU** (`terraform/gcp_old/`): TPU infrastructure across multiple GCP projects:
-  - **TPU v5**: v5litepod-1 nodes for CI testing
-  - **TPU v6e**: v6e-1 and v6e-8 nodes with hyperdisk-balanced storage
-  - **TPU v7x**: v7x-2 and v7x-8 nodes with up to 4TB disk
-  - **CPU**: e2-standard-2 and n2-standard-64 instances for CPU-only workloads
-  - **Monitoring**: e2-micro instances running buildkite-agent-metrics exporter with GCP Ops Agent
+Public pipeline generation and test selection remain here. Infrastructure provisioning and state management are handled from the private repository.
 
 ### Kubernetes
 
@@ -199,15 +159,6 @@ C++ compilation outputs are cached in S3 (`vllm-build-sccache` in us-west-2), co
 
 When no critical source files have changed, CI uses precompiled wheels from the merge-base commit (hosted at `wheels.vllm.ai`) instead of building from source.
 
-## GitHub Runner Groups
-
-The `github/` directory contains Terraform configurations for GitHub Actions runner groups used by partner organizations:
-
-- **Neural Magic** (`group-neural-magic/`): Dedicated runner group for Neural Magic workloads.
-- **IBM** (`group-ibm/`): Dedicated runner group for IBM workloads.
-
-These are deployed with `terraform apply` and require a GitHub PAT with organizational admin permissions.
-
 ## Development
 
 ### Testing Changes
@@ -237,6 +188,7 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 | `DOCS_ONLY_DISABLE` | Skip docs-only detection (always run CI) |
 | `AMD_MIRROR_HW` | AMD hardware mirror target (default: `amdproduction`) |
 | `AITER_NIGHTLY` | AMD CI: set to `1` to test the latest AITER nightly wheel on every MI300/MI355 production step (see [AITER nightly](#aiter-nightly-amd-ci)); also disables the docs-only skip |
+| `AITER_SPEC` | AMD CI, with vLLM's `build.sh`: optional pip spec that pins the AITER wheel the test image installs (default with `AITER_NIGHTLY=1`: the newest matching nightly) |
 | `NOAUTO` | Set to `1` to gate all steps behind manual approval blocks |
 | `PRIORITY` | Set to `HIGH` for high-priority pipeline scheduling |
 
@@ -248,6 +200,10 @@ pre-commit install
 ```
 
 Enforces YAML validation, Python formatting (ruff), spell checking (typos), and GitHub Actions linting (actionlint).
+
+The CUDA CI image step (`image-build`) uses `cpu_queue_premerge_us_east_1`
+on non-main branches, sharing the warm-cache AMI and cache region used by main.
+Other non-main x86 image steps stay on `medium_cpu_queue_premerge`.
 
 ## Onboarding New Runners
 
