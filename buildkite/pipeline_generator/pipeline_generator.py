@@ -20,6 +20,7 @@ from buildkite_step import (
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
+    shard_coverage_step,
     kernrec_collect_group,
     kernrec_amd_enabled,
     kernrec_enabled,
@@ -167,6 +168,9 @@ class PipelineGenerator:
             collect += kernrec_collect_group(buildkite_group_steps).steps
         if fnrec_enabled():
             collect += fnrec_collect_group(buildkite_group_steps).steps
+        coverage = shard_coverage_step(buildkite_group_steps)
+        if coverage:
+            collect.append(coverage)
         if collect:
             buildkite_group_steps.append(
                 BuildkiteGroupStep(group=COLLECT_GROUP, steps=collect)
