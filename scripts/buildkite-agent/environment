@@ -159,6 +159,8 @@ if [[ -n "$IMAGE" ]]; then
     else
       echo "Pulling image $IMAGE..."
       retry_or_fail image-pull 205 "docker pull $IMAGE" docker pull "$IMAGE"
+      # The daily image cleanup can delete the lock directory during a pull.
+      mkdir -p "$LOCK_DIR"
       touch "$DONE_FILE"
       echo "Image pull complete."
     fi
