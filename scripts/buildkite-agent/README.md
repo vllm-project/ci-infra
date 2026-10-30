@@ -26,6 +26,9 @@ The `environment` hook maps each agent's spawn number to a MIG slice UUID using
 the MIG profile created on the GPUs, `spawn` in `buildkite-agent.cfg`, and
 `SLICES_PER_GPU` in `environment`.
 
+A whole-GPU host (no MIG) sets `spawn=1` and `SLICES_PER_GPU=0`; the hook then
+skips the slice mapping and the job gets every GPU.
+
 ## Files
 
 | File | Install to | Purpose |
