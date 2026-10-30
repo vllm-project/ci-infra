@@ -199,9 +199,9 @@ whether they passed or failed. It executes `collect.sh`:
    Several builds can collect the same commit (daily and nightly often
    share one); a later run whose map is broken publishes nothing and leaves
    the earlier pair in place. The bucket is public-read
-   (`terraform/aws/s3.tf`), so the selector's bootstrap can fetch over plain
+   ([bucket configuration](https://github.com/vllm-project/ci-infra-private/blob/main/terraform/aws/s3.tf), maintainer access required), so the selector's bootstrap can fetch over plain
    HTTPS; the postmerge agents that run the collect step hold the write
-   policy (`terraform/aws/iam.tf`). The step is `soft_fail`: a publishing
+   policy defined in the [private infrastructure configuration](https://github.com/vllm-project/ci-infra-private/blob/main/terraform/aws/iam.tf). The step is `soft_fail`: a publishing
    problem is reported, never a red build.
 
 ## Consuming it
