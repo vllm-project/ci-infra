@@ -128,6 +128,7 @@ Run the hook regression checks with:
 ```bash
 bash scripts/buildkite-agent/tests/pre-checkout.sh
 bash scripts/buildkite-agent/tests/environment.sh   # bash 4+ and GNU grep (agent host or Linux)
+bash scripts/buildkite-agent/tests/environment-race.sh   # real flock (agent host or Linux)
 ```
 
-Both stub every external command, so they need no AWS credentials or GPU.
+None needs AWS credentials or a GPU: they stub every call that leaves the host.
