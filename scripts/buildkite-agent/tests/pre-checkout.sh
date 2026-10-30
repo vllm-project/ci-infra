@@ -99,4 +99,29 @@ printf 'PASS %s\n' secret-store-down
     [[ "$(<"$marks")" == 'infra-retry:job-1:github-token=github-token,3,recovered' ]]
 ) || { echo "FAIL secret-store-transient"; exit 1; }
 printf 'PASS %s\n' secret-store-transient
-rm -f "$marks"
+
+# A secret the store refuses (missing, or the pipeline's policy denies it) is a
+# misconfiguration a retry can't fix: exit 1 after one try, not 201.
+calls=$(mktemp)
+log=$(mktemp)
+(
+    function /usr/bin/buildkite-agent() {
+        if [[ "$1 $2" == 'secret get' ]]; then
+            echo x >>"$calls"
+            echo 'buildkite-agent: fatal: Failed to fetch some secrets:' >&2
+            echo ' - secret "GITHUB_READONLY_PAT": GET https://agent-edge.buildkite.com/v3/jobs/job-1/secrets?key=GITHUB_READONLY_PAT: 404 Not Found: Secret not found or access denied' >&2
+        fi
+        return 1
+    }
+    export BUILDKITE_JOB_ID=job-1
+    export BUILDKITE_PIPELINE_ID=018cdabc-d930-49f6-9085-634c4cb582ed
+    export BUILDKITE_REPO=https://github.com/vllm-project/vllm.git
+    export BUILDKITE_BRANCH=feature BUILDKITE_COMMIT="$sha"
+    unset BUILDKITE_PULL_REQUEST BUILDKITE_REFSPEC GIT_CONFIG_COUNT
+    source "$hook" 2>"$log"
+) || status=$?
+[[ "${status:-0}" -eq 1 ]] || { echo "FAIL secret-denied: expected 1, got ${status:-0}"; exit 1; }
+[[ "$(wc -l <"$calls" | tr -d ' ')" == 1 ]] || { echo "FAIL secret-denied: fetched $(wc -l <"$calls") times"; exit 1; }
+grep -q '404 Not Found' "$log" || { echo "FAIL secret-denied: the store's error is not in the job log"; exit 1; }
+printf 'PASS %s\n' secret-denied
+rm -f "$marks" "$calls" "$log"
