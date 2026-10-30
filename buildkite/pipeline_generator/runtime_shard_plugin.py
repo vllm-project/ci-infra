@@ -12,7 +12,10 @@ command the plan covers, it:
     drop out of every shard,
   - opens a Buildkite log group per file, opens the group of a file that
     fails, and puts the failures and summary in their own open group,
-  - turns "no tests ran" into success when every test went to other shards.
+  - turns "no tests ran" into success when every test went to other shards,
+  - records what it ran for the build's coverage check
+    (runtime_shard_coverage.py): the command's first shard collects every file
+    and also records the whole list of tests the command should run.
 
 Each job collects the same tests, so the parts of a split file add up to the
 file. Elsewhere (a setup command's pytest, a pytest a test starts) it does
@@ -23,11 +26,13 @@ import base64
 import json
 import os
 import sys
+import time
 import zlib
 
 import pytest
 
 PLAN_ENV = "RUNTIME_SHARD_PLAN"
+COVERAGE_DIR_ENV = "RUNTIME_SHARD_COVERAGE_DIR"
 
 
 def pytest_configure(config):
@@ -41,7 +46,8 @@ def pytest_configure(config):
         if _without_plugins(command["args"]) == args:
             shard = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
             config.pluginmanager.register(
-                ShardPlugin(command, shard, plan["shards"]), "runtime_shard_job"
+                ShardPlugin(command, shard, plan["shards"], plan.get("key")),
+                "runtime_shard_job",
             )
             return
 
@@ -63,7 +69,7 @@ def _without_plugins(args):
 
 
 class ShardPlugin:
-    def __init__(self, command, shard, shards):
+    def __init__(self, command, shard, shards, step_key=None):
         self.files = command["files"]  # file from rootdir -> its shard
         self.split = command["split"]  # file -> {"shards", "assign"}
         self.prefix = command["prefix"]
@@ -80,12 +86,28 @@ class ShardPlugin:
         self.dropped = 0
         self.current = None
         self.expanded = False
+        self.step_key = step_key
+        self.position = command.get("position")
+        self.coverage_dir = os.environ.get(COVERAGE_DIR_ENV)
+        # The first shard that runs the command says what the command should
+        # run: collected here, on the job's hardware, at the job's commit.
+        self.collects_all = bool(self.coverage_dir) and shard == self.fallback
+        self.expected = None
+        self.planned = []  # the tests kept here
+        self.ran = set()  # the tests pytest reported on here
+
+    def pytest_configure(self, config):
+        if self.collects_all:
+            # A file another shard runs must not stop this shard's own tests.
+            # The run still fails, as that file's own shard does.
+            config.option.continue_on_collection_errors = True
 
     def pytest_ignore_collect(self, collection_path, config):
-        """A file planned whole for another shard isn't even imported."""
+        """A file planned whole for another shard isn't even imported, unless
+        this shard is the one that records the whole command."""
         relative = os.path.relpath(str(collection_path), str(config.rootpath))
         shard = self.files.get(relative.replace(os.sep, "/"))
-        if shard is not None and shard != self.shard:
+        if shard is not None and shard != self.shard and not self.collects_all:
             self.dropped += 1
             self.elsewhere_files.setdefault(shard, set()).add(relative)
             return True
@@ -114,6 +136,8 @@ class ShardPlugin:
     @pytest.hookimpl(trylast=True)  # after -m, -k and conftest hooks
     def pytest_collection_modifyitems(self, session, config, items):
         keep, drop = [], []
+        if self.collects_all:
+            self.expected = [item.nodeid for item in items]
         for item in items:
             file = item.nodeid.split("::")[0]
             self.totals[file] = self.totals.get(file, 0) + 1
@@ -128,10 +152,14 @@ class ShardPlugin:
             self.dropped += len(drop)
             config.hook.pytest_deselected(items=drop)
             items[:] = keep
+        self.planned = [item.nodeid for item in items]
 
     def pytest_collection_finish(self, session):
         if session.config.getoption("collectonly"):
+            self.coverage_dir = None
             return
+        # Before any test: a shard that dies leaves this, marked unfinished.
+        self._write_record(finished=False)
         # Looked up here: it registers after -p plugins are configured.
         self.reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if self.reporter is None:
@@ -142,6 +170,37 @@ class ShardPlugin:
                 f"runtime-shard: not in the plan, so run in shard {self.fallback + 1}: "
                 + ", ".join(self.unplanned)
             )
+
+    def _write_record(self, finished):
+        """One file per job per command, for the build's coverage check. A
+        failure here costs the check a record, never the job its tests.
+
+        Directories are 0777: a job writes as root into a checkout the agent
+        owns, and the agent must be able to delete them for the next job.
+        """
+        if not self.coverage_dir:
+            return
+        job_id = os.environ.get("BUILDKITE_JOB_ID", "no-job-id")
+        job_dir = os.path.join(self.coverage_dir, job_id)
+        record = {
+            "step": self.step_key,
+            "position": self.position,
+            "shard": self.shard,
+            "retry": int(os.environ.get("BUILDKITE_RETRY_COUNT") or 0),
+            "finished": finished,
+            "finished_at": time.time(),
+            "expected": self.expected,
+            "planned": self.planned,
+            "ran": sorted(self.ran),
+        }
+        try:
+            os.makedirs(job_dir, exist_ok=True)
+            os.chmod(self.coverage_dir, 0o777)
+            os.chmod(job_dir, 0o777)
+            with open(os.path.join(job_dir, f"{self.position}.json"), "w") as f:
+                json.dump(record, f)
+        except OSError as error:
+            print(f"runtime-shard: no coverage record: {error}")
 
     def _where(self):
         """Which of the command's tests run here, and where the rest run, so
@@ -189,6 +248,7 @@ class ShardPlugin:
 
     @pytest.hookimpl(trylast=True)  # after -v prints FAILED or ERROR
     def pytest_runtest_logreport(self, report):
+        self.ran.add(report.nodeid)
         if self.reporter is not None and report.failed and not self.expanded:
             self.expanded = True
             self._say("^^^ +++")  # Buildkite: open this file's group
@@ -206,6 +266,12 @@ class ShardPlugin:
         # is not a failure. A command that collects nothing at all still is.
         if exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED and self.dropped:
             session.exitstatus = pytest.ExitCode.OK
+        # -x, --maxfail or a Ctrl-C stopped the run: tests here may not have run.
+        stopped = session.shouldstop or session.shouldfail or exitstatus in (
+            pytest.ExitCode.INTERRUPTED,
+            pytest.ExitCode.INTERNAL_ERROR,
+        )
+        self._write_record(finished=not stopped)
 
 
 def _plural(count, noun):

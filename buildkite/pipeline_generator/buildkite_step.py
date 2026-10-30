@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
+import json
 import math
 import os
 import time
@@ -850,6 +851,74 @@ def _collect_step(
     )
 
 
+def shard_coverage_step(
+    groups: "List[BuildkiteGroupStep]",
+) -> "Optional[BuildkiteCommandStep]":
+    """The job that checks no test dropped out of a build's shards, or None
+    when nothing in this build is sharded.
+
+    Soft-fails: a miss shows red and in a red annotation, and blocks nothing.
+    Waits like a recorder's collect step, on what the shards wait on and then
+    on their state (COLLECT_WAIT): a timed-out or cancelled shard would end a
+    step depending on it waiting_failed, and a shard that didn't finish is one
+    of the things this job reports.
+    """
+    steps = {}
+    sharded = []
+    runnable_keys = {s.key for g in groups for s in g.steps if not s.deferred}
+    for group in groups:
+        for step in group.steps:
+            packed = (step.env or {}).get(runtime_shard.PLAN_ENV)
+            if not packed or step.deferred:
+                continue
+            plan = runtime_shard.unpack(packed)
+            sharded.append(step)
+            steps[step.key] = [
+                {
+                    "position": planned["position"],
+                    "label": planned["label"],
+                    "fallback": planned["fallback"],
+                    "owners": runtime_shard.owners(planned),
+                }
+                for planned in plan["commands"]
+            ]
+    if not steps:
+        return None
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        f"{branch}/buildkite/pipeline_generator/runtime_shard_coverage.py"
+    )
+    script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
+    on_main = get_global_config()["branch"] == "main"
+    queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
+    depends_on = []
+    for dep in (d for s in sharded for d in (s.depends_on or [])):
+        if dep in runnable_keys and dep not in depends_on:
+            depends_on.append(dep)
+    return BuildkiteCommandStep(
+        label=":mag: Check every test ran",
+        key="runtime-shard-coverage",
+        env={
+            "RUNTIME_SHARD_COVERAGE_STEPS": json.dumps(steps),
+            "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(steps),
+            "CI_SELECTOR_COLLECT_DEADLINE": str(
+                int(time.time()) + COLLECT_AFTER_MINUTES * 60
+            ),
+        },
+        agents={"queue": queue.value},
+        commands=[
+            COLLECT_WAIT,
+            f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
+            f" && python3 {script}",
+        ],
+        depends_on=depends_on,
+        allow_dependency_failure=True,
+        soft_fail=True,
+        timeout_in_minutes=COLLECT_AFTER_MINUTES + 30,
+    )
+
+
 def _kernrec_finish_command() -> str:
     """Record the step's exit status in the recorder's sidecar, explicitly.
 
@@ -1094,6 +1163,7 @@ def _shard_at_generation(
     commands: List[str],
     env: Optional[Dict[str, str]],
     mode: str,
+    setup_profile: SetupProfile = "nvidia",
 ) -> Optional[Tuple[int, List[str], Dict[str, str]]]:
     """Plan an enrolled step's shards from the checkout (runtime_shard.py)
     and, in "on" mode, turn its job's prepared commands and env into one
@@ -1125,7 +1195,7 @@ def _shard_at_generation(
         f"{env.get('PYTEST_ADDOPTS', '')} -p no:pytest-shard"
         f" -p {runtime_shard.PLUGIN_MODULE}"
     ).strip()
-    plan = {"shards": result["shards"], "commands": result["commands"]}
+    plan = {"shards": result["shards"], "commands": result["commands"], "key": step_key}
     env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
     env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()
     commands = list(commands)
@@ -1145,7 +1215,8 @@ def _shard_at_generation(
             commands[at + 1] = runtime_shard.guard(
                 commands[at + 1], planned, result["shards"]
             )
-    return result["shards"], runtime_shard.shard_job_setup() + commands, env
+    checkout = _fnrec_checkout_path(step, setup_profile)
+    return result["shards"], runtime_shard.shard_job_setup(checkout) + commands, env
 
 
 def convert_group_step_to_buildkite_step(
@@ -1202,6 +1273,7 @@ def convert_group_step_to_buildkite_step(
                         amd_commands,
                         amd_env,
                         amd_shard_mode,
+                        "amd",
                     )
                     if amd_shard_mode
                     else None
@@ -1230,7 +1302,8 @@ def convert_group_step_to_buildkite_step(
                     extra_artifact_paths=_fnrec_artifact_paths(step, "amd")
                     + (
                         [KERNREC_ARTIFACT_PATH] if _kernrec_applies(step, "amd") else []
-                    ),
+                    )
+                    + ([runtime_shard.COVERAGE_ARTIFACT_PATH] if amd_sharded else []),
                     recorded_step=step,
                 )
                 amd_step.deferred = not _step_should_run(step, list_file_diff)
@@ -1349,6 +1422,10 @@ def convert_group_step_to_buildkite_step(
                 ) = sharded
                 # Buildkite fills in %N (from 1) and %t (the shard count): "... Shard 2/4".
                 buildkite_step.label = f"{buildkite_step.label} Shard %N/%t"
+                buildkite_step.artifact_paths = _merge_artifact_paths(
+                    buildkite_step.artifact_paths,
+                    [runtime_shard.COVERAGE_ARTIFACT_PATH],
+                )
             if include_step:
                 group_steps_list.append(buildkite_step)
 
@@ -1422,6 +1499,7 @@ def convert_group_step_to_buildkite_step(
                         amd_commands,
                         extra_env,
                         amd_shard_mode,
+                        "amd",
                     )
                     if amd_shard_mode
                     else None
@@ -1459,7 +1537,8 @@ def convert_group_step_to_buildkite_step(
                         [KERNREC_ARTIFACT_PATH]
                         if _kernrec_applies(amd_command_step, "amd")
                         else []
-                    ),
+                    )
+                    + ([runtime_shard.COVERAGE_ARTIFACT_PATH] if amd_sharded else []),
                     recorded_step=amd_command_step,
                 )
                 amd_step.deferred = not _amd_mirror_should_run(

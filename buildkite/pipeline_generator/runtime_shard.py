@@ -67,6 +67,10 @@ PLAN_ENV = "RUNTIME_SHARD_PLAN"
 PLUGIN_ENV = "RUNTIME_SHARD_PLUGIN"
 PLUGIN_DIR = "/tmp/runtime-shard"
 PLUGIN_MODULE = "runtime_shard_plugin"
+COVERAGE_DIR_ENV = "RUNTIME_SHARD_COVERAGE_DIR"
+# Where a shard's coverage records go, relative to the checkout.
+COVERAGE_DIR = ".runtime-shard-coverage"
+COVERAGE_ARTIFACT_PATH = f"{COVERAGE_DIR}/*/*.json"
 # pytest-shard would select a subset a second time on top of the plan.
 _UNSHARDABLE_ARGS = ("--num-shards", "--shard-id")
 _SHELL_SYNTAX = ("&&", "||", ";", "|", ">", "<", "`", "$", "\n")
@@ -746,9 +750,17 @@ def plugin_source() -> str:
         return base64.b64encode(zlib.compress(f.read().encode())).decode()
 
 
-def shard_job_setup() -> List[str]:
+def shard_job_setup(checkout: str) -> List[str]:
     """Commands that install the plugin in a shard job, before its own. $$ is
-    a literal $ in the uploaded pipeline."""
+    a literal $ in the uploaded pipeline.
+
+    Args:
+        checkout: Where this job can see the Buildkite checkout, the only
+            place artifact_paths can upload the coverage records from.
+
+    Returns:
+        The commands.
+    """
     unpack_plugin = (
         "import base64, os, sys, zlib; sys.stdout.write(zlib.decompress("
         f"base64.b64decode(os.environ['{PLUGIN_ENV}'])).decode())"
@@ -758,6 +770,7 @@ def shard_job_setup() -> List[str]:
         f" > {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
         # On the path of whichever python runs pytest (a venv's included).
         f'export PYTHONPATH="{PLUGIN_DIR}$${{PYTHONPATH:+:$$PYTHONPATH}}"',
+        f'export {COVERAGE_DIR_ENV}="{checkout}/{COVERAGE_DIR}"',
     ]
 
 
