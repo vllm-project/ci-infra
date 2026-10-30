@@ -689,6 +689,7 @@ def kernrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroup
                 "kernrec",
                 KERNREC_COLLECT_KEY,
                 ":satellite: Collect kernel coverage",
+                count_armed=True,
             )
         ],
     )
@@ -709,6 +710,12 @@ def fnrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupSt
             )
         ],
     )
+
+
+def _kernrec_backend(step: "BuildkiteCommandStep") -> str:
+    """The backend the kernel recorder prelude exports on this rendered step."""
+    text = " ".join(list(step.commands or []) + [str(v) for v in (step.env or {}).values()])
+    return "rocm" if "KERNREC_BACKEND=rocm" in text else "cuda"
 
 
 def _carries(step: "BuildkiteCommandStep", recorder: str) -> bool:
@@ -792,7 +799,16 @@ def _collect_step(
         # Taken off the same list that decides what this step waits for, so it
         # can never count a job that never starts. A step with parallelism N is
         # one step and N jobs, and a lost shard is the case this exists for.
-        env["FNREC_EXPECTED_JOBS"] = str(sum(s.parallelism or 1 for s in armed))
+        if recorder == "fnrec":
+            env["FNREC_EXPECTED_JOBS"] = str(sum(s.parallelism or 1 for s in armed))
+        else:
+            # Per backend, because the two publish independently: vllm/ci
+            # #97886 published ROCm while every CUDA recording had been lost
+            # since #685, and the step passed.
+            for backend in ("cuda", "rocm"):
+                env[f"KERNREC_EXPECTED_JOBS_{backend.upper()}"] = str(
+                    sum(s.parallelism or 1 for s in armed if _kernrec_backend(s) == backend)
+                )
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"

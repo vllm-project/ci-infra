@@ -71,3 +71,11 @@ jobs:
       - name: Kernel recorder setup under bash and sh
         working-directory: buildkite/ci_selector
         run: KERNREC_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" bash recorders/kernrec/test_ci_setup.sh
+
+      # The collect steps' publishing and failure rules, with buildkite-agent
+      # and aws stubbed: a build that lost a recorder's output must fail.
+      - name: Collect steps' publishing rules
+        working-directory: buildkite/ci_selector
+        run: |
+          KERNREC_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" bash recorders/kernrec/test_collect.sh
+          bash recorders/fnrec/test_collect.sh

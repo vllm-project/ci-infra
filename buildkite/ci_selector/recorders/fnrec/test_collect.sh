@@ -3,7 +3,8 @@
 # Checks the publishing rules that matter:
 #
 #   1. happy path: a foldable build -> table under <commit>/, latest.json written
-#   2. no recordings at all         -> exit 0, nothing published, not a failure
+#   2. no recordings at all         -> exit 1 when the generator armed jobs
+#      (FNREC_EXPECTED_JOBS > 0); exit 0, nothing published, without a count
 #   3. the fold itself fails        -> exit 1, nothing published
 #   4. recordings nothing can be read out of -> the delivery check refuses
 #   5. no AWS identity              -> artifacts only, exit 0
@@ -59,7 +60,7 @@ run_case() { # name expect_exit expect_latest expect_commit mode [s3_untouched]
   local commit; commit=$(make_vllm_repo "$T/vllm")
 
   case "$mode" in
-    no-recordings) ;;
+    no-recordings|no-recordings-unarmed) ;;
     # No root in the header and no #root line: the reader returns nothing for
     # it, so the job contributes no row and the table comes out empty.
     unreadable) mkdir -p "$T/build/.fnrec/job-a"
@@ -75,6 +76,7 @@ run_case() { # name expect_exit expect_latest expect_commit mode [s3_untouched]
   [[ "$mode" == "fork-branch" ]] && branch="tahsintunan:some-branch"
   local expected=1
   [[ "$mode" == "below-floor" ]] && expected=10
+  [[ "$mode" == "no-recordings-unarmed" ]] && expected=""
   # Folding another build: this build's own count is wrong for the source, so
   # the case passes only if the source's is the one the fold uses. The stand-in
   # agent serves nothing unless asked for the source build.
@@ -122,6 +124,7 @@ EOF
   [[ -f "$T/s3/bkt/ci/fnrec/$commit/table.json.gz" ]] && commit_up=yes
   [[ "$(s3_digest "$T/s3")" == "$s3_before" ]] && untouched=yes
   local verdict=OK
+  [[ -f "$T/artifacts/fnrec_collect_summary.json" ]] || { verdict=FAIL; fail=1; echo "      no fnrec_collect_summary.json"; }
   [[ "$rc" == "$want_rc" && "$latest" == "$want_latest" && "$commit_up" == "$want_commit" ]] \
     || { verdict=FAIL; fail=1; }
   [[ "$want_untouched" == "no" || "$untouched" == "yes" ]] || { verdict=FAIL; fail=1; }
@@ -147,7 +150,8 @@ EOF
 }
 
 run_case happy          0 yes yes happy
-run_case no-recordings  0 no  no  no-recordings
+run_case no-recordings  1 no  no  no-recordings
+run_case no-rec-unarmed 0 no  no  no-recordings-unarmed
 run_case fold-fails     1 no  no  fold-fails
 run_case unreadable     1 no  no  unreadable
 run_case no-identity    0 no  no  no-identity
