@@ -131,11 +131,20 @@ def test_l4_step_without_num_devices_defaults_to_one_gpu():
 
 
 
-def test_k8s_retry_counts_timeouts_separately_ahead_of_agent_lost():
-    assert buildkite_step.K8S_RETRY["automatic"][:2] == [
-        {"exit_status": -1, "signal_reason": "cancel", "limit": 1},
-        {"exit_status": -1, "limit": 1},
-    ]
+@pytest.mark.parametrize(
+    "retry",
+    [
+        buildkite_step.ensure_infra_failure_retry(None),
+        buildkite_step.ensure_infra_failure_retry(buildkite_step.K8S_RETRY),
+    ],
+    ids=["nvidia", "l4"],
+)
+def test_exit_minus_one_has_one_retry_budget_whatever_the_signal(retry):
+    # Buildkite counts each rule's limit separately, so a second -1 rule (say
+    # one for timeouts) would let a job that lost its agent and then timed out
+    # run three times. Timeouts are told apart by the job's signal_reason.
+    minus_one_rules = [r for r in retry["automatic"] if r.get("exit_status") == -1]
+    assert minus_one_rules == [{"exit_status": -1, "limit": 1}]
 
 def test_l4_step_keeps_explicit_retry():
     explicit_retry = {"automatic": [{"exit_status": 5, "limit": 3}]}
@@ -177,7 +186,6 @@ def test_non_l4_steps_keep_existing_routing(device, num_devices, queue):
     # nothing beyond it (in particular not K8S_RETRY).
     assert command_step.retry == {
         "automatic": [
-            buildkite_step.TIMEOUT_RETRY,
             buildkite_step.EXIT_STATUS_NEGATIVE_ONE_RETRY,
             buildkite_step.EXIT_STATUS_255_RETRY,
             buildkite_step.EXIT_STATUS_94_RETRY,
