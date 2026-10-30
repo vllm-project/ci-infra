@@ -22,6 +22,19 @@ def test_standard_docker_templates_forward_buildkite_analytics_token(template):
     assert BUILDKITE_ANALYTICS_TOKEN in template["environment"]
 
 
+@pytest.mark.parametrize("device", ["h200_18gb", "h200_35gb"])
+def test_mig_steps_get_a_cpu_quota_and_matching_thread_caps(
+    fake_global_config, device
+):
+    step = Step(label="MIG", device=device)
+
+    plugin = docker_plugin.get_docker_plugin(step, "example/image:latest")
+
+    cpus = plugin["cpus"]
+    assert 0 < int(cpus) <= 8
+    assert f"OMP_NUM_THREADS={cpus}" in plugin["environment"]
+
+
 def test_every_trusted_main_step_mounts_buildkite_agent(fake_global_config):
     fake_global_config["branch"] = "main"
     step = Step(label="Traced", device="h200_35gb")
