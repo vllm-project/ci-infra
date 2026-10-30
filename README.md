@@ -201,6 +201,10 @@ pre-commit install
 
 Enforces YAML validation, Python formatting (ruff), spell checking (typos), and GitHub Actions linting (actionlint).
 
+The CUDA CI image step (`image-build`) uses `cpu_queue_premerge_us_east_1`
+on non-main branches, sharing the warm-cache AMI and cache region used by main.
+Other non-main x86 image steps stay on `medium_cpu_queue_premerge`.
+
 ## Onboarding New Runners
 
 Machines communicate with Buildkite via an agent. Three deployment options:

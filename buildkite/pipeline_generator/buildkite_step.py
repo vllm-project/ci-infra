@@ -42,6 +42,8 @@ import runtime_shard
 # build also depend on this so pre-commit and image build can run in parallel.
 PRECOMMIT_STEP_KEY = "pre-commit"
 PRECOMMIT_GROUP = "GitHub pre-commit check"
+# The CUDA image build. Every PR test step waits on it.
+CUDA_IMAGE_BUILD_STEP_KEY = "image-build"
 AMD_GROUP = "Hardware-AMD Tests"
 PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
@@ -344,8 +346,12 @@ def get_agent_queue(step: Step):
                 return AgentQueue.ARM64_CPU_PREMERGE
         if branch == "main":
             return AgentQueue.CPU_POSTMERGE_US_EAST_1
-        else:
-            return AgentQueue.MEDIUM_CPU_PREMERGE
+        # On the us-east-1 warm-cache AMI the CUDA image reuses local layers
+        # instead of pulling them cold (~16 min -> ~6 min on a cache hit).
+        # The other PR images are cheap enough to stay on the medium queue.
+        if step.key == CUDA_IMAGE_BUILD_STEP_KEY:
+            return AgentQueue.CPU_PREMERGE_US_EAST_1
+        return AgentQueue.MEDIUM_CPU_PREMERGE
     elif step.label == "Documentation Build":
         return AgentQueue.SMALL_CPU_PREMERGE
     elif step.device == DeviceType.CPU_SMALL:
