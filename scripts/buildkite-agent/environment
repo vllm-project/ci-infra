@@ -100,8 +100,9 @@ ecr_cache_login() {
 # The lock lets one job log in while the others wait for it. A failed login
 # leaves no marker, and a failed pull removes it, so the next job logs in again.
 # The wait is bounded by one job's worst-case login retries, and a job that
-# waited and finds no login fails at once: during an ECR outage the waiters fail
-# as a login failure instead of each repeating the retries in turn behind the lock.
+# waited and finds no login tries once, with no retries: during an ECR outage it
+# fails quickly instead of repeating the retries behind the lock, and if a failed
+# pull only dropped the marker, it logs in again.
 ECR_LOGIN_MARKER=/tmp/buildkite-ecr-login.success
 exec 8>/tmp/buildkite-ecr-login.lock
 waited_for_login=
@@ -123,11 +124,12 @@ ecr_login_cached() {
 }
 if ! ecr_login_cached; then
   if [[ -n "$waited_for_login" ]]; then
-    echo "ERROR: another job's ECR login failed (provider/infrastructure failure — exiting 202 to trigger the infra retry)" >&2
-    exit 202
+    ecr_public_login || { echo "ERROR: ECR public login failed (provider/infrastructure failure — exiting 202 to trigger the infra retry)" >&2; exit 202; }
+    ecr_cache_login || { echo "ERROR: ECR pull-through-cache login failed (provider/infrastructure failure — exiting 203 to trigger the infra retry)" >&2; exit 203; }
+  else
+    retry_or_fail ecr-public-login 202 "ECR public login" ecr_public_login
+    retry_or_fail ecr-cache-login 203 "ECR pull-through-cache login" ecr_cache_login
   fi
-  retry_or_fail ecr-public-login 202 "ECR public login" ecr_public_login
-  retry_or_fail ecr-cache-login 203 "ECR pull-through-cache login" ecr_cache_login
   touch "$ECR_LOGIN_MARKER"
 fi
 exec 8>&-

@@ -112,10 +112,14 @@ run failed-pull-drops-login 205 - - FAIL_PULL=99
 # the same retries.
 run login-lock-timeout 202 - - LOGIN_LOCK_BUSY=1
 [[ $(calls aws) -eq 0 ]] || { echo "FAIL login-lock-timeout: logged in anyway"; exit 1; }
-# A job that waited for the login and finds none fails at once, rather than
-# repeating every retry behind the lock, one job after another.
-run login-waiter-fails-fast 202 '' '' LOGIN_WAITER=1
-[[ $(calls aws) -eq 0 ]] || { echo "FAIL login-waiter-fails-fast: logged in"; exit 1; }
+# A job that waited and finds no login tries once, with no retries: the job ahead
+# may have failed, or a failed pull may have dropped a good login.
+run login-waiter-logs-in 0 '' '' LOGIN_WAITER=1
+[[ $(calls aws) -eq 1 && $(calls awscache) -eq 1 ]] || { echo "FAIL login-waiter-logs-in: $(calls aws)/$(calls awscache) logins"; exit 1; }
+run login-waiter-tries-once 202 '' '' LOGIN_WAITER=1 FAIL_AWS=99
+[[ $(calls aws) -eq 1 ]] || { echo "FAIL login-waiter-tries-once: aws called $(calls aws) times"; exit 1; }
+run login-waiter-cache-tries-once 203 '' '' LOGIN_WAITER=1 FAIL_AWS_CACHE=99
+[[ $(calls awscache) -eq 1 ]] || { echo "FAIL login-waiter-cache-tries-once: called $(calls awscache) times"; exit 1; }
 # A job that waited while another logged in uses that login.
 run first-job-logs-in 0 '' ''
 KEEP_MARKER=1 run login-waiter-reuses 0 '' '' LOGIN_WAITER=1
@@ -128,6 +132,6 @@ run whole-gpu 0 '' '' FAIL_SMI=99
 [[ $(calls smi) -eq 0 ]] || { echo "FAIL whole-gpu: nvidia-smi called $(calls smi) times"; exit 1; }
 device=$(env PATH="$tmp/bin:$PATH" DOCKER_CONFIG="$tmp/docker" BUILDKITE_AGENT_NAME=no-number BUILDKITE_JOB_ID=job-1 \
     BUILDKITE_PLUGIN_DOCKER_IMAGE="test/image:$$" \
-    bash -c 'source "$1"; echo "$BUILDKITE_PLUGIN_DOCKER_DEVICES_0"' _ "$tmp/environment" 2>/dev/null)
+    bash -c 'source "$1" >/dev/null; echo "$BUILDKITE_PLUGIN_DOCKER_DEVICES_0"' _ "$tmp/environment" 2>/dev/null)
 [[ "$device" == nvidia.com/gpu=all ]] || { echo "FAIL whole-gpu: device was '$device'"; exit 1; }
 printf 'PASS %s\n' whole-gpu-device
