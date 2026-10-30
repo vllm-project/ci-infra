@@ -66,11 +66,9 @@ run mark-write-fails-blip 0 - '2 ' FAIL_PULL=1 MARK_FAILS=1
 run two-classes 0 $'infra-retry:job-1:gpu-discovery=gpu-discovery,2,recovered\ninfra-retry:job-1:image-pull=image-pull,3,recovered' '2 2 4 ' FAIL_SMI=1 FAIL_PULL=2
 run mark-write-fails-down 205 - '2 4 8 16 ' FAIL_PULL=99 MARK_FAILS=1
 
-# Waiter: the winner's pull failed (no done marker), so the waiter pulls itself.
-run waiter-pulls 0 '' '' WAITER=1
-[[ $(calls pull) -eq 1 ]] || { echo "FAIL waiter-pulls: pull called $(calls pull) times"; exit 1; }
-run waiter-retries 0 'infra-retry:job-1:image-pull=image-pull,3,recovered' '2 4 ' WAITER=1 FAIL_PULL=2
-run waiter-down 205 'infra-retry:job-1:image-pull=image-pull,5,exhausted' '2 4 8 16 ' WAITER=1 FAIL_PULL=99
-# Waiter: the winner's pull succeeded (done marker appears), so no pull.
+# Waiter: the winner's pull failed (no done marker), so the waiter fails at once
+# instead of repeating every retry behind the lock, one agent after another.
+run waiter-fails-fast 205 '' ''  WAITER=1
+[[ $(calls pull) -eq 0 ]] || { echo "FAIL waiter-fails-fast: pull called $(calls pull) times"; exit 1; }
 run waiter-sees-done 0 '' '' WAITER=1 WAITER_DONE="/tmp/docker-pull-locks/test_image_$$.lock.done"
 [[ $(calls pull) -eq 0 ]] || { echo "FAIL waiter-sees-done: pulled"; exit 1; }

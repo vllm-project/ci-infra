@@ -145,9 +145,14 @@ if [[ -n "$IMAGE" ]]; then
     if ! flock -n 9; then
       echo "Waiting for another agent to finish pulling $IMAGE..."
       flock 9
+      # The winner's pull succeeded only if it left the done marker. If it used
+      # every retry, fail now rather than repeat them all behind the lock, one
+      # agent after another; the job-level retry runs this job again.
+      if [[ ! -f "$DONE_FILE" ]]; then
+        echo "ERROR: another agent's docker pull $IMAGE failed (provider/infrastructure failure — exiting 205 to trigger the infra retry)" >&2
+        exit 205
+      fi
     fi
-    # We hold the lock: we won it, or the winner released it. The winner's pull
-    # succeeded only if it left the done marker; otherwise pull it ourselves.
     # Retries hold the lock so the other agents wait instead of stampeding.
     if [[ -f "$DONE_FILE" ]]; then
       echo "Image $IMAGE is now available."
