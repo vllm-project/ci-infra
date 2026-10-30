@@ -124,4 +124,32 @@ log=$(mktemp)
 [[ "$(wc -l <"$calls" | tr -d ' ')" == 1 ]] || { echo "FAIL secret-denied: fetched $(wc -l <"$calls") times"; exit 1; }
 grep -q '404 Not Found' "$log" || { echo "FAIL secret-denied: the store's error is not in the job log"; exit 1; }
 printf 'PASS %s\n' secret-denied
+
+# A blip, then a refusal: the retry that fired is still marked.
+: >"$calls"
+: >"$marks"
+(
+    function /usr/bin/buildkite-agent() {
+        case "$1 $2" in
+            'secret get')
+                echo x >>"$calls"
+                [[ "$(wc -l <"$calls" | tr -d ' ')" == 1 ]] && return 1
+                echo ' - secret "GITHUB_READONLY_PAT": 404 Not Found: Secret not found or access denied' >&2
+                return 1
+                ;;
+            'meta-data set') echo "$3=$4" >"$marks" ;;
+        esac
+        return 1
+    }
+    export BUILDKITE_JOB_ID=job-1
+    export BUILDKITE_PIPELINE_ID=018cdabc-d930-49f6-9085-634c4cb582ed
+    export BUILDKITE_REPO=https://github.com/vllm-project/vllm.git
+    export BUILDKITE_BRANCH=feature BUILDKITE_COMMIT="$sha"
+    unset BUILDKITE_PULL_REQUEST BUILDKITE_REFSPEC GIT_CONFIG_COUNT
+    source "$hook" 2>/dev/null
+) || status=$?
+[[ "${status:-0}" -eq 1 ]] || { echo "FAIL secret-blip-then-denied: expected 1, got ${status:-0}"; exit 1; }
+[[ "$(<"$marks")" == 'infra-retry:job-1:github-token=github-token,2,refused' ]] ||
+    { echo "FAIL secret-blip-then-denied: mark was '$(<"$marks")'"; exit 1; }
+printf 'PASS %s\n' secret-blip-then-denied
 rm -f "$marks" "$calls" "$log"
