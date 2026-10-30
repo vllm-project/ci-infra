@@ -83,7 +83,9 @@ COVERAGE_DIR_ENV = "RUNTIME_SHARD_COVERAGE_DIR"
 COVERAGE_DIR = ".runtime-shard-coverage"
 COVERAGE_ARTIFACT_PATH = f"{COVERAGE_DIR}/*/*.json"
 # pytest-shard would select a subset a second time on top of the plan.
-_UNSHARDABLE_ARGS = ("--num-shards", "--shard-id")
+# -n: pytest-xdist workers don't get the plan, so each shard would run it all.
+_UNSHARDABLE_ARGS = ("--num-shards", "--shard-id", "-n", "--numprocesses")
+_ATTACHED_XDIST = re.compile(r"-n(\d+|auto|logical)")
 _SHELL_SYNTAX = ("&&", "||", ";", "|", ">", "<", "`", "$", "\n")
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # pytest options that take their value as the next argument, so that value is
@@ -198,7 +200,7 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
         if _program(command) != "pytest" or any(s in command for s in _SHELL_SYNTAX):
             return None
         if any(
-            a.split("=")[0] in _UNSHARDABLE_ARGS
+            a.split("=")[0] in _UNSHARDABLE_ARGS or _ATTACHED_XDIST.fullmatch(a)
             for a in shlex.split(command, comments=True)
         ):
             return None
