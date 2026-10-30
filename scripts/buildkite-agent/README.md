@@ -26,12 +26,15 @@ The `environment` hook maps each agent's spawn number to a MIG slice UUID using
 the MIG profile created on the GPUs, `spawn` in `buildkite-agent.cfg`, and
 `SLICES_PER_GPU` in `environment`.
 
+A whole-GPU host (no MIG) sets `spawn=1` and `SLICES_PER_GPU=0`; the hook then
+skips the slice mapping and the job gets every GPU.
+
 ## Files
 
 | File | Install to | Purpose |
 |------|-----------|---------|
 | `buildkite-agent.cfg` | `/etc/buildkite-agent/buildkite-agent.cfg` | Agent config: queue tag, `spawn` (see table above), build/git-mirror paths. |
-| `environment` | `/etc/buildkite-agent/hooks/environment` | Exports secrets, logs into ECR, maps agent spawn # → MIG slice UUID, serializes the first docker pull, sets shallow git flags. |
+| `environment` | `/etc/buildkite-agent/hooks/environment` | Exports secrets, logs into ECR once per host every 10 h (`/tmp/buildkite-ecr-login.success`; delete it to force a fresh login), maps agent spawn # → MIG slice UUID, serializes the first docker pull, sets shallow git flags. |
 | `buildkite-gpu-cdi-env.sh` | `/usr/local/libexec/buildkite-gpu-cdi-env.sh` | Converts the MIG GPU selection into a CDI device (`nvidia.com/gpu=...`) and validates it exists. Sourced by `environment`. |
 | `pre-checkout` | `/etc/buildkite-agent/hooks/pre-checkout` | Injects a GitHub read-only PAT (from the agent secret store) as a git HTTP header for the vllm / perf-eval repos. |
 | `post-checkout` | `/etc/buildkite-agent/hooks/post-checkout` | Removes the injected git header after fetch. |

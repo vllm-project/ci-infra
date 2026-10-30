@@ -12,10 +12,12 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin"
 sed -e "s#/usr/local/libexec/#$dir/#" -e "s#/tmp/docker-pull-locks#$tmp/locks#" \
+    -e "s#/tmp/buildkite-ecr-login#$tmp/ecr-login#" \
     "$dir/environment" >"$tmp/environment"
 
 stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" >"$tmp/bin/$1"; chmod +x "$tmp/bin/$1"; }
-stub aws 'echo password'
+# AWS_DOWN fails every login after a moment, as a rejected request does.
+stub aws "echo call >>$tmp/aws; [[ -z \${AWS_DOWN:-} ]] || { $real_sleep 0.1; exit 1; }; echo password"
 stub sleep 'exit 0'
 stub buildkite-agent 'exit 0'
 stub nvidia-smi 'for n in {1..20}; do echo "  MIG 1g.18gb Device $n: (UUID: MIG-$n)"; done'
@@ -23,7 +25,7 @@ stub nvidia-ctk 'for n in {1..20}; do echo "nvidia.com/gpu=MIG-$n"; done'
 # A pull lasts PULL_SECONDS and exits PULL_STATUS. mkdir fails if a pull is
 # already running, which records an overlap. DELETE_LOCKS deletes the lock
 # directory during the pull, as the daily image cleanup can.
-stub docker "[[ \$1 == login ]] && { cat >/dev/null; exit 0; }
+stub docker "[[ \$1 == login ]] && { cat >/dev/null; mkdir -p \$DOCKER_CONFIG; echo \"\\\"\${!#}\\\": {}\" >>\$DOCKER_CONFIG/config.json; exit 0; }
 echo pull >>$tmp/pulls
 mkdir $tmp/pulling 2>/dev/null || echo overlap >>$tmp/overlaps
 [[ -z \${DELETE_LOCKS:-} ]] || rm -rf $tmp/locks
@@ -35,7 +37,7 @@ exit \${PULL_STATUS:-0}"
 run_jobs() {
     local jobs=$1 n
     shift
-    rm -rf "$tmp"/status.* "$tmp"/pulls "$tmp"/overlaps "$tmp"/pulling "$tmp"/locks
+    rm -rf "$tmp"/status.* "$tmp"/pulls "$tmp"/overlaps "$tmp"/pulling "$tmp"/locks "$tmp"/aws "$tmp"/docker "$tmp"/ecr-login.*
     for (( n = 1; n <= jobs; n++ )); do
         (
             env "$@" PATH="$tmp/bin:$PATH" DOCKER_CONFIG="$tmp/docker" BUILDKITE_AGENT_NAME="host-$n" \
@@ -69,3 +71,16 @@ run_jobs 1 DELETE_LOCKS=1
 check locks-deleted-status "$(statuses)" '0 '
 [[ -n $(find "$tmp/locks" -name '*.done' 2>/dev/null) ]] || { echo "FAIL locks-deleted: no done marker"; exit 1; }
 printf 'PASS %s\n' locks-deleted
+
+# A quick failed pull drops the login while other jobs still queue for it: they
+# log in again and report the pull, never a login failure that did not happen.
+run_jobs 20 PULL_STATUS=1 PULL_SECONDS=0.01
+check quick-pull-failure-status "$(statuses)" '205 '
+printf 'PASS %s\n' quick-pull-failure
+
+# ECR rejects logins: every job reports it, and the waiters try once rather than
+# each repeat five attempts, which would be 100 calls.
+run_jobs 20 AWS_DOWN=1
+check login-down-status "$(statuses)" '202 '
+(( $(count aws) < 50 )) || { echo "FAIL login-down: $(count aws) calls"; exit 1; }
+printf 'PASS %s\n' login-down
