@@ -32,7 +32,7 @@ stub sleep "echo \$1 >>$tmp/sleep.log"
 stub flock "[[ \$1 == -n ]] && { [[ -z \${WAITER:-} ]]; exit; }; [[ \$1 == -w ]] && { [[ -z \${LOGIN_LOCK_BUSY:-} ]]; exit; }; [[ -z \${WAITER_DONE:-} ]] || touch \$WAITER_DONE; exit 0"
 # Lists our device first, then enough lines to fill the pipe, so `grep -q` exits
 # early and the writer dies of SIGPIPE like the real one can.
-stub nvidia-ctk "echo nvidia.com/gpu=MIG-abc; exec seq 1000000"
+stub nvidia-ctk "echo nvidia.com/gpu=MIG-abc; echo nvidia.com/gpu=all; exec seq 1000000"
 stub buildkite-agent "echo \"\$3=\$4\" >>$tmp/marks.log; [[ -z \${MARK_FAILS:-} ]]"
 
 # run <name> <expected-status> <expected-mark|-> <expected-sleeps|-> [VAR=val...]
@@ -111,3 +111,14 @@ run failed-pull-drops-login 205 - - FAIL_PULL=99
 # the same retries.
 run login-lock-timeout 202 - - LOGIN_LOCK_BUSY=1
 [[ $(calls aws) -eq 0 ]] || { echo "FAIL login-lock-timeout: logged in anyway"; exit 1; }
+
+# A whole-GPU host (SLICES_PER_GPU=0) has no MIG slice to pin: it never lists
+# GPUs, whatever its agent is called, and the job gets every GPU through CDI.
+sed 's/^SLICES_PER_GPU=7$/SLICES_PER_GPU=0/' "$tmp/environment" >"$tmp/whole-gpu" && mv "$tmp/whole-gpu" "$tmp/environment"
+run whole-gpu 0 '' '' FAIL_SMI=99
+[[ $(calls smi) -eq 0 ]] || { echo "FAIL whole-gpu: nvidia-smi called $(calls smi) times"; exit 1; }
+device=$(env PATH="$tmp/bin:$PATH" DOCKER_CONFIG="$tmp/docker" BUILDKITE_AGENT_NAME=no-number BUILDKITE_JOB_ID=job-1 \
+    BUILDKITE_PLUGIN_DOCKER_IMAGE="test/image:$$" \
+    bash -c 'source "$1"; echo "$BUILDKITE_PLUGIN_DOCKER_DEVICES_0"' _ "$tmp/environment" 2>/dev/null)
+[[ "$device" == nvidia.com/gpu=all ]] || { echo "FAIL whole-gpu: device was '$device'"; exit 1; }
+printf 'PASS %s\n' whole-gpu-device
