@@ -49,9 +49,10 @@ PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
 PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
-# A job that hits its timeout also reports exit status -1. It gets its own rule
-# ahead of the general -1 rule so timeout retries are counted separately.
-TIMEOUT_RETRY = {"exit_status": -1, "signal_reason": "cancel", "limit": 1}
+# A job that hits its timeout also reports -1, with signal_reason "cancel",
+# and this rule retries it once. It gets no rule of its own: Buildkite counts
+# each rule's limit separately, so a second -1 rule would give a job that lost
+# its agent and then timed out a third run. Count timeouts by signal_reason.
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
 # 255 is the agent being terminated, and what the self-hosted GPU agent hooks
 # exited with on any provider failure before they had codes of their own.
@@ -75,7 +76,6 @@ EXIT_STATUS_128_RETRY = {"exit_status": 128, "limit": 1}
 # clean non-zero exits, which exit-code-only retries would miss.
 K8S_RETRY = {
     "automatic": [
-        TIMEOUT_RETRY,
         EXIT_STATUS_NEGATIVE_ONE_RETRY,
         {"exit_status": 1, "limit": 1},
         {"exit_status": 128, "limit": 1},
@@ -1029,10 +1029,10 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
 def ensure_infra_failure_retry(
     retry: Optional[Dict[str, Any]], nvidia: bool = True
 ) -> Dict[str, Any]:
-    """Add one-time retries for agent-lost (-1), agent-terminated (255), Git
-    mirror lock (94) and the hooks' provider failures (201-205), plus timeout
-    (-1, cancel) and checkout (128) failures on non-AMD steps. A status the
-    step already retries keeps the step's own rule."""
+    """Add one-time retries for agent-lost or timed-out (-1), agent-terminated
+    (255), Git mirror lock (94) and the hooks' provider failures (201-205),
+    plus checkout (128) failures on non-AMD steps. A status the step already
+    retries keeps the step's own rule."""
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -1064,7 +1064,7 @@ def ensure_infra_failure_retry(
         EXIT_STATUS_HOOK_RETRY,
     ]
     if nvidia:
-        defaults = [TIMEOUT_RETRY, *defaults, EXIT_STATUS_128_RETRY]
+        defaults = [*defaults, EXIT_STATUS_128_RETRY]
     infra_conditions = []
     for condition in defaults:
         status = condition["exit_status"]
