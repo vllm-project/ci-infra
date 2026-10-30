@@ -28,8 +28,9 @@ stub nvidia-smi "N=smi FAIL=\${FAIL_SMI:-0} T=$tmp; $counted; echo '  MIG 1g.18g
 stub docker "[[ \$1 == login ]] && { cat >/dev/null; mkdir -p \$DOCKER_CONFIG; echo \"\\\"\${!#}\\\": {}\" >>\$DOCKER_CONFIG/config.json; exit 0; }; N=pull FAIL=\${FAIL_PULL:-0} T=$tmp; $counted"
 stub sleep "echo \$1 >>$tmp/sleep.log"
 # WAITER=1 loses the non-blocking lock; WAITER_DONE=<file> is created when the blocking wait ends.
+# LOGIN_WAITER=1 loses the non-blocking try for the ECR login lock, then gets it;
 # LOGIN_LOCK_BUSY=1 times out the bounded wait (-w) for the ECR login lock.
-stub flock "[[ \$1 == -n ]] && { [[ -z \${WAITER:-} ]]; exit; }; [[ \$1 == -w ]] && { [[ -z \${LOGIN_LOCK_BUSY:-} ]]; exit; }; [[ -z \${WAITER_DONE:-} ]] || touch \$WAITER_DONE; exit 0"
+stub flock "[[ \$1 == -n && \$2 == 8 ]] && { [[ -z \${LOGIN_WAITER:-}\${LOGIN_LOCK_BUSY:-} ]]; exit; }; [[ \$1 == -n ]] && { [[ -z \${WAITER:-} ]]; exit; }; [[ \$1 == -w ]] && { [[ -z \${LOGIN_LOCK_BUSY:-} ]]; exit; }; [[ -z \${WAITER_DONE:-} ]] || touch \$WAITER_DONE; exit 0"
 # Lists our device first, then enough lines to fill the pipe, so `grep -q` exits
 # early and the writer dies of SIGPIPE like the real one can.
 stub nvidia-ctk "echo nvidia.com/gpu=MIG-abc; echo nvidia.com/gpu=all; exec seq 1000000"
@@ -111,6 +112,14 @@ run failed-pull-drops-login 205 - - FAIL_PULL=99
 # the same retries.
 run login-lock-timeout 202 - - LOGIN_LOCK_BUSY=1
 [[ $(calls aws) -eq 0 ]] || { echo "FAIL login-lock-timeout: logged in anyway"; exit 1; }
+# A job that waited for the login and finds none fails at once, rather than
+# repeating every retry behind the lock, one job after another.
+run login-waiter-fails-fast 202 '' '' LOGIN_WAITER=1
+[[ $(calls aws) -eq 0 ]] || { echo "FAIL login-waiter-fails-fast: logged in"; exit 1; }
+# A job that waited while another logged in uses that login.
+run first-job-logs-in 0 '' ''
+KEEP_MARKER=1 run login-waiter-reuses 0 '' '' LOGIN_WAITER=1
+[[ $(calls aws) -eq 0 ]] || { echo "FAIL login-waiter-reuses: logged in again"; exit 1; }
 
 # A whole-GPU host (SLICES_PER_GPU=0) has no MIG slice to pin: it never lists
 # GPUs, whatever its agent is called, and the job gets every GPU through CDI.
