@@ -4,8 +4,9 @@ One TPU worker cluster for the kube CI fleet, built in your own project. The
 cluster joins the fleet in `cloud-ullm-inference-ci-cd`; the fleet's manager
 dispatches CI workloads to it, and the fleet's deploy installs what runs inside
 it. You own the cluster and the project. You need no access to the fleet's
-project, and the fleet needs no role in yours: the maintainers register the
-cluster in the fleet from their side once it exists.
+project, and the maintainers register the cluster in the fleet from their side
+once it exists. In yours the fleet gets what registration needs and read access
+for its dashboard, which your apply grants.
 
 Your workers are module blocks in an environment, `workers/<environment>/`:
 one Terraform root and one state, for one worker or several.
@@ -29,6 +30,14 @@ All of it in your project:
   cluster a binding of the fleet's deployer account,
   `tpu-ci-deployer@cloud-ullm-inference-ci-cd.iam.gserviceaccount.com`, to
   `cluster-admin`. See "Why the deployer binding".
+- If your project is not `cloud-ullm-inference-ci-cd`, read access for the
+  fleet's dashboard account,
+  `tpu-ci-dashboard@cloud-ullm-inference-ci-cd.iam.gserviceaccount.com`:
+  `roles/container.clusterViewer` and `roles/monitoring.viewer` on the
+  project, and `roles/logging.viewAccessor` on the `_Default` bucket's
+  `_AllLogs` view. The cluster's node pools, metrics, events and container
+  logs are kept in your project, and the dashboard shows them beside the
+  fleet's other clusters.
 
 ## Before you apply
 

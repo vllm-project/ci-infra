@@ -909,7 +909,9 @@ manager with `kueue/templates/dashboard_rbac.yaml.tpl`, the workers with
 `dashboard_rbac_worker.yaml.tpl`, events only. Both are applied by
 `deploy_manifests.py` like the rest, so the page reports those reads as failed
 until they are. A source that fails is named at the top of the page, and the
-rest still render.
+rest still render. A worker in another project keeps its node pools, metrics
+and logs in that project, where `modules/worker/dashboard.tf` grants the
+account the same three reads `dashboard.tf` grants here.
 
 ## Reading the metrics
 

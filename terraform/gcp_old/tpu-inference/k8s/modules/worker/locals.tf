@@ -9,6 +9,11 @@ locals {
   # a worker's root from naming some other identity cluster-admin.
   deployer = "${var.fleet.name_prefix}-deployer@${var.fleet.project_id}.iam.gserviceaccount.com"
 
+  # The account the fleet's dashboard reads as, which manager/ creates under
+  # the same name. Derived too, so the reads in dashboard.tf go to that account
+  # and no other.
+  dashboard = "${var.fleet.name_prefix}-dashboard@${var.fleet.project_id}.iam.gserviceaccount.com"
+
   # Every pool on this cluster. The pool name is derived from the shape rather
   # than given in the tfvars, so it cannot describe hardware the pool does not
   # have.
