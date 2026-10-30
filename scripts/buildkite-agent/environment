@@ -99,8 +99,9 @@ ecr_cache_login() {
 # Docker credentials, so log in once per host every 10 h rather than per job.
 # The lock lets one job log in while the others wait for it. A failed login
 # leaves no marker, and a failed pull removes it, so the next job logs in again.
-# The wait is bounded by one job's worst-case login retries, and a job that
-# waited and finds no login tries once, with no retries: during an ECR outage it
+# The wait is capped at 180 s, about five quick failed attempts per registry (a
+# slow login can take longer, and the waiter then exits 202 and is retried). A job
+# that waited and finds no login tries once, with no retries: during an ECR outage it
 # fails quickly instead of repeating the retries behind the lock, and if a failed
 # pull only dropped the marker, it logs in again.
 ECR_LOGIN_MARKER=/tmp/buildkite-ecr-login.success
