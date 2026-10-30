@@ -72,7 +72,9 @@ COVERAGE_DIR_ENV = "RUNTIME_SHARD_COVERAGE_DIR"
 COVERAGE_DIR = ".runtime-shard-coverage"
 COVERAGE_ARTIFACT_PATH = f"{COVERAGE_DIR}/*/*.json"
 # pytest-shard would select a subset a second time on top of the plan.
-_UNSHARDABLE_ARGS = ("--num-shards", "--shard-id")
+# -n: pytest-xdist workers don't get the plan, so each shard would run it all.
+_UNSHARDABLE_ARGS = ("--num-shards", "--shard-id", "-n", "--numprocesses")
+_ATTACHED_XDIST = re.compile(r"-n(\d+|auto|logical)")
 _SHELL_SYNTAX = ("&&", "||", ";", "|", ">", "<", "`", "$", "\n")
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # pytest options that take their value as the next argument, so that value is
@@ -187,7 +189,7 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
         if _program(command) != "pytest" or any(s in command for s in _SHELL_SYNTAX):
             return None
         if any(
-            a.split("=")[0] in _UNSHARDABLE_ARGS
+            a.split("=")[0] in _UNSHARDABLE_ARGS or _ATTACHED_XDIST.fullmatch(a)
             for a in shlex.split(command, comments=True)
         ):
             return None
@@ -294,10 +296,19 @@ def discover(command: str, cwd: str, root: str) -> Dict:
     return {"files": files, "selected": selected}
 
 
+# Unreachable this many times in a row: stop asking. Every step would otherwise
+# wait out the timeout in the bootstrap job, one after another.
+MAX_FETCH_OUTAGES = 3
+_fetch_outages = 0
+
+
 def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
     """Main's per-file medians for the step on `queue`, with per-test medians
     for the files over one shard's budget; None if the endpoint has none or is
     down."""
+    global _fetch_outages
+    if _fetch_outages >= MAX_FETCH_OUTAGES:
+        return None
     query = {
         "stepKey": step_key,
         "queue": queue.value,
@@ -306,8 +317,14 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
     url = TIMINGS_URL + "?" + urllib.parse.urlencode(query)
     try:
         with urllib.request.urlopen(url, timeout=15) as response:
-            return json.load(response)
+            timings = json.load(response)
+        _fetch_outages = 0
+        return timings
     except Exception as error:  # 404 (no passing main build), outage: no plan
+        if isinstance(error, urllib.error.HTTPError) and error.code == 404:
+            _fetch_outages = 0
+        else:
+            _fetch_outages += 1
         print(f"runtime-shard: no timings for {step_key} ({error})", file=sys.stderr)
         return None
 

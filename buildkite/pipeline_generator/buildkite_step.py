@@ -1114,6 +1114,75 @@ def ensure_infra_failure_retry(
 # "off" is the rollback switch: enrolled steps run as their normal single job.
 RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
 
+# Under automatic_shard_default: step key -> why it runs as one job in this
+# build, for the one annotation that lists them (one_job_annotation).
+ONE_JOB_REASONS: Dict[str, str] = {}
+
+
+def _shard_by_default() -> bool:
+    return bool(get_global_config().get("automatic_shard_default"))
+
+
+def _automatic_shard_on(step: Step, amd: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether the step (or its AMD mirror, given `amd`) wants shards.
+
+    Under automatic_shard_default a step shards unless it says false, and a
+    mirror follows its step unless it says otherwise. Elsewhere, on a branch
+    that hasn't opted in, a step says true and so does its mirror.
+    """
+    if not _shard_by_default():
+        return bool(step.automatic_shard) and (amd is None or bool(amd.get("automatic_shard")))
+    on = True if step.automatic_shard is None else step.automatic_shard
+    if amd is None:
+        return on
+    value = amd.get("automatic_shard", on)
+    if not isinstance(value, bool):  # pydantic checks a step's; a mirror is a dict
+        raise ValueError(
+            f"amd-{step.key}: automatic_shard must be true or false, not {value!r}"
+        )
+    return value
+
+
+def hand_splits(steps: List[Step]) -> List[str]:
+    """Under automatic_shard_default, the jobs with a fixed parallelism that
+    don't say automatic_shard: false. Two sources of truth for a job's shards
+    have run whole suites in every job, so the generator refuses them."""
+    if not _shard_by_default():
+        return []
+    found = []
+    for step in steps:
+        key = step.key or _generate_step_key(step.label)
+        if step.parallelism and _automatic_shard_on(step):
+            found.append(key)
+        amd = (step.mirror or {}).get("amd")
+        if amd and amd.get("parallelism") and _automatic_shard_on(step, amd):
+            found.append(f"amd-{key}")
+    return found
+
+
+def one_job_annotation(groups: "List[BuildkiteGroupStep]") -> Optional[str]:
+    """One collapsed list of this build's test jobs that run as one job, or
+    None when there are none."""
+    rows = []
+    for group in groups:
+        for step in group.steps:
+            reason = ONE_JOB_REASONS.get(step.key)
+            # A hand split that opted out still runs several jobs.
+            if (
+                reason
+                and not step.deferred
+                and not step.parallelism
+                and not step.label.startswith(":docker:")
+            ):
+                rows.append(f"| {step.label} | {reason} |")
+    if not rows:
+        return None
+    jobs = f"{len(rows)} job{'' if len(rows) == 1 else 's'}"
+    return (
+        f"<details><summary>{jobs} ran as one job</summary>\n\n"
+        "| Job | Why |\n| --- | --- |\n" + "\n".join(rows) + "\n\n</details>"
+    )
+
 
 def _runtime_shard_mode(
     step: Step,
@@ -1121,11 +1190,11 @@ def _runtime_shard_mode(
     list_file_diff: List[str],
     amd: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """How to run a step with `automatic_shard: true`: "on" (as shards),
-    "shadow" (one job, plus an annotation of the plan), or None (as usual).
-    For an AMD mirror, `step` is the mirror's effective step and `amd` its
-    block, whose own `automatic_shard` must be set too."""
-    if not step.automatic_shard or (amd and not amd.get("automatic_shard")):
+    """How to run a step that wants shards: "on" (as shards), "shadow" (one
+    job, plus an annotation of the plan), or None (as usual). For an AMD
+    mirror, `step` is the mirror's effective step and `amd` its block."""
+    by_default = _shard_by_default()
+    if not by_default and not _automatic_shard_on(step, amd):
         return None
     if amd:
         should_run = _amd_mirror_should_run(
@@ -1135,23 +1204,34 @@ def _runtime_shard_mode(
         should_run = _step_should_run(step, list_file_diff)
     if not should_run:
         return None
+    if not _automatic_shard_on(step, amd):
+        ONE_JOB_REASONS[step_key] = "opted out (`automatic_shard: false`)"
+        return None
     mode = os.getenv(RUNTIME_SHARD_ENV_VAR) or "on"
     if mode not in ("on", "shadow"):
         if mode != "off":
             print(
                 f"automatic_shard ignored on {step_key}: {RUNTIME_SHARD_ENV_VAR}={mode} is not on, shadow or off"
             )
+        ONE_JOB_REASONS[step_key] = f"{RUNTIME_SHARD_ENV_VAR}={mode}"
         return None
-    if (
-        runtime_shard.split_commands(step.commands or []) is None
-        or step.no_plugin
-        or (is_amd_device(step.device) and step.dind)
-        or (step.num_nodes and step.num_nodes >= 2)
-    ):
-        print(
-            f"automatic_shard ignored on {step_key}: only single-node, non-dind "
-            "steps whose test commands are all plain pytest can be sharded"
-        )
+    reason = None
+    if step.num_nodes and step.num_nodes >= 2:
+        reason = "multi-node"
+    elif step.no_plugin:
+        reason = "no_plugin"
+    elif is_amd_device(step.device) and step.dind:
+        reason = "dind"
+    elif runtime_shard.split_commands(step.commands or []) is None:
+        reason = "commands aren't all plain pytest"
+    if reason:
+        if by_default:
+            ONE_JOB_REASONS[step_key] = reason
+        else:
+            print(
+                f"automatic_shard ignored on {step_key}: only single-node, non-dind "
+                "steps whose test commands are all plain pytest can be sharded"
+            )
         return None
     return mode
 
@@ -1180,6 +1260,10 @@ def _shard_at_generation(
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
         return None
+    if result is None and _shard_by_default():
+        # One line in the one-job list, not an annotation per untimed step.
+        ONE_JOB_REASONS[step_key] = "no plan: main has no timings for it, or it couldn't be planned"
+        return None
     if (
         result is None
         or result["overBudget"]
@@ -1187,6 +1271,7 @@ def _shard_at_generation(
     ):
         runtime_shard.annotate(step_key, text, "warning")
     if result is None or result["shards"] < 2:
+        ONE_JOB_REASONS[step_key] = "fits in one job"
         return None
     env = dict(env or {})
     # pytest-shard, installed in the image for fixed shards, would print its
@@ -1479,6 +1564,10 @@ def convert_group_step_to_buildkite_step(
                 # A native mirror that opted in plans its own shards, from its
                 # own commands and timings; an explicit parallelism wins.
                 amd_parallelism = amd.get("parallelism", step.parallelism)
+                if _shard_by_default() and _automatic_shard_on(step, amd):
+                    # Its step's hand split has flags this job doesn't: left in
+                    # place, a one-job plan would run the whole suite N times.
+                    amd_parallelism = amd.get("parallelism")
                 amd_label = amd.get("label")
                 amd_key = f"amd-{step_key}"
                 amd_shard_mode = (
