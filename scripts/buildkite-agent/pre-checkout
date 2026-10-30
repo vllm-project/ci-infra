@@ -54,6 +54,7 @@ for ((attempt = 1; ; attempt++)); do
     # misconfiguration that no retry fixes.
     if grep -q '404 Not Found' "$secret_error"; then
         rm -f "$secret_error"
+        ((attempt == 1)) || timeout 10 /usr/bin/buildkite-agent meta-data set "infra-retry:${BUILDKITE_JOB_ID:-}:github-token" "github-token,${attempt},refused" || true
         echo "ERROR: the agent secret store refused GITHUB_READONLY_PAT (missing, or denied to this pipeline); not retrying" >&2
         exit 1
     fi
