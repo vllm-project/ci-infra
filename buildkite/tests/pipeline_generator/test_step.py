@@ -750,7 +750,6 @@ def test_generated_steps_retry_when_the_agent_is_lost():
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
-            {"exit_status": 128, "limit": 1},
         ],
     }
 
@@ -773,10 +772,17 @@ def test_agent_lost_retry_preserves_step_retry_conditions():
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
-            {"exit_status": 128, "limit": 1},
             {"exit_status": 143, "limit": 2},
         ],
     }
+
+
+def test_default_retries_leave_a_git_failure_alone():
+    # Exit 128 is git's own fatal error. It was rare once checkouts settled, the
+    # agent already tries a checkout several times itself, and what remained
+    # (a bad ref) fails again on a retry.
+    automatic = buildkite_step.ensure_infra_failure_retry(None)["automatic"]
+    assert all(rule["exit_status"] != 128 for rule in automatic)
 
 
 def test_infra_retry_tolerates_exit_status_arrays():
@@ -798,7 +804,6 @@ def test_infra_retry_tolerates_exit_status_arrays():
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
-            {"exit_status": 128, "limit": 1},
             {"exit_status": [1, 2], "limit": 1},
         ],
     }
@@ -821,7 +826,6 @@ def test_infra_retry_dedupes_statuses_inside_arrays():
             {"exit_status": -1, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
-            {"exit_status": 128, "limit": 1},
             {"exit_status": [2, 255], "limit": 1},
         ],
     }
@@ -846,7 +850,6 @@ def test_infra_retry_keeps_a_steps_own_rule_for_a_git_mirror_timeout():
             {"exit_status": -1, "limit": 1},
             {"exit_status": 255, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
-            {"exit_status": 128, "limit": 1},
             {"exit_status": 94, "limit": 3},
         ],
     }
@@ -872,7 +875,6 @@ def test_infra_retry_keeps_yaml_agent_lost_rule_without_duplicates():
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
-            {"exit_status": 128, "limit": 1},
             {"exit_status": -1, "limit": 2},
         ],
     }
@@ -1236,7 +1238,6 @@ def test_the_precommit_gate_retries_infra_failures():
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
-            {"exit_status": 128, "limit": 1},
         ],
     }
 
@@ -1259,7 +1260,6 @@ def test_a_step_that_retries_a_hook_code_keeps_its_own_rule_for_it():
             {"exit_status": 255, "limit": 1},
             {"exit_status": 94, "limit": 1},
             {"exit_status": [201, 202, 204, 205], "limit": 1},
-            {"exit_status": 128, "limit": 1},
             {"exit_status": [2, 203], "limit": 2},
         ],
     }

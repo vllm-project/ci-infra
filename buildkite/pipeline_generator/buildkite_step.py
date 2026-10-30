@@ -69,8 +69,6 @@ EXIT_STATUS_HOOK_RETRY = {"exit_status": HOOK_FAILURE_EXIT_STATUSES, "limit": 1}
 # (134, 139) are deliberately not here: they were mostly one real,
 # recurring crash that a retry would only repeat.
 EXIT_STATUS_94_RETRY = {"exit_status": 94, "limit": 1}
-# Checkout failures happen before the test starts, so a retry can't mask one.
-EXIT_STATUS_128_RETRY = {"exit_status": 128, "limit": 1}
 
 # Pod-level failures on EKS surface as agent stops / lost pods rather than
 # clean non-zero exits, which exit-code-only retries would miss.
@@ -1027,12 +1025,11 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
 
 
 def ensure_infra_failure_retry(
-    retry: Optional[Dict[str, Any]], nvidia: bool = True
+    retry: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Add one-time retries for agent-lost or timed-out (-1), agent-terminated
-    (255), Git mirror lock (94) and the hooks' provider failures (201-205),
-    plus checkout (128) failures on non-AMD steps. A status the step already
-    retries keeps the step's own rule."""
+    (255), Git mirror lock (94) and the hooks' provider failures (201-205). A
+    status the step already retries keeps the step's own rule."""
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -1063,8 +1060,6 @@ def ensure_infra_failure_retry(
         EXIT_STATUS_94_RETRY,
         EXIT_STATUS_HOOK_RETRY,
     ]
-    if nvidia:
-        defaults = [*defaults, EXIT_STATUS_128_RETRY]
     infra_conditions = []
     for condition in defaults:
         status = condition["exit_status"]
@@ -1311,9 +1306,7 @@ def convert_group_step_to_buildkite_step(
                 )
             if step.retry:
                 buildkite_step.retry = step.retry
-            buildkite_step.retry = ensure_infra_failure_retry(
-                buildkite_step.retry, nvidia=not is_amd_device(step.device)
-            )
+            buildkite_step.retry = ensure_infra_failure_retry(buildkite_step.retry)
             if step.parallelism:
                 buildkite_step.parallelism = step.parallelism
             if is_amd_device(step.device):
@@ -1670,7 +1663,7 @@ def _create_amd_step(
     if display_label:
         options["label"] = display_label
     # AMD's own retries plus the repo-wide infra ones every other step gets.
-    options["retry"] = ensure_infra_failure_retry(options.get("retry"), nvidia=False)
+    options["retry"] = ensure_infra_failure_retry(options.get("retry"))
     if extra_artifact_paths:
         options["artifact_paths"] = _merge_artifact_paths(
             options.get("artifact_paths"), extra_artifact_paths

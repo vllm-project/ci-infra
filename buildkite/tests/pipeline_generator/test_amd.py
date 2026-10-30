@@ -158,7 +158,7 @@ def test_build_sh_layout_pods_run_the_build_image(build_sh_layout):
     assert [v["name"] for v in pod["volumes"]] == ["devshm"]
 
 
-def test_amd_cpu_step_gets_no_checkout_rule():
+def test_amd_cpu_step_gets_only_the_repo_wide_retries():
     step = Step(
         label="AMD build",
         group="Hardware - AMD Build",
@@ -169,7 +169,6 @@ def test_amd_cpu_step_gets_no_checkout_rule():
 
     command_step = _render_single_step(step).steps[-1]
 
-    # Only non-AMD steps gain the 128 rule.
     assert command_step.retry == {
         "automatic": [
             {"signal_reason": "stack_error", "limit": 1},
