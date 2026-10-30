@@ -99,14 +99,18 @@ ecr_cache_login() {
 # Docker credentials, so log in once per host every 10 h rather than per job.
 # The lock lets one job log in while the others wait for it. A failed login
 # leaves no marker, and a failed pull removes it, so the next job logs in again.
-# The wait is bounded by one job's worst-case login retries: during an ECR
-# outage the waiters fail as a login failure instead of each repeating the
-# retries in turn behind the lock.
+# The wait is bounded by one job's worst-case login retries, and a job that
+# waited and finds no login fails at once: during an ECR outage the waiters fail
+# as a login failure instead of each repeating the retries in turn behind the lock.
 ECR_LOGIN_MARKER=/tmp/buildkite-ecr-login.success
 exec 8>/tmp/buildkite-ecr-login.lock
-if ! flock -w 180 8; then
-  echo "ERROR: another job held the ECR login lock for 180 s (provider/infrastructure failure — exiting 202 to trigger the infra retry)" >&2
-  exit 202
+waited_for_login=
+if ! flock -n 8; then
+  waited_for_login=1
+  if ! flock -w 180 8; then
+    echo "ERROR: another job held the ECR login lock for 180 s (provider/infrastructure failure — exiting 202 to trigger the infra retry)" >&2
+    exit 202
+  fi
 fi
 # The marker is trusted only while Docker still holds both logins: a logout or
 # a rewritten config loses them, and the plugin's own pull would then fail
@@ -118,6 +122,10 @@ ecr_login_cached() {
     && grep -qF '"936637512419.dkr.ecr.us-west-2.amazonaws.com"' "$config" 2>/dev/null
 }
 if ! ecr_login_cached; then
+  if [[ -n "$waited_for_login" ]]; then
+    echo "ERROR: another job's ECR login failed (provider/infrastructure failure — exiting 202 to trigger the infra retry)" >&2
+    exit 202
+  fi
   retry_or_fail ecr-public-login 202 "ECR public login" ecr_public_login
   retry_or_fail ecr-cache-login 203 "ECR pull-through-cache login" ecr_cache_login
   touch "$ECR_LOGIN_MARKER"
