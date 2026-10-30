@@ -30,6 +30,7 @@ class GlobalConfig(TypedDict):
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
     only_step_keys: Optional[FrozenSet[str]] = None
+    automatic_shard_default: bool = False
 
 
 config = None
@@ -83,6 +84,9 @@ def init_global_config(pipeline_config_path: str):
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
         only_step_keys=_parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR)),
+        # In the checkout's config, not a default here: release branches run
+        # this generator on their own older steps, which never opted in.
+        automatic_shard_default=bool(pipeline_config.get("automatic_shard_default")),
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True

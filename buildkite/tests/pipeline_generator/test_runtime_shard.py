@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import re
@@ -8,6 +9,8 @@ import sys
 import time
 
 import pytest
+import urllib.error
+import yaml
 
 import buildkite_step
 import runtime_shard as rs
@@ -1657,3 +1660,343 @@ def test_coverage_job_fetches_the_script_from_the_staged_branch(
     fake_global_config["branch"] = "main"
     job = buildkite_step.shard_coverage_step([group])
     assert job.agents["queue"] == AgentQueue.SMALL_CPU_POSTMERGE.value
+
+
+# automatic_shard_default: true, on a branch whose pipeline config opted in.
+
+
+@pytest.fixture
+def by_default(fake_global_config, checkout):
+    fake_global_config["run_all"] = True
+    fake_global_config["automatic_shard_default"] = True
+    buildkite_step.ONE_JOB_REASONS.clear()
+    yield checkout
+    buildkite_step.ONE_JOB_REASONS.clear()
+
+
+AMD = {"device": "mi325_1", "dind": False}
+
+
+@pytest.mark.parametrize(
+    "step_flag, mirror_flag, step_shards, mirror_shards",
+    [
+        (None, None, True, True),  # no flags: both shard
+        (True, None, True, True),
+        (None, True, True, True),
+        (True, True, True, True),
+        (False, None, False, False),  # a mirror follows its step's false
+        (False, False, False, False),
+        (None, False, True, False),  # a mirror opts out alone
+        (True, False, True, False),
+        (False, True, False, True),  # a mirror opts in alone
+    ],
+)
+def test_default_on_flag_combinations(
+    by_default, step_flag, mirror_flag, step_shards, mirror_shards
+):
+    amd = dict(AMD)
+    if mirror_flag is not None:
+        amd["automatic_shard"] = mirror_flag
+    fields = {} if step_flag is None else {"automatic_shard": step_flag}
+    step = _step(mirror={"amd": amd}, **fields)
+    [group, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+    [job], [mirror] = group.steps, amd_group.steps
+    assert (job.parallelism == 3) is step_shards
+    assert ("Shard %N/%t" in job.label) is step_shards
+    assert (mirror.parallelism == 3) is mirror_shards
+    assert ("Shard %N/%t" in mirror.label) is mirror_shards
+    if step_shards:
+        assert "RUNTIME_SHARD_PLAN" in job.env
+    else:
+        assert "RUNTIME_SHARD_PLAN" not in (job.env or {})
+    reasons = buildkite_step.ONE_JOB_REASONS
+    assert ("model-executor" in reasons) is not step_shards
+    assert ("amd-model-executor" in reasons) is not mirror_shards
+
+
+@pytest.mark.parametrize(
+    "step_flag, mirror_flag, step_shards, mirror_shards",
+    [
+        (None, None, False, False),  # no flags: nothing shards
+        (True, None, True, False),  # a mirror needs its own flag
+        (None, True, False, False),  # and its step's
+        (True, True, True, True),
+        (False, True, False, False),
+        (True, False, True, False),
+    ],
+)
+def test_without_the_default_flags_work_as_before(
+    fake_global_config, checkout, step_flag, mirror_flag, step_shards, mirror_shards
+):
+    fake_global_config["run_all"] = True
+    buildkite_step.ONE_JOB_REASONS.clear()
+    amd = dict(AMD)
+    if mirror_flag is not None:
+        amd["automatic_shard"] = mirror_flag
+    fields = {} if step_flag is None else {"automatic_shard": step_flag}
+    step = _step(mirror={"amd": amd}, **fields)
+    [group, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+    assert (group.steps[0].parallelism == 3) is step_shards
+    assert (amd_group.steps[0].parallelism == 3) is mirror_shards
+
+
+@pytest.mark.parametrize("value", ["true", "on", 1, None])
+def test_a_mirror_flag_that_is_not_a_boolean_is_an_error(by_default, value):
+    step = _step(mirror={"amd": {**AMD, "automatic_shard": value}})
+    with pytest.raises(
+        ValueError,
+        match=f"^amd-model-executor: automatic_shard must be true or false, not {value!r}$",
+    ):
+        buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+
+
+def test_yaml_on_and_off_are_booleans():
+    # What a YAML `automatic_shard: on` parses to, on a step and in a mirror.
+    parsed = yaml.safe_load("a: on\nb: off\n")
+    assert parsed == {"a": True, "b": False}
+    assert Step(label="x", commands=["true"], automatic_shard="on").automatic_shard is True
+
+
+def test_a_standalone_amd_step_shards_with_no_flag(by_default):
+    step = _step(device="mi325_1", dind=False)
+    [job] = _render(step)
+    assert job.parallelism == 3 and "Shard %N/%t" in job.label
+
+
+def test_a_standalone_amd_step_that_forgets_dind_false_is_listed(by_default):
+    [job] = _render(_step(device="mi325_1"))
+    assert job.parallelism is None
+    assert buildkite_step.ONE_JOB_REASONS["model-executor"] == "dind"
+
+
+@pytest.mark.parametrize(
+    "fields, reason",
+    [
+        (dict(commands=["python3 run.py"]), "commands aren't all plain pytest"),
+        (dict(no_plugin=True), "no_plugin"),
+        (dict(num_nodes=2, num_devices=2), "multi-node"),
+        (dict(automatic_shard=False), "opted out (`automatic_shard: false`)"),
+    ],
+)
+def test_a_job_that_cannot_shard_is_listed_quietly(by_default, capsys, fields, reason):
+    [job] = _render(_step(**fields))
+    assert job.parallelism is None and "Shard" not in job.label
+    assert buildkite_step.ONE_JOB_REASONS["model-executor"] == reason
+    assert "automatic_shard ignored" not in capsys.readouterr().out
+    assert by_default == []  # no per-step annotation
+
+
+def test_without_the_default_an_enrolled_job_that_cannot_shard_still_warns(
+    fake_global_config, checkout, capsys
+):
+    fake_global_config["run_all"] = True
+    buildkite_step.ONE_JOB_REASONS.clear()
+    _render(_step(commands=["python3 run.py"], automatic_shard=True))
+    assert (
+        "automatic_shard ignored on model-executor: only single-node, non-dind "
+        "steps whose test commands are all plain pytest can be sharded\n"
+    ) in capsys.readouterr().out
+    assert buildkite_step.ONE_JOB_REASONS == {}
+
+
+def test_no_timings_lists_the_job_instead_of_annotating_it(by_default, monkeypatch):
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
+    [job] = _render(_step())
+    assert job.parallelism is None
+    assert buildkite_step.ONE_JOB_REASONS["model-executor"] == (
+        "no plan: main has no timings for it, or it couldn't be planned"
+    )
+    assert by_default == []
+
+
+def test_without_the_default_no_timings_still_annotates(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
+    _render(_step(automatic_shard=True))
+    assert [style for _, _, style in checkout] == ["warning"]
+
+
+def test_a_job_that_fits_is_listed(by_default, monkeypatch):
+    timings = _timings(TESTS[0], {f: 10 for f in ME_FILES})
+    timings["files"] += _timings(TESTS[1], {ENTRYPOINT: 10})["files"]
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    [job] = _render(_step())
+    assert job.parallelism is None
+    assert buildkite_step.ONE_JOB_REASONS["model-executor"] == "fits in one job"
+
+
+def test_rollback_switch_runs_everything_as_one_job(by_default, monkeypatch):
+    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "off")
+    [job] = _render(_step())
+    assert job.parallelism is None
+    assert buildkite_step.ONE_JOB_REASONS["model-executor"] == "VLLM_CI_RUNTIME_SHARD=off"
+
+
+def test_a_step_not_in_this_build_is_not_listed(by_default, fake_global_config):
+    fake_global_config["only_step_keys"] = frozenset({"other"})
+    buildkite_step.convert_group_step_to_buildkite_step(
+        {"g": [_step(automatic_shard=False)]}
+    )
+    assert buildkite_step.ONE_JOB_REASONS == {}
+
+
+def test_one_job_annotation_lists_this_builds_jobs_and_skips_the_rest(by_default):
+    reasons = buildkite_step.ONE_JOB_REASONS
+    [one] = _render(_step(commands=["python3 run.py"]))
+    [image] = _render(_step(label=":docker: Build", key="image"))
+    reasons["image"] = "commands aren't all plain pytest"
+    image.parallelism = None  # fits in one job, and still isn't a test job
+    [deferred] = _render(_step(label="Later", key="later", commands=["python3 x.py"]))
+    deferred.deferred = True
+    [sharded] = _render(_step(label="Big", key="big"))
+    group = buildkite_step.BuildkiteGroupStep(
+        group="g", steps=[one, image, deferred, sharded]
+    )
+    text = buildkite_step.one_job_annotation([group])
+    assert text == (
+        "<details><summary>1 job ran as one job</summary>\n\n"
+        "| Job | Why |\n| --- | --- |\n"
+        "| Model Executor | commands aren't all plain pytest |\n\n</details>"
+    )
+
+
+def test_one_job_annotation_counts_and_stays_away_when_empty(by_default):
+    [sharded] = _render(_step())
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[sharded])
+    assert buildkite_step.one_job_annotation([group]) is None
+    [a] = _render(_step(label="A", key="a", automatic_shard=False))
+    [b] = _render(_step(label="B", key="b", automatic_shard=False))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[a, b])
+    assert "2 jobs ran as one job" in buildkite_step.one_job_annotation([group])
+
+
+def test_hand_splits_are_named_under_the_default(by_default):
+    steps = [
+        _step(key="split", parallelism=2),
+        _step(key="enrolled", parallelism=2, automatic_shard=True),
+        _step(key="excluded", parallelism=2, automatic_shard=False),
+        _step(key="plain"),
+        _step(key="mirrored", mirror={"amd": {**AMD, "parallelism": 4}}),
+        _step(
+            key="mirror-excluded",
+            mirror={"amd": {**AMD, "parallelism": 4, "automatic_shard": False}},
+        ),
+        _step(
+            key="follows",
+            automatic_shard=False,
+            mirror={"amd": {**AMD, "parallelism": 4}},
+        ),
+    ]
+    assert buildkite_step.hand_splits(steps) == ["split", "enrolled", "amd-mirrored"]
+
+
+def test_hand_splits_are_allowed_without_the_default(fake_global_config):
+    assert buildkite_step.hand_splits([_step(key="split", parallelism=2)]) == []
+
+
+def test_generate_refuses_a_hand_split_under_the_default(
+    by_default, fake_global_config, tmp_path, monkeypatch
+):
+    import pipeline_generator as generator
+
+    calls = []
+    monkeypatch.setattr(generator, "get_global_config", lambda: fake_global_config)
+    monkeypatch.setattr(generator, "read_steps_from_job_dir", lambda d: [_step(parallelism=2)])
+    monkeypatch.setattr(generator, "_annotate_best_effort", lambda m, style=None: calls.append(style))
+    fake_global_config["job_dirs"] = ["x"]
+    fake_global_config["docs_only_disable"] = "1"
+    pipeline = generator.PipelineGenerator.__new__(generator.PipelineGenerator)
+    pipeline.output_file_path = str(tmp_path / "out.yaml")
+    with pytest.raises(ValueError, match="model-executor"):
+        pipeline.generate()
+    assert calls == ["error"]
+
+
+def test_a_mirror_opting_in_past_its_steps_hand_split_does_not_run_it_n_times(
+    by_default, monkeypatch
+):
+    timings = _timings(TESTS[0], {f: 10 for f in ME_FILES})
+    timings["files"] += _timings(TESTS[1], {ENTRYPOINT: 10})["files"]
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    step = _step(
+        automatic_shard=False,
+        parallelism=3,
+        mirror={"amd": {**AMD, "automatic_shard": True}},
+    )
+    [group, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+    assert group.steps[0].parallelism == 3  # the step's hand split stands
+    assert amd_group.steps[0].parallelism is None  # one job, once
+
+
+def test_a_mirror_that_follows_a_false_step_keeps_its_hand_split(by_default):
+    step = _step(automatic_shard=False, parallelism=3, mirror={"amd": dict(AMD)})
+    [group, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+    assert group.steps[0].parallelism == 3 and amd_group.steps[0].parallelism == 3
+
+
+def test_pytest_xdist_can_not_be_sharded():
+    for args in ("-n 4", "-n=4", "-n4", "-nauto", "-nlogical", "--numprocesses=4"):
+        assert rs.split_commands([f"pytest tests {args}"]) is None
+    assert rs.split_commands(["pytest tests -name-like-arg"]) is not None
+    for args in ("--num-shards=2", "--shard-id=0"):
+        assert rs.split_commands([f"pytest tests {args}"]) is None
+
+
+def test_an_outage_stops_asking_for_timings_but_a_404_does_not(monkeypatch):
+    calls = []
+
+    def unreachable(url, timeout):
+        calls.append(url)
+        raise OSError("down")
+
+    def not_found(url, timeout):
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 404, "none", None, None)
+
+    assert rs.MAX_FETCH_OUTAGES == 3
+    monkeypatch.setattr(rs, "_fetch_outages", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", not_found)
+    for _ in range(rs.MAX_FETCH_OUTAGES + 2):
+        assert rs.fetch_timings("k", AgentQueue.H200) is None
+    assert len(calls) == rs.MAX_FETCH_OUTAGES + 2
+    calls.clear()
+    monkeypatch.setattr(rs.urllib.request, "urlopen", unreachable)
+    for _ in range(rs.MAX_FETCH_OUTAGES + 2):
+        assert rs.fetch_timings("k", AgentQueue.H200) is None
+    assert len(calls) == rs.MAX_FETCH_OUTAGES
+
+
+def test_excluded_hand_splits_keep_their_split_and_are_not_called_one_job(by_default):
+    job = _render_mirror(
+        _step(automatic_shard=False, device="mi325_1", dind=False, parallelism=2)
+    )
+    assert job.parallelism == 2 and "Shard %N/%t" not in job.label
+    [nvidia] = _render(_step(automatic_shard=False, parallelism=2))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[job, nvidia])
+    assert buildkite_step.one_job_annotation([group]) is None
+    mirrored = _step(mirror={"amd": {**AMD, "parallelism": 4, "automatic_shard": False}})
+    [_, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [mirrored]})
+    assert amd_group.steps[0].parallelism == 4
+
+
+def test_a_hand_split_with_no_key_is_named_by_its_label(by_default):
+    step = _step(key=None, label="My Split", parallelism=2)
+    assert buildkite_step.hand_splits([step]) == ["my-split"]
+
+
+def test_a_good_answer_returns_its_timings_and_forgives_earlier_outages(monkeypatch):
+    monkeypatch.setattr(rs, "_fetch_outages", rs.MAX_FETCH_OUTAGES - 1)
+    monkeypatch.setattr(
+        rs.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(b'{"files": []}')
+    )
+    assert rs.fetch_timings("k", AgentQueue.H200) == {"files": []}
+    assert rs._fetch_outages == 0
+
+
+def test_a_mirrors_own_parallelism_stays_when_the_generator_is_called_directly(by_default):
+    # generate() refuses this first; the renderer still keeps what it was given.
+    step = _step(mirror={"amd": {**AMD, "parallelism": 4}})
+    [_, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+    assert amd_group.steps[0].parallelism == 4

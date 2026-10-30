@@ -21,6 +21,8 @@ from buildkite_step import (
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
     shard_coverage_step,
+    hand_splits,
+    one_job_annotation,
     kernrec_collect_group,
     kernrec_amd_enabled,
     kernrec_enabled,
@@ -29,6 +31,7 @@ from buildkite_step import (
 )
 from constants import AgentQueue
 from recorder_switches import fnrec_enabled
+import runtime_shard
 import selector_gate
 from global_config import get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
@@ -101,6 +104,14 @@ class PipelineGenerator:
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+        splits = hand_splits(steps)
+        if splits:
+            message = (
+                "A fixed parallelism needs `automatic_shard: false`, or drop it "
+                "and let the planner shard the job: " + ", ".join(splits)
+            )
+            _annotate_best_effort(message, style="error")
+            raise ValueError(message)
         early_keys = upload_image_steps_early(
             steps, os.path.dirname(self.output_file_path)
         )
@@ -171,6 +182,9 @@ class PipelineGenerator:
         coverage = shard_coverage_step(buildkite_group_steps)
         if coverage:
             collect.append(coverage)
+        one_job = one_job_annotation(buildkite_group_steps)
+        if one_job:
+            runtime_shard.annotate("one-job", one_job, "info")
         if collect:
             buildkite_group_steps.append(
                 BuildkiteGroupStep(group=COLLECT_GROUP, steps=collect)

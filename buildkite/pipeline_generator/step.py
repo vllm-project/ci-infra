@@ -34,7 +34,8 @@ class Step(BaseModel):
     dind: bool = True
     mirror: Optional[Dict[str, Dict[str, Any]]] = None
     # Plan this step's tests into shards from main's timings (runtime_shard.py).
-    automatic_shard: bool = False
+    # Unset follows the pipeline config's automatic_shard_default.
+    automatic_shard: Optional[bool] = None
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
