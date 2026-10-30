@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -906,7 +907,7 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     # log headers and tracing labels, so main's timings keep matching. Each
     # test command exports its position, and runs only in the shards that
     # have its tests.
-    setup = rs.shard_job_setup()
+    setup = rs.shard_job_setup("/workdir")
     assert step.commands[: len(setup)] == setup
     jobs = step.commands[len(setup) :]
     assert len(jobs) == len(plain.commands)
@@ -1093,7 +1094,7 @@ def test_generator_shards_on_a_recording_build_too(
     monkeypatch.setattr(buildkite_step, "kernrec_enabled", lambda: True)
     [step] = _render(_step(automatic_shard=True))
     assert step.parallelism == 3
-    setup = rs.shard_job_setup()
+    setup = rs.shard_job_setup("/workdir")
     assert step.commands[: len(setup)] == setup
 
 
@@ -1132,7 +1133,10 @@ def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
     assert rs.guard(wrapped[1], plan["commands"][1], 3).startswith(
         'case "$${BUILDKITE_PARALLEL_JOB:-0}" in'
     )
-    assert job.env["VLLM_TEST_COMMANDS"] == " && ".join(rs.shard_job_setup() + [mirror])
+    assert job.env["VLLM_TEST_COMMANDS"] == " && ".join(
+        rs.shard_job_setup("$${BUILDKITE_BUILD_CHECKOUT_PATH:-/tmp/fnrec-no-checkout}")
+        + [mirror]
+    )
     # The CUDA step is planned separately, on its own queue.
     assert checkout.calls == [
         ("model-executor", AgentQueue.H200_35GB),
@@ -1150,7 +1154,12 @@ def test_generator_shards_a_standalone_native_amd_step(fake_global_config, check
     assert plan["shards"] == 3
     assert checkout.calls == [("model-executor", AgentQueue.AMD_MI325_1)]
     assert "runtime_shard_plugin" in job.env["PYTEST_ADDOPTS"]
-    assert rs.shard_job_setup()[0] in job.env["VLLM_TEST_COMMANDS"]
+    assert rs.shard_job_setup("x")[0] in job.env["VLLM_TEST_COMMANDS"]
+    assert rs.COVERAGE_ARTIFACT_PATH in job.artifact_paths
+    assert (
+        'RUNTIME_SHARD_COVERAGE_DIR="$${BUILDKITE_BUILD_CHECKOUT_PATH'
+        in job.env["VLLM_TEST_COMMANDS"]
+    )
 
 
 @pytest.mark.parametrize("overrides", [{"dind": True}, {"parallelism": 2}])
@@ -1393,7 +1402,7 @@ def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     assert step.retry == plain.retry == buildkite_step.ensure_infra_failure_retry(
         buildkite_step.K8S_RETRY
     )
-    jobs = step.commands[len(rs.shard_job_setup()) :]
+    jobs = step.commands[len(rs.shard_job_setup("/workdir")) :]
     assert step.parallelism == 3 and len(jobs) == len(plain.commands)
     # The same commands, each tagged with its position, the one-file command
     # run only by the shard with it.
@@ -1419,7 +1428,7 @@ def _run_after_setup(tmp_path, command, pythonpath="/x", venv=None):
     venv's: the setup's copies go there and not into the python running these
     tests."""
     venv = venv or _venv(tmp_path / "venv")
-    script = "\n".join(rs.shard_job_setup() + [command]).replace("$$", "$")
+    script = "\n".join(rs.shard_job_setup("/checkout") + [command]).replace("$$", "$")
     env = dict(
         os.environ, RUNTIME_SHARD_PLUGIN=rs.plugin_source(), PYTHONPATH=pythonpath
     )
@@ -1436,8 +1445,11 @@ FIND_PLUGIN = (
 
 
 def test_shard_job_setup_installs_the_plugin_for_any_python(tmp_path):
-    run = _run_after_setup(tmp_path, FIND_PLUGIN + '\necho "$PYTHONPATH"')
-    path, pythonpath = run.stdout.split()
+    run = _run_after_setup(
+        tmp_path, FIND_PLUGIN + '\necho "$PYTHONPATH" "$RUNTIME_SHARD_COVERAGE_DIR"'
+    )
+    path, pythonpath, coverage_dir = run.stdout.split()
+    assert coverage_dir == "/checkout/.runtime-shard-coverage"
     assert path == f"{rs.PLUGIN_DIR}/runtime_shard_plugin.py"
     assert pythonpath == f"{rs.PLUGIN_DIR}:/x"
     source = os.path.join(os.path.dirname(rs.__file__), "runtime_shard_plugin.py")
@@ -1531,12 +1543,13 @@ def _project(tmp_path, files):
         path.write_text(text)
 
 
-def _run(tmp_path, command, plan, shard, wrapper_args=()):
+def _run(tmp_path, command, plan, shard, wrapper_args=(), extra_env=None):
     """One shard's run of a command, as its job runs it."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
     env.update(
         PYTEST_ADDOPTS="-p runtime_shard_plugin",
         PYTHONPATH=os.path.dirname(rs.__file__),
+        **(extra_env or {}),
     )
     if shard is not None:
         env["BUILDKITE_PARALLEL_JOB"] = str(shard)
@@ -1567,6 +1580,7 @@ def _command_plan(command, label, files):
         "label": label,
         "files": files,
         "split": {},
+        "position": 0,
     }
 
 
@@ -2134,3 +2148,268 @@ def test_excluded_hand_splits_keep_their_split_and_are_not_called_one_job(by_def
     [_, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [mirrored]})
     assert amd_group.steps[0].parallelism == 4
 
+# The coverage records, from real pytest runs.
+
+
+COVERED_FILES = {
+    "pkg/test_a.py": "def test_1(): pass\ndef test_2(): pass\n",
+    "pkg/test_b.py": "open('imported_b', 'w').close()\ndef test_1(): pass\n",
+}
+
+
+def _covered_run(tmp_path, shard, job, command="pytest -v pkg", retry=None, fallback=0):
+    """One job's run with records on. Returns (the run, its record)."""
+    files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
+    planned = _command_plan(command, "Command (1/1)", files)
+    planned["fallback"] = fallback
+    plan = {"shards": 2, "key": "k", "commands": [planned]}
+    env = {
+        "RUNTIME_SHARD_COVERAGE_DIR": str(tmp_path / "records"),
+        "BUILDKITE_JOB_ID": job,
+    }
+    if retry is not None:
+        env["BUILDKITE_RETRY_COUNT"] = str(retry)
+    run = _run(tmp_path, command, plan, shard, extra_env=env)
+    path = tmp_path / "records" / job / "0.json"
+    if not (tmp_path / "records").is_dir() or not path.exists():
+        return run, None
+    return run, json.loads(path.read_text())
+
+
+def test_the_first_shard_records_the_whole_command_and_each_what_it_ran(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    every = [
+        "tests/pkg/test_a.py::test_1",
+        "tests/pkg/test_a.py::test_2",
+        "tests/pkg/test_b.py::test_1",
+    ]
+    shown = [nodeid[len("tests/") :] for nodeid in every]
+
+    run, first = _covered_run(tmp_path, 0, "job-0", retry=2)
+    assert run.returncode == 0, run.stdout
+    assert first["expected"] == every
+    assert first["ran"] == every[:2] and first["planned"] == every[:2]
+    assert (first["step"], first["position"], first["shard"]) == ("k", 0, 0)
+    assert first["retry"] == 2 and first["finished"] is True
+    assert first["finished_at"] > 1_000_000_000
+    # It collected the other shard's file but did not run its test.
+    assert (tmp_path / "tests" / "imported_b").exists()
+    assert _ran(run.stdout) == shown[:2]
+
+    (tmp_path / "tests" / "imported_b").unlink()
+    run, second = _covered_run(tmp_path, 1, "job-1")
+    assert run.returncode == 0, run.stdout
+    assert second["expected"] is None and second["ran"] == every[2:]
+    assert second["retry"] == 0
+    assert _ran(run.stdout) == shown[2:]
+
+
+def test_only_the_first_shard_imports_other_shards_files(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    _covered_run(tmp_path, 1, "job-1", fallback=1)  # shard 2 is the command's first
+    assert (tmp_path / "tests" / "imported_b").exists()
+    (tmp_path / "tests" / "imported_b").unlink()
+    # And shard 1 is then an ordinary shard: test_b.py is another shard's file.
+    run, record = _covered_run(tmp_path, 0, "job-0", fallback=1)
+    assert record["expected"] is None and not (tmp_path / "tests" / "imported_b").exists()
+    assert run.returncode == 0
+
+
+def test_no_coverage_directory_means_no_records_and_no_extra_collection(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
+    plan = {"shards": 2, "commands": [_command_plan("pytest -v pkg", "C", files)]}
+    assert _run(tmp_path, "pytest -v pkg", plan, 0).returncode == 0
+    assert not (tmp_path / "tests" / "imported_b").exists()
+    assert not (tmp_path / "records").exists()
+
+
+def test_a_broken_file_of_another_shard_does_not_stop_the_first_shards_tests(tmp_path):
+    _project(
+        tmp_path,
+        {"pkg/test_a.py": "def test_1(): pass\n", "pkg/test_b.py": "raise ValueError\n"},
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    assert record["ran"] == ["tests/pkg/test_a.py::test_1"] and record["finished"] is True
+    # The run stays red, as it would unsharded.
+    assert run.returncode != 0
+    assert "ValueError" in run.stdout
+
+
+def test_a_collection_error_in_a_later_shard_still_stops_it(tmp_path):
+    # Only the recording shard continues; the file's own shard fails as before.
+    _project(
+        tmp_path,
+        {"pkg/test_a.py": "def test_1(): pass\n", "pkg/test_b.py": "raise ValueError\n"},
+    )
+    run, _ = _covered_run(tmp_path, 1, "job-1")
+    assert run.returncode == 2  # pytest's "interrupted"
+
+
+def test_a_stopped_run_is_not_finished(tmp_path):
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": "def test_1(): assert False\ndef test_2(): pass\n",
+            "pkg/test_b.py": "def test_1(): pass\n",
+        },
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0", command="pytest -v -x pkg")
+    assert run.returncode == 1
+    assert record["finished"] is False and record["ran"] == ["tests/pkg/test_a.py::test_1"]
+
+
+def test_a_run_that_dies_leaves_its_list_marked_unfinished(tmp_path):
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": "import os\ndef test_1(): os._exit(3)\n",
+            "pkg/test_b.py": "def test_1(): pass\n",
+        },
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    assert run.returncode == 3
+    assert record["finished"] is False
+    assert record["expected"] == ["tests/pkg/test_a.py::test_1", "tests/pkg/test_b.py::test_1"]
+    assert record["ran"] == []
+
+
+def test_a_failed_test_counts_as_ran_and_keeps_the_job_red(tmp_path):
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": "import pytest\ndef test_1(): assert False\n"
+            "@pytest.mark.skip\ndef test_2(): pass\n",
+            "pkg/test_b.py": "def test_1(): pass\n",
+        },
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    assert run.returncode == 1
+    assert record["ran"] == ["tests/pkg/test_a.py::test_1", "tests/pkg/test_a.py::test_2"]
+
+
+def test_collect_only_writes_no_record_and_a_job_id_is_optional(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    _, record = _covered_run(tmp_path, 0, "job-0", command="pytest --collect-only pkg")
+    assert record is None
+    files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
+    plan = {"shards": 2, "key": "k", "commands": [_command_plan("pytest -v pkg", "C", files)]}
+    env = {"RUNTIME_SHARD_COVERAGE_DIR": str(tmp_path / "records")}
+    without_id = {k: v for k, v in os.environ.items() if k != "BUILDKITE_JOB_ID"}
+    os.environ.pop("BUILDKITE_JOB_ID", None)
+    try:
+        _run(tmp_path, "pytest -v pkg", plan, 0, extra_env=env)
+    finally:
+        os.environ.clear()
+        os.environ.update(without_id)
+    assert (tmp_path / "records" / "no-job-id" / "0.json").exists()
+
+
+def test_record_directories_can_be_deleted_by_the_agent(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    _covered_run(tmp_path, 0, "job-0")
+    for path in (tmp_path / "records", tmp_path / "records" / "job-0"):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o777
+
+
+def test_a_record_that_cannot_be_written_leaves_the_job_alone(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    (tmp_path / "records").write_text("a file where the directory goes")
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    assert run.returncode == 0 and record is None
+    assert re.search(r"^runtime-shard: no coverage record: ", run.stdout, re.M)
+
+
+# The job that compares them.
+
+
+def test_generator_adds_one_coverage_job_for_the_sharded_steps(
+    fake_global_config, checkout
+):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    mirror = _render_mirror(_mirror_step())
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step, mirror])
+    job = buildkite_step.shard_coverage_step([group])
+    assert job.key == "runtime-shard-coverage"
+    # Not on the shards: a timed-out one would end this job waiting_failed.
+    # On what they wait for, when that's in the build, and then on their state.
+    assert job.depends_on == []
+    assert job.env["CI_SELECTOR_COLLECT_WAIT_FOR"] == "model-executor amd-model-executor"
+    assert int(job.env["CI_SELECTOR_COLLECT_DEADLINE"]) > time.time() + 170 * 60
+    assert job.allow_dependency_failure is True and job.soft_fail is True
+    steps = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"])
+    assert sorted(steps) == ["amd-model-executor", "model-executor"]
+    plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
+    assert plan["key"] == "model-executor"
+    assert [c["position"] for c in steps["model-executor"]] == [2, 3]
+    me = steps["model-executor"][0]
+    assert me["fallback"] == plan["commands"][0]["fallback"]
+    assert me["label"] == plan["commands"][0]["label"]
+    assert me["owners"] == rs.owners(plan["commands"][0])
+    # Sharded steps upload their records; the AMD mirror too.
+    assert rs.COVERAGE_ARTIFACT_PATH == ".runtime-shard-coverage/*/*.json"
+    assert rs.COVERAGE_ARTIFACT_PATH in step.artifact_paths
+    assert rs.COVERAGE_ARTIFACT_PATH in mirror.artifact_paths
+    assert job.label == ":mag: Check every test ran" and (
+        job.timeout_in_minutes == buildkite_step.COLLECT_AFTER_MINUTES + 30
+    )
+    script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/main/"
+        "buildkite/pipeline_generator/runtime_shard_coverage.py"
+    )
+    assert job.commands == [
+        buildkite_step.COLLECT_WAIT,
+        f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}" && python3 {script}',
+    ]
+    # And their records land where each job can reach the checkout.
+    coverage_setup = rs.shard_job_setup("/workdir")[-1]
+    assert 'RUNTIME_SHARD_COVERAGE_DIR="/workdir/' in coverage_setup
+    assert step.commands[len(rs.shard_job_setup("/workdir")) - 1] == coverage_setup
+    assert (
+        'RUNTIME_SHARD_COVERAGE_DIR="$${BUILDKITE_BUILD_CHECKOUT_PATH'
+        in mirror.env["VLLM_TEST_COMMANDS"]
+    )
+
+
+def test_coverage_job_leaves_out_deferred_steps_and_builds_without_shards(
+    fake_global_config, checkout
+):
+    fake_global_config["run_all"] = True
+    [sharded] = _render(_step(automatic_shard=True))
+    [plain] = _render(_step())
+    plain.key = "plain"
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[plain])
+    assert buildkite_step.shard_coverage_step([group]) is None
+    sharded.deferred = True
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[sharded, plain])
+    assert buildkite_step.shard_coverage_step([group]) is None
+    [running] = _render(_step(automatic_shard=True, key="running"))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[sharded, running])
+    job = buildkite_step.shard_coverage_step([group])
+    assert job.env["CI_SELECTOR_COLLECT_WAIT_FOR"] == "running"
+    assert json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"]).keys() == {"running"}
+    image = buildkite_step.BuildkiteGroupStep(
+        group="i",
+        steps=[buildkite_step.BuildkiteCommandStep(label="i", key="image-build", commands=["x"])],
+    )
+    job = buildkite_step.shard_coverage_step([image, group])
+    assert job.depends_on == ["image-build"]  # once, though both wait on it
+
+
+def test_coverage_job_fetches_the_script_from_the_staged_branch(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    monkeypatch.setenv("VLLM_CI_BRANCH", "agent/x")
+    [step] = _render(_step(automatic_shard=True))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+    job = buildkite_step.shard_coverage_step([group])
+    assert "/ci-infra/agent/x/buildkite/pipeline_generator/runtime_shard_coverage.py" in (
+        job.commands[1]
+    )
+    assert job.agents["queue"] == AgentQueue.SMALL_CPU_PREMERGE.value
+    fake_global_config["branch"] = "main"
+    job = buildkite_step.shard_coverage_step([group])
+    assert job.agents["queue"] == AgentQueue.SMALL_CPU_POSTMERGE.value
