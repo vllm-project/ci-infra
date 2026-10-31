@@ -103,7 +103,7 @@ def test_amd_template_block_keys_and_dependencies(label, slug, dind, build_steps
     )
 
 
-def _render(list_file_diff="", aiter_nightly="0", ci_repo="rocm/vllm-ci"):
+def _render(list_file_diff="", aiter_nightly="0", ci_repo="rocm/vllm-ci", **extra):
     gpu_steps = [("MoE", "amdgfx942nightly"), ("MI250", "amdgfx90anightly")]
     rendered = minijinja.render_str(
         TEMPLATE,
@@ -115,6 +115,7 @@ def _render(list_file_diff="", aiter_nightly="0", ci_repo="rocm/vllm-ci"):
         aiter_nightly=aiter_nightly,
         amd_build_steps=BUILD_STEPS,
         ci_repo=ci_repo,
+        **extra,
         steps=[
             {
                 "label": label,
@@ -133,7 +134,8 @@ def _render(list_file_diff="", aiter_nightly="0", ci_repo="rocm/vllm-ci"):
 @pytest.mark.parametrize("ci_repo", ["rocm/vllm-ci", "rocm/vllm-dev"])
 def test_build_sh_layout_renders_vllm_build_steps(ci_repo):
     steps = _render(ci_repo=ci_repo)
-    build = [s for s in steps.values() if s.get("agents") == {"queue": "amd-cpu"}]
+    queue = "amd-cpu-trusted" if ci_repo == "rocm/vllm-ci" else "amd-cpu"
+    build = [s for s in steps.values() if s.get("agents") == {"queue": queue}]
     assert [s["key"] for s in build] == ["refresh-rocm-base-amd", "image-build-amd"]
     assert all(s["env"]["ROCM_CI_REPO"] == ci_repo for s in build)
     base, image = build
@@ -210,6 +212,99 @@ def test_aiter_nightly_build_sh_layout_has_no_overlay_step():
         if s.get("agents", {}).get("queue", "").startswith("amd_mi")
     }
     assert gpu_jobs == {"MoE"}
+
+
+PR_SHA, MAIN_SHA = "a" * 40, "b" * 40
+PREBUILD_OFFER = dict(
+    rocm_prebuild="offer",
+    pr="123",
+    commit=PR_SHA,
+    pipeline_slug="amd-ci",
+)
+
+
+def _queues(steps):
+    return {k: s.get("agents", {}).get("queue") for k, s in steps.items()}
+
+
+@pytest.mark.parametrize(
+    "ci_repo,extra",
+    [("rocm/vllm-dev", PREBUILD_OFFER), ("rocm/vllm-ci", {}), ("rocm/vllm-dev", {})],
+)
+def test_only_main_build_steps_target_the_trusted_queue(ci_repo, extra):
+    """PR, nightly and branch builds never reach the agents that can push rocm/vllm-ci."""
+    queues = _queues(_render(ci_repo=ci_repo, **extra))
+    trusted = {k for k, q in queues.items() if q == "amd-cpu-trusted"}
+    if ci_repo == "rocm/vllm-ci":
+        assert trusted == {"refresh-rocm-base-amd", "image-build-amd"}
+    else:
+        assert not trusted
+
+
+def test_pr_offers_a_gated_prebuild_as_a_main_build():
+    steps = _render(ci_repo="rocm/vllm-dev", **PREBUILD_OFFER)
+    block = steps["block-rocm-prebuild"]
+    assert PR_SHA in block["prompt"]
+    assert block["blocked_state"] == "passed"
+    trigger = next(s for s in steps.values() if "trigger" in s)
+    assert trigger["depends_on"] == "block-rocm-prebuild" and trigger["async"] is True
+    assert trigger["trigger"] == "amd-ci"
+    assert trigger["build"]["branch"] == "main"
+    assert trigger["build"]["commit"] == "HEAD"  # main as of the unblock
+    assert trigger["build"]["env"] == {
+        "ROCM_PREBUILD_PR": "123",
+        "ROCM_PREBUILD_SHA": PR_SHA,
+    }
+    assert "block-rocm-prebuild" not in _render(ci_repo="rocm/vllm-dev")
+
+
+def test_prebuild_build_runs_only_mains_build_sh_on_the_trusted_queue():
+    steps = _render(rocm_prebuild="run", prebuild_pr="123")
+    assert list(steps) == ["rocm-prebuild"]
+    step = steps["rocm-prebuild"]
+    assert step["agents"] == {"queue": "amd-cpu-trusted"}
+    # Not the PR's amd.yaml: a fixed command, run in the main checkout.
+    assert step["commands"] == [f"{BUILD_SH} prebuild"]
+    assert step["env"] == {"ROCM_CI_REPO": "rocm/vllm-ci"}
+    assert {"exit_status": 75, "limit": 1} in step["retry"]["automatic"]
+
+
+TRUSTED_HOOK = BUILDKITE_DIR / "hooks" / "amd-cpu-trusted" / "environment"
+BUILD_SH = "bash .buildkite/scripts/rocm/build.sh rocm"
+MAIN_JOB = {
+    "BUILDKITE_PULL_REQUEST": "false",
+    "BUILDKITE_BRANCH": "main",
+    "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
+    "BUILDKITE_COMMIT": MAIN_SHA,
+    "BUILDKITE_COMMAND": f"{BUILD_SH} base",
+    "ROCM_CI_REPO": "rocm/vllm-ci",
+}
+
+
+@pytest.mark.parametrize(
+    "override,reason",
+    [
+        ({"BUILDKITE_PULL_REQUEST": "123"}, "PR builds never run here"),
+        ({"BUILDKITE_BRANCH": "feature"}, "only main builds run here"),
+        ({"BUILDKITE_REPO": "https://github.com/someone/vllm.git"}, "not vllm-project"),
+        ({"BUILDKITE_COMMIT": "HEAD"}, "not a full commit SHA"),
+        ({"BUILDKITE_PLUGINS": '[{"docker#v5": {}}]'}, "plugins are not allowed"),
+        ({"BUILDKITE_COMMAND": f"{BUILD_SH} base; id"}, "command not allowed"),
+        ({"BUILDKITE_COMMAND": f"{BUILD_SH} prebuild"}, "needs ROCM_PREBUILD_PR"),
+        ({"ROCM_CI_REPO": "rocm/vllm-dev"}, "ROCM_CI_REPO is not rocm/vllm-ci"),
+        ({"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "x"}, "triggered builds only"),
+        ({"BUILDKITE_SOURCE": "trigger_job"}, "triggered builds only"),
+        ({"ROCM_CI_CACHE_REPO": "rocm/vllm-dev"}, "ROCM_CI_CACHE_REPO must not"),
+        ({"GIT_CONFIG_COUNT": "1"}, "GIT_CONFIG_COUNT must not"),
+        ({"AITER_SPEC": "amd-aiter==0"}, "AITER_SPEC must not"),
+    ],
+)
+def test_trusted_queue_hook_refuses_untrusted_jobs(override, reason):
+    env = {"PATH": os.environ["PATH"], **MAIN_JOB, **override}
+    out = subprocess.run(
+        ["bash", str(TRUSTED_HOOK)], env=env, capture_output=True, text=True
+    )
+    assert out.returncode != 0 and reason in out.stderr
 
 
 VLLM = "https://github.com/vllm-project/vllm.git"

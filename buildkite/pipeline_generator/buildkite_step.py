@@ -337,6 +337,8 @@ def _get_step_plugin(step: Step):
 def get_agent_queue(step: Step):
     branch = get_global_config()["branch"]
     if step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
+        if rocm_build_layout() and rocm_ci_repo() == "rocm/vllm-ci":
+            return AgentQueue.AMD_CPU_TRUSTED
         return AgentQueue.AMD_CPU
     if step.label.startswith(":docker:"):
         if "arm64" in step.label:
@@ -1293,6 +1295,9 @@ def convert_group_step_to_buildkite_step(
                         buildkite_step.concurrency_group = (
                             step.concurrency_group.replace("$ROCM_CI_REPO", repo)
                         )
+                    # Its agent hook admits only the bare build.sh command.
+                    if buildkite_step.agents["queue"] == AgentQueue.AMD_CPU_TRUSTED:
+                        buildkite_step.commands = list(step.commands)
             if step.key == AMD_ROCM_BASE_REFRESH_STEP_KEY:
                 refresh_env = dict(buildkite_step.env or {})
                 refresh_env.update(get_rocm_base_refresh_env())

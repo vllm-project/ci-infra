@@ -68,6 +68,7 @@ class AgentQueue(str, Enum):
     GH200 = "gh200_queue"
     ASCEND = "ascend"
     AMD_CPU = "amd-cpu"
+    AMD_CPU_TRUSTED = "amd-cpu-trusted"
     AMD_MI250 = "amd_mi250"
     AMD_MI300_1 = "amd_mi300_1"
     AMD_MI300_2 = "amd_mi300_2"

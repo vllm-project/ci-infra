@@ -145,9 +145,29 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                   {% endif %}
 {%- endmacro %}
 
+{# Only these agents hold push credentials for rocm/vllm-ci and rocm/vllm-ci-cache. Their environment
+   hook (hooks/amd-cpu-trusted/environment) refuses anything but main's build.sh on a main commit. #}
+{% set trusted_queue = "amd-cpu-trusted" %}
+{% set prebuild_retry = [{"signal_reason": "stack_error", "limit": 1}, {"signal_reason": "agent_stop", "limit": 1}, {"signal_reason": "agent_refused", "limit": 1}, {"exit_status": 75, "limit": 1}] %}
   - group: "AMD Tests"
     depends_on: ~
     steps:
+      {% if rocm_prebuild == "run" %}
+      {# A maintainer-approved stack pre-build: main's checkout, build.sh and bake file, with only the
+         stack inputs taken from the PR merged into main. Nothing else from main's build runs. #}
+      - label: ":lock: :docker: Pre-build ROCm stack for #{{ prebuild_pr }}"
+        key: "rocm-prebuild"
+        commands: ["bash .buildkite/scripts/rocm/build.sh rocm prebuild"]
+        timeout_in_minutes: 540
+        concurrency: 1
+        concurrency_group: "vllm/rocm/prebuild/rocm"
+        retry:
+          automatic: {{ prebuild_retry | tojson }}
+        env:
+          ROCM_CI_REPO: {{ ci_repo | tojson }}
+        agents:
+          queue: {{ trusted_queue }}
+      {% else %}
       {% if amd_build_steps %}
       {% for s in amd_build_steps %}
       {% set ns = namespace(run=not s.source_file_dependencies or run_all == "1" or nightly == "1") %}
@@ -182,9 +202,29 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           {{ key }}: {{ value | tojson }}
           {% endfor %}
         agents:
-          queue: amd-cpu
+          queue: {{ trusted_queue if ci_repo == "rocm/vllm-ci" else "amd-cpu" }}
       {% endif %}
       {% endfor %}
+      {% if rocm_prebuild == "offer" %}
+      {# The trigger starts a main build of main's head at unblock time that runs only the step above, and
+         only once a maintainer has approved this exact commit on GitHub (checked on the trusted agent). #}
+      - block: ":lock: Pre-build ROCm stack for main"
+        key: "block-rocm-prebuild"
+        depends_on: ~
+        blocked_state: "passed"
+        prompt: "Maintainers: build this PR's ROCm stack, merged into main, into rocm/vllm-ci so main reuses it at merge. Needs a maintainer approval of {{ commit }} on GitHub."
+      - trigger: {{ pipeline_slug | tojson }}
+        label: ":lock: ROCm stack pre-build"
+        depends_on: "block-rocm-prebuild"
+        async: true
+        build:
+          branch: "main"
+          commit: "HEAD"
+          message: "ROCm stack pre-build for #{{ pr }}"
+          env:
+            ROCM_PREBUILD_PR: "{{ pr }}"
+            ROCM_PREBUILD_SHA: "{{ commit }}"
+      {% endif %}
       {% else %}
       - label: ":docker: Refresh ROCm base"
         depends_on: ~
@@ -448,3 +488,4 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
 {{ amd_infra_retry('        ') }}
     {% endif %}
     {% endfor %}
+    {% endif %}
