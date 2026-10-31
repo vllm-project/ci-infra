@@ -36,6 +36,14 @@ if [[ "${AITER_NIGHTLY}" == "1" ]]; then
     DOCS_ONLY_DISABLE=1
 fi
 
+# ROCm stack pre-build: "run" in the main build a PR's trigger step starts (ROCM_PREBUILD_PR/SHA);
+# "offer" in a PR build that changes the stack inputs.
+ROCM_PREBUILD=""
+if [[ -n "${ROCM_PREBUILD_PR:-}" ]]; then
+    ROCM_PREBUILD=run
+    DOCS_ONLY_DISABLE=1
+fi
+
 if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
@@ -177,6 +185,11 @@ upload_pipeline() {
         echo '{{ steps | tojson }}' > amd-build-steps.j2
         AMD_BUILD_STEPS=$(minijinja-cli amd-build-steps.j2 hardware_tests/amd.yaml)
     fi
+    if [[ $ROCM_PREBUILD == run ]] && ! [[ ${ROCM_CI_REPO:-} == rocm/vllm-ci \
+          && $ROCM_PREBUILD_PR =~ ^[0-9]+$ && ${ROCM_PREBUILD_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
+        buildkite-agent annotate --style error "ROCm stack pre-build needs a main build of vllm-project/vllm and a PR number and SHA" || true
+        exit 1
+    fi
     (
         set -x
         # Output pipeline.yaml with all blank lines removed
@@ -191,6 +204,12 @@ upload_pipeline() {
             -D ci_repo="${ROCM_CI_REPO:-}" \
             -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
             -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
+            -D rocm_prebuild="$ROCM_PREBUILD" \
+            -D prebuild_pr="${ROCM_PREBUILD_PR:-}" \
+            -D pr="${BUILDKITE_PULL_REQUEST:-false}" \
+            -D commit="$(git rev-parse HEAD)" \
+            -D main_commit="$(git rev-parse origin/main 2>/dev/null || true)" \
+            -D pipeline_slug="$BUILDKITE_PIPELINE_SLUG" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -335,6 +354,13 @@ while IFS= read -r file; do
         fi
     fi
 done < <(printf '%s\n' "$file_diff" | tr -d '\r')
+
+# Offer the maintainer-gated stack pre-build once main's build.sh has the prebuild mode.
+if [[ ${BUILDKITE_PULL_REQUEST:-false} != false ]] \
+    && printf '%s\n' "$file_diff" | tr -d '\r' | grep -xE 'docker/Dockerfile\.rocm_base|tools/vllm-rocm/therock_wheels\.py' >/dev/null \
+    && git show origin/main:.buildkite/scripts/rocm/build.sh 2>/dev/null | grep '^  prebuild)' >/dev/null; then
+    ROCM_PREBUILD=offer
+fi
 
 # Check for ready-run-all-tests label
 LABEL_RUN_ALL=$(check_run_all_label)
