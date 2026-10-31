@@ -208,7 +208,6 @@ upload_pipeline() {
             -D prebuild_pr="${ROCM_PREBUILD_PR:-}" \
             -D pr="${BUILDKITE_PULL_REQUEST:-false}" \
             -D commit="$(git rev-parse HEAD)" \
-            -D main_commit="$(git rev-parse origin/main 2>/dev/null || true)" \
             -D pipeline_slug="$BUILDKITE_PIPELINE_SLUG" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml

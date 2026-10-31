@@ -1,0 +1,93 @@
+#!/bin/bash
+# Agent environment hook for the amd-cpu-trusted queue, whose agents alone hold push credentials for
+# rocm/vllm-ci and rocm/vllm-ci-cache. It is the first job phase, before plugins, the checkout and any
+# repository hook, and admits only main's build.sh on a commit that is on vllm-project/vllm main:
+#   build.sh rocm base|ci   main's build steps (test-template-amd.j2, pipeline_generator)
+#   build.sh rocm prebuild  a PR's stack pre-build, once a maintainer approved ROCM_PREBUILD_SHA
+# Job env reaches this hook: the agent's environment-variable allowlist keeps BASH_ENV and exported
+# functions out of it, and this hook refuses the names that steer build.sh, buildx or git.
+# A prebuild needs ROCM_TRUSTED_GITHUB_TOKEN to read the PR's reviews and the reviewer's permission.
+
+TRUSTED_VLLM=https://github.com/vllm-project/vllm
+TRUSTED_BUILD_SH="bash .buildkite/scripts/rocm/build.sh rocm"
+TRUSTED_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+trusted_tmp=""
+
+trusted_die() {
+  echo "amd-cpu-trusted: refusing job: $*" >&2
+  [[ -n $trusted_tmp ]] && /bin/rm -rf "$trusted_tmp"
+  exit 1
+}
+
+# git, curl and jq never see the job's environment (GIT_CONFIG_*, HOME, PATH, proxies, ...).
+trusted_run() { /usr/bin/env -i PATH="$TRUSTED_PATH" HOME="$trusted_tmp" "$@"; }
+
+trusted_github() {
+  trusted_run curl -fsSL -H "Authorization: Bearer ${ROCM_TRUSTED_GITHUB_TOKEN:-}" \
+    -H "Accept: application/vnd.github+json" "https://api.github.com/repos/vllm-project/vllm/$1"
+}
+
+trusted_check_prebuild_approval() {
+  local pr=$ROCM_PREBUILD_PR sha=$ROCM_PREBUILD_SHA page=1 reviews users="" user perm
+  [[ -n ${ROCM_TRUSTED_GITHUB_TOKEN:-} ]] || trusted_die "ROCM_TRUSTED_GITHUB_TOKEN is not set on this agent"
+  while :; do
+    reviews=$(trusted_github "pulls/$pr/reviews?per_page=100&page=$page") || trusted_die "cannot read the reviews of #$pr"
+    users+=" $(trusted_run jq -r --arg sha "$sha" \
+      '.[] | select(.state == "APPROVED" and .commit_id == $sha) | .user.login' <<<"$reviews")" \
+      || trusted_die "cannot parse the reviews of #$pr"
+    [[ $(trusted_run jq length <<<"$reviews") -lt 100 ]] && break
+    page=$((page + 1))
+  done
+  for user in $users; do
+    perm=$(trusted_github "collaborators/$user/permission") || trusted_die "cannot read $user's permission"
+    perm=$(trusted_run jq -r .permission <<<"$perm")
+    [[ $perm == admin || $perm == write ]] && { echo "#$pr $sha approved by $user ($perm)"; return 0; }
+  done
+  trusted_die "no approval of $sha on #$pr by a maintainer"
+}
+
+[[ ${BUILDKITE_PULL_REQUEST:-} == false ]] || trusted_die "PR builds never run here"
+[[ ${BUILDKITE_BRANCH:-} == main ]] || trusted_die "only main builds run here"
+[[ ${BUILDKITE_REPO:-} =~ ^(https://github\.com/|git@github\.com:)vllm-project/vllm(\.git)?$ ]] \
+  || trusted_die "not vllm-project/vllm: ${BUILDKITE_REPO:-}"
+[[ ${BUILDKITE_COMMIT:-} =~ ^[0-9a-f]{40}$ ]] || trusted_die "not a full commit SHA: ${BUILDKITE_COMMIT:-}"
+[[ ${BUILDKITE_PLUGINS:-[]} == "[]" ]] || trusted_die "plugins are not allowed"
+[[ ${ROCM_CI_REPO:-} == rocm/vllm-ci ]] || trusted_die "ROCM_CI_REPO is not rocm/vllm-ci: ${ROCM_CI_REPO:-}"
+case ${BUILDKITE_COMMAND:-} in
+  "$TRUSTED_BUILD_SH base" | "$TRUSTED_BUILD_SH ci")
+    # A trigger step (which any PR can add to its pipeline) chooses the triggered build's env.
+    [[ -z ${BUILDKITE_TRIGGERED_FROM_BUILD_ID:-} && ${BUILDKITE_SOURCE:-} != trigger_job ]] \
+      || trusted_die "triggered builds only run prebuild" ;;
+  "$TRUSTED_BUILD_SH prebuild")
+    [[ ${ROCM_PREBUILD_PR:-} =~ ^[0-9]+$ && ${ROCM_PREBUILD_SHA:-} =~ ^[0-9a-f]{40}$ ]] \
+      || trusted_die "prebuild needs ROCM_PREBUILD_PR and ROCM_PREBUILD_SHA" ;;
+  *) trusted_die "command not allowed: ${BUILDKITE_COMMAND:-}" ;;
+esac
+# Names that build.sh, buildx, git or the loader read (the bake file's variables are checked below).
+for trusted_name in $(compgen -e); do
+  [[ $trusted_name =~ ^(ROCM_CI_CACHE_REPO|ROCM_CI_TRUSTED_REPO|AITER_.*|GIT_.*|DOCKER_.*|BUILDX_.*|BUILDKIT_HOST|BUILDKITD_CONFIG|LD_.*|BASH_ENV|ENV|BASH_FUNC_.*)$ ]] \
+    && trusted_die "$trusted_name must not be set on this queue"
+done
+
+trusted_tmp=$(/usr/bin/env -i PATH="$TRUSTED_PATH" mktemp -d) || trusted_die "mktemp failed"
+
+# The branch name of a manual or triggered build is free text: the commit itself must be on main.
+trusted_run git -C "$trusted_tmp" init -q \
+  && trusted_run git -C "$trusted_tmp" fetch -q --filter=tree:0 --depth=1000 "$TRUSTED_VLLM.git" main \
+  || trusted_die "cannot fetch vllm-project/vllm main"
+trusted_run git -C "$trusted_tmp" merge-base --is-ancestor "$BUILDKITE_COMMIT" FETCH_HEAD 2>/dev/null \
+  || trusted_die "$BUILDKITE_COMMIT is not in main's last 1000 commits"
+
+# buildx bake reads each variable of this commit's bake file from the environment.
+trusted_bake=$(trusted_run curl -fsSL \
+  "https://raw.githubusercontent.com/vllm-project/vllm/$BUILDKITE_COMMIT/docker/docker-bake-rocm.hcl") \
+  || trusted_die "cannot read docker-bake-rocm.hcl at $BUILDKITE_COMMIT"
+trusted_bake=$(trusted_run sed -n 's/^variable "\([A-Za-z0-9_]*\)".*/\1/p' <<<"$trusted_bake" \
+  | trusted_run grep -vx BUILDKITE_COMMIT | trusted_run paste -sd'|')
+for trusted_name in $(compgen -e); do
+  [[ -n $trusted_bake && $trusted_name =~ ^($trusted_bake)$ ]] && trusted_die "$trusted_name must not be set on this queue"
+done
+
+[[ ${BUILDKITE_COMMAND} == "$TRUSTED_BUILD_SH prebuild" ]] && trusted_check_prebuild_approval
+/bin/rm -rf "$trusted_tmp"
+unset trusted_tmp trusted_bake trusted_name

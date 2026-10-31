@@ -145,8 +145,8 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                   {% endif %}
 {%- endmacro %}
 
-{# Only these agents hold push credentials for rocm/vllm-ci and rocm/vllm-ci-cache. Their pre-checkout
-   hook (hooks/amd-cpu-trusted/pre-checkout) refuses anything but main's build.sh on a main commit. #}
+{# Only these agents hold push credentials for rocm/vllm-ci and rocm/vllm-ci-cache. Their environment
+   hook (hooks/amd-cpu-trusted/environment) refuses anything but main's build.sh on a main commit. #}
 {% set trusted_queue = "amd-cpu-trusted" %}
 {% set prebuild_retry = [{"signal_reason": "stack_error", "limit": 1}, {"signal_reason": "agent_stop", "limit": 1}, {"signal_reason": "agent_refused", "limit": 1}, {"exit_status": 75, "limit": 1}] %}
   - group: "AMD Tests"
@@ -206,11 +206,12 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
       {% endif %}
       {% endfor %}
       {% if rocm_prebuild == "offer" %}
-      {# The trigger starts a main build that runs only the step above, and only once a maintainer
-         has approved this exact commit on GitHub (checked on the trusted agent, not here). #}
+      {# The trigger starts a main build of main's head at unblock time that runs only the step above, and
+         only once a maintainer has approved this exact commit on GitHub (checked on the trusted agent). #}
       - block: ":lock: Pre-build ROCm stack for main"
         key: "block-rocm-prebuild"
         depends_on: ~
+        blocked_state: "passed"
         prompt: "Maintainers: build this PR's ROCm stack, merged into main, into rocm/vllm-ci so main reuses it at merge. Needs a maintainer approval of {{ commit }} on GitHub."
       - trigger: {{ pipeline_slug | tojson }}
         label: ":lock: ROCm stack pre-build"
@@ -218,7 +219,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         async: true
         build:
           branch: "main"
-          commit: {{ main_commit | tojson }}
+          commit: "HEAD"
           message: "ROCm stack pre-build for #{{ pr }}"
           env:
             ROCM_PREBUILD_PR: "{{ pr }}"

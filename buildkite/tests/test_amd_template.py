@@ -219,7 +219,6 @@ PREBUILD_OFFER = dict(
     rocm_prebuild="offer",
     pr="123",
     commit=PR_SHA,
-    main_commit=MAIN_SHA,
     pipeline_slug="amd-ci",
 )
 
@@ -246,11 +245,12 @@ def test_pr_offers_a_gated_prebuild_as_a_main_build():
     steps = _render(ci_repo="rocm/vllm-dev", **PREBUILD_OFFER)
     block = steps["block-rocm-prebuild"]
     assert PR_SHA in block["prompt"]
+    assert block["blocked_state"] == "passed"
     trigger = next(s for s in steps.values() if "trigger" in s)
     assert trigger["depends_on"] == "block-rocm-prebuild" and trigger["async"] is True
     assert trigger["trigger"] == "amd-ci"
     assert trigger["build"]["branch"] == "main"
-    assert trigger["build"]["commit"] == MAIN_SHA
+    assert trigger["build"]["commit"] == "HEAD"  # main as of the unblock
     assert trigger["build"]["env"] == {
         "ROCM_PREBUILD_PR": "123",
         "ROCM_PREBUILD_SHA": PR_SHA,
@@ -269,7 +269,7 @@ def test_prebuild_build_runs_only_mains_build_sh_on_the_trusted_queue():
     assert {"exit_status": 75, "limit": 1} in step["retry"]["automatic"]
 
 
-TRUSTED_HOOK = BUILDKITE_DIR / "hooks" / "amd-cpu-trusted" / "pre-checkout"
+TRUSTED_HOOK = BUILDKITE_DIR / "hooks" / "amd-cpu-trusted" / "environment"
 BUILD_SH = "bash .buildkite/scripts/rocm/build.sh rocm"
 MAIN_JOB = {
     "BUILDKITE_PULL_REQUEST": "false",
@@ -277,6 +277,7 @@ MAIN_JOB = {
     "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
     "BUILDKITE_COMMIT": MAIN_SHA,
     "BUILDKITE_COMMAND": f"{BUILD_SH} base",
+    "ROCM_CI_REPO": "rocm/vllm-ci",
 }
 
 
@@ -290,6 +291,12 @@ MAIN_JOB = {
         ({"BUILDKITE_PLUGINS": '[{"docker#v5": {}}]'}, "plugins are not allowed"),
         ({"BUILDKITE_COMMAND": f"{BUILD_SH} base; id"}, "command not allowed"),
         ({"BUILDKITE_COMMAND": f"{BUILD_SH} prebuild"}, "needs ROCM_PREBUILD_PR"),
+        ({"ROCM_CI_REPO": "rocm/vllm-dev"}, "ROCM_CI_REPO is not rocm/vllm-ci"),
+        ({"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "x"}, "triggered builds only"),
+        ({"BUILDKITE_SOURCE": "trigger_job"}, "triggered builds only"),
+        ({"ROCM_CI_CACHE_REPO": "rocm/vllm-dev"}, "ROCM_CI_CACHE_REPO must not"),
+        ({"GIT_CONFIG_COUNT": "1"}, "GIT_CONFIG_COUNT must not"),
+        ({"AITER_SPEC": "amd-aiter==0"}, "AITER_SPEC must not"),
     ],
 )
 def test_trusted_queue_hook_refuses_untrusted_jobs(override, reason):

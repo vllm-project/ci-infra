@@ -47,7 +47,6 @@ def _context(**overrides):
         "prebuild_pr": "",
         "pr": "false",
         "commit": "",
-        "main_commit": "",
         "pipeline_slug": "",
         "steps": STEPS,
         **overrides,
