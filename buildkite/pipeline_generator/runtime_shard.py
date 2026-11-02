@@ -473,9 +473,10 @@ def plan(
         for (index, file), key in keys.items()
     }
 
-    def pack(part_seconds: float) -> Tuple:
+    def pack(part_seconds: float, fit: bool = False) -> Tuple:
         """Cut each file over the budget into parts of about `part_seconds`,
-        then pack the units into the fewest shards within the budget."""
+        each within it if `fit`, then pack the units into the fewest shards
+        within the budget."""
         # One unit per file, or per part of a file over the budget.
         units = []  # (command index, file, part or None, seconds)
         whole = []  # per unit: its name if main timed it exactly and it can't be cut
@@ -509,8 +510,25 @@ def plan(
                 group_of[nodeid] = group
                 groups[group] = groups.get(group, 0.0) + test_seconds
             names = sorted(groups)
-            parts = min(len(names), math.ceil(seconds / part_seconds))
+            parts = math.ceil(seconds / part_seconds)
+            if fit:
+                # Long groups can't share a part even when their total divides
+                # evenly: groups over half a part need one each.
+                halves = sum(1 for n in names if groups[n] > part_seconds / 2)
+                parts = max(parts, halves)
+            parts = min(len(names), parts)
             part_of, part_loads = _least_loaded([groups[n] for n in names], parts)
+            # A part over the budget fits no shard: cut finer while one holds
+            # several groups. A group over the budget alone can't be cut.
+            while fit:
+                groups_in = Counter(part_of)
+                if not any(
+                    load > part_seconds and groups_in[part] > 1
+                    for part, load in enumerate(part_loads)
+                ):
+                    break
+                parts += 1
+                part_of, part_loads = _least_loaded([groups[n] for n in names], parts)
             part_of_group = dict(zip(names, part_of))
             assigns[(index, file)] = {
                 nodeid: part_of_group[group_of[nodeid]] for nodeid in tests
@@ -530,7 +548,14 @@ def plan(
             shard_of, loads = _least_loaded(sizes, count)
         return units, assigns, oversized, count, shard_of, loads, whole
 
-    units, assigns, oversized, count, shard_of, loads, whole = pack(max_shard_seconds)
+    units, assigns, oversized, count, shard_of, loads, whole = pack(
+        max_shard_seconds, fit=True
+    )
+    # Finer parts can outnumber the most shards and double up; keep the
+    # coarser cut when its slowest shard is shorter.
+    uncut = pack(max_shard_seconds)
+    if max(uncut[5]) < max(loads):
+        units, assigns, oversized, count, shard_of, loads, whole = uncut
     # Over the budget at the most shards, budget-sized parts can outnumber
     # the shards and double up. Parts of an even share of the most shards may
     # balance better; keep whichever plan's slowest shard is shorter.
