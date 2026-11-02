@@ -101,7 +101,7 @@ With `build.sh`, a failed selection or install fails `image-build-amd` (retried 
 
 A retried overlay step reinstalls the wheel its first attempt chose.
 
-The pipeline generator does the same when `AITER_NIGHTLY=1` is set on a build it generates, such as `ci`, with `build.sh` only: its `image-build-amd` installs the wheel as above, and generation fails on an older checkout. It chooses jobs by GPU instead of by tag: the AMD build steps and the GPU jobs on gfx942 (MI300, MI325) and gfx950 (MI355), unblocked. Every other step, CUDA included, is dropped. See the [pipeline generator README](buildkite/pipeline_generator/README.md#environment-variables).
+The pipeline generator does the same when `AITER_NIGHTLY=1` is set on a build it generates, such as `ci`, with `build.sh` only: its `image-build-amd` installs the wheel as above, and generation fails on an older checkout. It chooses jobs by GPU instead of by tag: the AMD build steps and the GPU jobs on gfx942 (MI300, MI325) and gfx950 (MI355), unblocked. Every other step, CUDA included, is dropped (on a PR build, pre-commit still runs). See the [pipeline generator README](buildkite/pipeline_generator/README.md#environment-variables).
 
 ### Bootstrap Scripts
 

@@ -113,6 +113,15 @@ class PipelineGenerator:
                 "AITER nightly needs vLLM's .buildkite/scripts/rocm/build.sh, "
                 "which installs the AITER nightly wheel; this checkout has none."
             )
+        if aiter_nightly and (
+            kernrec_enabled() or kernrec_amd_enabled() or fnrec_enabled()
+        ):
+            # The recordings feed the test selector, and an AMD-only run on an
+            # unreleased AITER would skew them.
+            _fail_generation(
+                "AITER nightly cannot record for the test selector: unset "
+                "VLLM_CI_KERNREC, VLLM_CI_KERNREC_AMD and VLLM_CI_FNREC."
+            )
         if torch_nightly:
             # ROCm has its own pinned torch and gains nothing from validating
             # against a CUDA torch-nightly build, so the AMD lane is excluded
@@ -390,6 +399,10 @@ def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
             _step_should_run(_get_amd_mirror_effective_step(step, amd), diff), diff
         ):
             keys.append(f"amd-{step.key}")
+    if get_global_config()["aiter_nightly"] == "1":
+        # Every step "should run" there; only the AITER nightly's jobs do.
+        kept = aiter_nightly_jobs(steps)
+        keys = [key for key in keys if key in kept]
     return keys
 
 
@@ -473,7 +486,12 @@ def select_steps_and_dependencies(
         if step.key in steps_by_key:
             raise ValueError(f"Duplicate CI step key: {step.key}")
         steps_by_key[step.key] = step
-        dependencies_by_key[step.key] = step.depends_on or []
+        # As the converter emits them: AMD GPU jobs wait for image-build-amd.
+        dependencies_by_key[step.key] = (
+            normalize_amd_depends_on(step.depends_on)
+            if is_amd_gpu_device(step.device)
+            else step.depends_on or []
+        )
         if is_amd_device(step.device):
             amd_step_keys.add(step.key)
 
@@ -543,8 +561,13 @@ def aiter_nightly_jobs(steps: List[Step]) -> Dict[str, List[str]]:
                 if is_amd_gpu_device(step.device)
                 else list(step.depends_on or [])
             )
+        # The converter emits no mirror for a step that is itself an AMD GPU job.
         amd_mirror = (step.mirror or {}).get("amd")
-        if amd_mirror and runs_in_aiter_nightly(amd_mirror.get("device")):
+        if (
+            amd_mirror
+            and not is_amd_gpu_device(step.device)
+            and runs_in_aiter_nightly(amd_mirror.get("device"))
+        ):
             jobs[f"amd-{key}"] = normalize_amd_depends_on(amd_mirror.get("depends_on"))
     return jobs
 

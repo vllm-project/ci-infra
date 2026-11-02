@@ -9,8 +9,8 @@ On by default. `VLLM_CI_SELECTOR` overrides it for one build:
   off     the selector does not run; today's rules, and no record
 
 PR, branch and main builds are selected; a main build diffs against its
-parent commit, as today's rules do there. Release-branch, nightly, run-all
-(the scheduled full CI runs) and docs-only builds, and builds that already
+parent commit, as today's rules do there. Release-branch, nightly, AITER
+nightly, run-all (the scheduled full CI runs) and docs-only builds, and builds that already
 name their steps (`VLLM_CI_ONLY_STEP_KEYS`), keep today's rules. Any failure keeps them too: the selector cannot be fetched or run, it
 times out, it declines to name steps (its own fail-open), or it names a step
 this generator does not know. The selector never makes a build fail.

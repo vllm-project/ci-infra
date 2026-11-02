@@ -10,6 +10,8 @@ import amd
 import buildkite_step
 import global_config
 import pipeline_generator
+import selector_gate
+import unblock_jobs
 from pipeline_generator import select_steps_and_dependencies
 from step import Step, group_steps
 
@@ -109,10 +111,54 @@ def _steps():
     ]
 
 
-def _render(fake_global_config, aiter_nightly):
+def _render(fake_global_config, aiter_nightly, steps=None):
     fake_global_config["aiter_nightly"] = aiter_nightly
-    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(_steps()))
+    steps = _steps() if steps is None else steps
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps(steps))
     return {job.key: job for group in groups for job in group.steps}
+
+
+def _native(key, device, **fields):
+    return Step(
+        label=key,
+        group="Kernels",
+        key=key,
+        device=device,
+        commands=["pytest -v -s kernels"],
+        **fields,
+    )
+
+
+def _odd_steps():
+    """Step shapes _steps() does not have."""
+    return _build_steps() + [
+        Step(label="CUDA image", group="Build", key="image-build", commands=["b"]),
+        # No key: uploaded under one derived from the label.
+        Step(label="Unkeyed MI300", group="Kernels", device="mi300_1", commands=["t"]),
+        # A100 itself is retired, but its AMD mirror still runs.
+        Step(
+            label="a100",
+            group="Models",
+            key="a100",
+            device="a100",
+            commands=["t"],
+            mirror={"amd": {"device": "mi355_1"}},
+        ),
+        _mirrored("dind-mirror", "mi300_1", dind=True),
+        Step(
+            label="no-device-mirror",
+            group="Models",
+            key="no-device-mirror",
+            device="h100",
+            commands=["t"],
+            mirror={"amd": {}},
+        ),
+        # An AMD GPU job emits no mirror of itself.
+        _native("native-with-mirror", "mi300_1", mirror={"amd": {"device": "mi355_1"}}),
+        # Inherited from a group default: AMD jobs wait for image-build-amd.
+        _native("native-on-image-build", "mi355_1", depends_on=["image-build"]),
+        _native("amd-cpu-tool", "amd_cpu", depends_on=["image-build-amd"]),
+    ]
 
 
 def _pod_image(job):
@@ -331,19 +377,29 @@ def test_generate_uploads_only_the_amd_image_steps_early(
     assert "amd-mi300" in final
 
 
-def _depends_on_a_dropped_step(fake_global_config):
+def _depends_on_a_dropped_step(fake_global_config, monkeypatch):
     return _steps() + [_mirrored("needs-cuda", "mi300_1", depends_on=["cuda-only"])]
 
 
-def _with_torch_nightly(fake_global_config):
+def _with_torch_nightly(fake_global_config, monkeypatch):
     fake_global_config["torch_nightly"] = "1"
     return _steps()
 
 
-def _without_build_sh(fake_global_config):
+def _without_build_sh(fake_global_config, monkeypatch):
     # Older vLLM checkouts would silently test the stock AITER.
     os.remove(".buildkite/scripts/rocm/build.sh")
     return _steps()
+
+
+def _recording(env_var):
+    # An AMD-only run on an unreleased AITER would skew the selector's records.
+    def setup(fake_global_config, monkeypatch):
+        monkeypatch.setenv(env_var, "1")
+        return _steps()
+
+    setup.__name__ = f"_recording_{env_var}"
+    return setup
 
 
 @pytest.mark.parametrize(
@@ -352,6 +408,9 @@ def _without_build_sh(fake_global_config):
         (_depends_on_a_dropped_step, "amd-needs-cuda -> cuda-only"),
         (_with_torch_nightly, "TORCH_NIGHTLY and AITER_NIGHTLY"),
         (_without_build_sh, "build.sh"),
+        (_recording("VLLM_CI_KERNREC"), "cannot record"),
+        (_recording("VLLM_CI_KERNREC_AMD"), "cannot record"),
+        (_recording("VLLM_CI_FNREC"), "cannot record"),
     ],
 )
 def test_generate_fails_before_uploading_anything(
@@ -360,7 +419,7 @@ def test_generate_fails_before_uploading_anything(
     # A real build: the image steps would otherwise go up early, and run with
     # no tests after them.
     build_sh_layout.setenv("BUILDKITE_JOB_ID", "job-1")
-    steps = setup(fake_global_config)
+    steps = setup(fake_global_config, build_sh_layout)
     generator, annotations, uploads = _generator(
         fake_global_config, monkeypatch, tmp_path, steps
     )
@@ -373,12 +432,170 @@ def test_generate_fails_before_uploading_anything(
     assert not (tmp_path / "out/pipeline.yaml").exists()
 
 
+@pytest.mark.parametrize("steps", [_steps, _odd_steps])
 def test_dependency_check_sees_the_jobs_the_nightly_uploads(
-    fake_global_config, build_sh_layout
+    fake_global_config, build_sh_layout, steps
 ):
     """aiter_nightly_jobs predicts, before the early upload, what
     convert_group_step_to_buildkite_step emits."""
-    rendered = _render(fake_global_config, "1")
-    assert pipeline_generator.aiter_nightly_jobs(_steps()) == {
+    rendered = _render(fake_global_config, "1", steps())
+    assert pipeline_generator.aiter_nightly_jobs(steps()) == {
         key: job.depends_on or [] for key, job in rendered.items()
     }
+
+
+def test_odd_steps_render_as_expected(fake_global_config, build_sh_layout):
+    jobs = _render(fake_global_config, "1", _odd_steps())
+    assert set(jobs) == {
+        "refresh-rocm-base-amd",
+        "image-build-amd",
+        buildkite_step._generate_step_key("Unkeyed MI300"),
+        "amd-a100",
+        "amd-dind-mirror",
+        "native-with-mirror",
+        "native-on-image-build",
+        "amd-cpu-tool",
+    }
+    assert jobs["native-on-image-build"].depends_on == ["image-build-amd"]
+
+
+def test_retry_rejects_a_mirror_the_converter_never_emits():
+    with pytest.raises(ValueError, match="amd-native-with-mirror"):
+        select_steps_and_dependencies(
+            _odd_steps(), frozenset({"amd-native-with-mirror"}), aiter_nightly=True
+        )
+
+
+@pytest.mark.parametrize("aiter_nightly", [False, True])
+def test_retry_of_an_amd_job_pulls_in_the_amd_image_build(aiter_nightly):
+    # Its raw depends_on names the CUDA image-build; the uploaded job waits
+    # for image-build-amd instead, so that is what the retry must bring.
+    _, selected = select_steps_and_dependencies(
+        _odd_steps(),
+        frozenset({"native-on-image-build"}),
+        aiter_nightly=aiter_nightly,
+    )
+    assert selected == {
+        "native-on-image-build",
+        "image-build-amd",
+        "refresh-rocm-base-amd",
+    }
+
+
+def test_sharding_plans_only_the_jobs_the_nightly_keeps(
+    fake_global_config, build_sh_layout, monkeypatch
+):
+    planned = []
+
+    def plan_step(key, *args):
+        planned.append(key)
+        return {"shards": 3, "commands": [], "overBudget": False}, "plan"
+
+    monkeypatch.setattr(buildkite_step.runtime_shard, "plan_step", plan_step)
+    monkeypatch.setattr(buildkite_step.runtime_shard, "annotate", lambda *a: None)
+    build_sh_layout.setenv("NOAUTO", "1")
+    build_sh_layout.delenv("VLLM_CI_RUNTIME_SHARD", raising=False)
+    # As vLLM writes them: native AMD jobs say dind: false.
+    steps = _build_steps() + [
+        _native("sharded-mi355", "mi355_1", dind=False, automatic_shard=True),
+        _native("sharded-mi250", "mi250_1", dind=False, automatic_shard=True),
+        _native("sharded-h100", "h100", automatic_shard=True),
+    ]
+
+    jobs = _render(fake_global_config, "1", steps)
+
+    assert planned == ["sharded-mi355"]
+    job = jobs["sharded-mi355"]
+    assert job.parallelism == 3 and not job.deferred
+    assert job.depends_on == ["image-build-amd"]
+    assert pipeline_generator.aiter_nightly_jobs(steps) == {
+        key: job.depends_on or [] for key, job in jobs.items()
+    }
+
+
+def test_retry_build_through_generate(
+    fake_global_config, build_sh_layout, monkeypatch, tmp_path
+):
+    build_sh_layout.setenv("NOAUTO", "1")
+    fake_global_config["only_step_keys"] = frozenset({"native-on-image-build"})
+    generator, _, uploads = _generator(
+        fake_global_config, monkeypatch, tmp_path, _odd_steps()
+    )
+    generator.generate()
+
+    jobs = _jobs(yaml.safe_load((tmp_path / "out/pipeline.yaml").read_text()))
+    assert set(jobs) == {
+        "native-on-image-build",
+        "image-build-amd",
+        "refresh-rocm-base-amd",
+    }
+    assert uploads == []
+    for job in jobs.values():
+        for dependency in job.get("depends_on") or []:
+            assert dependency in jobs, (job["key"], dependency)
+
+
+def test_retry_build_of_a_dropped_job_fails_before_uploading(
+    fake_global_config, build_sh_layout, monkeypatch, tmp_path
+):
+    fake_global_config["only_step_keys"] = frozenset({"cuda-only"})
+    generator, annotations, uploads = _generator(
+        fake_global_config, monkeypatch, tmp_path, _steps()
+    )
+    with pytest.raises(ValueError, match="cuda-only"):
+        generator.generate()
+    assert [kwargs for text, kwargs in annotations if "cuda-only" in text] == [
+        {"style": "error"}
+    ]
+    assert uploads == []
+    assert not (tmp_path / "out/pipeline.yaml").exists()
+
+
+def test_nightly_has_no_run_more_jobs_step(
+    fake_global_config, build_sh_layout, monkeypatch, tmp_path
+):
+    build_sh_layout.setenv("NOAUTO", "1")
+    generator, _, _ = _generator(fake_global_config, monkeypatch, tmp_path, _steps())
+    generator.generate()
+
+    uploaded = yaml.safe_load((tmp_path / "out/pipeline.yaml").read_text())
+    every_key = {
+        step.get("key") for group in uploaded["steps"] for step in group["steps"]
+    }
+    assert every_key == {
+        "refresh-rocm-base-amd",
+        "image-build-amd",
+        "amd-mi300",
+        "amd-mi325",
+        "amd-mi355",
+        "amd-optional",
+        "direct-mi355",
+    }
+    assert not any(key.startswith(unblock_jobs.INPUT_KEY) for key in every_key)
+    assert not (tmp_path / "out" / unblock_jobs.DEFERRED_DIR).exists()
+
+
+def test_selector_record_lists_only_the_nightlys_jobs(
+    fake_global_config, build_sh_layout, monkeypatch, tmp_path
+):
+    build_sh_layout.setenv(selector_gate.SELECTOR_ENV_VAR, "on")
+    records = []
+    monkeypatch.setattr(
+        selector_gate, "write_and_upload", lambda record, _: records.append(record)
+    )
+    monkeypatch.setattr(selector_gate, "annotate", lambda record: None)
+    generator, _, _ = _generator(fake_global_config, monkeypatch, tmp_path, _steps())
+    generator.generate()
+
+    (record,) = records
+    assert record["skipped"].startswith("AITER nightly")
+    jobs = _jobs(yaml.safe_load((tmp_path / "out/pipeline.yaml").read_text()))
+    assert set(record["legacy_keys"]) == set(record["scheduled_keys"]) == set(jobs)
+
+
+@pytest.mark.parametrize("value", ["true", "yes", " 1", "", "0"])
+def test_only_1_turns_the_nightly_on(build_sh_layout, value):
+    # global_config and rocm_ci_repo read the variable separately: they agree.
+    build_sh_layout.setenv("AITER_NIGHTLY", value)
+    assert _init_global_config({"AITER_NIGHTLY": value})["aiter_nightly"] == value
+    assert amd.rocm_ci_repo() == "rocm/vllm-ci"
