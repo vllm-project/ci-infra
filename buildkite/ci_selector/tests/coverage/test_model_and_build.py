@@ -12,6 +12,7 @@ import dataclasses
 import gzip
 import hashlib
 import inspect
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from ci_selector.coverage.model import (
     STAMP_SHAPE,
     TABLE_VERSION,
     Row,
+    SourceIndex,
     Stamp,
     UnresolvableCommit,
     read_process,
@@ -517,6 +519,19 @@ class TestMergeBuild:
         assert set(rows["lora"].functions) == {"vllm/mod.py"}
         assert rows["lora"].stamp.dropped_absent_files == 1
 
+    def test_a_cached_absent_file_is_still_counted_on_every_row(
+        self, build: Build, tmp_repo: Repo
+    ):
+        # The answer is cached per path but the count is per row, so the second
+        # row must not read clean because the first row already asked.
+        for key in ("lora", "moe"):
+            d = build.job(f"j-{key}", step_key=key)
+            process_file(d / "fn.a.txt", [("_version.py", "<module>")])
+        rows = merge_build(build.finish(), tmp_repo.root)
+
+        assert rows["lora"].stamp.dropped_absent_files == 1
+        assert rows["moe"].stamp.dropped_absent_files == 1
+
     def test_a_name_the_source_cannot_produce_flags_the_file(
         self, build: Build, tmp_repo: Repo
     ):
@@ -822,3 +837,26 @@ class TestCrossBuildShards:
         row = merge_builds([a, b], tmp_repo.root)["moe"]
         assert row.stamp.shards_seen == {"1": [0, 1, 2, 3, 4]}
         assert row.stamp.shards_complete
+
+
+class TestSourceIndexExists:
+    @pytest.fixture
+    def git_calls(self, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+        calls: list[list[str]] = []
+        real = subprocess.run
+
+        def counting(args, **kwargs):
+            calls.append(args)
+            return real(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", counting)
+        return calls
+
+    def test_each_path_asks_git_once(self, tmp_repo: Repo, git_calls: list[list[str]]):
+        # Every row recording a generated file asks again, and each ask is a process.
+        source = SourceIndex(tmp_repo.root, tmp_repo.head())
+        git_calls.clear()
+
+        assert [source.exists("vllm/_version.py") for _ in range(3)] == [False] * 3
+        assert [source.exists("vllm/mod.py") for _ in range(3)] == [True] * 3
+        assert len(git_calls) == 2

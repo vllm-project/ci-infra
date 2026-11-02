@@ -332,6 +332,7 @@ class SourceIndex:
         # path -> (every qualname, the subset that runs on import). One entry,
         # because both fall out of the same compile.
         self._cache: dict[str, tuple[frozenset[str], frozenset[str]] | None] = {}
+        self._exists: dict[str, bool] = {}
 
     def require_commit(self) -> None:
         """Raise unless the commit resolves here. Call before reading a build."""
@@ -397,7 +398,9 @@ class SourceIndex:
         return frozenset() if compiled is None else compiled[1]
 
     def exists(self, path: str) -> bool:
-        return (
+        if path in self._exists:
+            return self._exists[path]
+        result = (
             subprocess.run(
                 [
                     "git",
@@ -411,6 +414,8 @@ class SourceIndex:
             ).returncode
             == 0
         )
+        self._exists[path] = result
+        return result
 
 
 def _code_objects(code: types.CodeType):
