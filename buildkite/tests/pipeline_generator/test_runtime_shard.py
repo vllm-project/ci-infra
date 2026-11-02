@@ -829,14 +829,18 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     for field in ("depends_on", "agents", "plugins", "retry", "timeout_in_minutes"):
         assert getattr(step, field) == getattr(plain, field)
     # Its commands are the step's own, after installing the plugin: the same
-    # log headers and tracing labels, so main's timings keep matching. A test
-    # command runs only in the shards that have its tests.
+    # log headers and tracing labels, so main's timings keep matching. Each
+    # test command exports its position, and runs only in the shards that
+    # have its tests.
     assert step.commands[:2] == rs.shard_job_setup()
     jobs = step.commands[2:]
     assert len(jobs) == len(plain.commands)
-    guarded = [job for job, own in zip(jobs, plain.commands) if job != own]
-    assert len(guarded) == 1 and TESTS[1] in guarded[0]  # the one-file command
-    assert guarded[0].startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
+    tagged = [job for job, own in zip(jobs, plain.commands) if job != own]
+    assert len(tagged) == 2
+    assert tagged[0].startswith(f"export {rs.COMMAND_ENV}=2 && pytest -v -s model_executor")
+    assert TESTS[1] in tagged[1]  # the one-file command
+    assert tagged[1].startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
+    assert f"export {rs.COMMAND_ENV}=3 && pytest -v -s entrypoints" in tagged[1]
     assert step.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
@@ -850,6 +854,7 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
 
 def test_a_command_runs_only_in_the_shards_with_its_tests():
     planned = {
+        "position": 0,
         "files": {"tests/a.py": 2},
         "split": {"tests/b.py": {"shards": {"0": 2, "1": 0}}},
     }
@@ -868,10 +873,11 @@ def test_a_command_runs_only_in_the_shards_with_its_tests():
     )
     # A command every shard has a part of runs as it is.
     everywhere = {
+        "position": 1,
         "files": {"tests/a.py": 0, "tests/c.py": 1, "tests/d.py": 2},
         "split": {},
     }
-    assert rs.guard("echo RAN", everywhere, 3) == "echo RAN"
+    assert rs.guard("echo RAN", everywhere, 3) == f"export {rs.COMMAND_ENV}=1 && echo RAN"
 
 
 def test_generator_keeps_the_single_job_without_a_plan(
@@ -972,14 +978,16 @@ def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
     # CUDA, the one-file command runs only in the shard that has its tests.
     # AMD _prepare_commands wraps each command in { } to preserve exports/cd
     # across &&-joined commands, so the actual prepared form is "{\nTESTS[1]\n}".
-    wrapped = f"{{\n{TESTS[1]}\n}}"
-    guarded = rs.guard(wrapped, plan["commands"][1], 3)
-    assert guarded.startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
     mirror = plain.env["VLLM_TEST_COMMANDS"]
-    assert mirror.count(f"&& {wrapped}") == 1
-    assert job.env["VLLM_TEST_COMMANDS"] == " && ".join(
-        rs.shard_job_setup() + [mirror.replace(f"&& {wrapped}", f"&& {guarded}")]
+    wrapped = re.findall(r"\{\n[^\n]*\n\}", mirror)[-2:]  # the two test commands
+    assert TESTS[1] in wrapped[1]
+    for one, planned in zip(wrapped, plan["commands"]):
+        assert mirror.count(f"&& {one}") == 1
+        mirror = mirror.replace(f"&& {one}", f"&& {rs.guard(one, planned, 3)}")
+    assert rs.guard(wrapped[1], plan["commands"][1], 3).startswith(
+        'case "$${BUILDKITE_PARALLEL_JOB:-0}" in'
     )
+    assert job.env["VLLM_TEST_COMMANDS"] == " && ".join(rs.shard_job_setup() + [mirror])
     # The CUDA step is planned separately, on its own queue.
     assert checkout.calls == [
         ("model-executor", AgentQueue.H200_35GB),
@@ -1124,9 +1132,11 @@ def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     assert "kubernetes" in step.plugins[0] and step.plugins == plain.plugins
     assert step.retry == plain.retry == buildkite_step.K8S_RETRY
     assert step.parallelism == 3 and len(step.commands[2:]) == len(plain.commands)
-    # The same commands, the one-file command run only by the shard with it.
+    # The same commands, each tagged with its position, the one-file command
+    # run only by the shard with it.
     changed = [new for new, old in zip(step.commands[2:], plain.commands) if new != old]
-    assert len(changed) == 1 and changed[0].startswith("case ")
+    assert len(changed) == 2 and changed[0].startswith(f"export {rs.COMMAND_ENV}=")
+    assert changed[1].startswith("case ")
 
 
 def test_shard_job_setup_installs_the_plugin_for_any_python():
@@ -1166,8 +1176,9 @@ def _run(tmp_path, command, plan, shard, wrapper_args=()):
     env.update(
         PYTEST_ADDOPTS="-p runtime_shard_plugin",
         PYTHONPATH=os.path.dirname(rs.__file__),
-        BUILDKITE_PARALLEL_JOB=str(shard),
     )
+    if shard is not None:
+        env["BUILDKITE_PARALLEL_JOB"] = str(shard)
     if plan is not None:
         env["RUNTIME_SHARD_PLAN"] = rs.pack(plan)
     return subprocess.run(
@@ -1294,6 +1305,55 @@ def test_every_test_runs_in_exactly_one_shard(tmp_path, monkeypatch):
         summary = re.search(r"^runtime-shard: shard .*$", run.stdout, re.M).group(0)
         assert "; the rest run in shard " in summary, summary
     assert sorted(ran) == sorted(everything)  # each test exactly once
+
+
+def test_commands_that_differ_only_in_env_each_run_their_own_tests(tmp_path):
+    # Batch Invariance (Distributed) runs one pytest command per model, chosen
+    # by env vars alone, so the commands' pytest args are identical.
+    _project(
+        tmp_path,
+        {"test_model.py": "import os\ndef test_model(): print('MODEL=' + os.environ['MODEL'])\n"},
+    )
+    command = "pytest -v -s test_model.py"
+    plan = {"shards": 2, "commands": []}
+    for position in range(2):
+        planned = _command_plan(
+            command, f"Command ({position + 1}/2)", {"tests/test_model.py": position}
+        )
+        plan["commands"].append({**planned, "position": position})
+    pytest = f"{shlex.quote(sys.executable)} -m {command}"
+    job = " && ".join(
+        rs.guard(f"MODEL={model} {pytest}", planned, 2)
+        for model, planned in zip(("olmoe", "granite"), plan["commands"])
+    ).replace("$$", "$")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env.update(
+        PYTEST_ADDOPTS="-p runtime_shard_plugin",
+        PYTHONPATH=os.path.dirname(rs.__file__),
+        RUNTIME_SHARD_PLAN=rs.pack(plan),
+    )
+    models = []
+    for shard in range(2):
+        run = subprocess.run(
+            ["sh", "-ec", job],
+            cwd=tmp_path / "tests",
+            env=dict(env, BUILDKITE_PARALLEL_JOB=str(shard)),
+            capture_output=True,
+            text=True,
+        )
+        assert run.returncode == 0, run.stdout + run.stderr
+        models += re.findall(r"MODEL=(\w+)", run.stdout)
+    assert sorted(models) == ["granite", "olmoe"]
+
+
+def test_a_job_without_a_parallel_index_runs_the_first_shards_tests(tmp_path):
+    _project(tmp_path, {"test_a.py": "def test_a(): pass\n", "test_b.py": "def test_b(): pass\n"})
+    command = "pytest -v test_a.py test_b.py"
+    files = {"tests/test_a.py": 0, "tests/test_b.py": 1}
+    plan = {"shards": 2, "commands": [_command_plan(command, "Command (1/1)", files)]}
+    run = _run(tmp_path, command, plan, None)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert _ran(run.stdout) == ["test_a.py::test_a"]
 
 
 def test_a_shard_opens_a_log_group_per_file(tmp_path):

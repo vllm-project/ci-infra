@@ -64,6 +64,9 @@ _FILTER_OPTIONS = ("-m", "-k")
 # Where the image keeps the checkout; a step's working_dir lives under it.
 CONTAINER_WORKSPACE = "/vllm-workspace"
 PLAN_ENV = "RUNTIME_SHARD_PLAN"
+# The position of the step command a job is running, for the plugin to tell
+# apart commands whose pytest args differ only in env vars.
+COMMAND_ENV = "RUNTIME_SHARD_COMMAND"
 PLUGIN_ENV = "RUNTIME_SHARD_PLUGIN"
 PLUGIN_DIR = "/tmp/runtime-shard"
 PLUGIN_MODULE = "runtime_shard_plugin"
@@ -724,6 +727,7 @@ def owners(planned: Dict) -> List[int]:
 def guard(command: str, planned: Dict, shards: int) -> str:
     """A job's command, run only by the shards that have its tests. The others
     say where they run instead of starting pytest to deselect everything."""
+    command = f"export {COMMAND_ENV}={planned['position']} && {command}"
     runs = owners(planned)
     if len(runs) == shards:
         return command
