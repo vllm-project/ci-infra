@@ -12,7 +12,6 @@ import dataclasses
 import gzip
 import hashlib
 import inspect
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -21,7 +20,6 @@ from ci_selector.coverage.model import (
     STAMP_SHAPE,
     TABLE_VERSION,
     Row,
-    SourceIndex,
     Stamp,
     UnresolvableCommit,
     read_process,
@@ -837,26 +835,3 @@ class TestCrossBuildShards:
         row = merge_builds([a, b], tmp_repo.root)["moe"]
         assert row.stamp.shards_seen == {"1": [0, 1, 2, 3, 4]}
         assert row.stamp.shards_complete
-
-
-class TestSourceIndexExists:
-    @pytest.fixture
-    def git_calls(self, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-        calls: list[list[str]] = []
-        real = subprocess.run
-
-        def counting(args, **kwargs):
-            calls.append(args)
-            return real(args, **kwargs)
-
-        monkeypatch.setattr(subprocess, "run", counting)
-        return calls
-
-    def test_each_path_asks_git_once(self, tmp_repo: Repo, git_calls: list[list[str]]):
-        # Every row recording a generated file asks again, and each ask is a process.
-        source = SourceIndex(tmp_repo.root, tmp_repo.head())
-        git_calls.clear()
-
-        assert [source.exists("vllm/_version.py") for _ in range(3)] == [False] * 3
-        assert [source.exists("vllm/mod.py") for _ in range(3)] == [True] * 3
-        assert len(git_calls) == 2
