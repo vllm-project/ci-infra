@@ -45,9 +45,6 @@ def _context(**overrides):
         "rocm_base_refresh_force": "0",
         "rocm_prebuild": "",
         "prebuild_pr": "",
-        "pr": "false",
-        "commit": "",
-        "pipeline_slug": "",
         "steps": STEPS,
         **overrides,
     }

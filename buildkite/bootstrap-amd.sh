@@ -36,8 +36,7 @@ if [[ "${AITER_NIGHTLY}" == "1" ]]; then
     DOCS_ONLY_DISABLE=1
 fi
 
-# ROCm stack pre-build: "run" in the main build a PR's trigger step starts (ROCM_PREBUILD_PR/SHA);
-# "offer" in a PR build that changes the stack inputs.
+# ROCm stack pre-build: a main build that vLLM's `/amd-ci cache` starts with ROCM_PREBUILD_PR/SHA.
 ROCM_PREBUILD=""
 if [[ -n "${ROCM_PREBUILD_PR:-}" ]]; then
     ROCM_PREBUILD=run
@@ -206,9 +205,6 @@ upload_pipeline() {
             -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
             -D rocm_prebuild="$ROCM_PREBUILD" \
             -D prebuild_pr="${ROCM_PREBUILD_PR:-}" \
-            -D pr="${BUILDKITE_PULL_REQUEST:-false}" \
-            -D commit="$(git rev-parse HEAD)" \
-            -D pipeline_slug="$BUILDKITE_PIPELINE_SLUG" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
@@ -353,13 +349,6 @@ while IFS= read -r file; do
         fi
     fi
 done < <(printf '%s\n' "$file_diff" | tr -d '\r')
-
-# Offer the maintainer-gated stack pre-build once main's build.sh has the prebuild mode.
-if [[ ${BUILDKITE_PULL_REQUEST:-false} != false ]] \
-    && printf '%s\n' "$file_diff" | tr -d '\r' | grep -xE 'docker/Dockerfile\.rocm_base|tools/vllm-rocm/therock_wheels\.py' >/dev/null \
-    && git show origin/main:.buildkite/scripts/rocm/build.sh 2>/dev/null | grep '^  prebuild)' >/dev/null; then
-    ROCM_PREBUILD=offer
-fi
 
 # Check for ready-run-all-tests label
 LABEL_RUN_ALL=$(check_run_all_label)

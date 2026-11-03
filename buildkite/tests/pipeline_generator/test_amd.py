@@ -132,12 +132,7 @@ def test_build_sh_layout_build_steps_get_trusted_repo(build_sh_layout, env, expe
     assert command_step.env == {"ROCM_CI_REPO": expected}
     assert command_step.concurrency_group == f"g/{expected}/$BUILDKITE_BRANCH"
     assert command_step.timeout_in_minutes == 540
-    trusted = expected == "rocm/vllm-ci"
-    assert command_step.agents == {
-        "queue": AgentQueue.AMD_CPU_TRUSTED if trusted else AgentQueue.AMD_CPU
-    }
-    # The trusted queue's agent hook admits only the bare build.sh command.
-    assert (command_step.commands == step.commands) == trusted
+    assert command_step.agents == {"queue": AgentQueue.AMD_CPU}
 
 
 def test_build_sh_layout_pods_run_the_build_image(build_sh_layout):
