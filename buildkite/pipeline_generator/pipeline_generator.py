@@ -84,7 +84,6 @@ class PipelineGenerator:
             global_config["docs_only_disable"] == "0"
             and not global_config["run_all"]
             and global_config["only_step_keys"] is None
-            # The AITER nightly tests main as it is, whatever the last commit.
             and global_config["aiter_nightly"] != "1"
         ):
             if is_docs_only_change(global_config["list_file_diff"]):
@@ -109,8 +108,7 @@ class PipelineGenerator:
             # Torch nightly drops the AMD lane; AITER nightly keeps only that lane.
             _fail_generation("TORCH_NIGHTLY and AITER_NIGHTLY cannot both be set.")
         if aiter_nightly and not rocm_build_layout():
-            # vLLM's build.sh installs the wheel in image-build-amd. Older
-            # checkouts would silently test the stock AITER.
+            # Without it the build would pass while testing the stock AITER.
             _fail_generation(
                 "AITER nightly needs vLLM's .buildkite/scripts/rocm/build.sh, "
                 "which installs the AITER nightly wheel; this checkout has none."
@@ -118,8 +116,6 @@ class PipelineGenerator:
         if aiter_nightly and (
             kernrec_enabled() or kernrec_amd_enabled() or fnrec_enabled()
         ):
-            # The recordings feed the test selector, and an AMD-only run on an
-            # unreleased AITER would skew them.
             _fail_generation(
                 "AITER nightly cannot record for the test selector: unset "
                 "VLLM_CI_KERNREC, VLLM_CI_KERNREC_AMD and VLLM_CI_FNREC."
@@ -136,9 +132,6 @@ class PipelineGenerator:
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
         if aiter_nightly:
-            # Run as a build of named steps, like a retry build. That also
-            # skips the early image upload, so nothing is uploaded before
-            # these checks pass.
             try:
                 global_config["only_step_keys"] = aiter_nightly_step_keys(
                     steps, global_config["only_step_keys"]
@@ -541,11 +534,11 @@ def aiter_nightly_step_keys(
 
     Raises ValueError if those, or their prerequisites, include any other step.
     """
-    keys = set()
+    nightly_keys = set()
     for step in steps:
         key = step.key or _generate_step_key(step.label)
         if runs_in_aiter_nightly(step.device):
-            keys.add(key)
+            nightly_keys.add(key)
         # An AMD GPU job is not mirrored; mirrors come from other steps.
         amd_mirror = (step.mirror or {}).get("amd")
         if (
@@ -553,16 +546,16 @@ def aiter_nightly_step_keys(
             and not is_amd_gpu_device(step.device)
             and runs_in_aiter_nightly(amd_mirror.get("device"))
         ):
-            keys.add(f"amd-{key}")
-    named = frozenset(keys) if requested is None else requested
-    _, selected = select_steps_and_dependencies(steps, named)
-    others = selected - keys
-    if others:
+            nightly_keys.add(f"amd-{key}")
+    run_keys = frozenset(nightly_keys) if requested is None else requested
+    _, needed_keys = select_steps_and_dependencies(steps, run_keys)
+    non_nightly_keys = needed_keys - nightly_keys
+    if non_nightly_keys:
         raise ValueError(
             "AITER nightly runs only the AMD build steps and AMD GPU jobs on "
-            "gfx942/gfx950, but needs: " + ", ".join(sorted(others))
+            "gfx942/gfx950, but needs: " + ", ".join(sorted(non_nightly_keys))
         )
-    return named
+    return run_keys
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:
