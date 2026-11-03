@@ -161,6 +161,10 @@ upload_pipeline() {
     fi
     curl -fsSL -o "$TEMPLATE_PATH" \
         "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
+    if [[ $ROCM_PREBUILD == run ]] && ! grep -q 'rocm_prebuild == "run"' "$TEMPLATE_PATH"; then
+        buildkite-agent annotate --style error "ROCm stack pre-build: ci-infra $VLLM_CI_BRANCH cannot render it" || true
+        exit 1
+    fi
 
 
     echo "List file diff: $LIST_FILE_DIFF"
