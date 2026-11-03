@@ -24,6 +24,9 @@ from buildkite_step import (
     kernrec_amd_enabled,
     kernrec_enabled,
     create_precommit_group_step,
+    create_rocm_base_cache_group_step,
+    rocm_stack_key,
+    ROCM_STACK_INPUTS,
     split_deferred_steps,
 )
 from constants import AgentQueue
@@ -184,6 +187,16 @@ class PipelineGenerator:
                     global_config["github_repo_name"], global_config["commit"]
                 ),
             )
+            if (
+                os.getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH") == "main"
+                and global_config["merge_base_commit"]
+                and any(p in ROCM_STACK_INPUTS for p in global_config["list_file_diff"])
+            ):
+                key = rocm_stack_key(global_config["merge_base_commit"])
+                if key:
+                    buildkite_group_steps.append(create_rocm_base_cache_group_step(key))
+                else:
+                    print("ROCm base image change that /amd-ci cache cannot pre-build")
 
         if early_keys:
             # Already in the build: a second upload of a key would fail it.

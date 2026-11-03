@@ -1,3 +1,5 @@
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -865,3 +867,108 @@ def test_amd_mirror_parallelism_override(fake_global_config, amd_parallelism, ex
 )
 def test_is_amd_device(device, expected):
     assert is_amd_device(device) is expected
+
+
+ROCM_KEY_LINES = """\
+_trw=$( [[ $STACK == rocm ]] && echo tools/vllm-rocm/therock_wheels.py || true )
+Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree HEAD -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16)
+"""
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+@pytest.fixture
+def rocm_pr(tmp_path, monkeypatch):
+    """A main commit with the ROCm stack inputs, checked out as the PR's base."""
+    for path, text in (
+        ("docker/Dockerfile.rocm_base", "FROM base\n"),
+        ("tools/vllm-rocm/therock_wheels.py", "wheels = 1\n"),
+        (".buildkite/scripts/rocm/build.sh", ROCM_KEY_LINES),
+    ):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(text)
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "m")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path, _git(tmp_path, "rev-parse", "HEAD")
+
+
+def _commit(repo, change):
+    change(repo)
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pr")
+
+
+def test_rocm_stack_key_is_build_sh_key_of_the_pr(rocm_pr):
+    repo, base = rocm_pr
+    _commit(
+        repo, lambda r: (r / "docker/Dockerfile.rocm_base").write_text("FROM new\n")
+    )
+    expected = subprocess.run(
+        ["bash", "-c", ROCM_KEY_LINES + 'printf %s "$Ks"'],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SDF": "docker/Dockerfile.rocm_base", "STACK": "rocm"},
+    ).stdout
+    assert buildkite_step.rocm_stack_key(base) == expected
+    assert len(expected) == 16
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # The PR changes how build.sh keys the stack.
+        lambda r: (r / ".buildkite/scripts/rocm/build.sh").write_text(
+            ROCM_KEY_LINES.replace("zstd-3", "zstd-4")
+        ),
+        lambda r: (r / "tools/vllm-rocm/therock_wheels.py").unlink(),
+        lambda r: (r / "tools/vllm-rocm/therock_wheels.py").chmod(0o755),
+    ],
+    ids=["key-formula", "delete", "chmod"],
+)
+def test_rocm_stack_key_is_none_for_changes_cache_cannot_prebuild(rocm_pr, change):
+    repo, base = rocm_pr
+    _commit(repo, change)
+    assert buildkite_step.rocm_stack_key(base) is None
+
+
+@pytest.mark.parametrize(
+    ("code", "status", "annotated"),
+    [("200", 0, False), ("404", 1, True), ("429", 75, False), ("000", 75, False)],
+)
+def test_rocm_base_cache_step_asks_docker_hub_for_the_key(
+    tmp_path, code, status, annotated
+):
+    (step,) = buildkite_step.create_rocm_base_cache_group_step("0123456789abcdef").steps
+    assert step.key == "rocm-base-image-cache" and step.env == {
+        "BUILDKITE_SKIP_CHECKOUT": "true"
+    }
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text(
+        f'#!/bin/bash\necho "$@" > {tmp_path}/url\nprintf {code}\n'
+    )
+    (bin_dir / "buildkite-agent").write_text(
+        f"#!/bin/bash\ntouch {tmp_path}/annotated\n"
+    )
+    for tool in bin_dir.iterdir():
+        tool.chmod(0o755)
+    # What the agent runs after `pipeline upload` turns $$ back into $.
+    out = subprocess.run(
+        ["bash", "-e", "-c", step.commands[0].replace("$$", "$")],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+    )
+    assert out.returncode == status, out.stdout + out.stderr
+    assert (
+        "rocm/vllm-ci/tags/stack-rocm-0123456789abcdef"
+        in (tmp_path / "url").read_text()
+    )
+    assert (tmp_path / "annotated").exists() == annotated
