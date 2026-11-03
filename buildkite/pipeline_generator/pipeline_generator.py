@@ -84,6 +84,8 @@ class PipelineGenerator:
             global_config["docs_only_disable"] == "0"
             and not global_config["run_all"]
             and global_config["only_step_keys"] is None
+            # The AITER nightly tests main as it is, whatever the last commit.
+            and global_config["aiter_nightly"] != "1"
         ):
             if is_docs_only_change(global_config["list_file_diff"]):
                 print("List file diff: ", global_config["list_file_diff"])
@@ -134,14 +136,15 @@ class PipelineGenerator:
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
         if aiter_nightly:
-            # Before the image steps go up early: a failed build must not
-            # leave them running with no tests after them.
-            broken = aiter_nightly_broken_dependencies(steps)
-            if broken:
-                _fail_generation(
-                    "AITER nightly: step(s) depend on steps it drops: "
-                    + ", ".join(broken)
+            # Run as a build of named steps, like a retry build. That also
+            # skips the early image upload, so nothing is uploaded before
+            # these checks pass.
+            try:
+                global_config["only_step_keys"] = aiter_nightly_step_keys(
+                    steps, global_config["only_step_keys"]
                 )
+            except ValueError as error:
+                _fail_generation(str(error))
         early_keys = upload_image_steps_early(
             steps, os.path.dirname(self.output_file_path)
         )
@@ -159,10 +162,7 @@ class PipelineGenerator:
                 )
                 global_config["selector_step_keys"] = scheduled
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps,
-                global_config["only_step_keys"],
-                torch_nightly=torch_nightly,
-                aiter_nightly=aiter_nightly,
+                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
             )
         except ValueError as error:
             if not (record and record["applied"]):
@@ -175,10 +175,7 @@ class PipelineGenerator:
             global_config["selector_step_keys"] = None
             scheduled = None
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps,
-                global_config["only_step_keys"],
-                torch_nightly=torch_nightly,
-                aiter_nightly=aiter_nightly,
+                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
             )
         global_config["only_step_keys"] = selected_step_keys
         if record is not None:
@@ -399,10 +396,6 @@ def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
             _step_should_run(_get_amd_mirror_effective_step(step, amd), diff), diff
         ):
             keys.append(f"amd-{step.key}")
-    if get_global_config()["aiter_nightly"] == "1":
-        # Every step "should run" there; only the AITER nightly's jobs do.
-        kept = aiter_nightly_jobs(steps)
-        keys = [key for key in keys if key in kept]
     return keys
 
 
@@ -469,7 +462,6 @@ def select_steps_and_dependencies(
     steps: List[Step],
     requested_step_keys: Optional[FrozenSet[str]],
     torch_nightly: bool = False,
-    aiter_nightly: bool = False,
 ) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
     if requested_step_keys is None:
         return steps, None
@@ -519,14 +511,6 @@ def select_steps_and_dependencies(
                 "AMD CI step key(s) requested, but AMD steps are excluded from "
                 "torch-nightly runs: " + ", ".join(sorted(requested_amd_keys))
             )
-    if aiter_nightly:
-        excluded_keys = requested_step_keys - aiter_nightly_jobs(steps).keys()
-        if excluded_keys:
-            raise ValueError(
-                "CI step key(s) requested, but AITER nightly runs only the AMD "
-                "build steps and AMD GPU jobs on gfx942/gfx950: "
-                + ", ".join(sorted(excluded_keys))
-            )
 
     selected_step_keys = set(requested_step_keys)
     pending = list(requested_step_keys)
@@ -549,39 +533,36 @@ def select_steps_and_dependencies(
     return selected, frozenset(selected_step_keys)
 
 
-def aiter_nightly_jobs(steps: List[Step]) -> Dict[str, List[str]]:
-    """The jobs the AITER nightly uploads, by key, with their depends_on as
-    convert_group_step_to_buildkite_step emits them."""
-    jobs = {}
+def aiter_nightly_step_keys(
+    steps: List[Step], requested: Optional[FrozenSet[str]]
+) -> FrozenSet[str]:
+    """The steps the AITER nightly runs: the AMD build steps and the AMD GPU
+    jobs on gfx942/gfx950, or in a retry build the requested ones.
+
+    Raises ValueError if those, or their prerequisites, include any other step.
+    """
+    keys = set()
     for step in steps:
         key = step.key or _generate_step_key(step.label)
         if runs_in_aiter_nightly(step.device):
-            jobs[key] = (
-                normalize_amd_depends_on(step.depends_on)
-                if is_amd_gpu_device(step.device)
-                else list(step.depends_on or [])
-            )
-        # The converter emits no mirror for a step that is itself an AMD GPU job.
+            keys.add(key)
+        # An AMD GPU job is not mirrored; mirrors come from other steps.
         amd_mirror = (step.mirror or {}).get("amd")
         if (
             amd_mirror
             and not is_amd_gpu_device(step.device)
             and runs_in_aiter_nightly(amd_mirror.get("device"))
         ):
-            jobs[f"amd-{key}"] = normalize_amd_depends_on(amd_mirror.get("depends_on"))
-    return jobs
-
-
-def aiter_nightly_broken_dependencies(steps: List[Step]) -> List[str]:
-    """Each "job -> dependency" where a job the AITER nightly runs depends on a
-    step it drops."""
-    jobs = aiter_nightly_jobs(steps)
-    return sorted(
-        f"{key} -> {dependency}"
-        for key, dependencies in jobs.items()
-        for dependency in dependencies
-        if dependency not in jobs
-    )
+            keys.add(f"amd-{key}")
+    named = frozenset(keys) if requested is None else requested
+    _, selected = select_steps_and_dependencies(steps, named)
+    others = selected - keys
+    if others:
+        raise ValueError(
+            "AITER nightly runs only the AMD build steps and AMD GPU jobs on "
+            "gfx942/gfx950, but needs: " + ", ".join(sorted(others))
+        )
+    return named
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:

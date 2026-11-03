@@ -24,7 +24,6 @@ from amd import (
     is_amd_gpu_device,
     rocm_build_layout,
     rocm_ci_repo,
-    runs_in_aiter_nightly,
 )
 from step import Step
 from utils_lib.docker_utils import (
@@ -1160,8 +1159,6 @@ def convert_group_step_to_buildkite_step(
     # ROCm has its own pinned torch and gains nothing from validating against
     # a CUDA torch-nightly build, so the AMD lane is excluded entirely there.
     include_amd = global_config["torch_nightly"] != "1"
-    # The AITER nightly runs only the AMD lane, on AITER archs.
-    aiter_nightly = global_config["aiter_nightly"] == "1"
 
     amd_hardware_steps = []
 
@@ -1176,13 +1173,10 @@ def convert_group_step_to_buildkite_step(
             include_step = (
                 step.device != DeviceType.A100
                 and (include_amd or not is_amd_device(step.device))
-                and (runs_in_aiter_nightly(step.device) or not aiter_nightly)
                 and (only_step_keys is None or step_key in only_step_keys)
             )
             if is_amd_gpu_device(step.device):
                 if not include_amd:
-                    continue
-                if aiter_nightly and not runs_in_aiter_nightly(step.device):
                     continue
                 amd_commands = [f"export VLLM_TEST_GROUP_NAME={step_key}"]
                 amd_commands.extend(
@@ -1364,10 +1358,6 @@ def convert_group_step_to_buildkite_step(
                 and step.mirror
                 and step.mirror.get("amd")
                 and (only_step_keys is None or f"amd-{step_key}" in only_step_keys)
-                and (
-                    runs_in_aiter_nightly(step.mirror["amd"].get("device"))
-                    or not aiter_nightly
-                )
             ):
                 amd = step.mirror["amd"]
                 amd_no_plugin = amd.get("no_plugin", False)
@@ -1498,7 +1488,9 @@ def convert_group_step_to_buildkite_step(
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
     if global_config["aiter_nightly"] == "1":
-        return True
+        # Its steps are named (aiter_nightly_step_keys), and a scheduled build
+        # has nobody to unblock them, so NOAUTO does not gate them.
+        return step.key in global_config["only_step_keys"]
     if os.getenv("NOAUTO") == "1":
         return False
     if global_config["only_step_keys"] is not None:
