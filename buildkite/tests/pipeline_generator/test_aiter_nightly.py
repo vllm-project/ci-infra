@@ -178,14 +178,21 @@ def test_runs_in_aiter_nightly(device, expected):
 def test_nightly_runs_only_the_amd_lane(run, monkeypatch, noauto):
     if noauto:
         monkeypatch.setenv("NOAUTO", "1")
+    # Ignored: its records would mislead the test selector.
+    for recorder in ("VLLM_CI_KERNREC", "VLLM_CI_KERNREC_AMD", "VLLM_CI_FNREC"):
+        monkeypatch.setenv(recorder, "1")
     monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "on")
     # A docs-only last commit does not skip it.
     run.config.update(list_file_diff=["docs/index.md"], docs_only_disable="0")
 
     jobs, early = run()
 
-    # Nothing gated or deferred: no block, no "Run more jobs", no early upload.
+    # Nothing gated or deferred: no block, no "Run more jobs", no early upload,
+    # no recording or collect step.
     assert set(jobs) == NIGHTLY_JOBS
+    uploaded = (run.out / "pipeline.yaml").read_text()
+    for marker in ("kernrec", "fnrec", "VLLM_KERNEL_SYMBOL_MAP"):
+        assert marker not in uploaded
     assert early == {}
     assert not any("artifact" in cmd for cmd in run.calls)
     for job in jobs.values():
@@ -250,11 +257,6 @@ def _no_build_sh(run, monkeypatch):
     (run.out.parent / ".buildkite/scripts/rocm/build.sh").unlink()
 
 
-def _recorder(name):
-    # Its records feed the test selector; this run would skew them.
-    return lambda run, monkeypatch: monkeypatch.setenv(name, "1")
-
-
 def _retry(*keys):
     return lambda run, monkeypatch: run.config.update(only_step_keys=frozenset(keys))
 
@@ -265,9 +267,6 @@ def _retry(*keys):
         (_depends_on_cuda, "cuda-only"),
         (_torch_nightly, "TORCH_NIGHTLY and AITER_NIGHTLY"),
         (_no_build_sh, "build.sh"),
-        (_recorder("VLLM_CI_KERNREC"), "cannot record"),
-        (_recorder("VLLM_CI_KERNREC_AMD"), "cannot record"),
-        (_recorder("VLLM_CI_FNREC"), "cannot record"),
         (_retry("cuda-only"), "cuda-only"),
         (_retry("amd-mi250"), "amd-mi250"),
         (_retry("amd-native-with-mirror"), "amd-native-with-mirror"),

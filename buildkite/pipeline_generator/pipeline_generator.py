@@ -113,13 +113,6 @@ class PipelineGenerator:
                 "AITER nightly needs vLLM's .buildkite/scripts/rocm/build.sh, "
                 "which installs the AITER nightly wheel; this checkout has none."
             )
-        if aiter_nightly and (
-            kernrec_enabled() or kernrec_amd_enabled() or fnrec_enabled()
-        ):
-            _fail_generation(
-                "AITER nightly cannot record for the test selector: unset "
-                "VLLM_CI_KERNREC, VLLM_CI_KERNREC_AMD and VLLM_CI_FNREC."
-            )
         if torch_nightly:
             # ROCm has its own pinned torch and gains nothing from validating
             # against a CUDA torch-nightly build, so the AMD lane is excluded
