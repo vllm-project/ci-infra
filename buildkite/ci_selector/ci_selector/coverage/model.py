@@ -153,7 +153,8 @@ def read_process(path: Path) -> ProcessRecord | None:
     packages: set[str] = set()
     libcalls: dict[str, set[str]] = {}
     line_files: dict[str, str] = {}
-    raw_lines: list[tuple[str, int]] = []
+    numbers_by_file: dict[str, set[int]] = defaultdict(set)
+    line_records = 0
     records_lines = False
     line_counter = None
     job = py = retry = None
@@ -168,7 +169,15 @@ def read_process(path: Path) -> ProcessRecord | None:
         for line in fh:
             parts = line.rstrip("\n").split("\t")
             tag = parts[0]
-            if tag == "#start":
+            # First because line records are nearly every line of a nightly.
+            if tag == "#ln":
+                filename = line_files.get(parts[1]) if len(parts) == 3 else None
+                if filename is not None and parts[2].isdigit():
+                    numbers_by_file[filename].add(int(parts[2]))
+                    line_records += 1
+                else:
+                    malformed += 1
+            elif tag == "#start":
                 meta = _kv(parts[1:])
                 header_root = meta.get("root") or None
                 job = meta.get(BUILDKITE_JOB_ID_ENV)
@@ -193,12 +202,6 @@ def read_process(path: Path) -> ProcessRecord | None:
             elif tag == "#lf":
                 if len(parts) == 3 and parts[1] and parts[2]:
                     line_files[parts[1]] = parts[2]
-                else:
-                    malformed += 1
-            elif tag == "#ln":
-                filename = line_files.get(parts[1]) if len(parts) == 3 else None
-                if filename is not None and parts[2].isdigit():
-                    raw_lines.append((filename, int(parts[2])))
                 else:
                     malformed += 1
             elif tag in ("#stat", "#end"):
@@ -243,10 +246,10 @@ def read_process(path: Path) -> ProcessRecord | None:
         else:
             outside += 1
     lines: dict[str, set[int]] = defaultdict(set)
-    for filename, number in raw_lines:
+    for filename, numbers in numbers_by_file.items():
         for base, scope in roots:
             if filename.startswith(base):
-                lines[scope + filename[len(base) :]].add(number)
+                lines[scope + filename[len(base) :]] |= numbers
                 break
 
     return ProcessRecord(
@@ -267,7 +270,7 @@ def read_process(path: Path) -> ProcessRecord | None:
         libcalls=libcalls,
         lines=dict(lines),
         records_lines=records_lines,
-        lost_line_records=line_counter is not None and len(raw_lines) < line_counter,
+        lost_line_records=line_counter is not None and line_records < line_counter,
     )
 
 

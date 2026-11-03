@@ -418,6 +418,25 @@ class TestMergeBuild:
         assert census.collapsed
         assert len(census.no_dir) == 4
 
+    def test_each_job_keeps_its_own_records_past_the_read_ahead(
+        self, build: Build, tmp_repo: Repo, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Parallel reads come back by position, so a job with nothing to read
+        must not shift the records of the jobs after it."""
+        monkeypatch.setattr("ci_selector.scripts.build.READ_AHEAD_JOBS", 1)
+        for i in range(3):
+            process_file(
+                build.job(f"j{i}", step_key=f"step-{i}") / "fn.a.txt",
+                [("mod.py", f"fn{i}")],
+            )
+            build.job(f"gap{i}", step_key=f"gap-{i}", recorded=False)
+
+        rows = merge_build(build.finish(), tmp_repo.root)
+
+        assert {key: set(*row.functions.values()) for key, row in rows.items()} == {
+            f"step-{i}": {f"fn{i}"} for i in range(3)
+        }
+
     def test_the_three_no_recording_causes_are_told_apart(
         self, build: Build, tmp_repo: Repo
     ):

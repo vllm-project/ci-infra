@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -41,6 +43,7 @@ from ..coverage.model import (
     ENV_ABSENT,
     MIN_RECORD_RATE,
     MIRROR_NOTE,
+    ProcessRecord,
     RECORD_GLOB,
     TABLE_VERSION,
     Row,
@@ -63,6 +66,10 @@ WORLD_ENV = (
     "VLLM_CI_BRANCH",
 )
 JOB_STATE_PASSED = "passed"
+
+READ_WORKERS = min(os.cpu_count() or 1, 16)
+# Finished reads wait in this process's memory until the fold reaches them.
+READ_AHEAD_JOBS = 2 * READ_WORKERS
 
 
 def read_world(build_dir: Path, index: dict) -> tuple[str, str, dict[str, str], bool]:
@@ -244,6 +251,23 @@ def _job_from_recordings(job_id: str, fnrec_dir: Path, delivery: str) -> dict:
     return job
 
 
+def _read_files(files: list[Path]) -> list[ProcessRecord]:
+    records = (read_process(path) for path in files)
+    return [record for record in records if record is not None]
+
+
+def _read_jobs(jobs: list[list[Path]]):
+    """Each job's process records, in order, with a bounded read-ahead."""
+    with ProcessPoolExecutor(max_workers=READ_WORKERS) as pool:
+        pending = deque()
+        for files in jobs:
+            pending.append(pool.submit(_read_files, files))
+            if len(pending) >= READ_AHEAD_JOBS:
+                yield pending.popleft().result()
+        while pending:
+            yield pending.popleft().result()
+
+
 def merge_build(
     build_dir: Path,
     repo: Path,
@@ -290,7 +314,13 @@ def merge_build(
     census.build = build_dir.name
     census.expected = expected_jobs
 
-    for job in index["jobs"]:
+    job_files = [
+        sorted((build_dir / "jobs" / job["job"] / "fnrec").glob(RECORD_GLOB))
+        for job in index["jobs"]
+    ]
+    reads = _read_jobs([files for files in job_files if files])
+
+    for job, files in zip(index["jobs"], job_files):
         census.n_jobs += 1
         census.attempted += int(_attempted(job))
         delivery = job.get("artifact") or "unknown"
@@ -300,14 +330,12 @@ def merge_build(
         if not fnrec_dir.is_dir():
             census.no_dir.append(job["job"])
             continue
-        files = sorted(fnrec_dir.glob(RECORD_GLOB))
         if not files:
             # Delivered something, but no recording. `install.err` with no
             # fn.*.txt beside it is the live shape: the installer failed.
             census.no_record_files.append(job["job"])
             continue
-        processes = [read_process(p) for p in files]
-        processes = [p for p in processes if p is not None]
+        processes = next(reads)
         if not processes:
             # Files, but none names a root, so nothing in them can be placed in
             # the tree. Our parser, not the build.
@@ -391,6 +419,8 @@ def merge_build(
 
         if verbose:
             print(f"  {key}: {len(accumulated[key])} files")
+
+    reads.close()
 
     rows: dict[str, Row] = {}
     # Keyed on stamps and not on what accumulated, because a step can record
