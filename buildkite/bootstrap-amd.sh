@@ -36,10 +36,10 @@ if [[ "${AITER_NIGHTLY}" == "1" ]]; then
     DOCS_ONLY_DISABLE=1
 fi
 
-# ROCm stack pre-build: a main build that vLLM's `/amd-ci cache` starts with ROCM_PREBUILD_PR/SHA.
-ROCM_PREBUILD=""
-if [[ -n "${ROCM_PREBUILD_PR:-}" ]]; then
-    ROCM_PREBUILD=run
+# ROCm base image cache: the main build vLLM's `/amd-ci cache` starts with ROCM_PROMOTE_PR/SHA/IMAGES.
+ROCM_PROMOTE=""
+if [[ -n "${ROCM_PROMOTE_PR:-}" ]]; then
+    ROCM_PROMOTE=run
     DOCS_ONLY_DISABLE=1
 fi
 
@@ -161,8 +161,8 @@ upload_pipeline() {
     fi
     curl -fsSL -o "$TEMPLATE_PATH" \
         "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
-    if [[ $ROCM_PREBUILD == run ]] && ! grep -q 'rocm_prebuild == "run"' "$TEMPLATE_PATH"; then
-        buildkite-agent annotate --style error "ROCm stack pre-build: ci-infra $VLLM_CI_BRANCH cannot render it" || true
+    if [[ $ROCM_PROMOTE == run ]] && ! grep -q 'rocm_promote == "run"' "$TEMPLATE_PATH"; then
+        buildkite-agent annotate --style error "ROCm base image cache: ci-infra $VLLM_CI_BRANCH cannot render it" || true
         exit 1
     fi
 
@@ -188,9 +188,9 @@ upload_pipeline() {
         echo '{{ steps | tojson }}' > amd-build-steps.j2
         AMD_BUILD_STEPS=$(minijinja-cli amd-build-steps.j2 hardware_tests/amd.yaml)
     fi
-    if [[ $ROCM_PREBUILD == run ]] && ! [[ ${ROCM_CI_REPO:-} == rocm/vllm-ci \
-          && $ROCM_PREBUILD_PR =~ ^[0-9]+$ && ${ROCM_PREBUILD_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
-        buildkite-agent annotate --style error "ROCm stack pre-build needs a main build of vllm-project/vllm and a PR number and SHA" || true
+    if [[ $ROCM_PROMOTE == run ]] && ! [[ ${ROCM_CI_REPO:-} == rocm/vllm-ci \
+          && $ROCM_PROMOTE_PR =~ ^[0-9]+$ && ${ROCM_PROMOTE_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
+        buildkite-agent annotate --style error "ROCm base image cache needs a main build of vllm-project/vllm and a PR number and SHA" || true
         exit 1
     fi
     (
@@ -207,8 +207,8 @@ upload_pipeline() {
             -D ci_repo="${ROCM_CI_REPO:-}" \
             -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
             -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
-            -D rocm_prebuild="$ROCM_PREBUILD" \
-            -D prebuild_pr="${ROCM_PREBUILD_PR:-}" \
+            -D rocm_promote="$ROCM_PROMOTE" \
+            -D promote_pr="${ROCM_PROMOTE_PR:-}" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )

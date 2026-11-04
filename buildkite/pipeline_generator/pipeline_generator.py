@@ -7,18 +7,11 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import (
-    AMD_ALWAYS_RUN_STEP_KEYS,
-    ROCM_BASE_CACHE_GROUP,
-    is_amd_device,
-    normalize_amd_depends_on,
-    rocm_base_cache_step,
-)
+from amd import AMD_ALWAYS_RUN_STEP_KEYS, is_amd_device, normalize_amd_depends_on
 from buildkite_step import (
     AMD_GROUP,
     COLLECT_GROUP,
     PRECOMMIT_GROUP,
-    BuildkiteCommandStep,
     BuildkiteGroupStep,
     _amd_mirror_should_run,
     _generate_step_key,
@@ -191,21 +184,6 @@ class PipelineGenerator:
                     global_config["github_repo_name"], global_config["commit"]
                 ),
             )
-            # Only the upstream pipeline (ci_config.yaml), where /amd-ci cache
-            # retries the job.
-            rocm_cache = None
-            if global_config.get("name") == "vllm_ci":
-                rocm_cache = rocm_base_cache_step(
-                    global_config.get("list_file_diff") or [],
-                    global_config.get("merge_base_commit"),
-                )
-            if rocm_cache:
-                buildkite_group_steps.append(
-                    BuildkiteGroupStep(
-                        group=ROCM_BASE_CACHE_GROUP,
-                        steps=[BuildkiteCommandStep(**rocm_cache)],
-                    )
-                )
 
         if early_keys:
             # Already in the build: a second upload of a key would fail it.

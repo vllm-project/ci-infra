@@ -145,22 +145,20 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                   {% endif %}
 {%- endmacro %}
 
-{% set prebuild_retry = [{"signal_reason": "stack_error", "limit": 1}, {"signal_reason": "agent_stop", "limit": 1}, {"exit_status": 75, "limit": 1}, {"exit_status": -1, "limit": 1}, {"exit_status": -10, "limit": 1}] %}
+{% set promote_retry = [{"signal_reason": "stack_error", "limit": 1}, {"signal_reason": "agent_stop", "limit": 1}, {"exit_status": 75, "limit": 1}, {"exit_status": -1, "limit": 1}, {"exit_status": -10, "limit": 1}] %}
   - group: "AMD Tests"
     depends_on: ~
     steps:
-      {% if rocm_prebuild == "run" %}
+      {% if rocm_promote == "run" %}
       {# vLLM's `/amd-ci cache` (a maintainer's comment on a PR that changes the ROCm stack) starts
-         this as a main build: main's checkout, build.sh and bake file, with only the stack inputs
-         taken from the PR merged into main. Nothing else from main's build runs. #}
-      - label: ":docker: Cache the ROCm base image for #{{ prebuild_pr }}"
-        key: "rocm-prebuild"
-        commands: ["bash .buildkite/scripts/rocm/build.sh rocm prebuild"]
-        timeout_in_minutes: 540
-        concurrency: 1
-        concurrency_group: "vllm/rocm/prebuild/rocm"
+         this as a main build: main's build.sh copies the stack images that PR's CI built into
+         rocm/vllm-ci. Nothing else from main's build runs. #}
+      - label: ":docker: Cache the ROCm base image for #{{ promote_pr }}"
+        key: "rocm-base-image-cache"
+        commands: ["bash .buildkite/scripts/rocm/build.sh rocm promote"]
+        timeout_in_minutes: 30
         retry:
-          automatic: {{ prebuild_retry | tojson }}
+          automatic: {{ promote_retry | tojson }}
         env:
           ROCM_CI_REPO: {{ ci_repo | tojson }}
         agents:

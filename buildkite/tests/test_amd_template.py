@@ -213,16 +213,16 @@ def test_aiter_nightly_build_sh_layout_has_no_overlay_step():
     assert gpu_jobs == {"MoE"}
 
 
-def test_prebuild_build_runs_only_mains_build_sh():
-    steps = _render(rocm_prebuild="run", prebuild_pr="123")
-    assert list(steps) == ["rocm-prebuild"]
-    step = steps["rocm-prebuild"]
+def test_cache_build_runs_only_mains_build_sh():
+    steps = _render(rocm_promote="run", promote_pr="123")
+    assert list(steps) == ["rocm-base-image-cache"]
+    step = steps["rocm-base-image-cache"]
     assert step["agents"] == {"queue": "amd-cpu"}
     # Not the PR's amd.yaml: a fixed command, run in the main checkout.
-    assert step["commands"] == ["bash .buildkite/scripts/rocm/build.sh rocm prebuild"]
+    assert step["commands"] == ["bash .buildkite/scripts/rocm/build.sh rocm promote"]
     assert step["env"] == {"ROCM_CI_REPO": "rocm/vllm-ci"}
     assert {"exit_status": 75, "limit": 1} in step["retry"]["automatic"]
-    assert "rocm-prebuild" not in _render()
+    assert "rocm-base-image-cache" not in _render()
 
 
 VLLM = "https://github.com/vllm-project/vllm.git"
