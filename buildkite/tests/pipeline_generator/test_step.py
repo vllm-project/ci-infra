@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import buildkite_step
-from constants import Platform
+from constants import AgentQueue, Platform
 from pipeline_generator import select_steps_and_dependencies
 from step import Step, group_steps, read_steps_from_job_dir
 
@@ -450,6 +450,28 @@ def test_otel_trace_keeps_assignment_prefixed_commands_in_shell(fake_global_conf
         assert "ci_otel_run" not in command
     assert "TP_SIZE=1 pytest tests/entrypoints" in commands[2]
     assert "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed" in commands[4]
+
+
+def test_otel_trace_labels_long_commands_in_full(fake_global_config):
+    fake_global_config["branch"] = "main"
+    long = "pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/"
+    step = Step(label="Traced", commands=[long + "fp8.txt", long + "int8.txt"])
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    labels = [
+        shlex.split(re.search(r"ci_otel_run \d+ (.*?) pytest", c).group(1))[0]
+        for c in (commands[2], commands[4])
+    ]
+    assert labels[0] != labels[1]
+    assert labels == step.commands
+    assert commands[3].endswith(f'Command (2/2): {labels[1]}"')
+    assert commands[2].endswith(step.commands[0])
+    assert commands[4].endswith(step.commands[1])
 
 
 def test_is_simple_command():
@@ -1147,3 +1169,45 @@ def test_docs_and_recipe_only_changes_skip_ci(diff, docs_only):
     from pipeline_generator import is_docs_only_change
 
     assert is_docs_only_change(diff) is docs_only
+
+
+@pytest.mark.parametrize(
+    ("key", "label", "branch", "queue"),
+    [
+        (
+            "image-build",
+            ":docker: Build image",
+            "main",
+            AgentQueue.CPU_POSTMERGE_US_EAST_1,
+        ),
+        (
+            "image-build",
+            ":docker: Build image",
+            "user:feature",
+            AgentQueue.CPU_PREMERGE_US_EAST_1,
+        ),
+        (
+            "image-build-cpu",
+            ":docker: Build CPU image",
+            "user:feature",
+            AgentQueue.MEDIUM_CPU_PREMERGE,
+        ),
+        (
+            "image-build-smoke-test",
+            ":docker: :smoking: Non-root smoke tests",
+            "user:feature",
+            AgentQueue.MEDIUM_CPU_PREMERGE,
+        ),
+        (
+            "image-build-arm64",
+            ":docker: Build arm64 image",
+            "user:feature",
+            AgentQueue.ARM64_CPU_PREMERGE,
+        ),
+    ],
+)
+def test_docker_step_queue_routing(monkeypatch, key, label, branch, queue):
+    config = {**buildkite_step.get_global_config(), "branch": branch}
+    monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
+    step = Step(label=label, key=key, commands=["true"])
+    assert buildkite_step.get_agent_queue(step) == queue

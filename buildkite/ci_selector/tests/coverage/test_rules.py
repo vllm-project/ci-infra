@@ -1115,3 +1115,117 @@ class TestTestsRecordingAge:
         reading = self._read(self._table(tmp_path, tmp_repo, new=True, with_tests=False))
         assert reading.dropped == ["vllm_ci:runs-plain"]
         assert not reading.reasons["row-predates-tests-recording"]
+
+
+class TestDeferredToTheKernelRecord:
+    """A step selected for a csrc file and a Python file. This record cannot
+    weigh the csrc file and the kernel record cannot weigh the Python one, so
+    each held the step for the other. With the csrc file deferred, this
+    record weighs the rest and hands over the steps it clears (`cleared`),
+    still kept: the drop is the kernel record's."""
+
+    KERNEL = "csrc/k.cu"
+
+    def _read(self, table, query, step, files, paths, deferred):
+        sel = Selection(
+            selected={step: ["r"] * len(files)},
+            selected_paths={step: paths},
+            selected_files={step: files},
+        )
+        return read_pr(
+            table,
+            sel,
+            query,
+            unknown_names(query, UNION, {}),
+            KNOWN,
+            OWNER,
+            deferred=frozenset(deferred),
+        )
+
+    def _query(self, *extra: FileQuery) -> Query:
+        q = query_for("vllm/mod.py", "plain")
+        q.files.append(
+            FileQuery(
+                path=self.KERNEL, status=Attribution.ATTRIBUTED, head_names=frozenset()
+            )
+        )
+        q.files.extend(extra)
+        return q
+
+    def test_a_deferred_csrc_reason_no_longer_holds_the_step(self, table):
+        args = (
+            table,
+            self._query(),
+            "vllm_ci:elsewhere",
+            ["vllm/mod.py", self.KERNEL],
+            [["vllm/mod.py"], None],
+        )
+        before = self._read(*args, deferred=())
+        assert before.kept == ["vllm_ci:elsewhere"] and before.cleared == []
+        assert before.reasons["not droppable-reason"] == 1
+        after = self._read(*args, deferred={self.KERNEL})
+        assert after.kept == ["vllm_ci:elsewhere"] and after.dropped == []
+        assert after.cleared == ["vllm_ci:elsewhere"]
+        assert after.reasons["cleared-pending-kernel-record"] == 1
+
+    def test_a_row_running_the_python_change_is_not_cleared(self, table):
+        r = self._read(
+            table,
+            self._query(),
+            "vllm_ci:runs-plain",
+            ["vllm/mod.py", self.KERNEL],
+            [["vllm/mod.py"], None],
+            deferred={self.KERNEL},
+        )
+        assert r.cleared == [] and r.executes == ["vllm_ci:runs-plain"]
+
+    def test_a_reason_about_a_file_not_deferred_still_holds(self, table):
+        r = self._read(
+            table,
+            self._query(),
+            "vllm_ci:elsewhere",
+            ["vllm/mod.py", self.KERNEL, "docker/Dockerfile"],
+            [["vllm/mod.py"], None, None],
+            deferred={self.KERNEL},
+        )
+        assert r.cleared == []
+
+    def test_stand_ins_for_a_deferred_file_are_set_aside(self, table):
+        """An op-wrapper stand-in answers for the csrc file, coarsely: every op
+        the file binds. The kernel record answers for it per kernel, so once
+        the file is deferred the stand-in no longer keeps the step."""
+        stand_in = FileQuery(
+            path="vllm/other.py",
+            status=Attribution.ATTRIBUTED,
+            head_names=frozenset({"elsewhere"}),
+            proxy=True,
+        )
+        args = (
+            table,
+            self._query(stand_in),
+            "vllm_ci:elsewhere",
+            ["vllm/mod.py", self.KERNEL],
+            [["vllm/mod.py"], ["vllm/other.py"]],
+        )
+        before = self._read(*args, deferred=())
+        assert before.executes_by_proxy == ["vllm_ci:elsewhere"]
+        after = self._read(*args, deferred={self.KERNEL})
+        assert after.cleared == ["vllm_ci:elsewhere"]
+        # another csrc file, not deferred, may own the stand-in: it stays
+        other = self._query(stand_in)
+        other.files.append(
+            FileQuery(
+                path="csrc/other.cu",
+                status=Attribution.ATTRIBUTED,
+                head_names=frozenset(),
+            )
+        )
+        partial = self._read(
+            table,
+            other,
+            "vllm_ci:elsewhere",
+            ["vllm/mod.py", self.KERNEL],
+            [["vllm/mod.py"], ["vllm/other.py"]],
+            deferred={self.KERNEL},
+        )
+        assert partial.cleared == []

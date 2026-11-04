@@ -122,7 +122,7 @@ def test_a_mirror_publishes_the_hardware_as_a_prefix(loaded):
 
 
 @pytest.mark.drift
-def test_auto_run_semantics(loaded):
+def test_auto_run_semantics(loaded, vllm_repo):
     """always_runs is the generator's key shortcut (image-build*/AMD list),
     NOT "has no deps": a no-deps step without the shortcut never auto-runs."""
     _, steps, _ = loaded
@@ -158,7 +158,12 @@ def test_auto_run_semantics(loaded):
     # only guard tying the generator's list to vLLM's yaml. Under `if key in
     # rocm` a step vanishing from the yaml would skip the check in silence.
     rocm = {s.key: s for s in steps["vllm_rocm_ci"] if s.key}
-    for key in AMD_ALWAYS_RUN_STEP_KEYS:
+    # The list serves both ROCm build layouts; a build.sh checkout has no
+    # ensure-ci-base-amd (the old chain's base step).
+    expected = AMD_ALWAYS_RUN_STEP_KEYS
+    if (vllm_repo / ".buildkite/scripts/rocm/build.sh").exists():
+        expected = expected - {"ensure-ci-base-amd"}
+    for key in sorted(expected):
         assert key in rocm, drift_message(
             f"AMD_ALWAYS_RUN_STEP_KEYS names a step that no longer exists: {key}",
             "These steps declare no dependencies, so always_runs is the only "

@@ -196,7 +196,33 @@ public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-x86_64-cu129
 
 # ROCm
 public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-rocm
+
+# aarch64 CUDA (GB200)
+public.ecr.aws/q9t5s3a7/vllm-release-repo:<commit_sha>-aarch64
 ```
+
+**Unblock "additional wheels" once per RC.** The macOS arm64 CPU wheel,
+along with the CUDA 12.9, x86 CPU, XPU and arm64 wheels, builds only after
+that block step is unblocked. Main's nightlies leave it blocked, so a
+macOS-only compile break stays hidden until the release. In v0.32.0,
+vllm-project/vllm#54113 called `socket2::Socket::domain()`, which doesn't
+exist on macOS. The fix, vllm-project/vllm#62177, had to be cherry-picked.
+These wheels are per-commit artifacts and publish nothing for an RC.
+
+**`small_cpu_queue_release` has no agent:** if Bootstrap waits with no
+agent connected, look at the `bk-small-cpu-queue-release` ASG in us-east-1.
+In v0.32.0, a month-old instance was healthy to EC2 but its
+buildkite-agent had never started, because cloud-init hit an IMDS 503 at
+boot. That instance held the ASG's only slot. Check it with SSM
+(`systemctl status buildkite-agent`), then replace it:
+
+```bash
+aws autoscaling terminate-instance-in-auto-scaling-group --region us-east-1 \
+  --instance-id <id> --no-should-decrement-desired-capacity
+```
+
+A new agent connects in about 1.5 min. Building a new release-v2 build on
+the same branch cancels the older one, even mid-Bootstrap.
 
 ---
 
@@ -215,6 +241,19 @@ bk build create --yes --ignore-branch-filters \
   --env "RUN_ALL=1" \
   --env "NIGHTLY=1"
 ```
+
+To run only some steps, add
+`--env 'VLLM_CI_ONLY_STEP_KEYS=["<step_key>", ...]'`. This covers jobs that
+were disabled or skipped in the full run (v0.32.0 filled in the L4 jobs this
+way), checking a cherry-pick (e.g. just the Rust frontend steps), and
+bisecting a job that only runs in Full CI. To bisect, run the job on the
+suspect commit and on its parent on `main`, with `NIGHTLY=1`. Each run takes
+about 1 h, including the image build. In v0.32.0 this confirmed #56997
+(Humming) and #61064 (MM Extended Pooling).
+
+Before calling a failure a release blocker, look up the same job in the last
+~14 Full CI runs on main. Jobs that fail on every run, like a missing HF
+token on an agent, aren't regressions. They need an owner.
 
 ---
 
@@ -364,6 +403,40 @@ Things to watch for when reading results:
 - Share the browser version of the link in the Slack announcement:
   `https://ci.vllm.ai/compare?baseline=<prev_image>&candidate=<new_image>`
 
+- **How a number is made:** each config runs 3 repeats. For each metric
+  separately, `lib/aggregate_perf.py` keeps the **median** of the three.
+  The dashboard then compares that single value per image with a flat 2%
+  threshold, and has no variance to go on. If one repeat is an outlier,
+  the reported value is just the slower of the two good runs. Many configs
+  in v0.32.0 had one ~5× slow repeat per build. So a +15% mean TTFT can be
+  pure noise. Check the per-repeat `results_*.json` before believing it.
+- **Host noise (mithril):** `mithril-h200-*` hosts have
+  `kernel.numa_balancing=1` and h200-ci-1 has 0. With it on, vLLM's CPU-side
+  processes stall at random, so CPU-heavy workloads (spec decode) run slower
+  and identical runs swing up to 30%. Most of the 49 "regressions" in the
+  v0.32.0 dashboard view came from comparing different hosts.
+- **Prefix-cache artifacts:** some benchmarks resend the same seeded prompts
+  across warm-up and repeats with prefix caching on, so they mostly measure
+  cache hits (96% for Qwen3.5 H200). Rerun those with prefix caching off
+  before bisecting.
+- **Compare API down:** if `/api/compare` returns 500, diff the
+  `bench-*.json` artifacts of both perf-eval builds locally. vllm-dashboard#227
+  fixed the cause in v0.32.0: the eval history outgrew Databricks' 25 MiB
+  INLINE limit.
+
+**Bisecting a perf regression:** run all suspect images in one job, on one
+host, back to back. The perf-eval branch `bisect/v0.32-regressions` does
+this with `BISECT_IMAGES=img1,img2,...`, where each entry can be
+`image|extra serve args`. It skips ingest and nsys. Interleave baseline and
+candidate (A, B, A, B) to get clean pairs. Use
+`public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:<full_sha>` for any main
+commit, since release images exist only for nightlies and RCs. Pinning to a
+host by bouncing jobs (`H200_PIN_AGENT`, exit 97) missed h200-ci-1 on all 10
+retries, so don't rely on it. In v0.32.0 this found the one real regression,
+a ~3% decode loss at TP>1 from #56891, fixed by vllm-project/vllm#61989. In
+zsh, build the image list in Python: `$R:c…` and `$R:e…` are modifiers and
+eat the colon.
+
 To confirm a regression with a targeted rerun, launch a new perf-eval
 build with `WORKLOADS` (comma-separated workload stems from the
 perf-eval repo's `workloads/` dir, e.g. `deepseek_v4_pro_5_h200`) and
@@ -433,6 +506,19 @@ git pull origin releases/vX.Y.Z   # pick up any commits pushed by others
 git fetch origin <commit_sha>
 git cherry-pick <commit_sha>
 ```
+
+If the user has the release branch checked out in their own clone, pick in a
+separate detached worktree
+(`git worktree add --detach ../vllm-rel-pick origin/releases/vX.Y.Z`) and
+push with `git push origin "${SHA}:refs/heads/releases/vX.Y.Z"`. Keep the
+braces: in zsh, `$SHA:r…` is a modifier and eats the refspec. Then tell the
+user to `git pull`.
+
+When a conflict is in a test file, don't take the PR's whole hunk. It can
+bring along tests from main-only PRs that import helpers missing on the
+branch. In v0.31.0rc4 that broke 3 CI jobs. After resolving, compare your
+change to the file with `git show <pick> -- <file>` and keep only what the
+pick itself adds.
 
 If pre-commit hooks fail due to local environment issues (e.g. SSL errors
 downloading shellcheck), bypass them:
@@ -531,6 +617,9 @@ wait for `/health`, hit `/v1/models`, send one chat completion ("What is
 - `rerun.py`: retries startup failures with the fix the error asks for.
 
 v0.31.0rc5 took about 3h on B200 (two lanes) and about 3.5h on H200; 9/9 passed on each.
+v0.32.0rc3 ran on reserved H200, GB200 and B300 machines (see below). Every
+model passed on B300 and GB200, some after a rerun. On H200, one DeepSeek
+start timed out while loading weights from NFS.
 
 ### Hosts and how to free them
 
@@ -542,6 +631,32 @@ schedule onto. Free the host first, and put it back afterwards.
 | B200 ×8 | `ssh dgxb200-01` (or any Ready k8s node) | cordon, then wait until no GPU pods are left | uncordon | `/raid/hf_cache` (22T free on `/raid`) |
 | H200 ×8 | `ssh h200-ci-1` (perf-eval H200 agent) | pause the Buildkite agent; it finishes its current job | resume | `/mnt/vllm-ci` (perf-eval models are cached) |
 | GB200 ×4 | `gcloud compute ssh gb200-rack1-07 --zone us-central1-b --ssh-key-file ~/.ssh/id_ed25519` | check `docker ps` / `nvidia-smi` are idle | none | `/mnt/lustre/hf-models` |
+
+**Or reserve a machine with `daeho`.** This is Inferact's compute CLI
+(`daeho login` first). It avoids taking CI capacity away, and v0.32.0 used
+it:
+
+```bash
+daeho compute --json                       # fleet: machines[].status free/reserved
+daeho reserve <machine> --hours 6 --purpose "vX.Y.ZrcN smoke test (<you>)" < /dev/null
+daeho ssh <machine> --print-command        # how to log in
+daeho mine --json; daeho cancel <id>       # cancel as soon as a host is done
+```
+
+| Machine | Login | Work dir | HF cache |
+|---|---|---|---|
+| `crusoe-h200-N` (8×H200) | `ssh -i ~/.ssh/inferact-devbox.pem ubuntu@<ip>` | `/mnt/ephemeral` (root disk is tiny) | `/mnt/vllm-ci` (NFS, slow for the biggest checkpoints) |
+| `gcp-gb200-rack1-NN` (4×GB200, arm64) | `gcloud compute ssh gb200-rack1-NN --zone us-central1-b` (needs a fresh `gcloud auth login`) | `/var/tmp` | `/mnt/lustre/hf-models` |
+| `verda-b300-0N` (8×B300) | `ssh kevin@verda-b300-0N.e.r.inferact.dev` | `/mnt/nvme` (nearly full on -01) | `/mnt/shared/hf-models` (NFS, ~2 TB free) |
+
+- The verda B300 nodes are drained in Slurm, so `daeho` can't reserve them.
+  They're OK to use over ssh directly.
+- A reserve can succeed with "not enforced on slurm": cancel it and pick
+  another node.
+- A "free" node can still be running someone else's work. Check
+  `nvidia-smi` first.
+- GB200 runs the `-aarch64` image.
+- For B300, make the plan with `--hw b200`.
 
 Don't use these:
 
@@ -660,7 +775,7 @@ python3.12 -m venv /tmp/vllm-smoke && /tmp/vllm-smoke/bin/pip install vllm==X.Y.
 - **Entrypoint:** the release image's entrypoint is `["vllm", "serve"]`. So `docker run <img> <model> <args>` works. Don't add `serve` yourself: it becomes `vllm serve serve <model>`. For `hf`, `bench` or `python3`, override with `--entrypoint`.
 - **Shared memory:** always pass `--ipc=host`. DP/TP servers need more than docker's 64 MiB `/dev/shm`.
 - **Image pull:** anonymous ECR Public pulls hit "Data limit exceeded" at 30 GB per image. Run `docker login` first (shown above).
-- **Startup timeout:** with `VLLM_USE_RUST_FRONTEND=1`, set `VLLM_ENGINE_READY_TIMEOUT_S=3600` or the frontend gives up after 600 s. `runner.py` sets it.
+- **Startup timeout:** with `VLLM_USE_RUST_FRONTEND=1`, the frontend gives up after `VLLM_ENGINE_READY_TIMEOUT_S` (600 s by default) with `failed to connect to engine core`. `runner.py` sets it to its own 90 min health limit. With 3600 s, DeepSeek-V4.1-Flash on crusoe H200 died at shard 43/48 after 59 min of loading from `/mnt/vllm-ci`. To raise it for one model, add `"env": {"VLLM_ENGINE_READY_TIMEOUT_S": "7200"}` to its plan entry.
 - **Startup times:** big models take 5–25 min to start even from cache. `runner.py` waits up to 90 min and bails as soon as the container exits.
 - **TP from `vram_minimum_gb`:** it ignores KV cache. 1M-context models then fail with "KV cache is needed" (GLM-5.3 NVFP4 at TP4 and MiniMax-M3 NVFP4 at TP2 on B200). Fix with more TP, or `--max-model-len` on H200. `rerun.py` does this.
 - **Recipe gaps found in v0.31.0rc5:**

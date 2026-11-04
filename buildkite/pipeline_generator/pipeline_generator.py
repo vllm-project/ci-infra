@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import shutil
@@ -6,7 +7,7 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import normalize_amd_depends_on, runs_on
+from amd import AMD_ALWAYS_RUN_STEP_KEYS, normalize_amd_depends_on, runs_on
 from buildkite_step import (
     AMD_GROUP,
     COLLECT_GROUP,
@@ -20,6 +21,7 @@ from buildkite_step import (
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
     kernrec_collect_group,
+    kernrec_amd_enabled,
     kernrec_enabled,
     create_precommit_group_step,
     split_deferred_steps,
@@ -34,6 +36,10 @@ from global_config import (
 )
 from step import Step, group_steps, read_steps_from_job_dir
 import unblock_jobs
+
+# Set to "0" to upload the whole pipeline at once, as before.
+EARLY_IMAGE_UPLOAD_ENV_VAR = "VLLM_CI_EARLY_IMAGE_UPLOAD"
+EARLY_IMAGE_PIPELINE_FILE = "pipeline-images.yaml"
 
 
 def _annotate_best_effort(message: str, style: Optional[str] = None) -> None:
@@ -98,6 +104,9 @@ class PipelineGenerator:
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+        early_keys = upload_image_steps_early(
+            steps, os.path.dirname(self.output_file_path)
+        )
         record = _selector_decision(steps)
         scheduled = None
         try:
@@ -156,7 +165,7 @@ class PipelineGenerator:
         # Both recorders share one group, so they don't make two groups
         # with the same name.
         collect = []
-        if kernrec_enabled():
+        if kernrec_enabled() or kernrec_amd_enabled():
             collect += kernrec_collect_group(buildkite_group_steps).steps
         if fnrec_enabled():
             collect += fnrec_collect_group(buildkite_group_steps).steps
@@ -177,6 +186,11 @@ class PipelineGenerator:
                     global_config["github_repo_name"], global_config["commit"]
                 ),
             )
+
+        if early_keys:
+            # Already in the build: a second upload of a key would fail it.
+            buildkite_group_steps = _without_keys(buildkite_group_steps, early_keys)
+            deferred_group_steps = _without_keys(deferred_group_steps, early_keys)
 
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
@@ -202,6 +216,82 @@ class PipelineGenerator:
                 buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
             )
         return
+
+
+def _is_image_step(step: Step) -> bool:
+    # The steps _step_should_run always runs: they build the images every
+    # test depends on, whatever the diff or the test selector says.
+    return bool(step.key) and (
+        step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
+    )
+
+
+def upload_image_steps_early(steps: List[Step], output_dir: str) -> FrozenSet[str]:
+    """Upload the image build steps before the rest of the pipeline is
+    generated, and return their keys.
+
+    The test selector takes minutes per build, and the image builds wait for
+    the pipeline upload that follows it although they never depend on its
+    answer. Uploaded here, they start that much sooner; `generate` leaves
+    them out of the final pipeline. Returns no keys, so everything goes up
+    together as before, when the upload fails or does not apply.
+    """
+    global_config = get_global_config()
+    if (
+        os.getenv(EARLY_IMAGE_UPLOAD_ENV_VAR) == "0"
+        or not os.getenv("BUILDKITE_JOB_ID")
+        or global_config["only_step_keys"] is not None
+    ):
+        return frozenset()
+    early = [copy.deepcopy(step) for step in steps if _is_image_step(step)]
+    # Only steps whose prerequisites go up with them.
+    while True:
+        keys = {step.key for step in early}
+        kept = [s for s in early if all(d in keys for d in s.depends_on or [])]
+        if len(kept) == len(early):
+            break
+        early = kept
+    if not early:
+        return frozenset()
+    groups, _ = split_deferred_steps(
+        convert_group_step_to_buildkite_step(group_steps(early))
+    )
+    keys = frozenset(step.key for group in groups for step in group.steps)
+    if not keys:
+        return frozenset()
+    path = os.path.join(output_dir, EARLY_IMAGE_PIPELINE_FILE)
+    with open(path, "w") as f:
+        yaml.dump(
+            {"steps": [group.dict(exclude_none=True) for group in groups]},
+            f,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+    try:
+        result = subprocess.run(
+            ["buildkite-agent", "pipeline", "upload", path], check=False, timeout=120
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"Early image upload failed, uploading with the pipeline: {error}")
+        return frozenset()
+    if result.returncode != 0:
+        print("Early image upload failed, uploading with the pipeline")
+        return frozenset()
+    print(f"Uploaded the image builds early: {', '.join(sorted(keys))}")
+    return keys
+
+
+def _without_keys(
+    groups: List[BuildkiteGroupStep], keys: FrozenSet[str]
+) -> List[BuildkiteGroupStep]:
+    kept = []
+    for group in groups:
+        steps = [step for step in group.steps if step.key not in keys]
+        if len(steps) == len(group.steps):
+            kept.append(group)
+        elif steps:
+            kept.append(group.model_copy(update={"steps": steps}))
+    return kept
 
 
 def write_deferred_steps(
