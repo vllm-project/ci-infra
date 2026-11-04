@@ -1,8 +1,11 @@
+import io
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import urllib.error
 
 import pytest
 
@@ -1115,12 +1118,127 @@ def test_fetch_timings_sends_the_queue(monkeypatch):
         urls.append(url)
         raise OSError("down")
 
+    monkeypatch.setattr(rs, "_timings_failures", 0)
     monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
     assert rs.fetch_timings("amd-k", AgentQueue.AMD_MI325_1) is None
     assert "stepKey=amd-k" in urls[0] and "queue=amd_mi325_1" in urls[0]
     # Per-test times for any file a shard's tests could fail to hold: the
     # budget less the most setup charged, 16 min.
     assert "testsOverMs=960000" in urls[0]
+
+
+class _Response(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _urlopen_answering(*answers):
+    """A fake urlopen that raises or returns each answer in turn, recording
+    the timeout of every call."""
+    timeouts = []
+
+    def urlopen(url, timeout):
+        timeouts.append(timeout)
+        answer = answers[len(timeouts) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return _Response(json.dumps(answer).encode())
+
+    return urlopen, timeouts
+
+
+def test_fetch_timings_starts_with_no_failed_steps():
+    assert rs._timings_failures == 0
+
+
+def test_fetch_timings_retries_a_timeout_with_a_longer_limit(monkeypatch):
+    urlopen, timeouts = _urlopen_answering(TimeoutError("read timed out"), {"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) == {"files": []}
+    assert timeouts == [15, 30]
+
+
+def test_fetch_timings_retries_a_server_error(monkeypatch):
+    error = urllib.error.HTTPError("u", 500, "internal error", {}, None)
+    urlopen, timeouts = _urlopen_answering(error, {"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) == {"files": []}
+    assert len(timeouts) == 2
+
+
+def test_fetch_timings_counts_a_step_whose_reads_both_fail(monkeypatch, capsys):
+    error = urllib.error.HTTPError("u", 502, "bad gateway", {}, None)
+    urlopen, timeouts = _urlopen_answering(error, error)
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) is None
+    assert len(timeouts) == 2
+    assert rs._timings_failures == 1
+    assert capsys.readouterr().err == (
+        "runtime-shard: no timings for k (HTTP Error 502: bad gateway)\n")
+
+
+def test_fetch_timings_does_not_retry_a_404(monkeypatch, capsys):
+    # 404: main has no passing build for the step; a retry can't change that,
+    # and it isn't the endpoint failing.
+    error = urllib.error.HTTPError("u", 404, "not found", {}, None)
+    urlopen, timeouts = _urlopen_answering(error, {"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 2)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) is None
+    assert len(timeouts) == 1
+    # The endpoint answered, so it is up: earlier failures stop counting.
+    assert rs._timings_failures == 0
+    assert capsys.readouterr().err == (
+        "runtime-shard: no timings for k (HTTP Error 404: not found)\n")
+
+
+def test_fetch_timings_skips_the_endpoint_after_three_failed_steps(monkeypatch, capsys):
+    calls = []
+
+    def urlopen(url, timeout):
+        calls.append(url)
+        raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    for key in ("a", "b", "c", "d"):
+        assert rs.fetch_timings(key, AgentQueue.GPU_1) is None
+    # Two reads each for a, b and c; none for d.
+    assert len(calls) == 6
+    assert capsys.readouterr().err.splitlines() == [
+        "runtime-shard: no timings for a (read timed out)",
+        "runtime-shard: no timings for b (read timed out)",
+        "runtime-shard: no timings for c (read timed out)",
+        "runtime-shard: no timings for d (endpoint skipped after 3 failed steps)",
+    ]
+
+
+def test_fetch_timings_404s_between_failures_keep_the_endpoint_in_use(monkeypatch):
+    timeout = TimeoutError("read timed out")
+    missing = urllib.error.HTTPError("u", 404, "not found", {}, None)
+    # Steps a, c, e time out on both reads; b and d have no passing main build.
+    urlopen, timeouts = _urlopen_answering(
+        timeout, timeout, missing, timeout, timeout, missing, timeout, timeout,
+        {"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    for key in ("a", "b", "c", "d", "e"):
+        assert rs.fetch_timings(key, AgentQueue.GPU_1) is None
+    assert rs.fetch_timings("f", AgentQueue.GPU_1) == {"files": []}
+
+
+def test_fetch_timings_success_resets_the_failure_count(monkeypatch):
+    urlopen, _ = _urlopen_answering({"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 2)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) == {"files": []}
+    assert rs._timings_failures == 0
 
 
 def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
