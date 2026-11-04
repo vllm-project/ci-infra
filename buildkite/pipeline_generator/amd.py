@@ -598,11 +598,11 @@ def build_amd_step_options(
 
 
 # A PR that changes these fails CI's ROCm base image cache job until rocm/vllm-ci
-# has the stack image main will need after the merge, so main and other PRs reuse
-# it instead of rebuilding it. vLLM's `/amd-ci cache` builds that image and then
-# retries the job.
+# has the stack image main will need after the merge (the key vLLM's keys.sh
+# computes, as build.sh does), so main and other PRs reuse it instead of
+# rebuilding it. vLLM's `/amd-ci cache` builds that image and then retries the job.
 ROCM_STACK_INPUTS = ("docker/Dockerfile.rocm_base", "tools/vllm-rocm/therock_wheels.py")
-ROCM_BUILD_SH = ".buildkite/scripts/rocm/build.sh"
+ROCM_KEYS_SH = ".buildkite/scripts/rocm/keys.sh"
 ROCM_BASE_CACHE_GROUP = "ROCm base image cache"
 ROCM_BASE_CACHE_STEP_KEY = "rocm-base-image-cache"
 ROCM_BASE_CACHE_SCRIPT = "buildkite/scripts/rocm-base-image-cache.sh"
@@ -614,37 +614,40 @@ def _git(*args: str) -> str:
     ).stdout
 
 
-def _rocm_key_lines(rev: str) -> str:
-    """build.sh's lines that compute the stack key Ks at rev."""
-    return "".join(
-        line + "\n"
-        for line in _git("show", f"{rev}:{ROCM_BUILD_SH}").splitlines()
-        if re.match(r"(_trw|Ks)=", line)
-    )
-
-
 def rocm_stack_key(merge_base: str) -> Optional[str]:
-    """build.sh's stack key for the PR checkout, which /ci run merges main into.
+    """The stack key of the PR checkout (main merged in by /ci run), from main's
+    keys.sh, which build.sh sources too.
 
-    None when `/amd-ci cache` cannot pre-build the change: the PR changes how
-    build.sh computes the key, or deletes or chmods a stack input.
+    None, with the reason printed, when there is no job to add: main has no
+    keys.sh yet (it comes with `/amd-ci cache`), the PR changes keys.sh, deletes
+    or chmods a stack input, or the key cannot be computed.
     """
-    lines = _rocm_key_lines(merge_base)
-    summary = _git("diff", "--summary", merge_base, "HEAD", "--", *ROCM_STACK_INPUTS)
-    if _rocm_key_lines("HEAD") != lines or re.search(
-        r"^ (delete|mode change)", summary, re.M
-    ):
+    try:
+        keys_sh = _git("show", f"{merge_base}:{ROCM_KEYS_SH}")
+        if _git("show", f"HEAD:{ROCM_KEYS_SH}") != keys_sh:
+            print("No ROCm base image cache job: the PR changes keys.sh")
+            return None
+        summary = _git(
+            "diff", "--summary", merge_base, "HEAD", "--", *ROCM_STACK_INPUTS
+        )
+        if re.search(r"^ (delete|mode change)", summary, re.M):
+            print("No ROCm base image cache job: a stack input is deleted or chmod-ed")
+            return None
+        keys = subprocess.run(
+            # With build.sh's shell options, so it fails where build.sh would.
+            ["bash", "-c", "set -euo pipefail\n" + keys_sh + "\nkeys_at HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "SDF": ROCM_STACK_INPUTS[0], "STACK": "rocm"},
+        ).stdout.split()
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"No ROCm base image cache job: {error}")
         return None
-    key = subprocess.run(
-        ["bash", "-c", lines + 'printf %s "$Ks"'],
-        capture_output=True,
-        text=True,
-        check=True,
-        env={**os.environ, "SDF": ROCM_STACK_INPUTS[0], "STACK": "rocm"},
-    ).stdout
-    if not re.fullmatch(r"[0-9a-f]{16}", key):
-        raise RuntimeError(f"No ROCm stack key from {ROCM_BUILD_SH}: {key!r}")
-    return key
+    if not keys or not re.fullmatch(r"[0-9a-f]{16}", keys[0]):
+        print(f"No ROCm base image cache job: no stack key from keys.sh: {keys}")
+        return None
+    return keys[0]
 
 
 def rocm_base_cache_step(
@@ -660,7 +663,6 @@ def rocm_base_cache_step(
         return None
     key = rocm_stack_key(merge_base)
     if key is None:
-        print("ROCm base image change that /amd-ci cache cannot pre-build")
         return None
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (

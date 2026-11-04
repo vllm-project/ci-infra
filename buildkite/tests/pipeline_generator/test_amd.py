@@ -869,9 +869,41 @@ def test_is_amd_device(device, expected):
     assert is_amd_device(device) is expected
 
 
-ROCM_KEY_LINES = """\
+# A copy of vLLM's .buildkite/scripts/rocm/keys.sh.
+ROCM_KEYS_SH = r"""#!/bin/bash
+# The ROCm image content keys, sourced by build.sh and read by ci-infra's "ROCm base image cache"
+# job, which needs the stack key of a PR before it is built. Needs STACK and SDF (the stack
+# Dockerfile) set, and a git repository.
+#
+# Ks (stack key): hash of the stack Dockerfile + therock_wheels.py.
+#   A Ks cache miss triggers a full stack rebuild (hours).
+# Kr (runtime key): Ks + the portion of Dockerfile.rocm above the per-commit
+#   marker + all pip requirement files.
+#   A Kr cache miss triggers a runtime rebuild (minutes).
+
 _trw=$( [[ $STACK == rocm ]] && echo tools/vllm-rocm/therock_wheels.py || true )
-Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree HEAD -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16)
+# keys_at <rev>  — print "Ks Kr" for the files at <rev>. In $(), set -e is off: failures are returned.
+keys_at() {
+  local rev=$1 Ks Kr
+  # The layer format (compression, and mtimes as built: see the bake file) is part of every image's
+  # identity: an image left in an older format would hand later builds a second copy of the same layers.
+  Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree "$rev" -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16) \
+    || return 1
+  Kr=$(
+    {
+      echo "$Ks"
+      git show "$rev:docker/Dockerfile.rocm" | sed -n '1,/^# ==== per-commit stages/p' || exit 1
+      git ls-tree "$rev" -- \
+        requirements/common.txt \
+        requirements/rocm.txt \
+        requirements/test/rocm.txt \
+        rust-toolchain.toml \
+        tests/vllm_test_utils \
+        tools/install_torchcodec_rocm.sh
+    } | sha256sum | cut -c1-16
+  ) || return 1
+  echo "$Ks $Kr"
+}
 """
 ROCM_CACHE_SCRIPT = Path(__file__).parents[2] / "scripts" / "rocm-base-image-cache.sh"
 
@@ -890,13 +922,15 @@ def _commit(repo, change):
 
 @pytest.fixture
 def rocm_pr(tmp_path, monkeypatch):
-    """A main commit with the ROCm stack inputs, checked out as the PR's base."""
+    """A main commit with the ROCm stack inputs and keys.sh, checked out as the
+    PR's base."""
 
     def files(repo):
         for path, text in (
             ("docker/Dockerfile.rocm_base", "FROM base\n"),
+            ("docker/Dockerfile.rocm", "FROM stack\n# ==== per-commit stages\n"),
             ("tools/vllm-rocm/therock_wheels.py", "wheels = 1\n"),
-            (".buildkite/scripts/rocm/build.sh", ROCM_KEY_LINES),
+            (".buildkite/scripts/rocm/keys.sh", ROCM_KEYS_SH),
         ):
             (repo / path).parent.mkdir(parents=True, exist_ok=True)
             (repo / path).write_text(text)
@@ -907,37 +941,53 @@ def rocm_pr(tmp_path, monkeypatch):
     return tmp_path, _git(tmp_path, "rev-parse", "HEAD")
 
 
-def test_rocm_stack_key_is_build_sh_key_of_the_pr(rocm_pr):
+def _keys_at_head(repo):
+    return subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + ROCM_KEYS_SH + "\nkeys_at HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "SDF": "docker/Dockerfile.rocm_base", "STACK": "rocm"},
+    ).stdout.split()[0]
+
+
+def test_rocm_stack_key_is_the_key_build_sh_computes(rocm_pr):
     repo, base = rocm_pr
     _commit(
         repo, lambda r: (r / "docker/Dockerfile.rocm_base").write_text("FROM new\n")
     )
-    expected = subprocess.run(
-        ["bash", "-c", ROCM_KEY_LINES + 'printf %s "$Ks"'],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "SDF": "docker/Dockerfile.rocm_base", "STACK": "rocm"},
-    ).stdout
-    assert len(expected) == 16
-    assert amd.rocm_stack_key(base) == expected
+    key = amd.rocm_stack_key(base)
+    assert len(key) == 16 and key == _keys_at_head(repo)
 
 
 @pytest.mark.parametrize(
     "change",
     [
-        # The PR changes how build.sh keys the stack.
-        lambda r: (r / ".buildkite/scripts/rocm/build.sh").write_text(
-            ROCM_KEY_LINES.replace("zstd-3", "zstd-4")
+        lambda r: (r / ".buildkite/scripts/rocm/keys.sh").write_text(
+            ROCM_KEYS_SH.replace("zstd-3", "zstd-4")
         ),
         lambda r: (r / "tools/vllm-rocm/therock_wheels.py").unlink(),
         lambda r: (r / "tools/vllm-rocm/therock_wheels.py").chmod(0o755),
+        # keys_at fails: never the generator.
+        lambda r: (r / "docker/Dockerfile.rocm").unlink(),
     ],
-    ids=["key-formula", "delete", "chmod"],
+    ids=["keys.sh", "delete", "chmod", "keys_at-fails"],
 )
-def test_rocm_stack_key_is_none_for_changes_cache_cannot_prebuild(rocm_pr, change):
+def test_rocm_stack_key_is_none_when_there_is_no_job_to_add(rocm_pr, change):
     repo, base = rocm_pr
     _commit(repo, change)
+    assert amd.rocm_stack_key(base) is None
+
+
+def test_rocm_stack_key_is_none_until_main_has_keys_sh(rocm_pr):
+    # Before vLLM's /amd-ci cache lands, main has no keys.sh: no job.
+    repo, _ = rocm_pr
+    _commit(repo, lambda r: (r / ".buildkite/scripts/rocm/keys.sh").unlink())
+    base = _git(repo, "rev-parse", "HEAD")
+    _commit(
+        repo, lambda r: (r / "docker/Dockerfile.rocm_base").write_text("FROM new\n")
+    )
     assert amd.rocm_stack_key(base) is None
 
 
