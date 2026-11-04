@@ -10,7 +10,7 @@ from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_p
 
 
 ONLY_STEP_KEYS_ENV_VAR = "VLLM_CI_ONLY_STEP_KEYS"
-ONLY_PLATFORM_ENV_VAR = "VLLM_CI_ONLY_PLATFORM"
+PLATFORM_ENV_VAR = "VLLM_CI_PLATFORM"
 STEP_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -87,7 +87,7 @@ def init_global_config(pipeline_config_path: str):
         fail_fast=_should_fail_fast(pr_labels),
         only_step_keys=_parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR)),
         platform=_parse_platform(
-            os.getenv(ONLY_PLATFORM_ENV_VAR), os.getenv("TORCH_NIGHTLY") == "1"
+            os.getenv(PLATFORM_ENV_VAR), os.getenv("TORCH_NIGHTLY") == "1"
         ),
     )
     if "ready-run-all-tests" in pr_labels:
@@ -133,7 +133,7 @@ def _parse_platform(value: Optional[str], torch_nightly: bool) -> Optional[Platf
             platform = Platform(value.strip().lower())
         except ValueError as error:
             raise ValueError(
-                f"{ONLY_PLATFORM_ENV_VAR} must be one of: "
+                f"{PLATFORM_ENV_VAR} must be one of: "
                 + ", ".join(p.value for p in Platform)
             ) from error
     if torch_nightly:
@@ -142,7 +142,7 @@ def _parse_platform(value: Optional[str], torch_nightly: bool) -> Optional[Platf
         if platform not in (None, Platform.CUDA):
             raise ValueError(
                 f"TORCH_NIGHTLY runs only CUDA jobs, so "
-                f"{ONLY_PLATFORM_ENV_VAR}={platform.value} cannot be combined with it."
+                f"{PLATFORM_ENV_VAR}={platform.value} cannot be combined with it."
             )
         return Platform.CUDA
     return platform
