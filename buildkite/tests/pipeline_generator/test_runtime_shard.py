@@ -1,8 +1,11 @@
+import io
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import urllib.error
 
 import pytest
 
@@ -829,14 +832,18 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     for field in ("depends_on", "agents", "plugins", "retry", "timeout_in_minutes"):
         assert getattr(step, field) == getattr(plain, field)
     # Its commands are the step's own, after installing the plugin: the same
-    # log headers and tracing labels, so main's timings keep matching. A test
-    # command runs only in the shards that have its tests.
+    # log headers and tracing labels, so main's timings keep matching. Each
+    # test command exports its position, and runs only in the shards that
+    # have its tests.
     assert step.commands[:2] == rs.shard_job_setup()
     jobs = step.commands[2:]
     assert len(jobs) == len(plain.commands)
-    guarded = [job for job, own in zip(jobs, plain.commands) if job != own]
-    assert len(guarded) == 1 and TESTS[1] in guarded[0]  # the one-file command
-    assert guarded[0].startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
+    tagged = [job for job, own in zip(jobs, plain.commands) if job != own]
+    assert len(tagged) == 2
+    assert tagged[0].startswith(f"export {rs.COMMAND_ENV}=2 && pytest -v -s model_executor")
+    assert TESTS[1] in tagged[1]  # the one-file command
+    assert tagged[1].startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
+    assert f"export {rs.COMMAND_ENV}=3 && pytest -v -s entrypoints" in tagged[1]
     assert step.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
@@ -850,6 +857,7 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
 
 def test_a_command_runs_only_in_the_shards_with_its_tests():
     planned = {
+        "position": 0,
         "files": {"tests/a.py": 2},
         "split": {"tests/b.py": {"shards": {"0": 2, "1": 0}}},
     }
@@ -868,10 +876,11 @@ def test_a_command_runs_only_in_the_shards_with_its_tests():
     )
     # A command every shard has a part of runs as it is.
     everywhere = {
+        "position": 1,
         "files": {"tests/a.py": 0, "tests/c.py": 1, "tests/d.py": 2},
         "split": {},
     }
-    assert rs.guard("echo RAN", everywhere, 3) == "echo RAN"
+    assert rs.guard("echo RAN", everywhere, 3) == f"export {rs.COMMAND_ENV}=1 && echo RAN"
 
 
 def test_generator_keeps_the_single_job_without_a_plan(
@@ -972,14 +981,16 @@ def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
     # CUDA, the one-file command runs only in the shard that has its tests.
     # AMD _prepare_commands wraps each command in { } to preserve exports/cd
     # across &&-joined commands, so the actual prepared form is "{\nTESTS[1]\n}".
-    wrapped = f"{{\n{TESTS[1]}\n}}"
-    guarded = rs.guard(wrapped, plan["commands"][1], 3)
-    assert guarded.startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
     mirror = plain.env["VLLM_TEST_COMMANDS"]
-    assert mirror.count(f"&& {wrapped}") == 1
-    assert job.env["VLLM_TEST_COMMANDS"] == " && ".join(
-        rs.shard_job_setup() + [mirror.replace(f"&& {wrapped}", f"&& {guarded}")]
+    wrapped = re.findall(r"\{\n[^\n]*\n\}", mirror)[-2:]  # the two test commands
+    assert TESTS[1] in wrapped[1]
+    for one, planned in zip(wrapped, plan["commands"]):
+        assert mirror.count(f"&& {one}") == 1
+        mirror = mirror.replace(f"&& {one}", f"&& {rs.guard(one, planned, 3)}")
+    assert rs.guard(wrapped[1], plan["commands"][1], 3).startswith(
+        'case "$${BUILDKITE_PARALLEL_JOB:-0}" in'
     )
+    assert job.env["VLLM_TEST_COMMANDS"] == " && ".join(rs.shard_job_setup() + [mirror])
     # The CUDA step is planned separately, on its own queue.
     assert checkout.calls == [
         ("model-executor", AgentQueue.H200_35GB),
@@ -1107,12 +1118,127 @@ def test_fetch_timings_sends_the_queue(monkeypatch):
         urls.append(url)
         raise OSError("down")
 
+    monkeypatch.setattr(rs, "_timings_failures", 0)
     monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
     assert rs.fetch_timings("amd-k", AgentQueue.AMD_MI325_1) is None
     assert "stepKey=amd-k" in urls[0] and "queue=amd_mi325_1" in urls[0]
     # Per-test times for any file a shard's tests could fail to hold: the
     # budget less the most setup charged, 16 min.
     assert "testsOverMs=960000" in urls[0]
+
+
+class _Response(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _urlopen_answering(*answers):
+    """A fake urlopen that raises or returns each answer in turn, recording
+    the timeout of every call."""
+    timeouts = []
+
+    def urlopen(url, timeout):
+        timeouts.append(timeout)
+        answer = answers[len(timeouts) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return _Response(json.dumps(answer).encode())
+
+    return urlopen, timeouts
+
+
+def test_fetch_timings_starts_with_no_failed_steps():
+    assert rs._timings_failures == 0
+
+
+def test_fetch_timings_retries_a_timeout_with_a_longer_limit(monkeypatch):
+    urlopen, timeouts = _urlopen_answering(TimeoutError("read timed out"), {"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) == {"files": []}
+    assert timeouts == [15, 30]
+
+
+def test_fetch_timings_retries_a_server_error(monkeypatch):
+    error = urllib.error.HTTPError("u", 500, "internal error", {}, None)
+    urlopen, timeouts = _urlopen_answering(error, {"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) == {"files": []}
+    assert len(timeouts) == 2
+
+
+def test_fetch_timings_counts_a_step_whose_reads_both_fail(monkeypatch, capsys):
+    error = urllib.error.HTTPError("u", 502, "bad gateway", {}, None)
+    urlopen, timeouts = _urlopen_answering(error, error)
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) is None
+    assert len(timeouts) == 2
+    assert rs._timings_failures == 1
+    assert capsys.readouterr().err == (
+        "runtime-shard: no timings for k (HTTP Error 502: bad gateway)\n")
+
+
+def test_fetch_timings_does_not_retry_a_404(monkeypatch, capsys):
+    # 404: main has no passing build for the step; a retry can't change that,
+    # and it isn't the endpoint failing.
+    error = urllib.error.HTTPError("u", 404, "not found", {}, None)
+    urlopen, timeouts = _urlopen_answering(error, {"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 2)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) is None
+    assert len(timeouts) == 1
+    # The endpoint answered, so it is up: earlier failures stop counting.
+    assert rs._timings_failures == 0
+    assert capsys.readouterr().err == (
+        "runtime-shard: no timings for k (HTTP Error 404: not found)\n")
+
+
+def test_fetch_timings_skips_the_endpoint_after_three_failed_steps(monkeypatch, capsys):
+    calls = []
+
+    def urlopen(url, timeout):
+        calls.append(url)
+        raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    for key in ("a", "b", "c", "d"):
+        assert rs.fetch_timings(key, AgentQueue.GPU_1) is None
+    # Two reads each for a, b and c; none for d.
+    assert len(calls) == 6
+    assert capsys.readouterr().err.splitlines() == [
+        "runtime-shard: no timings for a (read timed out)",
+        "runtime-shard: no timings for b (read timed out)",
+        "runtime-shard: no timings for c (read timed out)",
+        "runtime-shard: no timings for d (endpoint skipped after 3 failed steps)",
+    ]
+
+
+def test_fetch_timings_404s_between_failures_keep_the_endpoint_in_use(monkeypatch):
+    timeout = TimeoutError("read timed out")
+    missing = urllib.error.HTTPError("u", 404, "not found", {}, None)
+    # Steps a, c, e time out on both reads; b and d have no passing main build.
+    urlopen, timeouts = _urlopen_answering(
+        timeout, timeout, missing, timeout, timeout, missing, timeout, timeout,
+        {"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    for key in ("a", "b", "c", "d", "e"):
+        assert rs.fetch_timings(key, AgentQueue.GPU_1) is None
+    assert rs.fetch_timings("f", AgentQueue.GPU_1) == {"files": []}
+
+
+def test_fetch_timings_success_resets_the_failure_count(monkeypatch):
+    urlopen, _ = _urlopen_answering({"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 2)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) == {"files": []}
+    assert rs._timings_failures == 0
 
 
 def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
@@ -1124,9 +1250,11 @@ def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     assert "kubernetes" in step.plugins[0] and step.plugins == plain.plugins
     assert step.retry == plain.retry == buildkite_step.K8S_RETRY
     assert step.parallelism == 3 and len(step.commands[2:]) == len(plain.commands)
-    # The same commands, the one-file command run only by the shard with it.
+    # The same commands, each tagged with its position, the one-file command
+    # run only by the shard with it.
     changed = [new for new, old in zip(step.commands[2:], plain.commands) if new != old]
-    assert len(changed) == 1 and changed[0].startswith("case ")
+    assert len(changed) == 2 and changed[0].startswith(f"export {rs.COMMAND_ENV}=")
+    assert changed[1].startswith("case ")
 
 
 def test_shard_job_setup_installs_the_plugin_for_any_python():
@@ -1166,8 +1294,9 @@ def _run(tmp_path, command, plan, shard, wrapper_args=()):
     env.update(
         PYTEST_ADDOPTS="-p runtime_shard_plugin",
         PYTHONPATH=os.path.dirname(rs.__file__),
-        BUILDKITE_PARALLEL_JOB=str(shard),
     )
+    if shard is not None:
+        env["BUILDKITE_PARALLEL_JOB"] = str(shard)
     if plan is not None:
         env["RUNTIME_SHARD_PLAN"] = rs.pack(plan)
     return subprocess.run(
@@ -1294,6 +1423,55 @@ def test_every_test_runs_in_exactly_one_shard(tmp_path, monkeypatch):
         summary = re.search(r"^runtime-shard: shard .*$", run.stdout, re.M).group(0)
         assert "; the rest run in shard " in summary, summary
     assert sorted(ran) == sorted(everything)  # each test exactly once
+
+
+def test_commands_that_differ_only_in_env_each_run_their_own_tests(tmp_path):
+    # Batch Invariance (Distributed) runs one pytest command per model, chosen
+    # by env vars alone, so the commands' pytest args are identical.
+    _project(
+        tmp_path,
+        {"test_model.py": "import os\ndef test_model(): print('MODEL=' + os.environ['MODEL'])\n"},
+    )
+    command = "pytest -v -s test_model.py"
+    plan = {"shards": 2, "commands": []}
+    for position in range(2):
+        planned = _command_plan(
+            command, f"Command ({position + 1}/2)", {"tests/test_model.py": position}
+        )
+        plan["commands"].append({**planned, "position": position})
+    pytest = f"{shlex.quote(sys.executable)} -m {command}"
+    job = " && ".join(
+        rs.guard(f"MODEL={model} {pytest}", planned, 2)
+        for model, planned in zip(("olmoe", "granite"), plan["commands"])
+    ).replace("$$", "$")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env.update(
+        PYTEST_ADDOPTS="-p runtime_shard_plugin",
+        PYTHONPATH=os.path.dirname(rs.__file__),
+        RUNTIME_SHARD_PLAN=rs.pack(plan),
+    )
+    models = []
+    for shard in range(2):
+        run = subprocess.run(
+            ["sh", "-ec", job],
+            cwd=tmp_path / "tests",
+            env=dict(env, BUILDKITE_PARALLEL_JOB=str(shard)),
+            capture_output=True,
+            text=True,
+        )
+        assert run.returncode == 0, run.stdout + run.stderr
+        models += re.findall(r"MODEL=(\w+)", run.stdout)
+    assert sorted(models) == ["granite", "olmoe"]
+
+
+def test_a_job_without_a_parallel_index_runs_the_first_shards_tests(tmp_path):
+    _project(tmp_path, {"test_a.py": "def test_a(): pass\n", "test_b.py": "def test_b(): pass\n"})
+    command = "pytest -v test_a.py test_b.py"
+    files = {"tests/test_a.py": 0, "tests/test_b.py": 1}
+    plan = {"shards": 2, "commands": [_command_plan(command, "Command (1/1)", files)]}
+    run = _run(tmp_path, command, plan, None)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert _ran(run.stdout) == ["test_a.py::test_a"]
 
 
 def test_a_shard_opens_a_log_group_per_file(tmp_path):
