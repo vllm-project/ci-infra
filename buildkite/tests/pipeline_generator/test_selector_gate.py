@@ -8,6 +8,7 @@ import subprocess
 import pytest
 
 import selector_gate
+from constants import Platform
 
 PR = {
     "name": "vllm_ci",
@@ -67,6 +68,7 @@ def test_a_pr_build_records_the_selectors_keys():
         ({"nightly": "1"}, "nightly"),
         ({"run_all": True}, "run-all"),
         ({"only_step_keys": frozenset({"x"})}, "VLLM_CI_ONLY_STEP_KEYS"),
+        ({"platform": Platform.AMD}, "AMD-only"),
     ],
 )
 def test_builds_that_keep_todays_rules(change, why):
@@ -75,6 +77,10 @@ def test_builds_that_keep_todays_rules(change, why):
 
     record = selector_gate.decide({**PR, **change}, ["x"], boom)
     assert why in record["skipped"] and record["selector_keys"] is None
+
+
+def test_a_cuda_only_build_is_still_selected():
+    assert selector_gate.skip_reason({**PR, "platform": Platform.CUDA}) is None
 
 
 def test_a_selector_failure_keeps_todays_rules():

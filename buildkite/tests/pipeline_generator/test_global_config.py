@@ -6,9 +6,11 @@ import pytest
 from buildkite.pipeline_generator.global_config import (
     ONLY_STEP_KEYS_ENV_VAR,
     _parse_only_step_keys,
+    _parse_platform,
     _validate_pipeline_config,
     init_global_config,
 )
+from constants import Platform
 
 
 @pytest.fixture(autouse=True)
@@ -143,6 +145,31 @@ def test_init_global_config_reads_only_step_keys(
         init_global_config("dummy_path")
 
     assert global_config.config["only_step_keys"] == frozenset({"selected-step"})
+
+
+@pytest.mark.parametrize(
+    "value, torch_nightly, expected",
+    [
+        (None, False, None),
+        ("", False, None),
+        ("amd", False, Platform.AMD),
+        (" CUDA ", False, Platform.CUDA),
+        (None, True, Platform.CUDA),
+        ("cuda", True, Platform.CUDA),
+    ],
+)
+def test_parse_platform(value, torch_nightly, expected):
+    assert _parse_platform(value, torch_nightly) == expected
+
+
+def test_parse_platform_rejects_unknown_platform():
+    with pytest.raises(ValueError, match="must be one of: amd, cuda"):
+        _parse_platform("tpu", False)
+
+
+def test_parse_platform_rejects_amd_under_torch_nightly():
+    with pytest.raises(ValueError, match="TORCH_NIGHTLY runs only CUDA jobs"):
+        _parse_platform("amd", True)
 
 
 def test_validate_pipeline_config_valid_repo():
