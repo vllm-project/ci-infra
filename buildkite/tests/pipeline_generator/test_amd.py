@@ -969,15 +969,25 @@ def test_rocm_stack_key_is_the_key_build_sh_computes(rocm_pr):
         ),
         lambda r: (r / "tools/vllm-rocm/therock_wheels.py").unlink(),
         lambda r: (r / "tools/vllm-rocm/therock_wheels.py").chmod(0o755),
-        # keys_at fails: never the generator.
+        # keys_at fails, or keys.sh is not text: never the generator.
         lambda r: (r / "docker/Dockerfile.rocm").unlink(),
+        lambda r: (r / ".buildkite/scripts/rocm/keys.sh").write_bytes(b"# caf\xe9\n"),
     ],
-    ids=["keys.sh", "delete", "chmod", "keys_at-fails"],
+    ids=["keys.sh", "delete", "chmod", "keys_at-fails", "keys.sh-not-utf8"],
 )
 def test_rocm_stack_key_is_none_when_there_is_no_job_to_add(rocm_pr, change):
     repo, base = rocm_pr
     _commit(repo, change)
     assert amd.rocm_stack_key(base) is None
+
+
+def test_rocm_stack_key_does_not_depend_on_the_working_directory(rocm_pr, monkeypatch):
+    repo, base = rocm_pr
+    _commit(
+        repo, lambda r: (r / "docker/Dockerfile.rocm_base").write_text("FROM new\n")
+    )
+    monkeypatch.chdir(repo / "docker")
+    assert amd.rocm_stack_key(base) == _keys_at_head(repo)
 
 
 def test_rocm_stack_key_is_none_until_main_has_keys_sh(rocm_pr):

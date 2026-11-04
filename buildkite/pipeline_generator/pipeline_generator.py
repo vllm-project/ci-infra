@@ -191,10 +191,14 @@ class PipelineGenerator:
                     global_config["github_repo_name"], global_config["commit"]
                 ),
             )
-            rocm_cache = rocm_base_cache_step(
-                global_config.get("list_file_diff") or [],
-                global_config.get("merge_base_commit"),
-            )
+            # Only the upstream pipeline (ci_config.yaml), where /amd-ci cache
+            # retries the job.
+            rocm_cache = None
+            if global_config.get("name") == "vllm_ci":
+                rocm_cache = rocm_base_cache_step(
+                    global_config.get("list_file_diff") or [],
+                    global_config.get("merge_base_commit"),
+                )
             if rocm_cache:
                 buildkite_group_steps.append(
                     BuildkiteGroupStep(

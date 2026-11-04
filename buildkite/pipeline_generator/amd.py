@@ -608,9 +608,9 @@ ROCM_BASE_CACHE_STEP_KEY = "rocm-base-image-cache"
 ROCM_BASE_CACHE_SCRIPT = "buildkite/scripts/rocm-base-image-cache.sh"
 
 
-def _git(*args: str) -> str:
+def _run(*args: str, **kwargs: Any) -> str:
     return subprocess.run(
-        ["git", *args], capture_output=True, text=True, check=True
+        args, capture_output=True, text=True, check=True, timeout=60, **kwargs
     ).stdout
 
 
@@ -623,25 +623,35 @@ def rocm_stack_key(merge_base: str) -> Optional[str]:
     or chmods a stack input, or the key cannot be computed.
     """
     try:
-        keys_sh = _git("show", f"{merge_base}:{ROCM_KEYS_SH}")
-        if _git("show", f"HEAD:{ROCM_KEYS_SH}") != keys_sh:
+        # keys.sh's paths are relative to the top of the repository.
+        top = _run("git", "rev-parse", "--show-toplevel").strip()
+        keys_sh = _run("git", "show", f"{merge_base}:{ROCM_KEYS_SH}", cwd=top)
+        if _run("git", "show", f"HEAD:{ROCM_KEYS_SH}", cwd=top) != keys_sh:
             print("No ROCm base image cache job: the PR changes keys.sh")
             return None
-        summary = _git(
-            "diff", "--summary", merge_base, "HEAD", "--", *ROCM_STACK_INPUTS
+        summary = _run(
+            "git",
+            "diff",
+            "--summary",
+            merge_base,
+            "HEAD",
+            "--",
+            *ROCM_STACK_INPUTS,
+            cwd=top,
         )
         if re.search(r"^ (delete|mode change)", summary, re.M):
             print("No ROCm base image cache job: a stack input is deleted or chmod-ed")
             return None
-        keys = subprocess.run(
+        keys = _run(
             # With build.sh's shell options, so it fails where build.sh would.
-            ["bash", "-c", "set -euo pipefail\n" + keys_sh + "\nkeys_at HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
+            "bash",
+            "-c",
+            "set -euo pipefail\n" + keys_sh + "\nkeys_at HEAD",
+            cwd=top,
             env={**os.environ, "SDF": ROCM_STACK_INPUTS[0], "STACK": "rocm"},
-        ).stdout.split()
-    except (OSError, subprocess.CalledProcessError) as error:
+        ).split()
+    # ValueError: undecodable output; SubprocessError: a failure or timeout.
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"No ROCm base image cache job: {error}")
         return None
     if not keys or not re.fullmatch(r"[0-9a-f]{16}", keys[0]):

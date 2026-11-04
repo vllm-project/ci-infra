@@ -16,7 +16,7 @@ case $code in
     echo "$image exists"
     ;;
   404)
-    msg="ROCm base image: this PR changes it, and $image does not exist yet. Once the rest of CI is green, a vLLM maintainer comments /amd-ci cache on the PR, then again once that AMD CI build passes; that retries this job."
+    msg="ROCm base image: this PR changes it, and $image does not exist yet. Once the rest of CI is green, a vLLM maintainer comments /amd-ci cache on the PR, then again once that AMD CI build passes; that retries this job. A PR behind main needs /ci run first, which merges main."
     buildkite-agent annotate --context rocm-base-image-cache --style error "$msg" || true
     echo "$msg" >&2
     exit 1
