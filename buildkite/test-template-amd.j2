@@ -150,8 +150,8 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
     depends_on: ~
     steps:
       {% if rocm_promote == "run" %}
-      {# vLLM's cache-rocm-base-image label (added by a maintainer to a PR that changes the ROCm
-         stack) starts this as a main build: main's build.sh copies the stack images that PR's CI
+      {# vLLM's /ci rocm cache (commented by a maintainer on a PR that changes the ROCm stack)
+         starts this as a main build: main's build.sh copies the stack images that PR's CI
          built into rocm/vllm-ci. Nothing else from main's build runs. #}
       - label: ":docker: Cache the ROCm base image for #{{ promote_pr }}"
         key: "rocm-base-image-cache"
