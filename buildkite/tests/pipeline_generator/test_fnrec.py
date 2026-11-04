@@ -454,7 +454,7 @@ def test_recording_gives_steps_a_timeout_margin(monkeypatch):
     monkeypatch.delenv(recorder_switches.FNREC_ENV_VAR, raising=False)
     assert _timeout(step) == 40
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
-    assert _timeout(step) == 50
+    assert _timeout(step) == 60, "RECORDING_MIN_EXTRA_MINUTES beats 1.25x here"
 
 
 def _rendered_groups(*steps):
@@ -477,14 +477,15 @@ def test_collect_group_folds_the_build_from_the_generating_branch(
     (step,) = collect.steps
     assert collect.group == buildkite_step.COLLECT_GROUP
     assert step.key == buildkite_step.FNREC_COLLECT_KEY
-    assert set(step.depends_on) == {"a", "b"}
+    assert set(step.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()) == {"a", "b"}
+    assert not set(step.depends_on) & {"a", "b"}, "waited for in the command"
     assert step.allow_dependency_failure is True, (
         "a failed job's recording is still evidence"
     )
     assert step.soft_fail is True, "publishing must not turn the build red"
     assert (
         "ci-infra/my-branch/buildkite/ci_selector/recorders/fnrec/collect.sh"
-        in step.commands[0]
+        in step.commands[-1]
     )
 
 
@@ -501,7 +502,10 @@ def test_collect_group_waits_only_on_steps_that_record(monkeypatch, fake_global_
     keys = [s.key for g in groups for s in g.steps if hasattr(s, "commands")]
     assert {"amd-mirrored", "image"} <= set(keys), f"premise: {keys}"
     step = buildkite_step.fnrec_collect_group(groups).steps[0]
-    assert set(step.depends_on) == {"mirrored", "amd-mirrored"}
+    assert set(step.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()) == {
+        "mirrored",
+        "amd-mirrored",
+    }
 
 
 def test_the_two_collect_steps_share_one_group(monkeypatch, fake_global_config):
@@ -524,7 +528,7 @@ def test_the_collect_url_names_a_file_that_exists(monkeypatch, fake_global_confi
     """The step curls this at run time; a wrong path is a 404 in CI."""
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
     groups = _rendered_groups(_step(key="a", group="g1"))
-    command = buildkite_step.fnrec_collect_group(groups).steps[0].commands[0]
+    command = buildkite_step.fnrec_collect_group(groups).steps[0].commands[-1]
     name = command.split("recorders/fnrec/")[1].split('"')[0]
     assert (PAYLOAD / name).is_file(), f"{name} is not in {PAYLOAD}"
 
@@ -574,15 +578,15 @@ def test_the_count_follows_a_narrowed_build(monkeypatch, fake_global_config):
     assert step.env["FNREC_EXPECTED_JOBS"] == "1"
 
 
-def test_the_count_skips_steps_behind_a_block(monkeypatch, fake_global_config):
-    """A blocked step never starts, so it can never deliver. Counting it puts
+def test_the_count_skips_deferred_steps(monkeypatch, fake_global_config):
+    """A deferred step never starts, so it can never deliver. Counting it puts
     the delivery rate below the floor and refuses a build that was fine."""
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
     groups = _rendered_groups(
         _step(key="a", group="g1"), _step(key="b", group="g2", label="Other")
     )
     step = buildkite_step.fnrec_collect_group(groups).steps[0]
-    assert step.depends_on == [], "the premise: both are behind a block"
+    assert step.depends_on == [], "the premise: both are deferred"
     assert step.env["FNREC_EXPECTED_JOBS"] == "0"
 
 
@@ -606,3 +610,21 @@ def test_the_amd_runner_still_records(monkeypatch):
     monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
     step = _step(commands=["bash .buildkite/scripts/hardware_ci/run-amd-test.sh"])
     assert buildkite_step._fnrec_applies(step, "nvidia")
+
+
+def test_the_python_fold_runs_on_a_large_agent(monkeypatch, fake_global_config):
+    """The Python fold holds every job's recordings at once and outgrew the
+    16 GB small queue (nightly #94688). The kernel fold still fits there."""
+    monkeypatch.setenv(recorder_switches.FNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    fake_global_config["nightly"] = "1"
+    groups = _rendered_groups(_step(key="a", group="g1"))
+    for branch, big, small in (
+        ("main", "cpu_queue_postmerge", "small_cpu_queue_postmerge"),
+        ("my-branch", "cpu_queue_premerge", "small_cpu_queue_premerge"),
+    ):
+        fake_global_config["branch"] = branch
+        (fn,) = buildkite_step.fnrec_collect_group(groups).steps
+        (kern,) = buildkite_step.kernrec_collect_group(groups).steps
+        assert fn.agents == {"queue": big}, branch
+        assert kern.agents == {"queue": small}, branch

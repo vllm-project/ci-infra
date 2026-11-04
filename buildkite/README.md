@@ -29,3 +29,17 @@ Two scripts install uv: `bootstrap.sh` at the start of a build, and `ci_selector
 A uv already on the agent's `PATH` is used only if it reports the pinned version, so nothing is downloaded on a machine that already has the right one, and an agent cannot quietly decide the version for us. `VLLM_CI_UV_BIN` names a uv to run instead, for a rerun by hand or a test, and is taken at its word.
 
 Three paths are still outside this. `bootstrap-intel.sh` installs the generator's dependencies with `pip` and no pins. `bootstrap-amd.sh` installs minijinja by piping an installer to a shell, at a pinned version but no checksum, and the AMD pipeline is a Jinja template rather than a Python one. `ci_selector/recorders/kernrec/collect.sh` runs its table builder under the agent's own `python3`. None of them is on the lockfile.
+
+## Automatic test sharding
+
+`automatic_shard: true` enables timing-based pytest sharding for NVIDIA jobs,
+native AMD mirrors, and standalone native AMD jobs. AMD mirrors also need the
+flag in their `mirror.amd` block. Explicit parallelism takes precedence;
+Docker-in-Docker and multi-node jobs are not automatically sharded.
+
+Commands retain their original pytest selectors. A command selecting a node ID
+can split its parametrized cases when main has per-test timings for that exact
+command. Without matching timings, the selected file stays together.
+
+The planner's estimates are not a substitute for measuring CI: validate both
+the slowest shard and the sum of all shard runtimes against the original job.

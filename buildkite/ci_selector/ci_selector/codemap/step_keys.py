@@ -46,6 +46,9 @@ class Emission:
     # instead of as steps quietly not running.
     unnameable: list[str] = field(default_factory=list)
     kept: int = 0
+    # Steps whose own definition the diff changed or added, by their head
+    # keys (Selection.changed_step_keys). CI runs these even when optional.
+    changed_keys: list[str] = field(default_factory=list)
 
     def as_env(self) -> dict[str, str]:
         return (
@@ -99,7 +102,12 @@ def emit(state: RepoState, sel: Selection, pipeline: str = PR_PIPELINE) -> Emiss
             reason="nothing selected; refusing to emit an empty list",
             kept=kept,
         )
-    return Emission(omit=False, keys=sorted(keys), kept=kept)
+    return Emission(
+        omit=False,
+        keys=sorted(keys),
+        kept=kept,
+        changed_keys=sorted(getattr(sel, "changed_step_keys", ())),
+    )
 
 
 def render(emission: Emission) -> str:
@@ -113,6 +121,7 @@ def render(emission: Emission) -> str:
             "emitted": len(emission.keys),
             "keys": emission.keys,
             "unnameable": emission.unnameable,
+            "changed_keys": emission.changed_keys,
             "env": emission.as_env(),
         },
         indent=1,

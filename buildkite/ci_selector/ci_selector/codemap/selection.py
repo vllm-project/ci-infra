@@ -36,6 +36,11 @@ class Selection:
     # step_id -> per reason, the changed files the record may weigh, or None
     # when the reason is not droppable. Same order as selected_rules.
     selected_paths: dict[str, list[list[str] | None]] = field(default_factory=dict)
+    # step_id -> per reason, the changed file the reason is about, or None for
+    # a reason no file is behind. Same order as selected_rules. Lets one
+    # record clear a step's reasons about its files while another clears the
+    # rest (`coverage.rules.read_pr`'s `deferred`).
+    selected_files: dict[str, list[str | None]] = field(default_factory=dict)
     # changed file -> the auto steps selected because of it. The inverse of
     # `selected`, and the only thing that answers "what does the map say about
     # this one file". A step in no value here is always selected anyway.
@@ -51,6 +56,9 @@ class Selection:
     docs_affected: bool = False
     docs_reasons: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Keys of the steps whose definition the diff changed or added, as spelled
+    # at head (Claim.changed_step_keys, unioned over every claim).
+    changed_step_keys: set[str] = field(default_factory=set)
 
 
 def _record(
@@ -73,6 +81,8 @@ def _record(
     attrib = sel.manual_paths if manual else sel.selected_paths
     bucket.setdefault(step.step_id, []).append(reason)
     rules.setdefault(step.step_id, []).append(rule)
+    if not manual:
+        sel.selected_files.setdefault(step.step_id, []).append(by_file)
     # None, not empty: "no file answers for this" and "cannot be attributed at
     # all" must not read the same.
     attrib.setdefault(step.step_id, []).append(sorted(paths) if paths else None)
@@ -219,3 +229,4 @@ def _add_always_run(state: RepoState, sel: Selection) -> None:
                 )
                 sel.selected_rules.setdefault(step.step_id, []).append("always-run")
                 sel.selected_paths.setdefault(step.step_id, []).append(None)
+                sel.selected_files.setdefault(step.step_id, []).append(None)

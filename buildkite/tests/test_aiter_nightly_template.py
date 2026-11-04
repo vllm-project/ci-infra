@@ -38,13 +38,9 @@ def _context(**overrides):
         "list_file_diff": "",
         "run_all": "0",
         "nightly": "0",
-        "torch_nightly": "0",
         "mirror_hw": "amdproduction",
-        "fail_fast": "false",
-        "vllm_use_precompiled": "1",
-        "vllm_merge_base_commit": "abc123",
-        "cov_enabled": "0",
-        "vllm_ci_branch": "my-branch",
+        "amd_build_steps": [],
+        "ci_repo": "",
         "rocm_base_refresh_skip": "0",
         "rocm_base_refresh_force": "0",
         "steps": STEPS,
@@ -61,14 +57,15 @@ def _render(**overrides):
 def _tests(steps):
     """The GPU test steps, by label."""
     return {
-        step["label"].split(": ", 1)[1]: step
+        step["label"]: step
         for step in steps.values()
-        if step.get("label", "").startswith("mi")
+        if "label" in step
+        and (step.get("agents") or {}).get("queue", "").startswith("amd_mi")
     }
 
 
 def test_bootstrap_passes_the_flag_off_by_default():
-    passed = set(re.findall(r"^\s*-D (\w+)=", BOOTSTRAP, re.M))
+    passed = set(re.findall(r"^\s*-D (\w+):?=", BOOTSTRAP, re.M))
     assert passed == set(_context(aiter_nightly="0")) - {"steps"}
     assert re.search(r'AITER_NIGHTLY:-\}" ]]; then\s+AITER_NIGHTLY=0', BOOTSTRAP)
     # The nightly tests main as it is, docs-only changes included.

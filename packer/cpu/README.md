@@ -75,9 +75,9 @@ packer build \
 
 ## First-Time Setup
 
-1. **Deploy Terraform first** (creates security group, SSM parameters, pipeline, and queue):
+1. **Deploy Terraform first** from the [private infrastructure repository](https://github.com/vllm-project/ci-infra-private) (maintainer access required). Review its deployment guidance and plan before applying:
    ```bash
-   cd terraform/aws
+   cd /path/to/ci-infra-private/terraform/aws
    terraform apply
    ```
 

@@ -198,11 +198,17 @@ def test_amd_native_runtime_dependency_still_exists(vllm_repo):
     recall number is then measured against a generator we no longer model."""
     from ci_selector.handwritten import AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
 
-    missing = [
-        p
-        for p in AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
-        if not (vllm_repo / p).is_file()
-    ]
+    def present(p: str) -> bool:
+        if (vllm_repo / p).is_file():
+            return True
+        # A prefix entry (the build.sh layout's pytest plugins) names files
+        # only in that layout.
+        parent, _, stem = p.rpartition("/")
+        if not (vllm_repo / ".buildkite/scripts/rocm/build.sh").exists():
+            return not p.endswith(".sh")
+        return any((vllm_repo / parent).glob(f"{stem}*"))
+
+    missing = [p for p in AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES if not present(p)]
     assert not missing, drift_message(
         f"AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES names files that do not "
         f"exist: {missing}",
@@ -216,8 +222,9 @@ def test_amd_native_runtime_dependency_still_exists(vllm_repo):
 
 
 # Real labels from .buildkite/test_areas against real status contexts. A mirror
-# has two spellings: its own yaml label, used verbatim, and the wrapped form
-# "AMD: <parent> (<device>)" that older revisions carry.
+# has two spellings: its own yaml label, used verbatim, or the parent's title
+# under the AMD device's tag, ":amd: (<tag>) <title>". Older revisions wrapped
+# the parent instead: "AMD: <parent> (<device>)".
 MIRROR_CASES = [
     (
         "declared label",
@@ -230,6 +237,12 @@ MIRROR_CASES = [
         None,
         ":nvidia: (H200) Basic Correctness",
         "amd-nvidia-h200-basic-correctness-mi300-1",
+    ),
+    (
+        "wrapped parent label, current form",
+        None,
+        ":nvidia: (H200) Basic Correctness",
+        "amd-mi300-basic-correctness",
     ),
     (
         # `_slug` strips a trailing `-n`, so assembling the slug from parts ate

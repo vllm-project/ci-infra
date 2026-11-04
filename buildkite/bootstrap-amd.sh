@@ -101,21 +101,6 @@ if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
     fi
 fi
 
-fail_fast() {
-    DISABLE_LABEL="ci-no-fail-fast"
-    # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
-    if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
-        PR_LABELS=$(get_pr_labels)
-        if [[ $PR_LABELS == *"$DISABLE_LABEL"* ]]; then
-            echo false
-        else
-            echo true
-        fi
-    else
-        echo false  # not a PR or BUILDKITE_PULL_REQUEST not set
-    fi
-}
-
 check_run_all_label() {
     RUN_ALL_LABEL="ready-run-all-tests"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
@@ -178,8 +163,20 @@ upload_pipeline() {
     echo "AITER Nightly: $AITER_NIGHTLY"
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
-    FAIL_FAST=$(fail_fast)
     cd .buildkite
+    AMD_BUILD_STEPS="[]"
+    if [[ -f scripts/rocm/build.sh ]]; then
+        # vLLM defines its ROCm build steps in hardware_tests/amd.yaml. The one trust rule: only non-PR builds
+        # of vllm-project/vllm main, AITER nightly excluded, write rocm/vllm-ci. Exported for $ROCM_CI_REPO in amd.yaml.
+        ROCM_CI_REPO=rocm/vllm-dev
+        if [[ ${BUILDKITE_PULL_REQUEST:-} == false && ${BUILDKITE_BRANCH:-} == main \
+              && ${BUILDKITE_REPO:-} =~ [/:]vllm-project/vllm(\.git)?$ && $AITER_NIGHTLY != 1 ]]; then
+            ROCM_CI_REPO=rocm/vllm-ci
+        fi
+        export ROCM_CI_REPO
+        echo '{{ steps | tojson }}' > amd-build-steps.j2
+        AMD_BUILD_STEPS=$(minijinja-cli amd-build-steps.j2 hardware_tests/amd.yaml)
+    fi
     (
         set -x
         # Output pipeline.yaml with all blank lines removed
@@ -188,14 +185,10 @@ upload_pipeline() {
             -D list_file_diff="$LIST_FILE_DIFF" \
             -D run_all="$RUN_ALL" \
             -D nightly="$NIGHTLY" \
-            -D torch_nightly="$TORCH_NIGHTLY" \
             -D aiter_nightly="$AITER_NIGHTLY" \
             -D mirror_hw="$AMD_MIRROR_HW" \
-            -D fail_fast="$FAIL_FAST" \
-            -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
-            -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
-            -D cov_enabled="$COV_ENABLED" \
-            -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D amd_build_steps:="$AMD_BUILD_STEPS" \
+            -D ci_repo="${ROCM_CI_REPO:-}" \
             -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
             -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
             | sed '/^[[:space:]]*$/d' \
@@ -249,15 +242,15 @@ ROCM_BASE_DOCKERFILE="docker/Dockerfile.rocm_base"
 # Early exit start: skip pipeline if conditions are met
 # ----------------------------------------------------------------------
 
-# skip pipeline if *every* changed file is docs/** OR **/*.md OR mkdocs.yaml
+# skip pipeline if *every* changed file is docs/** OR recipes/** OR **/*.md OR mkdocs.yaml
 if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
   if [[ -n "${file_diff:-}" ]]; then
     docs_only=1
     # Iterate robustly over newline-separated paths
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
-      # Match any of: docs/**  OR  **/*.md  OR  mkdocs.yaml
-      if [[ "${f#docs/}" != "$f" || "$f" == *.md || "$f" == "mkdocs.yaml" ]]; then
+      # Match any of: docs/**  OR  recipes/**  OR  **/*.md  OR  mkdocs.yaml
+      if [[ "${f#docs/}" != "$f" || "${f#recipes/}" != "$f" || "$f" == *.md || "$f" == "mkdocs.yaml" ]]; then
         continue
       else
         docs_only=0
@@ -271,7 +264,7 @@ if [[ "${DOCS_ONLY_DISABLE}" != "1" ]]; then
 \`\`\`
 $(printf '%s\n' "$file_diff" | tr -d '\r')
 \`\`\`" --style "info" || true
-      echo "[docs-only] All changes are docs/**, *.md, or mkdocs.yaml. Exiting before pipeline upload."
+      echo "[docs-only] All changes are docs/**, recipes/**, *.md, or mkdocs.yaml. Exiting before pipeline upload."
       exit 0
     fi
   fi

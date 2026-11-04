@@ -28,6 +28,8 @@ py-modules = [
     "amd",
     "runtime_shard",
     "runtime_shard_plugin",
+    "unblock_jobs",
+    "selector_gate",
 ]
 
 [tool.setuptools.packages.find]

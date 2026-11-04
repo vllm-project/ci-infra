@@ -1,5 +1,7 @@
 # Test Plan for CPU Build AMI PR
 
+Terraform commands below run in a local checkout of [ci-infra-private](https://github.com/vllm-project/ci-infra-private) (maintainer access required). Packer commands still run in this public repository. Review the private repository deployment guidance before any plan or apply.
+
 ## Pre-flight Validation (done)
 - [x] `terraform validate` passes
 - [x] All files are syntactically correct
@@ -7,7 +9,7 @@
 ## Phase 1: Terraform Apply (creates infrastructure only)
 
 ```bash
-cd terraform/aws
+cd /path/to/ci-infra-private/terraform/aws
 terraform plan -target=aws_security_group.packer_build \
                -target=aws_ssm_parameter.packer_security_group_id \
                -target=aws_ssm_parameter.cpu_build_ami_us_east_1 \
@@ -92,7 +94,7 @@ To force a test:
 If something fails:
 
 ```bash
-cd terraform/aws
+cd /path/to/ci-infra-private/terraform/aws
 
 # Delete the Packer resources (CPU queues will use default Buildkite AMI)
 terraform destroy \

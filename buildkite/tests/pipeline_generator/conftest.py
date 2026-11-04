@@ -1,7 +1,15 @@
 import pytest
 
 import buildkite_step
+import selector_gate
 import step as step_module
+
+
+@pytest.fixture(autouse=True)
+def _selector_off(monkeypatch):
+    """The selector is on by default and would clone ci-infra and run for
+    real. Tests that exercise it turn it back on themselves."""
+    monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "off")
 
 
 @pytest.fixture

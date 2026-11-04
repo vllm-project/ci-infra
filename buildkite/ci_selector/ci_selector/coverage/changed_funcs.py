@@ -565,20 +565,90 @@ def _reach(tree: ast.Module, every: frozenset[str]) -> list[tuple]:
     return spans
 
 
+def _pure_guard(test: ast.expr) -> bool:
+    """A condition made only of `current_platform.is_<x>()` calls under
+    `not`, `and` and `or`: evaluating it does nothing but read the platform."""
+    if _guard(test) is not None:
+        return True
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return _pure_guard(test.operand)
+    if isinstance(test, ast.BoolOp):
+        return all(_pure_guard(v) for v in test.values)
+    return False
+
+
+def _new_guard_headers(tree: ast.Module, lines: set[int], every: frozenset[str]):
+    """line -> (families, guards) for the header of an `if` the diff added
+    whole, with no `else` and a pure guard for its condition. Elsewhere the
+    header only evaluates the guard to False and skips the block, so it
+    changes nothing there: the header reaches what the block reaches.
+    vllm#62276 added `if current_platform.is_rocm(): ...` to
+    GPUModelRunner.shutdown, and the header line alone read as a change on
+    every family."""
+    out = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If) or node.orelse or not node.body:
+            continue
+        span = set(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+        if not span <= lines or not _pure_guard(node.test):
+            continue
+        t, _f = _truth(node.test, every)
+        if t == every:
+            continue
+        for n in range(node.lineno, node.body[0].lineno):
+            out[n] = (t, _guards_in(node.test))
+    return out
+
+
+def _module_import_lines(tree: ast.Module) -> set[int]:
+    """Lines of the module-level import statements."""
+    out: set[int] = set()
+    for st in tree.body:
+        if isinstance(st, (ast.Import, ast.ImportFrom)):
+            out.update(range(st.lineno, (st.end_lineno or st.lineno) + 1))
+    return out
+
+
+def _import_split(text: str | None, lines: set[int]) -> tuple[set[int], bool]:
+    """(the changed module-level import lines, whether any other non-blank,
+    non-comment line changed). Unparseable text reports nothing to set aside."""
+    if text is None or not lines:
+        return set(), bool(lines)
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set(), True
+    source = text.splitlines()
+    imports = _module_import_lines(tree) & lines
+    other = any(
+        0 < n <= len(source)
+        and source[n - 1].strip()
+        and not source[n - 1].strip().startswith("#")
+        and n not in imports
+        for n in lines
+    )
+    return imports, other
+
+
 def _place(text: str | None, lines: set[int], every: frozenset[str]):
     """(the families that can reach any of `lines`, the guards that narrowed
     them): None when no line needs placing, False when that is every family
     or cannot be told. Blank and comment lines place anywhere; a line no
-    statement holds reaches all."""
+    statement holds reaches all.
+
+    The caller sets changed module-level imports aside first when other lines
+    changed too (`_platforms_reached`)."""
     if not lines:
         return None
     if text is None:
         return False
     try:
-        spans = _reach(ast.parse(text), every)
+        tree = ast.parse(text)
+        spans = _reach(tree, every)
     except SyntaxError:
         return False
     source = text.splitlines()
+    headers = _new_guard_headers(tree, lines, every)
     found: set[str] = set()
     guards: set[str] = set()
     placed = False
@@ -590,6 +660,8 @@ def _place(text: str | None, lines: set[int], every: frozenset[str]):
         if not holding:
             return False
         _w, reach, by = min(holding, key=lambda h: h[0])
+        if n in headers:
+            reach, by = reach & headers[n][0], by | headers[n][1]
         found |= reach
         guards |= by
         placed = True
@@ -672,6 +744,15 @@ def _platforms_reached(before, base_lines, after, head_lines):
     swapped = _guard_swap(before, base_lines, after, head_lines, every)
     if swapped is not None:
         return swapped
+    # Changed module-level imports run on every family, but in a file whose
+    # other lines changed too an import is not use (`phase.PhaseMode.CARVED`):
+    # it would only widen the reach of the change that is. Set them aside, on
+    # both sides at once. Imports alone place as before.
+    base_imports, base_other = _import_split(before, base_lines)
+    head_imports, head_other = _import_split(after, head_lines)
+    if base_other or head_other:
+        base_lines = set(base_lines) - base_imports
+        head_lines = set(head_lines) - head_imports
     sides = [_place(before, base_lines, every), _place(after, head_lines, every)]
     if False in sides:
         return None, frozenset()
@@ -993,8 +1074,13 @@ class _Shell(ast.NodeTransformer):
         node.body = [ast.Pass()]
         node.returns = None
         node.args = ast.arguments(
-            posonlyargs=[], args=[], vararg=None, kwonlyargs=[],
-            kw_defaults=[], kwarg=None, defaults=kept,
+            posonlyargs=[],
+            args=[],
+            vararg=None,
+            kwonlyargs=[],
+            kw_defaults=[],
+            kwarg=None,
+            defaults=kept,
         )
         if hasattr(node, "type_params"):
             node.type_params = []

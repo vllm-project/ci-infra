@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import buildkite_step
+from constants import AgentQueue
 from pipeline_generator import select_steps_and_dependencies
 from step import Step, group_steps, read_steps_from_job_dir
 
@@ -164,7 +165,7 @@ def test_selected_steps_support_amd_mirror_keys(fake_global_config, key, generat
 def test_an_optional_step_named_by_the_selector_runs_unblocked(fake_global_config):
     """The selector treats optional steps as ordinary ones and names them in
     VLLM_CI_ONLY_STEP_KEYS when the evidence reaches them. That relies on this:
-    a named step runs, optional or not. Blocked, it would be selected and still
+    a named step runs, optional or not. Deferred, it would be selected and still
     never run."""
     steps = [
         Step(
@@ -177,9 +178,7 @@ def test_an_optional_step_named_by_the_selector_runs_unblocked(fake_global_confi
     emitted = [job for group in groups for job in group.steps]
 
     assert [job.key for job in emitted] == ["nightly-eval"]
-    assert not any(
-        isinstance(job, buildkite_step.BuildkiteBlockStep) for job in emitted
-    )
+    assert not any(job.deferred for job in emitted)
 
 
 def test_a100_steps_are_not_emitted_but_amd_mirrors_are():
@@ -281,7 +280,6 @@ def test_every_generated_job_has_a_unique_key():
     assert all(keys)
     assert len(keys) == len(set(keys))
     assert "test-a" in keys
-    assert "block-test-a" in keys
 
 
 def test_explicit_step_key_is_preserved():
@@ -430,6 +428,28 @@ def test_otel_trace_keeps_assignment_prefixed_commands_in_shell(fake_global_conf
         assert "ci_otel_run" not in command
     assert "TP_SIZE=1 pytest tests/entrypoints" in commands[2]
     assert "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed" in commands[4]
+
+
+def test_otel_trace_labels_long_commands_in_full(fake_global_config):
+    fake_global_config["branch"] = "main"
+    long = "pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/"
+    step = Step(label="Traced", commands=[long + "fp8.txt", long + "int8.txt"])
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    labels = [
+        shlex.split(re.search(r"ci_otel_run \d+ (.*?) pytest", c).group(1))[0]
+        for c in (commands[2], commands[4])
+    ]
+    assert labels[0] != labels[1]
+    assert labels == step.commands
+    assert commands[3].endswith(f'Command (2/2): {labels[1]}"')
+    assert commands[2].endswith(step.commands[0])
+    assert commands[4].endswith(step.commands[1])
 
 
 def test_is_simple_command():
@@ -1080,3 +1100,64 @@ def test_step_explicitly_listing_excluded_subtree_still_matches():
 
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
+
+
+@pytest.mark.parametrize(
+    "diff, docs_only",
+    [
+        (["docs/a.md", "mkdocs.yaml"], True),
+        (["recipes/models/Qwen/Qwen3-4B.yaml"], True),
+        (["recipes/models/Qwen/Qwen3-4B.yaml", "docs/b.md"], True),
+        (["recipes/models/Qwen/Qwen3-4B.yaml", "vllm/x.py"], False),
+        (["tools/recipes/gen.py"], False),
+        ([], False),
+    ],
+)
+def test_docs_and_recipe_only_changes_skip_ci(diff, docs_only):
+    """recipes/ is read only by a GitHub workflow, so a change made of recipes
+    and docs builds nothing, NVIDIA or ROCm."""
+    from pipeline_generator import is_docs_only_change
+
+    assert is_docs_only_change(diff) is docs_only
+
+
+@pytest.mark.parametrize(
+    ("key", "label", "branch", "queue"),
+    [
+        (
+            "image-build",
+            ":docker: Build image",
+            "main",
+            AgentQueue.CPU_POSTMERGE_US_EAST_1,
+        ),
+        (
+            "image-build",
+            ":docker: Build image",
+            "user:feature",
+            AgentQueue.CPU_PREMERGE_US_EAST_1,
+        ),
+        (
+            "image-build-cpu",
+            ":docker: Build CPU image",
+            "user:feature",
+            AgentQueue.MEDIUM_CPU_PREMERGE,
+        ),
+        (
+            "image-build-smoke-test",
+            ":docker: :smoking: Non-root smoke tests",
+            "user:feature",
+            AgentQueue.MEDIUM_CPU_PREMERGE,
+        ),
+        (
+            "image-build-arm64",
+            ":docker: Build arm64 image",
+            "user:feature",
+            AgentQueue.ARM64_CPU_PREMERGE,
+        ),
+    ],
+)
+def test_docker_step_queue_routing(monkeypatch, key, label, branch, queue):
+    config = {**buildkite_step.get_global_config(), "branch": branch}
+    monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
+    step = Step(label=label, key=key, commands=["true"])
+    assert buildkite_step.get_agent_queue(step) == queue

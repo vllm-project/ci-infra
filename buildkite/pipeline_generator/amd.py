@@ -1,4 +1,5 @@
 import os
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
@@ -28,6 +29,9 @@ AMD_NATIVE_POD_IDENTITY_ENV = {
 }
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
     ".buildkite/scripts/hardware_ci/run-amd-test.sh",
+    # A prefix: the pytest plugins run-amd-test.sh loads into every AMD pytest
+    # run (build.sh layout), e.g. amd_ci_fast_exit.py.
+    ".buildkite/scripts/hardware_ci/amd_ci_",
 )
 AMD_STANDARD_TIMEOUT_MINUTES = 3 * 60
 AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
@@ -103,8 +107,32 @@ def ensure_amd_stack_error_retry(
     return retry_policy
 
 
+def rocm_build_layout() -> bool:
+    """The vLLM checkout builds its ROCm images with build.sh (else the old chain)."""
+    return os.path.exists(".buildkite/scripts/rocm/build.sh")
+
+
+def rocm_ci_repo() -> str:
+    """The trust rule: only non-PR builds of vllm-project/vllm main, not the
+    AITER nightly, write rocm/vllm-ci."""
+    repo = os.getenv("BUILDKITE_REPO", "")
+    trusted = (
+        os.getenv("BUILDKITE_PULL_REQUEST") == "false"
+        and os.getenv("BUILDKITE_BRANCH") == "main"
+        and re.search(r"[/:]vllm-project/vllm(\.git)?$", repo)
+        and os.getenv("AITER_NIGHTLY") != "1"
+    )
+    return "rocm/vllm-ci" if trusted else "rocm/vllm-dev"
+
+
+def get_amd_pod_image() -> str:
+    if rocm_build_layout():
+        return f"{rocm_ci_repo()}:build-$BUILDKITE_BUILD_ID"
+    return AMD_NATIVE_BASE_IMAGE
+
+
 def get_rocm_base_refresh_timeout() -> int:
-    if os.getenv("ROCM_BASE_REFRESH_SKIP", "0") == "1":
+    if os.getenv("ROCM_BASE_REFRESH_SKIP", "0") == "1" and not rocm_build_layout():
         return AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES
     return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
 
@@ -117,6 +145,8 @@ def _amd_mirror_should_run(default_should_run: bool, list_file_diff: List[str]) 
 
 def get_rocm_base_refresh_env() -> Dict[str, str]:
     """Bind the refresh script controls to the timeout decision."""
+    if rocm_build_layout():
+        return {}
     return {
         "ROCM_BASE_REFRESH_SKIP": os.getenv("ROCM_BASE_REFRESH_SKIP", "0"),
         "ROCM_BASE_REFRESH_FORCE": os.getenv("ROCM_BASE_REFRESH_FORCE", "0"),
@@ -128,13 +158,24 @@ class AmdDeviceConfig:
     queue: AgentQueue
     default_gpu_count: int
     uses_dra: bool = False
+    # One queue serves every GPU count; the agent stacks behind it are told
+    # apart by their gpu_size tag, so the step must target it explicitly.
+    gpu_size_tag: bool = False
 
 
 AMD_DEVICE_CONFIGS = {
-    DeviceType.AMD_MI250_1.value: AmdDeviceConfig(AgentQueue.AMD_MI250_1, 1),
-    DeviceType.AMD_MI250_2.value: AmdDeviceConfig(AgentQueue.AMD_MI250_2, 2),
-    DeviceType.AMD_MI250_4.value: AmdDeviceConfig(AgentQueue.AMD_MI250_4, 4),
-    DeviceType.AMD_MI250_8.value: AmdDeviceConfig(AgentQueue.AMD_MI250_8, 8),
+    DeviceType.AMD_MI250_1.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI250, 1, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI250_2.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI250, 2, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI250_4.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI250, 4, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI250_8.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI250, 8, gpu_size_tag=True
+    ),
     DeviceType.AMD_MI300_1.value: AmdDeviceConfig(AgentQueue.AMD_MI300_1, 1),
     DeviceType.AMD_MI300_2.value: AmdDeviceConfig(AgentQueue.AMD_MI300_2, 2),
     DeviceType.AMD_MI300_4.value: AmdDeviceConfig(AgentQueue.AMD_MI300_4, 4),
@@ -195,8 +236,30 @@ def get_amd_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
     return config.queue if config else None
 
 
+_LABEL_HARDWARE_PREFIX = re.compile(r"^:[a-z0-9_+-]+: \([^)]*\) ")
+
+
+def get_amd_label_tag(device: Optional[str]) -> str:
+    """The hardware tag of an AMD GPU label: "MI355 DPX" for mi355_dpx, else
+    the pool's family ("mi300_1" -> "MI300"); empty for non-GPU devices."""
+    value = _device_value(device) or ""
+    if value == DeviceType.AMD_MI355_DPX.value:
+        return "MI355 DPX"
+    if not value.startswith("mi"):
+        return ""
+    return value.split("_", 1)[0].upper()
+
+
 def get_amd_label(label: str, device: Optional[str]) -> str:
-    return f"AMD: {label} ({_device_value(device) or ''})"
+    """Every AMD job reads ":amd: (<tag>) <title>", like the :nvidia: ones.
+    A label already in that form is kept; any other hardware prefix is
+    replaced with the AMD device's."""
+    if label.startswith(":amd: ("):
+        return label
+    tag = get_amd_label_tag(device)
+    if not tag:
+        return label
+    return f":amd: ({tag}) {_LABEL_HARDWARE_PREFIX.sub('', label, count=1)}"
 
 
 def normalize_amd_depends_on(depends_on: Optional[List[str]]) -> List[str]:
@@ -243,6 +306,8 @@ def get_amd_agents(
         )
 
     agents = {"queue": config.queue}
+    if config.gpu_size_tag:
+        agents["gpu_size"] = str(config.default_gpu_count)
     if agent_tags is not None and not isinstance(agent_tags, dict):
         raise ValueError("AMD agent_tags must be a mapping.")
     if not agent_tags:
@@ -260,8 +325,9 @@ def get_amd_agents(
             raise ValueError(
                 "AMD agent_tags keys and values must be non-empty strings."
             )
-        if key != "queue":
-            agents[key] = value
+        if key == "queue" or (config.gpu_size_tag and key == "gpu_size"):
+            continue
+        agents[key] = value
     return agents
 
 
@@ -292,6 +358,16 @@ def get_amd_setup_commands() -> List[str]:
     ]
 
 
+_AMD_ARTIFACT_WORKSPACE_ENV = (
+    "VLLM_CI_ARTIFACT_STEP",
+    "VLLM_CI_ARTIFACT_CHECKSUM_GLOB",
+    "VLLM_CI_USE_ARTIFACTS",
+    "VLLM_CI_ARTIFACT_GLOB",
+    "VLLM_CI_WORKSPACE",
+    "VLLM_CI_REQUIRE_WORKSPACE_MOUNT",
+)
+
+
 def _get_amd_env(
     *,
     commands: str,
@@ -317,7 +393,7 @@ def _get_amd_env(
         env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
         env.update(
             {
-                "VLLM_CI_BASE_IMAGE": AMD_NATIVE_BASE_IMAGE,
+                "VLLM_CI_BASE_IMAGE": get_amd_pod_image(),
                 "VLLM_CI_USE_ARTIFACTS": "1",
                 "VLLM_CI_ARTIFACT_GLOB": AMD_ARTIFACT_GLOB,
                 "VLLM_CI_RESULTS_ROOT": AMD_RESULTS_ROOT,
@@ -330,6 +406,11 @@ def _get_amd_env(
                 "PYTORCH_ROCM_ARCH": "",
             }
         )
+        if rocm_build_layout():
+            # The per-build image already holds vLLM and /vllm-workspace: no test
+            # artifact to install and no workspace volume.
+            for name in _AMD_ARTIFACT_WORKSPACE_ENV:
+                env.pop(name, None)
     else:
         env.update(
             {
@@ -446,6 +527,10 @@ def build_amd_step_options(
 
     if not isinstance(dind, bool):
         raise ValueError("AMD dind must be a boolean.")
+    if rocm_build_layout():
+        # The build.sh layout has no DinD path: every GPU job is a native pod,
+        # as test-template-amd.j2 renders it.
+        dind, no_plugin = False, False
     if not dind and no_plugin:
         raise ValueError(
             "Native AMD jobs cannot use no_plugin; the wrapper installs the test artifact."
@@ -465,9 +550,12 @@ def build_amd_step_options(
             "VLLM_CI_REQUIRE_WORKSPACE_MOUNT": "1",
             "PYTORCH_ROCM_ARCH": "",
         }
+        if rocm_build_layout():
+            for name in _AMD_ARTIFACT_WORKSPACE_ENV:
+                container_env.pop(name, None)
         plugins = [
             get_amd_k8s_plugin(
-                image=AMD_NATIVE_BASE_IMAGE,
+                image=get_amd_pod_image(),
                 gpu_count=gpu_count,
                 workspace=AMD_NATIVE_WORKSPACE,
                 workspace_volume_name=AMD_NATIVE_WORKSPACE_VOLUME,
@@ -476,6 +564,12 @@ def build_amd_step_options(
                 uses_dra=config.uses_dra,
             )
         ]
+        if rocm_build_layout():
+            # The per-build image holds /vllm-workspace; an emptyDir would hide it.
+            pod = plugins[0]["kubernetes"]["podSpecPatch"]
+            vm = pod["containers"][0]["volumeMounts"]
+            pod["containers"][0]["volumeMounts"] = [m for m in vm if m["name"] != AMD_NATIVE_WORKSPACE_VOLUME]
+            pod["volumes"] = [v for v in pod["volumes"] if v["name"] != AMD_NATIVE_WORKSPACE_VOLUME]
 
     if no_plugin:
         env = dict(extra_env or {}) or None
