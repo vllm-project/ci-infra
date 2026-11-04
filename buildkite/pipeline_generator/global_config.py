@@ -25,6 +25,7 @@ class GlobalConfig(TypedDict):
     run_all_exclude_patterns: Optional[List[str]] = None
     nightly: Optional[str] = "0"
     torch_nightly: Optional[str] = "0"
+    aiter_nightly: Optional[str] = "0"
     run_all: bool = False
     docs_only_disable: Optional[str] = "0"
     merge_base_commit: Optional[str] = None
@@ -73,6 +74,7 @@ def init_global_config(pipeline_config_path: str):
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
         torch_nightly=os.getenv("TORCH_NIGHTLY", "0"),
+        aiter_nightly=os.getenv("AITER_NIGHTLY", "0"),
         run_all=_should_run_all(
             pr_labels,
             list_file_diff,
