@@ -8,6 +8,7 @@ on:
       - "buildkite/tests/**"
       - "buildkite/bootstrap-amd.sh"
       - "buildkite/test-template-amd.j2"
+      - "buildkite/scripts/rocm-base-image-cache.sh"
       - "buildkite/ci_selector/recorders/**"
       - "pyproject.toml"
       - "requirements.txt"

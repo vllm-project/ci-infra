@@ -6,7 +6,6 @@ import os
 import time
 import re
 import shlex
-import subprocess
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
@@ -186,74 +185,6 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
     )
     return BuildkiteGroupStep(group=PRECOMMIT_GROUP, steps=[precommit_step])
-
-
-ROCM_BASE_CACHE_STEP_KEY = "rocm-base-image-cache"
-ROCM_STACK_INPUTS = ("docker/Dockerfile.rocm_base", "tools/vllm-rocm/therock_wheels.py")
-_ROCM_BUILD_SH = ".buildkite/scripts/rocm/build.sh"
-
-
-def rocm_stack_key(merge_base: str) -> Optional[str]:
-    """build.sh's stack key for the PR checkout (main merged in by /ci run).
-
-    None when /amd-ci cache cannot pre-build the change: the PR changes how
-    build.sh computes the key, or deletes or chmods a stack input.
-    """
-
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], capture_output=True, text=True, check=True
-        ).stdout
-
-    def key_lines(rev: str) -> str:
-        return "".join(
-            line + "\n"
-            for line in git("show", f"{rev}:{_ROCM_BUILD_SH}").splitlines()
-            if re.match(r"(_trw|Ks)=", line)
-        )
-
-    summary = git("diff", "--summary", merge_base, "HEAD", "--", *ROCM_STACK_INPUTS)
-    if key_lines("HEAD") != key_lines(merge_base) or re.search(
-        r"^ (delete|mode change)", summary, re.M
-    ):
-        return None
-    key = subprocess.run(
-        ["bash", "-c", key_lines(merge_base) + 'printf %s "$Ks"'],
-        capture_output=True,
-        text=True,
-        check=True,
-        env={**os.environ, "SDF": ROCM_STACK_INPUTS[0], "STACK": "rocm"},
-    ).stdout
-    if not re.fullmatch(r"[0-9a-f]{16}", key):
-        raise RuntimeError(f"No ROCm stack key from {_ROCM_BUILD_SH}: {key!r}")
-    return key
-
-
-# Fails until rocm/vllm-ci has the stack image main needs after the merge, so main
-# and other PRs reuse it instead of rebuilding it. vLLM's `/amd-ci cache` builds
-# it and then retries this step. Exit 75: Docker Hub could not be asked.
-_ROCM_BASE_CACHE_SCRIPT = r"""url=https://hub.docker.com/v2/repositories/rocm/vllm-ci/tags/stack-rocm-__KEY__
-code=$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-connrefused "$url") || true
-[[ $code == 200 ]] && { echo "rocm/vllm-ci:stack-rocm-__KEY__ exists"; exit 0; }
-[[ $code == 404 ]] || { echo "Could not check $url (HTTP ${code:-none})"; exit 75; }
-msg="ROCm base image: this PR changes it, and rocm/vllm-ci:stack-rocm-__KEY__ does not exist yet. Once the rest of CI is green, a vLLM maintainer comments /amd-ci cache on the PR, then again once that AMD CI build passes; that retries this job."
-buildkite-agent annotate --context rocm-base-image-cache --style error "$msg" || true
-echo "$msg"
-exit 1"""
-
-
-def create_rocm_base_cache_group_step(key: str) -> "BuildkiteGroupStep":
-    step = BuildkiteCommandStep(
-        label=":rocm: ROCm base image cache",
-        key=ROCM_BASE_CACHE_STEP_KEY,
-        # $$: literal for `buildkite-agent pipeline upload`.
-        commands=[_ROCM_BASE_CACHE_SCRIPT.replace("__KEY__", key).replace("$", "$$")],
-        depends_on=[],
-        agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
-        env={"BUILDKITE_SKIP_CHECKOUT": "true"},
-        retry={"automatic": [{"exit_status": 75, "limit": 2}]},
-    )
-    return BuildkiteGroupStep(group="ROCm base image cache", steps=[step])
 
 
 def add_precommit_dependency(

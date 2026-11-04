@@ -873,6 +873,7 @@ ROCM_KEY_LINES = """\
 _trw=$( [[ $STACK == rocm ]] && echo tools/vllm-rocm/therock_wheels.py || true )
 Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree HEAD -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16)
 """
+ROCM_CACHE_SCRIPT = Path(__file__).parents[2] / "scripts" / "rocm-base-image-cache.sh"
 
 
 def _git(repo, *args):
@@ -881,27 +882,29 @@ def _git(repo, *args):
     ).stdout.strip()
 
 
-@pytest.fixture
-def rocm_pr(tmp_path, monkeypatch):
-    """A main commit with the ROCm stack inputs, checked out as the PR's base."""
-    for path, text in (
-        ("docker/Dockerfile.rocm_base", "FROM base\n"),
-        ("tools/vllm-rocm/therock_wheels.py", "wheels = 1\n"),
-        (".buildkite/scripts/rocm/build.sh", ROCM_KEY_LINES),
-    ):
-        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / path).write_text(text)
-    _git(tmp_path, "init", "-q")
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "m")
-    monkeypatch.chdir(tmp_path)
-    return tmp_path, _git(tmp_path, "rev-parse", "HEAD")
-
-
 def _commit(repo, change):
     change(repo)
     _git(repo, "add", "-A")
-    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pr")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c")
+
+
+@pytest.fixture
+def rocm_pr(tmp_path, monkeypatch):
+    """A main commit with the ROCm stack inputs, checked out as the PR's base."""
+
+    def files(repo):
+        for path, text in (
+            ("docker/Dockerfile.rocm_base", "FROM base\n"),
+            ("tools/vllm-rocm/therock_wheels.py", "wheels = 1\n"),
+            (".buildkite/scripts/rocm/build.sh", ROCM_KEY_LINES),
+        ):
+            (repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (repo / path).write_text(text)
+
+    _git(tmp_path, "init", "-q")
+    _commit(tmp_path, files)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path, _git(tmp_path, "rev-parse", "HEAD")
 
 
 def test_rocm_stack_key_is_build_sh_key_of_the_pr(rocm_pr):
@@ -916,8 +919,8 @@ def test_rocm_stack_key_is_build_sh_key_of_the_pr(rocm_pr):
         text=True,
         env={**os.environ, "SDF": "docker/Dockerfile.rocm_base", "STACK": "rocm"},
     ).stdout
-    assert buildkite_step.rocm_stack_key(base) == expected
     assert len(expected) == 16
+    assert amd.rocm_stack_key(base) == expected
 
 
 @pytest.mark.parametrize(
@@ -935,20 +938,46 @@ def test_rocm_stack_key_is_build_sh_key_of_the_pr(rocm_pr):
 def test_rocm_stack_key_is_none_for_changes_cache_cannot_prebuild(rocm_pr, change):
     repo, base = rocm_pr
     _commit(repo, change)
-    assert buildkite_step.rocm_stack_key(base) is None
+    assert amd.rocm_stack_key(base) is None
+
+
+def test_rocm_base_cache_step_only_for_stack_changes_into_main(rocm_pr, monkeypatch):
+    repo, base = rocm_pr
+    _commit(
+        repo, lambda r: (r / "docker/Dockerfile.rocm_base").write_text("FROM new\n")
+    )
+    stack_diff = ["vllm/x.py", "docker/Dockerfile.rocm_base"]
+    monkeypatch.setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "releases/v1")
+    assert amd.rocm_base_cache_step(stack_diff, base) is None
+    monkeypatch.setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+    assert amd.rocm_base_cache_step(["vllm/x.py"], base) is None
+    assert amd.rocm_base_cache_step(stack_diff, None) is None
+
+    monkeypatch.setenv("VLLM_CI_BRANCH", "my-branch")
+    step = buildkite_step.BuildkiteCommandStep(
+        **amd.rocm_base_cache_step(stack_diff, base)
+    )
+
+    assert step.key == "rocm-base-image-cache"
+    assert step.env == {
+        "BUILDKITE_SKIP_CHECKOUT": "true",
+        "ROCM_STACK_KEY": amd.rocm_stack_key(base),
+    }
+    assert (
+        "ci-infra/my-branch/buildkite/scripts/rocm-base-image-cache.sh"
+        in (step.commands[0])
+    )
+    # Nothing for `buildkite-agent pipeline upload` to interpolate.
+    assert "$" not in "".join(step.commands)
 
 
 @pytest.mark.parametrize(
     ("code", "status", "annotated"),
     [("200", 0, False), ("404", 1, True), ("429", 75, False), ("000", 75, False)],
 )
-def test_rocm_base_cache_step_asks_docker_hub_for_the_key(
+def test_rocm_base_cache_script_asks_docker_hub_for_the_key(
     tmp_path, code, status, annotated
 ):
-    (step,) = buildkite_step.create_rocm_base_cache_group_step("0123456789abcdef").steps
-    assert step.key == "rocm-base-image-cache" and step.env == {
-        "BUILDKITE_SKIP_CHECKOUT": "true"
-    }
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "curl").write_text(
@@ -959,16 +988,16 @@ def test_rocm_base_cache_step_asks_docker_hub_for_the_key(
     )
     for tool in bin_dir.iterdir():
         tool.chmod(0o755)
-    # What the agent runs after `pipeline upload` turns $$ back into $.
     out = subprocess.run(
-        ["bash", "-e", "-c", step.commands[0].replace("$$", "$")],
-        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        ["bash", str(ROCM_CACHE_SCRIPT)],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "ROCM_STACK_KEY": "0123456789abcdef",
+        },
         capture_output=True,
         text=True,
     )
     assert out.returncode == status, out.stdout + out.stderr
-    assert (
-        "rocm/vllm-ci/tags/stack-rocm-0123456789abcdef"
-        in (tmp_path / "url").read_text()
-    )
+    assert "vllm-ci/tags/stack-rocm-0123456789abcdef" in (tmp_path / "url").read_text()
     assert (tmp_path / "annotated").exists() == annotated

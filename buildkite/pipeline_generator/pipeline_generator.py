@@ -7,11 +7,18 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import AMD_ALWAYS_RUN_STEP_KEYS, is_amd_device, normalize_amd_depends_on
+from amd import (
+    AMD_ALWAYS_RUN_STEP_KEYS,
+    ROCM_BASE_CACHE_GROUP,
+    is_amd_device,
+    normalize_amd_depends_on,
+    rocm_base_cache_step,
+)
 from buildkite_step import (
     AMD_GROUP,
     COLLECT_GROUP,
     PRECOMMIT_GROUP,
+    BuildkiteCommandStep,
     BuildkiteGroupStep,
     _amd_mirror_should_run,
     _generate_step_key,
@@ -24,9 +31,6 @@ from buildkite_step import (
     kernrec_amd_enabled,
     kernrec_enabled,
     create_precommit_group_step,
-    create_rocm_base_cache_group_step,
-    rocm_stack_key,
-    ROCM_STACK_INPUTS,
     split_deferred_steps,
 )
 from constants import AgentQueue
@@ -187,16 +191,17 @@ class PipelineGenerator:
                     global_config["github_repo_name"], global_config["commit"]
                 ),
             )
-            if (
-                os.getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH") == "main"
-                and global_config["merge_base_commit"]
-                and any(p in ROCM_STACK_INPUTS for p in global_config["list_file_diff"])
-            ):
-                key = rocm_stack_key(global_config["merge_base_commit"])
-                if key:
-                    buildkite_group_steps.append(create_rocm_base_cache_group_step(key))
-                else:
-                    print("ROCm base image change that /amd-ci cache cannot pre-build")
+            rocm_cache = rocm_base_cache_step(
+                global_config.get("list_file_diff") or [],
+                global_config.get("merge_base_commit"),
+            )
+            if rocm_cache:
+                buildkite_group_steps.append(
+                    BuildkiteGroupStep(
+                        group=ROCM_BASE_CACHE_GROUP,
+                        steps=[BuildkiteCommandStep(**rocm_cache)],
+                    )
+                )
 
         if early_keys:
             # Already in the build: a second upload of a key would fail it.
