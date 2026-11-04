@@ -28,7 +28,9 @@ Two scripts install uv: `bootstrap.sh` at the start of a build, and `ci_selector
 
 A uv already on the agent's `PATH` is used only if it reports the pinned version, so nothing is downloaded on a machine that already has the right one, and an agent cannot quietly decide the version for us. `VLLM_CI_UV_BIN` names a uv to run instead, for a rerun by hand or a test, and is taken at its word.
 
-Three paths are still outside this. `bootstrap-intel.sh` installs the generator's dependencies with `pip` and no pins. `bootstrap-amd.sh` installs minijinja by piping an installer to a shell, at a pinned version but no checksum, and the AMD pipeline is a Jinja template rather than a Python one. `ci_selector/recorders/kernrec/collect.sh` runs its table builder under the agent's own `python3`. None of them is on the lockfile.
+`bootstrap.sh` also hands its uv to the generator as `VLLM_CI_UV_BIN`, for the selector that `pipeline_generator/selector_gate.py` runs.
+
+Four paths are still outside this. A generator started any other way has no uv handed to it, so `selector_gate.py` takes the one on `PATH` at any version, or installs the latest. It still runs on the lockfile, but on any 3.12 rather than `.python-version`, which a uv that old may not be able to download. `bootstrap-intel.sh` installs the generator's dependencies with `pip` and no pins. `bootstrap-amd.sh` installs minijinja by piping an installer to a shell, at a pinned version but no checksum, and the AMD pipeline is a Jinja template rather than a Python one. `ci_selector/recorders/kernrec/collect.sh` runs its table builder under the agent's own `python3`. None of them is on the lockfile.
 
 ## Automatic test sharding
 

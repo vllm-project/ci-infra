@@ -106,6 +106,14 @@ def test_no_script_installs_whatever_uv_is_current(path):
     )
 
 
+def test_bootstrap_hands_the_generator_its_uv():
+    """The selector runs under the generator, and would otherwise find its own."""
+    text = re.sub(r"\\\n\s*", " ", SOURCE.read_text())
+    assert re.search(r'VLLM_CI_UV_BIN="\$\{UV_BIN\}" "\$\{GENERATOR_BIN\}"', text), (
+        f"{SOURCE.relative_to(REPO)} does not pass its uv to the generator"
+    )
+
+
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
 def test_every_workflow_sets_up_the_pinned_uv(path, pinned):
     text = path.read_text()

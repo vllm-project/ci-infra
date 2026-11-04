@@ -143,7 +143,7 @@ main() {
     # A committed one would skip CI on every build.
     rm -f "${DOCS_ONLY_MARKER}"
 
-    "${GENERATOR_BIN}" \
+    VLLM_CI_UV_BIN="${UV_BIN}" "${GENERATOR_BIN}" \
         --pipeline_config_path "${PIPELINE_CONFIG_PATH}" \
         --output_file_path "${OUTPUT_PIPELINE_PATH}" ||
         fail "Pipeline generation failed, see the output above."

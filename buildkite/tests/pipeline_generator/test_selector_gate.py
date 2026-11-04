@@ -374,3 +374,54 @@ def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkey
     assert record["selector_changed_steps"] == ["nightly-changed"]
     assert record["selector_keys"] == ["nightly-changed", "test-b"]
     assert record["selector_optional_dropped"] == ["nightly-other"]
+
+
+def test_uses_the_uv_bootstrap_hands_it(monkeypatch, tmp_path):
+    monkeypatch.setenv("VLLM_CI_UV_BIN", "/pinned/uv")
+    monkeypatch.setattr(selector_gate.shutil, "which", lambda name: "/agent/uv")
+    assert selector_gate._uv(str(tmp_path)) == "/pinned/uv"
+
+
+def test_without_a_handed_uv_takes_the_agents(monkeypatch, tmp_path):
+    monkeypatch.delenv("VLLM_CI_UV_BIN", raising=False)
+    monkeypatch.setattr(selector_gate.shutil, "which", lambda name: "/agent/uv")
+    assert selector_gate._uv(str(tmp_path)) == "/agent/uv"
+
+
+def _uv_commands(monkeypatch, tmp_path, uv):
+    commands = []
+
+    def run(cmd, cwd=None, timeout=600):
+        commands.append(cmd)
+        return "c" * 40 + "\n"
+
+    def subprocess_run(cmd, **kw):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"keys": []}', stderr="")
+
+    monkeypatch.setattr(selector_gate, "_run", run)
+    monkeypatch.setattr(selector_gate.subprocess, "run", subprocess_run)
+    monkeypatch.setattr(selector_gate, "_latest", lambda recorder: {})
+    monkeypatch.setattr(selector_gate.tempfile, "mkdtemp", lambda **kw: str(tmp_path))
+
+    selector_gate.run_ci_select("/repo", "base", "head", "vllm_ci")
+
+    uv_commands = [cmd for cmd in commands if cmd[0] == uv]
+    assert len(uv_commands) == 3
+    return uv_commands
+
+
+def test_a_handed_uv_takes_the_lockfile_and_the_workspace_python(monkeypatch, tmp_path):
+    monkeypatch.setenv("VLLM_CI_UV_BIN", "/pinned/uv")
+    for cmd in _uv_commands(monkeypatch, tmp_path, "/pinned/uv"):
+        assert "--locked" in cmd
+        assert "--python" not in cmd
+
+
+def test_an_agents_uv_takes_the_lockfile_and_any_312(monkeypatch, tmp_path):
+    """It may be too old to download the patch release .python-version names."""
+    monkeypatch.delenv("VLLM_CI_UV_BIN", raising=False)
+    monkeypatch.setattr(selector_gate.shutil, "which", lambda name: "/agent/uv")
+    for cmd in _uv_commands(monkeypatch, tmp_path, "/agent/uv"):
+        assert "--locked" in cmd
+        assert cmd[cmd.index("--python") + 1] == "3.12"

@@ -21,8 +21,9 @@ the Buildkite API alone: what the selector chose, what today's rules would
 have run, what was scheduled, and which recording it decided from.
 
 Python 3.9: the generator runs on the small CPU queue's python3. The selector
-needs 3.12 and its own dependencies, so it runs through uv from a shallow
-checkout of ci-infra at `VLLM_CI_BRANCH`, as the collect steps do.
+needs 3.12 and its own dependencies, so it runs through uv, on the workspace's
+lockfile, from a shallow checkout of ci-infra at `VLLM_CI_BRANCH`, as the collect
+steps do.
 """
 
 import json
@@ -35,6 +36,7 @@ import urllib.request
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
 
 SELECTOR_ENV_VAR = "VLLM_CI_SELECTOR"
+UV_BIN_ENV_VAR = "VLLM_CI_UV_BIN"
 DECISION_FILE = "ci_selector_decision.json"
 RECORD_VERSION = 1
 CI_INFRA_REPO = "https://github.com/vllm-project/ci-infra.git"
@@ -239,6 +241,11 @@ def _run(cmd: List[str], cwd: Optional[str] = None, timeout: float = 600) -> str
 
 
 def _uv(workdir: str) -> str:
+    # bootstrap.sh hands over the uv it pinned. Nothing else starts the generator
+    # with one, so the other paths still take what they find.
+    handed = os.getenv(UV_BIN_ENV_VAR)
+    if handed:
+        return handed
     found = shutil.which("uv")
     if found:
         return found
@@ -290,7 +297,12 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     ci_infra_commit = _run(["git", "-C", checkout, "rev-parse", "HEAD"]).strip()
     project = os.path.join(checkout, "buildkite", "ci_selector")
     uv = _uv(workdir)
-    run = [uv, "run", "--quiet", "--no-dev", "--python", "3.12", "--project", project]
+    # --locked so the lockfile picks the versions. A handed uv reads the
+    # workspace's .python-version. One found on the agent may be too old to
+    # download that patch release, which would turn the selector off, so it
+    # takes any 3.12.
+    python = [] if os.getenv(UV_BIN_ENV_VAR) else ["--python", "3.12"]
+    run = [uv, "run", "--quiet", "--locked", "--no-dev", *python, "--project", project]
     data = os.path.join(workdir, "data")
     explain_path = os.path.join(workdir, "explain.json")
     _run(run + ["ci-fetch-function-record", "--out", data], timeout=left())
