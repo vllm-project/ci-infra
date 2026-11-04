@@ -36,7 +36,7 @@ if [[ "${AITER_NIGHTLY}" == "1" ]]; then
     DOCS_ONLY_DISABLE=1
 fi
 
-# ROCm base image cache: the main build vLLM's `/amd-ci cache` starts with ROCM_PROMOTE_PR/SHA/IMAGES.
+# ROCm base image cache: the main build vLLM's cache-rocm-base-image label starts with ROCM_PROMOTE_PR/SHA/IMAGES.
 ROCM_PROMOTE=""
 if [[ -n "${ROCM_PROMOTE_PR:-}" ]]; then
     ROCM_PROMOTE=run
