@@ -149,6 +149,23 @@ def test_on_leaves_skipped_steps_alone(monkeypatch):
     assert any("kernrec" in c for c in _commands(_render(_gpu_step())))
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "benchmarks-cli-test",
+        "pipeline-context-parallelism-4-gpus",
+        "plugin-tests-2-gpus",
+    ],
+)
+def test_on_leaves_cupti_sensitive_steps_alone(monkeypatch, key):
+    """Steps whose tests need CUPTI themselves (torch.profiler) or have no
+    memory margin for it are not recorded."""
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    rendered = _render(_gpu_step(key=key))
+    assert not any("kernrec" in c for c in _commands(rendered))
+    assert not _artifact_paths(rendered)
+
+
 def _rendered_groups(*steps):
     groups = {}
     for s in steps:

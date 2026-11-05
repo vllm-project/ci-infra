@@ -477,6 +477,18 @@ KERNREC_SKIP_STEPS = {
     # latent read of uninitialised memory or a race that CUPTI's allocations or
     # timing expose; back on once a kernel owner has looked.
     "quantization": "int4 per-token KV cache test fails under CUPTI",
+    # benchmarks/test_forward_cli.py runs `vllm bench forward --profile-dir`.
+    # Its torch.profiler (Kineto) gets no CUPTI activity while the recorder
+    # holds CUPTI: "No GPU activity recorded". Red in recording runs since #858
+    # armed kernrec on NVIDIA (nightly 98753 to 100007); 277/277 green on
+    # recorder-free per-commit main since Nov 1.
+    "benchmarks-cli-test": "bench forward profiler needs CUPTI",
+    "pipeline-context-parallelism-4-gpus": "bench forward profiler needs CUPTI",
+    # plugins_tests/test_colbert_query_io_processor_plugins.py starts an offline
+    # engine at gpu_memory_utilization 0.92 while the module's server is still
+    # up. The recorder's per-process CUPTI memory leaves 20.25 GiB free on L4
+    # against 20.27 GiB wanted. Red since 98753; 77/77 on per-commit main.
+    "plugin-tests-2-gpus": "colbert offline test has no L4 memory margin for CUPTI",
 }
 
 
