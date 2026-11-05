@@ -39,6 +39,8 @@ for mode in $modes; do
   touch "$case_dir/rocm/include/rocprofiler-sdk/rocprofiler.h"
   cp "$WORK/fixtures/sdk.so" "$case_dir/rocm/lib/librocprofiler-sdk.so"
   cp "$WORK/fixtures/tool.so" "$case_dir/cache/libkernrec.so"
+  cp "$HERE/kernrec_torch.py" "$case_dir/cache/kernrec_torch.py"
+  mkdir -p "$case_dir/site"
   [[ "$mode" != wrong-version ]] || cp "$WORK/fixtures/wrong-sdk.so" "$case_dir/rocm/lib/librocprofiler-sdk.so"
   [[ "$mode" != rocm10 ]] || cp "$WORK/fixtures/rocm10-sdk.so" "$case_dir/rocm/lib/librocprofiler-sdk.so"
   [[ "$mode" != missing-sdk ]] || rm "$case_dir/rocm/lib/librocprofiler-sdk.so"
@@ -67,7 +69,7 @@ CURL
   env -u KERNREC_ACTIVE_DIR -u VLLM_WORKER_MULTIPROC_METHOD -u VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS \
     CASE_DIR="$case_dir" MODE="$mode" TOOL_FIXTURE="$WORK/fixtures/tool.so" \
     PATH="$case_dir/bin:$PATH" CXX="$compiler" ROCM_PATH="$case_dir/rocm" \
-    KERNREC_CACHE_DIR="$case_dir/cache" KERNREC_SOURCE_DIR="$case_dir/source" \
+    KERNREC_CACHE_DIR="$case_dir/cache" KERNREC_SOURCE_DIR="$case_dir/source" KERNREC_SITE_DIR="$case_dir/site" \
     KERNREC_BACKEND="$backend" BUILDKITE_BUILD_CHECKOUT_PATH="$case_dir/other-checkout" \
     KERNREC_CHECKOUT_PATH="$case_dir/checkout" KERNREC_DISABLE="$disable" \
     BUILDKITE_JOB_ID=job BUILDKITE_STEP_KEY=step BUILDKITE_LABEL=$'quoted "label"\nline' \
@@ -132,7 +134,10 @@ elif mode == "cuda":
     assert initial["preload"] == previous_preload
     assert initial["worker_method"] is None
     assert initial["worker_shutdown"] == "30"
+    assert (root / "site/kernrec_torch.pth").read_text() == "import kernrec_torch\n"
+    assert (root / "site/kernrec_torch.py").read_text() == (root / "cache/kernrec_torch.py").read_text()
 else:
+    assert not (root / "site/kernrec_torch.pth").exists()
     assert final["collection_error"]
     assert initial["preload"] == previous_preload
     assert initial["tool"] == ("existing-profiler" if mode == "conflict" else "")

@@ -32,6 +32,14 @@ CUptiResult CUPTIAPI cuptiActivityEnable(CUpti_ActivityKind kind) {
   return enable_status;
 }
 
+static int disabled = 0, flushes = 0;
+
+CUptiResult CUPTIAPI cuptiActivityDisable(CUpti_ActivityKind kind) {
+  (void)kind;
+  disabled++;
+  return CUPTI_SUCCESS;
+}
+
 CUptiResult CUPTIAPI cuptiActivityGetNextRecord(uint8_t *buffer, size_t valid,
                                                CUpti_Activity **record) {
   (void)buffer;
@@ -53,6 +61,7 @@ CUptiResult CUPTIAPI cuptiActivityGetNumDroppedRecords(CUcontext context,
 
 CUptiResult CUPTIAPI cuptiActivityFlushAll(uint32_t flags) {
   (void)flags;
+  flushes++;
   return flush_status;
 }
 
@@ -83,7 +92,13 @@ int main(int argc, char **argv) {
   const char *mode = argv[2];
   if (!strcmp(mode, "register")) registration_status = CUPTI_ERROR_UNKNOWN;
   if (!strcmp(mode, "enable")) enable_status = CUPTI_ERROR_UNKNOWN;
+  if (!strcmp(mode, "released-pid")) {
+    char pid[32];
+    snprintf(pid, sizeof pid, "%ld", (long)getpid());
+    setenv("KERNREC_RELEASED_PID", pid, 1);
+  }
   assert(InitializeInjection() == 1);
+  if (!strcmp(mode, "released-pid")) assert(!g_armed && kernrec_release() == 0);
   assert(g_out != NULL);
   char path[4096];
   assert(snprintf(path, sizeof(path), "%s/kern.%ld.txt", argv[1], (long)getpid()) > 0);
@@ -115,7 +130,13 @@ int main(int argc, char **argv) {
     }
   }
   if (!strcmp(mode, "flush")) flush_status = CUPTI_ERROR_UNKNOWN;
+  if (!strcmp(mode, "release")) {
+    assert(kernrec_release() == 1 && disabled == 1 && flushes == 1);
+    assert(kernrec_release() == 0 && disabled == 1);
+  }
   at_exit();
+  if (!strcmp(mode, "release") || !strcmp(mode, "released-pid"))
+    assert(flushes == (strcmp(mode, "release") ? 0 : 1)); /* none at exit */
   FILE *input = fopen(path, "r");
   assert(input != NULL);
   char text[8192] = {0};
@@ -128,6 +149,8 @@ int main(int argc, char **argv) {
   else if (!strcmp(mode, "read")) assert(strstr(text, "# error=read-buffer"));
   else if (!strcmp(mode, "dropped-query")) assert(strstr(text, "# error=read-drop-count"));
   else if (!strcmp(mode, "flush")) assert(strstr(text, "# error=final-flush"));
+  else if (!strcmp(mode, "release") || !strcmp(mode, "released-pid"))
+    assert(strstr(text, "# error=released-to-profiler"));
   else if (!strcmp(mode, "names")) {
     assert(strstr(text, "# end records=3 unique=1 dropped=0 errors=0 unresolved=1\n"));
   } else if (!strcmp(mode, "drops")) {
