@@ -67,6 +67,7 @@ RULES = frozenset(
         "added-benchmark",
         "added-head-closure",
         "added-native-source",
+        "cmake-sources",
         "inert",
         "renamed",
         "rust",

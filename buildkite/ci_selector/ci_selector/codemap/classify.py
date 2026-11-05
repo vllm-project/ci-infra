@@ -51,6 +51,7 @@ from ..handwritten import (
 )
 from . import (
     build_map,
+    cmake_sources,
     colocation,
     hardware,
     native_ops,
@@ -1508,6 +1509,82 @@ def _classify_native_addition(
     )
 
 
+def _classify_cmake_edit(
+    state: RepoState, path: str, ctx: DiffContext | None
+) -> Claim | None:
+    """An edit to CMakeLists.txt, routed as the csrc sources it reaches.
+
+    The file is copied into the image, so it otherwise runs everything. Its
+    own dataflow names the sources an edit reaches (`cmake_sources.py`), and
+    each routes as if it had changed: the map's claim for that source, and the
+    kernel record weighing its kernels, since the edit can change only how
+    they compile. An edit inside another family's build block (a HIP-only
+    arch filter) runs that family's steps. Anything the walk cannot follow
+    declines, and the file fails open as before.
+    """
+    if path != cmake_sources.CMAKELISTS or ctx is None or ctx.status.get(path) != "M":
+        return None
+    reach = cmake_sources.reach(state.repo, ctx.base, ctx.head)
+    if reach.inert:
+        return Claim(
+            "inert",
+            f"{path} changes only comments, blank lines or message(); "
+            "nothing compiles differently",
+        )
+    if reach.why_not:
+        return None
+    step_ids: set[str] = set()
+    test_files: set[str] = set()
+    droppable: set[str] = set()
+    held: set[str] = set()
+    droppable_tests = True
+    # The walk followed CUDA-guarded statements to every source, so a source
+    # the map leaves unclaimed (a header the build map cannot place) runs the
+    # CUDA build's steps, as the build-map-scoped fail-open does, not
+    # everything: the kernel record can still clear those.
+    cuda_steps = _build_map_allowed(state, frozenset({build_map.CUDA}))
+    for source in sorted(reach.sources):
+        sub = _classify(state, source, None)
+        if sub.run_all:
+            step_ids |= cuda_steps
+            held |= cuda_steps
+            continue
+        step_ids |= sub.step_ids
+        test_files |= sub.test_files
+        droppable |= sub.droppable_step_ids
+        held |= sub.step_ids - sub.droppable_step_ids
+        droppable_tests = droppable_tests and (
+            sub.droppable_test_files or not sub.test_files
+        )
+    if reach.other_families:
+        family_steps = _build_map_allowed(state, reach.other_families)
+        step_ids |= family_steps
+        held |= family_steps
+    names = sorted(reach.sources)
+    shown = ", ".join(names[:4]) + (
+        f" and {len(names) - 4} more" if len(names) > 4 else ""
+    )
+    detail = f"{path} edits only the build of {shown or 'no CUDA source'}"
+    if reach.other_families:
+        detail += (
+            f"; and {sorted(reach.other_families)}-only blocks, running that family"
+        )
+    # The record weighs the sources in place of the file. A family-only block
+    # is something no kernel silence can speak to, so the file itself stays
+    # among the evidence and holds every step it reached.
+    evidence = set(reach.sources) | ({path} if reach.other_families else set())
+    return Claim(
+        "cmake-sources",
+        detail,
+        step_ids=step_ids,
+        test_files=test_files,
+        droppable_step_ids=(droppable & step_ids) - held,
+        droppable_test_files=droppable_tests,
+        image_union_exempt=True,
+        evidence_paths=frozenset(evidence),
+    )
+
+
 def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Claim:
     configs = [p.config for p in state.pipelines]
     image = _classify_image_input(state, path)
@@ -1528,6 +1605,9 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
     native = _classify_native_addition(state, path, ctx)
     if native is not None:
         return native
+    cmake = _classify_cmake_edit(state, path, ctx)
+    if cmake is not None:
+        return cmake
     if path.startswith(".buildkite/"):
         return _classify_buildkite(state, path, configs, ctx)
     # A file exclusive to a family with no live steps has nothing to run. The

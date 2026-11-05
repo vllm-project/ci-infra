@@ -501,6 +501,8 @@ def _apply_kernel_record(
     if not getattr(state, "pipelines", None):
         raise RuntimeError("no pipeline state to resolve step keys against")
     changed = changed_paths(diff_files(repo, base, head))
+    selection, sources = _as_cmake_sources(selection)
+    changed += sorted(sources - set(changed))
     added: set[str] = set()
     dropped: set[str] = set()
     executes: set[str] = set()
@@ -548,6 +550,33 @@ def _apply_kernel_record(
     out.executes_by_kernels = executes
     out.steps |= out.added_by_kernels
     out.steps -= out.dropped_by_kernels
+
+
+def _as_cmake_sources(selection) -> tuple[object, set[str]]:
+    """The selection with a CMakeLists.txt edit standing for its sources.
+
+    `classify._classify_cmake_edit` routes such an edit as the csrc sources it
+    reaches. Here those sources vote as changed files, whole, since the edit
+    changed how every kernel in them compiles, and the steps the edit selected
+    count as selected by them. An edit that also reached another family's
+    build keeps the file itself among its evidence, which no kernel can clear.
+    """
+    import dataclasses
+
+    from .codemap.cmake_sources import CMAKELISTS
+
+    claims = [c for c in getattr(selection, "claims", ()) if c.rule == "cmake-sources"]
+    if not claims:
+        return selection, set()
+    sources = {p for c in claims for p in c.evidence_paths if p.startswith("csrc/")}
+    if any(CMAKELISTS in c.evidence_paths for c in claims):
+        return selection, sources
+    by_file = {p: list(steps) for p, steps in selection.selected_by_file.items()}
+    steps = by_file.pop(CMAKELISTS, [])
+    for source in sorted(sources):
+        seen = by_file.setdefault(source, [])
+        seen.extend(s for s in steps if s not in seen)
+    return dataclasses.replace(selection, selected_by_file=by_file), sources
 
 
 def _apply_library_record(
