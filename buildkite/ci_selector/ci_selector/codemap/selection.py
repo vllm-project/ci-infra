@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from . import hardware
 from .claim import OUTPUT_RULES, Claim
+from ..handwritten import AMD_ALWAYS_RUN_STEP_KEYS
 from .pipeline.step import Step
 from .pipeline.targets import StepTargets
 from .state import PipelineData, RepoState
@@ -219,13 +220,16 @@ def _apply_run_all(state: RepoState, sel: Selection) -> None:
 
 
 def _add_always_run(state: RepoState, sel: Selection) -> None:
+    """The AMD base steps the generator always runs. Not the image builds,
+    which it also always runs today: a selected step's depends_on brings in
+    its image, and step_keys.emit adds the CUDA image's smoke test and floor."""
     for pdata in state.pipelines:
         for step in pdata.steps:
-            if step.always_runs:
+            if step.always_runs and step.key in AMD_ALWAYS_RUN_STEP_KEYS:
                 # Not _record: an always-run step is never manual. All three
                 # lists must stay aligned, since consumers pair them by index.
                 sel.selected.setdefault(step.step_id, []).append(
-                    "always-run key shortcut (image-build*/AMD base)"
+                    "always-run key shortcut (AMD base)"
                 )
                 sel.selected_rules.setdefault(step.step_id, []).append("always-run")
                 sel.selected_paths.setdefault(step.step_id, []).append(None)
