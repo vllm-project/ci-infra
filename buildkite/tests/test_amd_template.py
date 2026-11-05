@@ -103,7 +103,7 @@ def test_amd_template_block_keys_and_dependencies(label, slug, dind, build_steps
     )
 
 
-def _render(list_file_diff="", aiter_nightly="0", ci_repo="rocm/vllm-ci"):
+def _render(list_file_diff="", aiter_nightly="0", ci_repo="rocm/vllm-ci", **extra):
     gpu_steps = [("MoE", "amdgfx942nightly"), ("MI250", "amdgfx90anightly")]
     rendered = minijinja.render_str(
         TEMPLATE,
@@ -115,6 +115,7 @@ def _render(list_file_diff="", aiter_nightly="0", ci_repo="rocm/vllm-ci"):
         aiter_nightly=aiter_nightly,
         amd_build_steps=BUILD_STEPS,
         ci_repo=ci_repo,
+        **extra,
         steps=[
             {
                 "label": label,
@@ -210,6 +211,18 @@ def test_aiter_nightly_build_sh_layout_has_no_overlay_step():
         if s.get("agents", {}).get("queue", "").startswith("amd_mi")
     }
     assert gpu_jobs == {"MoE"}
+
+
+def test_cache_build_runs_only_mains_build_sh():
+    steps = _render(rocm_promote="run", promote_pr="123")
+    assert list(steps) == ["rocm-base-image-cache"]
+    step = steps["rocm-base-image-cache"]
+    assert step["agents"] == {"queue": "amd-cpu"}
+    # Not the PR's amd.yaml: a fixed command, run in the main checkout.
+    assert step["commands"] == ["bash .buildkite/scripts/rocm/build.sh rocm promote"]
+    assert step["env"] == {"ROCM_CI_REPO": "rocm/vllm-ci"}
+    assert {"exit_status": 75, "limit": 1} in step["retry"]["automatic"]
+    assert "rocm-base-image-cache" not in _render()
 
 
 VLLM = "https://github.com/vllm-project/vllm.git"

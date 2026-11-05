@@ -43,6 +43,8 @@ def _context(**overrides):
         "ci_repo": "",
         "rocm_base_refresh_skip": "0",
         "rocm_base_refresh_force": "0",
+        "rocm_promote": "",
+        "promote_pr": "",
         "steps": STEPS,
         **overrides,
     }
