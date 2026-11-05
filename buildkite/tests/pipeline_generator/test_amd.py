@@ -865,3 +865,58 @@ def test_amd_mirror_parallelism_override(fake_global_config, amd_parallelism, ex
 )
 def test_is_amd_device(device, expected):
     assert is_amd_device(device) is expected
+
+
+def _mirrored_and_native(optional=False):
+    return [
+        Step(
+            label="Mirrored kernel test",
+            group="Kernels",
+            commands=["pytest tests/kernels"],
+            source_file_dependencies=["tests/kernels/"],
+            optional=optional,
+            mirror={"amd": {"device": "mi300_1"}},
+        ),
+        Step(
+            label="Native AMD test",
+            group="Kernels",
+            key="native-amd-kernels",
+            device="mi355_1",
+            commands=["pytest tests/amd"],
+            source_file_dependencies=["tests/amd/"],
+        ),
+    ]
+
+
+def test_amd_run_all_runs_every_amd_step_and_no_cuda_step(fake_global_config):
+    """csrc/ moves from run_all_patterns to amd_run_all_patterns: the selector
+    narrows it on CUDA, while AMD, not selected yet, keeps running everything."""
+    fake_global_config["list_file_diff"] = ["csrc/attention/attention_kernels.cu"]
+    fake_global_config["amd_run_all"] = True
+    mirrored, native = _mirrored_and_native()
+    amd_cfg = mirrored.mirror["amd"]
+    run = buildkite_step._step_should_run
+    assert not run(mirrored, fake_global_config["list_file_diff"]), "CUDA: its own deps"
+    effective = buildkite_step._get_amd_mirror_effective_step(mirrored, amd_cfg)
+    assert run(effective, fake_global_config["list_file_diff"]), "AMD mirror runs"
+    assert run(native, fake_global_config["list_file_diff"]), "native AMD runs"
+
+
+def test_amd_run_all_leaves_optional_amd_steps_optional(fake_global_config):
+    fake_global_config["list_file_diff"] = ["csrc/attention/attention_kernels.cu"]
+    fake_global_config["amd_run_all"] = True
+    (mirrored, _) = _mirrored_and_native(optional=True)
+    effective = buildkite_step._get_amd_mirror_effective_step(
+        mirrored, mirrored.mirror["amd"]
+    )
+    assert not buildkite_step._step_should_run(
+        effective, fake_global_config["list_file_diff"]
+    ), "as with run_all, an optional step stays for the nightly"
+
+
+def test_amd_run_all_off_keeps_dependency_rules(fake_global_config):
+    fake_global_config["list_file_diff"] = ["csrc/attention/attention_kernels.cu"]
+    (_, native) = _mirrored_and_native()
+    assert not buildkite_step._step_should_run(
+        native, fake_global_config["list_file_diff"]
+    )
