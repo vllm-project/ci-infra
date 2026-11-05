@@ -21,7 +21,9 @@ def _record(shard, ran, expected=None, position=0, finished=True, retry=0, at=1.
     }
 
 
-STEPS = {"k": [{"position": 0, "label": "Command (1/1)", "fallback": 0, "owners": [0, 1]}]}
+STEPS = {
+    "k": [{"position": 0, "label": "Command (1/1)", "fallback": 0, "owners": [0, 1]}]
+}
 
 
 def test_all_tests_ran():
@@ -93,6 +95,54 @@ def test_nothing_uploaded_is_unverified_not_clean():
     assert result["unverified"] and coverage.report([result])[0] == "warning"
 
 
+def test_a_test_two_shards_ran_is_a_duplicate_naming_both():
+    records = [_record(0, ["a", "b"], expected=["a", "b"]), _record(1, ["b"])]
+    [result] = coverage.compare(STEPS, records)
+    assert result["duplicated"] == {"b": [0, 1]} and result["missed"] == []
+
+
+def test_a_retried_shard_or_a_rerun_inside_one_shard_is_not_a_duplicate():
+    records = [
+        _record(0, ["a", "a"], expected=["a", "b"]),  # rerun of a flaky test
+        _record(1, ["b"], retry=0),
+        _record(1, ["b"], retry=1),  # the same shard retried
+    ]
+    assert coverage.compare(STEPS, records)[0]["duplicated"] == {}
+
+
+def test_a_duplicate_alone_is_a_warning_naming_the_test_and_its_shards():
+    records = [_record(0, ["a", "b"], expected=["a", "b"]), _record(1, ["b"])]
+    style, text = coverage.report(coverage.compare(STEPS, records))
+    assert style == "warning"
+    assert text == (
+        "### Tests that ran in more than one shard\n"
+        "**k**, Command (1/1):\n- `b`: shards 1, 2"
+    )
+
+
+def test_a_miss_stays_an_error_when_a_duplicate_is_also_listed():
+    records = [_record(0, ["a", "b"], expected=["a", "b", "c"]), _record(1, ["b"])]
+    style, text = coverage.report(coverage.compare(STEPS, records))
+    assert style == "error"
+    assert "- `c`" in text and "- `b`: shards 1, 2" in text
+
+
+def test_the_duplicate_list_is_capped_like_the_others():
+    many = [f"t{i}" for i in range(coverage.MAX_IDS_SHOWN + 2)]
+    records = [_record(0, many, expected=many), _record(1, many)]
+    _, text = coverage.report(coverage.compare(STEPS, records))
+    assert text.count(": shards 1, 2") == coverage.MAX_IDS_SHOWN
+    assert text.endswith("- and 2 more, listed in this job's log")
+
+
+def test_only_finished_shards_count_towards_a_duplicate():
+    records = [
+        _record(0, ["a", "b"], expected=["a", "b"]),
+        _record(1, ["b"], finished=False),
+    ]
+    assert coverage.compare(STEPS, records)[0]["duplicated"] == {}
+
+
 def test_latest_finished_attempt_wins_over_an_earlier_and_a_later_unfinished_one():
     records = [
         _record(0, ["a"], expected=["a", "b"]),
@@ -131,7 +181,9 @@ def test_contract_with_the_generator():
 
 def test_a_list_of_exactly_the_cap_has_no_more_line():
     expected = [f"t{i}" for i in range(coverage.MAX_IDS_SHOWN)]
-    [result] = coverage.compare(STEPS, [_record(0, [], expected=expected), _record(1, [])])
+    [result] = coverage.compare(
+        STEPS, [_record(0, [], expected=expected), _record(1, [])]
+    )
     assert "more" not in coverage.report([result])[1]
 
 
@@ -157,7 +209,9 @@ def test_commands_are_compared_apart():
 
 def test_the_annotation_caps_its_lists_and_points_at_the_log():
     expected = [f"t{i}" for i in range(coverage.MAX_IDS_SHOWN + 5)]
-    [result] = coverage.compare(STEPS, [_record(0, [], expected=expected), _record(1, [])])
+    [result] = coverage.compare(
+        STEPS, [_record(0, [], expected=expected), _record(1, [])]
+    )
     _, text = coverage.report([result])
     assert text.count("- `t") == coverage.MAX_IDS_SHOWN
     assert text.endswith("- and 5 more, listed in this job's log")
@@ -166,7 +220,9 @@ def test_the_annotation_caps_its_lists_and_points_at_the_log():
 def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
     folder = tmp_path / "x" / ".runtime-shard-coverage" / "job"
     folder.mkdir(parents=True)
-    (folder / "0.json").write_text(json.dumps(_record(0, ["a"], expected=["a", "gone"])))
+    (folder / "0.json").write_text(
+        json.dumps(_record(0, ["a"], expected=["a", "gone"]))
+    )
     (folder / "1.json").write_text(json.dumps(_record(1, [])))
     calls = []
 
@@ -214,7 +270,9 @@ def test_the_script_end_to_end_with_an_agent_on_the_path(tmp_path):
     """As the job runs it: a file of its own, with a real artifact tree."""
     records = tmp_path / "artifacts" / ".runtime-shard-coverage" / "job"
     records.mkdir(parents=True)
-    (records / "0.json").write_text(json.dumps(_record(0, ["a"], expected=["a", "gone"])))
+    (records / "0.json").write_text(
+        json.dumps(_record(0, ["a"], expected=["a", "gone"]))
+    )
     (records / "1.json").write_text(json.dumps(_record(1, [])))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
