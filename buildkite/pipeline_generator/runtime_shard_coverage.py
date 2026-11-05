@@ -6,8 +6,9 @@ Each shard of a runtime-sharded step records what it ran
 every test the command should run. This job compares them and posts one
 annotation: red for a miss, a test that no shard ran although every shard
 finished. Tests of a shard that didn't finish are listed apart, because the
-build is already red for that. Standard library only: it runs on a small CPU
-agent, fetched as a single file.
+build is already red for that. Yellow for a test that two finished shards both
+ran: it costs a shard's time but loses no test. Standard library only: it runs
+on a small CPU agent, fetched as a single file.
 """
 
 import glob
@@ -16,7 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
 ARTIFACTS = ".runtime-shard-coverage/*/*.json"
@@ -53,8 +54,9 @@ def compare(
     Returns:
         One entry per command: the step, label, `tests` (how many it should
         run), `missed` (test IDs), `unfinished` (shards that didn't finish),
-        `not_run` (test IDs lost to them) and `unverified` (why it can't be
-        checked, or None).
+        `not_run` (test IDs lost to them), `duplicated` (each test ID that
+        more than one finished shard ran, to those shards) and `unverified`
+        (why it can't be checked, or None).
     """
     latest = latest_records(records)
     results = []
@@ -63,12 +65,15 @@ def compare(
             position = command["position"]
             ran = set()
             unfinished = []
+            shards_of = {}  # test ID -> the finished shards that ran it
             for shard in command["owners"]:
                 record = latest.get((step_key, position, shard))
                 if record is None or not record["finished"]:
                     unfinished.append(shard)
                 else:
                     ran.update(record["ran"])
+                    for nodeid in set(record["ran"]):
+                        shards_of.setdefault(nodeid, []).append(shard)
             # The expected list is written before any test runs, so a shard
             # that died still has it.
             first = latest.get((step_key, position, command["fallback"]))
@@ -80,6 +85,11 @@ def compare(
                 "missed": [],
                 "unfinished": unfinished,
                 "not_run": [],
+                "duplicated": {
+                    nodeid: shards
+                    for nodeid, shards in sorted(shards_of.items())
+                    if len(shards) > 1
+                },
                 "unverified": None,
             }
             if expected is None:
@@ -93,8 +103,15 @@ def compare(
     return results
 
 
-def _ids(ids: List[str]) -> List[str]:
-    lines = [f"- `{nodeid}`" for nodeid in ids[:MAX_IDS_SHOWN]]
+def _ids(ids: List[str], shards_of: Optional[Dict[str, List[int]]] = None) -> List[str]:
+    lines = []
+    for nodeid in ids[:MAX_IDS_SHOWN]:
+        line = f"- `{nodeid}`"
+        if shards_of:
+            line += ": shards " + ", ".join(
+                str(shard + 1) for shard in shards_of[nodeid]
+            )
+        lines.append(line)
     if len(ids) > MAX_IDS_SHOWN:
         lines.append(f"- and {len(ids) - MAX_IDS_SHOWN} more, listed in this job's log")
     return lines
@@ -110,10 +127,13 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
     missed = [result for result in results if result["missed"]]
     unfinished = [result for result in results if result["unfinished"]]
     unverified = [result for result in results if result["unverified"]]
+    duplicated = [result for result in results if result["duplicated"]]
     lines = []
     if missed:
         count = sum(len(result["missed"]) for result in missed)
-        lines.append(f"### :x: {count} tests ran in no shard, though every shard finished")
+        lines.append(
+            f"### :x: {count} tests ran in no shard, though every shard finished"
+        )
         for result in missed:
             lines.append(f"**{result['step']}**, {result['label']}:")
             lines.extend(_ids(result["missed"]))
@@ -123,10 +143,18 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
             shards = ", ".join(str(shard + 1) for shard in result["unfinished"])
             lines.append(f"**{result['step']}**, {result['label']}: shard {shards}")
             lines.extend(_ids(result["not_run"]))
+    if duplicated:
+        # Costs a shard's time and can hide order-dependent tests, but loses none.
+        lines.append("### Tests that ran in more than one shard")
+        for result in duplicated:
+            lines.append(f"**{result['step']}**, {result['label']}:")
+            lines.extend(_ids(list(result["duplicated"]), result["duplicated"]))
     if unverified:
         lines.append("### Couldn't check")
         for result in unverified:
-            lines.append(f"**{result['step']}**, {result['label']}: {result['unverified']}")
+            lines.append(
+                f"**{result['step']}**, {result['label']}: {result['unverified']}"
+            )
     if lines:
         style = "error" if missed else "warning"
         return style, "\n".join(lines)
