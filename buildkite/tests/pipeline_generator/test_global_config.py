@@ -5,6 +5,7 @@ import pytest
 
 from buildkite.pipeline_generator.global_config import (
     ONLY_STEP_KEYS_ENV_VAR,
+    _matches_run_all_patterns,
     _parse_only_step_keys,
     _parse_platform,
     _validate_pipeline_config,
@@ -209,3 +210,13 @@ def test_validate_pipeline_config_invalid_repo_traversal():
     with patch("os.path.exists", return_value=True):
         with pytest.raises(ValueError, match="Invalid github_repo_name"):
             _validate_pipeline_config(config)
+
+
+def test_amd_run_all_patterns_use_the_shared_excludes():
+    patterns, excludes = ["csrc/"], ["csrc/cpu/", "csrc/rocm/"]
+    match = _matches_run_all_patterns
+    assert match(["csrc/attention/a.cu"], patterns, excludes)
+    assert not match(["csrc/cpu/a.cpp"], patterns, excludes)
+    assert not match(["csrc/rocm/a.cu"], patterns, excludes)
+    assert not match(["vllm/a.py"], patterns, excludes)
+    assert not match(["csrc/a.cu"], None, excludes), "no patterns, no match"
