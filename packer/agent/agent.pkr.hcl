@@ -23,10 +23,6 @@ source "amazon-ebs" "agent" {
   ssh_interface               = "private_ip"
   ssh_username                = "ec2-user"
   ssh_timeout                 = "15m"
-  tags = {
-    BuildkiteAgentVersion = "3.138.2"
-    SourceAMI             = var.source_ami
-  }
 }
 build {
   sources = ["source.amazon-ebs.agent"]
