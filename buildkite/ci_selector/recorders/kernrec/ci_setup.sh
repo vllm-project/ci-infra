@@ -84,6 +84,32 @@ kernrec_finish() {
   fi
 }
 
+# CUPTI has one activity client per process. kernrec_torch.py makes the
+# recorder step aside when a CUDA torch.profiler starts; without it that
+# profiler records nothing. Best effort: on failure the step still records.
+kernrec_install_torch_hook() {
+  local dir="$1" base="$2"
+  if [ ! -s "$dir/kernrec_torch.py" ]; then
+    curl -sSfL --retry 3 --max-time 60 -o "$dir/kernrec_torch.py.tmp" "$base/kernrec_torch.py" \
+      && mv "$dir/kernrec_torch.py.tmp" "$dir/kernrec_torch.py" || return 1
+  fi
+  KERNREC_TORCH_HOOK="$dir/kernrec_torch.py" "${KERNREC_PYTHON:-python3}" - <<'PY'
+import os
+import shutil
+import site
+import sys
+
+target = os.environ.get("KERNREC_SITE_DIR") or next(
+    (p for p in site.getsitepackages() if os.path.isdir(p)), None
+)
+if not target:
+    sys.exit(1)
+shutil.copyfile(os.environ["KERNREC_TORCH_HOOK"], os.path.join(target, "kernrec_torch.py"))
+with open(os.path.join(target, "kernrec_torch.pth"), "w") as pth:
+    pth.write("import kernrec_torch\n")
+PY
+}
+
 kernrec_setup() {
   local branch="${KERNREC_BRANCH:-${VLLM_CI_BRANCH:-main}}"
   local base="https://raw.githubusercontent.com/vllm-project/ci-infra/${branch}/buildkite/ci_selector/recorders/kernrec"
@@ -134,6 +160,8 @@ PY
       fi
       export CUDA_INJECTION64_PATH="$dir/libkernrec.so"
       export VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS="${VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS:-30}"
+      kernrec_install_torch_hook "$dir" "$base" \
+        || echo "kernrec: torch.profiler hand-off not installed; a CUDA profiler in this step will see no GPU activity" >&2
       ;;
     rocm)
       # Torch import initializes the SDK before vLLM's first device call.

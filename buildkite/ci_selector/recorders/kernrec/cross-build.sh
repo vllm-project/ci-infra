@@ -83,6 +83,7 @@ with open("libkernrec.so", "rb") as f:
                 if s["st_info"]["bind"] == "STB_GLOBAL" and s["st_shndx"] != "SHN_UNDEF"]
     assert e["e_machine"] == "EM_X86_64", e["e_machine"]
     assert "InitializeInjection" in exported, exported
+    assert "kernrec_release" in exported, exported
     assert any(n.startswith("libcupti.so.") for n in needed), needed
     print("libkernrec.so ok: needs", needed, "exports", exported)
 PY
