@@ -503,6 +503,7 @@ def _apply_kernel_record(
     changed = changed_paths(diff_files(repo, base, head))
     selection, sources = _as_cmake_sources(selection)
     changed += sorted(sources - set(changed))
+    protected = _protected_from_kernel_drops(out) | _held_by_cmake(selection)
     added: set[str] = set()
     dropped: set[str] = set()
     executes: set[str] = set()
@@ -522,7 +523,7 @@ def _apply_kernel_record(
             held=lambda path: csrc_held_steps(state, path),
             stale=stale,
             allow_drops=pair.matched or bool(os.environ.get(KERNEL_UNMATCHED_ENV)),
-            protected=_protected_from_kernel_drops(out),
+            protected=protected,
             python_cleared=frozenset(out.cleared_by_coverage),
             attribute=_kernel_attribution(repo, base, head, attribution_mode),
             declarations=_declaration_attribution(
@@ -552,14 +553,33 @@ def _apply_kernel_record(
     out.steps -= out.dropped_by_kernels
 
 
+def _held_by_cmake(selection) -> frozenset[str]:
+    """Steps a CMakeLists.txt edit selected that no kernel silence may clear.
+
+    `classify._classify_cmake_edit` keeps the file among the evidence when the
+    edit can make a source compile where it did not (anything but dropping
+    arches), or reaches another family's build. A step that launched none of
+    the sources' kernels says nothing then: it may be the one that starts to.
+    """
+    from .codemap.cmake_sources import CMAKELISTS
+
+    return frozenset(
+        step
+        for c in getattr(selection, "claims", ())
+        if c.rule == "cmake-sources" and CMAKELISTS in c.evidence_paths
+        for step in c.step_ids
+    )
+
+
 def _as_cmake_sources(selection) -> tuple[object, set[str]]:
     """The selection with a CMakeLists.txt edit standing for its sources.
 
     `classify._classify_cmake_edit` routes such an edit as the csrc sources it
     reaches. Here those sources vote as changed files, whole, since the edit
     changed how every kernel in them compiles, and the steps the edit selected
-    count as selected by them. An edit that also reached another family's
-    build keeps the file itself among its evidence, which no kernel can clear.
+    count as selected by them. An edit that may compile more, or reached
+    another family's build, keeps the file itself among its evidence, which
+    no kernel can clear (`_held_by_cmake`).
     """
     import dataclasses
 

@@ -18,7 +18,7 @@ from ci_selector.codemap.claim import Claim
 from ci_selector.codemap.cmake_sources import reach
 from ci_selector.codemap.selection import Selection
 from ci_selector.codemap.state import DiffContext
-from ci_selector.decide import _as_cmake_sources
+from ci_selector.decide import _as_cmake_sources, _held_by_cmake
 
 CMAKE = """\
 set(VLLM_EXT_SRC
@@ -96,11 +96,15 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-def _edit(repo: Path, old: str, new: str) -> tuple[str, str]:
+def _edit(repo: Path, old: str, new: str, *more: str) -> tuple[str, str]:
+    """One commit replacing `old` with `new`, and each further pair in `more`."""
     base = _git(repo, "rev-parse", "HEAD")
     text = (repo / "CMakeLists.txt").read_text()
-    assert old in text
-    (repo / "CMakeLists.txt").write_text(text.replace(old, new, 1))
+    pairs = [(old, new), *zip(more[::2], more[1::2])]
+    for a, b in pairs:
+        assert a in text
+        text = text.replace(a, b, 1)
+    (repo / "CMakeLists.txt").write_text(text)
     _git(repo, "commit", "-q", "-am", "edit")
     return base, _git(repo, "rev-parse", "HEAD")
 
@@ -115,6 +119,106 @@ def test_an_arch_list_reaches_the_sources_it_compiles(repo: Path):
         "csrc/marlin/repack.cu",
     }
     assert not r.why_not and not r.other_families
+    assert r.only_removes_arches
+
+
+def test_an_added_arch_may_compile_more(repo: Path):
+    r = reach(repo, *_edit(repo, '"8.0;12.0f"', '"8.0;10.0;12.0f"'))
+    assert "csrc/marlin/marlin.cu" in r.sources
+    assert not r.only_removes_arches
+
+
+GUARDED = (
+    "  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)\n"
+    '    cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;12.0f" "${CUDA_ARCHS}")\n'
+    "  else()\n"
+    '    cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;12.0a" "${CUDA_ARCHS}")\n'
+    "  endif()\n"
+)
+FLAT = '  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;12.0f" "${CUDA_ARCHS}")\n'
+
+
+@pytest.mark.parametrize(
+    "new, removes",
+    [
+        # vllm#65540: drop the SM12x cubins, and the compiler guard with them.
+        ('  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0" "${CUDA_ARCHS}")\n', True),
+        # 12.0f was only in one arm: CUDA < 13 now compiles it.
+        (FLAT, False),
+        # Same arches, but intersected with another list.
+        ('  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0" "${SM_ARCHS}")\n', False),
+    ],
+    ids=["drops-arches-and-guard", "arch-from-one-arm", "other-arguments"],
+)
+def test_collapsing_a_guarded_arch_list(repo: Path, new: str, removes: bool):
+    _edit(repo, FLAT, GUARDED)
+    r = reach(repo, *_edit(repo, GUARDED, new))
+    assert r.sources and r.only_removes_arches is removes
+
+
+def test_an_arch_list_moved_out_of_its_guard_may_compile_more(repo: Path):
+    """Fewer arches, but now set when ENABLE_MARLIN is off, where it was not."""
+    _edit(repo, FLAT, "  if(ENABLE_MARLIN)\n  " + FLAT + "  endif()\n")
+    r = reach(
+        repo,
+        *_edit(
+            repo,
+            "  if(ENABLE_MARLIN)\n  " + FLAT + "  endif()\n",
+            "  if(ENABLE_MARLIN)\n  endif()\n" + FLAT.replace('"8.0;12.0f"', '"8.0"'),
+        ),
+    )
+    assert r.sources and not r.only_removes_arches
+
+
+def test_dropping_a_guard_around_kept_code_may_compile_more(repo: Path):
+    r = reach(
+        repo,
+        *_edit(
+            repo,
+            '"8.0;12.0f"',
+            '"8.0"',
+            '  if(TOPK_ARCHS)\n    list(APPEND VLLM_EXT_SRC "csrc/topk.cu")\n',
+            '    list(APPEND VLLM_EXT_SRC "csrc/topk.cu")\n',
+            "    target_compile_definitions(_C PRIVATE VLLM_ENABLE_TOPK=1)\n  endif()\n",
+            "    target_compile_definitions(_C PRIVATE VLLM_ENABLE_TOPK=1)\n",
+        ),
+    )
+    assert "csrc/topk.cu" in r.sources and not r.only_removes_arches
+
+
+def test_a_moved_endif_reaches_the_statements_it_moves(repo: Path):
+    """Moving the Marlin block's endif() past the topk block nests topk under
+    MARLIN_ARCHS: git diffs it as two endif() lines and nothing else."""
+    topk = (
+        '  cuda_archs_loose_intersection(TOPK_ARCHS "9.0" "${CUDA_ARCHS}")\n'
+        "  if(TOPK_ARCHS)\n"
+        '    list(APPEND VLLM_EXT_SRC "csrc/topk.cu")\n'
+        "    target_compile_definitions(_C PRIVATE VLLM_ENABLE_TOPK=1)\n"
+        "  endif()\n"
+    )
+    base, head = _edit(repo, "  endif()\n" + topk, topk + "  endif()\n")
+    diff = _git(repo, "diff", "-U0", base, head)
+    assert [line for line in diff.splitlines() if line[:1] in "+-"][2:] == [
+        "-  endif()",
+        "+  endif()",
+    ]
+    r = reach(repo, base, head)
+    assert not r.inert and not r.why_not
+    assert {"csrc/topk.cu", "csrc/marlin/marlin.cu"} <= r.sources
+    assert not r.only_removes_arches
+
+
+def test_an_edit_inside_a_flags_list_is_not_a_source_edit(repo: Path):
+    """An inner line of a multi-line list stands for itself only when the list
+    names sources. A flags list reaches the extension's COMPILE_FLAGS, which
+    declines, even beside an edit the walk can follow."""
+    _edit(
+        repo,
+        "define_extension_target(",
+        'list(APPEND VLLM_GPU_FLAGS\n  "-DA=1"\n  "-DB=1")\ndefine_extension_target(',
+    )
+    r = reach(repo, *_edit(repo, '"-DB=1"', '"-DB=2"', '"8.0;12.0f"', '"8.0"'))
+    assert r.why_not and not r.sources
 
 
 def test_a_line_edited_inside_a_source_list_reaches_that_item(repo: Path):
@@ -194,6 +298,33 @@ def test_the_claim_routes_as_its_sources(repo: Path, monkeypatch):
     assert claim.droppable_step_ids == {"a"}
     assert claim.evidence_paths == frozenset(subs)
     assert claim.image_union_exempt, "else every image consumer comes back"
+
+
+def test_an_edit_that_may_compile_more_holds_every_step(repo: Path, monkeypatch):
+    """A step that never launched Marlin may be the one that starts to once
+    its arch is added, so the kernel record may clear none of them."""
+    base, head = _edit(repo, '"8.0;12.0f"', '"8.0;10.0;12.0f"')
+    sub = Claim("fail-open", "m", step_ids={"a", "b"}, droppable_step_ids={"a"})
+    monkeypatch.setattr(classify, "_classify", lambda state, p, ctx: sub)
+    monkeypatch.setattr(classify, "_build_map_allowed", lambda state, fams: set())
+    claim = classify._classify_cmake_edit(
+        _state(repo), "CMakeLists.txt", DiffContext(base, head, {"CMakeLists.txt": "M"})
+    )
+    assert claim.step_ids == {"a", "b"}
+    assert not claim.droppable_step_ids
+    assert "CMakeLists.txt" in claim.evidence_paths
+    selection = Selection(claims=[claim], selected_by_file={"CMakeLists.txt": ["a"]})
+    assert _held_by_cmake(selection) == {"a", "b"}
+    view, sources = _as_cmake_sources(selection)
+    assert view.selected_by_file == {"CMakeLists.txt": ["a"]}
+    assert "csrc/marlin/marlin.cu" in sources
+
+
+def test_an_arch_removal_is_left_to_the_kernel_record():
+    claim = Claim(
+        "cmake-sources", "d", step_ids={"s1"}, evidence_paths=frozenset({"csrc/a.cu"})
+    )
+    assert not _held_by_cmake(Selection(claims=[claim]))
 
 
 def test_an_edit_the_walk_declines_fails_open_as_before(repo: Path):

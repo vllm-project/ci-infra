@@ -45,8 +45,12 @@ _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _KEYWORD = re.compile(r"^[A-Z][A-Z_]+$")
 
 _BRANCH = frozenset({"if", "elseif", "else"})
-# Statements that change no build input on their own.
+# Statements that change no build input on their own. An endif() reached from
+# its chain is one of them; a changed endif() is not, since moving it moves
+# statements in or out of the block (see `walk`).
 _NEUTRAL = frozenset({"endif", "message"})
+# An arch in an arch list ("8.0", "12.0f", "9.0a", "10.0+PTX").
+_ARCH = re.compile(r"(?<![\w.])\d+\.\d+[a-z]?(?:\+PTX)?(?![\w.])")
 # Statements that place flags on the sources SRCS (or the leading list) names.
 _ON_SOURCES = frozenset({"set_gencode_flags_for_srcs", "set_source_files_properties"})
 
@@ -64,6 +68,9 @@ class Statement:
     depth: int  # if-nesting of the statement itself
     # Device families whose build can run it, from the enclosing guards.
     families: frozenset[str] = ALL_FAMILIES
+    # The enclosing arms, outermost first: (line of their if(), the arm as
+    # text, its if() condition included), comparable across the two sides.
+    guards: tuple[tuple[int, str], ...] = ()
 
 
 def _strip_comment(line: str) -> str:
@@ -100,6 +107,8 @@ def parse(text: str) -> list[Statement]:
     buf: list[str] = []
     # Per open if-chain: [this arm's families or None, families taken, known].
     frames: list[list] = []
+    # Per open if-chain: (line of its if(), its condition, the current arm).
+    arms: list[tuple[int, str, str]] = []
 
     def families() -> frozenset[str]:
         eff = set(ALL_FAMILIES)
@@ -122,6 +131,10 @@ def parse(text: str) -> list[Statement]:
         buf, balance = [], 0
         m = re.match(r"([A-Za-z_]\w*)\s*\((.*)\)\s*$", joined, re.S)
         name, args = (m.group(1).lower(), m.group(2)) if m else ("?", joined)
+        if name in ("endif", "elseif", "else") and arms:
+            line, cond, _ = arms.pop()
+            if name != "endif":
+                arms.append((line, cond, f"{name} {' '.join(args.split())}"))
         if name in ("endif", "elseif", "else") and frames:
             arm, taken, known = frames[-1]
             if name == "endif":
@@ -142,8 +155,12 @@ def parse(text: str) -> list[Statement]:
                         known,
                     ]
         depth = len(frames) - (1 if name in ("elseif", "else") else 0)
-        out.append(Statement(name, args, start, number, depth, families()))
+        guards = tuple((line, f"{cond} / {arm}") for line, cond, arm in arms)
+        if name in ("elseif", "else"):
+            guards = guards[:-1]  # the arm it opens is not around it
+        out.append(Statement(name, args, start, number, depth, families(), guards))
         if name == "if":
+            arms.append((start, " ".join(args.split()), "if"))
             fams = _guard(args)
             frames.append(
                 [set(fams) if fams is not None else None, set(), fams is not None]
@@ -210,12 +227,28 @@ class Side:
         i = self.statements.index(st)
         while self.statements[i].name != "if" or self.statements[i].depth != st.depth:
             i -= 1
+            if i < 0:
+                raise Declined(f"{st.name}() at line {st.first} closes no if()")
         out = []
         for nxt in self.statements[i + 1 :]:
             if nxt.depth == st.depth and nxt.name == "endif":
                 break
             out.append(nxt)
         return out
+
+    def block(self, st: Statement) -> list[Statement] | None:
+        """The if() an if/elseif/else/endif belongs to, through its endif()."""
+        i = self.statements.index(st)
+        while self.statements[i].name != "if" or self.statements[i].depth != st.depth:
+            i -= 1
+            if i < 0:
+                return None
+        out = [self.statements[i]]
+        for nxt in self.statements[i + 1 :]:
+            out.append(nxt)
+            if nxt.depth == st.depth and nxt.name == "endif":
+                return out
+        return None
 
     def _uses(self, var: str) -> list[Statement]:
         bare = re.compile(rf"(?<![\w${{]){re.escape(var)}(?!\w)")
@@ -299,8 +332,7 @@ class Side:
         return [
             st
             for st in self.statements
-            if any(st.first <= n <= st.last for n in changed)
-            and st.name not in _NEUTRAL
+            if any(st.first <= n <= st.last for n in changed) and st.name != "message"
         ]
 
     def _lines_text(self, st: Statement, lines) -> str:
@@ -327,7 +359,11 @@ class Side:
                 continue
             var = _target(st)
             header_changed = st.first in changed
-            if st.name in _BRANCH:
+            if st.name == "endif" and st in todo_seed:
+                # Moved or added: statements moved in or out of the block, on
+                # this side or the other, so every arm it closes is reached.
+                todo.extend(self._chain(st))
+            elif st.name in _BRANCH:
                 todo.extend(self._chain(st))
             elif st.name in _NEUTRAL:
                 continue
@@ -349,6 +385,7 @@ class Side:
                 and not header_changed
                 and st.name in ("set", "list")
                 and st.first < st.last
+                and self._is_source_list(var)
             ):
                 # Lines edited inside a source list: those items, not its users.
                 sources |= self.expand(self._lines_text(st, changed))
@@ -408,6 +445,77 @@ class Reach:
     # Families whose build alone runs part of the edit (an `if(VLLM_GPU_LANG
     # STREQUAL "HIP")` block): their steps run, whatever the sources say.
     other_families: frozenset[str] = frozenset()
+    # The edit only removes arches from arch lists, so each source compiles
+    # for fewer arches than before: a step that launched none of its kernels
+    # cannot have been running them. Any other edit may make a source compile
+    # where it did not (an added arch, a guard moved or removed), and the
+    # steps that would now launch it are exactly the ones the record never
+    # saw launch it, so the record may not clear them.
+    only_removes_arches: bool = False
+
+
+def _arch_definition(st: Statement) -> tuple[str, frozenset[str], str] | None:
+    """(variable, arches, everything else) for an arch-list definition."""
+    var = _target(st)
+    if var is None or st.name not in ("cuda_archs_loose_intersection", "set"):
+        return None
+    rest = re.sub(r'[\s;"]', "", _ARCH.sub("", st.args))
+    if st.name == "set" and rest != var:
+        return None
+    return var, frozenset(_ARCH.findall(st.args)), rest
+
+
+def only_removes_arches(
+    old: Side | None, old_lines: set[int], new: Side | None, new_lines: set[int]
+) -> bool:
+    """Whether the edit only drops arches from arch lists.
+
+    Every statement it adds defines an arch list, and every one it removes
+    either does or is a guard around removed definitions only (collapsing
+    `if(CUDA >= 13) set "8.0;12.0f" else() set "8.0;12.0a" endif()` into one
+    list). Each list it redefines keeps its other arguments and names only
+    arches that every removed arm of it named, so no compiler or guard
+    compiles a source for an arch it did not before.
+    """
+    removed = old.changed_statements(old_lines) if old else []
+    added = new.changed_statements(new_lines) if new else []
+    if not removed:
+        return False
+    was: dict[str, list[tuple[frozenset[str], str, tuple[str, ...]]]] = {}
+    gone = {st.first for st in removed}
+    for st in removed:
+        definition = _arch_definition(st)
+        if definition is not None:
+            # The guards that stay: a removed block's arms are what the edit
+            # collapses, the rest must still be around the new definition.
+            outer = tuple(arm for line, arm in st.guards if line not in gone)
+            was.setdefault(definition[0], []).append((*definition[1:], outer))
+            continue
+        if st.name not in ("if", "elseif", "else", "endif") or old is None:
+            return False
+        # The whole block goes: its if(), every arm, its endif(). Anything
+        # it guarded that stays would now compile unguarded.
+        block = old.block(st)
+        if block is None or any(
+            inner.first not in gone and inner.name != "message" for inner in block
+        ):
+            return False
+    now: dict[str, list[tuple[frozenset[str], str, tuple[str, ...]]]] = {}
+    for st in added:
+        definition = _arch_definition(st)
+        if definition is None:
+            return False
+        guards = tuple(arm for _, arm in st.guards)
+        now.setdefault(definition[0], []).append((*definition[1:], guards))
+    if set(now) != set(was):
+        return False
+    for var, defs in now.items():
+        common = frozenset.intersection(*(arches for arches, _, _ in was[var]))
+        before = {(rest, outer) for _, rest, outer in was[var]}
+        for arches, rest, guards in defs:
+            if not arches <= common or before != {(rest, guards)}:
+                return False
+    return True
 
 
 def reach(repo: Path, base: str, head: str) -> Reach:
@@ -417,6 +525,7 @@ def reach(repo: Path, base: str, head: str) -> Reach:
         sources: set[str] = set()
         others: set[str] = set()
         touched = False
+        sides: dict[str, Side] = {}
         for ref, lines in ((base, old), (head, new)):
             if not lines:
                 continue
@@ -426,6 +535,7 @@ def reach(repo: Path, base: str, head: str) -> Reach:
                 grep=lambda word, ref=ref: _grep(repo, ref, word),
             )
             touched |= bool(side.changed_statements(lines))
+            sides[ref] = side
             sources |= side.walk(lines)
             others |= side.other_families
     except Declined as why:
@@ -437,4 +547,10 @@ def reach(repo: Path, base: str, head: str) -> Reach:
         return Reach(inert=True)
     if not sources and not others:
         return Reach(why_not="the edit reaches no source")
-    return Reach(sources=frozenset(sources), other_families=frozenset(others))
+    return Reach(
+        sources=frozenset(sources),
+        other_families=frozenset(others),
+        only_removes_arches=only_removes_arches(
+            sides.get(base), old, sides.get(head), new
+        ),
+    )

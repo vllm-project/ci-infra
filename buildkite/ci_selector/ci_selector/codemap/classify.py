@@ -1569,10 +1569,18 @@ def _classify_cmake_edit(
         detail += (
             f"; and {sorted(reach.other_families)}-only blocks, running that family"
         )
-    # The record weighs the sources in place of the file. A family-only block
-    # is something no kernel silence can speak to, so the file itself stays
-    # among the evidence and holds every step it reached.
-    evidence = set(reach.sources) | ({path} if reach.other_families else set())
+    # The record weighs the sources in place of the file only when the edit
+    # just drops arches: then a step that launched none of their kernels
+    # cannot have been running them. Any other edit can make a source compile
+    # where it did not (an added arch, a moved guard), for steps the record
+    # never saw launch it; and a family-only block is something no kernel
+    # silence can speak to. Either way the file itself stays among the
+    # evidence and holds every step it reached.
+    clearable = reach.only_removes_arches and not reach.other_families
+    if not clearable:
+        held |= step_ids
+        detail += "; the kernel record cannot clear it (it may compile more)"
+    evidence = set(reach.sources) | ({path} if not clearable else set())
     return Claim(
         "cmake-sources",
         detail,
