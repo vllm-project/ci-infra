@@ -15,7 +15,7 @@ cd "$workdir"
 curl --fail --silent --show-error --location --retry 3 \
   "https://github.com/buildkite/agent/releases/download/v${version}/${archive}" -o "$archive"
 printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --strict
-tar -xzf "$archive" buildkite-agent
+tar -xzf "$archive" ./buildkite-agent
 ./buildkite-agent --version | grep -F "version ${version}"
 ./buildkite-agent secret get --help >/dev/null
 sudo install -o root -g root -m 0755 buildkite-agent /usr/bin/buildkite-agent-stable
