@@ -226,7 +226,7 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
     (folder / "1.json").write_text(json.dumps(_record(1, [])))
     calls = []
 
-    def fake_run(command, check):
+    def fake_run(command, check, **kwargs):
         assert check is False  # an agent hiccup must not hide the result
         calls.append(command)
 
@@ -248,13 +248,34 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
     assert "missed: k: gone\n" in out and "### :x:" in out
 
 
+def test_main_logs_every_duplicate_and_downloads_every_attempt(monkeypatch, capsys):
+    many = [f"t{i}" for i in range(coverage.MAX_IDS_SHOWN + 1)]
+    records = [_record(0, many, expected=many), _record(1, many)]
+    calls = []
+
+    def fake_run(command, check, **kwargs):
+        calls.append((command, kwargs.get("env") or {}))
+
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert coverage.main() == 0  # a duplicate alone doesn't fail the job
+    download, env = calls[0]
+    assert download[:3] == ["buildkite-agent", "artifact", "download"]
+    # An earlier finished attempt only reaches latest_records() this way.
+    assert env["BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS"] == "true"
+    out = capsys.readouterr().out
+    last = many[-1]
+    assert f"duplicated: k: {last}: shards 1, 2\n" in out  # past the cap
+
+
 def coverage_records(folder):
     return [json.loads(path.read_text()) for path in sorted(folder.iterdir())]
 
 
 def test_main_exits_clean_without_a_miss(monkeypatch):
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
-    monkeypatch.setattr(subprocess, "run", lambda command, check: None)
+    monkeypatch.setattr(subprocess, "run", lambda command, check, **kwargs: None)
     monkeypatch.setattr(coverage, "_read_records", lambda _: [])
     assert coverage.main() == 0  # unverified warns but stays green
 
@@ -264,6 +285,17 @@ def test_read_records_finds_what_download_wrote(tmp_path):
     folder.mkdir(parents=True)
     (folder / "0.json").write_text(json.dumps({"a": 1}))
     assert coverage._read_records(str(tmp_path)) == [{"a": 1}]
+
+
+def test_a_cut_off_record_is_skipped_and_the_rest_still_read(tmp_path, capsys):
+    folder = tmp_path / ".runtime-shard-coverage" / "job"
+    folder.mkdir(parents=True)
+    (folder / "0.json").write_text('{"step": "k", "ran": ["a"')  # killed mid-write
+    (folder / "1.json").write_text(json.dumps({"a": 1}))
+    assert coverage._read_records(str(tmp_path)) == [{"a": 1}]
+    [line] = capsys.readouterr().out.splitlines()  # named in the log
+    assert line.startswith("runtime-shard coverage: skipped unreadable ")
+    assert "0.json: " in line and line.endswith("(char 25)")
 
 
 def test_the_script_end_to_end_with_an_agent_on_the_path(tmp_path):

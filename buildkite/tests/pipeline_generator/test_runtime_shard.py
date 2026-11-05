@@ -2320,6 +2320,30 @@ def test_a_record_that_cannot_be_written_leaves_the_job_alone(tmp_path):
     assert re.search(r"^runtime-shard: no coverage record: ", run.stdout, re.M)
 
 
+def test_a_write_that_dies_halfway_leaves_the_earlier_record_whole(
+    tmp_path, monkeypatch
+):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    monkeypatch.setenv("BUILDKITE_JOB_ID", "job-0")
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    shard._write_record(finished=False)
+    path = tmp_path / "records" / "job-0" / "0.json"
+    assert json.loads(path.read_text())["finished"] is False
+
+    def dies_halfway(record, f):
+        f.write('{"step": "k", "fin')
+        raise OSError("killed")
+
+    monkeypatch.setattr(plugin.json, "dump", dies_halfway)
+    shard._write_record(finished=True)
+    assert json.loads(path.read_text())["finished"] is False
+    records = [p.name for p in path.parent.iterdir() if p.suffix == ".json"]
+    assert records == ["0.json"]
+
+
 # The job that compares them.
 
 

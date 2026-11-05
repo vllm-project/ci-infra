@@ -166,8 +166,13 @@ def _read_records(folder: str) -> List[Dict[str, Any]]:
     records = []
     pattern = os.path.join(folder, ARTIFACTS)
     for path in glob.glob(pattern, recursive=True):
-        with open(path) as f:
-            records.append(json.load(f))
+        # A shard killed mid-write leaves one bad file; skipping it makes that
+        # shard read as unfinished rather than stopping every step's check.
+        try:
+            with open(path) as f:
+                records.append(json.load(f))
+        except ValueError as error:
+            print(f"runtime-shard coverage: skipped unreadable {path}: {error}")
     return records
 
 
@@ -175,8 +180,13 @@ def main() -> int:
     steps = json.loads(os.environ[STEPS_ENV])
     with tempfile.TemporaryDirectory() as folder:
         # Fails when no job uploaded anything; the comparison then says so.
+        # Every attempt, not only the latest, so latest_records() can pick the
+        # latest that finished. An env var, not the flag: an agent too old for
+        # it ignores the variable, where an unknown flag fails the download.
         subprocess.run(
-            ["buildkite-agent", "artifact", "download", ARTIFACTS, folder], check=False
+            ["buildkite-agent", "artifact", "download", ARTIFACTS, folder],
+            check=False,
+            env=dict(os.environ, BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS="true"),
         )
         records = _read_records(folder)
     results = compare(steps, records)
@@ -184,6 +194,9 @@ def main() -> int:
         for name in ("missed", "not_run"):
             for nodeid in result[name]:
                 print(f"{name}: {result['step']}: {nodeid}")
+        for nodeid, shards in result["duplicated"].items():
+            numbers = ", ".join(str(shard + 1) for shard in shards)
+            print(f"duplicated: {result['step']}: {nodeid}: shards {numbers}")
     style, text = report(results)
     print(text)
     subprocess.run(

@@ -275,8 +275,12 @@ class ShardPlugin:
             os.makedirs(job_dir, exist_ok=True)
             os.chmod(self.coverage_dir, 0o777)
             os.chmod(job_dir, 0o777)
-            with open(os.path.join(job_dir, f"{self.position}.json"), "w") as f:
+            path = os.path.join(job_dir, f"{self.position}.json")
+            # Written aside, then swapped in whole: a job killed mid-write
+            # keeps its earlier record. The .tmp name isn't an artifact.
+            with open(f"{path}.tmp", "w") as f:
                 json.dump(record, f)
+            os.replace(f"{path}.tmp", path)
         except OSError as error:
             print(f"runtime-shard: no coverage record: {error}")
 
