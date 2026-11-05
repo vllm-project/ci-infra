@@ -24,7 +24,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from ..handwritten import ONLY_STEP_KEYS_ENV, PR_PIPELINE
+from ..handwritten import (
+    AMD_ALWAYS_RUN_STEP_KEYS,
+    IMAGE_BUILD_KEY_PREFIX,
+    ONLY_STEP_KEYS_ENV,
+    PR_PIPELINE,
+)
+from .hardware import family_of_device
 from .pipeline.step import Step
 from .selection import Selection
 from .state import RepoState
@@ -95,6 +101,7 @@ def emit(state: RepoState, sel: Selection, pipeline: str = PR_PIPELINE) -> Emiss
             unnameable=sorted(unnameable),
             kept=kept,
         )
+    keys |= _image_floor_and_smoke_test(keys, steps.values())
     if not keys:
         # An empty answer is a bug in us, never an instruction to run nothing.
         return Emission(
@@ -108,6 +115,51 @@ def emit(state: RepoState, sel: Selection, pipeline: str = PR_PIPELINE) -> Emiss
         kept=kept,
         changed_keys=sorted(getattr(sel, "changed_step_keys", ())),
     )
+
+
+# The CUDA image and the step that smoke-tests it.
+IMAGE_SMOKE_TEST_KEY = f"{IMAGE_BUILD_KEY_PREFIX}-smoke-test"
+
+
+def _image_floor_and_smoke_test(keys: set[str], steps) -> set[str]:
+    """Images build on demand: the generator expands each emitted key's
+    depends_on, so a selected test brings its own image and no other (vllm/ci
+    #100085 built the XPU, HPU, CPU and Zen images, ~40 CPU-minutes, for two
+    CUDA kernel tests). What that leaves out is added here:
+
+    - the CUDA image's smoke test, whenever the CUDA image builds, since no
+      test depends on it;
+    - the CUDA image as the floor when nothing outside AMD (which keeps today's
+      rules) is selected, as a comment-only change has always built it.
+    """
+    by_key = {s.buildkite_key: s for s in steps if s.buildkite_key}
+    if IMAGE_BUILD_KEY_PREFIX not in by_key:
+        return set()
+
+    def is_amd(key: str) -> bool:
+        step = by_key.get(key)
+        return key in AMD_ALWAYS_RUN_STEP_KEYS or (
+            step is not None
+            and (
+                step.mirror_hw == "amd"
+                or family_of_device(getattr(step, "device", None)) == "amd"
+            )
+        )
+
+    added: set[str] = set()
+    if all(is_amd(k) for k in keys):
+        added.add(IMAGE_BUILD_KEY_PREFIX)
+    needed, stack = set(), [*keys, *added]
+    while stack:
+        key = stack.pop()
+        if key in needed:
+            continue
+        needed.add(key)
+        step = by_key.get(key)
+        stack.extend(getattr(step, "depends_on", None) or ())
+    if IMAGE_BUILD_KEY_PREFIX in needed and IMAGE_SMOKE_TEST_KEY in by_key:
+        added.add(IMAGE_SMOKE_TEST_KEY)
+    return added
 
 
 def render(emission: Emission) -> str:

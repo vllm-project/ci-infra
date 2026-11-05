@@ -18,6 +18,8 @@ class FakeStep:
     key: str | None = None
     label: str = "A Step"
     mirror_hw: str | None = None
+    device: str | None = None
+    depends_on: list = field(default_factory=list)
 
     @property
     def buildkite_key(self) -> str:
@@ -116,3 +118,47 @@ def test_a_keyless_step_uses_the_derived_key():
     )
     got = emit(state, FakeSelection({"vllm_ci:Rust Frontend Serve/Admin Coverage": []}))
     assert got.keys == ["rust-frontend-serve-admin-coverage"]
+
+
+def _image_pipeline():
+    return state_of(
+        FakeStep("vllm_ci:image", "image-build"),
+        FakeStep("vllm_ci:image-cpu", "image-build-cpu"),
+        FakeStep("vllm_ci:image-xpu", "image-build-xpu"),
+        FakeStep("vllm_ci:smoke", "image-build-smoke-test", depends_on=["image-build"]),
+        FakeStep(
+            "vllm_ci:kernels", "kernels", device="h100", depends_on=["image-build"]
+        ),
+        FakeStep(
+            "vllm_ci:cpu-test", "cpu-test", device="cpu", depends_on=["image-build-cpu"]
+        ),
+        FakeStep("vllm_ci:amd-base", "ensure-ci-base-amd"),
+    )
+
+
+def test_images_follow_the_selected_tests():
+    """vllm/ci #100085 built the XPU, HPU, CPU and Zen images for two CUDA
+    kernel tests. The generator brings a test's own image in through its
+    depends_on; only the CUDA image's smoke test is added alongside it."""
+    got = emit(_image_pipeline(), FakeSelection({"vllm_ci:kernels": []}))
+    assert got.keys == ["image-build-smoke-test", "kernels"]
+
+
+def test_a_cpu_test_brings_only_its_own_image():
+    got = emit(_image_pipeline(), FakeSelection({"vllm_ci:cpu-test": []}))
+    assert got.keys == ["cpu-test"], "no CUDA image, so no smoke test"
+
+
+def test_the_cuda_image_is_the_floor_when_only_amd_is_selected():
+    """A comment-only change has always built the CUDA image; AMD steps keep
+    today's rules and are dropped by the gate, so they cannot stand in."""
+    got = emit(_image_pipeline(), FakeSelection({"vllm_ci:amd-base": []}))
+    assert got.keys == ["ensure-ci-base-amd", "image-build", "image-build-smoke-test"]
+
+
+def test_the_agents_field_does_not_force_a_step():
+    """The generator drops `agents`, so it cannot gate execution; it forced
+    zen-cpu-image-build onto every PR."""
+    from ci_selector.handwritten import KNOWN_STEP_FIELDS
+
+    assert "agents" in KNOWN_STEP_FIELDS
