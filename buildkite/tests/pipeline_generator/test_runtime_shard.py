@@ -1986,6 +1986,30 @@ def test_a_record_that_cannot_be_written_leaves_the_job_alone(tmp_path):
     assert re.search(r"^runtime-shard: no coverage record: ", run.stdout, re.M)
 
 
+def test_a_write_that_dies_halfway_leaves_the_earlier_record_whole(
+    tmp_path, monkeypatch
+):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    monkeypatch.setenv("BUILDKITE_JOB_ID", "job-0")
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    shard._write_record(finished=False)
+    path = tmp_path / "records" / "job-0" / "0.json"
+    assert json.loads(path.read_text())["finished"] is False
+
+    def dies_halfway(record, f):
+        f.write('{"step": "k", "fin')
+        raise OSError("killed")
+
+    monkeypatch.setattr(plugin.json, "dump", dies_halfway)
+    shard._write_record(finished=True)
+    assert json.loads(path.read_text())["finished"] is False
+    records = [p.name for p in path.parent.iterdir() if p.suffix == ".json"]
+    assert records == ["0.json"]
+
+
 # The job that compares them.
 
 
@@ -2030,7 +2054,9 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
         f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}" && python3 {script}',
     ]
     # And their records land where each job can reach the checkout.
-    assert 'RUNTIME_SHARD_COVERAGE_DIR="/workdir/' in step.commands[2]
+    coverage_setup = rs.shard_job_setup("/workdir")[-1]
+    assert 'RUNTIME_SHARD_COVERAGE_DIR="/workdir/' in coverage_setup
+    assert step.commands[len(rs.shard_job_setup("/workdir")) - 1] == coverage_setup
     assert (
         'RUNTIME_SHARD_COVERAGE_DIR="$${BUILDKITE_BUILD_CHECKOUT_PATH'
         in mirror.env["VLLM_TEST_COMMANDS"]
