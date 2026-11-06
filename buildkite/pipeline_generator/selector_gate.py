@@ -13,8 +13,11 @@ parent commit, as today's rules do there. Release-branch, nightly, run-all
 (the scheduled full CI runs), docs-only and AMD-only (`VLLM_CI_PLATFORM=amd`)
 builds, and builds that already name their steps (`VLLM_CI_ONLY_STEP_KEYS`),
 keep today's rules. Any failure keeps them too: the selector cannot be fetched or run, it
-times out, it declines to name steps (its own fail-open), or it names a step
-this generator does not know. The selector never makes a build fail.
+times out, it declines to name steps for another reason, or it names a step
+this generator does not know. When it declines because it cannot narrow the
+diff at all (its own fail-open, "run-all: ..."), every non-optional step
+runs instead, as a run_all_patterns match would; AMD keeps today's rules.
+The selector never makes a build fail.
 
 Every armed build writes one JSON record, `ci_selector_decision.json`, and
 uploads it as a build artifact, so the rollout can be evaluated afterwards from
@@ -192,7 +195,12 @@ def write_and_upload(record: Dict[str, Any], output_dir: str) -> str:
 
 
 def annotate(record: Dict[str, Any]) -> None:
-    if record["applied"]:
+    if record["applied"] and record.get("selector_run_all"):
+        text = (
+            ":dart: ci-selector cannot narrow this change, so every test step "
+            f"runs: {record['selector_run_all']}"
+        )
+    elif record["applied"]:
         n, m = len(record["scheduled_keys"] or []), len(record["legacy_keys"] or [])
         text = (
             f":dart: ci-selector chose {len(record['selector_keys'])} test steps "
