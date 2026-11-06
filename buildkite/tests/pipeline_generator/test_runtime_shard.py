@@ -161,9 +161,12 @@ def test_plan_charges_setup_up_to_the_limit_and_flags_more():
     assert rs.setup_too_long(slow)
     assert "Setup takes 10.0 min per job" in rs.summary("k", slow)
     # A step without setupMs (an older endpoint) charges none.
-    assert rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))[
-        "setupSeconds"
-    ] == 0
+    assert (
+        rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))[
+            "setupSeconds"
+        ]
+        == 0
+    )
 
 
 def test_a_one_job_plan_flags_a_long_setup_too():
@@ -421,7 +424,9 @@ def test_plan_cuts_a_file_into_parts_that_each_fit():
     )
     result = rs.plan(_commands(TESTS[0], ["big.py", "mm.py", *small]), timings)
     split = result["commands"][0]["split"]["tests/big.py"]
-    assert len(set(split["assign"].values())) == len(split["shards"]) == 4  # a part per case
+    assert (
+        len(set(split["assign"].values())) == len(split["shards"]) == 4
+    )  # a part per case
     assert not result["overBudget"] and result["shards"] == 5
 
 
@@ -528,7 +533,6 @@ def test_plan_keeps_budget_sized_parts_when_they_balance_better():
     assert result["estimates"] == [2100.0] * 10
 
 
-
 # Trimming shards one long test makes useless. Each step here has 1 min of
 # setup: 18 min of tests per shard.
 
@@ -546,7 +550,10 @@ def test_one_job_over_the_budget_says_so():
     assert "fit in one job" not in text and "one job for 1 file;" in text
     assert "`tests/a.py` takes 20.0 min on its own, over the 18.0 min" in text
     assert "The planner cannot split it further" in text
-    assert "1 shard is the fewest the planner finds that keep every shard within 20.0 min." in text
+    assert (
+        "1 shard is the fewest the planner finds that keep every shard within 20.0 min."
+        in text
+    )
 
 
 def test_a_one_job_plan_without_a_long_test_says_it_is_over():
@@ -664,7 +671,9 @@ def test_plan_of_one_long_test_holds_steady_across_twice_the_budget(rest):
     third shard that the long test kept from finishing any sooner."""
     tests = {"test_slow": 1230, "test_a": rest, "test_b": rest}
     timings = _timed(
-        _with_tests(_timings(TESTS[0], {"big.py": sum(tests.values())}), "big.py", tests)
+        _with_tests(
+            _timings(TESTS[0], {"big.py": sum(tests.values())}), "big.py", tests
+        )
     )
     result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
     assert result["shards"] == 2 and result["estimates"] == [1230, 2 * rest]
@@ -677,7 +686,10 @@ def test_plan_at_the_most_shards_drops_one_that_does_not_help():
     assert result["shards"] == 9 and max(result["estimates"]) == 3000
     text = rs.summary("k", result)
     assert "its shard needs at least 50.0 min" in text
-    assert "9 shards is the fewest the planner finds that keep every shard within 50.0 min." in text
+    assert (
+        "9 shards is the fewest the planner finds that keep every shard within 50.0 min."
+        in text
+    )
     assert sorted(result["commands"][0]["files"]) == sorted(f"tests/{f}" for f in files)
 
 
@@ -904,15 +916,18 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     # log headers and tracing labels, so main's timings keep matching. Each
     # test command exports its position, and runs only in the shards that
     # have its tests.
-    assert step.commands[:2] == rs.shard_job_setup()
-    jobs = step.commands[2:]
+    setup = rs.shard_job_setup()
+    assert step.commands[: len(setup)] == setup
+    jobs = step.commands[len(setup) :]
     assert len(jobs) == len(plain.commands)
     tagged = [job for job, own in zip(jobs, plain.commands) if job != own]
     assert len(tagged) == 2
-    assert tagged[0].startswith(f"export {rs.COMMAND_ENV}=2 && pytest -v -s model_executor")
+    assert tagged[0].startswith(f"export {rs.COMMAND_ENV}=2 {rs.APPLIED_ENV}=")
+    assert "&& pytest -v -s model_executor" in tagged[0]
     assert TESTS[1] in tagged[1]  # the one-file command
     assert tagged[1].startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
-    assert f"export {rs.COMMAND_ENV}=3 && pytest -v -s entrypoints" in tagged[1]
+    assert f"export {rs.COMMAND_ENV}=3 {rs.APPLIED_ENV}=" in tagged[1]
+    assert "&& pytest -v -s entrypoints" in tagged[1]
     assert step.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
@@ -930,7 +945,8 @@ def test_a_command_runs_only_in_the_shards_with_its_tests():
         "files": {"tests/a.py": 2},
         "split": {"tests/b.py": {"shards": {"0": 2, "1": 0}}},
     }
-    script = rs.guard("echo RAN", planned, 3).replace("$$", "$")
+    applied = f'echo RAN && touch "$${rs.APPLIED_ENV}"'
+    script = rs.guard(applied, planned, 3).replace("$$", "$")
     ran = {}
     for job in range(3):
         env = dict(os.environ, BUILDKITE_PARALLEL_JOB=str(job))
@@ -949,7 +965,29 @@ def test_a_command_runs_only_in_the_shards_with_its_tests():
         "files": {"tests/a.py": 0, "tests/c.py": 1, "tests/d.py": 2},
         "split": {},
     }
-    assert rs.guard("echo RAN", everywhere, 3) == f"export {rs.COMMAND_ENV}=1 && echo RAN"
+    assert rs.guard("echo RAN", everywhere, 3).startswith(
+        f"export {rs.COMMAND_ENV}=1 {rs.APPLIED_ENV}="
+    )
+
+
+def _guarded(command):
+    planned = {"position": 0, "files": {"tests/a.py": 0}, "split": {}}
+    script = rs.guard(command, planned, 1).replace("$$", "$")
+    return subprocess.run(["sh", "-ec", script], capture_output=True, text=True)
+
+
+def test_a_command_that_passes_without_the_plan_applied_fails():
+    # A pytest that didn't load the plugin, or didn't match the planned
+    # command, ran all of its tests or none: it must not pass as a shard.
+    run = _guarded("echo RAN")
+    assert run.returncode == 1
+    assert "RAN" in run.stdout
+    assert "pytest ran without applying the shard plan" in run.stderr
+
+
+def test_a_failing_command_fails_as_itself():
+    run = _guarded("exit 3")
+    assert run.returncode == 3 and run.stderr == ""
 
 
 def test_generator_keeps_the_single_job_without_a_plan(
@@ -1021,7 +1059,8 @@ def test_generator_shards_on_a_recording_build_too(
     monkeypatch.setattr(buildkite_step, "kernrec_enabled", lambda: True)
     [step] = _render(_step(automatic_shard=True))
     assert step.parallelism == 3
-    assert step.commands[:2] == rs.shard_job_setup()
+    setup = rs.shard_job_setup()
+    assert step.commands[: len(setup)] == setup
 
 
 def _mirror_step(**amd):
@@ -1224,7 +1263,9 @@ def test_fetch_timings_starts_with_no_failed_steps():
 
 
 def test_fetch_timings_retries_a_timeout_with_a_longer_limit(monkeypatch):
-    urlopen, timeouts = _urlopen_answering(TimeoutError("read timed out"), {"files": []})
+    urlopen, timeouts = _urlopen_answering(
+        TimeoutError("read timed out"), {"files": []}
+    )
     monkeypatch.setattr(rs, "_timings_failures", 0)
     monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
     assert rs.fetch_timings("k", AgentQueue.GPU_1) == {"files": []}
@@ -1249,7 +1290,8 @@ def test_fetch_timings_counts_a_step_whose_reads_both_fail(monkeypatch, capsys):
     assert len(timeouts) == 2
     assert rs._timings_failures == 1
     assert capsys.readouterr().err == (
-        "runtime-shard: no timings for k (HTTP Error 502: bad gateway)\n")
+        "runtime-shard: no timings for k (HTTP Error 502: bad gateway)\n"
+    )
 
 
 def test_fetch_timings_does_not_retry_a_404(monkeypatch, capsys):
@@ -1264,7 +1306,8 @@ def test_fetch_timings_does_not_retry_a_404(monkeypatch, capsys):
     # The endpoint answered, so it is up: earlier failures stop counting.
     assert rs._timings_failures == 0
     assert capsys.readouterr().err == (
-        "runtime-shard: no timings for k (HTTP Error 404: not found)\n")
+        "runtime-shard: no timings for k (HTTP Error 404: not found)\n"
+    )
 
 
 def test_fetch_timings_skips_the_endpoint_after_three_failed_steps(monkeypatch, capsys):
@@ -1293,8 +1336,16 @@ def test_fetch_timings_404s_between_failures_keep_the_endpoint_in_use(monkeypatc
     missing = urllib.error.HTTPError("u", 404, "not found", {}, None)
     # Steps a, c, e time out on both reads; b and d have no passing main build.
     urlopen, timeouts = _urlopen_answering(
-        timeout, timeout, missing, timeout, timeout, missing, timeout, timeout,
-        {"files": []})
+        timeout,
+        timeout,
+        missing,
+        timeout,
+        timeout,
+        missing,
+        timeout,
+        timeout,
+        {"files": []},
+    )
     monkeypatch.setattr(rs, "_timings_failures", 0)
     monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
     for key in ("a", "b", "c", "d", "e"):
@@ -1318,32 +1369,97 @@ def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     [step] = _render(_step(device="l4", automatic_shard=True))
     assert "kubernetes" in step.plugins[0] and step.plugins == plain.plugins
     assert step.retry == plain.retry == buildkite_step.K8S_RETRY
-    assert step.parallelism == 3 and len(step.commands[2:]) == len(plain.commands)
+    jobs = step.commands[len(rs.shard_job_setup()) :]
+    assert step.parallelism == 3 and len(jobs) == len(plain.commands)
     # The same commands, each tagged with its position, the one-file command
     # run only by the shard with it.
-    changed = [new for new, old in zip(step.commands[2:], plain.commands) if new != old]
+    changed = [new for new, old in zip(jobs, plain.commands) if new != old]
     assert len(changed) == 2 and changed[0].startswith(f"export {rs.COMMAND_ENV}=")
     assert changed[1].startswith("case ")
 
 
-def test_shard_job_setup_installs_the_plugin_for_any_python():
-    script = "\n".join(rs.shard_job_setup()).replace("$$", "$")
-    script += '\npython3 -c "import runtime_shard_plugin as p; print(p.__file__)"'
-    env = dict(os.environ, RUNTIME_SHARD_PLUGIN=rs.plugin_source(), PYTHONPATH="/x")
-    env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env["PATH"]
-    run = subprocess.run(
-        ["bash", "-ec", script + '\necho "$PYTHONPATH"'],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
+def _venv(path, pytest_python=None):
+    """A venv whose `pytest` runs pytest_python (its own python by default)."""
+    if not path.exists():
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", path], check=True
+        )
+    pytest = path / "bin" / "pytest"
+    pytest.write_text(f"#!{pytest_python or path / 'bin' / 'python3'}\n")
+    pytest.chmod(0o755)
+    return path
+
+
+def _run_after_setup(tmp_path, command, pythonpath="/x", venv=None):
+    """A shard job's setup, then the command, with python3 and pytest a fresh
+    venv's: the setup's copies go there and not into the python running these
+    tests."""
+    venv = venv or _venv(tmp_path / "venv")
+    script = "\n".join(rs.shard_job_setup() + [command]).replace("$$", "$")
+    env = dict(
+        os.environ, RUNTIME_SHARD_PLUGIN=rs.plugin_source(), PYTHONPATH=pythonpath
     )
+    env["PATH"] = str(venv / "bin") + os.pathsep + env["PATH"]
+    return subprocess.run(
+        ["bash", "-ec", script], env=env, capture_output=True, text=True, check=True
+    )
+
+
+FIND_PLUGIN = (
+    'python3 -c "import importlib.util as u;'
+    " print(u.find_spec('runtime_shard_plugin').origin)\""
+)
+
+
+def test_shard_job_setup_installs_the_plugin_for_any_python(tmp_path):
+    run = _run_after_setup(tmp_path, FIND_PLUGIN + '\necho "$PYTHONPATH"')
     path, pythonpath = run.stdout.split()
     assert path == f"{rs.PLUGIN_DIR}/runtime_shard_plugin.py"
     assert pythonpath == f"{rs.PLUGIN_DIR}:/x"
     source = os.path.join(os.path.dirname(rs.__file__), "runtime_shard_plugin.py")
     with open(path) as installed, open(source) as original:
         assert installed.read() == original.read()
+
+
+def test_a_command_setting_its_own_pythonpath_still_finds_the_plugin(tmp_path):
+    # vLLM's entrypoints-integration-api-server runs
+    # `PYTHONPATH=/vllm-workspace pytest ...`, which replaces the exported path.
+    for command in (
+        f"PYTHONPATH=/vllm-workspace {FIND_PLUGIN}",
+        f"export PYTHONPATH=/x; {FIND_PLUGIN}",
+        f"env -u PYTHONPATH {FIND_PLUGIN}",
+    ):
+        run = _run_after_setup(tmp_path, command)
+        [found] = run.stdout.split()
+        assert found.startswith(str(tmp_path / "venv" / "lib")), (command, found)
+        assert found.endswith("/site-packages/runtime_shard_plugin.py")
+
+
+def test_shard_job_setup_installs_the_plugin_for_pytests_own_python(tmp_path):
+    # python3 and the python that runs `pytest` can differ: both get a copy.
+    other = _venv(tmp_path / "other")
+    venv = _venv(tmp_path / "venv", pytest_python=other / "bin" / "python3")
+    _run_after_setup(tmp_path, "true", venv=venv)
+    for each in (venv, other):
+        [site] = (each / "lib").glob("python*/site-packages")
+        assert (site / "runtime_shard_plugin.py").exists(), each
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the mode"
+)
+def test_shard_job_setup_runs_where_site_packages_is_read_only(tmp_path):
+    # The copy is best effort, and says so: the exported PYTHONPATH still
+    # covers the job.
+    venv = _venv(tmp_path / "venv")
+    [site] = (venv / "lib").glob("python*/site-packages")
+    site.chmod(0o555)
+    try:
+        run = _run_after_setup(tmp_path, FIND_PLUGIN)
+    finally:
+        site.chmod(0o755)
+    assert run.stdout.split() == [f"{rs.PLUGIN_DIR}/runtime_shard_plugin.py"]
+    assert "runtime-shard: couldn't install the plugin for" in run.stderr
 
 
 # The plugin, in real pytest runs: each shard runs the step's command as is.
@@ -1499,7 +1615,9 @@ def test_commands_that_differ_only_in_env_each_run_their_own_tests(tmp_path):
     # by env vars alone, so the commands' pytest args are identical.
     _project(
         tmp_path,
-        {"test_model.py": "import os\ndef test_model(): print('MODEL=' + os.environ['MODEL'])\n"},
+        {
+            "test_model.py": "import os\ndef test_model(): print('MODEL=' + os.environ['MODEL'])\n"
+        },
     )
     command = "pytest -v -s test_model.py"
     plan = {"shards": 2, "commands": []}
@@ -1534,7 +1652,10 @@ def test_commands_that_differ_only_in_env_each_run_their_own_tests(tmp_path):
 
 
 def test_a_job_without_a_parallel_index_runs_the_first_shards_tests(tmp_path):
-    _project(tmp_path, {"test_a.py": "def test_a(): pass\n", "test_b.py": "def test_b(): pass\n"})
+    _project(
+        tmp_path,
+        {"test_a.py": "def test_a(): pass\n", "test_b.py": "def test_b(): pass\n"},
+    )
     command = "pytest -v test_a.py test_b.py"
     files = {"tests/test_a.py": 0, "tests/test_b.py": 1}
     plan = {"shards": 2, "commands": [_command_plan(command, "Command (1/1)", files)]}

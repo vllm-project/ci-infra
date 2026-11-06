@@ -75,6 +75,9 @@ PLAN_ENV = "RUNTIME_SHARD_PLAN"
 # The position of the step command a job is running, for the plugin to tell
 # apart commands whose pytest args differ only in env vars.
 COMMAND_ENV = "RUNTIME_SHARD_COMMAND"
+# The file the plugin writes once it has applied the plan, which the guard
+# checks after the command.
+APPLIED_ENV = "RUNTIME_SHARD_APPLIED"
 PLUGIN_ENV = "RUNTIME_SHARD_PLUGIN"
 PLUGIN_DIR = "/tmp/runtime-shard"
 PLUGIN_MODULE = "runtime_shard_plugin"
@@ -312,8 +315,11 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
     """
     global _timings_failures
     if _timings_failures >= MAX_TIMINGS_FAILURES:
-        print(f"runtime-shard: no timings for {step_key} (endpoint skipped after "
-              f"{_timings_failures} failed steps)", file=sys.stderr)
+        print(
+            f"runtime-shard: no timings for {step_key} (endpoint skipped after "
+            f"{_timings_failures} failed steps)",
+            file=sys.stderr,
+        )
         return None
     query = {
         "stepKey": step_key,
@@ -330,7 +336,10 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
         except urllib.error.HTTPError as error:
             if error.code < 500:  # 404: no passing main build, so no plan
                 _timings_failures = 0  # the endpoint answered
-                print(f"runtime-shard: no timings for {step_key} ({error})", file=sys.stderr)
+                print(
+                    f"runtime-shard: no timings for {step_key} ({error})",
+                    file=sys.stderr,
+                )
                 return None
             last_error = error
         except Exception as error:  # timeout, connection refused
@@ -468,8 +477,7 @@ def plan(
     # share, is still an estimate.
     labels = [command_preview(entry["command"]) for entry in commands]
     exact = {
-        (index, file): len(set(labels)) == len(labels)
-        and key == (labels[index], file)
+        (index, file): len(set(labels)) == len(labels) and key == (labels[index], file)
         for (index, file), key in keys.items()
     }
 
@@ -634,9 +642,7 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
     estimates = ", ".join(f"{s / 60:.1f}" for s in result["estimates"])
     source = result["timingSource"]
     builds = len(source.get("buildNumbers") or [source.get("buildNumber")])
-    allocation = (
-        "one job" if result["shards"] == 1 else f"{result['shards']} shards"
-    )
+    allocation = "one job" if result["shards"] == 1 else f"{result['shards']} shards"
     text = (
         f"**Runtime sharding for `{step_key}`:** {allocation} for "
         f"{result['files']} file{'s' if result['files'] != 1 else ''}; "
@@ -679,8 +685,7 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             )
             if len(result["commands"]) > 1:
                 text += (
-                    " and any shard running several commands within "
-                    f"{budget:.1f} min"
+                    f" and any shard running several commands within {budget:.1f} min"
                 )
             text += "."
     elif result["overBudget"]:
@@ -780,8 +785,21 @@ def owners(planned: Dict) -> List[int]:
 
 def guard(command: str, planned: Dict, shards: int) -> str:
     """A job's command, run only by the shards that have its tests. The others
-    say where they run instead of starting pytest to deselect everything."""
-    command = f"export {COMMAND_ENV}={planned['position']} && {command}"
+    say where they run instead of starting pytest to deselect everything.
+
+    The command fails if it passed without the plugin applying the plan: a
+    pytest that didn't load the plugin, or whose args didn't match the planned
+    command's, would have run all of the command's tests in every shard, or
+    none of them, and passed."""
+    position = planned["position"]
+    applied = f"{PLUGIN_DIR}/applied-{position}"
+    command = (
+        f"export {COMMAND_ENV}={position} {APPLIED_ENV}={applied}"
+        f" && rm -f {applied} && {command}"
+        f' && {{ [ -f {applied} ] || {{ echo "runtime-shard: pytest ran without'
+        " applying the shard plan (the plugin didn't load, or didn't match the"
+        ' command); failing rather than run the wrong tests" >&2; exit 1; }; }'
+    )
     runs = owners(planned)
     if len(runs) == shards:
         return command
@@ -816,6 +834,10 @@ def shard_job_setup() -> List[str]:
         f" > {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
         # On the path of whichever python runs pytest (a venv's included).
         f'export PYTHONPATH="{PLUGIN_DIR}$${{PYTHONPATH:+:$$PYTHONPATH}}"',
+        # And in the site-packages of python3 and of pytest's python, which a
+        # command that sets its own PYTHONPATH (PYTHONPATH=/vllm-workspace
+        # pytest ...) doesn't replace. It exits 0: a failed copy only warns.
+        f"python3 {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
     ]
 
 
