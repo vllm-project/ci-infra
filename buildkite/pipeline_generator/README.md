@@ -88,6 +88,58 @@ generated. The input step also has an optional **Job keys** text field
 step keys one per line, so to pick through the API, unblock the input step
 with `{"fields": {"more-jobs": "<key>\n<key>"}}`.
 
+## Image builds start before the test selector
+
+The test selector takes minutes per build, and no test can start before its
+image. So the CUDA image (`image-build`), its smoke test, the ROCm image
+(`image-build-amd`) and the AMD base steps go up before the selector runs
+(`EARLY_IMAGE_KEYS`). Every non-doc build needs them: the CUDA image is the
+selector's floor, and the AMD steps keep today's always-run rules. The other
+images (CPU, XPU, HPU, arm64, ...) go up with the pipeline, only when a
+selected step depends on them.
+
+Buildkite holds the steps a job uploads until that job exits. Uploaded by
+bootstrap, the early images still wait out the selector. To start them sooner,
+a second step beside bootstrap runs `pipeline-generator --images_only`: it
+uploads them and exits within about a minute of getting an agent, then records
+the keys it uploaded in the build meta-data `vllm-ci-early-images` (empty when
+none: a doc-only change, or a failed upload). Bootstrap, given that step's key
+in `VLLM_CI_IMAGES_STEP`, does not upload them; after the selector, it reads
+the record and leaves those keys out of its pipeline. If the step finishes
+without a record, or has none after 10 minutes, bootstrap uploads the images
+itself, as it does without an images step; an images step that comes later
+then fails its own upload (Buildkite rejects a key already in the build),
+which costs nothing.
+
+In the `vllm/ci` pipeline settings:
+
+```yaml
+steps:
+  - label: ":docker: images"
+    key: bootstrap-images
+    agents:
+      queue: small_cpu_queue_premerge
+    soft_fail: true
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+    commands:
+      - |
+        if [[ -f .buildkite/.pipeline_gen_v2 ]]; then
+          pip install "git+https://github.com/vllm-project/ci-infra.git@${VLLM_CI_BRANCH:-main}#subdirectory=buildkite/pipeline_generator"
+          /var/lib/buildkite-agent/.local/bin/pipeline-generator --pipeline_config_path .buildkite/ci_config.yaml --images_only
+        fi
+  - label: "bootstrap"
+    key: bootstrap
+    env:
+      VLLM_CI_IMAGES_STEP: bootstrap-images
+    # ... the existing bootstrap step, unchanged
+```
+
+Without `VLLM_CI_IMAGES_STEP`, bootstrap uploads the early images itself, as
+before.
+
 ## Environment Variables
 
 The generator relies on several environment variables, typically provided by Buildkite or set by user:
@@ -100,6 +152,8 @@ The generator relies on several environment variables, typically provided by Bui
 * `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build. Implies `VLLM_CI_PLATFORM=cuda`, so AMD build/test steps and AMD mirrors are dropped: ROCm uses its own pinned torch and gains no signal from validating against a CUDA torch-nightly build.
 * `VLLM_CI_PLATFORM`: Set to `amd` or `cuda` to generate only that platform's jobs; every other step is dropped from the pipeline (not deferred into "Run more jobs"). `amd` keeps the AMD jobs: `amd_cpu` (the AMD build steps), the AMD GPUs and `amd-` mirrors. `cuda` keeps every other job (so for now it also keeps the few Intel, Arm and Ascend jobs). Steps are still chosen by the usual rules within the platform, so add `RUN_ALL=1` or `NIGHTLY=1` to run all of them. With `amd`, the test selector does not run, since it never picks AMD steps. `VLLM_CI_ONLY_STEP_KEYS` naming a step outside the platform fails generation.
 * `RUN_ALL`: Set to "1" to force run all steps.
+* `VLLM_CI_IMAGES_STEP`: The key of the step that runs `pipeline-generator --images_only` beside bootstrap. Set on bootstrap, so it leaves the early images to that step (see "Image builds start before the test selector").
+* `VLLM_CI_EARLY_IMAGE_UPLOAD`: Set to "0" to upload the whole pipeline at once, early images included.
 * `SKIP_TIMEOUT`: Set to "1" at pipeline generation time to omit all configured step timeouts.
 * `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.
 * `VLLM_USE_PRECOMPILED`: Set to "1" to force use of precompiled wheels.
