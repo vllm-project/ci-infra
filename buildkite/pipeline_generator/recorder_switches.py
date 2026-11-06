@@ -17,19 +17,22 @@ KERNREC_AMD_ENV_VAR = "VLLM_CI_KERNREC_AMD"
 FNREC_ENV_VAR = "VLLM_CI_FNREC"
 
 
-def _armed(env_var: str) -> bool:
-    # The AITER nightly runs only AMD jobs, on an unreleased AITER: its
-    # records would mislead the selector, so it never records.
+def _enabled(env_var: str) -> bool:
+    """`env_var` is "1" and this is not an AITER nightly build.
+
+    The AITER nightly tests an unreleased AITER, so its records would
+    mislead the selector.
+    """
     return os.getenv(env_var, "") == "1" and os.getenv("AITER_NIGHTLY", "") != "1"
 
 
 def kernrec_enabled() -> bool:
-    return _armed(KERNREC_ENV_VAR)
+    return _enabled(KERNREC_ENV_VAR)
 
 
 def kernrec_amd_enabled() -> bool:
-    return _armed(KERNREC_AMD_ENV_VAR)
+    return _enabled(KERNREC_AMD_ENV_VAR)
 
 
 def fnrec_enabled() -> bool:
-    return _armed(FNREC_ENV_VAR)
+    return _enabled(FNREC_ENV_VAR)
