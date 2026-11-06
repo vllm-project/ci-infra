@@ -5,6 +5,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import urllib.error
 
 import pytest
@@ -399,11 +400,29 @@ def test_plan_splits_a_file_over_the_budget_by_test_function():
 
 
 def test_plan_cuts_a_function_over_the_budget_by_case():
+    # Two of these cases together are over the budget, so each is its own part.
     cases = {f"test_x[{i}]": 700 for i in range(3)}
     timings = _with_tests(_timings(TESTS[0], {"big.py": 2100}), "big.py", cases)
     result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
     assign = result["commands"][0]["split"]["tests/big.py"]["assign"]
-    assert len(set(assign.values())) == 2 and result["shards"] == 2
+    assert len(set(assign.values())) == 3 and result["shards"] == 3
+    assert not result["overBudget"]
+
+
+def test_plan_cuts_a_file_into_parts_that_each_fit():
+    # PyTorch Fullgraph's test_basic_correctness.py: four long cases that
+    # ceil(total / budget) = 3 parts would force two of into one part over
+    # the budget, which no shard count can fit; with the step's small files,
+    # the plan then climbed to the most shards.
+    cases = {"test_c[a]": 720, "test_c[b]": 666, "test_c[c]": 654, "test_c[d]": 498}
+    small = {f"test_{n}.py": 90 for n in ("simple", "toy", "graphs")}
+    timings = _with_tests(
+        _timings(TESTS[0], {"big.py": 2538, "mm.py": 708, **small}), "big.py", cases
+    )
+    result = rs.plan(_commands(TESTS[0], ["big.py", "mm.py", *small]), timings)
+    split = result["commands"][0]["split"]["tests/big.py"]
+    assert len(set(split["assign"].values())) == len(split["shards"]) == 4  # a part per case
+    assert not result["overBudget"] and result["shards"] == 5
 
 
 def test_plan_keeps_a_node_selection_whole_without_matching_command_timings():
@@ -444,6 +463,55 @@ def test_plan_cuts_a_file_too_long_for_the_most_shards_into_one_part_each():
     result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
     assert result["shards"] == 10 and result["overBudget"]
     assert result["estimates"] == [1600.0] * 10
+
+
+def test_a_case_over_the_budget_alone_does_not_cut_the_rest_finer():
+    # No number of parts fits the long case; the short ones still share one.
+    cases = {"test_x[long]": 1200, **{f"test_x[{i}]": 1 for i in range(600)}}
+    timings = _with_tests(_timings(TESTS[0], {"big.py": 1800}), "big.py", cases)
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assert len(result["commands"][0]["split"]["tests/big.py"]["shards"]) == 2
+    assert result["estimates"] == [1200, 600]
+
+
+def test_plan_at_the_most_shards_keeps_coarser_parts_when_they_are_faster():
+    # Cutting a.py finer gives eleven units for ten shards, and two of them
+    # share one: slower than its one part over the budget.
+    a = {"test_a[0]": 600, "test_a[1]": 600, "test_a[2]": 750, "test_a[3]": 300}
+    b = {f"test_b[{i}]": 1050 for i in range(8)}
+    timings = _timings(TESTS[0], {"a.py": 2250, "b.py": 8400})
+    timings = _with_tests(_with_tests(timings, "a.py", a), "b.py", b)
+    result = rs.plan(_commands(TESTS[0], ["a.py", "b.py"]), timings)
+    assert result["shards"] == 10 and max(result["estimates"]) == 1200
+
+
+def test_plan_cuts_many_long_cases_in_one_pass():
+    # Cases over half the budget can't share a part: start from their count
+    # rather than adding parts one at a time.
+    cases = {f"test_x[{i}]": 600 for i in range(800)}
+    timings = _with_tests(_timings(TESTS[0], {"big.py": 480000}), "big.py", cases)
+    start = time.monotonic()
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assert time.monotonic() - start < 1
+    assert result["shards"] == 10 and max(result["estimates"]) == 48000
+
+
+def test_a_part_of_exactly_the_budget_is_not_cut_again():
+    cases = {"test_x[0]": 1140, "test_x[1]": 570, "test_x[2]": 570}
+    timings = _with_tests(_timings(TESTS[0], {"big.py": 2280}), "big.py", cases)
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assert len(result["commands"][0]["split"]["tests/big.py"]["shards"]) == 2
+    assert result["shards"] == 2 and not result["overBudget"]
+
+
+def test_plan_at_the_most_shards_keeps_an_even_share_of_the_file_per_part():
+    """Past the most shards' budget, parts of an even share are cut once:
+    some run a case over the share, and more parts than shards would double
+    up (Basic Models Extra Initialization, one file of 410 cases)."""
+    cases = {f"test_x[{i}]": 132 for i in range(101)}
+    timings = _with_tests(_timings(TESTS[0], {"big.py": 13332}), "big.py", cases)
+    result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
+    assert result["shards"] == 10 and max(result["estimates"]) == 11 * 132
 
 
 def test_plan_keeps_budget_sized_parts_when_they_balance_better():
@@ -615,14 +683,15 @@ def test_plan_at_the_most_shards_drops_one_that_does_not_help():
 
 def test_plan_keeps_its_shards_when_the_long_unit_is_a_guess():
     """A file main never timed counts as the median file: an hour here. Were it
-    taken at its word the timed tests would share two shards, and a new file
+    taken at its word the timed tests would share one shard, and a new file
     that takes a minute would leave the step an hour long."""
     tests = {f"test_{i}": 600 for i in range(6)}
     timings = _timed(_with_tests(_timings(TESTS[0], {"big.py": 3600}), "big.py", tests))
     result = rs.plan(_commands(TESTS[0], ["big.py", "new.py"]), timings)
     assert result["unknownFiles"] == ["tests/new.py"]
-    assert result["shards"] == 5
-    assert sorted(result["estimates"]) == [600, 600, 1200, 1200, 3600]
+    # Two of these tests are over the budget together: a shard each.
+    assert result["shards"] == 7
+    assert sorted(result["estimates"]) == [600] * 6 + [3600]
 
 
 @pytest.mark.parametrize("filtered", [False, True])
@@ -638,15 +707,15 @@ def test_plan_keeps_its_shards_when_a_smaller_unit_has_no_timing(filtered):
     assert result["longTest"] is None
 
 
-def test_plan_keeps_its_shards_when_the_long_unit_holds_several_tests():
-    """Cutting a file of four 10-minute tests in three parts puts two tests
-    in one: a part over the budget that no single test is."""
+def test_plan_never_cuts_a_part_over_the_budget_from_shorter_tests():
+    """Cutting a file of four 10-minute tests in ceil(40 / 18) = 3 parts would
+    put two tests in one: a part over the budget that no single test is."""
     tests = {f"test_{i}": 600 for i in range(4)}
     seconds = {"big.py": 2400, "small.py": 300}
     timings = _timed(_with_tests(_timings(TESTS[0], seconds), "big.py", tests))
     result = rs.plan(_commands(TESTS[0], seconds), timings)
-    assert result["shards"] == 4
-    assert sorted(result["estimates"]) == [300, 600, 600, 1200]
+    assert result["shards"] == 4 and not result["overBudget"]
+    assert sorted(result["estimates"]) == [600, 600, 600, 900]
 
 
 def test_plan_combines_commands_in_a_shard_within_the_budget():
