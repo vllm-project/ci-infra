@@ -5,7 +5,7 @@ What each CI step actually ran, for the test selector. Both are off unless the b
 | | records | switch | writes |
 | --- | --- | --- | --- |
 | [`fnrec/`](fnrec) | Python functions entered | `VLLM_CI_FNREC=1` | `.fnrec/<job-id>/` |
-| [`kernrec/`](kernrec) | CUDA kernels launched | `VLLM_CI_KERNREC=1` | `.kernrec/<job-id>/` |
+| [`kernrec/`](kernrec) | GPU kernels launched | `VLLM_CI_KERNREC=1` (CUDA), `VLLM_CI_KERNREC_AMD=1` (ROCm) | `.kernrec/<job-id>/` |
 
 Independent: turn on either, or both. Each owns its own directory, so neither can touch the other's files and the order they run in does not matter.
 
@@ -15,7 +15,8 @@ Set these on the build, then run it:
 
 ```
 VLLM_CI_FNREC=1                  # Python
-VLLM_CI_KERNREC=1                # CUDA, plus the line below
+VLLM_CI_KERNREC=1                # CUDA, plus the symbol map line below
+VLLM_CI_KERNREC_AMD=1            # ROCm, plus the symbol map line below
 VLLM_KERNEL_SYMBOL_MAP=1         # maps kernel symbols back to source files
 ```
 

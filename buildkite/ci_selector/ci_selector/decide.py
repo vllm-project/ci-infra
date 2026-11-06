@@ -46,6 +46,7 @@ to skip dropping entirely.
 from __future__ import annotations
 
 import os
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,7 +54,7 @@ from .coverage import freshness
 from .coverage.phase import DEFAULT_MODE, PhaseMode, mode_from_env
 from .coverage.kernels import KernelEvidence
 from .coverage.rules import RowKeys, newest_commit, read_pr, unknown_names
-from .coverage.source import fetch_kernel_evidence, fetch_table
+from .coverage.source import fetch_kernel_records, fetch_table
 from .coverage.table import Table
 
 #: Set to re-enable the freshness gate, which is off by default. Governs both
@@ -100,9 +101,13 @@ class Decision:
     # may not drop these.
     executes_by_coverage: set[str] = field(default_factory=set)
     executes_by_proxy: set[str] = field(default_factory=set)
+    # Steps the Python record cleared on its own files but kept for csrc
+    # files the kernel record answers for. That record may drop these.
+    cleared_by_coverage: set[str] = field(default_factory=set)
     # The kernel record's contribution, kept apart the same way.
     added_by_kernels: set[str] = field(default_factory=set)
     dropped_by_kernels: set[str] = field(default_factory=set)
+    executes_by_kernels: set[str] = field(default_factory=set)
     kernel_note: str = ""
     # Which table and map answered, and whether they match.
     kernel_pair: str = ""
@@ -134,7 +139,7 @@ def decide(
     *,
     table: Table | None = None,
     mode: PhaseMode | None = None,
-    kernels: KernelEvidence | None = None,
+    kernels: KernelEvidence | list[KernelEvidence] | None = None,
 ) -> Decision:
     """Apply both records to the map's selection.
 
@@ -153,6 +158,10 @@ def decide(
     out = Decision(steps=set(selection.selected), from_map=set(selection.selected))
 
     table = table if table is not None else fetch_table()
+    # Fetched before the Python record, which defers the csrc files this one
+    # answers for. Applied after it, as before.
+    kernels = kernels if kernels is not None else fetch_kernel_records()
+    pairs = [kernels] if isinstance(kernels, KernelEvidence) else kernels
     if not table.available:
         out.coverage_note = table.unavailable
     else:
@@ -162,7 +171,17 @@ def decide(
         if getattr(state, "pipelines", None):
             out.unreadable_rows = _unreadable_rows(state, table)
         try:
-            _apply_record(out, table, selection, repo, base, head, mode, state)
+            _apply_record(
+                out,
+                table,
+                selection,
+                repo,
+                base,
+                head,
+                mode,
+                state,
+                deferred=_deferred_to_kernels(pairs, selection),
+            )
         except Exception as exc:  # noqa: BLE001 - see the module docstring
             # Broad on purpose. A narrower handler would have to decide what
             # to do with a half-built reading, and the only safe answer is
@@ -172,16 +191,20 @@ def decide(
             out.dropped_by_coverage.clear()
             out.executes_by_coverage.clear()
             out.executes_by_proxy.clear()
+            out.cleared_by_coverage.clear()
             out.coverage_note = f"coverage unusable ({type(exc).__name__}: {exc})"
 
-    kernels = kernels if kernels is not None else fetch_kernel_evidence()
-    if kernels.unavailable:
-        out.kernel_note = kernels.unavailable
+    available = [pair for pair in pairs if not pair.unavailable]
+    if not available:
+        out.kernel_note = (
+            "; ".join(pair.unavailable for pair in pairs)
+            or "no kernel records configured"
+        )
     else:
-        out.kernel_pair = kernels.describe()
+        out.kernel_pair = "; ".join(pair.describe() for pair in available)
         try:
             _apply_kernel_record(
-                out, kernels, selection, state, repo, base, head, kernel_mode
+                out, available, selection, state, repo, base, head, kernel_mode
             )
         except Exception as exc:  # noqa: BLE001 - same reasoning as above
             out.steps = (
@@ -189,6 +212,7 @@ def decide(
             ) - out.dropped_by_coverage
             out.added_by_kernels.clear()
             out.dropped_by_kernels.clear()
+            out.executes_by_kernels.clear()
             out.kernel_note = f"kernel record unusable ({type(exc).__name__}: {exc})"
 
     if not table.available:
@@ -261,6 +285,7 @@ def _apply_record(
     head: str | None,
     mode: PhaseMode = DEFAULT_MODE,
     state=None,
+    deferred: frozenset[str] = frozenset(),
 ) -> None:
     from .codemap.worktree import state_for
     from .coverage.changed_funcs import build as build_query
@@ -316,6 +341,7 @@ def _apply_record(
         mode=mode,
         reached_via=_reached_via(repo, base, head, unresolved, union_names, state),
         platform_mockers=platform_mockers(repo, base, query.files),
+        deferred=deferred,
     )
     out.stale_steps = len(stale)
     out.reasons = dict(reading.reasons)
@@ -327,6 +353,7 @@ def _apply_record(
     out.dropped_by_coverage = set(reading.dropped)
     out.executes_by_coverage = set(reading.executes)
     out.executes_by_proxy = set(reading.executes_by_proxy)
+    out.cleared_by_coverage = set(reading.cleared)
     out.steps |= out.added_by_coverage
     out.steps -= out.dropped_by_coverage
 
@@ -452,7 +479,7 @@ def _append_op_proxies(
 
 def _apply_kernel_record(
     out: Decision,
-    kernels: KernelEvidence,
+    kernels: list[KernelEvidence],
     selection,
     state,
     repo: Path,
@@ -473,29 +500,52 @@ def _apply_kernel_record(
 
     if not getattr(state, "pipelines", None):
         raise RuntimeError("no pipeline state to resolve step keys against")
-    keys = RowKeys.resolve_from_state(set(kernels.table._rows), state)
     changed = changed_paths(diff_files(repo, base, head))
-
-    stale: frozenset[str] = frozenset()
-    if os.environ.get(FRESHNESS_ENV):
-        stale = _csrc_moved_since(repo, kernels.symbol_map.commit, base, changed)
-
-    allow_drops = kernels.matched or bool(os.environ.get(KERNEL_UNMATCHED_ENV))
-    reading = kernel_rules.read_pr(
-        kernels,
-        selection,
-        changed,
-        keys,
-        held=lambda path: csrc_held_steps(state, path),
-        stale=stale,
-        allow_drops=allow_drops,
-        protected=_protected_from_kernel_drops(out),
-        attribute=_kernel_attribution(repo, base, head, attribution_mode),
-    )
-    out.kernel_reasons = dict(reading.reasons)
-    out.kernel_files = dict(reading.files)
-    out.added_by_kernels = set(reading.added)
-    out.dropped_by_kernels = set(reading.dropped)
+    added: set[str] = set()
+    dropped: set[str] = set()
+    executes: set[str] = set()
+    held_by_record: set[str] = set()
+    reasons = Counter()
+    files: dict[str, list[str]] = {}
+    for pair in kernels:
+        keys = RowKeys.resolve_from_state(set(pair.table._rows), state)
+        stale: frozenset[str] = frozenset()
+        if os.environ.get(FRESHNESS_ENV):
+            stale = _csrc_moved_since(repo, pair.symbol_map.commit, base, changed)
+        reading = kernel_rules.read_pr(
+            pair,
+            selection,
+            changed,
+            keys,
+            held=lambda path: csrc_held_steps(state, path),
+            stale=stale,
+            allow_drops=pair.matched or bool(os.environ.get(KERNEL_UNMATCHED_ENV)),
+            protected=_protected_from_kernel_drops(out),
+            python_cleared=frozenset(out.cleared_by_coverage),
+            attribute=_kernel_attribution(repo, base, head, attribution_mode),
+            declarations=_declaration_attribution(
+                repo, base, head, pair.symbol_map, attribution_mode
+            ),
+        )
+        added.update(reading.added)
+        dropped.update(reading.dropped)
+        executes.update(reading.executes)
+        # A second pair can veto a drop only for steps it actually recorded.
+        # Missing rows in the other backend say nothing about this step.
+        held_by_record.update(
+            step
+            for step in reading.kept
+            if (row := pair.table.row(keys.key_for(step))) is not None
+            and row.backend in {pair.symbol_map.backend, "unknown"}
+        )
+        reasons.update(reading.reasons)
+        for path, note in reading.files.items():
+            files.setdefault(path, []).append(f"{pair.symbol_map.backend}: {note}")
+    out.kernel_reasons = dict(reasons)
+    out.kernel_files = {path: "; ".join(notes) for path, notes in files.items()}
+    out.added_by_kernels = added
+    out.dropped_by_kernels = dropped - added - held_by_record
+    out.executes_by_kernels = executes
     out.steps |= out.added_by_kernels
     out.steps -= out.dropped_by_kernels
 
@@ -505,7 +555,7 @@ def _apply_library_record(
 ) -> None:
     """Steps the map picked only for a library's version pin, dropped when
     their rows never called it. Keys resolve at the base, as for kernels. A
-    step the Python record kept on an observed call stays."""
+    step either execution record observed running changed code stays."""
     from .coverage import libraries
     from .gitdiff import diff_files
 
@@ -520,11 +570,22 @@ def _apply_library_record(
         selection,
         out.bumped,
         keys,
-        frozenset(out.executes_by_coverage),
+        frozenset(out.executes_by_coverage | out.executes_by_kernels),
         libraries.wrappers_at(repo, base),
     )
     out.library_reasons = dict(reasons)
     out.dropped_by_libraries = set(dropped) & out.steps
+
+
+def _deferred_to_kernels(pairs: list[KernelEvidence], selection) -> frozenset[str]:
+    """Changed csrc files the kernel record will answer for: the ones a usable
+    pair's map compiled. Empty when no pair is usable, so nothing waits on it."""
+    maps = [pair.symbol_map for pair in pairs if not pair.unavailable]
+    return frozenset(
+        p
+        for p in selection.selected_by_file
+        if p.startswith("csrc/") and any(sm.knows(p) for sm in maps)
+    )
 
 
 def _protected_from_kernel_drops(out: Decision) -> frozenset[str]:
@@ -582,5 +643,30 @@ def _kernel_attribution(repo: Path, base: str, head: str | None, mode: str):
     def narrow(path: str, symbols: frozenset[str]):
         a = attribute(repo, base, head, path, symbols)
         return (a.kernels if a.narrowed else frozenset()), a.why
+
+    return narrow
+
+
+def _declaration_attribution(repo: Path, base: str, head: str | None, sm, mode: str):
+    """The narrowing for a header or bindings file whose diff only declares or
+    registers functions (`coverage/changed_decls`), or None for the whole-file
+    reading."""
+    if mode == "file":
+        return None
+    from .coverage.changed_decls import attribute
+    from .coverage.changed_kernels import kernel_names_in
+
+    def narrow(path: str):
+        if not path.startswith("csrc/"):
+            return frozenset(), ""
+        a = attribute(
+            repo,
+            base,
+            head,
+            path,
+            sm.sources,
+            lambda f: kernel_names_in(sm.symbols(f)),
+        )
+        return a.kernels, a.why
 
     return narrow

@@ -117,6 +117,11 @@ class Claim:
     # for the steps it adds, so its sentence does not replay under every step.
     step_detail: dict[str, str] = field(default_factory=dict)
     step_rule: dict[str, str] = field(default_factory=dict)
+    # Buildkite keys, as spelled at the diff's head, of the steps whose own
+    # definition this claim's yaml changed or added. A step added by the diff
+    # is in no base state, so this is the only way to name it, and CI runs
+    # these even when they are optional: the change is to them.
+    changed_step_keys: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.rule not in RULES:

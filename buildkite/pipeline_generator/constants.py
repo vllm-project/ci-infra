@@ -41,6 +41,14 @@ class DeviceType(str, Enum):
     AMD_ZEN5_CPU = "zen5"
 
 
+class Platform(str, Enum):
+    """A build restricted to one platform runs only its jobs (VLLM_CI_PLATFORM):
+    `amd` the AMD jobs, `cuda` every other job."""
+
+    AMD = "amd"
+    CUDA = "cuda"
+
+
 class AgentQueue(str, Enum):
     CPU_PREMERGE = "cpu_queue_premerge"
     CPU_POSTMERGE = "cpu_queue_postmerge"
@@ -68,10 +76,7 @@ class AgentQueue(str, Enum):
     GH200 = "gh200_queue"
     ASCEND = "ascend"
     AMD_CPU = "amd-cpu"
-    AMD_MI250_1 = "amd_mi250_1"
-    AMD_MI250_2 = "amd_mi250_2"
-    AMD_MI250_4 = "amd_mi250_4"
-    AMD_MI250_8 = "amd_mi250_8"
+    AMD_MI250 = "amd_mi250"
     AMD_MI300_1 = "amd_mi300_1"
     AMD_MI300_2 = "amd_mi300_2"
     AMD_MI300_4 = "amd_mi300_4"

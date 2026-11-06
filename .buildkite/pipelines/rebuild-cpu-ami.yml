@@ -21,9 +21,14 @@ env:
 steps:
   - label: ":packer: Build CPU AMI"
     key: build-ami
+    if: build.branch == "main" || build.env("AGENT_ONLY") == "1"
     command:
       - |
         set -euo pipefail
+        if [[ "$${AGENT_ONLY:-0}" == 1 ]]; then
+          bash packer/agent/build.sh
+          exit 0
+        fi
         cd packer/cpu
 
         # Install a pinned standalone yq if not available. The PyPI yq package
@@ -221,6 +226,7 @@ steps:
 
   - label: ":aws: Update SSM Parameter"
     key: update-ssm
+    if: build.branch == "main" && build.env("AGENT_ONLY") != "1"
     command:
       - |
         echo "--- :ssm: Updating SSM parameter with new AMI ID"
@@ -242,6 +248,7 @@ steps:
 
   - label: ":rocket: Update Launch Templates"
     key: update-launch-templates
+    if: build.branch == "main" && build.env("AGENT_ONLY") != "1"
     command:
       - |
         set -euo pipefail
@@ -350,6 +357,7 @@ steps:
 
   - label: ":broom: Cleanup Old AMIs"
     key: cleanup-amis
+    if: build.branch == "main" && build.env("AGENT_ONLY") != "1"
     command:
       - |
         set -euo pipefail

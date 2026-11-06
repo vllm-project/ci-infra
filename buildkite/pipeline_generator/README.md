@@ -97,12 +97,14 @@ The generator relies on several environment variables, typically provided by Bui
 * `BUILDKITE_PULL_REQUEST`: Pull request number (or "false").
 * `BUILDKITE_PULL_REQUEST_BASE_BRANCH`: Base branch for PRs.
 * `NIGHTLY`: Set to "1" to auto-run the curated torch-nightly steps (those tagged `mirror.torch_nightly`).
-* `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build. AMD build/test steps and AMD mirrors are dropped entirely for this run, since ROCm uses its own pinned torch and gains no signal from validating against a CUDA torch-nightly build.
+* `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build. Implies `VLLM_CI_PLATFORM=cuda`, so AMD build/test steps and AMD mirrors are dropped: ROCm uses its own pinned torch and gains no signal from validating against a CUDA torch-nightly build.
+* `VLLM_CI_PLATFORM`: Set to `amd` or `cuda` to generate only that platform's jobs; every other step is dropped from the pipeline (not deferred into "Run more jobs"). `amd` keeps the AMD jobs: `amd_cpu` (the AMD build steps), the AMD GPUs and `amd-` mirrors. `cuda` keeps every other job (so for now it also keeps the few Intel, Arm and Ascend jobs). Steps are still chosen by the usual rules within the platform, so add `RUN_ALL=1` or `NIGHTLY=1` to run all of them. With `amd`, the test selector does not run, since it never picks AMD steps. `VLLM_CI_ONLY_STEP_KEYS` naming a step outside the platform fails generation.
 * `RUN_ALL`: Set to "1" to force run all steps.
 * `SKIP_TIMEOUT`: Set to "1" at pipeline generation time to omit all configured step timeouts.
 * `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.
 * `VLLM_USE_PRECOMPILED`: Set to "1" to force use of precompiled wheels.
 * `VLLM_CI_KERNREC`: Set to "1" to load the kernel-launch recorder (`buildkite/ci_selector/recorders/kernrec`) into every CUDA process of every GPU step and upload its `.kernrec/**` output as job artifacts. Off by default; meant for nightly and post-merge builds that feed the test selector.
+* `VLLM_CI_KERNREC_AMD`: Set to "1" to do the same on AMD steps with the ROCm backend. Independent of `VLLM_CI_KERNREC`: either backend can be recorded alone.
 * `VLLM_CI_FNREC`: Set to "1" to load the Python function recorder (`buildkite/ci_selector/recorders/fnrec`) into every Python process of every step, writing to its own `.fnrec/<job-id>`. Off by default; independent of `VLLM_CI_KERNREC`, same audience.
 * `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
     set, the generator emits those steps and their transitive dependencies,

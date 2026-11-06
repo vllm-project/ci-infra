@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import buildkite_step
+from constants import AgentQueue, Platform
 from pipeline_generator import select_steps_and_dependencies
 from step import Step, group_steps, read_steps_from_job_dir
 
@@ -221,16 +222,16 @@ def test_selected_steps_reject_unknown_dependency():
         select_steps_and_dependencies([step], frozenset({"test"}))
 
 
-def test_selected_steps_reject_amd_gpu_key_under_torch_nightly():
+def test_selected_steps_reject_amd_gpu_key_on_cuda_platform():
     step = Step(label="AMD GPU test", key="amd-gpu-test", device="mi300_2")
 
-    with pytest.raises(ValueError, match="amd-gpu-test"):
+    with pytest.raises(ValueError, match="only cuda steps: amd-gpu-test"):
         select_steps_and_dependencies(
-            [step], frozenset({"amd-gpu-test"}), torch_nightly=True
+            [step], frozenset({"amd-gpu-test"}), platform=Platform.CUDA
         )
 
 
-def test_selected_steps_reject_amd_mirror_key_under_torch_nightly():
+def test_selected_steps_reject_amd_mirror_key_on_cuda_platform():
     step = Step(
         label="Multimodal Processor",
         key="multimodal-processor",
@@ -240,19 +241,41 @@ def test_selected_steps_reject_amd_mirror_key_under_torch_nightly():
 
     with pytest.raises(ValueError, match="amd-multimodal-processor"):
         select_steps_and_dependencies(
-            [step], frozenset({"amd-multimodal-processor"}), torch_nightly=True
+            [step], frozenset({"amd-multimodal-processor"}), platform=Platform.CUDA
         )
 
 
-def test_selected_steps_allow_non_amd_key_under_torch_nightly():
+def test_selected_steps_allow_non_amd_key_on_cuda_platform():
     step = Step(label="CUDA test", key="cuda-test", commands=["test"])
 
     selected, selected_keys = select_steps_and_dependencies(
-        [step], frozenset({"cuda-test"}), torch_nightly=True
+        [step], frozenset({"cuda-test"}), platform=Platform.CUDA
     )
 
     assert [s.key for s in selected] == ["cuda-test"]
     assert selected_keys == frozenset({"cuda-test"})
+
+
+def test_selected_steps_on_amd_platform_reject_cuda_key_but_allow_its_mirror():
+    steps = [
+        Step(label="AMD image build", key="image-build-amd", device="amd_cpu"),
+        Step(
+            label="Multimodal Processor",
+            key="multimodal-processor",
+            device="h100",
+            commands=["test"],
+            mirror={"amd": {"device": "mi355_1"}},
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="only amd steps: multimodal-processor"):
+        select_steps_and_dependencies(
+            steps, frozenset({"multimodal-processor"}), platform=Platform.AMD
+        )
+    _, selected_keys = select_steps_and_dependencies(
+        steps, frozenset({"amd-multimodal-processor"}), platform=Platform.AMD
+    )
+    assert selected_keys == frozenset({"amd-multimodal-processor", "image-build-amd"})
 
 
 def test_selected_step_runs_without_source_match(fake_global_config):
@@ -427,6 +450,28 @@ def test_otel_trace_keeps_assignment_prefixed_commands_in_shell(fake_global_conf
         assert "ci_otel_run" not in command
     assert "TP_SIZE=1 pytest tests/entrypoints" in commands[2]
     assert "TP_SIZE=1 DP_SIZE=2 pytest tests/distributed" in commands[4]
+
+
+def test_otel_trace_labels_long_commands_in_full(fake_global_config):
+    fake_global_config["branch"] = "main"
+    long = "pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/"
+    step = Step(label="Traced", commands=[long + "fp8.txt", long + "int8.txt"])
+
+    commands = buildkite_step._prepare_commands(
+        step,
+        variables_to_inject={},
+        setup_profile="none",
+    )
+
+    labels = [
+        shlex.split(re.search(r"ci_otel_run \d+ (.*?) pytest", c).group(1))[0]
+        for c in (commands[2], commands[4])
+    ]
+    assert labels[0] != labels[1]
+    assert labels == step.commands
+    assert commands[3].endswith(f'Command (2/2): {labels[1]}"')
+    assert commands[2].endswith(step.commands[0])
+    assert commands[4].endswith(step.commands[1])
 
 
 def test_is_simple_command():
@@ -911,38 +956,66 @@ def _amd_and_cuda_steps():
             commands=["test"],
             mirror={"amd": {"device": "mi355_1", "depends_on": ["image-build-amd"]}},
         ),
+        Step(
+            label="CUDA image build",
+            group="Build",
+            key="image-build",
+            commands=["build"],
+        ),
+        Step(
+            label="CPU test",
+            group="Misc",
+            key="cpu-test",
+            device="cpu-small",
+            commands=["test"],
+        ),
+        Step(
+            label="Intel CPU test",
+            group="Hardware",
+            key="intel-cpu-test",
+            device="intel_cpu",
+            no_plugin=True,
+            commands=["test"],
+        ),
     ]
 
 
-def test_torch_nightly_run_omits_amd_build_gpu_and_mirror_steps(fake_global_config):
-    fake_global_config["torch_nightly"] = "1"
-
+def _generated_keys(platform):
+    config = buildkite_step.get_global_config()
+    config["platform"] = platform
     groups = buildkite_step.convert_group_step_to_buildkite_step(
         group_steps(_amd_and_cuda_steps())
     )
-    generated_keys = [job.key for group in groups for job in group.steps]
-
-    assert "image-build-amd" not in generated_keys
-    assert "amd-native" not in generated_keys
-    assert "amd-multimodal-processor" not in generated_keys
-    assert not any(g.group == "Hardware-AMD Tests" for g in groups)
-    assert "multimodal-processor" in generated_keys
+    return {job.key for group in groups for job in group.steps}
 
 
-def test_torch_nightly_off_still_generates_amd_build_gpu_and_mirror_steps(
-    fake_global_config,
-):
-    fake_global_config["torch_nightly"] = "0"
+def test_cuda_platform_omits_only_amd_build_gpu_and_mirror_steps():
+    assert _generated_keys(Platform.CUDA) == {
+        "image-build",
+        "multimodal-processor",
+        "cpu-test",
+        "intel-cpu-test",
+    }
 
-    groups = buildkite_step.convert_group_step_to_buildkite_step(
-        group_steps(_amd_and_cuda_steps())
-    )
-    generated_keys = [job.key for group in groups for job in group.steps]
 
-    assert "image-build-amd" in generated_keys
-    assert "amd-native" in generated_keys
-    assert "amd-multimodal-processor" in generated_keys
-    assert "multimodal-processor" in generated_keys
+def test_amd_platform_keeps_only_amd_build_gpu_and_mirror_steps():
+    assert _generated_keys(Platform.AMD) == {
+        "image-build-amd",
+        "amd-native",
+        "amd-multimodal-processor",
+    }
+
+
+def test_no_platform_generates_every_step():
+    assert _generated_keys(None) == {
+        "image-build-amd",
+        "amd-native",
+        "amd-multimodal-processor",
+        "multimodal-processor",
+        "image-build",
+        "cpu-test",
+        "intel-cpu-test",
+    }
 
 
 def test_image_tag_matches_get_image_and_latest_suppressed_on_nightly(
@@ -1096,3 +1169,45 @@ def test_docs_and_recipe_only_changes_skip_ci(diff, docs_only):
     from pipeline_generator import is_docs_only_change
 
     assert is_docs_only_change(diff) is docs_only
+
+
+@pytest.mark.parametrize(
+    ("key", "label", "branch", "queue"),
+    [
+        (
+            "image-build",
+            ":docker: Build image",
+            "main",
+            AgentQueue.CPU_POSTMERGE_US_EAST_1,
+        ),
+        (
+            "image-build",
+            ":docker: Build image",
+            "user:feature",
+            AgentQueue.CPU_PREMERGE_US_EAST_1,
+        ),
+        (
+            "image-build-cpu",
+            ":docker: Build CPU image",
+            "user:feature",
+            AgentQueue.MEDIUM_CPU_PREMERGE,
+        ),
+        (
+            "image-build-smoke-test",
+            ":docker: :smoking: Non-root smoke tests",
+            "user:feature",
+            AgentQueue.MEDIUM_CPU_PREMERGE,
+        ),
+        (
+            "image-build-arm64",
+            ":docker: Build arm64 image",
+            "user:feature",
+            AgentQueue.ARM64_CPU_PREMERGE,
+        ),
+    ],
+)
+def test_docker_step_queue_routing(monkeypatch, key, label, branch, queue):
+    config = {**buildkite_step.get_global_config(), "branch": branch}
+    monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
+    step = Step(label=label, key=key, commands=["true"])
+    assert buildkite_step.get_agent_queue(step) == queue

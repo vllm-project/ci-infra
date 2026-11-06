@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import shutil
@@ -6,7 +7,7 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
 
-from amd import is_amd_device, normalize_amd_depends_on
+from amd import AMD_ALWAYS_RUN_STEP_KEYS, normalize_amd_depends_on, runs_on
 from buildkite_step import (
     AMD_GROUP,
     COLLECT_GROUP,
@@ -20,16 +21,21 @@ from buildkite_step import (
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
     kernrec_collect_group,
+    kernrec_amd_enabled,
     kernrec_enabled,
     create_precommit_group_step,
     split_deferred_steps,
 )
-from constants import AgentQueue
+from constants import AgentQueue, Platform
 from recorder_switches import fnrec_enabled
 import selector_gate
-from global_config import get_global_config, init_global_config
+from global_config import PLATFORM_ENV_VAR, get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
 import unblock_jobs
+
+# Set to "0" to upload the whole pipeline at once, as before.
+EARLY_IMAGE_UPLOAD_ENV_VAR = "VLLM_CI_EARLY_IMAGE_UPLOAD"
+EARLY_IMAGE_PIPELINE_FILE = "pipeline-images.yaml"
 
 
 def _annotate_best_effort(message: str, style: Optional[str] = None) -> None:
@@ -82,18 +88,21 @@ class PipelineGenerator:
                     f.write("true")
                 return
 
-        torch_nightly = global_config["torch_nightly"] == "1"
-        if torch_nightly:
-            # ROCm has its own pinned torch and gains nothing from validating
-            # against a CUDA torch-nightly build, so the AMD lane is excluded
-            # further downstream (see is_amd_device / include_amd).
-            _annotate_best_effort(
-                "AMD lane excluded: torch-nightly validates CUDA only."
+        platform = global_config["platform"]
+        if platform:
+            reason = (
+                "torch nightly validates CUDA only"
+                if global_config["torch_nightly"] == "1"
+                else f"{PLATFORM_ENV_VAR}={platform.value}"
             )
+            _annotate_best_effort(f"Only {platform.value} jobs run: {reason}.")
 
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+        early_keys = upload_image_steps_early(
+            steps, os.path.dirname(self.output_file_path)
+        )
         record = _selector_decision(steps)
         scheduled = None
         try:
@@ -102,13 +111,11 @@ class PipelineGenerator:
                 # Every step stays in the pipeline; the rest are deferred
                 # (_step_should_run), so "Run more jobs" still offers them.
                 _, scheduled = select_steps_and_dependencies(
-                    steps,
-                    global_config["selector_step_keys"],
-                    torch_nightly=torch_nightly,
+                    steps, global_config["selector_step_keys"]
                 )
                 global_config["selector_step_keys"] = scheduled
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+                steps, global_config["only_step_keys"], platform=platform
             )
         except ValueError as error:
             if not (record and record["applied"]):
@@ -121,7 +128,7 @@ class PipelineGenerator:
             global_config["selector_step_keys"] = None
             scheduled = None
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+                steps, global_config["only_step_keys"], platform=platform
             )
         global_config["only_step_keys"] = selected_step_keys
         if record is not None:
@@ -154,7 +161,7 @@ class PipelineGenerator:
         # Both recorders share one group, so they don't make two groups
         # with the same name.
         collect = []
-        if kernrec_enabled():
+        if kernrec_enabled() or kernrec_amd_enabled():
             collect += kernrec_collect_group(buildkite_group_steps).steps
         if fnrec_enabled():
             collect += fnrec_collect_group(buildkite_group_steps).steps
@@ -175,6 +182,11 @@ class PipelineGenerator:
                     global_config["github_repo_name"], global_config["commit"]
                 ),
             )
+
+        if early_keys:
+            # Already in the build: a second upload of a key would fail it.
+            buildkite_group_steps = _without_keys(buildkite_group_steps, early_keys)
+            deferred_group_steps = _without_keys(deferred_group_steps, early_keys)
 
         buildkite_steps_dict = {"steps": []}
         for buildkite_group_step in buildkite_group_steps:
@@ -200,6 +212,82 @@ class PipelineGenerator:
                 buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
             )
         return
+
+
+def _is_image_step(step: Step) -> bool:
+    # The steps _step_should_run always runs: they build the images every
+    # test depends on, whatever the diff or the test selector says.
+    return bool(step.key) and (
+        step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
+    )
+
+
+def upload_image_steps_early(steps: List[Step], output_dir: str) -> FrozenSet[str]:
+    """Upload the image build steps before the rest of the pipeline is
+    generated, and return their keys.
+
+    The test selector takes minutes per build, and the image builds wait for
+    the pipeline upload that follows it although they never depend on its
+    answer. Uploaded here, they start that much sooner; `generate` leaves
+    them out of the final pipeline. Returns no keys, so everything goes up
+    together as before, when the upload fails or does not apply.
+    """
+    global_config = get_global_config()
+    if (
+        os.getenv(EARLY_IMAGE_UPLOAD_ENV_VAR) == "0"
+        or not os.getenv("BUILDKITE_JOB_ID")
+        or global_config["only_step_keys"] is not None
+    ):
+        return frozenset()
+    early = [copy.deepcopy(step) for step in steps if _is_image_step(step)]
+    # Only steps whose prerequisites go up with them.
+    while True:
+        keys = {step.key for step in early}
+        kept = [s for s in early if all(d in keys for d in s.depends_on or [])]
+        if len(kept) == len(early):
+            break
+        early = kept
+    if not early:
+        return frozenset()
+    groups, _ = split_deferred_steps(
+        convert_group_step_to_buildkite_step(group_steps(early))
+    )
+    keys = frozenset(step.key for group in groups for step in group.steps)
+    if not keys:
+        return frozenset()
+    path = os.path.join(output_dir, EARLY_IMAGE_PIPELINE_FILE)
+    with open(path, "w") as f:
+        yaml.dump(
+            {"steps": [group.dict(exclude_none=True) for group in groups]},
+            f,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+    try:
+        result = subprocess.run(
+            ["buildkite-agent", "pipeline", "upload", path], check=False, timeout=120
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"Early image upload failed, uploading with the pipeline: {error}")
+        return frozenset()
+    if result.returncode != 0:
+        print("Early image upload failed, uploading with the pipeline")
+        return frozenset()
+    print(f"Uploaded the image builds early: {', '.join(sorted(keys))}")
+    return keys
+
+
+def _without_keys(
+    groups: List[BuildkiteGroupStep], keys: FrozenSet[str]
+) -> List[BuildkiteGroupStep]:
+    kept = []
+    for group in groups:
+        steps = [step for step in group.steps if step.key not in keys]
+        if len(steps) == len(group.steps):
+            kept.append(group)
+        elif steps:
+            kept.append(group.model_copy(update={"steps": steps}))
+    return kept
 
 
 def write_deferred_steps(
@@ -289,11 +377,18 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
         record = selector_gate.decide(global_config, legacy)
         keys = record["selector_keys"]
         if keys:
-            # A PR build never runs optional (nightly / manual) steps today, and
-            # the selector does not get to start doing so: they stay optional.
-            optional = selector_gate.optional_keys(steps)
+            # Steps whose own definition the diff changed or added run, even
+            # optional ones: the change is to them, and otherwise it would go
+            # untested until the nightly (vllm#61832 added automatic_shard to
+            # three nightly-only steps).
+            changed = set((record.get("selector") or {}).get("changed_keys") or ())
+            changed &= selector_gate.known_keys(steps)
+            record["selector_changed_steps"] = sorted(changed)
+            # Every other optional (nightly / manual) step stays optional, as
+            # on any PR build today.
+            optional = selector_gate.optional_keys(steps) - changed
             record["selector_optional_dropped"] = sorted(set(keys) & optional)
-            keys = sorted(set(keys) - optional)
+            keys = sorted((set(keys) | changed) - optional)
             # AMD steps keep today's rules; the selector decides the rest.
             amd = selector_gate.amd_keys(steps)
             record["selector_amd_left_to_todays_rules"] = sorted(set(keys) & amd)
@@ -319,14 +414,14 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
 def select_steps_and_dependencies(
     steps: List[Step],
     requested_step_keys: Optional[FrozenSet[str]],
-    torch_nightly: bool = False,
+    platform: Optional[Platform] = None,
 ) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
     if requested_step_keys is None:
         return steps, None
 
     steps_by_key = {}
     dependencies_by_key = {}
-    amd_step_keys = set()
+    off_platform_keys = set()
     for step in steps:
         # Steps without an explicit key are uploaded with a label-derived key
         # (see convert_group_step_to_buildkite_step), so retry builds reference
@@ -337,8 +432,8 @@ def select_steps_and_dependencies(
             raise ValueError(f"Duplicate CI step key: {step.key}")
         steps_by_key[step.key] = step
         dependencies_by_key[step.key] = step.depends_on or []
-        if is_amd_device(step.device):
-            amd_step_keys.add(step.key)
+        if not runs_on(platform, step.device):
+            off_platform_keys.add(step.key)
 
         # AMD mirrors are uploaded as generated `amd-<key>` steps, so retry
         # builds reference them by that key too.
@@ -351,19 +446,19 @@ def select_steps_and_dependencies(
             dependencies_by_key[mirror_key] = normalize_amd_depends_on(
                 amd_mirror.get("depends_on")
             )
-            amd_step_keys.add(mirror_key)
+            if not runs_on(platform, amd_mirror.get("device")):
+                off_platform_keys.add(mirror_key)
 
     missing = requested_step_keys - steps_by_key.keys()
     if missing:
         raise ValueError("Unknown CI step key(s): " + ", ".join(sorted(missing)))
 
-    if torch_nightly:
-        requested_amd_keys = requested_step_keys & amd_step_keys
-        if requested_amd_keys:
-            raise ValueError(
-                "AMD CI step key(s) requested, but AMD steps are excluded from "
-                "torch-nightly runs: " + ", ".join(sorted(requested_amd_keys))
-            )
+    requested_off_platform_keys = requested_step_keys & off_platform_keys
+    if requested_off_platform_keys:
+        raise ValueError(
+            f"CI step key(s) requested, but this build runs only {platform.value} "
+            "steps: " + ", ".join(sorted(requested_off_platform_keys))
+        )
 
     selected_step_keys = set(requested_step_keys)
     pending = list(requested_step_keys)

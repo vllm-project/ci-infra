@@ -153,7 +153,9 @@ EXCLUSIVE_NAMESPACES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] =
         ("vllm/platforms/cpu.py", "vllm/platforms/zen_cpu.py"),
         "cpu",
     ),
-    (("csrc/rocm/",), (), "amd"),
+    # tools/vllm-rocm/: the ROCm stack's build tooling (therock_wheels.py is
+    # COPYed by docker/Dockerfile.rocm_base only).
+    (("csrc/rocm/", "tools/vllm-rocm/"), (), "amd"),
     ((), ("vllm/platforms/tpu.py",), "tpu"),
     (
         (
@@ -491,6 +493,11 @@ KNOWN_STEP_FIELDS = {
     # `mount_buildkite_agent` is real plugin wiring, read in docker_plugin.py.
     "group",
     "mount_buildkite_agent",
+    # Buildkite's agent targeting, set by zen-cpu-image-build. The generator's
+    # Step model has no such field and drops it (the queue comes from
+    # `device`), so it cannot gate execution; forcing the step for it built
+    # the Zen image on every PR.
+    "agents",
 }
 
 # mirror.<hw> fields the generator honors (ci-infra buildkite_step.py).

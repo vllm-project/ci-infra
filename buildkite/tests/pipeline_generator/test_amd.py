@@ -95,6 +95,69 @@ def test_skip_timeout_omits_rocm_base_refresh_timeout(fake_global_config, monkey
     assert "timeout_in_minutes" not in command_step.model_dump(exclude_none=True)
 
 
+@pytest.fixture
+def build_sh_layout(tmp_path, monkeypatch):
+    """A vLLM checkout that builds its ROCm images with build.sh."""
+    (tmp_path / ".buildkite/scripts/rocm").mkdir(parents=True)
+    (tmp_path / ".buildkite/scripts/rocm/build.sh").touch()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BUILDKITE_REPO", "https://github.com/vllm-project/vllm.git")
+    monkeypatch.setenv("BUILDKITE_PULL_REQUEST", "false")
+    monkeypatch.setenv("BUILDKITE_BRANCH", "main")
+    monkeypatch.delenv("AITER_NIGHTLY", raising=False)
+    return monkeypatch
+
+
+@pytest.mark.parametrize(
+    "env,expected",
+    [
+        ({}, "rocm/vllm-ci"),
+        ({"BUILDKITE_PULL_REQUEST": "42"}, "rocm/vllm-dev"),
+        ({"BUILDKITE_REPO": "git@github.com:someone/vllm.git"}, "rocm/vllm-dev"),
+        ({"AITER_NIGHTLY": "1"}, "rocm/vllm-dev"),
+        ({"BUILDKITE_BRANCH": "releases/v0.99"}, "rocm/vllm-dev"),
+    ],
+)
+def test_build_sh_layout_build_steps_get_trusted_repo(build_sh_layout, env, expected):
+    for name, value in env.items():
+        build_sh_layout.setenv(name, value)
+    build_sh_layout.setenv("ROCM_BASE_REFRESH_SKIP", "1")  # ignored by build.sh
+
+    step = _rocm_base_refresh_step().model_copy(
+        update={"concurrency_group": "g/$ROCM_CI_REPO/$BUILDKITE_BRANCH"}
+    )
+
+    command_step = _render_single_step(step).steps[0]
+
+    assert command_step.env == {"ROCM_CI_REPO": expected}
+    assert command_step.concurrency_group == f"g/{expected}/$BUILDKITE_BRANCH"
+    assert command_step.timeout_in_minutes == 540
+    assert command_step.agents == {"queue": AgentQueue.AMD_CPU}
+
+
+def test_build_sh_layout_pods_run_the_build_image(build_sh_layout):
+    build_sh_layout.setenv("BUILDKITE_PULL_REQUEST", "42")
+    step = Step(
+        label="AMD test",
+        group="Direct AMD",
+        key="amd-test",
+        device="mi300_1",
+        dind=False,
+        commands=["pytest tests/foo.py"],
+    )
+
+    command_step = _render_single_step(step).steps[-1]
+
+    assert command_step.depends_on[0] == "image-build-amd"
+    pod = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
+    container = pod["containers"][0]
+    assert container["image"] == "rocm/vllm-dev:build-$BUILDKITE_BUILD_ID"
+    assert command_step.env["VLLM_CI_BASE_IMAGE"] == container["image"]
+    assert container["imagePullPolicy"] == "Always"
+    assert [m["name"] for m in container["volumeMounts"]] == ["devshm"]
+    assert [v["name"] for v in pod["volumes"]] == ["devshm"]
+
+
 @pytest.mark.parametrize(
     ("device", "queue", "dind", "expected_gpu_count"),
     [
@@ -212,6 +275,31 @@ def test_amd_device_rejects_conflicting_gpu_count(device, gpu_count):
         match=rf"AMD device {device} provides {gpu_count} GPUs, but num_devices=2",
     ):
         _render_single_step(step)
+
+
+@pytest.mark.parametrize(
+    "device,gpu_size",
+    [("mi250_1", "1"), ("mi250_2", "2"), ("mi250_4", "4"), ("mi250_8", "8")],
+)
+def test_mi250_steps_share_one_queue_split_by_gpu_size(device, gpu_size):
+    step = Step(
+        label="MI250 test",
+        group="Direct AMD",
+        key=f"amd-{device}",
+        device=device,
+        dind=False,
+        agent_tags={"gpu_size": "99", "queue": "other", "label": "x"},
+        commands=["pytest tests/foo.py"],
+    )
+
+    command_step = _render_single_step(step).steps[-1]
+
+    assert command_step.agents == {
+        "queue": AgentQueue.AMD_MI250,
+        "gpu_size": gpu_size,
+        "label": "x",
+    }
+    assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == gpu_size
 
 
 def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
@@ -777,3 +865,58 @@ def test_amd_mirror_parallelism_override(fake_global_config, amd_parallelism, ex
 )
 def test_is_amd_device(device, expected):
     assert is_amd_device(device) is expected
+
+
+def _mirrored_and_native(optional=False):
+    return [
+        Step(
+            label="Mirrored kernel test",
+            group="Kernels",
+            commands=["pytest tests/kernels"],
+            source_file_dependencies=["tests/kernels/"],
+            optional=optional,
+            mirror={"amd": {"device": "mi300_1"}},
+        ),
+        Step(
+            label="Native AMD test",
+            group="Kernels",
+            key="native-amd-kernels",
+            device="mi355_1",
+            commands=["pytest tests/amd"],
+            source_file_dependencies=["tests/amd/"],
+        ),
+    ]
+
+
+def test_amd_run_all_runs_every_amd_step_and_no_cuda_step(fake_global_config):
+    """csrc/ moves from run_all_patterns to amd_run_all_patterns: the selector
+    narrows it on CUDA, while AMD, not selected yet, keeps running everything."""
+    fake_global_config["list_file_diff"] = ["csrc/attention/attention_kernels.cu"]
+    fake_global_config["amd_run_all"] = True
+    mirrored, native = _mirrored_and_native()
+    amd_cfg = mirrored.mirror["amd"]
+    run = buildkite_step._step_should_run
+    assert not run(mirrored, fake_global_config["list_file_diff"]), "CUDA: its own deps"
+    effective = buildkite_step._get_amd_mirror_effective_step(mirrored, amd_cfg)
+    assert run(effective, fake_global_config["list_file_diff"]), "AMD mirror runs"
+    assert run(native, fake_global_config["list_file_diff"]), "native AMD runs"
+
+
+def test_amd_run_all_leaves_optional_amd_steps_optional(fake_global_config):
+    fake_global_config["list_file_diff"] = ["csrc/attention/attention_kernels.cu"]
+    fake_global_config["amd_run_all"] = True
+    (mirrored, _) = _mirrored_and_native(optional=True)
+    effective = buildkite_step._get_amd_mirror_effective_step(
+        mirrored, mirrored.mirror["amd"]
+    )
+    assert not buildkite_step._step_should_run(
+        effective, fake_global_config["list_file_diff"]
+    ), "as with run_all, an optional step stays for the nightly"
+
+
+def test_amd_run_all_off_keeps_dependency_rules(fake_global_config):
+    fake_global_config["list_file_diff"] = ["csrc/attention/attention_kernels.cu"]
+    (_, native) = _mirrored_and_native()
+    assert not buildkite_step._step_should_run(
+        native, fake_global_config["list_file_diff"]
+    )

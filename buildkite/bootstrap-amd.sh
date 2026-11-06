@@ -36,6 +36,13 @@ if [[ "${AITER_NIGHTLY}" == "1" ]]; then
     DOCS_ONLY_DISABLE=1
 fi
 
+# ROCm base image cache: the main build vLLM's /ci rocm cache starts with ROCM_PROMOTE_PR/SHA/IMAGES.
+ROCM_PROMOTE=""
+if [[ -n "${ROCM_PROMOTE_PR:-}" ]]; then
+    ROCM_PROMOTE=run
+    DOCS_ONLY_DISABLE=1
+fi
+
 if [[ -z "${COV_ENABLED:-}" ]]; then
     COV_ENABLED=0
 fi
@@ -101,21 +108,6 @@ if [[ -z "${MERGE_BASE_COMMIT:-}" ]]; then
     fi
 fi
 
-fail_fast() {
-    DISABLE_LABEL="ci-no-fail-fast"
-    # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
-    if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
-        PR_LABELS=$(get_pr_labels)
-        if [[ $PR_LABELS == *"$DISABLE_LABEL"* ]]; then
-            echo false
-        else
-            echo true
-        fi
-    else
-        echo false  # not a PR or BUILDKITE_PULL_REQUEST not set
-    fi
-}
-
 check_run_all_label() {
     RUN_ALL_LABEL="ready-run-all-tests"
     # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
@@ -169,6 +161,10 @@ upload_pipeline() {
     fi
     curl -fsSL -o "$TEMPLATE_PATH" \
         "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
+    if [[ $ROCM_PROMOTE == run ]] && ! grep -q 'rocm_promote == "run"' "$TEMPLATE_PATH"; then
+        buildkite-agent annotate --style error "ROCm base image cache: ci-infra $VLLM_CI_BRANCH cannot render it" || true
+        exit 1
+    fi
 
 
     echo "List file diff: $LIST_FILE_DIFF"
@@ -178,8 +174,25 @@ upload_pipeline() {
     echo "AITER Nightly: $AITER_NIGHTLY"
     echo "AMD Mirror HW: $AMD_MIRROR_HW"
 
-    FAIL_FAST=$(fail_fast)
     cd .buildkite
+    AMD_BUILD_STEPS="[]"
+    if [[ -f scripts/rocm/build.sh ]]; then
+        # vLLM defines its ROCm build steps in hardware_tests/amd.yaml. The one trust rule: only non-PR builds
+        # of vllm-project/vllm main, AITER nightly excluded, write rocm/vllm-ci. Exported for $ROCM_CI_REPO in amd.yaml.
+        ROCM_CI_REPO=rocm/vllm-dev
+        if [[ ${BUILDKITE_PULL_REQUEST:-} == false && ${BUILDKITE_BRANCH:-} == main \
+              && ${BUILDKITE_REPO:-} =~ [/:]vllm-project/vllm(\.git)?$ && $AITER_NIGHTLY != 1 ]]; then
+            ROCM_CI_REPO=rocm/vllm-ci
+        fi
+        export ROCM_CI_REPO
+        echo '{{ steps | tojson }}' > amd-build-steps.j2
+        AMD_BUILD_STEPS=$(minijinja-cli amd-build-steps.j2 hardware_tests/amd.yaml)
+    fi
+    if [[ $ROCM_PROMOTE == run ]] && ! [[ ${ROCM_CI_REPO:-} == rocm/vllm-ci \
+          && $ROCM_PROMOTE_PR =~ ^[0-9]+$ && ${ROCM_PROMOTE_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
+        buildkite-agent annotate --style error "ROCm base image cache needs a main build of vllm-project/vllm and a PR number and SHA" || true
+        exit 1
+    fi
     (
         set -x
         # Output pipeline.yaml with all blank lines removed
@@ -188,16 +201,14 @@ upload_pipeline() {
             -D list_file_diff="$LIST_FILE_DIFF" \
             -D run_all="$RUN_ALL" \
             -D nightly="$NIGHTLY" \
-            -D torch_nightly="$TORCH_NIGHTLY" \
             -D aiter_nightly="$AITER_NIGHTLY" \
             -D mirror_hw="$AMD_MIRROR_HW" \
-            -D fail_fast="$FAIL_FAST" \
-            -D vllm_use_precompiled="$VLLM_USE_PRECOMPILED" \
-            -D vllm_merge_base_commit="$MERGE_BASE_COMMIT" \
-            -D cov_enabled="$COV_ENABLED" \
-            -D vllm_ci_branch="$VLLM_CI_BRANCH" \
+            -D amd_build_steps:="$AMD_BUILD_STEPS" \
+            -D ci_repo="${ROCM_CI_REPO:-}" \
             -D rocm_base_refresh_skip="${ROCM_BASE_REFRESH_SKIP:-0}" \
             -D rocm_base_refresh_force="${ROCM_BASE_REFRESH_FORCE:-0}" \
+            -D rocm_promote="$ROCM_PROMOTE" \
+            -D promote_pr="${ROCM_PROMOTE_PR:-}" \
             | sed '/^[[:space:]]*$/d' \
             > pipeline.yaml
     )
