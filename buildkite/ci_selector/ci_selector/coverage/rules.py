@@ -669,7 +669,8 @@ def _add_from_rows(
             # selector reads it), and adds nothing until the scope says so.
             for f in query.files
             if not f.proxy and f.in_recorder_scope
-            for name in f.names - set(unresolved.get(f.path, ()))
+            # A Triton kernel's launchers are drop evidence only, like a proxy.
+            for name in f.names - set(unresolved.get(f.path, ())) - f.launcher_names
         ):
             reading.added.append(step_id)
 
