@@ -185,13 +185,18 @@ def _parse_file(repo: Path, file: str, index: ModuleIndex, graph: ImportGraph) -
         graph.parse_errors.append(file)
         return
     module = index.file_to_module.get(file, "")
-    consts = _module_string_consts(tree)
-    consts |= _private_param_consts(tree, consts)
-    options = _parametrize_options(tree)
+    # One walk shared by the three scans below, each of which used to walk the
+    # whole tree itself: the walks were most of a graph build's time.
+    nodes = list(ast.walk(tree))
+    consts = _module_string_consts(tree, nodes)
+    consts |= _private_param_consts(tree, consts, nodes)
+    options = _parametrize_options(tree, nodes)
     _FileVisitor(repo, file, module, index, graph, consts, options).visit(tree)
 
 
-def _module_string_consts(tree: ast.Module) -> dict[str, str]:
+def _module_string_consts(
+    tree: ast.Module, nodes: list[ast.AST] | None = None
+) -> dict[str, str]:
     """`NAME = "literal"` bindings, at any scope. Only names that are
     unambiguous file-wide: every write is the same string and nothing else
     binds them. A name meaning two things is not readable, and picking one
@@ -208,7 +213,7 @@ def _module_string_consts(tree: ast.Module) -> dict[str, str]:
         ):
             string_writes.setdefault(target.id, []).append(value.value)
 
-    for node in ast.walk(tree):
+    for node in ast.walk(tree) if nodes is None else nodes:
         # Every rebinding, any scope.
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             write_count[node.id] = write_count.get(node.id, 0) + 1
@@ -239,7 +244,9 @@ def _module_string_consts(tree: ast.Module) -> dict[str, str]:
     return out
 
 
-def _parametrize_options(tree: ast.Module) -> dict[str, set[str]]:
+def _parametrize_options(
+    tree: ast.Module, nodes: list[ast.AST] | None = None
+) -> dict[str, set[str]]:
     """Parameter name -> every string `pytest.mark.parametrize` binds to it.
     Plural, so it cannot go in `consts`. The decorator lists every value, so
     the set is complete; a name any row leaves unreadable is dropped whole."""
@@ -251,7 +258,7 @@ def _parametrize_options(tree: ast.Module) -> dict[str, set[str]]:
             return list(argvalues.elts)
         return None
 
-    for node in ast.walk(tree):
+    for node in ast.walk(tree) if nodes is None else nodes:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for deco in node.decorator_list:
@@ -299,7 +306,9 @@ def _parametrize_options(tree: ast.Module) -> dict[str, set[str]]:
     return {n: v for n, v in options.items() if n not in unreadable}
 
 
-def _private_param_consts(tree: ast.Module, consts: dict[str, str]) -> dict[str, str]:
+def _private_param_consts(
+    tree: ast.Module, consts: dict[str, str], nodes: list[ast.AST] | None = None
+) -> dict[str, str]:
     """Parameters of a module-private helper that every call in the file
     passes the same string for. The underscore bounds the search to this file,
     so these call sites are all of them. Dropped if any call is unreadable, the
@@ -315,8 +324,10 @@ def _private_param_consts(tree: ast.Module, consts: dict[str, str]) -> dict[str,
             if args.vararg or args.kwarg or args.kwonlyargs or args.posonlyargs:
                 continue
             functions[node.name] = [a.arg for a in args.args]
+    if not functions:
+        return {}  # no private helper, so no call site to read
 
-    for node in ast.walk(tree):
+    for node in ast.walk(tree) if nodes is None else nodes:
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
         names = functions.get(node.func.id)

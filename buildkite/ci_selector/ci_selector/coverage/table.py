@@ -465,6 +465,20 @@ def load(path: Path) -> Table:
     return Table(rows, rejected=rejected, source=payload.get("source") or {})
 
 
+def problem(table: Table, commit: str) -> str:
+    """Why a table fetched for `commit` must be refused, or "". The fetch's
+    checks, shared with `ci-select --table-commit`, which makes them on the
+    table it loads when the fetch skipped them (`--no-verify`)."""
+    if not table.available:
+        return table.unavailable
+    # A mismatch means table and pointer were published out of step.
+    if table.commit and table.commit != commit:
+        return (
+            f"asked for {commit[:10]}, table records {table.commit[:10]}; refusing it"
+        )
+    return ""
+
+
 def apply(table: Table, query: Query, steps: list[str]) -> list[Verdict]:
     """Verdicts for a map selection. Wiring for the smoke test, not the rule."""
     mark_unfaithful(query, table.unfaithful_paths)

@@ -301,8 +301,8 @@ def _apply_record(
 
     stale: frozenset[str] = frozenset()
     if os.environ.get(FRESHNESS_ENV):
-        # `RowKeys.resolve` already built and cached this state, so this is
-        # cheap.
+        # The one full state at the table's commit, built only when the gate
+        # is on: `RowKeys.resolve` reads that commit's yaml alone.
         surfaces = freshness.build(state_for(repo, recorded_at), recorded_at)
         moved = freshness.changed_between(repo, recorded_at, base)
         stale = frozenset(surfaces.stale_steps(selection.selected, moved))

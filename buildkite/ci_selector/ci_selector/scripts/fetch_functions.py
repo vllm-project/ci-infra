@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 
 from ..coverage.source import COVERAGE_DIR, TABLE_NAME
-from ..coverage.table import load
+from ..coverage.table import load, problem
 
 DEFAULT_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/fnrec"
 URL_ENV = "CI_SELECTOR_FUNCTION_RECORD_URL"
@@ -44,6 +44,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--out", type=Path, default=COVERAGE_DIR, help="directory to write into"
     )
+    ap.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="save the table without loading it to check it, and print only "
+        "its commit. For a caller that loads it anyway: `ci-select "
+        "--table-commit <that commit>` makes the same checks then. Replaces a "
+        "table already in --out even if the new one is bad.",
+    )
     args = ap.parse_args(argv)
     url = args.url.rstrip("/")
 
@@ -57,18 +65,13 @@ def main(argv: list[str] | None = None) -> int:
         with tempfile.TemporaryDirectory(dir=args.out) as tmp:
             staged = Path(tmp) / TABLE_NAME
             staged.write_bytes(_get(f"{url}/{commit}/{TABLE_NAME}"))
-            table = load(staged)
-            if not table.available:
-                print(f"error: {table.unavailable}", file=sys.stderr)
-                return 1
-            # A mismatch means table and pointer were published out of step.
-            if table.commit and table.commit != commit:
-                print(
-                    f"error: asked for {commit[:10]}, table records "
-                    f"{table.commit[:10]}; refusing it",
-                    file=sys.stderr,
-                )
-                return 1
+            table = None
+            if not args.no_verify:
+                table = load(staged)
+                refusal = problem(table, commit)
+                if refusal:
+                    print(f"error: {refusal}", file=sys.stderr)
+                    return 1
             os.replace(staged, args.out / TABLE_NAME)
     except urllib.error.HTTPError as exc:
         what = "nothing published yet" if exc.code in (403, 404) else "download failed"
@@ -78,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
+    if table is None:
+        # The only output, for the caller to hand `ci-select --table-commit`.
+        print(commit)
+        return 0
     print(
         f"function record for {commit[:10]} (build {build}): "
         f"{len(table)} step rows -> {args.out}"

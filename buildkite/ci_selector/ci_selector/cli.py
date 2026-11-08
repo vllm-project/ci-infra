@@ -92,6 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr_p.set_defaults(_mode="pr")
     parser.add_argument("--table", type=Path, help="coverage table to read")
     parser.add_argument(
+        "--table-commit",
+        help="the commit the table was fetched for (`ci-fetch-function-record "
+        "--no-verify` prints it): exit 1 if the table is unusable or records "
+        "another commit, the checks that fetch skipped",
+    )
+    parser.add_argument(
         "--kernel-table",
         type=Path,
         help="explicit kernel table override (default: CUDA and ROCm pairs)",
@@ -170,6 +176,10 @@ def main(argv: list[str] | None = None) -> int:
         from .decide import decide
 
         table = fetch_table(args.table)
+        refusal = table_refusal(table, getattr(args, "table_commit", None))
+        if refusal:
+            print(f"error: {refusal}", file=sys.stderr)
+            return 1
         if table.dead_interpreter:
             print(f"coverage: {table.dead_interpreter}", file=sys.stderr)
         kernels = fetch_kernel_records(args.kernel_table, args.kernel_symbol_map)
@@ -216,6 +226,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     print(render_json(sel))
     return 0
+
+
+def table_refusal(table, table_commit: str | None) -> str:
+    """With `--table-commit`, why the table fetched for it must be refused:
+    what `ci-fetch-function-record` refuses when it checks. Without it, "":
+    an unusable table then only leaves the selection to the code map."""
+    if table_commit is None:
+        return ""
+    from .coverage.table import problem
+
+    return problem(table, table_commit)
 
 
 def _restrict(sel, d):

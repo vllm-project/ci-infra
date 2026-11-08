@@ -61,6 +61,26 @@ def newest_commit(table: Table, repo: Path) -> str:
     return ordered[0] if ordered else sorted(commits)[0]
 
 
+class _PipelinesAt:
+    """The `pipelines` of the `RepoState` at `ref`, parsed from its yaml
+    alone: the same configs and steps `RepoState.build` loads first, without
+    the import graph and the rest it builds after."""
+
+    def __init__(self, repo: Path, ref: str):
+        from ci_selector.codemap.pipeline.buildkite import (
+            load_pipeline_configs,
+            load_steps,
+        )
+        from ci_selector.codemap.state import PipelineData
+        from ci_selector.codemap.worktree import worktree_at
+
+        tree = worktree_at(repo, ref)
+        self.pipelines = [
+            PipelineData(config, load_steps(tree, config), {})
+            for config in load_pipeline_configs(tree)
+        ]
+
+
 class RowKeys:
     """Which steps a table is entitled to answer for.
 
@@ -96,9 +116,15 @@ class RowKeys:
 
     @classmethod
     def resolve(cls, table: Table, repo: Path, ref: str) -> RowKeys:
-        from ci_selector.codemap.worktree import state_for
+        """Resolve the table's rows against the pipeline yaml at `ref`, the
+        commit the rows were recorded at.
 
-        return cls.resolve_from_state(set(table._rows), state_for(repo, ref))
+        Reads the yaml and nothing else. `resolve_from_state` only looks at a
+        state's pipelines, and a whole `RepoState` there (`state_for`) also
+        builds the import graph of the full tree: about half of a CI run's
+        selector time, spent on a state nothing else read.
+        """
+        return cls.resolve_from_state(set(table._rows), _PipelinesAt(repo, ref))
 
     @classmethod
     def resolve_from_state(cls, rows: set[str], state) -> RowKeys:

@@ -98,3 +98,22 @@ def test_the_table_override_reads_the_path_it_is_given(tmp_path):
     # Reached the file rather than raising, and judged it on its contents.
     assert not table.available
     assert "re-merge" in table.unavailable
+
+
+def test_table_commit_is_parsed():
+    assert _parse([]).table_commit is None
+    assert _parse(["--table-commit", "abc"]).table_commit == "abc"
+
+
+def test_table_commit_refuses_what_the_fetch_would_have(tmp_path):
+    """With `--table-commit`, a table the fetch would have refused fails the
+    run (exit 1), so the gate falls back to today's rules as it did when the
+    fetch refused it."""
+    from ci_selector.cli import table_refusal
+    from ci_selector.coverage.source import fetch_table
+
+    bad = tmp_path / "table.json.gz"
+    bad.write_bytes(b"truncated")
+    assert "cannot parse" in table_refusal(fetch_table(bad), "c9")
+    # Without the flag a bad table only switches the record off, as before.
+    assert table_refusal(fetch_table(bad), None) == ""

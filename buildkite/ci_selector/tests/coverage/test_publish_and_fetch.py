@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from ci_selector.coverage.source import TABLE_NAME
-from ci_selector.coverage.table import load
+from ci_selector.coverage.table import load, problem
 from ci_selector.scripts import fetch_functions, publish
 from ci_selector.scripts.build import merge_build, write_table
 
@@ -204,3 +204,50 @@ class TestFetch:
         assert fetch_functions.main(["--url", base, "--out", str(out)]) == 1
         assert "refusing it" in capsys.readouterr().err
         assert not (out / TABLE_NAME).exists()
+
+    def test_no_verify_saves_the_table_unread_and_prints_its_commit(
+        self, table, tmp_path, monkeypatch, capsys, tmp_repo
+    ):
+        """CI's ci-select loads the table anyway, and makes the same checks
+        with `--table-commit`, so the fetch need not parse a gigabyte of JSON
+        first."""
+        base, commit = "https://b/ci/fnrec", tmp_repo.head()
+        self.serve(
+            monkeypatch,
+            {
+                f"{base}/latest.json": json.dumps({"commit": commit}).encode(),
+                f"{base}/{commit}/{TABLE_NAME}": table.read_bytes(),
+            },
+        )
+
+        def refuse(path):
+            raise AssertionError("--no-verify loaded the table")
+
+        monkeypatch.setattr(fetch_functions, "load", refuse)
+        out = tmp_path / "out"
+        argv = ["--url", base, "--out", str(out), "--no-verify"]
+        assert fetch_functions.main(argv) == 0
+        assert capsys.readouterr().out.strip() == commit
+        assert (out / TABLE_NAME).read_bytes() == table.read_bytes()
+
+    def test_no_verify_still_fails_on_a_failed_download(self, tmp_path, monkeypatch):
+        self.serve(monkeypatch, {})
+        out = tmp_path / "out"
+        argv = ["--url", "https://b/ci/fnrec", "--out", str(out), "--no-verify"]
+        assert fetch_functions.main(argv) == 1
+        assert not (out / TABLE_NAME).exists()
+
+
+class TestTableProblem:
+    """The checks a fetch makes, shared with `ci-select --table-commit`."""
+
+    def test_a_good_table_for_its_commit_has_none(self, table, tmp_repo):
+        assert problem(load(table), tmp_repo.head()) == ""
+
+    def test_an_unusable_table_is_one(self, tmp_path):
+        bad = tmp_path / TABLE_NAME
+        bad.write_bytes(b"truncated")
+        assert "cannot parse" in problem(load(bad), "c9")
+
+    def test_a_table_recording_another_commit_is_one(self, table):
+        assert problem(load(table), "deadbeef").endswith("; refusing it")

@@ -437,3 +437,42 @@ def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkey
     assert record["selector_changed_steps"] == ["nightly-changed"]
     assert record["selector_keys"] == ["nightly-changed", "test-b"]
     assert record["selector_optional_dropped"] == ["nightly-other"]
+
+
+def _fake_selector_run(monkeypatch, fetch_stdout):
+    """run_ci_select with every command faked; returns the commands it ran."""
+    ran = []
+
+    def fake_run(cmd, cwd=None, timeout=600):
+        ran.append(cmd)
+        if "ci-fetch-function-record" in cmd:
+            return fetch_stdout
+        return "c" * 40 + "\n" if "rev-parse" in cmd else ""
+
+    def fake_subprocess_run(cmd, **kw):
+        ran.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, '{"omit": false, "keys": []}', "")
+
+    monkeypatch.setattr(selector_gate, "_run", fake_run)
+    monkeypatch.setattr(selector_gate, "_uv", lambda workdir: "uv")
+    monkeypatch.setattr(selector_gate, "_latest", lambda recorder: {})
+    monkeypatch.setattr(selector_gate.subprocess, "run", fake_subprocess_run)
+    return ran
+
+
+def test_the_table_is_parsed_once_by_ci_select(monkeypatch):
+    """The fetch skips loading the gigabyte table (--no-verify) and ci-select,
+    which loads it anyway, makes the fetch's checks on it (--table-commit)."""
+    commit = "d" * 40
+    ran = _fake_selector_run(monkeypatch, commit + "\n")
+    selector_gate.run_ci_select(repo=".", base="a" * 40, head="b" * 40, pipeline="p")
+    fetch = next(c for c in ran if "ci-fetch-function-record" in c)
+    select = next(c for c in ran if "ci-select" in c)
+    assert "--no-verify" in fetch
+    assert select[select.index("--table-commit") + 1] == commit
+
+
+def test_a_fetch_that_names_no_commit_keeps_todays_rules(monkeypatch):
+    _fake_selector_run(monkeypatch, "")
+    with pytest.raises(RuntimeError, match="no commit"):
+        selector_gate.run_ci_select(repo=".", base="a", head="b", pipeline="p")
