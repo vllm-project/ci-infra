@@ -266,10 +266,11 @@ def _uv(workdir: str) -> str:
     return os.path.join(install_dir, "uv")
 
 
-def _latest(recorder: str) -> Optional[Dict[str, Any]]:
+def _latest(recorder: str, pointer: str = "latest.json") -> Optional[Dict[str, Any]]:
     try:
         with urllib.request.urlopen(
-            RECORD_URL.format(recorder=recorder), timeout=30
+            RECORD_URL.format(recorder=recorder).replace("latest.json", pointer),
+            timeout=30,
         ) as r:
             return json.loads(r.read())
     except Exception as error:  # noqa: BLE001 - informational only
@@ -306,6 +307,30 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     explain_path = os.path.join(workdir, "explain.json")
     _run(run + ["ci-fetch-function-record", "--out", data], timeout=left())
     _run(run + ["ci-fetch-kernel-record", "--out", data], timeout=left())
+    # The ROCm pair is optional: without it AMD steps get no kernel narrowing
+    # and the CUDA pair decides alone, as before it was fetched.
+    try:
+        _run(
+            run + ["ci-fetch-kernel-record", "--backend", "rocm", "--out", data],
+            timeout=left(),
+        )
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        print(f"ci-selector: no ROCm kernel record ({error}); CUDA decides alone")
+    # Both pairs through the selector's default loaders: --kernel-table and
+    # --kernel-symbol-map name a single pair and would leave ROCm out.
+    env = {
+        **os.environ,
+        "CI_SELECTOR_KERNEL_TABLE": os.path.join(data, "kernel_table.json.gz"),
+        "CI_SELECTOR_KERNEL_SYMBOL_MAP": os.path.join(
+            data, "kernel_symbol_map.json.gz"
+        ),
+        "CI_SELECTOR_ROCM_KERNEL_TABLE": os.path.join(
+            data, "kernel_table.rocm.json.gz"
+        ),
+        "CI_SELECTOR_ROCM_KERNEL_SYMBOL_MAP": os.path.join(
+            data, "kernel_symbol_map.rocm.json.gz"
+        ),
+    }
     out = subprocess.run(
         run
         + [
@@ -319,10 +344,6 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
             pipeline,
             "--table",
             os.path.join(data, "table.json.gz"),
-            "--kernel-table",
-            os.path.join(data, "kernel_table.json.gz"),
-            "--kernel-symbol-map",
-            os.path.join(data, "kernel_symbol_map.json.gz"),
             "--explain",
             explain_path,
         ],
@@ -330,6 +351,7 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
         text=True,
         timeout=left(),
         check=False,
+        env=env,
     )
     if out.returncode != 0:
         raise RuntimeError(f"ci-select exited {out.returncode}: {out.stderr[-1500:]}")
@@ -342,7 +364,11 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     return {
         "emission": json.loads(out.stdout),
         "explain": explain,
-        "records": {"fnrec": _latest("fnrec"), "kernrec": _latest("kernrec")},
+        "records": {
+            "fnrec": _latest("fnrec"),
+            "kernrec": _latest("kernrec"),
+            "kernrec_rocm": _latest("kernrec", "latest.rocm.json"),
+        },
         "log": out.stderr[-4000:],
         "ci_infra_commit": ci_infra_commit,
     }

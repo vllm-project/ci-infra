@@ -437,3 +437,54 @@ def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkey
     assert record["selector_changed_steps"] == ["nightly-changed"]
     assert record["selector_keys"] == ["nightly-changed", "test-b"]
     assert record["selector_optional_dropped"] == ["nightly-other"]
+
+
+def _fake_selector_run(monkeypatch, tmp_path, rocm_fails):
+    """Run run_ci_select with git, uv and the selector stubbed; return the
+    commands it ran and the ci-select environment."""
+    calls = []
+
+    def fake_run(cmd, cwd=None, timeout=600):
+        calls.append(cmd)
+        if "rev-parse" in cmd:
+            return "c" * 40
+        if rocm_fails and "--backend" in cmd and "rocm" in cmd:
+            raise RuntimeError("ci-fetch-kernel-record exited 1: nothing published")
+        return ""
+
+    seen = {}
+
+    class Done:
+        returncode = 0
+        stdout = json.dumps({"omit": False, "keys": ["test-b"]})
+        stderr = ""
+
+    def fake_subprocess_run(cmd, **kwargs):
+        seen["cmd"], seen["env"] = cmd, kwargs.get("env") or {}
+        return Done()
+
+    monkeypatch.setattr(selector_gate, "_run", fake_run)
+    monkeypatch.setattr(selector_gate, "_uv", lambda workdir: "uv")
+    monkeypatch.setattr(selector_gate, "_latest", lambda *a, **k: {"build": 1})
+    monkeypatch.setattr(selector_gate.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(selector_gate.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
+    result = selector_gate.run_ci_select("/repo", "a" * 40, "b" * 40, "vllm_ci")
+    return calls, seen, result
+
+
+@pytest.mark.parametrize("rocm_fails", [False, True])
+def test_the_selector_loads_both_kernel_pairs(monkeypatch, tmp_path, rocm_fails):
+    """The gate fetched only the CUDA pair and named it with --kernel-table,
+    which loads a single pair: AMD steps never saw the ROCm recordings. A
+    missing ROCm record leaves CUDA deciding alone instead of failing."""
+    calls, seen, result = _fake_selector_run(monkeypatch, tmp_path, rocm_fails)
+    fetches = [c for c in calls if "ci-fetch-kernel-record" in c]
+    assert any("--backend" in c and "rocm" in c for c in fetches)
+    assert "--kernel-table" not in seen["cmd"]
+    assert "--kernel-symbol-map" not in seen["cmd"]
+    assert seen["env"]["CI_SELECTOR_KERNEL_TABLE"].endswith("kernel_table.json.gz")
+    assert seen["env"]["CI_SELECTOR_ROCM_KERNEL_TABLE"].endswith(
+        "kernel_table.rocm.json.gz"
+    )
+    assert result["emission"]["keys"] == ["test-b"]
+    assert "kernrec_rocm" in result["records"]
