@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 
 from ..coverage.source import COVERAGE_DIR, TABLE_NAME
-from ..coverage.table import load, problem
+from ..coverage.table import Table, load
 
 DEFAULT_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/fnrec"
 URL_ENV = "CI_SELECTOR_FUNCTION_RECORD_URL"
@@ -29,6 +29,61 @@ TIMEOUT = 60
 def _get(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=TIMEOUT) as r:  # noqa: S310 - https, fixed host
         return r.read()
+
+
+class FetchError(Exception):
+    """A table that could not be downloaded, or one that must be refused."""
+
+
+def fetch(
+    url: str, commit: str | None = None, out: Path = COVERAGE_DIR
+) -> tuple[Table, str, str]:
+    """Download the table published for `commit`, or the one `latest.json`
+    names, into `out`, and return `(table, commit, build)`.
+
+    The table is parsed once, here, and checked before it replaces the one on
+    disk, so a bad download leaves the old one in place. A caller that goes on
+    to use the table takes the parsed one rather than reading the file again:
+    it is about 1 GB of JSON. Raises FetchError on any problem.
+    """
+    url = url.rstrip("/")
+    try:
+        if commit:
+            build = "?"
+        else:
+            latest = json.loads(_get(f"{url}/latest.json"))
+            commit, build = latest["commit"], latest.get("build", "?")
+        out.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=out) as tmp:
+            staged = Path(tmp) / TABLE_NAME
+            staged.write_bytes(_get(f"{url}/{commit}/{TABLE_NAME}"))
+            table = load(staged)
+            if not table.available:
+                raise FetchError(table.unavailable)
+            # A mismatch means table and pointer were published out of step.
+            if table.commit and table.commit != commit:
+                raise FetchError(
+                    f"asked for {commit[:10]}, table records "
+                    f"{table.commit[:10]}; refusing it"
+                )
+            os.replace(staged, out / TABLE_NAME)
+    except urllib.error.HTTPError as exc:
+        what = "nothing published yet" if exc.code in (403, 404) else "download failed"
+        raise FetchError(f"{what}: HTTP {exc.code} for {exc.url}") from exc
+    except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
+        raise FetchError(f"{type(exc).__name__}: {exc}") from exc
+    return table, commit, build
+
+
+def fetch_into(table_path: Path | None = None) -> Table:
+    """The latest published table, saved where `table_path` points (default
+    coverage-data/), for `ci-select --fetch`. Raises FetchError."""
+    out = COVERAGE_DIR
+    if table_path is not None:
+        if table_path.name != TABLE_NAME:
+            raise FetchError(f"--table must be named {TABLE_NAME} to fetch into it")
+        out = table_path.parent
+    return fetch(os.environ.get(URL_ENV, DEFAULT_URL), out=out)[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,47 +99,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--out", type=Path, default=COVERAGE_DIR, help="directory to write into"
     )
-    ap.add_argument(
-        "--no-verify",
-        action="store_true",
-        help="save the table without loading it to check it, and print only "
-        "its commit. For a caller that loads it anyway: `ci-select "
-        "--table-commit <that commit>` makes the same checks then. Replaces a "
-        "table already in --out even if the new one is bad.",
-    )
     args = ap.parse_args(argv)
-    url = args.url.rstrip("/")
-
     try:
-        if args.commit:
-            commit, build = args.commit, "?"
-        else:
-            latest = json.loads(_get(f"{url}/latest.json"))
-            commit, build = latest["commit"], latest.get("build", "?")
-        args.out.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=args.out) as tmp:
-            staged = Path(tmp) / TABLE_NAME
-            staged.write_bytes(_get(f"{url}/{commit}/{TABLE_NAME}"))
-            table = None
-            if not args.no_verify:
-                table = load(staged)
-                refusal = problem(table, commit)
-                if refusal:
-                    print(f"error: {refusal}", file=sys.stderr)
-                    return 1
-            os.replace(staged, args.out / TABLE_NAME)
-    except urllib.error.HTTPError as exc:
-        what = "nothing published yet" if exc.code in (403, 404) else "download failed"
-        print(f"error: {what}: HTTP {exc.code} for {exc.url}", file=sys.stderr)
+        table, commit, build = fetch(args.url, args.commit, args.out)
+    except FetchError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
-        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
-
-    if table is None:
-        # The only output, for the caller to hand `ci-select --table-commit`.
-        print(commit)
-        return 0
     print(
         f"function record for {commit[:10]} (build {build}): "
         f"{len(table)} step rows -> {args.out}"

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from ci_selector.coverage.source import TABLE_NAME
-from ci_selector.coverage.table import load, problem
+from ci_selector.coverage.table import load
 from ci_selector.scripts import fetch_functions, publish
 from ci_selector.scripts.build import merge_build, write_table
 
@@ -205,13 +205,42 @@ class TestFetch:
         assert "refusing it" in capsys.readouterr().err
         assert not (out / TABLE_NAME).exists()
 
-    def test_no_verify_saves_the_table_unread_and_prints_its_commit(
-        self, table, tmp_path, monkeypatch, capsys, tmp_repo
+    def test_fetch_hands_back_the_table_it_parsed(
+        self, table, tmp_path, monkeypatch, tmp_repo
     ):
-        """CI's ci-select loads the table anyway, and makes the same checks
-        with `--table-commit`, so the fetch need not parse a gigabyte of JSON
-        first."""
+        """`ci-select --fetch` uses the returned table instead of reading the
+        ~1 GB file a second time, so it must be the checked one."""
         base, commit = "https://b/ci/fnrec", tmp_repo.head()
+        self.serve(
+            monkeypatch,
+            {
+                f"{base}/latest.json": json.dumps(
+                    {"commit": commit, "build": "42"}
+                ).encode(),
+                f"{base}/{commit}/{TABLE_NAME}": table.read_bytes(),
+            },
+        )
+        loads = []
+        real_load = fetch_functions.load
+        monkeypatch.setattr(
+            fetch_functions, "load", lambda p: loads.append(p) or real_load(p)
+        )
+        out = tmp_path / "out"
+        got, got_commit, build = fetch_functions.fetch(base, out=out)
+        assert len(loads) == 1
+        assert (got_commit, build) == (commit, "42")
+        assert got.commit == commit and len(got) == len(load(out / TABLE_NAME))
+
+    def test_fetch_raises_what_main_reports(self, tmp_path, monkeypatch):
+        self.serve(monkeypatch, {})
+        with pytest.raises(fetch_functions.FetchError, match="nothing published yet"):
+            fetch_functions.fetch("https://b/ci/fnrec", out=tmp_path / "out")
+
+    def test_fetch_into_saves_beside_the_table_path(
+        self, table, tmp_path, monkeypatch, tmp_repo
+    ):
+        base, commit = "https://b/ci/fnrec", tmp_repo.head()
+        monkeypatch.setenv(fetch_functions.URL_ENV, base)
         self.serve(
             monkeypatch,
             {
@@ -219,35 +248,12 @@ class TestFetch:
                 f"{base}/{commit}/{TABLE_NAME}": table.read_bytes(),
             },
         )
+        target = tmp_path / "data" / TABLE_NAME
+        assert fetch_functions.fetch_into(target).commit == commit
+        assert target.is_file()
 
-        def refuse(path):
-            raise AssertionError("--no-verify loaded the table")
-
-        monkeypatch.setattr(fetch_functions, "load", refuse)
-        out = tmp_path / "out"
-        argv = ["--url", base, "--out", str(out), "--no-verify"]
-        assert fetch_functions.main(argv) == 0
-        assert capsys.readouterr().out.strip() == commit
-        assert (out / TABLE_NAME).read_bytes() == table.read_bytes()
-
-    def test_no_verify_still_fails_on_a_failed_download(self, tmp_path, monkeypatch):
-        self.serve(monkeypatch, {})
-        out = tmp_path / "out"
-        argv = ["--url", "https://b/ci/fnrec", "--out", str(out), "--no-verify"]
-        assert fetch_functions.main(argv) == 1
-        assert not (out / TABLE_NAME).exists()
-
-
-class TestTableProblem:
-    """The checks a fetch makes, shared with `ci-select --table-commit`."""
-
-    def test_a_good_table_for_its_commit_has_none(self, table, tmp_repo):
-        assert problem(load(table), tmp_repo.head()) == ""
-
-    def test_an_unusable_table_is_one(self, tmp_path):
-        bad = tmp_path / TABLE_NAME
-        bad.write_bytes(b"truncated")
-        assert "cannot parse" in problem(load(bad), "c9")
-
-    def test_a_table_recording_another_commit_is_one(self, table):
-        assert problem(load(table), "deadbeef").endswith("; refusing it")
+    def test_fetch_into_refuses_a_table_path_it_would_not_write(self, tmp_path):
+        """The fetch always writes `table.json.gz`; any other name would leave
+        --table pointing at a file the fetch never touched."""
+        with pytest.raises(fetch_functions.FetchError, match=TABLE_NAME):
+            fetch_functions.fetch_into(tmp_path / "other.json.gz")

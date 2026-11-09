@@ -100,20 +100,25 @@ def test_the_table_override_reads_the_path_it_is_given(tmp_path):
     assert "re-merge" in table.unavailable
 
 
-def test_table_commit_is_parsed():
-    assert _parse([]).table_commit is None
-    assert _parse(["--table-commit", "abc"]).table_commit == "abc"
+def test_fetch_is_a_flag():
+    assert _parse(["--fetch"]).fetch
+    assert not _parse([]).fetch
 
 
-def test_table_commit_refuses_what_the_fetch_would_have(tmp_path):
-    """With `--table-commit`, a table the fetch would have refused fails the
-    run (exit 1), so the gate falls back to today's rules as it did when the
-    fetch refused it."""
-    from ci_selector.cli import table_refusal
-    from ci_selector.coverage.source import fetch_table
+def test_a_table_that_cannot_be_fetched_exits_1_before_any_work(monkeypatch):
+    """`--fetch` replaces the separate fetch step bootstrap ran first: exit 1
+    sends bootstrap back to today's rules, and it should cost nothing first."""
+    import ci_selector.codemap.worktree as worktree
+    import ci_selector.scripts.fetch_functions as fetch_functions
+    from ci_selector.cli import main
 
-    bad = tmp_path / "table.json.gz"
-    bad.write_bytes(b"truncated")
-    assert "cannot parse" in table_refusal(fetch_table(bad), "c9")
-    # Without the flag a bad table only switches the record off, as before.
-    assert table_refusal(fetch_table(bad), None) == ""
+    def refuse(table_path):
+        raise fetch_functions.FetchError("nothing published yet: HTTP 404")
+
+    def no_state(*a, **k):
+        raise AssertionError("built the repo state before the fetch failed")
+
+    monkeypatch.setattr(fetch_functions, "fetch_into", refuse)
+    monkeypatch.setattr(worktree, "state_for", no_state)
+    repo = os.environ["VLLM_REPO"]
+    assert main(["--repo", repo, "--diff", "HEAD~1...HEAD", "--fetch"]) == 1

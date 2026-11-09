@@ -129,21 +129,20 @@ def test_a_name_meaning_two_things_is_not_folded():
 
     from ci_selector.codemap.graph.imports import _module_string_consts
 
-    consts = _module_string_consts(
-        ast.parse(
-            "SAME = 'vllm.a'\n"
-            "def one():\n"
-            "    SAME = 'vllm.a'\n"
-            "    LOCAL = 'vllm.b'\n"
-            "def two():\n"
-            "    SPLIT = 'vllm.c'\n"
-            "def three():\n"
-            "    SPLIT = 'vllm.d'\n"
-            "def four(SHADOWED):\n"
-            "    pass\n"
-            "SHADOWED = 'vllm.e'\n"
-        )
+    tree = ast.parse(
+        "SAME = 'vllm.a'\n"
+        "def one():\n"
+        "    SAME = 'vllm.a'\n"
+        "    LOCAL = 'vllm.b'\n"
+        "def two():\n"
+        "    SPLIT = 'vllm.c'\n"
+        "def three():\n"
+        "    SPLIT = 'vllm.d'\n"
+        "def four(SHADOWED):\n"
+        "    pass\n"
+        "SHADOWED = 'vllm.e'\n"
     )
+    consts = _module_string_consts(list(ast.walk(tree)))
     assert consts["LOCAL"] == "vllm.b"
     assert consts["SAME"] == "vllm.a"
     assert "SPLIT" not in consts

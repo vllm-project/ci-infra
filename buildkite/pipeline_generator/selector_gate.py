@@ -304,16 +304,9 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     run = [uv, "run", "--quiet", "--no-dev", "--python", "3.12", "--project", project]
     data = os.path.join(workdir, "data")
     explain_path = os.path.join(workdir, "explain.json")
-    # The function table is about 1 GB of JSON. ci-select loads it anyway, so
-    # the fetch skips loading it to check it (--no-verify) and ci-select makes
-    # the same checks on its own load (--table-commit): parsed once, not twice.
-    fetched = _run(
-        run + ["ci-fetch-function-record", "--out", data, "--no-verify"],
-        timeout=left(),
-    ).split()
-    if not fetched:
-        raise RuntimeError("ci-fetch-function-record printed no commit")
-    table_commit = fetched[-1]
+    # The function table is about 1 GB of JSON. `ci-select --fetch` downloads
+    # it and makes the fetch's checks on the one parse it uses, so it is not
+    # parsed a second time by a separate fetch step.
     _run(run + ["ci-fetch-kernel-record", "--out", data], timeout=left())
     out = subprocess.run(
         run
@@ -328,8 +321,7 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
             pipeline,
             "--table",
             os.path.join(data, "table.json.gz"),
-            "--table-commit",
-            table_commit,
+            "--fetch",
             "--kernel-table",
             os.path.join(data, "kernel_table.json.gz"),
             "--kernel-symbol-map",

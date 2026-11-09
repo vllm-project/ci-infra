@@ -92,10 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr_p.set_defaults(_mode="pr")
     parser.add_argument("--table", type=Path, help="coverage table to read")
     parser.add_argument(
-        "--table-commit",
-        help="the commit the table was fetched for (`ci-fetch-function-record "
-        "--no-verify` prints it): exit 1 if the table is unusable or records "
-        "another commit, the checks that fetch skipped",
+        "--fetch",
+        action="store_true",
+        help="download the latest published coverage table first, into the "
+        "directory of --table (default coverage-data/), and use it. Exit 1 if "
+        "it cannot be fetched or fails the checks ci-fetch-function-record "
+        "makes. It is parsed once, here, not again",
     )
     parser.add_argument(
         "--kernel-table",
@@ -153,6 +155,17 @@ def main(argv: list[str] | None = None) -> int:
         print("no changed files", file=sys.stderr)
         return 0
 
+    # Before the state is built, so a table that cannot be had fails fast.
+    fetched = None
+    if args._mode != "codemap" and args.fetch:
+        from .scripts.fetch_functions import FetchError, fetch_into
+
+        try:
+            fetched = fetch_into(args.table)
+        except FetchError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
     # A ranged diff is analyzed at its BASE, because added-file routing and
     # table scoping assume state built there. The working tree is only right
     # when it happens to BE the base.
@@ -175,11 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         from .coverage.source import fetch_kernel_records, fetch_table
         from .decide import decide
 
-        table = fetch_table(args.table)
-        refusal = table_refusal(table, getattr(args, "table_commit", None))
-        if refusal:
-            print(f"error: {refusal}", file=sys.stderr)
-            return 1
+        table = fetched if fetched is not None else fetch_table(args.table)
         if table.dead_interpreter:
             print(f"coverage: {table.dead_interpreter}", file=sys.stderr)
         kernels = fetch_kernel_records(args.kernel_table, args.kernel_symbol_map)
@@ -226,17 +235,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     print(render_json(sel))
     return 0
-
-
-def table_refusal(table, table_commit: str | None) -> str:
-    """With `--table-commit`, why the table fetched for it must be refused:
-    what `ci-fetch-function-record` refuses when it checks. Without it, "":
-    an unusable table then only leaves the selection to the code map."""
-    if table_commit is None:
-        return ""
-    from .coverage.table import problem
-
-    return problem(table, table_commit)
 
 
 def _restrict(sel, d):
