@@ -9,11 +9,11 @@ import yaml
 
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
-    is_amd_device,
     is_amd_gpu_device,
     normalize_amd_depends_on,
     rocm_build_layout,
     runs_in_aiter_nightly,
+    runs_on,
 )
 from buildkite_step import (
     AMD_GROUP,
@@ -33,10 +33,10 @@ from buildkite_step import (
     create_precommit_group_step,
     split_deferred_steps,
 )
-from constants import AgentQueue
+from constants import AgentQueue, Platform
 from recorder_switches import fnrec_enabled
 import selector_gate
-from global_config import get_global_config, init_global_config
+from global_config import PLATFORM_ENV_VAR, get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
 import unblock_jobs
 
@@ -102,24 +102,29 @@ class PipelineGenerator:
                     f.write("true")
                 return
 
-        torch_nightly = global_config["torch_nightly"] == "1"
+        platform = global_config["platform"]
         aiter_nightly = global_config["aiter_nightly"] == "1"
-        if aiter_nightly and torch_nightly:
-            # Torch nightly drops the AMD lane; AITER nightly keeps only that lane.
-            _fail_generation("TORCH_NIGHTLY and AITER_NIGHTLY cannot both be set.")
+        if aiter_nightly and platform == Platform.CUDA:
+            # A CUDA-only build drops every job the AITER nightly runs.
+            cause = (
+                "TORCH_NIGHTLY"
+                if global_config["torch_nightly"] == "1"
+                else f"{PLATFORM_ENV_VAR}=cuda"
+            )
+            _fail_generation(f"{cause} and AITER_NIGHTLY cannot both be set.")
         if aiter_nightly and not rocm_build_layout():
             # Without it the build would pass while testing the stock AITER.
             _fail_generation(
                 "AITER nightly needs vLLM's .buildkite/scripts/rocm/build.sh, "
                 "which installs the AITER nightly wheel; this checkout has none."
             )
-        if torch_nightly:
-            # ROCm has its own pinned torch and gains nothing from validating
-            # against a CUDA torch-nightly build, so the AMD lane is excluded
-            # further downstream (see is_amd_device / include_amd).
-            _annotate_best_effort(
-                "AMD lane excluded: torch-nightly validates CUDA only."
+        if platform:
+            reason = (
+                "torch nightly validates CUDA only"
+                if global_config["torch_nightly"] == "1"
+                else f"{PLATFORM_ENV_VAR}={platform.value}"
             )
+            _annotate_best_effort(f"Only {platform.value} jobs run: {reason}.")
 
         steps = []
         for job_dir in global_config["job_dirs"]:
@@ -144,13 +149,11 @@ class PipelineGenerator:
                 # Every step stays in the pipeline; the rest are deferred
                 # (_step_should_run), so "Run more jobs" still offers them.
                 _, scheduled = select_steps_and_dependencies(
-                    steps,
-                    global_config["selector_step_keys"],
-                    torch_nightly=torch_nightly,
+                    steps, global_config["selector_step_keys"]
                 )
                 global_config["selector_step_keys"] = scheduled
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+                steps, global_config["only_step_keys"], platform=platform
             )
         except ValueError as error:
             if not (record and record["applied"]):
@@ -163,7 +166,7 @@ class PipelineGenerator:
             global_config["selector_step_keys"] = None
             scheduled = None
             steps, selected_step_keys = select_steps_and_dependencies(
-                steps, global_config["only_step_keys"], torch_nightly=torch_nightly
+                steps, global_config["only_step_keys"], platform=platform
             )
         global_config["only_step_keys"] = selected_step_keys
         if record is not None:
@@ -387,6 +390,11 @@ def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
     return keys
 
 
+# How selector_gate records the selector declining because it cannot narrow
+# the diff at all ("run-all: fail-open: <file> is unclaimed ...").
+RUN_ALL_DECLINE = "selector declined: run-all:"
+
+
 def _selector_decision(steps: List[Step]) -> Optional[dict]:
     """Ask the test selector for this build's steps (selector_gate.py).
 
@@ -411,6 +419,25 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
         legacy = _legacy_keys(steps, diff)
         record = selector_gate.decide(global_config, legacy)
         keys = record["selector_keys"]
+        declined = record.get("fallback") or ""
+        if not keys and declined.startswith(RUN_ALL_DECLINE) and gate == "on":
+            # The selector's own fail-open: it cannot narrow this diff, so
+            # every step runs, as a run_all_patterns match would. Falling back
+            # to today's rules instead ran only what the hand-written lists
+            # name: vllm/ci #96609 ran 145 of ~360 steps on an unclaimed file.
+            # Optional steps stay optional and AMD keeps today's rules, as on
+            # any run-all PR build.
+            keys = sorted(
+                selector_gate.known_keys(steps)
+                - selector_gate.amd_keys(steps)
+                - selector_gate.optional_keys(steps)
+            )
+            record["selector_run_all"] = declined[len(RUN_ALL_DECLINE) :].strip()
+            record["selector_keys"] = keys
+            record["fallback"] = None
+            global_config["selector_step_keys"] = frozenset(keys)
+            record["applied"] = True
+            return record
         if keys:
             # Steps whose own definition the diff changed or added run, even
             # optional ones: the change is to them, and otherwise it would go
@@ -449,14 +476,14 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
 def select_steps_and_dependencies(
     steps: List[Step],
     requested_step_keys: Optional[FrozenSet[str]],
-    torch_nightly: bool = False,
+    platform: Optional[Platform] = None,
 ) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
     if requested_step_keys is None:
         return steps, None
 
     steps_by_key = {}
     dependencies_by_key = {}
-    amd_step_keys = set()
+    off_platform_keys = set()
     for step in steps:
         # Steps without an explicit key are uploaded with a label-derived key
         # (see convert_group_step_to_buildkite_step), so retry builds reference
@@ -473,8 +500,8 @@ def select_steps_and_dependencies(
             if is_amd_gpu_device(step.device)
             else step.depends_on or []
         )
-        if is_amd_device(step.device):
-            amd_step_keys.add(step.key)
+        if not runs_on(platform, step.device):
+            off_platform_keys.add(step.key)
 
         # AMD mirrors are uploaded as generated `amd-<key>` steps, so retry
         # builds reference them by that key too.
@@ -487,19 +514,19 @@ def select_steps_and_dependencies(
             dependencies_by_key[mirror_key] = normalize_amd_depends_on(
                 amd_mirror.get("depends_on")
             )
-            amd_step_keys.add(mirror_key)
+            if not runs_on(platform, amd_mirror.get("device")):
+                off_platform_keys.add(mirror_key)
 
     missing = requested_step_keys - steps_by_key.keys()
     if missing:
         raise ValueError("Unknown CI step key(s): " + ", ".join(sorted(missing)))
 
-    if torch_nightly:
-        requested_amd_keys = requested_step_keys & amd_step_keys
-        if requested_amd_keys:
-            raise ValueError(
-                "AMD CI step key(s) requested, but AMD steps are excluded from "
-                "torch-nightly runs: " + ", ".join(sorted(requested_amd_keys))
-            )
+    requested_off_platform_keys = requested_step_keys & off_platform_keys
+    if requested_off_platform_keys:
+        raise ValueError(
+            f"CI step key(s) requested, but this build runs only {platform.value} "
+            "steps: " + ", ".join(sorted(requested_off_platform_keys))
+        )
 
     selected_step_keys = set(requested_step_keys)
     pending = list(requested_step_keys)

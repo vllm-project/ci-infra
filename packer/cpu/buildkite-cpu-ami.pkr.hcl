@@ -117,6 +117,10 @@ build {
     source      = "vllm-cache-source"
   }
 
+  provisioner "shell" {
+    script = "../agent/install-agent.sh"
+  }
+
   # Install BuildKit as standalone systemd service (runs as ec2-user with sudo)
   provisioner "shell" {
     script = "scripts/install-build-tools.sh"

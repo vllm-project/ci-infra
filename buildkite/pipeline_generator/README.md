@@ -97,13 +97,14 @@ The generator relies on several environment variables, typically provided by Bui
 * `BUILDKITE_PULL_REQUEST`: Pull request number (or "false").
 * `BUILDKITE_PULL_REQUEST_BASE_BRANCH`: Base branch for PRs.
 * `NIGHTLY`: Set to "1" to auto-run the curated torch-nightly steps (those tagged `mirror.torch_nightly`).
-* `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build. AMD build/test steps and AMD mirrors are dropped entirely for this run, since ROCm uses its own pinned torch and gains no signal from validating against a CUDA torch-nightly build.
+* `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build. Implies `VLLM_CI_PLATFORM=cuda`, so AMD build/test steps and AMD mirrors are dropped: ROCm uses its own pinned torch and gains no signal from validating against a CUDA torch-nightly build.
+* `VLLM_CI_PLATFORM`: Set to `amd` or `cuda` to generate only that platform's jobs; every other step is dropped from the pipeline (not deferred into "Run more jobs"). `amd` keeps the AMD jobs: `amd_cpu` (the AMD build steps), the AMD GPUs and `amd-` mirrors. `cuda` keeps every other job (so for now it also keeps the few Intel, Arm and Ascend jobs). Steps are still chosen by the usual rules within the platform, so add `RUN_ALL=1` or `NIGHTLY=1` to run all of them. With `amd`, the test selector does not run, since it never picks AMD steps. `VLLM_CI_ONLY_STEP_KEYS` naming a step outside the platform fails generation.
 * `AITER_NIGHTLY`: Set to "1" to test vLLM against the latest [AITER](https://github.com/ROCm/aiter) nightly wheel (or the one `AITER_SPEC` pins). Meant for a scheduled build of `main`.
     * Runs only the AMD build steps and the MI300, MI325 and MI355 jobs (gfx942, gfx950). Everything else, CUDA and MI250 included, is dropped; PR builds still run pre-commit.
     * Ignores `NOAUTO` and the docs-only skip.
     * Pushes the image to `rocm/vllm-dev`, never `rocm/vllm-ci`.
     * Turns off the selector recorders (`VLLM_CI_KERNREC`, `VLLM_CI_KERNREC_AMD`, `VLLM_CI_FNREC`).
-    * Generation fails with `TORCH_NIGHTLY`, on a vLLM checkout without `.buildkite/scripts/rocm/build.sh`, or if a kept step depends on a dropped one.
+    * Generation fails with `TORCH_NIGHTLY` or `VLLM_CI_PLATFORM=cuda`, on a vLLM checkout without `.buildkite/scripts/rocm/build.sh`, or if a kept step depends on a dropped one.
 * `RUN_ALL`: Set to "1" to force run all steps.
 * `SKIP_TIMEOUT`: Set to "1" at pipeline generation time to omit all configured step timeouts.
 * `DOCS_ONLY_DISABLE`: Set to "0" to enable skipping CI for doc-only changes.

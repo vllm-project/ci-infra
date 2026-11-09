@@ -28,9 +28,16 @@
  * kernel activity record per graph node. Only the set of names is kept, not
  * the timeline, which is what keeps the overhead and the output small.
  *
- * Known limit: CUPTI allows one activity client per process. If torch.profiler
- * (Kineto) starts in the same process it re-registers the buffer callbacks and
- * this recorder goes quiet. Steps that run profiler tests should not record.
+ * One activity client per process: CUPTI allows only one. When torch.profiler
+ * (Kineto) took over mid-run, it was handed this recorder's half-filled
+ * buffer, dropped it as "unknown", and reported no GPU activity at all
+ * (vLLM's bench-forward tests, nightly 98753 onwards). kernrec_torch.py
+ * calls kernrec_release() just before a CUDA profiler prepares. The release
+ * disables kernel activity, drains this recorder's buffers into its own file,
+ * and steps aside. The file then carries "# error=released-to-profiler": its
+ * names stay positive evidence, but the row is no longer complete. When the
+ * profiler starts before CUDA is initialised, KERNREC_RELEASED_PID keeps
+ * this recorder from arming in that one process.
  */
 #define _GNU_SOURCE
 #include <cupti.h>
@@ -82,6 +89,8 @@ static void check_status(CUptiResult status, const char *operation) {
   pthread_mutex_unlock(&g_lock);
 }
 static int g_initialized = 0;
+static int g_armed = 0;
+static int g_released = 0;
 
 /* Flush thread; see the header comment. g_flush_pid guards the join: a forked
  * child inherits the atexit handler but not the thread. */
@@ -322,11 +331,30 @@ static void stop_flush_thread(void) {
   g_flush_pid = 0;
 }
 
+/* Hands CUPTI to another activity client; see the header comment. Returns 1
+ * when this call released it. A forked child shares the parent's flag but
+ * never had CUPTI armed, and its stop_flush_thread() is a no-op. */
+int kernrec_release(void) {
+  if (!g_armed || g_released) return 0;
+  g_released = 1;
+  stop_flush_thread();
+  check_status(cuptiActivityDisable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL),
+               "release-disable");
+  check_status(cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED),
+               "release-flush");
+  pthread_mutex_lock(&g_lock);
+  record_error("released-to-profiler");
+  pthread_mutex_unlock(&g_lock);
+  return 1;
+}
+
 static void at_exit(void) {
   stop_flush_thread();
-  /* Drain records still sitting in device buffers. */
-  check_status(cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED),
-               "final-flush");
+  /* Drain records still sitting in device buffers. After a release the
+   * buffers are the profiler's, so leave them alone. */
+  if (!g_released)
+    check_status(cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED),
+                 "final-flush");
   pthread_mutex_lock(&g_lock);
   if (g_out && g_out_pid == getpid()) {
     if (fflush(g_out) != 0 || ferror(g_out)) g_errors++;
@@ -354,6 +382,16 @@ int InitializeInjection(void) {
   pthread_mutex_unlock(&g_lock);
   atexit(at_exit);
 
+  /* Still writes a file, so the row shows this process ran unrecorded. */
+  const char *released = getenv("KERNREC_RELEASED_PID");
+  if (released && strtol(released, NULL, 10) == (long)getpid()) {
+    g_released = 1;
+    pthread_mutex_lock(&g_lock);
+    record_error("released-to-profiler");
+    pthread_mutex_unlock(&g_lock);
+    return 1;
+  }
+
   CUptiResult st = cuptiActivityRegisterCallbacks(buffer_requested,
                                                   buffer_completed);
   if (st != CUPTI_SUCCESS) {
@@ -374,6 +412,7 @@ int InitializeInjection(void) {
     check_status(st, "enable-kernel-activity");
     return 1;
   }
+  g_armed = 1;
   start_flush_thread();
   return 1;
 }

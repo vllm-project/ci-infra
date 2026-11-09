@@ -8,6 +8,7 @@ import amd
 import buildkite_step
 import pipeline_generator
 import selector_gate
+from constants import Platform
 from pipeline_generator import select_steps_and_dependencies
 from step import Step
 
@@ -186,7 +187,10 @@ def test_runs_in_aiter_nightly(device, expected):
     assert amd.runs_in_aiter_nightly(device) is expected
 
 
-def test_runs_the_amd_build_steps_and_gfx942_gfx950_jobs(build):
+@pytest.mark.parametrize("platform", [None, Platform.AMD])
+def test_runs_the_amd_build_steps_and_gfx942_gfx950_jobs(build, platform):
+    build.config["platform"] = platform
+
     jobs = build.generate()
 
     assert set(jobs) == NIGHTLY_JOBS
@@ -268,7 +272,11 @@ def _depends_on_cuda(build):
 
 
 def _torch_nightly(build):
-    build.config["torch_nightly"] = "1"
+    build.config.update(torch_nightly="1", platform=Platform.CUDA)
+
+
+def _cuda_platform(build):
+    build.config["platform"] = Platform.CUDA
 
 
 def _no_build_sh(build):
@@ -285,6 +293,7 @@ def _rerun(*keys):
     [
         (_depends_on_cuda, "cuda-only"),
         (_torch_nightly, "TORCH_NIGHTLY and AITER_NIGHTLY"),
+        (_cuda_platform, "VLLM_CI_PLATFORM=cuda and AITER_NIGHTLY"),
         (_no_build_sh, "build.sh"),
         (_rerun("cuda-only"), "cuda-only"),
         (_rerun("amd-mi250"), "amd-mi250"),

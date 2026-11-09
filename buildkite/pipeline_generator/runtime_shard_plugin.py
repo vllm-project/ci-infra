@@ -28,6 +28,7 @@ import zlib
 import pytest
 
 PLAN_ENV = "RUNTIME_SHARD_PLAN"
+COMMAND_ENV = "RUNTIME_SHARD_COMMAND"
 
 
 def pytest_configure(config):
@@ -37,13 +38,19 @@ def pytest_configure(config):
         return
     plan = json.loads(zlib.decompress(base64.b64decode(packed)))
     args = _without_plugins(config.invocation_params.args)
-    for command in plan["commands"]:
-        if _without_plugins(command["args"]) == args:
-            shard = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
-            config.pluginmanager.register(
-                ShardPlugin(command, shard, plan["shards"]), "runtime_shard_job"
-            )
-            return
+    matches = [c for c in plan["commands"] if _without_plugins(c["args"]) == args]
+    if not matches:
+        return
+    # Commands that differ only in env vars have the same args; the job's
+    # guard exports the position of the one running.
+    position = os.environ.get(COMMAND_ENV)
+    command = next(
+        (c for c in matches if str(c.get("position")) == position), matches[0]
+    )
+    shard = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
+    config.pluginmanager.register(
+        ShardPlugin(command, shard, plan["shards"]), "runtime_shard_job"
+    )
 
 
 def _without_plugins(args):

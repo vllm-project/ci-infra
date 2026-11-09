@@ -145,9 +145,25 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                   {% endif %}
 {%- endmacro %}
 
+{% set promote_retry = [{"signal_reason": "stack_error", "limit": 1}, {"signal_reason": "agent_stop", "limit": 1}, {"exit_status": 75, "limit": 1}, {"exit_status": -1, "limit": 1}, {"exit_status": -10, "limit": 1}] %}
   - group: "AMD Tests"
     depends_on: ~
     steps:
+      {% if rocm_promote == "run" %}
+      {# vLLM's /ci rocm cache (commented by a maintainer on a PR that changes the ROCm stack)
+         starts this as a main build: main's build.sh copies the stack images that PR's CI
+         built into rocm/vllm-ci. Nothing else from main's build runs. #}
+      - label: ":docker: Cache the ROCm base image for #{{ promote_pr }}"
+        key: "rocm-base-image-cache"
+        commands: ["bash .buildkite/scripts/rocm/build.sh rocm promote"]
+        timeout_in_minutes: 30
+        retry:
+          automatic: {{ promote_retry | tojson }}
+        env:
+          ROCM_CI_REPO: {{ ci_repo | tojson }}
+        agents:
+          queue: amd-cpu
+      {% else %}
       {% if amd_build_steps %}
       {% for s in amd_build_steps %}
       {% set ns = namespace(run=not s.source_file_dependencies or run_all == "1" or nightly == "1") %}
@@ -448,3 +464,4 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
 {{ amd_infra_retry('        ') }}
     {% endif %}
     {% endfor %}
+    {% endif %}

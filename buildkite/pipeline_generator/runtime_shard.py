@@ -35,6 +35,7 @@ import shlex
 import statistics
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
@@ -44,6 +45,13 @@ from typing import Dict, List, Optional, Tuple
 from constants import AgentQueue
 
 TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
+# A first read can take over 15 s when the endpoint's cache is cold; the retry
+# waits longer.
+TIMINGS_TIMEOUTS_SECONDS = (15, 30)
+# Steps in a row whose timings read failed, retry included; at the limit the
+# endpoint is treated as down for the rest of the run.
+MAX_TIMINGS_FAILURES = 3
+_timings_failures = 0
 # One shard's job: its setup (main's setupMs) and its tests. Planned below the
 # 20-minute limit so run-to-run noise rarely pushes a real shard over it.
 MAX_SHARD_SECONDS = 1140
@@ -64,6 +72,9 @@ _FILTER_OPTIONS = ("-m", "-k")
 # Where the image keeps the checkout; a step's working_dir lives under it.
 CONTAINER_WORKSPACE = "/vllm-workspace"
 PLAN_ENV = "RUNTIME_SHARD_PLAN"
+# The position of the step command a job is running, for the plugin to tell
+# apart commands whose pytest args differ only in env vars.
+COMMAND_ENV = "RUNTIME_SHARD_COMMAND"
 PLUGIN_ENV = "RUNTIME_SHARD_PLUGIN"
 PLUGIN_DIR = "/tmp/runtime-shard"
 PLUGIN_MODULE = "runtime_shard_plugin"
@@ -293,19 +304,40 @@ def discover(command: str, cwd: str, root: str) -> Dict:
 def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
     """Main's per-file medians for the step on `queue`, with per-test medians
     for the files over one shard's budget; None if the endpoint has none or is
-    down."""
+    down.
+
+    A read that times out or fails gets one longer retry. After
+    MAX_TIMINGS_FAILURES steps in a row fail, the rest of the run skips the
+    endpoint, so an outage costs a few reads instead of two per step.
+    """
+    global _timings_failures
+    if _timings_failures >= MAX_TIMINGS_FAILURES:
+        print(f"runtime-shard: no timings for {step_key} (endpoint skipped after "
+              f"{_timings_failures} failed steps)", file=sys.stderr)
+        return None
     query = {
         "stepKey": step_key,
         "queue": queue.value,
         "testsOverMs": (MAX_SHARD_SECONDS - MAX_SETUP_SECONDS) * 1000,
     }
     url = TIMINGS_URL + "?" + urllib.parse.urlencode(query)
-    try:
-        with urllib.request.urlopen(url, timeout=15) as response:
-            return json.load(response)
-    except Exception as error:  # 404 (no passing main build), outage: no plan
-        print(f"runtime-shard: no timings for {step_key} ({error})", file=sys.stderr)
-        return None
+    for timeout_seconds in TIMINGS_TIMEOUTS_SECONDS:
+        try:
+            with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
+                timings = json.load(response)
+            _timings_failures = 0
+            return timings
+        except urllib.error.HTTPError as error:
+            if error.code < 500:  # 404: no passing main build, so no plan
+                _timings_failures = 0  # the endpoint answered
+                print(f"runtime-shard: no timings for {step_key} ({error})", file=sys.stderr)
+                return None
+            last_error = error
+        except Exception as error:  # timeout, connection refused
+            last_error = error
+    _timings_failures += 1
+    print(f"runtime-shard: no timings for {step_key} ({last_error})", file=sys.stderr)
+    return None
 
 
 def _least_loaded(sizes: List[float], count: int) -> Tuple[List[int], List[float]]:
@@ -441,9 +473,10 @@ def plan(
         for (index, file), key in keys.items()
     }
 
-    def pack(part_seconds: float) -> Tuple:
+    def pack(part_seconds: float, fit: bool = False) -> Tuple:
         """Cut each file over the budget into parts of about `part_seconds`,
-        then pack the units into the fewest shards within the budget."""
+        each within it if `fit`, then pack the units into the fewest shards
+        within the budget."""
         # One unit per file, or per part of a file over the budget.
         units = []  # (command index, file, part or None, seconds)
         whole = []  # per unit: its name if main timed it exactly and it can't be cut
@@ -477,8 +510,25 @@ def plan(
                 group_of[nodeid] = group
                 groups[group] = groups.get(group, 0.0) + test_seconds
             names = sorted(groups)
-            parts = min(len(names), math.ceil(seconds / part_seconds))
+            parts = math.ceil(seconds / part_seconds)
+            if fit:
+                # Long groups can't share a part even when their total divides
+                # evenly: groups over half a part need one each.
+                halves = sum(1 for n in names if groups[n] > part_seconds / 2)
+                parts = max(parts, halves)
+            parts = min(len(names), parts)
             part_of, part_loads = _least_loaded([groups[n] for n in names], parts)
+            # A part over the budget fits no shard: cut finer while one holds
+            # several groups. A group over the budget alone can't be cut.
+            while fit:
+                groups_in = Counter(part_of)
+                if not any(
+                    load > part_seconds and groups_in[part] > 1
+                    for part, load in enumerate(part_loads)
+                ):
+                    break
+                parts += 1
+                part_of, part_loads = _least_loaded([groups[n] for n in names], parts)
             part_of_group = dict(zip(names, part_of))
             assigns[(index, file)] = {
                 nodeid: part_of_group[group_of[nodeid]] for nodeid in tests
@@ -498,7 +548,14 @@ def plan(
             shard_of, loads = _least_loaded(sizes, count)
         return units, assigns, oversized, count, shard_of, loads, whole
 
-    units, assigns, oversized, count, shard_of, loads, whole = pack(max_shard_seconds)
+    units, assigns, oversized, count, shard_of, loads, whole = pack(
+        max_shard_seconds, fit=True
+    )
+    # Finer parts can outnumber the most shards and double up; keep the
+    # coarser cut when its slowest shard is shorter.
+    uncut = pack(max_shard_seconds)
+    if max(uncut[5]) < max(loads):
+        units, assigns, oversized, count, shard_of, loads, whole = uncut
     # Over the budget at the most shards, budget-sized parts can outnumber
     # the shards and double up. Parts of an even share of the most shards may
     # balance better; keep whichever plan's slowest shard is shorter.
@@ -724,6 +781,7 @@ def owners(planned: Dict) -> List[int]:
 def guard(command: str, planned: Dict, shards: int) -> str:
     """A job's command, run only by the shards that have its tests. The others
     say where they run instead of starting pytest to deselect everything."""
+    command = f"export {COMMAND_ENV}={planned['position']} && {command}"
     runs = owners(planned)
     if len(runs) == shards:
         return command
