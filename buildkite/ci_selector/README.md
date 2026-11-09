@@ -52,7 +52,7 @@ ci-fetch-kernel-record          # the kernel record, which answers for csrc/
 
 Each follows its own `latest.json` in the public `vllm-ci-selector` bucket, validates what it downloaded, and only then replaces what is on disk.
 
-`ci-select` given no `--table` and no `$CI_SELECTOR_TABLE` downloads the latest Python record itself, the same way, and uses the copy it parsed: the table is about 1 GB of JSON, so CI parses it once rather than in a separate fetch step and again here. It exits 1 when that download fails or is refused. Name a table with `--table` or `$CI_SELECTOR_TABLE` to use it as it is, without fetching; `--kernel-table` / `--kernel-symbol-map` or `$CI_SELECTOR_KERNEL_TABLE` / `$CI_SELECTOR_KERNEL_SYMBOL_MAP` do the same for the kernel record. A named Python table that is missing or unreadable leaves the selector on the code map alone, and it says so on stderr; without the kernel record csrc files do the same, which today means every step on the CUDA image.
+`ci-select` uses the Python record named by `--table` or `$CI_SELECTOR_TABLE`, or else the one already in `coverage-data/`, as it is. With none at hand, as in CI's fresh checkout, it downloads the latest itself, the same way, and uses the copy it parsed: the table is about 1 GB of JSON, so CI parses it once rather than in a separate fetch step and again here. It exits 1 when that download fails or is refused; `--kernel-table` / `--kernel-symbol-map` or `$CI_SELECTOR_KERNEL_TABLE` / `$CI_SELECTOR_KERNEL_SYMBOL_MAP` do the same for the kernel record. A named Python table that is missing or unreadable leaves the selector on the code map alone, and it says so on stderr; without the kernel record csrc files do the same, which today means every step on the CUDA image.
 
 ## Commands
 

@@ -166,9 +166,8 @@ def main(argv: list[str] | None = None) -> int:
     sel = select(state, paths, base=base, head=head)
 
     if args._mode != "codemap":
-        from .coverage.source import coverage_table, fetch_kernel_records
+        from .coverage.source import FetchError, coverage_table, fetch_kernel_records
         from .decide import decide
-        from .scripts.fetch_functions import FetchError
 
         try:
             table = coverage_table(args.table)

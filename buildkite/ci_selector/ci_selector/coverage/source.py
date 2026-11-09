@@ -30,6 +30,10 @@ KERNEL_MAP_ENV = "CI_SELECTOR_KERNEL_SYMBOL_MAP"
 TABLE_ENV = "CI_SELECTOR_TABLE"
 
 
+class FetchError(Exception):
+    """A published table that could not be downloaded, or must be refused."""
+
+
 def table_path() -> Path:
     """Where a local table is expected. `CI_SELECTOR_TABLE` overrides it."""
     override = os.environ.get(TABLE_ENV)
@@ -55,11 +59,15 @@ def fetch_table(path: Path | None = None) -> Table:
 
 
 def coverage_table(path: Path | None = None) -> Table:
-    """The table `path` or CI_SELECTOR_TABLE names, read as it is. With
-    neither, the latest published one, downloaded and parsed once here: what
-    CI wants, with no separate fetch step parsing the ~1 GB file to check it.
-    Raises FetchError when that download fails or is refused."""
-    if path is not None or os.environ.get(TABLE_ENV):
+    """The table to select with.
+
+    One named by `path` or CI_SELECTOR_TABLE, or one already in
+    coverage-data/, is read as it is. Otherwise the latest published one is
+    downloaded there and parsed once, here: CI's case, since its checkout is
+    fresh, with no separate fetch step parsing the ~1 GB file to check it.
+    Raises FetchError when that download fails or is refused.
+    """
+    if path is not None or os.environ.get(TABLE_ENV) or table_path().is_file():
         return fetch_table(path)
     # Imported here: the fetch script imports this module for its paths.
     from ..scripts.fetch_functions import fetch_latest

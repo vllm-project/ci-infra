@@ -15,7 +15,7 @@ import urllib.error
 from pathlib import Path
 
 import pytest
-from ci_selector.coverage.source import TABLE_NAME
+from ci_selector.coverage.source import TABLE_NAME, FetchError
 from ci_selector.coverage.table import load
 from ci_selector.scripts import fetch_functions, publish
 from ci_selector.scripts.build import merge_build, write_table
@@ -208,8 +208,8 @@ class TestFetch:
     def test_fetch_hands_back_the_table_it_parsed(
         self, table, tmp_path, monkeypatch, tmp_repo
     ):
-        """`ci-select --fetch` uses the returned table instead of reading the
-        ~1 GB file a second time, so it must be the checked one."""
+        """`ci-select` run without a table uses the returned table instead of
+        reading the ~1 GB file a second time, so it must be the checked one."""
         base, commit = "https://b/ci/fnrec", tmp_repo.head()
         self.serve(
             monkeypatch,
@@ -233,7 +233,7 @@ class TestFetch:
 
     def test_fetch_raises_what_main_reports(self, tmp_path, monkeypatch):
         self.serve(monkeypatch, {})
-        with pytest.raises(fetch_functions.FetchError, match="nothing published yet"):
+        with pytest.raises(FetchError, match="nothing published yet"):
             fetch_functions.fetch("https://b/ci/fnrec", out=tmp_path / "out")
 
     def test_fetch_latest_follows_the_configured_bucket(
@@ -251,3 +251,13 @@ class TestFetch:
         )
         assert fetch_functions.fetch_latest().commit == commit
         assert (tmp_path / "data" / TABLE_NAME).is_file()
+
+    def test_a_latest_pointer_that_is_not_an_object_is_refused_cleanly(
+        self, tmp_path, monkeypatch
+    ):
+        """A list or string in latest.json raised TypeError/AttributeError,
+        which escaped as a traceback instead of exit 1 with a message."""
+        base = "https://b/ci/fnrec"
+        self.serve(monkeypatch, {f"{base}/latest.json": b'["not", "an", "object"]'})
+        with pytest.raises(FetchError, match="TypeError"):
+            fetch_functions.fetch(base, out=tmp_path / "out")

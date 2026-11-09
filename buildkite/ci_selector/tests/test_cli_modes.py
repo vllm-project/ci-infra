@@ -100,44 +100,74 @@ def test_the_table_override_reads_the_path_it_is_given(tmp_path):
     assert "re-merge" in table.unavailable
 
 
-def _no_download(monkeypatch):
+@pytest.fixture
+def no_download(monkeypatch):
+    """Fail the test if the latest table is downloaded."""
     import ci_selector.scripts.fetch_functions as fetch_functions
 
     def refuse():
-        raise AssertionError("downloaded a table although one was named")
+        raise AssertionError("downloaded a table although one was at hand")
 
     monkeypatch.setattr(fetch_functions, "fetch_latest", refuse)
-    return fetch_functions
 
 
-def test_a_named_table_is_read_as_it_is(tmp_path, monkeypatch):
-    """Replays and tests pin a table with --table; it must never be swapped
-    for the latest one."""
+@pytest.fixture
+def empty_coverage_dir(tmp_path, monkeypatch):
+    """No table named and none in coverage-data/: CI's fresh checkout."""
+    import ci_selector.coverage.source as source
+
+    monkeypatch.delenv(source.TABLE_ENV, raising=False)
+    monkeypatch.setattr(source, "COVERAGE_DIR", tmp_path / "coverage-data")
+    return tmp_path / "coverage-data"
+
+
+def _unreadable_table(path: Path) -> Path:
+    """A table `load` reads and then refuses for its version, so a test can
+    tell it was this file that was read."""
+    import gzip
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = b'{"version": 999, "rows": {}}'
+    path.write_bytes(gzip.compress(body) if path.suffix == ".gz" else body)
+    return path
+
+
+def test_a_named_table_is_read_as_it_is(tmp_path, empty_coverage_dir, no_download):
+    """Replays and tests pin a table with --table; it is never swapped for the
+    latest one."""
     from ci_selector.coverage.source import coverage_table
 
-    _no_download(monkeypatch)
-    monkeypatch.delenv("CI_SELECTOR_TABLE", raising=False)
-    pinned = tmp_path / "pinned.json"
-    pinned.write_text('{"version": 999, "rows": {}}')
+    pinned = _unreadable_table(tmp_path / "pinned.json")
     assert "re-merge" in coverage_table(pinned).unavailable
 
 
-def test_a_table_named_by_the_environment_is_read_as_it_is(tmp_path, monkeypatch):
-    from ci_selector.coverage.source import coverage_table
+def test_a_table_named_by_the_environment_is_read_as_it_is(
+    tmp_path, empty_coverage_dir, no_download, monkeypatch
+):
+    from ci_selector.coverage.source import TABLE_ENV, coverage_table
 
-    _no_download(monkeypatch)
-    pinned = tmp_path / "pinned.json"
-    pinned.write_text('{"version": 999, "rows": {}}')
-    monkeypatch.setenv("CI_SELECTOR_TABLE", str(pinned))
+    monkeypatch.setenv(TABLE_ENV, str(_unreadable_table(tmp_path / "pinned.json")))
     assert "re-merge" in coverage_table(None).unavailable
 
 
-def test_with_no_table_named_the_latest_is_fetched_and_parsed_once(monkeypatch):
-    """What CI does: no separate fetch step, one parse, here."""
+def test_a_table_already_fetched_is_used_rather_than_replaced(
+    empty_coverage_dir, no_download
+):
+    """`ci-fetch-function-record --commit X`, then `ci-select`: the pinned
+    table on disk is used, and offline runs keep working."""
+    from ci_selector.coverage.source import TABLE_NAME, coverage_table
+
+    _unreadable_table(empty_coverage_dir / TABLE_NAME)
+    assert "re-merge" in coverage_table(None).unavailable
+
+
+def test_with_no_table_at_hand_the_latest_is_fetched_and_parsed_once(
+    empty_coverage_dir, monkeypatch
+):
+    """CI's case: no separate fetch step, one parse, here."""
     import ci_selector.scripts.fetch_functions as fetch_functions
     from ci_selector.coverage.source import coverage_table
 
-    monkeypatch.delenv("CI_SELECTOR_TABLE", raising=False)
     sentinel = object()
     calls = []
     monkeypatch.setattr(
@@ -147,16 +177,14 @@ def test_with_no_table_named_the_latest_is_fetched_and_parsed_once(monkeypatch):
     assert calls == [1]
 
 
-def test_a_refused_download_reaches_the_caller(monkeypatch):
+def test_a_refused_download_reaches_the_caller(empty_coverage_dir, monkeypatch):
     """main() turns it into exit 1, which sends CI back to today's rules."""
     import ci_selector.scripts.fetch_functions as fetch_functions
-    from ci_selector.coverage.source import coverage_table
-
-    monkeypatch.delenv("CI_SELECTOR_TABLE", raising=False)
+    from ci_selector.coverage.source import FetchError, coverage_table
 
     def refuse():
-        raise fetch_functions.FetchError("nothing published yet: HTTP 404")
+        raise FetchError("nothing published yet: HTTP 404")
 
     monkeypatch.setattr(fetch_functions, "fetch_latest", refuse)
-    with pytest.raises(fetch_functions.FetchError):
+    with pytest.raises(FetchError):
         coverage_table(None)

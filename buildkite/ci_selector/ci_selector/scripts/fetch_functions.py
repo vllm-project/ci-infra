@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from ..coverage.source import COVERAGE_DIR, TABLE_NAME
+from ..coverage.source import COVERAGE_DIR, TABLE_NAME, FetchError
 from ..coverage.table import Table, load
 
 DEFAULT_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/fnrec"
@@ -29,10 +29,6 @@ TIMEOUT = 60
 def _get(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=TIMEOUT) as r:  # noqa: S310 - https, fixed host
         return r.read()
-
-
-class FetchError(Exception):
-    """A table that could not be downloaded, or one that must be refused."""
 
 
 def fetch(
@@ -59,7 +55,7 @@ def fetch(
             staged.write_bytes(_get(f"{url}/{commit}/{TABLE_NAME}"))
             table = load(staged)
             if not table.available:
-                raise FetchError(table.unavailable)
+                raise FetchError(f"table for {commit[:10]}: {table.unavailable}")
             # A mismatch means table and pointer were published out of step.
             if table.commit and table.commit != commit:
                 raise FetchError(
@@ -70,7 +66,14 @@ def fetch(
     except urllib.error.HTTPError as exc:
         what = "nothing published yet" if exc.code in (403, 404) else "download failed"
         raise FetchError(f"{what}: HTTP {exc.code} for {exc.url}") from exc
-    except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
+    except (
+        urllib.error.URLError,
+        OSError,
+        KeyError,
+        ValueError,
+        TypeError,  # latest.json that is not an object
+        AttributeError,
+    ) as exc:
         raise FetchError(f"{type(exc).__name__}: {exc}") from exc
     return table, commit, build
 

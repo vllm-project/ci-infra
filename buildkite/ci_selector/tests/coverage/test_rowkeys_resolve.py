@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import pytest
 from ci_selector.codemap import worktree
-from ci_selector.codemap.pipeline.buildkite import load_pipeline_configs, load_steps
 from ci_selector.coverage.rules import RowKeys
 from ci_selector.coverage.table import Table
 
@@ -83,18 +82,15 @@ def test_resolve_reads_only_the_pipeline_yaml(pipeline_repo, no_state):
     assert keys.match_rate == {"vllm_ci": 1.0}
 
 
-def test_resolve_answers_as_the_state_did(pipeline_repo, no_state):
-    """Owners, rates, spellings and the step objects: everything
-    `resolve_from_pipelines` derives from a state's pipelines."""
+def test_resolve_answers_as_the_full_state_did(pipeline_repo):
+    """Owners, rates, spellings and the step objects: the same answer as
+    resolving against the whole `RepoState` at that commit, which is what
+    `resolve` used to build."""
     repo, recorded, _ = pipeline_repo
     table = _table("keyed", "Label Only", "a-row-no-step-spells")
 
-    tree = worktree.worktree_at(repo.root, recorded)
-    pipelines = [
-        type("P", (), {"config": c, "steps": load_steps(tree, c)})()
-        for c in load_pipeline_configs(tree)
-    ]
-    expected = RowKeys.resolve_from_pipelines(set(table._rows), pipelines)
+    state = worktree.state_for(repo.root, recorded)
+    expected = RowKeys.resolve_from_pipelines(set(table._rows), state.pipelines)
     got = RowKeys.resolve(table, repo.root, recorded)
     assert got.owners == expected.owners
     assert got.match_rate == expected.match_rate
