@@ -292,8 +292,8 @@ def _rerun(*keys):
     "setup, error",
     [
         (_depends_on_cuda, "cuda-only"),
-        (_torch_nightly, "TORCH_NIGHTLY and AITER_NIGHTLY"),
-        (_cuda_platform, "VLLM_CI_PLATFORM=cuda and AITER_NIGHTLY"),
+        (_torch_nightly, "AITER_NIGHTLY runs only AMD jobs"),
+        (_cuda_platform, "AITER_NIGHTLY runs only AMD jobs"),
         (_no_build_sh, "build.sh"),
         (_rerun("cuda-only"), "cuda-only"),
         (_rerun("amd-mi250"), "amd-mi250"),

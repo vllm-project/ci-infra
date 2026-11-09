@@ -105,13 +105,11 @@ class PipelineGenerator:
         platform = global_config["platform"]
         aiter_nightly = global_config["aiter_nightly"] == "1"
         if aiter_nightly and platform == Platform.CUDA:
-            # A CUDA-only build drops every job the AITER nightly runs.
-            cause = (
-                "TORCH_NIGHTLY"
-                if global_config["torch_nightly"] == "1"
-                else f"{PLATFORM_ENV_VAR}=cuda"
+            # TORCH_NIGHTLY also sets the platform to cuda (global_config.py).
+            _fail_generation(
+                "AITER_NIGHTLY runs only AMD jobs, so it cannot be combined with "
+                f"{PLATFORM_ENV_VAR}=cuda or TORCH_NIGHTLY."
             )
-            _fail_generation(f"{cause} and AITER_NIGHTLY cannot both be set.")
         if aiter_nightly and not rocm_build_layout():
             # Without it the build would pass while testing the stock AITER.
             _fail_generation(
