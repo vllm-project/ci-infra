@@ -189,7 +189,7 @@ def _parse_file(repo: Path, file: str, index: ModuleIndex, graph: ImportGraph) -
     # whole tree itself: the walks were most of a graph build's time.
     nodes = list(ast.walk(tree))
     consts = _module_string_consts(nodes)
-    consts |= _private_param_consts(tree.body, consts, nodes)
+    consts |= _private_param_consts(consts, nodes)
     options = _parametrize_options(nodes)
     _FileVisitor(repo, file, module, index, graph, consts, options).visit(tree)
 
@@ -303,7 +303,7 @@ def _parametrize_options(nodes: list[ast.AST]) -> dict[str, set[str]]:
 
 
 def _private_param_consts(
-    body: list[ast.stmt], consts: dict[str, str], nodes: list[ast.AST]
+    consts: dict[str, str], nodes: list[ast.AST]
 ) -> dict[str, str]:
     """Parameters of a module-private helper that every call in the file
     passes the same string for. The underscore bounds the search to this file,
@@ -312,7 +312,9 @@ def _private_param_consts(
     params: dict[str, list[str]] = {}
     unreadable: set[str] = set()
     functions: dict[str, list[str]] = {}
-    for node in body:
+    # `ast.walk` yields the module first, so nodes[0].body is the top level:
+    # the module-private helpers, as opposed to nested functions and methods.
+    for node in nodes[0].body:
         if isinstance(
             node, (ast.FunctionDef, ast.AsyncFunctionDef)
         ) and node.name.startswith("_"):

@@ -508,7 +508,7 @@ def _apply_kernel_record(
     reasons = Counter()
     files: dict[str, list[str]] = {}
     for pair in kernels:
-        keys = RowKeys.resolve_from_state(set(pair.table._rows), state)
+        keys = RowKeys.resolve_from_pipelines(set(pair.table._rows), state.pipelines)
         stale: frozenset[str] = frozenset()
         if os.environ.get(FRESHNESS_ENV):
             stale = _csrc_moved_since(repo, pair.symbol_map.commit, base, changed)
@@ -564,7 +564,7 @@ def _apply_library_record(
         return
     if not getattr(state, "pipelines", None):
         raise RuntimeError("no pipeline state to resolve step keys against")
-    keys = RowKeys.resolve_from_state(set(table._rows), state)
+    keys = RowKeys.resolve_from_pipelines(set(table._rows), state.pipelines)
     dropped, reasons = libraries.read_pr(
         table,
         selection,

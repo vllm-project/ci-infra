@@ -440,8 +440,9 @@ def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkey
 
 
 def test_the_table_is_fetched_and_parsed_by_ci_select_alone(monkeypatch, tmp_path):
-    """The ~1 GB function table is parsed once: ci-select downloads it itself
-    (--fetch) instead of a separate fetch step that parsed it to check it."""
+    """The ~1 GB function table is parsed once: ci-select, given no table,
+    downloads it itself instead of a separate fetch step that parsed it to
+    check it."""
     ran = []
 
     def fake_run(cmd, **kw):
@@ -457,5 +458,4 @@ def test_the_table_is_fetched_and_parsed_by_ci_select_alone(monkeypatch, tmp_pat
 
     assert not [c for c in ran if "ci-fetch-function-record" in c]
     select = next(c for c in ran if "ci-select" in c)
-    assert "--fetch" in select
-    assert select[select.index("--table") + 1].endswith("table.json.gz")
+    assert "--table" not in select

@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .codemap.classify import select
 from .codemap.state import RepoState
@@ -15,6 +17,9 @@ from .handwritten import (
     PR_PIPELINE,
 )
 from .report import render_json
+
+if TYPE_CHECKING:
+    from .coverage.table import Table
 
 # Every flag defined once, so `--repo X codemap` and `codemap --repo X` agree.
 # SUPPRESS is load-bearing: with `parents=`, a subparser re-applies its parents'
@@ -92,14 +97,6 @@ def build_parser() -> argparse.ArgumentParser:
     pr_p.set_defaults(_mode="pr")
     parser.add_argument("--table", type=Path, help="coverage table to read")
     parser.add_argument(
-        "--fetch",
-        action="store_true",
-        help="download the latest published coverage table first, into the "
-        "directory of --table (default coverage-data/), and use it. Exit 1 if "
-        "it cannot be fetched or fails the checks ci-fetch-function-record "
-        "makes. It is parsed once, here, not again",
-    )
-    parser.add_argument(
         "--kernel-table",
         type=Path,
         help="explicit kernel table override (default: CUDA and ROCm pairs)",
@@ -155,17 +152,6 @@ def main(argv: list[str] | None = None) -> int:
         print("no changed files", file=sys.stderr)
         return 0
 
-    # Before the state is built, so a table that cannot be had fails fast.
-    fetched = None
-    if args._mode != "codemap" and args.fetch:
-        from .scripts.fetch_functions import FetchError, fetch_into
-
-        try:
-            fetched = fetch_into(args.table)
-        except FetchError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-
     # A ranged diff is analyzed at its BASE, because added-file routing and
     # table scoping assume state built there. The working tree is only right
     # when it happens to BE the base.
@@ -185,10 +171,15 @@ def main(argv: list[str] | None = None) -> int:
     sel = select(state, paths, base=base, head=head)
 
     if args._mode != "codemap":
-        from .coverage.source import fetch_kernel_records, fetch_table
+        from .coverage.source import fetch_kernel_records
         from .decide import decide
+        from .scripts.fetch_functions import FetchError
 
-        table = fetched if fetched is not None else fetch_table(args.table)
+        try:
+            table = coverage_table(args.table)
+        except FetchError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         if table.dead_interpreter:
             print(f"coverage: {table.dead_interpreter}", file=sys.stderr)
         kernels = fetch_kernel_records(args.kernel_table, args.kernel_symbol_map)
@@ -235,6 +226,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     print(render_json(sel))
     return 0
+
+
+def coverage_table(table_path: Path | None) -> Table:
+    """The table `--table` or CI_SELECTOR_TABLE names, read as it is. With
+    neither, the latest published one, downloaded and parsed once here, which
+    is what CI wants: no separate fetch step parsing the ~1 GB file to check
+    it. Raises FetchError when that download cannot be had or is refused."""
+    from .coverage.source import TABLE_ENV, fetch_table
+
+    if table_path is not None or os.environ.get(TABLE_ENV):
+        return fetch_table(table_path)
+    from .scripts.fetch_functions import fetch_latest
+
+    return fetch_latest()
 
 
 def _restrict(sel, d):

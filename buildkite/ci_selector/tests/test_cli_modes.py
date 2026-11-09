@@ -100,25 +100,63 @@ def test_the_table_override_reads_the_path_it_is_given(tmp_path):
     assert "re-merge" in table.unavailable
 
 
-def test_fetch_is_a_flag():
-    assert _parse(["--fetch"]).fetch
-    assert not _parse([]).fetch
-
-
-def test_a_table_that_cannot_be_fetched_exits_1_before_any_work(monkeypatch):
-    """`--fetch` replaces the separate fetch step bootstrap ran first: exit 1
-    sends bootstrap back to today's rules, and it should cost nothing first."""
-    import ci_selector.codemap.worktree as worktree
+def _no_download(monkeypatch):
     import ci_selector.scripts.fetch_functions as fetch_functions
-    from ci_selector.cli import main
 
-    def refuse(table_path):
+    def refuse():
+        raise AssertionError("downloaded a table although one was named")
+
+    monkeypatch.setattr(fetch_functions, "fetch_latest", refuse)
+    return fetch_functions
+
+
+def test_a_named_table_is_read_as_it_is(tmp_path, monkeypatch):
+    """Replays and tests pin a table with --table; it must never be swapped
+    for the latest one."""
+    from ci_selector.cli import coverage_table
+
+    _no_download(monkeypatch)
+    monkeypatch.delenv("CI_SELECTOR_TABLE", raising=False)
+    pinned = tmp_path / "pinned.json"
+    pinned.write_text('{"version": 999, "rows": {}}')
+    assert "re-merge" in coverage_table(pinned).unavailable
+
+
+def test_a_table_named_by_the_environment_is_read_as_it_is(tmp_path, monkeypatch):
+    from ci_selector.cli import coverage_table
+
+    _no_download(monkeypatch)
+    pinned = tmp_path / "pinned.json"
+    pinned.write_text('{"version": 999, "rows": {}}')
+    monkeypatch.setenv("CI_SELECTOR_TABLE", str(pinned))
+    assert "re-merge" in coverage_table(None).unavailable
+
+
+def test_with_no_table_named_the_latest_is_fetched_and_parsed_once(monkeypatch):
+    """What CI does: no separate fetch step, one parse, here."""
+    import ci_selector.scripts.fetch_functions as fetch_functions
+    from ci_selector.cli import coverage_table
+
+    monkeypatch.delenv("CI_SELECTOR_TABLE", raising=False)
+    sentinel = object()
+    calls = []
+    monkeypatch.setattr(
+        fetch_functions, "fetch_latest", lambda: calls.append(1) or sentinel
+    )
+    assert coverage_table(None) is sentinel
+    assert calls == [1]
+
+
+def test_a_refused_download_reaches_the_caller(monkeypatch):
+    """main() turns it into exit 1, which sends CI back to today's rules."""
+    import ci_selector.scripts.fetch_functions as fetch_functions
+    from ci_selector.cli import coverage_table
+
+    monkeypatch.delenv("CI_SELECTOR_TABLE", raising=False)
+
+    def refuse():
         raise fetch_functions.FetchError("nothing published yet: HTTP 404")
 
-    def no_state(*a, **k):
-        raise AssertionError("built the repo state before the fetch failed")
-
-    monkeypatch.setattr(fetch_functions, "fetch_into", refuse)
-    monkeypatch.setattr(worktree, "state_for", no_state)
-    repo = os.environ["VLLM_REPO"]
-    assert main(["--repo", repo, "--diff", "HEAD~1...HEAD", "--fetch"]) == 1
+    monkeypatch.setattr(fetch_functions, "fetch_latest", refuse)
+    with pytest.raises(fetch_functions.FetchError):
+        coverage_table(None)

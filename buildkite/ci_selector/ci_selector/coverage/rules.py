@@ -61,26 +61,6 @@ def newest_commit(table: Table, repo: Path) -> str:
     return ordered[0] if ordered else sorted(commits)[0]
 
 
-class _PipelinesAt:
-    """The `pipelines` of the `RepoState` at `ref`, parsed from its yaml
-    alone: the same configs and steps `RepoState.build` loads first, without
-    the import graph and the rest it builds after."""
-
-    def __init__(self, repo: Path, ref: str):
-        from ci_selector.codemap.pipeline.buildkite import (
-            load_pipeline_configs,
-            load_steps,
-        )
-        from ci_selector.codemap.state import PipelineData
-        from ci_selector.codemap.worktree import worktree_at
-
-        tree = worktree_at(repo, ref)
-        self.pipelines = [
-            PipelineData(config, load_steps(tree, config), {})
-            for config in load_pipeline_configs(tree)
-        ]
-
-
 class RowKeys:
     """Which steps a table is entitled to answer for.
 
@@ -119,24 +99,34 @@ class RowKeys:
         """Resolve the table's rows against the pipeline yaml at `ref`, the
         commit the rows were recorded at.
 
-        Reads the yaml and nothing else. `resolve_from_state` only looks at a
-        state's pipelines, and a whole `RepoState` there (`state_for`) also
-        builds the import graph of the full tree: about half of a CI run's
-        selector time, spent on a state nothing else read.
+        Reads the yaml and nothing else: matching rows to steps needs only the
+        steps, not the import graph a whole `RepoState` there would build.
         """
-        return cls.resolve_from_state(set(table._rows), _PipelinesAt(repo, ref))
+        from ci_selector.codemap.pipeline.buildkite import (
+            load_pipeline_configs,
+            load_steps,
+        )
+        from ci_selector.codemap.state import PipelineData
+        from ci_selector.codemap.worktree import worktree_at
+
+        tree = worktree_at(repo, ref)
+        pipelines = [
+            PipelineData(config, load_steps(tree, config), {})
+            for config in load_pipeline_configs(tree)
+        ]
+        return cls.resolve_from_pipelines(set(table._rows), pipelines)
 
     @classmethod
-    def resolve_from_state(cls, rows: set[str], state) -> RowKeys:
-        """`resolve` against a state the caller already holds.
+    def resolve_from_pipelines(cls, rows: set[str], pipelines) -> RowKeys:
+        """`resolve` against pipelines the caller already holds.
 
-        The kernel record resolves at the PR's base, whose state `decide`
-        was handed, so this costs nothing where `resolve` builds a worktree.
+        The kernel and library records resolve at the PR's base, whose state
+        `decide` was handed, so they pass its pipelines and build nothing.
         `rows` is the table's row keys, whichever table.
         """
         spellings: dict[str, str] = {}
         match_rate: dict[str, float] = {}
-        for pipeline in state.pipelines:
+        for pipeline in pipelines:
             idents = set()
             for step in pipeline.steps:
                 ident = step.buildkite_key or step.label
@@ -148,7 +138,7 @@ class RowKeys:
         resolved = cls.from_match_rates(match_rate, spellings)
         resolved.steps = {
             step.step_id: step
-            for pipeline in state.pipelines
+            for pipeline in pipelines
             if pipeline.config.name in resolved.owners
             for step in pipeline.steps
         }

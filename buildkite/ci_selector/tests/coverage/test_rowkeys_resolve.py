@@ -85,20 +85,16 @@ def test_resolve_reads_only_the_pipeline_yaml(pipeline_repo, no_state):
 
 def test_resolve_answers_as_the_state_did(pipeline_repo, no_state):
     """Owners, rates, spellings and the step objects: everything
-    `resolve_from_state` derives from a state's pipelines."""
+    `resolve_from_pipelines` derives from a state's pipelines."""
     repo, recorded, _ = pipeline_repo
     table = _table("keyed", "Label Only", "a-row-no-step-spells")
 
-    class PipelinesOnly:
-        def __init__(self, tree):
-            self.pipelines = [
-                type("P", (), {"config": c, "steps": load_steps(tree, c)})()
-                for c in load_pipeline_configs(tree)
-            ]
-
-    expected = RowKeys.resolve_from_state(
-        set(table._rows), PipelinesOnly(worktree.worktree_at(repo.root, recorded))
-    )
+    tree = worktree.worktree_at(repo.root, recorded)
+    pipelines = [
+        type("P", (), {"config": c, "steps": load_steps(tree, c)})()
+        for c in load_pipeline_configs(tree)
+    ]
+    expected = RowKeys.resolve_from_pipelines(set(table._rows), pipelines)
     got = RowKeys.resolve(table, repo.root, recorded)
     assert got.owners == expected.owners
     assert got.match_rate == expected.match_rate

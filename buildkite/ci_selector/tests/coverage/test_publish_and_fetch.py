@@ -236,11 +236,12 @@ class TestFetch:
         with pytest.raises(fetch_functions.FetchError, match="nothing published yet"):
             fetch_functions.fetch("https://b/ci/fnrec", out=tmp_path / "out")
 
-    def test_fetch_into_saves_beside_the_table_path(
+    def test_fetch_latest_follows_the_configured_bucket(
         self, table, tmp_path, monkeypatch, tmp_repo
     ):
         base, commit = "https://b/ci/fnrec", tmp_repo.head()
         monkeypatch.setenv(fetch_functions.URL_ENV, base)
+        monkeypatch.setattr(fetch_functions, "COVERAGE_DIR", tmp_path / "data")
         self.serve(
             monkeypatch,
             {
@@ -248,12 +249,5 @@ class TestFetch:
                 f"{base}/{commit}/{TABLE_NAME}": table.read_bytes(),
             },
         )
-        target = tmp_path / "data" / TABLE_NAME
-        assert fetch_functions.fetch_into(target).commit == commit
-        assert target.is_file()
-
-    def test_fetch_into_refuses_a_table_path_it_would_not_write(self, tmp_path):
-        """The fetch always writes `table.json.gz`; any other name would leave
-        --table pointing at a file the fetch never touched."""
-        with pytest.raises(fetch_functions.FetchError, match=TABLE_NAME):
-            fetch_functions.fetch_into(tmp_path / "other.json.gz")
+        assert fetch_functions.fetch_latest().commit == commit
+        assert (tmp_path / "data" / TABLE_NAME).is_file()

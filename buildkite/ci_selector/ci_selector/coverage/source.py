@@ -27,9 +27,12 @@ KERNEL_TABLE_ENV = "CI_SELECTOR_KERNEL_TABLE"
 KERNEL_MAP_ENV = "CI_SELECTOR_KERNEL_SYMBOL_MAP"
 
 
+TABLE_ENV = "CI_SELECTOR_TABLE"
+
+
 def table_path() -> Path:
     """Where a local table is expected. `CI_SELECTOR_TABLE` overrides it."""
-    override = os.environ.get("CI_SELECTOR_TABLE")
+    override = os.environ.get(TABLE_ENV)
     return Path(override) if override else COVERAGE_DIR / TABLE_NAME
 
 

@@ -75,15 +75,10 @@ def fetch(
     return table, commit, build
 
 
-def fetch_into(table_path: Path | None = None) -> Table:
-    """The latest published table, saved where `table_path` points (default
-    coverage-data/), for `ci-select --fetch`. Raises FetchError."""
-    out = COVERAGE_DIR
-    if table_path is not None:
-        if table_path.name != TABLE_NAME:
-            raise FetchError(f"--table must be named {TABLE_NAME} to fetch into it")
-        out = table_path.parent
-    return fetch(os.environ.get(URL_ENV, DEFAULT_URL), out=out)[0]
+def fetch_latest() -> Table:
+    """The latest published table, downloaded into coverage-data/ and parsed
+    once, for `ci-select` run without a table. Raises FetchError."""
+    return fetch(os.environ.get(URL_ENV, DEFAULT_URL), out=COVERAGE_DIR)[0]
 
 
 def main(argv: list[str] | None = None) -> int:
